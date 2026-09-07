@@ -282,7 +282,7 @@ func buildFeeQuote(suiBalance *big.Int, isNative bool, nativeAmount uint64, symb
 
 func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
 	if req.MemoHex != "" {
-		return chains.PreparedTx{}, fmt.Errorf("sui transfers cannot carry a bridge memo")
+		return chains.PreparedTx{}, chains.Invalid("sui transfers cannot carry a bridge memo")
 	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err

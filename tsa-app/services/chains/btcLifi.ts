@@ -22,6 +22,12 @@ import { registerNonEVMAddress } from './nonevmApi';
 /** Bitcoin's standard OP_RETURN relay limit, mirrored from the backend. */
 const MAX_MEMO_BYTES = 80;
 
+// Swaps are mainnet-only (LiFi has no testnets), so the deposit is pinned to
+// mainnet rather than following the app's network toggle — the same pin
+// solanaLifi.ts applies. The testnet guard below still runs: it stops a
+// testnet-mode wallet from quoting against balances it isn't about to spend.
+const SWAP_NETWORK = 'mainnet' as const;
+
 /**
  * Read the sats figure out of a LiFi transactionRequest `value`. LiFi ships it
  * as base units — hex-quantity on EVM, and the same convention on UTXO routes —
@@ -31,7 +37,10 @@ export function parseLiFiSats(value: string | number | undefined): bigint {
   if (value === undefined || value === null || value === '') {
     throw new Error('The route did not say how much BTC to send. Refresh the quote and try again.');
   }
-  const raw = typeof value === 'number' ? BigInt(value) : parseSatsString(String(value).trim());
+  // Stringify BEFORE parsing so a JSON number takes the same guarded path as a
+  // string: BigInt(0.00125) throws a raw RangeError whose internal wording
+  // would land in the swap UI, while BigInt('0.00125') is caught below.
+  const raw = parseSatsString(String(value).trim());
   if (raw <= 0n) throw new Error('The route quoted a zero BTC deposit. Refresh the quote and try again.');
   return raw;
 }
@@ -126,6 +135,7 @@ export async function executeLiFiBtcSwap({
     symbol: 'BTC',
     walletAddress,
     memoHex,
+    network: SWAP_NETWORK,
   };
 
   onStage?.('Building Bitcoin deposit…');

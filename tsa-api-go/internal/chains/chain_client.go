@@ -1,6 +1,23 @@
 package chains
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// InvalidRequestError marks a TransferRequest the caller can fix — a malformed
+// memo, a bad address, an amount below dust — as opposed to an upstream RPC or
+// indexer failure. Handlers surface its Reason to the client verbatim and keep
+// everything else generic, so an actionable message is not lost behind "fee
+// estimate failed" on a path that moves money.
+type InvalidRequestError struct{ Reason string }
+
+func (e *InvalidRequestError) Error() string { return e.Reason }
+
+// Invalid builds an InvalidRequestError with a formatted reason.
+func Invalid(format string, a ...any) error {
+	return &InvalidRequestError{Reason: fmt.Sprintf(format, a...)}
+}
 
 type Curve string
 

@@ -58,6 +58,18 @@ describe('parseLiFiSats', () => {
     expect(() => parseLiFiSats(undefined)).toThrow();
     expect(() => parseLiFiSats('0')).toThrow();
   });
+
+  // JSON hands us a number, not a string, whenever LiFi omits the quotes. That
+  // path used to reach BigInt() unguarded, so a fractional value surfaced
+  // "The number 0.00125 cannot be converted to a BigInt because it is not an
+  // integer" in the swap UI.
+  it('reports a fractional JSON number in its own words, not the engine\'s', () => {
+    expect(() => parseLiFiSats(0.00125 as never)).toThrow(/deposit amount/i);
+    // Integral numbers still parse. (Only values ≥ 1e21 stringify to
+    // exponential form and get rejected — five orders of magnitude past the
+    // 2.1e15 sats that will ever exist, so no real deposit reaches it.)
+    expect(parseLiFiSats(2_100_000_000_000_000 as never)).toBe(2_100_000_000_000_000n);
+  });
 });
 
 describe('parseLiFiBtcMemo', () => {
@@ -102,6 +114,16 @@ describe('executeLiFiBtcSwap', () => {
   it('supports memo-less routes (deposit-address bridges)', async () => {
     await run({ to: DEPOSIT, value: '125000' });
     expect(mockPrepareBtc).toHaveBeenCalledWith(expect.objectContaining({ memoHex: '' }));
+  });
+
+  // The address, the signing key and the broadcast all have to agree on one
+  // network. Pinning it in the params — rather than leaving prepare/sign/submit
+  // to re-read the app toggle three times — is what keeps them from drifting
+  // apart if the toggle flips mid-swap.
+  it('pins every leg of the deposit to mainnet', async () => {
+    await run({ to: DEPOSIT, value: '125000' });
+    expect(mockPrepareBtc).toHaveBeenCalledWith(expect.objectContaining({ network: 'mainnet' }));
+    expect(mockBroadcastBtc).toHaveBeenCalledWith(PREPARED, expect.objectContaining({ network: 'mainnet' }));
   });
 
   it('refuses a route asking for a different amount than the user quoted', async () => {

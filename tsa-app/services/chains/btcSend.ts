@@ -8,7 +8,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
-import { deriveBtcPrivateKey } from './derivation';
+import { deriveBtcPrivateKey, type BtcNetwork } from './derivation';
 import { signSecpDigest } from './sign';
 
 async function authHeaders() {
@@ -43,6 +43,20 @@ export interface SendBtcParams {
    * cannot encode, so a bad one fails before any BTC moves.
    */
   memoHex?: string;
+  /**
+   * Network to build, sign and broadcast on. Defaults to the app's current
+   * toggle, which is what a wallet send wants. A caller pinned to one network —
+   * swaps, which LiFi only quotes on mainnet — MUST pass it explicitly: the
+   * address, the signing key and the broadcast all have to agree, and a caller
+   * that merely checks the toggle before it starts is one reordering away from
+   * signing a mainnet route with a testnet key.
+   */
+  network?: BtcNetwork;
+}
+
+/** The network a send acts on: the caller's pin, else the app's toggle. */
+function networkFor(params: SendBtcParams): BtcNetwork {
+  return params.network ?? (getNetwork() as BtcNetwork);
 }
 
 async function readJson(res: Response): Promise<any> {
@@ -67,7 +81,7 @@ export async function prepareBtc(params: SendBtcParams): Promise<BtcPrepared> {
     symbol: params.symbol, tokenAddr: '',
     ...(params.memoHex ? { memoHex: params.memoHex } : {}),
   };
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${networkFor(params)}`, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
   const json = await readJson(res);
@@ -94,11 +108,11 @@ export async function broadcastBtc(
   }
   const mnemonic = await getMnemonic(params.walletAddress);
   if (!mnemonic) throw new Error('no key for wallet');
-  const btcKey = deriveBtcPrivateKey(mnemonic, getNetwork());
+  const btcKey = deriveBtcPrivateKey(mnemonic, networkFor(params));
   const sigs = payloads.map((p) => ({ index: p.index, sigHex: signSecpDigest(p.hashHex, btcKey) }));
 
   const headers = await authHeaders();
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=btc&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=btc&network=${networkFor(params)}`, {
     method: 'POST', headers,
     body: JSON.stringify({
       prepared, sigs,

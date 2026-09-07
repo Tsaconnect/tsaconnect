@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -516,8 +517,20 @@ func TestPrepareRejectsUnusableMemo(t *testing.T) {
 	} {
 		req := transferReq(sender, to, "80000")
 		req.MemoHex = memo
-		if _, err := c.PrepareTransfer(context.Background(), req); err == nil {
+		prepErr := func() error { _, err := c.PrepareTransfer(context.Background(), req); return err }()
+		if prepErr == nil {
 			t.Fatalf("%s: want error, got none", name)
+		}
+		// The reason has to survive as a caller-fixable error: the prepare
+		// handler flattens anything else into "fee estimate failed", which
+		// tells a user staring at a stuck swap nothing at all.
+		var invalid *chains.InvalidRequestError
+		if !errors.As(prepErr, &invalid) {
+			t.Fatalf("%s: want a chains.InvalidRequestError, got %T (%v)", name, prepErr, prepErr)
+		}
+		// EstimateFee runs first in the handler, so it must classify identically.
+		if _, err := c.EstimateFee(context.Background(), req); !errors.As(err, &invalid) {
+			t.Fatalf("%s: EstimateFee must reject it the same way, got %T (%v)", name, err, err)
 		}
 	}
 }

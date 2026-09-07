@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -202,5 +203,70 @@ func TestRegisterNonEVM_OwnershipScoping(t *testing.T) {
 	}
 	if b2.Address != "TnewB" {
 		t.Errorf("user B self-update did not apply: got %q, want %q", b2.Address, "TnewB")
+	}
+}
+
+// stubFeeFailure fails the fee estimate with a supplied error, standing in for
+// a chain client that rejects the request (bad bridge memo) or cannot reach its
+// indexer.
+type stubFeeFailure struct {
+	chains.ChainClient
+	err error
+}
+
+func (stubFeeFailure) Family() string               { return "btc" }
+func (stubFeeFailure) ValidateAddress(string) error { return nil }
+func (s stubFeeFailure) EstimateFee(context.Context, chains.TransferRequest) (chains.FeeQuote, error) {
+	return chains.FeeQuote{}, s.err
+}
+
+func prepareNonEVMRequest(t *testing.T, h *Handlers, body map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	raw, _ := json.Marshal(body)
+	c.Request, _ = http.NewRequest("POST", "/?chain=btc&network=mainnet", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.PrepareNonEVMTx(c)
+	return w
+}
+
+// PrepareNonEVMTx runs EstimateFee before PrepareTransfer, so a caller-fixable
+// reason has to survive that branch. It used to collapse into "fee estimate
+// failed", leaving a user with a stuck bridge deposit and no idea why.
+func TestPrepareNonEVMTx_SurfacesInvalidRequestReason(t *testing.T) {
+	reason := "memo is 81 bytes; the OP_RETURN standardness limit is 80"
+	reg := chains.NewRegistry()
+	reg.Register("mainnet", "btc", stubFeeFailure{err: chains.Invalid("%s", reason)})
+
+	w := prepareNonEVMRequest(t, &Handlers{ChainRegistry: reg}, map[string]string{
+		"from": "bc1qsender", "to": "bc1qdeposit", "amount": "125000",
+		"symbol": "BTC", "memoHex": "ab",
+	})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for a caller-fixable request, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(reason)) {
+		t.Fatalf("the actionable reason must reach the client, got %s", w.Body.String())
+	}
+}
+
+// An upstream failure stays generic — the client learns the call failed, not
+// the shape of our infrastructure.
+func TestPrepareNonEVMTx_KeepsUpstreamFailuresGeneric(t *testing.T) {
+	reg := chains.NewRegistry()
+	reg.Register("mainnet", "btc", stubFeeFailure{err: errors.New("dial tcp 10.0.0.1:443: connect: refused")})
+
+	w := prepareNonEVMRequest(t, &Handlers{ChainRegistry: reg}, map[string]string{
+		"from": "bc1qsender", "to": "bc1qdeposit", "amount": "125000", "symbol": "BTC",
+	})
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("want 502 for an upstream failure, got %d", w.Code)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("10.0.0.1")) {
+		t.Fatalf("upstream detail leaked to the client: %s", w.Body.String())
 	}
 }

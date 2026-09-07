@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -1110,6 +1111,16 @@ func rawToFloat(raw string, decimals int) float64 {
 	return f
 }
 
+// invalidRequestReason reports whether err is a caller-fixable
+// chains.InvalidRequestError and returns its message.
+func invalidRequestReason(err error) (string, bool) {
+	var invalid *chains.InvalidRequestError
+	if errors.As(err, &invalid) {
+		return invalid.Reason, true
+	}
+	return "", false
+}
+
 // PrepareNonEVMTx handles POST /api/wallet/nonevm/prepare-tx.
 // Estimates fee and builds an unsigned tx for a non-EVM send.
 // Query param: ?chain=tron
@@ -1132,6 +1143,14 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 	}
 	fee, err := client.EstimateFee(c.Request.Context(), req)
 	if err != nil {
+		// A request the caller can fix (bad memo, bad address) keeps its
+		// message; an upstream RPC/indexer failure stays generic. Without the
+		// split, "memo is 81 bytes; the limit is 80" reaches the app as "fee
+		// estimate failed" on a path that is about to move money.
+		if reason, ok := invalidRequestReason(err); ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, reason)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadGateway, "fee estimate failed")
 		return
 	}
@@ -1141,6 +1160,10 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 	}
 	prepared, err := client.PrepareTransfer(c.Request.Context(), req)
 	if err != nil {
+		if reason, ok := invalidRequestReason(err); ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, reason)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
 		return
 	}

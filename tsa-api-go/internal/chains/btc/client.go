@@ -543,17 +543,17 @@ func memoPkScript(memoHex string) ([]byte, error) {
 	}
 	data, err := hex.DecodeString(memoHex)
 	if err != nil {
-		return nil, fmt.Errorf("memo is not valid hex")
+		return nil, chains.Invalid("memo is not valid hex")
 	}
 	if len(data) == 0 {
 		return nil, nil
 	}
 	if len(data) > maxMemoBytes {
-		return nil, fmt.Errorf("memo is %d bytes; the OP_RETURN standardness limit is %d", len(data), maxMemoBytes)
+		return nil, chains.Invalid("memo is %d bytes; the OP_RETURN standardness limit is %d", len(data), maxMemoBytes)
 	}
 	script, err := txscript.NewScriptBuilder().AddOp(txscript.OP_RETURN).AddData(data).Script()
 	if err != nil {
-		return nil, fmt.Errorf("memo script: %v", err)
+		return nil, chains.Invalid("memo script: %v", err)
 	}
 	return script, nil
 }

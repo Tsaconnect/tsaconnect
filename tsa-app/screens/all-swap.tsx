@@ -30,6 +30,7 @@ import {
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import { missingAddressNotice } from '@/utils/swapAddresses';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 import { useTheme } from '@/theme';
 import {
@@ -98,11 +99,15 @@ export default function AllSwapScreen() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Derived non-EVM addresses for the active wallet — the from/to address on
-  // Solana- and Bitcoin-side routes. null until derived (or when no mnemonic
-  // exists). All three families come off the same mnemonic, so a cross-VM swap
-  // needs no address input from the user.
+  // Solana- and Bitcoin-side routes. All three families come off the same
+  // mnemonic, so a cross-VM swap needs no address input from the user.
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
   const [btcAddress, setBtcAddress] = useState<string | null>(null);
+  // Whether derivation has finished. A null address means "still deriving"
+  // before this flips and "this wallet has no key for that chain" after — a
+  // key-only or watch-only wallet has no mnemonic to derive from, and telling
+  // that user we are still preparing an address is a promise we never keep.
+  const [addressesDerived, setAddressesDerived] = useState(false);
 
   useEffect(() => {
     getActiveWallet()
@@ -113,12 +118,14 @@ export default function AllSwapScreen() {
   useEffect(() => {
     if (!walletAddress) return;
     let cancelled = false;
-    getSolanaAddress(walletAddress)
-      .then(addr => { if (!cancelled) setSolanaAddress(addr); })
-      .catch(() => {});
-    getBtcAddress(walletAddress)
-      .then(addr => { if (!cancelled) setBtcAddress(addr); })
-      .catch(() => {});
+    setAddressesDerived(false);
+    Promise.allSettled([getSolanaAddress(walletAddress), getBtcAddress(walletAddress)])
+      .then(([sol, btc]) => {
+        if (cancelled) return;
+        setSolanaAddress(sol.status === 'fulfilled' ? sol.value : null);
+        setBtcAddress(btc.status === 'fulfilled' ? btc.value : null);
+        setAddressesDerived(true);
+      });
     return () => { cancelled = true; };
   }, [walletAddress]);
 
@@ -126,7 +133,8 @@ export default function AllSwapScreen() {
    * The address that signs (and receives) on a given LiFi chain. Each VM family
    * derives its own key from the one mnemonic, so this is the single place the
    * screen decides "whose address is this route's side". null while a non-EVM
-   * address is still deriving, or when the wallet has no mnemonic to derive it.
+   * address is still deriving, or when the wallet has no mnemonic to derive it —
+   * `addressesDerived` tells those two apart.
    */
   const addressForChain = useCallback((chainId: number): string | null => {
     if (isSolanaLiFiChain(chainId)) return solanaAddress;
@@ -370,8 +378,11 @@ export default function AllSwapScreen() {
     if (!fromAmount || Number(fromAmount) <= 0) return 'Enter an amount';
     // A non-EVM side needs its own derived address before LiFi can be quoted;
     // say so rather than sit on "Waiting for price…" forever.
-    if (!addressForChain(fromChainId)) return `Preparing your ${chainName(fromChainId)} address…`;
-    if (!addressForChain(toChainId)) return `Preparing your ${chainName(toChainId)} address…`;
+    const addressNotice = missingAddressNotice([
+      { chainName: chainName(fromChainId), address: addressForChain(fromChainId) },
+      { chainName: chainName(toChainId), address: addressForChain(toChainId) },
+    ], addressesDerived);
+    if (addressNotice) return addressNotice;
     try {
       const amountUnits = ethers.parseUnits(fromAmount, fromToken.decimals);
       const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
