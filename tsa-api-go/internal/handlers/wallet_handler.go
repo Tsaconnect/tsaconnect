@@ -100,6 +100,9 @@ func recordPendingSwapFee(userID uuid.UUID, txHash, feature, symbol, amount stri
 		return
 	}
 	row := models.PendingSwapFee{
+		// Explicit rather than leaning on the column default: whether GORM omits
+		// a zero UUID so Postgres can fill it is a detail to not bet a fee row on.
+		ID:          uuid.New(),
 		UserID:      userID,
 		TxHash:      txHash,
 		Feature:     feature,
