@@ -186,6 +186,12 @@ func main() {
 		log.Printf("Warning: Cloudinary initialization failed: %v", err)
 	}
 
+	// Backfill supported_tokens.chains for rows created before a chain was
+	// added to a token's default set (e.g. USDT/USDC predate Arbitrum/Base
+	// support) — additive-only, safe to run on every boot regardless of
+	// migrate mode. See EnsureSupportedTokenChains for the bug this fixes.
+	handlers.EnsureSupportedTokenChains()
+
 	// Initialize services
 	priceService := services.NewPriceService()
 	blockchainService := services.NewBlockchainService(cfg)
