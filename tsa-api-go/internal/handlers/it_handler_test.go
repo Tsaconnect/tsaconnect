@@ -344,6 +344,20 @@ func TestITHandler_Currencies(t *testing.T) {
 	// NewCurrencyRegistry seeds the defaults and loads them.
 	h.currencies = services.NewCurrencyRegistry(db)
 
+	// Simulate a row that predates the ramp_provider column: force NGN's column
+	// blank directly in the DB (NewCurrencyRegistry's seed literal sets it, so
+	// without this the handler would read the same "paycrest" value whether it
+	// calls RampProvider(code) or the struct field directly — the assertions
+	// below wouldn't tell the two implementations apart). NGN is the row that
+	// matters: it is the only live currency, so this is the failure mode the
+	// endpoint exists to prevent.
+	if err := db.Model(&models.Currency{}).Where("code = ?", "NGN").Update("ramp_provider", "").Error; err != nil {
+		t.Fatalf("blank NGN ramp_provider: %v", err)
+	}
+	if err := h.currencies.Load(); err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/it/currencies", nil)
@@ -365,6 +379,9 @@ func TestITHandler_Currencies(t *testing.T) {
 	for _, c := range resp.Data {
 		byCode[c.Code] = c.RampProvider
 	}
+	// NGN's column is blank (forced above), so this only passes if the handler
+	// resolves it through RampProvider's compiled-in-default fallback rather
+	// than reading the empty struct field.
 	if byCode["NGN"] != "paycrest" {
 		t.Errorf("NGN ramp = %q, want paycrest", byCode["NGN"])
 	}
