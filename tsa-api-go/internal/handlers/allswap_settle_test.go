@@ -23,16 +23,15 @@ import (
 func newAllSwapHandler(t *testing.T, db *gorm.DB, fromAmountUSD float64, reachable bool) *SwapLiFiHandler {
 	t.Helper()
 	cfg := &config.Config{
-		TPPerUSD:                  1.0,
-		AllSwapFeeDeviationMax:    0.10,
-		AllSwapNominalFeeBps:      300, // 3%
-		AllSwapConservativeFeeBps: 350, // 3.5%
+		TPPerUSD:               1.0,
+		AllSwapFeeDeviationMax: 0.10,
+		AllSwapNominalFeeBps:   300, // 3%
 	}
 	h := NewSwapLiFiHandler("", "", "")
 	h.Config = cfg
 	h.FeeService = services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
-		return fromAmountUSD, reachable
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
+		return requeryResult{FromAmountUSD: fromAmountUSD, Reachable: reachable, FeeCollectable: true}
 	}
 	return h
 }
@@ -116,14 +115,13 @@ func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 	}
 }
 
-// (c) LiFi unreachable → conservative default (3.5%), NOT 0 and NOT the client
-// value; still accrues the verified (conservative) fee.
+// (c) LiFi unreachable → still books a fee, from a basis priced here: NOT 0,
+// and NOT the client's number.
 //
-// The basis used to be `fromAmount` read as dollars. It is base units, so that
-// is only ever right by accident — see TestAllSwap_UnreachableLiFiPricesTheBasis.
-// The conservative charge now comes off a priced basis; what this test still
-// pins is that the client's own number is ignored either way.
-func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
+// The rate is the same as the verified path. This accrual mirrors a fixed cut
+// LiFi already took, so a higher "conservative" rate would record income that
+// was never received and fund TP and cashback out of nothing.
+func TestAllSwap_LiFiUnreachableIgnoresTheClientsNumber(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
@@ -131,8 +129,8 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	h.PriceService.SeedPriceForTest("USDC", services.PriceData{USD: 1.0})
 	user := mkWUser(t, db, "asdown", nil)
 
-	// Client claims $1 (tiny). LiFi down → we ignore the client and charge the
-	// conservative 3.5% of the priced from-amount (1,000 USDC = $1000) = $35.
+	// Client claims $1 (tiny). LiFi down → we ignore the client and book 3% of
+	// the priced from-amount (1,000 USDC = $1000) = $30.
 	w := doSettle(t, h, user, map[string]interface{}{
 		"quoteId": "down-1", "fromToken": "USDC", "toToken": "ETH",
 		"fromAmount": "1000000000", "fromSymbol": "USDC", "fromDecimals": 6,
@@ -143,13 +141,13 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	}
 	sourceID := deterministicUUID("allswap:down-1")
 	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
-		t.Fatalf("want 1 conservative guard row, got %d", got)
+		t.Fatalf("want 1 guard row, got %d", got)
 	}
 	var fd models.FeeDistribution
 	db.Where("source_type = ? AND source_id = ?", "allswap", sourceID).First(&fd)
-	// 3.5% of $1000 = $35 — never 0, never the client's $1.
-	if fd.FeeUSD < 34.999 || fd.FeeUSD > 35.001 {
-		t.Errorf("conservative feeUSD=%v want 35 (3.5%% of 1000)", fd.FeeUSD)
+	// 3% of $1000 = $30 — never 0, never the client's $1.
+	if fd.FeeUSD < 29.999 || fd.FeeUSD > 30.001 {
+		t.Errorf("feeUSD=%v want 30 (3%% of 1000)", fd.FeeUSD)
 	}
 }
 
@@ -164,9 +162,9 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 
 	const svmChainID int64 = 1151111081099710
 	var gotFromChain, gotToChain string
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
 		gotFromChain, gotToChain = p.FromChain, p.ToChain
-		return 1000.0, true
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
 	}
 
 	w := doSettle(t, h, user, map[string]interface{}{
@@ -185,8 +183,8 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	}
 }
 
-// FromAmount is in base units. Reading it as dollars — which the conservative
-// fallback used to do — turns a 1,000 USDC swap (fromAmount "1000000000") into
+// FromAmount is in base units. Reading it as dollars — which the fallback
+// used to do — turns a 1,000 USDC swap (fromAmount "1000000000") into
 // a $35,000,000 fee event, and every split, TP award and reward computed from
 // it inherits that. With a price available the basis is priced properly.
 func TestAllSwap_UnreachableLiFiPricesTheBasis(t *testing.T) {
@@ -205,9 +203,10 @@ func TestAllSwap_UnreachableLiFiPricesTheBasis(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	// 1,000 USDC at $1 → conservative 3.5% → $35. NOT $35,000,000.
-	if got := settledFee(t, db, "priced-1").FeeUSD; got < 34.999 || got > 35.001 {
-		t.Fatalf("feeUSD=%v, want 35 (3.5%% of a $1,000 basis)", got)
+	// 1,000 USDC at $1 → 3% → $30. NOT $35,000,000, and not the 3.5% that would
+	// over-record against what LiFi actually collected.
+	if got := settledFee(t, db, "priced-1").FeeUSD; got < 29.999 || got > 30.001 {
+		t.Fatalf("feeUSD=%v, want 30 (3%% of a $1,000 basis)", got)
 	}
 }
 
@@ -247,9 +246,9 @@ func TestAllSwap_RequeryCarriesRouteAddresses(t *testing.T) {
 	user := mkWUser(t, db, "asaddr", nil)
 
 	var got settleQuoteParams
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
 		got = p
-		return 1000.0, true
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
 	}
 	doSettle(t, h, user, map[string]interface{}{
 		"quoteId": "addr-1", "fromToken": "bitcoin", "toToken": "USDC",

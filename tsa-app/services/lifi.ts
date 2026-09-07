@@ -93,6 +93,16 @@ export interface LiFiQuote {
   toAmountUSD: string;
   estimatedDuration: number;
   gasCostUSD: string;
+  /**
+   * Total platform + protocol fees LiFi reports for this route, in USD
+   * (estimate.feeCosts).
+   *
+   * The UI shows THIS rather than a percentage of its own: the rate lives at
+   * portal.li.fi, is configured per chain, and a number hardcoded in the app
+   * becomes a lie the moment it is changed there. Undefined when the route
+   * reports no fee, in which case the UI shows nothing at all.
+   */
+  feeCostUSD?: string;
   tool: string;
   transactionRequest: LiFiTransactionRequest;
   approvalAddress?: string;
@@ -215,6 +225,7 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,
     gasCostUSD: data.estimate?.gasCosts?.[0]?.amountUSD ?? '0',
+    feeCostUSD: sumFeeCostsUSD(data.estimate?.feeCosts),
     tool: data.toolDetails?.name ?? data.tool ?? 'LiFi',
     transactionRequest: data.transactionRequest,
     approvalAddress: data.estimate?.approvalAddress || undefined,
@@ -286,6 +297,56 @@ export async function settleSwapFee(params: SettleSwapFeeParams): Promise<void> 
     const body = await res.text();
     throw new Error(`settle failed (${res.status}): ${body.slice(0, 200)}`);
   }
+}
+
+export type SwapDeliveryStatus = 'PENDING' | 'DONE' | 'FAILED';
+
+export interface SwapDelivery {
+  status: SwapDeliveryStatus;
+  destTxHash?: string;
+  receivedAmount?: string;
+}
+
+/**
+ * Ask the backend what became of a broadcast swap on the DESTINATION chain.
+ *
+ * A cross-chain route is not finished when its source transaction confirms —
+ * the bridge still has to deliver, which takes minutes and can fail. Any error
+ * reads as still-pending: right after a broadcast LiFi does not know the hash
+ * yet, and that is indistinguishable from a transient failure, so "not yet" is
+ * the honest answer rather than "it failed".
+ */
+export async function getSwapDelivery(txHash: string): Promise<SwapDelivery> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${API_BASE_URL}/swap/lifi/status?txHash=${encodeURIComponent(txHash)}`, { headers });
+    if (!res.ok) return { status: 'PENDING' };
+    const body = await res.json();
+    const d = body?.data ?? {};
+    const status: SwapDeliveryStatus =
+      d.status === 'DONE' || d.status === 'FAILED' ? d.status : 'PENDING';
+    return { status, destTxHash: d.destTxHash, receivedAmount: d.receivedAmount };
+  } catch {
+    return { status: 'PENDING' };
+  }
+}
+
+/**
+ * Total of a quote's feeCosts in USD. Returns undefined when the route reports
+ * none, so callers can tell "no fee reported" from "zero fee".
+ */
+function sumFeeCostsUSD(feeCosts: { amountUSD?: string }[] | undefined): string | undefined {
+  if (!Array.isArray(feeCosts) || feeCosts.length === 0) return undefined;
+  let total = 0;
+  let sawOne = false;
+  for (const fc of feeCosts) {
+    const amount = Number(fc?.amountUSD);
+    if (Number.isFinite(amount)) {
+      total += amount;
+      sawOne = true;
+    }
+  }
+  return sawOne ? total.toFixed(2) : undefined;
 }
 
 /** ABI-encodes approve(address,uint256) calldata for ERC-20 token approval. */

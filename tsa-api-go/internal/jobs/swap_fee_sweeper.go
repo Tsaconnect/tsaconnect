@@ -24,9 +24,8 @@ import (
 // (models.PendingSwapFee); this sweeps whatever is still outstanding.
 //
 // It is the safety net, not the primary path: it prices the swap from our own
-// price service and charges the CONSERVATIVE rate, because it has no quote to
-// verify against. A client that settles promptly gets the exact figure and a
-// cheaper rate.
+// price service rather than a fresh quote. The rate is the same either way —
+// what differs is the confidence in the basis, not what LiFi took.
 //
 // Idempotency: accrual uses the same source key as the settle endpoint —
 // uuidv5("allswap:"+TxHash) — so a sweep racing a late client settle collapses
@@ -40,8 +39,10 @@ type SwapFeeSweeper struct {
 	// comfortably exceed a normal settle round-trip so the fast path wins the
 	// race in the ordinary case.
 	Grace time.Duration
-	// ConservativeBps is the rate applied to a swept swap.
-	ConservativeBps int
+	// FeeBps is the rate a swept swap is booked at. Same rate the settle path
+	// uses, deliberately: this accrual mirrors a fixed cut LiFi already took, so
+	// a higher "conservative" rate would record income never received.
+	FeeBps int
 	// MaxAttempts bounds retries. A row that keeps failing (an unpriceable
 	// token, say) is parked as abandoned and alerted on rather than retried for
 	// ever.
@@ -129,7 +130,7 @@ func (s *SwapFeeSweeper) sweepOne(ctx context.Context, row *models.PendingSwapFe
 		return
 	}
 
-	feeUSD := basisUSD * float64(s.conservativeBps()) / 10000.0
+	feeUSD := basisUSD * float64(s.feeBps()) / 10000.0
 	if feeUSD <= 0 {
 		s.recordFailure(ctx, row, "priced basis produced a non-positive fee")
 		return
@@ -153,14 +154,14 @@ func (s *SwapFeeSweeper) sweepOne(ctx context.Context, row *models.PendingSwapFe
 		return
 	}
 	log.Printf("[fees] swap_fee_swept_total=1 tx=%s feature=%s basis=$%.2f fee=$%.6f "+
-		"(client never settled; conservative %d bps)", row.TxHash, row.Feature, basisUSD, feeUSD, s.conservativeBps())
+		"(client never settled; %d bps)", row.TxHash, row.Feature, basisUSD, feeUSD, s.feeBps())
 }
 
-func (s *SwapFeeSweeper) conservativeBps() int {
-	if s.ConservativeBps <= 0 {
-		return 350
+func (s *SwapFeeSweeper) feeBps() int {
+	if s.FeeBps <= 0 {
+		return 300
 	}
-	return s.ConservativeBps
+	return s.FeeBps
 }
 
 // priceUSD values the swap from our own price service. There is no quote to
