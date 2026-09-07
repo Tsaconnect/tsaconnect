@@ -281,3 +281,43 @@ func TestPaycrestDirectory_PropagatesFetchFailure(t *testing.T) {
 		t.Fatal("expected the fetch failure to surface, not an empty map")
 	}
 }
+
+func TestPaycrestDirectory_NonNigerianCurrenciesPassCodesThrough(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Equity Bank Kenya", Code: "EQBLKENA", Type: "bank"},
+		{Name: "KCB Bank Kenya", Code: "KCBLKENX", Type: "bank"},
+	}}
+	// The local bank list is Nigerian and must not be consulted for KES.
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	d := NewPaycrestDirectory(pc, local)
+
+	got, err := d.Institutions(context.Background(), "KES")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d options, want both Kenyan banks: %#v", len(got), got)
+	}
+	if got[0].Code != "EQBLKENA" {
+		t.Errorf("code = %q, want Paycrest's own code passed through", got[0].Code)
+	}
+	if local.calls != 0 {
+		t.Errorf("the Nigerian bank list was fetched %d times for KES; it is irrelevant there", local.calls)
+	}
+}
+
+func TestPaycrestDirectory_NigeriaStillMapsToNIBSS(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Access Bank", Code: "ABNGNGLA", Type: "bank"},
+	}}
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	d := NewPaycrestDirectory(pc, local)
+
+	got, err := d.Institutions(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	if len(got) != 1 || got[0].Code != "044" {
+		t.Fatalf("NGN must return NIBSS codes the app already speaks, got %#v", got)
+	}
+}

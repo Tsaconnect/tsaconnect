@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -85,42 +86,52 @@ func (h *PaycrestHandler) Quote(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
 }
 
-// GET /api/paycrest/banks — banks that can actually receive a payout on this
-// route, in NIBSS codes the app already speaks.
+// GET /api/paycrest/banks — payout destinations that can actually receive on
+// this route. NGN returns NIBSS codes the app already speaks; every other
+// currency passes Paycrest's own institution codes through unchanged.
 func (h *PaycrestHandler) Banks(c *gin.Context) {
 	if h.dir == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Bank list unavailable")
 		return
 	}
-	m, err := h.dir.BankMap(c.Request.Context(), c.DefaultQuery("currency", "NGN"))
+	currency := c.DefaultQuery("currency", "NGN")
+	opts, err := h.dir.Institutions(c.Request.Context(), currency)
 	if err != nil {
 		paycrestError(c, err)
 		return
 	}
+	codes := make([]string, 0, len(opts))
+	for _, o := range opts {
+		codes = append(codes, o.Code)
+	}
+
+	// Unmatched only ever means anything for NGN, where the matcher can fail
+	// to tie a Paycrest bank to a NIBSS code — that's deliberately still in
+	// the response, not just a log line, so a gap in OUR matcher (e.g. OPay,
+	// PalmPay, Moniepoint) is visible rather than silent. Every other
+	// currency has no local list to match against, so nothing is ever
+	// "unmatched" there and the field stays an empty array rather than
+	// implying a matching step that didn't run.
 	type bank struct {
 		Code string `json:"code"`
 		Name string `json:"name"`
 	}
-	codes := make([]string, 0, len(m.NIBSSToPaycrest))
-	banks := make([]bank, 0, len(m.NIBSSToPaycrest))
-	for nibss := range m.NIBSSToPaycrest {
-		codes = append(codes, nibss)
-		banks = append(banks, bank{Code: nibss, Name: m.Names[nibss]})
+	unmatched := []bank{}
+	if strings.EqualFold(strings.TrimSpace(currency), "NGN") || currency == "" {
+		m, err := h.dir.BankMap(c.Request.Context(), currency)
+		if err != nil {
+			paycrestError(c, err)
+			return
+		}
+		for _, u := range m.Unmatched {
+			unmatched = append(unmatched, bank{Code: u.Code, Name: u.Name})
+		}
+		sort.Slice(unmatched, func(i, j int) bool { return unmatched[i].Name < unmatched[j].Name })
 	}
-	sort.Slice(banks, func(i, j int) bool { return banks[i].Name < banks[j].Name })
-
-	// Unmatched is deliberately in the response, not just a log line. A bank
-	// Paycrest carries that we could not tie to a local code is a gap in OUR
-	// matcher, and the only way anyone notices is by being able to see it.
-	unmatched := make([]bank, 0, len(m.Unmatched))
-	for _, u := range m.Unmatched {
-		unmatched = append(unmatched, bank{Code: u.Code, Name: u.Name})
-	}
-	sort.Slice(unmatched, func(i, j int) bool { return unmatched[i].Name < unmatched[j].Name })
 
 	utils.SuccessResponse(c, http.StatusOK, "Supported banks", gin.H{
 		"bankCodes": codes, // kept for the existing client
-		"banks":     banks,
+		"banks":     opts,
 		"unmatched": unmatched,
 	})
 }

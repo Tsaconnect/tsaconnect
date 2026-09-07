@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -180,6 +181,54 @@ func (d *PaycrestDirectory) BankMap(ctx context.Context, fiat string) (*Paycrest
 	d.cached[fiat] = m
 	d.mu.Unlock()
 	return m, nil
+}
+
+// PaycrestPayoutOption is one selectable payout destination, in whatever
+// vocabulary the app should send back for that currency.
+type PaycrestPayoutOption struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// Institutions lists payout destinations for a currency.
+//
+// Nigeria is the exception, not the rule: the app's picker speaks NIBSS codes
+// because it predates Paycrest, so NGN goes through the matcher. Every other
+// currency has no local list to reconcile against — inventing one would put
+// every bank in Unmatched — so Paycrest's own codes pass straight through and
+// are sent back on the order unchanged.
+func (d *PaycrestDirectory) Institutions(ctx context.Context, fiat string) ([]PaycrestPayoutOption, error) {
+	if d == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	fiat = strings.ToUpper(strings.TrimSpace(fiat))
+	if fiat == "" {
+		fiat = "NGN"
+	}
+
+	if fiat == "NGN" {
+		m, err := d.BankMap(ctx, fiat)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]PaycrestPayoutOption, 0, len(m.NIBSSToPaycrest))
+		for nibss := range m.NIBSSToPaycrest {
+			out = append(out, PaycrestPayoutOption{Code: nibss, Name: m.Names[nibss]})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out, nil
+	}
+
+	rows, err := d.pc.Institutions(ctx, fiat)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PaycrestPayoutOption, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, PaycrestPayoutOption{Code: r.Code, Name: r.Name})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // buildPaycrestBankMap does the matching. Split out so it is testable without
