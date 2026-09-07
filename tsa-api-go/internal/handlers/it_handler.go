@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,12 +25,13 @@ import (
 // In this phase the NGN legs are admin-approved (buy credit / sell settle /
 // reverse) because auto-credit is gated on the confirmed strong attribution key.
 type ITHandler struct {
-	db *gorm.DB
-	it *services.ITService
+	db         *gorm.DB
+	it         *services.ITService
+	currencies *services.CurrencyRegistry
 }
 
-func NewITHandler(db *gorm.DB, it *services.ITService) *ITHandler {
-	return &ITHandler{db: db, it: it}
+func NewITHandler(db *gorm.DB, it *services.ITService, currencies *services.CurrencyRegistry) *ITHandler {
+	return &ITHandler{db: db, it: it, currencies: currencies}
 }
 
 func (h *ITHandler) userWallet(userID uuid.UUID) string {
@@ -60,6 +62,41 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 		"buyRateKobo": buyKobo.String(), "sellRateKobo": sellKobo.String(),
 		"stale": fx.Stale,
 	})
+}
+
+// GET /api/it/currencies — every currency the ramp knows about, and who serves
+// it.
+//
+// Payout-only currencies are LISTED with an empty rampProvider rather than
+// omitted. The app should be able to say "not available in USD" instead of
+// silently lacking the option, which reads as a bug to the user.
+func (h *ITHandler) Currencies(c *gin.Context) {
+	if h.currencies == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Currency list unavailable")
+		return
+	}
+	type row struct {
+		Code           string `json:"code"`
+		Exponent       int    `json:"exponent"`
+		RampProvider   string `json:"rampProvider"`
+		DepositEnabled bool   `json:"depositEnabled"`
+		PayoutEnabled  bool   `json:"payoutEnabled"`
+		MinPayoutMinor int64  `json:"minPayoutMinor"`
+	}
+	all := h.currencies.All()
+	out := make([]row, 0, len(all))
+	for _, cur := range all {
+		out = append(out, row{
+			Code:           cur.Code,
+			Exponent:       cur.Exponent,
+			RampProvider:   h.currencies.RampProvider(cur.Code),
+			DepositEnabled: cur.DepositEnabled,
+			PayoutEnabled:  cur.PayoutEnabled,
+			MinPayoutMinor: cur.MinPayoutMinor,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	utils.SuccessResponse(c, http.StatusOK, "Currencies", out)
 }
 
 // GET /api/it/withdraw/quote?ngn=<amt>&currency=<ISO> — live FX preview for a

@@ -912,6 +912,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		it.Use(auth)
 		{
 			it.GET("/rate", ith.GetRate)
+			it.GET("/currencies", ith.Currencies)
 			it.GET("/agreement", ith.GetAgreement)
 			it.POST("/agreement/accept", itIdem, ith.AcceptAgreement)
 			it.GET("/withdraw/quote", ith.QuoteWithdrawal)

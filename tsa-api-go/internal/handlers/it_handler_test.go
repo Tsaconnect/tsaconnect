@@ -60,7 +60,7 @@ func newITTestHandler(t *testing.T) (*ITHandler, *gorm.DB) {
 	})
 	swap.SetOperatorSigner(fakeITReleaseSigner{})
 	it := services.NewITService(db, swap, stubITFx{})
-	return NewITHandler(db, it), db
+	return NewITHandler(db, it, nil), db
 }
 
 func doITSell(h *ITHandler, user *models.User, body map[string]any) *httptest.ResponseRecorder {
@@ -333,5 +333,47 @@ func TestSell_NGNBank_ExplicitCurrency_StillRequiresTenDigitAccountNumber(t *tes
 	resp := decodeITResponse(t, w)
 	if resp["message"] != "bankCode and a 10-digit accountNumber are required" {
 		t.Fatalf("message = %v, want the NUBAN validation message", resp["message"])
+	}
+}
+
+func TestITHandler_Currencies(t *testing.T) {
+	h, db := newITTestHandler(t)
+	if err := db.AutoMigrate(&models.Currency{}); err != nil {
+		t.Fatalf("migrate currencies: %v", err)
+	}
+	// NewCurrencyRegistry seeds the defaults and loads them.
+	h.currencies = services.NewCurrencyRegistry(db)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/it/currencies", nil)
+	h.Currencies(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			Code         string `json:"code"`
+			RampProvider string `json:"rampProvider"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byCode := map[string]string{}
+	for _, c := range resp.Data {
+		byCode[c.Code] = c.RampProvider
+	}
+	if byCode["NGN"] != "paycrest" {
+		t.Errorf("NGN ramp = %q, want paycrest", byCode["NGN"])
+	}
+	// A payout-only currency must be listed, not omitted: the app shows it as
+	// unavailable rather than pretending it does not exist.
+	if _, ok := byCode["USD"]; !ok {
+		t.Error("USD must be listed so the app can say it is unavailable")
+	}
+	if byCode["USD"] != "" {
+		t.Errorf("USD ramp = %q, want empty", byCode["USD"])
 	}
 }

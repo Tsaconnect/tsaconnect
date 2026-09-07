@@ -68,7 +68,7 @@ func newStableTestRouter(t *testing.T) (*gin.Engine, *services.ITService) {
 	// PostStableSell tests exercise the create path, not that refusal.
 	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
-	h := NewITHandler(db, it)
+	h := NewITHandler(db, it, nil)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
 	// PostStableSell sits behind the same IT trade gate as Buy/Sell, so the
 	// fixture user has to have accepted — the same thing newITTestRig does.
@@ -116,7 +116,7 @@ func newStableTestRouterMultiUser(t *testing.T) (*gin.Engine, *services.ITServic
 	// PostStableSell tests exercise the create path, not that refusal.
 	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
-	h := NewITHandler(db, it)
+	h := NewITHandler(db, it, nil)
 	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
 	userB := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETB"}
 	// Both accept: this fixture exercises ownership, not the trade gate.

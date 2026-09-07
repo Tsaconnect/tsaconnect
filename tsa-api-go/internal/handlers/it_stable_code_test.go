@@ -95,7 +95,7 @@ func newStableCodeTestFixture(t *testing.T) *gin.Engine {
 	it.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
 	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
-	h := NewITHandler(db, it)
+	h := NewITHandler(db, it, nil)
 	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
 	userB := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETB"}
 	for _, u := range []*models.User{userA, userB} {

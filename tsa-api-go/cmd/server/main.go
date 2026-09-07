@@ -251,7 +251,7 @@ func main() {
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itService.SetCurrencyRegistry(currencyRegistry)
-				itHandler = handlers.NewITHandler(config.DB, itService)
+				itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}
 		} else {

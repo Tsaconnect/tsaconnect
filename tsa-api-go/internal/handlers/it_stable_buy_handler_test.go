@@ -169,7 +169,7 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 		t.Fatalf("accept agreement: %v", err)
 	}
 
-	h := NewITHandler(db, it)
+	h := NewITHandler(db, it, nil)
 	idem := middleware.Idempotency(db)
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -234,7 +234,7 @@ func TestPostStableBuyQuote_ResponseIsMarkedIndicative(t *testing.T) {
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
 	wireStableBuyPrereqs(it)
-	h := NewITHandler(nil, it)
+	h := NewITHandler(nil, it, nil)
 
 	r := gin.New()
 	r.POST("/api/it/stable/buy/quote", h.PostStableBuyQuote)
