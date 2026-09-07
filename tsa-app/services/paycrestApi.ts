@@ -147,11 +147,17 @@ export async function getQuote(
   return request<PaycrestQuote>(`/quote?${q.toString()}`);
 }
 
-/** NIBSS bank codes that can receive a payout on this route. Intersect with
- *  the app's existing bank list rather than replacing it. */
-export async function getSupportedBankCodes(currency = 'NGN'): Promise<string[]> {
-  const data = await request<{ bankCodes: string[] }>(`/banks?currency=${currency}`);
-  return data.bankCodes ?? [];
+export interface PayoutInstitution {
+  code: string;
+  name: string;
+}
+
+/** Payout destinations for a currency, already in the vocabulary the order
+ *  expects: NIBSS codes for NGN, Paycrest's own codes elsewhere. The caller
+ *  sends the code back unchanged. */
+export async function getPayoutInstitutions(currency = 'NGN'): Promise<PayoutInstitution[]> {
+  const data = await request<{ banks: PayoutInstitution[] }>(`/banks?currency=${currency}`);
+  return data.banks ?? [];
 }
 
 export interface CreateBuyInput {

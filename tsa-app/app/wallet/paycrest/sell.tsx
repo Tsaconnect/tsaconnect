@@ -34,15 +34,17 @@ import {
 } from '@/components/ui';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
-import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { resolveAccountName } from '@/services/ngBanks';
 import {
   createSell,
+  getPayoutInstitutions,
   getQuote,
-  getSupportedBankCodes,
   PaycrestError,
   type PaycrestOrder,
   type PaycrestQuote,
   type PaycrestVenue,
+  type PayoutInstitution,
 } from '@/services/paycrestApi';
 
 const QUOTE_DEBOUNCE_MS = 450;
@@ -67,6 +69,12 @@ export default function PaycrestSellScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
   const { asset } = useLocalSearchParams<{ asset?: string }>();
+  const { currency } = useCurrency();
+  const currencyCode = currency.code;
+  // resolveAccountName is a Nigerian NUBAN lookup — it cannot resolve an
+  // account in any other currency's country, so gate both the lookup and the
+  // submit requirement on NGN or sell becomes permanently stuck outside it.
+  const requiresNameCheck = currencyCode === 'NGN';
 
   const [amount, setAmount] = useState('');
   const [quote, setQuote] = useState<PaycrestQuote | null>(null);
@@ -76,8 +84,8 @@ export default function PaycrestSellScreen() {
   const [routeOpen, setRouteOpen] = useState(false);
 
   // Payout destination.
-  const [banks, setBanks] = useState<NgBank[]>([]);
-  const [bank, setBank] = useState<NgBank | null>(null);
+  const [banks, setBanks] = useState<PayoutInstitution[]>([]);
+  const [bank, setBank] = useState<PayoutInstitution | null>(null);
   const [bankOpen, setBankOpen] = useState(false);
   const [accountNo, setAccountNo] = useState('');
   const [accountName, setAccountName] = useState('');
@@ -95,29 +103,14 @@ export default function PaycrestSellScreen() {
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
-  // Only banks Paycrest can actually pay out to. Showing the full national
-  // list and failing at submit would waste the user's time on a choice that
-  // was never available.
+  // The server returns the list already in the right vocabulary for this
+  // currency, so there is nothing to intersect. Outside Nigeria there is no
+  // local list to intersect WITH.
   useEffect(() => {
-    (async () => {
-      try {
-        const [all, supported] = await Promise.all([
-          getNigerianBanks(),
-          getSupportedBankCodes('NGN'),
-        ]);
-        const allow = new Set(supported);
-        setBanks(supported.length ? all.filter((b) => allow.has(b.code)) : all);
-      } catch {
-        // A failed intersection must not leave the user with no bank list at
-        // all — fall back to the full one and let the server reject.
-        try {
-          setBanks(await getNigerianBanks());
-        } catch {
-          /* the picker simply stays empty */
-        }
-      }
-    })();
-  }, []);
+    getPayoutInstitutions(currencyCode)
+      .then(setBanks)
+      .catch(() => setBanks([]));
+  }, [currencyCode]);
 
   // Live quoting, same contract as the buy screen: a quote is only true for
   // the size it was asked about, and only for a moment.
@@ -161,7 +154,7 @@ export default function PaycrestSellScreen() {
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
   useEffect(() => {
-    if (!bank || accountNo.length !== NUBAN_LENGTH) {
+    if (!requiresNameCheck || !bank || accountNo.length !== NUBAN_LENGTH) {
       setAccountName('');
       return;
     }
@@ -181,7 +174,7 @@ export default function PaycrestSellScreen() {
     return () => {
       cancelled = true;
     };
-  }, [bank, accountNo]);
+  }, [requiresNameCheck, bank, accountNo]);
 
   const onConfirm = useCallback(async () => {
     if (!venue || !address || !bank) return;
@@ -223,7 +216,11 @@ export default function PaycrestSellScreen() {
   );
 
   const ready =
-    !!venue && !!address && !!bank && accountNo.length === NUBAN_LENGTH && !!accountName;
+    !!venue &&
+    !!address &&
+    !!bank &&
+    accountNo.length === NUBAN_LENGTH &&
+    (!requiresNameCheck || !!accountName);
 
   // ── Deposit instructions ────────────────────────────────────────────────
   if (order) {
@@ -367,21 +364,25 @@ export default function PaycrestSellScreen() {
             keyboardType="number-pad"
             placeholder="0123456789"
           />
-          {resolving && (
+          {requiresNameCheck && resolving && (
             <Text variant="caption" style={{ color: colors.textMuted }}>
               Checking account…
             </Text>
           )}
-          {!!accountName && (
+          {requiresNameCheck && !!accountName && (
             <Text variant="bodySm" weight="600" style={{ color: colors.success }}>
               {accountName}
             </Text>
           )}
-          {!resolving && !accountName && accountNo.length === NUBAN_LENGTH && bank && (
-            <Text variant="caption" style={{ color: colors.danger }}>
-              We could not verify that account. Check the number and bank.
-            </Text>
-          )}
+          {requiresNameCheck &&
+            !resolving &&
+            !accountName &&
+            accountNo.length === NUBAN_LENGTH &&
+            bank && (
+              <Text variant="caption" style={{ color: colors.danger }}>
+                We could not verify that account. Check the number and bank.
+              </Text>
+            )}
 
           {venue && (
             <SummaryCard>
