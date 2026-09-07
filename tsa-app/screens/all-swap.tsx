@@ -25,7 +25,7 @@ import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWal
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote,
+  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee,
   isSolanaLiFiChain, isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
@@ -411,6 +411,20 @@ export default function AllSwapScreen() {
         onStage: setSigningStatus,
       });
       setTxHash(swapHash); setScreen('success');
+      // The swap is on-chain now, so the fee is owed whatever happens next.
+      // Report it without blocking the success screen and without ever turning
+      // a completed swap into a visible failure.
+      settleSwapFee({
+        quoteId: swapHash,
+        fromChainId,
+        toChainId,
+        fromToken: fromToken.address,
+        toToken: toToken!.address,
+        fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
+        toAmount: quote.toAmount,
+        fromSymbol: fromToken.symbol,
+        feature: 'allswap',
+      }).catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);
       setError(e?.message || 'Swap failed'); setScreen('failure');

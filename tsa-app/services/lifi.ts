@@ -223,6 +223,60 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
   };
 }
 
+export interface SettleSwapFeeParams {
+  /**
+   * What makes this swap unique, for idempotency. The source-chain tx hash:
+   * it exists only once the swap actually happened, is stable across retries
+   * of this call, and differs for every execution — so a retry never
+   * double-charges and two real swaps are never collapsed into one.
+   */
+  quoteId: string;
+  /** Route as quoted — the backend re-queries LiFi with exactly these. */
+  fromChainId: number;
+  toChainId: number;
+  fromToken: string; // contract address (what LiFi resolves reliably)
+  toToken: string;
+  fromAmount: string; // base units
+  toAmount?: string;
+  /** Settlement token symbol for the fee ledger (the address means nothing there). */
+  fromSymbol: string;
+  /** Fee bucket: the cross-chain bridge, or the same-chain trading desk. */
+  feature: 'allswap' | 'spot';
+}
+
+/**
+ * Report an executed swap so the backend can accrue its platform fee.
+ *
+ * The fee is computed server-side from a fresh LiFi quote — we deliberately
+ * send no fee figure, because the client's opinion of it is exactly what the
+ * endpoint is designed not to trust.
+ *
+ * The swap has already happened on-chain by the time this runs, so a failure
+ * here must never reach the user as a failed swap; callers fire it and log.
+ */
+export async function settleSwapFee(params: SettleSwapFeeParams): Promise<void> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/settle`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      quoteId: params.quoteId,
+      fromToken: params.fromToken,
+      toToken: params.toToken,
+      fromAmount: params.fromAmount,
+      toAmount: params.toAmount ?? '',
+      chainId: params.fromChainId,
+      toChainId: params.toChainId,
+      fromSymbol: params.fromSymbol,
+      feature: params.feature,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`settle failed (${res.status}): ${body.slice(0, 200)}`);
+  }
+}
+
 /** ABI-encodes approve(address,uint256) calldata for ERC-20 token approval. */
 export function buildERC20ApproveCalldata(spender: string, amount: string): string {
   const iface = new ethers.Interface(['function approve(address spender, uint256 amount)']);

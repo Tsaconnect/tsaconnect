@@ -1,5 +1,5 @@
 import {
-  getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata,
+  getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
 } from './lifi';
 
@@ -70,6 +70,47 @@ describe('getLiFiChains', () => {
     await getLiFiChains();
     expect(isBtcLiFiChain(UNKNOWN_UTXO)).toBe(true);
     expect(isNonEVMLiFiChain(UNKNOWN_UTXO)).toBe(true);
+  });
+});
+
+describe('settleSwapFee', () => {
+  const params = {
+    quoteId: '0xswaphash',
+    fromChainId: 42161,
+    toChainId: 1,
+    fromToken: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    toToken: '0x0000000000000000000000000000000000000000',
+    fromAmount: '1000000000',
+    toAmount: '250957',
+    fromSymbol: 'USDC',
+    feature: 'allswap' as const,
+  };
+
+  it('reports the executed route and never claims a fee figure', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => '{}' });
+    await settleSwapFee(params);
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/swap/lifi/settle');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({
+      quoteId: '0xswaphash',
+      chainId: 42161,
+      toChainId: 1,
+      fromToken: params.fromToken,
+      fromAmount: '1000000000',
+      fromSymbol: 'USDC',
+      feature: 'allswap',
+    });
+    // The server recomputes the fee from a fresh quote; a number from here is
+    // precisely what it is built not to trust.
+    expect(body).not.toHaveProperty('clientFeeUsd');
+  });
+
+  it('throws on a rejected settle so the caller can log it', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 422, text: async () => 'fee deviation' });
+    await expect(settleSwapFee(params)).rejects.toThrow(/422/);
   });
 });
 

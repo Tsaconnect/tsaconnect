@@ -19,7 +19,7 @@ import {
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { CHAINS, type ChainKey } from '@/constants/chains';
 import { getActiveWallet, ensureGas, readErc20BalanceOf, getProvider } from '@/services/wallet';
-import { getLiFiToken, getLiFiTokens, getLiFiQuote, type LiFiToken, type LiFiQuote } from '@/services/lifi';
+import { getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
@@ -196,6 +196,20 @@ export default function SpotTrade() {
       });
       setTxHash(hash);
       setScreen('success');
+      // Books against `spot`, not `allswap`: same rate, separate line in the
+      // P&L. Fire-and-forget — the trade is already on-chain, so a settle
+      // failure must not show up as a failed trade.
+      settleSwapFee({
+        quoteId: hash,
+        fromChainId: chain!.chainId,
+        toChainId: chain!.chainId,
+        fromToken: fromToken.address,
+        toToken: toToken!.address,
+        fromAmount: ethers.parseUnits(amount, fromToken.decimals).toString(),
+        toAmount: q.toAmount,
+        fromSymbol: fromToken.symbol,
+        feature: 'spot',
+      }).catch(e => console.error('[spot] fee settle failed', { txHash: hash, e }));
     } catch (e: any) {
       setError(e?.message || 'Trade failed');
       setScreen('failure');

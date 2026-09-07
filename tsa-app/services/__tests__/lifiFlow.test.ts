@@ -175,6 +175,29 @@ describe('executeLiFiSwap — Solana source routes', () => {
   });
 });
 
+// The backend's submit-time fee fallback multiplies `amount` by 1% as though
+// it were dollars. For a swap that amount is a quantity of the from-token, so
+// the guess is wrong by whatever the token is worth — pennies on WETH,
+// thousands on a memecoin. Swaps defer it and settle a verified figure.
+describe('executeLiFiSwap — fee handling', () => {
+  it('marks the swap submission fee-deferred', async () => {
+    await executeLiFiSwap(params());
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true });
+  });
+
+  it('leaves the approval alone — it never accrued a fee', async () => {
+    mockSubmitTransaction.mockResolvedValue({ success: true, data: { txHash: '0xapprovehash' } });
+    mockWithRpcFallback.mockResolvedValue({ status: 1 });
+    await executeLiFiSwap(params({
+      quote: quote({ approvalAddress: '0xspender', approvalToken: '0xtoken' }),
+    }));
+    const approveCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'approve');
+    expect(approveCall).toBeDefined();
+    expect(approveCall?.[7]).toBeUndefined();
+  });
+});
+
 describe('executeLiFiSwap — Bitcoin source routes', () => {
   const BTC_CHAIN_ID = 20000000000001;
 

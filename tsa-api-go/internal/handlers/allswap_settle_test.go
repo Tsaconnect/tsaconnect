@@ -176,6 +176,74 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	}
 }
 
+// settledFee loads the guard row a settle call produced.
+func settledFee(t *testing.T, db *gorm.DB, quoteID string) models.FeeDistribution {
+	t.Helper()
+	sourceID := deterministicUUID("allswap:" + quoteID)
+	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
+		t.Fatalf("want 1 guard row for %s, got %d", quoteID, got)
+	}
+	var fd models.FeeDistribution
+	if err := db.Where("source_type = ? AND source_id = ?", "allswap", sourceID).First(&fd).Error; err != nil {
+		t.Fatalf("load guard: %v", err)
+	}
+	return fd
+}
+
+// The same-chain trading desk and the cross-chain bridge settle through this
+// one endpoint but are reported as separate lines, so the caller names its
+// bucket. Anything unrecognised books as allswap rather than inventing a
+// feature the fee config has no rate for.
+func TestAllSwap_BooksTheRequestedFeature(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "featureuser", nil)
+
+	for _, tc := range []struct{ requested, want string }{
+		{"spot", models.FeatureSpot},
+		{"allswap", models.FeatureAllswap},
+		{"", models.FeatureAllswap},
+		{"product_merchant", models.FeatureAllswap}, // not this endpoint's to write
+	} {
+		quoteID := "feature-" + tc.requested
+		w := doSettle(t, h, user, map[string]interface{}{
+			"quoteId": quoteID, "fromToken": "USDC", "toToken": "ETH",
+			"fromAmount": "1000", "chainId": 1, "feature": tc.requested,
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("%q: status=%d body=%s", tc.requested, w.Code, w.Body.String())
+		}
+		if got := settledFee(t, db, quoteID).Feature; got != tc.want {
+			t.Errorf("feature %q booked as %q, want %q", tc.requested, got, tc.want)
+		}
+	}
+}
+
+// The fee event's token is a settlement SYMBOL — SP5 resolves payouts from it,
+// and the column holds 16 characters. The route is named by contract address,
+// so an address here would both mean nothing downstream and overflow the
+// column.
+func TestAllSwap_LabelsFeeWithSymbolNotAddress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "symboluser", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId":    "symbol-1",
+		"fromToken":  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC on Arbitrum
+		"toToken":    "0x0000000000000000000000000000000000000000",
+		"fromAmount": "1000000000", "chainId": 42161, "fromSymbol": "usdc",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := settledFee(t, db, "symbol-1").Token; got != "USDC" {
+		t.Errorf("fee token=%q, want the uppercased symbol USDC", got)
+	}
+}
+
 // waitForGuardHandler polls for the async EnqueueFeeSettled goroutine to land a
 // guard row (releasing the single SQLite connection between polls).
 func waitForGuardHandler(t *testing.T, db *gorm.DB, sourceType string, sourceID uuid.UUID, want int64) int64 {

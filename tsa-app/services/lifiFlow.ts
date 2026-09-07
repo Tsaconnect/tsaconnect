@@ -164,7 +164,14 @@ export async function executeLiFiSwap({
   const signedSwap = await signLiFiTransaction(swapTx);
   let res;
   try {
-    res = await submitTransaction(signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress);
+    // feeDeferred: `humanAmount` is a quantity of fromSymbol, and the backend's
+    // submit-time fallback would read it as dollars. The caller settles the fee
+    // against a re-queried USD value instead (see settleSwapFee) — or, for the
+    // brokered stablecoin ramp, charges no platform fee at all.
+    res = await submitTransaction(
+      signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress,
+      { feeDeferred: true },
+    );
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });
     throw new Error('Swap broadcast failed. The network may be congested — try again.');

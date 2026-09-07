@@ -30,8 +30,16 @@ SATS="${3:-200000}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-hdr=()
-if [[ -n "${LIFI_API_KEY:-}" ]]; then hdr=(-H "x-lifi-api-key: ${LIFI_API_KEY}"); fi
+# GET with the API key when one is set. Written as a function rather than an
+# argument array because macOS ships bash 3.2, where expanding an empty array
+# under `set -u` is an "unbound variable" error.
+lifi_get() {
+  if [[ -n "${LIFI_API_KEY:-}" ]]; then
+    curl -sS -H "x-lifi-api-key: ${LIFI_API_KEY}" "$1"
+  else
+    curl -sS "$1"
+  fi
+}
 
 say() { printf "${CYAN}%s${NC}\n" "$1"; }
 ok()  { printf "${GREEN}  PASS${NC} %s\n" "$1"; }
@@ -40,7 +48,7 @@ bad() { printf "${RED}  FAIL${NC} %s\n" "$1"; }
 command -v jq >/dev/null || { echo "jq is required"; exit 1; }
 
 say "1. Bitcoin in /chains?chainTypes=UTXO"
-chains=$(curl -sS "${hdr[@]}" "${BASE}/chains?chainTypes=UTXO")
+chains=$(lifi_get "${BASE}/chains?chainTypes=UTXO")
 echo "$chains" | jq -r '.chains[] | "  id=\(.id) key=\(.key) coin=\(.coin) chainType=\(.chainType)"'
 btc_chain_id=$(echo "$chains" | jq -r '.chains[] | select(.coin == "BTC") | .id' | head -1)
 if [[ "$btc_chain_id" == "20000000000001" ]]; then
@@ -52,11 +60,11 @@ else
 fi
 
 say "2. BTC token entry in /tokens?chainTypes=UTXO"
-curl -sS "${hdr[@]}" "${BASE}/tokens?chainTypes=UTXO" \
+lifi_get "${BASE}/tokens?chainTypes=UTXO" \
   | jq -r --arg c "$btc_chain_id" '.tokens[$c][] | "  address=\(.address) symbol=\(.symbol) decimals=\(.decimals)"'
 
 say "3. BTC -> USDC(Arbitrum) quote: the deposit instructions"
-quote=$(curl -sS "${hdr[@]}" "${BASE}/quote?fromChain=${btc_chain_id}&toChain=42161&fromToken=bitcoin&toToken=USDC&fromAmount=${SATS}&fromAddress=${BTC_ADDR}&toAddress=${EVM_ADDR}&slippage=0.005")
+quote=$(lifi_get "${BASE}/quote?fromChain=${btc_chain_id}&toChain=42161&fromToken=bitcoin&toToken=USDC&fromAmount=${SATS}&fromAddress=${BTC_ADDR}&toAddress=${EVM_ADDR}&slippage=0.005")
 if [[ "$(echo "$quote" | jq -r '.transactionRequest // "null"')" == "null" ]]; then
   bad "no transactionRequest — LiFi said: $(echo "$quote" | jq -r '.message // .' | head -3)"
   exit 1

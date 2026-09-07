@@ -70,6 +70,24 @@ type submitTxRequest struct {
 	// FromAddress is the wallet the tx was PREPARED for (the app's active
 	// wallet). The signature must recover to it. Empty = the registered wallet.
 	FromAddress string `json:"fromAddress,omitempty"`
+	// FeeDeferred says another path owns this transaction's fee, so this one
+	// must not guess at it. Aggregator swaps set it: the amount here is a
+	// quantity of the from-token, not dollars, and the fallback below would
+	// read it as USD — pennies on a WETH swap, thousands on a memecoin one.
+	// POST /swap/lifi/settle re-queries the aggregator and accrues the
+	// verified figure instead.
+	FeeDeferred bool `json:"feeDeferred,omitempty"`
+}
+
+// shouldAccrueSubmitFee reports whether a submitted transaction settles its own
+// fee here. Swaps and sends normally do. A fee-deferred one never does: its fee
+// is accrued against a server-verified USD value by POST /swap/lifi/settle, and
+// charging here as well would bill the user twice and double-count TP.
+func shouldAccrueSubmitFee(req submitTxRequest) bool {
+	if req.FeeDeferred {
+		return false
+	}
+	return req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -682,10 +700,12 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 
 	// Distribute TP for swap and send transaction types.
 	// Escrow TP is handled separately by the checkout handler on order resolution.
-	if req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend {
+	if shouldAccrueSubmitFee(req) {
 		systemFeeUSD := req.FeeUSD
 		if systemFeeUSD <= 0 {
-			// Fallback: estimate system fee from transaction amount
+			// Fallback: estimate system fee from transaction amount. Only sound
+			// when the amount is denominated in something near $1 — see
+			// FeeDeferred on submitTxRequest.
 			amountFloat, _ := strconv.ParseFloat(req.Amount, 64)
 			switch req.TxType {
 			case models.TxTypeSwap:

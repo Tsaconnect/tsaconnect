@@ -534,6 +534,37 @@ type allSwapSettleRequest struct {
 	ChainID      int64   `json:"chainId"`
 	ToChainID    int64   `json:"toChainId"`
 	ClientFeeUSD float64 `json:"clientFeeUsd"`
+	// FromSymbol labels the fee event's settlement token. FromToken is a
+	// contract address (what LiFi resolves most reliably on the re-query), and
+	// an address in this field would reach SP5 payout resolution as the token
+	// symbol. Optional: falls back to FromToken when absent.
+	FromSymbol string `json:"fromSymbol"`
+	// Feature is the fee bucket to book against: "allswap" (cross-chain, the
+	// default) or "spot" (the same-chain trading desk). Both are configured at
+	// the same rate, but they are reported separately, so a spot trade booked
+	// as allswap is a wrong line in the P&L, not a rounding difference.
+	Feature string `json:"feature"`
+}
+
+// settleFeature validates the requested fee bucket. Only the two swap features
+// may be booked here; anything else (a typo, or a client reaching for a bucket
+// this endpoint has no business writing to) falls back to allswap.
+func settleFeature(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case models.FeatureSpot:
+		return models.FeatureSpot
+	default:
+		return models.FeatureAllswap
+	}
+}
+
+// settlementSymbol is the token label for the fee event: the caller's symbol
+// when it sent one, else whatever it used to name the token.
+func settlementSymbol(req allSwapSettleRequest) string {
+	if s := strings.TrimSpace(req.FromSymbol); s != "" {
+		return strings.ToUpper(s)
+	}
+	return strings.ToUpper(req.FromToken)
 }
 
 // SettleAllSwap handles POST /api/swap/lifi/settle (authenticated user — NOT
@@ -615,10 +646,11 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	sourceID := deterministicUUID("allswap:" + req.QuoteID)
 
 	// Accrue the VERIFIED fee (never the client value).
+	feature := settleFeature(req.Feature)
 	if h.FeeService != nil && verifiedFeeUSD > 0 {
 		h.FeeService.EnqueueFeeSettled(services.FeeEvent{
-			Feature:    models.FeatureAllswap,
-			Token:      strings.ToUpper(req.FromToken),
+			Feature:    feature,
+			Token:      settlementSymbol(req),
 			FeeUSD:     verifiedFeeUSD,
 			UserID:     user.ID,
 			SourceType: "allswap",
@@ -626,10 +658,11 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 		})
 	}
 
-	utils.SuccessResponse(c, http.StatusOK, "AllSwap fee settled", gin.H{
+	utils.SuccessResponse(c, http.StatusOK, "Swap fee settled", gin.H{
 		"quoteId":        req.QuoteID,
 		"verifiedFeeUsd": verifiedFeeUSD,
 		"lifiReachable":  reachable,
+		"feature":        feature,
 	})
 }
 

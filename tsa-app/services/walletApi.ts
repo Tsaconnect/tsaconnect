@@ -455,7 +455,8 @@ export async function submitTransaction(
   toAddress: string,
   amount: string,
   chainId: number,
-  fromAddress: string
+  fromAddress: string,
+  opts: { feeDeferred?: boolean } = {}
 ): Promise<ApiResponse<{ txHash: string }>> {
   try {
     const headers = await getAuthHeaders();
@@ -465,6 +466,10 @@ export async function submitTransaction(
       body: JSON.stringify({
         signedTx, txType, tokenSymbol, toAddress, amount, chainId,
         ...(fromAddress ? { fromAddress } : {}),
+        // `amount` here is a quantity of tokenSymbol. The backend's fee
+        // fallback reads it as USD, which only holds for a stablecoin — so an
+        // aggregator swap defers its fee to the server-verified settle.
+        ...(opts.feeDeferred ? { feeDeferred: true } : {}),
       }),
     });
     const result = await safeJson<any>(response);

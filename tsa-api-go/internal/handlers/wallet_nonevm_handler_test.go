@@ -270,3 +270,29 @@ func TestPrepareNonEVMTx_KeepsUpstreamFailuresGeneric(t *testing.T) {
 		t.Fatalf("upstream detail leaked to the client: %s", w.Body.String())
 	}
 }
+
+// The submit-tx fallback reads `amount` as if it were dollars. That is only
+// sound for a stablecoin: an aggregator swap names its amount in the from-token
+// (0.5 WETH would accrue $0.005, 2M SHIB would accrue $20,000), so those defer
+// their fee to the server-verified settle instead of being guessed at here.
+func TestShouldAccrueSubmitFee(t *testing.T) {
+	cases := []struct {
+		name string
+		req  submitTxRequest
+		want bool
+	}{
+		{"swap accrues", submitTxRequest{TxType: models.TxTypeSwap}, true},
+		{"send accrues", submitTxRequest{TxType: models.TxTypeSend}, true},
+		{"deferred swap does not", submitTxRequest{TxType: models.TxTypeSwap, FeeDeferred: true}, false},
+		{"deferred send does not", submitTxRequest{TxType: models.TxTypeSend, FeeDeferred: true}, false},
+		{"approve never did", submitTxRequest{TxType: "approve"}, false},
+		// A deferred tx must not slip through on a client-supplied fee either —
+		// the whole point is that the server figures the number out itself.
+		{"deferred with a claimed fee still does not", submitTxRequest{TxType: models.TxTypeSwap, FeeDeferred: true, FeeUSD: 12.5}, false},
+	}
+	for _, tc := range cases {
+		if got := shouldAccrueSubmitFee(tc.req); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
