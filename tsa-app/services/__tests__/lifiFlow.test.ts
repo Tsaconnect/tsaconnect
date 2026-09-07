@@ -183,7 +183,24 @@ describe('executeLiFiSwap — fee handling', () => {
   it('marks the swap submission fee-deferred', async () => {
     await executeLiFiSwap(params());
     const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
-    expect(swapCall?.[7]).toEqual({ feeDeferred: true });
+    // Defaults to the cross-chain bucket when the caller names none.
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'allswap' });
+  });
+
+  // The backend records the debt under this label at submit time, so the fee
+  // survives a client that never calls settle.
+  it('names the fee bucket so the debt can be recorded server-side', async () => {
+    await executeLiFiSwap(params({ feeFeature: 'spot' }));
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'spot' });
+  });
+
+  // The brokered stablecoin ramp charges no platform fee. It must say so, or
+  // the sweeper later collects on a flow that is meant to be free.
+  it('passes through "none" for a swap that owes nothing', async () => {
+    await executeLiFiSwap(params({ feeFeature: 'none' }));
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'none' });
   });
 
   it('leaves the approval alone — it never accrued a fee', async () => {

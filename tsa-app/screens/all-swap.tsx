@@ -398,10 +398,32 @@ export default function AllSwapScreen() {
   // Approve→wait→swap execution lives in services/lifiFlow (shared with the
   // Spot Trade desk); this handler only owns the screen-state wiring.
   const handleSwap = async () => {
-    if (!quote || !fromToken || !walletAddress) return;
+    if (!quote || !fromToken || !toToken || !walletAddress) return;
     setScreen('signing'); setError('');
+
+    // Built BEFORE the swap runs, so that nothing about reporting the fee can
+    // throw after the swap is on-chain — a completed swap must never land on
+    // the failure screen. The backend also records the fee as owed at submit
+    // time, so this call is the fast path, not the only one.
+    const feeReport = {
+      fromChainId,
+      toChainId,
+      fromToken: fromToken.address,
+      toToken: toToken.address,
+      fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
+      toAmount: quote.toAmount,
+      fromSymbol: fromToken.symbol,
+      fromDecimals: fromToken.decimals,
+      // The same endpoints the quote used — LiFi will not re-quote without
+      // them, and a UTXO route needs the funded sender specifically.
+      fromAddress: addressForChain(fromChainId) ?? walletAddress,
+      toAddress: addressForChain(toChainId) ?? walletAddress,
+      feature: 'allswap' as const,
+    };
+
+    let swapHash: string;
     try {
-      const swapHash = await executeLiFiSwap({
+      swapHash = await executeLiFiSwap({
         quote,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
@@ -410,30 +432,15 @@ export default function AllSwapScreen() {
         fromChainId,
         onStage: setSigningStatus,
       });
-      setTxHash(swapHash); setScreen('success');
-      // The swap is on-chain now, so the fee is owed whatever happens next.
-      // Report it without blocking the success screen and without ever turning
-      // a completed swap into a visible failure.
-      settleSwapFee({
-        quoteId: swapHash,
-        fromChainId,
-        toChainId,
-        fromToken: fromToken.address,
-        toToken: toToken!.address,
-        fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
-        toAmount: quote.toAmount,
-        fromSymbol: fromToken.symbol,
-        fromDecimals: fromToken.decimals,
-        // The same endpoints the quote used — LiFi will not re-quote without
-        // them, and a UTXO route needs the funded sender specifically.
-        fromAddress: addressForChain(fromChainId) ?? walletAddress,
-        toAddress: addressForChain(toChainId) ?? walletAddress,
-        feature: 'allswap',
-      }).catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);
       setError(e?.message || 'Swap failed'); setScreen('failure');
+      return;
     }
+
+    setTxHash(swapHash); setScreen('success');
+    settleSwapFee({ ...feeReport, quoteId: swapHash })
+      .catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
   };
 
   const outputAmount = quote && toToken

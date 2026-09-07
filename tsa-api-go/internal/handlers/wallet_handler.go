@@ -77,6 +77,57 @@ type submitTxRequest struct {
 	// POST /swap/lifi/settle re-queries the aggregator and accrues the
 	// verified figure instead.
 	FeeDeferred bool `json:"feeDeferred,omitempty"`
+	// FeeFeature is the bucket a deferred fee will be booked to: "allswap"
+	// (default), "spot", or "none" for a swap that owes no platform fee at all
+	// — the brokered stablecoin ramp, whose whole point is being free.
+	FeeFeature string `json:"feeFeature,omitempty"`
+}
+
+// feeFeatureNone marks a deferred swap that owes nothing, so the sweeper does
+// not later charge a flow that is deliberately free.
+const feeFeatureNone = "none"
+
+// recordPendingSwapFee notes that a broadcast swap owes a fee this path cannot
+// compute, so the debt survives a client that never makes the settle call.
+// Best-effort by design: the swap is already on-chain and must be reported as
+// succeeded either way, so a failure here is logged for reconciliation rather
+// than surfaced. Idempotent on TxHash.
+func recordPendingSwapFee(userID uuid.UUID, txHash, feature, symbol, amount string, chainID int64) {
+	amountHuman, err := strconv.ParseFloat(strings.TrimSpace(amount), 64)
+	if err != nil || amountHuman <= 0 {
+		log.Printf("[fees] ALERT swap_fee_unrecorded_total=1 tx=%s: unparseable amount %q — "+
+			"fee cannot be swept if the client never settles", txHash, amount)
+		return
+	}
+	row := models.PendingSwapFee{
+		UserID:      userID,
+		TxHash:      txHash,
+		Feature:     feature,
+		TokenSymbol: strings.ToUpper(strings.TrimSpace(symbol)),
+		AmountHuman: amountHuman,
+		ChainID:     chainID,
+		Status:      models.PendingSwapFeePending,
+	}
+	// Ignore a duplicate: one fee per executed swap, however many times submit
+	// is retried for the same hash.
+	if err := config.DB.Where("tx_hash = ?", txHash).FirstOrCreate(&row).Error; err != nil {
+		log.Printf("[fees] ALERT swap_fee_unrecorded_total=1 tx=%s: %v — "+
+			"fee cannot be swept if the client never settles", txHash, err)
+	}
+}
+
+// markPendingSwapFeeSettled clears the debt for a swap whose fee has just been
+// accrued. Best-effort: the accrual itself is idempotent on the same key, so a
+// stale row costs a wasted sweep, not a double charge.
+func markPendingSwapFeeSettled(txHash string) {
+	now := time.Now()
+	if err := config.DB.Model(&models.PendingSwapFee{}).
+		Where("tx_hash = ? AND status = ?", txHash, models.PendingSwapFeePending).
+		Updates(map[string]interface{}{
+			"status": models.PendingSwapFeeSettled, "settled_at": now,
+		}).Error; err != nil {
+		log.Printf("[fees] failed to clear pending swap fee for %s: %v", txHash, err)
+	}
 }
 
 // shouldAccrueSubmitFee reports whether a submitted transaction settles its own
@@ -84,7 +135,11 @@ type submitTxRequest struct {
 // is accrued against a server-verified USD value by POST /swap/lifi/settle, and
 // charging here as well would bill the user twice and double-count TP.
 func shouldAccrueSubmitFee(req submitTxRequest) bool {
-	if req.FeeDeferred {
+	// Only a swap may defer: its amount is a token quantity that this path
+	// cannot value. A send's fee is a flat nominal charge that is always
+	// computable here, so honouring the flag there would just be a way for a
+	// client to opt out of paying.
+	if req.FeeDeferred && req.TxType == models.TxTypeSwap {
 		return false
 	}
 	return req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend
@@ -698,6 +753,13 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
+	// A deferred swap owes a fee that only the settle path can value. Record the
+	// debt now, while we still know who owes it and for what — the client that
+	// owes the follow-up call may never make it.
+	if req.FeeDeferred && req.TxType == models.TxTypeSwap && !strings.EqualFold(req.FeeFeature, feeFeatureNone) {
+		recordPendingSwapFee(user.ID, txHash, settleFeature(req.FeeFeature), req.TokenSymbol, req.Amount, req.ChainID)
+	}
+
 	// Distribute TP for swap and send transaction types.
 	// Escrow TP is handled separately by the checkout handler on order resolution.
 	if shouldAccrueSubmitFee(req) {
@@ -1196,6 +1258,18 @@ type submitNonEVMRequest struct {
 	From     string             `json:"from"`
 	Amount   string             `json:"amount"`
 	Symbol   string             `json:"symbol"`
+	// Fee fields mirror submitTxRequest for aggregator swaps signed off-chain
+	// (Solana, Bitcoin). This path never accrued a fee of its own, so there is
+	// nothing to suppress — but the debt still has to be recorded, or a Solana
+	// or Bitcoin swap whose client never settles is invisible.
+	//
+	// FeeAmountHuman is in WHOLE TOKENS, unlike Amount, which is base units on
+	// this path. Naming it separately is deliberate: silently reusing Amount is
+	// exactly the confusion that turned a 1,000 USDC swap into a $35,000,000 fee.
+	FeeDeferred    bool   `json:"feeDeferred,omitempty"`
+	FeeFeature     string `json:"feeFeature,omitempty"`
+	FeeAmountHuman string `json:"feeAmountHuman,omitempty"`
+	FeeChainID     int64  `json:"feeChainId,omitempty"`
 }
 
 // SubmitNonEVMTx handles POST /api/wallet/nonevm/submit-tx.
@@ -1267,6 +1341,14 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	}
 	if err := config.DB.Create(&activity).Error; err != nil {
 		log.Printf("nonevm: failed to record activity for tx %s: %v", hash, err)
+	}
+
+	// Same debt record as the EVM path: an aggregator swap owes a fee this
+	// request cannot value, and the client that owes the settle call may never
+	// make it.
+	if req.FeeDeferred && !strings.EqualFold(req.FeeFeature, feeFeatureNone) {
+		recordPendingSwapFee(user.ID, hash, settleFeature(req.FeeFeature),
+			req.Symbol, req.FeeAmountHuman, req.FeeChainID)
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})

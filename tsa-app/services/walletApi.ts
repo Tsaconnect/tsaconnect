@@ -448,6 +448,14 @@ export async function prepareSendTransaction(
  * sign → submit; re-resolving it at each step lets a mid-flow wallet switch
  * pair another account's nonce with this signature (queued-forever tx).
  */
+/**
+ * Which fee bucket a deferred swap will be booked to, or 'none' for a swap that
+ * owes no platform fee at all (the brokered stablecoin ramp). The backend
+ * records the debt under this label at submit time, so a swap whose settle call
+ * never arrives is still collectable — and a 'none' swap is never charged.
+ */
+export type SwapFeeFeature = 'allswap' | 'spot' | 'none';
+
 export async function submitTransaction(
   signedTx: string,
   txType: string,
@@ -456,7 +464,7 @@ export async function submitTransaction(
   amount: string,
   chainId: number,
   fromAddress: string,
-  opts: { feeDeferred?: boolean } = {}
+  opts: { feeDeferred?: boolean; feeFeature?: SwapFeeFeature } = {}
 ): Promise<ApiResponse<{ txHash: string }>> {
   try {
     const headers = await getAuthHeaders();
@@ -469,7 +477,7 @@ export async function submitTransaction(
         // `amount` here is a quantity of tokenSymbol. The backend's fee
         // fallback reads it as USD, which only holds for a stablecoin — so an
         // aggregator swap defers its fee to the server-verified settle.
-        ...(opts.feeDeferred ? { feeDeferred: true } : {}),
+        ...(opts.feeDeferred ? { feeDeferred: true, feeFeature: opts.feeFeature ?? 'allswap' } : {}),
       }),
     });
     const result = await safeJson<any>(response);

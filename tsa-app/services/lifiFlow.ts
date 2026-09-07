@@ -13,7 +13,7 @@
 import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
-import { submitTransaction } from '@/services/walletApi';
+import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
 import { buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
@@ -33,6 +33,12 @@ export interface ExecuteLiFiSwapParams {
    * chainId to branch on.
    */
   fromChainId?: number;
+  /**
+   * Fee bucket this swap will be booked to, recorded server-side at submit so
+   * the fee is collectable even if the settle call never lands. 'none' is for
+   * a swap that owes no platform fee at all (the brokered stablecoin ramp).
+   */
+  feeFeature?: SwapFeeFeature;
   /** Progress labels ("Step 1 of 2: Approving token…", …). */
   onStage?: (label: string) => void;
 }
@@ -44,6 +50,7 @@ export async function executeLiFiSwap({
   fromAmount,
   walletAddress,
   fromChainId,
+  feeFeature = 'allswap',
   onStage,
 }: ExecuteLiFiSwapParams): Promise<string> {
   if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
@@ -52,6 +59,7 @@ export async function executeLiFiSwap({
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       fromSymbol,
       walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,
     });
   }
@@ -61,6 +69,7 @@ export async function executeLiFiSwap({
       txRequest: quote.transactionRequest,
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,
     });
   }
@@ -170,7 +179,7 @@ export async function executeLiFiSwap({
     // brokered stablecoin ramp, charges no platform fee at all.
     res = await submitTransaction(
       signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress,
-      { feeDeferred: true },
+      { feeDeferred: true, feeFeature },
     );
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });

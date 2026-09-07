@@ -91,6 +91,13 @@ func (c *Client) prepareFromPSBT(req chains.TransferRequest) (*psbtSpend, error)
 	}
 
 	// Inputs: ours, unsigned, and each with the value its signature commits to.
+	//
+	// The claimed values are not checked against the chain, and do not need to
+	// be: BIP-143 folds the input amount into the sighash, so a PSBT that lies
+	// about one produces a signature every node rejects. The failure mode is a
+	// bounced broadcast, not a loss — which is also why the fee ceiling below
+	// can be computed from these values. Anything that starts using them where
+	// a signature does NOT bind them needs that assumption revisited.
 	var inSum int64
 	for i, in := range packet.Inputs {
 		if len(in.PartialSigs) > 0 || len(in.FinalScriptWitness) > 0 || len(in.FinalScriptSig) > 0 {

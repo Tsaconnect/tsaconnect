@@ -186,33 +186,37 @@ export default function SpotTrade() {
         setStage('Refreshing price…');
         q = await fetchQuote();
       }
-      const hash = await executeLiFiSwap({
-        quote: q,
-        fromSymbol: fromToken.symbol,
-        fromDecimals: fromToken.decimals,
-        fromAmount: amount,
-        walletAddress: wallet,
-        onStage: setStage,
-      });
-      setTxHash(hash);
-      setScreen('success');
-      // Books against `spot`, not `allswap`: same rate, separate line in the
-      // P&L. Fire-and-forget — the trade is already on-chain, so a settle
-      // failure must not show up as a failed trade.
-      settleSwapFee({
-        quoteId: hash,
-        fromChainId: chain!.chainId,
-        toChainId: chain!.chainId,
+      if (!toToken || !chain) throw new Error('Pair not ready yet');
+      // Built BEFORE the trade runs: nothing about reporting the fee may throw
+      // once the trade is on-chain, or a completed trade shows as failed.
+      // Books against `spot`, not `allswap` — same rate, separate P&L line.
+      const feeReport = {
+        fromChainId: chain.chainId,
+        toChainId: chain.chainId,
         fromToken: fromToken.address,
-        toToken: toToken!.address,
+        toToken: toToken.address,
         fromAmount: ethers.parseUnits(amount, fromToken.decimals).toString(),
         toAmount: q.toAmount,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
         fromAddress: wallet,
         toAddress: wallet,
-        feature: 'spot',
-      }).catch(e => console.error('[spot] fee settle failed', { txHash: hash, e }));
+        feature: 'spot' as const,
+      };
+
+      const hash = await executeLiFiSwap({
+        quote: q,
+        fromSymbol: fromToken.symbol,
+        fromDecimals: fromToken.decimals,
+        fromAmount: amount,
+        walletAddress: wallet,
+        feeFeature: 'spot',
+        onStage: setStage,
+      });
+      setTxHash(hash);
+      setScreen('success');
+      settleSwapFee({ ...feeReport, quoteId: hash })
+        .catch(e => console.error('[spot] fee settle failed', { txHash: hash, e }));
     } catch (e: any) {
       setError(e?.message || 'Trade failed');
       setScreen('failure');

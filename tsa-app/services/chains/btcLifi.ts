@@ -112,6 +112,8 @@ export interface ExecuteLiFiBtcSwapParams {
   fromAmountRaw: string;
   /** EVM wallet id — used to look up the mnemonic + derived BTC address. */
   walletAddress: string;
+  /** Fee bucket + human-units amount; see SendBtcParams.fee. */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
   onStage?: (label: string) => void;
 }
 
@@ -124,6 +126,7 @@ export async function executeLiFiBtcSwap({
   txRequest,
   fromAmountRaw,
   walletAddress,
+  fee,
   onStage,
 }: ExecuteLiFiBtcSwapParams): Promise<string> {
   // Swaps are mainnet-only (LiFi has no testnets) and the BTC address is
@@ -165,6 +168,7 @@ export async function executeLiFiBtcSwap({
     symbol: 'BTC',
     walletAddress,
     network: SWAP_NETWORK,
+    fee,
     // The backend either signs the route's own transaction — after proving the
     // inputs are ours and the outputs match this quote — or builds a deposit
     // and attaches the tag itself.

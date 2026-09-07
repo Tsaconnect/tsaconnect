@@ -97,6 +97,12 @@ export interface ExecuteLiFiSolanaSwapParams {
   fromSymbol: string;
   /** EVM wallet id — used to look up the mnemonic + derived Solana address. */
   walletAddress: string;
+  /**
+   * Fee bucket + human-units amount, recorded server-side at broadcast so the
+   * platform fee survives a client that never calls settle. Omitted for a swap
+   * that owes nothing.
+   */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
   onStage?: (label: string) => void;
 }
 
@@ -109,6 +115,7 @@ export async function executeLiFiSolanaSwap({
   fromAmountRaw,
   fromSymbol,
   walletAddress,
+  fee,
   onStage,
 }: ExecuteLiFiSolanaSwapParams): Promise<string> {
   // The broadcast is pinned to mainnet, so refuse to execute while the app is
@@ -157,6 +164,16 @@ export async function executeLiFiSolanaSwap({
       from: solAddress,
       amount: fromAmountRaw,
       symbol: fromSymbol,
+      // amount above is base units; the fee amount is whole tokens, hence a
+      // separate field rather than reusing it.
+      ...(fee && fee.feature !== 'none'
+        ? {
+            feeDeferred: true,
+            feeFeature: fee.feature,
+            feeAmountHuman: fee.amountHuman,
+            feeChainId: fee.chainId ?? 0,
+          }
+        : {}),
     }),
   });
   const text = await res.text();

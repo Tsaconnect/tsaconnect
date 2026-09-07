@@ -410,16 +410,17 @@ func (c *Client) selectCoins(ctx context.Context, req chains.TransferRequest) (c
 	if err != nil {
 		return coinSelection{}, nil, err
 	}
+	// Validate the memo before touching the network: a request we are going to
+	// reject should not cost two upstream calls first.
+	memoScript, err := memoPkScript(req.MemoHex)
+	if err != nil {
+		return coinSelection{}, nil, err
+	}
 	utxos, err := c.esp.GetUTXOs(ctx, req.From)
 	if err != nil {
 		return coinSelection{}, nil, err
 	}
 	feeRate, err := c.esp.FeeRateSatVB(ctx)
-	if err != nil {
-		return coinSelection{}, nil, err
-	}
-
-	memoScript, err := memoPkScript(req.MemoHex)
 	if err != nil {
 		return coinSelection{}, nil, err
 	}
@@ -578,6 +579,12 @@ func memoPkScript(memoHex string) ([]byte, error) {
 	memoHex = strings.TrimPrefix(strings.TrimSpace(memoHex), "0x")
 	if memoHex == "" {
 		return nil, nil
+	}
+	// A whole transaction arriving in the memo field means the caller branched
+	// wrongly on the route's payload. Say so, rather than reporting it as an
+	// oversized memo and sending the reader looking for the wrong bug.
+	if IsPSBT(memoHex) {
+		return nil, chains.Invalid("this is a transaction to sign, not a memo — send it as psbtHex")
 	}
 	data, err := hex.DecodeString(memoHex)
 	if err != nil {

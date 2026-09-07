@@ -51,6 +51,12 @@ export interface SendBtcParams {
    */
   psbtHex?: string;
   /**
+   * Fee bucket + human-units amount for an aggregator swap, recorded
+   * server-side at broadcast so the platform fee survives a client that never
+   * calls settle. Absent on a plain send, which owes no swap fee.
+   */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
+  /**
    * Network to build, sign and broadcast on. Defaults to the app's current
    * toggle, which is what a wallet send wants. A caller pinned to one network —
    * swaps, which LiFi only quotes on mainnet — MUST pass it explicitly: the
@@ -125,6 +131,15 @@ export async function broadcastBtc(
     body: JSON.stringify({
       prepared, sigs,
       from: params.from, amount: params.amount, symbol: params.symbol,
+      // `amount` is sats; the fee amount is whole BTC, hence a separate field.
+      ...(params.fee && params.fee.feature !== 'none'
+        ? {
+            feeDeferred: true,
+            feeFeature: params.fee.feature,
+            feeAmountHuman: params.fee.amountHuman,
+            feeChainId: params.fee.chainId ?? 0,
+          }
+        : {}),
     }),
   });
   const json = await readJson(res);

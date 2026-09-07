@@ -321,6 +321,23 @@ func TestPSBT_RawSurvivesJSONRoundTrip(t *testing.T) {
 
 // A transaction we build ourselves has no sequence recorded; it must keep
 // hashing as RBF so prepared txs from before the field existed still assemble.
+// A whole transaction in the memo field is a caller that branched wrongly on
+// the route payload; the error should say that, not "memo too large".
+func TestPSBTInMemoFieldIsNamedAsSuch(t *testing.T) {
+	_, sender := testKey(t)
+	c := newTestClient("http://unused", "mainnet")
+	req := transferReq(sender, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "80000")
+	req.MemoHex = fixturePSBT
+
+	_, err := c.PrepareTransfer(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "not a memo") {
+		t.Fatalf("want a wrong-field error, got %v", err)
+	}
+	if !IsPSBT(fixturePSBT) || IsPSBT("6a11deadbeef") {
+		t.Error("IsPSBT does not identify the BIP-174 magic")
+	}
+}
+
 func TestSequenceDefaultsToRBF(t *testing.T) {
 	if got := (rawInput{}).sequenceOr(); got != rbfSequence {
 		t.Errorf("unset sequence = %x, want %x", got, rbfSequence)

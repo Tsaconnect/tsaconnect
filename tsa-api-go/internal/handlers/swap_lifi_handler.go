@@ -718,6 +718,11 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 		})
 	}
 
+	// The debt recorded at submit time is now paid; clear it so the sweeper
+	// does not revisit it. (The fee engine's guard makes a double settle a
+	// no-op anyway — this just keeps the queue honest.)
+	markPendingSwapFeeSettled(req.QuoteID)
+
 	utils.SuccessResponse(c, http.StatusOK, "Swap fee settled", gin.H{
 		"quoteId":        req.QuoteID,
 		"verifiedFeeUsd": verifiedFeeUSD,

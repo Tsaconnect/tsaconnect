@@ -509,6 +509,20 @@ func main() {
 		log.Printf("[fee-manager] dormant: no FeeManager chain configured with a reachable RPC — admin set-fee flow + drift reconciler off")
 	}
 
+	// Collects platform fees for swaps whose client never called settle. Without
+	// it, a swap whose app was killed between broadcast and settle owes a fee
+	// that nothing in the system would ever notice.
+	if cfg.FeeModelV2Enabled && feeDistributionService != nil {
+		scheduler.Register(&jobs.SwapFeeSweeper{
+			DB:              config.DB,
+			FeeService:      feeDistributionService,
+			PriceService:    priceService,
+			ConservativeBps: cfg.AllSwapConservativeFeeBpsOrDefault(),
+		})
+		log.Printf("[fees] swap-fee sweeper registered (grace=10m, conservative=%d bps)",
+			cfg.AllSwapConservativeFeeBpsOrDefault())
+	}
+
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.
 	rfh := handlers.NewRewardFlagHandler(config.DB, rewardEligibilityService)
 
