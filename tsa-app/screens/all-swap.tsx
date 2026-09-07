@@ -25,7 +25,8 @@ import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWal
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee,
+  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
+  type SwapDeliveryStatus,
   isSolanaLiFiChain, isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
@@ -44,7 +45,9 @@ import {
   ScreenHeader,
 } from '@/components/ui';
 
-const FEE_PCT = 3;
+// The fee comes from the quote (LiFi's own feeCosts), never a constant here:
+// the rate lives at portal.li.fi and a number hardcoded in the app silently
+// becomes a lie the moment it is changed there.
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
@@ -512,6 +515,7 @@ export default function AllSwapScreen() {
       outputAmount={outputAmount}
       txHash={txHash}
       chainId={quote?.transactionRequest.chainId ?? fromChainId}
+      crossChain={fromChainId !== toChainId}
       onDone={() => router.back()}
     />
   );
@@ -576,7 +580,7 @@ export default function AllSwapScreen() {
           <DetailRow label="Route" value={quote?.tool ?? '—'} />
           <DetailRow label="Est. time" value={quote ? `~${Math.ceil(quote.estimatedDuration / 60)} min` : '—'} />
           <DetailRow label="Gas cost" value={`$${quote?.gasCostUSD ?? '0'}`} />
-          <DetailRow label="Fee" value={`${FEE_PCT}%`} highlight />
+          {quote?.feeCostUSD ? <DetailRow label="Fee" value={`$${quote.feeCostUSD}`} highlight /> : null}
           <DetailRow label="Slippage" value={slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`} last />
         </Card>
 
@@ -744,7 +748,8 @@ export default function AllSwapScreen() {
             >
               <Icon name="bolt" size={13} color={colors.accent} />
               <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
+                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min
+                {quote.feeCostUSD ? ` · $${quote.feeCostUSD} fee` : ''} · ${quote.gasCostUSD} gas
               </Text>
               {quoteStatus === 'expired' ? (
                 <PressableScale onPress={refreshQuote} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
@@ -889,12 +894,41 @@ export default function AllSwapScreen() {
   );
 }
 
-function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, chainId, onDone }: {
+function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, chainId, crossChain, onDone }: {
   fromToken: LiFiToken | null; toToken: LiFiToken | null;
   fromAmount: string; outputAmount: string | null;
-  txHash: string; chainId: number; onDone: () => void;
+  txHash: string; chainId: number; crossChain: boolean; onDone: () => void;
 }) {
   const { colors, spacing, radius } = useTheme();
+
+  // A same-chain swap is done when its transaction confirms. A cross-chain one
+  // is not: the bridge still has to deliver on the far side, so saying
+  // "complete" at broadcast tells the user their funds have arrived when they
+  // are still in flight — and says nothing at all when the bridge fails.
+  const [delivery, setDelivery] = useState<SwapDeliveryStatus>(crossChain ? 'PENDING' : 'DONE');
+  useEffect(() => {
+    if (!crossChain || !txHash) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const { status } = await getSwapDelivery(txHash);
+      if (cancelled) return;
+      setDelivery(status);
+      // Keep asking while it is in flight; a bridge leg runs to minutes.
+      if (status === 'PENDING') timer = setTimeout(poll, 15_000);
+    };
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [crossChain, txHash]);
+
+  const title =
+    delivery === 'DONE' ? 'Swap Complete'
+      : delivery === 'FAILED' ? 'Bridge Failed'
+        : 'Swap Sent';
+  const subtitle =
+    delivery === 'PENDING' ? 'Bridging to the destination chain — this can take a few minutes. You can close this screen; it will keep going.'
+      : delivery === 'FAILED' ? 'The bridge could not complete this route. Bridges refund to your address when they fail — check the explorer link below.'
+        : null;
   const iconScale = useSharedValue(0);
   const ringScale = useSharedValue(1);
   const ringOpacity = useSharedValue(0);
@@ -945,7 +979,12 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
 
         {/* Title + swap summary */}
         <Animated.View style={[{ alignItems: 'center' }, contentStyle]}>
-          <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing['2xl'] }}>Swap Complete</Text>
+          <Text variant="title1" weight="700" align="center" style={{ marginBottom: subtitle ? spacing.sm : spacing['2xl'] }}>{title}</Text>
+          {subtitle ? (
+            <Text variant="caption" color="textMuted" align="center" style={{ marginBottom: spacing['2xl'] }}>
+              {subtitle}
+            </Text>
+          ) : null}
 
           <Card padding="lg" style={{ width: '100%' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>

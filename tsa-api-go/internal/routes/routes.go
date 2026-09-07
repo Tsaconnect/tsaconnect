@@ -483,6 +483,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			lifiGroup.GET("/tokens/all", slh.GetAllChainTokens)
 			lifiGroup.GET("/token", slh.GetToken)
 			lifiGroup.GET("/quote", slh.GetQuote)
+			// Follows a broadcast swap to the destination chain: a cross-chain
+			// route is not done when its source tx confirms.
+			lifiGroup.GET("/status", slh.GetSwapStatus)
 			// AllSwap server-verified settle (design §8, I8): authenticated user,
 			// NOT super-admin. Backend re-queries LiFi + accrues the verified fee.
 			lifiGroup.POST("/settle", slh.SettleAllSwap)

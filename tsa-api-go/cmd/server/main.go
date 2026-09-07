@@ -459,6 +459,9 @@ func main() {
 	// Values the from-amount when LiFi cannot be re-queried; without it that
 	// path has no USD basis and defers the fee rather than guessing one.
 	slh.PriceService = priceService
+	// Rates come from fee_config (what admins edit), not the env constant.
+	slh.FeeConfigService = feeConfigService
+	slh.StatusClient = services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey)
 	if cfg.FeeModelV2Enabled {
 		slh.FeeService = feeDistributionService
 	}
@@ -514,13 +517,13 @@ func main() {
 	// that nothing in the system would ever notice.
 	if cfg.FeeModelV2Enabled && feeDistributionService != nil {
 		scheduler.Register(&jobs.SwapFeeSweeper{
-			DB:              config.DB,
-			FeeService:      feeDistributionService,
-			PriceService:    priceService,
-			ConservativeBps: cfg.AllSwapConservativeFeeBpsOrDefault(),
+			DB:           config.DB,
+			FeeService:   feeDistributionService,
+			PriceService: priceService,
+			FeeBps:       cfg.AllSwapNominalFeeBpsOrDefault(),
 		})
-		log.Printf("[fees] swap-fee sweeper registered (grace=10m, conservative=%d bps)",
-			cfg.AllSwapConservativeFeeBpsOrDefault())
+		log.Printf("[fees] swap-fee sweeper registered (grace=10m, %d bps)",
+			cfg.AllSwapNominalFeeBpsOrDefault())
 	}
 
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.

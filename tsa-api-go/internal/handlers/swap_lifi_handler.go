@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -93,6 +94,12 @@ type SwapLiFiHandler struct {
 	// PriceService values the from-amount when LiFi cannot be re-queried. Without
 	// it that path has no USD basis and the fee is deferred rather than guessed.
 	PriceService *services.PriceService
+	// FeeConfigService supplies the admin-managed rate for the feature being
+	// booked. Nil-safe: the env constant stands in when it is absent.
+	FeeConfigService *services.FeeConfigService
+	// StatusClient follows a swap to the destination chain. Nil-safe: the status
+	// endpoint reports "not configured" rather than pretending a swap landed.
+	StatusClient *services.LiFiStatusClient
 
 	// requeryQuoteUSD re-queries LiFi for the supplied route and returns the
 	// from-amount USD value LiFi reports (estimate.fromAmountUSD). Split out as a
@@ -510,7 +517,95 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 		return
 	}
 
+	// Fee wallets are configured per chain at portal.li.fi. A chain we have not
+	// set one up for — a newly added one, typically — makes LiFi reject the
+	// whole quote, which would take swapping on that chain down entirely rather
+	// than merely forgo the fee. Retry once without the fee so the user can
+	// still swap, and make the lost revenue loud rather than silent.
+	if resp.StatusCode != http.StatusOK && isIntegratorFeeUnconfigured(body) {
+		log.Printf("[allswap] ALERT allswap_fee_unconfigured_total=1 integrator %q has no fee wallet for "+
+			"chain %s — quoting WITHOUT a fee (this swap earns nothing); configure it at portal.li.fi",
+			h.integratorID, params.Get("fromChain"))
+		params.Del("fee")
+		params.Del("integrator")
+		retry, rerr := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
+		if rerr == nil {
+			defer retry.Body.Close()
+			if rbody, rerr := io.ReadAll(retry.Body); rerr == nil {
+				c.Data(retry.StatusCode, "application/json", rbody)
+				return
+			}
+		}
+	}
+
 	c.Data(resp.StatusCode, "application/json", body)
+}
+
+// isIntegratorFeeUnconfigured spots LiFi's "not configured for collecting fees
+// on chain X" rejection, which is about our portal setup rather than the route.
+func isIntegratorFeeUnconfigured(body []byte) bool {
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false
+	}
+	msg := strings.ToLower(parsed.Message)
+	return strings.Contains(msg, "not configured for collecting fees")
+}
+
+// GetSwapStatus handles GET /api/swap/lifi/status?txHash=0x…
+//
+// A cross-chain swap is not finished when its source transaction confirms — the
+// bridge still has to deliver on the far side, which takes minutes and can
+// fail. Without this the app can only ever say "broadcast" and call it success,
+// which is how a user ends up believing a swap completed while the funds are
+// still in flight (or refunded).
+func (h *SwapLiFiHandler) GetSwapStatus(c *gin.Context) {
+	txHash := strings.TrimSpace(c.Query("txHash"))
+	if txHash == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "txHash is required")
+		return
+	}
+	if h.StatusClient == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "swap status is not configured")
+		return
+	}
+
+	st, err := h.StatusClient.Status(c.Request.Context(), txHash)
+	switch {
+	case errors.Is(err, services.ErrLiFiPending):
+		// Not an error for the caller: the bridge simply has not finished.
+		utils.SuccessResponse(c, http.StatusOK, "pending", gin.H{
+			"status": services.LiFiStatusPending, "txHash": txHash,
+		})
+		return
+	case errors.Is(err, services.ErrLiFiFailed):
+		utils.SuccessResponse(c, http.StatusOK, "failed", gin.H{
+			"status": services.LiFiStatusFailed, "txHash": txHash,
+		})
+		return
+	case err != nil:
+		// LiFi does not know the transaction yet in the first seconds after a
+		// broadcast; that is indistinguishable from a transient failure here, so
+		// report it as pending rather than telling the user their swap failed.
+		utils.SuccessResponse(c, http.StatusOK, "pending", gin.H{
+			"status": services.LiFiStatusPending, "txHash": txHash,
+		})
+		return
+	}
+
+	out := gin.H{"status": st.Status, "txHash": txHash}
+	if st.DestTxHash != "" {
+		out["destTxHash"] = st.DestTxHash
+	}
+	if st.DestChainID != 0 {
+		out["destChainId"] = st.DestChainID
+	}
+	if st.ReceivedBaseUnits != nil {
+		out["receivedAmount"] = st.ReceivedBaseUnits.String()
+	}
+	utils.SuccessResponse(c, http.StatusOK, "ok", out)
 }
 
 // ── AllSwap server-verified settle (design §8, I8) ──────────────────────────
@@ -602,6 +697,27 @@ func (h *SwapLiFiHandler) fromAmountUSDFromPrices(req allSwapSettleRequest) (flo
 	return whole * price.USD, true
 }
 
+// nominalBpsFor is the rate this swap's fee is booked at.
+//
+// fee_config is the source of truth under the v2 engine — it is what admins
+// edit and what the FeeManager reconciler keeps honest — so the env constant is
+// only a fallback for when the config service is absent or has no row. Reading
+// the env value first is how the ledger silently keeps booking 3% after someone
+// changes the rate in the admin console.
+func (h *SwapLiFiHandler) nominalBpsFor(feature, tokenSymbol string) int {
+	if h.FeeConfigService != nil {
+		if bps, _, exempt, found := h.FeeConfigService.RateFor(feature, tokenSymbol, nil); found {
+			if exempt {
+				return 0
+			}
+			if bps > 0 {
+				return bps
+			}
+		}
+	}
+	return h.Config.AllSwapNominalFeeBpsOrDefault()
+}
+
 // settlementSymbol is the token label for the fee event: the caller's symbol
 // when it sent one, else whatever it used to name the token.
 func settlementSymbol(req allSwapSettleRequest) string {
@@ -654,10 +770,13 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 		ToAddress:   req.ToAddress,
 	})
 
+	feature := settleFeature(req.Feature)
+	nominalBps := h.nominalBpsFor(feature, settlementSymbol(req))
+
 	var verifiedFeeUSD float64
 	if reachable {
-		// Verified fee = fromAmountUSD × nominal integrator rate (bps).
-		feeRate := float64(h.Config.AllSwapNominalFeeBpsOrDefault()) / 10000.0
+		// Verified fee = fromAmountUSD × the configured rate for this feature.
+		feeRate := float64(nominalBps) / 10000.0
 		verifiedFeeUSD = fromAmountUSD * feeRate
 
 		// Anti-forgery: reject a client-supplied fee that deviates beyond the
@@ -675,9 +794,15 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	} else {
 		// LiFi unreachable: do NOT trust the client, and do NOT invent a number.
 		// FromAmount is in BASE UNITS — reading it as dollars turns a 1,000 USDC
-		// swap into a $35,000,000 fee — so the conservative charge is applied to
-		// a USD basis priced here, from our own price service.
-		consRate := float64(h.Config.AllSwapConservativeFeeBpsOrDefault()) / 10000.0
+		// swap into a $35,000,000 fee — so the charge is applied to a USD basis
+		// priced here, from our own price service.
+		//
+		// Same rate as the verified path, deliberately. This accrual MIRRORS what
+		// LiFi already collected into the fee wallet — a fixed percentage it takes
+		// whether or not we can re-query it — so booking a higher "conservative"
+		// rate would record fee income that was never received, and fund TP and
+		// cashback entitlements out of nothing. The uncertainty here is in the
+		// basis, not the rate, and biasing the rate does not fix a basis.
 		basisUSD, priced := h.fromAmountUSDFromPrices(req)
 		if !priced {
 			// No trustworthy basis exists. Accruing a guess would corrupt the fee
@@ -694,10 +819,10 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 			})
 			return
 		}
-		verifiedFeeUSD = basisUSD * consRate
+		verifiedFeeUSD = basisUSD * float64(nominalBps) / 10000.0
 		log.Printf("[allswap] ALERT allswap_lifi_unreachable_total=1 LiFi unreachable for quote %s — "+
-			"charging conservative %d bps of a priced $%.2f basis (=$%.6f), NOT the client value",
-			req.QuoteID, h.Config.AllSwapConservativeFeeBpsOrDefault(), basisUSD, verifiedFeeUSD)
+			"booking %d bps of a priced $%.2f basis (=$%.6f), NOT the client value",
+			req.QuoteID, nominalBps, basisUSD, verifiedFeeUSD)
 	}
 
 	// Idempotency key (allswap, quoteId). The quoteId is a string; derive a
@@ -706,7 +831,6 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	sourceID := deterministicUUID("allswap:" + req.QuoteID)
 
 	// Accrue the VERIFIED fee (never the client value).
-	feature := settleFeature(req.Feature)
 	if h.FeeService != nil && verifiedFeeUSD > 0 {
 		h.FeeService.EnqueueFeeSettled(services.FeeEvent{
 			Feature:    feature,

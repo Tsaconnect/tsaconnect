@@ -62,7 +62,7 @@ func pendingRow(t *testing.T, db *gorm.DB, txHash, symbol string, amount float64
 
 func sweeperFor(db *gorm.DB, ps *services.PriceService) *SwapFeeSweeper {
 	return &SwapFeeSweeper{
-		DB: db, PriceService: ps, Grace: 10 * time.Minute, ConservativeBps: 350,
+		DB: db, PriceService: ps, Grace: 10 * time.Minute, FeeBps: 300,
 	}
 }
 
@@ -85,9 +85,11 @@ func TestSwapFeeSweeper_ChargesAbandonedSwaps(t *testing.T) {
 		t.Fatalf("want 1 accrual, got %d", len(fees.events))
 	}
 	ev := fees.events[0]
-	// 1,000 USDC at $1, conservative 3.5%.
-	if ev.FeeUSD < 34.999 || ev.FeeUSD > 35.001 {
-		t.Errorf("feeUSD = %v, want 35", ev.FeeUSD)
+	// 1,000 USDC at $1 → 3%, the same rate the settle path books. A swept swap
+	// is not charged extra for its client having gone away: the accrual mirrors
+	// a fixed cut LiFi already took either way.
+	if ev.FeeUSD < 29.999 || ev.FeeUSD > 30.001 {
+		t.Errorf("feeUSD = %v, want 30", ev.FeeUSD)
 	}
 	if ev.Feature != models.FeatureAllswap || ev.Token != "USDC" {
 		t.Errorf("booked as %+v", ev)
