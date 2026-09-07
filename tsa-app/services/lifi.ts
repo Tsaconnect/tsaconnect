@@ -95,9 +95,12 @@ export interface LiFiQuote {
   gasCostUSD: string;
   /**
    * Total platform + protocol fees LiFi reports for this route, in USD
-   * (estimate.feeCosts). Undefined when LiFi reports none — the UI shows
-   * nothing rather than a hardcoded percentage that can drift from the rate
-   * actually configured at portal.li.fi.
+   * (estimate.feeCosts).
+   *
+   * The UI shows THIS rather than a percentage of its own: the rate lives at
+   * portal.li.fi, is configured per chain, and a number hardcoded in the app
+   * becomes a lie the moment it is changed there. Undefined when the route
+   * reports no fee, in which case the UI shows nothing at all.
    */
   feeCostUSD?: string;
   tool: string;
@@ -332,7 +335,7 @@ export async function getSwapDelivery(txHash: string): Promise<SwapDelivery> {
  * Total of a quote's feeCosts in USD. Returns undefined when the route reports
  * none, so callers can tell "no fee reported" from "zero fee".
  */
-function sumFeeCostsUSD(feeCosts: any): string | undefined {
+function sumFeeCostsUSD(feeCosts: { amountUSD?: string }[] | undefined): string | undefined {
   if (!Array.isArray(feeCosts) || feeCosts.length === 0) return undefined;
   let total = 0;
   let sawOne = false;

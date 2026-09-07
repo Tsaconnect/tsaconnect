@@ -30,8 +30,8 @@ func newAllSwapHandler(t *testing.T, db *gorm.DB, fromAmountUSD float64, reachab
 	h := NewSwapLiFiHandler("", "", "")
 	h.Config = cfg
 	h.FeeService = services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
-		return fromAmountUSD, reachable
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
+		return requeryResult{FromAmountUSD: fromAmountUSD, Reachable: reachable, FeeCollectable: true}
 	}
 	return h
 }
@@ -162,9 +162,9 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 
 	const svmChainID int64 = 1151111081099710
 	var gotFromChain, gotToChain string
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
 		gotFromChain, gotToChain = p.FromChain, p.ToChain
-		return 1000.0, true
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
 	}
 
 	w := doSettle(t, h, user, map[string]interface{}{
@@ -246,9 +246,9 @@ func TestAllSwap_RequeryCarriesRouteAddresses(t *testing.T) {
 	user := mkWUser(t, db, "asaddr", nil)
 
 	var got settleQuoteParams
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
 		got = p
-		return 1000.0, true
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
 	}
 	doSettle(t, h, user, map[string]interface{}{
 		"quoteId": "addr-1", "fromToken": "bitcoin", "toToken": "USDC",

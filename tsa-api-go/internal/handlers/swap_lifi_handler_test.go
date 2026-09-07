@@ -566,14 +566,14 @@ func TestLiveRequeryQuoteUSD_Malformed200_NotReachable(t *testing.T) {
 			defer mockLiFi.Close()
 
 			h := newTestLiFiHandler(mockLiFi.URL)
-			usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+			got := h.liveRequeryQuoteUSD(settleQuoteParams{
 				FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
 			})
-			if reachable {
-				t.Fatalf("malformed 200 must yield reachable=false, got reachable=true usd=%v", usd)
+			if got.Reachable {
+				t.Fatalf("malformed 200 must not count as reachable, got %+v", got)
 			}
-			if usd != 0 {
-				t.Fatalf("malformed 200 must yield usd=0, got %v", usd)
+			if got.FromAmountUSD != 0 {
+				t.Fatalf("malformed 200 must yield usd=0, got %v", got.FromAmountUSD)
 			}
 		})
 	}
@@ -590,11 +590,11 @@ func TestLiveRequeryQuoteUSD_Valid200_Reachable(t *testing.T) {
 	defer mockLiFi.Close()
 
 	h := newTestLiFiHandler(mockLiFi.URL)
-	usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+	got := h.liveRequeryQuoteUSD(settleQuoteParams{
 		FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
 	})
-	if !reachable || usd != 123.45 {
-		t.Fatalf("valid 200 want (123.45,true), got (%v,%v)", usd, reachable)
+	if !got.Reachable || !got.FeeCollectable || got.FromAmountUSD != 123.45 {
+		t.Fatalf("valid 200 want usd=123.45 reachable+collectable, got %+v", got)
 	}
 }
 

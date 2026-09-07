@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -101,11 +100,9 @@ type SwapLiFiHandler struct {
 	// endpoint reports "not configured" rather than pretending a swap landed.
 	StatusClient *services.LiFiStatusClient
 
-	// requeryQuoteUSD re-queries LiFi for the supplied route and returns the
-	// from-amount USD value LiFi reports (estimate.fromAmountUSD). Split out as a
+	// requeryQuoteUSD re-queries LiFi for the supplied route. Split out as a
 	// field so tests can inject a deterministic / unreachable LiFi without HTTP.
-	// reachable=false means LiFi could not be reached (→ conservative default).
-	requeryQuoteUSD func(p settleQuoteParams) (fromAmountUSD float64, reachable bool)
+	requeryQuoteUSD func(p settleQuoteParams) requeryResult
 }
 
 // NewSwapLiFiHandler creates a production SwapLiFiHandler.
@@ -528,17 +525,29 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 			h.integratorID, params.Get("fromChain"))
 		params.Del("fee")
 		params.Del("integrator")
-		retry, rerr := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
-		if rerr == nil {
-			defer retry.Body.Close()
-			if rbody, rerr := io.ReadAll(retry.Body); rerr == nil {
-				c.Data(retry.StatusCode, "application/json", rbody)
-				return
-			}
+		if status, rbody, ok := h.quoteWithoutFee(params); ok {
+			c.Data(status, "application/json", rbody)
+			return
 		}
 	}
 
 	c.Data(resp.StatusCode, "application/json", body)
+}
+
+// quoteWithoutFee re-asks LiFi for the same route with no integrator fee. Its
+// own function so the response body is closed here rather than held open for
+// the rest of the request. ok=false leaves the caller to return what it had.
+func (h *SwapLiFiHandler) quoteWithoutFee(params url.Values) (status int, body []byte, ok bool) {
+	resp, err := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
+	if err != nil {
+		return 0, nil, false
+	}
+	defer resp.Body.Close()
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, false
+	}
+	return resp.StatusCode, body, true
 }
 
 // isIntegratorFeeUnconfigured spots LiFi's "not configured for collecting fees
@@ -572,23 +581,12 @@ func (h *SwapLiFiHandler) GetSwapStatus(c *gin.Context) {
 		return
 	}
 
+	// Status reports the outcome in st.Status; its error is transport or decode
+	// only. LiFi does not know a transaction for the first seconds after a
+	// broadcast, and that is indistinguishable from a transient failure here —
+	// so any error reads as "not yet", never as a failed swap.
 	st, err := h.StatusClient.Status(c.Request.Context(), txHash)
-	switch {
-	case errors.Is(err, services.ErrLiFiPending):
-		// Not an error for the caller: the bridge simply has not finished.
-		utils.SuccessResponse(c, http.StatusOK, "pending", gin.H{
-			"status": services.LiFiStatusPending, "txHash": txHash,
-		})
-		return
-	case errors.Is(err, services.ErrLiFiFailed):
-		utils.SuccessResponse(c, http.StatusOK, "failed", gin.H{
-			"status": services.LiFiStatusFailed, "txHash": txHash,
-		})
-		return
-	case err != nil:
-		// LiFi does not know the transaction yet in the first seconds after a
-		// broadcast; that is indistinguishable from a transient failure here, so
-		// report it as pending rather than telling the user their swap failed.
+	if err != nil {
 		utils.SuccessResponse(c, http.StatusOK, "pending", gin.H{
 			"status": services.LiFiStatusPending, "txHash": txHash,
 		})
@@ -612,6 +610,23 @@ func (h *SwapLiFiHandler) GetSwapStatus(c *gin.Context) {
 
 // settleQuoteParams is the route the client claims it swapped on, used to
 // re-query LiFi server-side.
+// requeryResult is what a settle-time re-query of LiFi established.
+//
+// The three states are genuinely different and collapsing any two of them
+// misbooks money:
+//
+//	Reachable && FeeCollectable   — the route's USD value, book the rate on it
+//	!Reachable                    — we learned nothing; price the basis ourselves
+//	Reachable && !FeeCollectable  — LiFi answered that it collects NO fee on this
+//	                                chain (no fee wallet configured for it), so
+//	                                the swap earned nothing and booking a rate
+//	                                would invent income
+type requeryResult struct {
+	FromAmountUSD  float64
+	Reachable      bool
+	FeeCollectable bool
+}
+
 type settleQuoteParams struct {
 	FromChain   string
 	ToChain     string
@@ -704,9 +719,16 @@ func (h *SwapLiFiHandler) fromAmountUSDFromPrices(req allSwapSettleRequest) (flo
 // only a fallback for when the config service is absent or has no row. Reading
 // the env value first is how the ledger silently keeps booking 3% after someone
 // changes the rate in the admin console.
-func (h *SwapLiFiHandler) nominalBpsFor(feature, tokenSymbol string) int {
+func (h *SwapLiFiHandler) nominalBpsFor(feature, tokenSymbol string, chainID int64) int {
 	if h.FeeConfigService != nil {
-		if bps, _, exempt, found := h.FeeConfigService.RateFor(feature, tokenSymbol, nil); found {
+		// Rates are configurable per chain as well as per token — passing nil
+		// here would silently ignore a chain-specific rate an admin had set,
+		// which is the very drift this function exists to remove.
+		var chain *int64
+		if chainID != 0 {
+			chain = &chainID
+		}
+		if bps, _, exempt, found := h.FeeConfigService.RateFor(feature, tokenSymbol, chain); found {
 			if exempt {
 				return 0
 			}
@@ -760,7 +782,7 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	// Re-query LiFi for the from-amount USD on the supplied route. The integrator
 	// fee is a percentage of the from-amount value; the verified fee is
 	// fromAmountUSD × the integrator-fee rate.
-	fromAmountUSD, reachable := h.requeryQuoteUSD(settleQuoteParams{
+	requery := h.requeryQuoteUSD(settleQuoteParams{
 		FromChain:   strconv.FormatInt(req.ChainID, 10),
 		ToChain:     strconv.FormatInt(orChain(req.ToChainID, req.ChainID), 10),
 		FromToken:   req.FromToken,
@@ -771,13 +793,33 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	})
 
 	feature := settleFeature(req.Feature)
-	nominalBps := h.nominalBpsFor(feature, settlementSymbol(req))
+	nominalBps := h.nominalBpsFor(feature, settlementSymbol(req), req.ChainID)
+
+	// LiFi collects per chain, and a chain with no fee wallet configured earns
+	// nothing — GetQuote re-quotes those fee-less so the swap still works. There
+	// is no fee to mirror, so booking the rate anyway would invent income, which
+	// is the whole failure this endpoint exists to avoid. The debt is cleared:
+	// nothing is owed, and the sweeper must not revisit it.
+	if requery.Reachable && !requery.FeeCollectable {
+		log.Printf("[allswap] ALERT allswap_fee_uncollected_total=1 quote=%s feature=%s chain=%d — "+
+			"LiFi collects no fee on this chain, so NOTHING was earned and nothing is booked; "+
+			"configure a fee wallet at portal.li.fi to start earning here",
+			req.QuoteID, feature, req.ChainID)
+		markPendingSwapFeeSettled(req.QuoteID)
+		utils.SuccessResponse(c, http.StatusOK, "No fee collected on this route", gin.H{
+			"quoteId":        req.QuoteID,
+			"verifiedFeeUsd": 0.0,
+			"lifiReachable":  true,
+			"feeCollected":   false,
+		})
+		return
+	}
 
 	var verifiedFeeUSD float64
-	if reachable {
+	if requery.Reachable {
 		// Verified fee = fromAmountUSD × the configured rate for this feature.
 		feeRate := float64(nominalBps) / 10000.0
-		verifiedFeeUSD = fromAmountUSD * feeRate
+		verifiedFeeUSD = requery.FromAmountUSD * feeRate
 
 		// Anti-forgery: reject a client-supplied fee that deviates beyond the
 		// threshold from the verified figure. A zero/absent ClientFeeUSD is the
@@ -850,7 +892,7 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Swap fee settled", gin.H{
 		"quoteId":        req.QuoteID,
 		"verifiedFeeUsd": verifiedFeeUSD,
-		"lifiReachable":  reachable,
+		"lifiReachable":  requery.Reachable,
 		"feature":        feature,
 	})
 }
@@ -882,7 +924,7 @@ func deterministicUUID(key string) uuid.UUID {
 // liveRequeryQuoteUSD re-queries LiFi /quote for the supplied route and returns
 // the from-amount USD (estimate.fromAmountUSD). reachable=false on any transport
 // or decode failure so the caller falls back to the conservative default.
-func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, bool) {
+func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) requeryResult {
 	// fromAddress is REQUIRED by LiFi ("querystring must have required property
 	// 'fromAddress'"), and a UTXO route additionally needs it to hold coins,
 	// since the quote is built from that address's UTXOs. Omitting it made every
@@ -901,15 +943,22 @@ func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, boo
 
 	resp, err := h.lifiGet(liFiHTTPClient, q)
 	if err != nil {
-		return 0, false
+		return requeryResult{}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, false
-	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, false
+		return requeryResult{}
+	}
+	if resp.StatusCode != http.StatusOK {
+		// LiFi answering "no fee wallet for this chain" is not a failure to
+		// reach it — it is a definite answer that this swap earned nothing,
+		// because GetQuote will have re-quoted it fee-less for the same reason.
+		// Booking a rate here would record income that was never collected.
+		if isIntegratorFeeUnconfigured(body) {
+			return requeryResult{Reachable: true, FeeCollectable: false}
+		}
+		return requeryResult{}
 	}
 	var parsed struct {
 		Estimate struct {
@@ -917,15 +966,15 @@ func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, boo
 		} `json:"estimate"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return 0, false
+		return requeryResult{}
 	}
 	usd := parseFloatOr0(parsed.Estimate.FromAmountUSD)
-	// A 200 with a malformed/empty/zero fromAmountUSD must NOT yield (0, true):
-	// that would silently route a verifiedFeeUSD=0 down the "reachable" path and
-	// accrue a $0 fee. Treat it as unreachable so the caller applies the
-	// conservative configured default instead (design §8, I8 — never silent $0).
+	// A 200 with a malformed/empty/zero fromAmountUSD must NOT count as
+	// reachable: that would route a verifiedFeeUSD=0 down the verified path and
+	// silently accrue nothing. Report it as unknown so the caller prices the
+	// basis itself (design §8, I8 — never a silent $0).
 	if usd <= 0 {
-		return 0, false
+		return requeryResult{}
 	}
-	return usd, true
+	return requeryResult{FromAmountUSD: usd, Reachable: true, FeeCollectable: true}
 }

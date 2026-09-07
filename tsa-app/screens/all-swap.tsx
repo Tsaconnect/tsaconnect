@@ -45,9 +45,6 @@ import {
   ScreenHeader,
 } from '@/components/ui';
 
-// The fee comes from the quote (LiFi's own feeCosts), never a constant here:
-// the rate lives at portal.li.fi and a number hardcoded in the app silently
-// becomes a lie the moment it is changed there.
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
@@ -906,16 +903,25 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
   // "complete" at broadcast tells the user their funds have arrived when they
   // are still in flight — and says nothing at all when the bridge fails.
   const [delivery, setDelivery] = useState<SwapDeliveryStatus>(crossChain ? 'PENDING' : 'DONE');
+  const [gaveUpWaiting, setGaveUpWaiting] = useState(false);
   useEffect(() => {
     if (!crossChain || !txHash) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    // A bridge leg runs to minutes, so keep asking — but not forever. Past this
+    // the screen stops polling and points at the explorer rather than holding a
+    // spinner (and a LiFi call every 15s) open indefinitely.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 40; // ~10 minutes
     const poll = async () => {
       const { status } = await getSwapDelivery(txHash);
       if (cancelled) return;
       setDelivery(status);
-      // Keep asking while it is in flight; a bridge leg runs to minutes.
-      if (status === 'PENDING') timer = setTimeout(poll, 15_000);
+      if (status === 'PENDING' && ++attempts < MAX_ATTEMPTS) {
+        timer = setTimeout(poll, 15_000);
+      } else if (status === 'PENDING') {
+        setGaveUpWaiting(true);
+      }
     };
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
@@ -926,9 +932,10 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
       : delivery === 'FAILED' ? 'Bridge Failed'
         : 'Swap Sent';
   const subtitle =
-    delivery === 'PENDING' ? 'Bridging to the destination chain — this can take a few minutes. You can close this screen; it will keep going.'
-      : delivery === 'FAILED' ? 'The bridge could not complete this route. Bridges refund to your address when they fail — check the explorer link below.'
-        : null;
+    delivery === 'FAILED' ? 'The bridge could not complete this route. Bridges refund to your address when they fail — check the explorer link below.'
+      : delivery !== 'PENDING' ? null
+        : gaveUpWaiting ? 'Still bridging. This one is taking longer than usual — follow the explorer link below for the latest.'
+          : 'Bridging to the destination chain — this can take a few minutes. You can close this screen; it will keep going.';
   const iconScale = useSharedValue(0);
   const ringScale = useSharedValue(1);
   const ringOpacity = useSharedValue(0);
