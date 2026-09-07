@@ -5,9 +5,11 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // stubPaycrestOrderer implements PaycrestOrderer. Its methods panic when
@@ -228,5 +230,212 @@ func TestGrossDownForSenderFee_RoundTripsToTheUsersNumber(t *testing.T) {
 					requested, pct, submitted, got, want, diff)
 			}
 		}
+	}
+}
+
+// ─── Bug: abandoned orders alarming as unmatched deposits ─────────────────
+//
+// UnmatchedDeposit() reports a fact about Paycrest's response — expired +
+// amountPaid=0 — but that signature is IDENTICAL for two very different
+// orders: one where the user paid and the protocol lost track of it (a real
+// operator alarm), and one the user simply never paid at all (routine).
+// mapPaycrestStatus is where the two are told apart, using row.PaymentClaimedAt
+// (whether the user tapped "I've sent the money"/"I've sent it") as the only
+// signal our side actually has.
+
+// TestMapPaycrestStatus_AbandonedOrderReadsAsOrdinaryExpired is the abandoned
+// half: nobody claimed to have paid, so the identical expired+amountPaid=0
+// signature must NOT read as unmatched.
+func TestMapPaycrestStatus_AbandonedOrderReadsAsOrdinaryExpired(t *testing.T) {
+	expired := &PaycrestOrder{Status: PaycrestStatusExpired, AmountPaid: "0"}
+
+	got := mapPaycrestStatus(expired, models.PaycrestDirectionBuy, false /* not claimed */)
+
+	if got != models.PaycrestStatusExpired {
+		t.Fatalf("abandoned order mapped to %q, want %q", got, models.PaycrestStatusExpired)
+	}
+}
+
+// TestMapPaycrestStatus_ClaimedOrderReadsAsUnmatched is the genuine-alarm
+// half: the user asserted they paid, so the same signature must still surface
+// to the operator queue.
+func TestMapPaycrestStatus_ClaimedOrderReadsAsUnmatched(t *testing.T) {
+	expired := &PaycrestOrder{Status: PaycrestStatusExpired, AmountPaid: "0"}
+
+	got := mapPaycrestStatus(expired, models.PaycrestDirectionBuy, true /* claimed */)
+
+	if got != models.PaycrestStatusUnmatched {
+		t.Fatalf("claimed order mapped to %q, want %q", got, models.PaycrestStatusUnmatched)
+	}
+}
+
+// TestMapPaycrestStatus_ClaimDoesNotOverrideAGenuinelySettledOrder guards the
+// gate against over-firing: claimed=true must only matter for the
+// expired+amountPaid=0 signature, never override an order that actually
+// settled or is still progressing normally.
+func TestMapPaycrestStatus_ClaimDoesNotOverrideAGenuinelySettledOrder(t *testing.T) {
+	settled := &PaycrestOrder{Status: PaycrestStatusSettled, AmountPaid: "1000"}
+	if got := mapPaycrestStatus(settled, models.PaycrestDirectionBuy, true); got != models.PaycrestStatusSettled {
+		t.Fatalf("settled order with a claim mapped to %q, want %q", got, models.PaycrestStatusSettled)
+	}
+}
+
+// stubGetOrderReturns implements PaycrestOrderer with a fixed GetOrder
+// response, for exercising Sync end-to-end. Create* methods are unused by
+// these tests and panic like the package's other stubs if reached.
+type stubGetOrderReturns struct{ order *PaycrestOrder }
+
+func (s stubGetOrderReturns) CreateOnrampOrder(context.Context, PaycrestOnrampRequest) (*PaycrestOrder, error) {
+	panic("CreateOnrampOrder not used by this test")
+}
+
+func (s stubGetOrderReturns) CreateOfframpOrder(context.Context, PaycrestOfframpRequest) (*PaycrestOrder, error) {
+	panic("CreateOfframpOrder not used by this test")
+}
+
+func (s stubGetOrderReturns) GetOrder(context.Context, string) (*PaycrestOrder, error) {
+	return s.order, nil
+}
+
+// newSyncTestRow inserts a non-terminal order row directly (bypassing
+// CreateBuy, which needs a live quote) so Sync has something to operate on.
+func newSyncTestRow(t *testing.T, db *gorm.DB, userID uuid.UUID, claimed bool) *models.PaycrestOrderRecord {
+	t.Helper()
+	row := &models.PaycrestOrderRecord{
+		ID:            uuid.New(),
+		UserID:        userID,
+		Direction:     models.PaycrestDirectionBuy,
+		Status:        models.PaycrestStatusAwaitingPayment,
+		Reference:     "ref-" + uuid.New().String(),
+		PaycrestID:    "pc-" + uuid.New().String(),
+		FiatCode:      "NGN",
+		FiatAmount:    "1000",
+		Token:         "USDT",
+		ChainKey:      "bsc",
+		Network:       "bnb-smart-chain",
+		WalletAddress: "0xabc",
+	}
+	if claimed {
+		now := time.Now()
+		row.PaymentClaimedAt = &now
+	}
+	if err := db.Create(row).Error; err != nil {
+		t.Fatalf("failed to seed order row: %v", err)
+	}
+	return row
+}
+
+// TestSync_AbandonedOrderExpiresWithoutAlarming is the end-to-end version of
+// the mapPaycrestStatus test: an order nobody claimed to have paid, that
+// Paycrest reports expired+amountPaid=0, must land on ordinary "expired" —
+// not "unmatched" — and must not carry the operator-alarm failure reason.
+func TestSync_AbandonedOrderExpiresWithoutAlarming(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate paycrest_order_records: %v", err)
+	}
+	remote := &PaycrestOrder{ID: "pc-1", Status: PaycrestStatusExpired, AmountPaid: "0"}
+	svc := NewPaycrestOrderService(db, stubGetOrderReturns{order: remote}, NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil), nil, "", "")
+
+	userID := uuid.New()
+	row := newSyncTestRow(t, db, userID, false /* never claimed */)
+
+	got, err := svc.Sync(context.Background(), row)
+	if err != nil {
+		t.Fatalf("Sync err = %v", err)
+	}
+	if got.Status != models.PaycrestStatusExpired {
+		t.Fatalf("abandoned order Status = %q, want %q", got.Status, models.PaycrestStatusExpired)
+	}
+	if got.FailureReason != "" {
+		t.Fatalf("abandoned order should not carry an alarm failure reason, got %q", got.FailureReason)
+	}
+}
+
+// TestSync_ClaimedOrderAlarmsAsUnmatched is the mirror: a user who tapped
+// "I've sent the money" before the order expired with amountPaid=0 must still
+// reach the unmatched status and its operator-facing failure reason.
+func TestSync_ClaimedOrderAlarmsAsUnmatched(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate paycrest_order_records: %v", err)
+	}
+	remote := &PaycrestOrder{ID: "pc-1", Status: PaycrestStatusExpired, AmountPaid: "0"}
+	svc := NewPaycrestOrderService(db, stubGetOrderReturns{order: remote}, NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil), nil, "", "")
+
+	userID := uuid.New()
+	row := newSyncTestRow(t, db, userID, true /* claimed before expiry */)
+
+	got, err := svc.Sync(context.Background(), row)
+	if err != nil {
+		t.Fatalf("Sync err = %v", err)
+	}
+	if got.Status != models.PaycrestStatusUnmatched {
+		t.Fatalf("claimed order Status = %q, want %q", got.Status, models.PaycrestStatusUnmatched)
+	}
+	if got.FailureReason == "" {
+		t.Fatal("expected an operator-facing failure reason on an unmatched deposit")
+	}
+}
+
+// ─── ClaimPayment ───────────────────────────────────────────────────────────
+
+func TestClaimPayment_SetsClaimedAtAndIsIdempotent(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate paycrest_order_records: %v", err)
+	}
+	svc := NewPaycrestOrderService(db, stubPaycrestOrderer{}, NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil), nil, "", "")
+
+	userID := uuid.New()
+	row := newSyncTestRow(t, db, userID, false)
+
+	first, err := svc.ClaimPayment(context.Background(), userID, row.ID)
+	if err != nil {
+		t.Fatalf("ClaimPayment err = %v", err)
+	}
+	if first.PaymentClaimedAt == nil {
+		t.Fatal("expected PaymentClaimedAt to be set")
+	}
+	if first.Status != models.PaycrestStatusAwaitingPayment {
+		t.Fatalf("ClaimPayment must not move Status, got %q", first.Status)
+	}
+	claimedAt := *first.PaymentClaimedAt
+
+	second, err := svc.ClaimPayment(context.Background(), userID, row.ID)
+	if err != nil {
+		t.Fatalf("second ClaimPayment err = %v", err)
+	}
+	if second.PaymentClaimedAt == nil || !second.PaymentClaimedAt.Equal(claimedAt) {
+		t.Fatalf("expected the second claim to be a no-op, got %v want %v", second.PaymentClaimedAt, claimedAt)
+	}
+}
+
+// TestClaimPayment_RefusesAnotherUsersOrder proves the endpoint this backs
+// cannot be used to mark someone else's order — it must fail exactly like
+// looking up an order that isn't yours.
+func TestClaimPayment_RefusesAnotherUsersOrder(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate paycrest_order_records: %v", err)
+	}
+	svc := NewPaycrestOrderService(db, stubPaycrestOrderer{}, NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil), nil, "", "")
+
+	owner := uuid.New()
+	row := newSyncTestRow(t, db, owner, false)
+
+	intruder := uuid.New()
+	_, err := svc.ClaimPayment(context.Background(), intruder, row.ID)
+	if !errors.Is(err, ErrPaycrestOrderNotYours) {
+		t.Fatalf("ClaimPayment by a different user: err = %v, want ErrPaycrestOrderNotYours", err)
+	}
+
+	// And the real owner's order must be untouched.
+	var reloaded models.PaycrestOrderRecord
+	if err := db.Where("id = ?", row.ID).First(&reloaded).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.PaymentClaimedAt != nil {
+		t.Fatal("an intruder's claim attempt must not have set PaymentClaimedAt")
 	}
 }

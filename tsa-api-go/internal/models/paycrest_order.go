@@ -107,6 +107,17 @@ type PaycrestOrderRecord struct {
 	// TxHash is the on-chain delivery (buy) or the user's deposit (sell).
 	TxHash string `gorm:"size:128" json:"txHash,omitempty"`
 
+	// PaymentClaimedAt is set when the user taps "I've sent the money" (buy)
+	// or "I've sent it" (sell) — the app's only signal that they believe they
+	// completed their side. It is NOT proof of payment (we never see the bank
+	// or the chain confirm this ourselves) and never moves Status on its own.
+	// Its one job is distinguishing, on an order that later expires with
+	// amountPaid=0, a genuine unmatched deposit (paid, bank confirmed, protocol
+	// never saw it — see PaycrestStatusUnmatched) from an order the user simply
+	// abandoned before paying, which looks identical to Paycrest. See
+	// mapPaycrestStatus in paycrest_order_service.go for where this is read.
+	PaymentClaimedAt *time.Time `json:"paymentClaimedAt,omitempty"`
+
 	// FailureReason is operator-facing text for anything the user cannot fix.
 	FailureReason string `gorm:"size:512" json:"failureReason,omitempty"`
 	// LastCheckedAt drives the poller's ordering. Paycrest webhooks require a

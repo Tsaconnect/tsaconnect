@@ -257,6 +257,34 @@ func (h *PaycrestHandler) GetOrder(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Order", row)
 }
 
+// POST /api/paycrest/orders/:id/claim-payment — the user asserts they
+// completed their side (bank transfer on a buy, on-chain send on a sell).
+//
+// This does not move the order's status — only the next Sync does that,
+// via mapPaycrestStatus — it just records the claim so a genuine
+// unmatched-deposit ALARM (paid, bank confirmed, protocol never registered
+// it) can be told apart from an order the user simply abandoned before
+// paying, which otherwise looks identical once it expires. Idempotent and
+// scoped to the caller's own order.
+func (h *PaycrestHandler) ClaimPayment(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	row, err := h.orders.ClaimPayment(c.Request.Context(), user.ID, id)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", row)
+}
+
 // GET /api/paycrest/orders — the user's recent orders.
 func (h *PaycrestHandler) ListOrders(c *gin.Context) {
 	user := getUserFromContext(c)

@@ -42,6 +42,7 @@ import { getNigerianBanks, type NgBank } from '@/services/ngBanks';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import {
+  claimPayment,
   createBuy,
   getQuote,
   PaycrestError,
@@ -314,7 +315,17 @@ export default function PaycrestBuyScreen() {
 
           <Button
             title="I've sent the money"
-            onPress={() => router.replace(`/wallet/paycrest/order/${order.id}` as never)}
+            onPress={() => {
+              // Tell the server the user asserts they paid — the only signal
+              // that lets an order which later expires with amountPaid=0 read
+              // as a genuine unmatched-deposit alarm instead of an ordinary
+              // abandoned checkout. Fire-and-forget: the user has already
+              // sent the money, so a failed claim must not block navigation —
+              // it just means this order degrades to a plain "expired" if it
+              // never matches, the same as before this existed.
+              claimPayment(order.id).catch(() => {});
+              router.replace(`/wallet/paycrest/order/${order.id}` as never);
+            }}
             disabled={expired}
             fullWidth
           />

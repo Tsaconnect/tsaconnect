@@ -89,6 +89,8 @@ export interface PaycrestOrder {
   amountPaid?: string;
   txHash?: string;
   failureReason?: string;
+  /** Set once claimPayment() lands — see that function for why it exists. */
+  paymentClaimedAt?: string;
   settledAt?: string;
   createdAt: string;
 }
@@ -206,6 +208,24 @@ export async function getOrder(id: string): Promise<PaycrestOrder> {
 
 export async function listOrders(limit = 25): Promise<PaycrestOrder[]> {
   return request<PaycrestOrder[]>(`/orders?limit=${limit}`);
+}
+
+/**
+ * Tells the server the user believes they completed their side — the bank
+ * transfer on a buy ("I've sent the money"), the on-chain send on a sell
+ * ("I've sent it"). This is the ONLY way the server can distinguish a
+ * genuine unmatched deposit (paid, bank confirmed, Paycrest never registered
+ * it — a real operator alarm) from an order the user simply abandoned before
+ * paying, which looks identical once it expires with amountPaid=0.
+ *
+ * Does not move the order's status — it just records the claim for the next
+ * sync to read. Callers should fire this and swallow failures: the user has
+ * already sent (or believes they sent) the money, so a lost claim must
+ * degrade to the ordinary "expired" outcome, not block navigation or retry
+ * loops on this screen.
+ */
+export async function claimPayment(id: string): Promise<PaycrestOrder> {
+  return request<PaycrestOrder>(`/orders/${id}/claim-payment`, { method: 'POST' });
 }
 
 /** Statuses that will never change on their own. */

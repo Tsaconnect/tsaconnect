@@ -37,6 +37,7 @@ import { useCountdown } from '@/hooks/useCountdown';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { resolveAccountName } from '@/services/ngBanks';
 import {
+  claimPayment,
   createSell,
   getPayoutInstitutions,
   getQuote,
@@ -299,7 +300,17 @@ export default function PaycrestSellScreen() {
 
           <Button
             title="I've sent it"
-            onPress={() => router.replace(`/wallet/paycrest/order/${order.id}` as never)}
+            onPress={() => {
+              // Tell the server the user asserts they sent the deposit — the
+              // only signal that lets an order which later expires with
+              // amountPaid=0 read as a genuine unmatched-deposit alarm
+              // instead of an ordinary abandoned checkout. Fire-and-forget:
+              // the user has already sent it, so a failed claim must not
+              // block navigation — it just means this order degrades to a
+              // plain "expired" if it never matches, the same as before.
+              claimPayment(order.id).catch(() => {});
+              router.replace(`/wallet/paycrest/order/${order.id}` as never);
+            }}
             disabled={expired}
             fullWidth
           />

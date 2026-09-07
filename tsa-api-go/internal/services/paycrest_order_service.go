@@ -421,7 +421,7 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 		updates["tx_hash"] = h
 	}
 
-	next := mapPaycrestStatus(remote, row.Direction)
+	next := mapPaycrestStatus(remote, row.Direction, row.PaymentClaimedAt != nil)
 	if next == models.PaycrestStatusUnmatched {
 		// The user paid, the bank confirmed, and the protocol never saw it.
 		// Loud, because nothing automated can resolve this.
@@ -443,13 +443,54 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 	return s.Get(ctx, row.UserID, row.ID)
 }
 
+// ClaimPayment records that the user asserts they completed their side of
+// the order — the bank transfer on a buy, the on-chain send on a sell —
+// after tapping "I've sent the money"/"I've sent it". Scoped to the caller's
+// own order via Get's ownership check (returns ErrPaycrestOrderNotYours
+// otherwise) and idempotent: a retried tap, or one that lands after another
+// request already recorded the claim, is a no-op past the first call, and
+// the original claim time is preserved rather than bumped forward.
+//
+// Deliberately does NOT touch Status. Only mapPaycrestStatus (via Sync) moves
+// an order's status; this just leaves evidence for the next Sync to read.
+func (s *PaycrestOrderService) ClaimPayment(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	row, err := s.Get(ctx, userID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if row.PaymentClaimedAt != nil {
+		return row, nil
+	}
+	now := time.Now()
+	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND user_id = ? AND payment_claimed_at IS NULL", orderID, userID).
+		Update("payment_claimed_at", &now).Error; err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, userID, orderID)
+}
+
 // mapPaycrestStatus translates their vocabulary into ours, and detects the one
 // state they have no word for.
-func mapPaycrestStatus(o *PaycrestOrder, direction string) string {
+//
+// claimed is row.PaymentClaimedAt != nil — whether THIS user tapped "I've
+// sent the money"/"I've sent it" on THIS order. It has to come from our row,
+// not from PaycrestOrder: that type is only Paycrest's API response and
+// carries no memory of what our app showed the user. o.UnmatchedDeposit()
+// reports a fact about their response (expired + amountPaid=0); whether that
+// fact means "genuine unmatched deposit, page an operator" or "the user
+// abandoned this before paying, which looks identical to Paycrest" is a
+// judgment only our claim record can make — so the gate lives here, at the
+// point where both pieces of information are in scope, rather than on
+// PaycrestOrder itself.
+func mapPaycrestStatus(o *PaycrestOrder, direction string, claimed bool) string {
 	if o == nil {
 		return ""
 	}
-	if o.UnmatchedDeposit() {
+	if o.UnmatchedDeposit() && claimed {
 		return models.PaycrestStatusUnmatched
 	}
 	switch strings.ToLower(strings.TrimSpace(o.Status)) {
