@@ -15,11 +15,9 @@
 //               figure here could be one the quote screen cannot honour.
 //
 // Currency support is not uniform and the rows say so rather than failing
-// later (see currencySupport):
-//   NGN   stablecoins route through Paycrest
-//   GHS   deposit-enabled at Flutterwave, so stablecoins use the legacy path
-//   USD/EUR/GBP  payout-only — there is no virtual-account product for them, so
-//               collecting is impossible and the row says "not available"
+// later. Which provider (if any) serves a currency comes from the backend
+// currency registry via getRampCurrencies/rampProviderFor — not hardcoded
+// here, so adding a currency is a backend change, not an app release.
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -42,9 +40,12 @@ import {
   getITBalance,
   getITRate,
   listITIntents,
+  getRampCurrencies,
+  rampProviderFor,
   type ITBalance,
   type ITIntent,
   type ITRate,
+  type RampCurrency,
 } from '@/services/itApi';
 import {
   listOrders as listPaycrestOrders,
@@ -55,20 +56,6 @@ import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd } from '@/utils/currencyDisplay';
-
-/**
- * Where a currency can buy stablecoins, if anywhere.
- *
- * Source of truth is the backend currency registry
- * (services/currency_registry.go): NGN and GHS are deposit-enabled; USD, EUR
- * and GBP are payout-only because no virtual-account product exists for them.
- * Paycrest's live corridors cover NGN but not GHS, hence the split.
- */
-function currencySupport(code: string): 'paycrest' | 'flutterwave' | 'none' {
-  if (code === 'NGN') return 'paycrest';
-  if (code === 'GHS') return 'flutterwave';
-  return 'none';
-}
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -187,6 +174,7 @@ export default function ITHub() {
   const [intents, setIntents] = useState<ITIntent[]>([]);
   const [orders, setOrders] = useState<PaycrestOrder[]>([]);
   const [stable, setStable] = useState<Record<string, number>>({});
+  const [currencies, setCurrencies] = useState<RampCurrency[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -196,13 +184,18 @@ export default function ITHub() {
     // server key and the balance call needs a wallet on this device — a hub
     // that fails wholesale because one of those is missing would be worse than
     // one showing a dash.
-    const [b, r, list, pc, balances] = await Promise.all([
+    const [b, r, list, pc, balances, curList] = await Promise.all([
       getITBalance(),
       getITRate(),
       listITIntents(),
       listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
       address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
+      // A failed fetch yields an empty table, which resolves to no provider —
+      // so the screen says "unavailable" rather than offering a trade the
+      // backend would refuse.
+      getRampCurrencies().catch(() => [] as RampCurrency[]),
     ]);
+    setCurrencies(curList);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
@@ -243,7 +236,7 @@ export default function ITHub() {
     : undefined;
 
   const code = currency?.code ?? 'NGN';
-  const support = currencySupport(code);
+  const support = rampProviderFor(currencies, code);
 
   const assets: AssetRow[] = useMemo(() => {
     const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
@@ -282,7 +275,7 @@ export default function ITHub() {
       stableRow('USDC'),
       stableRow('USDT'),
     ];
-  }, [loading, address, stable, support, code, spendable, mcgpRateLine]);
+  }, [loading, address, stable, support, code, spendable, mcgpRateLine, currencies]);
 
   const recent = useMemo(() => {
     const rows = [
