@@ -67,6 +67,20 @@ type Currency struct {
 	// rather than "floor of zero".
 	MinPayoutMinor int64 `gorm:"not null;default:0" json:"minPayoutMinor"`
 
+	// RampProvider names who serves the stablecoin ramp for this currency:
+	// "paycrest", "flutterwave", or empty for none.
+	//
+	// Deliberately NOT folded into DepositEnabled. That field means
+	// "Flutterwave has a virtual-account product here" and it_fiat_va.go
+	// depends on it; a Paycrest-only currency with DepositEnabled true would
+	// make the VA path believe it can provision an account that does not
+	// exist.
+	//
+	// Empty is ambiguous by construction: it means either "no ramp" or "this
+	// row predates the column". CurrencyRegistry.RampProvider resolves it
+	// against a compiled-in default rather than reading it literally.
+	RampProvider string `gorm:"size:16;not null;default:''" json:"rampProvider"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
