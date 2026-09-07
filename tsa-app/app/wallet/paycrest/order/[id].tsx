@@ -193,7 +193,11 @@ export default function PaycrestOrderScreen() {
             <CopyableField label="Bank" value={order.payInstitution ?? ''} />
             <CopyableField label="Account number" value={order.payAccountNumber ?? ''} />
             <CopyableField label="Account name" value={order.payAccountName ?? ''} />
-            <CopyableField label="Amount" value={order.payAmount ?? ''} />
+            {/* Copyable value stays bare — the user pastes it into a bank
+                app, where a currency symbol would be rejected — but the label
+                carries the currency so the row is not the only unlabelled
+                money figure on the screen. */}
+            <CopyableField label="Amount (₦)" value={order.payAmount ?? ''} />
           </Card>
         )}
 
@@ -212,11 +216,15 @@ export default function PaycrestOrderScreen() {
         )}
 
         <SummaryCard>
-          <SummaryRow label="Reference" value={order.reference} />
-          <SummaryRow
-            label={order.direction === 'buy' ? 'You pay' : 'You receive'}
-            value={`₦${order.amount}`}
-          />
+          {/* On a buy the transfer instruction above already states what to
+              send, and it is the authoritative figure — repeating it here as
+              "You pay" was redundant at best. Before the sender fee moved into
+              the rate the two even disagreed: "you pay 800" beside "transfer
+              804.02". Only the sell direction needs this row, where the fiat
+              figure is what the user RECEIVES and appears nowhere else. */}
+          {order.direction === 'sell' ? (
+            <SummaryRow label="You receive" value={`₦${order.amount}`} />
+          ) : null}
           <SummaryRow
             label={order.direction === 'buy' ? 'You receive' : 'You send'}
             value={`${order.tokenAmount ?? '—'} ${order.token}`}
@@ -224,6 +232,9 @@ export default function PaycrestOrderScreen() {
           {order.rate ? <SummaryRow label="Rate" value={`₦${order.rate}`} /> : null}
           <SummaryRow label="Network" value={CHAIN_LABELS[order.chain] ?? order.chain} />
           {order.settledAt ? <SummaryRow label="Completed" value={order.settledAt} /> : null}
+          {/* Last, and deliberately: the reference means nothing to the user
+              until something goes wrong, at which point support asks for it. */}
+          <SummaryRow label="Reference" value={order.reference} />
         </SummaryCard>
 
         {order.txHash ? (

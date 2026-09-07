@@ -124,6 +124,38 @@ type PaycrestBuyRequest struct {
 	RefundAccountName string
 }
 
+// grossDownForSenderFee converts the amount the user asked to pay into the
+// amount we submit, so that Paycrest's own fee arithmetic lands back on the
+// user's number.
+//
+// Paycrest computes amountToTransfer = amount x (1 + senderFeePercent/100) —
+// the fee is added ON TOP. Submitting the user's figure directly means someone
+// who types 800 is told to transfer 804.02, and the screen ends up asserting
+// both "you pay 800" and "transfer 804.02", which cannot both be true. Dividing
+// first puts the fee in the rate instead: the user sends exactly what they
+// typed and receives correspondingly less token. Same margin, one number.
+//
+// Returns the requested amount unchanged when the fee percent is unknown —
+// which is the case when PAYCREST_SENDER_FEE_PERCENT is unset and the value
+// comes from the dashboard profile instead. Guessing it would put the user's
+// transfer a few kobo off the amount the provider is waiting for, and an
+// inexact transfer is exactly what strands a payment.
+func grossDownForSenderFee(requested, feePercent string) (string, bool) {
+	feePercent = strings.TrimSpace(feePercent)
+	if feePercent == "" {
+		return requested, false
+	}
+	pct, err := strconv.ParseFloat(feePercent, 64)
+	if err != nil || pct <= 0 {
+		return requested, false
+	}
+	amt, err := strconv.ParseFloat(strings.TrimSpace(requested), 64)
+	if err != nil || amt <= 0 {
+		return requested, false
+	}
+	return strconv.FormatFloat(amt/(1+pct/100), 'f', 2, 64), true
+}
+
 // CreateBuy prices the chosen venue afresh, opens the order, and returns the
 // provider account for the user to pay.
 //
@@ -161,9 +193,13 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, err
 	}
 
+	// Submit the grossed-down figure so the provider asks the user for exactly
+	// the amount they entered. FiatAmount on the row stays the user's number.
+	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, s.senderFeePercent)
+
 	ref := paycrestReference("PCB", req.UserID)
 	order, err := s.pc.CreateOnrampOrder(ctx, PaycrestOnrampRequest{
-		AmountNGN:        req.FiatAmount,
+		AmountNGN:        submitAmount,
 		FiatCode:         fiat,
 		Token:            venue.Token,
 		Network:          venue.Network,
@@ -208,8 +244,27 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		row.PayInstitution = pa.Institution
 		row.PayAccountNumber = pa.AccountIdentifier
 		row.PayAccountName = pa.AccountName
+		// PayAmount is ALWAYS the provider's figure, never our prediction — it
+		// is what the user must transfer exactly, and being a kobo out is what
+		// strands a payment.
 		row.PayAmount = pa.AmountToTransfer
 		row.ValidUntil = parsePaycrestTime(pa.ValidUntil)
+
+		// We divided; they multiplied. Rounding at two decimals can leave the
+		// two a kobo apart, and the user would then see "pay 800" beside
+		// "transfer 800.01". Log the drift rather than hide it: the transfer
+		// amount above is still correct, but the screen's two numbers stop
+		// agreeing and someone should know why.
+		if grossedDown {
+			if want, err1 := strconv.ParseFloat(req.FiatAmount, 64); err1 == nil {
+				if got, err2 := strconv.ParseFloat(pa.AmountToTransfer, 64); err2 == nil {
+					if diff := got - want; diff > 0.01 || diff < -0.01 {
+						log.Printf("[paycrest] gross-down drift ref=%s requested=%s submitted=%s provider_wants=%s (%.2f off)",
+							ref, req.FiatAmount, submitAmount, pa.AmountToTransfer, diff)
+					}
+				}
+			}
+		}
 	}
 	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
 		// The order exists at Paycrest but we failed to record it. Log loudly
