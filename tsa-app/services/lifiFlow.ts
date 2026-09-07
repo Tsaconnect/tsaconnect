@@ -14,9 +14,12 @@ import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
 import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
-import { buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
+import {
+  buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, type LiFiQuote,
+} from '@/services/lifi';
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
+import { executeLiFiSuiSwap } from '@/services/chains/suiLifi';
 import { mapSubmitError } from '@/services/swapErrors';
 
 export interface ExecuteLiFiSwapParams {
@@ -56,6 +59,17 @@ export async function executeLiFiSwap({
   if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
     return executeLiFiSolanaSwap({
       txDataB64: quote.transactionRequest.data,
+      fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      fromSymbol,
+      walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
+      onStage,
+    });
+  }
+
+  if (fromChainId !== undefined && isSuiLiFiChain(fromChainId)) {
+    return executeLiFiSuiSwap({
+      txBytesB64: quote.transactionRequest.data,
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       fromSymbol,
       walletAddress,

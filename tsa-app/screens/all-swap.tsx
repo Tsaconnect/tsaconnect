@@ -23,11 +23,12 @@ import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain
 import { getActiveWallet, readErc20BalanceOf, getProvider } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
+import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { ethers } from 'ethers';
 import {
   getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
   type SwapDeliveryStatus,
-  isSolanaLiFiChain, isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
+  isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
@@ -99,10 +100,11 @@ export default function AllSwapScreen() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Derived non-EVM addresses for the active wallet — the from/to address on
-  // Solana- and Bitcoin-side routes. All three families come off the same
+  // Solana-, Bitcoin- and Sui-side routes. Every family comes off the same
   // mnemonic, so a cross-VM swap needs no address input from the user.
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
   const [btcAddress, setBtcAddress] = useState<string | null>(null);
+  const [suiAddress, setSuiAddress] = useState<string | null>(null);
   // Whether derivation has finished. A null address means "still deriving"
   // before this flips and "this wallet has no key for that chain" after — a
   // key-only or watch-only wallet has no mnemonic to derive from, and telling
@@ -119,13 +121,15 @@ export default function AllSwapScreen() {
     if (!walletAddress) return;
     let cancelled = false;
     setAddressesDerived(false);
-    Promise.allSettled([getSolanaAddress(walletAddress), getBtcAddress(walletAddress)])
-      .then(([sol, btc]) => {
-        if (cancelled) return;
-        setSolanaAddress(sol.status === 'fulfilled' ? sol.value : null);
-        setBtcAddress(btc.status === 'fulfilled' ? btc.value : null);
-        setAddressesDerived(true);
-      });
+    Promise.allSettled([
+      getSolanaAddress(walletAddress), getBtcAddress(walletAddress), getSuiAddress(walletAddress),
+    ]).then(([sol, btc, sui]) => {
+      if (cancelled) return;
+      setSolanaAddress(sol.status === 'fulfilled' ? sol.value : null);
+      setBtcAddress(btc.status === 'fulfilled' ? btc.value : null);
+      setSuiAddress(sui.status === 'fulfilled' ? sui.value : null);
+      setAddressesDerived(true);
+    });
     return () => { cancelled = true; };
   }, [walletAddress]);
 
@@ -139,8 +143,9 @@ export default function AllSwapScreen() {
   const addressForChain = useCallback((chainId: number): string | null => {
     if (isSolanaLiFiChain(chainId)) return solanaAddress;
     if (isBtcLiFiChain(chainId)) return btcAddress;
+    if (isSuiLiFiChain(chainId)) return suiAddress;
     return walletAddress || null;
-  }, [walletAddress, solanaAddress, btcAddress]);
+  }, [walletAddress, solanaAddress, btcAddress, suiAddress]);
 
   // Lazy-load all-chain tokens paginated. Initial page is fetched the first
   // time the picker is opened in "All" mode (see `loadAllChainsPage`); we don't
@@ -193,7 +198,7 @@ export default function AllSwapScreen() {
   useFocusEffect(useCallback(() => {
     loadBalances();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fromChainId, solanaAddress, btcAddress]));
+  }, [fromChainId, solanaAddress, btcAddress, suiAddress]));
 
   useEffect(() => {
     let active = true;
@@ -229,6 +234,11 @@ export default function AllSwapScreen() {
       if (isBtcLiFiChain(fromChainId)) {
         if (!btcAddress) { setBalances([]); return; }
         setBalances(await getBtcBalances(btcAddress));
+        return;
+      }
+      if (isSuiLiFiChain(fromChainId)) {
+        if (!suiAddress) { setBalances([]); return; }
+        setBalances(await getSuiBalances(suiAddress));
         return;
       }
       const res = await getWalletBalances(fromChainId);
@@ -273,6 +283,16 @@ export default function AllSwapScreen() {
           setLiveFromBalance(rows[0]?.balance ?? '0');
           return;
         }
+        if (isSuiLiFiChain(fromChainId)) {
+          if (!suiAddress) return;
+          // Sui carries many coin types, so match the selected one by symbol
+          // against the wallet's rows rather than assuming the native coin.
+          const rows = await getSuiBalances(suiAddress);
+          if (cancelled) return;
+          const row = rows.find(b => b.symbol.toUpperCase() === fromToken.symbol.toUpperCase());
+          setLiveFromBalance(row?.balance ?? '0');
+          return;
+        }
         const chain = getChainByChainId(fromChainId);
         if (!chain) return;
         const addr = fromToken.address.toLowerCase();
@@ -291,7 +311,7 @@ export default function AllSwapScreen() {
     return () => {
       cancelled = true;
     };
-  }, [fromToken, fromChainId, walletAddress, solanaAddress, btcAddress, refreshKey]);
+  }, [fromToken, fromChainId, walletAddress, solanaAddress, btcAddress, suiAddress, refreshKey]);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -471,6 +491,7 @@ export default function AllSwapScreen() {
   const chainName = (chainId: number) => {
     if (isSolanaLiFiChain(chainId)) return NONEVM_CHAINS.solana.shortName;
     if (isBtcLiFiChain(chainId)) return NONEVM_CHAINS.btc.shortName;
+    if (isSuiLiFiChain(chainId)) return NONEVM_CHAINS.sui.shortName;
     const entry = Object.values(CHAINS).find(c => c.chainId === chainId);
     return entry?.shortName ?? String(chainId);
   };
@@ -1017,7 +1038,9 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
 
           {txHash ? (() => {
             const url = isNonEVMLiFiChain(chainId)
-              ? txExplorerUrl(txHash, { chainKey: isSolanaLiFiChain(chainId) ? 'solana' : 'btc' }) ?? null
+              ? txExplorerUrl(txHash, {
+                  chainKey: isSolanaLiFiChain(chainId) ? 'solana' : isSuiLiFiChain(chainId) ? 'sui' : 'btc',
+                }) ?? null
               : (() => {
                   const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
                   return explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;

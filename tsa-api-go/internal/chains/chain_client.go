@@ -58,6 +58,15 @@ type TransferRequest struct {
 	// prepareFromPSBT for what has to hold before a digest is handed out.
 	// Families other than Bitcoin MUST reject a non-empty value.
 	PSBTHex string `json:"psbtHex,omitempty"`
+
+	// TxBytesB64 is the same idea as PSBTHex for account-based chains that hand
+	// back a whole pre-built transaction: Sui's BCS TransactionData, base64.
+	// (Two fields rather than one because the encodings are conventional to
+	// their chains — PSBT is passed as hex everywhere, Sui tx bytes as base64 —
+	// and silently reinterpreting one as the other is a way to sign nonsense.)
+	// It is NOT trusted: see the family's prepare path for what must hold first.
+	// Families that cannot sign one MUST reject a non-empty value.
+	TxBytesB64 string `json:"txBytesB64,omitempty"`
 }
 
 // FeeQuote is the result of the mandatory pre-send gas check.

@@ -225,6 +225,13 @@ func (c *Client) resolveMetas(ctx context.Context, types []string) (map[string]c
 }
 
 func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (chains.FeeQuote, error) {
+	// An aggregator-built transaction carries its own gas budget; there is
+	// nothing for us to estimate, and no recipient of ours to validate.
+	if req.TxBytesB64 != "" {
+		return chains.FeeQuote{
+			GasSymbol: c.cfg.NativeSymbol, GasDecimals: c.cfg.NativeDecimals, HasEnoughGas: true,
+		}, nil
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.FeeQuote{}, err
 	}
@@ -286,6 +293,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	}
 	if req.PSBTHex != "" {
 		return chains.PreparedTx{}, chains.Invalid("a PSBT is a Bitcoin transaction; it cannot be signed on sui")
+	}
+	// An aggregator-built transaction is signed as given, once the network has
+	// confirmed what it would move (see prepareFromTxBytes). There is no `To`
+	// to validate on that path: the route decides its own recipients.
+	if req.TxBytesB64 != "" {
+		return c.prepareFromTxBytes(ctx, req)
 	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err

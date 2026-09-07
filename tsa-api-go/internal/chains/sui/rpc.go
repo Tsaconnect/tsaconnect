@@ -258,6 +258,45 @@ func (r *RPC) ExecuteTransactionBlock(ctx context.Context, txBytesB64 string, si
 	return out, err
 }
 
+// DryRunBalanceChange is one address's net movement of one coin type, as the
+// node computes it by simulating a transaction.
+type DryRunBalanceChange struct {
+	Owner    json.RawMessage `json:"owner"`
+	CoinType string          `json:"coinType"`
+	// Amount is a SIGNED decimal string in base units: negative leaves the
+	// address, positive arrives.
+	Amount string `json:"amount"`
+}
+
+// DryRunResult is the part of a simulation we act on: whether it would succeed,
+// and what it would move.
+type DryRunResult struct {
+	Effects struct {
+		Status struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"status"`
+	} `json:"effects"`
+	BalanceChanges []DryRunBalanceChange `json:"balanceChanges"`
+}
+
+// DryRun simulates an unsigned transaction without submitting it.
+//
+// This is what makes it safe to sign a transaction somebody else built: the
+// node reports exactly what it would move, so an aggregator's opaque payload
+// can be checked against what the user actually agreed to before a signing
+// digest is handed out.
+func (r *RPC) DryRun(ctx context.Context, txBytesB64 string) (*DryRunResult, error) {
+	var out *DryRunResult
+	if err := r.call(ctx, "sui_dryRunTransactionBlock", []interface{}{txBytesB64}, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, fmt.Errorf("sui: empty dry-run response")
+	}
+	return out, nil
+}
+
 // GetTransactionBlock reads a transaction by digest (with effects) for status.
 func (r *RPC) GetTransactionBlock(ctx context.Context, digest string) (*SuiTxResponse, error) {
 	var out *SuiTxResponse

@@ -27,12 +27,12 @@ const defaultLiFiBaseURL = "https://li.quest/v1"
 const (
 	lifiDefaultSlippage = "0.005"
 
-	// lifiChainTypes is the VM families we expose to the app: EVM, Solana
-	// (SVM) and Bitcoin (UTXO). LiFi defaults to EVM only, so every chain and
-	// token call has to name them explicitly or Bitcoin/Solana silently
+	// lifiChainTypes is the VM families we expose to the app: EVM, Solana (SVM),
+	// Bitcoin (UTXO) and Sui (MVM). LiFi defaults to EVM only, so every chain
+	// and token call has to name them explicitly or the non-EVM chains silently
 	// vanish from the picker. Widen this only alongside an app-side signer for
 	// the family — a chain the app cannot sign for is a dead route in the UI.
-	lifiChainTypes = "EVM,SVM,UTXO"
+	lifiChainTypes = "EVM,SVM,UTXO,MVM"
 
 	allTokensDefaultLimit = 100
 	allTokensMaxLimit     = 500
@@ -191,7 +191,7 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 }
 
 // GetChains handles GET /api/swap/lifi/chains
-// Proxies the LiFi chain list (EVM + Solana + Bitcoin) with a 24-hour
+// Proxies the LiFi chain list (EVM + Solana + Bitcoin + Sui) with a 24-hour
 // in-memory cache.
 func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	h.mu.Lock()

@@ -31,6 +31,20 @@ export interface SendSuiParams {
   symbol: string;
   tokenAddr?: string; // Sui coin type; empty for native SUI
   walletAddress: string; // EVM wallet id used to look up the mnemonic
+  /**
+   * Optional pre-built transaction (base64 BCS TransactionData) to sign instead
+   * of building one. Aggregator Sui routes hand the whole transaction back this
+   * way; the backend dry-runs it and checks what it would move against `from`
+   * and `amount` before returning anything to sign.
+   */
+  txBytesB64?: string;
+  /**
+   * Fee bucket + human-units amount for an aggregator swap, recorded server-side
+   * at broadcast so the platform fee survives a client that never calls settle.
+   */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
+  /** Network override; swaps pin mainnet, wallet sends follow the app toggle. */
+  network?: string;
 }
 
 async function readJson(res: Response): Promise<any> {
@@ -54,8 +68,9 @@ export async function prepareSui(params: SendSuiParams): Promise<SuiPrepared> {
   const body = {
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: params.tokenAddr ?? '',
+    ...(params.txBytesB64 ? { txBytesB64: params.txBytesB64 } : {}),
   };
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=sui&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=sui&network=${params.network ?? getNetwork()}`, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
   const json = await readJson(res);
@@ -96,11 +111,21 @@ export async function broadcastSui(
   });
 
   const headers = await authHeaders();
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=sui&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=sui&network=${params.network ?? getNetwork()}`, {
     method: 'POST', headers,
     body: JSON.stringify({
       prepared, sigs,
       from: params.from, amount: params.amount, symbol: params.symbol,
+      // `amount` is base units; the fee amount is whole tokens, hence a
+      // separate field rather than reusing it.
+      ...(params.fee && params.fee.feature !== 'none'
+        ? {
+            feeDeferred: true,
+            feeFeature: params.fee.feature,
+            feeAmountHuman: params.fee.amountHuman,
+            feeChainId: params.fee.chainId ?? 0,
+          }
+        : {}),
     }),
   });
   const json = await readJson(res);
