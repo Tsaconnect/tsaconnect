@@ -266,3 +266,28 @@ func TestCurrencyRegistry_RampProviderFallsBackWhenColumnEmpty(t *testing.T) {
 		t.Fatalf("RampProvider(XYZ) = %q, want none", got)
 	}
 }
+
+func TestDefaultCurrencies_EastAfricanCorridors(t *testing.T) {
+	byCode := map[string]models.Currency{}
+	for _, c := range DefaultCurrencies() {
+		byCode[c.Code] = c
+	}
+	for _, code := range []string{"KES", "UGX", "TZS"} {
+		c, ok := byCode[code]
+		if !ok {
+			t.Fatalf("%s missing from DefaultCurrencies", code)
+		}
+		if c.RampProvider != RampProviderPaycrest {
+			t.Errorf("%s ramp = %q, want paycrest", code, c.RampProvider)
+		}
+		if !c.PayoutEnabled {
+			t.Errorf("%s must be payout-enabled — Paycrest pays out in it", code)
+		}
+		// DepositEnabled means "Flutterwave has a VA product here". Nothing
+		// uses it for these currencies, and a true we have never exercised is
+		// a claim nobody has verified.
+		if c.DepositEnabled {
+			t.Errorf("%s DepositEnabled must be false; nothing exercises FW VAs there", code)
+		}
+	}
+}

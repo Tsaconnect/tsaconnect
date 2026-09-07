@@ -86,6 +86,15 @@ func DefaultCurrencies() []models.Currency {
 			MinPayoutMinor:     0, // unconfirmed — sandbox-verify before enabling GHS payouts
 			RampProvider:       RampProviderFlutterwave,
 		},
+		// Paycrest corridors. Payout-enabled because Paycrest pays out in them;
+		// DepositEnabled stays false because that flag is about Flutterwave's
+		// virtual-account product, which nothing here uses.
+		//
+		// MinPayoutMinor is 0 (ungated) because no floor has been confirmed for
+		// these rails — same position GHS is in. Confirm before volume.
+		{Code: "KES", Exponent: 2, PayoutEnabled: true, RampProvider: RampProviderPaycrest, HasMarketAnchor: true},
+		{Code: "UGX", Exponent: 0, PayoutEnabled: true, RampProvider: RampProviderPaycrest},
+		{Code: "TZS", Exponent: 2, PayoutEnabled: true, RampProvider: RampProviderPaycrest},
 		// USD/EUR/GBP: payout-only, permanently. Flutterwave has no virtual
 		// account product for them, so DepositEnabled can never become true
 		// here — a balance in these arrives by settlement or treasury wire.
