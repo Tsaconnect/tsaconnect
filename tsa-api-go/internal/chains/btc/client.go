@@ -94,6 +94,18 @@ type rawInput struct {
 	Txid     string `json:"txid"`
 	Vout     uint32 `json:"vout"`
 	ValueSat int64  `json:"valueSat"`
+	// Sequence carries an aggregator-supplied nSequence through to the digest.
+	// Zero means "unset" — the txs we build ourselves all opt into RBF, and a
+	// prepared tx from before this field existed has to keep hashing the same.
+	Sequence uint32 `json:"sequence,omitempty"`
+}
+
+// sequenceOr returns the input's nSequence, defaulting to RBF.
+func (in rawInput) sequenceOr() uint32 {
+	if in.Sequence == 0 {
+		return rbfSequence
+	}
+	return in.Sequence
 }
 
 type rawOutput struct {
@@ -105,6 +117,17 @@ func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (c
 	quote := chains.FeeQuote{GasSymbol: "BTC", GasDecimals: 8}
 	if req.TokenAddr != "" {
 		return quote, fmt.Errorf("btc has no token transfers")
+	}
+	// An aggregator-built spend already chose its inputs and its fee; there is
+	// nothing to estimate, only to validate.
+	if req.PSBTHex != "" {
+		spend, err := c.prepareFromPSBT(req)
+		if err != nil {
+			return quote, err
+		}
+		quote.EstFeeRaw = strconv.FormatInt(spend.feeSat, 10)
+		quote.HasEnoughGas = true
+		return quote, nil
 	}
 	amountSat, err := parseSat(req.Amount)
 	if err != nil {
@@ -129,6 +152,15 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	params := netParams(c.cfg.Network)
 	if req.TokenAddr != "" {
 		return chains.PreparedTx{}, fmt.Errorf("btc has no token transfers")
+	}
+	// An aggregator-built spend is signed as given, once it has been proven to
+	// be ours to sign and to match the quote (see prepareFromPSBT).
+	if req.PSBTHex != "" {
+		spend, err := c.prepareFromPSBT(req)
+		if err != nil {
+			return chains.PreparedTx{}, err
+		}
+		return preparedFromRaw(spend.raw)
 	}
 	amountSat, err := parseSat(req.Amount)
 	if err != nil {
@@ -180,6 +212,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 		raw.Outputs = append(raw.Outputs, rawOutput{PkScript: hex.EncodeToString(senderScript), ValueSat: sel.changeSat})
 	}
 
+	return preparedFromRaw(raw)
+}
+
+// preparedFromRaw turns an unsigned tx into the digests the app signs. Shared
+// by both ways one is arrived at: coin selection here, or an aggregator's PSBT.
+func preparedFromRaw(raw rawTx) (chains.PreparedTx, error) {
 	digests, _, err := computeDigests(raw)
 	if err != nil {
 		return chains.PreparedTx{}, err
@@ -441,7 +479,7 @@ func computeDigests(raw rawTx) ([][]byte, *wire.MsgTx, error) {
 			return nil, nil, fmt.Errorf("bad input txid: %v", err)
 		}
 		op := wire.OutPoint{Hash: *h, Index: in.Vout}
-		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: op, Sequence: rbfSequence})
+		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: op, Sequence: in.sequenceOr()})
 		prevOuts[op] = wire.NewTxOut(in.ValueSat, senderScript)
 	}
 	for _, out := range raw.Outputs {

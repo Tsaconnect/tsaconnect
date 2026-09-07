@@ -3,6 +3,10 @@
 # LiFi Bitcoin route probe
 # Usage: ./scripts/lifi-btc-probe.sh [BTC_ADDRESS] [EVM_ADDRESS] [SATS]
 #
+# BTC_ADDRESS must HOLD UTXOs: LiFi builds the spend from them and answers
+# "No UTXOs found for any sender addresses" otherwise. EVM_ADDRESS must be
+# EIP-55 checksummed or LiFi rejects it as an invalid address.
+#
 # The Bitcoin swap path (app: services/chains/btcLifi.ts) reads three things
 # out of a LiFi UTXO quote and refuses to broadcast if any of them looks
 # different than expected:
@@ -87,12 +91,35 @@ else
   echo "       If LiFi legitimately quotes a different deposit amount, that guard needs revisiting."
 fi
 
-memo="${data#0x}"
-if [[ -z "$memo" ]]; then
-  ok "no memo on this route (deposit-address bridge) — supported"
-elif [[ "$memo" =~ ^[0-9a-fA-F]+$ ]] && (( ${#memo} % 2 == 0 )) && (( ${#memo} / 2 <= 80 )); then
-  ok "memo is $(( ${#memo} / 2 )) bytes of hex: $(python3 -c "print(bytes.fromhex('$memo').decode('utf-8','replace'))")"
+# `data` is either a whole PSBT to sign (Layerswap, as of the 2026-09-07 probe)
+# or a bare memo to attach to a deposit we build. btcLifi.ts tells them apart by
+# the BIP-174 magic; anything else is refused rather than guessed at.
+payload="${data#0x}"
+payload="$(printf '%s' "$payload" | tr '[:upper:]' '[:lower:]')"
+if [[ -z "$payload" ]]; then
+  ok "no payload on this route (deposit-address bridge) — supported"
+elif [[ "$payload" == 70736274ff* ]]; then
+  ok "payload is a PSBT ($(( ${#payload} / 2 )) bytes) — signed as-is after validation"
+  echo "       Outputs (the bridge credits the deposit only if ALL of them go out):"
+  python3 - "$payload" <<'PY'
+import sys
+raw = bytes.fromhex(sys.argv[1])
+o = 5; klen = raw[o]; o += 1 + klen; vlen = raw[o]; o += 1
+tx = raw[o:o+vlen]; p = 4
+nin = tx[p]; p += 1
+for _ in range(nin):
+    p += 32 + 4; p += 1 + tx[p]; p += 4
+nout = tx[p]; p += 1
+for i in range(nout):
+    val = int.from_bytes(tx[p:p+8], 'little'); p += 8
+    slen = tx[p]; p += 1; script = tx[p:p+slen]; p += slen
+    kind = ("P2TR" if script[:2] == b'\x51\x20' else "P2WPKH" if script[:2] == b'\x00\x14'
+            else "OP_RETURN" if script[:1] == b'\x6a' else script[:2].hex())
+    print(f"         [{i}] {val:>12} sats  {kind}")
+PY
+elif [[ "$payload" =~ ^[0-9a-f]+$ ]] && (( ${#payload} % 2 == 0 )) && (( ${#payload} / 2 <= 80 )); then
+  ok "payload is a $(( ${#payload} / 2 ))-byte memo: $(python3 -c "print(bytes.fromhex('$payload').decode('utf-8','replace'))")"
 else
-  bad "memo is not hex we can put in an OP_RETURN: ${data}"
+  bad "payload is neither a PSBT nor an OP_RETURN-sized memo: ${data:0:64}…"
   echo "       btcLifi.ts aborts rather than send a deposit the bridge cannot match."
 fi

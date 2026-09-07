@@ -44,6 +44,13 @@ export interface SendBtcParams {
    */
   memoHex?: string;
   /**
+   * Optional pre-built transaction (BIP-174, hex) to sign instead of building
+   * one. Aggregator Bitcoin routes that construct the whole spend send it
+   * here; the backend validates it against `from`, `to` and `amount` before
+   * handing back anything to sign.
+   */
+  psbtHex?: string;
+  /**
    * Network to build, sign and broadcast on. Defaults to the app's current
    * toggle, which is what a wallet send wants. A caller pinned to one network —
    * swaps, which LiFi only quotes on mainnet — MUST pass it explicitly: the
@@ -80,6 +87,7 @@ export async function prepareBtc(params: SendBtcParams): Promise<BtcPrepared> {
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: '',
     ...(params.memoHex ? { memoHex: params.memoHex } : {}),
+    ...(params.psbtHex ? { psbtHex: params.psbtHex } : {}),
   };
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${networkFor(params)}`, {
     method: 'POST', headers, body: JSON.stringify(body),

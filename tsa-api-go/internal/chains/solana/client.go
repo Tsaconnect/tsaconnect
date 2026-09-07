@@ -246,6 +246,9 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	if req.MemoHex != "" {
 		return chains.PreparedTx{}, chains.Invalid("solana transfers cannot carry a bridge memo")
 	}
+	if req.PSBTHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a PSBT is a Bitcoin transaction; it cannot be signed on solana")
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

@@ -56,10 +56,40 @@ function parseSatsString(s: string): bigint {
   }
 }
 
+/** BIP-174 magic, "psbt\xff", as it appears at the head of a hex payload. */
+const PSBT_MAGIC_HEX = '70736274ff';
+
+/**
+ * What a route wants us to do with its `data` field. LiFi's UTXO tools differ:
+ * one hands back a whole transaction it built from our UTXOs (sign it as-is —
+ * its exact output set is what makes the deposit creditable), another just
+ * tags a deposit we build ourselves. Both arrive in the same field, so the
+ * payload is identified by its shape rather than assumed.
+ */
+export type BtcRoutePayload =
+  | { kind: 'psbt'; psbtHex: string }
+  | { kind: 'memo'; memoHex: string };
+
+export function parseLiFiBtcPayload(data: string | undefined): BtcRoutePayload {
+  const hex = stripHexPrefix(data);
+  if (hex.toLowerCase().startsWith(PSBT_MAGIC_HEX)) {
+    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) {
+      throw new Error('This route returned a transaction this app cannot read. Refresh the quote and try again.');
+    }
+    return { kind: 'psbt', psbtHex: hex.toLowerCase() };
+  }
+  return { kind: 'memo', memoHex: parseLiFiBtcMemo(data) };
+}
+
+function stripHexPrefix(data: string | undefined): string {
+  if (!data) return '';
+  return data.startsWith('0x') || data.startsWith('0X') ? data.slice(2) : data;
+}
+
 /**
  * Normalize the memo from a LiFi transactionRequest `data` field: hex without
- * the 0x prefix, or '' when the route carries no memo (Chainflip-style bridges
- * use a unique deposit address instead). Throws when `data` is present but not
+ * the 0x prefix, or '' when the route carries no memo (deposit-address bridges
+ * use a unique address instead). Throws when `data` is present but not
  * something we can put in an OP_RETURN.
  */
 export function parseLiFiBtcMemo(data: string | undefined): string {
@@ -121,7 +151,7 @@ export async function executeLiFiBtcSwap({
     throw new Error('This route changed the amount to send. Refresh the quote and try again.');
   }
 
-  const memoHex = parseLiFiBtcMemo(txRequest.data);
+  const payload = parseLiFiBtcPayload(txRequest.data);
 
   // submit-tx only broadcasts for addresses registered to this user;
   // registration is an idempotent upsert, so make sure it happened even if the
@@ -134,8 +164,11 @@ export async function executeLiFiBtcSwap({
     amount: sats.toString(),
     symbol: 'BTC',
     walletAddress,
-    memoHex,
     network: SWAP_NETWORK,
+    // The backend either signs the route's own transaction — after proving the
+    // inputs are ours and the outputs match this quote — or builds a deposit
+    // and attaches the tag itself.
+    ...(payload.kind === 'psbt' ? { psbtHex: payload.psbtHex } : { memoHex: payload.memoHex }),
   };
 
   onStage?.('Building Bitcoin deposit…');

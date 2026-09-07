@@ -4,7 +4,7 @@
 // about failing CLOSED — a deposit sent with the wrong amount, or without its
 // memo, is unrecoverable, so a transactionRequest we cannot read exactly must
 // abort rather than guess.
-import { parseLiFiSats, parseLiFiBtcMemo, executeLiFiBtcSwap } from '../btcLifi';
+import { parseLiFiSats, parseLiFiBtcMemo, parseLiFiBtcPayload, executeLiFiBtcSwap } from '../btcLifi';
 
 const mockGetNetwork = jest.fn(() => 'mainnet');
 jest.mock('../../../hooks/useNetwork', () => ({
@@ -87,6 +87,30 @@ describe('parseLiFiBtcMemo', () => {
   });
 });
 
+// A live LiFi BTC→USDC quote (2026-09-07, Layerswap) returns its `data` as a
+// whole PSBT built from the sender's UTXOs — not a memo. Truncated here; the
+// backend holds the verbatim fixture and validates it output by output.
+const FIXTURE_PSBT = '70736274ff0100b80200000001450e2079d46908fb35671806e18796442c0647748d5a84897b7976b6d6607179020000';
+
+describe('parseLiFiBtcPayload', () => {
+  it('recognises a pre-built transaction by its BIP-174 magic', () => {
+    expect(parseLiFiBtcPayload('0x' + FIXTURE_PSBT)).toEqual({ kind: 'psbt', psbtHex: FIXTURE_PSBT });
+    expect(parseLiFiBtcPayload(FIXTURE_PSBT.toUpperCase())).toEqual({ kind: 'psbt', psbtHex: FIXTURE_PSBT });
+  });
+
+  it('still reads a short tag as a memo for the bridges that use one', () => {
+    expect(parseLiFiBtcPayload('0x' + MEMO_HEX)).toEqual({ kind: 'memo', memoHex: MEMO_HEX });
+    expect(parseLiFiBtcPayload('0x')).toEqual({ kind: 'memo', memoHex: '' });
+    expect(parseLiFiBtcPayload(undefined)).toEqual({ kind: 'memo', memoHex: '' });
+  });
+
+  // A PSBT is far past the 80-byte OP_RETURN limit, so before this existed
+  // every live BTC route was rejected as "a deposit tag too large for Bitcoin".
+  it('does not mistake a transaction for an oversized memo', () => {
+    expect(() => parseLiFiBtcPayload('0x' + FIXTURE_PSBT)).not.toThrow();
+  });
+});
+
 describe('executeLiFiBtcSwap', () => {
   const run = (txRequest: any, fromAmountRaw = '125000') =>
     executeLiFiBtcSwap({ txRequest, fromAmountRaw, walletAddress: WALLET });
@@ -114,6 +138,19 @@ describe('executeLiFiBtcSwap', () => {
   it('supports memo-less routes (deposit-address bridges)', async () => {
     await run({ to: DEPOSIT, value: '125000' });
     expect(mockPrepareBtc).toHaveBeenCalledWith(expect.objectContaining({ memoHex: '' }));
+  });
+
+  // The live route shape: LiFi already picked the UTXOs and built the spend, so
+  // it is forwarded for signing rather than reconstructed from to/value.
+  it('forwards a pre-built transaction for signing instead of building one', async () => {
+    await run({ to: DEPOSIT, value: '125000', data: '0x' + FIXTURE_PSBT });
+
+    const params = mockPrepareBtc.mock.calls[0][0];
+    expect(params.psbtHex).toBe(FIXTURE_PSBT);
+    expect(params).not.toHaveProperty('memoHex');
+    // to/amount still travel: the backend checks the transaction pays this
+    // deposit address, and no more than this amount, before signing anything.
+    expect(params).toMatchObject({ to: DEPOSIT, amount: '125000', from: BTC_ADDR });
   });
 
   // The address, the signing key and the broadcast all have to agree on one

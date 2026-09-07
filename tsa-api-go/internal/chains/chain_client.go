@@ -44,11 +44,20 @@ type TransferRequest struct {
 	TokenAddr string `json:"tokenAddr"` // empty for native sends
 
 	// MemoHex is an optional bridge memo (hex, no 0x) the send must carry
-	// on-chain. Bitcoin bridge deposits (LiFi's UTXO routes) identify the swap
-	// solely by this memo — a deposit that drops it is an unrecoverable send to
-	// the bridge's address. Families that cannot carry one MUST reject a
-	// non-empty value rather than silently ignore it.
+	// on-chain. Some Bitcoin bridges identify a deposit solely by this memo — a
+	// deposit that drops it is an unrecoverable send to the bridge's address.
+	// Families that cannot carry one MUST reject a non-empty value rather than
+	// silently ignore it.
 	MemoHex string `json:"memoHex,omitempty"`
+
+	// PSBTHex is an optional pre-built Bitcoin transaction (BIP-174, hex) to
+	// sign instead of building one. Aggregators whose UTXO routes construct the
+	// whole spend — inputs, bridge deposit, tag and change — hand it back this
+	// way, and the exact output set is what makes the deposit creditable, so it
+	// is signed as given rather than reconstructed. It is NOT trusted: see
+	// prepareFromPSBT for what has to hold before a digest is handed out.
+	// Families other than Bitcoin MUST reject a non-empty value.
+	PSBTHex string `json:"psbtHex,omitempty"`
 }
 
 // FeeQuote is the result of the mandatory pre-send gas check.
