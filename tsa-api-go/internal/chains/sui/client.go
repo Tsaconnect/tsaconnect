@@ -21,9 +21,13 @@ import (
 const (
 	suiDecimals = 9
 
+	// nativeCoinPackage is the Sui framework's own address, padded as the RPC
+	// returns it; "0x2" is the same package written short.
+	nativeCoinPackage = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
 	// nativeCoinType is the fully-qualified type of the native SUI coin. Sui also
 	// reports the short form "0x2::sui::SUI"; both normalize to this.
-	nativeCoinType      = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+	nativeCoinType      = nativeCoinPackage + "::sui::SUI"
 	nativeCoinTypeShort = "0x2::sui::SUI"
 
 	// defaultGasBudgetMist is the gas budget (a CAP, not a charge — only actual

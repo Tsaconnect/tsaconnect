@@ -309,9 +309,12 @@ func (g DryRunGasUsed) NetGas() *big.Int {
 // balance changes cover coins and nothing else, so an NFT, an LP position, a
 // staked-SUI receipt or a DeepBook capability can leave the wallet without
 // moving a single unit of any coin.
+//
+// (The response also carries a "sender", but it is the TRANSACTION's sender
+// rather than the object's previous owner, so it cannot answer "was this ours
+// before?" — the question it looks like it answers. It is left unparsed.)
 type DryRunObjectChange struct {
-	Type   string `json:"type"`
-	Sender string `json:"sender"`
+	Type string `json:"type"`
 	// Owner is the owner AFTER execution, in the same enum shape balance
 	// changes use: {"AddressOwner": "0x…"}, {"ObjectOwner": …}, {"Shared": …},
 	// or the bare string "Immutable". Absent on changes that own nothing.

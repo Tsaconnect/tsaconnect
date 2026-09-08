@@ -197,7 +197,7 @@ func TestCheckObjectChanges(t *testing.T) {
 	)
 	owned := func(objType, owner string) DryRunObjectChange {
 		return DryRunObjectChange{
-			Type: "mutated", Sender: testOwner, ObjectType: objType,
+			Type: "mutated", ObjectType: objType,
 			Owner: json.RawMessage(`{"AddressOwner":"` + owner + `"}`),
 		}
 	}
@@ -229,9 +229,24 @@ func TestCheckObjectChanges(t *testing.T) {
 			changes: []DryRunObjectChange{owned(usdcCoinObj, testStranger)},
 		},
 		{
+			// The wrapping bypass, and the reason a created object is not
+			// exempt: our capability leaves as an ownerless `wrapped` change
+			// carrying no balance, and the only entry that names the thief is
+			// the new object minted for them.
+			name: "an object wrapped into a new one owned by a stranger",
+			changes: []DryRunObjectChange{
+				{Type: "wrapped", ObjectType: tradeCap},
+				{
+					Type: "created", ObjectType: "0xbad::wrap::Wrapper",
+					Owner: json.RawMessage(`{"AddressOwner":"` + testStranger + `"}`),
+				},
+			},
+			wantErr: "out of your wallet",
+		},
+		{
 			name: "an object wrapped into a shared pool",
 			changes: []DryRunObjectChange{{
-				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Type: "mutated", ObjectType: tradeCap,
 				Owner: json.RawMessage(`{"Shared":{"initial_shared_version":3}}`),
 			}},
 		},
@@ -240,20 +255,20 @@ func TestCheckObjectChanges(t *testing.T) {
 			// transfer into anybody's wallet.
 			name: "an object owned by another object",
 			changes: []DryRunObjectChange{{
-				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Type: "mutated", ObjectType: tradeCap,
 				Owner: json.RawMessage(`{"ObjectOwner":"0xpool"}`),
 			}},
 		},
 		{
 			name: "a deleted object owns nothing",
 			changes: []DryRunObjectChange{{
-				Type: "deleted", Sender: testOwner, ObjectType: tradeCap,
+				Type: "deleted", ObjectType: tradeCap,
 			}},
 		},
 		{
 			name: "an immutable object",
 			changes: []DryRunObjectChange{{
-				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Type: "mutated", ObjectType: tradeCap,
 				Owner: json.RawMessage(`"Immutable"`),
 			}},
 		},
@@ -410,11 +425,11 @@ func TestPrepareFromTxBytes_RefusesAnObjectTransferHiddenBehindCleanBalances(t *
 		[]DryRunBalanceChange{change(testOwner, suiCoin, "-125992")}, // gas, and nothing else
 		false,
 		DryRunObjectChange{
-			Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+			Type: "mutated", ObjectType: tradeCap,
 			Owner: json.RawMessage(`{"AddressOwner":"` + testStranger + `"}`),
 		},
 		DryRunObjectChange{ // the gas coin, still ours
-			Type: "mutated", Sender: testOwner, ObjectType: "0x2::coin::Coin<0x2::sui::SUI>",
+			Type: "mutated", ObjectType: "0x2::coin::Coin<0x2::sui::SUI>",
 			Owner: json.RawMessage(`{"AddressOwner":"` + testOwner + `"}`),
 		},
 	)
@@ -517,10 +532,12 @@ func TestRealLiFiRouteIsAccepted(t *testing.T) {
 		t.Fatalf("fixture looks wrong: status=%q objects=%d",
 			sim.Effects.Status.Status, len(sim.ObjectChanges))
 	}
-	// The rebate exceeded the cost on this route, so the raw figure is
-	// negative and the allowance must floor at zero rather than go backwards.
-	if got := sim.Effects.GasUsed.NetGas(); got.Sign() != 0 {
-		t.Fatalf("a net gas refund must floor at zero, got %s", got)
+	// The rebate exceeded the cost on this route, which is exactly the refund
+	// case the floor exists for. Asserted as the invariant that always holds
+	// rather than as this capture's own number, so regenerating the fixture
+	// from a route with ordinary gas does not fail here for no reason.
+	if got := sim.Effects.GasUsed.NetGas(); got.Sign() < 0 {
+		t.Fatalf("net gas must never go negative, got %s", got)
 	}
 
 	approvedAmount, _ := new(big.Int).SetString("100000000", 10) // 0.1 SUI, as quoted

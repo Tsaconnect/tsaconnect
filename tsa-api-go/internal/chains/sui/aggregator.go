@@ -174,10 +174,6 @@ func outflowAllowance(coin, fromCoin string, approved, gasAllowance *big.Int) *b
 	return allowance
 }
 
-// nativeCoinPackage is the Sui framework's address in the padded form the RPC
-// returns; "0x2" is the same package written short.
-const nativeCoinPackage = "0x0000000000000000000000000000000000000000000000000000000000000002"
-
 // checkObjectChanges enforces that no object of ours ends up in somebody else's
 // wallet.
 //
@@ -196,6 +192,16 @@ func checkObjectChanges(changes []DryRunObjectChange, owner string) error {
 		if isCoinType(oc.ObjectType) {
 			continue
 		}
+		// NOTE a `created` object is deliberately NOT exempt, however much it
+		// looks like it should be — a thing that did not exist before the
+		// transaction cannot have been taken from anybody. Exempting it opens
+		// the wrapping bypass: wrap our object into a new one owned by the
+		// thief, and the original leaves as a `wrapped`/`deleted` change with
+		// no owner and no balance change at all, while the only entry naming
+		// the thief is the `created` wrapper. Rejecting that is what closes
+		// the hole. The cost is that a route legitimately minting a non-coin
+		// object for someone else is refused; that is the trade we want.
+		//
 		// Anything that is not owned by a plain address is not in a wallet:
 		// shared, immutable, wrapped inside another object, or destroyed. None
 		// of those is a theft, and all of them are ordinary DeFi bookkeeping.
@@ -226,6 +232,12 @@ func isCoinType(objectType string) bool {
 // it lands somewhere that is not a wallet at all. Only AddressOwner counts:
 // ObjectOwner means it went inside another object, Shared and Immutable mean it
 // belongs to nobody, and an absent or unreadable owner belongs to nobody either.
+//
+// That last clause is the one place this file fails OPEN rather than closed,
+// and it is deliberate: an owner we cannot read is not an address, so nothing
+// is sitting in a thief's wallet on the strength of it. The node computing the
+// simulation is our own configured fullnode; if it is lying to us, refusing
+// this one shape buys nothing.
 func addressOwnerOf(rawOwner json.RawMessage) (string, bool) {
 	var asObject map[string]json.RawMessage
 	if err := json.Unmarshal(rawOwner, &asObject); err != nil {
