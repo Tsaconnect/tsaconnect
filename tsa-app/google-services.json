@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "484417635575",
+    "project_id": "tsa-connect-e7643",
+    "storage_bucket": "tsa-connect-e7643.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:484417635575:android:15dce6d18089f66e407ff2",
+        "android_client_info": {
+          "package_name": "com.tsaconnectworld.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCc6l-Rhcdpq5kOyOpBlo1zle02PKyDVow"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
