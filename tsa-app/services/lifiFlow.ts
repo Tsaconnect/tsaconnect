@@ -14,9 +14,12 @@ import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
 import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
-import { buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
+import {
+  buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, type LiFiQuote,
+} from '@/services/lifi';
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
+import { executeLiFiSuiSwap } from '@/services/chains/suiLifi';
 import { mapSubmitError } from '@/services/swapErrors';
 
 export interface ExecuteLiFiSwapParams {
@@ -24,6 +27,12 @@ export interface ExecuteLiFiSwapParams {
   /** Symbol + decimals of the token being paid (the quote's from side). */
   fromSymbol: string;
   fromDecimals: number;
+  /**
+   * Address of the token being paid, in the source chain's own form (a Sui
+   * coin type, an ERC-20 address). Only the Sui path reads it today, to tell
+   * the swapped coin apart from the SUI that pays for gas.
+   */
+  fromTokenAddress?: string;
   /** Human-units amount the user entered (what the quote was fetched for). */
   fromAmount: string;
   walletAddress: string;
@@ -48,6 +57,7 @@ export async function executeLiFiSwap({
   fromSymbol,
   fromDecimals,
   fromAmount,
+  fromTokenAddress,
   walletAddress,
   fromChainId,
   feeFeature = 'allswap',
@@ -58,6 +68,18 @@ export async function executeLiFiSwap({
       txDataB64: quote.transactionRequest.data,
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       fromSymbol,
+      walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
+      onStage,
+    });
+  }
+
+  if (fromChainId !== undefined && isSuiLiFiChain(fromChainId)) {
+    return executeLiFiSuiSwap({
+      txBytesB64: quote.transactionRequest.data,
+      fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      fromSymbol,
+      fromTokenAddr: fromTokenAddress,
       walletAddress,
       fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,

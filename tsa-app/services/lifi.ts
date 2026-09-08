@@ -30,13 +30,29 @@ export function isBtcLiFiChain(chainId: number): boolean {
   return utxoChainIds.has(chainId);
 }
 
+// LiFi's chain id for Sui (MVM family).
+//
+// NOTE this one exceeds Number.MAX_SAFE_INTEGER (9007199254740991). It survives
+// JSON and String() exactly because it is even and the float64 gap at that
+// magnitude is 2 — but `Number.isSafeInteger` is false for it and arithmetic is
+// lossy (id + 1 === id). Compare it and pass it through; never compute with it.
+export const SUI_LIFI_CHAIN_ID = 9270000000000000;
+
+// Ids LiFi reports as chainType 'MVM', re-learned from its own answer like the
+// UTXO set below.
+const mvmChainIds = new Set<number>([SUI_LIFI_CHAIN_ID]);
+
+export function isSuiLiFiChain(chainId: number): boolean {
+  return mvmChainIds.has(chainId);
+}
+
 /**
- * True for any chain the swap flow signs through the non-EVM path (Bitcoin or
- * Solana). These have no entry in the EVM CHAINS map and no ERC-20 balances, so
- * every EVM-shaped lookup must be guarded by this.
+ * True for any chain the swap flow signs through the non-EVM path (Bitcoin,
+ * Solana or Sui). These have no entry in the EVM CHAINS map and no ERC-20
+ * balances, so every EVM-shaped lookup must be guarded by this.
  */
 export function isNonEVMLiFiChain(chainId: number): boolean {
-  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId);
+  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId);
 }
 
 export interface LiFiChain {
@@ -120,7 +136,9 @@ export async function getLiFiChains(): Promise<LiFiChain[]> {
   // Learn LiFi's UTXO chain ids from its own answer so isBtcLiFiChain stays
   // right even if the id changes or a second UTXO chain is added upstream.
   for (const c of chains) {
-    if (c.chainType === 'UTXO' && typeof c.id === 'number') utxoChainIds.add(c.id);
+    if (typeof c.id !== 'number') continue;
+    if (c.chainType === 'UTXO') utxoChainIds.add(c.id);
+    if (c.chainType === 'MVM') mvmChainIds.add(c.id);
   }
   // Swaps are mainnet-only (LiFi has no testnets). In testnet mode the wallet's
   // Solana side points at devnet and its BTC address is a tb1… testnet one, so

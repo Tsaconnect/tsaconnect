@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -256,6 +258,101 @@ func (r *RPC) ExecuteTransactionBlock(ctx context.Context, txBytesB64 string, si
 	err := r.call(ctx, "sui_executeTransactionBlock",
 		[]interface{}{txBytesB64, sigsB64, opts, "WaitForEffectsCert"}, &out)
 	return out, err
+}
+
+// DryRunBalanceChange is one address's net movement of one coin type, as the
+// node computes it by simulating a transaction.
+type DryRunBalanceChange struct {
+	Owner    json.RawMessage `json:"owner"`
+	CoinType string          `json:"coinType"`
+	// Amount is a SIGNED decimal string in base units: negative leaves the
+	// address, positive arrives.
+	Amount string `json:"amount"`
+}
+
+// DryRunGasUsed is the simulation's own gas accounting, in MIST.
+type DryRunGasUsed struct {
+	ComputationCost string `json:"computationCost"`
+	StorageCost     string `json:"storageCost"`
+	StorageRebate   string `json:"storageRebate"`
+}
+
+// NetGas is computationCost + storageCost - storageRebate: what the sender
+// actually pays, and exactly the amount the node subtracts from their SUI
+// balance change. (Confirmed against mainnet: a transaction that did nothing
+// but pay gas reports a sender balance change of precisely -netGas.) That
+// makes it the allowance the spend check must grant SUI on top of the swap,
+// or every Sui swap is refused for spending its own gas.
+//
+// A storage rebate larger than the cost makes the total negative — a refund,
+// which arrives as an inflow rather than an outflow — so it floors at zero.
+func (g DryRunGasUsed) NetGas() *big.Int {
+	total := new(big.Int)
+	for _, v := range []string{g.ComputationCost, g.StorageCost} {
+		if n, ok := new(big.Int).SetString(strings.TrimSpace(v), 10); ok {
+			total.Add(total, n)
+		}
+	}
+	if n, ok := new(big.Int).SetString(strings.TrimSpace(g.StorageRebate), 10); ok {
+		total.Sub(total, n)
+	}
+	if total.Sign() < 0 {
+		return new(big.Int)
+	}
+	return total
+}
+
+// DryRunObjectChange is one object the simulation would touch, with the owner
+// it ends up under.
+//
+// This is the half of a simulation that BalanceChanges cannot see. Sui's
+// balance changes cover coins and nothing else, so an NFT, an LP position, a
+// staked-SUI receipt or a DeepBook capability can leave the wallet without
+// moving a single unit of any coin.
+//
+// (The response also carries a "sender", but it is the TRANSACTION's sender
+// rather than the object's previous owner, so it cannot answer "was this ours
+// before?" — the question it looks like it answers. It is left unparsed.)
+type DryRunObjectChange struct {
+	Type string `json:"type"`
+	// Owner is the owner AFTER execution, in the same enum shape balance
+	// changes use: {"AddressOwner": "0x…"}, {"ObjectOwner": …}, {"Shared": …},
+	// or the bare string "Immutable". Absent on changes that own nothing.
+	Owner      json.RawMessage `json:"owner"`
+	ObjectType string          `json:"objectType"`
+	ObjectID   string          `json:"objectId"`
+}
+
+// DryRunResult is the part of a simulation we act on: whether it would succeed,
+// what it would move, and what it would cost to run.
+type DryRunResult struct {
+	Effects struct {
+		Status struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"status"`
+		GasUsed DryRunGasUsed `json:"gasUsed"`
+	} `json:"effects"`
+	BalanceChanges []DryRunBalanceChange `json:"balanceChanges"`
+	// ObjectChanges sits beside effects in the response, not inside it.
+	ObjectChanges []DryRunObjectChange `json:"objectChanges"`
+}
+
+// DryRun simulates an unsigned transaction without submitting it.
+//
+// This is what makes it safe to sign a transaction somebody else built: the
+// node reports exactly what it would move, so an aggregator's opaque payload
+// can be checked against what the user actually agreed to before a signing
+// digest is handed out.
+func (r *RPC) DryRun(ctx context.Context, txBytesB64 string) (*DryRunResult, error) {
+	var out *DryRunResult
+	if err := r.call(ctx, "sui_dryRunTransactionBlock", []interface{}{txBytesB64}, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, fmt.Errorf("sui: empty dry-run response")
+	}
+	return out, nil
 }
 
 // GetTransactionBlock reads a transaction by digest (with effects) for status.
