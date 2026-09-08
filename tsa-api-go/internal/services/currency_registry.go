@@ -43,6 +43,9 @@ const (
 // to run BEFORE the code is a deploy hazard nobody remembers at 3am.
 var defaultRampProviders = map[string]string{
 	"NGN": RampProviderPaycrest,
+	"KES": RampProviderPaycrest,
+	"UGX": RampProviderPaycrest,
+	"TZS": RampProviderPaycrest,
 }
 
 // DefaultCurrencies is the seed set. See the multi-currency spec §4.1.
@@ -81,6 +84,11 @@ func DefaultCurrencies() []models.Currency {
 			// that changed nothing when selected — every route behind it was
 			// still a naira one. Restore RampProviderFlutterwave when the ramp
 			// itself is currency-aware end to end, not before.
+			//
+			// Paycrest is not the way out either: /v1/currencies lists NGN,
+			// KES, UGX and TZS only, and a GHS rate request answers "Fiat
+			// currency GHS is not supported" (probed 2026-09-08). GHS needs the
+			// Flutterwave path or nothing.
 			Code: "GHS", Exponent: 2,
 			DepositEnabled: true, PayoutEnabled: true,
 			RequiresNationalID: false,
@@ -89,22 +97,29 @@ func DefaultCurrencies() []models.Currency {
 			MinPayoutMinor:     0, // unconfirmed — sandbox-verify before enabling GHS payouts
 			RampProvider:       RampProviderNone,
 		},
-		// East African corridors. Payout-enabled because Paycrest pays out in
-		// them, but RampProvider is deliberately left empty (RampProviderNone) —
-		// buy.tsx/sell.tsx are not currency-aware yet (they call getQuote and
-		// createBuy/createSell with no currency, which server-defaults to NGN),
-		// so advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
-		// user a naira order: a ₦ amount field, a Nigerian refund-bank picker,
-		// and instructions to wire naira to a Nigerian account. The row stays —
-		// it is a valid payout currency and the per-currency institution list
-		// already works — only the ramp claim goes. Enabling it later is one
-		// UPDATE plus currency-aware screens.
+		// East African corridors — live Paycrest ramps as of 2026-09-08.
+		//
+		// These were held back while the ramp screens were naira-only; that
+		// stopped being true when the Paycrest path became currency-aware end
+		// to end (symbols, per-currency institutions, per-currency bank codes).
+		// Paycrest's own /v1/currencies lists exactly NGN, KES, UGX and TZS, so
+		// this is the complete set that provider can serve.
+		//
+		// The registry says WHO serves a currency, never WHICH DIRECTION: UGX
+		// and TZS have offramp providers only, and KES onramp liquidity sits on
+		// a subset of venues. Direction is derived live from the Paycrest order
+		// book (PaycrestQuoteService.RampLegs) because it changes with provider
+		// liquidity, not with our deploys — a column here would be a claim that
+		// silently goes stale.
 		//
 		// MinPayoutMinor is 0 (ungated) because no floor has been confirmed for
 		// these rails — same position GHS is in. Confirm before volume.
-		{Code: "KES", Exponent: 2, PayoutEnabled: true, HasMarketAnchor: true},
-		{Code: "UGX", Exponent: 0, PayoutEnabled: true},
-		{Code: "TZS", Exponent: 2, PayoutEnabled: true},
+		{Code: "KES", Exponent: 2, PayoutEnabled: true, HasMarketAnchor: true,
+			RampProvider: RampProviderPaycrest},
+		{Code: "UGX", Exponent: 0, PayoutEnabled: true,
+			RampProvider: RampProviderPaycrest},
+		{Code: "TZS", Exponent: 2, PayoutEnabled: true,
+			RampProvider: RampProviderPaycrest},
 		// USD/EUR/GBP: payout-only, permanently. Flutterwave has no virtual
 		// account product for them, so DepositEnabled can never become true
 		// here — a balance in these arrives by settlement or treasury wire.
