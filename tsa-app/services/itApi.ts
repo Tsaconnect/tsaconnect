@@ -464,9 +464,21 @@ export interface RampCurrency {
   code: string;
   exponent: number;
   rampProvider: RampProvider;
+  /** Whether this currency can trade in each direction RIGHT NOW. A currency
+   *  can have a provider and still trade one way only — UGX and TZS have
+   *  offramp providers and no onramp — so the two are separate questions.
+   *  Derived server-side from the live Paycrest order book, not configured. */
+  rampBuy?: boolean;
+  rampSell?: boolean;
   depositEnabled: boolean;
   payoutEnabled: boolean;
   minPayoutMinor: number;
+}
+
+/** Which directions a currency trades in. */
+export interface RampLegs {
+  buy: boolean;
+  sell: boolean;
 }
 
 export async function getRampCurrencies(): Promise<RampCurrency[]> {
@@ -481,4 +493,18 @@ export async function getRampCurrencies(): Promise<RampCurrency[]> {
  *  backend would refuse. */
 export function rampProviderFor(list: RampCurrency[], code: string): RampProvider {
   return list.find((c) => c.code === code)?.rampProvider ?? '';
+}
+
+/** Which directions a currency can trade in right now.
+ *
+ *  No provider means no legs, whatever else the row says. Beyond that the
+ *  fields are optional on purpose: an older API build does not send them, and
+ *  an app that read a missing field as "closed" would blank out the working
+ *  NGN ramp the moment it talked to one. Absent therefore means "both", which
+ *  is what this app assumed before directions existed — the order endpoints
+ *  still refuse a leg no provider can fill. */
+export function rampLegsFor(list: RampCurrency[], code: string): RampLegs {
+  const row = list.find((c) => c.code === code);
+  if (!row || !row.rampProvider) return { buy: false, sell: false };
+  return { buy: row.rampBuy ?? true, sell: row.rampSell ?? true };
 }

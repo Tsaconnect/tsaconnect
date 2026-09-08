@@ -142,11 +142,15 @@ export function useRampCurrency(providerFilter?: RampProvider) {
     AsyncStorage.setItem(RAMP_CURRENCY_KEY, upper).catch(() => {});
   }, []);
 
-  // Only offer a choice when there is one — a picker listing a single
-  // currency is noise, and today NGN (paycrest) is the only currency with a
-  // live provider, so that is exactly what this is. GHS used to claim one and
-  // selecting it changed nothing: every screen behind the choice still quoted
-  // and settled in naira.
+  // Only offer a choice when there is one — a picker listing a single currency
+  // is noise. Today Paycrest serves NGN, KES, UGX and TZS, so there is a real
+  // choice; GHS is absent because Paycrest does not list it and the
+  // Flutterwave path behind it still quotes and settles in naira.
+  //
+  // The options are currencies with a PROVIDER, not currencies that trade both
+  // ways: UGX and TZS sell only. The hub reads the per-direction legs and
+  // renders the live one — a currency the user can sell is still worth
+  // offering here.
   const options: RampCurrencyOption[] = useMemo(
     () => candidates.map((c) => ({ id: c.code, label: c.code })),
     [candidates],
