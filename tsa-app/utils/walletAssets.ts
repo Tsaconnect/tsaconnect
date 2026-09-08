@@ -12,13 +12,14 @@
 // focus) were both invisible to type-checking.
 
 /** The independent origins of wallet rows, in the order they render. */
-export type AssetSource = 'evm' | 'tron' | 'btc' | 'solana' | 'premium';
+export type AssetSource = 'evm' | 'tron' | 'btc' | 'solana' | 'sui' | 'premium';
 
 export const ASSET_SOURCES: readonly AssetSource[] = [
   'evm',
   'tron',
   'btc',
   'solana',
+  'sui',
   'premium',
 ] as const;
 
@@ -30,6 +31,7 @@ export const emptySourceAssets = <T>(): SourceAssets<T> => ({
   tron: null,
   btc: null,
   solana: null,
+  sui: null,
   premium: null,
 });
 
