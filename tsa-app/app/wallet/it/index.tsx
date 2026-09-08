@@ -29,6 +29,8 @@ import {
   Button,
   Card,
   Divider,
+  Icon,
+  PickerSheet,
   PressableScale,
   Spinner,
   SummaryCard,
@@ -36,16 +38,15 @@ import {
   Text,
 } from '@/components/ui';
 import CurrencySelector from '@/components/currency/CurrencySelector';
+import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
   getITBalance,
   getITRate,
   listITIntents,
-  getRampCurrencies,
   rampProviderFor,
   type ITBalance,
   type ITIntent,
   type ITRate,
-  type RampCurrency,
 } from '@/services/itApi';
 import {
   listOrders as listPaycrestOrders,
@@ -174,9 +175,9 @@ export default function ITHub() {
   const [intents, setIntents] = useState<ITIntent[]>([]);
   const [orders, setOrders] = useState<PaycrestOrder[]>([]);
   const [stable, setStable] = useState<Record<string, number>>({});
-  const [currencies, setCurrencies] = useState<RampCurrency[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
 
   const load = useCallback(async () => {
     setError('');
@@ -184,18 +185,13 @@ export default function ITHub() {
     // server key and the balance call needs a wallet on this device — a hub
     // that fails wholesale because one of those is missing would be worse than
     // one showing a dash.
-    const [b, r, list, pc, balances, curList] = await Promise.all([
+    const [b, r, list, pc, balances] = await Promise.all([
       getITBalance(),
       getITRate(),
       listITIntents(),
       listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
       address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
-      // A failed fetch yields an empty table, which resolves to no provider —
-      // so the screen says "unavailable" rather than offering a trade the
-      // backend would refuse.
-      getRampCurrencies().catch(() => [] as RampCurrency[]),
     ]);
-    setCurrencies(curList);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
@@ -239,15 +235,15 @@ export default function ITHub() {
   // useCurrency() — that context is the price-FORMATTING preference (default
   // USD, persisted in AsyncStorage, auto-derived from device country), not
   // the currency an order actually settles in. Before this screen read
-  // `currency` at all, buy/sell here always meant NGN, which is still the
-  // only currency the screens (buy.tsx/sell.tsx, Paycrest buy/sell) can
-  // transact in. Deriving the ramp from the display preference regressed any
-  // user who ever switched it to USD to read prices in dollars: they would
-  // see "Not available in USD" where the working NGN ramp used to be. Keep
-  // these two independent — CurrencySelector below still governs price
-  // formatting, which is its job, but must never gate what currency Buy/Sell
-  // actually uses.
-  const code = 'NGN';
+  // `currency` at all, buy/sell here always meant NGN, and deriving the ramp
+  // from the display preference regressed any user who ever switched it to
+  // USD to read prices in dollars: they would see "Not available in USD"
+  // where the working NGN ramp used to be. So it stays a separate, explicit
+  // choice — useRampCurrency persists it under its own AsyncStorage key,
+  // defaults from the user's own country among currencies that actually have
+  // a provider, and CurrencySelector below still governs price formatting
+  // only, never what currency Buy/Sell actually uses.
+  const { code, setCode, options: currencyOptions, currencies } = useRampCurrency();
   const support = rampProviderFor(currencies, code);
 
   const assets: AssetRow[] = useMemo(() => {
@@ -262,14 +258,14 @@ export default function ITHub() {
         case 'paycrest':
           return {
             ...base,
-            onBuy: () => router.push(`/wallet/paycrest/buy?asset=${token}` as never),
-            onSell: () => router.push(`/wallet/paycrest/sell?asset=${token}` as never),
+            onBuy: () => router.push(`/wallet/paycrest/buy?asset=${token}&currency=${code}` as never),
+            onSell: () => router.push(`/wallet/paycrest/sell?asset=${token}&currency=${code}` as never),
           };
         case 'flutterwave':
           return {
             ...base,
-            onBuy: () => router.push(`/wallet/it/buy-stable?asset=${token}` as never),
-            onSell: () => router.push(`/wallet/it/sell-stable?asset=${token}` as never),
+            onBuy: () => router.push(`/wallet/it/buy-stable?asset=${token}&currency=${code}` as never),
+            onSell: () => router.push(`/wallet/it/sell-stable?asset=${token}&currency=${code}` as never),
           };
         default:
           return { ...base, unavailable: `Not available in ${code}` };
@@ -287,7 +283,7 @@ export default function ITHub() {
       stableRow('USDC'),
       stableRow('USDT'),
     ];
-  }, [loading, address, stable, support, code, spendable, mcgpRateLine, currencies]);
+  }, [loading, address, stable, support, code, spendable, mcgpRateLine]);
 
   const recent = useMemo(() => {
     const rows = [
@@ -311,9 +307,24 @@ export default function ITHub() {
         <View
           style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
         >
-          <Text variant="bodySm" style={{ color: colors.textMuted }}>
-            Buy and sell with {code}
-          </Text>
+          {/* Only offer a choice when there is one — a picker listing a
+              single currency is noise, and most of the time (today: always)
+              that is exactly what this is. */}
+          {currencyOptions.length > 1 ? (
+            <PressableScale
+              onPress={() => setShowCurrencyPicker(true)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+            >
+              <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                Buy and sell with {code}
+              </Text>
+              <Icon name="chevronDown" size={14} color={colors.textMuted} />
+            </PressableScale>
+          ) : (
+            <Text variant="bodySm" style={{ color: colors.textMuted }}>
+              Buy and sell with {code}
+            </Text>
+          )}
           <CurrencySelector variant="header" />
         </View>
 
@@ -405,6 +416,19 @@ export default function ITHub() {
 
         {loading ? <Spinner /> : null}
       </ScrollView>
+
+      <PickerSheet
+        visible={showCurrencyPicker}
+        onClose={() => setShowCurrencyPicker(false)}
+        title="Buy and sell with"
+        items={currencyOptions}
+        selectedId={code}
+        onSelect={(item) => {
+          setCode(item.id);
+          setShowCurrencyPicker(false);
+        }}
+        emptyText="No ramp currencies available."
+      />
     </SafeAreaView>
   );
 }

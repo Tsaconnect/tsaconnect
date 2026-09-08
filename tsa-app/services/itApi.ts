@@ -456,12 +456,14 @@ export const cancelStableBuy = (intentId: string) =>
 // hardcoded NGN/GHS switch in app/wallet/it/index.tsx — adding a currency is
 // now a backend registry change, not an app release.
 
+export type RampProvider = 'paycrest' | 'flutterwave' | '';
+
 /** One currency the ramp knows about. rampProvider is '' when the stablecoin
  *  ramp is unavailable in it — the app shows that rather than hiding it. */
 export interface RampCurrency {
   code: string;
   exponent: number;
-  rampProvider: 'paycrest' | 'flutterwave' | '';
+  rampProvider: RampProvider;
   depositEnabled: boolean;
   payoutEnabled: boolean;
   minPayoutMinor: number;
@@ -477,9 +479,6 @@ export async function getRampCurrencies(): Promise<RampCurrency[]> {
  *  Defaults to '' for an unknown code and for an empty table, so a failed or
  *  in-flight fetch shows "unavailable" rather than offering a trade the
  *  backend would refuse. */
-export function rampProviderFor(
-  list: RampCurrency[],
-  code: string,
-): 'paycrest' | 'flutterwave' | '' {
+export function rampProviderFor(list: RampCurrency[], code: string): RampProvider {
   return list.find((c) => c.code === code)?.rampProvider ?? '';
 }

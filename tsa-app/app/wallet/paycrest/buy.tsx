@@ -38,14 +38,22 @@ import {
   Text,
 } from '@/components/ui';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getNigerianBanks, type NgBank } from '@/services/ngBanks';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
+import { useRampCurrency } from '@/hooks/useRampCurrency';
+import {
+  accountNumberMaxLength,
+  isDigitsOnlyAccountCurrency,
+  isValidAccountNumber,
+  sanitizeAccountNumberInput,
+} from '@/utils/payoutAccount';
 import {
   claimPayment,
   createBuy,
+  getPayoutInstitutions,
   getQuote,
   PaycrestError,
+  type PayoutInstitution,
   type PaycrestOrder,
   type PaycrestQuote,
   type PaycrestVenue,
@@ -68,13 +76,12 @@ const CHAIN_LABELS: Record<string, string> = {
   ethereum: 'Ethereum',
 };
 
-/** NUBAN length. */
-const NUBAN_LENGTH = 10;
-
 /** The refund account is insurance against a rare failure, not part of the
  *  purchase — asking for it on every buy is friction for something most users
- *  will never use. Remembered after the first time and shown as one line. */
-const REFUND_STORE_KEY = 'paycrest.refundAccount.v1';
+ *  will never use. Remembered after the first time and shown as one line.
+ *  Scoped per currency: a NGN account number is meaningless as a GHS refund
+ *  destination. */
+const REFUND_STORE_KEY = (currency: string) => `paycrest.refundAccount.v1.${currency}`;
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) =>
@@ -86,7 +93,32 @@ export default function PaycrestBuyScreen() {
   // The asset the user picked upstream. A PREFERENCE, not a filter: a token
   // with no provider today must not leave them with an empty screen, so we
   // fall back to whatever the book can actually fill.
-  const { asset } = useLocalSearchParams<{ asset?: string }>();
+  const { asset, currency: currencyParam } = useLocalSearchParams<{
+    asset?: string;
+    currency?: string;
+  }>();
+
+  // The currency this order settles in — NOT the display currency (see
+  // hooks/useRampCurrency.ts). Restricted to 'paycrest' so the picker below
+  // can never offer a currency this screen would fail to quote (e.g. one that
+  // routes through Flutterwave instead). A currency arriving via the route
+  // param (the hub already resolved one) is applied immediately so the first
+  // render doesn't briefly show a different default while AsyncStorage loads.
+  const {
+    code: currencyCode,
+    currency: currencyConfig,
+    setCode: setCurrencyCode,
+    options: currencyOptions,
+  } = useRampCurrency('paycrest');
+  const symbol = currencyConfig.symbol;
+  useEffect(() => {
+    if (currencyParam) setCurrencyCode(currencyParam);
+    // Applying the hub's choice is a one-time sync on arrival, not a binding —
+    // re-running on every setCurrencyCode identity change would fight the
+    // user's own in-screen picker selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currencyParam]);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
 
   const [amount, setAmount] = useState('');
   const [quote, setQuote] = useState<PaycrestQuote | null>(null);
@@ -99,8 +131,14 @@ export default function PaycrestBuyScreen() {
   // cannot know who will pay until the transfer arrives — so this is the only
   // thing that decides where money goes back to if the order fails. Asked
   // once and kept, rather than per purchase.
-  const [banks, setBanks] = useState<NgBank[]>([]);
-  const [refundBank, setRefundBank] = useState<NgBank | null>(null);
+  //
+  // The list itself comes from getPayoutInstitutions, already in the
+  // vocabulary the order expects: NIBSS codes for NGN, Paycrest's own codes
+  // elsewhere. Re-fetched (and the remembered selection re-validated) whenever
+  // the currency changes, since a NGN refund bank is meaningless once the
+  // order settles in GHS.
+  const [banks, setBanks] = useState<PayoutInstitution[]>([]);
+  const [refundBank, setRefundBank] = useState<PayoutInstitution | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
   const [refundAccount, setRefundAccount] = useState('');
 
@@ -115,11 +153,14 @@ export default function PaycrestBuyScreen() {
   const [editingRefund, setEditingRefund] = useState(false);
 
   useEffect(() => {
-    getNigerianBanks()
+    let cancelled = false;
+    setRefundBank(null);
+    getPayoutInstitutions(currencyCode)
       .then(async (list) => {
+        if (cancelled) return;
         setBanks(list);
         try {
-          const saved = await AsyncStorage.getItem(REFUND_STORE_KEY);
+          const saved = await AsyncStorage.getItem(REFUND_STORE_KEY(currencyCode));
           if (!saved) {
             setEditingRefund(true); // first time: ask
             return;
@@ -129,6 +170,7 @@ export default function PaycrestBuyScreen() {
           if (found && account) {
             setRefundBank(found);
             setRefundAccount(account);
+            setEditingRefund(false);
           } else {
             setEditingRefund(true);
           }
@@ -136,8 +178,13 @@ export default function PaycrestBuyScreen() {
           setEditingRefund(true);
         }
       })
-      .catch(() => setEditingRefund(true));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setEditingRefund(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currencyCode]);
 
   useEffect(() => {
     const raw = amount.trim();
@@ -151,7 +198,7 @@ export default function PaycrestBuyScreen() {
     setQuoting(true);
     const t = setTimeout(async () => {
       try {
-        const q = await getQuote('buy', raw);
+        const q = await getQuote('buy', raw, currencyCode);
         if (seq !== quoteSeq.current) return;
         setQuote(q);
         setQuoteError(null);
@@ -180,7 +227,7 @@ export default function PaycrestBuyScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, asset]);
+  }, [amount, asset, currencyCode]);
 
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
@@ -196,10 +243,11 @@ export default function PaycrestBuyScreen() {
         walletAddress: address,
         refundBankCode: refundBank.code,
         refundAccount,
+        currency: currencyCode,
       });
       // Remember it only once an order actually succeeded with it.
       AsyncStorage.setItem(
-        REFUND_STORE_KEY,
+        REFUND_STORE_KEY(currencyCode),
         JSON.stringify({ code: refundBank.code, account: refundAccount }),
       ).catch(() => {});
       setOrder(created);
@@ -211,7 +259,7 @@ export default function PaycrestBuyScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, amount, refundBank, refundAccount]);
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode]);
 
   const pickerItems = useMemo(
     () =>
@@ -233,10 +281,11 @@ export default function PaycrestBuyScreen() {
               Transfer exactly
             </Text>
             <Text variant="display" weight="700" style={{ color: colors.textPrimary }}>
-              ₦{order.payAmount}
+              {symbol}{order.payAmount}
             </Text>
             <Text variant="caption" style={{ color: colors.textMuted }}>
-              Includes the service fee, so it is slightly more than the ₦{order.amount} you entered.
+              The service fee is already priced into your rate, so this is exactly the amount
+              you entered.
             </Text>
           </Card>
 
@@ -300,7 +349,7 @@ export default function PaycrestBuyScreen() {
 
           <SummaryCard>
             <SummaryRow label="You receive" value={`${order.tokenAmount} ${order.token}`} />
-            <SummaryRow label="Rate" value={`₦${order.rate} / ${order.token}`} />
+            <SummaryRow label="Rate" value={`${symbol}${order.rate} / ${order.token}`} />
             <SummaryRow label="Network" value={CHAIN_LABELS[order.chain] ?? order.chain} />
           </SummaryCard>
 
@@ -342,11 +391,22 @@ export default function PaycrestBuyScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          {/* Only offer a choice when there is one — today that's true for
+              every Paycrest-ramped currency (just NGN), but the picker grows
+              on its own the day a second one is added to the registry. */}
+          {currencyOptions.length > 1 && (
+            <SelectRow
+              label="Currency"
+              value={currencyCode}
+              onPress={() => setCurrencyPickerOpen(true)}
+            />
+          )}
+
           <AmountInput
             label="You pay"
             value={amount}
             onChangeText={setAmount}
-            symbol="₦"
+            symbol={symbol}
             symbolPosition="prefix"
             autoFocus
           />
@@ -376,7 +436,8 @@ export default function PaycrestBuyScreen() {
                     {venue.tokenAmount.toFixed(6)} {venue.token}
                   </Text>
                   <Text variant="caption" style={{ color: colors.textMuted }}>
-                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · ₦{venue.rate} per {venue.token}
+                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · {symbol}
+                    {venue.rate} per {venue.token}
                   </Text>
                   {/* Only offer a choice when there is one. A picker with a
                       single option is noise. */}
@@ -412,10 +473,11 @@ export default function PaycrestBuyScreen() {
                 label="Account number"
                 value={refundAccount}
                 onChangeText={(v: string) =>
-                  setRefundAccount(v.replace(/\D/g, '').slice(0, NUBAN_LENGTH))
+                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v))
                 }
-                keyboardType="number-pad"
-                placeholder="0123456789"
+                keyboardType={isDigitsOnlyAccountCurrency(currencyCode) ? 'number-pad' : 'default'}
+                placeholder={isDigitsOnlyAccountCurrency(currencyCode) ? '0123456789' : 'Account number'}
+                maxLength={accountNumberMaxLength(currencyCode)}
               />
               <Text variant="caption" style={{ color: colors.textMuted }}>
                 Used only if your order fails. Pay from this account so a refund reaches you.
@@ -431,7 +493,7 @@ export default function PaycrestBuyScreen() {
               !venue ||
               !address ||
               !refundBank ||
-              refundAccount.length !== NUBAN_LENGTH ||
+              !isValidAccountNumber(currencyCode, refundAccount) ||
               quoting ||
               creating
             }
@@ -445,6 +507,24 @@ export default function PaycrestBuyScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      <PickerSheet
+        visible={currencyPickerOpen}
+        onClose={() => setCurrencyPickerOpen(false)}
+        title="Currency"
+        items={currencyOptions}
+        selectedId={currencyCode}
+        onSelect={(item) => {
+          setCurrencyCode(item.id);
+          // A new currency means a fresh route and refund bank — the ones
+          // held over would either belong to the wrong currency's quote or
+          // (for the refund bank) simply not exist in the new list.
+          setAmount('');
+          setVenue(null);
+          setRefundAccount('');
+          setCurrencyPickerOpen(false);
+        }}
+        emptyText="No currencies available."
+      />
       <PickerSheet
         visible={pickerOpen}
         onClose={() => setPickerOpen(false)}

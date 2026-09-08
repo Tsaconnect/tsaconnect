@@ -580,21 +580,45 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 	return nil
 }
 
-// paycrestBankCode translates a NIBSS code into Paycrest's, refusing rather
-// than guessing — a wrong institution sends someone's payout to another bank.
-func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, nibss string) (string, error) {
+// paycrestBankCode resolves the bank/institution code the app sent into
+// Paycrest's own vocabulary, refusing rather than guessing — a wrong
+// institution sends someone's payout to another bank.
+//
+// NGN is the only currency whose picker speaks NIBSS codes (see
+// PaycrestDirectory.Institutions, which predates Paycrest and still matches
+// the app's ngBanks.ts list) — so only NGN needs translating through the
+// NIBSS<->Paycrest map. Every other currency's picker already sent Paycrest's
+// own code straight from that same Institutions() call, so running it through
+// the NIBSS map here would look up a Paycrest code as if it were a NIBSS one
+// and always miss. For those currencies, confirm the code is a real
+// institution for this fiat (via the same Institutions() the picker used) and
+// pass it through unchanged.
+func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code string) (string, error) {
 	if s.dir == nil {
 		return "", ErrPaycrestDisabled
+	}
+	code = strings.TrimSpace(code)
+	if strings.ToUpper(strings.TrimSpace(fiat)) != "NGN" {
+		institutions, err := s.dir.Institutions(ctx, fiat)
+		if err != nil {
+			return "", err
+		}
+		for _, inst := range institutions {
+			if inst.Code == code {
+				return code, nil
+			}
+		}
+		return "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
 	}
 	m, err := s.dir.BankMap(ctx, fiat)
 	if err != nil {
 		return "", err
 	}
-	code, ok := m.NIBSSToPaycrest[strings.TrimSpace(nibss)]
+	paycrestCode, ok := m.NIBSSToPaycrest[code]
 	if !ok {
-		return "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, nibss)
+		return "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
 	}
-	return code, nil
+	return paycrestCode, nil
 }
 
 // paycrestReference mints our idempotency key. The user id is embedded so an

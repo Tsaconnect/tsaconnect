@@ -34,8 +34,14 @@ import {
 } from '@/components/ui';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
-import { useCurrency } from '@/contexts/CurrencyContext';
+import { useRampCurrency } from '@/hooks/useRampCurrency';
 import { resolveAccountName } from '@/services/ngBanks';
+import {
+  accountNumberMaxLength,
+  isDigitsOnlyAccountCurrency,
+  isValidAccountNumber,
+  sanitizeAccountNumberInput,
+} from '@/utils/payoutAccount';
 import {
   claimPayment,
   createSell,
@@ -52,8 +58,6 @@ const QUOTE_DEBOUNCE_MS = 450;
 /** Warn while the user can still act. An on-chain send needs gas, a signature
  *  and confirmations — more steps than a bank transfer, so warn earlier. */
 const EXPIRY_WARNING_SECONDS = 420;
-/** NUBAN length — resolve the account name only once it can possibly match. */
-const NUBAN_LENGTH = 10;
 
 const CHAIN_LABELS: Record<string, string> = {
   base: 'Base',
@@ -69,9 +73,32 @@ const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] 
 export default function PaycrestSellScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
-  const { asset } = useLocalSearchParams<{ asset?: string }>();
-  const { currency } = useCurrency();
-  const currencyCode = currency.code;
+  const { asset, currency: currencyParam } = useLocalSearchParams<{
+    asset?: string;
+    currency?: string;
+  }>();
+
+  // The currency this order settles in — NOT the display currency. See
+  // hooks/useRampCurrency.ts: deriving this from CurrencyContext's display
+  // preference is the exact regression documented at wallet/it/index.tsx (a
+  // user who switched display to USD lost the working NGN ramp). Restricted
+  // to 'paycrest' so the picker can never offer a currency this screen would
+  // fail to quote.
+  const {
+    code: currencyCode,
+    currency: currencyConfig,
+    setCode: setCurrencyCode,
+    options: currencyOptions,
+  } = useRampCurrency('paycrest');
+  const symbol = currencyConfig.symbol;
+  useEffect(() => {
+    if (currencyParam) setCurrencyCode(currencyParam);
+    // One-time sync of the hub's choice on arrival — see the identical note
+    // on the buy screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currencyParam]);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+
   // resolveAccountName is a Nigerian NUBAN lookup — it cannot resolve an
   // account in any other currency's country, so gate both the lookup and the
   // submit requirement on NGN or sell becomes permanently stuck outside it.
@@ -106,8 +133,11 @@ export default function PaycrestSellScreen() {
 
   // The server returns the list already in the right vocabulary for this
   // currency, so there is nothing to intersect. Outside Nigeria there is no
-  // local list to intersect WITH.
+  // local list to intersect WITH. The previously selected bank is cleared on
+  // a currency change — it belongs to the old currency's list and may not
+  // even exist in the new one.
   useEffect(() => {
+    setBank(null);
     getPayoutInstitutions(currencyCode)
       .then(setBanks)
       .catch(() => setBanks([]));
@@ -127,7 +157,7 @@ export default function PaycrestSellScreen() {
     setQuoting(true);
     const t = setTimeout(async () => {
       try {
-        const q = await getQuote('sell', raw);
+        const q = await getQuote('sell', raw, currencyCode);
         if (seq !== quoteSeq.current) return;
         setQuote(q);
         setQuoteError(null);
@@ -150,12 +180,12 @@ export default function PaycrestSellScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, asset]);
+  }, [amount, asset, currencyCode]);
 
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
   useEffect(() => {
-    if (!requiresNameCheck || !bank || accountNo.length !== NUBAN_LENGTH) {
+    if (!requiresNameCheck || !bank || !isValidAccountNumber(currencyCode, accountNo)) {
       setAccountName('');
       return;
     }
@@ -175,7 +205,7 @@ export default function PaycrestSellScreen() {
     return () => {
       cancelled = true;
     };
-  }, [requiresNameCheck, bank, accountNo]);
+  }, [requiresNameCheck, bank, accountNo, currencyCode]);
 
   const onConfirm = useCallback(async () => {
     if (!venue || !address || !bank) return;
@@ -189,6 +219,7 @@ export default function PaycrestSellScreen() {
         bankCode: bank.code,
         accountNumber: accountNo,
         accountName,
+        currency: currencyCode,
       });
       setOrder(created);
     } catch (e) {
@@ -199,7 +230,7 @@ export default function PaycrestSellScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, bank, accountNo, accountName, amount]);
+  }, [venue, address, bank, accountNo, accountName, amount, currencyCode]);
 
   const routeItems = useMemo(
     () =>
@@ -220,7 +251,7 @@ export default function PaycrestSellScreen() {
     !!venue &&
     !!address &&
     !!bank &&
-    accountNo.length === NUBAN_LENGTH &&
+    isValidAccountNumber(currencyCode, accountNo) &&
     (!requiresNameCheck || !!accountName);
 
   // ── Deposit instructions ────────────────────────────────────────────────
@@ -292,10 +323,10 @@ export default function PaycrestSellScreen() {
           </Card>
 
           <SummaryCard>
-            <SummaryRow label="You receive" value={`₦${order.amount}`} />
+            <SummaryRow label="You receive" value={`${symbol}${order.amount}`} />
             <SummaryRow label="Into" value={order.payoutAccountName ?? ''} />
             <SummaryRow label="Account" value={order.payoutAccount ?? ''} />
-            {order.rate ? <SummaryRow label="Rate" value={`₦${order.rate}`} /> : null}
+            {order.rate ? <SummaryRow label="Rate" value={`${symbol}${order.rate}`} /> : null}
           </SummaryCard>
 
           <Button
@@ -327,11 +358,21 @@ export default function PaycrestSellScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          {/* Only offer a choice when there is one — see the identical note
+              on the buy screen. */}
+          {currencyOptions.length > 1 && (
+            <SelectRow
+              label="Currency"
+              value={currencyCode}
+              onPress={() => setCurrencyPickerOpen(true)}
+            />
+          )}
+
           <AmountInput
             label="You receive"
             value={amount}
             onChangeText={setAmount}
-            symbol="₦"
+            symbol={symbol}
             symbolPosition="prefix"
             autoFocus
           />
@@ -371,9 +412,10 @@ export default function PaycrestSellScreen() {
           <Input
             label="Account number"
             value={accountNo}
-            onChangeText={(v: string) => setAccountNo(v.replace(/\D/g, '').slice(0, NUBAN_LENGTH))}
-            keyboardType="number-pad"
-            placeholder="0123456789"
+            onChangeText={(v: string) => setAccountNo(sanitizeAccountNumberInput(currencyCode, v))}
+            keyboardType={isDigitsOnlyAccountCurrency(currencyCode) ? 'number-pad' : 'default'}
+            placeholder={isDigitsOnlyAccountCurrency(currencyCode) ? '0123456789' : 'Account number'}
+            maxLength={accountNumberMaxLength(currencyCode)}
           />
           {requiresNameCheck && resolving && (
             <Text variant="caption" style={{ color: colors.textMuted }}>
@@ -388,7 +430,7 @@ export default function PaycrestSellScreen() {
           {requiresNameCheck &&
             !resolving &&
             !accountName &&
-            accountNo.length === NUBAN_LENGTH &&
+            isValidAccountNumber(currencyCode, accountNo) &&
             bank && (
               <Text variant="caption" style={{ color: colors.danger }}>
                 We could not verify that account. Check the number and bank.
@@ -401,7 +443,7 @@ export default function PaycrestSellScreen() {
                 label="You send"
                 value={`${venue.tokenAmount.toFixed(6)} ${venue.token}`}
               />
-              <SummaryRow label="Rate" value={`₦${venue.rate} / ${venue.token}`} />
+              <SummaryRow label="Rate" value={`${symbol}${venue.rate} / ${venue.token}`} />
             </SummaryCard>
           )}
 
@@ -420,6 +462,25 @@ export default function PaycrestSellScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      <PickerSheet
+        visible={currencyPickerOpen}
+        onClose={() => setCurrencyPickerOpen(false)}
+        title="Currency"
+        items={currencyOptions}
+        selectedId={currencyCode}
+        onSelect={(item) => {
+          setCurrencyCode(item.id);
+          // A new currency means a fresh route and payout destination — the
+          // ones held over would either belong to the wrong currency's quote
+          // or (for the bank/account) simply not exist in the new list.
+          setAmount('');
+          setVenue(null);
+          setAccountNo('');
+          setAccountName('');
+          setCurrencyPickerOpen(false);
+        }}
+        emptyText="No currencies available."
+      />
       <PickerSheet
         visible={routeOpen}
         onClose={() => setRouteOpen(false)}

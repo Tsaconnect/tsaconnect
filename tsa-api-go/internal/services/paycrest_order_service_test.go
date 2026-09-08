@@ -173,6 +173,68 @@ func TestPaycrestOrderService_CreateBuy_AllowsWhenPaycrest(t *testing.T) {
 	})
 }
 
+// TestPaycrestBankCode_NGN_TranslatesNIBSSToPaycrest is the long-standing
+// Nigerian path: the app's picker speaks NIBSS codes, so order creation must
+// still translate one to Paycrest's own code before submitting.
+func TestPaycrestBankCode_NGN_TranslatesNIBSSToPaycrest(t *testing.T) {
+	svc, _ := newPaycrestOrderTestService(t)
+	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}}
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	svc.dir = NewPaycrestDirectory(pc, local)
+
+	got, err := svc.paycrestBankCode(context.Background(), "NGN", "044")
+	if err != nil {
+		t.Fatalf("paycrestBankCode: %v", err)
+	}
+	if got != "ABNGNGLA" {
+		t.Errorf("got %q, want the NIBSS code translated to Paycrest's own", got)
+	}
+}
+
+// TestPaycrestBankCode_NonNGN_PassesPaycrestCodeThroughUnchanged is the bug
+// this fix closes: GET /paycrest/banks?currency=KES (via
+// PaycrestDirectory.Institutions) already hands the app Paycrest's own
+// institution codes for a non-NGN currency, not NIBSS ones. Running that code
+// back through the NGN-only NIBSS map on order creation would look it up as
+// if it were a NIBSS code and always miss — so every non-NGN order would fail
+// with "this bank cannot receive payouts through this route" regardless of
+// which bank was picked.
+func TestPaycrestBankCode_NonNGN_PassesPaycrestCodeThroughUnchanged(t *testing.T) {
+	svc, _ := newPaycrestOrderTestService(t)
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Equity Bank Kenya", Code: "EQBLKENA"},
+	}}
+	// The Nigerian bank list must never be consulted for a non-NGN currency —
+	// if it were, this is a regression back to the NIBSS-only lookup.
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	svc.dir = NewPaycrestDirectory(pc, local)
+
+	got, err := svc.paycrestBankCode(context.Background(), "KES", "EQBLKENA")
+	if err != nil {
+		t.Fatalf("paycrestBankCode: %v", err)
+	}
+	if got != "EQBLKENA" {
+		t.Errorf("got %q, want the Paycrest code passed through unchanged", got)
+	}
+	if local.calls != 0 {
+		t.Errorf("the Nigerian bank list was consulted %d times for KES; it is irrelevant there", local.calls)
+	}
+}
+
+// TestPaycrestBankCode_NonNGN_UnknownCodeRefused proves the pass-through does
+// not become a rubber stamp: a code Paycrest does not list for this currency
+// is still refused, not silently forwarded.
+func TestPaycrestBankCode_NonNGN_UnknownCodeRefused(t *testing.T) {
+	svc, _ := newPaycrestOrderTestService(t)
+	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "Equity Bank Kenya", Code: "EQBLKENA"}}}
+	svc.dir = NewPaycrestDirectory(pc, &stubBankDir{})
+
+	_, err := svc.paycrestBankCode(context.Background(), "KES", "NOT-A-REAL-CODE")
+	if !errors.Is(err, ErrPaycrestBankUnsupported) {
+		t.Fatalf("err = %v, want ErrPaycrestBankUnsupported", err)
+	}
+}
+
 // The user types what they will send. Paycrest adds its sender fee ON TOP of
 // the submitted amount, so submitting the user's figure directly told someone
 // who entered 800 to transfer 804.02 — and the screen then asserted both "you
