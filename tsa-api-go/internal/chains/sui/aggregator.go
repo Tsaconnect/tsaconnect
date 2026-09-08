@@ -25,6 +25,11 @@ package sui
 //   - nothing may leave any address that is not ours — we are the only signer,
 //     but a transaction that moves someone else's funds is not one we want to
 //     put our name on either
+//   - no OBJECT of ours may end up owned by another address. Balance changes
+//     cover coins and nothing else, so an NFT, an LP position, a staked-SUI
+//     receipt or a DeepBook capability can leave the wallet without moving a
+//     unit of any coin — a transaction that transfers one simulates as a
+//     success whose only balance change is its own gas.
 //
 // What survives is handed to the same digest/broadcast path a normal Sui send
 // uses, so signing, assembly and submission are one code path in both cases.
@@ -90,6 +95,9 @@ func (c *Client) prepareFromTxBytes(ctx context.Context, req chains.TransferRequ
 	if err := checkBalanceChanges(sim.BalanceChanges, req.From, fromCoin, approved, sim.Effects.GasUsed.NetGas()); err != nil {
 		return chains.PreparedTx{}, err
 	}
+	if err := checkObjectChanges(sim.ObjectChanges, req.From); err != nil {
+		return chains.PreparedTx{}, err
+	}
 
 	digest := signingDigest(raw)
 	return chains.PreparedTx{
@@ -137,7 +145,7 @@ func checkBalanceChanges(changes []DryRunBalanceChange, owner, fromCoinType stri
 		switch {
 		case allowance.Sign() == 0:
 			return chains.Invalid("the route would move %s out of your wallet, which this swap does not involve",
-				shortCoinType(ch.CoinType))
+				shortTypeName(ch.CoinType))
 		case coin != fromCoin:
 			// Native SUI leaving a swap it is not the subject of is gas, and
 			// the only gas we vouch for is the amount the node just quoted.
@@ -145,7 +153,7 @@ func checkBalanceChanges(changes []DryRunBalanceChange, owner, fromCoinType stri
 				outflow, allowance)
 		default:
 			return chains.Invalid("the route would spend %s of %s but only %s was approved",
-				outflow, shortCoinType(ch.CoinType), allowance)
+				outflow, shortTypeName(ch.CoinType), allowance)
 		}
 	}
 	return nil
@@ -164,6 +172,74 @@ func outflowAllowance(coin, fromCoin string, approved, gasAllowance *big.Int) *b
 		allowance.Add(allowance, gasAllowance)
 	}
 	return allowance
+}
+
+// nativeCoinPackage is the Sui framework's address in the padded form the RPC
+// returns; "0x2" is the same package written short.
+const nativeCoinPackage = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
+// checkObjectChanges enforces that no object of ours ends up in somebody else's
+// wallet.
+//
+// This is the other half of the spend check, and the half a coin ledger cannot
+// give us: on Sui most value that is not a coin is an object, and transferring
+// one moves no balance at all. Without this, a route could hand back a
+// transaction that simulates as a clean success — a single balance change for
+// its own gas — while assigning an NFT or a trading capability to an address
+// the user has never seen.
+func checkObjectChanges(changes []DryRunObjectChange, owner string) error {
+	ownerLower := strings.ToLower(strings.TrimSpace(owner))
+	for _, oc := range changes {
+		// A coin's value is already bounded by checkBalanceChanges, and a
+		// cross-chain route legitimately pays one to a bridge's address —
+		// refusing that here would break every Sui-to-elsewhere swap.
+		if isCoinType(oc.ObjectType) {
+			continue
+		}
+		// Anything that is not owned by a plain address is not in a wallet:
+		// shared, immutable, wrapped inside another object, or destroyed. None
+		// of those is a theft, and all of them are ordinary DeFi bookkeeping.
+		addr, ok := addressOwnerOf(oc.Owner)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(addr, ownerLower) {
+			return chains.Invalid("the route would move %s out of your wallet",
+				shortTypeName(oc.ObjectType))
+		}
+	}
+	return nil
+}
+
+// isCoinType reports whether a Move type is the framework's own Coin<T>, in
+// either the short or the padded form of its package address. The package is
+// checked rather than the module name alone: a type is only a coin because
+// 0x2 says so, and a package of somebody else's that happens to call its
+// module "coin" must not inherit the exemption above.
+func isCoinType(objectType string) bool {
+	t := strings.TrimSpace(objectType)
+	return strings.HasPrefix(t, "0x2::coin::Coin<") ||
+		strings.HasPrefix(t, nativeCoinPackage+"::coin::Coin<")
+}
+
+// addressOwnerOf returns the address an object ends up owned by, and false when
+// it lands somewhere that is not a wallet at all. Only AddressOwner counts:
+// ObjectOwner means it went inside another object, Shared and Immutable mean it
+// belongs to nobody, and an absent or unreadable owner belongs to nobody either.
+func addressOwnerOf(rawOwner json.RawMessage) (string, bool) {
+	var asObject map[string]json.RawMessage
+	if err := json.Unmarshal(rawOwner, &asObject); err != nil {
+		return "", false
+	}
+	raw, ok := asObject["AddressOwner"]
+	if !ok {
+		return "", false
+	}
+	var addr string
+	if err := json.Unmarshal(raw, &addr); err != nil {
+		return "", false
+	}
+	return strings.ToLower(addr), true
 }
 
 // balanceChangeOwner pulls the address out of Sui's Owner enum, which is a
@@ -186,9 +262,10 @@ func balanceChangeOwner(rawOwner json.RawMessage) (string, error) {
 	return "", errUnattributableOwner
 }
 
-// shortCoinType trims a fully-qualified coin type to its last segment for
-// error messages ("0x2::sui::SUI" → "SUI").
-func shortCoinType(coinType string) string {
+// shortTypeName trims a fully-qualified Move type to its last segment for error
+// messages ("0x2::sui::SUI" → "SUI", "0x…::balance_manager::TradeCap" →
+// "TradeCap").
+func shortTypeName(coinType string) string {
 	if i := strings.LastIndex(coinType, "::"); i >= 0 && i+2 < len(coinType) {
 		return coinType[i+2:]
 	}

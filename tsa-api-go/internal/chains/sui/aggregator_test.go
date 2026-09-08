@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -179,6 +180,127 @@ func TestDryRunGasUsedNetGas(t *testing.T) {
 	}
 }
 
+// Balance changes cover coins and nothing else, so the object ledger is the
+// only place a stolen NFT, LP position or capability shows up.
+//
+// The "steals a capability" case below is a real transaction: built with
+// unsafe_transferObject against a live mainnet address that owned a DeepBook
+// TradeCap, dry-run on a fullnode, and reproduced here as the node returned it.
+// Its balance changes contained exactly one entry — gas — so the coin check
+// passes it without complaint.
+func TestCheckObjectChanges(t *testing.T) {
+	const (
+		tradeCap    = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809::balance_manager::TradeCap"
+		suiCoinObj  = "0x2::coin::Coin<0x2::sui::SUI>"
+		usdcCoinObj = "0x2::coin::Coin<0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC>"
+		nft         = "0x5b8f1c::art::Piece"
+	)
+	owned := func(objType, owner string) DryRunObjectChange {
+		return DryRunObjectChange{
+			Type: "mutated", Sender: testOwner, ObjectType: objType,
+			Owner: json.RawMessage(`{"AddressOwner":"` + owner + `"}`),
+		}
+	}
+
+	cases := []struct {
+		name    string
+		changes []DryRunObjectChange
+		wantErr string
+	}{
+		{
+			name:    "steals a capability object",
+			changes: []DryRunObjectChange{owned(tradeCap, testStranger)},
+			wantErr: "TradeCap",
+		},
+		{
+			name:    "steals an NFT",
+			changes: []DryRunObjectChange{owned(nft, testStranger)},
+			wantErr: "out of your wallet",
+		},
+		{
+			name:    "our own objects stay ours",
+			changes: []DryRunObjectChange{owned(tradeCap, testOwner), owned(suiCoinObj, testOwner)},
+		},
+		{
+			// A coin's value is already bounded by the balance check, and a
+			// cross-chain route legitimately pays one to a bridge address —
+			// refusing that here would break every Sui-to-EVM swap.
+			name:    "a coin paid to another address is left to the balance check",
+			changes: []DryRunObjectChange{owned(usdcCoinObj, testStranger)},
+		},
+		{
+			name: "an object wrapped into a shared pool",
+			changes: []DryRunObjectChange{{
+				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Owner: json.RawMessage(`{"Shared":{"initial_shared_version":3}}`),
+			}},
+		},
+		{
+			// Landing inside another object is normal DeFi bookkeeping, not a
+			// transfer into anybody's wallet.
+			name: "an object owned by another object",
+			changes: []DryRunObjectChange{{
+				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Owner: json.RawMessage(`{"ObjectOwner":"0xpool"}`),
+			}},
+		},
+		{
+			name: "a deleted object owns nothing",
+			changes: []DryRunObjectChange{{
+				Type: "deleted", Sender: testOwner, ObjectType: tradeCap,
+			}},
+		},
+		{
+			name: "an immutable object",
+			changes: []DryRunObjectChange{{
+				Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+				Owner: json.RawMessage(`"Immutable"`),
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkObjectChanges(tc.changes, testOwner)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want an error mentioning %q, got %v", tc.wantErr, err)
+			}
+			var invalid *chains.InvalidRequestError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("want a caller-fixable error, got %T", err)
+			}
+		})
+	}
+}
+
+// Only the framework's own Coin<T> is exempt from the object check; a package
+// that names its own module "coin" and its struct "Coin" must not inherit it.
+func TestIsCoinType(t *testing.T) {
+	for _, ok := range []string{
+		"0x2::coin::Coin<0x2::sui::SUI>",
+		nativeCoinPackage + "::coin::Coin<0x2::sui::SUI>",
+	} {
+		if !isCoinType(ok) {
+			t.Errorf("%s should be a coin", ok)
+		}
+	}
+	for _, notCoin := range []string{
+		"0xdeadbeef::coin::Coin<0x2::sui::SUI>", // an impostor package
+		"0x2::balance_manager::TradeCap",
+		"",
+	} {
+		if isCoinType(notCoin) {
+			t.Errorf("%s should NOT be a coin", notCoin)
+		}
+	}
+}
+
 // Sui's Owner is an enum: a bare string for Immutable, an object otherwise.
 func TestBalanceChangeOwner(t *testing.T) {
 	got, err := balanceChangeOwner(json.RawMessage(`{"AddressOwner":"0xABC"}`))
@@ -198,7 +320,7 @@ func TestBalanceChangeOwner(t *testing.T) {
 const mockNetGas = 3_651_072
 
 // mockSuiRPC answers sui_dryRunTransactionBlock with a canned result.
-func mockSuiRPC(t *testing.T, status string, changes []DryRunBalanceChange, fail bool) *httptest.Server {
+func mockSuiRPC(t *testing.T, status string, changes []DryRunBalanceChange, fail bool, objects ...DryRunObjectChange) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -209,7 +331,7 @@ func mockSuiRPC(t *testing.T, status string, changes []DryRunBalanceChange, fail
 			w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"nope"}}`))
 			return
 		}
-		res := DryRunResult{BalanceChanges: changes}
+		res := DryRunResult{BalanceChanges: changes, ObjectChanges: objects}
 		res.Effects.Status.Status = status
 		res.Effects.GasUsed = DryRunGasUsed{
 			ComputationCost: "3000000", StorageCost: "1000000", StorageRebate: "348928", // net 3651072
@@ -278,6 +400,36 @@ func TestPrepareFromTxBytes_AcceptsATokenSwapPayingGasInSui(t *testing.T) {
 	}
 }
 
+// The attack the coin ledger cannot see, end to end. This is the shape a real
+// mainnet dry run returned for an unsafe_transferObject of a DeepBook TradeCap:
+// status success, one balance change for gas alone, and the theft visible only
+// in the object changes. Every coin-side rule passes it.
+func TestPrepareFromTxBytes_RefusesAnObjectTransferHiddenBehindCleanBalances(t *testing.T) {
+	const tradeCap = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809::balance_manager::TradeCap"
+	srv := mockSuiRPC(t, "success",
+		[]DryRunBalanceChange{change(testOwner, suiCoin, "-125992")}, // gas, and nothing else
+		false,
+		DryRunObjectChange{
+			Type: "mutated", Sender: testOwner, ObjectType: tradeCap,
+			Owner: json.RawMessage(`{"AddressOwner":"` + testStranger + `"}`),
+		},
+		DryRunObjectChange{ // the gas coin, still ours
+			Type: "mutated", Sender: testOwner, ObjectType: "0x2::coin::Coin<0x2::sui::SUI>",
+			Owner: json.RawMessage(`{"AddressOwner":"` + testOwner + `"}`),
+		},
+	)
+	defer srv.Close()
+
+	_, err := aggClient(srv.URL).PrepareTransfer(context.Background(),
+		aggReq(base64.StdEncoding.EncodeToString([]byte("tx"))))
+	if err == nil {
+		t.Fatal("a route that transfers our objects away must not be signed")
+	}
+	if !strings.Contains(err.Error(), "TradeCap") {
+		t.Fatalf("want the stolen object named, got %v", err)
+	}
+}
+
 func TestPrepareFromTxBytes_RefusesWhatItCannotVouchFor(t *testing.T) {
 	txB64 := base64.StdEncoding.EncodeToString([]byte("tx"))
 
@@ -339,4 +491,44 @@ func hexOf(b []byte) string {
 		out = append(out, hexdigits[c>>4], hexdigits[c&0x0f])
 	}
 	return string(out)
+}
+
+// A real LiFi route, so the guard is measured against a transaction the app
+// will actually be asked to sign rather than one written to pass.
+//
+// Captured 2026-09-08: an Aftermath SUI→USDC swap quoted from li.quest for
+// 0.1 SUI, dry-run on a mainnet fullnode, trimmed to the fields DryRunResult
+// reads. It is deliberately awkward — 96 object changes, three of them shared,
+// a storage rebate that makes net gas NEGATIVE, and inflows to addresses that
+// are not ours. Every one of those is a way a stricter rule could start
+// refusing real swaps.
+func TestRealLiFiRouteIsAccepted(t *testing.T) {
+	const me = "0x194dd4e93d21d6ffcb0a9a939e534ff75b71f066131dd4a235db1c5213b0916e"
+
+	raw, err := os.ReadFile("testdata/lifi_sui_swap_dryrun.json")
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	var sim DryRunResult
+	if err := json.Unmarshal(raw, &sim); err != nil {
+		t.Fatalf("fixture does not parse as a dry-run result: %v", err)
+	}
+	if sim.Effects.Status.Status != "success" || len(sim.ObjectChanges) == 0 {
+		t.Fatalf("fixture looks wrong: status=%q objects=%d",
+			sim.Effects.Status.Status, len(sim.ObjectChanges))
+	}
+	// The rebate exceeded the cost on this route, so the raw figure is
+	// negative and the allowance must floor at zero rather than go backwards.
+	if got := sim.Effects.GasUsed.NetGas(); got.Sign() != 0 {
+		t.Fatalf("a net gas refund must floor at zero, got %s", got)
+	}
+
+	approvedAmount, _ := new(big.Int).SetString("100000000", 10) // 0.1 SUI, as quoted
+	if err := checkBalanceChanges(sim.BalanceChanges, me, nativeCoinType,
+		approvedAmount, sim.Effects.GasUsed.NetGas()); err != nil {
+		t.Errorf("a real route's balances must be accepted: %v", err)
+	}
+	if err := checkObjectChanges(sim.ObjectChanges, me); err != nil {
+		t.Errorf("a real route's objects must be accepted: %v", err)
+	}
 }

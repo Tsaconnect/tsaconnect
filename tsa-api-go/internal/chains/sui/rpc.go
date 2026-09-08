@@ -302,6 +302,24 @@ func (g DryRunGasUsed) NetGas() *big.Int {
 	return total
 }
 
+// DryRunObjectChange is one object the simulation would touch, with the owner
+// it ends up under.
+//
+// This is the half of a simulation that BalanceChanges cannot see. Sui's
+// balance changes cover coins and nothing else, so an NFT, an LP position, a
+// staked-SUI receipt or a DeepBook capability can leave the wallet without
+// moving a single unit of any coin.
+type DryRunObjectChange struct {
+	Type   string `json:"type"`
+	Sender string `json:"sender"`
+	// Owner is the owner AFTER execution, in the same enum shape balance
+	// changes use: {"AddressOwner": "0x…"}, {"ObjectOwner": …}, {"Shared": …},
+	// or the bare string "Immutable". Absent on changes that own nothing.
+	Owner      json.RawMessage `json:"owner"`
+	ObjectType string          `json:"objectType"`
+	ObjectID   string          `json:"objectId"`
+}
+
 // DryRunResult is the part of a simulation we act on: whether it would succeed,
 // what it would move, and what it would cost to run.
 type DryRunResult struct {
@@ -313,6 +331,8 @@ type DryRunResult struct {
 		GasUsed DryRunGasUsed `json:"gasUsed"`
 	} `json:"effects"`
 	BalanceChanges []DryRunBalanceChange `json:"balanceChanges"`
+	// ObjectChanges sits beside effects in the response, not inside it.
+	ObjectChanges []DryRunObjectChange `json:"objectChanges"`
 }
 
 // DryRun simulates an unsigned transaction without submitting it.
