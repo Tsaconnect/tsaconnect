@@ -143,8 +143,10 @@ export function useRampCurrency(providerFilter?: RampProvider) {
   }, []);
 
   // Only offer a choice when there is one — a picker listing a single
-  // currency is noise, and today only NGN (paycrest) and GHS (flutterwave)
-  // carry a live provider.
+  // currency is noise, and today NGN (paycrest) is the only currency with a
+  // live provider, so that is exactly what this is. GHS used to claim one and
+  // selecting it changed nothing: every screen behind the choice still quoted
+  // and settled in naira.
   const options: RampCurrencyOption[] = useMemo(
     () => candidates.map((c) => ({ id: c.code, label: c.code })),
     [candidates],
