@@ -24,6 +24,7 @@ jest.mock('../lifi', () => ({
   buildERC20ApproveCalldata: () => '0xapprovecalldata',
   isSolanaLiFiChain: (id: number) => id === 1151111081099710,
   isBtcLiFiChain: (id: number) => id === 20000000000001,
+  isSuiLiFiChain: (id: number) => id === 9270000000000000,
 }));
 
 const mockExecuteLiFiSolanaSwap = jest.fn();
@@ -34,6 +35,14 @@ jest.mock('../chains/solanaLifi', () => ({
 const mockExecuteLiFiBtcSwap = jest.fn();
 jest.mock('../chains/btcLifi', () => ({
   executeLiFiBtcSwap: (...a: any[]) => mockExecuteLiFiBtcSwap(...a),
+}));
+
+// Mocked for the same reason as the two above, and one more: the real module
+// reaches AsyncStorage through hooks/useNetwork at import time, which throws
+// under this suite's environment before a single test can run.
+const mockExecuteLiFiSuiSwap = jest.fn();
+jest.mock('../chains/suiLifi', () => ({
+  executeLiFiSuiSwap: (...a: any[]) => mockExecuteLiFiSuiSwap(...a),
 }));
 
 jest.mock('../swapErrors', () => ({
@@ -212,6 +221,41 @@ describe('executeLiFiSwap — fee handling', () => {
     const approveCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'approve');
     expect(approveCall).toBeDefined();
     expect(approveCall?.[7]).toBeUndefined();
+  });
+});
+
+describe('executeLiFiSwap — Sui source routes', () => {
+  const SUI_CHAIN_ID = 9270000000000000;
+
+  it('delegates to the Sui executor with the coin type, so gas is told apart from the swap', async () => {
+    mockExecuteLiFiSuiSwap.mockResolvedValue('suidigest');
+    const q = quote({ transactionRequest: { data: 'c3VpdHg=' } }); // BCS bytes, nothing else
+    const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
+
+    const hash = await executeLiFiSwap(params({
+      quote: q, fromSymbol: 'USDC', fromDecimals: 6, fromAmount: '1',
+      fromTokenAddress: USDC, fromChainId: SUI_CHAIN_ID,
+    }));
+
+    expect(hash).toBe('suidigest');
+    expect(mockExecuteLiFiSuiSwap).toHaveBeenCalledWith(expect.objectContaining({
+      txBytesB64: 'c3VpdHg=',
+      fromAmountRaw: '1000000',
+      fromSymbol: 'USDC',
+      // Without this the backend cannot tell which coin the amount bounds, and
+      // bounds the SUI spent on gas by it too — refusing the swap.
+      fromTokenAddr: USDC,
+      walletAddress: WALLET,
+    }));
+    expect(mockFetchPendingNonce).not.toHaveBeenCalled();
+    expect(mockSignLiFiTransaction).not.toHaveBeenCalled();
+    expect(mockSubmitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('still runs the EVM path when fromChainId is an EVM chain (EVM→SUI direction)', async () => {
+    const hash = await executeLiFiSwap(params({ fromChainId: 56 }));
+    expect(hash).toBe('0xswaphash');
+    expect(mockExecuteLiFiSuiSwap).not.toHaveBeenCalled();
   });
 });
 
