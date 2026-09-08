@@ -1144,8 +1144,24 @@ func main() {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
 	}
 
+	// One dispute queue across every order type that cannot resolve itself.
+	// Subjects are registered per stack rather than unconditionally: a dormant
+	// integration should have no disputable orders, not a route that fails when
+	// someone tries to use it.
+	disputeService := services.NewDisputeService(config.DB, eventBus)
+	disputeService.RegisterSubject(models.DisputeSubjectPaycrestOrder, services.PaycrestDisputeSubject(config.DB))
+	disputeService.RegisterSubject(models.DisputeSubjectITIntent, services.ITDisputeSubject(config.DB))
+	if billService != nil {
+		disputeService.RegisterSubject(models.DisputeSubjectBillOrder, services.BillDisputeSubject(config.DB))
+		// The bills stack's own report endpoints now read and write this same
+		// table, so the shipped app keeps working while the console moves to
+		// the unified queue.
+		billService.SetDisputes(disputeService)
+	}
+	disputeHandler := handlers.NewDisputeHandler(disputeService)
+
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

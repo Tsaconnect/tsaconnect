@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -17,9 +16,11 @@ var (
 	ErrBillNotReportable   = errors.New("only a paid order can be reported")
 	ErrBillReportNotFound  = errors.New("bill report not found")
 	ErrBillReportBadState  = errors.New("this report has already been resolved")
+	// ErrBillDisputesUnavailable means the bills stack was built without the
+	// dispute service. Reporting is dormant rather than silently writing to a
+	// table nothing reads.
+	ErrBillDisputesUnavailable = errors.New("reporting is unavailable")
 )
-
-const billReportReasonMax = 1000
 
 // reportableBillStatuses: money moved (or tried to), so there is something to
 // complain about. Unpaid quotes and expired quotes are excluded.
@@ -30,59 +31,82 @@ var reportableBillStatuses = []string{
 }
 
 // ReportOrder files a complaint against one of the caller's own bill orders.
+//
+// The storage moved to the generic disputes table so bills, ramp orders and
+// instant trades land in ONE operator queue instead of three. This function
+// stays, with its old name, route and response shape, because app builds
+// already in users' hands call it — they must keep working across the release
+// rather than 404ing until everyone updates.
 func (s *BillService) ReportOrder(ctx context.Context, userID, orderID uuid.UUID, reason string) (*models.BillReport, error) {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return nil, fmt.Errorf("%w: reason required", ErrBillBadRequest)
+	if s.disputes == nil {
+		return nil, ErrBillDisputesUnavailable
 	}
-	if len(reason) > billReportReasonMax {
-		return nil, fmt.Errorf("%w: reason too long", ErrBillBadRequest)
+	d, err := s.disputes.File(ctx, userID, DisputeInput{
+		SubjectType: models.DisputeSubjectBillOrder,
+		SubjectID:   orderID,
+		Reason:      reason,
+	})
+	if err != nil {
+		return nil, billReportErr(err)
 	}
+	return billReportView(d), nil
+}
 
-	var order models.BillOrder
-	if err := s.db.WithContext(ctx).First(&order, "id = ? AND user_id = ?", orderID, userID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrBillNotFound
-		}
-		return nil, err
+// billReportErr maps the generic dispute sentinels back onto the bill ones the
+// bills handler already translates into HTTP statuses and user-facing copy.
+func billReportErr(err error) error {
+	switch {
+	case errors.Is(err, ErrDisputeAlreadyExists):
+		return ErrBillAlreadyReported
+	case errors.Is(err, ErrDisputeNotDisputable):
+		return ErrBillNotReportable
+	case errors.Is(err, ErrDisputeSubjectNotFound):
+		return ErrBillNotFound
+	case errors.Is(err, ErrOrderDisputeNotFound):
+		return ErrBillReportNotFound
+	case errors.Is(err, ErrDisputeClosed):
+		return ErrBillReportBadState
+	case errors.Is(err, ErrDisputeBadRequest):
+		return fmt.Errorf("%w: %s", ErrBillBadRequest, strings.TrimPrefix(err.Error(), "invalid dispute request: "))
 	}
-	reportable := false
-	for _, st := range reportableBillStatuses {
-		if order.Status == st {
-			reportable = true
-			break
-		}
-	}
-	if !reportable {
-		return nil, ErrBillNotReportable
-	}
+	return err
+}
 
-	report := &models.BillReport{
-		OrderID: order.ID,
-		UserID:  userID,
-		Reason:  reason,
-		Status:  models.BillReportStatusOpen,
+// billReportView projects a Dispute into the BillReport shape the app and the
+// existing admin console already parse. Escalated has no equivalent in the old
+// vocabulary and reads as still-open, which is what it is to the user.
+func billReportView(d *models.Dispute) *models.BillReport {
+	if d == nil {
+		return nil
 	}
-	if err := s.db.WithContext(ctx).Create(report).Error; err != nil {
-		if isBillDuplicateKeyErr(err) {
-			return nil, ErrBillAlreadyReported
-		}
-		return nil, fmt.Errorf("persist bill report: %w", err)
+	status := d.Status
+	if status == models.DisputeStatusEscalated {
+		status = models.BillReportStatusOpen
 	}
-	return report, nil
+	return &models.BillReport{
+		ID:         d.ID,
+		OrderID:    d.SubjectID,
+		UserID:     d.UserID,
+		Reason:     d.Reason,
+		Status:     status,
+		ResolvedBy: d.ResolvedBy,
+		Resolution: d.Resolution,
+		ResolvedAt: d.ResolvedAt,
+		CreatedAt:  d.CreatedAt,
+		UpdatedAt:  d.UpdatedAt,
+	}
 }
 
 // GetOrderReport returns the caller's report on an order, if any.
 func (s *BillService) GetOrderReport(ctx context.Context, userID, orderID uuid.UUID) (*models.BillReport, error) {
-	var report models.BillReport
-	if err := s.db.WithContext(ctx).
-		First(&report, "order_id = ? AND user_id = ?", orderID, userID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrBillReportNotFound
-		}
-		return nil, err
+	if s.disputes == nil {
+		return nil, ErrBillDisputesUnavailable
 	}
-	return &report, nil
+	d, err := s.disputes.ForSubject(ctx, userID, models.DisputeSubjectBillOrder, orderID)
+	if err != nil {
+		return nil, billReportErr(err)
+	}
+	return billReportView(d), nil
 }
 
 // BillReportUser is the slim identity shown to admins next to a report —
@@ -101,30 +125,31 @@ type BillReportAdminRow struct {
 	User   *BillReportUser   `json:"user,omitempty"`
 }
 
-// ListReportsAdmin returns reports (optionally filtered by status), newest
-// first, with orders and reporter identities batch-resolved.
+// ListReportsAdmin returns bill disputes in the old admin shape.
+//
+// Kept so the existing bill-reports console page keeps working until it is
+// replaced by the unified disputes queue; it simply filters the shared table
+// down to bill orders.
 func (s *BillService) ListReportsAdmin(ctx context.Context, status string, limit, offset int) ([]BillReportAdminRow, int64, error) {
-	q := s.db.WithContext(ctx).Model(&models.BillReport{})
-	if st := strings.TrimSpace(status); st != "" {
-		q = q.Where("status = ?", st)
+	if s.disputes == nil {
+		return nil, 0, ErrBillDisputesUnavailable
 	}
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
+	rows, total, err := s.disputes.ListAdmin(ctx, DisputeQuery{
+		Status:      strings.TrimSpace(status),
+		SubjectType: models.DisputeSubjectBillOrder,
+		Limit:       limit,
+		Offset:      offset,
+	})
+	if err != nil {
 		return nil, 0, err
 	}
-	var reports []models.BillReport
-	if err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&reports).Error; err != nil {
-		return nil, 0, err
-	}
-	if len(reports) == 0 {
+	if len(rows) == 0 {
 		return []BillReportAdminRow{}, total, nil
 	}
 
-	orderIDs := make([]uuid.UUID, 0, len(reports))
-	userIDs := make([]uuid.UUID, 0, len(reports))
-	for _, r := range reports {
-		orderIDs = append(orderIDs, r.OrderID)
-		userIDs = append(userIDs, r.UserID)
+	orderIDs := make([]uuid.UUID, 0, len(rows))
+	for _, r := range rows {
+		orderIDs = append(orderIDs, r.Dispute.SubjectID)
 	}
 	var orders []models.BillOrder
 	if err := s.db.WithContext(ctx).Where("id IN ?", orderIDs).Find(&orders).Error; err != nil {
@@ -137,75 +162,40 @@ func (s *BillService) ListReportsAdmin(ctx context.Context, status string, limit
 		orders[i].DeliveryPayload = ""
 		ordersByID[orders[i].ID] = &orders[i]
 	}
-	var users []models.User
-	if err := s.db.WithContext(ctx).
-		Select("id", "name", "username", "email").
-		Where("id IN ?", userIDs).Find(&users).Error; err != nil {
-		return nil, 0, err
-	}
-	usersByID := make(map[uuid.UUID]*BillReportUser, len(users))
-	for _, u := range users {
-		usersByID[u.ID] = &BillReportUser{ID: u.ID, Name: u.Name, Username: u.Username, Email: u.Email}
-	}
 
-	rows := make([]BillReportAdminRow, 0, len(reports))
-	for _, r := range reports {
-		rows = append(rows, BillReportAdminRow{
-			Report: r,
-			Order:  ordersByID[r.OrderID],
-			User:   usersByID[r.UserID],
-		})
+	out := make([]BillReportAdminRow, 0, len(rows))
+	for _, r := range rows {
+		row := BillReportAdminRow{
+			Report: *billReportView(&r.Dispute),
+			Order:  ordersByID[r.Dispute.SubjectID],
+		}
+		if r.User != nil {
+			row.User = &BillReportUser{ID: r.User.ID, Name: r.User.Name, Username: r.User.Username, Email: r.User.Email}
+		}
+		out = append(out, row)
 	}
-	return rows, total, nil
+	return out, total, nil
 }
 
-// ResolveReport closes an open report as resolved or rejected. The update is
-// conditional on the report still being open, so two admins can't both win.
+// ResolveReport closes an open bill dispute, in the old admin vocabulary.
 func (s *BillService) ResolveReport(ctx context.Context, adminID, reportID uuid.UUID, status, resolution string) (*models.BillReport, error) {
-	status = strings.ToLower(strings.TrimSpace(status))
-	if !models.ValidBillReportResolution(status) {
+	if s.disputes == nil {
+		return nil, ErrBillDisputesUnavailable
+	}
+	if !models.ValidBillReportResolution(strings.ToLower(strings.TrimSpace(status))) {
 		return nil, fmt.Errorf("%w: status must be resolved or rejected", ErrBillBadRequest)
 	}
-	resolution = strings.TrimSpace(resolution)
-	if len(resolution) > billReportReasonMax {
-		return nil, fmt.Errorf("%w: resolution too long", ErrBillBadRequest)
+	d, err := s.disputes.Resolve(ctx, adminID, reportID, status, resolution)
+	if err != nil {
+		return nil, billReportErr(err)
 	}
-
-	var report models.BillReport
-	if err := s.db.WithContext(ctx).First(&report, "id = ?", reportID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrBillReportNotFound
-		}
-		return nil, err
-	}
-	if report.Status != models.BillReportStatusOpen {
-		return nil, ErrBillReportBadState
-	}
-
-	now := time.Now()
-	res := s.db.WithContext(ctx).Model(&models.BillReport{}).
-		Where("id = ? AND status = ?", reportID, models.BillReportStatusOpen).
-		Updates(map[string]interface{}{
-			"status":      status,
-			"resolved_by": adminID,
-			"resolution":  resolution,
-			"resolved_at": now,
-		})
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, ErrBillReportBadState
-	}
-	if err := s.db.WithContext(ctx).First(&report, "id = ?", reportID).Error; err != nil {
-		return nil, err
-	}
-	return &report, nil
+	return billReportView(d), nil
 }
 
-// isBillDuplicateKeyErr matches unique-violation errors across Postgres
-// (SQLSTATE 23505) and the SQLite test rig, same as the handlers-layer helper.
-func isBillDuplicateKeyErr(err error) bool {
+// isDuplicateKeyErr matches unique-violation errors across Postgres (SQLSTATE
+// 23505) and the SQLite test rig, same as the handlers-layer helper. Used
+// wherever a unique index is the guard rather than a pre-check.
+func isDuplicateKeyErr(err error) bool {
 	if err == nil {
 		return false
 	}

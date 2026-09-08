@@ -29,7 +29,7 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -907,6 +907,48 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.GET("/orders/:id", pch.GetOrder)
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
 			pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
+			}
+		}
+
+		// One dispute queue for every order type that cannot resolve itself.
+		// Registered only when at least one order stack is wired — see
+		// DisputeService.RegisterSubject.
+		if dh.Enabled() {
+			// The unique index bounds how many disputes one user can hold, but
+			// nothing bounds the RATE of attempts, and each carries up to four
+			// URLs and a kilobyte of text. The bills report route this
+			// supersedes was rate limited; keep that.
+			disputeWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
+				v, _ := c.Get("user")
+				switch u := v.(type) {
+				case models.User:
+					return "dispute:" + u.ID.String()
+				case *models.User:
+					return "dispute:" + u.ID.String()
+				}
+				return "dispute:" + c.ClientIP()
+			})
+			d := api.Group("/disputes")
+			d.Use(auth)
+			{
+				d.POST("", disputeWriteLimit, dh.File)
+				d.GET("", dh.List)
+				d.GET("/:id", dh.Get)
+				d.GET("/subject/:type/:id", dh.ForSubject)
+			}
+
+			// Disputes carry the reporter's identity and, for bills, customer
+			// phone numbers and meter ids. The bill-reports queue this replaces
+			// was gated adminAuth + RequireP2PAdmin, so anything looser would
+			// widen who can read that data — match it rather than inherit the
+			// weaker default.
+			adminDisputes := api.Group("/admin/disputes")
+			adminDisputes.Use(auth, adminAuth, middleware.RequireP2PAdmin())
+			{
+				adminDisputes.GET("", dh.ListAdmin)
+				adminDisputes.GET("/:id", dh.GetAdmin)
+				adminDisputes.POST("/:id/escalate", dh.EscalateAdmin)
+				adminDisputes.POST("/:id/resolve", dh.ResolveAdmin)
 			}
 		}
 
