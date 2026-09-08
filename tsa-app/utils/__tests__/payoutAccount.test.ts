@@ -6,7 +6,10 @@
 // that wasn't exactly 10 characters.
 
 import {
+  accountFieldLabel,
+  accountFieldPlaceholder,
   accountNumberMaxLength,
+  isDigitsOnlyAccountCurrency,
   isValidAccountNumber,
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
@@ -54,5 +57,51 @@ describe('sanitizeAccountNumberInput', () => {
     expect(sanitizeAccountNumberInput('KES', 'GB33 BUKB 2020 1555 5555 55')).toBe(
       'GB33BUKB20201555555555',
     );
+  });
+});
+
+// Mobile money is a different kind of destination, not a different currency.
+// Every UGX payout is MTN or Airtel, and KES and TZS carry a few among their
+// banks — so the rule follows the institution the user picked, not the code.
+describe('mobile-money destinations', () => {
+  it('asks for a phone number, not an account number', () => {
+    expect(accountFieldLabel('mobile_money')).toBe('Mobile money number');
+    expect(accountFieldLabel('bank')).toBe('Account number');
+    expect(accountFieldLabel()).toBe('Account number');
+  });
+
+  it('uses a numeric keypad whatever the currency', () => {
+    // UGX has no fixed bank rule, so without the kind this would be false.
+    expect(isDigitsOnlyAccountCurrency('UGX', 'mobile_money')).toBe(true);
+    expect(isDigitsOnlyAccountCurrency('UGX')).toBe(false);
+  });
+
+  it('accepts local and country-code forms alike', () => {
+    expect(isValidAccountNumber('UGX', '0772123456', 'mobile_money')).toBe(true);
+    expect(isValidAccountNumber('UGX', '256772123456', 'mobile_money')).toBe(true);
+    expect(isValidAccountNumber('UGX', '', 'mobile_money')).toBe(false);
+  });
+
+  // The important one: NGN's 10-digit NUBAN rule is a BANK rule. Applied to a
+  // Nigerian mobile-money number it would reject a real destination.
+  it('does not apply the NUBAN length rule to a mobile-money number', () => {
+    expect(isValidAccountNumber('NGN', '08031234567', 'mobile_money')).toBe(true);
+    expect(isValidAccountNumber('NGN', '08031234567')).toBe(false);
+  });
+
+  it('strips non-digits and caps at E.164 length', () => {
+    expect(sanitizeAccountNumberInput('UGX', '+256 772-123456', 'mobile_money')).toBe(
+      '256772123456',
+    );
+    expect(sanitizeAccountNumberInput('UGX', '1234567890123456789', 'mobile_money')).toHaveLength(
+      15,
+    );
+    expect(accountNumberMaxLength('UGX', 'mobile_money')).toBe(15);
+  });
+
+  it('shows a phone-shaped placeholder', () => {
+    expect(accountFieldPlaceholder('UGX', 'mobile_money')).toBe('0772123456');
+    expect(accountFieldPlaceholder('NGN', 'bank')).toBe('0123456789');
+    expect(accountFieldPlaceholder('KES', 'bank')).toBe('Account number');
   });
 });

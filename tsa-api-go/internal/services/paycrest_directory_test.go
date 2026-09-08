@@ -321,3 +321,76 @@ func TestPaycrestDirectory_NigeriaStillMapsToNIBSS(t *testing.T) {
 		t.Fatalf("NGN must return NIBSS codes the app already speaks, got %#v", got)
 	}
 }
+
+// ─── Destination kind ──────────────────────────────────────────────────────
+
+// Every UGX destination is mobile money, and KES and TZS mix a few in among
+// their banks, so the app cannot infer from the currency what to ask for. It
+// asks for an account number when the answer is an MTN phone number, and the
+// payout fails AFTER the on-chain leg — hence the type travels with the option.
+func TestPaycrestDirectory_Institutions_CarriesTheDestinationKind(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "MTN Mobile Money", Code: "MOMOUGPC", Type: "mobile_money"},
+		{Name: "Stanbic Bank", Code: "SBICUGKX", Type: "bank"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	opts, err := d.Institutions(context.Background(), "UGX")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	byCode := map[string]string{}
+	for _, o := range opts {
+		byCode[o.Code] = o.Type
+	}
+	if byCode["MOMOUGPC"] != PaycrestInstitutionMobileMoney {
+		t.Errorf("MTN type = %q, want mobile_money", byCode["MOMOUGPC"])
+	}
+	if byCode["SBICUGKX"] != PaycrestInstitutionBank {
+		t.Errorf("Stanbic type = %q, want bank", byCode["SBICUGKX"])
+	}
+}
+
+// An unset or unrecognised type must read as a bank: that is the majority
+// destination everywhere, and it is what the app rendered for every currency
+// before the field existed. Defaulting the other way would ask a Kenyan bank
+// customer for a phone number.
+func TestPaycrestDirectory_Institutions_UnknownKindDefaultsToBank(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Some Bank", Code: "AAAAKENX"},
+		{Name: "Odd One", Code: "BBBBKENX", Type: "wallet"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	opts, err := d.Institutions(context.Background(), "KES")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	for _, o := range opts {
+		if o.Type != PaycrestInstitutionBank {
+			t.Errorf("%s type = %q, want bank", o.Code, o.Type)
+		}
+	}
+}
+
+// NGN goes through the NIBSS matcher rather than Paycrest's list, so its
+// options are built by different code and would otherwise ship with an empty
+// type — a field the app is about to branch on.
+func TestPaycrestDirectory_Institutions_NGNOptionsAreBanks(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}}
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	d := NewPaycrestDirectory(pc, local)
+
+	opts, err := d.Institutions(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	if len(opts) == 0 {
+		t.Fatal("no NGN options")
+	}
+	for _, o := range opts {
+		if o.Type != PaycrestInstitutionBank {
+			t.Errorf("NGN option %s type = %q, want bank", o.Code, o.Type)
+		}
+	}
+}

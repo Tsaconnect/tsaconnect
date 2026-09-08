@@ -1,7 +1,14 @@
 // utils/payoutAccount.ts
 //
-// Per-currency rules for a payout/refund account number field (bank transfer
-// destinations on the Paycrest buy/sell screens).
+// Rules for the payout/refund account field on the Paycrest buy/sell screens.
+//
+// Two things decide the rule, in this order:
+//
+//   1. The DESTINATION KIND. A mobile-money destination wants a phone number,
+//      not an account number — every UGX destination is MTN or Airtel, and KES
+//      and TZS mix a few in among their banks. The kind comes from Paycrest via
+//      the institution list; it cannot be inferred from the currency.
+//   2. The CURRENCY, for bank destinations only.
 //
 // NUBAN (Nigeria) is a fixed 10 digits, and it's the only rule this codebase
 // actually knows — every other currency's account-number format varies by
@@ -18,20 +25,52 @@ const FIXED_DIGIT_LENGTHS: Record<string, number> = {
  *  an IBAN (34 chars, the longest in use) without being unbounded. */
 const DEFAULT_MAX_LENGTH = 34;
 
+/** What the destination actually is, from Paycrest's institution list. */
+export type PayoutDestinationKind = 'bank' | 'mobile_money';
+
+/** E.164's ceiling. Mobile-money numbers are entered either locally
+ *  (0772123456) or with a country code (256772123456), and we know of no fixed
+ *  length that holds for both — so the cap is the only rule applied. */
+const MSISDN_MAX_LENGTH = 15;
+
 function fixedLengthFor(currency: string): number | undefined {
   return FIXED_DIGIT_LENGTHS[currency.toUpperCase()];
 }
 
+function isMobileMoney(kind?: PayoutDestinationKind): boolean {
+  return kind === 'mobile_money';
+}
+
 /** Max length to cap a text input at while the user types. */
-export function accountNumberMaxLength(currency: string): number {
+export function accountNumberMaxLength(currency: string, kind?: PayoutDestinationKind): number {
+  if (isMobileMoney(kind)) return MSISDN_MAX_LENGTH;
   return fixedLengthFor(currency) ?? DEFAULT_MAX_LENGTH;
 }
 
-/** Whether this currency's account numbers are known to be digits-only
- *  (NUBAN). Callers use this to pick a numeric keyboard/placeholder — an
- *  unknown currency defaults to a plain keyboard rather than assuming digits. */
-export function isDigitsOnlyAccountCurrency(currency: string): boolean {
-  return fixedLengthFor(currency) != null;
+/** Whether the field takes digits only. True for NUBAN and for every
+ *  mobile-money number; an unknown bank currency defaults to a plain keyboard
+ *  rather than assuming digits (an IBAN is alphanumeric). */
+export function isDigitsOnlyAccountCurrency(
+  currency: string,
+  kind?: PayoutDestinationKind,
+): boolean {
+  return isMobileMoney(kind) || fixedLengthFor(currency) != null;
+}
+
+/** What to call the field. Asking a Ugandan for an "account number" when the
+ *  answer is an MTN phone number is how a payout fails after the on-chain leg
+ *  has already moved. */
+export function accountFieldLabel(kind?: PayoutDestinationKind): string {
+  return isMobileMoney(kind) ? 'Mobile money number' : 'Account number';
+}
+
+/** Placeholder for the field, matched to the label. */
+export function accountFieldPlaceholder(
+  currency: string,
+  kind?: PayoutDestinationKind,
+): string {
+  if (isMobileMoney(kind)) return '0772123456';
+  return isDigitsOnlyAccountCurrency(currency, kind) ? '0123456789' : 'Account number';
 }
 
 /**
@@ -42,9 +81,18 @@ export function isDigitsOnlyAccountCurrency(currency: string): boolean {
  * else, only non-empty is required — never block a valid non-Nigerian
  * account because it isn't 10 digits.
  */
-export function isValidAccountNumber(currency: string, value: string): boolean {
+export function isValidAccountNumber(
+  currency: string,
+  value: string,
+  kind?: PayoutDestinationKind,
+): boolean {
   const v = value.trim();
   if (!v) return false;
+  // A mobile-money number is not a bank account: NGN's 10-digit NUBAN rule
+  // must not be applied to a Nigerian mobile-money destination, and no fixed
+  // MSISDN length is safe to assume. Non-empty within the cap is the honest
+  // rule until a real one is confirmed per network.
+  if (isMobileMoney(kind)) return v.length <= MSISDN_MAX_LENGTH;
   const fixed = fixedLengthFor(currency);
   return fixed == null || v.length === fixed;
 }
@@ -55,7 +103,12 @@ export function isValidAccountNumber(currency: string, value: string): boolean {
  * numbers can be alphanumeric (e.g. an IBAN), so only whitespace is stripped
  * — digit-only sanitizing would silently mangle a valid non-Nigerian entry.
  */
-export function sanitizeAccountNumberInput(currency: string, raw: string): string {
-  const cleaned = fixedLengthFor(currency) != null ? raw.replace(/\D/g, "") : raw.replace(/\s/g, "");
-  return cleaned.slice(0, accountNumberMaxLength(currency));
+export function sanitizeAccountNumberInput(
+  currency: string,
+  raw: string,
+  kind?: PayoutDestinationKind,
+): string {
+  const digitsOnly = isMobileMoney(kind) || fixedLengthFor(currency) != null;
+  const cleaned = digitsOnly ? raw.replace(/\D/g, "") : raw.replace(/\s/g, "");
+  return cleaned.slice(0, accountNumberMaxLength(currency, kind));
 }

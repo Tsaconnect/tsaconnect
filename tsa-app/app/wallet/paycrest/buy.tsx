@@ -42,6 +42,8 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
+  accountFieldLabel,
+  accountFieldPlaceholder,
   accountNumberMaxLength,
   isDigitsOnlyAccountCurrency,
   isValidAccountNumber,
@@ -140,6 +142,10 @@ export default function PaycrestBuyScreen() {
   const [banks, setBanks] = useState<PayoutInstitution[]>([]);
   const [refundBank, setRefundBank] = useState<PayoutInstitution | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  // The refund destination can be mobile money too — in Uganda it always is —
+  // and the field must ask for a phone number when it is. Missing type reads
+  // as a bank, which is what every currency's majority destination is.
+  const refundKind = refundBank?.type ?? 'bank';
   const [refundAccount, setRefundAccount] = useState('');
 
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
@@ -470,14 +476,16 @@ export default function PaycrestBuyScreen() {
                 onPress={() => setRefundOpen(true)}
               />
               <Input
-                label="Account number"
+                label={accountFieldLabel(refundKind)}
                 value={refundAccount}
                 onChangeText={(v: string) =>
-                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v))
+                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v, refundKind))
                 }
-                keyboardType={isDigitsOnlyAccountCurrency(currencyCode) ? 'number-pad' : 'default'}
-                placeholder={isDigitsOnlyAccountCurrency(currencyCode) ? '0123456789' : 'Account number'}
-                maxLength={accountNumberMaxLength(currencyCode)}
+                keyboardType={
+                  isDigitsOnlyAccountCurrency(currencyCode, refundKind) ? 'number-pad' : 'default'
+                }
+                placeholder={accountFieldPlaceholder(currencyCode, refundKind)}
+                maxLength={accountNumberMaxLength(currencyCode, refundKind)}
               />
               <Text variant="caption" style={{ color: colors.textMuted }}>
                 Used only if your order fails. Pay from this account so a refund reaches you.
@@ -493,7 +501,7 @@ export default function PaycrestBuyScreen() {
               !venue ||
               !address ||
               !refundBank ||
-              !isValidAccountNumber(currencyCode, refundAccount) ||
+              !isValidAccountNumber(currencyCode, refundAccount, refundKind) ||
               quoting ||
               creating
             }

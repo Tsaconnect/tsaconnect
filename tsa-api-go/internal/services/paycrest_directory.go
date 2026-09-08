@@ -183,11 +183,34 @@ func (d *PaycrestDirectory) BankMap(ctx context.Context, fiat string) (*Paycrest
 	return m, nil
 }
 
+// Institution kinds. Type decides what the app must ASK FOR: a bank wants an
+// account number, mobile money wants a phone number. Getting it wrong is not
+// cosmetic — the payout fails after the on-chain leg has already moved.
+const (
+	PaycrestInstitutionBank        = "bank"
+	PaycrestInstitutionMobileMoney = "mobile_money"
+)
+
 // PaycrestPayoutOption is one selectable payout destination, in whatever
 // vocabulary the app should send back for that currency.
 type PaycrestPayoutOption struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
+	// Type is "bank" or "mobile_money". Every UGX destination is mobile money,
+	// and KES and TZS mix a few in among their banks, so the app cannot infer
+	// this from the currency.
+	Type string `json:"type"`
+}
+
+// normalizePayoutType maps Paycrest's institution type onto our two kinds,
+// defaulting to bank. The default is the safe one: an account-number field is
+// what every currency's majority destination wants, and it is what the app
+// showed for all of them before this field existed.
+func normalizePayoutType(t string) string {
+	if strings.EqualFold(strings.TrimSpace(t), PaycrestInstitutionMobileMoney) {
+		return PaycrestInstitutionMobileMoney
+	}
+	return PaycrestInstitutionBank
 }
 
 // Institutions lists payout destinations for a currency.
@@ -213,7 +236,12 @@ func (d *PaycrestDirectory) Institutions(ctx context.Context, fiat string) ([]Pa
 		}
 		out := make([]PaycrestPayoutOption, 0, len(m.NIBSSToPaycrest))
 		for nibss := range m.NIBSSToPaycrest {
-			out = append(out, PaycrestPayoutOption{Code: nibss, Name: m.Names[nibss]})
+			// NIBSS is a bank-code registry; the Nigerian neobanks in it
+			// (OPay, PalmPay, Moniepoint) take NUBAN account numbers like any
+			// other bank, so every NGN option is a bank destination.
+			out = append(out, PaycrestPayoutOption{
+				Code: nibss, Name: m.Names[nibss], Type: PaycrestInstitutionBank,
+			})
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		return out, nil
@@ -225,7 +253,9 @@ func (d *PaycrestDirectory) Institutions(ctx context.Context, fiat string) ([]Pa
 	}
 	out := make([]PaycrestPayoutOption, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, PaycrestPayoutOption{Code: r.Code, Name: r.Name})
+		out = append(out, PaycrestPayoutOption{
+			Code: r.Code, Name: r.Name, Type: normalizePayoutType(r.Type),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
