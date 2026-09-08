@@ -27,6 +27,7 @@ import {
   Text,
 } from '@/components/ui';
 import { useCountdown } from '@/hooks/useCountdown';
+import { DisputeSection } from '@/components/disputes/DisputeSection';
 import {
   cancelOrder,
   getOrder,
@@ -287,7 +288,23 @@ export default function PaycrestOrderScreen() {
           </Card>
         ) : null}
 
-        {unmatched && <Button title="Get help" onPress={contactSupport} fullWidth />}
+        {/* Was a mailto. A dispute is the same intent with a record behind it:
+            support can see it, it can be escalated to the provider, and the
+            user can watch it move instead of wondering if the email landed.
+            The mailto stays alongside for anyone who prefers email. */}
+        <DisputeSection
+          subjectType="paycrest_order"
+          subjectId={order.id}
+          disputable={!awaiting && order.status !== 'cancelled'}
+          title={unmatched ? 'Open a dispute' : 'Report a problem'}
+          prompt={
+            unmatched
+              ? 'Attach your bank receipt — it must show the session ID. That is what the provider needs to trace the payment.'
+              : 'Tell us what went wrong. Attach a receipt or screenshot if you have one — it is the fastest way for us to chase this up.'
+          }
+        />
+
+        {unmatched && <Button title="Email support" variant="ghost" onPress={contactSupport} fullWidth />}
 
         {/* Only while the order is still waiting on the user AND they have not
             claimed to have paid — past either point the server refuses, and
