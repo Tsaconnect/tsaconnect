@@ -36,12 +36,32 @@ export async function getBiometricType(): Promise<string> {
   return 'Biometric';
 }
 
-export async function authenticateWithBiometric(): Promise<boolean> {
+export async function authenticateWithBiometric(
+  promptMessage = 'Unlock TSA Connect'
+): Promise<boolean> {
   if (!LocalAuthentication) return false;
   const result = await LocalAuthentication.authenticateAsync({
-    promptMessage: 'Unlock TSA Connect',
+    promptMessage,
     fallbackLabel: 'Use PIN',
     disableDeviceFallback: true,
+  });
+  return result.success;
+}
+
+/**
+ * Biometric prompt that also accepts the device passcode/pattern.
+ *
+ * Callers must go through here rather than importing expo-local-authentication
+ * themselves: a dynamic `import()` of a native module is fetched from the Metro
+ * dev server at call time, so it fails with LoadBundleFromServerRequestError
+ * whenever the device cannot reach the server.
+ */
+export async function authenticateWithDeviceFallback(promptMessage: string): Promise<boolean> {
+  if (!LocalAuthentication) return false;
+  const result = await LocalAuthentication.authenticateAsync({
+    promptMessage,
+    fallbackLabel: 'Use device passcode',
+    disableDeviceFallback: false,
   });
   return result.success;
 }
