@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -392,5 +393,146 @@ func TestITHandler_Currencies(t *testing.T) {
 	}
 	if byCode["USD"] != "" {
 		t.Errorf("USD ramp = %q, want empty", byCode["USD"])
+	}
+}
+
+// ─── Ramp directions ───────────────────────────────────────────────────────
+
+type stubLegs struct {
+	legs map[string]services.RampLegs
+	err  error
+}
+
+func (s stubLegs) RampLegs(context.Context) (map[string]services.RampLegs, error) {
+	return s.legs, s.err
+}
+
+// currencyRows decodes /api/it/currencies into a code-keyed view of everything
+// the direction assertions below care about.
+type currencyRow struct {
+	RampProvider string `json:"rampProvider"`
+	RampBuy      bool   `json:"rampBuy"`
+	RampSell     bool   `json:"rampSell"`
+}
+
+func getCurrencyRows(t *testing.T, h *ITHandler) map[string]currencyRow {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/it/currencies", nil)
+	h.Currencies(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			Code string `json:"code"`
+			currencyRow
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out := map[string]currencyRow{}
+	for _, r := range resp.Data {
+		out[r.Code] = r.currencyRow
+	}
+	return out
+}
+
+func newCurrencyHandler(t *testing.T) *ITHandler {
+	t.Helper()
+	h, db := newITTestHandler(t)
+	if err := db.AutoMigrate(&models.Currency{}); err != nil {
+		t.Fatalf("migrate currencies: %v", err)
+	}
+	h.currencies = services.NewCurrencyRegistry(db)
+	return h
+}
+
+// The whole point of the endpoint: a currency that only sells must say so, so
+// the app can render Sell without Buy instead of offering a button whose order
+// no provider will fill.
+func TestCurrencies_ReportsDirectionsSeparately(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{
+		"NGN": {Buy: true, Sell: true},
+		"KES": {Buy: true, Sell: true},
+		"UGX": {Sell: true},
+		"TZS": {Sell: true},
+	}})
+
+	rows := getCurrencyRows(t, h)
+
+	for _, code := range []string{"NGN", "KES"} {
+		if !rows[code].RampBuy || !rows[code].RampSell {
+			t.Errorf("%s = %+v, want both directions", code, rows[code])
+		}
+	}
+	for _, code := range []string{"UGX", "TZS"} {
+		if rows[code].RampBuy {
+			t.Errorf("%s reports a buy leg; Paycrest has offramp providers only there", code)
+		}
+		if !rows[code].RampSell {
+			t.Errorf("%s = %+v, want a sell leg", code, rows[code])
+		}
+	}
+}
+
+// A currency with no provider is never tradable in either direction, whatever
+// the book happens to say. GHS is the live example: Paycrest does not serve it,
+// and the Flutterwave path cannot either.
+func TestCurrencies_NoProviderMeansNoLegs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{
+		"GHS": {Buy: true, Sell: true},
+		"USD": {Buy: true, Sell: true},
+	}})
+
+	rows := getCurrencyRows(t, h)
+
+	for _, code := range []string{"GHS", "USD"} {
+		if rows[code].RampProvider != "" {
+			t.Fatalf("%s provider = %q, want none — fixture assumption broken",
+				code, rows[code].RampProvider)
+		}
+		if rows[code].RampBuy || rows[code].RampSell {
+			t.Errorf("%s = %+v, want no legs: a book entry cannot conjure a ramp "+
+				"for a currency no provider serves", code, rows[code])
+		}
+	}
+}
+
+// The failure that must NOT hide the live rail: the book has never loaded, so
+// directions are unknown. Reporting "no legs" would empty the IT hub for every
+// Nigerian user because a public endpoint was briefly unreachable.
+func TestCurrencies_UnknownDirectionsFallBackToBoth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(stubLegs{err: errors.New("paycrest unreachable")})
+
+	rows := getCurrencyRows(t, h)
+
+	if !rows["NGN"].RampBuy || !rows["NGN"].RampSell {
+		t.Errorf("NGN = %+v, want both directions when the book cannot be read", rows["NGN"])
+	}
+	if rows["USD"].RampBuy || rows["USD"].RampSell {
+		t.Errorf("USD = %+v, want no legs — the fallback applies to provider-backed "+
+			"currencies only", rows["USD"])
+	}
+}
+
+// Same fallback with the Paycrest stack absent entirely (no key, nil service),
+// which is how every non-production environment boots.
+func TestCurrencies_NoLegSourceFallsBackToBoth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+
+	rows := getCurrencyRows(t, h)
+
+	if !rows["NGN"].RampBuy || !rows["NGN"].RampSell {
+		t.Errorf("NGN = %+v, want both directions when no leg source is wired", rows["NGN"])
 	}
 }

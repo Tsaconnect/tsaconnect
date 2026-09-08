@@ -95,6 +95,36 @@ func (s *PaycrestOrderService) requirePaycrestEnabled(fiat string) error {
 	return nil
 }
 
+// explainMissingVenue separates "nobody fills THIS amount" from "this currency
+// does not trade this way at all".
+//
+// Both arrive as ErrPaycrestNoVenue, and the difference matters to the person
+// reading it: the first is answered by trying another amount, the second never
+// is. UGX and TZS have offramp providers only, so a UGX buy is permanently
+// empty rather than momentarily unlucky.
+//
+// The app already hides a dead direction (GET /it/currencies reports the legs),
+// so reaching this means a stale client or a leg that closed mid-session — the
+// order is refused either way; only the wording changes.
+func (s *PaycrestOrderService) explainMissingVenue(ctx context.Context, side, fiat string, err error) error {
+	if !errors.Is(err, ErrPaycrestNoVenue) || s.quotes == nil {
+		return err
+	}
+	legs, legErr := s.quotes.RampLegs(ctx)
+	if legErr != nil {
+		return err
+	}
+	l := legs[strings.ToUpper(strings.TrimSpace(fiat))]
+	if (side == "buy" && !l.Buy) || (side == "sell" && !l.Sell) {
+		verb := "Buying"
+		if side == "sell" {
+			verb = "Selling"
+		}
+		return fmt.Errorf("%s is not available in %s right now", verb, strings.ToUpper(fiat))
+	}
+	return err
+}
+
 // NewPaycrestOrderService returns nil unless everything it needs is wired, so
 // routes can be gated the same way the rest of the package is.
 func NewPaycrestOrderService(db *gorm.DB, pc PaycrestOrderer, quotes *PaycrestQuoteService, dir *PaycrestDirectory, feePercent, feeAddress string) *PaycrestOrderService {
@@ -190,7 +220,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	}
 	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
-		return nil, err
+		return nil, s.explainMissingVenue(ctx, "buy", fiat, err)
 	}
 	refundInst, err := s.paycrestBankCode(ctx, fiat, req.RefundBankCode)
 	if err != nil {
@@ -325,7 +355,7 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	}
 	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
-		return nil, err
+		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
 	}
 	payoutInst, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
 	if err != nil {

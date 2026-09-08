@@ -1122,6 +1122,14 @@ func main() {
 			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
 			paycrestOrders.SetCurrencyRegistry(currencyRegistry)
 		}
+		// Direction lives on the order book, not in our config: /api/it/currencies
+		// asks the quote service which way each currency can actually trade, so
+		// the app never offers a leg no provider will fill. itHandler is nil
+		// when IT itself is unconfigured, and the endpoint falls back to
+		// "both directions" whenever this is unwired.
+		if itHandler != nil {
+			itHandler.SetRampLegs(paycrestQuotes)
+		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.

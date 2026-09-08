@@ -103,16 +103,17 @@ func TestPaycrestOrderService_CreateBuy_RefusesWhenNotPaycrest(t *testing.T) {
 	svc, registry := newPaycrestOrderTestService(t)
 	svc.SetCurrencyRegistry(registry)
 
-	// KES is payout-enabled but (per finding 1) carries no ramp provider by
-	// default — exactly the "not paycrest" case the gate exists for.
-	if got := registry.RampProvider("KES"); got == RampProviderPaycrest {
-		t.Fatalf("test fixture invalid: KES resolves to paycrest (got %q)", got)
+	// GHS is payout-enabled but carries no ramp provider — Paycrest does not
+	// serve it at all — which is exactly the "not paycrest" case the gate
+	// exists for. (KES used to play this role; it is a live Paycrest ramp now.)
+	if got := registry.RampProvider("GHS"); got == RampProviderPaycrest {
+		t.Fatalf("test fixture invalid: GHS resolves to paycrest (got %q)", got)
 	}
 
 	_, err := svc.CreateBuy(context.Background(), PaycrestBuyRequest{
 		UserID:            uuid.New(),
 		WalletAddress:     "0xabc",
-		FiatCode:          "KES",
+		FiatCode:          "GHS",
 		FiatAmount:        "1000",
 		RefundBankCode:    "044",
 		RefundAccount:     "0123456789",
@@ -132,7 +133,7 @@ func TestPaycrestOrderService_CreateSell_RefusesWhenNotPaycrest(t *testing.T) {
 	_, err := svc.CreateSell(context.Background(), PaycrestSellRequest{
 		UserID:        uuid.New(),
 		WalletAddress: "0xabc",
-		FiatCode:      "KES",
+		FiatCode:      "GHS",
 		FiatAmount:    "1000",
 		BankCode:      "044",
 		AccountNo:     "0123456789",

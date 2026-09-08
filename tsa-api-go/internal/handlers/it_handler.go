@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -28,11 +29,26 @@ type ITHandler struct {
 	db         *gorm.DB
 	it         *services.ITService
 	currencies *services.CurrencyRegistry
+	// legs answers which DIRECTIONS a ramp currency can trade right now. Set
+	// separately because the Paycrest stack is built later in boot (and is
+	// dormant without a key) — see SetRampLegs.
+	legs RampLegSource
+}
+
+// RampLegSource is the narrow seam over PaycrestQuoteService this handler
+// needs. *services.PaycrestQuoteService satisfies it as-is.
+type RampLegSource interface {
+	RampLegs(ctx context.Context) (map[string]services.RampLegs, error)
 }
 
 func NewITHandler(db *gorm.DB, it *services.ITService, currencies *services.CurrencyRegistry) *ITHandler {
 	return &ITHandler{db: db, it: it, currencies: currencies}
 }
+
+// SetRampLegs wires the live direction source. Without it, and whenever it
+// cannot answer, Currencies falls back to advertising both directions for any
+// currency that has a provider — see the reasoning there.
+func (h *ITHandler) SetRampLegs(src RampLegSource) { h.legs = src }
 
 func (h *ITHandler) userWallet(userID uuid.UUID) string {
 	var u models.User
@@ -70,6 +86,11 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 // Payout-only currencies are LISTED with an empty rampProvider rather than
 // omitted. The app should be able to say "not available in USD" instead of
 // silently lacking the option, which reads as a bug to the user.
+//
+// rampProvider says WHO serves the currency; rampBuy/rampSell say WHICH WAY it
+// can trade at this moment. The two are separate because they change for
+// different reasons — a provider is a product decision an operator makes, a
+// direction is provider liquidity that moves on its own.
 func (h *ITHandler) Currencies(c *gin.Context) {
 	if h.currencies == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Currency list unavailable")
@@ -79,17 +100,55 @@ func (h *ITHandler) Currencies(c *gin.Context) {
 		Code           string `json:"code"`
 		Exponent       int    `json:"exponent"`
 		RampProvider   string `json:"rampProvider"`
+		RampBuy        bool   `json:"rampBuy"`
+		RampSell       bool   `json:"rampSell"`
 		DepositEnabled bool   `json:"depositEnabled"`
 		PayoutEnabled  bool   `json:"payoutEnabled"`
 		MinPayoutMinor int64  `json:"minPayoutMinor"`
 	}
+
+	// Which directions actually have liquidity right now. A currency can have a
+	// provider and still trade one way only: UGX and TZS are offramp-only
+	// today, so the app must show Sell without Buy.
+	//
+	// legs == nil means we could not find out — the Paycrest stack is dormant,
+	// or its order book has never loaded. Then every currency WITH a provider
+	// is reported as trading both ways, which is what this endpoint said before
+	// directions existed.
+	//
+	// That fallback is deliberately optimistic, and the choice is asymmetric:
+	// reporting "no legs" would take the live NGN rail out of the app because a
+	// public book was briefly unreachable, while an over-reported leg costs the
+	// user one error at quote time and nothing more — CreateBuy/CreateSell
+	// still refuse an order no venue can fill.
+	var legs map[string]services.RampLegs
+	if h.legs != nil {
+		var err error
+		if legs, err = h.legs.RampLegs(c.Request.Context()); err != nil {
+			log.Printf("[IT] ramp_legs_unavailable err=%v — reporting both directions for provider-backed currencies", err)
+			legs = nil
+		}
+	}
+
 	all := h.currencies.All()
 	out := make([]row, 0, len(all))
 	for _, cur := range all {
+		provider := h.currencies.RampProvider(cur.Code)
+		buy, sell := false, false
+		if provider != services.RampProviderNone {
+			if legs == nil {
+				buy, sell = true, true
+			} else {
+				l := legs[strings.ToUpper(cur.Code)]
+				buy, sell = l.Buy, l.Sell
+			}
+		}
 		out = append(out, row{
 			Code:           cur.Code,
 			Exponent:       cur.Exponent,
-			RampProvider:   h.currencies.RampProvider(cur.Code),
+			RampProvider:   provider,
+			RampBuy:        buy,
+			RampSell:       sell,
 			DepositEnabled: cur.DepositEnabled,
 			PayoutEnabled:  cur.PayoutEnabled,
 			MinPayoutMinor: cur.MinPayoutMinor,

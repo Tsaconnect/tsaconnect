@@ -281,6 +281,90 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	return res, nil
 }
 
+// ─── Ramp legs ─────────────────────────────────────────────────────────────
+
+// RampLegs says which directions a currency can actually trade in right now.
+// Both false means the currency has a provider on paper but nothing on the
+// book — the app must offer neither button.
+type RampLegs struct {
+	Buy  bool `json:"buy"`
+	Sell bool `json:"sell"`
+}
+
+// RampLegs reports, per fiat, which sides have live liquidity on a venue we
+// route.
+//
+// This is derived rather than declared on purpose. Direction is a property of
+// provider liquidity, not of our product decisions: UGX and TZS have offramp
+// providers only today, and the day someone starts quoting a UGX onramp we
+// should offer it without shipping a migration. The registry stays the
+// authority on WHO serves a currency; the book answers WHICH WAY.
+//
+// It rides the same 20s-TTL book the venue picker uses, so the currency list
+// costs nothing extra: one shared /v2/markets call (~0.2s) serves every caller,
+// and a later fetch failure serves the previous book rather than erroring. An
+// error here therefore means the book has NEVER loaded — see the caller for
+// what gets served then.
+func (s *PaycrestQuoteService) RampLegs(ctx context.Context) (map[string]RampLegs, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	book, err := s.cachedBook(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	wanted := make(map[string]bool, len(s.tokens))
+	for _, t := range s.tokens {
+		wanted[strings.ToUpper(t)] = true
+	}
+	networkFor := make(map[string]string, len(s.chainKeys))
+	for _, chainKey := range s.chainKeys {
+		if network, ok := PaycrestNetwork(chainKey); ok {
+			networkFor[network] = chainKey
+		}
+	}
+	return legsByFiat(book, wanted, networkFor), nil
+}
+
+// legsByFiat is the pure core of RampLegs: group the book by fiat and side,
+// counting only entries on a token and network we would actually route.
+//
+// Order-size bands are deliberately ignored. The currency list renders before
+// the user has typed an amount, so applying a band here would mean inventing
+// one — and a currency whose only liquidity is large would vanish from the
+// picker even though it trades fine at that size. Quote() applies the band when
+// there is a real amount to apply it to.
+func legsByFiat(book *PaycrestMarkets, wantToken map[string]bool, networkFor map[string]string) map[string]RampLegs {
+	out := map[string]RampLegs{}
+	if book == nil {
+		return out
+	}
+	for _, e := range book.Book {
+		fiat := strings.ToUpper(strings.TrimSpace(e.Fiat))
+		if fiat == "" {
+			continue
+		}
+		if !wantToken[strings.ToUpper(strings.TrimSpace(e.Token))] {
+			continue
+		}
+		if _, ok := networkFor[strings.ToLower(strings.TrimSpace(e.Network))]; !ok {
+			continue
+		}
+		legs := out[fiat]
+		switch strings.ToLower(strings.TrimSpace(e.Side)) {
+		case "buy":
+			legs.Buy = true
+		case "sell":
+			legs.Sell = true
+		default:
+			continue
+		}
+		out[fiat] = legs
+	}
+	return out
+}
+
 // VenueFor binds the price for one venue immediately before an order is
 // created. This is where the single authoritative /v2/rates call is spent.
 //
