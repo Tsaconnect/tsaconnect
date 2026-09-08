@@ -70,6 +70,17 @@ var ErrPaycrestNoVenue = errors.New("paycrest: no network can fill this amount r
 // API calls on an amount nobody will quote.
 var ErrPaycrestBelowMinimum = errors.New("paycrest: amount is below the minimum order size")
 
+// ErrPaycrestBookEmpty means the order book parsed successfully and contained
+// nothing we can use. It is deliberately an ERROR rather than "no currency
+// trades", because those two are indistinguishable in the data and wildly
+// different in likelihood: every provider on the protocol going dark at once
+// has never happened, while a renamed JSON field or an upstream blip produces
+// exactly this and produces it silently.
+//
+// Callers that would otherwise read the empty result as "nothing trades" must
+// treat this as "we could not find out" — see ITHandler.Currencies.
+var ErrPaycrestBookEmpty = errors.New("paycrest: order book has no usable entries")
+
 // PaycrestQuoter is the rate surface the quote service needs.
 type PaycrestQuoter interface {
 	// Markets is the whole order book in one fast call — the venue list comes
@@ -324,7 +335,15 @@ func (s *PaycrestQuoteService) RampLegs(ctx context.Context) (map[string]RampLeg
 			networkFor[network] = chainKey
 		}
 	}
-	return legsByFiat(book, wanted, networkFor), nil
+	legs := legsByFiat(book, wanted, networkFor)
+	if len(legs) == 0 {
+		// Not "nothing trades anywhere" — that is not a state this protocol
+		// reaches. An empty map here means the book was empty or shaped in a
+		// way we no longer parse, and reporting it as fact would take every
+		// currency (NGN included) dark on a single bad response.
+		return nil, ErrPaycrestBookEmpty
+	}
+	return legs, nil
 }
 
 // legsByFiat is the pure core of RampLegs: group the book by fiat and side,

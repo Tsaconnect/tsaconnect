@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -535,4 +536,71 @@ func TestCurrencies_NoLegSourceFallsBackToBoth(t *testing.T) {
 	if !rows["NGN"].RampBuy || !rows["NGN"].RampSell {
 		t.Errorf("NGN = %+v, want both directions when no leg source is wired", rows["NGN"])
 	}
+}
+
+// The handler-side half of the empty-book guard. An empty map is non-nil in
+// Go, so without the len check every provider-backed currency would report
+// closed and the IT hub would go to "paused" for everyone — including the live
+// NGN rail. RampLegs refuses to return one; this pins the caller so a future
+// source cannot reintroduce it.
+func TestCurrencies_EmptyLegMapFallsBackToBoth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{}})
+
+	rows := getCurrencyRows(t, h)
+
+	if !rows["NGN"].RampBuy || !rows["NGN"].RampSell {
+		t.Errorf("NGN = %+v, want both directions — an empty map is 'we do not know', "+
+			"not 'nothing trades'", rows["NGN"])
+	}
+}
+
+// And the distinction that keeps the guard honest: a POPULATED map that omits
+// a provider-backed currency really does mean that currency is closed.
+func TestCurrencies_PopulatedLegMapStillClosesAMissingCurrency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{
+		"NGN": {Buy: true, Sell: true},
+	}})
+
+	rows := getCurrencyRows(t, h)
+
+	if !rows["NGN"].RampBuy {
+		t.Error("NGN buy lost")
+	}
+	if rows["KES"].RampBuy || rows["KES"].RampSell {
+		t.Errorf("KES = %+v, want no legs — absent from a live book means closed", rows["KES"])
+	}
+}
+
+// The lookup is bounded so a slow Paycrest cannot hold up the currency list:
+// the hub calls this on every focus, and the fallback is instant and correct.
+func TestCurrencies_SlowLegSourceDoesNotBlockTheList(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newCurrencyHandler(t)
+	h.SetRampLegs(blockingLegs{})
+
+	start := time.Now()
+	rows := getCurrencyRows(t, h)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Errorf("currency list took %s; it must give up on the leg lookup, not wait out "+
+			"the Paycrest client's own 30s timeout", elapsed)
+	}
+	if !rows["NGN"].RampBuy || !rows["NGN"].RampSell {
+		t.Errorf("NGN = %+v, want the both-directions fallback after the lookup gives up", rows["NGN"])
+	}
+}
+
+// blockingLegs never answers on its own; it returns only when the caller's
+// context is cancelled, which is exactly what an unresponsive upstream looks
+// like from here.
+type blockingLegs struct{}
+
+func (blockingLegs) RampLegs(ctx context.Context) (map[string]services.RampLegs, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }

@@ -163,6 +163,61 @@ func TestRampLegs_ServesStaleBookOnLaterFailure(t *testing.T) {
 	}
 }
 
+// The regression that takes production dark: a book that parses fine and
+// contains nothing. Reported as "no legs" it reads as "no currency trades",
+// and every row on the IT hub — NGN included — goes to "paused".
+//
+// It does not need Paycrest to be down. A renamed JSON field unmarshals to an
+// empty slice with no error, gets cached, and re-fetches into the same state.
+func TestRampLegs_EmptyBookIsUnknownNotClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		book *PaycrestMarkets
+	}{
+		{"no entries", &PaycrestMarkets{Book: []PaycrestBookEntry{}}},
+		{"nil slice, as a renamed field would unmarshal", &PaycrestMarkets{}},
+		{"entries we cannot route", &PaycrestMarkets{Book: []PaycrestBookEntry{
+			{Fiat: "NGN", Side: "buy", Token: "DAI", Network: "tron", Rate: "1", Min: "1", Max: "2"},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewPaycrestQuoteService(&legsQuoter{book: tc.book},
+				[]string{"USDC", "USDT"}, []string{"base", "polygon"})
+
+			legs, err := s.RampLegs(context.Background())
+			if !errors.Is(err, ErrPaycrestBookEmpty) {
+				t.Fatalf("err = %v, want ErrPaycrestBookEmpty — an empty book must read as "+
+					"'we could not find out', never as 'nothing trades'", err)
+			}
+			if legs != nil {
+				t.Errorf("legs = %+v, want nil so the caller cannot mistake it for an answer", legs)
+			}
+		})
+	}
+}
+
+// The distinction that makes the guard above safe: one currency missing from a
+// POPULATED book is a real state — its providers went offline — and must still
+// report as closed rather than being swept into "unknown".
+func TestRampLegs_PopulatedBookStillClosesAMissingCurrency(t *testing.T) {
+	book := &PaycrestMarkets{Book: []PaycrestBookEntry{
+		{Fiat: "NGN", Side: "buy", Token: "USDC", Network: "base", Rate: "1380", Min: "0.5", Max: "2000"},
+	}}
+	s := NewPaycrestQuoteService(&legsQuoter{book: book},
+		[]string{"USDC", "USDT"}, []string{"base", "polygon"})
+
+	legs, err := s.RampLegs(context.Background())
+	if err != nil {
+		t.Fatalf("RampLegs: %v", err)
+	}
+	if !legs["NGN"].Buy {
+		t.Error("NGN buy lost")
+	}
+	if got := legs["KES"]; got.Buy || got.Sell {
+		t.Errorf("KES legs = %+v, want none — absent from a live book means its providers left", got)
+	}
+}
+
 // ─── Order-time wording ────────────────────────────────────────────────────
 
 // "No venue" has two very different meanings and the user can only act on one

@@ -80,6 +80,11 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 	})
 }
 
+// rampLegsTimeout bounds the live direction lookup on the currency list. The
+// fallback (both directions for provider-backed currencies) is correct and
+// instant, so there is no reason to make a user wait on Paycrest to reach it.
+const rampLegsTimeout = 2 * time.Second
+
 // GET /api/it/currencies — every currency the ramp knows about, and who serves
 // it.
 //
@@ -123,9 +128,23 @@ func (h *ITHandler) Currencies(c *gin.Context) {
 	// still refuse an order no venue can fill.
 	var legs map[string]services.RampLegs
 	if h.legs != nil {
+		// Bounded well under the Paycrest client's own 30s timeout: this runs
+		// on every hub focus, the answer is cached for 20s, and the fallback
+		// below is both cheap and safe — so waiting on a slow upstream buys
+		// nothing a user would want.
+		ctx, cancel := context.WithTimeout(c.Request.Context(), rampLegsTimeout)
+		defer cancel()
+
 		var err error
-		if legs, err = h.legs.RampLegs(c.Request.Context()); err != nil {
+		if legs, err = h.legs.RampLegs(ctx); err != nil {
 			log.Printf("[IT] ramp_legs_unavailable err=%v — reporting both directions for provider-backed currencies", err)
+			legs = nil
+		}
+		// An EMPTY map is not the same as a nil one in Go, and reading it as
+		// "nothing trades" would take every currency dark. RampLegs already
+		// refuses to return one, so this is the guard for a future source that
+		// does not — the distinction is too costly to leave to one caller.
+		if len(legs) == 0 {
 			legs = nil
 		}
 	}
