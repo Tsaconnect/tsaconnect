@@ -83,6 +83,17 @@ type BillService struct {
 	fx            FxProvider
 	dataMarkupBps int
 	quoteTTL      time.Duration
+	// disputes stores user complaints. Optional at construction so existing
+	// call sites compile unchanged; without it reporting is dormant rather
+	// than writing somewhere nothing reads.
+	disputes *DisputeService
+}
+
+// SetDisputes wires the shared dispute queue in. Called at boot.
+func (s *BillService) SetDisputes(d *DisputeService) {
+	if s != nil {
+		s.disputes = d
+	}
 }
 
 func NewBillService(db *gorm.DB, vendor billVendor, payer billPayer, price billPriceSource, fx FxProvider, dataMarkupBps int, quoteTTL time.Duration) *BillService {

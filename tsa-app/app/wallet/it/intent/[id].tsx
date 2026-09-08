@@ -20,6 +20,7 @@ import {
 } from '@/services/itApi';
 import { formatTokenAmount } from '@/services/p2p';
 import { formatKobo, isLikelyTxHash, isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
+import { DisputeSection } from '@/components/disputes/DisputeSection';
 // Buy equivalents of the sell mappings above — a stablecoin BUY intent has its
 // own status set (payment_received, awaiting_funds, delivering,
 // buy_awaiting_rate, …) that does not exist on the sell side, so statusToHops
@@ -650,7 +651,9 @@ export default function ITIntentDetail() {
               <Button
                 title="Start again"
                 variant="secondary"
-                onPress={() => router.push(`/wallet/it/sell-stable?asset=${intent.asset}`)}
+                onPress={() =>
+                  router.push(`/wallet/paycrest/sell?asset=${intent.asset}` as never)
+                }
               />
             </Card>
           )
@@ -704,6 +707,18 @@ export default function ITIntentDetail() {
             )}
           </Card>
         ) : null}
+        {/* Same queue as ramp orders and bills. Kept off intents still waiting
+            on the user's money — there is nothing to dispute until something
+            has been sent, and the server refuses those anyway. */}
+        <DisputeSection
+          subjectType="it_intent"
+          subjectId={intent.id}
+          disputable={
+            intent.status !== 'pending_payment' &&
+            intent.status !== 'pending_deposit' &&
+            intent.status !== 'cancelled'
+          }
+        />
       </ScrollView>
     </SafeAreaView>
   );

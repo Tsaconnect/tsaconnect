@@ -1,8 +1,24 @@
 // app/wallet/it/index.tsx
 //
-// Instant Transfer hub: spendable MCGP balance, Buy/Sell entry points, and
-// recent orders (tap for detail).
-import React, { useCallback, useState } from 'react';
+// Instant Transfer hub: buy and sell crypto with your local currency.
+//
+// One asset list rather than "MCGP, plus some others" — the split was the
+// screen's main problem. What differs between the assets is real, though, and
+// the design has to carry it honestly:
+//
+//   MCGP        an entitlement WE hold for the user, at an admin-set rate, so
+//               it has a spendable balance and a single published buy/sell
+//               price worth showing.
+//   USDC/USDT   brokered to the user's OWN wallet. The balance shown is theirs
+//               on-chain, not ours. There is no single rate either — pricing
+//               moves with order size and with which providers are live, so a
+//               figure here could be one the quote screen cannot honour.
+//
+// Currency support is not uniform and the rows say so rather than failing
+// later. Which provider (if any) serves a currency comes from the backend
+// currency registry via getRampCurrencies/rampProviderFor — not hardcoded
+// here, so adding a currency is a backend change, not an app release.
+import React, { useCallback, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -10,10 +26,11 @@ import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
-  AccentCard,
   Button,
   Card,
   Divider,
+  Icon,
+  PickerSheet,
   PressableScale,
   Spinner,
   SummaryCard,
@@ -21,20 +38,31 @@ import {
   Text,
 } from '@/components/ui';
 import CurrencySelector from '@/components/currency/CurrencySelector';
+import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
   getITBalance,
   getITRate,
   listITIntents,
+  rampProviderFor,
   type ITBalance,
   type ITIntent,
   type ITRate,
 } from '@/services/itApi';
+import {
+  listOrders as listPaycrestOrders,
+  statusLabel as paycrestStatusLabel,
+  type PaycrestOrder,
+} from '@/services/paycrestApi';
+import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd } from '@/utils/currencyDisplay';
 
 const fmtMcgp = (wei?: string) => {
   try {
-    return Number(ethers.formatUnits(wei || '0', 18)).toLocaleString(undefined, { maximumFractionDigits: 4 });
+    return Number(ethers.formatUnits(wei || '0', 18)).toLocaleString(undefined, {
+      maximumFractionDigits: 4,
+    });
   } catch {
     return '0';
   }
@@ -53,19 +81,20 @@ const fmtNaira = (kobo?: string) => {
     return '0';
   }
 };
+const fmtToken = (n: number) =>
+  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 4 : 6 });
 
-function statusLabel(status: string, direction: string): string {
+function itStatusLabel(status: string, direction: string): string {
   switch (status) {
     case 'pending_payment':
       return 'Awaiting transfer';
     case 'processing':
       return 'Processing';
     case 'credited':
+    case 'settled':
       return 'Complete';
     case 'debited':
       return 'Payout in progress';
-    case 'settled':
-      return 'Complete';
     case 'awaiting_rate':
       return 'Awaiting rate';
     case 'failed':
@@ -79,33 +108,115 @@ function statusLabel(status: string, direction: string): string {
   }
 }
 
-function intentTitle(i: ITIntent): string {
-  const amt = i.direction === 'buy' ? `₦${fmtNaira(i.ngnKobo)}` : `${fmtMcgp(i.mcgpAmount)} MCGP`;
-  return i.direction === 'buy' ? `Buy · ${amt}` : `Sell · ${amt}`;
+type Activity = {
+  key: string;
+  title: string;
+  status: string;
+  at: string;
+  onPress: () => void;
+};
+
+function itActivity(i: ITIntent): Activity {
+  // A stablecoin intent carries asset/assetAmount and leaves mcgpAmount empty.
+  // Formatting every sell as MCGP rendered those as "Sell · 0 MCGP".
+  const asset = i.asset && i.asset !== 'MCGP' ? i.asset : null;
+  const amt =
+    i.direction === 'buy'
+      ? `₦${fmtNaira(i.ngnKobo)}`
+      : asset
+        ? `${i.assetAmount ?? '—'} ${asset}`
+        : `${fmtMcgp(i.mcgpAmount)} MCGP`;
+  return {
+    key: `it-${i.id}`,
+    title: `${i.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}`,
+    status: itStatusLabel(i.status, i.direction),
+    at: i.createdAt,
+    onPress: () => router.push(`/wallet/it/intent/${i.id}`),
+  };
 }
+
+function paycrestActivity(o: PaycrestOrder): Activity {
+  const amt = o.direction === 'buy' ? `₦${o.amount}` : `${o.tokenAmount ?? o.amount} ${o.token}`;
+  return {
+    key: `pc-${o.id}`,
+    // Name the asset on a buy too, or "Buy · ₦1,000" is indistinguishable from
+    // an MCGP purchase sitting next to it in the same list.
+    title: `${o.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}${
+      o.direction === 'buy' ? ` ${o.token}` : ''
+    }`,
+    status: paycrestStatusLabel(o),
+    at: o.createdAt,
+    onPress: () => router.push(`/wallet/paycrest/order/${o.id}` as never),
+  };
+}
+
+/** One row of the asset list. */
+type AssetRow = {
+  token: string;
+  /** Formatted holding, or null while loading. */
+  balance: string | null;
+  /** Where the balance lives — the distinction matters to the user. */
+  balanceNote: string;
+  /** Price line, only where a single published rate actually exists. */
+  rateLine?: string;
+  onBuy?: () => void;
+  onSell?: () => void;
+  /** Set when the selected currency cannot trade this asset at all. */
+  unavailable?: string;
+};
 
 export default function ITHub() {
   const { colors, spacing } = useTheme();
   const { formatPrice, allRates } = useCurrency();
+  const { address } = useSignableWallet();
+
   const [bal, setBal] = useState<ITBalance | null>(null);
   const [rate, setRate] = useState<ITRate | null>(null);
   const [intents, setIntents] = useState<ITIntent[]>([]);
+  const [orders, setOrders] = useState<PaycrestOrder[]>([]);
+  const [stable, setStable] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
 
   const load = useCallback(async () => {
     setError('');
-    const [b, r, list] = await Promise.all([
-      getITBalance(), getITRate(), listITIntents(),
+    // Each optional source degrades on its own. Paycrest is dormant without a
+    // server key and the balance call needs a wallet on this device — a hub
+    // that fails wholesale because one of those is missing would be worse than
+    // one showing a dash.
+    const [b, r, list, pc, balances] = await Promise.all([
+      getITBalance(),
+      getITRate(),
+      listITIntents(),
+      listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
+      address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
     ]);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
     if (list.success && list.data?.intents) setIntents(list.data.intents);
-    setLoading(false);
-  }, []);
+    setOrders(pc);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+    if (balances?.success && balances.data) {
+      // Stablecoins live on several chains at once, and the user thinks in
+      // "how much USDC do I have", not "how much on Base". Sum across chains.
+      const totals: Record<string, number> = {};
+      for (const row of normalizeWalletBalances(balances.data)) {
+        const sym = (row.symbol || '').toUpperCase();
+        if (sym !== 'USDC' && sym !== 'USDT') continue;
+        totals[sym] = (totals[sym] ?? 0) + (Number(row.balance) || 0);
+      }
+      setStable(totals);
+    }
+    setLoading(false);
+  }, [address]);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load]),
+  );
 
   const spendable = bal
     ? (BigInt(bal.premiumBought || '0') + BigInt(bal.premiumCredited || '0')).toString()
@@ -114,64 +225,184 @@ export default function ITHub() {
   const ngnRate = allRates.NGN?.midRate ?? null;
   const buyUsd = rate ? ngnToUsd(Number(rate.buyRateKobo) / 100, ngnRate) : null;
   const sellUsd = rate ? ngnToUsd(Number(rate.sellRateKobo) / 100, ngnRate) : null;
-  const rateLine = rate
+  const mcgpRateLine = rate
     ? buyUsd != null && sellUsd != null
-      ? `Buy ${formatPrice(buyUsd)} · Sell ${formatPrice(sellUsd)} per MCGP`
-      : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)} per MCGP`
-    : null;
+      ? `Buy ${formatPrice(buyUsd)} · Sell ${formatPrice(sellUsd)}`
+      : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)}`
+    : undefined;
 
-  const recent = intents.filter((i) => !['cancelled'].includes(i.status)).slice(0, 8);
+  // The ramp's settlement currency is deliberately NOT `currency` from
+  // useCurrency() — that context is the price-FORMATTING preference (default
+  // USD, persisted in AsyncStorage, auto-derived from device country), not
+  // the currency an order actually settles in. Before this screen read
+  // `currency` at all, buy/sell here always meant NGN, and deriving the ramp
+  // from the display preference regressed any user who ever switched it to
+  // USD to read prices in dollars: they would see "Not available in USD"
+  // where the working NGN ramp used to be. So it stays a separate, explicit
+  // choice — useRampCurrency persists it under its own AsyncStorage key,
+  // defaults from the user's own country among currencies that actually have
+  // a provider, and CurrencySelector below still governs price formatting
+  // only, never what currency Buy/Sell actually uses.
+  const { code, setCode, options: currencyOptions, currencies } = useRampCurrency();
+  const support = rampProviderFor(currencies, code);
+
+  const assets: AssetRow[] = useMemo(() => {
+    const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
+      const base: AssetRow = {
+        token,
+        balance: loading && !address ? null : fmtToken(stable[token] ?? 0),
+        balanceNote: address ? 'in your wallet' : 'connect a wallet',
+      };
+      if (!address) return { ...base, unavailable: 'Connect a wallet to trade' };
+      switch (support) {
+        case 'paycrest':
+          return {
+            ...base,
+            onBuy: () => router.push(`/wallet/paycrest/buy?asset=${token}&currency=${code}` as never),
+            onSell: () => router.push(`/wallet/paycrest/sell?asset=${token}&currency=${code}` as never),
+          };
+        case 'flutterwave':
+          return {
+            ...base,
+            onBuy: () => router.push(`/wallet/it/buy-stable?asset=${token}&currency=${code}` as never),
+            onSell: () => router.push(`/wallet/it/sell-stable?asset=${token}&currency=${code}` as never),
+          };
+        default:
+          return { ...base, unavailable: `Not available in ${code}` };
+      }
+    };
+    return [
+      {
+        token: 'MCGP',
+        balance: loading ? null : fmtMcgp(spendable),
+        balanceNote: 'spendable',
+        rateLine: mcgpRateLine,
+        onBuy: () => router.push('/wallet/it/buy'),
+        onSell: () => router.push('/wallet/it/sell'),
+      },
+      stableRow('USDC'),
+      stableRow('USDT'),
+    ];
+  }, [loading, address, stable, support, code, spendable, mcgpRateLine]);
+
+  const recent = useMemo(() => {
+    const rows = [
+      ...intents.filter((i) => i.status !== 'cancelled').map(itActivity),
+      ...orders.map(paycrestActivity),
+    ];
+    // Newest first across both systems; an undated row sorts last rather than
+    // jumping to the top on a bad parse.
+    rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+    return rows.slice(0, 8);
+  }, [intents, orders]);
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
+        refreshControl={
+          <RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />
+        }
       >
-        <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+        <View
+          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+        >
+          {/* Only offer a choice when there is one — a picker listing a
+              single currency is noise, and most of the time (today: always)
+              that is exactly what this is. */}
+          {currencyOptions.length > 1 ? (
+            <PressableScale
+              onPress={() => setShowCurrencyPicker(true)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+            >
+              <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                Buy and sell with {code}
+              </Text>
+              <Icon name="chevronDown" size={14} color={colors.textMuted} />
+            </PressableScale>
+          ) : (
+            <Text variant="bodySm" style={{ color: colors.textMuted }}>
+              Buy and sell with {code}
+            </Text>
+          )}
           <CurrencySelector variant="header" />
         </View>
 
-        <AccentCard>
-          <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-            Spendable MCGP
+        {error ? (
+          <Text variant="bodySm" style={{ color: colors.danger }}>
+            {error}
           </Text>
-          <Text variant="title1" weight="700" numeric style={{ color: colors.textPrimary, marginTop: spacing.xs }}>
-            {loading ? '—' : fmtMcgp(spendable)} MCGP
-          </Text>
-          {rateLine ? (
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-              {rateLine}
-            </Text>
-          ) : null}
-        </AccentCard>
+        ) : null}
 
-        {error ? <Text variant="bodySm" style={{ color: colors.danger }}>{error}</Text> : null}
-
-        <View style={{ flexDirection: 'row', gap: spacing.md }}>
-          <View style={{ flex: 1 }}>
-            <Button title="Buy" onPress={() => router.push('/wallet/it/buy')} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button title="Sell" variant="secondary" onPress={() => router.push('/wallet/it/sell')} />
-          </View>
-        </View>
+        {/* One list, so no asset reads as an afterthought. Balance is the
+            anchor on each row; the actions sit under it rather than competing
+            with it for the eye. */}
+        <Card>
+          {assets.map((a, idx) => (
+            <View key={a.token}>
+              {idx > 0 ? <Divider spacing="md" /> : null}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: spacing.md,
+                }}
+              >
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                    {a.token}
+                  </Text>
+                  <Text
+                    variant="title3"
+                    weight="700"
+                    numeric
+                    style={{ color: colors.textPrimary }}
+                  >
+                    {a.balance ?? '—'}
+                  </Text>
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    {a.balanceNote}
+                    {a.rateLine ? ` · ${a.rateLine}` : ''}
+                  </Text>
+                </View>
+                {a.unavailable ? (
+                  <Text
+                    variant="caption"
+                    style={{ color: colors.textMuted, maxWidth: 120, textAlign: 'right' }}
+                  >
+                    {a.unavailable}
+                  </Text>
+                ) : (
+                  <View style={{ flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.xs }}>
+                    <Button title="Buy" size="sm" onPress={a.onBuy} />
+                    <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
+                  </View>
+                )}
+              </View>
+            </View>
+          ))}
+        </Card>
 
         {recent.length > 0 ? (
           <Card>
-            <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.sm }}>
+            <Text
+              variant="title3"
+              weight="700"
+              style={{ color: colors.textPrimary, marginBottom: spacing.sm }}
+            >
               Recent activity
             </Text>
             <SummaryCard>
-              {recent.map((i, idx) => (
-                <View key={i.id}>
+              {recent.map((row, idx) => (
+                <View key={row.key}>
                   {idx > 0 ? <Divider spacing="xs" /> : null}
                   <PressableScale
-                    onPress={() => router.push(`/wallet/it/intent/${i.id}`)}
+                    onPress={row.onPress}
                     accessibilityRole="button"
-                    accessibilityLabel={`${intentTitle(i)}, ${statusLabel(i.status, i.direction)}`}
+                    accessibilityLabel={`${row.title}, ${row.status}`}
                   >
-                    <SummaryRow label={intentTitle(i)} value={statusLabel(i.status, i.direction)} />
+                    <SummaryRow label={row.title} value={row.status} />
                   </PressableScale>
                 </View>
               ))}
@@ -179,12 +410,25 @@ export default function ITHub() {
           </Card>
         ) : !loading ? (
           <Text variant="bodySm" style={{ color: colors.textMuted }}>
-            No Instant Transfer orders yet. Buy opens an order you can track until payment clears.
+            No orders yet. Buying opens an order you can track until payment clears.
           </Text>
         ) : null}
 
         {loading ? <Spinner /> : null}
       </ScrollView>
+
+      <PickerSheet
+        visible={showCurrencyPicker}
+        onClose={() => setShowCurrencyPicker(false)}
+        title="Buy and sell with"
+        items={currencyOptions}
+        selectedId={code}
+        onSelect={(item) => {
+          setCode(item.id);
+          setShowCurrencyPicker(false);
+        }}
+        emptyText="No ramp currencies available."
+      />
     </SafeAreaView>
   );
 }

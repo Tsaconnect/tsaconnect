@@ -13,8 +13,11 @@ npm-debug.*
 
 # Store submission credentials — referenced by eas.json submit profiles.
 google-play-service-account.json
-google-services.json
 GoogleService-Info.plist
+
+# NOTE: google-services.json is intentionally tracked. EAS Build only uploads
+# git-tracked files, and app.json's android.googleServicesFile needs it at build
+# time. It holds no secret — the same values ship inside every published APK.
 *.orig.*
 web-build/
 

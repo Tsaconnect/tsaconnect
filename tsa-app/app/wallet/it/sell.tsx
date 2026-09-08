@@ -178,7 +178,11 @@ export default function ITSell() {
 
   const onAssetChange = (next: string) => {
     if (next === 'USDC' || next === 'USDT') {
-      router.push({ pathname: '/wallet/it/sell-stable', params: { asset: next } });
+      // NGN stablecoin trades route through Paycrest, not Flutterwave: ~0.24-1.1%
+      // against 2.15%, and ~73s against a next-morning settlement window. The
+      // buy-stable / sell-stable screens are deliberately left in place but
+      // unlinked, so reverting is a one-line change if Paycrest misbehaves.
+      router.push(`/wallet/paycrest/sell?asset=${next}` as never);
       return;
     }
     setAsset('MCGP');

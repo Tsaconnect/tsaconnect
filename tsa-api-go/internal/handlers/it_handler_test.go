@@ -60,7 +60,7 @@ func newITTestHandler(t *testing.T) (*ITHandler, *gorm.DB) {
 	})
 	swap.SetOperatorSigner(fakeITReleaseSigner{})
 	it := services.NewITService(db, swap, stubITFx{})
-	return NewITHandler(db, it), db
+	return NewITHandler(db, it, nil), db
 }
 
 func doITSell(h *ITHandler, user *models.User, body map[string]any) *httptest.ResponseRecorder {
@@ -333,5 +333,64 @@ func TestSell_NGNBank_ExplicitCurrency_StillRequiresTenDigitAccountNumber(t *tes
 	resp := decodeITResponse(t, w)
 	if resp["message"] != "bankCode and a 10-digit accountNumber are required" {
 		t.Fatalf("message = %v, want the NUBAN validation message", resp["message"])
+	}
+}
+
+func TestITHandler_Currencies(t *testing.T) {
+	h, db := newITTestHandler(t)
+	if err := db.AutoMigrate(&models.Currency{}); err != nil {
+		t.Fatalf("migrate currencies: %v", err)
+	}
+	// NewCurrencyRegistry seeds the defaults and loads them.
+	h.currencies = services.NewCurrencyRegistry(db)
+
+	// Simulate a row that predates the ramp_provider column: force NGN's column
+	// blank directly in the DB (NewCurrencyRegistry's seed literal sets it, so
+	// without this the handler would read the same "paycrest" value whether it
+	// calls RampProvider(code) or the struct field directly — the assertions
+	// below wouldn't tell the two implementations apart). NGN is the row that
+	// matters: it is the only live currency, so this is the failure mode the
+	// endpoint exists to prevent.
+	if err := db.Model(&models.Currency{}).Where("code = ?", "NGN").Update("ramp_provider", "").Error; err != nil {
+		t.Fatalf("blank NGN ramp_provider: %v", err)
+	}
+	if err := h.currencies.Load(); err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/it/currencies", nil)
+	h.Currencies(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			Code         string `json:"code"`
+			RampProvider string `json:"rampProvider"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byCode := map[string]string{}
+	for _, c := range resp.Data {
+		byCode[c.Code] = c.RampProvider
+	}
+	// NGN's column is blank (forced above), so this only passes if the handler
+	// resolves it through RampProvider's compiled-in-default fallback rather
+	// than reading the empty struct field.
+	if byCode["NGN"] != "paycrest" {
+		t.Errorf("NGN ramp = %q, want paycrest", byCode["NGN"])
+	}
+	// A payout-only currency must be listed, not omitted: the app shows it as
+	// unavailable rather than pretending it does not exist.
+	if _, ok := byCode["USD"]; !ok {
+		t.Error("USD must be listed so the app can say it is unavailable")
+	}
+	if byCode["USD"] != "" {
+		t.Errorf("USD ramp = %q, want empty", byCode["USD"])
 	}
 }

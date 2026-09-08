@@ -20,7 +20,7 @@ import { useThemeControls, useTheme, type SchemePreference } from "@/theme";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
-  authenticateWithBiometric,
+  authenticateWithBiometric, authenticateWithDeviceFallback,
 } from "@/services/localAuth";
 
 interface SettingsItem {
@@ -67,17 +67,10 @@ const SettingsScreen = () => {
       const success = await authenticateWithBiometric();
       if (success) return true;
     }
-    // On Android, Alert.prompt doesn't exist — use biometric with device fallback
+    // On Android, Alert.prompt doesn't exist — use the system biometric prompt,
+    // which includes the device PIN/pattern fallback.
     if (pinSet) {
-      // Use system biometric prompt which includes device PIN/pattern fallback
-      const result = await import('expo-local-authentication').then(m =>
-        m.authenticateAsync({
-          promptMessage: 'Verify your identity',
-          fallbackLabel: 'Use device passcode',
-          disableDeviceFallback: false,
-        })
-      );
-      return result.success;
+      return authenticateWithDeviceFallback('Verify your identity');
     }
     return true;
   };
@@ -107,21 +100,21 @@ const SettingsScreen = () => {
   };
 
   const handleToggleBiometric = async () => {
-    // Verify with biometric before toggling
-    if (bioEnabled) {
-      // Disabling — verify with biometric first
-      const success = await authenticateWithBiometric();
-      if (!success) {
-        Alert.alert('Verification Failed', `${bioType} verification required to disable.`);
-        return;
-      }
-    } else {
-      // Enabling — verify biometric works
-      const success = await authenticateWithBiometric();
-      if (!success) {
-        Alert.alert('Verification Failed', `Could not verify ${bioType}. Please try again.`);
-        return;
-      }
+    // Verify with biometric before toggling, both to enable and to disable
+    let success = false;
+    try {
+      success = await authenticateWithBiometric();
+    } catch {
+      success = false;
+    }
+    if (!success) {
+      Alert.alert(
+        'Verification Failed',
+        bioEnabled
+          ? `${bioType} verification required to disable.`
+          : `Could not verify ${bioType}. Please try again.`
+      );
+      return;
     }
     const newVal = !bioEnabled;
     await setBiometricEnabled(newVal);

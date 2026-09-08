@@ -975,24 +975,45 @@ func (h *Handlers) GetSupportedTokens(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Supported tokens retrieved", result)
 }
 
-// seedDefaultTokens inserts the default token set into the database.
-func seedDefaultTokens() []models.SupportedToken {
-	type tokenDef struct {
-		Symbol    string
-		Name      string
-		Decimals  int
-		IconColor string
-		Chains    []string
-	}
+// tokenDef is one row of the compiled-in default token set — the definitive
+// list of which chains a symbol is supposed to be readable on. Both
+// seedDefaultTokens (first-time setup) and ensureSupportedTokenChains
+// (backfill for rows that already exist) read from defaultTokenDefs so the
+// two never drift apart from each other again the way the seed once drifted
+// from config.go.
+type tokenDef struct {
+	Symbol    string
+	Name      string
+	Decimals  int
+	IconColor string
+	Chains    []string
+}
 
-	defaults := []tokenDef{
-		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc"}},
-		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc"}},
+// defaultTokenDefs is the compiled-in default token set.
+//
+// USDT/USDC listed only "sonic", "bsc" until 2026-09 — commit 25d14842 added
+// Arbitrum/Base token addresses to config.go's network config, but nobody
+// updated this list to match. GetWalletBalances gates its per-chain ERC-20
+// lookup on a token's Chains membership (see the loop below), so on Base/
+// Arbitrum the lookup was never attempted at all — not "$0", just silently
+// absent from the response. A wallet holding 1.29 USDC split across
+// Base/Arbitrum/Sonic showed 0.2 (the Sonic leg alone) on the IT hub because
+// of exactly this. Keep this list a superset of every chain config.go has a
+// "<chain>:<symbol>" address for.
+func defaultTokenDefs() []tokenDef {
+	return []tokenDef{
+		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc", "arbitrum", "base"}},
+		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc", "arbitrum", "base"}},
 		{"MCGP", "MCG Protocol", 18, "#FFD700", []string{"sonic"}},
 		// Robinhood Chain's canonical stablecoin (Paxos Global Dollar). Decimals
 		// are read on-chain at balance time; 6 here is the fallback.
 		{"USDG", "Global Dollar", 6, "#00C805", []string{"robinhood"}},
 	}
+}
+
+// seedDefaultTokens inserts the default token set into the database.
+func seedDefaultTokens() []models.SupportedToken {
+	defaults := defaultTokenDefs()
 
 	var created []models.SupportedToken
 	for _, d := range defaults {
@@ -1013,6 +1034,66 @@ func seedDefaultTokens() []models.SupportedToken {
 		created = append(created, token)
 	}
 	return created
+}
+
+// EnsureSupportedTokenChains backfills supported_tokens.chains for rows that
+// already exist, adding any chain defaultTokenDefs lists for that symbol but
+// the row doesn't have yet. Called once at boot (see cmd/server/main.go),
+// after AutoMigrate.
+//
+// seedDefaultTokens only fires when the table is completely empty, so a
+// symbol added later to defaultTokenDefs' chain list (as arbitrum/base were
+// for USDT/USDC) never reaches a production row on its own — the row was
+// created back when the list was shorter and nothing ever revisits it. This
+// is deliberately additive-only (union, never replace or remove): it treats
+// defaultTokenDefs as a floor, not a source of truth to overwrite from, so
+// hitting this after an operator has manually curated a row's Chains (there's
+// no admin UI for it today, but the column is data, not code) can only ever
+// add a chain a token is genuinely deployed on, never drop one.
+func EnsureSupportedTokenChains() {
+	if config.DB == nil {
+		return
+	}
+	for _, d := range defaultTokenDefs() {
+		var tok models.SupportedToken
+		if err := config.DB.Where("symbol = ?", d.Symbol).First(&tok).Error; err != nil {
+			// Not created yet (fresh DB) — seedDefaultTokens' job, not this one.
+			continue
+		}
+
+		var have []string
+		_ = json.Unmarshal(tok.Chains, &have)
+		seen := make(map[string]bool, len(have))
+		for _, c := range have {
+			seen[c] = true
+		}
+
+		merged := have
+		changed := false
+		for _, c := range d.Chains {
+			if !seen[c] {
+				merged = append(merged, c)
+				seen[c] = true
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+
+		chainsJSON, err := json.Marshal(merged)
+		if err != nil {
+			log.Printf("[wallet] failed to marshal backfilled chains for %s: %v", d.Symbol, err)
+			continue
+		}
+		if err := config.DB.Model(&models.SupportedToken{}).
+			Where("id = ?", tok.ID).
+			Update("chains", chainsJSON).Error; err != nil {
+			log.Printf("[wallet] failed to backfill chains for %s: %v", d.Symbol, err)
+			continue
+		}
+		log.Printf("[wallet] backfilled supported_tokens chains for %s -> %v", d.Symbol, merged)
+	}
 }
 
 // ConfirmSeedPhraseBackup handles POST /api/wallet/seed-phrase-backed-up.

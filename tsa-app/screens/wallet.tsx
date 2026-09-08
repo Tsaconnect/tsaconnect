@@ -48,6 +48,7 @@ import {
 import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
 import { loadSolanaWallet } from '../services/chains/solanaWallet';
+import { loadSuiWallet } from '../services/chains/suiWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { type SpotCategory } from '../services/spotApi';
 import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
@@ -560,7 +561,7 @@ const ManageTokensModal: React.FC<{
   onImport: () => void;
 }> = ({ visible, assets, hiddenTokens, tokenKey, onToggle, onClose, onImport }) => {
   const [search, setSearch] = useState('');
-  const [chainFilter, setChainFilter] = useState<'all' | ChainKey>('all');
+  const [chainFilter, setChainFilter] = useState<'all' | AnyChainKey>('all');
   const insets = useSafeAreaInsets();
   const { colors, spacing, radius, fonts, type } = useTheme();
 
@@ -624,6 +625,20 @@ const ManageTokensModal: React.FC<{
               onPress={() => setChainFilter(key)}
             />
           ))}
+          {NONEVM_CHAIN_KEYS.map((key) => {
+            const chain = getChainDisplay(key);
+            if (!chain) return null;
+            return (
+              <ManageChip
+                key={key}
+                active={chainFilter === key}
+                label={chain.shortName}
+                iconUrl={chain.iconUrl}
+                iconColor={chain.iconColor}
+                onPress={() => setChainFilter(key)}
+              />
+            );
+          })}
         </ScrollView>
 
         <View
@@ -1014,6 +1029,43 @@ const WalletScreen: React.FC = () => {
     return out;
   }, [tokenList]);
 
+  const loadSuiAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
+    const out: WalletAsset[] = [];
+    // Non-EVM (Sui): same seed, self-registering, and SUI shows as a native
+    // token (visible at 0 in the zero-balance section) so Sui always appears;
+    // held coin types ride alongside. loadSuiWallet already swallows a dormant
+    // backend and yields an address with no rows, so a chain that is switched
+    // off costs the user an empty section rather than an error.
+    try {
+      const sui = await loadSuiWallet(addr || undefined);
+      if (sui) {
+        const suiChain = getChainDisplay('sui');
+        let uId = 1;
+        for (const row of sui.balances) {
+          const isNative = row.symbol === 'SUI';
+          out.push({
+            id: `sui-${uId++}`,
+            symbol: row.symbol,
+            name: isNative ? 'Sui' : row.name,
+            balance: parseFloat(row.balance) || 0,
+            usdValue: parseFloat(row.usdValue) || 0,
+            usdPrice: row.usdPrice || 0,
+            iconColor: suiChain?.iconColor || '#4DA2FF',
+            iconUrl: isNative ? suiChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
+            contractAddress: row.contractAddress || undefined,
+            decimals: row.decimals,
+            details: {
+              type: isNative ? 'Native Token' : 'Token',
+              chain: 'Sui',
+              chainKey: 'sui',
+            },
+          });
+        }
+      }
+    } catch { /* chain unavailable — skip Sui */ }
+    return out;
+  }, [tokenList]);
+
   const loadPremiumAssets = useCallback(async (): Promise<WalletAsset[]> => {
     const out: WalletAsset[] = [];
     // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
@@ -1125,6 +1177,7 @@ const WalletScreen: React.FC = () => {
       run('tron', () => loadTronAssets(addr)),
       run('btc', () => loadBtcAssets(addr)),
       run('solana', () => loadSolanaAssets(addr)),
+      run('sui', () => loadSuiAssets(addr)),
       run('premium', loadPremiumAssets),
     ]);
     if (!isCurrent()) return;
@@ -1157,7 +1210,8 @@ const WalletScreen: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     buildNativeAssets, customTokens, network,
-    loadEvmAssets, loadTronAssets, loadBtcAssets, loadSolanaAssets, loadPremiumAssets,
+    loadEvmAssets, loadTronAssets, loadBtcAssets, loadSolanaAssets, loadSuiAssets,
+    loadPremiumAssets,
   ]);
 
   // Focus-driven, not mount-only. This screen is a TAB: creating a wallet ends

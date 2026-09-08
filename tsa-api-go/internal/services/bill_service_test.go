@@ -241,6 +241,15 @@ func newBillServiceRig(t *testing.T) *billRig {
 	price := &fakeBillPrice{usdcPerMcgp: big.NewInt(18_000)}
 	fx := &fakeBillFx{rate: 1500}
 	svc := NewBillService(db, vendor, payer, price, fx, 300, 5*time.Minute)
+	// Reporting a bill order writes to the shared disputes table now, so the
+	// bills rig wires the same collaborator main.go does. These tests are what
+	// prove the old report API still behaves identically over the new storage.
+	if err := db.AutoMigrate(&models.Dispute{}); err != nil {
+		t.Fatalf("migrate disputes: %v", err)
+	}
+	disputes := NewDisputeService(db, nil)
+	disputes.RegisterSubject(models.DisputeSubjectBillOrder, BillDisputeSubject(db))
+	svc.SetDisputes(disputes)
 	return &billRig{svc: svc, vendor: vendor, payer: payer, db: db, userID: uuid.New()}
 }
 

@@ -449,3 +449,36 @@ export const getStableBuyChains = (asset: string) =>
  *  until the intent expires 24h later. */
 export const cancelStableBuy = (intentId: string) =>
   req<{ cancelled: boolean }>('POST', `/it/stable/buy/${intentId}/cancel`);
+
+// ──────────────────────────── currency ramp table ─────────────────────────
+//
+// Source of truth for which currency routes to which provider. Replaces a
+// hardcoded NGN/GHS switch in app/wallet/it/index.tsx — adding a currency is
+// now a backend registry change, not an app release.
+
+export type RampProvider = 'paycrest' | 'flutterwave' | '';
+
+/** One currency the ramp knows about. rampProvider is '' when the stablecoin
+ *  ramp is unavailable in it — the app shows that rather than hiding it. */
+export interface RampCurrency {
+  code: string;
+  exponent: number;
+  rampProvider: RampProvider;
+  depositEnabled: boolean;
+  payoutEnabled: boolean;
+  minPayoutMinor: number;
+}
+
+export async function getRampCurrencies(): Promise<RampCurrency[]> {
+  const res = await req<RampCurrency[]>('GET', '/it/currencies');
+  return res.success && res.data ? res.data : [];
+}
+
+/** Who serves the ramp for a currency, or '' for none.
+ *
+ *  Defaults to '' for an unknown code and for an empty table, so a failed or
+ *  in-flight fetch shows "unavailable" rather than offering a trade the
+ *  backend would refuse. */
+export function rampProviderFor(list: RampCurrency[], code: string): RampProvider {
+  return list.find((c) => c.code === code)?.rampProvider ?? '';
+}

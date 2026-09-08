@@ -27,6 +27,7 @@ const WalletLayout = () => {
       <Stack.Screen name="mcgp" options={{ headerShown: false }} />
       <Stack.Screen name="spot-trade" options={{ title: 'Spot Trade' }} />
       <Stack.Screen name="it" options={{ headerShown: false }} />
+      <Stack.Screen name="paycrest" options={{ headerShown: false }} />
       <Stack.Screen name="seedphrase" options={{ title: 'Seed Phrase' }} />
       <Stack.Screen name="history" options={{ title: 'Transaction History' }} />
       <Stack.Screen name="tokens" options={{ title: 'All Tokens' }} />

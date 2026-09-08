@@ -557,6 +557,150 @@ func TestGetSupportedTokens_AutoSeed(t *testing.T) {
 	}
 }
 
+// TestSeedDefaultTokens_StablecoinsCoverEveryConfiguredChain guards against
+// the exact drift that caused the IT hub to show 0.2 USDC for a wallet
+// holding 1.29 (split across Base/Arbitrum/Sonic): config.go grew Arbitrum
+// and Base token addresses (commit 25d14842) but the USDT/USDC seed rows
+// stayed at ["sonic", "bsc"], so GetWalletBalances' per-chain lookup — gated
+// on SupportedToken.Chains — never ran on Base/Arbitrum for those symbols.
+func TestSeedDefaultTokens_StablecoinsCoverEveryConfiguredChain(t *testing.T) {
+	setupTestDB(t)
+
+	created := seedDefaultTokens()
+
+	want := map[string][]string{
+		"USDT": {"sonic", "bsc", "arbitrum", "base"},
+		"USDC": {"sonic", "bsc", "arbitrum", "base"},
+	}
+	found := map[string]bool{}
+	for _, tok := range created {
+		wantChains, ok := want[tok.Symbol]
+		if !ok {
+			continue
+		}
+		found[tok.Symbol] = true
+		var chains []string
+		if err := json.Unmarshal(tok.Chains, &chains); err != nil {
+			t.Fatalf("failed to unmarshal chains for %s: %v", tok.Symbol, err)
+		}
+		have := map[string]bool{}
+		for _, c := range chains {
+			have[c] = true
+		}
+		for _, c := range wantChains {
+			if !have[c] {
+				t.Errorf("%s: expected chain %q in seeded Chains, got %v", tok.Symbol, c, chains)
+			}
+		}
+	}
+	for sym := range want {
+		if !found[sym] {
+			t.Errorf("expected seedDefaultTokens to create a %s row", sym)
+		}
+	}
+}
+
+// ---------- EnsureSupportedTokenChains ----------
+
+// TestEnsureSupportedTokenChains_BackfillsMissingChains reproduces the
+// production state directly: a supported_tokens row created back when the
+// seed only knew about sonic/bsc, before Arbitrum/Base were added to
+// config.go. EnsureSupportedTokenChains must add the missing chains so
+// GetWalletBalances stops silently skipping them.
+func TestEnsureSupportedTokenChains_BackfillsMissingChains(t *testing.T) {
+	db := setupTestDB(t)
+
+	staleChains, _ := json.Marshal([]string{"sonic", "bsc"})
+	stale := models.SupportedToken{
+		ID:        uuid.New(),
+		Symbol:    "USDC",
+		Name:      "USD Coin",
+		Decimals:  6,
+		IconColor: "#2775CA",
+		Chains:    staleChains,
+		IsActive:  true,
+	}
+	if err := db.Create(&stale).Error; err != nil {
+		t.Fatalf("failed to seed stale row: %v", err)
+	}
+
+	EnsureSupportedTokenChains()
+
+	var got models.SupportedToken
+	if err := db.Where("symbol = ?", "USDC").First(&got).Error; err != nil {
+		t.Fatalf("failed to reload row: %v", err)
+	}
+	var chains []string
+	if err := json.Unmarshal(got.Chains, &chains); err != nil {
+		t.Fatalf("failed to unmarshal chains: %v", err)
+	}
+	have := map[string]bool{}
+	for _, c := range chains {
+		have[c] = true
+	}
+	for _, want := range []string{"sonic", "bsc", "arbitrum", "base"} {
+		if !have[want] {
+			t.Errorf("expected backfilled chains to include %q, got %v", want, chains)
+		}
+	}
+
+	// The row's other fields — and its ID — must be untouched.
+	if got.ID != stale.ID || got.Name != "USD Coin" || got.Decimals != 6 {
+		t.Errorf("backfill must only touch the chains column, got %+v", got)
+	}
+}
+
+// TestEnsureSupportedTokenChains_PreservesOperatorAddedChain checks the
+// union is genuinely additive: a chain already present that ISN'T in
+// defaultTokenDefs (there's no admin UI for this today, but the column is
+// still just data) must survive the backfill rather than being replaced by
+// the compiled-in list.
+func TestEnsureSupportedTokenChains_PreservesOperatorAddedChain(t *testing.T) {
+	db := setupTestDB(t)
+
+	chainsJSON, _ := json.Marshal([]string{"sonic", "bsc", "polygon"})
+	tok := models.SupportedToken{
+		ID:        uuid.New(),
+		Symbol:    "USDT",
+		Name:      "Tether",
+		Decimals:  6,
+		IconColor: "#26A17B",
+		Chains:    chainsJSON,
+		IsActive:  true,
+	}
+	if err := db.Create(&tok).Error; err != nil {
+		t.Fatalf("failed to seed row: %v", err)
+	}
+
+	EnsureSupportedTokenChains()
+
+	var got models.SupportedToken
+	if err := db.Where("symbol = ?", "USDT").First(&got).Error; err != nil {
+		t.Fatalf("failed to reload row: %v", err)
+	}
+	var chains []string
+	json.Unmarshal(got.Chains, &chains)
+	have := map[string]bool{}
+	for _, c := range chains {
+		have[c] = true
+	}
+	if !have["polygon"] {
+		t.Errorf("expected the pre-existing 'polygon' chain to survive the backfill, got %v", chains)
+	}
+	if !have["arbitrum"] || !have["base"] {
+		t.Errorf("expected arbitrum/base to be added by the backfill, got %v", chains)
+	}
+}
+
+// TestEnsureSupportedTokenChains_NoRowsIsNoOp guards against a boot-time
+// panic/error when the table has no matching rows yet (fresh DB, before
+// seedDefaultTokens has ever run).
+func TestEnsureSupportedTokenChains_NoRowsIsNoOp(t *testing.T) {
+	setupTestDB(t)
+
+	EnsureSupportedTokenChains() // must not panic or error
+}
+
 // ---------- parseTokenAmount ----------
 
 func TestParseTokenAmount(t *testing.T) {

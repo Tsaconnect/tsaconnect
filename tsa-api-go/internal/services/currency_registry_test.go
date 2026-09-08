@@ -30,6 +30,7 @@ func newCurrencyTestDB(t *testing.T) *gorm.DB {
 		is_base_float        BOOLEAN NOT NULL DEFAULT 0,
 		has_market_anchor    BOOLEAN NOT NULL DEFAULT 0,
 		min_payout_minor     INTEGER NOT NULL DEFAULT 0,
+		ramp_provider        TEXT NOT NULL DEFAULT '',
 		created_at           DATETIME,
 		updated_at           DATETIME
 	)`).Error; err != nil {
@@ -225,5 +226,75 @@ func TestRegistryGatesPayout_NotJustTheCatalog(t *testing.T) {
 	if _, err := reg.RequirePayout("GHS"); !errors.Is(err, ErrCurrencyNotPayable) {
 		t.Errorf("RequirePayout(GHS) = %v, want ErrCurrencyNotPayable — disabling a currency "+
 			"in the registry must stop payouts even while it remains in the catalog", err)
+	}
+}
+
+func TestCurrencyRegistry_RampProviderFallsBackWhenColumnEmpty(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	// A row that predates the column: ramp_provider is the zero value.
+	if err := db.Create(&models.Currency{Code: "NGN", Exponent: 2,
+		DepositEnabled: true, PayoutEnabled: true}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	r := NewCurrencyRegistry(db)
+	if err := r.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// An empty column must NOT read as "no ramp" — that would take the live
+	// currency offline the moment the column is added.
+	if got := r.RampProvider("NGN"); got != RampProviderPaycrest {
+		t.Fatalf("RampProvider(NGN) = %q, want %q from the compiled-in default", got, RampProviderPaycrest)
+	}
+	// An explicit value in the column wins over the default.
+	if err := db.Model(&models.Currency{}).Where("code = ?", "NGN").
+		Update("ramp_provider", RampProviderFlutterwave).Error; err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := r.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := r.RampProvider("NGN"); got != RampProviderFlutterwave {
+		t.Fatalf("RampProvider(NGN) = %q, want the column value to win", got)
+	}
+	// A currency with no ramp anywhere stays empty.
+	if got := r.RampProvider("USD"); got != RampProviderNone {
+		t.Fatalf("RampProvider(USD) = %q, want none", got)
+	}
+	// An unknown code is not an error, just no ramp.
+	if got := r.RampProvider("XYZ"); got != RampProviderNone {
+		t.Fatalf("RampProvider(XYZ) = %q, want none", got)
+	}
+}
+
+func TestDefaultCurrencies_EastAfricanCorridors(t *testing.T) {
+	byCode := map[string]models.Currency{}
+	for _, c := range DefaultCurrencies() {
+		byCode[c.Code] = c
+	}
+	for _, code := range []string{"KES", "UGX", "TZS"} {
+		c, ok := byCode[code]
+		if !ok {
+			t.Fatalf("%s missing from DefaultCurrencies", code)
+		}
+		// RampProvider must be empty (RampProviderNone), NOT paycrest: buy.tsx
+		// and sell.tsx are not currency-aware (they call getQuote/createBuy/
+		// createSell with no currency, which server-defaults to NGN), so
+		// advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
+		// user a naira order — a ₦ amount field, a Nigerian refund-bank
+		// picker, and instructions to wire naira to a Nigerian account. The
+		// row itself stays a valid payout currency; only the ramp claim goes.
+		if c.RampProvider != RampProviderNone {
+			t.Errorf("%s ramp = %q, want none (screens are NGN-only)", code, c.RampProvider)
+		}
+		if !c.PayoutEnabled {
+			t.Errorf("%s must be payout-enabled — Paycrest pays out in it", code)
+		}
+		// DepositEnabled means "Flutterwave has a VA product here". Nothing
+		// uses it for these currencies, and a true we have never exercised is
+		// a claim nobody has verified.
+		if c.DepositEnabled {
+			t.Errorf("%s DepositEnabled must be false; nothing exercises FW VAs there", code)
+		}
 	}
 }

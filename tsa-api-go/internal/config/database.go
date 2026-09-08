@@ -124,9 +124,11 @@ func AutoMigrate() error {
 		&models.BillOrder{},
 		// User complaints about bill orders, reviewed by admins. One per order.
 		&models.BillReport{},
+		&models.Dispute{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},
+		&models.PaycrestOrderRecord{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse

@@ -15,19 +15,12 @@ import React, {
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CurrencyConfig, DEFAULT_CURRENCY } from "../constants/currencies";
+import { COUNTRY_CURRENCY_MAP } from "../constants/countryCurrency";
 import { formatMicroPrice, isMicroPrice } from "../utils/formatPrice";
 import { exchangeRateService, P2PRate } from "../services/exchangeRateApi";
 import { useAuth } from "../AuthContext/AuthContext";
 
 const SELECTED_CURRENCY_KEY = "selected_currency";
-
-const COUNTRY_CURRENCY_MAP: Record<string, string> = {
-  NG: "NGN", GH: "GHS", KE: "KES", ZA: "ZAR", UG: "UGX", TZ: "TZS", RW: "RWF",
-  SN: "XOF", CI: "XOF", ML: "XOF", BF: "XOF", BJ: "XOF", TG: "XOF", NE: "XOF",
-  CM: "XAF", CF: "XAF", TD: "XAF", GQ: "XAF", GA: "XAF", CG: "XAF",
-  GB: "GBP", US: "USD",
-  DE: "EUR", FR: "EUR", IT: "EUR", ES: "EUR", NL: "EUR", BE: "EUR",
-};
 
 function rateToConfig(rate: P2PRate): CurrencyConfig {
   return {

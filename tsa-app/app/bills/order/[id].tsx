@@ -11,11 +11,19 @@ import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
+  disputeStatusLabel,
+  fileDispute,
+  getDisputeForSubject,
+  isDisputeOpen,
+  type Dispute,
+} from '@/services/disputesApi';
+import {
   Badge,
   Button,
   Card,
   Divider,
   Input,
+  PhotoPickerTile,
   RadioGroup,
   Sheet,
   Spinner,
@@ -26,10 +34,7 @@ import {
 } from '@/components/ui';
 import {
   getBillOrder,
-  getBillOrderReport,
-  reportBillOrder,
   type BillOrder,
-  type BillReport,
 } from '@/services/billsApi';
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -137,13 +142,14 @@ export default function BillOrderDetail() {
   const toast = useToast();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [order, setOrder] = useState<BillOrder | null>(null);
-  const [report, setReport] = useState<BillReport | null>(null);
+  const [report, setReport] = useState<Dispute | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const [reporting, setReporting] = useState(false);
   const [reason, setReason] = useState<ReportReason | null>(null);
   const [details, setDetails] = useState('');
+  const [evidence, setEvidence] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(async () => {
@@ -153,12 +159,18 @@ export default function BillOrderDetail() {
       return;
     }
     setError('');
-    const [o, r] = await Promise.all([getBillOrder(id), getBillOrderReport(id)]);
+    // A bill report is a dispute now (one operator queue across every order
+    // type), so this reads the shared endpoint. The /bills report routes still
+    // exist and still work — they are what app builds already installed call.
+    const [o, r] = await Promise.all([
+      getBillOrder(id),
+      getDisputeForSubject('bill_order', id),
+    ]);
     if (o.success && o.data) setOrder(o.data);
     else setError(o.message || 'Order not found');
-    // "No report yet" is the normal case and comes back success:false — only a
-    // successful fetch carries a report.
-    setReport(r.success && r.data ? r.data : null);
+    // "No dispute yet" is the normal case and resolves to null; only a real
+    // failure leaves the previous value alone.
+    if (r.success) setReport(r.data ?? null);
     setLoading(false);
   }, [id]);
 
@@ -191,18 +203,24 @@ export default function BillOrderDetail() {
     const text = [REASON_SENTENCE[reason], details.trim()].filter(Boolean).join(' ');
     if (!text) return;
     setSubmitting(true);
-    const r = await reportBillOrder(order.id, text);
+    const r = await fileDispute({
+      subjectType: 'bill_order',
+      subjectId: order.id,
+      reason: text,
+      ...(evidence.length > 0 ? { evidenceUrls: evidence } : {}),
+    });
     setSubmitting(false);
     if (r.success && r.data) {
       setReport(r.data);
       setReporting(false);
       setReason(null);
       setDetails('');
+      setEvidence([]);
       toast.success('Report submitted — we’ll look into it');
     } else {
       toast.error(r.message || 'Could not submit the report');
     }
-  }, [order, reason, details, toast]);
+  }, [order, reason, details, evidence, toast]);
 
   if (loading && !order) {
     return (
@@ -328,9 +346,9 @@ export default function BillOrderDetail() {
                 </Text>
               </View>
               <Badge
-                label={report.status === 'open' ? 'Under review' : report.status === 'resolved' ? 'Resolved' : 'Rejected'}
+                label={disputeStatusLabel(report.status)}
                 color={
-                  report.status === 'open'
+                  isDisputeOpen(report.status)
                     ? colors.warning
                     : report.status === 'resolved'
                       ? colors.success
@@ -341,7 +359,7 @@ export default function BillOrderDetail() {
             <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               {report.reason}
             </Text>
-            {report.status !== 'open' && report.resolution ? (
+            {!isDisputeOpen(report.status) && report.resolution ? (
               <>
                 <Divider spacing="sm" />
                 <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
@@ -352,9 +370,11 @@ export default function BillOrderDetail() {
                 </Text>
               </>
             ) : null}
-            {report.status === 'open' ? (
+            {isDisputeOpen(report.status) ? (
               <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-                Our team is looking into this. The outcome will appear here.
+                {report.status === 'escalated'
+                  ? 'We have taken this to the payment provider. The outcome will appear here.'
+                  : 'Our team is looking into this. The outcome will appear here.'}
               </Text>
             ) : null}
           </Card>
@@ -394,6 +414,12 @@ export default function BillOrderDetail() {
             maxLength={500}
             counter
             placeholder="Anything that helps us trace it"
+          />
+          <PhotoPickerTile
+            label="Evidence (optional)"
+            value={evidence}
+            onChange={setEvidence}
+            max={4}
           />
           <Button
             title="Submit report"

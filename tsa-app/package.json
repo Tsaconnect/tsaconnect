@@ -4,6 +4,7 @@
   "scripts": {
     "start": "expo start",
     "restart": "expo start --dev-client",
+    "dev:android": "adb reverse tcp:8081 tcp:8081; expo start --dev-client --scheme tsaconnect --localhost",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",
     "ios": "expo run:ios",
@@ -43,6 +44,7 @@
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.13",
+    "expo-dev-client": "~6.0.21",
     "expo-device": "~8.0.10",
     "expo-file-system": "~19.0.21",
     "expo-font": "~14.0.11",

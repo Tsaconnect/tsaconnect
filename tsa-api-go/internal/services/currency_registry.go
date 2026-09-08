@@ -26,6 +26,26 @@ var (
 	ErrCurrencyNotPayable     = errors.New("currency is not enabled for payouts")
 )
 
+// Ramp providers. Empty means the stablecoin ramp is unavailable in that
+// currency and the app says so.
+const (
+	RampProviderPaycrest    = "paycrest"
+	RampProviderFlutterwave = "flutterwave"
+	RampProviderNone        = ""
+)
+
+// defaultRampProviders is the compiled-in fallback for a row whose
+// ramp_provider column is empty — which every row is immediately after the
+// column is added, since seedMissing only ever INSERTs.
+//
+// This is what makes the deploy safe in any order: without it, adding the
+// column would take NGN offline until a backfill ran, and a backfill that has
+// to run BEFORE the code is a deploy hazard nobody remembers at 3am.
+var defaultRampProviders = map[string]string{
+	"NGN": RampProviderPaycrest,
+	"GHS": RampProviderFlutterwave,
+}
+
 // DefaultCurrencies is the seed set. See the multi-currency spec §4.1.
 //
 // Every entry is Exponent 2, which is not a coincidence: Flutterwave's
@@ -48,6 +68,7 @@ func DefaultCurrencies() []models.Currency {
 			IsBaseFloat:        true,
 			HasMarketAnchor:    true,
 			MinPayoutMinor:     10000, // ₦100 — FW TRANSFER_AMOUNT_LIMIT
+			RampProvider:       RampProviderPaycrest,
 		},
 		{
 			// Ghana: the second live rail. FW documents NO identity document
@@ -60,7 +81,24 @@ func DefaultCurrencies() []models.Currency {
 			IsBaseFloat:        true,
 			HasMarketAnchor:    true,
 			MinPayoutMinor:     0, // unconfirmed — sandbox-verify before enabling GHS payouts
+			RampProvider:       RampProviderFlutterwave,
 		},
+		// East African corridors. Payout-enabled because Paycrest pays out in
+		// them, but RampProvider is deliberately left empty (RampProviderNone) —
+		// buy.tsx/sell.tsx are not currency-aware yet (they call getQuote and
+		// createBuy/createSell with no currency, which server-defaults to NGN),
+		// so advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
+		// user a naira order: a ₦ amount field, a Nigerian refund-bank picker,
+		// and instructions to wire naira to a Nigerian account. The row stays —
+		// it is a valid payout currency and the per-currency institution list
+		// already works — only the ramp claim goes. Enabling it later is one
+		// UPDATE plus currency-aware screens.
+		//
+		// MinPayoutMinor is 0 (ungated) because no floor has been confirmed for
+		// these rails — same position GHS is in. Confirm before volume.
+		{Code: "KES", Exponent: 2, PayoutEnabled: true, HasMarketAnchor: true},
+		{Code: "UGX", Exponent: 0, PayoutEnabled: true},
+		{Code: "TZS", Exponent: 2, PayoutEnabled: true},
 		// USD/EUR/GBP: payout-only, permanently. Flutterwave has no virtual
 		// account product for them, so DepositEnabled can never become true
 		// here — a balance in these arrives by settlement or treasury wire.
@@ -193,6 +231,28 @@ func (r *CurrencyRegistry) RequirePayout(code string) (models.Currency, error) {
 		return models.Currency{}, fmt.Errorf("%w: %s", ErrCurrencyNotPayable, row.Code)
 	}
 	return row, nil
+}
+
+// RampProvider names who serves the stablecoin ramp for a currency, or
+// RampProviderNone.
+//
+// An explicit column value always wins, so an operator can disable a currency
+// by setting it to something unrecognised without a deploy. An EMPTY column
+// resolves against the compiled-in default instead of being read literally —
+// see defaultRampProviders for why.
+//
+// An unknown currency is not an error here: the caller is asking "can I ramp
+// in this?", and "no" is a complete answer.
+func (r *CurrencyRegistry) RampProvider(code string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	row, err := r.Get(code)
+	if err != nil {
+		return RampProviderNone
+	}
+	if p := strings.TrimSpace(row.RampProvider); p != "" {
+		return p
+	}
+	return defaultRampProviders[code]
 }
 
 // All returns every registry row, for admin listings and diagnostics.

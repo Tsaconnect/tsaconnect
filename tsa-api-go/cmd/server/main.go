@@ -186,6 +186,12 @@ func main() {
 		log.Printf("Warning: Cloudinary initialization failed: %v", err)
 	}
 
+	// Backfill supported_tokens.chains for rows created before a chain was
+	// added to a token's default set (e.g. USDT/USDC predate Arbitrum/Base
+	// support) — additive-only, safe to run on every boot regardless of
+	// migrate mode. See EnsureSupportedTokenChains for the bug this fixes.
+	handlers.EnsureSupportedTokenChains()
+
 	// Initialize services
 	priceService := services.NewPriceService()
 	blockchainService := services.NewBlockchainService(cfg)
@@ -251,7 +257,7 @@ func main() {
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itService.SetCurrencyRegistry(currencyRegistry)
-				itHandler = handlers.NewITHandler(config.DB, itService)
+				itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}
 		} else {
@@ -1096,8 +1102,66 @@ func main() {
 	// Override health check with DB status
 	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
 
+	// ─── Paycrest ramp ─────────────────────────────────────────────────────
+	// Dormant unless PAYCREST_API_KEY is set: no key, nil client, routes never
+	// registered. Quoting works without a key (the rate endpoints are public),
+	// but there is no point offering a quote we cannot turn into an order.
+	paycrestClient := services.NewPaycrestClient(
+		os.Getenv("PAYCREST_BASE_URL"), os.Getenv("PAYCREST_API_KEY"))
+	var paycrestHandler *handlers.PaycrestHandler
+	var paycrestWebhookHandler *handlers.PaycrestWebhookHandler
+	if paycrestClient.IsEnabled() {
+		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
+		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
+		paycrestOrders := services.NewPaycrestOrderService(
+			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
+			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
+		if paycrestOrders != nil {
+			// Server-side kill switch: an operator can now stop the rail for a
+			// currency by flipping its ramp_provider column, not just change
+			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
+			paycrestOrders.SetCurrencyRegistry(currencyRegistry)
+		}
+		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		// Webhooks need their own secret. Without it the verifier is nil and the
+		// route answers 503 — fail closed rather than accept unsigned events.
+		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
+			paycrestWebhookHandler = handlers.NewPaycrestWebhookHandler(
+				v, services.NewWebhookStoreForProvider(config.DB, services.ProviderPaycrest), paycrestOrders)
+			log.Printf("[paycrest] webhook endpoint ready")
+		} else {
+			log.Printf("[paycrest] webhook DORMANT — set PAYCREST_API_SECRET; orders advance by polling only")
+		}
+		if paycrestOrders != nil {
+			// No public webhook endpoint yet, so orders only advance because
+			// something polls them.
+			scheduler.Register(jobs.NewPaycrestOrderPoller(paycrestOrders, 20*time.Second))
+			log.Printf("[paycrest] ramp ready (poller 20s)")
+		} else {
+			log.Printf("[paycrest] client configured but order service could not be built — routes dormant")
+		}
+	} else {
+		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
+	}
+
+	// One dispute queue across every order type that cannot resolve itself.
+	// Subjects are registered per stack rather than unconditionally: a dormant
+	// integration should have no disputable orders, not a route that fails when
+	// someone tries to use it.
+	disputeService := services.NewDisputeService(config.DB, eventBus)
+	disputeService.RegisterSubject(models.DisputeSubjectPaycrestOrder, services.PaycrestDisputeSubject(config.DB))
+	disputeService.RegisterSubject(models.DisputeSubjectITIntent, services.ITDisputeSubject(config.DB))
+	if billService != nil {
+		disputeService.RegisterSubject(models.DisputeSubjectBillOrder, services.BillDisputeSubject(config.DB))
+		// The bills stack's own report endpoints now read and write this same
+		// table, so the shipped app keeps working while the console moves to
+		// the unified queue.
+		billService.SetDisputes(disputeService)
+	}
+	disputeHandler := handlers.NewDisputeHandler(disputeService)
+
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
