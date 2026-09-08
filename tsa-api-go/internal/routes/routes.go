@@ -906,6 +906,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.GET("/orders", pch.ListOrders)
 				pc.GET("/orders/:id", pch.GetOrder)
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
+			pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
 			}
 		}
 

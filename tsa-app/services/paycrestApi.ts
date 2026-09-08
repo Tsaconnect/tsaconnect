@@ -56,7 +56,10 @@ export type PaycrestStatus =
   | 'refunded'
   | 'expired'
   | 'unmatched'
-  | 'failed';
+  | 'failed'
+  /** Ours: the user abandoned the order before sending anything. Paycrest's
+   *  own copy keeps running to its expiry — see the cancel endpoint. */
+  | 'cancelled';
 
 export interface PaycrestOrder {
   id: string;
@@ -228,9 +231,22 @@ export async function claimPayment(id: string): Promise<PaycrestOrder> {
   return request<PaycrestOrder>(`/orders/${id}/claim-payment`, { method: 'POST' });
 }
 
+/**
+ * Abandon an order the user has not paid or funded.
+ *
+ * The server holds one open order per user per direction, so an order left
+ * hanging blocks the next one until its window closes — this is the way out of
+ * that. It is refused once the payment has been claimed as sent, and unlike
+ * claimPayment that refusal must reach the user: they are about to walk away
+ * from an order that is still live at the provider.
+ */
+export async function cancelOrder(id: string): Promise<PaycrestOrder> {
+  return request<PaycrestOrder>(`/orders/${id}/cancel`, { method: 'POST' });
+}
+
 /** Statuses that will never change on their own. */
 export function isTerminal(status: PaycrestStatus): boolean {
-  return ['settled', 'refunded', 'expired', 'unmatched', 'failed'].includes(status);
+  return ['settled', 'refunded', 'expired', 'unmatched', 'failed', 'cancelled'].includes(status);
 }
 
 /** Whether the order is still waiting on the user to do something. */
@@ -273,5 +289,7 @@ export function statusLabel(order: PaycrestOrder): string {
       return 'We are recovering your payment';
     case 'failed':
       return 'Could not be completed';
+    case 'cancelled':
+      return 'Cancelled';
   }
 }

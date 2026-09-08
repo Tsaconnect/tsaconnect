@@ -43,6 +43,10 @@ var (
 	// silently goes nowhere.
 	ErrPaycrestBankUnsupported = errors.New("this bank cannot receive payouts through this route")
 	ErrPaycrestOrderNotYours   = errors.New("order not found")
+	// ErrPaycrestNotCancellable covers both "too late" and "already gone": an
+	// order past the waiting-for-the-user stage, and one whose payment the user
+	// has already claimed to have sent.
+	ErrPaycrestNotCancellable = errors.New("this order can no longer be cancelled")
 )
 
 // PaycrestOrderer is the client surface this service needs.
@@ -531,6 +535,53 @@ func (s *PaycrestOrderService) Get(ctx context.Context, userID, orderID uuid.UUI
 	return &row, err
 }
 
+// Cancel abandons an order the user has not paid or funded yet.
+//
+// It is local by necessity: Paycrest has no cancel endpoint (all 404 — see the
+// PaycrestClient doc comment), so their copy of the order stays live until its
+// own window closes. What this actually buys the user is the one-open-order
+// lock in assertNoOpenOrder, which otherwise holds them for the full 30-minute
+// validUntil before the poller can mark the order expired.
+//
+// Cancelling is refused once PaymentClaimedAt is set. That claim is the user
+// saying money is on its way to a provider address; marking the order dead
+// underneath it would tell them nothing is coming while the deposit is still
+// in flight — the stranded-funds case that has no recovery path.
+//
+// The write is status-guarded rather than read-then-write so a poller sync (or
+// a second tap) landing in the same instant wins, and this call reports the
+// truth: the order is no longer cancellable.
+func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	row, err := s.Get(ctx, userID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if row.PaymentClaimedAt != nil {
+		return nil, ErrPaycrestNotCancellable
+	}
+
+	res := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND user_id = ? AND payment_claimed_at IS NULL AND status IN ?",
+			orderID, userID, []string{
+				models.PaycrestStatusAwaitingPayment,
+				models.PaycrestStatusAwaitingDeposit,
+			}).
+		Updates(map[string]any{
+			"status":         models.PaycrestStatusCancelled,
+			"failure_reason": "cancelled by user",
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrPaycrestNotCancellable
+	}
+	return s.Get(ctx, userID, orderID)
+}
+
 // List returns the user's recent orders, newest first.
 func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit int) ([]models.PaycrestOrderRecord, error) {
 	if limit <= 0 || limit > 100 {
@@ -548,11 +599,11 @@ func (s *PaycrestOrderService) DueForSync(ctx context.Context, limit int) ([]mod
 	if limit <= 0 {
 		limit = 50
 	}
-	terminal := []string{
-		models.PaycrestStatusSettled, models.PaycrestStatusRefunded,
-		models.PaycrestStatusExpired, models.PaycrestStatusUnmatched,
-		models.PaycrestStatusFailed,
-	}
+	// Shared with PaycrestOrderTerminal: a status listed in one and not the
+	// other lets the poller refresh a row Sync considers settled — which for a
+	// user-cancelled order means overwriting our status with Paycrest's still-
+	// live copy and re-locking the user out of the direction.
+	terminal := models.PaycrestTerminalStatuses()
 	var rows []models.PaycrestOrderRecord
 	err := s.db.WithContext(ctx).
 		Where("status NOT IN ? AND paycrest_id <> ''", terminal).

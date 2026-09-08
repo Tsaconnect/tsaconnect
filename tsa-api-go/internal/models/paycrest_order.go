@@ -41,7 +41,28 @@ const (
 	// ordinary expiry the user simply ignored.
 	PaycrestStatusUnmatched = "unmatched"
 	PaycrestStatusFailed    = "failed"
+	// PaycrestStatusCancelled is OURS too, and means the USER abandoned the
+	// order before sending anything. Paycrest has no cancel endpoint, so their
+	// copy stays live until it expires on its own — this status only says we
+	// have stopped treating it as the user's open order. Distinct from
+	// PaycrestStatusFailed, which is where Paycrest's own "cancelled" lands.
+	PaycrestStatusCancelled = "cancelled"
 )
+
+// paycrestTerminalStatuses is the single list of states nothing can move on
+// from. Both readers below derive from it: they used to keep separate copies,
+// and a status added to one but not the other lets the poller resurrect a row.
+var paycrestTerminalStatuses = []string{
+	PaycrestStatusSettled, PaycrestStatusRefunded, PaycrestStatusExpired,
+	PaycrestStatusUnmatched, PaycrestStatusFailed, PaycrestStatusCancelled,
+}
+
+// PaycrestTerminalStatuses returns the terminal set for query use (SQL NOT IN).
+func PaycrestTerminalStatuses() []string {
+	out := make([]string, len(paycrestTerminalStatuses))
+	copy(out, paycrestTerminalStatuses)
+	return out
+}
 
 // PaycrestOrderRecord is one brokered ramp order.
 type PaycrestOrderRecord struct {
@@ -140,10 +161,10 @@ func (o *PaycrestOrderRecord) BeforeCreate(tx *gorm.DB) error {
 // is terminal for the automated path even though the money is unresolved —
 // only an operator can move it.
 func PaycrestOrderTerminal(status string) bool {
-	switch status {
-	case PaycrestStatusSettled, PaycrestStatusRefunded, PaycrestStatusExpired,
-		PaycrestStatusUnmatched, PaycrestStatusFailed:
-		return true
+	for _, s := range paycrestTerminalStatuses {
+		if s == status {
+			return true
+		}
 	}
 	return false
 }

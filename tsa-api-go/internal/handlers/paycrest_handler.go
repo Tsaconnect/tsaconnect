@@ -53,7 +53,13 @@ func paycrestError(c *gin.Context, err error) {
 			"No provider can fill that amount right now. Try a different amount or network.")
 	case errors.Is(err, services.ErrPaycrestOrderOpen):
 		utils.ErrorResponse(c, http.StatusConflict,
-			"You already have an order awaiting payment. Finish or let it expire first.")
+			"You already have an order awaiting payment. Finish it, or cancel it from your orders.")
+	case errors.Is(err, services.ErrPaycrestNotCancellable):
+		// Deliberately names the payment as the reason, because the common case
+		// is a user who already sent and is now trying to undo it — which is
+		// the one thing cancelling must not appear to do.
+		utils.ErrorResponse(c, http.StatusConflict,
+			"This order can no longer be cancelled. If you have already sent the payment, contact support instead.")
 	case errors.Is(err, services.ErrPaycrestBankUnsupported):
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"That bank can't receive payouts on this route. Choose another account.")
@@ -283,6 +289,31 @@ func (h *PaycrestHandler) ClaimPayment(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", row)
+}
+
+// POST /api/paycrest/orders/:id/cancel — the user abandons an order they have
+// not paid or funded.
+//
+// Local only: Paycrest has no cancel endpoint, so their order runs to its own
+// expiry regardless. What this releases is the one-open-order lock, which
+// otherwise holds the user for the full validUntil window.
+func (h *PaycrestHandler) Cancel(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	row, err := h.orders.Cancel(c.Request.Context(), user.ID, id)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", row)
 }
 
 // GET /api/paycrest/orders — the user's recent orders.

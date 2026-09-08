@@ -28,6 +28,7 @@ import {
 } from '@/components/ui';
 import { useCountdown } from '@/hooks/useCountdown';
 import {
+  cancelOrder,
   getOrder,
   isAwaitingUser,
   isTerminal,
@@ -57,6 +58,7 @@ export default function PaycrestOrderScreen() {
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
   const stopped = useRef(false);
 
   const load = useCallback(async () => {
@@ -106,6 +108,45 @@ export default function PaycrestOrderScreen() {
     Linking.openURL(
       `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
     ).catch(() => Alert.alert('Could not open mail', `Please email ${SUPPORT_EMAIL}.`));
+  }, [order]);
+
+  // Cancelling is the way out of the server's one-open-order lock: an
+  // abandoned order otherwise blocks the next one for the full 30-minute
+  // window. The confirm exists for the single question that matters — a user
+  // who has already sent must not cancel, because the deposit is still on its
+  // way to an order they would be marking dead.
+  const confirmCancel = useCallback(() => {
+    if (!order) return;
+    Alert.alert(
+      'Cancel this order?',
+      order.direction === 'buy'
+        ? 'Only cancel if you have NOT transferred the money yet. If you have already paid, do not cancel — contact support instead.'
+        : 'Only cancel if you have NOT sent the crypto yet. If you have already sent it, do not cancel — contact support instead.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Cancel order',
+          style: 'destructive',
+          onPress: async () => {
+            setCancelling(true);
+            try {
+              const updated = await cancelOrder(order.id);
+              setOrder(updated);
+              // Nothing can move a cancelled order, so stop the poll rather
+              // than letting it keep hitting the provider.
+              stopped.current = true;
+            } catch (e) {
+              Alert.alert(
+                'Could not cancel',
+                e instanceof PaycrestError ? e.message : 'Please try again.',
+              );
+            } finally {
+              setCancelling(false);
+            }
+          },
+        },
+      ],
+    );
   }, [order]);
 
   if (loading && !order) {
@@ -247,6 +288,20 @@ export default function PaycrestOrderScreen() {
         ) : null}
 
         {unmatched && <Button title="Get help" onPress={contactSupport} fullWidth />}
+
+        {/* Only while the order is still waiting on the user AND they have not
+            claimed to have paid — past either point the server refuses, and
+            offering a button that always fails is worse than not offering it. */}
+        {awaiting && !order.paymentClaimedAt && (
+          <Button
+            title="Cancel order"
+            variant="ghost"
+            onPress={confirmCancel}
+            loading={cancelling}
+            disabled={cancelling}
+            fullWidth
+          />
+        )}
 
         {error && (
           <Text variant="caption" style={{ color: colors.textMuted }}>

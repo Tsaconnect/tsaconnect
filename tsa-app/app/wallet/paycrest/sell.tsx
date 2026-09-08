@@ -48,6 +48,7 @@ import {
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
 import {
+  cancelOrder,
   claimPayment,
   createSell,
   getPayoutInstitutions,
@@ -168,6 +169,7 @@ export default function PaycrestSellScreen() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   // Every chain's balances in one request — the un-filtered endpoint already
   // fans out server-side, so annotating all five routes costs no more than
@@ -335,6 +337,43 @@ export default function PaycrestSellScreen() {
     }
   }, [order, address, balances, goToOrder]);
 
+  // Backing out here is the common case — the user got to the deposit screen
+  // and changed their mind. Without this the abandoned order holds the
+  // server's one-open-order lock until its window closes, so they cannot start
+  // the sale they actually want. See PaycrestOrderService.Cancel.
+  const confirmCancel = useCallback(() => {
+    if (!order) return;
+    Alert.alert(
+      'Cancel this sale?',
+      'Only cancel if you have NOT sent the crypto yet. If you have already sent it, do not cancel — contact support instead.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Cancel sale',
+          style: 'destructive',
+          onPress: async () => {
+            setCancelling(true);
+            try {
+              await cancelOrder(order.id);
+              // Back to the form with the lock released, rather than to a dead
+              // order screen the user would only have to leave again.
+              setOrder(null);
+              setSendError(null);
+              setManualOpen(false);
+            } catch (e) {
+              Alert.alert(
+                'Could not cancel',
+                e instanceof PaycrestError ? e.message : 'Please try again.',
+              );
+            } finally {
+              setCancelling(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [order]);
+
   const routeItems = useMemo(
     () =>
       (quote?.venues ?? []).map((v) => {
@@ -491,6 +530,19 @@ export default function PaycrestSellScreen() {
               title="Send from another wallet"
               variant="ghost"
               onPress={() => setManualOpen(true)}
+              fullWidth
+            />
+          )}
+
+          {/* Hidden once the user says they have sent — cancelling then would
+              claim the order is dead while their deposit is still in flight. */}
+          {!order.paymentClaimedAt && (
+            <Button
+              title="Cancel this sale"
+              variant="ghost"
+              onPress={confirmCancel}
+              loading={cancelling}
+              disabled={cancelling}
               fullWidth
             />
           )}
