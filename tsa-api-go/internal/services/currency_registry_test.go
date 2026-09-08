@@ -229,6 +229,37 @@ func TestRegistryGatesPayout_NotJustTheCatalog(t *testing.T) {
 	}
 }
 
+// NGN is the ONLY currency the ramp actually serves today, and both places
+// that can claim otherwise are asserted here.
+//
+// The regression this guards: GHS was seeded with RampProviderFlutterwave, so
+// /it/currencies advertised two ramp currencies and the app's IT hub grew a
+// currency picker. Selecting GHS changed nothing — ActivateFiatVA mints NGN
+// accounts only, sells hard-code Currency "NGN", and the app's stablecoin
+// screens quote and settle in naira regardless of what they are handed. A
+// picker whose choice is silently ignored is worse than no picker.
+//
+// Adding a ramp currency means making the buy/sell path currency-aware first,
+// then updating this test on purpose.
+func TestDefaultCurrencies_OnlyNGNHasARamp(t *testing.T) {
+	for _, c := range DefaultCurrencies() {
+		want := RampProviderNone
+		if c.Code == "NGN" {
+			want = RampProviderPaycrest
+		}
+		if c.RampProvider != want {
+			t.Errorf("%s ramp = %q, want %q — the ramp is NGN-only until the buy/sell path is currency-aware",
+				c.Code, c.RampProvider, want)
+		}
+	}
+	for code, provider := range defaultRampProviders {
+		if code != "NGN" {
+			t.Errorf("defaultRampProviders[%s] = %q; the fallback must not resurrect a ramp the screens cannot serve",
+				code, provider)
+		}
+	}
+}
+
 func TestCurrencyRegistry_RampProviderFallsBackWhenColumnEmpty(t *testing.T) {
 	db := newCurrencyTestDB(t)
 	// A row that predates the column: ramp_provider is the zero value.

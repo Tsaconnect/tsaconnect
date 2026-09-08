@@ -271,15 +271,26 @@ export default function ITHub() {
           return { ...base, unavailable: `Not available in ${code}` };
       }
     };
+    // MCGP's own buy/sell screens are NGN-only — buy.tsx offers a single
+    // payment currency and sell.tsx raises the intent with Currency "NGN" —
+    // and neither is handed `code`. So the row says so rather than opening a
+    // naira form under another currency's name. Today the registry serves
+    // only NGN, so this never fires; it fires the day a second ramp currency
+    // is switched on before these screens are currency-aware.
+    const mcgpRow: AssetRow = {
+      token: 'MCGP',
+      balance: loading ? null : fmtMcgp(spendable),
+      balanceNote: 'spendable',
+      rateLine: mcgpRateLine,
+    };
     return [
-      {
-        token: 'MCGP',
-        balance: loading ? null : fmtMcgp(spendable),
-        balanceNote: 'spendable',
-        rateLine: mcgpRateLine,
-        onBuy: () => router.push('/wallet/it/buy'),
-        onSell: () => router.push('/wallet/it/sell'),
-      },
+      code === 'NGN'
+        ? {
+            ...mcgpRow,
+            onBuy: () => router.push('/wallet/it/buy'),
+            onSell: () => router.push('/wallet/it/sell'),
+          }
+        : { ...mcgpRow, unavailable: `Not available in ${code}` },
       stableRow('USDC'),
       stableRow('USDT'),
     ];

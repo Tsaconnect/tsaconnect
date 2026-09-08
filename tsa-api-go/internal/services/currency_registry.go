@@ -43,7 +43,6 @@ const (
 // to run BEFORE the code is a deploy hazard nobody remembers at 3am.
 var defaultRampProviders = map[string]string{
 	"NGN": RampProviderPaycrest,
-	"GHS": RampProviderFlutterwave,
 }
 
 // DefaultCurrencies is the seed set. See the multi-currency spec §4.1.
@@ -71,17 +70,24 @@ func DefaultCurrencies() []models.Currency {
 			RampProvider:       RampProviderPaycrest,
 		},
 		{
-			// Ghana: the second live rail. FW documents NO identity document
-			// for GHS virtual accounts, which is why deposits here do not need
-			// a per-country KYC model — only that the NGN gate stop being
-			// unconditional. Market-anchored: Bybit P2P quotes GHS.
+			// Ghana: a payout corridor, NOT a ramp — same position as the East
+			// African rows below. FW documents no identity document for GHS
+			// virtual accounts, so the KYC shape is easy, but nothing on the
+			// buy/sell path is currency-aware yet: ActivateFiatVA mints NGN
+			// only (itDepositCurrency, gated on an 11-digit BVN/NIN), sells
+			// hard-code Currency "NGN", and buy-stable/sell-stable in the app
+			// quote, pay and settle in naira whatever currency they are handed.
+			// Claiming a GHS ramp here put a currency in the app's IT picker
+			// that changed nothing when selected — every route behind it was
+			// still a naira one. Restore RampProviderFlutterwave when the ramp
+			// itself is currency-aware end to end, not before.
 			Code: "GHS", Exponent: 2,
 			DepositEnabled: true, PayoutEnabled: true,
 			RequiresNationalID: false,
 			IsBaseFloat:        true,
 			HasMarketAnchor:    true,
 			MinPayoutMinor:     0, // unconfirmed — sandbox-verify before enabling GHS payouts
-			RampProvider:       RampProviderFlutterwave,
+			RampProvider:       RampProviderNone,
 		},
 		// East African corridors. Payout-enabled because Paycrest pays out in
 		// them, but RampProvider is deliberately left empty (RampProviderNone) —
