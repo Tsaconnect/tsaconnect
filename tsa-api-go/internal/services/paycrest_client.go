@@ -61,6 +61,9 @@ const (
 	paycrestDefaultBase = "https://api.paycrest.io"
 	paycrestHTTPTimeout = 30 * time.Second
 
+	// maxPaycrestResponseBytes caps any single response we will buffer.
+	maxPaycrestResponseBytes = 8 << 20
+
 	// PaycrestMinOrderUSD is the protocol floor. Below this no provider quotes.
 	PaycrestMinOrderUSD = 0.5
 )
@@ -172,7 +175,10 @@ func (c *PaycrestClient) do(ctx context.Context, method, path string, body []byt
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	// Bounded: /v2/markets returns the protocol-wide book and is now fetched on
+	// a user-facing path, so a misbehaving or hostile upstream must not be able
+	// to stream us out of memory.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxPaycrestResponseBytes))
 	if err != nil {
 		return nil, nil, err
 	}
