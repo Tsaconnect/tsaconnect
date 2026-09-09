@@ -46,6 +46,9 @@ func TestStableStatusFor_BuyInputErrorsAre400(t *testing.T) {
 		services.ErrStableBuyBelowMinimum,
 		services.ErrStableBuyAlreadyOpen,
 		services.ErrStableBuyNoVA,
+		// 400, not 503. The rail is healthy; an out-of-date client asked for
+		// the wrong one, and a 5xx would have it retry forever.
+		services.ErrStableBuyWrongRamp,
 		services.ErrUnsupportedChainAsset,
 	} {
 		if got := stableStatusFor(err); got != 400 {

@@ -1033,6 +1033,10 @@ func stableStatusFor(err error) int {
 		errors.Is(err, services.ErrStableBuyAlreadyOpen),
 		errors.Is(err, services.ErrStableBuyNoVA),
 		errors.Is(err, services.ErrStableBuyNoWallet),
+		// The caller asked for a rail this currency does not use. 400, not 503:
+		// the ramp is up, this client is simply out of date, and a 5xx would
+		// have it retry a request that can never succeed.
+		errors.Is(err, services.ErrStableBuyWrongRamp),
 		errors.Is(err, services.ErrUnsupportedChainAsset):
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrStableQuoteUnavailable),
@@ -1090,6 +1094,12 @@ func stableCodeFor(err error) string {
 		return "stable_buy_no_va"
 	case errors.Is(err, services.ErrStableBuyNoWallet):
 		return "stable_buy_no_wallet"
+	case errors.Is(err, services.ErrStableBuyWrongRamp):
+		// The client asked for a rail this currency does not use — an app build
+		// older than the Paycrest cutover. Distinct from stable_not_configured
+		// so the app can send the user to the right screen rather than tell
+		// them buying is unavailable.
+		return "stable_buy_wrong_ramp"
 	case errors.Is(err, services.ErrUnsupportedChainAsset):
 		return "stable_unsupported_chain_asset"
 	case errors.Is(err, services.ErrStableDeliveryExhausted):

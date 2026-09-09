@@ -367,6 +367,14 @@ func main() {
 		scheduler.Register(jobs.NewMCGPSwapReconciler(mcgpSwapService, config.DB, time.Minute))
 	}
 
+	// Instant Transfer: close unpaid MCGP buy orders the settle path has
+	// already stopped honouring, so the hub stops showing a user an order
+	// nothing will fulfil. Registered wherever IT is live — it needs no
+	// provider, only the database.
+	if itService != nil {
+		scheduler.Register(jobs.NewBuyOrderExpiry(itService, time.Hour))
+	}
+
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
 	if billService != nil {
