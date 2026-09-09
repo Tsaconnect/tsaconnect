@@ -386,6 +386,47 @@ func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAd
 	return s.CreateBuyIntent(ctx, userID, walletAddr, ngnKobo, nil)
 }
 
+// ExpireStaleBuyOrders cancels unpaid MCGP buy orders past buyOrderClaimWindow,
+// and reports how many it closed.
+//
+// The window already stops such an order from claiming a payment (see
+// AutoCreditFromVA). Without this sweep it merely stops mattering: nothing else
+// closes one — OpenBuyOrder supersedes only when the user opens another MCGP
+// buy, and this leg has no user-facing cancel — so the row sits in the hub
+// reading "awaiting transfer" indefinitely while the settle path ignores it.
+// Telling the user it is closed is the honest end state.
+//
+// Two guards, both load-bearing:
+//
+//	The MINTED-ref filter is the same one OpenBuyOrder uses, for the same
+//	reason. Settlement overwrites payment_ref with the provider charge id the
+//	moment money is attributed, so a row without its minted ref has real money
+//	against it and must never be cancelled on age.
+//
+//	MCGP only. Stablecoin purchases have a user-facing cancel, a resume view
+//	and the one-open-purchase rule, so a stale one is both visible and
+//	clearable; sweeping them here would close orders out from under that flow.
+//
+// Idempotent: a converged state cancels nothing and returns 0.
+func (s *ITService) ExpireStaleBuyOrders(ctx context.Context) (int64, error) {
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?) "+
+			"AND payment_ref LIKE ? AND created_at < ?",
+			models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP,
+			mintedRefPrefix+"%", time.Now().Add(-buyOrderClaimWindow)).
+		Updates(map[string]any{
+			"status":         models.ITStatusCancelled,
+			"failure_reason": "expired unpaid — start a new order to buy",
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("[it] it_buy_orders_expired_total=%d (unpaid past %s)", res.RowsAffected, buyOrderClaimWindow)
+	}
+	return res.RowsAffected, nil
+}
+
 // ApproveBuyCredit credits the user's spend-only premium for a paid buy intent.
 // Operator-signed; verified on-chain before the intent is marked credited.
 // Idempotent: a credited intent returns success.

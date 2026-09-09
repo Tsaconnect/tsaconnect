@@ -38,6 +38,10 @@ func TestStableCodeFor_MapsEachSentinelToItsSnakeCaseCode(t *testing.T) {
 		{"no deposit address", services.ErrStableNoDepositAddress, "stable_not_configured"},
 		{"no token address", services.ErrStableNoTokenAddress, "stable_not_configured"},
 		{"fee exceeds proceeds", services.ErrStableFeeExceedsProceeds, "stable_fee_exceeds_proceeds"},
+		// Its own code, not stable_not_configured: the ramp is up, this client
+		// is simply asking for the wrong provider, and the app needs to tell
+		// those two apart to send the user somewhere useful.
+		{"wrong ramp", services.ErrStableBuyWrongRamp, "stable_buy_wrong_ramp"},
 		// Wrapped errors must still match via errors.Is, same as stableStatusFor.
 		{"wrapped already claimed", fmtErrorf(services.ErrStableDepositAlreadyClaimed), "stable_deposit_already_claimed"},
 		{"unmapped", errors.New("some other failure"), ""},

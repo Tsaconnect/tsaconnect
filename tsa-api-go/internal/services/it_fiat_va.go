@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -31,6 +32,23 @@ const (
 	// even if two intent rows were somehow created for one charge (Spec 1 §3).
 	itVARefDomain = "IT:va:"
 )
+
+// buyOrderClaimWindow bounds how long an unpaid MCGP buy order may claim an
+// incoming charge.
+//
+// Nothing else expires one. OpenBuyOrder supersedes a previous MCGP order, but
+// only when the user opens another MCGP buy — opening a stablecoin purchase
+// runs through CreateStableBuyIntent and leaves the MCGP row untouched. So an
+// abandoned order sits in pending_payment indefinitely and silently swallows
+// the user's next unrelated transfer, which is precisely the complaint this
+// window answers.
+//
+// Deliberately the same 24h as stableBuyClaimWindow: the question is identical
+// (how long may an unpaid order lie in wait for money?) and two different
+// answers on the two legs would be a difference nobody could justify later.
+// Past the window the charge creates a fresh order at the live rate, which is
+// the same thing that happens for a user with no open order at all.
+const buyOrderClaimWindow = stableBuyClaimWindow
 
 var (
 	ErrITVANotConfigured  = errors.New("IT virtual account provisioning unavailable")
@@ -343,10 +361,15 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	// already claims a stablecoin buy before this point, but scoping here too
 	// makes correctness structural rather than order-dependent — nothing on
 	// this path can overwrite mcgp_amount/rate_kobo on a USDC/USDT intent.
+	//
+	// Bounded by buyOrderClaimWindow for the reason that constant records: an
+	// abandoned order never expires on its own, and an unbounded match lets one
+	// swallow a payment made days later for something else entirely.
 	var pending models.ITIntent
 	pendErr := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?)",
-			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP).
+		Where("user_id = ? AND direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?) AND created_at >= ?",
+			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP,
+			time.Now().Add(-buyOrderClaimWindow)).
 		Order("created_at DESC").
 		First(&pending).Error
 

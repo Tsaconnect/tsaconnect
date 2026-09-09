@@ -23,6 +23,16 @@ var (
 	ErrStableBuyNoVA = errors.New("it stable buy: user has no virtual account; activate one first")
 	// ErrStableBuyNoWallet means the user has no wallet to receive into.
 	ErrStableBuyNoWallet = errors.New("it stable buy: user has no wallet")
+	// ErrStableBuyWrongRamp means this currency's stablecoin ramp is served by
+	// another provider, or by none. The registry is the authority on that and
+	// the app already reads it; this is the same answer enforced server-side,
+	// where an out-of-date client cannot route around it.
+	//
+	// Worded for a reader, not a maintainer: the handler returns err.Error()
+	// verbatim and only an out-of-date app can reach this, so its text lands on
+	// a buyer's screen. Which provider actually serves the currency goes to the
+	// log instead — it is not something a buyer can act on.
+	ErrStableBuyWrongRamp = errors.New("buying stablecoins with this currency has moved to a new provider — update the app to continue")
 )
 
 // HasStableBuy reports whether everything the BUY leg needs is actually wired.
@@ -174,6 +184,31 @@ func (s *ITService) CreateStableBuyIntent(
 	}
 	if q == nil {
 		return nil, nil, errors.New("it stable buy: nil quote")
+	}
+	// Which provider serves this currency's ramp is a server fact. The app
+	// routes naira to Paycrest and leaves these screens in place but unlinked,
+	// which made the routing a client-side convention — an older build still
+	// calls this path, opens a Flutterwave order for a Paycrest currency, and
+	// Flutterwave then refuses the conversion while the money is already held.
+	//
+	// Gated ONLY here, not in QuoteStableBuy: settleStableBuyFromCharge prices
+	// an already-claimed intent through that quote, so gating it would strand
+	// in-flight purchases the moment a currency moved to another provider.
+	// Refusing to OPEN one is the whole of the fix; nothing already funded
+	// needs to be blocked.
+	//
+	// A nil registry is deliberately no gate. It is optional on ITService and
+	// several construction sites never wire one; gating on its absence would
+	// take the rail down wherever that is true.
+	if s.currencies != nil {
+		if p := s.currencies.RampProvider(q.Currency); p != RampProviderFlutterwave {
+			// Both quoted: the currency reaches here from a request body, and
+			// TrimSpace does not remove an embedded newline that could forge a
+			// second log line.
+			log.Printf("[it stable buy] refused: %q ramps on %q, not flutterwave — caller is an out-of-date client",
+				q.Currency, p)
+			return nil, nil, ErrStableBuyWrongRamp
+		}
 	}
 	destChain = strings.ToUpper(strings.TrimSpace(destChain))
 	destAddress = strings.TrimSpace(destAddress)
