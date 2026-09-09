@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -28,11 +29,26 @@ type ITHandler struct {
 	db         *gorm.DB
 	it         *services.ITService
 	currencies *services.CurrencyRegistry
+	// legs answers which DIRECTIONS a ramp currency can trade right now. Set
+	// separately because the Paycrest stack is built later in boot (and is
+	// dormant without a key) — see SetRampLegs.
+	legs RampLegSource
+}
+
+// RampLegSource is the narrow seam over PaycrestQuoteService this handler
+// needs. *services.PaycrestQuoteService satisfies it as-is.
+type RampLegSource interface {
+	RampLegs(ctx context.Context) (map[string]services.RampLegs, error)
 }
 
 func NewITHandler(db *gorm.DB, it *services.ITService, currencies *services.CurrencyRegistry) *ITHandler {
 	return &ITHandler{db: db, it: it, currencies: currencies}
 }
+
+// SetRampLegs wires the live direction source. Without it, and whenever it
+// cannot answer, Currencies falls back to advertising both directions for any
+// currency that has a provider — see the reasoning there.
+func (h *ITHandler) SetRampLegs(src RampLegSource) { h.legs = src }
 
 func (h *ITHandler) userWallet(userID uuid.UUID) string {
 	var u models.User
@@ -64,12 +80,22 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 	})
 }
 
+// rampLegsTimeout bounds the live direction lookup on the currency list. The
+// fallback (both directions for provider-backed currencies) is correct and
+// instant, so there is no reason to make a user wait on Paycrest to reach it.
+const rampLegsTimeout = 2 * time.Second
+
 // GET /api/it/currencies — every currency the ramp knows about, and who serves
 // it.
 //
 // Payout-only currencies are LISTED with an empty rampProvider rather than
 // omitted. The app should be able to say "not available in USD" instead of
 // silently lacking the option, which reads as a bug to the user.
+//
+// rampProvider says WHO serves the currency; rampBuy/rampSell say WHICH WAY it
+// can trade at this moment. The two are separate because they change for
+// different reasons — a provider is a product decision an operator makes, a
+// direction is provider liquidity that moves on its own.
 func (h *ITHandler) Currencies(c *gin.Context) {
 	if h.currencies == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Currency list unavailable")
@@ -79,17 +105,83 @@ func (h *ITHandler) Currencies(c *gin.Context) {
 		Code           string `json:"code"`
 		Exponent       int    `json:"exponent"`
 		RampProvider   string `json:"rampProvider"`
+		RampBuy        bool   `json:"rampBuy"`
+		RampSell       bool   `json:"rampSell"`
 		DepositEnabled bool   `json:"depositEnabled"`
 		PayoutEnabled  bool   `json:"payoutEnabled"`
 		MinPayoutMinor int64  `json:"minPayoutMinor"`
 	}
+
+	// Which directions actually have liquidity right now. A currency can have a
+	// provider and still trade one way only: UGX and TZS are offramp-only
+	// today, so the app must show Sell without Buy.
+	//
+	// legs == nil means we could not find out — the Paycrest stack is dormant,
+	// or its order book has never loaded. Then every currency WITH a provider
+	// is reported as trading both ways, which is what this endpoint said before
+	// directions existed.
+	//
+	// That fallback is deliberately optimistic, and the choice is asymmetric:
+	// reporting "no legs" would take the live NGN rail out of the app because a
+	// public book was briefly unreachable, while an over-reported leg costs the
+	// user one error at quote time and nothing more — CreateBuy/CreateSell
+	// still refuse an order no venue can fill.
+	var legs map[string]services.RampLegs
+	if h.legs != nil {
+		// Bounded well under the Paycrest client's own 30s timeout: this runs
+		// on every hub focus, the answer is cached for 20s, and the fallback
+		// below is both cheap and safe — so waiting on a slow upstream buys
+		// nothing a user would want.
+		ctx, cancel := context.WithTimeout(c.Request.Context(), rampLegsTimeout)
+		defer cancel()
+
+		var err error
+		if legs, err = h.legs.RampLegs(ctx); err != nil {
+			log.Printf("[IT] ramp_legs_unavailable err=%v — reporting both directions for provider-backed currencies", err)
+			legs = nil
+		}
+		// An EMPTY map is not the same as a nil one in Go, and reading it as
+		// "nothing trades" would take every currency dark. RampLegs already
+		// refuses to return one, so this is the guard for a future source that
+		// does not — the distinction is too costly to leave to one caller.
+		if len(legs) == 0 {
+			legs = nil
+		}
+	}
+
 	all := h.currencies.All()
 	out := make([]row, 0, len(all))
 	for _, cur := range all {
+		provider := h.currencies.RampProvider(cur.Code)
+		buy, sell := false, false
+		// Paycrest specifically, not "any non-empty provider". Two reasons,
+		// both silent failures otherwise:
+		//
+		//   The kill switch. An operator disables a rail by setting
+		//   ramp_provider to something unrecognised, and requirePaycrestEnabled
+		//   then refuses every order. A != none test would keep reporting the
+		//   legs Paycrest's book still lists, so the app would show live
+		//   buttons for a rail that refuses everything.
+		//
+		//   A second provider. The legs come from PAYCREST's book; looking a
+		//   Flutterwave currency up in it would report closed with no error and
+		//   no log. Any other provider stays false until it has a leg source of
+		//   its own, which is the honest answer and matches what the order path
+		//   will actually do.
+		if provider == services.RampProviderPaycrest {
+			if legs == nil {
+				buy, sell = true, true
+			} else {
+				l := legs[strings.ToUpper(cur.Code)]
+				buy, sell = l.Buy, l.Sell
+			}
+		}
 		out = append(out, row{
 			Code:           cur.Code,
 			Exponent:       cur.Exponent,
-			RampProvider:   h.currencies.RampProvider(cur.Code),
+			RampProvider:   provider,
+			RampBuy:        buy,
+			RampSell:       sell,
 			DepositEnabled: cur.DepositEnabled,
 			PayoutEnabled:  cur.PayoutEnabled,
 			MinPayoutMinor: cur.MinPayoutMinor,

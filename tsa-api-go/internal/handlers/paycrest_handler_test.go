@@ -3,8 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -158,5 +161,73 @@ func TestPaycrestHandler_Banks_EmptyCurrencyBehavesAsNGN(t *testing.T) {
 	}
 	if len(resp.Data.BankCodes) != 1 || resp.Data.BankCodes[0] != "044" {
 		t.Fatalf("empty currency should behave as NGN (NIBSS codes), got %#v", resp.Data.BankCodes)
+	}
+}
+
+// ─── Error mapping ─────────────────────────────────────────────────────────
+
+// paycrestError is a pure errors.Is switch, so an error the service builds
+// without %w silently falls through to the 502 default. That is not a cosmetic
+// difference: it turns "this direction does not exist" into "the provider is
+// unreachable, try again", which is both wrong and an invitation to retry
+// something that can never work.
+//
+// A service-level test cannot catch this — err.Error() reads correctly either
+// way. Only asserting the status code does.
+func TestPaycrestError_MapsEachSentinelToAStatusTheUserCanActOn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"closed leg is a conflict, not a gateway failure",
+			services.ErrPaycrestLegClosed, http.StatusConflict},
+		{"a leg closed mid-flight still maps once wrapped",
+			fmt.Errorf("%w: Buying is not available in UGX right now", services.ErrPaycrestLegClosed),
+			http.StatusConflict},
+		{"thin book stays the retryable conflict",
+			services.ErrPaycrestNoVenue, http.StatusConflict},
+		{"provider off is a 503",
+			services.ErrPaycrestDisabled, http.StatusServiceUnavailable},
+		{"below minimum is the user's to fix",
+			services.ErrPaycrestBelowMinimum, http.StatusBadRequest},
+		{"an unknown error is the only 502",
+			errors.New("connection reset"), http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/paycrest/buy", nil)
+
+			paycrestError(c, tc.err)
+
+			if w.Code != tc.status {
+				t.Errorf("status = %d, want %d (body=%s)", w.Code, tc.status, w.Body.String())
+			}
+		})
+	}
+}
+
+// The closed-leg message must not send the user back to try another amount —
+// that is the advice for a thin book, and following it here wastes their time
+// on a direction that does not exist.
+func TestPaycrestError_ClosedLegDoesNotSuggestAnotherAmount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/paycrest/buy", nil)
+
+	paycrestError(c, services.ErrPaycrestLegClosed)
+
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Contains(strings.ToLower(resp.Message), "amount") {
+		t.Errorf("message = %q; a closed direction is not fixed by changing the amount", resp.Message)
 	}
 }

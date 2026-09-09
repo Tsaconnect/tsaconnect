@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // paycrest_quote.go — venue selection.
@@ -70,6 +72,23 @@ var ErrPaycrestNoVenue = errors.New("paycrest: no network can fill this amount r
 // API calls on an amount nobody will quote.
 var ErrPaycrestBelowMinimum = errors.New("paycrest: amount is below the minimum order size")
 
+// ErrPaycrestLegClosed means this currency does not trade in this direction at
+// all — not that the book is thin for the requested size. UGX and TZS have
+// offramp providers and no onramp, and no amount the user types will change
+// that, so it must not be reported as the retryable "no venue" case.
+var ErrPaycrestLegClosed = errors.New("paycrest: this currency does not trade this way")
+
+// ErrPaycrestBookEmpty means the order book parsed successfully and contained
+// nothing we can use. It is deliberately an ERROR rather than "no currency
+// trades", because those two are indistinguishable in the data and wildly
+// different in likelihood: every provider on the protocol going dark at once
+// has never happened, while a renamed JSON field or an upstream blip produces
+// exactly this and produces it silently.
+//
+// Callers that would otherwise read the empty result as "nothing trades" must
+// treat this as "we could not find out" — see ITHandler.Currencies.
+var ErrPaycrestBookEmpty = errors.New("paycrest: order book has no usable entries")
+
 // PaycrestQuoter is the rate surface the quote service needs.
 type PaycrestQuoter interface {
 	// Markets is the whole order book in one fast call — the venue list comes
@@ -95,9 +114,11 @@ type PaycrestQuoteService struct {
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
 
-	bookMu sync.Mutex
-	book   *PaycrestMarkets
-	bookAt time.Time
+	bookMu     sync.Mutex
+	book       *PaycrestMarkets
+	bookAt     time.Time
+	bookFailAt time.Time
+	bookSF     singleflight.Group
 }
 
 type marketRateEntry struct {
@@ -117,6 +138,25 @@ const paycrestMarketRateTTL = 60 * time.Second
 // leaving without re-fetching it on every keystroke. Short, because the whole
 // reason this service re-quotes constantly is that the book moves.
 const paycrestBookTTL = 20 * time.Second
+
+// paycrestBookFetchTimeout bounds the shared book fetch itself, independently
+// of how long any one caller is willing to wait for it.
+const paycrestBookFetchTimeout = 10 * time.Second
+
+// paycrestBookFailTTL suppresses re-fetching after a failure. Short enough that
+// recovery is quick, long enough that an outage does not turn every request
+// into an outbound connection.
+const paycrestBookFailTTL = 5 * time.Second
+
+// rampLegsMaxStale is how old a book may be and still answer a direction
+// question. Generous next to the 20s TTL — this is a ceiling on a degraded
+// path, not a refresh interval.
+const rampLegsMaxStale = 5 * time.Minute
+
+// ErrPaycrestBookUnavailable means we have no book at all and are in the
+// cool-off after a failed fetch. Distinct from ErrPaycrestBookEmpty, which is a
+// book we DID get and could not use.
+var ErrPaycrestBookUnavailable = errors.New("paycrest: order book is unavailable")
 
 // NewPaycrestQuoteService returns nil when the client is unavailable so
 // callers gate on `!= nil`, consistent with the rest of the package.
@@ -281,6 +321,117 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	return res, nil
 }
 
+// ─── Ramp legs ─────────────────────────────────────────────────────────────
+
+// RampLegs says which directions a currency can actually trade in right now.
+// Both false means the currency has a provider on paper but nothing on the
+// book — the app must offer neither button.
+type RampLegs struct {
+	Buy  bool `json:"buy"`
+	Sell bool `json:"sell"`
+}
+
+// RampLegs reports, per fiat, which sides have live liquidity on a venue we
+// route.
+//
+// This is derived rather than declared on purpose. Direction is a property of
+// provider liquidity, not of our product decisions: UGX and TZS have offramp
+// providers only today, and the day someone starts quoting a UGX onramp we
+// should offer it without shipping a migration. The registry stays the
+// authority on WHO serves a currency; the book answers WHICH WAY.
+//
+// It rides the same 20s-TTL book the venue picker uses, so the currency list
+// costs nothing extra: one shared /v2/markets call (~0.2s) serves every caller,
+// and a later fetch failure serves the previous book rather than erroring. An
+// error here therefore means the book has NEVER loaded — see the caller for
+// what gets served then.
+func (s *PaycrestQuoteService) RampLegs(ctx context.Context) (map[string]RampLegs, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	book, err := s.cachedBook(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	wanted := make(map[string]bool, len(s.tokens))
+	for _, t := range s.tokens {
+		wanted[strings.ToUpper(t)] = true
+	}
+	networkFor := make(map[string]string, len(s.chainKeys))
+	for _, chainKey := range s.chainKeys {
+		if network, ok := PaycrestNetwork(chainKey); ok {
+			networkFor[network] = chainKey
+		}
+	}
+	// A leg claim is nothing like a quote: Quote re-prices against /v2/rates
+	// before an order exists, so a slightly stale book there is harmless. Here
+	// nothing re-checks. cachedBook serves a stale book indefinitely on
+	// repeated failure, which would let an hour-old book keep a reopened leg
+	// shut, or keep a closed one open, presented as current fact. Past the
+	// ceiling we would rather say we do not know and let the caller fall back.
+	s.bookMu.Lock()
+	age := time.Since(s.bookAt)
+	s.bookMu.Unlock()
+	if age > rampLegsMaxStale {
+		return nil, fmt.Errorf("%w (book is %s old)", ErrPaycrestBookUnavailable, age.Truncate(time.Second))
+	}
+
+	legs := legsByFiat(book, wanted, networkFor)
+	if len(legs) == 0 {
+		// Not "nothing trades anywhere" — that is not a state this protocol
+		// reaches. An empty map here means the book was empty or shaped in a
+		// way we no longer parse, and reporting it as fact would take every
+		// currency (NGN included) dark on a single bad response.
+		return nil, ErrPaycrestBookEmpty
+	}
+	return legs, nil
+}
+
+// legsByFiat is the pure core of RampLegs: group the book by fiat and side,
+// counting only entries on a token and network we would actually route.
+//
+// Order-size bands are deliberately ignored. The currency list renders before
+// the user has typed an amount, so applying a band here would mean inventing
+// one — and a currency whose only liquidity is large would vanish from the
+// picker even though it trades fine at that size. Quote() applies the band when
+// there is a real amount to apply it to.
+func legsByFiat(book *PaycrestMarkets, wantToken map[string]bool, networkFor map[string]string) map[string]RampLegs {
+	out := map[string]RampLegs{}
+	if book == nil {
+		return out
+	}
+	for _, e := range book.Book {
+		fiat := strings.ToUpper(strings.TrimSpace(e.Fiat))
+		if fiat == "" {
+			continue
+		}
+		if !wantToken[strings.ToUpper(strings.TrimSpace(e.Token))] {
+			continue
+		}
+		if _, ok := networkFor[strings.ToLower(strings.TrimSpace(e.Network))]; !ok {
+			continue
+		}
+		// Same sanity Quote applies when building venues: an entry priced at
+		// zero or unparseable can never become one, so counting it as a live
+		// leg would advertise a direction the quote screen then refuses.
+		if rate, err := strconv.ParseFloat(e.Rate, 64); err != nil || rate <= 0 {
+			continue
+		}
+		legs := out[fiat]
+		switch strings.ToLower(strings.TrimSpace(e.Side)) {
+		case "buy":
+			legs.Buy = true
+		case "sell":
+			legs.Sell = true
+		default:
+			continue
+		}
+		out[fiat] = legs
+	}
+	return out
+}
+
 // VenueFor binds the price for one venue immediately before an order is
 // created. This is where the single authoritative /v2/rates call is spent.
 //
@@ -367,8 +518,39 @@ func (s *PaycrestQuoteService) cachedMarketRate(ctx context.Context, fiat, side 
 	return rate, nil
 }
 
+// expireBook ages the cached book out so a test can exercise the refresh and
+// stale-serve paths without reaching into the mutex and timestamps directly.
+// Test-only, but it lives here so there is one place to update when the cache
+// changes shape.
+func (s *PaycrestQuoteService) expireBook() {
+	s.bookMu.Lock()
+	s.bookAt = s.bookAt.Add(-2 * paycrestBookTTL)
+	s.bookFailAt = time.Time{}
+	s.bookMu.Unlock()
+}
+
 // cachedBook fetches the order book at most once per TTL. The book is public
 // and identical for every caller, so one fetch serves every concurrent quote.
+//
+// Three properties matter here, and each exists because of a way this endpoint
+// can amplify a provider outage into a worse one:
+//
+//   - SINGLEFLIGHT. Every caller past the TTL used to launch its own fetch.
+//     The currency list is now the highest-frequency consumer (the hub asks on
+//     every focus), so a TTL boundary became a fan-out proportional to active
+//     users, aimed at a provider that may already be struggling.
+//
+//   - A DETACHED fetch context. The currency list gives up after 2s; a quote
+//     waits far longer. Sharing one fetch means the impatient caller would
+//     cancel the patient one's work — and, worse, a fetch cancelled before it
+//     lands never populates the cache, so under sustained latency the cache
+//     could never warm and every request re-fired. The fetch therefore runs on
+//     its own deadline and its own lifetime; callers only choose how long they
+//     are willing to WAIT for it.
+//
+//   - NEGATIVE CACHING. After a failure, hold off briefly rather than letting
+//     the next request retry immediately. A hanging upstream otherwise costs
+//     every request its full patience before falling back.
 func (s *PaycrestQuoteService) cachedBook(ctx context.Context) (*PaycrestMarkets, error) {
 	s.bookMu.Lock()
 	if s.book != nil && time.Since(s.bookAt) < paycrestBookTTL {
@@ -376,9 +558,55 @@ func (s *PaycrestQuoteService) cachedBook(ctx context.Context) (*PaycrestMarkets
 		s.bookMu.Unlock()
 		return b, nil
 	}
+	stale, failedAt := s.book, s.bookFailAt
 	s.bookMu.Unlock()
 
-	b, err := s.pc.Markets(ctx)
+	// Recently failed: serve what we have instead of re-attempting. Without
+	// this, a hanging provider costs every caller its full timeout.
+	if !failedAt.IsZero() && time.Since(failedAt) < paycrestBookFailTTL {
+		if stale != nil {
+			return stale, nil
+		}
+		return nil, ErrPaycrestBookUnavailable
+	}
+
+	type bookResult struct{ book *PaycrestMarkets }
+	ch := s.bookSF.DoChan("book", func() (any, error) {
+		// Detached from the caller: see the note above. The fetch outlives any
+		// one request so that a caller who gives up still leaves the cache
+		// warmer for the next.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), paycrestBookFetchTimeout)
+		defer cancel()
+
+		b, err := s.pc.Markets(fetchCtx)
+		if err != nil {
+			s.bookMu.Lock()
+			s.bookFailAt = time.Now()
+			s.bookMu.Unlock()
+			return nil, err
+		}
+		s.bookMu.Lock()
+		s.book, s.bookAt, s.bookFailAt = b, time.Now(), time.Time{}
+		s.bookMu.Unlock()
+		return bookResult{book: b}, nil
+	})
+
+	var (
+		b   *PaycrestMarkets
+		err error
+	)
+	select {
+	case res := <-ch:
+		err = res.Err
+		if res.Val != nil {
+			b = res.Val.(bookResult).book
+		}
+	case <-ctx.Done():
+		// This caller is out of patience; the shared fetch continues. Fall
+		// through to the stale book, or to an error if we have never had one.
+		err = ctx.Err()
+	}
+
 	if err != nil {
 		// Serve a stale book rather than denying every quote: a book from a
 		// minute ago is far more useful than an error, and the order still
@@ -391,8 +619,5 @@ func (s *PaycrestQuoteService) cachedBook(ctx context.Context) (*PaycrestMarkets
 		}
 		return nil, err
 	}
-	s.bookMu.Lock()
-	s.book, s.bookAt = b, time.Now()
-	s.bookMu.Unlock()
 	return b, nil
 }

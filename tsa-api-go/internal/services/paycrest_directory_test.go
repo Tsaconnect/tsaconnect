@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // Names on both sides are taken verbatim from the live lists (Paycrest
@@ -319,5 +320,153 @@ func TestPaycrestDirectory_NigeriaStillMapsToNIBSS(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Code != "044" {
 		t.Fatalf("NGN must return NIBSS codes the app already speaks, got %#v", got)
+	}
+}
+
+// ─── Destination kind ──────────────────────────────────────────────────────
+
+// Every UGX destination is mobile money, and KES and TZS mix a few in among
+// their banks, so the app cannot infer from the currency what to ask for. It
+// asks for an account number when the answer is an MTN phone number, and the
+// payout fails AFTER the on-chain leg — hence the type travels with the option.
+func TestPaycrestDirectory_Institutions_CarriesTheDestinationKind(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "MTN Mobile Money", Code: "MOMOUGPC", Type: "mobile_money"},
+		{Name: "Stanbic Bank", Code: "SBICUGKX", Type: "bank"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	opts, err := d.Institutions(context.Background(), "UGX")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	byCode := map[string]string{}
+	for _, o := range opts {
+		byCode[o.Code] = o.Type
+	}
+	if byCode["MOMOUGPC"] != PaycrestInstitutionMobileMoney {
+		t.Errorf("MTN type = %q, want mobile_money", byCode["MOMOUGPC"])
+	}
+	if byCode["SBICUGKX"] != PaycrestInstitutionBank {
+		t.Errorf("Stanbic type = %q, want bank", byCode["SBICUGKX"])
+	}
+}
+
+// An unset or unrecognised type must read as a bank: that is the majority
+// destination everywhere, and it is what the app rendered for every currency
+// before the field existed. Defaulting the other way would ask a Kenyan bank
+// customer for a phone number.
+func TestPaycrestDirectory_Institutions_UnknownKindDefaultsToBank(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Some Bank", Code: "AAAAKENX"},
+		{Name: "Odd One", Code: "BBBBKENX", Type: "wallet"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	opts, err := d.Institutions(context.Background(), "KES")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	for _, o := range opts {
+		if o.Type != PaycrestInstitutionBank {
+			t.Errorf("%s type = %q, want bank", o.Code, o.Type)
+		}
+	}
+}
+
+// NGN goes through the NIBSS matcher rather than Paycrest's list, so its
+// options are built by different code and would otherwise ship with an empty
+// type — a field the app is about to branch on.
+func TestPaycrestDirectory_Institutions_NGNOptionsAreBanks(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}}
+	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
+	d := NewPaycrestDirectory(pc, local)
+
+	opts, err := d.Institutions(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("Institutions: %v", err)
+	}
+	if len(opts) == 0 {
+		t.Fatal("no NGN options")
+	}
+	for _, o := range opts {
+		if o.Type != PaycrestInstitutionBank {
+			t.Errorf("NGN option %s type = %q, want bank", o.Code, o.Type)
+		}
+	}
+}
+
+// NGN was cached from the start (through BankMap); every other currency called
+// Paycrest on every request. That only became a live path when the East
+// African ramps opened, and the endpoint it sits behind is called whenever a
+// payout picker opens.
+func TestPaycrestDirectory_Institutions_CachesNonNGN(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Equity Bank Kenya", Code: "EQBLKENA", Type: "bank"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	for i := 0; i < 5; i++ {
+		if _, err := d.Institutions(context.Background(), "KES"); err != nil {
+			t.Fatalf("Institutions: %v", err)
+		}
+	}
+	if pc.calls != 1 {
+		t.Errorf("Institutions fetched %d times, want 1 — the list changes when a "+
+			"provider onboards a bank, not per request", pc.calls)
+	}
+
+	// A different currency is a different list, not a cache hit.
+	if _, err := d.Institutions(context.Background(), "UGX"); err != nil {
+		t.Fatalf("Institutions(UGX): %v", err)
+	}
+	if pc.calls != 2 {
+		t.Errorf("calls = %d, want 2 — each currency caches separately", pc.calls)
+	}
+}
+
+// The currency becomes a URL path segment at the provider. PathEscape does not
+// escape ".", so a traversal-shaped value would be appended verbatim.
+func TestPaycrestDirectory_Institutions_RejectsANonCurrencyCode(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "X", Code: "X"}}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	// "" is deliberately absent: an empty currency means NGN by long-standing
+	// contract (TestPaycrestHandler_Banks_EmptyCurrencyBehavesAsNGN), and that
+	// path never reaches the provider URL builder.
+	for _, bad := range []string{"..", "../../admin", "KESX", "K", "kes/../ngn", "NGN%2F.."} {
+		if _, err := d.Institutions(context.Background(), bad); err == nil {
+			t.Errorf("Institutions(%q) = nil error; a value that is not a currency code "+
+				"must never reach the provider URL", bad)
+		}
+	}
+	if pc.calls != 0 {
+		t.Errorf("provider called %d times for invalid input, want 0", pc.calls)
+	}
+}
+
+// A provider blip must not empty a picker the user has open.
+func TestPaycrestDirectory_Institutions_ServesAStaleListOnFailure(t *testing.T) {
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "Equity Bank Kenya", Code: "EQBLKENA", Type: "bank"},
+	}}
+	d := NewPaycrestDirectory(pc, &stubBankDir{})
+
+	if _, err := d.Institutions(context.Background(), "KES"); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	// Expire, then break the upstream.
+	d.instMu.Lock()
+	d.institutions["KES"] = institutionEntry{rows: d.institutions["KES"].rows,
+		at: time.Now().Add(-2 * institutionTTL)}
+	d.instMu.Unlock()
+	pc.err = errors.New("paycrest unreachable")
+
+	opts, err := d.Institutions(context.Background(), "KES")
+	if err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+	if len(opts) != 1 || opts[0].Code != "EQBLKENA" {
+		t.Errorf("options = %+v, want the previously cached list", opts)
 	}
 }

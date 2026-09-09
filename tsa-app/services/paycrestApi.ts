@@ -155,6 +155,11 @@ export async function getQuote(
 export interface PayoutInstitution {
   code: string;
   name: string;
+  /** What the destination is, so the account field can ask for the right
+   *  thing: a bank wants an account number, mobile money wants a phone
+   *  number. Optional because an older API build does not send it; absent is
+   *  treated as a bank, which is every currency's majority destination. */
+  type?: 'bank' | 'mobile_money';
 }
 
 /** Payout destinations for a currency, already in the vocabulary the order

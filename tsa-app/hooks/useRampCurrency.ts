@@ -26,6 +26,7 @@ import { currencyForCountry } from '@/constants/countryCurrency';
 import { deviceCountryCode } from '@/utils/deviceLocale';
 import {
   getRampCurrencies,
+  rampLegsFor,
   rampProviderFor,
   type RampCurrency,
   type RampProvider,
@@ -39,55 +40,75 @@ export interface RampCurrencyOption {
 }
 
 /**
- * Pure resolver: pick the ramp currency code to use, from currencies that
- * actually have a live ramp provider.
+ * Pure resolver: pick the ramp currency code to use, from currencies that can
+ * actually trade — optionally in one specific direction.
  *
- *  1. The user's own explicit pick, if it still has a provider (a provider
+ *  1. The user's own explicit pick, if it still qualifies (a provider or a leg
  *     can be withdrawn from under a choice made earlier).
- *  2. Their own country's currency — KYC first, then device locale — if that
- *     currency has a provider.
- *  3. NGN, if it has a provider.
- *  4. Whatever currency in the list has a provider at all.
+ *  2. Their own country's currency — KYC first, then device locale.
+ *  3. NGN.
+ *  4. Whatever currency in the list qualifies at all.
  *  5. NGN unconditionally — the caller still has to render something, and an
  *     empty/not-yet-loaded list must not crash the screen.
  *
- * Never returns a currency without a provider (other than the final,
- * unavoidable NGN fallback for an empty list) — offering one would let the
- * user quote or submit an order the backend is guaranteed to refuse.
+ * `leg` is what makes this safe on a single-direction screen. Without it, a
+ * Ugandan user opening Buy defaults to UGX — which Paycrest sells but never
+ * buys — and every amount they type fails the quote with a generic error. A
+ * screen that only buys must only ever be handed a currency that buys.
  */
 export function resolveRampCurrencyCode(
   selectedCode: string | null | undefined,
   list: RampCurrency[],
-  opts: { kycCountry?: string | null; deviceCountry?: string | null } = {},
+  opts: { kycCountry?: string | null; deviceCountry?: string | null; leg?: RampLeg } = {},
 ): string {
-  const hasProvider = (code: string) => rampProviderFor(list, code) !== '';
+  const qualifies = (code: string) => currencyTrades(list, code, opts.leg);
 
   if (selectedCode) {
     const upper = selectedCode.toUpperCase();
-    if (hasProvider(upper)) return upper;
+    if (qualifies(upper)) return upper;
   }
 
   const fromCountry = (country?: string | null): string | null => {
     const code = currencyForCountry(country);
-    return code && hasProvider(code) ? code : null;
+    return code && qualifies(code) ? code : null;
   };
 
   return (
     fromCountry(opts.kycCountry) ??
     fromCountry(opts.deviceCountry) ??
-    (hasProvider('NGN') ? 'NGN' : null) ??
-    list.find((c) => c.rampProvider !== '')?.code ??
+    (qualifies('NGN') ? 'NGN' : null) ??
+    list.find((c) => currencyTrades(list, c.code, opts.leg))?.code ??
     'NGN'
   );
 }
 
+/** One direction of trade, for screens that only do one. */
+export type RampLeg = 'buy' | 'sell';
+
 /**
- * Ramp-scoped currency, optionally restricted to one provider (pass
- * 'paycrest' from a Paycrest-only screen so its picker never offers a
- * currency Paycrest doesn't serve, e.g. one that routes through Flutterwave
- * instead).
+ * Whether a currency can be traded at all — or, when `leg` is given, in that
+ * direction specifically.
+ *
+ * A provider is necessary but not sufficient: UGX and TZS have offramp
+ * providers and no onramp.
  */
-export function useRampCurrency(providerFilter?: RampProvider) {
+function currencyTrades(list: RampCurrency[], code: string, leg?: RampLeg): boolean {
+  if (rampProviderFor(list, code) === '') return false;
+  if (!leg) return true;
+  const legs = rampLegsFor(list, code);
+  return leg === 'buy' ? legs.buy : legs.sell;
+}
+
+/**
+ * Ramp-scoped currency, optionally restricted to one provider and/or one
+ * direction.
+ *
+ * Pass `providerFilter` from a provider-specific screen so its picker never
+ * offers a currency that provider doesn't serve. Pass `leg` from a screen that
+ * only does one direction — a buy screen handed a sell-only currency can never
+ * quote, and the user finds out only after typing an amount.
+ */
+export function useRampCurrency(providerFilter?: RampProvider, leg?: RampLeg) {
   const { currentUser } = useAuth();
   const { supportedCurrencies } = useCurrency();
   const [all, setAll] = useState<RampCurrency[]>([]);
@@ -111,24 +132,29 @@ export function useRampCurrency(providerFilter?: RampProvider) {
     };
   }, []);
 
-  // The candidate list this screen may use — every provider on the hub
-  // (which has to know about both to route stablecoin buy/sell correctly),
-  // or just the one a Paycrest/Flutterwave-specific screen actually talks to.
-  const candidates = useMemo(
-    () =>
-      providerFilter
-        ? all.filter((c) => c.rampProvider === providerFilter)
-        : all.filter((c) => c.rampProvider !== ''),
-    [all, providerFilter],
-  );
+  // The candidate list this screen may use: every provider on the hub (which
+  // has to know about both to route stablecoin buy/sell correctly), or just the
+  // one a Paycrest/Flutterwave-specific screen actually talks to — and, on a
+  // one-direction screen, only the currencies that trade that way.
+  const candidates = useMemo(() => {
+    const byProvider = providerFilter
+      ? all.filter((c) => c.rampProvider === providerFilter)
+      : all.filter((c) => c.rampProvider !== '');
+    if (!leg) return byProvider;
+    return byProvider.filter((c) => {
+      const legs = rampLegsFor(all, c.code);
+      return leg === 'buy' ? legs.buy : legs.sell;
+    });
+  }, [all, providerFilter, leg]);
 
   const code = useMemo(
     () =>
       resolveRampCurrencyCode(selectedCode, candidates, {
         kycCountry: currentUser?.country,
         deviceCountry: deviceCountryCode(),
+        leg,
       }),
-    [selectedCode, candidates, currentUser?.country],
+    [selectedCode, candidates, currentUser?.country, leg],
   );
 
   const currency: CurrencyConfig = useMemo(
@@ -142,11 +168,15 @@ export function useRampCurrency(providerFilter?: RampProvider) {
     AsyncStorage.setItem(RAMP_CURRENCY_KEY, upper).catch(() => {});
   }, []);
 
-  // Only offer a choice when there is one — a picker listing a single
-  // currency is noise, and today NGN (paycrest) is the only currency with a
-  // live provider, so that is exactly what this is. GHS used to claim one and
-  // selecting it changed nothing: every screen behind the choice still quoted
-  // and settled in naira.
+  // Only offer a choice when there is one — a picker listing a single currency
+  // is noise. Today Paycrest serves NGN, KES, UGX and TZS, so there is a real
+  // choice; GHS is absent because Paycrest does not list it and the
+  // Flutterwave path behind it still quotes and settles in naira.
+  //
+  // The options are currencies with a PROVIDER, not currencies that trade both
+  // ways: UGX and TZS sell only. The hub reads the per-direction legs and
+  // renders the live one — a currency the user can sell is still worth
+  // offering here.
   const options: RampCurrencyOption[] = useMemo(
     () => candidates.map((c) => ({ id: c.code, label: c.code })),
     [candidates],

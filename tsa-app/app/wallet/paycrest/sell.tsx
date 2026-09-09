@@ -42,8 +42,11 @@ import { useCountdown } from '@/hooks/useCountdown';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
 import { resolveAccountName } from '@/services/ngBanks';
 import {
+  accountFieldLabel,
+  accountFieldPlaceholder,
+  accountValueSurvivesKindChange,
   accountNumberMaxLength,
-  isDigitsOnlyAccountCurrency,
+  isDigitsOnlyAccountField,
   isValidAccountNumber,
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
@@ -132,7 +135,7 @@ export default function PaycrestSellScreen() {
     currency: currencyConfig,
     setCode: setCurrencyCode,
     options: currencyOptions,
-  } = useRampCurrency('paycrest');
+  } = useRampCurrency('paycrest', 'sell');
   const symbol = currencyConfig.symbol;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);
@@ -158,6 +161,11 @@ export default function PaycrestSellScreen() {
   const [banks, setBanks] = useState<PayoutInstitution[]>([]);
   const [bank, setBank] = useState<PayoutInstitution | null>(null);
   const [bankOpen, setBankOpen] = useState(false);
+  // What the chosen destination actually is. Paycrest reports it per
+  // institution — every UGX option is mobile money, KES and TZS carry a few
+  // among their banks — and it decides what the account field asks for. An
+  // API build that does not send it reads as a bank, the majority everywhere.
+  const destKind = bank?.type ?? 'bank';
   const [accountNo, setAccountNo] = useState('');
   const [accountName, setAccountName] = useState('');
   const [resolving, setResolving] = useState(false);
@@ -258,7 +266,7 @@ export default function PaycrestSellScreen() {
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
   useEffect(() => {
-    if (!requiresNameCheck || !bank || !isValidAccountNumber(currencyCode, accountNo)) {
+    if (!requiresNameCheck || !bank || !isValidAccountNumber(currencyCode, accountNo, destKind)) {
       setAccountName('');
       return;
     }
@@ -278,7 +286,10 @@ export default function PaycrestSellScreen() {
     return () => {
       cancelled = true;
     };
-  }, [requiresNameCheck, bank, accountNo, currencyCode]);
+    // destKind belongs here: switching a Nigerian destination between a bank
+    // and mobile money changes whether the entered number is valid, and a
+    // stale resolved name would then be attached to the wrong destination.
+  }, [requiresNameCheck, bank, accountNo, currencyCode, destKind]);
 
   const onConfirm = useCallback(async () => {
     if (!venue || !address || !bank) return;
@@ -410,7 +421,7 @@ export default function PaycrestSellScreen() {
     !!venue &&
     !!address &&
     !!bank &&
-    isValidAccountNumber(currencyCode, accountNo) &&
+    isValidAccountNumber(currencyCode, accountNo, destKind) &&
     (!requiresNameCheck || !!accountName) &&
     !fundingBlocks;
 
@@ -607,16 +618,23 @@ export default function PaycrestSellScreen() {
           <SelectRow
             label="Pay into"
             value={bank?.name}
-            placeholder="Choose a bank"
+            placeholder="Choose a destination"
             onPress={() => setBankOpen(true)}
           />
+          {/* The field follows the DESTINATION, not the currency: pick MTN in
+              Uganda and this asks for a phone number, pick a bank and it asks
+              for an account number. */}
           <Input
-            label="Account number"
+            label={accountFieldLabel(destKind)}
             value={accountNo}
-            onChangeText={(v: string) => setAccountNo(sanitizeAccountNumberInput(currencyCode, v))}
-            keyboardType={isDigitsOnlyAccountCurrency(currencyCode) ? 'number-pad' : 'default'}
-            placeholder={isDigitsOnlyAccountCurrency(currencyCode) ? '0123456789' : 'Account number'}
-            maxLength={accountNumberMaxLength(currencyCode)}
+            onChangeText={(v: string) =>
+              setAccountNo(sanitizeAccountNumberInput(currencyCode, v, destKind))
+            }
+            keyboardType={
+              isDigitsOnlyAccountField(currencyCode, destKind) ? 'number-pad' : 'default'
+            }
+            placeholder={accountFieldPlaceholder(currencyCode, destKind)}
+            maxLength={accountNumberMaxLength(currencyCode, destKind)}
           />
           {requiresNameCheck && resolving && (
             <Text variant="caption" style={{ color: colors.textMuted }}>
@@ -631,7 +649,7 @@ export default function PaycrestSellScreen() {
           {requiresNameCheck &&
             !resolving &&
             !accountName &&
-            isValidAccountNumber(currencyCode, accountNo) &&
+            isValidAccountNumber(currencyCode, accountNo, destKind) &&
             bank && (
               <Text variant="caption" style={{ color: colors.danger }}>
                 We could not verify that account. Check the number and bank.
@@ -714,15 +732,23 @@ export default function PaycrestSellScreen() {
       <PickerSheet
         visible={bankOpen}
         onClose={() => setBankOpen(false)}
-        title="Choose a bank"
+        title="Choose a destination"
         items={bankItems}
         selectedId={bank?.code}
         searchable
         onSelect={(item) => {
-          setBank(banks.find((b) => b.code === item.id) ?? null);
+          const next = banks.find((b) => b.code === item.id) ?? null;
+          // Switching between kinds invalidates what was typed — a phone
+          // number is not an account number, and each passes the other's rule
+          // by accident. See accountValueSurvivesKindChange.
+          if (!accountValueSurvivesKindChange(destKind, next?.type)) {
+            setAccountNo('');
+            setAccountName('');
+          }
+          setBank(next);
           setBankOpen(false);
         }}
-        emptyText="No banks available."
+        emptyText="No destinations available."
       />
     </SafeAreaView>
   );

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,13 @@ var (
 	// for Paycrest. Explicit, because the alternative is a payout that
 	// silently goes nowhere.
 	ErrPaycrestBankUnsupported = errors.New("this bank cannot receive payouts through this route")
-	ErrPaycrestOrderNotYours   = errors.New("order not found")
+
+	// ErrPaycrestAccountShape means the identifier does not match the kind of
+	// destination it is aimed at — a bank account number sent to a mobile-money
+	// code, or a number too short to be either. Refused before the order
+	// exists, because after the on-chain leg it is not correctable.
+	ErrPaycrestAccountShape  = errors.New("that account number does not match the destination you chose")
+	ErrPaycrestOrderNotYours = errors.New("order not found")
 	// ErrPaycrestNotCancellable covers both "too late" and "already gone": an
 	// order past the waiting-for-the-user stage, and one whose payment the user
 	// has already claimed to have sent.
@@ -93,6 +100,41 @@ func (s *PaycrestOrderService) requirePaycrestEnabled(fiat string) error {
 		return ErrPaycrestDisabled
 	}
 	return nil
+}
+
+// explainMissingVenue separates "nobody fills THIS amount" from "this currency
+// does not trade this way at all".
+//
+// Both arrive as ErrPaycrestNoVenue, and the difference matters to the person
+// reading it: the first is answered by trying another amount, the second never
+// is. UGX and TZS have offramp providers only, so a UGX buy is permanently
+// empty rather than momentarily unlucky.
+//
+// The app already hides a dead direction (GET /it/currencies reports the legs),
+// so reaching this means a stale client or a leg that closed mid-session — the
+// order is refused either way; only the wording changes.
+func (s *PaycrestOrderService) explainMissingVenue(ctx context.Context, side, fiat string, err error) error {
+	if !errors.Is(err, ErrPaycrestNoVenue) || s.quotes == nil {
+		return err
+	}
+	legs, legErr := s.quotes.RampLegs(ctx)
+	if legErr != nil {
+		return err
+	}
+	l := legs[strings.ToUpper(strings.TrimSpace(fiat))]
+	if (side == "buy" && !l.Buy) || (side == "sell" && !l.Sell) {
+		verb := "Buying"
+		if side == "sell" {
+			verb = "Selling"
+		}
+		// Wrapped, because the handler maps sentinels to status codes with
+		// errors.Is: an unwrapped error here falls to its default branch and
+		// tells the user the provider is unreachable — "broken, try again" —
+		// when the truth is that this direction is permanently closed.
+		return fmt.Errorf("%w: %s is not available in %s right now",
+			ErrPaycrestLegClosed, verb, strings.ToUpper(fiat))
+	}
+	return err
 }
 
 // NewPaycrestOrderService returns nil unless everything it needs is wired, so
@@ -188,13 +230,22 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	if err := s.requirePaycrestEnabled(fiat); err != nil {
 		return nil, err
 	}
-	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	// Destination first, then price. Resolving the refund account is cheap and
+	// cached, while VenueFor spends the slow, concurrency-throttled /v2/rates
+	// call — no reason to spend it on a request a malformed destination is
+	// about to refuse. The refund account only matters when an order fails,
+	// which is exactly when a bad one cannot be corrected.
+	refundInst, refundKind, err := s.paycrestBankCode(ctx, fiat, req.RefundBankCode)
 	if err != nil {
 		return nil, err
 	}
-	refundInst, err := s.paycrestBankCode(ctx, fiat, req.RefundBankCode)
-	if err != nil {
+	if err := validatePayoutIdentifier(refundKind, fiat, req.RefundAccount); err != nil {
 		return nil, err
+	}
+
+	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "buy", fiat, err)
 	}
 
 	// Submit the grossed-down figure so the provider asks the user for exactly
@@ -323,13 +374,20 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	if err := s.requirePaycrestEnabled(fiat); err != nil {
 		return nil, err
 	}
-	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	// Destination before price, for the same reason as the buy path — and here
+	// it matters more: this is where the user's money is pointed somewhere, and
+	// after the on-chain leg there is nothing to correct.
+	payoutInst, payoutKind, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
 	if err != nil {
 		return nil, err
 	}
-	payoutInst, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
-	if err != nil {
+	if err := validatePayoutIdentifier(payoutKind, fiat, req.AccountNo); err != nil {
 		return nil, err
+	}
+
+	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
 	}
 
 	// Paycrest prices an offramp in token units.
@@ -644,32 +702,73 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 // and always miss. For those currencies, confirm the code is a real
 // institution for this fiat (via the same Institutions() the picker used) and
 // pass it through unchanged.
-func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code string) (string, error) {
+// Returns the provider's code AND the destination kind, because the kind
+// decides what a valid identifier looks like and this is the only place that
+// already knows it.
+func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code string) (string, string, error) {
 	if s.dir == nil {
-		return "", ErrPaycrestDisabled
+		return "", "", ErrPaycrestDisabled
 	}
 	code = strings.TrimSpace(code)
 	if strings.ToUpper(strings.TrimSpace(fiat)) != "NGN" {
 		institutions, err := s.dir.Institutions(ctx, fiat)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		for _, inst := range institutions {
 			if inst.Code == code {
-				return code, nil
+				return code, inst.Type, nil
 			}
 		}
-		return "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
+		return "", "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
 	}
 	m, err := s.dir.BankMap(ctx, fiat)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	paycrestCode, ok := m.NIBSSToPaycrest[code]
 	if !ok {
-		return "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
+		return "", "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
 	}
-	return paycrestCode, nil
+	// NIBSS is a bank registry; every code in it takes a NUBAN account number.
+	return paycrestCode, PaycrestInstitutionBank, nil
+}
+
+// msisdnPattern and nubanPattern are the only two identifier shapes we can
+// state with confidence. Everything else stays "non-empty" rather than being
+// forced through a rule we would be guessing at.
+var (
+	msisdnPattern = regexp.MustCompile(`^\d{9,15}$`)
+	nubanPattern  = regexp.MustCompile(`^\d{10}$`)
+)
+
+// validatePayoutIdentifier checks the account identifier against the KIND of
+// destination it is going to.
+//
+// The app already asks for the right thing per destination, but the app is not
+// a trust boundary: an older build, or any direct API caller, can post a
+// 10-digit bank account number against an MTN mobile-money code. The payout
+// then fails at the provider AFTER the on-chain leg has moved, which is the
+// one failure this whole area exists to prevent — and a short-but-real number
+// does not fail at all, it pays a stranger.
+func validatePayoutIdentifier(kind, fiat, identifier string) error {
+	id := strings.TrimSpace(identifier)
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case PaycrestInstitutionMobileMoney:
+		if !msisdnPattern.MatchString(id) {
+			return fmt.Errorf("%w: a mobile money destination needs a phone number (9-15 digits)",
+				ErrPaycrestAccountShape)
+		}
+	default:
+		// NUBAN is the one bank format we know. Other currencies' account
+		// numbers vary by country and bank, so requiring a length there would
+		// reject real accounts — non-empty is enforced by the caller.
+		if strings.EqualFold(strings.TrimSpace(fiat), "NGN") && !nubanPattern.MatchString(id) {
+			return fmt.Errorf("%w: a Nigerian bank account number is 10 digits",
+				ErrPaycrestAccountShape)
+		}
+	}
+	return nil
 }
 
 // paycrestReference mints our idempotency key. The user id is embedded so an

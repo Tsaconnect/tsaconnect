@@ -229,35 +229,63 @@ func TestRegistryGatesPayout_NotJustTheCatalog(t *testing.T) {
 	}
 }
 
-// NGN is the ONLY currency the ramp actually serves today, and both places
-// that can claim otherwise are asserted here.
+// The ramp set is exactly what Paycrest can serve, and both places that can
+// claim otherwise are asserted here.
 //
-// The regression this guards: GHS was seeded with RampProviderFlutterwave, so
-// /it/currencies advertised two ramp currencies and the app's IT hub grew a
-// currency picker. Selecting GHS changed nothing — ActivateFiatVA mints NGN
-// accounts only, sells hard-code Currency "NGN", and the app's stablecoin
-// screens quote and settle in naira regardless of what they are handed. A
-// picker whose choice is silently ignored is worse than no picker.
+// Paycrest's /v1/currencies lists NGN, KES, UGX and TZS. GHS is absent, and a
+// GHS rate request answers "Fiat currency GHS is not supported" — so GHS must
+// never appear here, whatever provider it is given. That is the regression
+// this guards: GHS was seeded with RampProviderFlutterwave, /it/currencies
+// advertised it, the app grew a currency picker, and selecting GHS changed
+// nothing because every route behind it was still naira. A picker whose choice
+// is silently ignored is worse than no picker.
 //
-// Adding a ramp currency means making the buy/sell path currency-aware first,
-// then updating this test on purpose.
-func TestDefaultCurrencies_OnlyNGNHasARamp(t *testing.T) {
+// Note what this test does NOT pin: direction. UGX and TZS have offramp
+// providers only, but that is liquidity, not product policy — it moves without
+// our deploys and is derived from the live order book (legsByFiat).
+//
+// Adding a currency here means Paycrest actually serves it. Re-probe
+// /v1/currencies rather than assuming.
+func TestDefaultCurrencies_RampSetMatchesPaycrest(t *testing.T) {
+	paycrestServes := map[string]bool{"NGN": true, "KES": true, "UGX": true, "TZS": true}
+
 	for _, c := range DefaultCurrencies() {
 		want := RampProviderNone
-		if c.Code == "NGN" {
+		if paycrestServes[c.Code] {
 			want = RampProviderPaycrest
 		}
 		if c.RampProvider != want {
-			t.Errorf("%s ramp = %q, want %q — the ramp is NGN-only until the buy/sell path is currency-aware",
+			t.Errorf("%s ramp = %q, want %q — the ramp set is exactly the currencies Paycrest serves",
 				c.Code, c.RampProvider, want)
 		}
 	}
 	for code, provider := range defaultRampProviders {
-		if code != "NGN" {
-			t.Errorf("defaultRampProviders[%s] = %q; the fallback must not resurrect a ramp the screens cannot serve",
+		if !paycrestServes[code] {
+			t.Errorf("defaultRampProviders[%s] = %q; the fallback must not resurrect a ramp the provider cannot serve",
 				code, provider)
 		}
 	}
+}
+
+// GHS gets its own assertion rather than riding on the loop above: it is the
+// one currency that has already been wrongly advertised once, and the failure
+// message should say why rather than reading as a table mismatch.
+func TestDefaultCurrencies_GHSClaimsNoRamp(t *testing.T) {
+	for _, c := range DefaultCurrencies() {
+		if c.Code != "GHS" {
+			continue
+		}
+		if c.RampProvider != RampProviderNone {
+			t.Errorf("GHS ramp = %q, want none — Paycrest does not list GHS, and the "+
+				"Flutterwave path (NGN-only VAs, NGN-denominated intents, naira-only "+
+				"screens) cannot serve it either", c.RampProvider)
+		}
+		if !c.PayoutEnabled {
+			t.Error("GHS must stay payout-enabled — the withdrawal catalog offers a Ghanaian bank rail")
+		}
+		return
+	}
+	t.Fatal("GHS missing from DefaultCurrencies")
 }
 
 func TestCurrencyRegistry_RampProviderFallsBackWhenColumnEmpty(t *testing.T) {
@@ -308,24 +336,66 @@ func TestDefaultCurrencies_EastAfricanCorridors(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s missing from DefaultCurrencies", code)
 		}
-		// RampProvider must be empty (RampProviderNone), NOT paycrest: buy.tsx
-		// and sell.tsx are not currency-aware (they call getQuote/createBuy/
-		// createSell with no currency, which server-defaults to NGN), so
-		// advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
-		// user a naira order — a ₦ amount field, a Nigerian refund-bank
-		// picker, and instructions to wire naira to a Nigerian account. The
-		// row itself stays a valid payout currency; only the ramp claim goes.
-		if c.RampProvider != RampProviderNone {
-			t.Errorf("%s ramp = %q, want none (screens are NGN-only)", code, c.RampProvider)
+		// These are live Paycrest ramps. They were held back while the ramp
+		// screens were naira-only — a Kenyan user would have got a ₦ amount
+		// field, a Nigerian refund-bank picker, and instructions to wire naira
+		// to a Nigerian account — and were opened once the Paycrest path became
+		// currency-aware end to end.
+		if c.RampProvider != RampProviderPaycrest {
+			t.Errorf("%s ramp = %q, want paycrest", code, c.RampProvider)
 		}
 		if !c.PayoutEnabled {
 			t.Errorf("%s must be payout-enabled — Paycrest pays out in it", code)
 		}
-		// DepositEnabled means "Flutterwave has a VA product here". Nothing
-		// uses it for these currencies, and a true we have never exercised is
-		// a claim nobody has verified.
+		// DepositEnabled means "Flutterwave has a VA product here". A Paycrest
+		// buy needs no VA from us — the user pays the provider directly, and
+		// nothing on that path consults this flag — so opening the ramp does
+		// not make this true. A true we have never exercised is a claim nobody
+		// has verified.
 		if c.DepositEnabled {
 			t.Errorf("%s DepositEnabled must be false; nothing exercises FW VAs there", code)
 		}
+	}
+}
+
+// The path a deployed database actually takes.
+//
+// seedMissing never updates an existing row, and KES/UGX/TZS were seeded
+// payout-only long before this ramp opened — so in production their
+// ramp_provider column is blank and the DefaultCurrencies() literal above is
+// INERT. The fallback map is the only thing that opens these rails.
+//
+// The seed-literal tests cannot see that. Deleting an entry from
+// defaultRampProviders passes every one of them while the rail stays shut and
+// requirePaycrestEnabled refuses each order with ErrPaycrestDisabled. This is
+// the test that fails instead.
+func TestCurrencyRegistry_RampsSurviveAPreExistingBlankRow(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	// Exactly the production shape: rows that predate the column.
+	for _, code := range []string{"NGN", "KES", "UGX", "TZS"} {
+		if err := db.Create(&models.Currency{
+			Code: code, Exponent: 2, PayoutEnabled: true,
+		}).Error; err != nil {
+			t.Fatalf("seed %s: %v", code, err)
+		}
+	}
+
+	r := NewCurrencyRegistry(db)
+	if err := r.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	for _, code := range []string{"NGN", "KES", "UGX", "TZS"} {
+		if got := r.RampProvider(code); got != RampProviderPaycrest {
+			t.Errorf("RampProvider(%s) = %q, want paycrest — seedMissing never updates "+
+				"an existing row, so on a deployed database the fallback map is the only "+
+				"thing that opens this rail", code, got)
+		}
+	}
+	// And the converse still holds: GHS (seeded by the registry itself, since
+	// it was not pre-created above) must not acquire a ramp through the
+	// fallback either.
+	if got := r.RampProvider("GHS"); got != RampProviderNone {
+		t.Errorf("RampProvider(GHS) = %q, want none", got)
 	}
 }

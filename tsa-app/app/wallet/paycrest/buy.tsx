@@ -42,8 +42,11 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
+  accountFieldLabel,
+  accountFieldPlaceholder,
+  accountValueSurvivesKindChange,
   accountNumberMaxLength,
-  isDigitsOnlyAccountCurrency,
+  isDigitsOnlyAccountField,
   isValidAccountNumber,
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
@@ -100,8 +103,10 @@ export default function PaycrestBuyScreen() {
 
   // The currency this order settles in — NOT the display currency (see
   // hooks/useRampCurrency.ts). Restricted to 'paycrest' so the picker below
-  // can never offer a currency this screen would fail to quote (e.g. one that
-  // routes through Flutterwave instead). A currency arriving via the route
+  // can never offer a currency this screen would fail to quote — provider AND
+  // direction, since Paycrest sells UGX and TZS but does not buy them, so a
+  // provider-only filter would default a Ugandan user into a currency this
+  // screen can never price. A currency arriving via the route
   // param (the hub already resolved one) is applied immediately so the first
   // render doesn't briefly show a different default while AsyncStorage loads.
   const {
@@ -109,7 +114,7 @@ export default function PaycrestBuyScreen() {
     currency: currencyConfig,
     setCode: setCurrencyCode,
     options: currencyOptions,
-  } = useRampCurrency('paycrest');
+  } = useRampCurrency('paycrest', 'buy');
   const symbol = currencyConfig.symbol;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);
@@ -140,6 +145,10 @@ export default function PaycrestBuyScreen() {
   const [banks, setBanks] = useState<PayoutInstitution[]>([]);
   const [refundBank, setRefundBank] = useState<PayoutInstitution | null>(null);
   const [refundOpen, setRefundOpen] = useState(false);
+  // The refund destination can be mobile money too — in Uganda it always is —
+  // and the field must ask for a phone number when it is. Missing type reads
+  // as a bank, which is what every currency's majority destination is.
+  const refundKind = refundBank?.type ?? 'bank';
   const [refundAccount, setRefundAccount] = useState('');
 
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
@@ -470,14 +479,16 @@ export default function PaycrestBuyScreen() {
                 onPress={() => setRefundOpen(true)}
               />
               <Input
-                label="Account number"
+                label={accountFieldLabel(refundKind)}
                 value={refundAccount}
                 onChangeText={(v: string) =>
-                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v))
+                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v, refundKind))
                 }
-                keyboardType={isDigitsOnlyAccountCurrency(currencyCode) ? 'number-pad' : 'default'}
-                placeholder={isDigitsOnlyAccountCurrency(currencyCode) ? '0123456789' : 'Account number'}
-                maxLength={accountNumberMaxLength(currencyCode)}
+                keyboardType={
+                  isDigitsOnlyAccountField(currencyCode, refundKind) ? 'number-pad' : 'default'
+                }
+                placeholder={accountFieldPlaceholder(currencyCode, refundKind)}
+                maxLength={accountNumberMaxLength(currencyCode, refundKind)}
               />
               <Text variant="caption" style={{ color: colors.textMuted }}>
                 Used only if your order fails. Pay from this account so a refund reaches you.
@@ -493,7 +504,7 @@ export default function PaycrestBuyScreen() {
               !venue ||
               !address ||
               !refundBank ||
-              !isValidAccountNumber(currencyCode, refundAccount) ||
+              !isValidAccountNumber(currencyCode, refundAccount, refundKind) ||
               quoting ||
               creating
             }
@@ -546,7 +557,14 @@ export default function PaycrestBuyScreen() {
         selectedId={refundBank?.code}
         searchable
         onSelect={(item) => {
-          setRefundBank(banks.find((b) => b.code === item.id) ?? null);
+          const next = banks.find((b) => b.code === item.id) ?? null;
+          // Same reasoning as the sell screen's payout picker: a value typed
+          // for one kind of destination is meaningless — and dangerously
+          // plausible — against the other.
+          if (!accountValueSurvivesKindChange(refundKind, next?.type)) {
+            setRefundAccount('');
+          }
+          setRefundBank(next);
           setRefundOpen(false);
         }}
         emptyText="No banks available."

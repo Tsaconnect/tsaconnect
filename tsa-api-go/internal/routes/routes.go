@@ -897,12 +897,36 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// credential leaves the routes unregistered rather than 500ing.
 		if pch.Enabled() {
 			pc := api.Group("/paycrest")
+			// Quoting stays public: it is a price, it is Paycrest's own public
+			// endpoint behind our cache, and the app shows rates before login.
 			pc.GET("/quote", pch.Quote)
-			pc.GET("/banks", pch.Banks)
 			pc.Use(auth)
 			{
-				pc.POST("/buy", itIdem, pch.Buy)
-				pc.POST("/sell", itIdem, pch.Sell)
+				// Behind auth: every caller is a signed-in screen (the app
+				// sends a token on this call already), and for a non-NGN
+				// currency it reaches Paycrest, so leaving it open let anyone
+				// drive one upstream request per HTTP request.
+				pc.GET("/banks", pch.Banks)
+				// Per user, not per IP. Order creation is the most sensitive
+				// write here and the only one that spends a /v2/rates call —
+				// slow and concurrency-throttled at the provider. One order at
+				// a time is already enforced by assertNoOpenOrder, and an
+				// idempotency key only collapses IDENTICAL retries, so a
+				// single account can otherwise loop failing creates and burn
+				// provider quota for everyone. Ten a minute is far above any
+				// real user's pace. Mirrors the dispute and bill write limits.
+				paycrestWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
+					v, _ := c.Get("user")
+					switch u := v.(type) {
+					case models.User:
+						return "paycrest:" + u.ID.String()
+					case *models.User:
+						return "paycrest:" + u.ID.String()
+					}
+					return "" // falls back to client IP inside RateLimiterBy
+				})
+				pc.POST("/buy", itIdem, paycrestWriteLimit, pch.Buy)
+				pc.POST("/sell", itIdem, paycrestWriteLimit, pch.Sell)
 				pc.GET("/orders", pch.ListOrders)
 				pc.GET("/orders/:id", pch.GetOrder)
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)

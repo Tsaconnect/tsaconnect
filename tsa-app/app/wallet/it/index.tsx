@@ -18,6 +18,12 @@
 // later. Which provider (if any) serves a currency comes from the backend
 // currency registry via getRampCurrencies/rampProviderFor — not hardcoded
 // here, so adding a currency is a backend change, not an app release.
+//
+// Direction is a separate question from provider, and the rows carry that too:
+// Paycrest has offramp providers for UGX and TZS and no onramp, so those
+// currencies show Sell with no Buy. The legs come from the live order book via
+// rampLegsFor, so a leg that opens or closes at the provider is reflected
+// without shipping anything.
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -43,6 +49,7 @@ import {
   getITBalance,
   getITRate,
   listITIntents,
+  rampLegsFor,
   rampProviderFor,
   type ITBalance,
   type ITIntent,
@@ -57,6 +64,7 @@ import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd } from '@/utils/currencyDisplay';
+import { stableRowActions } from '@/utils/rampRow';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -245,6 +253,15 @@ export default function ITHub() {
   // only, never what currency Buy/Sell actually uses.
   const { code, setCode, options: currencyOptions, currencies } = useRampCurrency();
   const support = rampProviderFor(currencies, code);
+  // Which way this currency actually trades. A provider is not a promise of
+  // both directions: Paycrest has offramp providers for UGX and TZS and no
+  // onramp, so those currencies sell and cannot be bought. The server derives
+  // this from the live order book, which is why it is a per-render fact rather
+  // than something baked into the build.
+  // Memoized so the row memo below can depend on it: rampLegsFor builds a
+  // fresh object each call, and an unstable dependency would rebuild every row
+  // on every render.
+  const legs = useMemo(() => rampLegsFor(currencies, code), [currencies, code]);
 
   const assets: AssetRow[] = useMemo(() => {
     const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
@@ -253,23 +270,29 @@ export default function ITHub() {
         balance: loading && !address ? null : fmtToken(stable[token] ?? 0),
         balanceNote: address ? 'in your wallet' : 'connect a wallet',
       };
-      if (!address) return { ...base, unavailable: 'Connect a wallet to trade' };
-      switch (support) {
-        case 'paycrest':
-          return {
-            ...base,
-            onBuy: () => router.push(`/wallet/paycrest/buy?asset=${token}&currency=${code}` as never),
-            onSell: () => router.push(`/wallet/paycrest/sell?asset=${token}&currency=${code}` as never),
-          };
-        case 'flutterwave':
-          return {
-            ...base,
-            onBuy: () => router.push(`/wallet/it/buy-stable?asset=${token}&currency=${code}` as never),
-            onSell: () => router.push(`/wallet/it/sell-stable?asset=${token}&currency=${code}` as never),
-          };
-        default:
-          return { ...base, unavailable: `Not available in ${code}` };
-      }
+      // What this row may offer, and why not when it may not — see
+      // utils/rampRow.ts. Each action is attached only if its direction is
+      // live, so a sell-only currency shows Sell alone rather than a Buy that
+      // fails once the user has already picked an amount.
+      const actions = stableRowActions({
+        token,
+        currency: code,
+        provider: support,
+        legs,
+        hasWallet: !!address,
+      });
+      if (actions.unavailable) return { ...base, unavailable: actions.unavailable };
+
+      const route = (dir: 'buy' | 'sell') =>
+        support === 'paycrest'
+          ? `/wallet/paycrest/${dir}?asset=${token}&currency=${code}`
+          : `/wallet/it/${dir}-stable?asset=${token}&currency=${code}`;
+
+      return {
+        ...base,
+        onBuy: actions.buy ? () => router.push(route('buy') as never) : undefined,
+        onSell: actions.sell ? () => router.push(route('sell') as never) : undefined,
+      };
     };
     // MCGP's own buy/sell screens are NGN-only — buy.tsx offers a single
     // payment currency and sell.tsx raises the intent with Currency "NGN" —
@@ -294,7 +317,7 @@ export default function ITHub() {
       stableRow('USDC'),
       stableRow('USDT'),
     ];
-  }, [loading, address, stable, support, code, spendable, mcgpRateLine]);
+  }, [loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
 
   const recent = useMemo(() => {
     const rows = [
@@ -319,8 +342,7 @@ export default function ITHub() {
           style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
         >
           {/* Only offer a choice when there is one — a picker listing a
-              single currency is noise, and most of the time (today: always)
-              that is exactly what this is. */}
+              single currency is noise. */}
           {currencyOptions.length > 1 ? (
             <PressableScale
               onPress={() => setShowCurrencyPicker(true)}
@@ -385,9 +407,14 @@ export default function ITHub() {
                     {a.unavailable}
                   </Text>
                 ) : (
+                  // Only the directions that actually trade get a button. A
+                  // disabled-looking Buy would still read as "try me"; absence
+                  // is the honest rendering of a leg no provider quotes.
                   <View style={{ flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.xs }}>
-                    <Button title="Buy" size="sm" onPress={a.onBuy} />
-                    <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
+                    {a.onBuy ? <Button title="Buy" size="sm" onPress={a.onBuy} /> : null}
+                    {a.onSell ? (
+                      <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
+                    ) : null}
                   </View>
                 )}
               </View>
