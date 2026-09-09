@@ -44,8 +44,9 @@ import { resolveAccountName } from '@/services/ngBanks';
 import {
   accountFieldLabel,
   accountFieldPlaceholder,
+  accountValueSurvivesKindChange,
   accountNumberMaxLength,
-  isDigitsOnlyAccountCurrency,
+  isDigitsOnlyAccountField,
   isValidAccountNumber,
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
@@ -134,7 +135,7 @@ export default function PaycrestSellScreen() {
     currency: currencyConfig,
     setCode: setCurrencyCode,
     options: currencyOptions,
-  } = useRampCurrency('paycrest');
+  } = useRampCurrency('paycrest', 'sell');
   const symbol = currencyConfig.symbol;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);
@@ -630,7 +631,7 @@ export default function PaycrestSellScreen() {
               setAccountNo(sanitizeAccountNumberInput(currencyCode, v, destKind))
             }
             keyboardType={
-              isDigitsOnlyAccountCurrency(currencyCode, destKind) ? 'number-pad' : 'default'
+              isDigitsOnlyAccountField(currencyCode, destKind) ? 'number-pad' : 'default'
             }
             placeholder={accountFieldPlaceholder(currencyCode, destKind)}
             maxLength={accountNumberMaxLength(currencyCode, destKind)}
@@ -731,15 +732,23 @@ export default function PaycrestSellScreen() {
       <PickerSheet
         visible={bankOpen}
         onClose={() => setBankOpen(false)}
-        title="Choose a bank"
+        title="Choose a destination"
         items={bankItems}
         selectedId={bank?.code}
         searchable
         onSelect={(item) => {
-          setBank(banks.find((b) => b.code === item.id) ?? null);
+          const next = banks.find((b) => b.code === item.id) ?? null;
+          // Switching between kinds invalidates what was typed — a phone
+          // number is not an account number, and each passes the other's rule
+          // by accident. See accountValueSurvivesKindChange.
+          if (!accountValueSurvivesKindChange(destKind, next?.type)) {
+            setAccountNo('');
+            setAccountName('');
+          }
+          setBank(next);
           setBankOpen(false);
         }}
-        emptyText="No banks available."
+        emptyText="No destinations available."
       />
     </SafeAreaView>
   );

@@ -33,9 +33,24 @@ export type PayoutDestinationKind = 'bank' | 'mobile_money';
  *  length that holds for both — so the cap is the only rule applied. */
 const MSISDN_MAX_LENGTH = 15;
 
+/** Digits only, 9 to 15 — the range that covers a local or country-code form
+ *  without admitting an obvious typo. Mirrored server-side, which is the rule
+ *  that actually binds; this one is for the keyboard and the button state. */
+const MSISDN_PATTERN = /^\d{9,15}$/;
+
 function fixedLengthFor(currency: string): number | undefined {
   return FIXED_DIGIT_LENGTHS[currency.toUpperCase()];
 }
+
+/** A locally-shaped example per corridor. Showing a Ugandan number to a
+ *  Kenyan is a small thing, but this field exists precisely because the wrong
+ *  hint makes people second-guess a correct entry. */
+const MSISDN_PLACEHOLDERS: Record<string, string> = {
+  UGX: '0772123456',
+  KES: '0722123456',
+  TZS: '0754123456',
+  NGN: '08031234567',
+};
 
 function isMobileMoney(kind?: PayoutDestinationKind): boolean {
   return kind === 'mobile_money';
@@ -49,8 +64,11 @@ export function accountNumberMaxLength(currency: string, kind?: PayoutDestinatio
 
 /** Whether the field takes digits only. True for NUBAN and for every
  *  mobile-money number; an unknown bank currency defaults to a plain keyboard
- *  rather than assuming digits (an IBAN is alphanumeric). */
-export function isDigitsOnlyAccountCurrency(
+ *  rather than assuming digits (an IBAN is alphanumeric).
+ *
+ *  Named for the FIELD, not the currency: the destination kind decides this as
+ *  much as the currency does. */
+export function isDigitsOnlyAccountField(
   currency: string,
   kind?: PayoutDestinationKind,
 ): boolean {
@@ -69,8 +87,8 @@ export function accountFieldPlaceholder(
   currency: string,
   kind?: PayoutDestinationKind,
 ): string {
-  if (isMobileMoney(kind)) return '0772123456';
-  return isDigitsOnlyAccountCurrency(currency, kind) ? '0123456789' : 'Account number';
+  if (isMobileMoney(kind)) return MSISDN_PLACEHOLDERS[currency.toUpperCase()] ?? 'Phone number';
+  return isDigitsOnlyAccountField(currency, kind) ? '0123456789' : 'Account number';
 }
 
 /**
@@ -89,10 +107,13 @@ export function isValidAccountNumber(
   const v = value.trim();
   if (!v) return false;
   // A mobile-money number is not a bank account: NGN's 10-digit NUBAN rule
-  // must not be applied to a Nigerian mobile-money destination, and no fixed
-  // MSISDN length is safe to assume. Non-empty within the cap is the honest
-  // rule until a real one is confirmed per network.
-  if (isMobileMoney(kind)) return v.length <= MSISDN_MAX_LENGTH;
+  // must not be applied to a Nigerian mobile-money destination. No fixed
+  // length is safe to assume — users type both the local (0772123456) and
+  // country-code (256772123456) forms — but digits and a floor are: nine is
+  // below every MSISDN in these corridors, so it rejects a truncated entry
+  // without rejecting a real number. "0" passing as valid is how a payout
+  // reaches a stranger after the on-chain leg has moved.
+  if (isMobileMoney(kind)) return MSISDN_PATTERN.test(v);
   const fixed = fixedLengthFor(currency);
   return fixed == null || v.length === fixed;
 }
@@ -111,4 +132,29 @@ export function sanitizeAccountNumberInput(
   const digitsOnly = isMobileMoney(kind) || fixedLengthFor(currency) != null;
   const cleaned = digitsOnly ? raw.replace(/\D/g, "") : raw.replace(/\s/g, "");
   return cleaned.slice(0, accountNumberMaxLength(currency, kind));
+}
+
+/**
+ * Whether a value already typed is still meaningful after the destination
+ * changes from `from` to `to`.
+ *
+ * It is not, whenever the KIND changes. The two are different identifiers for
+ * different systems: a phone number is not an account number, and each
+ * validates under rules the other would pass by accident. Concretely — in KES
+ * or TZS, whose lists mix banks and mobile money — a user types a bank account
+ * number, reconsiders, picks M-Pesa, and the number stays in a field now
+ * labelled "Mobile money number"; it revalidates, Continue enables, and outside
+ * NGN there is no beneficiary-name check to catch it. The payout then goes to
+ * whatever that number means on the mobile-money network, after the on-chain
+ * leg has already moved.
+ *
+ * Switching between two banks keeps the value: that is the same kind of
+ * identifier, and re-typing an account number to change bank is a real
+ * annoyance with no safety benefit.
+ */
+export function accountValueSurvivesKindChange(
+  from?: PayoutDestinationKind,
+  to?: PayoutDestinationKind,
+): boolean {
+  return (from ?? 'bank') === (to ?? 'bank');
 }

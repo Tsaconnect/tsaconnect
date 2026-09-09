@@ -56,3 +56,54 @@ describe('resolveRampCurrencyCode', () => {
     expect(resolveRampCurrencyCode('ghs', list)).toBe('GHS');
   });
 });
+
+// Direction is a separate question from provider, and a one-direction screen
+// must never be handed a currency that cannot go that way.
+//
+// The concrete failure: a Ugandan user opens Buy, the resolver picks UGX from
+// their KYC country because UGX has a provider, and Paycrest has no UGX onramp
+// — so every amount they type fails the quote with a generic "could not fetch a
+// rate". Reachable with no currency param at all from the MCGP asset picker.
+const legList: RampCurrency[] = [
+  { code: 'NGN', exponent: 2, rampProvider: 'paycrest', rampBuy: true, rampSell: true, depositEnabled: true, payoutEnabled: true, minPayoutMinor: 10000 },
+  { code: 'KES', exponent: 2, rampProvider: 'paycrest', rampBuy: true, rampSell: true, depositEnabled: false, payoutEnabled: true, minPayoutMinor: 0 },
+  { code: 'UGX', exponent: 0, rampProvider: 'paycrest', rampBuy: false, rampSell: true, depositEnabled: false, payoutEnabled: true, minPayoutMinor: 0 },
+  { code: 'TZS', exponent: 2, rampProvider: 'paycrest', rampBuy: false, rampSell: true, depositEnabled: false, payoutEnabled: true, minPayoutMinor: 0 },
+];
+
+describe('resolveRampCurrencyCode with a direction', () => {
+  it('does not default a Ugandan user into a currency that cannot be bought', () => {
+    expect(resolveRampCurrencyCode(null, legList, { kycCountry: 'UG', leg: 'buy' })).not.toBe('UGX');
+    // Their own currency is still right for the direction that does work.
+    expect(resolveRampCurrencyCode(null, legList, { kycCountry: 'UG', leg: 'sell' })).toBe('UGX');
+  });
+
+  it('ignores an explicit pick that cannot trade this way', () => {
+    // Saved from the hub or a sell screen, then carried onto Buy.
+    expect(resolveRampCurrencyCode('UGX', legList, { leg: 'buy' })).not.toBe('UGX');
+    expect(resolveRampCurrencyCode('UGX', legList, { leg: 'sell' })).toBe('UGX');
+  });
+
+  it('falls back to a currency that does trade this way', () => {
+    expect(resolveRampCurrencyCode(null, legList, { kycCountry: 'TZ', leg: 'buy' })).toBe('NGN');
+  });
+
+  it('still honours a currency that trades both ways', () => {
+    expect(resolveRampCurrencyCode(null, legList, { kycCountry: 'KE', leg: 'buy' })).toBe('KES');
+    expect(resolveRampCurrencyCode(null, legList, { kycCountry: 'KE', leg: 'sell' })).toBe('KES');
+  });
+
+  // Without a leg the hub gets every tradable currency, because it renders the
+  // live direction per row rather than picking one for the whole screen.
+  it('is unrestricted when no direction is given', () => {
+    expect(resolveRampCurrencyCode('UGX', legList)).toBe('UGX');
+  });
+
+  // Against an API build that predates the direction fields, absent means both
+  // — the same convention rampLegsFor uses — so a leg filter must not blank out
+  // a working ramp.
+  it('treats missing direction fields as tradable either way', () => {
+    expect(resolveRampCurrencyCode(null, list, { leg: 'buy' })).toBe('NGN');
+    expect(resolveRampCurrencyCode('GHS', list, { leg: 'sell' })).toBe('GHS');
+  });
+});
