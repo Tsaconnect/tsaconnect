@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -131,6 +132,14 @@ type PaycrestDirectory struct {
 
 	mu     sync.Mutex
 	cached map[string]*PaycrestBankMap // key: fiat
+
+	instMu       sync.Mutex
+	institutions map[string]institutionEntry // key: fiat
+}
+
+type institutionEntry struct {
+	rows []PaycrestInstitution
+	at   time.Time
 }
 
 // paycrestBankMapTTL matches the Flutterwave bank cache: the list changes on
@@ -207,10 +216,22 @@ type PaycrestPayoutOption struct {
 // what every currency's majority destination wants, and it is what the app
 // showed for all of them before this field existed.
 func normalizePayoutType(t string) string {
-	if strings.EqualFold(strings.TrimSpace(t), PaycrestInstitutionMobileMoney) {
+	raw := strings.TrimSpace(t)
+	switch strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(raw)) {
+	case "mobile_money", "mobilemoney", "momo":
 		return PaycrestInstitutionMobileMoney
+	case "", "bank":
+		return PaycrestInstitutionBank
+	default:
+		// Falling back to "bank" is right for the mixed lists (KES, TZS) but is
+		// the WRONG default for UGX, where every destination is mobile money —
+		// a silent reclassification there asks a Ugandan for an account number.
+		// So an unrecognised value is logged rather than absorbed: the shape of
+		// a vocabulary change should be visible the day it happens.
+		log.Printf("[paycrest] unknown institution type %q — treating as bank; "+
+			"if the provider changed vocabulary this needs a new alias", raw)
+		return PaycrestInstitutionBank
 	}
-	return PaycrestInstitutionBank
 }
 
 // Institutions lists payout destinations for a currency.
@@ -247,7 +268,7 @@ func (d *PaycrestDirectory) Institutions(ctx context.Context, fiat string) ([]Pa
 		return out, nil
 	}
 
-	rows, err := d.pc.Institutions(ctx, fiat)
+	rows, err := d.cachedInstitutions(ctx, fiat)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +280,58 @@ func (d *PaycrestDirectory) Institutions(ctx context.Context, fiat string) ([]Pa
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// institutionTTL matches the 24h the NGN bank map already uses: this list
+// changes when a provider onboards a bank, not minute to minute.
+const institutionTTL = 24 * time.Hour
+
+// fiatCodePattern is what may become a URL path segment. Paycrest's own
+// currency codes are three letters; anything else is a caller error, and
+// PathEscape does not escape "." so an unvalidated value is worth refusing
+// before it is appended to a provider URL.
+var fiatCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+
+// cachedInstitutions caches the per-currency institution list.
+//
+// NGN has been cached since it was written (through BankMap); every other
+// currency called Paycrest on EVERY request, which only became a live path
+// when the East African ramps opened. The list feeds a payout picker, so a
+// day-old copy is the right trade.
+func (d *PaycrestDirectory) cachedInstitutions(ctx context.Context, fiat string) ([]PaycrestInstitution, error) {
+	fiat = strings.ToUpper(strings.TrimSpace(fiat))
+	if !fiatCodePattern.MatchString(fiat) {
+		return nil, fmt.Errorf("%w (currency %q)", ErrPaycrestBankUnsupported, fiat)
+	}
+
+	d.instMu.Lock()
+	if e, ok := d.institutions[fiat]; ok && time.Since(e.at) < institutionTTL {
+		rows := e.rows
+		d.instMu.Unlock()
+		return rows, nil
+	}
+	d.instMu.Unlock()
+
+	rows, err := d.pc.Institutions(ctx, fiat)
+	if err != nil {
+		// Serve a stale list rather than breaking the picker: the codes are
+		// validated against this same list at order time either way.
+		d.instMu.Lock()
+		stale, ok := d.institutions[fiat]
+		d.instMu.Unlock()
+		if ok && len(stale.rows) > 0 {
+			return stale.rows, nil
+		}
+		return nil, err
+	}
+
+	d.instMu.Lock()
+	if d.institutions == nil {
+		d.institutions = map[string]institutionEntry{}
+	}
+	d.institutions[fiat] = institutionEntry{rows: rows, at: time.Now()}
+	d.instMu.Unlock()
+	return rows, nil
 }
 
 // buildPaycrestBankMap does the matching. Split out so it is testable without

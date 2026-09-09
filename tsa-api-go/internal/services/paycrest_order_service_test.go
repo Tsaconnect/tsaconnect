@@ -46,6 +46,19 @@ func newPaycrestOrderTestService(t *testing.T) (*PaycrestOrderService, *Currency
 	if svc == nil {
 		t.Fatal("NewPaycrestOrderService returned nil")
 	}
+	// A working directory, so the destination step (which now runs BEFORE the
+	// quote, to avoid spending a throttled rates call on a request a bad
+	// destination will refuse) resolves and lets a test reach the quoter.
+	// Without it every request would stop at the destination with
+	// ErrPaycrestDisabled — indistinguishable from the currency gate's own
+	// refusal, which is exactly what the gate tests need to tell apart.
+	svc.dir = NewPaycrestDirectory(
+		&stubInstitutions{rows: []PaycrestInstitution{
+			{Name: "Access Bank", Code: "ABNGNGLA", Type: "bank"},
+			{Name: "Equity Bank Kenya", Code: "EQBLKENA", Type: "bank"},
+		}},
+		&stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}},
+	)
 
 	registry := NewCurrencyRegistry(db)
 	return svc, registry
@@ -85,12 +98,15 @@ func TestPaycrestOrderService_NilRegistryIsNoGate(t *testing.T) {
 		}
 	}()
 	_, _ = svc.CreateBuy(context.Background(), PaycrestBuyRequest{
-		UserID:            uuid.New(),
-		WalletAddress:     "0xabc",
-		FiatCode:          "KES",
-		FiatAmount:        "1000",
-		RefundBankCode:    "044",
-		RefundAccount:     "0123456789",
+		UserID:        uuid.New(),
+		WalletAddress: "0xabc",
+		FiatCode:      "KES",
+		FiatAmount:    "1000",
+		// A real KES institution and a plausible account, so the request
+		// clears destination resolution (which now runs first) and reaches the
+		// quoter — the panic is what proves the currency gate did not stop it.
+		RefundBankCode:    "EQBLKENA",
+		RefundAccount:     "01234567890123",
 		RefundAccountName: "Test User",
 	})
 }
@@ -183,9 +199,13 @@ func TestPaycrestBankCode_NGN_TranslatesNIBSSToPaycrest(t *testing.T) {
 	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
 	svc.dir = NewPaycrestDirectory(pc, local)
 
-	got, err := svc.paycrestBankCode(context.Background(), "NGN", "044")
+	got, kind, err := svc.paycrestBankCode(context.Background(), "NGN", "044")
 	if err != nil {
 		t.Fatalf("paycrestBankCode: %v", err)
+	}
+	// NIBSS is a bank registry, so every NGN destination takes a NUBAN.
+	if kind != PaycrestInstitutionBank {
+		t.Errorf("NGN kind = %q, want bank", kind)
 	}
 	if got != "ABNGNGLA" {
 		t.Errorf("got %q, want the NIBSS code translated to Paycrest's own", got)
@@ -210,9 +230,14 @@ func TestPaycrestBankCode_NonNGN_PassesPaycrestCodeThroughUnchanged(t *testing.T
 	local := &stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}}
 	svc.dir = NewPaycrestDirectory(pc, local)
 
-	got, err := svc.paycrestBankCode(context.Background(), "KES", "EQBLKENA")
+	got, kind, err := svc.paycrestBankCode(context.Background(), "KES", "EQBLKENA")
 	if err != nil {
 		t.Fatalf("paycrestBankCode: %v", err)
+	}
+	// The kind travels with the code so the caller can check the identifier
+	// shape against it.
+	if kind != PaycrestInstitutionBank {
+		t.Errorf("KES bank kind = %q, want bank", kind)
 	}
 	if got != "EQBLKENA" {
 		t.Errorf("got %q, want the Paycrest code passed through unchanged", got)
@@ -230,7 +255,7 @@ func TestPaycrestBankCode_NonNGN_UnknownCodeRefused(t *testing.T) {
 	pc := &stubInstitutions{rows: []PaycrestInstitution{{Name: "Equity Bank Kenya", Code: "EQBLKENA"}}}
 	svc.dir = NewPaycrestDirectory(pc, &stubBankDir{})
 
-	_, err := svc.paycrestBankCode(context.Background(), "KES", "NOT-A-REAL-CODE")
+	_, _, err := svc.paycrestBankCode(context.Background(), "KES", "NOT-A-REAL-CODE")
 	if !errors.Is(err, ErrPaycrestBankUnsupported) {
 		t.Fatalf("err = %v, want ErrPaycrestBankUnsupported", err)
 	}
@@ -500,5 +525,76 @@ func TestClaimPayment_RefusesAnotherUsersOrder(t *testing.T) {
 	}
 	if reloaded.PaymentClaimedAt != nil {
 		t.Fatal("an intruder's claim attempt must not have set PaymentClaimedAt")
+	}
+}
+
+// ─── Destination shape ─────────────────────────────────────────────────────
+
+// The app asks for the right thing per destination, but the app is not a trust
+// boundary. An older build or a direct API caller can aim a bank account number
+// at a mobile-money code, and the payout then fails at the provider AFTER the
+// on-chain leg has moved — or worse, a short-but-real number pays a stranger.
+func TestValidatePayoutIdentifier(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		kind, fiat string
+		id         string
+		wantErr    bool
+	}{
+		{"a phone number for mobile money", PaycrestInstitutionMobileMoney, "UGX", "0772123456", false},
+		{"with a country code", PaycrestInstitutionMobileMoney, "UGX", "256772123456", false},
+		{"too short to be anyone's number", PaycrestInstitutionMobileMoney, "UGX", "077", true},
+		{"a single digit", PaycrestInstitutionMobileMoney, "UGX", "7", true},
+		{"letters are not a phone number", PaycrestInstitutionMobileMoney, "UGX", "GB33BUKB2020", true},
+		{"an IBAN aimed at mobile money", PaycrestInstitutionMobileMoney, "KES", "GB33BUKB20201555555555", true},
+		{"a NUBAN is 10 digits", PaycrestInstitutionBank, "NGN", "0123456789", false},
+		{"nine digits is not a NUBAN", PaycrestInstitutionBank, "NGN", "012345678", true},
+		{"a phone number aimed at a Nigerian bank", PaycrestInstitutionBank, "NGN", "08031234567", true},
+		// Outside NGN we do not know the bank format, and inventing one would
+		// reject real accounts.
+		{"a Kenyan bank account of unknown shape", PaycrestInstitutionBank, "KES", "01234567890123", false},
+		{"an IBAN for a European bank", PaycrestInstitutionBank, "EUR", "GB33BUKB20201555555555", false},
+		// An unset kind reads as bank, matching normalizePayoutType.
+		{"unset kind is treated as a bank", "", "NGN", "0123456789", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePayoutIdentifier(tc.kind, tc.fiat, tc.id)
+			if tc.wantErr && !errors.Is(err, ErrPaycrestAccountShape) {
+				t.Errorf("err = %v, want ErrPaycrestAccountShape", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// The check has to run BEFORE an order exists — after the on-chain leg there is
+// nothing to correct.
+func TestPaycrestOrderService_CreateSell_RefusesAMismatchedIdentifier(t *testing.T) {
+	svc, registry := newPaycrestOrderTestService(t)
+	svc.SetCurrencyRegistry(registry)
+	pc := &stubInstitutions{rows: []PaycrestInstitution{
+		{Name: "MTN Mobile Money", Code: "MOMOUGPC", Type: "mobile_money"},
+	}}
+	svc.dir = NewPaycrestDirectory(pc, &stubBankDir{})
+
+	_, err := svc.CreateSell(context.Background(), PaycrestSellRequest{
+		UserID:        uuid.New(),
+		WalletAddress: "0xabc",
+		FiatCode:      "UGX",
+		FiatAmount:    "100000",
+		BankCode:      "MOMOUGPC",
+		AccountNo:     "GB33BUKB20201555555555", // a bank account, aimed at MTN
+		AccountName:   "Test User",
+	})
+	if !errors.Is(err, ErrPaycrestAccountShape) {
+		t.Fatalf("CreateSell err = %v, want ErrPaycrestAccountShape", err)
+	}
+
+	var count int64
+	svc.db.Model(&models.PaycrestOrderRecord{}).Count(&count)
+	if count != 0 {
+		t.Errorf("%d order rows written; the refusal must happen before an order exists", count)
 	}
 }
