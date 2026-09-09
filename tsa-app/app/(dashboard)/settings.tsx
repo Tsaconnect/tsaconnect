@@ -11,6 +11,7 @@ import {
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import Constants from "expo-constants";
+import * as Updates from "expo-updates";
 import { COMPANY } from "@/constants/legal";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "../../AuthContext/AuthContext";
@@ -34,6 +35,33 @@ interface SettingsItem {
 interface SettingsSection {
   title: string;
   items: SettingsItem[];
+}
+
+/**
+ * What the user is actually running, for support.
+ *
+ * The marketing version alone cannot answer "did the fix reach you": it only
+ * moves when app.json changes, so every over-the-air bundle published between
+ * two releases reports the same number. The update id and its publish date are
+ * what identify the JS bundle, and the runtime version is what decides which
+ * updates this binary is even eligible for.
+ */
+function buildInfo(): string {
+  const lines = [`Version ${Constants.expoConfig?.version ?? "1.0.0"}`];
+  if (Updates.runtimeVersion) {
+    const channel = Updates.channel ? ` · ${Updates.channel}` : "";
+    lines.push(`Runtime ${Updates.runtimeVersion}${channel}`);
+  }
+  // updateId stays null until an update replaces the bundle the binary shipped
+  // with — that state is the answer to "the update never arrived", so name it.
+  lines.push(
+    Updates.isEmbeddedLaunch || !Updates.updateId
+      ? "Update: none (bundled with the app)"
+      : `Update ${Updates.updateId.slice(0, 8)} · ${
+          Updates.createdAt?.toLocaleString() ?? "date unknown"
+        }`
+  );
+  return lines.join("\n");
 }
 
 const SettingsScreen = () => {
@@ -260,7 +288,7 @@ const SettingsScreen = () => {
           onPress: () =>
             Alert.alert(
               "TSA Connect",
-              `Version ${Constants.expoConfig?.version ?? "1.0.0"}` +
+              `${buildInfo()}` +
                 `\n\nOperated by ${COMPANY.legalName} (${COMPANY.registrationNumber}).`
             ),
         },
