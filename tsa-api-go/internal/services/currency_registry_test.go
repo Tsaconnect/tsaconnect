@@ -357,3 +357,45 @@ func TestDefaultCurrencies_EastAfricanCorridors(t *testing.T) {
 		}
 	}
 }
+
+// The path a deployed database actually takes.
+//
+// seedMissing never updates an existing row, and KES/UGX/TZS were seeded
+// payout-only long before this ramp opened — so in production their
+// ramp_provider column is blank and the DefaultCurrencies() literal above is
+// INERT. The fallback map is the only thing that opens these rails.
+//
+// The seed-literal tests cannot see that. Deleting an entry from
+// defaultRampProviders passes every one of them while the rail stays shut and
+// requirePaycrestEnabled refuses each order with ErrPaycrestDisabled. This is
+// the test that fails instead.
+func TestCurrencyRegistry_RampsSurviveAPreExistingBlankRow(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	// Exactly the production shape: rows that predate the column.
+	for _, code := range []string{"NGN", "KES", "UGX", "TZS"} {
+		if err := db.Create(&models.Currency{
+			Code: code, Exponent: 2, PayoutEnabled: true,
+		}).Error; err != nil {
+			t.Fatalf("seed %s: %v", code, err)
+		}
+	}
+
+	r := NewCurrencyRegistry(db)
+	if err := r.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	for _, code := range []string{"NGN", "KES", "UGX", "TZS"} {
+		if got := r.RampProvider(code); got != RampProviderPaycrest {
+			t.Errorf("RampProvider(%s) = %q, want paycrest — seedMissing never updates "+
+				"an existing row, so on a deployed database the fallback map is the only "+
+				"thing that opens this rail", code, got)
+		}
+	}
+	// And the converse still holds: GHS (seeded by the registry itself, since
+	// it was not pre-created above) must not acquire a ramp through the
+	// fallback either.
+	if got := r.RampProvider("GHS"); got != RampProviderNone {
+		t.Errorf("RampProvider(GHS) = %q, want none", got)
+	}
+}

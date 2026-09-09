@@ -604,3 +604,66 @@ func (blockingLegs) RampLegs(ctx context.Context) (map[string]services.RampLegs,
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
+
+// The kill switch must fire on BOTH halves. An operator disables a rail by
+// setting ramp_provider to something unrecognised; requirePaycrestEnabled then
+// refuses every order. If the currency list still advertised the legs Paycrest
+// lists, the app would show live Buy and Sell buttons for a rail that refuses
+// everything the user does with them.
+func TestCurrencies_DisabledProviderReportsNoLegs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, db := newITTestHandler(t)
+	if err := db.AutoMigrate(&models.Currency{}); err != nil {
+		t.Fatalf("migrate currencies: %v", err)
+	}
+	h.currencies = services.NewCurrencyRegistry(db)
+	// The book still lists NGN — the provider is fine, we are switching it off.
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{"NGN": {Buy: true, Sell: true}}})
+
+	if err := db.Model(&models.Currency{}).Where("code = ?", "NGN").
+		Update("ramp_provider", "paused").Error; err != nil {
+		t.Fatalf("pause NGN: %v", err)
+	}
+	if err := h.currencies.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	rows := getCurrencyRows(t, h)
+
+	if rows["NGN"].RampBuy || rows["NGN"].RampSell {
+		t.Errorf("NGN = %+v, want no legs — orders are refused while ramp_provider is "+
+			"not paycrest, so the app must not offer the buttons", rows["NGN"])
+	}
+}
+
+// A currency served by some OTHER provider must not have Paycrest's book
+// consulted on its behalf. It would report closed with no error and no log —
+// the silent-wrong-answer this endpoint is meant to avoid.
+func TestCurrencies_NonPaycrestProviderIsNotLookedUpInPaycrestsBook(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, db := newITTestHandler(t)
+	if err := db.AutoMigrate(&models.Currency{}); err != nil {
+		t.Fatalf("migrate currencies: %v", err)
+	}
+	h.currencies = services.NewCurrencyRegistry(db)
+	h.SetRampLegs(stubLegs{legs: map[string]services.RampLegs{"NGN": {Buy: true, Sell: true}}})
+
+	if err := db.Model(&models.Currency{}).Where("code = ?", "GHS").
+		Update("ramp_provider", services.RampProviderFlutterwave).Error; err != nil {
+		t.Fatalf("set GHS provider: %v", err)
+	}
+	if err := h.currencies.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	rows := getCurrencyRows(t, h)
+
+	if rows["GHS"].RampProvider != services.RampProviderFlutterwave {
+		t.Fatalf("GHS provider = %q, want flutterwave — fixture assumption broken",
+			rows["GHS"].RampProvider)
+	}
+	if rows["GHS"].RampBuy || rows["GHS"].RampSell {
+		t.Errorf("GHS = %+v, want no legs until Flutterwave has a leg source of its own",
+			rows["GHS"])
+	}
+}

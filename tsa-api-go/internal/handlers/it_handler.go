@@ -154,7 +154,21 @@ func (h *ITHandler) Currencies(c *gin.Context) {
 	for _, cur := range all {
 		provider := h.currencies.RampProvider(cur.Code)
 		buy, sell := false, false
-		if provider != services.RampProviderNone {
+		// Paycrest specifically, not "any non-empty provider". Two reasons,
+		// both silent failures otherwise:
+		//
+		//   The kill switch. An operator disables a rail by setting
+		//   ramp_provider to something unrecognised, and requirePaycrestEnabled
+		//   then refuses every order. A != none test would keep reporting the
+		//   legs Paycrest's book still lists, so the app would show live
+		//   buttons for a rail that refuses everything.
+		//
+		//   A second provider. The legs come from PAYCREST's book; looking a
+		//   Flutterwave currency up in it would report closed with no error and
+		//   no log. Any other provider stays false until it has a leg source of
+		//   its own, which is the honest answer and matches what the order path
+		//   will actually do.
+		if provider == services.RampProviderPaycrest {
 			if legs == nil {
 				buy, sell = true, true
 			} else {

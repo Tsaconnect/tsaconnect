@@ -46,6 +46,12 @@ func paycrestError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPaycrestBelowMinimum):
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"That amount is below the minimum for this route. Try a larger amount.")
+	case errors.Is(err, services.ErrPaycrestLegClosed):
+		// Ordered BEFORE the no-venue case: a closed direction is also a
+		// no-venue condition, and the difference is what the user should do
+		// about it. Nothing — so do not invite a retry with another amount.
+		utils.ErrorResponse(c, http.StatusConflict,
+			"This currency can't be traded in that direction right now. Try the other direction, or another currency.")
 	case errors.Is(err, services.ErrPaycrestNoVenue), errors.Is(err, services.ErrPaycrestNoProvider):
 		// Liquidity, not breakage. Say so plainly so the user retries rather
 		// than assuming the feature is broken.
@@ -60,6 +66,9 @@ func paycrestError(c *gin.Context, err error) {
 		// the one thing cancelling must not appear to do.
 		utils.ErrorResponse(c, http.StatusConflict,
 			"This order can no longer be cancelled. If you have already sent the payment, contact support instead.")
+	case errors.Is(err, services.ErrPaycrestAccountShape):
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"That account number doesn't look right for the destination you chose. Check it and try again.")
 	case errors.Is(err, services.ErrPaycrestBankUnsupported):
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"That bank can't receive payouts on this route. Choose another account.")
