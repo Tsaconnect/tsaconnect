@@ -747,11 +747,39 @@ func main() {
 	// yet at this point in boot. A product that registers late still matches
 	// everything ingested before it — credits are durable and re-run.
 	var inboundMatcher *services.InboundMatcher
+
+	// Operator queue over held inbound credits (central-account design §8).
+	//
+	// ALWAYS registered, in both inbound modes and with or without Flutterwave
+	// credentials. The ingestor records credits regardless of mode, and a held
+	// credit has no automatic exit — a queue that only exists when the poller
+	// is healthy is a queue nobody can drain after an outage.
+	//
+	// Constructed HERE, before any claim source exists, so registration can go
+	// through one path (registerInboundClaim below) instead of two lists that
+	// have to be kept in step by hand.
+	inboundAdminService := services.NewInboundAdminService(config.DB)
+
+	// registerInboundClaim is the ONLY way a product joins inbound attribution.
+	//
+	// The matcher decides who a credit belongs to; the hold queue explains to an
+	// operator why it could not decide. Those must consult the SAME sources — a
+	// product registered with one and not the other produces holds whose
+	// evidence view is silently empty, which is worse than no queue at all
+	// because it looks like an answer. One call, both registries.
+	registerInboundClaim := func(claimType string, src services.ClaimSource) {
+		if inboundMatcher != nil {
+			inboundMatcher.Register(claimType, src)
+		}
+		inboundAdminService.AddClaimSource(src)
+	}
+
 	if inboundPoller != nil && itService != nil {
 		inboundMatcher = services.NewInboundMatcher(config.DB)
-		inboundMatcher.Register(services.InboundClaimTypeITMCGP,
+		inboundAdminService.SetBinder(inboundMatcher)
+		registerInboundClaim(services.InboundClaimTypeITMCGP,
 			services.NewITMCGPClaimSource(config.DB, itService))
-		inboundMatcher.Register(services.InboundClaimTypeITStable,
+		registerInboundClaim(services.InboundClaimTypeITStable,
 			services.NewITStableClaimSource(itService))
 		inboundPoller.SetMatcher(inboundMatcher)
 		log.Printf("[inbound] matcher wired (claim sources: %s, %s)",
@@ -1182,13 +1210,16 @@ func main() {
 		// because only now do the trade service and release signer exist. The
 		// claim's user is the BUYER — they send the naira — while the merchant
 		// is credited and forwarded to; see inbound_claim_p2p.go.
+		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
+		p2pClaims.SetForwarder(settlementForwarder)
+		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
 		if inboundMatcher != nil {
-			p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
-			p2pClaims.SetForwarder(settlementForwarder)
-			inboundMatcher.Register(services.InboundClaimTypeP2PTrade, p2pClaims)
 			log.Printf("[inbound] matcher gained the %s claim source", services.InboundClaimTypeP2PTrade)
 		} else {
-			log.Printf("[inbound] P2P claim source not registered: no matcher wired")
+			// No matcher, so nothing auto-binds — but the hold queue still gets
+			// the source, so an operator can see and assign P2P candidates.
+			log.Printf("[inbound] no matcher wired; %s registered for the hold queue only",
+				services.InboundClaimTypeP2PTrade)
 		}
 		// NGN ledger drift reconciler (VA-only model): compares the SUM of all
 		// active PMs' off-chain available_ngn against the live single-parent Nomba
@@ -1328,17 +1359,6 @@ func main() {
 	}
 	disputeHandler := handlers.NewDisputeHandler(disputeService)
 
-	// Operator queue over held inbound credits (central-account design §8).
-	//
-	// ALWAYS registered, in both inbound modes and with or without Flutterwave
-	// credentials. The ingestor records credits regardless of mode, and a held
-	// credit has no automatic exit — a queue that only exists when the poller
-	// is healthy is a queue nobody can drain after an outage.
-	//
-	// Its matcher seams are wired later, the same way the poller takes one:
-	// SetBinder for manual assignment (Assign refuses with a 503 until then)
-	// and AddClaimSource for the near-miss evidence.
-	inboundAdminService := services.NewInboundAdminService(config.DB)
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 
 	// Setup all routes
