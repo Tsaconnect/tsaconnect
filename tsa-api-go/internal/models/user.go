@@ -34,6 +34,22 @@ type User struct {
 	DiditSessionID     string         `json:"diditSessionId,omitempty"`
 	VerificationStatus string         `gorm:"default:'pending'" json:"verificationStatus"`
 	VerificationNotes  string         `json:"verificationNotes,omitempty"`
+	// VerifiedLegalName is the name Didit read off the identity document. It is
+	// the only name on this record that was checked against anything — `Name` is
+	// free text typed at signup — which is why inbound bank transfers into the
+	// central account are attributed against this field and never against `Name`.
+	// Written only by the KYC paths; profile edits must not touch it.
+	//
+	// `json:"-"` is deliberate. The whole User struct rides along on payloads it
+	// was never designed for (the `user` association on merchant and
+	// account-deletion requests, every admin listing that selects a User), so a
+	// tagged field leaks by default. The two surfaces that should show it — the
+	// user's own KYC status and the admin verification queue — opt in by name.
+	VerifiedLegalName string `json:"-"`
+	// VerifiedLegalNameAt dates the capture so a name backfilled from an old
+	// session can be told apart from one written live at approval, and so a row
+	// predating a re-verification can be spotted and re-pulled.
+	VerifiedLegalNameAt *time.Time `json:"-"`
 	// AccountStatus gates every authenticated request: the auth middleware
 	// re-reads the user per request and rejects anything but "active", so a
 	// change here takes effect immediately. Indexed because public product

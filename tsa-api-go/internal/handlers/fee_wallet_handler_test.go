@@ -54,7 +54,7 @@ func setupFeeWalletTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`).Error; err != nil {
 		t.Fatalf("ddl users: %v", err)
 	}

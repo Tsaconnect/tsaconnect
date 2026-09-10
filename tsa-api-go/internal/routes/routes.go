@@ -197,6 +197,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		kycGroup.GET("/admin/verifications", adminAuth, h.GetAllVerifications)
 		kycGroup.POST("/admin/override/:id", adminAuth, h.AdminOverrideKYC)
 		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
+		// Repairs users verified before the Didit legal name was stored; run by
+		// hand, one bounded page at a time.
+		kycGroup.POST("/admin/backfill-legal-names", adminAuth, h.AdminBackfillVerifiedNames)
 	}
 
 	// Nomba webhook — signature-verified (no auth middleware), mounted OUTSIDE

@@ -71,7 +71,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 	}
 	for _, s := range baseSqls {
@@ -112,7 +112,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME,
 			deleted_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME
