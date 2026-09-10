@@ -133,6 +133,10 @@ func AutoMigrate() error {
 		// before any matching runs. Additive and inert until the poller is
 		// wired; nothing reads it yet.
 		&models.InboundCredit{},
+		// Append-only record of every operator decision on a held credit.
+		// Separate from inbound_credits because that row only ever shows the
+		// current state — who acted, and on what, has to outlive it.
+		&models.InboundCreditAuditLog{},
 		&models.PaycrestOrderRecord{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},

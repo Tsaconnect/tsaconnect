@@ -210,3 +210,47 @@ func TestInboundPollIntervalOrDefault(t *testing.T) {
 		t.Errorf("configured = %s, want 15s", got)
 	}
 }
+
+// A hold is unattributed customer money whose only exit is an operator, so the
+// alert list has to survive the ways an env var actually gets written: stray
+// spaces, a trailing comma, the same mailbox pasted twice in different case.
+// A duplicate mails the same person twice on every hold.
+func TestLoad_InboundAlertEmails(t *testing.T) {
+	t.Setenv("INBOUND_ALERT_EMAILS", " ops@tsaconnectworld.com , finance@tsaconnectworld.com,,OPS@tsaconnectworld.com , ")
+	cfg := Load()
+	want := []string{"ops@tsaconnectworld.com", "finance@tsaconnectworld.com"}
+	if !reflect.DeepEqual(cfg.InboundAlertEmails, want) {
+		t.Errorf("InboundAlertEmails = %v, want %v", cfg.InboundAlertEmails, want)
+	}
+}
+
+// Unset means nobody is alerted. That must be an empty list rather than one
+// element containing "" — a blank recipient is a send that fails on every hold
+// and buries the log line that matters.
+func TestLoad_InboundAlertEmailsUnset(t *testing.T) {
+	t.Setenv("INBOUND_ALERT_EMAILS", "")
+	if got := Load().InboundAlertEmails; len(got) != 0 {
+		t.Errorf("InboundAlertEmails = %v, want empty", got)
+	}
+}
+
+// ADMIN_URL is a comma-separated CORS list ordered dev-first. The hold alert
+// needs ONE origin an on-call operator can click, so the https entry has to
+// win over the localhost one that happens to be listed first.
+func TestAdminConsoleBaseURL(t *testing.T) {
+	tests := map[string]string{
+		"http://localhost:5173,https://admin.tsaconnectworld.com": "https://admin.tsaconnectworld.com",
+		"https://admin.tsaconnectworld.com/":                      "https://admin.tsaconnectworld.com",
+		" http://localhost:5173 ":                                 "http://localhost:5173",
+		"":                                                        "",
+	}
+	for in, want := range tests {
+		if got := (&Config{AdminURL: in}).AdminConsoleBaseURL(); got != want {
+			t.Errorf("AdminConsoleBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	var nilCfg *Config
+	if got := nilCfg.AdminConsoleBaseURL(); got != "" {
+		t.Errorf("nil config = %q, want empty", got)
+	}
+}
