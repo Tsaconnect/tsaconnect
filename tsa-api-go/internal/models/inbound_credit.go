@@ -1,0 +1,96 @@
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+// Inbound credit lifecycle (central-account attribution design §4).
+//
+// A row only ever moves forward, and only `unmatched` has an automatic exit:
+// `held` is terminal until a human acts (decision 9 — no auto-release, because
+// an unattributed credit that silently resolves itself is exactly how money
+// reaches the wrong user).
+const (
+	// InboundCreditUnmatched — ingested; the matcher has not reached a decision.
+	InboundCreditUnmatched = "unmatched"
+	// InboundCreditMatched — bound to a claim and the product settle path ran.
+	InboundCreditMatched = "matched"
+	// InboundCreditHeld — the matcher declined to bind. Needs an operator.
+	InboundCreditHeld = "held"
+	// InboundCreditRefunded — an operator returned it to the sender.
+	InboundCreditRefunded = "refunded"
+	// InboundCreditIgnored — not customer money (own-float top-up, test credit).
+	InboundCreditIgnored = "ignored"
+
+	InboundCreditProviderFlutterwave = "flutterwave"
+
+	// Match strengths, as justified by NameMatcher.
+	InboundMatchStrengthExact   = "exact"
+	InboundMatchStrengthPartial = "partial"
+)
+
+// InboundCredit is an immutable record of one credit into the central account.
+// Rows are never deleted; AmountKobo and ProviderRef are never updated.
+//
+// The table exists to separate "money seen" from "money attributed": the
+// ingestor writes here and stops, so no matching bug can lose the fact that
+// money arrived. Everything downstream is re-runnable against rows that are
+// already durable.
+type InboundCredit struct {
+	ID       uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Provider string    `gorm:"size:16;not null" json:"provider"` // "flutterwave"
+
+	// ProviderRef is the NIBSS NIP session id (30 digits) from the statement
+	// row's `reference`. Unique per credit and the ONLY viable dedupe key —
+	// funding rows carry no account number and no transfer sub-object.
+	ProviderRef string `gorm:"size:64;not null;uniqueIndex" json:"providerRef"`
+
+	Currency string `gorm:"size:8;not null;index" json:"currency"`
+
+	// AmountKobo is the credit as it appears on the statement row.
+	AmountKobo int64 `gorm:"not null" json:"amountKobo"`
+	// FeeKobo is the paired fee row when the provider nets its charge, else 0.
+	FeeKobo int64 `gorm:"not null;default:0" json:"feeKobo"`
+	// GrossKobo = AmountKobo + FeeKobo. This is what claims match against, so
+	// matching is correct whether the provider nets its fee or bills separately.
+	GrossKobo int64 `gorm:"not null;index" json:"grossKobo"`
+
+	// SenderRaw is the statement's free-text remark, stored verbatim for audit:
+	//   "Received Money from GTBANK|ADEMU EMMANUEL O."
+	SenderRaw  string `gorm:"size:255;not null" json:"senderRaw"`
+	SenderBank string `gorm:"size:64" json:"senderBank,omitempty"`  // parsed left of "|"
+	SenderName string `gorm:"size:128" json:"senderName,omitempty"` // parsed right of "|"
+
+	TransactionDate time.Time `gorm:"not null;index" json:"transactionDate"`
+	SeenAt          time.Time `gorm:"not null" json:"seenAt"`
+
+	// Status: unmatched | matched | held | refunded | ignored
+	Status     string `gorm:"size:16;not null;default:'unmatched';index" json:"status"`
+	HoldReason string `gorm:"size:255" json:"holdReason,omitempty"` // why the matcher declined to bind
+
+	MatchedClaimType string     `gorm:"size:24" json:"matchedClaimType,omitempty"`
+	MatchedClaimID   *uuid.UUID `gorm:"type:uuid;index" json:"matchedClaimId,omitempty"`
+	MatchedUserID    *uuid.UUID `gorm:"type:uuid;index" json:"matchedUserId,omitempty"`
+	MatchedAt        *time.Time `json:"matchedAt,omitempty"`
+	// MatchStrength records how the bind was justified: "exact" | "partial".
+	MatchStrength string `gorm:"size:16" json:"matchStrength,omitempty"`
+	// ResolvedBy is the admin who assigned a held credit by hand, if any.
+	ResolvedBy *uuid.UUID `gorm:"type:uuid" json:"resolvedBy,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// BeforeCreate mints the id in Go rather than leaning on the column default.
+// The default only exists on PostgreSQL (pgcrypto); the SQLite test rigs have
+// no gen_random_uuid(), and an ingestor that inserts fine in production but
+// not under test is worse than useless.
+func (c *InboundCredit) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
+	}
+	return nil
+}

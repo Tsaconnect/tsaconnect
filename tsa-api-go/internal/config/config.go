@@ -432,6 +432,28 @@ type Config struct {
 	FlutterwaveCompanyEmail string
 	FlutterwaveCompanyPhone string
 
+	// InboundMode selects how inbound naira is attributed (central-account
+	// design §9). "va" is today's behaviour: a per-user Flutterwave virtual
+	// account, attribution by charge.completed webhook. "central" routes every
+	// payer to the one company account, where attribution comes from polling
+	// the wallet statement instead.
+	//
+	// It is a single global flag by decision 10 — a per-user rollout would mean
+	// two live attribution paths over one account, and a credit that both or
+	// neither path claims. Existing VAs are deactivated, never deleted, so
+	// flipping back is this variable plus a restart.
+	InboundMode string
+	// InboundPollInterval is the wallet-statement poll period (default 30s,
+	// decision 8). This is not a reconciler cadence: wallet funding fires no
+	// webhook at all, so the poll is the ONLY way a credit is ever noticed and
+	// the interval is the user's wait.
+	InboundPollInterval time.Duration
+	// InboundStatementLookback is how far back each poll reads. Overlap is free
+	// (ingestion is idempotent on the NIP session id) whereas a window shorter
+	// than an outage silently loses every credit that arrived during it — so
+	// this is deliberately far wider than the poll interval.
+	InboundStatementLookback time.Duration
+
 	// StableSpreadBps is the company margin on brokered stablecoin trades, in
 	// basis points. It REPLACES the swap/routing bps legs for these flows
 	// rather than stacking on them, and it is the buffer that absorbs FX drift
@@ -759,6 +781,14 @@ func Load() *Config {
 	cfg.FlutterwaveCompanyName = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_NAME", "TSA Connect"))
 	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
 	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
+
+	// Central-account inbound attribution. Defaults to `va` — the mode that is
+	// live today — so a deploy that forgets this variable changes nothing.
+	// An unrecognised value is treated as `va` for the same reason: a typo must
+	// not silently retire every virtual account.
+	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
+	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
+	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
 
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
@@ -1161,6 +1191,43 @@ func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 		return 24 * time.Hour
 	}
 	return c.GlobalPoolSettleInterval
+}
+
+// Inbound attribution modes (central-account design §9).
+const (
+	// InboundModeVA — per-user Flutterwave virtual accounts, attribution by
+	// charge.completed webhook. Today's behaviour and the default.
+	InboundModeVA = "va"
+	// InboundModeCentral — one company account; attribution by polling the
+	// wallet statement and matching sender name + amount.
+	InboundModeCentral = "central"
+)
+
+// normalizeInboundMode maps an env value onto a known mode, defaulting to `va`.
+// Unknown values do NOT fail the boot: the safe reading of a typo is "leave the
+// live behaviour alone", and the failure mode of guessing `central` instead
+// would be an entire fleet that stops handing users a VA to pay into.
+func normalizeInboundMode(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), InboundModeCentral) {
+		return InboundModeCentral
+	}
+	return InboundModeVA
+}
+
+// InboundCentralEnabled reports whether inbound naira is attributed through the
+// central account. Read it rather than comparing InboundMode by hand so the
+// buy paths, the VA activation guard and the KYC gate cannot drift apart.
+func (c *Config) InboundCentralEnabled() bool {
+	return c != nil && c.InboundMode == InboundModeCentral
+}
+
+// InboundPollIntervalOrDefault returns the statement poll period, falling back
+// to the 30s of decision 8 when unset or non-positive.
+func (c *Config) InboundPollIntervalOrDefault() time.Duration {
+	if c == nil || c.InboundPollInterval <= 0 {
+		return 30 * time.Second
+	}
+	return c.InboundPollInterval
 }
 
 // ResolveFiatProvider names the active fiat gateway. Flutterwave is the sole
