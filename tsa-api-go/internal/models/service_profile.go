@@ -37,6 +37,13 @@ type ServiceProfile struct {
 	CoverageArea     string `json:"coverageArea,omitempty"`
 	OperatingCompany string `json:"operatingCompany,omitempty"` // flight/transport only
 
+	// Timezone is the IANA zone the availability windows are written in. A
+	// merchant who opens at 09:00 means 09:00 where they are, so the wall-clock
+	// windows are meaningless without it — read as UTC they land an hour early
+	// in Lagos, which is where nearly every listing is. Slot instants are derived
+	// in this zone and compared back in it at checkout.
+	Timezone string `gorm:"default:'Africa/Lagos'" json:"timezone"`
+
 	// Policies (booking type) — free text shown to the buyer before reserving.
 	CancellationPolicy string `json:"cancellationPolicy,omitempty"`
 	ReschedulePolicy   string `json:"reschedulePolicy,omitempty"`
@@ -69,6 +76,40 @@ const (
 	PricingMethodFixed     = "fixed"
 	PricingMethodOnRequest = "on_request"
 )
+
+// DefaultServiceTimezone is the zone an unconfigured service is read in. The
+// platform is Nigeria-first, so this keeps every existing listing correct
+// without a data migration.
+const DefaultServiceTimezone = "Africa/Lagos"
+
+// Location resolves the profile's IANA timezone, falling back to the platform
+// default when unset or unloadable. It never returns nil, so callers can derive
+// slot times without a second error path — an unknown zone is rejected at write
+// time by ValidTimezone, and a zone the host's tzdata cannot load is a platform
+// fault the buyer should not be blocked by.
+func (p *ServiceProfile) Location() *time.Location {
+	name := p.Timezone
+	if name == "" {
+		name = DefaultServiceTimezone
+	}
+	if loc, err := time.LoadLocation(name); err == nil {
+		return loc
+	}
+	if loc, err := time.LoadLocation(DefaultServiceTimezone); err == nil {
+		return loc
+	}
+	return time.UTC
+}
+
+// ValidTimezone reports whether s is a loadable IANA zone. An empty string is
+// valid and means "use the platform default".
+func ValidTimezone(s string) bool {
+	if s == "" {
+		return true
+	}
+	_, err := time.LoadLocation(s)
+	return err == nil
+}
 
 // ValidBookingType reports whether s is a known booking type.
 func ValidBookingType(s string) bool {

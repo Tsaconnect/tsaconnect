@@ -392,6 +392,13 @@ func AutoMigrate() error {
 	         WHERE service_fee_mode = 'booking'
 	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
 
+	// Booking timezone backfill: availability windows were always wall-clock in
+	// the merchant's own zone, but were read as UTC, so every slot surfaced an
+	// hour early in Lagos. Existing profiles adopt the platform default rather
+	// than being migrated — stored booking instants are left alone. Idempotent.
+	DB.Exec(`UPDATE service_profiles SET timezone = 'Africa/Lagos'
+	         WHERE timezone IS NULL OR timezone = ''`)
+
 	// Seed the first Spot Trade listing (MCGP/USDC on Sonic) once, at startup —
 	// NOT on every read, so an admin who deletes it stays deleted. Guarded on an
 	// empty table + a unique (base,quote,chain) index, so repeat boots are no-ops.

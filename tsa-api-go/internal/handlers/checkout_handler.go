@@ -261,6 +261,10 @@ func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) in
 // inside a configured weekly availability window, and returns the matched
 // window's start-minute (for grid-alignment checks). windowStart is -1 when no
 // window covers the slot.
+//
+// slotStart MUST already be expressed in the service's own timezone: the stored
+// windows are wall-clock there, so both the weekday and the time-of-day read
+// below are only meaningful in that zone.
 func slotWithinAvailability(tx *gorm.DB, productID uuid.UUID, slotStart time.Time, durationMin int) (ok bool, windowStart int) {
 	dow := int(slotStart.Weekday())
 	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
@@ -347,21 +351,26 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 	slotStart := req.SlotStart.UTC()
 	slotEnd := slotStart.Add(time.Duration(duration) * time.Minute)
 
+	// The instant is what gets stored and compared for capacity, but the
+	// availability windows are wall-clock in the service's own zone — so the
+	// weekday and time-of-day checks below have to read the slot there.
+	local := slotStart.In(profile.Location())
+
 	// Reject slots in the past (a booking must be for a future time).
 	if !slotStart.After(time.Now().UTC()) {
-		return nil, fmt.Sprintf("%s is in the past", formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is in the past", formatSlot(local))
 	}
 
-	within, windowStart := slotWithinAvailability(tx, product.ID, slotStart, duration)
+	within, windowStart := slotWithinAvailability(tx, product.ID, local, duration)
 	if !within {
-		return nil, fmt.Sprintf("%s is not available at %s", product.Name, formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is not available at %s", product.Name, formatSlot(local))
 	}
 	// Grid alignment: the slot must sit on the duration grid measured from the
 	// window start, otherwise a buyer could send offset starts (10:00, 10:01, …)
 	// that each count as a distinct slot and bypass per-slot capacity entirely.
-	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
+	slotStartMin := local.Hour()*60 + local.Minute()
 	if (slotStartMin-windowStart)%duration != 0 {
-		return nil, fmt.Sprintf("%s is not a valid slot time", formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is not a valid slot time", formatSlot(local))
 	}
 
 	if profile.MaxCapacityPerSlot > 0 {
@@ -375,7 +384,7 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 		}
 		booked := slotBookedCountTx(tx, product.ID, slotStart)
 		if booked+partySize > profile.MaxCapacityPerSlot {
-			return nil, fmt.Sprintf("The %s slot is full", formatSlot(slotStart))
+			return nil, fmt.Sprintf("The %s slot is full", formatSlot(local))
 		}
 	}
 	return &models.ServiceBooking{

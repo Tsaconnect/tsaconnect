@@ -233,6 +233,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			service_address TEXT,
 			coverage_area TEXT,
 			operating_company TEXT,
+			timezone TEXT DEFAULT 'Africa/Lagos',
 			cancellation_policy TEXT,
 			reschedule_policy TEXT,
 			refund_policy TEXT,
