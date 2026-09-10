@@ -86,6 +86,23 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
+	// Central inbound mode sends every payer to one company account, so an
+	// unset account number is not a dormant feature — it is a pay-into screen
+	// with a blank number on it, and users transferring money nowhere. There is
+	// no safe degraded mode, so refuse to boot rather than serve it.
+	if cfg.InboundCentralEnabled() {
+		central := services.CentralAccount{
+			AccountNumber: cfg.InboundCentralAccountNumber,
+			BankName:      cfg.InboundCentralBankName,
+			AccountName:   cfg.InboundCentralAccountName,
+		}
+		if !central.IsConfigured() {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_MODE=central requires " +
+				"INBOUND_CENTRAL_ACCOUNT_NUMBER, INBOUND_CENTRAL_BANK_NAME and " +
+				"INBOUND_CENTRAL_ACCOUNT_NAME to all be set")
+		}
+	}
+
 	// Build the non-EVM chain registry. Each (network, chain) is registered only
 	// when its config is present, so absent combos stay dormant (ForKey → false).
 	// mainnet + testnet can be live at once, mirroring the EVM Networks map.
@@ -257,6 +274,11 @@ func main() {
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itService.SetCurrencyRegistry(currencyRegistry)
+				itService.SetCentralAccount(services.CentralAccount{
+					AccountNumber: cfg.InboundCentralAccountNumber,
+					BankName:      cfg.InboundCentralBankName,
+					AccountName:   cfg.InboundCentralAccountName,
+				})
 				itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}

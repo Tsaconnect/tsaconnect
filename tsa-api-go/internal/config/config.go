@@ -454,6 +454,17 @@ type Config struct {
 	// this is deliberately far wider than the poll interval.
 	InboundStatementLookback time.Duration
 
+	// InboundCentralAccount* are the company bank account every payer is sent
+	// to in central mode. They are config rather than constants because the
+	// account is an operational fact that can be replaced without a code
+	// change, and because a wrong hardcoded number is money sent to a stranger.
+	//
+	// Unset in VA mode, which is why consumers must check IsConfigured before
+	// rendering them — see services.CentralAccount.
+	InboundCentralAccountNumber string
+	InboundCentralBankName      string
+	InboundCentralAccountName   string
+
 	// StableSpreadBps is the company margin on brokered stablecoin trades, in
 	// basis points. It REPLACES the swap/routing bps legs for these flows
 	// rather than stacking on them, and it is the buffer that absorbs FX drift
@@ -789,6 +800,9 @@ func Load() *Config {
 	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
 	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
 	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
+	cfg.InboundCentralAccountNumber = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NUMBER")
+	cfg.InboundCentralBankName = os.Getenv("INBOUND_CENTRAL_BANK_NAME")
+	cfg.InboundCentralAccountName = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NAME")
 
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
