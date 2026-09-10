@@ -15,7 +15,7 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
-import { ADVERT_TYPE_PRODUCT } from "../../constants/constantValues";
+import { ADVERT_TYPE_PRODUCT, ADVERT_TYPE_SERVICE } from "../../constants/constantValues";
 import { useTheme } from "@/theme";
 import {
   AmountText,
@@ -239,10 +239,20 @@ const MyAdvertsScreen = () => {
               disabled={isSuspended}
               color={isSuspended ? colors.textMuted : colors.accent}
               onPress={() =>
-                router.push({
-                  pathname: `/profile/edit-advert`,
-                  params: { id: item?.id ?? item?._id },
-                })
+                // Services go to the service form, which is the only editor
+                // that can see fees, hours, policies and booking fields. The
+                // advert editor covers the base product columns only, so it
+                // stays the destination for products and for anything whose
+                // type the merchant never set.
+                item?.type === ADVERT_TYPE_SERVICE
+                  ? router.push({
+                      pathname: `/serviceaction`,
+                      params: { index: 1, productId: item?.id ?? item?._id },
+                    } as any)
+                  : router.push({
+                      pathname: `/profile/edit-advert`,
+                      params: { id: item?.id ?? item?._id },
+                    })
               }
             />
             <IconButton
