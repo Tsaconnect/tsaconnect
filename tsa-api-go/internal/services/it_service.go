@@ -77,9 +77,12 @@ type ITService struct {
 	fw *FlutterwaveClient
 
 	// centralAccount is the company pay-into account shown in place of a
-	// per-user VA once INBOUND_MODE=central. Zero value in VA mode. See
-	// inbound_central_account.go.
+	// per-user VA, and inboundCentral is whether that mode is actually on.
+	// Both are set together by SetInboundCentral and read together by
+	// ActiveCentralAccount — never read either directly, or a configured-but-
+	// not-enabled account starts routing payers. See inbound_central_account.go.
 	centralAccount CentralAccount
+	inboundCentral bool
 
 	// feeQuoter prices the fee deducted from each leg; fees carves what the
 	// platform keeps into system / cashback / TP. See it_fees.go.

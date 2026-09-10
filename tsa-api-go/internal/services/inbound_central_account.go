@@ -29,12 +29,29 @@ func (c CentralAccount) IsConfigured() bool {
 		strings.TrimSpace(c.AccountName) != ""
 }
 
-// SetCentralAccount wires the company pay-into account for buy flows.
+// SetInboundCentral wires both the mode and the account together.
 //
-// Deliberately a setter on the existing automation-seam pattern rather than a
-// constructor argument: ITService already takes its optional collaborators this
-// way, and in VA mode there is no central account to pass.
-func (s *ITService) SetCentralAccount(a CentralAccount) { s.centralAccount = a }
+// One setter takes both ON PURPOSE. An earlier version set only the account and
+// left callers to infer the mode from IsConfigured, which meant that merely
+// setting the three INBOUND_CENTRAL_* env vars — precisely how an operator
+// would stage a cutover — silently retired every virtual account without the
+// flag ever being flipped. Coupling them here makes that state unrepresentable
+// rather than merely discouraged.
+func (s *ITService) SetInboundCentral(enabled bool, a CentralAccount) {
+	s.inboundCentral = enabled
+	s.centralAccount = a
+}
 
-// CentralAccount returns the configured company pay-into account.
-func (s *ITService) CentralAccount() CentralAccount { return s.centralAccount }
+// ActiveCentralAccount returns the account payers must be sent to right now.
+//
+// ok is false in VA mode even when an account is fully configured, so a call
+// site cannot route payers to a pre-seeded account before the cutover. Prefer
+// this over reading the fields directly: it is one check that cannot be half
+// done, where "is central on?" and "do we have an account?" as two separate
+// checks invite getting only one of them right.
+func (s *ITService) ActiveCentralAccount() (CentralAccount, bool) {
+	if !s.inboundCentral || !s.centralAccount.IsConfigured() {
+		return CentralAccount{}, false
+	}
+	return s.centralAccount, true
+}

@@ -274,7 +274,7 @@ func main() {
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itService.SetCurrencyRegistry(currencyRegistry)
-				itService.SetCentralAccount(services.CentralAccount{
+				itService.SetInboundCentral(cfg.InboundCentralEnabled(), services.CentralAccount{
 					AccountNumber: cfg.InboundCentralAccountNumber,
 					BankName:      cfg.InboundCentralBankName,
 					AccountName:   cfg.InboundCentralAccountName,
