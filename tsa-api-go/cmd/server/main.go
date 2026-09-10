@@ -678,15 +678,17 @@ func main() {
 	// Registered in BOTH inbound modes on purpose: under `va` it attributes
 	// nothing and simply records what lands, which is how the design wants the
 	// statement observed against real traffic before the flag flips. The
-	// matching step is wired separately via SetMatcher and is absent today —
-	// ingestion is deliberately useful on its own.
+	// matching step is wired separately via SetMatcher, below, once the products
+	// that can claim a credit have been built — ingestion is deliberately useful
+	// on its own.
+	var inboundPoller *jobs.InboundCreditPoller
 	if fwClient != nil {
-		inboundPoller := jobs.NewInboundCreditPoller(
+		inboundPoller = jobs.NewInboundCreditPoller(
 			services.NewInboundIngestor(config.DB, fwClient, "NGN", cfg.InboundStatementLookback),
 			cfg.InboundPollIntervalOrDefault(),
 		)
 		scheduler.Register(inboundPoller)
-		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s, ingest-only — no matcher wired)",
+		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s)",
 			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
 
 		// The safety net over that poll (design §7). Per-user VAs made
@@ -718,6 +720,27 @@ func main() {
 		itService.SetRateQuoter(fwClient)
 		itService.SetFlutterwaveClient(fwClient)
 		log.Printf("[it] withdrawal FX quote + per-user fiat VA activate wired (Flutterwave)")
+	}
+
+	// Attribution: decide which user each recorded inbound credit belongs to
+	// (design §5.3). Wired after IT so the claim source sees a fully configured
+	// service, and only when there is a poller to drive it.
+	//
+	// Registered in BOTH inbound modes, like the ingestor. Under `va` the MCGP
+	// claim source still lists open buy orders, but no customer is being told to
+	// pay into the central account, so in practice nothing matches and every
+	// stray credit holds — which is exactly the shadow run the design asks for
+	// before the flag flips.
+	if inboundPoller != nil && itService != nil {
+		inboundMatcher := services.NewInboundMatcher(config.DB)
+		inboundMatcher.Register(services.InboundClaimTypeITMCGP,
+			services.NewITMCGPClaimSource(config.DB, itService))
+		inboundPoller.SetMatcher(inboundMatcher)
+		log.Printf("[inbound] matcher wired (claim sources: %s)", services.InboundClaimTypeITMCGP)
+	} else if inboundPoller != nil {
+		// Ingest keeps running. Credits pile up as `unmatched` and are
+		// attributed the moment a matcher exists — nothing about them expires.
+		log.Printf("[inbound] matcher dormant: IT service unavailable — credits will be recorded but not attributed")
 	}
 
 	// Brokered stablecoin ramp (design doc 2026-08-27-stablecoin-fiat-ramp).
