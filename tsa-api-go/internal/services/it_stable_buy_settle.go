@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -38,38 +39,12 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	}
 
 	// Idempotency first: a redelivered webhook must not settle twice.
-	var existing models.ITIntent
-	err := s.db.WithContext(ctx).
-		Where("payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).
-		First(&existing).Error
-	if err == nil {
-		if !IsStableAsset(existing.Asset) {
-			return false, nil
-		}
-		// A crash between claiming the charge (below) and pricing it would
-		// otherwise leave the creation-time quote in place forever — the rate
-		// lock the design removed, reappearing in a crash window. Redelivery
-		// finishes the job the interrupted attempt started.
-		if existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
-			if _, err := s.priceStableBuy(ctx, &existing, existing.ReceivedAmount,
-				models.ITStatusPaymentReceived, models.ITStatusPaymentReceived); err != nil {
-				log.Printf("[it stable buy] ALARM charge=%s redelivery could not price: %v", chargeID, err)
-				// Status-guarded like every other write on this path: a watcher
-				// tick that advanced the intent while we were on the rate call
-				// must not be dragged backwards into the park.
-				if uErr := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-					Where("id = ? AND status = ?", existing.ID, models.ITStatusPaymentReceived).
-					Updates(map[string]any{
-						"status":         models.ITStatusBuyAwaitingRate,
-						"failure_reason": "could not price at settlement: " + err.Error(),
-					}).Error; uErr != nil {
-					return false, uErr
-				}
-			}
-		}
-		return true, nil
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+	replayed, claimed, err := s.finishStableBuyReplay(ctx, chargeID, true)
+	if err != nil {
 		return false, err
+	}
+	if replayed {
+		return claimed, nil
 	}
 
 	// Claim atomically: the WHERE carries the expected status, so two
@@ -95,6 +70,94 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, err
 	}
 
+	return s.claimAndPriceStableBuy(ctx, &candidate, chargeID, amountMinor, true)
+}
+
+// finishStableBuyReplay handles money we have already seen.
+//
+// replayed reports whether some intent already carries paymentRef; claimed
+// reports whether that intent is a stablecoin buy (so the caller must stop)
+// rather than an MCGP one (so the caller continues).
+//
+// It is not a bare "already done, return" check. A crash between claiming a
+// payment and pricing it would otherwise leave the creation-time quote in place
+// forever — the rate lock the design removed, reappearing in a crash window —
+// so a replay finishes the job the interrupted attempt started.
+//
+// Shared by both entry points: a Flutterwave webhook redelivers, and the
+// central-account poller re-reads the same statement row every 30 seconds, so
+// both need exactly this behaviour and neither should own it alone.
+//
+// parkOnBadRate carries the same meaning as in claimAndPriceStableBuy — the
+// webhook parks because nothing else will come back for it, the poller errors
+// because something will, in 30 seconds.
+func (s *ITService) finishStableBuyReplay(ctx context.Context, paymentRef string, parkOnBadRate bool) (replayed, claimed bool, err error) {
+	var existing models.ITIntent
+	lookup := s.db.WithContext(ctx).
+		Where("payment_ref = ? AND direction = ?", paymentRef, models.ITDirectionBuy).
+		First(&existing).Error
+	if errors.Is(lookup, gorm.ErrRecordNotFound) {
+		return false, false, nil
+	}
+	if lookup != nil {
+		return false, false, lookup
+	}
+	if !IsStableAsset(existing.Asset) {
+		return true, false, nil
+	}
+	if existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+		if _, pErr := s.priceStableBuy(ctx, &existing, existing.ReceivedAmount,
+			models.ITStatusPaymentReceived, models.ITStatusPaymentReceived); pErr != nil {
+			if !parkOnBadRate {
+				return false, false, fmt.Errorf("it stable buy: cannot re-price %q: %w", paymentRef, pErr)
+			}
+			log.Printf("[it stable buy] ALARM payment=%s redelivery could not price: %v", paymentRef, pErr)
+			// Status-guarded like every other write on this path: a watcher
+			// tick that advanced the intent while we were on the rate call
+			// must not be dragged backwards into the park.
+			if uErr := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+				Where("id = ? AND status = ?", existing.ID, models.ITStatusPaymentReceived).
+				Updates(map[string]any{
+					"status":         models.ITStatusBuyAwaitingRate,
+					"failure_reason": "could not price at settlement: " + pErr.Error(),
+				}).Error; uErr != nil {
+				return false, false, uErr
+			}
+		}
+	}
+	return true, true, nil
+}
+
+// claimAndPriceStableBuy prices an intent on what actually landed and claims it
+// for paymentRef, in ONE status-guarded write.
+//
+// Shared by the two ways money can arrive: a Flutterwave charge keyed on the
+// charge id (VA mode) and a central-account credit keyed on the NIBSS session
+// id (central mode). They differ only in how the intent was chosen — by the
+// user's oldest open purchase, or by the matcher — so everything after that
+// point is deliberately one function rather than two that drift.
+//
+// Returns (true, nil) when the money funded this intent and the caller must
+// stop; (false, nil) when the claim was lost to a concurrent writer.
+//
+// parkOnBadRate decides what happens when the rate source will not answer, and
+// the two callers want opposite things:
+//
+//	true  (webhook) — park the intent for an operator. The charge event will
+//	                  not be redelivered forever and the money cannot be handed
+//	                  back, so erroring would leave it unprocessed with nothing
+//	                  scheduled to try again.
+//	false (inbound) — write NOTHING and return the error. The credit already
+//	                  has a durable inbound_credits row and the poller re-reads
+//	                  it every 30 seconds, so a transient rate outage resolves
+//	                  itself. Parking would convert a 30-second wait into a
+//	                  manual operator recovery for no gain.
+func (s *ITService) claimAndPriceStableBuy(
+	ctx context.Context,
+	candidate *models.ITIntent,
+	paymentRef, amountMinor string,
+	parkOnBadRate bool,
+) (bool, error) {
 	// Price BEFORE claiming, so that claiming and pricing are ONE write.
 	//
 	// Pricing in a second write left a window as wide as an HTTP round-trip to
@@ -106,12 +169,18 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	// drawn from the POOLED merchant balance, i.e. another user's stablecoin.
 	// Quoting first costs one wasted quote if we then lose the claim race,
 	// which is far cheaper than the window.
+	chargeID := paymentRef
 	claim := map[string]any{
 		"status":          models.ITStatusPaymentReceived,
 		"payment_ref":     chargeID,
 		"received_amount": amountMinor,
 	}
 	q, qErr := s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
+	if qErr != nil && !parkOnBadRate {
+		// Caller has its own retry (see parkOnBadRate). Nothing is written, so
+		// the intent stays open and the next attempt prices it properly.
+		return false, fmt.Errorf("it stable buy: cannot price %q at settlement: %w", paymentRef, qErr)
+	}
 	if qErr != nil {
 		// The money is here and cannot be handed back, so this must NOT error
 		// the webhook — that would leave the charge unprocessed and re-driven
@@ -169,8 +238,8 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	}
 
 	if qErr == nil {
-		log.Printf("[it stable buy] charge=%s funded %s %s for user=%s",
-			chargeID, q.AssetUnits, candidate.Asset, userID)
+		log.Printf("[it stable buy] payment=%s funded %s %s for user=%s",
+			chargeID, q.AssetUnits, candidate.Asset, candidate.UserID)
 	}
 	return true, nil
 }

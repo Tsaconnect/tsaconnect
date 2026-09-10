@@ -18,8 +18,17 @@ var (
 	// ErrStableBuyAlreadyOpen enforces one purchase awaiting payment per user.
 	// The standing VA's reference identifies the USER, not the purchase, so a
 	// second intent in pending_payment would make an incoming charge ambiguous.
+	//
+	// It holds in central mode for the same reason, arrived at differently:
+	// there the key is the payer's name plus the amount, so two open purchases
+	// by one user are only distinguishable while their amounts differ — and the
+	// matcher holds on any contention rather than picking. Keeping the rule is
+	// cheaper than explaining a hold to the one user it would affect.
 	ErrStableBuyAlreadyOpen = errors.New("it stable buy: this user already has a purchase awaiting payment")
 	// ErrStableBuyNoVA means the user has no standing virtual account yet.
+	//
+	// VA MODE ONLY. Central mode never looks a virtual account up, so this is
+	// not reachable there — see payIntoForStableBuy.
 	ErrStableBuyNoVA = errors.New("it stable buy: user has no virtual account; activate one first")
 	// ErrStableBuyNoWallet means the user has no wallet to receive into.
 	ErrStableBuyNoWallet = errors.New("it stable buy: user has no wallet")
@@ -158,13 +167,27 @@ func (s *ITService) DeliverableChainsForUser(ctx context.Context, userID uuid.UU
 	return DeliverableChains(asset, addrs), nil
 }
 
-// StableBuyInstructions is where the user sends their naira: their own
-// standing virtual account, unchanged between purchases.
+// StableBuyInstructions is where the user sends their naira.
+//
+// Two shapes, one struct. In VA mode it is the user's own standing virtual
+// account, unchanged between purchases, and Reference identifies them. In
+// central mode it is the ONE company account everybody pays into, Reference is
+// empty because nothing on a bank transfer carries it back to us, and AmountNGN
+// carries the whole load: the payer's name plus this exact figure is the entire
+// attribution key (design §5.3).
 type StableBuyInstructions struct {
 	AccountNumber string `json:"accountNumber"`
 	BankName      string `json:"bankName"`
 	AccountName   string `json:"accountName"`
-	Reference     string `json:"reference"`
+	// Reference is the VA's own reference, echoed by the charge webhook. Empty
+	// in central mode: a wallet-funding statement row has no reference of ours
+	// on it, only the NIBSS session id the provider mints.
+	Reference string `json:"reference,omitempty"`
+	// AmountNGN is the exact figure to transfer, in whole major units, set only
+	// in central mode. It is not a display convenience — matching compares the
+	// credit against this number, so a payer who rounds it themselves is a hold
+	// for an operator rather than an instant settlement.
+	AmountNGN string `json:"amountNgn,omitempty"`
 }
 
 // CreateStableBuyIntent opens a purchase and tells the user where to pay.
@@ -220,16 +243,12 @@ func (s *ITService) CreateStableBuyIntent(
 			ErrStableBuyBelowMinimum, StableFromBaseUnits(s.stableMinSell()), q.Asset)
 	}
 
-	var va models.FiatVirtualAccount
-	err := s.db.WithContext(ctx).
-		// Status filter matters: handing out an inactive VA's details tells the
-		// user to pay into an account that will not credit them.
-		Where("user_id = ? AND currency = ? AND status = ?",
-			userID, q.Currency, models.FiatVAStatusActive).
-		First(&va).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil, ErrStableBuyNoVA
-	} else if err != nil {
+	// Resolve where the user pays BEFORE anything is written. In central mode
+	// this never touches the virtual-account table, which is what makes
+	// ErrStableBuyNoVA genuinely unreachable there rather than merely unlikely:
+	// there is no lookup left to fail. See payIntoForStableBuy.
+	payInto, fiatMinor, err := s.payIntoForStableBuy(ctx, userID, q.Currency, q.FiatMinor)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -277,13 +296,16 @@ func (s *ITService) CreateStableBuyIntent(
 		//	McgpAmount           a stablecoin buy has no MCGP leg
 		//	FeeNgnKobo/NetNgnKobo  B1 charges the spread only; no fee line
 		//	ReceivedAmount       unknown until the naira actually lands
-		NgnKobo:     q.FiatMinor.String(),
-		AmountMinor: q.FiatMinor.String(),
+		// fiatMinor, not q.FiatMinor: central mode mints the ask at whole
+		// naira so it can be matched at naira granularity. In VA mode the two
+		// are the same value.
+		NgnKobo:     fiatMinor.String(),
+		AmountMinor: fiatMinor.String(),
 		RateKobo:    q.RatePerUnitMinor.String(),
 		RateMinor:   q.RatePerUnitMinor.String(),
 		McgpAmount:  "0",
 		FeeNgnKobo:  "0",
-		NetNgnKobo:  q.FiatMinor.String(),
+		NetNgnKobo:  fiatMinor.String(),
 		// PlatformKeptKobo has no `default:` tag, so GORM puts it in the INSERT
 		// as '' and BeforeSave mirrors that into PlatformKeptMinor. Postgres
 		// rejects ''::numeric (SQLSTATE 22P02). This is the EXACT defect the
@@ -300,12 +322,79 @@ func (s *ITService) CreateStableBuyIntent(
 		return nil, nil, err
 	}
 
-	return intent, &StableBuyInstructions{
+	return intent, payInto, nil
+}
+
+// payIntoForStableBuy resolves where the buyer sends their naira, and the exact
+// amount the intent should be minted at.
+//
+// ── Central mode ──
+//
+// Every payer goes to the one company account, so there is nothing per-user to
+// look up and ErrStableBuyNoVA cannot arise: the branch that returns it is not
+// merely unlikely here, it is not on the path at all. That matters more than it
+// sounds — a "cannot happen" error that still has a live code path is how a
+// retired feature comes back as a 500 nobody can reproduce.
+//
+// Attribution moves from a reference nobody can see to the payer's own name
+// plus the amount, so the amount has to be a number a human can type into a
+// bank app and reproduce exactly. That is why it is rounded to whole naira:
+// matching compares at naira granularity (design §5.4), and 99 kobo of
+// difference is 99 kobo the payer never sees and the matcher cannot forgive.
+//
+// ── VA mode ──
+//
+// Unchanged. The user's standing virtual account, refused when they have none.
+func (s *ITService) payIntoForStableBuy(
+	ctx context.Context,
+	userID uuid.UUID,
+	currency string,
+	fiatMinor *big.Int,
+) (*StableBuyInstructions, *big.Int, error) {
+	if central, ok := s.ActiveCentralAccount(); ok {
+		// wholeNairaKobo, not a rounding of our own. It is the SAME function the
+		// matcher rounds the incoming credit with, so the ask and the credit it
+		// will be compared against cannot round in opposite directions and turn
+		// a correct payment into a hold. Central mode is naira-only by
+		// construction — the account is a Nigerian NUBAN — so an NGN-specific
+		// helper is the honest one here rather than a currency-generic wrapper
+		// that implies a generality nothing has.
+		asked, ok := new(big.Int).SetString(wholeNairaKobo(fiatMinor.String()), 10)
+		if !ok || asked.Sign() <= 0 {
+			// Rounding took the ask to nothing. Only reachable for an amount
+			// under half a naira, which the delivery minimum already refuses —
+			// but "pay ₦0 into this account" must never render.
+			return nil, nil, fmt.Errorf("%w: amount rounds to zero at whole-naira granularity",
+				ErrStableBuyBelowMinimum)
+		}
+		return &StableBuyInstructions{
+			AccountNumber: central.AccountNumber,
+			BankName:      central.BankName,
+			AccountName:   central.AccountName,
+			// No Reference: nothing we mint survives a bank transfer into the
+			// company account. The name and the amount ARE the reference.
+			AmountNGN: minorToMajor(asked.Int64(), 2),
+		}, asked, nil
+	}
+
+	var va models.FiatVirtualAccount
+	err := s.db.WithContext(ctx).
+		// Status filter matters: handing out an inactive VA's details tells the
+		// user to pay into an account that will not credit them.
+		Where("user_id = ? AND currency = ? AND status = ?",
+			userID, currency, models.FiatVAStatusActive).
+		First(&va).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, ErrStableBuyNoVA
+	} else if err != nil {
+		return nil, nil, err
+	}
+	return &StableBuyInstructions{
 		AccountNumber: va.AccountNumber,
 		BankName:      va.BankName,
 		AccountName:   va.AccountName,
 		Reference:     va.Reference,
-	}, nil
+	}, fiatMinor, nil
 }
 
 // expireStaleStableBuys retires this user's abandoned purchases.

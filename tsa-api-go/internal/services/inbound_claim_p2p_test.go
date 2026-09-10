@@ -1,0 +1,682 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+)
+
+// ─── Rig ─────────────────────────────────────────────────────────────────────
+
+// createSettlementForwardTable adds p2p_settlement_forwards to the shared trade
+// SQLite rig. Raw DDL, not AutoMigrate, matching every other rig in this
+// package — and the two unique indexes are spelled out because they are the
+// idempotency guarantee under test, not incidental schema.
+func createSettlementForwardTable(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS p2p_settlement_forwards (
+		id             TEXT PRIMARY KEY,
+		trade_id       TEXT NOT NULL,
+		pm_id          TEXT NOT NULL,
+		provider_ref   TEXT NOT NULL,
+		currency       TEXT NOT NULL,
+		amount         TEXT NOT NULL,
+		status         TEXT NOT NULL DEFAULT 'pending',
+		reference      TEXT NOT NULL,
+		payout_id      TEXT,
+		failure_reason TEXT,
+		alerted_at     DATETIME,
+		submitted_at   DATETIME,
+		settled_at     DATETIME,
+		created_at     DATETIME,
+		updated_at     DATETIME
+	)`).Error; err != nil {
+		t.Fatalf("create p2p_settlement_forwards: %v", err)
+	}
+	for _, idx := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fwd_trade ON p2p_settlement_forwards (trade_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fwd_ref ON p2p_settlement_forwards (provider_ref)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fwd_reference ON p2p_settlement_forwards (reference)`,
+	} {
+		if err := db.Exec(idx).Error; err != nil {
+			t.Fatalf("index: %v", err)
+		}
+	}
+}
+
+// fwdRig is everything a forward test needs, assembled once.
+type fwdRig struct {
+	db      *gorm.DB
+	pm      *models.PaymentMerchant
+	trade   *models.P2PTrade
+	src     *P2PTradeClaimSource
+	fwd     *P2PSettlementForwarder
+	gateway *fakeNombaGateway
+	bal     *stubPayoutBalances
+	signer  *fakeReleaseSigner
+	esc     *mockEscrow
+}
+
+// stubPayoutBalances replays a fixed NGN balance, or an error.
+type stubPayoutBalances struct {
+	ngn   float64
+	err   error
+	calls int
+}
+
+func (s *stubPayoutBalances) FetchBalances(_ context.Context) ([]FWBalance, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return []FWBalance{{Currency: "NGN", AvailableBalance: s.ngn}}, nil
+}
+
+// newForwardRig builds an active merchant with a settlement bank, one open buy
+// trade on its sell ad, and a claim source with the forward wired.
+func newForwardRig(t *testing.T, fiat string) *fwdRig {
+	t.Helper()
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createSettlementForwardTable(t, db)
+	trades, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	// The settlement bank is where proceeds are swept. Already on the model and
+	// already documented as such — no onboarding change was needed for this.
+	if err := db.Model(&models.PaymentMerchant{}).Where("id = ?", pm.ID).
+		Updates(map[string]any{
+			"settlement_bank_code":      "058",
+			"settlement_account_number": "0987654321",
+			"settlement_account_name":   "TSA CONNECT LTD",
+		}).Error; err != nil {
+		t.Fatalf("seed settlement bank: %v", err)
+	}
+	pm.SettlementBankCode = "058"
+	pm.SettlementAccountNumber = "0987654321"
+
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	trade := seedBuyTradeOnAd(t, db, ad, uuid.New(), fiat)
+	setReleasedEvent(esc, trade)
+
+	signer := &fakeReleaseSigner{
+		addr: "0x1111111111111111111111111111111111111111",
+		hash: "0xrelease",
+	}
+	pmSvc := NewPMService(db)
+	gateway := &fakeNombaGateway{payoutID: "trf_1"}
+	bal := &stubPayoutBalances{ngn: 1_000_000}
+	fwd := NewP2PSettlementForwarder(db, pmSvc, gateway, bal, "TSA Connect")
+
+	src := NewP2PTradeClaimSource(db, pmSvc, trades, signer)
+	src.SetForwarder(fwd)
+
+	return &fwdRig{db: db, pm: pm, trade: trade, src: src, fwd: fwd, gateway: gateway, bal: bal, signer: signer, esc: esc}
+}
+
+func p2pInboundCredit(ref, amountNaira string) *models.InboundCredit {
+	kobo, _ := ngnToKobo(amountNaira)
+	return &models.InboundCredit{
+		ID:          uuid.New(),
+		Provider:    models.InboundCreditProviderFlutterwave,
+		ProviderRef: ref,
+		Currency:    "NGN",
+		AmountKobo:  kobo,
+		GrossKobo:   kobo,
+		SenderRaw:   "Received Money from GTBANK|JOHN DOE",
+		SenderName:  "JOHN DOE",
+	}
+}
+
+// availableNGN reads the merchant's ledger balance.
+//
+// Compared with ngnEqual rather than by string equality: the SQLite rig stores
+// the column as TEXT and gives back "1500" where PostgreSQL's numeric(38,2)
+// gives "1500.00". The money is the same either way, and pinning the rig's
+// formatting would make these tests assert the driver, not the ledger.
+func (r *fwdRig) availableNGN(t *testing.T) string {
+	t.Helper()
+	var pm models.PaymentMerchant
+	if err := r.db.First(&pm, "id = ?", r.pm.ID).Error; err != nil {
+		t.Fatalf("load pm: %v", err)
+	}
+	return pm.AvailableNGN
+}
+
+func (r *fwdRig) forward(t *testing.T) *models.P2PSettlementForward {
+	t.Helper()
+	var f models.P2PSettlementForward
+	if err := r.db.First(&f, "trade_id = ?", r.trade.ID).Error; err != nil {
+		t.Fatalf("load forward: %v", err)
+	}
+	return &f
+}
+
+// ─── OpenClaims ──────────────────────────────────────────────────────────────
+
+// The claim's UserID is the BUYER. This is the single most load-bearing fact in
+// this file: the buyer sends the naira, so the matcher compares their name.
+// Offering the merchant's user id would compare the wrong person's name against
+// every transfer and match nothing — or worse, match the merchant's own float.
+func TestP2POpenClaims_UserIsTheBuyerNotTheMerchant(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+
+	claims, err := r.src.OpenClaims(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1", len(claims))
+	}
+	c := claims[0]
+	if c.UserID != r.trade.BuyerID {
+		t.Fatalf("claim UserID = %s, want the BUYER %s", c.UserID, r.trade.BuyerID)
+	}
+	if c.UserID == r.pm.UserID {
+		t.Fatal("claim UserID is the merchant's user; the buyer is who sends the money")
+	}
+	if c.Type != InboundClaimTypeP2PTrade {
+		t.Fatalf("type = %q, want %q", c.Type, InboundClaimTypeP2PTrade)
+	}
+	if c.ID != r.trade.ID {
+		t.Fatalf("claim ID = %s, want the trade id %s", c.ID, r.trade.ID)
+	}
+	if c.AmountKobo != 150000 {
+		t.Fatalf("amountKobo = %d, want 150000", c.AmountKobo)
+	}
+	if c.AmountKobo%100 != 0 {
+		t.Fatalf("amountKobo = %d is not whole naira; matching compares at naira granularity", c.AmountKobo)
+	}
+}
+
+func TestP2POpenClaims_RoundsAFractionalTradeRatherThanDroppingIt(t *testing.T) {
+	// Matching is at naira granularity, so a trade priced at ₦1500.50 has to be
+	// rounded before it can bind anything — and rounded with the SAME helper the
+	// matcher rounds the credit with, or the two sides drift and a correct
+	// payment becomes a hold.
+	//
+	// Rounded, not dropped. Dropping it would hide a trade somebody has already
+	// paid for from the matcher entirely, including from the hold reason an
+	// operator reads when deciding where the money goes.
+	r := newForwardRig(t, "1500.50")
+
+	claims, err := r.src.OpenClaims(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1 — a fractional trade must still be visible to the matcher", len(claims))
+	}
+	if got := claims[0].AmountKobo; got != roundKoboToNaira(150050) {
+		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding)", got, roundKoboToNaira(150050))
+	}
+	if claims[0].AmountKobo%100 != 0 {
+		t.Fatalf("amountKobo = %d violates the InboundClaim contract's whole-naira invariant", claims[0].AmountKobo)
+	}
+}
+
+func TestP2POpenClaims_ExcludesNonMerchantTrades(t *testing.T) {
+	// A manual P2P trade's buyer pays the seller's own bank; that money never
+	// reaches the company account. Offering it as a claim would let an
+	// unrelated credit settle a trade nobody was actually paid for.
+	r := newForwardRig(t, "1500.00")
+	manualAd := &models.P2PAd{
+		ID: uuid.New(), SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", ChainID: 146, Amount: "1000000", Remaining: "1000000", Reserved: "0",
+		FiatCurrency: "NGN", Rate: "1300", RateType: models.P2PAdRateTypeFixed,
+		Status: models.P2PAdStatusActive,
+	}
+	if err := r.db.Create(manualAd).Error; err != nil {
+		t.Fatalf("seed manual ad: %v", err)
+	}
+	seedBuyTradeOnAd(t, r.db, manualAd, uuid.New(), "2500.00")
+
+	claims, err := r.src.OpenClaims(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want only the merchant trade", len(claims))
+	}
+	if claims[0].ID != r.trade.ID {
+		t.Fatalf("claimed the manual trade %s", claims[0].ID)
+	}
+}
+
+func TestP2POpenClaims_FiltersByCurrency(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+
+	claims, err := r.src.OpenClaims(context.Background(), "GHS")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("got %d claims for GHS, want 0", len(claims))
+	}
+}
+
+// ─── Accept ──────────────────────────────────────────────────────────────────
+
+func TestP2PAccept_CreditsTheMerchantAndSettlesTheTrade(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000001", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("trade status = %q, want released", trade.Status)
+	}
+	if trade.NombaInboundEventID != "inbound:999000000001" {
+		t.Fatalf("attribution = %q, want the NIBSS session id", trade.NombaInboundEventID)
+	}
+	// Credited, then forwarded, then confirmed by nothing yet — so the balance
+	// is still the merchant's.
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	if len(r.gateway.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1", len(r.gateway.calls))
+	}
+	if r.gateway.calls[0].AccountNumber != "0987654321" {
+		t.Fatalf("forwarded to %q, want the merchant's settlement account", r.gateway.calls[0].AccountNumber)
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted", f.Status)
+	}
+}
+
+// A replayed credit must move nothing. The poller re-runs every 30 seconds and
+// a crash between the settle and the status write is expected, so this is the
+// ordinary case rather than an edge one.
+func TestP2PAccept_IsIdempotentOnProviderRef(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	credit := p2pInboundCredit("999000000002", "1500.00")
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
+		t.Fatalf("first Accept: %v", err)
+	}
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
+		t.Fatalf("replayed Accept: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q after replay, want 1500.00 — the replay credited twice", got)
+	}
+	if len(r.gateway.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1 — the replay paid the merchant twice", len(r.gateway.calls))
+	}
+	var count int64
+	r.db.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", r.trade.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("%d forward rows, want 1", count)
+	}
+}
+
+func TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit(t *testing.T) {
+	// The credit is durable the moment it commits, so a settle that fails after
+	// it must be finishable. If the replay short-circuited on the idempotency
+	// row it would leave the trade wedged at pending_payment with the money
+	// already booked, and nothing would ever come back for it.
+	r := newForwardRig(t, "1500.00")
+	credit := p2pInboundCredit("999000000015", "1500.00")
+
+	// Break the release, so the first Accept credits and then fails to settle.
+	r.esc.releasedEvent = nil
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err == nil {
+		t.Fatal("Accept reported success despite a failed settle")
+	}
+	var mid models.P2PTrade
+	r.db.First(&mid, "id = ?", r.trade.ID)
+	if mid.Status == models.P2PTradeStatusReleased {
+		t.Fatal("precondition: the release should not have succeeded")
+	}
+	if !ngnEqual(r.availableNGN(t), "1500.00") {
+		t.Fatalf("available_ngn = %q; the ledger credit must stand even when the settle fails", r.availableNGN(t))
+	}
+
+	// Repair and replay the same credit.
+	setReleasedEvent(r.esc, r.trade)
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
+		t.Fatalf("retry Accept: %v", err)
+	}
+	var done models.P2PTrade
+	r.db.First(&done, "id = ?", r.trade.ID)
+	if done.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("trade status = %q after retry, want released — the replay wedged it", done.Status)
+	}
+	// And still exactly one credit.
+	if !ngnEqual(r.availableNGN(t), "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — the retry credited twice", r.availableNGN(t))
+	}
+}
+
+func TestP2PAccept_LedgerCreditPrecedesTheTransfer(t *testing.T) {
+	// The ordering claim, tested directly: the gateway must already see the
+	// merchant credited by the time it is asked to move money. If the credit
+	// came second, a gateway that panicked or hung would leave the merchant
+	// with neither the money nor the ledger entry.
+	r := newForwardRig(t, "1500.00")
+	var balanceAtTransfer string
+	r.gateway.onCall = func() { balanceAtTransfer = r.availableNGN(t) }
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000003", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if !ngnEqual(balanceAtTransfer, "1500.00") {
+		t.Fatalf("available_ngn was %q when the transfer fired, want it already credited (1500.00)", balanceAtTransfer)
+	}
+}
+
+// ─── The invariant: never neither ────────────────────────────────────────────
+//
+// A merchant must never end up with neither the money nor the ledger entry.
+// Each test below drives one way the transfer can fail and asserts the same
+// thing: the balance is still credited, and an operator can find the row.
+
+func TestP2PForward_RejectedAtSubmissionLeavesTheBalanceCredited(t *testing.T) {
+	// THE failure mode the MCGP sell leg gets wrong. The provider refuses the
+	// transfer outright, so no transfer exists, so no transfer.disburse webhook
+	// is ever sent, so nothing downstream can ever correct it. The balance must
+	// already be the merchant's and must stay that way.
+	r := newForwardRig(t, "1500.00")
+	r.gateway.err = errors.New("insufficient funds in payout balance")
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000004", "1500.00")); err != nil {
+		t.Fatalf("Accept must not fail because the forward did: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — the merchant has neither the money nor the ledger entry", got)
+	}
+	f := r.forward(t)
+	if f.Status != models.P2PForwardFailed {
+		t.Fatalf("forward status = %q, want failed", f.Status)
+	}
+	if !f.NeedsAttention() {
+		t.Fatal("a rejected transfer must surface to an operator; nothing else will ever revisit it")
+	}
+	if f.AlertedAt == nil {
+		t.Fatal("no admin alert raised for a transfer that will never happen")
+	}
+	if f.PayoutID != "" {
+		t.Fatalf("payout id = %q, want empty — nothing was ever created at the provider", f.PayoutID)
+	}
+}
+
+func TestP2PForward_AcceptedWithNoPayoutIDFailsRatherThanWaitingForever(t *testing.T) {
+	// The provider took the transfer but gave us nothing to correlate a webhook
+	// against. We can never learn whether it succeeded, so treating it as
+	// in-flight would leave it waiting for a confirmation that cannot arrive.
+	// Alert now; never debit on a guess.
+	r := newForwardRig(t, "1500.00")
+	r.gateway.payoutID = ""
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000005", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	f := r.forward(t)
+	if f.Status != models.P2PForwardFailed {
+		t.Fatalf("forward status = %q, want failed", f.Status)
+	}
+	if f.AlertedAt == nil {
+		t.Fatal("no alert raised for an unconfirmable transfer")
+	}
+}
+
+func TestP2PForward_ProviderReportedFailureLeavesTheBalanceCredited(t *testing.T) {
+	// The transfer was accepted and later failed. Money never left, so the
+	// ledger entry is already correct and must not be debited.
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000006", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	ref := r.forward(t).Reference
+
+	if err := r.fwd.Confirm(context.Background(), ref, false, "account closed"); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — a failed transfer debited the merchant", got)
+	}
+	f := r.forward(t)
+	if f.Status != models.P2PForwardFailed {
+		t.Fatalf("forward status = %q, want failed", f.Status)
+	}
+	if f.AlertedAt == nil {
+		t.Fatal("no alert raised for a failed disbursement")
+	}
+}
+
+func TestP2PForward_NeverAcknowledgedIsSweptAndAlerted(t *testing.T) {
+	// The silent case: accepted, then nothing. No webhook of either kind will
+	// arrive, so only a sweep makes it visible. The balance stays credited —
+	// the invariant holds — but "unpaid and unnoticed" is not a resting state.
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000007", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if r.forward(t).Status != models.P2PForwardSubmitted {
+		t.Fatal("precondition: forward should be submitted")
+	}
+
+	// Nothing to sweep yet — a transfer submitted seconds ago is just in flight.
+	n, err := r.fwd.SweepUnconfirmed(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("swept %d fresh forwards, want 0", n)
+	}
+
+	// Move past the staleness window.
+	r.fwd.withClock(func() time.Time { return time.Now().Add(2 * p2pForwardStaleAfter) })
+	n, err = r.fwd.SweepUnconfirmed(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d stale forwards, want 1", n)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — the sweep must never move money", got)
+	}
+	if r.forward(t).AlertedAt == nil {
+		t.Fatal("stale forward was not alerted on")
+	}
+	// Alerting is once per problem, not once per tick.
+	n, _ = r.fwd.SweepUnconfirmed(context.Background())
+	if n != 0 {
+		t.Fatalf("re-swept %d already-alerted forwards, want 0", n)
+	}
+}
+
+func TestP2PForward_MissingSettlementBankLeavesTheBalanceCredited(t *testing.T) {
+	// The merchant has nowhere to be paid. That is a merchant-record problem,
+	// and the existing manual withdrawal path can still reach the money —
+	// provided the ledger entry is there, which it must be.
+	r := newForwardRig(t, "1500.00")
+	if err := r.db.Model(&models.PaymentMerchant{}).Where("id = ?", r.pm.ID).
+		Updates(map[string]any{"settlement_bank_code": "", "settlement_account_number": ""}).Error; err != nil {
+		t.Fatalf("clear settlement bank: %v", err)
+	}
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000008", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	if len(r.gateway.calls) != 0 {
+		t.Fatal("submitted a transfer with no destination")
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardFailed {
+		t.Fatalf("forward status = %q, want failed", f.Status)
+	}
+}
+
+// ─── Balance pre-check ───────────────────────────────────────────────────────
+
+func TestP2PForward_ShortPayoutBalanceIsNotSubmitted(t *testing.T) {
+	// The pre-check the MCGP sell leg lacks. Refusing here is free — the
+	// merchant is already credited — whereas submitting burns a provider
+	// rejection and puts a row in front of a human for no reason.
+	r := newForwardRig(t, "1500.00")
+	r.bal.ngn = 10 // ₦10 against a ₦1,500 forward
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000009", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	if len(r.gateway.calls) != 0 {
+		t.Fatal("submitted a transfer the payout balance cannot fund")
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	f := r.forward(t)
+	// Retryable, NOT terminal: nothing was sent, so a later attempt is safe and
+	// the balance may simply not have cleared yet.
+	if f.Status != models.P2PForwardPending {
+		t.Fatalf("forward status = %q, want pending — nothing was submitted", f.Status)
+	}
+	if f.FailureReason == "" {
+		t.Fatal("no reason recorded for a deferred forward")
+	}
+}
+
+func TestP2PForward_UnreadableBalanceIsNotSubmitted(t *testing.T) {
+	// A balance we cannot read is the same bet as a balance we know is short,
+	// with the same downside. The upside of guessing is only ever "we happened
+	// to be right".
+	r := newForwardRig(t, "1500.00")
+	r.bal.err = errors.New("provider 503")
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000010", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	if len(r.gateway.calls) != 0 {
+		t.Fatal("submitted a transfer against an unknown balance")
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardPending {
+		t.Fatalf("forward status = %q, want pending (retryable)", f.Status)
+	}
+}
+
+func TestP2PForward_DeferredForwardIsRetryable(t *testing.T) {
+	// The point of leaving a deferred forward `pending` rather than `failed`:
+	// once the balance is visible the same row goes out without an operator.
+	r := newForwardRig(t, "1500.00")
+	r.bal.ngn = 10
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000011", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	r.bal.ngn = 1_000_000
+	if err := r.fwd.Forward(context.Background(), r.forward(t).ID); err != nil {
+		t.Fatalf("retry Forward: %v", err)
+	}
+	if len(r.gateway.calls) != 1 {
+		t.Fatalf("gateway called %d times on retry, want 1", len(r.gateway.calls))
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted", f.Status)
+	}
+}
+
+// ─── The only debit ──────────────────────────────────────────────────────────
+
+func TestP2PForward_ConfirmedDisbursementIsTheOnlyThingThatDebits(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000012", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q before confirmation, want 1500.00 — submitting is not disbursing", got)
+	}
+	ref := r.forward(t).Reference
+
+	if err := r.fwd.Confirm(context.Background(), ref, true, ""); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+
+	if got := r.availableNGN(t); !ngnEqual(got, "0.00") {
+		t.Fatalf("available_ngn = %q after a confirmed disbursement, want 0.00", got)
+	}
+	f := r.forward(t)
+	if f.Status != models.P2PForwardSettled {
+		t.Fatalf("forward status = %q, want settled", f.Status)
+	}
+	if f.SettledAt == nil {
+		t.Fatal("settled_at not stamped")
+	}
+}
+
+func TestP2PForward_ConfirmIsIdempotent(t *testing.T) {
+	// Webhook redelivery must not debit twice.
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000013", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	ref := r.forward(t).Reference
+
+	for i := 0; i < 3; i++ {
+		if err := r.fwd.Confirm(context.Background(), ref, true, ""); err != nil {
+			t.Fatalf("Confirm #%d: %v", i+1, err)
+		}
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "0.00") {
+		t.Fatalf("available_ngn = %q after 3 confirmations, want 0.00", got)
+	}
+}
+
+func TestP2PForward_ConfirmIgnoresForeignReferences(t *testing.T) {
+	// The disburse webhook is shared with the sell-payout flow. A reference
+	// that is not ours must be left entirely alone, not guessed at.
+	r := newForwardRig(t, "1500.00")
+	if err := r.fwd.Confirm(context.Background(), uuid.New().String(), true, ""); err != nil {
+		t.Fatalf("Confirm on a foreign reference: %v", err)
+	}
+	var count int64
+	r.db.Model(&models.P2PSettlementForward{}).Count(&count)
+	if count != 0 {
+		t.Fatal("a foreign reference created or touched a forward row")
+	}
+}
+
+func TestP2PForward_ListNeedingAttentionSurfacesUnpaidMerchants(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	r.gateway.err = errors.New("rejected")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000014", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	rows, err := r.fwd.ListNeedingAttention(context.Background())
+	if err != nil {
+		t.Fatalf("ListNeedingAttention: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].Amount != "1500.00" || rows[0].PMID != r.pm.ID {
+		t.Fatalf("queue row does not identify the unpaid merchant: %+v", rows[0])
+	}
+}

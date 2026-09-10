@@ -111,6 +111,10 @@ func AutoMigrate() error {
 		&models.P2PAuditLog{},
 		&models.P2PMerchantStats{},
 		&models.P2PRating{},
+		// Instant per-trade sweep of a merchant's naira proceeds to their own
+		// bank (central-account design decision 7). Also the idempotency claim
+		// that stops a replayed inbound credit crediting the ledger twice.
+		&models.P2PSettlementForward{},
 		// PM (Payment Merchant) — automated P2P liquidity provider (Phase 1: TSA).
 		&models.PaymentMerchant{},
 		// MCGP Swap Contract B — entitlement-ledger swap (premium buy/spend/sell,
