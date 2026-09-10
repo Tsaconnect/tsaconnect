@@ -139,7 +139,7 @@ func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntr
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		if !isCustomerFunding(row) {
+		if !IsCustomerFunding(row) {
 			res.Skipped++
 			continue
 		}
@@ -191,7 +191,7 @@ func (i *InboundIngestor) insert(ctx context.Context, credit *models.InboundCred
 }
 
 func (i *InboundIngestor) buildCredit(row FWStatementEntry, feeKobo int64, seenAt time.Time) *models.InboundCredit {
-	amountKobo := koboFromMajor(row.Amount.Float64())
+	amountKobo := KoboFromMajor(row.Amount.Float64())
 	bank, name := parseSenderRemark(row.Remarks)
 
 	txAt := row.TransactionDate.Time
@@ -222,11 +222,15 @@ func (i *InboundIngestor) buildCredit(row FWStatementEntry, feeKobo int64, seenA
 	}
 }
 
-// isCustomerFunding reports whether a statement row is money a customer sent
+// IsCustomerFunding reports whether a statement row is money a customer sent
 // us. Everything else on the statement — our payouts, our fees, settlements,
 // reversals, bills, card activity — is our own movement and must never become
 // a claimable credit.
-func isCustomerFunding(row FWStatementEntry) bool {
+//
+// Exported because the reconciler must classify rows EXACTLY as the ingestor
+// does. Two copies that drift would make the two sides count different sets and
+// alert on a gap that is pure definition mismatch, every tick, forever.
+func IsCustomerFunding(row FWStatementEntry) bool {
 	if !strings.EqualFold(strings.TrimSpace(row.Type), fwRowTypeFunding) {
 		return false
 	}
@@ -342,7 +346,7 @@ func pairFundingFees(rows []FWStatementEntry) map[int]int64 {
 	// Pass 1: a fee that carries the credit's own reference is unambiguous
 	// provenance and outranks any heuristic.
 	for ci, credit := range rows {
-		if !isCustomerFunding(credit) || strings.TrimSpace(credit.Reference) == "" {
+		if !IsCustomerFunding(credit) || strings.TrimSpace(credit.Reference) == "" {
 			continue
 		}
 		for fi, fee := range rows {
@@ -379,7 +383,7 @@ func pairFundingFees(rows []FWStatementEntry) map[int]int64 {
 // two candidates are equally good.
 func bestCreditForFee(feeIdx int, rows []FWStatementEntry, alreadyPaired map[int]int64) (int, bool) {
 	fee := rows[feeIdx]
-	feeKobo := koboFromMajor(fee.Amount.Float64())
+	feeKobo := KoboFromMajor(fee.Amount.Float64())
 	if feeKobo <= 0 || fee.TransactionDate.IsZero() {
 		return 0, false
 	}
@@ -389,13 +393,13 @@ func bestCreditForFee(feeIdx int, rows []FWStatementEntry, alreadyPaired map[int
 	tied := false
 
 	for ci, credit := range rows {
-		if ci == feeIdx || !isCustomerFunding(credit) || credit.TransactionDate.IsZero() {
+		if ci == feeIdx || !IsCustomerFunding(credit) || credit.TransactionDate.IsZero() {
 			continue
 		}
 		if _, done := alreadyPaired[ci]; done {
 			continue
 		}
-		creditKobo := koboFromMajor(credit.Amount.Float64())
+		creditKobo := KoboFromMajor(credit.Amount.Float64())
 		if creditKobo <= 0 || feeKobo*10000 > creditKobo*inboundFeeMaxBps {
 			continue
 		}
@@ -431,20 +435,24 @@ func isFeeRow(row FWStatementEntry) bool {
 // and 0 when it was billed as its own wallet debit. See pairFundingFees for
 // why the balance movement is the discriminator.
 func nettedFeeKobo(fee FWStatementEntry) int64 {
-	before := koboFromMajor(fee.Balance.Before.Float64())
-	after := koboFromMajor(fee.Balance.After.Float64())
+	before := KoboFromMajor(fee.Balance.Before.Float64())
+	after := KoboFromMajor(fee.Balance.After.Float64())
 	if before != after {
 		return 0
 	}
-	return koboFromMajor(fee.Amount.Float64())
+	return KoboFromMajor(fee.Amount.Float64())
 }
 
 // ─── small helpers ─────────────────────────────────────────────────────────
 
-// koboFromMajor converts a major-unit amount (naira) to integer kobo. Rounding
+// KoboFromMajor converts a major-unit amount (naira) to integer kobo. Rounding
 // is half-away-from-zero: the provider sends 2dp values as float64, so 19.72
 // arrives as 19.719999… and a truncation would quietly lose a kobo per row.
-func koboFromMajor(v float64) int64 {
+//
+// Exported for the same reason as IsCustomerFunding: the reconciler compares
+// integer sums against ours with a ZERO tolerance, so it must round identically
+// or every tick reports a phantom gap.
+func KoboFromMajor(v float64) int64 {
 	return int64(math.Round(v * 100))
 }
 

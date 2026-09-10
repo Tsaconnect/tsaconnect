@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 	"time"
 
@@ -109,7 +108,7 @@ const (
 	// That reconciler compares two independently-maintained 2dp decimal
 	// balances, so a naira of slack absorbs real rounding. Here both sides are
 	// integer kobo derived from the SAME provider numbers by the SAME rounding
-	// (inboundKoboFromMajor mirrors the ingestor's koboFromMajor), so a
+	// (both sides call services.KoboFromMajor, one definition), so a
 	// faithfully ingested row contributes exactly zero difference. There is
 	// nothing for a tolerance to absorb — it could only hide something. And
 	// the smallest real discrepancy is a whole credit: orders are minted at
@@ -423,7 +422,7 @@ func summarizeStatement(rows []services.FWStatementEntry, from, to time.Time) (s
 		if !at.IsZero() && (oldest.IsZero() || at.Before(oldest)) {
 			oldest = at
 		}
-		if !inboundIsCustomerFunding(row) {
+		if !services.IsCustomerFunding(row) {
 			continue
 		}
 		if at.IsZero() {
@@ -433,37 +432,10 @@ func summarizeStatement(rows []services.FWStatementEntry, from, to time.Time) (s
 		if at.Before(from) || !at.Before(to) {
 			continue
 		}
-		sumKobo += inboundKoboFromMajor(row.Amount.Float64())
+		sumKobo += services.KoboFromMajor(row.Amount.Float64())
 		count++
 	}
 	return sumKobo, count, undatable, oldest
-}
-
-// inboundIsCustomerFunding decides which statement rows are the customer money
-// this invariant is about.
-//
-// It MUST agree exactly with services.isCustomerFunding, which is what the
-// ingestor writes rows from. If the two ever disagree the reconciler compares
-// two different sets and alerts on every tick forever — the failure mode this
-// whole job exists to avoid. It is duplicated rather than shared only because
-// the ingestor keeps it unexported; when that predicate changes, this changes
-// in the same commit.
-func inboundIsCustomerFunding(row services.FWStatementEntry) bool {
-	if !strings.EqualFold(strings.TrimSpace(row.Type), inboundRowTypeFunding) {
-		return false
-	}
-	if d := strings.TrimSpace(row.Direction); d != "" && strings.EqualFold(d, "debit") {
-		return false
-	}
-	return true
-}
-
-// inboundKoboFromMajor mirrors the ingestor's koboFromMajor exactly: rounding
-// half-away-from-zero, because the provider sends 2dp values as float64 and
-// 19.72 arrives as 19.719999…. Truncating instead would shave a kobo off every
-// row on the provider side only, manufacturing a shortfall out of arithmetic.
-func inboundKoboFromMajor(v float64) int64 {
-	return int64(math.Round(v * 100))
 }
 
 func abs64(v int64) int64 {

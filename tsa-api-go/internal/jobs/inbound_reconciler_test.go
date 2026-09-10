@@ -674,8 +674,8 @@ func TestInboundReconcileKoboRounding_MatchesIngestor(t *testing.T) {
 		{123456.78, 12345678},
 	}
 	for _, tc := range cases {
-		if got := inboundKoboFromMajor(tc.naira); got != tc.want {
-			t.Errorf("inboundKoboFromMajor(%v) = %d, want %d", tc.naira, got, tc.want)
+		if got := services.KoboFromMajor(tc.naira); got != tc.want {
+			t.Errorf("services.KoboFromMajor(%v) = %d, want %d", tc.naira, got, tc.want)
 		}
 	}
 }
