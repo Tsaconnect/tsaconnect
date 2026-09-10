@@ -375,6 +375,12 @@ func main() {
 		scheduler.Register(jobs.NewBuyOrderExpiry(itService, time.Hour))
 	}
 
+	// Booking requests: close the ones nobody answered, and — the reason this
+	// matters — stop an approved, provider-priced quote staying payable forever.
+	// Database-only, so it runs wherever the API does.
+	scheduler.Register(jobs.NewBookingRequestExpiry(
+		services.NewBookingRequestService(config.DB), time.Hour))
+
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
 	if billService != nil {

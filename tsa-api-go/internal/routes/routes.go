@@ -563,6 +563,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		svc.GET("/requests", auth, ch.ListBookingRequests)
 		svc.POST("/requests/:reqId/approve", auth, ch.ApproveBookingRequest)
 		svc.POST("/requests/:reqId/reject", auth, ch.RejectBookingRequest)
+		// Cancel is open to either party (buyer withdraws, provider backs out).
+		svc.POST("/requests/:reqId/cancel", auth, ch.CancelBookingRequest)
 		svc.POST("/requests/:reqId/pay", auth, ch.PayBookingRequest)
 	}
 
