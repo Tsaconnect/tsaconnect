@@ -29,7 +29,7 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -1082,5 +1082,32 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		quote := api.Group("/it")
 		quote.Use(auth)
 		quote.GET("/quote", fqh.GetQuote)
+	}
+
+	// Held inbound credits — the operator queue for money that landed in the
+	// central account and could not be attributed (central-account design §8).
+	//
+	// ALWAYS registered, independent of INBOUND_MODE and of whether Flutterwave
+	// is configured: the ingestor records credits in either mode, and a held
+	// credit has no automatic exit, so a queue that disappears with the poller
+	// is a queue nobody can drain after an outage.
+	//
+	// Funds-adjacent, so AdminAuth + RequireP2PAdmin, matching /admin/fees and
+	// /admin/bills. The three actions that decide where real money ends up take
+	// the stricter super_admin gate on top, exactly like the IT orders console:
+	// a plain admin may read the queue and the evidence, only a super_admin may
+	// move the money.
+	if iah != nil {
+		adminInbound := api.Group("/admin/inbound")
+		adminInbound.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminInbound.GET("/credits", iah.ListCredits)
+			adminInbound.GET("/credits/:id/candidates", iah.GetCandidates)
+
+			superInbound := adminInbound.Group("", middleware.RequireSuperAdmin())
+			superInbound.POST("/credits/:id/assign", iah.AssignCredit)
+			superInbound.POST("/credits/:id/refund", iah.MarkRefunded)
+			superInbound.POST("/credits/:id/ignore", iah.MarkIgnored)
+		}
 	}
 }

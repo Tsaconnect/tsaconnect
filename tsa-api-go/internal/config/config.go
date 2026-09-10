@@ -453,6 +453,15 @@ type Config struct {
 	// than an outage silently loses every credit that arrived during it — so
 	// this is deliberately far wider than the poll interval.
 	InboundStatementLookback time.Duration
+	// InboundAlertEmails are the operator mailboxes told, one email per credit,
+	// whenever the matcher declines to attribute money and holds it.
+	//
+	// This is the first admin alert address in config, and it exists because a
+	// held credit has NO automatic exit (decision 9): nothing expires it, nothing
+	// refunds it, and the customer who sent the money is already waiting. Until
+	// a human looks, the queue is only discoverable by someone choosing to open
+	// it. Unset is a legitimate state — the queue still fills, nobody is paged.
+	InboundAlertEmails []string
 
 	// StableSpreadBps is the company margin on brokered stablecoin trades, in
 	// basis points. It REPLACES the swap/routing bps legs for these flows
@@ -789,6 +798,7 @@ func Load() *Config {
 	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
 	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
 	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
+	cfg.InboundAlertEmails = dedupeEmails(splitAndTrim(getEnv("INBOUND_ALERT_EMAILS", ""), ","))
 
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
@@ -1219,6 +1229,50 @@ func normalizeInboundMode(v string) string {
 // buy paths, the VA activation guard and the KYC gate cannot drift apart.
 func (c *Config) InboundCentralEnabled() bool {
 	return c != nil && c.InboundMode == InboundModeCentral
+}
+
+// dedupeEmails drops repeats from an operator-maintained address list,
+// comparing case-insensitively because a mailbox is the same mailbox however
+// it was typed. The first spelling is kept so the configured order — which is
+// usually the escalation order — survives.
+func dedupeEmails(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, addr := range in {
+		key := strings.ToLower(addr)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// AdminConsoleBaseURL returns one origin an operator can actually click.
+//
+// ADMIN_URL is a comma-separated CORS allow-list, not a single site address,
+// and it is ordered dev-first because that is convenient for CORS. A hold alert
+// linking an on-call operator to http://localhost:5173 is worse than no link at
+// all, so an https origin wins over anything else; the first entry is the
+// fallback for a single-origin deployment.
+func (c *Config) AdminConsoleBaseURL() string {
+	if c == nil {
+		return ""
+	}
+	origins := splitAndTrim(c.AdminURL, ",")
+	for _, o := range origins {
+		if strings.HasPrefix(strings.ToLower(o), "https://") {
+			return strings.TrimRight(o, "/")
+		}
+	}
+	if len(origins) == 0 {
+		return ""
+	}
+	return strings.TrimRight(origins[0], "/")
 }
 
 // InboundPollIntervalOrDefault returns the statement poll period, falling back

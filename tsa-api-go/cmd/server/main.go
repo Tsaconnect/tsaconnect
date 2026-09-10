@@ -1204,8 +1204,21 @@ func main() {
 	}
 	disputeHandler := handlers.NewDisputeHandler(disputeService)
 
+	// Operator queue over held inbound credits (central-account design §8).
+	//
+	// ALWAYS registered, in both inbound modes and with or without Flutterwave
+	// credentials. The ingestor records credits regardless of mode, and a held
+	// credit has no automatic exit — a queue that only exists when the poller
+	// is healthy is a queue nobody can drain after an outage.
+	//
+	// Its matcher seams are wired later, the same way the poller takes one:
+	// SetBinder for manual assignment (Assign refuses with a 503 until then)
+	// and AddClaimSource for the near-miss evidence.
+	inboundAdminService := services.NewInboundAdminService(config.DB)
+	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
+
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
