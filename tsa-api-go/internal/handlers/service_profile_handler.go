@@ -28,31 +28,50 @@ func (h *Handlers) GetServiceProfile(c *gin.Context) {
 				MaxCapacityPerSlot: 1,
 				BookingType:        models.BookingTypeInstant,
 				PricingMethod:      models.PricingMethodFixed,
+				Timezone:           models.DefaultServiceTimezone,
 			})
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Profile fetched successfully", profile)
 }
 
+// serviceProfileRequest is a partial update: every field is a pointer so an
+// omitted key keeps its stored value while an explicitly sent zero or empty
+// string still writes. Plain values made omission destructive, and silently so
+// — MaxCapacityPerSlot 0 means "unlimited", so a body that left it out removed
+// the listing's capacity limit without any signal to the merchant.
 type serviceProfileRequest struct {
-	AccessFeeUSD        float64 `json:"accessFeeUsd"`
-	CalloutFeeUSD       float64 `json:"calloutFeeUsd"`
-	SlotDurationMinutes int     `json:"slotDurationMinutes"`
-	MaxCapacityPerSlot  int     `json:"maxCapacityPerSlot"`
-	ServiceAddress      string  `json:"serviceAddress"`
-	CoverageArea        string  `json:"coverageArea"`
-	OperatingCompany    string  `json:"operatingCompany"`
-	CancellationPolicy  string  `json:"cancellationPolicy"`
-	ReschedulePolicy    string  `json:"reschedulePolicy"`
-	RefundPolicy        string  `json:"refundPolicy"`
-	BookingRules        string  `json:"bookingRules"`
+	AccessFeeUSD        *float64 `json:"accessFeeUsd"`
+	CalloutFeeUSD       *float64 `json:"calloutFeeUsd"`
+	SlotDurationMinutes *int     `json:"slotDurationMinutes"`
+	MaxCapacityPerSlot  *int     `json:"maxCapacityPerSlot"`
+	ServiceAddress      *string  `json:"serviceAddress"`
+	CoverageArea        *string  `json:"coverageArea"`
+	OperatingCompany    *string  `json:"operatingCompany"`
+	CancellationPolicy  *string  `json:"cancellationPolicy"`
+	ReschedulePolicy    *string  `json:"reschedulePolicy"`
+	RefundPolicy        *string  `json:"refundPolicy"`
+	BookingRules        *string  `json:"bookingRules"`
+
+	// Timezone is the IANA zone the availability windows are written in.
+	// Rejected at write time if it will not load, so a typo surfaces here
+	// rather than silently falling back every time slots are computed.
+	Timezone *string `json:"timezone"`
 
 	// Unified booking-engine config (optional). Empty enum values keep the
 	// existing/default value; an invalid value is rejected.
-	BookingType   string                     `json:"bookingType"`
-	PricingMethod string                     `json:"pricingMethod"`
-	BookingFeeUSD float64                    `json:"bookingFeeUsd"`
+	BookingType   *string                    `json:"bookingType"`
+	PricingMethod *string                    `json:"pricingMethod"`
+	BookingFeeUSD *float64                   `json:"bookingFeeUsd"`
 	FieldConfig   *models.BookingFieldConfig `json:"fieldConfig"`
+}
+
+// derefOr returns the pointed-to value, or fallback when the field was omitted.
+func derefOr[T any](p *T, fallback T) T {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }
 
 // UpsertServiceProfile handles PUT /api/services/:id/profile — the owning
@@ -71,17 +90,23 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid profile")
 		return
 	}
-	if req.AccessFeeUSD < 0 || req.CalloutFeeUSD < 0 || req.SlotDurationMinutes < 0 || req.MaxCapacityPerSlot < 0 || req.BookingFeeUSD < 0 {
+	if derefOr(req.AccessFeeUSD, 0) < 0 || derefOr(req.CalloutFeeUSD, 0) < 0 ||
+		derefOr(req.SlotDurationMinutes, 0) < 0 || derefOr(req.MaxCapacityPerSlot, 0) < 0 ||
+		derefOr(req.BookingFeeUSD, 0) < 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Fees, duration and capacity cannot be negative")
 		return
 	}
 	// Reject unknown enum values; an empty string keeps the existing/default.
-	if req.BookingType != "" && !models.ValidBookingType(req.BookingType) {
+	if bt := derefOr(req.BookingType, ""); bt != "" && !models.ValidBookingType(bt) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid booking type")
 		return
 	}
-	if req.PricingMethod != "" && !models.ValidPricingMethod(req.PricingMethod) {
+	if pm := derefOr(req.PricingMethod, ""); pm != "" && !models.ValidPricingMethod(pm) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid pricing method")
+		return
+	}
+	if !models.ValidTimezone(derefOr(req.Timezone, "")) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid timezone. Use an IANA name such as Africa/Lagos")
 		return
 	}
 	if err := models.ValidateFieldConfig(req.FieldConfig); err != nil {
@@ -90,24 +115,27 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	}
 	var profile models.ServiceProfile
 	err = config.DB.Where("product_id = ?", productID).First(&profile).Error
+	isNew := err != nil
 	profile.ProductID = productID
-	profile.AccessFeeUSD = req.AccessFeeUSD
-	profile.CalloutFeeUSD = req.CalloutFeeUSD
-	profile.SlotDurationMinutes = req.SlotDurationMinutes
-	profile.MaxCapacityPerSlot = req.MaxCapacityPerSlot
-	profile.ServiceAddress = req.ServiceAddress
-	profile.CoverageArea = req.CoverageArea
-	profile.OperatingCompany = req.OperatingCompany
-	profile.CancellationPolicy = req.CancellationPolicy
-	profile.ReschedulePolicy = req.ReschedulePolicy
-	profile.RefundPolicy = req.RefundPolicy
-	profile.BookingRules = req.BookingRules
-	profile.BookingFeeUSD = req.BookingFeeUSD
-	if req.BookingType != "" {
-		profile.BookingType = req.BookingType
+	// Merge: only fields the merchant actually sent are written.
+	profile.AccessFeeUSD = derefOr(req.AccessFeeUSD, profile.AccessFeeUSD)
+	profile.CalloutFeeUSD = derefOr(req.CalloutFeeUSD, profile.CalloutFeeUSD)
+	profile.SlotDurationMinutes = derefOr(req.SlotDurationMinutes, profile.SlotDurationMinutes)
+	profile.MaxCapacityPerSlot = derefOr(req.MaxCapacityPerSlot, profile.MaxCapacityPerSlot)
+	profile.ServiceAddress = derefOr(req.ServiceAddress, profile.ServiceAddress)
+	profile.CoverageArea = derefOr(req.CoverageArea, profile.CoverageArea)
+	profile.OperatingCompany = derefOr(req.OperatingCompany, profile.OperatingCompany)
+	profile.CancellationPolicy = derefOr(req.CancellationPolicy, profile.CancellationPolicy)
+	profile.ReschedulePolicy = derefOr(req.ReschedulePolicy, profile.ReschedulePolicy)
+	profile.RefundPolicy = derefOr(req.RefundPolicy, profile.RefundPolicy)
+	profile.BookingRules = derefOr(req.BookingRules, profile.BookingRules)
+	profile.BookingFeeUSD = derefOr(req.BookingFeeUSD, profile.BookingFeeUSD)
+	profile.Timezone = derefOr(req.Timezone, profile.Timezone)
+	if bt := derefOr(req.BookingType, ""); bt != "" {
+		profile.BookingType = bt
 	}
-	if req.PricingMethod != "" {
-		profile.PricingMethod = req.PricingMethod
+	if pm := derefOr(req.PricingMethod, ""); pm != "" {
+		profile.PricingMethod = pm
 	}
 	// Guarantee non-empty enums (new profiles start zero-valued; don't rely on
 	// the DB default tag filling them on insert).
@@ -116,6 +144,15 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	}
 	if profile.PricingMethod == "" {
 		profile.PricingMethod = models.PricingMethodFixed
+	}
+	if profile.Timezone == "" {
+		profile.Timezone = models.DefaultServiceTimezone
+	}
+	// Capacity defaults to one per slot only on create. On an update a stored 0
+	// is a deliberate "unlimited", so forcing 1 here would silently cap a
+	// listing the merchant had opened up.
+	if isNew && req.MaxCapacityPerSlot == nil {
+		profile.MaxCapacityPerSlot = 1
 	}
 	// Reject invalid combinations on the EFFECTIVE (merged) values, so a partial
 	// update can't slip a bad combo through preserve-existing semantics.
@@ -128,10 +165,22 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	// request + slot: a request is priced and paid later without a slot pick, so
 	// the pay step can't reserve a slot — the combination would strand the buyer.
 	if profile.BookingType != models.BookingTypeInstant && profile.SlotDurationMinutes > 0 {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Slot-based bookings must use instant booking; request bookings cannot reserve a time slot")
+		// The collision often comes from a preserved value rather than anything
+		// in this body — switching a slotted listing to request mode keeps its
+		// stored slot duration. Say which field to clear, or the merchant is
+		// told "no" about a field they did not send.
+		msg := "Request bookings cannot reserve a time slot. Set the slot duration to 0 to switch this listing to request mode."
+		if req.SlotDurationMinutes != nil {
+			msg = "Request bookings cannot reserve a time slot. Use instant booking for slot-based services."
+		}
+		utils.ErrorResponse(c, http.StatusBadRequest, msg)
 		return
 	}
-	profile.SetFieldConfig(req.FieldConfig)
+	// Omitting fieldConfig preserves the stored form; sending an empty Fields
+	// list is how a merchant clears it back to the legacy flow.
+	if req.FieldConfig != nil {
+		profile.SetFieldConfig(req.FieldConfig)
+	}
 
 	if err != nil {
 		// Not found → create.
