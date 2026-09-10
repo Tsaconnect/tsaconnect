@@ -648,6 +648,28 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// Central-account inbound attribution (design 2026-09-10). Polls the
+	// Flutterwave wallet statement and writes every customer credit to
+	// inbound_credits. There is NO webhook for wallet funding, so this poll is
+	// the only way such a credit is ever seen.
+	//
+	// Registered in BOTH inbound modes on purpose: under `va` it attributes
+	// nothing and simply records what lands, which is how the design wants the
+	// statement observed against real traffic before the flag flips. The
+	// matching step is wired separately via SetMatcher and is absent today —
+	// ingestion is deliberately useful on its own.
+	if fwClient != nil {
+		inboundPoller := jobs.NewInboundCreditPoller(
+			services.NewInboundIngestor(config.DB, fwClient, "NGN", cfg.InboundStatementLookback),
+			cfg.InboundPollIntervalOrDefault(),
+		)
+		scheduler.Register(inboundPoller)
+		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s, ingest-only — no matcher wired)",
+			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
+	} else {
+		log.Printf("[inbound] credit poller dormant: no Flutterwave client")
+	}
+
 	// Wire IT's live withdrawal FX quote (GET /api/it/withdraw/quote) onto
 	// Flutterwave's pass-through rate feed. Optional seam — nil fwClient (or
 	// IT dormant) leaves QuoteWithdrawal returning ErrITQuoteUnavailable.

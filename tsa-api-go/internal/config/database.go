@@ -128,6 +128,11 @@ func AutoMigrate() error {
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},
+		// Central-account inbound attribution — the immutable record of every
+		// credit into the company account, written by the statement poller
+		// before any matching runs. Additive and inert until the poller is
+		// wired; nothing reads it yet.
+		&models.InboundCredit{},
 		&models.PaycrestOrderRecord{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},

@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // A malformed FEE_MANAGER_ADDRESS_* must be rejected at load (design §6) — the
@@ -158,5 +159,54 @@ func TestLoad_RobinhoodWalletChain(t *testing.T) {
 	// Wallet-only: must never be registered as a P2P chain.
 	if _, isP2P := cfg.P2PChains[4663]; isP2P {
 		t.Errorf("robinhood (4663) must not be in P2PChains")
+	}
+}
+
+// INBOUND_MODE decides whether every naira in the platform is attributed by
+// webhook or by statement poll, so a typo must land on today's behaviour
+// rather than silently retiring every virtual account.
+func TestNormalizeInboundMode(t *testing.T) {
+	tests := map[string]string{
+		"central":    InboundModeCentral,
+		"CENTRAL":    InboundModeCentral,
+		"  central ": InboundModeCentral,
+		"va":         InboundModeVA,
+		"VA":         InboundModeVA,
+		"":           InboundModeVA,
+		"centrl":     InboundModeVA,
+		"true":       InboundModeVA,
+	}
+	for in, want := range tests {
+		if got := normalizeInboundMode(in); got != want {
+			t.Errorf("normalizeInboundMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInboundCentralEnabled(t *testing.T) {
+	if (&Config{InboundMode: InboundModeCentral}).InboundCentralEnabled() != true {
+		t.Error("central mode must report enabled")
+	}
+	if (&Config{InboundMode: InboundModeVA}).InboundCentralEnabled() != false {
+		t.Error("va mode must report disabled")
+	}
+	var nilCfg *Config
+	if nilCfg.InboundCentralEnabled() {
+		t.Error("nil config must not report central mode")
+	}
+}
+
+// The poll interval is the user's wait for a credit to be noticed, so an unset
+// or nonsense value must fall back to the 30s of decision 8, never to zero
+// (which the scheduler panics on at Register).
+func TestInboundPollIntervalOrDefault(t *testing.T) {
+	if got := (&Config{}).InboundPollIntervalOrDefault(); got != 30*time.Second {
+		t.Errorf("unset = %s, want 30s", got)
+	}
+	if got := (&Config{InboundPollInterval: -time.Second}).InboundPollIntervalOrDefault(); got != 30*time.Second {
+		t.Errorf("negative = %s, want 30s", got)
+	}
+	if got := (&Config{InboundPollInterval: 15 * time.Second}).InboundPollIntervalOrDefault(); got != 15*time.Second {
+		t.Errorf("configured = %s, want 15s", got)
 	}
 }
