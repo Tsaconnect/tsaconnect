@@ -360,6 +360,44 @@ func TestPairFundingFees_SeparatelyBilledFeeIsNotAddedBack(t *testing.T) {
 	}
 }
 
+// A fee row that carries no balance evidence must NOT be treated as netted.
+//
+// This is the production shape's failure mode: Flutterwave bills the funding fee
+// as its own transaction (confirmed 2026-09-10), so the credit row is already
+// gross. If a fee row ever arrives without balance figures, adding it back would
+// inflate gross by ~1.4% and fail the exact-amount match for every payer — a
+// silent, total outage of auto-crediting. Missing evidence means "not netted".
+func TestPairFundingFees_FeeWithNoBalanceEvidenceIsNotAddedBack(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	credit := fundingRow("100000000000000000000000000016", 2000, "Received Money from GTBANK|ADEMU EMMANUEL", "2026-09-02T10:00:00Z")
+	fee := FWStatementEntry{
+		Type:      "fee",
+		Direction: "debit",
+		Amount:    28,
+		// No balance figures at all — the provider omitted them.
+		Balance:         FWStatementBalance{},
+		Reference:       "100000000000000000000000000016",
+		Remarks:         "Wallet funding fee",
+		TransactionDate: stmtTime("2026-09-02T10:00:01Z"),
+	}
+
+	if _, err := ing.IngestRows(context.Background(), []FWStatementEntry{credit, fee}); err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	var got models.InboundCredit
+	if err := db.First(&got).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.FeeKobo != 0 {
+		t.Errorf("FeeKobo = %d, want 0 — no evidence of netting is not evidence of netting", got.FeeKobo)
+	}
+	if got.GrossKobo != 200000 {
+		t.Errorf("GrossKobo = %d, want 200000 — a ₦2,000 transfer must match a ₦2,000 order", got.GrossKobo)
+	}
+}
+
 func TestPairFundingFees(t *testing.T) {
 	netted := func(ref string, amount float64, at string) FWStatementEntry {
 		return FWStatementEntry{

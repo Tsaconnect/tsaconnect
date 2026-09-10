@@ -434,9 +434,24 @@ func isFeeRow(row FWStatementEntry) bool {
 // nettedFeeKobo returns the fee row's amount when it was netted off a credit,
 // and 0 when it was billed as its own wallet debit. See pairFundingFees for
 // why the balance movement is the discriminator.
+//
+// CONFIRMED 2026-09-10: Flutterwave debits the funding fee as its OWN
+// transaction the moment the money lands, so in production this returns 0 and
+// GrossKobo equals the credit as it appears on the statement. The netting
+// branch is kept because a provider can change this without telling us, and
+// because being wrong in that direction shorts every buyer.
+//
+// Netting requires POSITIVE evidence: both balance sides present and equal.
+// Absent balance data used to satisfy before == after and silently add the fee
+// back, inflating gross by ~1.4% and failing the exact-amount match for every
+// payer. Missing evidence now means "not netted", which is also what we know to
+// be true.
 func nettedFeeKobo(fee FWStatementEntry) int64 {
 	before := KoboFromMajor(fee.Balance.Before.Float64())
 	after := KoboFromMajor(fee.Balance.After.Float64())
+	if before <= 0 || after <= 0 {
+		return 0
+	}
 	if before != after {
 		return 0
 	}
