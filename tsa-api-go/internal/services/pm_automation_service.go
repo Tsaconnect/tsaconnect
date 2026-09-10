@@ -126,7 +126,16 @@ type PMAutomationService struct {
 	// charge.completed webhook before crediting (see flutterwave_dispatch.go).
 	// nil → charge settlement is refused (fail-closed).
 	fwCharges FlutterwaveChargeGetter
+	// forwards resolves disburse results for P2P settlement forwards, which
+	// share this webhook but are keyed by their own reference prefix. nil when
+	// the instant forward is not wired — see HandlePayoutStatus.
+	forwards *P2PSettlementForwarder
 }
+
+// SetSettlementForwarder routes settlement-forward disburse results to the
+// forwarder. Without it a confirmed forward is never debited from the
+// merchant's ledger, which over-credits them — the safe direction, but wrong.
+func (s *PMAutomationService) SetSettlementForwarder(f *P2PSettlementForwarder) { s.forwards = f }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
 // is the per-PM Nomba boundary used by the sell flow to pay the user's bank.
@@ -630,6 +639,23 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 // TODO(pm-phase2): automated bounded-retry + on-chain refund once
 // adminResolve-from-pending semantics are confirmed.
 func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutStatus) error {
+	// A settlement forward is not a sell payout, and its reference is not a
+	// trade UUID — so without this branch a disburse result for one would fall
+	// through to the "untracked payout, ignoring" log below, and the merchant's
+	// ledger would never be debited for money that actually reached their bank.
+	// Routed on the reference prefix, which no trade id can carry.
+	if s.forwards != nil && strings.HasPrefix(strings.TrimSpace(p.MerchantTxRef), p2pForwardRefPrefix) {
+		status := strings.ToLower(strings.TrimSpace(p.Status))
+		switch status {
+		case "success":
+			return s.forwards.Confirm(ctx, p.MerchantTxRef, true, "")
+		case "failed":
+			return s.forwards.Confirm(ctx, p.MerchantTxRef, false, "payout "+p.PayoutID+" (event "+p.EventID+")")
+		default:
+			return nil // pending or unknown — await a terminal result
+		}
+	}
+
 	// Resolve the trade. The deterministic key is merchantTxRef (= the trade UUID
 	// we sent when initiating the payout). Fall back to the stored nomba_payout_id
 	// only if merchantTxRef is empty/unparseable. Require at least one usable key:

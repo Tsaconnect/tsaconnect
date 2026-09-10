@@ -741,12 +741,21 @@ func main() {
 	// pay into the central account, so in practice nothing matches and every
 	// stray credit holds — which is exactly the shadow run the design asks for
 	// before the flag flips.
+	//
+	// Held outside the block so the P2P source can join later: it needs the PM
+	// service, the trade service and the release signer, none of which exist
+	// yet at this point in boot. A product that registers late still matches
+	// everything ingested before it — credits are durable and re-run.
+	var inboundMatcher *services.InboundMatcher
 	if inboundPoller != nil && itService != nil {
-		inboundMatcher := services.NewInboundMatcher(config.DB)
+		inboundMatcher = services.NewInboundMatcher(config.DB)
 		inboundMatcher.Register(services.InboundClaimTypeITMCGP,
 			services.NewITMCGPClaimSource(config.DB, itService))
+		inboundMatcher.Register(services.InboundClaimTypeITStable,
+			services.NewITStableClaimSource(itService))
 		inboundPoller.SetMatcher(inboundMatcher)
-		log.Printf("[inbound] matcher wired (claim sources: %s)", services.InboundClaimTypeITMCGP)
+		log.Printf("[inbound] matcher wired (claim sources: %s, %s)",
+			services.InboundClaimTypeITMCGP, services.InboundClaimTypeITStable)
 	} else if inboundPoller != nil {
 		// Ingest keeps running. Credits pile up as `unmatched` and are
 		// attributed the moment a matcher exists — nothing about them expires.
@@ -1140,6 +1149,47 @@ func main() {
 		// dispatches.
 		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
 		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
+
+		// Instant per-trade settlement forward (central-account design decision
+		// 7): on settle, sweep the merchant's naira to their own settlement
+		// bank rather than leaving it to a manual withdrawal.
+		//
+		// Wired in BOTH inbound modes, and deliberately so. The forward is a
+		// consequence of a trade settling, not of how the money was attributed,
+		// and the disburse webhook it depends on arrives regardless of the
+		// flag. Gating it on central mode would mean a forward submitted before
+		// a rollback could never be confirmed, which would leave the merchant
+		// permanently over-credited.
+		//
+		// fwClient doubles as the payout-balance reader: the pre-check refuses
+		// to submit a transfer the payout account cannot fund, which the
+		// stablecoin sell leg does and the MCGP sell leg's absence of is the
+		// root of its stranded-value bug. A nil client simply skips the
+		// pre-check — the ledger ordering, not this check, is what makes the
+		// forward safe.
+		var balanceReader services.PayoutBalanceReader
+		if fwClient != nil {
+			balanceReader = fwClient
+		}
+		settlementForwarder := services.NewP2PSettlementForwarder(
+			config.DB, pmSvc, gateway, balanceReader, cfg.NombaSenderName)
+		pmAuto.SetSettlementForwarder(settlementForwarder)
+		scheduler.Register(jobs.NewP2PForwardSweepJob(settlementForwarder))
+		log.Printf("[pm] settlement forward wired (balance pre-check=%t); unanswered-transfer sweep registered",
+			balanceReader != nil)
+
+		// P2P joins the matcher here rather than alongside the IT sources,
+		// because only now do the trade service and release signer exist. The
+		// claim's user is the BUYER — they send the naira — while the merchant
+		// is credited and forwarded to; see inbound_claim_p2p.go.
+		if inboundMatcher != nil {
+			p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
+			p2pClaims.SetForwarder(settlementForwarder)
+			inboundMatcher.Register(services.InboundClaimTypeP2PTrade, p2pClaims)
+			log.Printf("[inbound] matcher gained the %s claim source", services.InboundClaimTypeP2PTrade)
+		} else {
+			log.Printf("[inbound] P2P claim source not registered: no matcher wired")
+		}
 		// NGN ledger drift reconciler (VA-only model): compares the SUM of all
 		// active PMs' off-chain available_ngn against the live single-parent Nomba
 		// balance every 5m and logs drift (pm_ngn_reconciler_drift_total).
