@@ -101,6 +101,16 @@ func main() {
 				"INBOUND_CENTRAL_ACCOUNT_NUMBER, INBOUND_CENTRAL_BANK_NAME and " +
 				"INBOUND_CENTRAL_ACCOUNT_NAME to all be set")
 		}
+		// A held credit is customer money nobody has been able to attribute,
+		// and by design nothing releases it automatically — no refund timer, no
+		// expiry. The alert is the ONLY thing that tells anyone to go look. Not
+		// fatal, because the admin queue still holds the evidence and a mail
+		// outage should not stop the API taking money; loud, because without a
+		// recipient the queue is a place money goes quiet.
+		if len(cfg.InboundAlertEmails) == 0 {
+			log.Printf("[config] WARNING: INBOUND_MODE=central with no INBOUND_ALERT_EMAILS — " +
+				"held credits will raise no alert and are only visible in the admin queue")
+		}
 	}
 
 	// Build the non-EVM chain registry. Each (network, chain) is registered only

@@ -75,16 +75,20 @@ func insertHeldCredit(t *testing.T, db *gorm.DB, senderName string, grossKobo in
 	return c
 }
 
-// fakeClaimSource serves a fixed slice of open claims.
-type fakeClaimSource struct {
+// fakeAdminClaimSource serves a fixed slice of open claims to the admin
+// candidate view. Distinct from the matcher test's fake, which also records
+// Accept calls that this view never makes.
+type fakeAdminClaimSource struct {
 	claims []InboundClaim
 	err    error
 }
 
-func (f *fakeClaimSource) OpenClaims(context.Context, string) ([]InboundClaim, error) {
+func (f *fakeAdminClaimSource) OpenClaims(context.Context, string) ([]InboundClaim, error) {
 	return f.claims, f.err
 }
-func (f *fakeClaimSource) Accept(context.Context, uuid.UUID, *models.InboundCredit) error { return nil }
+func (f *fakeAdminClaimSource) Accept(context.Context, uuid.UUID, *models.InboundCredit) error {
+	return nil
+}
 
 // fakeBinder stands in for the matcher's BindManually.
 type fakeBinder struct {
@@ -224,7 +228,7 @@ func TestInboundAdminCandidatesExplainsEveryRejection(t *testing.T) {
 	noNameClaim, unrelatedClaim := uuid.New(), uuid.New()
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: nameOnlyClaim, UserID: nameOnly, AmountKobo: 150000},
 		{Type: InboundClaimTypeITStable, ID: amountOnlyClaim, UserID: amountOnly, AmountKobo: 200000},
 		{Type: InboundClaimTypeP2PTrade, ID: noNameClaim, UserID: noKYCName, AmountKobo: 200000},
@@ -280,7 +284,7 @@ func TestInboundAdminCandidatesShowsMatcherTokens(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -315,7 +319,7 @@ func TestInboundAdminCandidatesFlagsContention(t *testing.T) {
 	second := insertAdminTestUser(t, db, "Ademu Emmanuel")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: first, AmountKobo: 200000},
 		{Type: InboundClaimTypeITStable, ID: uuid.New(), UserID: second, AmountKobo: 200000},
 	}})
@@ -343,7 +347,7 @@ func TestInboundAdminCandidatesMarksASoleMatchBindable(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -364,7 +368,7 @@ func TestInboundAdminCandidatesComparesAtNairaGranularity(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -388,8 +392,8 @@ func TestInboundAdminCandidatesSurvivesABrokenClaimSource(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeClaimSource{err: errors.New("p2p is down")})
-	svc.AddClaimSource(&fakeClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(&fakeAdminClaimSource{err: errors.New("p2p is down")})
+	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
