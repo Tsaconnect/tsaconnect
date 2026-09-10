@@ -688,6 +688,25 @@ func main() {
 		scheduler.Register(inboundPoller)
 		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s, ingest-only — no matcher wired)",
 			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
+
+		// The safety net over that poll (design §7). Per-user VAs made
+		// attribution cryptographic; a free-text sender name and a poll with no
+		// webhook backstop do not, so this is what tells us the pipeline has not
+		// silently lost or duplicated money. It compares Σ inbound_credits
+		// against Flutterwave's own credit total for a settled window and alerts
+		// in BOTH directions — short means a customer paid and nobody has their
+		// money, long means one payment was recorded twice.
+		//
+		// Read-only, and registered alongside the poller in both modes for the
+		// same reason: what it checks is the ingestor, which runs in both.
+		// Email alerting is wired later via SetNotifier once INBOUND_ALERT_EMAILS
+		// exists; until then the ALERT log lines are the channel.
+		scheduler.Register(jobs.NewInboundReconciler(
+			jobs.NewInboundReconcileSource(config.DB, fwClient),
+			"NGN",
+			5*time.Minute,
+		))
+		log.Printf("[inbound] reconciler registered (Σ inbound_credits vs statement credits, 5m, both directions)")
 	} else {
 		log.Printf("[inbound] credit poller dormant: no Flutterwave client")
 	}
