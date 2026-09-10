@@ -30,8 +30,11 @@ const (
 	VerificationActionDiditInitiated = "didit_initiated"
 	VerificationActionDiditPassed    = "didit_passed"
 	VerificationActionDiditFailed    = "didit_failed"
-	VerificationActionAdminOverride  = "admin_override_approved"
-	VerificationActionAdminRejection = "admin_rejection"
+	// VerificationActionDiditNameCaptured records that the verified legal name
+	// was read from Didit — never the name itself, which stays out of the log.
+	VerificationActionDiditNameCaptured = "didit_name_captured"
+	VerificationActionAdminOverride     = "admin_override_approved"
+	VerificationActionAdminRejection    = "admin_rejection"
 )
 
 // Verification log status constants.

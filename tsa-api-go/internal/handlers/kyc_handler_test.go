@@ -130,7 +130,7 @@ func setupKYCTestDB(t *testing.T, withLogsTable bool) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 	}
 	if withLogsTable {
