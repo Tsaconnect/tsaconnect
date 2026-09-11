@@ -34,6 +34,20 @@ type InboundClaim struct {
 	// granularity — see the design's amount rule.
 	AmountKobo int64
 
+	// Currency is the ISO code this claim is priced in, upper-case and
+	// trimmed. EVERY ClaimSource must set it on every claim it returns; the
+	// matcher neither stamps it nor defaults it, and treats an empty value as
+	// a source bug.
+	//
+	// It exists because OpenClaims takes a currency argument and the matcher
+	// had no way to check the answer came back in it. The three sources do not
+	// agree on what an empty argument means — one falls back to NGN, two
+	// reject it — so "the source filtered correctly" was an assumption resting
+	// on three different implementations staying in step forever. Set it from
+	// the claim's OWN currency column, never by echoing the argument back:
+	// echoing makes the check tautological and re-hides the bug it is for.
+	Currency string
+
 	OpenedAt time.Time
 }
 

@@ -1,8 +1,10 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -92,7 +94,18 @@ func (f *fakeClaimSource) Accept(_ context.Context, claimID uuid.UUID, credit *m
 }
 
 func claimFor(userID uuid.UUID, kobo int64) InboundClaim {
-	return InboundClaim{ID: uuid.New(), UserID: userID, AmountKobo: kobo, OpenedAt: time.Now()}
+	return InboundClaim{
+		ID: uuid.New(), UserID: userID, AmountKobo: kobo,
+		Currency: "NGN", OpenedAt: time.Now(),
+	}
+}
+
+// claimInCurrency is claimFor for the cases that exist to prove the matcher
+// checks the currency rather than trusting the source to have filtered on it.
+func claimInCurrency(userID uuid.UUID, kobo int64, currency string) InboundClaim {
+	c := claimFor(userID, kobo)
+	c.Currency = currency
+	return c
 }
 
 func reloadCredit(t *testing.T, db *gorm.DB, id uuid.UUID) *models.InboundCredit {
@@ -774,5 +787,397 @@ func TestInboundMatcher_MatchPendingRespectsTheBatchLimit(t *testing.T) {
 	db.Model(&models.InboundCredit{}).Where("status = ?", models.InboundCreditHeld).Count(&held)
 	if held != 2 {
 		t.Errorf("held %d rows, want 2", held)
+	}
+}
+
+// ─── manual binding: the amount is not the operator's to override ──────────
+
+// The queue exists so a human can decide WHOSE the money is. It does not exist
+// so a human can decide HOW MUCH arrived. The P2P source credits the merchant
+// trade.FiatAmount rather than the credit's own amount, so assigning a ₦5,000
+// credit to a ₦500,000 trade pays the merchant ₦500,000 and releases the whole
+// escrow to the buyer — out of nothing.
+func TestInboundMatcher_BindManuallyRefusesAnAmountMismatch(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0021", 500_000, "EMMANUEL ADEMU") // ₦5,000 arrived
+
+	claim := claimFor(payer, 50_000_000) // an open ₦500,000 trade
+	src := &fakeClaimSource{typ: InboundClaimTypeP2PTrade, claims: []InboundClaim{claim}}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeP2PTrade, src)
+	ctx := context.Background()
+
+	if _, err := m.MatchPending(ctx, 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if got := reloadCredit(t, db, credit.ID); got.Status != models.InboundCreditHeld {
+		t.Fatalf("precondition: status = %q, want held", got.Status)
+	}
+
+	err := m.BindManually(ctx, credit.ID, InboundClaimTypeP2PTrade, claim.ID, uuid.New())
+	if err == nil {
+		t.Fatal("bound a ₦5,000 credit to a ₦500,000 claim")
+	}
+
+	// The money outcome, which is the whole point of the refusal: the settle
+	// path never ran, so no merchant was paid and no escrow was released.
+	if len(src.accepted) != 0 {
+		t.Fatalf("settled a ₦500,000 claim out of a ₦5,000 credit: %+v", src.accepted)
+	}
+	got := reloadCredit(t, db, credit.ID)
+	if got.Status != models.InboundCreditHeld {
+		t.Errorf("status = %q, want the credit left held for a real resolution", got.Status)
+	}
+	if got.MatchedClaimID != nil || got.MatchedUserID != nil {
+		t.Errorf("refused bind still stamped claim=%v user=%v", got.MatchedClaimID, got.MatchedUserID)
+	}
+	if got.ResolvedBy != nil {
+		t.Errorf("refused bind recorded an admin: %v", got.ResolvedBy)
+	}
+
+	// Both figures, or the operator cannot tell which one is wrong — the payer
+	// underpaid, or they picked the wrong row.
+	for _, want := range []string{"5,000.00", "500,000.00"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not state %q", err, want)
+		}
+	}
+}
+
+// The automatic path snaps both sides to whole naira before comparing, and the
+// manual path must snap the same way — otherwise an operator would be refused
+// a bind the matcher itself would have made unattended.
+func TestInboundMatcher_BindManuallyAllowsASubNairaRoundingDifference(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0022", 199_849, "SOMEBODY ELSE ENTIRELY") // ₦1,998.49
+
+	claim := claimFor(payer, 199_800) // ₦1,998
+	src := &fakeClaimSource{typ: InboundClaimTypeITMCGP, claims: []InboundClaim{claim}}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP, src)
+
+	if err := m.BindManually(context.Background(), credit.ID, InboundClaimTypeITMCGP, claim.ID, uuid.New()); err != nil {
+		t.Fatalf("refused a bind the matcher would have made itself: %v", err)
+	}
+	if len(src.accepted) != 1 {
+		t.Fatalf("Accept called %d times, want 1", len(src.accepted))
+	}
+}
+
+// ─── non-positive amounts ──────────────────────────────────────────────────
+
+// A malformed statement row that parses to zero yields a target of zero, and a
+// zero-amount claim is then an EXACT match — money moving on nothing at all.
+func TestInboundMatcher_NonPositiveGrossHoldsAndNeverMatches(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gross int64
+	}{
+		{"zero", 0},
+		{"negative", -50_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupMatcherDB(t)
+			payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+			credit := seedCredit(t, db, "sess-np-"+tc.name, tc.gross, "EMMANUEL ADEMU")
+
+			// A claim that would be an exact amount match on that target.
+			src := &fakeClaimSource{
+				typ:    InboundClaimTypeITMCGP,
+				claims: []InboundClaim{claimFor(payer, roundKoboToNaira(tc.gross))},
+			}
+			m := NewInboundMatcher(db)
+			m.Register(InboundClaimTypeITMCGP, src)
+
+			decided, err := m.MatchPending(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("MatchPending: %v", err)
+			}
+			if decided != 1 {
+				t.Fatalf("decided = %d, want 1 — a hold is a decision", decided)
+			}
+			if len(src.accepted) != 0 {
+				t.Fatalf("settled a claim for a %d-kobo credit: %+v", tc.gross, src.accepted)
+			}
+			got := reloadCredit(t, db, credit.ID)
+			if got.Status != models.InboundCreditHeld {
+				t.Fatalf("status = %q, want held", got.Status)
+			}
+			if got.MatchedClaimID != nil {
+				t.Errorf("held credit carries a claim id %v", got.MatchedClaimID)
+			}
+		})
+	}
+}
+
+// ─── claim currency ────────────────────────────────────────────────────────
+
+// The matcher asks for claims in one currency and has, until now, had to take
+// the source's word that it filtered on it. The three sources disagree about
+// what an empty currency means, so the word is not good enough: a ₦200,000
+// credit must never settle a claim priced at 200,000 of something else.
+func TestInboundMatcher_ClaimInAnotherCurrencyHoldsRatherThanBinding(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0023", 200_000, "EMMANUEL ADEMU") // NGN
+
+	src := &fakeClaimSource{
+		typ:    InboundClaimTypeITStable,
+		claims: []InboundClaim{claimInCurrency(payer, 200_000, "USD")},
+	}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITStable, src)
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if len(src.accepted) != 0 {
+		t.Fatalf("settled an NGN credit against a USD claim: %+v", src.accepted)
+	}
+	got := reloadCredit(t, db, credit.ID)
+	if got.Status != models.InboundCreditHeld {
+		t.Fatalf("status = %q, want held", got.Status)
+	}
+	if got.HoldReasonCode != models.InboundHoldCurrencyMismatch {
+		t.Errorf("code = %q, want %q — a source bug reads as its own thing",
+			got.HoldReasonCode, models.InboundHoldCurrencyMismatch)
+	}
+	// When this fires it is because one source forgot to populate the field.
+	// Whoever reads the queue should not have to guess which product to blame.
+	if !strings.Contains(got.HoldReason, InboundClaimTypeITStable) {
+		t.Errorf("hold reason %q does not name the source at fault", got.HoldReason)
+	}
+}
+
+// An unset Currency is exactly the shape a source bug takes: the field was
+// simply never populated. Letting "" pass would make the assertion inert
+// against the only failure it was written to catch.
+func TestInboundMatcher_ClaimWithNoCurrencyDoesNotPassTheAssertion(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0024", 200_000, "EMMANUEL ADEMU")
+
+	src := &fakeClaimSource{
+		typ:    InboundClaimTypeITMCGP,
+		claims: []InboundClaim{claimInCurrency(payer, 200_000, "")},
+	}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP, src)
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if len(src.accepted) != 0 {
+		t.Fatalf("bound a claim that never said what currency it was in: %+v", src.accepted)
+	}
+	got := reloadCredit(t, db, credit.ID)
+	if got.Status != models.InboundCreditHeld {
+		t.Fatalf("status = %q, want held", got.Status)
+	}
+	if got.HoldReasonCode != models.InboundHoldCurrencyMismatch {
+		t.Errorf("code = %q, want %q", got.HoldReasonCode, models.InboundHoldCurrencyMismatch)
+	}
+}
+
+// Case and padding are a source's formatting, not a disagreement about money.
+func TestInboundMatcher_ClaimCurrencyComparisonIsNormalised(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0025", 200_000, "EMMANUEL ADEMU")
+
+	src := &fakeClaimSource{
+		typ:    InboundClaimTypeITMCGP,
+		claims: []InboundClaim{claimInCurrency(payer, 200_000, " ngn ")},
+	}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP, src)
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if got := reloadCredit(t, db, credit.ID); got.Status != models.InboundCreditMatched {
+		t.Fatalf("status = %q reason=%q — \" ngn \" is NGN", got.Status, got.HoldReason)
+	}
+}
+
+// ─── hold reason codes, and keeping PII out of everything but the console ──
+
+// Every hold path must set a code, because the alert email renders the code
+// and nothing else. A hold that reaches the queue with an empty code is an
+// alert that says nothing at all.
+func TestInboundMatcher_EveryHoldPathSetsACodeAndKeepsTheProse(t *testing.T) {
+	payer := "Emmanuel Ademu"
+	cases := []struct {
+		name   string
+		gross  int64
+		sender string
+		claims func(t *testing.T, db *gorm.DB) []InboundClaim
+		want   string
+	}{
+		{
+			name: "no claim at that amount", gross: 200_000, sender: "EMMANUEL ADEMU",
+			claims: func(*testing.T, *gorm.DB) []InboundClaim { return nil },
+			want:   models.InboundHoldNoClaimAtAmount,
+		},
+		{
+			name: "no sender name on the statement", gross: 200_000, sender: "",
+			claims: func(t *testing.T, db *gorm.DB) []InboundClaim {
+				return []InboundClaim{claimFor(seedMatcherUser(t, db, payer), 200_000)}
+			},
+			want: models.InboundHoldNoSenderName,
+		},
+		{
+			name: "a rival nobody can check", gross: 200_000, sender: "EMMANUEL ADEMU",
+			claims: func(t *testing.T, db *gorm.DB) []InboundClaim {
+				return []InboundClaim{
+					claimFor(seedMatcherUser(t, db, payer), 200_000),
+					claimFor(seedMatcherUser(t, db, ""), 200_000),
+				}
+			},
+			want: models.InboundHoldUnverifiableRival,
+		},
+		{
+			name: "checked, and none of them", gross: 200_000, sender: "EMMANUEL ADEMU",
+			claims: func(t *testing.T, db *gorm.DB) []InboundClaim {
+				return []InboundClaim{claimFor(seedMatcherUser(t, db, "Chidi Okonkwo"), 200_000)}
+			},
+			want: models.InboundHoldNoNameMatch,
+		},
+		{
+			name: "two people answer to it", gross: 200_000, sender: "EMMANUEL ADEMU",
+			claims: func(t *testing.T, db *gorm.DB) []InboundClaim {
+				return []InboundClaim{
+					claimFor(seedMatcherUser(t, db, payer), 200_000),
+					claimFor(seedMatcherUser(t, db, "Emmanuel Ademu Okon"), 200_000),
+				}
+			},
+			want: models.InboundHoldContested,
+		},
+		{
+			name: "nothing actually arrived", gross: 0, sender: "EMMANUEL ADEMU",
+			claims: func(t *testing.T, db *gorm.DB) []InboundClaim {
+				return []InboundClaim{claimFor(seedMatcherUser(t, db, payer), 0)}
+			},
+			want: models.InboundHoldNonPositiveAmount,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupMatcherDB(t)
+			credit := seedCredit(t, db, "sess-code-"+tc.want, tc.gross, tc.sender)
+			m := NewInboundMatcher(db)
+			m.Register(InboundClaimTypeITMCGP,
+				&fakeClaimSource{typ: InboundClaimTypeITMCGP, claims: tc.claims(t, db)})
+
+			if _, err := m.MatchPending(context.Background(), 10); err != nil {
+				t.Fatalf("MatchPending: %v", err)
+			}
+			got := reloadCredit(t, db, credit.ID)
+			if got.Status != models.InboundCreditHeld {
+				t.Fatalf("status = %q, want held", got.Status)
+			}
+			if got.HoldReasonCode != tc.want {
+				t.Errorf("code = %q, want %q", got.HoldReasonCode, tc.want)
+			}
+			// The prose still has to exist — it is what the admin console
+			// shows, and the code alone cannot resolve anything.
+			if strings.TrimSpace(got.HoldReason) == "" {
+				t.Error("the code replaced the prose instead of joining it")
+			}
+		})
+	}
+}
+
+// A bound credit must not carry a stale code from the hold it came out of, or
+// a resolved row reads as still held.
+func TestInboundMatcher_BindingClearsTheHoldReasonCode(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-0026", 200_000, "SOMEBODY ELSE ENTIRELY")
+
+	claim := claimFor(payer, 200_000)
+	src := &fakeClaimSource{typ: InboundClaimTypeITMCGP, claims: []InboundClaim{claim}}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP, src)
+	ctx := context.Background()
+
+	if _, err := m.MatchPending(ctx, 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if got := reloadCredit(t, db, credit.ID); got.HoldReasonCode == "" {
+		t.Fatal("precondition: the hold set no code")
+	}
+	if err := m.BindManually(ctx, credit.ID, InboundClaimTypeITMCGP, claim.ID, uuid.New()); err != nil {
+		t.Fatalf("BindManually: %v", err)
+	}
+	got := reloadCredit(t, db, credit.ID)
+	if got.HoldReasonCode != "" {
+		t.Errorf("hold reason code = %q on a matched credit", got.HoldReasonCode)
+	}
+}
+
+// The code is rendered into an alert email to a mailbox we do not control, so
+// it must be safe on its own: no account name, no raw remark, no Didit name.
+func TestInboundMatcher_HoldReasonCodeCarriesNoPII(t *testing.T) {
+	db := setupMatcherDB(t)
+	rival := seedMatcherUser(t, db, "Chidi Okonkwo")
+	credit := seedCredit(t, db, "sess-0027", 200_000, "EMMANUEL ADEMU")
+
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP,
+		&fakeClaimSource{typ: InboundClaimTypeITMCGP, claims: []InboundClaim{claimFor(rival, 200_000)}})
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	got := reloadCredit(t, db, credit.ID)
+	for _, pii := range []string{"EMMANUEL", "Emmanuel", "ADEMU", "Chidi", "Okonkwo", "GTBANK", "Received Money"} {
+		if strings.Contains(got.HoldReasonCode, pii) {
+			t.Errorf("hold reason code %q leaks %q", got.HoldReasonCode, pii)
+		}
+	}
+	// And the prose that the code exists to replace really does carry it, so
+	// this test cannot pass by the two being the same empty thing.
+	if !strings.Contains(got.HoldReason, "EMMANUEL ADEMU") {
+		t.Fatalf("prose reason %q lost the detail the console needs", got.HoldReason)
+	}
+}
+
+// The application log is the other uncontrolled sink. It gets the code and the
+// provider ref — enough to find the row — and never the prose.
+func TestInboundMatcher_HoldLogLineCarriesNoPII(t *testing.T) {
+	db := setupMatcherDB(t)
+	rival := seedMatcherUser(t, db, "Chidi Okonkwo")
+	credit := seedCredit(t, db, "sess-0028", 200_000, "EMMANUEL ADEMU")
+
+	var logged bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP,
+		&fakeClaimSource{typ: InboundClaimTypeITMCGP, claims: []InboundClaim{claimFor(rival, 200_000)}})
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+
+	out := logged.String()
+	for _, pii := range []string{"EMMANUEL", "Emmanuel", "ADEMU", "Chidi", "Okonkwo", "GTBANK", "Received Money"} {
+		if strings.Contains(out, pii) {
+			t.Errorf("hold log line leaks %q:\n%s", pii, out)
+		}
+	}
+	// It still has to be actionable: the ref finds the row, the code says why.
+	if !strings.Contains(out, credit.ProviderRef) {
+		t.Errorf("hold log line does not carry the provider ref:\n%s", out)
+	}
+	if !strings.Contains(out, models.InboundHoldNoNameMatch) {
+		t.Errorf("hold log line does not carry the reason code:\n%s", out)
 	}
 }

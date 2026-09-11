@@ -32,6 +32,43 @@ const (
 	InboundMatchStrengthPartial = "partial"
 )
 
+// Hold reason codes — why the matcher declined to bind, said without naming
+// anybody.
+//
+// These exist because the prose in HoldReason embeds the sender's bank account
+// name, the raw statement remark and the Didit-verified legal names of every
+// candidate user. That string is fine in the admin console, behind auth, where
+// an operator needs exactly those details to resolve the row. It is not fine
+// in the application log or in an alert email to a mailbox nobody here
+// controls, and this repo's policy is that verified names stay out of logs.
+//
+// So the two are kept apart: the code travels to the log and the alert, the
+// prose stays for the console. Anything rendering a hold outside the console
+// renders the code and nothing else.
+//
+// They are values an operator reads cold, with no legend to hand, which is why
+// they are sentences-in-a-word rather than abbreviations. They are persisted,
+// so they must not be renamed once any row carries them.
+const (
+	// InboundHoldNoClaimAtAmount — money arrived that nobody is waiting for.
+	InboundHoldNoClaimAtAmount = "no_open_claim_at_this_amount"
+	// InboundHoldNoSenderName — the statement carried no name to check.
+	InboundHoldNoSenderName = "statement_carried_no_sender_name"
+	// InboundHoldUnverifiableRival — a rival claim's owner has no Didit name,
+	// so it can be neither matched nor ruled out.
+	InboundHoldUnverifiableRival = "rival_claim_owner_has_no_verified_name"
+	// InboundHoldNoNameMatch — names were on file and the sender is none of them.
+	InboundHoldNoNameMatch = "sender_matches_no_candidate_name"
+	// InboundHoldContested — several claims match on both amount and name.
+	InboundHoldContested = "several_claims_match_equally_well"
+	// InboundHoldNonPositiveAmount — the row parsed to zero or less, so there
+	// is no amount to match on.
+	InboundHoldNonPositiveAmount = "credit_amount_is_not_positive"
+	// InboundHoldCurrencyMismatch — a claim source answered with a claim in
+	// the wrong currency. Not an operator's mistake to fix: a bug in us.
+	InboundHoldCurrencyMismatch = "claim_currency_does_not_match_credit"
+)
+
 // InboundCredit is an immutable record of one credit into the central account.
 // Rows are never deleted; AmountKobo and ProviderRef are never updated.
 //
@@ -68,8 +105,15 @@ type InboundCredit struct {
 	SeenAt          time.Time `gorm:"not null" json:"seenAt"`
 
 	// Status: unmatched | matched | held | refunded | ignored
-	Status     string `gorm:"size:16;not null;default:'unmatched';index" json:"status"`
-	HoldReason string `gorm:"size:255" json:"holdReason,omitempty"` // why the matcher declined to bind
+	Status string `gorm:"size:16;not null;default:'unmatched';index" json:"status"`
+	// HoldReason is the operator-facing prose: which claims contended, whose
+	// names were compared, what the sender line said. It names real people, so
+	// it is for the admin console only — never a log line, never an alert.
+	HoldReason string `gorm:"size:255" json:"holdReason,omitempty"`
+	// HoldReasonCode is the same decision with nobody's name in it, safe to
+	// log and to email. Set together with HoldReason on every hold; both are
+	// cleared when the credit is finally bound.
+	HoldReasonCode string `gorm:"size:48;index" json:"holdReasonCode,omitempty"`
 
 	MatchedClaimType string     `gorm:"size:24" json:"matchedClaimType,omitempty"`
 	MatchedClaimID   *uuid.UUID `gorm:"type:uuid;index" json:"matchedClaimId,omitempty"`
