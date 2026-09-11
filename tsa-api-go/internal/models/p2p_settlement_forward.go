@@ -71,6 +71,14 @@ type P2PSettlementForward struct {
 	Reference string `gorm:"size:64;not null;uniqueIndex" json:"reference"`
 	PayoutID  string `gorm:"size:64;index" json:"payoutId,omitempty"`
 
+	// Attempts counts how many times a submission has been held back rather
+	// than sent — an unreadable payout balance, a short one, an absent gateway.
+	// A held forward is retryable by design, but retrying without a ceiling is
+	// its own silence: a permanently unpayable forward would be re-driven every
+	// five minutes forever and still never reach an operator, because only
+	// `failed` rows are queued. The count is what turns "retry" into "escalate".
+	Attempts int `gorm:"not null;default:0" json:"attempts"`
+
 	// FailureReason is operator-facing text, not a code. Whoever reads it is
 	// deciding whether to re-fire the transfer or pay the merchant by hand.
 	// Sized to match ITIntent.FailureReason so the shared truncateReason helper
@@ -104,6 +112,11 @@ func (f *P2PSettlementForward) BeforeCreate(tx *gorm.DB) error {
 
 // NeedsAttention reports whether this forward is money an operator has to look
 // at: the merchant is credited but nothing reached their bank.
+//
+// `pending` is deliberately NOT included here. Whether a pending forward is an
+// operator's problem depends on how long it has been pending, which this value
+// alone cannot say — that judgement lives in
+// P2PSettlementForwarder.ListNeedingAttention, which has the clock.
 func (f *P2PSettlementForward) NeedsAttention() bool {
 	return f != nil && f.Status == P2PForwardFailed
 }

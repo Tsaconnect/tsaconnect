@@ -39,6 +39,7 @@ type itStableClaimRow struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
 	NgnKobo   string
+	Currency  string
 	CreatedAt time.Time
 }
 
@@ -60,7 +61,7 @@ func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) (
 	var rows []itStableClaimRow
 	if err := s.it.db.WithContext(ctx).
 		Table("it_intents").
-		Select("id, user_id, ngn_kobo, created_at").
+		Select("id, user_id, ngn_kobo, currency, created_at").
 		Where("direction = ? AND status = ? AND asset IN ? AND currency = ? AND created_at >= ?",
 			models.ITDirectionBuy, models.ITStatusPendingPayment,
 			[]string{models.ITAssetUSDC, models.ITAssetUSDT}, cur,
@@ -87,7 +88,11 @@ func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) (
 			// them visible to the matcher rather than silently dropping a
 			// purchase somebody has already paid for.
 			AmountKobo: roundKoboToNaira(kobo.Int64()),
-			OpenedAt:   r.CreatedAt,
+			// The intent's OWN currency, not the argument echoed back: echoing
+			// it would make the matcher's assertion tautological and re-hide
+			// the mismatch it exists to catch.
+			Currency: normaliseCurrency(r.Currency),
+			OpenedAt: r.CreatedAt,
 		})
 	}
 	return claims, nil
@@ -134,6 +139,12 @@ func (s *ITStableClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	if intent.Direction != models.ITDirectionBuy || !IsStableAsset(intent.Asset) {
 		// The matcher handed us a claim id this source never produced.
 		return ErrITBadState
+	}
+	// Re-asserted here rather than trusted from OpenClaims: the manual-assign
+	// path reaches this function with a hand-typed claim id and never runs that
+	// filter at all.
+	if err := assertClaimCurrency("it stable", claimID, intent.Currency, credit); err != nil {
+		return err
 	}
 	if intent.Status != models.ITStatusPendingPayment {
 		// Advanced between the matcher's read and ours — most plausibly a

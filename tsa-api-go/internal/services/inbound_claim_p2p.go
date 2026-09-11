@@ -46,6 +46,26 @@ const p2pForwardRefPrefix = "p2pfwd:"
 // missing quietly on the MCGP sell leg.
 const p2pForwardStaleAfter = 30 * time.Minute
 
+// p2pForwardRedriveAfter is how long a `pending` forward is left alone before
+// the sweep re-drives it.
+//
+// It exists to keep the sweep off the attempt Accept has just made
+// synchronously. Forward re-reads the row and refuses anything that is not
+// `pending`, but that read and the provider call are not one atomic step, so
+// two attempts overlapping could submit the same transfer twice — and a
+// double-paid merchant is not recoverable the way an unpaid one is.
+const p2pForwardRedriveAfter = 2 * time.Minute
+
+// p2pForwardMaxAttempts is how many times a forward may be held back before it
+// is escalated to the failed queue instead of retried again.
+//
+// At the sweep's 5-minute cadence this is roughly half an hour of transient
+// outage absorbed silently, which is the point: a provider blip should not need
+// a human. Past it the cause is not transient, and a row that retries forever
+// is as invisible to an operator as one nothing drives at all — the failure
+// this whole file exists to prevent.
+const p2pForwardMaxAttempts = 6
+
 // ErrForwardNoSettlementAccount means the merchant has nowhere to be paid.
 // Their proceeds stay on the ledger; this is a merchant-record problem, not a
 // money problem.
@@ -77,10 +97,11 @@ func (s *P2PTradeClaimSource) SetForwarder(f *P2PSettlementForwarder) { s.forwar
 // trade: the matcher needs four fields and loading whole trades to build them
 // would read every open trade's proof URLs and tx hashes on every poll tick.
 type p2pClaimRow struct {
-	ID         uuid.UUID
-	BuyerID    uuid.UUID
-	FiatAmount string
-	CreatedAt  time.Time
+	ID           uuid.UUID
+	BuyerID      uuid.UUID
+	FiatAmount   string
+	FiatCurrency string
+	CreatedAt    time.Time
 }
 
 // OpenClaims returns every P2P trade currently waiting on a buyer's transfer.
@@ -98,11 +119,17 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 	if cur == "" {
 		return nil, errors.New("p2p claims: empty currency")
 	}
+	// Guarded like the MCGP sibling. An unwired source that panics here takes
+	// the whole poll tick with it, losing every other product's attribution
+	// too; an error is something the matcher can log and carry on past.
+	if s == nil || s.db == nil {
+		return nil, errors.New("p2p claims: not configured")
+	}
 
 	var rows []p2pClaimRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
-		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount, p2p_trades.created_at").
+		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount, p2p_trades.fiat_currency, p2p_trades.created_at").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
 		Where("p2p_ads.side = ?", models.P2PAdSideSell).
@@ -137,7 +164,11 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 			// name — see the file header.
 			UserID:     r.BuyerID,
 			AmountKobo: kobo,
-			OpenedAt:   r.CreatedAt,
+			// The trade's OWN currency, not the argument echoed back: echoing
+			// it would make the matcher's assertion tautological and re-hide
+			// the mismatch it exists to catch.
+			Currency: normaliseCurrency(r.FiatCurrency),
+			OpenedAt: r.CreatedAt,
 		})
 	}
 	return claims, nil
@@ -174,6 +205,13 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrTradeNotFound
 		}
+		return err
+	}
+	// Re-asserted from the trade itself rather than trusted from OpenClaims.
+	// The manual-assign path reaches here with a hand-typed claim id and never
+	// runs that filter, and crediting a merchant's naira ledger out of a
+	// transfer denominated in something else books money that never landed.
+	if err := assertClaimCurrency("p2p", claimID, trade.FiatCurrency, credit); err != nil {
 		return err
 	}
 	pm, err := s.merchantForTrade(ctx, trade.AdID)
@@ -257,18 +295,33 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(forward).Error; err != nil {
 			if isUniqueViolation(err) {
-				fresh = false
-				// Re-read the row that won, whether it was claimed by this ref
-				// or by this trade. Into a FRESH struct: the one we just tried
-				// to insert carries a primary key, and GORM would fold that
-				// into the WHERE and find nothing.
+				// Re-read on provider_ref ALONE. trade_id is unique too, so
+				// matching on either key would let a DISTINCT second credit
+				// bound to this trade read back the FIRST credit's row and
+				// report success — after which the matcher stamps the second
+				// credit `matched` with no ledger entry anywhere for its money.
+				// That is a real transfer silently absorbed.
+				//
+				// Into a FRESH struct: the one we just tried to insert carries
+				// a primary key, and GORM would fold that into the WHERE and
+				// find nothing.
 				var winner models.P2PSettlementForward
-				if err := tx.Where("provider_ref = ? OR trade_id = ?", ref, trade.ID).
-					First(&winner).Error; err != nil {
-					return err
+				readErr := tx.Where("provider_ref = ?", ref).First(&winner).Error
+				if readErr == nil {
+					fresh = false
+					*forward = winner
+					return nil
 				}
-				*forward = winner
-				return nil
+				if !errors.Is(readErr, gorm.ErrRecordNotFound) {
+					return readErr
+				}
+				// No row owns this ref, so the collision was on trade_id (or
+				// the reference): other money has already settled this trade.
+				// Erroring holds the credit for an operator, which is the only
+				// safe outcome — reporting success would mark it settled and
+				// nobody would ever be credited for it.
+				return fmt.Errorf("trade %s is already settled by a different credit; credit %s must not be absorbed into it",
+					trade.ID, ref)
 			}
 			return err
 		}
@@ -587,10 +640,18 @@ func (f *P2PSettlementForwarder) SweepUnconfirmed(ctx context.Context) (int, err
 
 // ListNeedingAttention returns forwards where the merchant is credited but no
 // money reached their bank — the operator queue for this feature.
+//
+// Aged `pending` rows belong here as much as `failed` ones do. The merchant is
+// credited and unpaid in both cases; the only difference is that a pending row
+// may yet fix itself, which is why it is given p2pForwardStaleAfter first. A
+// row still pending after that is a merchant nobody is paying and, before this,
+// one nobody could even find.
 func (f *P2PSettlementForwarder) ListNeedingAttention(ctx context.Context) ([]models.P2PSettlementForward, error) {
 	var out []models.P2PSettlementForward
 	err := f.db.WithContext(ctx).
-		Where("status = ?", models.P2PForwardFailed).
+		Where("status = ? OR (status = ? AND created_at < ?)",
+			models.P2PForwardFailed,
+			models.P2PForwardPending, f.now().Add(-p2pForwardStaleAfter)).
 		Order("created_at ASC").
 		Find(&out).Error
 	return out, err
@@ -614,12 +675,55 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 
 // hold leaves a forward retryable and records why it has not been sent. Unlike
 // fail this is not terminal — nothing was submitted, so a later attempt is safe.
+//
+// Safe to retry is not the same as worth retrying forever, though. Once the
+// attempts run out the cause is not a blip, and a row that only ever retries is
+// invisible to every operator surface, so it is escalated to the failed queue
+// where a human can see it. Nothing about the money changes either way: the
+// merchant keeps the ledger entry because nothing reached their bank.
 func (f *P2PSettlementForwarder) hold(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
-	log.Printf("[p2p forward] forward=%s trade=%s pm=%s deferred: %s — merchant remains credited %s %s",
-		fwd.ID, fwd.TradeID, fwd.PMID, reason, fwd.Currency, fwd.Amount)
+	if fwd.Attempts+1 >= p2pForwardMaxAttempts {
+		return f.fail(ctx, fwd, fmt.Sprintf("held %d times and still unsendable: %s", fwd.Attempts+1, reason))
+	}
+	log.Printf("[p2p forward] forward=%s trade=%s pm=%s deferred (attempt %d of %d): %s — merchant remains credited %s %s",
+		fwd.ID, fwd.TradeID, fwd.PMID, fwd.Attempts+1, p2pForwardMaxAttempts, reason, fwd.Currency, fwd.Amount)
 	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
 		Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
-		Update("failure_reason", truncateReason(reason)).Error
+		Updates(map[string]any{
+			"failure_reason": truncateReason(reason),
+			"attempts":       fwd.Attempts + 1,
+		}).Error
+}
+
+// RedrivePending re-attempts the forwards that were held back, and is the thing
+// whose absence made `hold`'s "a later attempt can pick it up" untrue.
+//
+// Forward was only ever called from Accept. SweepUnconfirmed looks at
+// `submitted` and ListNeedingAttention looked at `failed`, so a merchant held
+// by an unreadable balance, a short balance or an absent gateway was credited,
+// never paid, and on no operator surface at all — precisely the "nobody knows"
+// state this file sets out to eliminate.
+//
+// It returns how many forwards it re-drove, not how many succeeded: a re-drive
+// that holds again is still progress against the attempt ceiling. Errors are
+// logged per row rather than returned, because one merchant's broken payout
+// must not stop the next merchant's from going out.
+func (f *P2PSettlementForwarder) RedrivePending(ctx context.Context) (int, error) {
+	cutoff := f.now().Add(-p2pForwardRedriveAfter)
+	var due []models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).
+		Where("status = ? AND created_at < ?", models.P2PForwardPending, cutoff).
+		Order("created_at ASC").
+		Find(&due).Error; err != nil {
+		return 0, err
+	}
+	for i := range due {
+		if err := f.Forward(ctx, due[i].ID); err != nil {
+			log.Printf("[p2p forward] re-drive of forward=%s trade=%s still unsent: %v",
+				due[i].ID, due[i].TradeID, err)
+		}
+	}
+	return len(due), nil
 }
 
 func (f *P2PSettlementForwarder) markAlerted(ctx context.Context, id uuid.UUID) error {

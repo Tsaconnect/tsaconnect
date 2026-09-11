@@ -34,6 +34,12 @@ type InboundClaim struct {
 	// granularity — see the design's amount rule.
 	AmountKobo int64
 
+	// Currency is the ISO code this claim is priced in, upper-case and
+	// trimmed. EVERY ClaimSource must set it on every claim it returns; the
+	// matcher neither stamps it nor defaults it, and treats an empty value as
+	// a source bug.
+	Currency string
+
 	OpenedAt time.Time
 }
 
