@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -258,7 +260,7 @@ func TestFetchDiditVerifiedNameFallsBackToFirstAndLast(t *testing.T) {
 		]}`,
 	})
 
-	name, err := fetchDiditVerifiedName(didit.URL, "key", "s1")
+	name, err := fetchDiditVerifiedName(context.Background(), didit.URL, "key", "s1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestFetchDiditVerifiedNamePrefersApprovedNode(t *testing.T) {
 		]}`,
 	})
 
-	name, err := fetchDiditVerifiedName(didit.URL, "key", "s1")
+	name, err := fetchDiditVerifiedName(context.Background(), didit.URL, "key", "s1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -295,7 +297,7 @@ func TestFetchDiditVerifiedNameUnresolvedWhenAttributesWithheld(t *testing.T) {
 		]}`,
 	})
 
-	if _, err := fetchDiditVerifiedName(didit.URL, "key", "s1"); err != errDiditNameUnresolved {
+	if _, err := fetchDiditVerifiedName(context.Background(), didit.URL, "key", "s1"); err != errDiditNameUnresolved {
 		t.Fatalf("expected errDiditNameUnresolved, got %v", err)
 	}
 }
@@ -303,7 +305,7 @@ func TestFetchDiditVerifiedNameUnresolvedWhenAttributesWithheld(t *testing.T) {
 func TestFetchDiditVerifiedNameUnresolvedOnMissingSession(t *testing.T) {
 	didit := diditDecisionStub(t, map[string]string{})
 
-	if _, err := fetchDiditVerifiedName(didit.URL, "key", "gone"); err != errDiditNameUnresolved {
+	if _, err := fetchDiditVerifiedName(context.Background(), didit.URL, "key", "gone"); err != errDiditNameUnresolved {
 		t.Fatalf("expected errDiditNameUnresolved for a 404, got %v", err)
 	}
 }
@@ -317,7 +319,7 @@ func TestFetchDiditVerifiedNameErrorCarriesNoBody(t *testing.T) {
 	}))
 	defer didit.Close()
 
-	_, err := fetchDiditVerifiedName(didit.URL, "key", "s1")
+	_, err := fetchDiditVerifiedName(context.Background(), didit.URL, "key", "s1")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -447,6 +449,82 @@ func TestAdminBackfillUnavailableWhenDiditDormant(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when Didit is unconfigured, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// An operator who gives up on a run — or the proxy that times the request out
+// long before the loop is done — has to actually stop the work. Until the
+// request context reached the outbound call, an abandoned run kept spending
+// provider calls for a client that was no longer listening.
+func TestAdminBackfillStopsWhenTheRequestIsCancelled(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	for i := 0; i < 3; i++ {
+		verifiedUserWithSession(t, db, fmt.Sprintf("sess-%d", i))
+	}
+	admin := createKYCTestUser(t, db, models.VerificationStatusPending)
+
+	var hits int32
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		fmt.Fprint(w, approvedDecision("ADAEZE NWANKWO"))
+	}))
+	defer didit.Close()
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", admin)
+	req, _ := http.NewRequest("POST", "/api/kyc/admin/backfill-legal-names", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	c.Request = req.WithContext(ctx)
+
+	h.AdminBackfillVerifiedNames(c)
+
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("a cancelled run still made %d Didit calls", n)
+	}
+	var named int64
+	db.Model(&models.User{}).Where("verified_legal_name != ''").Count(&named)
+	if named != 0 {
+		t.Fatalf("a cancelled run still wrote %d names", named)
+	}
+}
+
+// The endpoint is designed to be re-run a page at a time, so the ceiling only
+// has to be a number a single request can reach the end of: every user in a
+// run costs one sequential provider call at a 15s timeout, and a cap in the
+// hundreds is hours of work behind a request nobody is still holding open.
+func TestAdminBackfillCapsOneRunToWhatARequestCanFinish(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	const population = 60
+	bodies := make(map[string]string, population)
+	for i := 0; i < population; i++ {
+		session := fmt.Sprintf("sess-%d", i)
+		verifiedUserWithSession(t, db, session)
+		bodies[session] = approvedDecision("ADAEZE NWANKWO")
+	}
+	admin := createKYCTestUser(t, db, models.VerificationStatusPending)
+
+	didit := diditDecisionStub(t, bodies)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	w := adminBackfillRequest(h, admin, `{"limit":500}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var res backfillResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	if res.Data.Scanned > 50 {
+		t.Fatalf("one run took on %d users, more than a request can finish: %+v", res.Data.Scanned, res.Data)
+	}
+	// The rest is left for the next run, and the operator is told how many.
+	if res.Data.Remaining != population-int64(res.Data.Updated) {
+		t.Fatalf("remaining count does not account for the users left behind: %+v", res.Data)
 	}
 }
 

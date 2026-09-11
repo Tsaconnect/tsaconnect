@@ -53,13 +53,22 @@ func NewEmailService(apiKey, secretKey string) *EmailService {
 	}
 }
 
+// Send delivers a plain-text message: its newlines become line breaks and
+// nothing else in it is markup, whoever wrote it.
 func (s *EmailService) Send(toEmail, toName, subject, title, message, ctaText, ctaURL string) error {
+	return s.SendBody(toEmail, toName, subject, title, plainEmailBody(message), ctaText, ctaURL)
+}
+
+// SendBody delivers a message composed of spans, for the few emails that want
+// emphasis or paragraphs of their own. See EmailSpan for why the structure is
+// expressed this way rather than as HTML the caller writes.
+func (s *EmailService) SendBody(toEmail, toName, subject, title string, body EmailBody, ctaText, ctaURL string) error {
 	if s.client == nil {
 		log.Printf("[EmailService] skipping email to %s (no client configured)", toEmail)
 		return nil
 	}
 
-	htmlBody, err := s.buildTemplate(title, message, ctaText, ctaURL)
+	htmlBody, err := body.RenderHTML(title, ctaText, ctaURL)
 	if err != nil {
 		log.Printf("[EmailService] failed to render email to %s: %v", toEmail, err)
 		return fmt.Errorf("failed to render email: %w", err)
@@ -225,7 +234,7 @@ var (
 	<tr>
 		<td style="padding: 40px 48px;">
 			<h2 style="margin: 0 0 16px 0; color: #1f2937; font-size: 20px; font-weight: 700; text-align: center;">{{.Title}}</h2>
-			<p style="margin: 0; color: #4b5563; font-size: 15px; line-height: 1.6; text-align: center;">{{range $i, $line := .Lines}}{{if $i}}<br>{{end}}{{$line}}{{end}}</p>
+			<p style="margin: 0; color: #4b5563; font-size: 15px; line-height: 1.6; text-align: center;">{{range $i, $line := .Body}}{{if $i}}<br>{{end}}{{range $line}}{{if .Bold}}<strong>{{.Text}}</strong>{{else}}{{.Text}}{{end}}{{end}}{{end}}</p>
 			<table width="100%" cellpadding="0" cellspacing="0">{{if .HasCTA}}
 			<tr>
 				<td align="center" style="padding: 28px 0 0 0;">
@@ -252,19 +261,80 @@ var (
 </html>`))
 )
 
-// emailShell is the data the generic template renders.
+// EmailSpan is one run of body text and the only emphasis it can be given.
 //
-// Lines exists because the message is plain text and the template puts it in a
-// single <p>, where a newline is whitespace: the hold alert's amount, time,
-// reason and reference would run together into one unreadable sentence. The
-// split happens here so the <br> is emitted by the template — escaped content
-// with markup between it, never escaped markup.
+// Bold is a bool rather than markup a caller writes, and Text has no trusted
+// counterpart anywhere in this API. That is deliberate: a variant of Send
+// taking pre-trusted HTML would compile just as happily when the string handed
+// to it is a submitter's name, and the injection hole reopens the first time
+// somebody reaches for it in a hurry. Here every string a caller supplies goes
+// through the template's escaping and every tag in the output was written in
+// the template, so there is no path for caller text to become markup at all —
+// nothing to remember and nothing to get wrong.
+type EmailSpan struct {
+	Text string
+	Bold bool
+}
+
+// EmailLine is one rendered line; an empty one is the blank line between
+// paragraphs.
+type EmailLine []EmailSpan
+
+// EmailBody is a whole message body.
+//
+// It is a list of lines because the template puts the message in a single <p>,
+// where a newline is whitespace: the hold alert's amount, time, reason and
+// reference would run together into one unreadable sentence. Splitting here
+// lets the template emit the <br> itself — escaped content with markup between
+// it, never escaped markup.
+type EmailBody []EmailLine
+
+// EmailText is body text with no emphasis.
+func EmailText(text string) EmailSpan { return EmailSpan{Text: text} }
+
+// EmailBold is body text the recipient's eye should land on first — an amount,
+// a status word. The text is still escaped; only the <strong> is ours.
+func EmailBold(text string) EmailSpan { return EmailSpan{Text: text, Bold: true} }
+
+// emailShell is the data the generic template renders.
 type emailShell struct {
 	Title   string
-	Lines   []string
+	Body    EmailBody
 	CTAText string
 	CTAURL  string
 	HasCTA  bool
+}
+
+// RenderHTML puts the body in the branded shell.
+//
+// Exposed alongside the Send methods because a composed body is worth being
+// able to look at: what a recipient sees is the only place where "the markup
+// is ours, the words are theirs" is actually observable.
+func (b EmailBody) RenderHTML(title, ctaText, ctaURL string) (string, error) {
+	var out strings.Builder
+	err := emailTemplate.Execute(&out, emailShell{
+		Title:   title,
+		Body:    b,
+		CTAText: ctaText,
+		CTAURL:  ctaURL,
+		// Both or neither: a button with no href is dead, and an href with no
+		// label is invisible.
+		HasCTA: ctaText != "" && ctaURL != "",
+	})
+	if err != nil {
+		return "", fmt.Errorf("render email: %w", err)
+	}
+	return out.String(), nil
+}
+
+// plainEmailBody turns a plain-text message into a body, one line per line.
+func plainEmailBody(message string) EmailBody {
+	lines := strings.Split(message, "\n")
+	body := make(EmailBody, 0, len(lines))
+	for _, line := range lines {
+		body = append(body, EmailLine{EmailText(line)})
+	}
+	return body
 }
 
 func (s *EmailService) buildOTPTemplate(code string) (string, error) {
@@ -276,18 +346,5 @@ func (s *EmailService) buildOTPTemplate(code string) (string, error) {
 }
 
 func (s *EmailService) buildTemplate(title, message, ctaText, ctaURL string) (string, error) {
-	var out strings.Builder
-	err := emailTemplate.Execute(&out, emailShell{
-		Title:   title,
-		Lines:   strings.Split(message, "\n"),
-		CTAText: ctaText,
-		CTAURL:  ctaURL,
-		// Both or neither: a button with no href is dead, and an href with no
-		// label is invisible.
-		HasCTA: ctaText != "" && ctaURL != "",
-	})
-	if err != nil {
-		return "", fmt.Errorf("render email: %w", err)
-	}
-	return out.String(), nil
+	return plainEmailBody(message).RenderHTML(title, ctaText, ctaURL)
 }

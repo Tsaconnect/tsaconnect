@@ -121,3 +121,55 @@ func TestMailerConfigured(t *testing.T) {
 		t.Error("NewEmailService built a client from credentials MailerConfigured rejects")
 	}
 }
+
+// ---------- structured bodies ----------
+
+// A composed body is the only way a caller gets emphasis into an email, and
+// the shape is the point: the markup belongs to the template and the text
+// never can. Bold is a flag rather than a tag the caller writes, so text that
+// came from a submitter or an admin stays escaped even in a span the caller
+// chose to embolden.
+func TestEmailBodyRendersItsOwnMarkupAndEscapesTheText(t *testing.T) {
+	body := EmailBody{
+		{EmailText("Hi "), EmailBold(`<script>alert('xss')</script>`)},
+		{},
+		{EmailText("Approved.")},
+	}
+
+	out, err := body.RenderHTML("Title", "", "")
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+
+	if !strings.Contains(out, "<strong>") {
+		t.Errorf("emphasis did not reach the recipient as markup\n---\n%s", out)
+	}
+	if strings.Contains(out, "<script") {
+		t.Errorf("caller text reached the body as live markup\n---\n%s", out)
+	}
+	if !strings.Contains(out, "&lt;script&gt;") {
+		t.Errorf("escaped text missing from body\n---\n%s", out)
+	}
+	// The empty line is the blank line between paragraphs; it has to survive
+	// as a break or the paragraphs run together.
+	if !strings.Contains(out, "<br><br>") {
+		t.Errorf("blank line did not render as a break\n---\n%s", out)
+	}
+}
+
+// Send's plain-text callers keep what they have: their message is text, its
+// newlines become breaks, and nothing in it is markup.
+func TestPlainSendBodyStillEscapesEverything(t *testing.T) {
+	s := &EmailService{}
+
+	out, err := s.buildTemplate("Title", "Amount: NGN 2,000.00\n<b>not bold</b>", "", "")
+	if err != nil {
+		t.Fatalf("buildTemplate: %v", err)
+	}
+	if !strings.Contains(out, "Amount: NGN 2,000.00<br>") {
+		t.Errorf("line break not rendered as <br>\n---\n%s", out)
+	}
+	if strings.Contains(out, "<b>not bold</b>") {
+		t.Errorf("plain-text message was rendered as markup\n---\n%s", out)
+	}
+}
