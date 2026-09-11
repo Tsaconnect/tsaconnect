@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -919,5 +920,147 @@ func TestFetchWalletStatement_EndBoundCoversTheCurrentDay(t *testing.T) {
 	}
 	if gotTo != "2026-09-04" {
 		t.Errorf("to = %q, want the bound past the last day of the window", gotTo)
+	}
+}
+
+// ─── Sanitizing must not move the dedupe key ───────────────────────────────
+
+// Credits recorded before free text was sanitized are stored under the ref
+// derived from the RAW reference, format characters and all. Re-deriving that
+// ref from sanitized text moves it, so the next poll's overlapping lookback no
+// longer recognises the row: the held-ref lookup misses, the unique index does
+// not fire, and one real payment ends up as two credits for the matcher to bind
+// to two separate claims at the same amount.
+func TestIngestRows_FormatCharInReferenceIsNotReingestedAfterDeploy(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	const rawRef = "10000000000000000000000000002‎"
+	row := fundingRow(rawRef, 2000, "Received Money from GTBANK|ADEMU EMMANUEL O.", "2026-09-02T10:00:00Z")
+
+	// What the poll wrote before sanitization existed.
+	if err := db.Create(&models.InboundCredit{
+		ID:              uuid.New(),
+		Provider:        models.InboundCreditProviderFlutterwave,
+		ProviderRef:     rawRef,
+		Currency:        "NGN",
+		AmountKobo:      200000,
+		GrossKobo:       200000,
+		SenderRaw:       "Received Money from GTBANK|ADEMU EMMANUEL O.",
+		TransactionDate: stmtTime("2026-09-02T10:00:00Z").Time,
+		SeenAt:          stmtTime("2026-09-02T10:00:05Z").Time,
+		Status:          models.InboundCreditUnmatched,
+	}).Error; err != nil {
+		t.Fatalf("seed pre-deploy credit: %v", err)
+	}
+
+	res, err := ing.IngestRows(context.Background(), []FWStatementEntry{row})
+	if err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	if res.Inserted != 0 || res.Duplicates != 1 {
+		t.Errorf("res = %+v, want the pre-deploy row recognised as a duplicate", res)
+	}
+	var n int64
+	db.Model(&models.InboundCredit{}).Count(&n)
+	if n != 1 {
+		t.Fatalf("row count = %d, want 1 — one payment must not become two credits", n)
+	}
+}
+
+// The stored half of that same row still has to be cleaned: SenderName is what
+// an operator reads when deciding whose money a held credit is.
+func TestIngestRows_FormatCharInReferenceStillSanitizesStoredText(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	const rawRef = "10000000000000000000000000003‎"
+	if _, err := ing.IngestRows(context.Background(), []FWStatementEntry{
+		fundingRow(rawRef, 2000, "Received Money from GTBANK|‮ADEMU‎ EMMANUEL", "2026-09-02T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	var got models.InboundCredit
+	if err := db.First(&got).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.ProviderRef != rawRef {
+		t.Errorf("ProviderRef = %q, want the raw reference %q", got.ProviderRef, rawRef)
+	}
+	if got.SenderName != "ADEMU EMMANUEL" {
+		t.Errorf("SenderName = %q, want the format characters stripped", got.SenderName)
+	}
+	if strings.ContainsAny(got.SenderRaw, "‮‎") {
+		t.Errorf("SenderRaw = %q, still carries format characters", got.SenderRaw)
+	}
+}
+
+// The synthesized ref hashes the row's own content, so sanitizing the remark
+// first moves it exactly as sanitizing the reference does. Two credits whose
+// remarks differ only by a format character hashed to two refs before
+// sanitization existed and are both sitting in the table under them; collapsing
+// them to one ref now makes the second credit re-ingest under a ref nothing
+// holds.
+func TestIngestRows_SyntheticRefIsDerivedFromTheRawRemark(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	withFormatChar := fundingRow("", 2000, "Received Money from GTBANK|ADEMU‎ EMMANUEL", "2026-09-02T10:00:00Z")
+	withoutFormatChar := fundingRow("", 2000, "Received Money from GTBANK|ADEMU EMMANUEL", "2026-09-02T10:00:00Z")
+
+	res, err := ing.IngestRows(context.Background(), []FWStatementEntry{withFormatChar, withoutFormatChar})
+	if err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	if res.Inserted != 2 {
+		t.Fatalf("res = %+v, want 2 distinct refs — the digest reads the raw remark", res)
+	}
+}
+
+// Fee pairing reads the page; the credit the fee lands on is keyed off the ref.
+// Both have to see the same text, or the fee attaches to the wrong credit: one
+// gross inflated, another understated, and a wrong gross is a wrong match.
+//
+// Production never reaches the netting branch — the provider bills its funding
+// fee as its own debit — so the fee row here is given the netted shape on
+// purpose. Without it pairFundingFees short-circuits and this proves nothing.
+func TestPairFundingFees_RefMatchSurvivesFormatCharacters(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	// The provider emitted the credit's reference with a format character in it
+	// and the fee's copy of that reference without. It is the same reference.
+	const feeRef = "10000000000000000000000000004"
+	target := fundingRow(feeRef+"‎", 2000, "Received Money from GTBANK|ADEMU EMMANUEL", "2026-09-02T10:00:00Z")
+	// Sized so the proximity heuristic prefers it: 14.00 is exactly 1.40% of it.
+	decoy := fundingRow("10000000000000000000000000005", 1000, "Received Money from KUDA MFB|JANE DOE", "2026-09-02T10:00:02Z")
+	fee := FWStatementEntry{
+		Type:            "fee",
+		Direction:       "debit",
+		Amount:          14,
+		Balance:         FWStatementBalance{Before: 4000, After: 4000},
+		Reference:       feeRef,
+		Remarks:         "Wallet funding fee",
+		TransactionDate: stmtTime("2026-09-02T10:00:01Z"),
+	}
+
+	if _, err := ing.IngestRows(context.Background(), []FWStatementEntry{target, decoy, fee}); err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+
+	var gotTarget, gotDecoy models.InboundCredit
+	if err := db.Where("provider_ref = ?", feeRef+"‎").First(&gotTarget).Error; err != nil {
+		t.Fatalf("read back target: %v", err)
+	}
+	if err := db.Where("provider_ref = ?", "10000000000000000000000000005").First(&gotDecoy).Error; err != nil {
+		t.Fatalf("read back decoy: %v", err)
+	}
+	if gotTarget.FeeKobo != 1400 || gotTarget.GrossKobo != 201400 {
+		t.Errorf("target fee=%d gross=%d, want 1400/201400 — the fee carries this credit's reference",
+			gotTarget.FeeKobo, gotTarget.GrossKobo)
+	}
+	if gotDecoy.FeeKobo != 0 || gotDecoy.GrossKobo != 100000 {
+		t.Errorf("decoy fee=%d gross=%d, want 0/100000 — this credit was never charged it",
+			gotDecoy.FeeKobo, gotDecoy.GrossKobo)
 	}
 }
