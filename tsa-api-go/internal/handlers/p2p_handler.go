@@ -67,9 +67,10 @@ func (h *P2PHandler) pmPayTo(accountNumber, bank, merchantName string) *models.P
 	if h.central != nil {
 		if central, ok := h.central.ActiveCentralAccount(); ok {
 			return &models.PmPayTo{
-				AccountNumber: central.AccountNumber,
-				Bank:          central.BankName,
-				AccountName:   central.AccountName,
+				AccountNumber:    central.AccountNumber,
+				Bank:             central.BankName,
+				AccountName:      central.AccountName,
+				PayerInstruction: central.PayerInstruction(),
 			}
 		}
 	}

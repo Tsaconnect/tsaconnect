@@ -310,6 +310,10 @@ func centralPayTo(a services.CentralAccount, ngnKobo string) gin.H {
 		"bank":          a.BankName,
 		"accountName":   a.AccountName,
 		"amountNgn":     wholeNairaFromKobo(ngnKobo),
+		// Absent from fiatVAPayTo on purpose: a VA is already in the payer's
+		// own name, so the warning would be telling them to fix what is not
+		// broken.
+		"payerInstruction": a.PayerInstruction(),
 	}
 }
 
