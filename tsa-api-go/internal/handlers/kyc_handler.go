@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -78,13 +79,18 @@ var errDiditNameUnresolved = errors.New("didit: no verified name for session")
 // fallback signs the envelope alone — trusting a payload field would let
 // unsigned data decide who a bank transfer belongs to. Didit documents this
 // webhook-then-fetch order as the recommended pattern.
-func fetchDiditVerifiedName(baseURL, apiKey, sessionID string) (string, error) {
+//
+// ctx is the caller's, not the background: the backfill makes one of these
+// calls per user in a loop, and without it an operator who walked away — or a
+// proxy that gave up on the request — left the run spending provider calls
+// nobody would ever see the result of.
+func fetchDiditVerifiedName(ctx context.Context, baseURL, apiKey, sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", errDiditNameUnresolved
 	}
 
 	endpoint := strings.TrimRight(baseURL, "/") + "/session/" + url.PathEscape(sessionID) + "/decision/"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -147,11 +153,11 @@ func firstApprovedName(items []diditIDVerification) string {
 // error on purpose: an approval must not be lost because a second Didit call
 // went wrong, and a missing name is repairable by AdminBackfillVerifiedNames
 // while a missing approval is not.
-func (h *Handlers) verifiedNameUpdates(userID uuid.UUID, sessionID string) map[string]interface{} {
+func (h *Handlers) verifiedNameUpdates(ctx context.Context, userID uuid.UUID, sessionID string) map[string]interface{} {
 	if h.Config == nil || h.Config.DiditAPIKey == "" || sessionID == "" {
 		return nil
 	}
-	name, err := fetchDiditVerifiedName(h.Config.DiditBaseURL, h.Config.DiditAPIKey, sessionID)
+	name, err := fetchDiditVerifiedName(ctx, h.Config.DiditBaseURL, h.Config.DiditAPIKey, sessionID)
 	if err != nil {
 		if !errors.Is(err, errDiditNameUnresolved) {
 			log.Printf("[KYC] verified-name lookup failed for user %s session %s: %v", userID, sessionID, err)
@@ -489,7 +495,7 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		// against anything, and inbound bank transfers are attributed against
 		// it. Folded into the same update so the name and the approval land
 		// together; a lookup that fails leaves it for the backfill.
-		for column, value := range h.verifiedNameUpdates(user.ID, sessionForName(payload, &user)) {
+		for column, value := range h.verifiedNameUpdates(c.Request.Context(), user.ID, sessionForName(payload, &user)) {
 			updates[column] = value
 		}
 		logEntry.Action = models.VerificationActionDiditPassed
@@ -576,7 +582,7 @@ func (h *Handlers) handleDiditDataUpdated(c *gin.Context, user *models.User, pay
 		return
 	}
 
-	updates := h.verifiedNameUpdates(user.ID, sessionForName(payload, user))
+	updates := h.verifiedNameUpdates(c.Request.Context(), user.ID, sessionForName(payload, user))
 	if updates == nil {
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "No verified name available"})
 		return
@@ -795,10 +801,14 @@ func (h *Handlers) AdminRejectKYC(c *gin.Context) {
 
 // One backfill run is bounded so an admin can watch it finish and re-run it,
 // rather than firing thousands of provider calls behind a single request.
-const (
-	defaultNameBackfillLimit = 100
-	maxNameBackfillLimit     = 500
-)
+//
+// The ceiling is what a request can actually reach the end of: the lookups are
+// sequential and each one can burn the Didit client's 15s timeout, so a cap in
+// the hundreds is hours of work behind a response the operator's browser and
+// every proxy between gave up on long ago — the counts that say how much is
+// left are then never seen by anybody. The endpoint is built to be re-run a
+// page at a time, so a low cap costs a second click and nothing else.
+const nameBackfillRunLimit = 50
 
 // AdminBackfillVerifiedNames reads the Didit legal name for users who passed
 // verification before the name was stored.
@@ -824,11 +834,8 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 	limit := req.Limit
-	if limit <= 0 {
-		limit = defaultNameBackfillLimit
-	}
-	if limit > maxNameBackfillLimit {
-		limit = maxNameBackfillLimit
+	if limit <= 0 || limit > nameBackfillRunLimit {
+		limit = nameBackfillRunLimit
 	}
 
 	// Only users the platform already treats as verified: an unverified user
@@ -854,7 +861,7 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 
 	for i := range users {
 		user := users[i]
-		name, err := fetchDiditVerifiedName(h.Config.DiditBaseURL, h.Config.DiditAPIKey, user.DiditSessionID)
+		name, err := fetchDiditVerifiedName(c.Request.Context(), h.Config.DiditBaseURL, h.Config.DiditAPIKey, user.DiditSessionID)
 		switch {
 		case errors.Is(err, errDiditNameUnresolved):
 			// Sessions Didit no longer holds, and users verified by admin
