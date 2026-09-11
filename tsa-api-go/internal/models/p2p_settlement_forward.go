@@ -40,14 +40,16 @@ const (
 //
 //  1. ProviderRef is the idempotency claim. It is the NIBSS session id of the
 //     credit that settled the trade, and the unique index on it is what stops a
-//     replayed credit from crediting the merchant's ledger a second time. The
-//     row is inserted BEFORE the ledger moves, so the claim is durable even if
-//     the process dies mid-settle.
+//     replayed credit from crediting the merchant's ledger a second time: the
+//     row and the ledger credit commit in ONE transaction, so a replay loses
+//     the insert and credits nothing, and a crash leaves neither behind.
 //
 //  2. A transfer that is rejected at submission produces no provider-side
 //     record and therefore no webhook — the exact hole that strands value on
-//     the MCGP sell leg (it_service.go, ~line 675). Without a row of our own
-//     there is nothing to alert on and nothing for an operator to find.
+//     the MCGP sell leg in ITService.AutoPayout, where a rejected payout leaves
+//     the premium debited and nothing will ever arrive to resolve it. Without a
+//     row of our own there is nothing to alert on and nothing for an operator
+//     to find.
 type P2PSettlementForward struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 
