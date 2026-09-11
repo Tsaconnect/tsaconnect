@@ -100,7 +100,7 @@ func (s *ITMCGPClaimSource) OpenClaims(ctx context.Context, currency string) ([]
 			// equal the 123500 the matcher compares against, so it would hold
 			// forever with the buyer's money already sent. It is also what
 			// keeps the InboundClaim contract's AmountKobo%100 == 0 true.
-			AmountKobo: roundKoboToNaira(kobo),
+			AmountKobo: RoundKoboToNaira(kobo),
 			// The order's OWN currency, not the argument echoed back: echoing
 			// it would make the matcher's assertion tautological and re-hide
 			// the mismatch it exists to catch.
@@ -147,7 +147,7 @@ func (s *ITMCGPClaimSource) Accept(ctx context.Context, claimID uuid.UUID, credi
 		return err
 	}
 
-	paid := big.NewInt(roundKoboToNaira(credit.GrossKobo))
+	paid := big.NewInt(RoundKoboToNaira(credit.GrossKobo))
 	return s.it.CreditBuyOrderFromInbound(ctx, claimID, credit.ProviderRef, paid)
 }
 

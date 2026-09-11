@@ -103,9 +103,9 @@ func TestITMCGPClaimSource_RoundsAPreCutoverOrderRatherThanOfferingFractions(t *
 	if len(claims) != 1 {
 		t.Fatalf("got %d claims, want 1 — a pre-cutover order must stay visible", len(claims))
 	}
-	if got := claims[0].AmountKobo; got != roundKoboToNaira(123456) {
+	if got := claims[0].AmountKobo; got != RoundKoboToNaira(123456) {
 		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding); as offered it can never equal the rounded credit",
-			got, roundKoboToNaira(123456))
+			got, RoundKoboToNaira(123456))
 	}
 	if claims[0].AmountKobo%100 != 0 {
 		t.Fatalf("amountKobo = %d violates the InboundClaim contract's whole-naira invariant", claims[0].AmountKobo)

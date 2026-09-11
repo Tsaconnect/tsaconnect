@@ -617,8 +617,8 @@ func TestInboundAdminNairaRounding(t *testing.T) {
 		200050: 200100,
 	}
 	for in, want := range tests {
-		if got := roundKoboToNaira(in); got != want {
-			t.Errorf("roundKoboToNaira(%d) = %d, want %d", in, got, want)
+		if got := RoundKoboToNaira(in); got != want {
+			t.Errorf("RoundKoboToNaira(%d) = %d, want %d", in, got, want)
 		}
 	}
 }

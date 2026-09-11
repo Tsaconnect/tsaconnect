@@ -305,3 +305,23 @@ func TestCentralPayTo_HalfNaira_ShowsTheFigureTheMatcherWillAskFor(t *testing.T)
 		t.Fatalf("amountNgn = %q, want 1001 (half a naira rounds away from zero)", shown)
 	}
 }
+
+// The pay-into screen and the matcher round in different numeric domains — the
+// screen works on the arbitrary-precision decimal string stored in ngn_kobo,
+// the matcher on int64 — so they cannot share an implementation. They can only
+// be held in step by a test that walks both.
+//
+// This is not a hypothetical drift: the screen truncated where the matcher
+// rounds until a review caught it, which made every half-naira order ask for a
+// figure the matcher would refuse, holding the credit every time.
+func TestWholeNairaFromKoboAgreesWithTheMatcher(t *testing.T) {
+	for kobo := int64(-100_050); kobo <= 100_050; kobo += 7 {
+		want := services.RoundKoboToNaira(kobo) / 100
+		got := wholeNairaFromKobo(strconv.FormatInt(kobo, 10))
+		if got != strconv.FormatInt(want, 10) {
+			t.Fatalf("wholeNairaFromKobo(%d) = %q, matcher would ask for %d — "+
+				"the screen and the claim disagree, so the payer cannot satisfy both",
+				kobo, got, want)
+		}
+	}
+}

@@ -171,7 +171,7 @@ func TestStableBuyAskRoundsExactlyAsTheMatcherDoes(t *testing.T) {
 		if !ok {
 			t.Fatalf("wholeNairaKobo(%d) did not parse back", kobo)
 		}
-		if want := roundKoboToNaira(kobo); asked.Int64() != want {
+		if want := RoundKoboToNaira(kobo); asked.Int64() != want {
 			t.Errorf("ask rounds %d to %d but the matcher rounds the credit to %d", kobo, asked.Int64(), want)
 		}
 		if asked.Int64()%100 != 0 {
@@ -253,8 +253,8 @@ func TestITStableOpenClaims_RoundsAPreCutoverIntentRatherThanDroppingIt(t *testi
 	if len(claims) != 1 {
 		t.Fatalf("got %d claims, want 1 — a pre-cutover purchase must stay visible", len(claims))
 	}
-	if got := claims[0].AmountKobo; got != roundKoboToNaira(150050) {
-		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding)", got, roundKoboToNaira(150050))
+	if got := claims[0].AmountKobo; got != RoundKoboToNaira(150050) {
+		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding)", got, RoundKoboToNaira(150050))
 	}
 	if claims[0].AmountKobo%100 != 0 {
 		t.Fatalf("amountKobo = %d violates the InboundClaim contract's whole-naira invariant", claims[0].AmountKobo)
@@ -355,7 +355,7 @@ func TestITStableAccept_SettlesOnGrossNotNet(t *testing.T) {
 }
 
 func TestITStableAccept_SettlesOnTheFigureTheMatcherMatched(t *testing.T) {
-	// The bind was justified by roundKoboToNaira(GrossKobo), never by the raw
+	// The bind was justified by RoundKoboToNaira(GrossKobo), never by the raw
 	// gross — that is the only figure the matcher ever compared with the ask.
 	// Settling on the raw one delivers stablecoin for an amount nobody checked,
 	// up to 99 kobo away from the one on the receipt, and the MCGP sibling has
@@ -371,7 +371,7 @@ func TestITStableAccept_SettlesOnTheFigureTheMatcherMatched(t *testing.T) {
 	// A gross the provider's fee reconstruction landed 49 kobo over. The matcher
 	// still binds it, because it rounds before it compares.
 	credit := stableInboundCredit("100004250250000000000000000009", ask+49)
-	if roundKoboToNaira(credit.GrossKobo) != ask {
+	if RoundKoboToNaira(credit.GrossKobo) != ask {
 		t.Fatalf("precondition: %d does not round onto the ask %d", credit.GrossKobo, ask)
 	}
 

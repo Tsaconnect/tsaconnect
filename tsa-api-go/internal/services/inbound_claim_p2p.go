@@ -186,7 +186,7 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 		// than skipped: a fractional trade predates the cutover, and dropping
 		// it would hide it from the matcher entirely — including from the hold
 		// reason an operator reads when deciding where the money goes.
-		kobo = roundKoboToNaira(kobo)
+		kobo = RoundKoboToNaira(kobo)
 		claims = append(claims, InboundClaim{
 			Type: InboundClaimTypeP2PTrade,
 			ID:   r.ID,

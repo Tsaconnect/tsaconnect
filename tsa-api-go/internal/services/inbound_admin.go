@@ -279,7 +279,7 @@ func (s *InboundAdminService) Candidates(ctx context.Context, creditID uuid.UUID
 	view := &InboundCandidatesView{
 		Credit:           *credit,
 		SenderNameTokens: AccountNameTokens(credit.SenderName),
-		MatchedNairaKobo: roundKoboToNaira(credit.GrossKobo),
+		MatchedNairaKobo: RoundKoboToNaira(credit.GrossKobo),
 		Candidates:       []InboundCandidate{},
 	}
 

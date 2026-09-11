@@ -142,8 +142,8 @@ func TestRoundKoboToNaira(t *testing.T) {
 		{-150, -200},
 	}
 	for _, c := range cases {
-		if got := roundKoboToNaira(c.in); got != c.want {
-			t.Errorf("roundKoboToNaira(%d) = %d, want %d", c.in, got, c.want)
+		if got := RoundKoboToNaira(c.in); got != c.want {
+			t.Errorf("RoundKoboToNaira(%d) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
@@ -886,7 +886,7 @@ func TestInboundMatcher_NonPositiveGrossHoldsAndNeverMatches(t *testing.T) {
 			// A claim that would be an exact amount match on that target.
 			src := &fakeClaimSource{
 				typ:    InboundClaimTypeITMCGP,
-				claims: []InboundClaim{claimFor(payer, roundKoboToNaira(tc.gross))},
+				claims: []InboundClaim{claimFor(payer, RoundKoboToNaira(tc.gross))},
 			}
 			m := NewInboundMatcher(db)
 			m.Register(InboundClaimTypeITMCGP, src)

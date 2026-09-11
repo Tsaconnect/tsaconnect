@@ -87,7 +87,7 @@ func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) (
 			// on intents created before the cutover — and rounding them keeps
 			// them visible to the matcher rather than silently dropping a
 			// purchase somebody has already paid for.
-			AmountKobo: roundKoboToNaira(kobo.Int64()),
+			AmountKobo: RoundKoboToNaira(kobo.Int64()),
 			// The intent's OWN currency, not the argument echoed back: echoing
 			// it would make the matcher's assertion tautological and re-hide
 			// the mismatch it exists to catch.
@@ -171,7 +171,7 @@ func (s *ITStableClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// one delivers stablecoin for an amount nothing checked, up to 99 kobo away
 	// from the figure on the buyer's receipt. The two have to agree or the
 	// matcher's arbitration means nothing.
-	gross = roundKoboToNaira(gross)
+	gross = RoundKoboToNaira(gross)
 
 	// parkOnBadRate=false. A rate outage must NOT park this intent for an
 	// operator: the credit has a durable inbound_credits row and the poller

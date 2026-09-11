@@ -214,8 +214,8 @@ func TestP2POpenClaims_RoundsAFractionalTradeRatherThanDroppingIt(t *testing.T) 
 	if len(claims) != 1 {
 		t.Fatalf("got %d claims, want 1 — a fractional trade must still be visible to the matcher", len(claims))
 	}
-	if got := claims[0].AmountKobo; got != roundKoboToNaira(150050) {
-		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding)", got, roundKoboToNaira(150050))
+	if got := claims[0].AmountKobo; got != RoundKoboToNaira(150050) {
+		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding)", got, RoundKoboToNaira(150050))
 	}
 	if claims[0].AmountKobo%100 != 0 {
 		t.Fatalf("amountKobo = %d violates the InboundClaim contract's whole-naira invariant", claims[0].AmountKobo)

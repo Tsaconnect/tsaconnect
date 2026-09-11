@@ -203,7 +203,7 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 		return false, err
 	}
 
-	want := roundKoboToNaira(credit.GrossKobo)
+	want := RoundKoboToNaira(credit.GrossKobo)
 	var candidates []InboundClaim
 	var wrongCurrency []InboundClaim
 	for _, c := range claims {
@@ -561,7 +561,7 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 	// Same rounding as the automatic path, from the same helper, so an
 	// operator is never refused a bind the matcher would have made unattended
 	// over a kobo of statement dust.
-	want := roundKoboToNaira(credit.GrossKobo)
+	want := RoundKoboToNaira(credit.GrossKobo)
 	if want <= 0 {
 		return fmt.Errorf("inbound bind: credit %s is %s — there is no amount here to assign",
 			creditID, inboundMoney(credit.Currency, credit.GrossKobo))
@@ -587,7 +587,7 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 
 // ─── amount ────────────────────────────────────────────────────────────────
 
-// roundKoboToNaira snaps a kobo amount to the nearest whole naira, half away
+// RoundKoboToNaira snaps a kobo amount to the nearest whole naira, half away
 // from zero.
 //
 // Both sides of the amount comparison pass through here so they cannot drift:
@@ -595,9 +595,16 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 // rounded before it is compared. Without the rounding, a provider fee
 // reconstruction that lands a kobo out — which float-sourced statement amounts
 // routinely do — would fail an otherwise perfect match and queue a hold.
-func roundKoboToNaira(kobo int64) int64 {
+//
+// Exported only so a consumer in another package can be TESTED against it. The
+// handler that renders the pay-into figure works on arbitrary-precision decimal
+// strings rather than int64, so it cannot call this and keeps its own copy of
+// the rule — and the two must agree, or the screen asks for a figure the
+// matcher will refuse and every such credit holds. That is not hypothetical:
+// the handler truncated where this rounds until a review caught it.
+func RoundKoboToNaira(kobo int64) int64 {
 	if kobo < 0 {
-		return -roundKoboToNaira(-kobo)
+		return -RoundKoboToNaira(-kobo)
 	}
 	return (kobo + 50) / 100 * 100
 }
@@ -645,7 +652,7 @@ func inboundDistinct(claims []InboundClaim, key func(InboundClaim) string) strin
 	return strings.Join(out, ", ")
 }
 
-// wholeNairaKobo is roundKoboToNaira over the decimal kobo strings the IT
+// wholeNairaKobo is RoundKoboToNaira over the decimal kobo strings the IT
 // service passes around, for minting an order at an amount a payer can actually
 // transfer.
 //
@@ -660,7 +667,7 @@ func wholeNairaKobo(ngnKobo string) string {
 	}
 	hundred := big.NewInt(100)
 	q, r := new(big.Int).QuoRem(n, hundred, new(big.Int))
-	// Half away from zero, matching roundKoboToNaira, so the order and the
+	// Half away from zero, matching RoundKoboToNaira, so the order and the
 	// credit it will be matched against can never round in opposite directions.
 	if r.CmpAbs(big.NewInt(50)) >= 0 {
 		if n.Sign() < 0 {
