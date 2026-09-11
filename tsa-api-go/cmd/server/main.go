@@ -1045,6 +1045,16 @@ func main() {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
+	// Without this the P2P buy screens keep showing the merchant's virtual
+	// account in central mode — the exact defect the cutover closes, and one
+	// that fails silently rather than at boot. ITService is the only holder of
+	// the company account; P2PHandler has no other route to it.
+	if itService != nil {
+		p2pHandler.SetInboundCentralSource(itService)
+	} else if cfg.InboundCentralEnabled() {
+		log.Printf("[inbound] WARNING: IT is dormant, so P2P cannot reach the company " +
+			"account and will keep showing merchant virtual accounts in central mode")
+	}
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
