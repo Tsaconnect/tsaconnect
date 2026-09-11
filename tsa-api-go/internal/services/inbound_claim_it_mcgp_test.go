@@ -66,11 +66,49 @@ func TestITMCGPClaimSource_OffersAnOpenBuyOrder(t *testing.T) {
 	if claims[0].AmountKobo != 200_000 {
 		t.Errorf("claim amount = %d kobo, want 200000", claims[0].AmountKobo)
 	}
-	if claims[0].AmountKobo%100 != 0 {
-		t.Errorf("claim amount %d is not a whole number of naira — no payer can send it", claims[0].AmountKobo)
-	}
 	if claims[0].Type != InboundClaimTypeITMCGP {
 		t.Errorf("claim type = %q", claims[0].Type)
+	}
+	if claims[0].Currency != "NGN" {
+		t.Errorf("claim currency = %q, want NGN — an unset currency holds real credits", claims[0].Currency)
+	}
+}
+
+// The whole-naira invariant can only be tested on an order that is NOT whole
+// naira to begin with. OpenBuyOrder mints at whole naira, so asserting the
+// invariant over its output passes whether or not this source rounds at all —
+// the fractional row has to be planted directly.
+//
+// A pre-cutover order for ₦1,234.56 offered as 123456 can never equal the
+// 123500 the matcher rounds the credit to, so it holds forever: the buyer paid
+// and nothing in the system will ever attribute it.
+func TestITMCGPClaimSource_RoundsAPreCutoverOrderRatherThanOfferingFractions(t *testing.T) {
+	src, s, user := newMCGPClaimSource(t)
+	ctx := context.Background()
+
+	fractional := &models.ITIntent{
+		ID: uuid.New(), UserID: user.ID, WalletAddress: user.WalletAddress,
+		Direction: models.ITDirectionBuy, Status: models.ITStatusPendingPayment,
+		Currency: "NGN", Asset: models.ITAssetMCGP, NgnKobo: "123456",
+		RateKobo: "1", McgpAmount: "1", PaymentRef: mintedRefPrefix + "FRACTION00001",
+	}
+	if err := s.db.Create(fractional).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	claims, err := src.OpenClaims(ctx, "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1 — a pre-cutover order must stay visible", len(claims))
+	}
+	if got := claims[0].AmountKobo; got != roundKoboToNaira(123456) {
+		t.Fatalf("amountKobo = %d, want %d (the matcher's own rounding); as offered it can never equal the rounded credit",
+			got, roundKoboToNaira(123456))
+	}
+	if claims[0].AmountKobo%100 != 0 {
+		t.Fatalf("amountKobo = %d violates the InboundClaim contract's whole-naira invariant", claims[0].AmountKobo)
 	}
 }
 
@@ -418,5 +456,37 @@ func TestWholeNairaKobo(t *testing.T) {
 		if got := wholeNairaKobo(c.in); got != c.want {
 			t.Errorf("wholeNairaKobo(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// ─── currency re-assertion ──────────────────────────────────────────────────
+
+// OpenClaims filters by currency, but Accept is also reached from the
+// manual-assign path, where an operator names a claim id by hand and no filter
+// runs at all. Settling a naira order out of a cedi transfer compares two
+// different units of money and issues MCGP against value that never arrived.
+func TestITMCGPClaimSource_AcceptRefusesACreditInAnotherCurrency(t *testing.T) {
+	src, s, user := newMCGPClaimSource(t)
+	ctx := context.Background()
+
+	order, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "200000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := inboundCreditFor(testInboundRef, 200_000)
+	foreign.Currency = "GHS"
+
+	if err := src.Accept(ctx, order.ID, foreign); err == nil {
+		t.Fatal("a GHS credit settled an NGN order")
+	}
+	var got models.ITIntent
+	if err := s.db.First(&got, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.PaymentRef != order.PaymentRef {
+		t.Errorf("payment_ref = %q — a foreign-currency credit burned the session id", got.PaymentRef)
+	}
+	if got.Status != models.ITStatusPendingPayment {
+		t.Errorf("status = %q, want pending_payment", got.Status)
 	}
 }

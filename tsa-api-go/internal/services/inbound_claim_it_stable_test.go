@@ -433,3 +433,59 @@ func mustInt64(t *testing.T, s string) int64 {
 
 // itoa renders a kobo count the way the intent stores it.
 func itoa(v int64) string { return big.NewInt(v).String() }
+
+// ─── currency ────────────────────────────────────────────────────────────────
+
+// The matcher asserts a candidate's OWN currency against the credit's and
+// treats an empty one as a source bug, holding the credit rather than letting
+// it match. A source that forgets the field therefore strands every payment it
+// could have settled.
+func TestITStableOpenClaims_StampsTheClaimsOwnCurrency(t *testing.T) {
+	s, userID := newCentralStableBuyService(t)
+	if _, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	src := NewITStableClaimSource(s)
+
+	// Lower-case on purpose: the argument is normalised on the way in, and the
+	// claim must carry the normalised code rather than whatever was passed.
+	claims, err := src.OpenClaims(context.Background(), "ngn")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1", len(claims))
+	}
+	if claims[0].Currency == "" {
+		t.Fatal("claim carries no currency; the matcher holds such a claim's credit instead of matching it")
+	}
+	if claims[0].Currency != "NGN" {
+		t.Fatalf("claim currency = %q, want NGN", claims[0].Currency)
+	}
+}
+
+// Accept is reached from the manual-assign path with no currency filter in
+// front of it, so the filtering inside OpenClaims is not the guard it looks
+// like.
+func TestITStableAccept_RefusesACreditInAnotherCurrency(t *testing.T) {
+	s, userID := newCentralStableBuyService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	src := NewITStableClaimSource(s)
+
+	var open models.ITIntent
+	s.db.First(&open, "id = ?", intent.ID)
+	foreign := stableInboundCredit("100004250250000000000000000099", mustInt64(t, open.NgnKobo))
+	foreign.Currency = "GHS"
+
+	if err := src.Accept(context.Background(), intent.ID, foreign); err == nil {
+		t.Fatal("a GHS credit funded an NGN purchase")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusPendingPayment {
+		t.Fatalf("status = %q, want pending_payment — foreign money funded the purchase", got.Status)
+	}
+	if got.PaymentRef == "100004250250000000000000000099" {
+		t.Fatal("the foreign credit's session id was attributed to an NGN purchase")
+	}
+}

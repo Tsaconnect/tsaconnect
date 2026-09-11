@@ -27,6 +27,7 @@ func createSettlementForwardTable(t *testing.T, db *gorm.DB) {
 		currency       TEXT NOT NULL,
 		amount         TEXT NOT NULL,
 		status         TEXT NOT NULL DEFAULT 'pending',
+		attempts       INTEGER NOT NULL DEFAULT 0,
 		reference      TEXT NOT NULL,
 		payout_id      TEXT,
 		failure_reason TEXT,
@@ -678,5 +679,253 @@ func TestP2PForward_ListNeedingAttentionSurfacesUnpaidMerchants(t *testing.T) {
 	}
 	if rows[0].Amount != "1500.00" || rows[0].PMID != r.pm.ID {
 		t.Fatalf("queue row does not identify the unpaid merchant: %+v", rows[0])
+	}
+}
+
+// ─── one trade, one credit ───────────────────────────────────────────────────
+
+// trade_id is unique as well as provider_ref, so a SECOND, DISTINCT credit
+// bound to the same trade violates the trade_id index — not the provider_ref
+// one. Reading the winner back on either key hands this credit the other
+// credit's row and reports success, and the matcher then stamps this credit
+// `matched` with no ledger entry anywhere for its money.
+//
+// That is a silent absorption of real naira: a payer's transfer looks
+// attributed and nobody is ever credited for it.
+func TestP2PAccept_RefusesASecondDistinctCreditOnTheSameTrade(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000020", "1500.00")); err != nil {
+		t.Fatalf("first Accept: %v", err)
+	}
+
+	// A different payer's money, same amount, bound to the same trade — the
+	// shape a duplicate transfer or a mis-keyed manual assign produces.
+	second := p2pInboundCredit("999000000021", "1500.00")
+	if err := r.src.Accept(ctx, r.trade.ID, second); err == nil {
+		t.Fatal("a second, distinct credit reported success; the matcher will mark it matched with nothing behind it")
+	}
+
+	// Nothing of the second credit's money may have moved, and no row may claim it.
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — the second credit moved money", got)
+	}
+	var claimed int64
+	r.db.Model(&models.P2PSettlementForward{}).Where("provider_ref = ?", "999000000021").Count(&claimed)
+	if claimed != 0 {
+		t.Fatalf("%d forward rows claim the second credit's ref, want 0", claimed)
+	}
+	var total int64
+	r.db.Model(&models.P2PSettlementForward{}).Count(&total)
+	if total != 1 {
+		t.Fatalf("%d forward rows, want 1", total)
+	}
+}
+
+// ─── pending forwards are re-driven ──────────────────────────────────────────
+
+// A held forward is left `pending` on the promise that "a later attempt can
+// pick it up". Nothing did: Forward was only ever called from Accept, the
+// staleness sweep filters `submitted`, and the operator queue filters `failed`.
+// A merchant hit by an unreadable balance was therefore credited, never paid,
+// and invisible on every surface.
+func TestP2PForward_PendingForwardIsRedriven(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000022", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardPending {
+		t.Fatalf("precondition: forward status = %q, want pending", f.Status)
+	}
+
+	// The outage clears. Past the redrive grace, so the sweep is not racing the
+	// synchronous attempt Accept already made.
+	r.bal.err = nil
+	r.fwd.withClock(func() time.Time { return time.Now().Add(2 * p2pForwardRedriveAfter) })
+
+	n, err := r.fwd.RedrivePending(ctx)
+	if err != nil {
+		t.Fatalf("RedrivePending: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("re-drove %d forwards, want 1", n)
+	}
+	if len(r.gateway.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1 — the merchant is still unpaid", len(r.gateway.calls))
+	}
+	if f := r.forward(t); f.Status != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted", f.Status)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q — submitting is not disbursing and must not debit", got)
+	}
+}
+
+// A forward fresh out of Accept is not re-driven: Accept has just tried it
+// synchronously, and a concurrent second attempt would submit the transfer
+// twice.
+func TestP2PForward_RedriveSkipsAForwardAccepJustTried(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000023", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	r.bal.err = nil
+
+	n, err := r.fwd.RedrivePending(ctx)
+	if err != nil {
+		t.Fatalf("RedrivePending: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("re-drove %d forwards inside the grace window, want 0", n)
+	}
+}
+
+// Retrying forever is its own silence: a forward that can never be paid would
+// be re-driven every five minutes indefinitely and still never reach an
+// operator, because only `failed` rows are queued. After the ceiling it
+// escalates instead.
+func TestP2PForward_UnpayableForwardEscalatesRatherThanRetryingForever(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000024", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	r.fwd.withClock(func() time.Time { return time.Now().Add(2 * p2pForwardRedriveAfter) })
+
+	for i := 0; i < p2pForwardMaxAttempts+2; i++ {
+		if _, err := r.fwd.RedrivePending(ctx); err != nil {
+			t.Fatalf("RedrivePending #%d: %v", i+1, err)
+		}
+	}
+
+	f := r.forward(t)
+	if f.Status != models.P2PForwardFailed {
+		t.Fatalf("forward status = %q after %d attempts, want failed — it retries forever and no operator ever sees it",
+			f.Status, p2pForwardMaxAttempts+2)
+	}
+	if f.AlertedAt == nil {
+		t.Fatal("escalated without raising an alert")
+	}
+	if len(r.gateway.calls) != 0 {
+		t.Fatal("submitted a transfer against an unreadable balance")
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00 — escalating must never move money", got)
+	}
+	// And once terminal it stops consuming attempts.
+	n, err := r.fwd.RedrivePending(ctx)
+	if err != nil {
+		t.Fatalf("RedrivePending after escalation: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("re-drove %d already-failed forwards, want 0", n)
+	}
+}
+
+// The operator queue is "merchant credited, bank not paid". A pending forward
+// that has sat for half an hour is exactly that, and was previously visible
+// nowhere.
+func TestP2PForward_ListNeedingAttentionIncludesAgedPending(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000025", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	// Fresh: still ordinary in-flight work, not an operator's problem yet.
+	rows, err := r.fwd.ListNeedingAttention(ctx)
+	if err != nil {
+		t.Fatalf("ListNeedingAttention: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("queued %d fresh pending forwards, want 0", len(rows))
+	}
+
+	if err := r.db.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", r.trade.ID).
+		Update("created_at", time.Now().Add(-2*p2pForwardStaleAfter)).Error; err != nil {
+		t.Fatalf("age the forward: %v", err)
+	}
+	rows, err = r.fwd.ListNeedingAttention(ctx)
+	if err != nil {
+		t.Fatalf("ListNeedingAttention: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("queued %d rows, want 1 — an aged pending forward is a credited-but-unpaid merchant", len(rows))
+	}
+	if rows[0].Status != models.P2PForwardPending || rows[0].PMID != r.pm.ID {
+		t.Fatalf("queue row does not identify the unpaid merchant: %+v", rows[0])
+	}
+}
+
+// ─── currency ────────────────────────────────────────────────────────────────
+
+func TestP2POpenClaims_StampsTheTradesOwnCurrency(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+
+	claims, err := r.src.OpenClaims(context.Background(), "ngn")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1", len(claims))
+	}
+	if claims[0].Currency == "" {
+		t.Fatal("claim carries no currency; the matcher holds such a claim's credit instead of matching it")
+	}
+	if claims[0].Currency != "NGN" {
+		t.Fatalf("claim currency = %q, want the trade's own NGN", claims[0].Currency)
+	}
+}
+
+// Accept is separated from OpenClaims by the whole bind, including the
+// manual-assign path where no currency filter runs at all. Crediting a
+// merchant's naira ledger out of a cedi transfer books money that never landed
+// in that currency.
+func TestP2PAccept_RefusesACreditInAnotherCurrency(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	foreign := p2pInboundCredit("999000000026", "1500.00")
+	foreign.Currency = "GHS"
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, foreign); err == nil {
+		t.Fatal("a GHS credit settled an NGN trade")
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "0") {
+		t.Fatalf("available_ngn = %q, want nothing credited", got)
+	}
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		t.Fatalf("trade status = %q — foreign money released the buyer's crypto", trade.Status)
+	}
+	var rows int64
+	r.db.Model(&models.P2PSettlementForward{}).Count(&rows)
+	if rows != 0 {
+		t.Fatalf("%d forward rows, want 0", rows)
+	}
+}
+
+// ─── configuration guard ─────────────────────────────────────────────────────
+
+// The MCGP sibling returns an error the matcher can log; this one dereferenced
+// a nil handle and took the poller down with a panic, which loses the whole
+// tick's worth of attribution rather than one source's.
+func TestP2POpenClaims_UnwiredSourceErrorsRatherThanPanicking(t *testing.T) {
+	src := NewP2PTradeClaimSource(nil, nil, nil, nil)
+
+	claims, err := src.OpenClaims(context.Background(), "NGN")
+	if err == nil {
+		t.Fatal("an unwired source reported success")
+	}
+	if claims != nil {
+		t.Fatalf("got %d claims from an unwired source", len(claims))
 	}
 }

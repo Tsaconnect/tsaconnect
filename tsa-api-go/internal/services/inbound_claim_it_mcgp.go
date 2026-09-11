@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"strconv"
@@ -89,11 +90,22 @@ func (s *ITMCGPClaimSource) OpenClaims(ctx context.Context, currency string) ([]
 			continue
 		}
 		claims = append(claims, InboundClaim{
-			Type:       InboundClaimTypeITMCGP,
-			ID:         rows[i].ID,
-			UserID:     rows[i].UserID,
-			AmountKobo: kobo,
-			OpenedAt:   rows[i].CreatedAt,
+			Type:   InboundClaimTypeITMCGP,
+			ID:     rows[i].ID,
+			UserID: rows[i].UserID,
+			// Rounded with the SAME helper the matcher rounds the credit with,
+			// exactly as both sibling sources do. Central mode mints every ask
+			// at whole naira, so this only bites on orders opened before the
+			// cutover — but an order offered at, say, 123456 kobo can never
+			// equal the 123500 the matcher compares against, so it would hold
+			// forever with the buyer's money already sent. It is also what
+			// keeps the InboundClaim contract's AmountKobo%100 == 0 true.
+			AmountKobo: roundKoboToNaira(kobo),
+			// The order's OWN currency, not the argument echoed back: echoing
+			// it would make the matcher's assertion tautological and re-hide
+			// the mismatch it exists to catch.
+			Currency: normaliseCurrency(rows[i].Currency),
+			OpenedAt: rows[i].CreatedAt,
 		})
 	}
 	return claims, nil
@@ -113,12 +125,53 @@ func (s *ITMCGPClaimSource) OpenClaims(ctx context.Context, currency string) ([]
 // bind from the admin queue and an automatic one settle through exactly the
 // same guards.
 func (s *ITMCGPClaimSource) Accept(ctx context.Context, claimID uuid.UUID, credit *models.InboundCredit) error {
-	if s == nil || s.it == nil {
+	if s == nil || s.it == nil || s.db == nil {
 		return errors.New("it mcgp claims: not configured")
 	}
 	if credit == nil {
 		return errors.New("it mcgp claims: nil credit")
 	}
+
+	// Re-read the order's currency rather than trusting that OpenClaims filtered
+	// it. The manual-assign path names a claim id directly and never runs that
+	// filter, so this is the only place the two units of money are ever
+	// compared before MCGP is issued against them.
+	var order models.ITIntent
+	if err := s.db.WithContext(ctx).Select("currency").First(&order, "id = ?", claimID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("it mcgp claims: intent %s not found", claimID)
+		}
+		return err
+	}
+	if err := assertClaimCurrency("it mcgp", claimID, order.Currency, credit); err != nil {
+		return err
+	}
+
 	paid := big.NewInt(roundKoboToNaira(credit.GrossKobo))
 	return s.it.CreditBuyOrderFromInbound(ctx, claimID, credit.ProviderRef, paid)
+}
+
+// assertClaimCurrency refuses to move money between two different units of it.
+//
+// Every source filters by currency in OpenClaims, but the whole bind — the
+// matcher's arbitration and the operator's manual assign — sits between that
+// filter and the settle. The manual path never runs the filter at all, so
+// without this a hand-typed claim id is all it takes to fund a naira order out
+// of a cedi transfer. An empty code on either side is a refusal too: unknown is
+// not the same as equal, and guessing here spends real money.
+//
+// Shared by all three claim sources; it is the same check for the same reason
+// in each.
+func assertClaimCurrency(source string, claimID uuid.UUID, claimCurrency string, credit *models.InboundCredit) error {
+	claim := normaliseCurrency(claimCurrency)
+	got := normaliseCurrency(credit.Currency)
+	if claim == "" || got == "" {
+		return fmt.Errorf("%s accept: claim %s currency %q and credit %s currency %q — one of them is unknown, so they cannot be compared",
+			source, claimID, claimCurrency, credit.ProviderRef, credit.Currency)
+	}
+	if claim != got {
+		return fmt.Errorf("%s accept: claim %s is priced in %s but credit %s is %s",
+			source, claimID, claim, credit.ProviderRef, got)
+	}
+	return nil
 }
