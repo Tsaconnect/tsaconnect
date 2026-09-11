@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -47,6 +48,12 @@ const (
 	inboundSenderRawMax  = 255
 	inboundSenderBankMax = 64
 	inboundSenderNameMax = 128
+
+	// inboundRefLookupChunk bounds the IN list of the already-held lookup. A
+	// statement page has no documented size limit and Postgres caps a statement
+	// at 65535 bind parameters, so an unchunked lookup would start erroring on
+	// exactly the busy day it matters most.
+	inboundRefLookupChunk = 500
 )
 
 // InboundStatementSource is the narrow slice of the Flutterwave client the
@@ -134,7 +141,7 @@ func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntr
 	fees := pairFundingFees(rows)
 	seenAt := i.now().UTC()
 
-	var firstErr error
+	credits := make([]*models.InboundCredit, 0, len(rows))
 	for idx, row := range rows {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
@@ -151,6 +158,20 @@ func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntr
 			// the provider's, not a contract. The raw text is stored either
 			// way and a human (or a later parser) can still read it.
 			res.Unparsed++
+		}
+		credits = append(credits, credit)
+	}
+
+	held := i.heldRefs(ctx, credits)
+
+	var firstErr error
+	for _, credit := range credits {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		if held[credit.ProviderRef] {
+			res.Duplicates++
+			continue
 		}
 
 		inserted, err := i.insert(ctx, credit)
@@ -169,6 +190,48 @@ func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntr
 		}
 	}
 	return res, firstErr
+}
+
+// heldRefs returns which of these credits we already hold.
+//
+// Poll windows overlap by design and the lookback is a day, so in the steady
+// state nearly every row on a page is one we wrote hours ago. Handing all of
+// them to INSERT ... ON CONFLICT DO NOTHING works, but Postgres implements that
+// clause by speculative insertion: every duplicate allocates a heap tuple and
+// then kills it. At a few hundred credits a day that is over a million dead
+// tuples daily, forever, on the highest-insert-rate table in this schema.
+//
+// A failed lookup is NOT an error: falling through to the insert path costs
+// churn and nothing else, while refusing to ingest would lose the one thing
+// this pipeline exists to keep.
+func (i *InboundIngestor) heldRefs(ctx context.Context, credits []*models.InboundCredit) map[string]bool {
+	if len(credits) == 0 {
+		return nil
+	}
+	refs := make([]string, 0, len(credits))
+	for _, c := range credits {
+		refs = append(refs, c.ProviderRef)
+	}
+
+	held := make(map[string]bool, len(refs))
+	for start := 0; start < len(refs); start += inboundRefLookupChunk {
+		end := start + inboundRefLookupChunk
+		if end > len(refs) {
+			end = len(refs)
+		}
+		var found []string
+		if err := i.db.WithContext(ctx).
+			Model(&models.InboundCredit{}).
+			Where("provider_ref IN ?", refs[start:end]).
+			Pluck("provider_ref", &found).Error; err != nil {
+			log.Printf("[inbound-ingest] held-ref lookup failed, falling back to insert-on-conflict: %v", err)
+			return nil
+		}
+		for _, ref := range found {
+			held[ref] = true
+		}
+	}
+	return held
 }
 
 // insert writes one credit, tolerating the row already being there.
@@ -191,6 +254,12 @@ func (i *InboundIngestor) insert(ctx context.Context, credit *models.InboundCred
 }
 
 func (i *InboundIngestor) buildCredit(row FWStatementEntry, feeKobo int64, seenAt time.Time) *models.InboundCredit {
+	// Sanitize before anything reads the text — the ref is derived from it, the
+	// remark is parsed from it, and both are stored. See sanitizeProviderText.
+	row.Remarks = sanitizeProviderText(row.Remarks)
+	row.Reference = sanitizeProviderText(row.Reference)
+	row.Currency = sanitizeProviderText(row.Currency)
+
 	amountKobo := KoboFromMajor(row.Amount.Float64())
 	bank, name := parseSenderRemark(row.Remarks)
 
@@ -339,25 +408,41 @@ const (
 // the same five minutes produce two indistinguishable fee rows, and pairing
 // them arbitrarily would move a fee onto the wrong credit — a wrong GrossKobo
 // is a wrong match, and a wrong match is money credited to the wrong user.
+// Both passes are skipped unless some fee row actually shows the netted shape.
+// In production none ever does (see nettedFeeKobo), and without that guard this
+// runs quadratically over one to two calendar days of statement, every thirty
+// seconds, only ever to arrive at a map of zeroes.
 func pairFundingFees(rows []FWStatementEntry) map[int]int64 {
+	if !anyNettedFee(rows) {
+		return nil
+	}
+
 	paired := make(map[int]int64)
 	feeUsed := make(map[int]bool)
 
 	// Pass 1: a fee that carries the credit's own reference is unambiguous
-	// provenance and outranks any heuristic.
-	for ci, credit := range rows {
-		if !IsCustomerFunding(credit) || strings.TrimSpace(credit.Reference) == "" {
+	// provenance and outranks any heuristic. Indexed by reference rather than
+	// compared row against row, which is the same answer without the square.
+	feesByRef := make(map[string][]int)
+	for fi, fee := range rows {
+		if !isFeeRow(fee) {
 			continue
 		}
-		for fi, fee := range rows {
-			if fi == ci || feeUsed[fi] || !isFeeRow(fee) {
-				continue
-			}
-			if strings.TrimSpace(fee.Reference) != strings.TrimSpace(credit.Reference) {
+		if ref := strings.TrimSpace(fee.Reference); ref != "" {
+			feesByRef[ref] = append(feesByRef[ref], fi)
+		}
+	}
+	for ci, credit := range rows {
+		ref := strings.TrimSpace(credit.Reference)
+		if ref == "" || !IsCustomerFunding(credit) {
+			continue
+		}
+		for _, fi := range feesByRef[ref] {
+			if fi == ci || feeUsed[fi] {
 				continue
 			}
 			feeUsed[fi] = true
-			paired[ci] = nettedFeeKobo(fee)
+			paired[ci] = nettedFeeKobo(rows[fi])
 			break
 		}
 	}
@@ -376,6 +461,20 @@ func pairFundingFees(rows []FWStatementEntry) map[int]int64 {
 		paired[best] = nettedFeeKobo(fee)
 	}
 	return paired
+}
+
+// anyNettedFee reports whether the page holds even one fee row that was taken
+// out of a credit rather than billed separately. When none is, every pairing
+// below can only produce zero, and pairing nothing is the same answer for far
+// less work. The netting branch itself is untouched — the day the provider
+// starts netting, this goes true again and the fees are added back.
+func anyNettedFee(rows []FWStatementEntry) bool {
+	for _, row := range rows {
+		if isFeeRow(row) && nettedFeeKobo(row) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // bestCreditForFee returns the index of the single funding row the fee at
@@ -469,6 +568,55 @@ func nettedFeeKobo(fee FWStatementEntry) int64 {
 // or every tick reports a phantom gap.
 func KoboFromMajor(v float64) int64 {
 	return int64(math.Round(v * 100))
+}
+
+// sanitizeProviderText makes provider free text safe to store and safe to read.
+//
+// Two separate hazards, both of which arrive through valid JSON and survive
+// decoding intact:
+//
+//   - U+0000 and the other C0/C1 controls. Postgres rejects a null byte in a
+//     varchar outright, so ONE such remark fails the INSERT — and the next poll
+//     thirty seconds later fails identically, and so does every poll after it.
+//     The credit is never recorded and the money is invisible for good. This is
+//     the one outcome the whole pipeline is built to prevent, and it costs a
+//     single character to cause.
+//   - Unicode format characters (category Cf), the bidi overrides especially.
+//     SenderName is what the operator reads when deciding whose money a held
+//     credit is, and U+202E makes text render in an order it is not written in:
+//     a sender can make their name display as somebody else's. The matcher
+//     already strips Cf before comparing, so what is spoofable today is exactly
+//     the human-facing half.
+//
+// Stripping rather than replacing: these characters carry no meaning we want,
+// and a substitute would change the length and the parse for no gain.
+func sanitizeProviderText(s string) string {
+	if !strings.ContainsFunc(s, unsafeProviderRune) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unsafeProviderRune(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// unsafeProviderRune is the strip list: C0 controls, DEL, C1 controls, category
+// Cf, and the replacement rune that invalid UTF-8 decodes to (which Postgres
+// accepts but which is noise on an operator's screen).
+func unsafeProviderRune(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		return true
+	case r == utf8.RuneError:
+		return true
+	default:
+		return unicode.Is(unicode.Cf, r)
+	}
 }
 
 // truncate caps a string at max BYTES without splitting a rune. Postgres sizes
