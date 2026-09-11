@@ -128,6 +128,35 @@ func TestCreateSpotListing_InvalidChain(t *testing.T) {
 	}
 }
 
+// The app's Spot Trade desk routes same-chain pairs on Solana and Sui, so a
+// listing may name them. Guards the widening in models.SpotChains.
+func TestCreateSpotListing_NonEVMChainsAccepted(t *testing.T) {
+	for _, chain := range []string{"solana", "sui", "robinhood"} {
+		t.Run(chain, func(t *testing.T) {
+			setupSpotTestDB(t)
+			h := newSpotHandlers()
+			body := `{"baseSymbol":"USDC","quoteSymbol":"USDT","chain":"` + chain + `"}`
+			c, w := spotCtx(t, http.MethodPost, body, adminUser())
+			h.CreateSpotListing(c)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201 for chain %q; body = %s", w.Code, chain, w.Body.String())
+			}
+		})
+	}
+}
+
+// Bitcoin carries exactly one token, so no same-chain pair exists to trade. A
+// BTC listing would render a form that could only fail at quote time.
+func TestCreateSpotListing_BitcoinRejected(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"BTC","quoteSymbol":"USDC","chain":"btc"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for bitcoin", w.Code)
+	}
+}
+
 func TestCreateSpotListing_DuplicatePair(t *testing.T) {
 	setupSpotTestDB(t)
 	h := newSpotHandlers()

@@ -49,9 +49,18 @@ func ValidSpotCategory(cat string) bool {
 
 // SpotChains is the set of chain keys a listing may reference. Mirrors the
 // NetworkConfig.Chains / SupportedToken chain-key space and the admin UI picker.
+//
+// Includes the non-EVM chains the app's Spot Trade desk can route a same-chain
+// pair on. Deliberately absent:
+//   - "btc": LiFi lists exactly one token on Bitcoin (BTC itself), so no
+//     same-chain pair exists. A BTC pair is inherently cross-chain, which a
+//     single Chain field cannot express.
+//   - "tron": LiFi routes no Tron liquidity at all.
 var SpotChains = map[string]bool{
 	"sonic": true, "bsc": true, "ethereum": true, "polygon": true,
-	"arbitrum": true, "base": true, "optimism": true, "avalanche": true, "linea": true,
+	"arbitrum": true, "base": true, "optimism": true, "avalanche": true,
+	"linea": true, "robinhood": true,
+	"solana": true, "sui": true,
 }
 
 // ValidSpotChain reports whether chain is a recognised chain key (lowercase).
@@ -66,12 +75,12 @@ func ValidSpotChain(chain string) bool {
 // existing flows selected by Route. BaseSymbol/QuoteSymbol are uppercase, Chain
 // is a lowercase NetworkConfig chain key (e.g. "sonic"), matching SupportedToken.
 type SpotListing struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	BaseSymbol   string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"baseSymbol"`
-	QuoteSymbol  string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"quoteSymbol"`
-	Chain        string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"chain"`
-	Route        string    `gorm:"default:'lifi'" json:"route"`
-	LogoURL string `json:"logoUrl,omitempty"`
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	BaseSymbol  string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"baseSymbol"`
+	QuoteSymbol string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"quoteSymbol"`
+	Chain       string    `gorm:"not null;uniqueIndex:idx_spot_pair" json:"chain"`
+	Route       string    `gorm:"default:'lifi'" json:"route"`
+	LogoURL     string    `json:"logoUrl,omitempty"`
 	// No `default:true` tag: GORM would then omit a zero-value (false) on insert
 	// and fall back to the DB default, so creating a disabled listing would
 	// silently persist as enabled. Handlers set Enabled explicitly instead.
@@ -83,8 +92,8 @@ type SpotListing struct {
 	// PinnedPosition is a 1-based admin override in the ranked public list
 	// (nil = unpinned; ranking then applies default pins / dynamic order).
 	PinnedPosition *int      `gorm:"column:pinned_position" json:"pinnedPosition"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.
