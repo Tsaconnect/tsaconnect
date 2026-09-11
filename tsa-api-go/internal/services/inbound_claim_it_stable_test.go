@@ -69,9 +69,18 @@ func TestCreateStableBuyIntent_CentralModeReturnsTheCompanyAccount(t *testing.T)
 func TestCreateStableBuyIntent_CentralModeMintsWholeNaira(t *testing.T) {
 	// Matching compares at naira granularity, so the ask has to be a figure the
 	// payer can type into a bank app and reproduce exactly.
+	//
+	// The quote MUST carry sub-naira kobo. testBuyQuote's fixture is already a
+	// whole number of naira, so asserting over it passed whether or not the
+	// service rounded at all — the rule went unprotected until this test drove
+	// a figure that actually needs rounding.
 	s, userID := newCentralStableBuyService(t)
 
-	intent, pay, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	quote := testBuyQuote()
+	quote.FiatMinor = big.NewInt(16502549) // ₦165,025.49
+	const wantKobo = "16502500"
+
+	intent, pay, err := s.CreateStableBuyIntent(context.Background(), userID, quote, "POLYGON", testBuyEVM)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -82,9 +91,13 @@ func TestCreateStableBuyIntent_CentralModeMintsWholeNaira(t *testing.T) {
 	if kobo%100 != 0 {
 		t.Fatalf("AmountNGN = %q is not whole naira", pay.AmountNGN)
 	}
+	if itoa(kobo) != wantKobo {
+		t.Fatalf("AmountNGN = %q (%d kobo), want %s — the 49 kobo must be rounded away, "+
+			"not carried into a figure no payer can reproduce", pay.AmountNGN, kobo, wantKobo)
+	}
 	// The intent must be minted at the SAME figure the payer was told, or the
 	// claim the matcher offers is not the amount anybody was asked to send.
-	if intent.NgnKobo != itoa(kobo) {
+	if intent.NgnKobo != wantKobo {
 		t.Fatalf("intent ngn_kobo = %q but the payer was asked for %q (%d kobo)", intent.NgnKobo, pay.AmountNGN, kobo)
 	}
 }
