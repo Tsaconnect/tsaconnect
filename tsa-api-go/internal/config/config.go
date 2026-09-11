@@ -438,10 +438,22 @@ type Config struct {
 	// payer to the one company account, where attribution comes from polling
 	// the wallet statement instead.
 	//
-	// It is a single global flag by decision 10 — a per-user rollout would mean
-	// two live attribution paths over one account, and a credit that both or
-	// neither path claims. Existing VAs are deactivated, never deleted, so
-	// flipping back is this variable plus a restart.
+	// It is a single global flag by decision 10 — a per-user rollout would put
+	// two attribution paths over the ONE company account, where a sender name
+	// is all there is to tell a rolled-out payer from a not-yet one, and a
+	// credit both or neither path claims is the result.
+	//
+	// It does not retire the virtual accounts that already exist: nothing here
+	// or anywhere else deactivates them at Flutterwave, and the charge-webhook
+	// credit path is not gated on the mode, so a payer who kept an old account
+	// number is still credited through it. Central mode only refuses to mint
+	// NEW accounts (ITService.ActivateFiatVA) and stops the app showing the old
+	// ones. The two paths cannot claim each other's money — they settle under
+	// different on-chain ref domains (IT:va: vs IT:inbound:) — but they are both
+	// live, and closing the accounts at the provider is a deliberate follow-up
+	// with its own review, not something this flag does.
+	//
+	// Flipping back is this variable plus a restart.
 	InboundMode string
 	// InboundPollInterval is the wallet-statement poll period (default 30s,
 	// decision 8). This is not a reconciler cadence: wallet funding fires no
@@ -805,7 +817,8 @@ func Load() *Config {
 	// Central-account inbound attribution. Defaults to `va` — the mode that is
 	// live today — so a deploy that forgets this variable changes nothing.
 	// An unrecognised value is treated as `va` for the same reason: a typo must
-	// not silently retire every virtual account.
+	// not silently move every payer onto the company account and stop the app
+	// showing the virtual accounts they have been paying into.
 	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
 	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
 	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
@@ -1229,8 +1242,9 @@ const (
 
 // normalizeInboundMode maps an env value onto a known mode, defaulting to `va`.
 // Unknown values do NOT fail the boot: the safe reading of a typo is "leave the
-// live behaviour alone", and the failure mode of guessing `central` instead
-// would be an entire fleet that stops handing users a VA to pay into.
+// live behaviour alone". Guessing `central` from a near-miss is the far worse
+// failure — every payer redirected onto the company account on the strength of
+// a typo, or, with that account unconfigured, a fleet that refuses to boot.
 func normalizeInboundMode(v string) string {
 	if strings.EqualFold(strings.TrimSpace(v), InboundModeCentral) {
 		return InboundModeCentral
@@ -1240,7 +1254,8 @@ func normalizeInboundMode(v string) string {
 
 // InboundCentralEnabled reports whether inbound naira is attributed through the
 // central account. Read it rather than comparing InboundMode by hand so the
-// buy paths, the VA activation guard and the KYC gate cannot drift apart.
+// pay-into paths (IT buy, stablecoin buy, P2P) and the virtual-account guards
+// cannot drift apart on which account a payer is being sent to.
 func (c *Config) InboundCentralEnabled() bool {
 	return c != nil && c.InboundMode == InboundModeCentral
 }

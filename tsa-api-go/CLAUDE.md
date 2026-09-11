@@ -112,6 +112,22 @@ Required (set in `.env`):
   script exists: the deploy runs `tsa-api -migrate` once, before starting the service,
   so processes never race on DDL. Set `true` for local development.
 
+Central-account inbound attribution (default `va` — a deploy that omits all of these changes nothing):
+- `INBOUND_MODE` - `va`: per-user Flutterwave virtual account, attributed by the charge
+  webhook. `central`: every payer is sent to one company account, attributed by polling the
+  wallet statement and matching the sender's name. Anything unrecognised reads as `va`.
+- These are the only variables here that can REFUSE TO BOOT. `central` requires
+  `INBOUND_CENTRAL_ACCOUNT_NUMBER` (validated as a 10-digit NUBAN), `INBOUND_CENTRAL_BANK_NAME`,
+  `INBOUND_CENTRAL_ACCOUNT_NAME` and Flutterwave credentials. The usual dormant-if-unset
+  pattern is wrong for them: a pay-into screen with a blank or unwatched account number takes
+  real customer money that nothing can attribute afterwards.
+- `INBOUND_POLL_INTERVAL`, `INBOUND_STATEMENT_LOOKBACK` - wallet funding fires no webhook, so
+  the poll is the only thing that ever notices a credit and the interval is the payer's wait.
+- `INBOUND_ALERT_EMAILS` - who is paged when the matcher holds a credit. Nothing releases a
+  held credit automatically; unset is legitimate but means the admin queue is the only place
+  it is ever seen.
+- Per-variable rationale is in `.env.example`; read it before changing any of them.
+
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
 - `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID

@@ -134,8 +134,7 @@ func AutoMigrate() error {
 		&models.FiatVirtualAccount{},
 		// Central-account inbound attribution — the immutable record of every
 		// credit into the company account, written by the statement poller
-		// before any matching runs. Additive and inert until the poller is
-		// wired; nothing reads it yet.
+		// before any matching runs.
 		&models.InboundCredit{},
 		// Append-only record of every operator decision on a held credit.
 		// Separate from inbound_credits because that row only ever shows the
