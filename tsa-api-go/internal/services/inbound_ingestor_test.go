@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -594,5 +599,324 @@ func TestFetchWalletStatement_ProviderError(t *testing.T) {
 
 	if _, err := c.FetchWalletStatement(context.Background(), "NGN", time.Time{}, time.Time{}); err == nil {
 		t.Fatal("want an error on a 503")
+	}
+}
+
+// A single U+0000 anywhere in provider free text made the INSERT fail on
+// Postgres, and fail identically on every poll after it — the credit stayed
+// invisible forever. The row must land, sanitized.
+func TestIngestRows_NullByteInRemarkStillRecorded(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	row := fundingRow("10000000000000000000000000\x00011", 2000,
+		"Received Money from GT\x00BANK|ADEMU\x00 EMMANUEL", "2026-09-02T10:00:00Z")
+
+	res, err := ing.IngestRows(context.Background(), []FWStatementEntry{row})
+	if err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	if res.Inserted != 1 {
+		t.Fatalf("res = %+v, want the credit recorded", res)
+	}
+	var got models.InboundCredit
+	if err := db.First(&got).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	for label, field := range map[string]string{
+		"ProviderRef": got.ProviderRef,
+		"SenderRaw":   got.SenderRaw,
+		"SenderBank":  got.SenderBank,
+		"SenderName":  got.SenderName,
+	} {
+		if strings.ContainsRune(field, 0) {
+			t.Errorf("%s = %q, still carries a null byte", label, field)
+		}
+	}
+	if got.SenderBank != "GTBANK" || got.SenderName != "ADEMU EMMANUEL" {
+		t.Errorf("parsed = (%q, %q), want the sanitized text to parse", got.SenderBank, got.SenderName)
+	}
+}
+
+// A bidi override survives JSON decoding intact, and SenderName is what the
+// operator reads when deciding whose money this is. Left in, a sender can make
+// their name render as somebody else's.
+func TestIngestRows_StripsBidiOverrideFromSenderName(t *testing.T) {
+	db := setupInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+
+	res, err := ing.IngestRows(context.Background(), []FWStatementEntry{
+		fundingRow("100000000000000000000000000012", 2000,
+			"Received Money from GTBANK|‮UJAMEDA‬ LEUNAMME", "2026-09-02T10:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("IngestRows: %v", err)
+	}
+	if res.Inserted != 1 {
+		t.Fatalf("res = %+v, want 1 inserted", res)
+	}
+	var got models.InboundCredit
+	if err := db.First(&got).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.ContainsAny(got.SenderName, "‮‬") || strings.ContainsAny(got.SenderRaw, "‮‬") {
+		t.Fatalf("SenderName=%q SenderRaw=%q still carry format characters", got.SenderName, got.SenderRaw)
+	}
+	if got.SenderName != "UJAMEDA LEUNAMME" {
+		t.Errorf("SenderName = %q, want the display-order text", got.SenderName)
+	}
+}
+
+// countingInboundDB counts INSERT attempts. Conflict-do-nothing absorbs
+// duplicates silently, so counting is the only way to see the re-insert storm.
+func countingInboundDB(t *testing.T) (*gorm.DB, *int) {
+	t.Helper()
+	db := setupInboundDB(t)
+	creates := 0
+	if err := db.Callback().Create().Before("gorm:create").
+		Register("test:count_creates", func(tx *gorm.DB) { creates++ }); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+	return db, &creates
+}
+
+// Every poll re-reads the whole lookback window, so almost every row is already
+// held. Each conflicting INSERT still allocates and kills a heap tuple.
+func TestIngestRows_DoesNotReinsertRowsAlreadyHeld(t *testing.T) {
+	db, creates := countingInboundDB(t)
+	ing := NewInboundIngestor(db, &fakeStatementSource{}, "NGN", time.Hour)
+	rows := []FWStatementEntry{
+		fundingRow("100000000000000000000000000021", 2000, "Received Money from GTBANK|A ONE", "2026-09-02T10:00:00Z"),
+		fundingRow("100000000000000000000000000022", 3000, "Received Money from UBA|B TWO", "2026-09-02T10:01:00Z"),
+		fundingRow("100000000000000000000000000023", 4000, "Received Money from OPAY|C THREE", "2026-09-02T10:02:00Z"),
+	}
+
+	if _, err := ing.IngestRows(context.Background(), rows); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	*creates = 0
+
+	second, err := ing.IngestRows(context.Background(), rows)
+	if err != nil {
+		t.Fatalf("second ingest: %v", err)
+	}
+	if second.Duplicates != 3 || second.Inserted != 0 {
+		t.Fatalf("second = %+v, want 3 duplicates", second)
+	}
+	if *creates != 0 {
+		t.Errorf("%d INSERT attempts for rows already held, want 0", *creates)
+	}
+
+	// A new row in the same page must still be written.
+	*creates = 0
+	third, err := ing.IngestRows(context.Background(), append(rows,
+		fundingRow("100000000000000000000000000024", 5000, "Received Money from KUDA|D FOUR", "2026-09-02T10:03:00Z")))
+	if err != nil {
+		t.Fatalf("third ingest: %v", err)
+	}
+	if third.Inserted != 1 || third.Duplicates != 3 {
+		t.Fatalf("third = %+v, want 1 inserted / 3 duplicates", third)
+	}
+	if *creates != 1 {
+		t.Errorf("%d INSERT attempts, want exactly the 1 new row", *creates)
+	}
+}
+
+// Production never nets the funding fee, so the pairing passes exist to compute
+// nothing at all — at O(N²) over one to two calendar days, every 30 seconds.
+func TestPairFundingFees_NoNettedFeeShortCircuits(t *testing.T) {
+	rows := []FWStatementEntry{
+		fundingRow("100000000000000000000000000031", 2000, "Received Money from GTBANK|A ONE", "2026-09-02T10:00:00Z"),
+		{
+			Direction: "debit", Type: "fee", Amount: 28,
+			Balance:         FWStatementBalance{Before: 3000, After: 2972},
+			Reference:       "100000000000000000000000000031",
+			TransactionDate: stmtTime("2026-09-02T10:00:05Z"),
+		},
+	}
+	if got := pairFundingFees(rows); len(got) != 0 {
+		t.Fatalf("pairFundingFees = %v, want an empty map when no fee was netted", got)
+	}
+}
+
+// The short-circuit must not cost the netting branch: the day the provider
+// starts netting, every buyer is shorted if the fee stops being added back.
+func TestPairFundingFees_ShortCircuitKeepsNettedFees(t *testing.T) {
+	rows := []FWStatementEntry{
+		fundingRow("100000000000000000000000000041", 1972, "Received Money from GTBANK|A ONE", "2026-09-02T10:00:00Z"),
+		{
+			Direction: "debit", Type: "fee", Amount: 28,
+			Balance:         FWStatementBalance{Before: 2972, After: 2972},
+			Reference:       "100000000000000000000000000041",
+			TransactionDate: stmtTime("2026-09-02T10:00:05Z"),
+		},
+	}
+	if got := pairFundingFees(rows); got[0] != 2800 {
+		t.Fatalf("pairFundingFees = %v, want the netted fee added back to the credit", got)
+	}
+}
+
+// statementPageJSON renders n distinct funding rows as one statement page.
+func statementPageJSON(startRef, n int) string {
+	rows := make([]string, 0, n)
+	for k := 0; k < n; k++ {
+		rows = append(rows, fmt.Sprintf(
+			`{"direction":"credit","type":"funding","amount":100,`+
+				`"balance":{"before":1000,"after":1100},"reference":"ref-%d",`+
+				`"remarks":"Received Money from GTBANK|A ONE",`+
+				`"transaction_date":"2026-09-02T10:00:00Z"}`, startRef+k))
+	}
+	return `{"status":"success","data":[` + strings.Join(rows, ",") + `]}`
+}
+
+// statementPager serves a fixed number of full pages then one short page,
+// recording the page numbers it was asked for.
+type statementPager struct {
+	mu        sync.Mutex
+	fullPages int
+	tailRows  int
+	asked     []string
+	ignore    bool // reply with page 1 whatever was asked
+}
+
+func (p *statementPager) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		page := q.Get("page")
+		p.mu.Lock()
+		p.asked = append(p.asked, page)
+		p.mu.Unlock()
+		if page == "" {
+			t.Error("statement fetched without a page parameter")
+		}
+		n, err := strconv.Atoi(page)
+		if err != nil || n < 1 {
+			t.Errorf("page = %q, want a 1-based page number", page)
+			n = 1
+		}
+		if p.ignore {
+			n = 1
+		}
+		size := fwStatementPageSize
+		switch {
+		case n <= p.fullPages:
+			_, _ = w.Write([]byte(statementPageJSON((n-1)*size, size)))
+		case n == p.fullPages+1:
+			_, _ = w.Write([]byte(statementPageJSON(p.fullPages*size, p.tailRows)))
+		default:
+			_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+		}
+	}
+}
+
+func newStatementPagerClient(t *testing.T, p *statementPager) *FlutterwaveClient {
+	t.Helper()
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/wallets/statement", p.handler(t))
+	c, _ := newFWTestServer(t, mux)
+	return c
+}
+
+// One request read one page and stopped. Everything older than that page fell
+// out of the ingest silently, and the reconciler — whose only coverage proof is
+// the oldest row on the page — declined every tick instead of catching it.
+func TestFetchWalletStatement_FollowsPagesToTheEndOfTheWindow(t *testing.T) {
+	pager := &statementPager{fullPages: 2, tailRows: 7}
+	c := newStatementPagerClient(t, pager)
+
+	rows, err := c.FetchWalletStatement(context.Background(), "NGN",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("FetchWalletStatement: %v", err)
+	}
+	want := 2*fwStatementPageSize + 7
+	if len(rows) != want {
+		t.Fatalf("got %d rows, want %d — the older pages were dropped", len(rows), want)
+	}
+	if rows[0].Reference != "ref-0" || rows[len(rows)-1].Reference != fmt.Sprintf("ref-%d", want-1) {
+		t.Errorf("page order lost: first=%q last=%q", rows[0].Reference, rows[len(rows)-1].Reference)
+	}
+	if len(pager.asked) != 3 {
+		t.Errorf("asked for pages %v, want to stop on the short page", pager.asked)
+	}
+}
+
+// The paging parameter names are unverified. A provider that ignores them
+// returns page 1 forever; looping on that would multiply the window instead of
+// extending it.
+func TestFetchWalletStatement_StopsWhenProviderIgnoresPaging(t *testing.T) {
+	pager := &statementPager{fullPages: 3, tailRows: 5, ignore: true}
+	c := newStatementPagerClient(t, pager)
+
+	rows, err := c.FetchWalletStatement(context.Background(), "NGN",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("FetchWalletStatement: %v", err)
+	}
+	if len(rows) != fwStatementPageSize {
+		t.Fatalf("got %d rows, want one page kept once", len(rows))
+	}
+	if len(pager.asked) != 2 {
+		t.Errorf("asked for pages %v, want to stop as soon as a page repeats", pager.asked)
+	}
+}
+
+// Hitting the page bound means the window is genuinely bigger than we can read.
+// Truncating there is survivable; doing it quietly is not.
+func TestFetchWalletStatement_BoundedAndLoudWhenPagesNeverEnd(t *testing.T) {
+	pager := &statementPager{fullPages: fwStatementMaxPages + 5, tailRows: 1}
+	c := newStatementPagerClient(t, pager)
+
+	var logged strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	rows, err := c.FetchWalletStatement(context.Background(), "NGN",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("FetchWalletStatement: %v", err)
+	}
+	if len(rows) != fwStatementMaxPages*fwStatementPageSize {
+		t.Fatalf("got %d rows, want the bound's worth", len(rows))
+	}
+	if len(pager.asked) != fwStatementMaxPages {
+		t.Errorf("asked for %d pages, want to stop at the bound", len(pager.asked))
+	}
+	if !strings.Contains(logged.String(), "statement page bound") {
+		t.Errorf("log = %q, want a loud warning about the truncated window", logged.String())
+	}
+}
+
+// Date-only bounds are the provider's convention, so an end bound of "today"
+// can exclude everything that arrived today — every credit of the current day,
+// invisible.
+func TestFetchWalletStatement_EndBoundCoversTheCurrentDay(t *testing.T) {
+	var tokenCalls int32
+	var gotFrom, gotTo string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/wallets/statement", func(w http.ResponseWriter, r *http.Request) {
+		gotFrom, gotTo = r.URL.Query().Get("from"), r.URL.Query().Get("to")
+		_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	if _, err := c.FetchWalletStatement(context.Background(), "NGN",
+		time.Date(2026, 9, 2, 13, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("FetchWalletStatement: %v", err)
+	}
+	if gotFrom != "2026-09-02" {
+		t.Errorf("from = %q, want the day the window starts in", gotFrom)
+	}
+	if gotTo != "2026-09-04" {
+		t.Errorf("to = %q, want the bound past the last day of the window", gotTo)
 	}
 }

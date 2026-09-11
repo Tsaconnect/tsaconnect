@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -1066,6 +1067,17 @@ func (c *FlutterwaveClient) ConvertBalance(ctx context.Context, merchantID, sour
 // but date-only from/to is its convention on every other listing endpoint.
 const fwStatementDateLayout = "2006-01-02"
 
+const (
+	// fwStatementPageSize is how many rows one request asks for. Also the
+	// signal that a page is the last one: a short page ends the walk.
+	fwStatementPageSize = 100
+	// fwStatementMaxPages bounds the walk so a provider that keeps handing
+	// back full pages cannot spin the poll forever. Reaching it means the
+	// window was NOT fully read, which is why it is logged rather than
+	// absorbed.
+	fwStatementMaxPages = 50
+)
+
 // FWStatementTime is a statement timestamp.
 //
 // It is a bespoke type rather than a plain time.Time because the layout is
@@ -1165,23 +1177,71 @@ type FWStatementEntry struct {
 // wallet funding fires no webhook at all, so a credit nobody polled for is a
 // credit nobody ever sees. from/to bound the window and are omitted when zero.
 //
-// If the provider ignores the window parameters we get its default page, which
-// is harmless: ingestion is idempotent on the NIP session id, so re-reading
-// rows we already hold costs nothing.
+// The window is walked page by page. One request returns one page, and a busy
+// day does not fit in one: everything past it is money that was never seen,
+// and the reconciler — which proves coverage by finding a row older than the
+// window start — has to decline every tick instead of catching it, so the
+// ingest path and its safety net fail at the same threshold.
+//
+// The paging parameter names are as unverified as everything else here, so the
+// walk never trusts them: it stops on a short page, stops when a page comes
+// back identical to the one before it (the shape of a provider ignoring `page`
+// entirely, which would otherwise multiply the window rather than extend it),
+// and stops at a hard bound with a warning rather than spinning.
+//
+// The end bound is pushed a day past `to` because the parameters are date-only
+// and we do not know whether the provider reads them as inclusive. Read as
+// exclusive, "to = today" hides every credit that arrived today. Over-fetching
+// is free — ingestion is idempotent on the NIP session id and the reconciler
+// filters by timestamp — while under-fetching loses money.
 func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency string, from, to time.Time) ([]FWStatementEntry, error) {
 	if !c.IsEnabled() {
 		return nil, ErrFlutterwaveDisabled
 	}
-	q := url.Values{}
-	if cur := strings.ToUpper(strings.TrimSpace(currency)); cur != "" {
-		q.Set("currency", cur)
+	pageQuery := func(page int) url.Values {
+		q := url.Values{}
+		if cur := strings.ToUpper(strings.TrimSpace(currency)); cur != "" {
+			q.Set("currency", cur)
+		}
+		if !from.IsZero() {
+			q.Set("from", from.UTC().Format(fwStatementDateLayout))
+		}
+		if !to.IsZero() {
+			q.Set("to", to.UTC().AddDate(0, 0, 1).Format(fwStatementDateLayout))
+		}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("size", strconv.Itoa(fwStatementPageSize))
+		return q
 	}
-	if !from.IsZero() {
-		q.Set("from", from.UTC().Format(fwStatementDateLayout))
+
+	var all, prev []FWStatementEntry
+	for page := 1; page <= fwStatementMaxPages; page++ {
+		// A failed page is not returned as a short window: partial results
+		// would read downstream as "the rest of the window is empty", and the
+		// row order the provider uses is unverified, so there is no telling
+		// which part is missing. The poll retries in seconds.
+		rows, err := c.fetchStatementPage(ctx, pageQuery(page))
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			return all, nil
+		}
+		if page > 1 && sameStatementPage(prev, rows) {
+			return all, nil
+		}
+		all = append(all, rows...)
+		if len(rows) < fwStatementPageSize {
+			return all, nil
+		}
+		prev = rows
 	}
-	if !to.IsZero() {
-		q.Set("to", to.UTC().Format(fwStatementDateLayout))
-	}
+	log.Printf("[flutterwave] WARNING statement page bound reached: %d pages of %d rows read and the provider still has more; the window is truncated and older credits may be unseen",
+		fwStatementMaxPages, fwStatementPageSize)
+	return all, nil
+}
+
+func (c *FlutterwaveClient) fetchStatementPage(ctx context.Context, q url.Values) ([]FWStatementEntry, error) {
 	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/statement?"+q.Encode(), nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("flutterwave statement: %w", err)
@@ -1198,4 +1258,26 @@ func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency s
 		return nil, fmt.Errorf("flutterwave statement decode data: %w", err)
 	}
 	return parsed, nil
+}
+
+// sameStatementPage reports whether two consecutive pages are the same rows —
+// the only evidence we can get that the provider is ignoring `page`. Rows are
+// compared rather than deduped because two genuinely identical rows do occur,
+// and dropping one would understate the provider's side and raise a phantom
+// surplus at the reconciler.
+func sameStatementPage(a, b []FWStatementEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		switch {
+		case a[i].Reference != b[i].Reference,
+			a[i].Amount != b[i].Amount,
+			a[i].Remarks != b[i].Remarks,
+			a[i].Balance.After != b[i].Balance.After,
+			!a[i].TransactionDate.Equal(b[i].TransactionDate.Time):
+			return false
+		}
+	}
+	return true
 }
