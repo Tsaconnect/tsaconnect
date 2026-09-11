@@ -103,13 +103,26 @@ func main() {
 		}
 		// A held credit is customer money nobody has been able to attribute,
 		// and by design nothing releases it automatically — no refund timer, no
-		// expiry. The alert is the ONLY thing that tells anyone to go look. Not
-		// fatal, because the admin queue still holds the evidence and a mail
-		// outage should not stop the API taking money; loud, because without a
-		// recipient the queue is a place money goes quiet.
-		if len(cfg.InboundAlertEmails) == 0 {
-			log.Printf("[config] WARNING: INBOUND_MODE=central with no INBOUND_ALERT_EMAILS — " +
+		// expiry. The alert is the ONLY thing that tells anyone to go look.
+		//
+		// The dangerous state is the CONFIGURED one: an operator who sets
+		// INBOUND_ALERT_EMAILS is entitled to believe they are paged, and if
+		// Mailjet has no credentials every one of those alerts is discarded at
+		// the first call without anyone noticing. An empty list is merely a
+		// choice — nobody is paged and nobody thinks otherwise — so it says so
+		// plainly and does not shout. Neither is fatal: the admin queue still
+		// holds the evidence, and a mail outage must not stop the API taking
+		// money.
+		switch {
+		case len(cfg.InboundAlertEmails) == 0:
+			log.Printf("[config] INBOUND_MODE=central with no INBOUND_ALERT_EMAILS — " +
 				"held credits will raise no alert and are only visible in the admin queue")
+		case !services.MailerConfigured(cfg.MailjetAPIKey, cfg.MailjetSecretKey):
+			log.Printf("[config] WARNING: INBOUND_ALERT_EMAILS names %d recipient(s) but Mailjet is not configured — "+
+				"every hold alert will be dropped and nobody at those addresses will hear that money is stuck",
+				len(cfg.InboundAlertEmails))
+		default:
+			log.Printf("[config] inbound hold alerts will go to %d recipient(s)", len(cfg.InboundAlertEmails))
 		}
 	}
 
@@ -680,6 +693,16 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// The one operator alert channel for inbound money the pipeline cannot
+	// account for: a credit it refused to attribute, and a window where our
+	// ledger disagrees with the provider's. Both are read by the same people
+	// out of the same INBOUND_ALERT_EMAILS list, and building it once here is
+	// what stops the matcher and the reconciler drifting onto different lists.
+	//
+	// Constructed unconditionally — with no recipients or no mailer it is a
+	// no-op, never a nil the callers have to guard.
+	inboundAlerts := services.NewInboundHoldNotifier(emailService, cfg.InboundAlertEmails, cfg.AdminConsoleBaseURL())
+
 	// Central-account inbound attribution (design 2026-09-10). Polls the
 	// Flutterwave wallet statement and writes every customer credit to
 	// inbound_credits. There is NO webhook for wallet funding, so this poll is
@@ -711,13 +734,18 @@ func main() {
 		//
 		// Read-only, and registered alongside the poller in both modes for the
 		// same reason: what it checks is the ingestor, which runs in both.
-		// Email alerting is wired later via SetNotifier once INBOUND_ALERT_EMAILS
-		// exists; until then the ALERT log lines are the channel.
-		scheduler.Register(jobs.NewInboundReconciler(
+		//
+		// The gap alert is wired here rather than left to the log line it
+		// shipped with, because a short gap is the one finding with NO other
+		// discovery path: the credit never reached inbound_credits, so there is
+		// no held row in the admin queue for anyone to come across.
+		inboundReconciler := jobs.NewInboundReconciler(
 			jobs.NewInboundReconcileSource(config.DB, fwClient),
 			"NGN",
 			5*time.Minute,
-		))
+		)
+		inboundReconciler.SetNotifier(inboundGapAlerts{to: inboundAlerts})
+		scheduler.Register(inboundReconciler)
 		log.Printf("[inbound] reconciler registered (Σ inbound_credits vs statement credits, 5m, both directions)")
 	} else {
 		log.Printf("[inbound] credit poller dormant: no Flutterwave client")
@@ -776,6 +804,10 @@ func main() {
 
 	if inboundPoller != nil && itService != nil {
 		inboundMatcher = services.NewInboundMatcher(config.DB)
+		// Without this the matcher holds credits and tells nobody: the queue
+		// has no automatic exit and is only discoverable by an operator
+		// deciding to open it.
+		inboundMatcher.SetHoldNotifier(inboundAlerts)
 		inboundAdminService.SetBinder(inboundMatcher)
 		registerInboundClaim(services.InboundClaimTypeITMCGP,
 			services.NewITMCGPClaimSource(config.DB, itService))
@@ -1429,6 +1461,30 @@ func (s *pmNGNLedgerSource) SumActiveAvailableNGN(ctx context.Context) (string, 
 
 func (s *pmNGNLedgerSource) FetchParentBalance(ctx context.Context) (string, error) {
 	return s.nomba.FetchParentBalance(ctx)
+}
+
+// inboundGapAlerts adapts the inbound alert channel onto the reconciler's
+// jobs.InboundGapNotifier, for the same reason pmNGNLedgerSource lives here:
+// jobs imports services, so the notifier cannot name jobs.InboundGap without
+// reversing that. The field copy is the price of the one-way dependency and is
+// cheaper than the alternative, which is moving mail composition into jobs
+// where the matcher — the notifier's primary caller — cannot reach it.
+type inboundGapAlerts struct {
+	to *services.InboundHoldNotifier
+}
+
+func (a inboundGapAlerts) NotifyInboundGap(ctx context.Context, gap jobs.InboundGap) error {
+	return a.to.NotifyGap(ctx, services.InboundGapAlert{
+		Currency:     gap.Currency,
+		From:         gap.From,
+		To:           gap.To,
+		IngestedKobo: gap.IngestedKobo,
+		ProviderKobo: gap.ProviderKobo,
+		GapKobo:      gap.GapKobo,
+		IngestedRows: gap.IngestedRows,
+		ProviderRows: gap.ProviderRows,
+		Streak:       gap.Streak,
+	})
 }
 
 // to validate statically here.
