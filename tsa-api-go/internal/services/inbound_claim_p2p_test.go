@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -1049,6 +1050,218 @@ func TestP2PMatch_AFailedReleaseDoesNotHoldTheCreditOnAFalseReason(t *testing.T)
 	r.db.First(&trade, "id = ?", r.trade.ID)
 	if trade.Status != models.P2PTradeStatusPaid {
 		t.Fatalf("trade status = %q, want paid — the paid-orphan shape RecoverStuckTrades sweeps", trade.Status)
+	}
+}
+
+// ─── The trade moving under the matcher ──────────────────────────────────────
+//
+// The claims the matcher binds against are a snapshot. Between OpenClaims
+// reading them and Accept settling one, the trade can legitimately move: the
+// timeout watchdog cancels expired pending_payment trades on a one-minute
+// ticker, so a transfer landing on the deadline is exactly when this happens.
+//
+// Each test below drives the real poller sequence, because Accept called by
+// hand cannot show the window at all.
+
+// tradeMover is a ClaimSource that runs one side effect between the real
+// source's OpenClaims and its Accept — the exact window the watchdog moves a
+// trade in, and a window nothing else in this file can reach. Everything else
+// is the real source, so the matcher, the guard and the settle all run for
+// real.
+type tradeMover struct {
+	inner  ClaimSource
+	move   func()
+	called bool
+}
+
+func (s *tradeMover) OpenClaims(ctx context.Context, currency string) ([]InboundClaim, error) {
+	claims, err := s.inner.OpenClaims(ctx, currency)
+	if s.move != nil && !s.called {
+		s.called = true
+		s.move()
+	}
+	return claims, err
+}
+
+func (s *tradeMover) Accept(ctx context.Context, claimID uuid.UUID, credit *models.InboundCredit) error {
+	return s.inner.Accept(ctx, claimID, credit)
+}
+
+// matchRig seeds the buyer and the credit the matcher will bind, and returns a
+// matcher with the P2P source registered.
+//
+// moveTo, when set, is the status the trade is driven to after the claims have
+// been gathered and before Accept sees them.
+func (r *fwdRig) matchRig(t *testing.T, ref, moveTo string) (*InboundMatcher, *models.InboundCredit) {
+	t.Helper()
+	createInboundMatchTables(t, r.db)
+	if err := r.db.Exec(`INSERT INTO users (id, name, verified_legal_name) VALUES (?, ?, ?)`,
+		r.trade.BuyerID, "Display Name", "JOHN DOE").Error; err != nil {
+		t.Fatalf("seed buyer: %v", err)
+	}
+	credit := seedCredit(t, r.db, ref, 150000, "JOHN DOE")
+
+	var src ClaimSource = r.src
+	if moveTo != "" {
+		mover := &tradeMover{inner: r.src}
+		mover.move = func() {
+			if err := r.db.Model(&models.P2PTrade{}).Where("id = ?", r.trade.ID).
+				Update("status", moveTo).Error; err != nil {
+				t.Errorf("move trade to %s: %v", moveTo, err)
+			}
+		}
+		// A mover that never ran would make every assertion below vacuous.
+		t.Cleanup(func() {
+			if !mover.called {
+				t.Error("the trade was never moved — this test proved nothing")
+			}
+		})
+		src = mover
+	}
+
+	m := NewInboundMatcher(r.db)
+	m.Register(InboundClaimTypeP2PTrade, src)
+	return m, credit
+}
+
+func TestP2PMatch_ATradeCancelledMidMatchDoesNotCreditTheMerchant(t *testing.T) {
+	// The regression this file was carrying. The watchdog cancels the trade
+	// after the matcher gathered it, so the crypto behind it can never be
+	// released — and paying the merchant anyway forwards naira to their bank
+	// against escrow nobody will ever open, with the credit reading `matched`
+	// and nothing anywhere to alert on it.
+	r := newForwardRig(t, "1500.00")
+	m, credit := r.matchRig(t, "999000000040", models.P2PTradeStatusCancelled)
+
+	if _, err := m.MatchPending(context.Background(), 10); err == nil {
+		t.Fatal("MatchPending reported success settling a cancelled trade")
+	}
+
+	if bal := r.availableNGN(t); ngnEqual(bal, "1500.00") {
+		t.Fatalf("available_ngn = %q — the merchant was paid for a trade that can never release", bal)
+	}
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.Status == models.InboundCreditMatched {
+		t.Fatal("credit marked matched — the money is unattributed and nothing will ever say so")
+	}
+	var count int64
+	r.db.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", r.trade.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("%d forward row(s) written — the merchant's bank transfer was queued anyway", count)
+	}
+
+	// And the operator can see it: the next tick has no claim to offer, so the
+	// credit lands in the hold queue rather than sitting silently.
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("second MatchPending: %v", err)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditHeld {
+		t.Fatalf("credit status = %q after the second tick, want held — an unsettleable credit must reach an operator", got.Status)
+	}
+}
+
+func TestP2PMatch_ADisputedTradeMidMatchDoesNotCreditTheMerchant(t *testing.T) {
+	// Same window, the other exit from pending_payment that AutoRelease
+	// refuses. A dispute is an operator's decision about who the money belongs
+	// to, and settling through it pays the merchant before that is answered.
+	r := newForwardRig(t, "1500.00")
+	m, credit := r.matchRig(t, "999000000041", models.P2PTradeStatusDisputed)
+
+	if _, err := m.MatchPending(context.Background(), 10); err == nil {
+		t.Fatal("MatchPending reported success settling a disputed trade")
+	}
+	if bal := r.availableNGN(t); ngnEqual(bal, "1500.00") {
+		t.Fatalf("available_ngn = %q — the merchant was paid while the trade was under dispute", bal)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status == models.InboundCreditMatched {
+		t.Fatal("credit marked matched — a disputed trade was settled silently")
+	}
+}
+
+func TestP2PMatch_ACancelledTradeIsNotDeferredToARecoveryJobThatSkipsIt(t *testing.T) {
+	// Defence in depth, reached through the one door the guard holds open.
+	//
+	// A first attempt credits the merchant and fails to settle, so a forward
+	// row now owns this ref and the guard must re-drive the credit. Between
+	// that and the replay the trade is cancelled. Only settleTrade can catch
+	// this — and it must, because RecoverStuckTrades selects `status = paid`,
+	// so deferring a cancelled trade marks the credit `matched` for a release
+	// nothing will ever perform.
+	r := newForwardRig(t, "1500.00")
+	m, credit := r.matchRig(t, "999000000042", "")
+	ctx := context.Background()
+
+	// Tick 1: credit the merchant, then break the release the same way the
+	// paid-orphan test does, so markPaid commits and AutoRelease does not.
+	r.esc.verifyReleasedErr = errors.New("rpc timeout verifying the release")
+	if _, err := m.MatchPending(ctx, 10); err != nil {
+		t.Fatalf("first MatchPending: %v", err)
+	}
+	if !ngnEqual(r.availableNGN(t), "1500.00") {
+		t.Fatalf("precondition: available_ngn = %q, want the merchant credited", r.availableNGN(t))
+	}
+
+	// The trade is then cancelled out from under the half-finished settle.
+	if err := r.db.Model(&models.P2PTrade{}).Where("id = ?", r.trade.ID).
+		Update("status", models.P2PTradeStatusCancelled).Error; err != nil {
+		t.Fatalf("cancel trade: %v", err)
+	}
+	if err := r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).
+		Update("status", models.InboundCreditUnmatched).Error; err != nil {
+		t.Fatalf("reopen credit: %v", err)
+	}
+
+	// The replay must refuse rather than defer.
+	err := r.src.Accept(ctx, r.trade.ID, reloadCredit(t, r.db, credit.ID))
+	if err == nil {
+		t.Fatal("Accept deferred a cancelled trade to a recovery job that only sweeps `paid`")
+	}
+	if !strings.Contains(err.Error(), models.P2PTradeStatusCancelled) {
+		t.Fatalf("error %q does not name the status that made it unrecoverable", err)
+	}
+	if errors.Is(err, errP2PReleaseDeferred) {
+		t.Fatalf("error is still the deferral sentinel, so the matcher will mark trade %s settled", r.trade.ID)
+	}
+}
+
+func TestP2PAccept_ReplayOnADifferentTradeIsStillRefused(t *testing.T) {
+	// The guard's exception is scoped to a forward row for THIS ref on THIS
+	// trade. A ref that already settled some other trade is not a replay of
+	// this one, and letting it through would clear the guard and then hand
+	// settleTrade a trade no credit ever paid for.
+	r := newForwardRig(t, "1500.00")
+	ref := "999000000043"
+
+	// A forward row owning the ref, but belonging to a different trade.
+	other := &models.P2PSettlementForward{
+		ID: uuid.New(), TradeID: uuid.New(), PMID: r.pm.ID,
+		ProviderRef: ref, Currency: "NGN", Amount: "1500.00",
+		Status: models.P2PForwardPending, Reference: p2pForwardRefPrefix + uuid.New().String(),
+	}
+	if err := r.db.Create(other).Error; err != nil {
+		t.Fatalf("seed foreign forward: %v", err)
+	}
+	// This trade is at `paid` — releasable, and nobody has paid for it. A
+	// ref-only replay check admits the credit here, claimAndCredit then reads
+	// the FOREIGN row back as "already ours" and credits nothing, and the
+	// release fires: the buyer gets the crypto, paid for by money that settled
+	// somebody else's trade, and Accept reports success.
+	if err := r.db.Model(&models.P2PTrade{}).Where("id = ?", r.trade.ID).
+		Update("status", models.P2PTradeStatusPaid).Error; err != nil {
+		t.Fatalf("advance trade: %v", err)
+	}
+
+	err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit(ref, "1500.00"))
+	if err == nil {
+		t.Fatal("Accept settled this trade off another trade's forward row")
+	}
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status == models.P2PTradeStatusReleased {
+		t.Fatal("the crypto was released against a credit that belongs to a different trade")
+	}
+	if bal := r.availableNGN(t); ngnEqual(bal, "1500.00") {
+		t.Fatalf("available_ngn = %q — one ref credited the merchant twice", bal)
 	}
 }
 

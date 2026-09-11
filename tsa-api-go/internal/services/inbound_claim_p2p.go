@@ -83,8 +83,15 @@ const p2pForwardSweepBatch = 200
 var ErrForwardNoSettlementAccount = errors.New("p2p forward: merchant has no settlement bank configured")
 
 // errP2PReleaseDeferred marks the one settle failure Accept must NOT report as
-// an error: markPaid has already committed, so the trade has left
-// pending_payment and OpenClaims will never offer it again.
+// an error: the trade has left pending_payment, so OpenClaims will never offer
+// it again, AND it is in a state a background job still comes back for — see
+// p2pReleaseIsRecoverable for which states those are and why.
+//
+// It is deliberately NOT every failed release. Wrapping a cancelled or disputed
+// trade in this makes Accept return nil and the matcher stamp the credit
+// `matched`, while no sweep's filter ever selects that trade — merchant paid,
+// buyer's crypto escrowed forever, no alert. settleTrade re-reads the status
+// precisely so this stays the narrow case it claims to be.
 //
 // Surfacing it would leave the credit `unmatched` for a matcher that can no
 // longer find its claim, and the next tick would hold the credit as "no open
@@ -242,6 +249,39 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 		return err
 	}
 
+	// Nothing below this line may move money for a trade that has left
+	// pending_payment. A fresh Accept should only ever see that status, because
+	// both the matcher and BindManually reach here through OpenClaims — so any
+	// other status means the trade moved between the claim being gathered and
+	// this call. The timeout watchdog cancelling an expired trade on its
+	// one-minute ticker is the real way that happens, and a transfer landing on
+	// the deadline is exactly when the window is open.
+	//
+	// The damage that follows is silent, which is why the check is here rather
+	// than deeper: AutoRelease refuses a cancelled or disputed trade, so the
+	// buyer's crypto stays escrowed forever while the merchant has been
+	// credited AND forwarded to their bank, and the credit reads `matched` with
+	// nothing left to alert anyone.
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		// Unless this ref already owns this trade's forward row. That is a
+		// replay of an attempt that credited and then failed to finish
+		// settling, and it is the one case that MUST be re-driven — refusing it
+		// would wedge a half-done settle forever with the money already booked
+		// and nothing coming back for it.
+		//
+		// Scoped to this trade as well as this ref: a ref that settled some
+		// OTHER trade is not a replay of this one, and admitting it would clear
+		// the guard and then hand settleTrade a trade no credit ever paid for.
+		replay, err := s.forwardFor(ctx, trade.ID, ref)
+		if err != nil {
+			return err
+		}
+		if replay == nil {
+			return fmt.Errorf("p2p accept: trade %s is %s, not pending_payment; credit %s must not settle it",
+				trade.ID, trade.Status, ref)
+		}
+	}
+
 	// fresh gates the LEDGER only. Everything after it is idempotent and is
 	// re-driven on a replay on purpose: if a first attempt credited the
 	// merchant and then failed to settle, short-circuiting here would leave the
@@ -257,11 +297,13 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// alternative is releasing crypto against a ledger entry that does not
 	// exist yet.
 	//
-	// A failed RELEASE is not an Accept failure, for the same reason a failed
-	// forward is not one below. markPaid has committed by then, so the trade is
-	// at `paid` and PMRecoveryJob's paid-orphan sweep owns it — that job exists
-	// for precisely this. Returning the error instead would strand the credit
-	// on a hold reason that is not true; see errP2PReleaseDeferred.
+	// A failed release is not an Accept failure ONLY when settleTrade has
+	// re-read the trade and found a state a recovery job still owns, which is
+	// what errP2PReleaseDeferred means. Then returning the error would strand
+	// the credit on a hold reason that is not true. Every other failed
+	// release — including a trade cancelled or disputed under us — comes back
+	// as an ordinary error, because nothing would ever come back for it and a
+	// `matched` credit over an unreleased trade alerts nobody.
 	if err := s.settleTrade(ctx, trade.ID, ref); err != nil {
 		if !errors.Is(err, errP2PReleaseDeferred) {
 			return fmt.Errorf("p2p accept: settle trade %s: %w", trade.ID, err)
@@ -299,6 +341,26 @@ func (s *P2PTradeClaimSource) merchantForTrade(ctx context.Context, adID uuid.UU
 		return nil, fmt.Errorf("p2p accept: load merchant %s: %w", *ad.PMID, err)
 	}
 	return pm, nil
+}
+
+// forwardFor reports whether this exact credit has already claimed this exact
+// trade, returning nil when it has not.
+//
+// Both keys together, never either alone: provider_ref and trade_id are each
+// unique on their own, so a one-key match can be some other credit's row or
+// some other trade's, and both would read back as "already ours".
+func (s *P2PTradeClaimSource) forwardFor(ctx context.Context, tradeID uuid.UUID, ref string) (*models.P2PSettlementForward, error) {
+	var fwd models.P2PSettlementForward
+	err := s.db.WithContext(ctx).
+		Where("trade_id = ? AND provider_ref = ?", tradeID, ref).
+		First(&fwd).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("p2p accept: look up forward for trade %s: %w", tradeID, err)
+	}
+	return &fwd, nil
 }
 
 // claimAndCredit writes the forward row and credits the merchant's ledger in
@@ -392,11 +454,67 @@ func (s *P2PTradeClaimSource) settleTrade(ctx context.Context, tradeID uuid.UUID
 		}
 	}
 	if _, err := s.trades.AutoRelease(ctx, tradeID, s.signer); err != nil {
-		// Past this line the trade has left pending_payment whichever branch
-		// above ran, so the claim is gone and only PMRecoveryJob can finish it.
+		// Deferral is earned by the trade's actual shape, not assumed from the
+		// fact that a release failed. RecoverStuckTrades sweeps `paid` and only
+		// `paid`, so that is the only status with a job behind it; deferring
+		// any other one tells the matcher to stamp the credit `matched` for a
+		// release nothing will ever come back to do.
+		//
+		// The status can still have moved under us — the guard in Accept cannot
+		// cover the gap between itself and this line — so it is re-read here
+		// rather than inferred from the branches above.
+		status, statusErr := s.tradeStatus(ctx, tradeID)
+		if statusErr != nil {
+			// An unknown state is not a recoverable one. Reported as an
+			// ordinary error so the credit stays visible: the alternative is
+			// guessing `paid` and handing an unreleased trade to a sweep that
+			// may never select it.
+			return fmt.Errorf("trade %s: release failed (%v) and its status could not be re-read: %w",
+				tradeID, err, statusErr)
+		}
+		if !p2pReleaseIsRecoverable(status) {
+			return fmt.Errorf("trade %s is %s after a failed release, so no recovery job owns it: %v",
+				tradeID, status, err)
+		}
+		// An orphan with an owner: the claim is gone from OpenClaims but a job
+		// will come back for the release, so erroring would strand the credit
+		// on a hold reason that is not true — see errP2PReleaseDeferred.
 		return fmt.Errorf("%w: trade %s: %v", errP2PReleaseDeferred, tradeID, err)
 	}
 	return nil
+}
+
+// p2pReleaseIsRecoverable reports whether a trade whose release just failed has
+// a background job that will come back for it.
+//
+// Exhaustive on purpose, because everything NOT in this list is a credit the
+// matcher would mark `matched` with nobody left to finish the release:
+//
+//	paid       RecoverStuckTrades sweeps exactly this, the paid-orphan.
+//	releasing  the chain reconciler reverts a stale `releasing` back to `paid`
+//	           once the grace window says the release tx was lost, which hands
+//	           it to RecoverStuckTrades. Two hops, but an owner at both.
+//
+// cancelled, disputed and resolved are the dangerous ones: AutoRelease refuses
+// them, RecoverStuckTrades' `status = paid` filter never selects them, and the
+// buyer's crypto stays escrowed for good.
+func p2pReleaseIsRecoverable(status string) bool {
+	return status == models.P2PTradeStatusPaid || status == models.P2PTradeStatusReleasing
+}
+
+// tradeStatus re-reads one trade's status, nothing else.
+func (s *P2PTradeClaimSource) tradeStatus(ctx context.Context, tradeID uuid.UUID) (string, error) {
+	var status string
+	if err := s.db.WithContext(ctx).
+		Model(&models.P2PTrade{}).
+		Where("id = ?", tradeID).
+		Pluck("status", &status).Error; err != nil {
+		return "", err
+	}
+	if status == "" {
+		return "", fmt.Errorf("trade %s has no status row", tradeID)
+	}
+	return status, nil
 }
 
 // ─── Instant forward ────────────────────────────────────────────────────────
