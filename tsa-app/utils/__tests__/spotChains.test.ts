@@ -51,6 +51,20 @@ describe('resolveSpotChain', () => {
     expect(resolveSpotChain(null)).toBeNull();
   });
 
+  // The key arrives from the API and from a deep link, so it is untrusted.
+  it('refuses inherited Object keys, which a plain-object lookup would resolve', () => {
+    expect(resolveSpotChain('constructor')).toBeNull();
+    expect(resolveSpotChain('valueOf')).toBeNull();
+    expect(resolveSpotChain('hasOwnProperty')).toBeNull();
+    expect(resolveSpotChain('__proto__')).toBeNull();
+  });
+
+  it('refuses a repeated query param, which expo-router hands over as an array', () => {
+    expect(resolveSpotChain(['sonic', 'bsc'] as never)).toBeNull();
+    expect(resolveSpotChain(42 as never)).toBeNull();
+    expect(resolveSpotChain({} as never)).toBeNull();
+  });
+
   it('is case- and whitespace-insensitive, since the key crosses an API', () => {
     expect(resolveSpotChain('  SONIC ')?.evmKey).toBe('sonic');
     expect(resolveSpotChain('Solana')?.family).toBe('solana');

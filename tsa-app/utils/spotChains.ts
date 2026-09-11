@@ -12,7 +12,7 @@
 // desk cannot trade. Returning null keeps such a listing from reaching a form
 // that could only fail at quote time.
 import {
-  CHAINS, NONEVM_CHAINS, isNonEVMChain, type ChainKey, type NonEVMChainKey,
+  CHAINS, CHAIN_KEYS, NONEVM_CHAINS, isNonEVMChain, type ChainKey, type NonEVMChainKey,
 } from '@/constants/chains';
 import { SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID } from '@/services/lifi';
 
@@ -41,9 +41,14 @@ const NON_EVM_LIFI_IDS: Partial<Record<NonEVMChainKey, number>> = {
  * Maps a listing's chain key to its LiFi chain. Returns null for anything the
  * same-chain desk cannot trade: an unknown key, Tron (LiFi has no Tron route),
  * or Bitcoin (single-asset chain — see the note at the top of this file).
+ *
+ * The key is untrusted — it comes from the API and from the screen's own route
+ * params, where a repeated query param arrives as an array rather than a
+ * string. Anything that is not a recognised key resolves to null.
  */
-export function resolveSpotChain(chain: string | undefined | null): SpotChain | null {
-  const key = (chain || '').trim().toLowerCase();
+export function resolveSpotChain(chain: unknown): SpotChain | null {
+  if (typeof chain !== 'string') return null;
+  const key = chain.trim().toLowerCase();
   if (!key) return null;
 
   if (isNonEVMChain(key)) {
@@ -57,14 +62,17 @@ export function resolveSpotChain(chain: string | undefined | null): SpotChain | 
     };
   }
 
+  // Membership is checked against the key LIST, not by indexing CHAINS: a plain
+  // object resolves inherited members, so CHAINS['constructor'] is truthy and
+  // would sail through as a chain named "Object".
+  if (!(CHAIN_KEYS as string[]).includes(key)) return null;
   const evm = CHAINS[key as ChainKey];
-  if (!evm) return null;
   return { lifiChainId: evm.chainId, name: evm.name, family: 'evm', evmKey: key as ChainKey };
 }
 
-/** True when LiFi's id is Bitcoin's — the one chain we reject by design. */
-export function isBitcoinSpotChain(chain: string | undefined | null): boolean {
-  return (chain || '').trim().toLowerCase() === 'btc';
+/** True when the key is Bitcoin's — the one chain we reject by design. */
+export function isBitcoinSpotChain(chain: unknown): boolean {
+  return typeof chain === 'string' && chain.trim().toLowerCase() === 'btc';
 }
 
 export { BTC_LIFI_CHAIN_ID };

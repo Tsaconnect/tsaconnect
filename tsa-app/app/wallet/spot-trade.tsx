@@ -30,6 +30,7 @@ import {
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import type { WalletBalanceWithChain } from '@/services/walletApi';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { resolveSpotChain, isBitcoinSpotChain, type SpotChain } from '@/utils/spotChains';
@@ -59,29 +60,50 @@ function unsupportedChainMessage(chain: string | undefined): string {
     : 'This pair’s network is not supported on this device.';
 }
 
-/**
- * Live balance of one leg, in human units. EVM reads the chain directly; Solana
- * and Sui have no ERC-20 call to make, so they read the wallet's rows and match
- * the token — by mint for Solana (the native row carries no contract address),
- * by symbol for Sui, whose coin types don't match LiFi's address form.
- */
-async function readSpotBalance(chain: SpotChain, address: string, token: LiFiToken): Promise<string> {
-  if (chain.family === 'solana') {
-    const rows = await getSolanaBalances(address);
-    const isNative = token.address === SOLANA_NATIVE_ADDRESS;
-    const row = rows.find((b) => (isNative ? !b.contractAddress : b.contractAddress === token.address));
-    return row?.balance ?? '0';
-  }
+/** Matches one leg against the wallet's rows — by mint on Solana (the native
+ *  row carries no contract address), by symbol on Sui, whose coin types don't
+ *  match LiFi's address form. A token the wallet doesn't hold reads as zero. */
+function matchRow(chain: SpotChain, rows: WalletBalanceWithChain[], token: LiFiToken): string {
   if (chain.family === 'sui') {
-    const rows = await getSuiBalances(address);
-    const row = rows.find((b) => b.symbol.toUpperCase() === token.symbol.toUpperCase());
-    return row?.balance ?? '0';
+    return rows.find((b) => b.symbol.toUpperCase() === token.symbol.toUpperCase())?.balance ?? '0';
   }
-  if (!chain.evmKey) throw new Error('Unsupported network');
-  const raw = isNativeAddr(token.address)
-    ? await getProvider(chain.evmKey).getBalance(address)
-    : await readErc20BalanceOf(token.address, address, chain.evmKey);
-  return ethers.formatUnits(raw, token.decimals);
+  const isNative = token.address === SOLANA_NATIVE_ADDRESS;
+  return rows.find((b) => (isNative ? !b.contractAddress : b.contractAddress === token.address))?.balance ?? '0';
+}
+
+/**
+ * Live balances for the pair's two legs, in human units, or null where the read
+ * failed. EVM reads each token from the chain, so the legs are independent and
+ * one failing leaves the other. Solana and Sui have no per-token call to make:
+ * both legs match against ONE fetch of the wallet's rows, so that fetch happens
+ * once per setup rather than once per leg.
+ */
+async function readSpotBalances(
+  chain: SpotChain, address: string, tokens: LiFiToken[],
+): Promise<(string | null)[]> {
+  if (chain.family === 'solana' || chain.family === 'sui') {
+    try {
+      const rows = chain.family === 'solana'
+        ? await getSolanaBalances(address)
+        : await getSuiBalances(address);
+      return tokens.map((t) => matchRow(chain, rows, t));
+    } catch {
+      // One fetch backs both legs, so its failure means neither is known.
+      return tokens.map(() => null);
+    }
+  }
+  const evmKey = chain.evmKey;
+  if (!evmKey) return tokens.map(() => null);
+  return Promise.all(tokens.map(async (t) => {
+    try {
+      const raw = isNativeAddr(t.address)
+        ? await getProvider(evmKey).getBalance(address)
+        : await readErc20BalanceOf(t.address, address, evmKey);
+      return ethers.formatUnits(raw, t.decimals);
+    } catch {
+      return null;
+    }
+  }));
 }
 
 export default function SpotTrade() {
@@ -117,7 +139,7 @@ export default function SpotTrade() {
   const [txHash, setTxHash] = useState('');
 
   // Resolve the pair's symbols against the chain's LiFi token list, then read
-  // both legs' live balances (native via getBalance, ERC-20 via balanceOf).
+  // both legs' live balances the way this chain's VM allows.
   const setup = useCallback(async () => {
     setSetupLoading(true);
     setSetupError('');
@@ -160,11 +182,7 @@ export default function SpotTrade() {
       setFromToken(from);
       setToToken(to);
 
-      const readBal = (t: LiFiToken) => readSpotBalance(spotChain, addr, t);
-      const [fb, tb] = await Promise.all([
-        readBal(from).catch(() => null),
-        readBal(to).catch(() => null),
-      ]);
+      const [fb, tb] = await readSpotBalances(spotChain, addr, [from, to]);
       setFromBalance(fb == null ? null : Number(fb));
       setFromBalanceStr(fb ?? '0');
       setToBalance(tb == null ? null : Number(tb));
