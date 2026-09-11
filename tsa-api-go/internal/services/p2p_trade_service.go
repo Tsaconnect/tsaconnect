@@ -1202,6 +1202,14 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return s.openTradeWithDeposit(ctx, &ad, buyerID, buyerAddress, params)
 	}
 
+	// Below the buy-ad branch on purpose. From here down `buyerID` really is
+	// the buyer: they are about to send fiat. On the branch above the opener is
+	// depositing crypto to SELL it, and gating that would trap a balance they
+	// already hold.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
+		return nil, nil, err
+	}
+
 	// Effective rate is recomputed live for float ads (snapshotted onto the
 	// trade row below), and returned verbatim for fixed ads. ErrRateStale on
 	// float ads is surfaced unchanged so the handler maps it to 503.

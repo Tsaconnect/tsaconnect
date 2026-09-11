@@ -987,12 +987,8 @@ func createInboundMatchTables(t *testing.T, db *gorm.DB) {
 			updated_at DATETIME
 		)`,
 		`CREATE UNIQUE INDEX idx_fwd_rig_inbound_ref ON inbound_credits (provider_ref)`,
-		`CREATE TABLE users (
-			id TEXT PRIMARY KEY,
-			name TEXT,
-			verified_legal_name TEXT,
-			verified_legal_name_at DATETIME
-		)`,
+		// No users table here: setupTradeDB creates it (testUsersDDL), because
+		// opening a trade as the buyer now reads verification_status from it.
 	} {
 		if err := db.Exec(stmt).Error; err != nil {
 			t.Fatalf("inbound match ddl: %v\nSQL=%s", err, stmt)

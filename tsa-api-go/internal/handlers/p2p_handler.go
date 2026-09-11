@@ -146,7 +146,12 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrPaymentMethodMissing),
 		errors.Is(err, services.ErrDisputeNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, services.ErrForbidden):
+	case errors.Is(err, services.ErrForbidden),
+		// The buyer has not finished verification. The blanket P2P check in
+		// require() normally catches this first; the service raises it too so
+		// a caller that reaches OpenTrade by any other route is refused the
+		// same way rather than opening a trade nobody can attribute.
+		errors.Is(err, services.ErrKYCVerificationRequired):
 		status = http.StatusForbidden
 	case errors.Is(err, services.ErrInvalidParams),
 		errors.Is(err, services.ErrAmountOutOfRange),

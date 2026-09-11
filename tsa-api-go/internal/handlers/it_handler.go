@@ -476,6 +476,12 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	// Ahead of the VA branch below, which answers a user with no virtual
+	// account by telling them to activate one. An unverified user must be sent
+	// to verification instead of onto a rail that is being retired.
+	if !h.requireVerifiedForMoneyIn(c, user.ID) {
+		return
+	}
 
 	// Central mode has no per-user account to find, so the VA lookup — and the
 	// activation refusal hanging off it — must not run at all. Left in place it
@@ -1083,6 +1089,12 @@ func (h *ITHandler) GetStuckStableBuys(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Stuck buys", gin.H{"stuck": rows, "thresholdMinutes": minutes})
 }
 
+// kycRequiredCode is the one machine code every money-in refusal carries, on
+// the MCGP leg and the stablecoin leg alike. The app routes it to the
+// verification flow, so a second spelling would silently lose one of the two
+// entry points on the client.
+const kycRequiredCode = "kyc_verification_required"
+
 // stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
 // is a 400; a missing provider or unconfigured deposit address is a 503,
 // because the request was fine and the platform was not.
@@ -1127,6 +1139,12 @@ func stableStatusFor(err error) int {
 		// it needs an operator, not a retry from the caller. Ours, not theirs.
 		errors.Is(err, services.ErrStableDeliveryExhausted):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		// 403, alongside the agreement gate: the caller is authenticated and
+		// the request is well-formed, but they are not permitted to transact
+		// yet. A 400 would read as "fix your input" on a screen where there is
+		// no input to fix.
+		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
 	}
@@ -1185,6 +1203,8 @@ func stableCodeFor(err error) string {
 		return "stable_unsupported_chain_asset"
 	case errors.Is(err, services.ErrStableDeliveryExhausted):
 		return "stable_delivery_exhausted"
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		return kycRequiredCode
 	default:
 		return ""
 	}
@@ -1208,6 +1228,24 @@ func (h *ITHandler) requireITAgreement(c *gin.Context, userID uuid.UUID) bool {
 	}
 	log.Printf("[it] agreement gate user=%s: %v", userID, err)
 	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify the trading agreement")
+	return false
+}
+
+// requireVerifiedForMoneyIn writes the 403 + machine code and returns false
+// when the caller may not pay in yet (handler must stop). Money-out endpoints
+// must not call it — see the note on services.ErrKYCVerificationRequired.
+func (h *ITHandler) requireVerifiedForMoneyIn(c *gin.Context, userID uuid.UUID) bool {
+	err := h.it.RequireVerifiedForMoneyIn(c.Request.Context(), userID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, services.ErrKYCVerificationRequired) {
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRequiredCode)
+		return false
+	}
+	// Fail closed, loudly. A DB error here must not read as "verified".
+	log.Printf("[it] kyc gate user=%s: %v", userID, err)
+	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not check your verification status")
 	return false
 }
 

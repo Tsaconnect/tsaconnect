@@ -392,6 +392,12 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 // every single time. Rounding here rather than at the comparison also means the
 // user is only ever shown a figure they can actually transfer.
 func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string) (*models.ITIntent, error) {
+	// Ahead of the supersede UPDATE below, not after it: a refused user must
+	// keep whatever order they already have. Cancelling it on the way to a
+	// refusal would close an order they may already have transferred into.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, userID); err != nil {
+		return nil, err
+	}
 	ngnKobo = wholeNairaKobo(ngnKobo)
 	_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("user_id = ? AND direction = ? AND status = ? AND payment_ref LIKE ?",

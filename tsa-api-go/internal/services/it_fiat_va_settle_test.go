@@ -23,22 +23,9 @@ const testChargeID = "chg_test_0001"
 func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtualAccount) {
 	t.Helper()
 	s := newITTestService(t)
-	// Raw DDL, not AutoMigrate — models.User carries PostgreSQL-specific
-	// defaults SQLite rejects (repo convention, see tsa-api-go/CLAUDE.md). Only
-	// the columns settlement reads are needed.
-	if err := s.db.Exec(`CREATE TABLE users (
-		id TEXT PRIMARY KEY,
-		name TEXT,
-		email TEXT,
-		phone_number TEXT,
-		wallet_address TEXT,
-			suspension_reason TEXT,
-			suspended_at DATETIME,
-			suspended_by TEXT,
-			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
-		)`).Error; err != nil {
-		t.Fatalf("create users: %v", err)
-	}
+	// The users table comes from newITTestService (testUsersDDL) — settlement
+	// reads the payer from it, and the money-in gate reads
+	// verification_status.
 	if _, err := s.SetRate(context.Background(), uuid.New(), 20000, 0); err != nil {
 		t.Fatalf("set rate: %v", err)
 	}
@@ -51,8 +38,8 @@ func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtu
 	// Raw insert to match the raw table above (GORM would write every column of
 	// models.User).
 	if err := s.db.Exec(
-		`INSERT INTO users (id, name, email, phone_number, wallet_address) VALUES (?, ?, ?, ?, ?)`,
-		user.ID, user.Name, user.Email, "08031234567", user.WalletAddress,
+		`INSERT INTO users (id, name, email, phone_number, wallet_address, verification_status) VALUES (?, ?, ?, ?, ?, ?)`,
+		user.ID, user.Name, user.Email, "08031234567", user.WalletAddress, models.VerificationStatusVerified,
 	).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
