@@ -344,7 +344,3 @@ func (s *EmailService) buildOTPTemplate(code string) (string, error) {
 	}
 	return out.String(), nil
 }
-
-func (s *EmailService) buildTemplate(title, message, ctaText, ctaURL string) (string, error) {
-	return plainEmailBody(message).RenderHTML(title, ctaText, ctaURL)
-}

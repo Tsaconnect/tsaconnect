@@ -15,16 +15,14 @@ import (
 // real money goes.
 
 func TestEmailTemplateEscapesProviderControlledText(t *testing.T) {
-	s := &EmailService{}
-
-	body, err := s.buildTemplate(
-		`Reason held: <script>alert('xss')</script>`,
-		"Received Money from GTBANK|<img src=x onerror=alert(1)>",
-		"Review",
-		"https://admin.tsa.test/inbound/credits/1",
-	)
+	body, err := plainEmailBody("Received Money from GTBANK|<img src=x onerror=alert(1)>").
+		RenderHTML(
+			`Reason held: <script>alert('xss')</script>`,
+			"Review",
+			"https://admin.tsa.test/inbound/credits/1",
+		)
 	if err != nil {
-		t.Fatalf("buildTemplate: %v", err)
+		t.Fatalf("RenderHTML: %v", err)
 	}
 
 	// Tag delimiters are the whole question: escaped, the attribute names are
@@ -44,11 +42,9 @@ func TestEmailTemplateEscapesProviderControlledText(t *testing.T) {
 // A CTA URL is an href, the one part of the email an operator is told to
 // click. A javascript: or data: scheme there turns the alert into the attack.
 func TestEmailTemplateNeutersAHostileCTAURL(t *testing.T) {
-	s := &EmailService{}
-
-	body, err := s.buildTemplate("Title", "Message", "Review this payment", "javascript:alert(1)")
+	body, err := plainEmailBody("Message").RenderHTML("Title", "Review this payment", "javascript:alert(1)")
 	if err != nil {
-		t.Fatalf("buildTemplate: %v", err)
+		t.Fatalf("RenderHTML: %v", err)
 	}
 	if strings.Contains(body, "javascript:alert") {
 		t.Errorf("javascript: URL survived into an href\n---\n%s", body)
@@ -60,11 +56,9 @@ func TestEmailTemplateNeutersAHostileCTAURL(t *testing.T) {
 // and much harder to read at 3am, so the template has to turn them into
 // breaks rather than swallowing them.
 func TestEmailTemplateKeepsLineBreaks(t *testing.T) {
-	s := &EmailService{}
-
-	body, err := s.buildTemplate("Title", "Amount: NGN 2,000.00\nReason held: contested", "", "")
+	body, err := plainEmailBody("Amount: NGN 2,000.00\nReason held: contested").RenderHTML("Title", "", "")
 	if err != nil {
-		t.Fatalf("buildTemplate: %v", err)
+		t.Fatalf("RenderHTML: %v", err)
 	}
 	if !strings.Contains(body, "Amount: NGN 2,000.00<br>Reason held: contested") {
 		t.Errorf("line break not rendered as <br>\n---\n%s", body)
@@ -72,11 +66,9 @@ func TestEmailTemplateKeepsLineBreaks(t *testing.T) {
 }
 
 func TestEmailTemplateDropsTheCTABlockWhenThereIsNoLink(t *testing.T) {
-	s := &EmailService{}
-
-	body, err := s.buildTemplate("Title", "Message", "", "")
+	body, err := plainEmailBody("Message").RenderHTML("Title", "", "")
 	if err != nil {
-		t.Fatalf("buildTemplate: %v", err)
+		t.Fatalf("RenderHTML: %v", err)
 	}
 	if strings.Contains(body, "<a href") {
 		t.Errorf("rendered a CTA anchor with no link configured\n---\n%s", body)
@@ -160,11 +152,9 @@ func TestEmailBodyRendersItsOwnMarkupAndEscapesTheText(t *testing.T) {
 // Send's plain-text callers keep what they have: their message is text, its
 // newlines become breaks, and nothing in it is markup.
 func TestPlainSendBodyStillEscapesEverything(t *testing.T) {
-	s := &EmailService{}
-
-	out, err := s.buildTemplate("Title", "Amount: NGN 2,000.00\n<b>not bold</b>", "", "")
+	out, err := plainEmailBody("Amount: NGN 2,000.00\n<b>not bold</b>").RenderHTML("Title", "", "")
 	if err != nil {
-		t.Fatalf("buildTemplate: %v", err)
+		t.Fatalf("RenderHTML: %v", err)
 	}
 	if !strings.Contains(out, "Amount: NGN 2,000.00<br>") {
 		t.Errorf("line break not rendered as <br>\n---\n%s", out)
