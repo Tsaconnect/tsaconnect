@@ -138,8 +138,31 @@ func (i *InboundIngestor) RunOnce(ctx context.Context) (IngestResult, error) {
 // page by hand after an outage.
 func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntry) (IngestResult, error) {
 	res := IngestResult{Rows: len(rows)}
-	fees := pairFundingFees(rows)
 	seenAt := i.now().UTC()
+
+	// This order is the only one that holds, and both halves of it are load
+	// bearing.
+	//
+	// The dedupe key comes off the RAW row, before anything is cleaned. Every
+	// credit recorded before sanitization existed is stored under a ref derived
+	// from raw text, and a reference or remark carrying a format character is
+	// precisely the case sanitization changes. Deriving the ref from cleaned
+	// text moves it: the overlapping lookback stops recognising the row, the
+	// unique index never fires, and one real payment becomes two credits for
+	// the matcher to bind to two open claims at the same amount.
+	//
+	// Everything downstream of the ref then reads ONE cleaned copy of the page.
+	// Fee pairing decides which credit a fee belongs to by comparing the two
+	// rows' references, so it has to compare the same text the credit is built
+	// from; pairing on raw references while the credit carries cleaned ones
+	// lets a fee land on the wrong credit, inflating one gross and understating
+	// another, and a wrong gross is a wrong match.
+	refs := make([]string, len(rows))
+	for idx := range rows {
+		refs[idx] = providerRefFor(rows[idx])
+	}
+	rows = sanitizeStatementRows(rows)
+	fees := pairFundingFees(rows)
 
 	credits := make([]*models.InboundCredit, 0, len(rows))
 	for idx, row := range rows {
@@ -152,7 +175,7 @@ func (i *InboundIngestor) IngestRows(ctx context.Context, rows []FWStatementEntr
 		}
 		res.Funding++
 
-		credit := i.buildCredit(row, fees[idx], seenAt)
+		credit := i.buildCredit(row, refs[idx], fees[idx], seenAt)
 		if credit.SenderBank == "" || credit.SenderName == "" {
 			// Not an error and never a reason to skip: the remark format is
 			// the provider's, not a contract. The raw text is stored either
@@ -253,13 +276,11 @@ func (i *InboundIngestor) insert(ctx context.Context, credit *models.InboundCred
 	return res.RowsAffected == 1, nil
 }
 
-func (i *InboundIngestor) buildCredit(row FWStatementEntry, feeKobo int64, seenAt time.Time) *models.InboundCredit {
-	// Sanitize before anything reads the text — the ref is derived from it, the
-	// remark is parsed from it, and both are stored. See sanitizeProviderText.
-	row.Remarks = sanitizeProviderText(row.Remarks)
-	row.Reference = sanitizeProviderText(row.Reference)
-	row.Currency = sanitizeProviderText(row.Currency)
-
+// buildCredit turns one already-sanitized row into a credit. providerRef is
+// handed in rather than derived here because it belongs to the raw row, which
+// this one is no longer — see IngestRows for why the two cannot be the same
+// text.
+func (i *InboundIngestor) buildCredit(row FWStatementEntry, providerRef string, feeKobo int64, seenAt time.Time) *models.InboundCredit {
 	amountKobo := KoboFromMajor(row.Amount.Float64())
 	bank, name := parseSenderRemark(row.Remarks)
 
@@ -277,7 +298,7 @@ func (i *InboundIngestor) buildCredit(row FWStatementEntry, feeKobo int64, seenA
 
 	return &models.InboundCredit{
 		Provider:        models.InboundCreditProviderFlutterwave,
-		ProviderRef:     providerRefFor(row),
+		ProviderRef:     providerRef,
 		Currency:        currency,
 		AmountKobo:      amountKobo,
 		FeeKobo:         feeKobo,
@@ -321,8 +342,17 @@ func IsCustomerFunding(row FWStatementEntry) bool {
 // balance.after is part of the digest precisely because it is the field that
 // still differs between two otherwise identical credits: each one lands on a
 // different running balance.
+//
+// It reads the RAW row and strips only what Postgres cannot store — never the
+// format characters sanitizeProviderText removes. Those rows inserted happily
+// before sanitization existed, so the ref they are held under still contains
+// them, and stripping them here would re-ingest every one of those credits on
+// the next poll. A row whose reference carries a control character is the one
+// case that can safely change: its INSERT never succeeded, so there is no
+// stored ref to disagree with, and leaving the character in would keep failing
+// that INSERT forever.
 func providerRefFor(row FWStatementEntry) string {
-	if ref := strings.TrimSpace(row.Reference); ref != "" {
+	if ref := strings.TrimSpace(stripRunes(row.Reference, unstorableProviderRune)); ref != "" {
 		return truncate(ref, 64)
 	}
 	seed := fmt.Sprintf("%s|%.2f|%.2f|%s|%s",
@@ -590,33 +620,69 @@ func KoboFromMajor(v float64) int64 {
 //
 // Stripping rather than replacing: these characters carry no meaning we want,
 // and a substitute would change the length and the parse for no gain.
+//
+// This is the STORED-AND-DISPLAYED half only — SenderRaw, SenderBank,
+// SenderName, Currency, and the references fee pairing compares. ProviderRef is
+// not one of them: it is a key, matched against keys written before any of this
+// existed, and providerRefFor says what it may strip instead.
 func sanitizeProviderText(s string) string {
-	if !strings.ContainsFunc(s, unsafeProviderRune) {
+	return stripRunes(s, unsafeProviderRune)
+}
+
+// sanitizeStatementRows returns a cleaned copy of a statement page, so that
+// everything reading it downstream of the dedupe key reads the same text. The
+// copy is deliberate: the caller's rows are the raw evidence, and a replay or a
+// second reader must still see what the provider actually sent.
+func sanitizeStatementRows(rows []FWStatementEntry) []FWStatementEntry {
+	out := make([]FWStatementEntry, len(rows))
+	copy(out, rows)
+	for i := range out {
+		out[i].Remarks = sanitizeProviderText(out[i].Remarks)
+		out[i].Reference = sanitizeProviderText(out[i].Reference)
+		out[i].Currency = sanitizeProviderText(out[i].Currency)
+	}
+	return out
+}
+
+// unsafeProviderRune is the full strip list for text a human will read: the
+// unstorable ones plus category Cf, the half that is spoofable rather than
+// fatal.
+func unsafeProviderRune(r rune) bool {
+	return unstorableProviderRune(r) || unicode.Is(unicode.Cf, r)
+}
+
+// unstorableProviderRune is the narrower list — C0 controls, DEL, C1 controls,
+// and the rune invalid UTF-8 decodes to. Only these may be stripped from a
+// dedupe key, because only these can stop the row being written at all, which
+// means no earlier row was ever stored under a key containing one.
+//
+// RuneError is in here rather than with the merely-unreadable characters
+// because a range loop cannot tell a well-formed U+FFFD (which Postgres would
+// take) from the invalid bytes it decodes to (which Postgres rejects). A
+// reference is a 30-digit NIP session id, so the second reading is the only
+// plausible one, and guessing the other way loses the credit for good.
+func unstorableProviderRune(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+		return true
+	default:
+		return r == utf8.RuneError
+	}
+}
+
+func stripRunes(s string, drop func(rune) bool) string {
+	if !strings.ContainsFunc(s, drop) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if unsafeProviderRune(r) {
+		if drop(r) {
 			continue
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
-}
-
-// unsafeProviderRune is the strip list: C0 controls, DEL, C1 controls, category
-// Cf, and the replacement rune that invalid UTF-8 decodes to (which Postgres
-// accepts but which is noise on an operator's screen).
-func unsafeProviderRune(r rune) bool {
-	switch {
-	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
-		return true
-	case r == utf8.RuneError:
-		return true
-	default:
-		return unicode.Is(unicode.Cf, r)
-	}
 }
 
 // truncate caps a string at max BYTES without splitting a rune. Postgres sizes
