@@ -45,6 +45,7 @@ func setupInboundDB(t *testing.T) *gorm.DB {
 		seen_at DATETIME NOT NULL,
 		status TEXT NOT NULL DEFAULT 'unmatched',
 		hold_reason TEXT,
+		hold_reason_code TEXT,
 		matched_claim_type TEXT,
 		matched_claim_id TEXT,
 		matched_user_id TEXT,

@@ -184,6 +184,17 @@ type inboundCandidate struct {
 // reached a decision (bound or held) and an error when it could not — in which
 // case the row is left untouched for the next tick.
 func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredit) (bool, error) {
+	// Nothing below this line means anything for an amount of zero or less: a
+	// target of zero makes every zero-amount claim an EXACT match, so a
+	// statement row that parsed badly would settle a product out of no money
+	// at all. Checked before the sources are asked anything, because there is
+	// no answer they could give that would help.
+	if credit.GrossKobo <= 0 {
+		return m.holdCredit(ctx, credit, models.InboundHoldNonPositiveAmount, fmt.Sprintf(
+			"the statement row parsed to %s, which is not an amount anything can be matched against — re-read the row, and check the ingestor's fee pairing",
+			inboundMoney(credit.Currency, credit.GrossKobo)))
+	}
+
 	claims, err := m.gatherClaims(ctx, credit.Currency)
 	if err != nil {
 		// A partial view of the open claims is worse than no view: the
@@ -194,13 +205,42 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 
 	want := roundKoboToNaira(credit.GrossKobo)
 	var candidates []InboundClaim
+	var wrongCurrency []InboundClaim
 	for _, c := range claims {
-		if c.AmountKobo == want {
-			candidates = append(candidates, c)
+		if c.AmountKobo != want {
+			continue
 		}
+		// The matcher asks each source for one currency and, until this
+		// check, had to take the answer on trust. The sources do not agree on
+		// what an empty currency argument means, so "it filtered correctly"
+		// rested on three implementations staying in step. An amount alone is
+		// not a currency: 200,000 of something else is not ₦2,000.
+		if !inboundSameCurrency(credit.Currency, c.Currency) {
+			wrongCurrency = append(wrongCurrency, c)
+			continue
+		}
+		candidates = append(candidates, c)
 	}
+
+	// Held rather than skipped. Dropping the offending claim would let a rival
+	// bind unopposed on a candidate set we already know is wrong, which is the
+	// same shape as every other bug in this file: a weak answer beating no
+	// answer. There is also nothing an operator can do about it — it is a bug
+	// in us — so it is logged where an engineer will see it.
+	if len(wrongCurrency) > 0 {
+		log.Printf("[inbound-match] BUG ref=%s: %s answered a %s request with %d claim(s) priced in %s — the source is not filtering on currency",
+			credit.ProviderRef, inboundClaimTypeList(wrongCurrency),
+			inboundOrDash(normaliseCurrency(credit.Currency)), len(wrongCurrency),
+			inboundCurrencyList(wrongCurrency))
+		return m.holdCredit(ctx, credit, models.InboundHoldCurrencyMismatch, fmt.Sprintf(
+			"%s: %d claim(s) from %s match the amount but are priced in %s, not %s. Nothing to assign by hand — this is a bug in the claim source, escalate it",
+			inboundMoney(credit.Currency, want), len(wrongCurrency),
+			inboundClaimTypeList(wrongCurrency), inboundCurrencyList(wrongCurrency),
+			inboundOrDash(normaliseCurrency(credit.Currency))))
+	}
+
 	if len(candidates) == 0 {
-		return m.holdCredit(ctx, credit, fmt.Sprintf(
+		return m.holdCredit(ctx, credit, models.InboundHoldNoClaimAtAmount, fmt.Sprintf(
 			"no open claim for %s — none of the %d claim(s) open across %d product(s) asks this amount; sender %s via %s. Check the amount, or refund",
 			inboundMoney(credit.Currency, want), len(claims), len(m.sources),
 			inboundSenderLabel(credit.SenderName), inboundOrDash(credit.SenderBank)))
@@ -210,7 +250,7 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 	// operator problem (the provider changed the remark format, or the payer's
 	// bank sent none) and reads as its own reason.
 	if strings.TrimSpace(credit.SenderName) == "" {
-		return m.holdCredit(ctx, credit, fmt.Sprintf(
+		return m.holdCredit(ctx, credit, models.InboundHoldNoSenderName, fmt.Sprintf(
 			"%s: %d claim(s) match the amount but the statement carried no sender name to check them against; raw remark %q",
 			inboundMoney(credit.Currency, want), len(candidates),
 			truncate(credit.SenderRaw, 80)))
@@ -243,16 +283,19 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 	// standing beside a claim whose owner has no name on file is not a clean
 	// match, it is an unresolved question about two people.
 	if len(unverifiable) > 0 {
-		return m.holdCredit(ctx, credit, inboundUnverifiableReason(credit, want, scored, unverifiable, matched))
+		return m.holdCredit(ctx, credit, models.InboundHoldUnverifiableRival,
+			inboundUnverifiableReason(credit, want, scored, unverifiable, matched))
 	}
 
 	switch len(matched) {
 	case 1:
 		return m.bindCredit(ctx, credit, matched[0], nil)
 	case 0:
-		return m.holdCredit(ctx, credit, inboundNoNameMatchReason(credit, want, scored))
+		return m.holdCredit(ctx, credit, models.InboundHoldNoNameMatch,
+			inboundNoNameMatchReason(credit, want, scored))
 	default:
-		return m.holdCredit(ctx, credit, inboundContestedReason(credit, want, matched))
+		return m.holdCredit(ctx, credit, models.InboundHoldContested,
+			inboundContestedReason(credit, want, matched))
 	}
 }
 
@@ -340,7 +383,11 @@ func (m *InboundMatcher) bindCredit(ctx context.Context, credit *models.InboundC
 		"matched_user_id":    cand.claim.UserID,
 		"matched_at":         now,
 		"match_strength":     string(cand.strength),
-		"hold_reason":        "",
+		// Both halves of the hold are cleared, or a resolved row keeps reading
+		// as held to whichever of the console and the alert looks at the other
+		// one.
+		"hold_reason":      "",
+		"hold_reason_code": "",
 	}
 	if resolvedBy != nil {
 		updates["resolved_by"] = *resolvedBy
@@ -383,13 +430,19 @@ func (m *InboundMatcher) bindCredit(ctx context.Context, credit *models.InboundC
 // Losing the alert costs an operator a few minutes; losing the hold leaves
 // money silently unattributed with the row back in `unmatched`, where the next
 // tick would re-derive the same non-answer and alert again forever.
-func (m *InboundMatcher) holdCredit(ctx context.Context, credit *models.InboundCredit, reason string) (bool, error) {
+//
+// code and reason are the same decision at two audiences. code names nobody
+// and goes anywhere; reason names the sender, the remark and the candidates'
+// Didit-verified legal names, and goes only to the admin console. They are
+// written together so no hold can reach the queue with one and not the other.
+func (m *InboundMatcher) holdCredit(ctx context.Context, credit *models.InboundCredit, code, reason string) (bool, error) {
 	reason = truncate(strings.TrimSpace(reason), inboundHoldReasonMax)
 	res := m.db.WithContext(ctx).Model(&models.InboundCredit{}).
 		Where("id = ? AND status = ?", credit.ID, models.InboundCreditUnmatched).
 		Updates(map[string]any{
-			"status":      models.InboundCreditHeld,
-			"hold_reason": reason,
+			"status":           models.InboundCreditHeld,
+			"hold_reason":      reason,
+			"hold_reason_code": code,
 		})
 	if res.Error != nil {
 		return false, fmt.Errorf("inbound match: hold ref %s: %w", credit.ProviderRef, res.Error)
@@ -399,7 +452,13 @@ func (m *InboundMatcher) holdCredit(ctx context.Context, credit *models.InboundC
 	}
 	credit.Status = models.InboundCreditHeld
 	credit.HoldReason = reason
-	log.Printf("[inbound-match] HELD ref=%s amountKobo=%d: %s", credit.ProviderRef, credit.GrossKobo, reason)
+	credit.HoldReasonCode = code
+	// The code, never the prose. This line lands in the application log, which
+	// is shipped, searched and retained by people who have no business reading
+	// a customer's bank account name — and the repo's policy is that verified
+	// names stay out of it. The ref is what an operator needs to find the row
+	// anyway; the names are one authenticated click away in the console.
+	log.Printf("[inbound-match] HELD ref=%s reason=%s", credit.ProviderRef, code)
 
 	m.notifyHold(ctx, credit)
 	return true, nil
@@ -425,10 +484,26 @@ func (m *InboundMatcher) notifyHold(ctx context.Context, credit *models.InboundC
 // differences are ResolvedBy, which records who decided, and MatchStrength,
 // which stays empty because a name did not justify this.
 //
-// The amount and the name are NOT re-checked: overriding them is the entire
-// reason an operator is here (the payer sent ₦1,999, or paid from a spouse's
-// account). What is checked is that the claim is still open — settling into an
-// order that has already been fulfilled would credit the same money twice.
+// The NAME is not re-checked: overriding it is the entire reason an operator
+// is here — the payer paid from a spouse's account, or from a business name
+// Didit never saw. What is checked is that the claim is still open (settling
+// into an order already fulfilled would credit the same money twice) and that
+// the amounts agree.
+//
+// The amount is checked because the operator is not the one who decides how
+// much arrived, and because a claim settles for ITS OWN amount, not the
+// credit's: the P2P source credits the merchant trade.FiatAmount and releases
+// the escrowed crypto to the buyer. Assigning a ₦5,000 credit to a ₦500,000
+// trade therefore pays out ₦500,000 of real money that nobody sent, and the
+// crypto leg is irreversible. The queue exists to answer "whose is this?",
+// and that question does not include "and how much was it?".
+//
+// There is deliberately NO override flag. An operator who believes the amounts
+// should differ is describing a partial payment or an overpayment — each a
+// product decision (top up and wait? settle short? refund the difference?)
+// that nobody has made. Until someone makes it, the safe answer is to refuse
+// and leave the money held, which is recoverable; the alternative is a payout
+// that is not.
 func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, claimType string, claimID uuid.UUID, adminID uuid.UUID) error {
 	if m == nil || m.db == nil {
 		return errors.New("inbound matcher: not configured")
@@ -483,6 +558,23 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 	}
 	target.Type = claimType
 
+	// Same rounding as the automatic path, from the same helper, so an
+	// operator is never refused a bind the matcher would have made unattended
+	// over a kobo of statement dust.
+	want := roundKoboToNaira(credit.GrossKobo)
+	if want <= 0 {
+		return fmt.Errorf("inbound bind: credit %s is %s — there is no amount here to assign",
+			creditID, inboundMoney(credit.Currency, credit.GrossKobo))
+	}
+	if want != target.AmountKobo {
+		// Both figures, because the refusal has to tell the operator WHICH is
+		// wrong: the payer underpaid, or they picked the wrong row.
+		return fmt.Errorf("inbound bind: credit %s is %s but %s claim %s asks %s — a claim settles for its own amount, so this would pay out money nobody sent. Refund the sender, or find the claim that asks %s",
+			creditID, inboundMoney(credit.Currency, want),
+			claimType, claimID, inboundMoney(credit.Currency, target.AmountKobo),
+			inboundMoney(credit.Currency, want))
+	}
+
 	bound, err := m.bindCredit(ctx, &credit, inboundCandidate{claim: *target}, &adminID)
 	if err != nil {
 		return err
@@ -508,6 +600,49 @@ func roundKoboToNaira(kobo int64) int64 {
 		return -roundKoboToNaira(-kobo)
 	}
 	return (kobo + 50) / 100 * 100
+}
+
+// inboundSameCurrency reports whether a claim's currency is the credit's.
+//
+// An empty value on either side is never a match. It is the exact shape a
+// source bug takes — the field was simply never populated — so reading it as
+// "assume NGN" would make the check inert against the only failure it exists
+// to catch. Case and padding, by contrast, are a source's formatting and not a
+// disagreement about money.
+func inboundSameCurrency(creditCurrency, claimCurrency string) bool {
+	credit := normaliseCurrency(creditCurrency)
+	claim := normaliseCurrency(claimCurrency)
+	return credit != "" && claim != "" && credit == claim
+}
+
+// inboundClaimTypeList names the products behind a set of claims, deduplicated
+// and in registration order. When the currency assertion fires it is because a
+// source forgot to populate the field, and the first thing anyone needs to
+// know — operator or engineer — is which product to go and look at.
+func inboundClaimTypeList(claims []InboundClaim) string {
+	return inboundDistinct(claims, func(c InboundClaim) string { return c.Type })
+}
+
+// inboundCurrencyList is the same for what those claims were priced in, so the
+// mismatch reads as a pair rather than half a fact.
+func inboundCurrencyList(claims []InboundClaim) string {
+	return inboundDistinct(claims, func(c InboundClaim) string {
+		return inboundOrDash(normaliseCurrency(c.Currency))
+	})
+}
+
+func inboundDistinct(claims []InboundClaim, key func(InboundClaim) string) string {
+	seen := make(map[string]struct{}, len(claims))
+	var out []string
+	for _, c := range claims {
+		k := key(c)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return strings.Join(out, ", ")
 }
 
 // wholeNairaKobo is roundKoboToNaira over the decimal kobo strings the IT
