@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // A malformed FEE_MANAGER_ADDRESS_* must be rejected at load (design §6) — the
@@ -158,5 +159,98 @@ func TestLoad_RobinhoodWalletChain(t *testing.T) {
 	// Wallet-only: must never be registered as a P2P chain.
 	if _, isP2P := cfg.P2PChains[4663]; isP2P {
 		t.Errorf("robinhood (4663) must not be in P2PChains")
+	}
+}
+
+// INBOUND_MODE decides whether every naira in the platform is attributed by
+// webhook or by statement poll, so a typo must land on today's behaviour
+// rather than silently retiring every virtual account.
+func TestNormalizeInboundMode(t *testing.T) {
+	tests := map[string]string{
+		"central":    InboundModeCentral,
+		"CENTRAL":    InboundModeCentral,
+		"  central ": InboundModeCentral,
+		"va":         InboundModeVA,
+		"VA":         InboundModeVA,
+		"":           InboundModeVA,
+		"centrl":     InboundModeVA,
+		"true":       InboundModeVA,
+	}
+	for in, want := range tests {
+		if got := normalizeInboundMode(in); got != want {
+			t.Errorf("normalizeInboundMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInboundCentralEnabled(t *testing.T) {
+	if (&Config{InboundMode: InboundModeCentral}).InboundCentralEnabled() != true {
+		t.Error("central mode must report enabled")
+	}
+	if (&Config{InboundMode: InboundModeVA}).InboundCentralEnabled() != false {
+		t.Error("va mode must report disabled")
+	}
+	var nilCfg *Config
+	if nilCfg.InboundCentralEnabled() {
+		t.Error("nil config must not report central mode")
+	}
+}
+
+// The poll interval is the user's wait for a credit to be noticed, so an unset
+// or nonsense value must fall back to the 30s of decision 8, never to zero
+// (which the scheduler panics on at Register).
+func TestInboundPollIntervalOrDefault(t *testing.T) {
+	if got := (&Config{}).InboundPollIntervalOrDefault(); got != 30*time.Second {
+		t.Errorf("unset = %s, want 30s", got)
+	}
+	if got := (&Config{InboundPollInterval: -time.Second}).InboundPollIntervalOrDefault(); got != 30*time.Second {
+		t.Errorf("negative = %s, want 30s", got)
+	}
+	if got := (&Config{InboundPollInterval: 15 * time.Second}).InboundPollIntervalOrDefault(); got != 15*time.Second {
+		t.Errorf("configured = %s, want 15s", got)
+	}
+}
+
+// A hold is unattributed customer money whose only exit is an operator, so the
+// alert list has to survive the ways an env var actually gets written: stray
+// spaces, a trailing comma, the same mailbox pasted twice in different case.
+// A duplicate mails the same person twice on every hold.
+func TestLoad_InboundAlertEmails(t *testing.T) {
+	t.Setenv("INBOUND_ALERT_EMAILS", " ops@tsaconnectworld.com , finance@tsaconnectworld.com,,OPS@tsaconnectworld.com , ")
+	cfg := Load()
+	want := []string{"ops@tsaconnectworld.com", "finance@tsaconnectworld.com"}
+	if !reflect.DeepEqual(cfg.InboundAlertEmails, want) {
+		t.Errorf("InboundAlertEmails = %v, want %v", cfg.InboundAlertEmails, want)
+	}
+}
+
+// Unset means nobody is alerted. That must be an empty list rather than one
+// element containing "" — a blank recipient is a send that fails on every hold
+// and buries the log line that matters.
+func TestLoad_InboundAlertEmailsUnset(t *testing.T) {
+	t.Setenv("INBOUND_ALERT_EMAILS", "")
+	if got := Load().InboundAlertEmails; len(got) != 0 {
+		t.Errorf("InboundAlertEmails = %v, want empty", got)
+	}
+}
+
+// ADMIN_URL is a comma-separated CORS list ordered dev-first. The hold alert
+// needs ONE origin an on-call operator can click, so the https entry has to
+// win over the localhost one that happens to be listed first.
+func TestAdminConsoleBaseURL(t *testing.T) {
+	tests := map[string]string{
+		"http://localhost:5173,https://admin.tsaconnectworld.com": "https://admin.tsaconnectworld.com",
+		"https://admin.tsaconnectworld.com/":                      "https://admin.tsaconnectworld.com",
+		" http://localhost:5173 ":                                 "http://localhost:5173",
+		"":                                                        "",
+	}
+	for in, want := range tests {
+		if got := (&Config{AdminURL: in}).AdminConsoleBaseURL(); got != want {
+			t.Errorf("AdminConsoleBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	var nilCfg *Config
+	if got := nilCfg.AdminConsoleBaseURL(); got != "" {
+		t.Errorf("nil config = %q, want empty", got)
 	}
 }

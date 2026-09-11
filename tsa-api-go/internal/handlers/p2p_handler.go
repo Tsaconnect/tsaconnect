@@ -34,6 +34,46 @@ type P2PHandler struct {
 	// active (Flutterwave since 2026-07; Nomba as fallback).
 	banks services.BankDirectory
 	stats *services.MerchantStatsService
+	// central answers where PM buyers are being sent right now. Optional only
+	// because it is wired after construction (SetInboundCentralSource); leaving
+	// it nil once INBOUND_MODE=central is on hands buyers the merchant's own
+	// account, which no longer feeds the statement the ingestor reads.
+	central CentralAccountSource
+}
+
+// CentralAccountSource is the single thing the PM buy screens need from the IT
+// service: the account payers must be sent to right now. Narrow interface
+// rather than *services.ITService because P2P has no other business with that
+// service, and because the one method carries the mode with it — there is no
+// way to ask this seam for an account without asking whether it is live.
+type CentralAccountSource interface {
+	ActiveCentralAccount() (services.CentralAccount, bool)
+}
+
+// SetInboundCentralSource wires the pay-into surface to the cutover, from
+// main.go. Separate from the constructor because the IT service is built later
+// in boot than the P2P handler.
+func (h *P2PHandler) SetInboundCentralSource(src CentralAccountSource) { h.central = src }
+
+// pmPayTo picks the account a PM buyer must send fiat to.
+//
+// After the cutover that is the company account and NOT the merchant's: the
+// buyer's transfer has to land on the statement the ingestor reads, or the
+// trade — which is offered to the matcher as a claim either way — waits on a
+// credit that will never arrive. The merchant is credited from that account and
+// forwarded to separately (see P2PSettlementForwarder), so nothing they are owed
+// changes; only where the buyer sends it does.
+func (h *P2PHandler) pmPayTo(accountNumber, bank, merchantName string) *models.PmPayTo {
+	if h.central != nil {
+		if central, ok := h.central.ActiveCentralAccount(); ok {
+			return &models.PmPayTo{
+				AccountNumber: central.AccountNumber,
+				Bank:          central.BankName,
+				AccountName:   central.AccountName,
+			}
+		}
+	}
+	return &models.PmPayTo{AccountNumber: accountNumber, Bank: bank, AccountName: merchantName}
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
@@ -778,11 +818,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 			log.Printf("[p2p GetAd] PM lookup failed for ad=%s pm=%s: %v", ad.ID, *ad.PMID, err)
 		} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 			detail.IsPm = true
-			detail.PmPayTo = &models.PmPayTo{
-				AccountNumber: pm.InboundAccountNumber,
-				Bank:          pm.InboundBank,
-				AccountName:   pm.Name,
-			}
+			detail.PmPayTo = h.pmPayTo(pm.InboundAccountNumber, pm.InboundBank, pm.Name)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
@@ -1643,11 +1679,7 @@ func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
 		log.Printf("[p2p GetTrade] PM lookup failed for trade=%s ad=%s: %v", trade.ID, trade.AdID, err)
 	} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 		trade.IsPM = true
-		trade.PmPayTo = &models.PmPayTo{
-			AccountNumber: pm.InboundAccountNumber,
-			Bank:          pm.InboundBank,
-			AccountName:   pm.Name,
-		}
+		trade.PmPayTo = h.pmPayTo(pm.InboundAccountNumber, pm.InboundBank, pm.Name)
 	}
 
 	var payerName string

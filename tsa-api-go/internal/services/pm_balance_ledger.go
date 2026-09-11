@@ -187,12 +187,24 @@ func (s *PMService) releaseInOn(db *gorm.DB, pmID uuid.UUID, currency, amount st
 // reintroduce exactly the read-modify-write race the rest of this ledger is
 // built to avoid.
 func (s *PMService) CreditIn(ctx context.Context, pmID uuid.UUID, currency, amount string) error {
+	return s.creditInOn(s.db.WithContext(ctx), pmID, currency, amount)
+}
+
+// CreditInTx is the transaction-aware variant, so a caller can make the credit
+// atomic with whatever record justifies it. The P2P instant forward needs this:
+// its idempotency row and the credit it authorises must land together, or a
+// crash between them leaves a claimed reference with no money behind it.
+func (s *PMService) CreditInTx(tx *gorm.DB, pmID uuid.UUID, currency, amount string) error {
+	return s.creditInOn(tx, pmID, currency, amount)
+}
+
+func (s *PMService) creditInOn(db *gorm.DB, pmID uuid.UUID, currency, amount string) error {
 	if err := validateNGNAmount(amount); err != nil {
 		return err
 	}
 	cur := normaliseCurrency(currency)
 
-	return inTx(s.db.WithContext(ctx), func(tx *gorm.DB) error {
+	return inTx(db, func(tx *gorm.DB) error {
 		if isLegacyNGN(cur) {
 			if err := s.creditNGNOn(tx, pmID, amount); err != nil {
 				return err
@@ -206,13 +218,25 @@ func (s *PMService) CreditIn(ctx context.Context, pmID uuid.UUID, currency, amou
 // covers it — a withdrawal must never dip into funds reserved for in-flight
 // trades. Returns ok=false (no error) when the free balance is insufficient.
 func (s *PMService) WithdrawIn(ctx context.Context, pmID uuid.UUID, currency, amount string) (bool, error) {
+	return s.withdrawInOn(s.db.WithContext(ctx), pmID, currency, amount)
+}
+
+// WithdrawInTx is the transaction-aware variant. The P2P instant forward debits
+// only on a CONFIRMED disbursement, and it has to mark its own record settled in
+// the same breath — a debit that commits without the record would be invisible,
+// and a record that commits without the debit would pay the merchant twice.
+func (s *PMService) WithdrawInTx(tx *gorm.DB, pmID uuid.UUID, currency, amount string) (bool, error) {
+	return s.withdrawInOn(tx, pmID, currency, amount)
+}
+
+func (s *PMService) withdrawInOn(db *gorm.DB, pmID uuid.UUID, currency, amount string) (bool, error) {
 	if err := validateNGNAmount(amount); err != nil {
 		return false, err
 	}
 	cur := normaliseCurrency(currency)
 
 	var ok bool
-	err := inTx(s.db.WithContext(ctx), func(tx *gorm.DB) error {
+	err := inTx(db, func(tx *gorm.DB) error {
 		if isLegacyNGN(cur) {
 			legacy, err := s.withdrawNGNOn(tx, pmID, amount)
 			if err != nil {

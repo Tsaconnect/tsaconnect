@@ -111,6 +111,10 @@ func AutoMigrate() error {
 		&models.P2PAuditLog{},
 		&models.P2PMerchantStats{},
 		&models.P2PRating{},
+		// Instant per-trade sweep of a merchant's naira proceeds to their own
+		// bank (central-account design decision 7). Also the idempotency claim
+		// that stops a replayed inbound credit crediting the ledger twice.
+		&models.P2PSettlementForward{},
 		// PM (Payment Merchant) — automated P2P liquidity provider (Phase 1: TSA).
 		&models.PaymentMerchant{},
 		// MCGP Swap Contract B — entitlement-ledger swap (premium buy/spend/sell,
@@ -128,6 +132,14 @@ func AutoMigrate() error {
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},
+		// Central-account inbound attribution — the immutable record of every
+		// credit into the company account, written by the statement poller
+		// before any matching runs.
+		&models.InboundCredit{},
+		// Append-only record of every operator decision on a held credit.
+		// Separate from inbound_credits because that row only ever shows the
+		// current state — who acted, and on what, has to outlive it.
+		&models.InboundCreditAuditLog{},
 		&models.PaycrestOrderRecord{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},

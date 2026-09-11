@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -1057,4 +1058,226 @@ func (c *FlutterwaveClient) ConvertBalance(ctx context.Context, merchantID, sour
 			},
 		},
 	})
+}
+
+// ─── Wallet statement ──────────────────────────────────────────────────────
+
+// fwStatementDateLayout is the window format sent to /wallets/statement. The
+// parameter names and layout are UNVERIFIED — Flutterwave documents neither —
+// but date-only from/to is its convention on every other listing endpoint.
+const fwStatementDateLayout = "2006-01-02"
+
+const (
+	// fwStatementPageSize is how many rows one request asks for. Also the
+	// signal that a page is the last one: a short page ends the walk.
+	fwStatementPageSize = 100
+	// fwStatementMaxPages bounds the walk so a provider that keeps handing
+	// back full pages cannot spin the poll forever. Reaching it means the
+	// window was NOT fully read, which is why it is logged rather than
+	// absorbed.
+	fwStatementMaxPages = 50
+)
+
+// FWStatementTime is a statement timestamp.
+//
+// It is a bespoke type rather than a plain time.Time because the layout is
+// unverified, and a strict decode would fail the WHOLE page on one oddly
+// formatted row. A dropped page is a dropped credit — the single outcome the
+// inbound pipeline exists to prevent. An unparseable value therefore decodes
+// to the zero time and the ingestor falls back to its own clock.
+type FWStatementTime struct{ time.Time }
+
+func (t *FWStatementTime) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		t.Time = time.Time{}
+		return nil
+	}
+	var s string
+	if b[0] == '"' {
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+	} else {
+		// Epoch seconds/millis are a plausible alternative shape and cost
+		// nothing to accept.
+		n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		if err != nil {
+			t.Time = time.Time{}
+			return nil
+		}
+		if n > 1e12 {
+			t.Time = time.UnixMilli(n).UTC()
+		} else {
+			t.Time = time.Unix(n, 0).UTC()
+		}
+		return nil
+	}
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		fwStatementDateLayout,
+	} {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			t.Time = parsed.UTC()
+			return nil
+		}
+	}
+	t.Time = time.Time{}
+	return nil
+}
+
+// FWStatementBalance is the running wallet balance either side of one
+// statement row. A row that actually moves the wallet leaves before != after;
+// a row that is only a memo of value which never landed leaves them equal.
+type FWStatementBalance struct {
+	Before FWQuoteAmount `json:"before"`
+	After  FWQuoteAmount `json:"after"`
+}
+
+// FWStatementEntry is one row of the merchant wallet statement.
+//
+// The shape is production-measured (2026-09-02), not documented — Flutterwave
+// publishes no schema for this endpoint. Two measured facts drive the whole
+// central-account attribution design:
+//
+//   - Reference on a `funding` row is the NIBSS NIP session id (30 digits),
+//     unique per credit. It is the ONLY viable dedupe key: funding rows carry
+//     no account number and no `transfer` sub-object (transfer and fee rows
+//     do carry one).
+//   - Remarks is free text — "Received Money from GTBANK|ADEMU EMMANUEL O." —
+//     bank left of the pipe, account name right. Unstable by construction, so
+//     nothing downstream may depend on it parsing.
+//
+// Unknown fields are ignored rather than rejected so a provider that starts
+// returning more does not break the poll.
+type FWStatementEntry struct {
+	// Direction is "credit" | "debit".
+	Direction string `json:"direction"`
+	// Type is one of transfer | fee | reversal | settlement | funding | bill |
+	// chargeback | card. Only `funding` is customer money arriving.
+	Type      string             `json:"type"`
+	Amount    FWQuoteAmount      `json:"amount"`
+	Balance   FWStatementBalance `json:"balance"`
+	Reference string             `json:"reference"`
+	Remarks   string             `json:"remarks"`
+	// Currency is absent on some measured rows; callers fall back to the
+	// currency they asked for.
+	Currency        string          `json:"currency"`
+	TransactionDate FWStatementTime `json:"transaction_date"`
+}
+
+// FetchWalletStatement reads the merchant wallet's transaction statement via
+// GET /wallets/statement (production-measured 2026-09-02, undocumented).
+//
+// This is the ONLY detection channel for money paid into the central account:
+// wallet funding fires no webhook at all, so a credit nobody polled for is a
+// credit nobody ever sees. from/to bound the window and are omitted when zero.
+//
+// The window is walked page by page. One request returns one page, and a busy
+// day does not fit in one: everything past it is money that was never seen,
+// and the reconciler — which proves coverage by finding a row older than the
+// window start — has to decline every tick instead of catching it, so the
+// ingest path and its safety net fail at the same threshold.
+//
+// The paging parameter names are as unverified as everything else here, so the
+// walk never trusts them: it stops on a short page, stops when a page comes
+// back identical to the one before it (the shape of a provider ignoring `page`
+// entirely, which would otherwise multiply the window rather than extend it),
+// and stops at a hard bound with a warning rather than spinning.
+//
+// The end bound is pushed a day past `to` because the parameters are date-only
+// and we do not know whether the provider reads them as inclusive. Read as
+// exclusive, "to = today" hides every credit that arrived today. Over-fetching
+// is free — ingestion is idempotent on the NIP session id and the reconciler
+// filters by timestamp — while under-fetching loses money.
+func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency string, from, to time.Time) ([]FWStatementEntry, error) {
+	if !c.IsEnabled() {
+		return nil, ErrFlutterwaveDisabled
+	}
+	pageQuery := func(page int) url.Values {
+		q := url.Values{}
+		if cur := strings.ToUpper(strings.TrimSpace(currency)); cur != "" {
+			q.Set("currency", cur)
+		}
+		if !from.IsZero() {
+			q.Set("from", from.UTC().Format(fwStatementDateLayout))
+		}
+		if !to.IsZero() {
+			q.Set("to", to.UTC().AddDate(0, 0, 1).Format(fwStatementDateLayout))
+		}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("size", strconv.Itoa(fwStatementPageSize))
+		return q
+	}
+
+	var all, prev []FWStatementEntry
+	for page := 1; page <= fwStatementMaxPages; page++ {
+		// A failed page is not returned as a short window: partial results
+		// would read downstream as "the rest of the window is empty", and the
+		// row order the provider uses is unverified, so there is no telling
+		// which part is missing. The poll retries in seconds.
+		rows, err := c.fetchStatementPage(ctx, pageQuery(page))
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			return all, nil
+		}
+		if page > 1 && sameStatementPage(prev, rows) {
+			return all, nil
+		}
+		all = append(all, rows...)
+		if len(rows) < fwStatementPageSize {
+			return all, nil
+		}
+		prev = rows
+	}
+	log.Printf("[flutterwave] WARNING statement page bound reached: %d pages of %d rows read and the provider still has more; the window is truncated and older credits may be unseen",
+		fwStatementMaxPages, fwStatementPageSize)
+	return all, nil
+}
+
+func (c *FlutterwaveClient) fetchStatementPage(ctx context.Context, q url.Values) ([]FWStatementEntry, error) {
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/statement?"+q.Encode(), nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("flutterwave statement: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fwError("statement", resp.StatusCode, body)
+	}
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("flutterwave statement decode: %w", err)
+	}
+	var parsed []FWStatementEntry
+	if err := json.Unmarshal(env.Data, &parsed); err != nil {
+		return nil, fmt.Errorf("flutterwave statement decode data: %w", err)
+	}
+	return parsed, nil
+}
+
+// sameStatementPage reports whether two consecutive pages are the same rows —
+// the only evidence we can get that the provider is ignoring `page`. Rows are
+// compared rather than deduped because two genuinely identical rows do occur,
+// and dropping one would understate the provider's side and raise a phantom
+// surplus at the reconciler.
+func sameStatementPage(a, b []FWStatementEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		switch {
+		case a[i].Reference != b[i].Reference,
+			a[i].Amount != b[i].Amount,
+			a[i].Remarks != b[i].Remarks,
+			a[i].Balance.After != b[i].Balance.After,
+			!a[i].TransactionDate.Equal(b[i].TransactionDate.Time):
+			return false
+		}
+	}
+	return true
 }

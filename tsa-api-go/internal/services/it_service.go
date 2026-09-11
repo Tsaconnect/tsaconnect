@@ -76,6 +76,14 @@ type ITService struct {
 	// fw is the Flutterwave client for Spec 1 per-user static VA activate.
 	fw *FlutterwaveClient
 
+	// centralAccount is the company pay-into account shown in place of a
+	// per-user VA, and inboundCentral is whether that mode is actually on.
+	// Both are set together by SetInboundCentral and read together by
+	// ActiveCentralAccount — never read either directly, or a configured-but-
+	// not-enabled account starts routing payers. See inbound_central_account.go.
+	centralAccount CentralAccount
+	inboundCentral bool
+
 	// feeQuoter prices the fee deducted from each leg; fees carves what the
 	// platform keeps into system / cashback / TP. See it_fees.go.
 	feeQuoter ITFeeQuoter
@@ -375,7 +383,16 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 // settlement overwrites payment_ref with the provider charge id the moment
 // money is attributed to an order — superseding one of those would cancel an
 // order a payment is already landing against.
+//
+// The ask is snapped to WHOLE NAIRA before the intent is minted (design §5.4).
+// Under central-account attribution the amount is half the evidence of who
+// paid: a credit is matched by comparing its gross, rounded to naira, against
+// this figure. An order for ₦1,000.37 could then never match the ₦1,000 the
+// payer's banking app actually let them send, and would hold for an operator
+// every single time. Rounding here rather than at the comparison also means the
+// user is only ever shown a figure they can actually transfer.
 func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string) (*models.ITIntent, error) {
+	ngnKobo = wholeNairaKobo(ngnKobo)
 	_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("user_id = ? AND direction = ? AND status = ? AND payment_ref LIKE ?",
 			userID, models.ITDirectionBuy, models.ITStatusPendingPayment, mintedRefPrefix+"%").

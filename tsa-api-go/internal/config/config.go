@@ -432,6 +432,60 @@ type Config struct {
 	FlutterwaveCompanyEmail string
 	FlutterwaveCompanyPhone string
 
+	// InboundMode selects how inbound naira is attributed (central-account
+	// design §9). "va" is today's behaviour: a per-user Flutterwave virtual
+	// account, attribution by charge.completed webhook. "central" routes every
+	// payer to the one company account, where attribution comes from polling
+	// the wallet statement instead.
+	//
+	// It is a single global flag by decision 10 — a per-user rollout would put
+	// two attribution paths over the ONE company account, where a sender name
+	// is all there is to tell a rolled-out payer from a not-yet one, and a
+	// credit both or neither path claims is the result.
+	//
+	// It does not retire the virtual accounts that already exist: nothing here
+	// or anywhere else deactivates them at Flutterwave, and the charge-webhook
+	// credit path is not gated on the mode, so a payer who kept an old account
+	// number is still credited through it. Central mode only refuses to mint
+	// NEW accounts (ITService.ActivateFiatVA) and stops the app showing the old
+	// ones. The two paths cannot claim each other's money — they settle under
+	// different on-chain ref domains (IT:va: vs IT:inbound:) — but they are both
+	// live, and closing the accounts at the provider is a deliberate follow-up
+	// with its own review, not something this flag does.
+	//
+	// Flipping back is this variable plus a restart.
+	InboundMode string
+	// InboundPollInterval is the wallet-statement poll period (default 30s,
+	// decision 8). This is not a reconciler cadence: wallet funding fires no
+	// webhook at all, so the poll is the ONLY way a credit is ever noticed and
+	// the interval is the user's wait.
+	InboundPollInterval time.Duration
+	// InboundStatementLookback is how far back each poll reads. Overlap is free
+	// (ingestion is idempotent on the NIP session id) whereas a window shorter
+	// than an outage silently loses every credit that arrived during it — so
+	// this is deliberately far wider than the poll interval.
+	InboundStatementLookback time.Duration
+	// InboundAlertEmails are the operator mailboxes told, one email per credit,
+	// whenever the matcher declines to attribute money and holds it.
+	//
+	// This is the first admin alert address in config, and it exists because a
+	// held credit has NO automatic exit (decision 9): nothing expires it, nothing
+	// refunds it, and the customer who sent the money is already waiting. Until
+	// a human looks, the queue is only discoverable by someone choosing to open
+	// it. Unset is a legitimate state — the queue still fills, nobody is paged.
+	InboundAlertEmails []string
+
+	// InboundCentralAccount* are the company bank account every payer is sent
+	// to in central mode. They are config rather than constants because the
+	// account is an operational fact that can be replaced without a code
+	// change, and because a wrong hardcoded number is money sent to a stranger.
+	//
+	// Unset in VA mode, which is why consumers must check IsConfigured before
+	// rendering them — see services.CentralAccount.
+	InboundCentralAccountNumber string
+	InboundCentralBankName      string
+	InboundCentralAccountName   string
+
 	// StableSpreadBps is the company margin on brokered stablecoin trades, in
 	// basis points. It REPLACES the swap/routing bps legs for these flows
 	// rather than stacking on them, and it is the buffer that absorbs FX drift
@@ -759,6 +813,19 @@ func Load() *Config {
 	cfg.FlutterwaveCompanyName = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_NAME", "TSA Connect"))
 	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
 	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
+
+	// Central-account inbound attribution. Defaults to `va` — the mode that is
+	// live today — so a deploy that forgets this variable changes nothing.
+	// An unrecognised value is treated as `va` for the same reason: a typo must
+	// not silently move every payer onto the company account and stop the app
+	// showing the virtual accounts they have been paying into.
+	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
+	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
+	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
+	cfg.InboundCentralAccountNumber = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NUMBER")
+	cfg.InboundCentralBankName = os.Getenv("INBOUND_CENTRAL_BANK_NAME")
+	cfg.InboundCentralAccountName = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NAME")
+	cfg.InboundAlertEmails = dedupeEmails(splitAndTrim(getEnv("INBOUND_ALERT_EMAILS", ""), ","))
 
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
@@ -1161,6 +1228,89 @@ func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 		return 24 * time.Hour
 	}
 	return c.GlobalPoolSettleInterval
+}
+
+// Inbound attribution modes (central-account design §9).
+const (
+	// InboundModeVA — per-user Flutterwave virtual accounts, attribution by
+	// charge.completed webhook. Today's behaviour and the default.
+	InboundModeVA = "va"
+	// InboundModeCentral — one company account; attribution by polling the
+	// wallet statement and matching sender name + amount.
+	InboundModeCentral = "central"
+)
+
+// normalizeInboundMode maps an env value onto a known mode, defaulting to `va`.
+// Unknown values do NOT fail the boot: the safe reading of a typo is "leave the
+// live behaviour alone". Guessing `central` from a near-miss is the far worse
+// failure — every payer redirected onto the company account on the strength of
+// a typo, or, with that account unconfigured, a fleet that refuses to boot.
+func normalizeInboundMode(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), InboundModeCentral) {
+		return InboundModeCentral
+	}
+	return InboundModeVA
+}
+
+// InboundCentralEnabled reports whether inbound naira is attributed through the
+// central account. Read it rather than comparing InboundMode by hand so the
+// pay-into paths (IT buy, stablecoin buy, P2P) and the virtual-account guards
+// cannot drift apart on which account a payer is being sent to.
+func (c *Config) InboundCentralEnabled() bool {
+	return c != nil && c.InboundMode == InboundModeCentral
+}
+
+// dedupeEmails drops repeats from an operator-maintained address list,
+// comparing case-insensitively because a mailbox is the same mailbox however
+// it was typed. The first spelling is kept so the configured order — which is
+// usually the escalation order — survives.
+func dedupeEmails(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, addr := range in {
+		key := strings.ToLower(addr)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// AdminConsoleBaseURL returns one origin an operator can actually click.
+//
+// ADMIN_URL is a comma-separated CORS allow-list, not a single site address,
+// and it is ordered dev-first because that is convenient for CORS. A hold alert
+// linking an on-call operator to http://localhost:5173 is worse than no link at
+// all, so an https origin wins over anything else; the first entry is the
+// fallback for a single-origin deployment.
+func (c *Config) AdminConsoleBaseURL() string {
+	if c == nil {
+		return ""
+	}
+	origins := splitAndTrim(c.AdminURL, ",")
+	for _, o := range origins {
+		if strings.HasPrefix(strings.ToLower(o), "https://") {
+			return strings.TrimRight(o, "/")
+		}
+	}
+	if len(origins) == 0 {
+		return ""
+	}
+	return strings.TrimRight(origins[0], "/")
+}
+
+// InboundPollIntervalOrDefault returns the statement poll period, falling back
+// to the 30s of decision 8 when unset or non-positive.
+func (c *Config) InboundPollIntervalOrDefault() time.Duration {
+	if c == nil || c.InboundPollInterval <= 0 {
+		return 30 * time.Second
+	}
+	return c.InboundPollInterval
 }
 
 // ResolveFiatProvider names the active fiat gateway. Flutterwave is the sole

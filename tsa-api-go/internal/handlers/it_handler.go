@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
@@ -289,6 +290,56 @@ func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
 	}
 }
 
+// centralPayTo is the same card as fiatVAPayTo, filled from the one company
+// account every payer is sent to after the cutover — plus the figure to send.
+//
+// The amount is not a display convenience. Nothing we mint survives a bank
+// transfer into a shared account, so the payer's name and this exact number are
+// the whole attribution key (design §5.3): a buyer who sends a different figure
+// is a hold for an operator instead of an instant settlement. It is taken from
+// the MINTED order rather than from what the user asked for, because
+// OpenBuyOrder snaps the ask to whole naira and the screen must never disagree
+// with the row the matcher compares against — which is also why the kobo divide
+// exactly here.
+//
+// Key names match fiatVAPayTo's ("bank", not "bankName") so the buy screen
+// renders one card either side of the cutover.
+func centralPayTo(a services.CentralAccount, ngnKobo string) gin.H {
+	return gin.H{
+		"accountNumber": a.AccountNumber,
+		"bank":          a.BankName,
+		"accountName":   a.AccountName,
+		"amountNgn":     wholeNairaFromKobo(ngnKobo),
+	}
+}
+
+// wholeNairaFromKobo renders kobo as the naira figure a payer types into their
+// bank app. Unparseable input yields "" rather than a guess — a wrong number
+// here is money sent to an amount nothing will match.
+//
+// Rounds half away from zero because that is what the order was minted with
+// (wholeNairaKobo) and what the matcher rounds a credit's gross with
+// (roundKoboToNaira). Truncating instead showed a pre-cutover order of ₦1,000.50
+// as ₦1,000 while the claim offered for it asked ₦1,001: the payer sends what
+// the screen told them, the two figures disagree by a naira, and the credit
+// holds for an operator every single time with the money already gone.
+func wholeNairaFromKobo(ngnKobo string) string {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(ngnKobo), 10)
+	if !ok {
+		return ""
+	}
+	hundred := big.NewInt(100)
+	q, r := new(big.Int).QuoRem(n, hundred, new(big.Int))
+	if r.CmpAbs(big.NewInt(50)) >= 0 {
+		if n.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	return q.String()
+}
+
 // fiatVAView is the client-safe projection of a FiatVirtualAccount. The raw
 // model is deliberately NOT serialized: fw_customer_id and reference are the
 // keys webhook settlement attributes payments on, and clients have no use for
@@ -310,6 +361,15 @@ func (h *ITHandler) GetVA(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	// A pre-cutover user still has a virtual-account row, and after the cutover
+	// nothing reads its statement — so returning it is a pay-into card for an
+	// account that swallows transfers. Gone rather than 404: this is not "you
+	// have not activated yet", which is what would send them to an activation
+	// that now refuses. The account to pay into comes with the order.
+	if _, ok := h.it.ActiveCentralAccount(); ok {
+		utils.ErrorResponse(c, http.StatusGone, services.ErrITVARetired.Error())
 		return
 	}
 	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
@@ -366,6 +426,11 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 	va, err := h.it.ActivateFiatVA(c.Request.Context(), user, idType, idNumber)
 	if err != nil {
 		switch {
+		case errors.Is(err, services.ErrITVARetired):
+			// Gone, not 5xx: the cutover removed the feature, so a retry can
+			// only fail again. The default branch below would answer "please try
+			// again", which is how a user ends up hammering a dead path.
+			utils.ErrorResponse(c, http.StatusGone, err.Error())
 		case errors.Is(err, services.ErrITVANotConfigured):
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
 		case errors.Is(err, services.ErrITVAWalletRequired):
@@ -412,35 +477,51 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		return
 	}
 
-	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
-	if errors.Is(err, services.ErrITVANotFound) {
-		mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
-		if qerr != nil {
-			utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
+	// Central mode has no per-user account to find, so the VA lookup — and the
+	// activation refusal hanging off it — must not run at all. Left in place it
+	// locks every user without a legacy virtual account out of buying MCGP
+	// entirely, for an activation that ActivateFiatVA now refuses anyway.
+	central, centralMode := h.it.ActiveCentralAccount()
+
+	var va *models.FiatVirtualAccount
+	if !centralMode {
+		var err error
+		va, err = h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+		if errors.Is(err, services.ErrITVANotFound) {
+			mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
+			if qerr != nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
+				return
+			}
+			utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
+				"needsActivation": true,
+				"quote": gin.H{
+					"ngnKobo":    strings.TrimSpace(req.NgnKobo),
+					"mcgpAmount": mcgp.String(),
+					"rateKobo":   rate.String(),
+				},
+				"payTo":  nil,
+				"intent": nil,
+			})
 			return
 		}
-		utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
-			"needsActivation": true,
-			"quote": gin.H{
-				"ngnKobo":    strings.TrimSpace(req.NgnKobo),
-				"mcgpAmount": mcgp.String(),
-				"rateKobo":   rate.String(),
-			},
-			"payTo":  nil,
-			"intent": nil,
-		})
-		return
-	}
-	if err != nil {
-		log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
-		return
+		if err != nil {
+			log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+			return
+		}
 	}
 
 	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
+	}
+	var payTo gin.H
+	if centralMode {
+		payTo = centralPayTo(central, intent.NgnKobo)
+	} else {
+		payTo = fiatVAPayTo(va, user.Name)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
 		"needsActivation": false,
@@ -453,7 +534,7 @@ func (h *ITHandler) Buy(c *gin.Context) {
 			"feeNgnKobo": intent.FeeNgnKobo,
 			"netNgnKobo": intent.NetNgnKobo,
 		},
-		"payTo":  fiatVAPayTo(va, user.Name),
+		"payTo":  payTo,
 		"intent": intent,
 	})
 }

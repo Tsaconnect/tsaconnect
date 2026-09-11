@@ -55,6 +55,10 @@ var (
 	ErrITVAWalletRequired = errors.New("set up a wallet before activating Instant Transfer")
 	ErrITVANotFound       = errors.New("no Instant Transfer account for this user")
 	ErrITKYCRequired      = errors.New("a BVN or NIN is required")
+	// ErrITVARetired is the cutover's answer to an activation request. Central
+	// mode retires virtual accounts as a class, so this is permanent for as long
+	// as the mode is on — not a "try again later" the caller should retry.
+	ErrITVARetired = errors.New("Instant Transfer accounts are retired — pay into the account shown on your order")
 )
 
 // SetFlutterwaveClient wires the Flutterwave API client used for per-user
@@ -87,6 +91,16 @@ func (s *ITService) GetFiatVA(ctx context.Context, userID uuid.UUID, currency st
 // Flutterwave customer. idType/idNumber are forwarded to FW and NEVER stored
 // or logged. Idempotent: an existing active row is returned unchanged.
 func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idType, idNumber string) (*models.FiatVirtualAccount, error) {
+	// Before every other check, including whether provisioning is even wired:
+	// under central inbound, nothing reads a virtual account's statement. A VA
+	// minted now would take the user's money into an account no ingestor polls
+	// and no claim can be matched against, and the user would have no way to
+	// tell that from a working one. Refusing is the only honest answer, and
+	// refusing FIRST means the answer does not change with whether a Flutterwave
+	// client happens to be configured.
+	if _, ok := s.ActiveCentralAccount(); ok {
+		return nil, ErrITVARetired
+	}
 	if !s.HasFiatVAProvisioning() {
 		return nil, ErrITVANotConfigured
 	}
@@ -560,4 +574,166 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate")
+}
+
+// ─── central-account settlement (inbound attribution design §6.1) ──────────
+
+// itInboundRefDomain namespaces the on-chain credit ref for a buy settled from
+// the CENTRAL account rather than a per-user virtual account. The ref becomes
+// keccak256("IT:inbound:" || NIBSS session id), replacing the charge-keyed
+// keccak256(itVARefDomain || chargeID) that VA settlement uses.
+//
+// The property being carried over verbatim from the VA path: the ref is derived
+// from THE MONEY, not from the order. Every route that can settle one credit —
+// the poller's first attempt, its 30-second replay after a crash, an operator
+// assigning the credit by hand from the admin queue — presents the SAME ref to
+// the contract, so `usedRef` refuses the second and only one can ever succeed.
+// Keying on the intent instead would let two intents for one transfer credit
+// twice, and the session id is the only identifier the central account gives us
+// that is unique per credit.
+//
+// The domain differs from itVARefDomain so the two rails can never collide on a
+// shared identifier, and so an on-chain ref stays traceable to the rail that
+// produced it.
+const itInboundRefDomain = "IT:inbound:"
+
+// CreditBuyOrderFromInbound settles an MCGP buy order against a credit into the
+// central account. It is the sibling of AutoCreditFromVA: same live-rate
+// pricing, same fee deduction, same approveBuyCreditWithRef broadcast — keyed
+// on the NIBSS session id instead of the Flutterwave charge id.
+//
+// It is deliberately NARROWER than AutoCreditFromVA. That function has to work
+// out who paid, whether a stablecoin purchase wants the money first, and which
+// of several orders to settle into, because a webhook arrives carrying nothing
+// but a charge. Here the matcher has already decided all of that and names one
+// specific intent, so this only has to make the credit happen exactly once.
+//
+// paidKobo is what the SENDER transferred (the credit's gross, snapped to whole
+// naira), not what landed after the provider's cut. The user is credited for the
+// money they actually sent; the funding charge is a platform cost covered by the
+// platform fee, exactly as the 2.15% VA charge was.
+func (s *ITService) CreditBuyOrderFromInbound(ctx context.Context, intentID uuid.UUID, providerRef string, paidKobo *big.Int) error {
+	if !s.IsConfigured() {
+		return ErrITNotConfigured
+	}
+	providerRef = strings.TrimSpace(providerRef)
+	if providerRef == "" {
+		return errors.New("it inbound credit: empty provider ref")
+	}
+	if paidKobo == nil || paidKobo.Sign() <= 0 {
+		return errors.New("it inbound credit: non-positive amount")
+	}
+	onChainRef := itRefKey(itInboundRefDomain, providerRef)
+
+	// Layer 1 of three: has this session id already been attributed? The other
+	// two are the partial unique index on payment_ref and the contract's
+	// usedRef. All three key on the money, so a replay cannot slip past them by
+	// arriving through a different route.
+	var existing models.ITIntent
+	err := s.db.WithContext(ctx).
+		Where("payment_ref = ? AND direction = ?", providerRef, models.ITDirectionBuy).
+		First(&existing).Error
+	switch {
+	case err == nil:
+		switch existing.Status {
+		case models.ITStatusCredited:
+			return nil
+		case models.ITStatusPendingPayment, models.ITStatusFailed:
+			// Priced and attributed, but the broadcast never landed. Re-drive
+			// with the SAME ref — the contract rejects it if it did land.
+			_, err = s.approveBuyCreditWithRef(ctx, existing.ID, "", &onChainRef)
+			return err
+		default:
+			// `processing` (broadcast with no reported outcome) or anything
+			// else. The money is real and is not credited, so this stays
+			// retryable rather than reporting success — a nil here would let
+			// the matcher mark the inbound credit `matched` with nothing
+			// behind it.
+			return fmt.Errorf("it inbound credit: intent %s already owns ref %s in state %q",
+				existing.ID, providerRef, existing.Status)
+		}
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return err
+	}
+
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: %w", err)
+	}
+	// Asset check as well as direction+status, for the reason
+	// RepriceAndCreditAwaitingRate gives: crediting a non-MCGP buy here would
+	// issue MCGP from company supply for a purchase made in something else.
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusPendingPayment ||
+		models.ITIntentAsset(intent) != models.ITAssetMCGP {
+		return fmt.Errorf("it inbound credit: intent %s is not an open MCGP buy (%s/%s)",
+			intent.ID, intent.Direction, intent.Status)
+	}
+	// Only an order still carrying its MINTED reference may be settled. A row
+	// whose payment_ref is already a provider identifier has other money
+	// landing against it, and payment_ref carries a partial unique index.
+	if !strings.HasPrefix(intent.PaymentRef, mintedRefPrefix) {
+		return fmt.Errorf("it inbound credit: intent %s already carries payment ref %q",
+			intent.ID, intent.PaymentRef)
+	}
+
+	wallet := s.intentWallet(intent, "")
+	if wallet == "" {
+		var user models.User
+		if err := s.db.WithContext(ctx).First(&user, "id = ?", intent.UserID).Error; err != nil {
+			return fmt.Errorf("it inbound credit: user: %w", err)
+		}
+		wallet = strings.TrimSpace(user.WalletAddress)
+	}
+	if wallet == "" {
+		return fmt.Errorf("it inbound credit: user %s has no wallet", intent.UserID)
+	}
+
+	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: rate: %w", err)
+	}
+	if fx.Stale {
+		// The VA path parks a stale-FX credit as `awaiting_rate` because a
+		// webhook is delivered once and cannot be asked for again. Here the
+		// inbound_credits row IS durable and the poller re-reads it every 30
+		// seconds, so a retryable error is the better answer: no operator
+		// ticket, and — the part that matters — no second on-chain ref domain.
+		// RepriceAndCreditAwaitingRate derives its ref from itVARefDomain, so
+		// parking here would hand the operator recovery a DIFFERENT ref for the
+		// same money and usedRef would no longer be able to refuse the double
+		// credit.
+		return ErrITFxUnavailable
+	}
+
+	// Fees come off the naira that landed; only the net buys MCGP.
+	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate, itDepositCurrency)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: %w", err)
+	}
+
+	// Repriced at the LIVE rate on the amount actually sent, not at the quote
+	// the order was minted with — identical to VA settlement, and the reason
+	// the order's own figure is never trusted here.
+	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"payment_ref":        providerRef,
+		"ngn_kobo":           paidKobo.String(),
+		"rate_kobo":          buyRate.String(),
+		"mcgp_amount":        mcgp.String(),
+		"fee_ngn_kobo":       fees.Fee.String(),
+		"net_ngn_kobo":       fees.Net.String(),
+		"platform_kept_kobo": fees.PlatformKept.String(),
+		"wallet_address":     wallet,
+	}).Error; err != nil {
+		if isUniqueViolation(err) {
+			// Another route claimed this session id between our lookup and our
+			// write. Retryable: the re-drive takes the idempotency branch above
+			// and observes the winner's outcome.
+			return fmt.Errorf("it inbound credit: concurrent settlement of ref %s", providerRef)
+		}
+		return err
+	}
+
+	_, err = s.approveBuyCreditWithRef(ctx, intent.ID, wallet, &onChainRef)
+	return err
 }

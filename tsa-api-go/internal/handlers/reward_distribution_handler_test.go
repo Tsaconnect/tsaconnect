@@ -110,7 +110,7 @@ func setupRewardDistTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 		`CREATE TABLE reward_claimables (
 			user_id TEXT PRIMARY KEY,

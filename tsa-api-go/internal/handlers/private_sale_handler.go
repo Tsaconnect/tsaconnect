@@ -123,6 +123,81 @@ func (h *PrivateSaleHandler) UpdatePrivateSaleStatus(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Submission status updated successfully.", submission)
 }
 
+// privateSaleEmail is one composed status notice.
+type privateSaleEmail struct {
+	Subject string
+	Title   string
+	Body    services.EmailBody
+	CTAText string
+	CTAURL  string
+}
+
+// privateSaleStatusEmail composes the approved/rejected notice.
+//
+// This is the only email in the product with structure of its own, and the two
+// values it is built around are the two nobody here wrote: the submitter chose
+// their name and an admin typed the note. Written as a string of literal
+// markup they either arrive as visible tag text (once the template escapes
+// them) or as live HTML the submitter controls (once it does not) — the body is
+// composed of spans instead so the emphasis is the template's and the words
+// stay words. Split from the send so a test can read what the recipient gets.
+func privateSaleStatusEmail(submission models.PrivateSaleSubmission, status, note, landingURL string) privateSaleEmail {
+	amount := fmt.Sprintf("$%.2f", submission.Amount)
+	greeting := services.EmailLine{services.EmailText("Hi " + submission.Name + ",")}
+
+	var msg privateSaleEmail
+	if status == "approved" {
+		msg = privateSaleEmail{
+			Subject: "🎉 Your TSA Connect Private Share Purchase has been Approved!",
+			Title:   "Purchase Approved",
+			Body: services.EmailBody{
+				greeting,
+				{},
+				{
+					services.EmailText("Your private share purchase of "),
+					services.EmailBold(amount),
+					services.EmailText(" has been "),
+					services.EmailBold("approved"),
+					services.EmailText("! Thank you for investing in the TSA Connect ecosystem."),
+				},
+				{},
+				{services.EmailText("You can track all updates and future announcements on our official channels.")},
+			},
+			CTAText: "Visit TSA Connect",
+			CTAURL:  landingURL,
+		}
+	} else {
+		msg = privateSaleEmail{
+			Subject: "TSA Connect Private Share Purchase — Status Update",
+			Title:   "Purchase Not Approved",
+			Body: services.EmailBody{
+				greeting,
+				{},
+				{
+					services.EmailText("After reviewing your private share purchase submission for "),
+					services.EmailBold(amount),
+					services.EmailText(", we are unable to approve it at this time."),
+				},
+				{},
+				{services.EmailText("This could be due to incomplete payment or missing details. If you have any questions, please reach out to our support team.")},
+			},
+			CTAText: "Contact Support",
+			CTAURL:  "mailto:support@tsaconnectworld.com",
+		}
+	}
+
+	if note != "" {
+		msg.Body = append(msg.Body,
+			services.EmailLine{},
+			services.EmailLine{
+				services.EmailBold("Note from admin:"),
+				services.EmailText(" " + note),
+			},
+		)
+	}
+	return msg
+}
+
 // sendStatusEmail sends an email to the submitter when their private sale is approved or rejected.
 func (h *PrivateSaleHandler) sendStatusEmail(submission models.PrivateSaleSubmission, status string, note string) {
 	landingURL := h.Config.LandingURL
@@ -130,40 +205,10 @@ func (h *PrivateSaleHandler) sendStatusEmail(submission models.PrivateSaleSubmis
 		landingURL = "https://tsaconnectworld.com"
 	}
 
-	var subject, title, message, ctaText, ctaURL string
-
-	if status == "approved" {
-		subject = "🎉 Your TSA Connect Private Share Purchase has been Approved!"
-		title = "Purchase Approved"
-		message = fmt.Sprintf(
-			"Hi %s,<br><br>"+
-				"Your private share purchase of <strong>$%.2f</strong> has been <strong>approved</strong>! "+
-				"Thank you for investing in the TSA Connect ecosystem.<br><br>"+
-				"You can track all updates and future announcements on our official channels.",
-			submission.Name, submission.Amount,
-		)
-		ctaText = "Visit TSA Connect"
-		ctaURL = landingURL
-	} else {
-		subject = "TSA Connect Private Share Purchase — Status Update"
-		title = "Purchase Not Approved"
-		message = fmt.Sprintf(
-			"Hi %s,<br><br>"+
-				"After reviewing your private share purchase submission for <strong>$%.2f</strong>, "+
-				"we are unable to approve it at this time.<br><br>"+
-				"This could be due to incomplete payment or missing details. "+
-				"If you have any questions, please reach out to our support team.",
-			submission.Name, submission.Amount,
-		)
-		ctaText = "Contact Support"
-		ctaURL = "mailto:support@tsaconnectworld.com"
-	}
-
-	if note != "" {
-		message += fmt.Sprintf("<br><br><strong>Note from admin:</strong> %s", note)
-	}
-
-	if err := h.EmailService.Send(submission.Email, submission.Name, subject, title, message, ctaText, ctaURL); err != nil {
+	msg := privateSaleStatusEmail(submission, status, note, landingURL)
+	if err := h.EmailService.SendBody(
+		submission.Email, submission.Name, msg.Subject, msg.Title, msg.Body, msg.CTAText, msg.CTAURL,
+	); err != nil {
 		// Log error but don't block — email failure shouldn't break the status update
 		fmt.Printf("[PrivateSaleHandler] failed to send %s email to %s: %v\n", status, submission.Email, err)
 	}

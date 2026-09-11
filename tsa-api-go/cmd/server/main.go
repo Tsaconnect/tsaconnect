@@ -59,6 +59,62 @@ func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwC
 	return nil
 }
 
+// p2pCentralRouting decides whether P2P buy screens may send buyers to the
+// company account, and what to say when they may not.
+//
+// Telling a buyer where to send naira and being able to turn that naira back
+// into their trade are two halves of one thing, but boot wires them far apart:
+// routing needs only a live Instant Transfer service, while the P2P claim
+// source is registered inside the PM-automation block, which additionally needs
+// a release key and a chain client. With IT live, central mode on and PM
+// automation dormant the halves disagreed — every buyer was pointed at the
+// company account while nothing existed to attribute their transfer, so every
+// P2P payment held indefinitely, and the only boot warning covered the inverse
+// case.
+//
+// It REFUSES to route rather than warning and routing anyway. The fallback is
+// the merchant's own account, which still attributes the payment and still
+// settles the trade; a warning only records the loss after a night of holds
+// nobody was reading the log to prevent. Central mode is a boot-time config, so
+// the operator who set it can see the refusal at the same moment they set it.
+func p2pCentralRouting(itLive, p2pClaimsRegistered, centralEnabled bool) (route bool, warning string) {
+	if itLive && p2pClaimsRegistered {
+		return true, ""
+	}
+	// Off the cutover there is nothing to warn about: merchant accounts are
+	// where buyers are supposed to be sent, and staging INBOUND_CENTRAL_* with
+	// the mode off is how a cutover is prepared.
+	if !centralEnabled {
+		return false, ""
+	}
+	if !itLive {
+		return false, "Instant Transfer is dormant, so P2P cannot reach the company account and " +
+			"will keep showing merchant virtual accounts in central mode"
+	}
+	return false, "P2P buyers are being kept on merchant accounts in central mode: the P2P claim " +
+		"source did not register (PM automation is dormant — it needs PM_RELEASE_PRIVATE_KEY and a " +
+		"Sonic client), so a payment into the company account would have nothing to attribute it to"
+}
+
+// isNUBAN reports whether s is a Nigerian NUBAN: exactly ten digits.
+//
+// Deliberately shape-only. It cannot catch a transposed digit — only a name
+// enquiry against the bank can — but every customer's money is routed by this
+// one string, so a truncated paste or a stray character is worth catching at
+// boot rather than from a support ticket.
+func isNUBAN(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) != 10 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	migrateFlag := flag.Bool("migrate", false,
 		"run database migrations and exit; used by the deploy between build and restart")
@@ -85,6 +141,62 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
+
+	// Central inbound mode sends every payer to one company account, so an
+	// unset account number is not a dormant feature — it is a pay-into screen
+	// with a blank number on it, and users transferring money nowhere. There is
+	// no safe degraded mode, so refuse to boot rather than serve it.
+	if cfg.InboundCentralEnabled() {
+		central := services.CentralAccount{
+			AccountNumber: cfg.InboundCentralAccountNumber,
+			BankName:      cfg.InboundCentralBankName,
+			AccountName:   cfg.InboundCentralAccountName,
+		}
+		if !central.IsConfigured() {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_MODE=central requires " +
+				"INBOUND_CENTRAL_ACCOUNT_NUMBER, INBOUND_CENTRAL_BANK_NAME and " +
+				"INBOUND_CENTRAL_ACCOUNT_NAME to all be set")
+		}
+		// A NUBAN is ten digits. This will not catch a transposition — only the
+		// bank can — but it catches a truncated paste, a stray space, or a sort
+		// code pasted into the wrong variable, and every one of those sends
+		// every customer's money to an account we do not own.
+		if !isNUBAN(central.AccountNumber) {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_CENTRAL_ACCOUNT_NUMBER %q "+
+				"is not a 10-digit NUBAN", central.AccountNumber)
+		}
+		// The wallet-statement poll is the ONLY way a central credit is ever
+		// seen — wallet funding fires no webhook. Booting central without
+		// Flutterwave credentials serves pay-into screens for an account
+		// nothing reads, so money arrives and not even a `held` row exists.
+		if strings.TrimSpace(cfg.FlutterwaveClientID) == "" || strings.TrimSpace(cfg.FlutterwaveClientSecret) == "" {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_MODE=central requires Flutterwave " +
+				"credentials — the wallet-statement poll is the only way a credit is ever seen")
+		}
+		// A held credit is customer money nobody has been able to attribute,
+		// and by design nothing releases it automatically — no refund timer, no
+		// expiry. The alert is the ONLY thing that tells anyone to go look.
+		//
+		// The dangerous state is the CONFIGURED one: an operator who sets
+		// INBOUND_ALERT_EMAILS is entitled to believe they are paged, and if
+		// Mailjet has no credentials every one of those alerts is discarded at
+		// the first call without anyone noticing. An empty list is merely a
+		// choice — nobody is paged and nobody thinks otherwise — so it says so
+		// plainly and does not shout. Neither is fatal: the admin queue still
+		// holds the evidence, and a mail outage must not stop the API taking
+		// money.
+		switch {
+		case len(cfg.InboundAlertEmails) == 0:
+			log.Printf("[config] INBOUND_MODE=central with no INBOUND_ALERT_EMAILS — " +
+				"held credits will raise no alert and are only visible in the admin queue")
+		case !services.MailerConfigured(cfg.MailjetAPIKey, cfg.MailjetSecretKey):
+			log.Printf("[config] WARNING: INBOUND_ALERT_EMAILS names %d recipient(s) but Mailjet is not configured — "+
+				"every hold alert will be dropped and nobody at those addresses will hear that money is stuck",
+				len(cfg.InboundAlertEmails))
+		default:
+			log.Printf("[config] inbound hold alerts will go to %d recipient(s)", len(cfg.InboundAlertEmails))
+		}
+	}
 
 	// Build the non-EVM chain registry. Each (network, chain) is registered only
 	// when its config is present, so absent combos stay dormant (ForKey → false).
@@ -257,6 +369,11 @@ func main() {
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itService.SetCurrencyRegistry(currencyRegistry)
+				itService.SetInboundCentral(cfg.InboundCentralEnabled(), services.CentralAccount{
+					AccountNumber: cfg.InboundCentralAccountNumber,
+					BankName:      cfg.InboundCentralBankName,
+					AccountName:   cfg.InboundCentralAccountName,
+				})
 				itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}
@@ -648,6 +765,64 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// The one operator alert channel for inbound money the pipeline cannot
+	// account for: a credit it refused to attribute, and a window where our
+	// ledger disagrees with the provider's. Both are read by the same people
+	// out of the same INBOUND_ALERT_EMAILS list, and building it once here is
+	// what stops the matcher and the reconciler drifting onto different lists.
+	//
+	// Constructed unconditionally — with no recipients or no mailer it is a
+	// no-op, never a nil the callers have to guard.
+	inboundAlerts := services.NewInboundHoldNotifier(emailService, cfg.InboundAlertEmails, cfg.AdminConsoleBaseURL())
+
+	// Central-account inbound attribution (design 2026-09-10). Polls the
+	// Flutterwave wallet statement and writes every customer credit to
+	// inbound_credits. There is NO webhook for wallet funding, so this poll is
+	// the only way such a credit is ever seen.
+	//
+	// Registered in BOTH inbound modes on purpose: under `va` it attributes
+	// nothing and simply records what lands, which is how the design wants the
+	// statement observed against real traffic before the flag flips. The
+	// matching step is wired separately via SetMatcher, below, once the products
+	// that can claim a credit have been built — ingestion is deliberately useful
+	// on its own.
+	var inboundPoller *jobs.InboundCreditPoller
+	if fwClient != nil {
+		inboundPoller = jobs.NewInboundCreditPoller(
+			services.NewInboundIngestor(config.DB, fwClient, "NGN", cfg.InboundStatementLookback),
+			cfg.InboundPollIntervalOrDefault(),
+		)
+		scheduler.Register(inboundPoller)
+		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s)",
+			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
+
+		// The safety net over that poll (design §7). Per-user VAs made
+		// attribution cryptographic; a free-text sender name and a poll with no
+		// webhook backstop do not, so this is what tells us the pipeline has not
+		// silently lost or duplicated money. It compares Σ inbound_credits
+		// against Flutterwave's own credit total for a settled window and alerts
+		// in BOTH directions — short means a customer paid and nobody has their
+		// money, long means one payment was recorded twice.
+		//
+		// Read-only, and registered alongside the poller in both modes for the
+		// same reason: what it checks is the ingestor, which runs in both.
+		//
+		// The gap alert is wired here rather than left to the log line it
+		// shipped with, because a short gap is the one finding with NO other
+		// discovery path: the credit never reached inbound_credits, so there is
+		// no held row in the admin queue for anyone to come across.
+		inboundReconciler := jobs.NewInboundReconciler(
+			jobs.NewInboundReconcileSource(config.DB, fwClient),
+			"NGN",
+			5*time.Minute,
+		)
+		inboundReconciler.SetNotifier(inboundGapAlerts{to: inboundAlerts})
+		scheduler.Register(inboundReconciler)
+		log.Printf("[inbound] reconciler registered (Σ inbound_credits vs statement credits, 5m, both directions)")
+	} else {
+		log.Printf("[inbound] credit poller dormant: no Flutterwave client")
+	}
+
 	// Wire IT's live withdrawal FX quote (GET /api/it/withdraw/quote) onto
 	// Flutterwave's pass-through rate feed. Optional seam — nil fwClient (or
 	// IT dormant) leaves QuoteWithdrawal returning ErrITQuoteUnavailable.
@@ -655,6 +830,68 @@ func main() {
 		itService.SetRateQuoter(fwClient)
 		itService.SetFlutterwaveClient(fwClient)
 		log.Printf("[it] withdrawal FX quote + per-user fiat VA activate wired (Flutterwave)")
+	}
+
+	// Attribution: decide which user each recorded inbound credit belongs to
+	// (design §5.3). Wired after IT so the claim source sees a fully configured
+	// service, and only when there is a poller to drive it.
+	//
+	// Registered in BOTH inbound modes, like the ingestor. Under `va` the MCGP
+	// claim source still lists open buy orders, but no customer is being told to
+	// pay into the central account, so in practice nothing matches and every
+	// stray credit holds — which is exactly the shadow run the design asks for
+	// before the flag flips.
+	//
+	// Held outside the block so the P2P source can join later: it needs the PM
+	// service, the trade service and the release signer, none of which exist
+	// yet at this point in boot. A product that registers late still matches
+	// everything ingested before it — credits are durable and re-run.
+	var inboundMatcher *services.InboundMatcher
+
+	// Operator queue over held inbound credits (central-account design §8).
+	//
+	// ALWAYS registered, in both inbound modes and with or without Flutterwave
+	// credentials. The ingestor records credits regardless of mode, and a held
+	// credit has no automatic exit — a queue that only exists when the poller
+	// is healthy is a queue nobody can drain after an outage.
+	//
+	// Constructed HERE, before any claim source exists, so registration can go
+	// through one path (registerInboundClaim below) instead of two lists that
+	// have to be kept in step by hand.
+	inboundAdminService := services.NewInboundAdminService(config.DB)
+
+	// registerInboundClaim is the ONLY way a product joins inbound attribution.
+	//
+	// The matcher decides who a credit belongs to; the hold queue explains to an
+	// operator why it could not decide. Those must consult the SAME sources — a
+	// product registered with one and not the other produces holds whose
+	// evidence view is silently empty, which is worse than no queue at all
+	// because it looks like an answer. One call, both registries.
+	registerInboundClaim := func(claimType string, src services.ClaimSource) {
+		if inboundMatcher != nil {
+			inboundMatcher.Register(claimType, src)
+		}
+		inboundAdminService.AddClaimSource(claimType, src)
+	}
+
+	if inboundPoller != nil && itService != nil {
+		inboundMatcher = services.NewInboundMatcher(config.DB)
+		// Without this the matcher holds credits and tells nobody: the queue
+		// has no automatic exit and is only discoverable by an operator
+		// deciding to open it.
+		inboundMatcher.SetHoldNotifier(inboundAlerts)
+		inboundAdminService.SetBinder(inboundMatcher)
+		registerInboundClaim(services.InboundClaimTypeITMCGP,
+			services.NewITMCGPClaimSource(config.DB, itService))
+		registerInboundClaim(services.InboundClaimTypeITStable,
+			services.NewITStableClaimSource(itService))
+		inboundPoller.SetMatcher(inboundMatcher)
+		log.Printf("[inbound] matcher wired (claim sources: %s, %s)",
+			services.InboundClaimTypeITMCGP, services.InboundClaimTypeITStable)
+	} else if inboundPoller != nil {
+		// Ingest keeps running. Credits pile up as `unmatched` and are
+		// attributed the moment a matcher exists — nothing about them expires.
+		log.Printf("[inbound] matcher dormant: IT service unavailable — credits will be recorded but not attributed")
 	}
 
 	// Brokered stablecoin ramp (design doc 2026-08-27-stablecoin-fiat-ramp).
@@ -877,6 +1114,12 @@ func main() {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
+	// Deliberately NOT wired here, even though ITService — the only holder of
+	// the company account — already exists. The P2P claim source is registered
+	// much further down, inside the PM-automation block, and until it is there
+	// is nothing to attribute a P2P payment to. Routing is decided after that
+	// block so the two cannot be enabled independently; see p2pCentralRouting.
+	p2pClaimsRegistered := false
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
@@ -1044,6 +1287,54 @@ func main() {
 		// dispatches.
 		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
 		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
+
+		// Instant per-trade settlement forward (central-account design decision
+		// 7): on settle, sweep the merchant's naira to their own settlement
+		// bank rather than leaving it to a manual withdrawal.
+		//
+		// Wired in BOTH inbound modes, and deliberately so. The forward is a
+		// consequence of a trade settling, not of how the money was attributed,
+		// and the disburse webhook it depends on arrives regardless of the
+		// flag. Gating it on central mode would mean a forward submitted before
+		// a rollback could never be confirmed, which would leave the merchant
+		// permanently over-credited.
+		//
+		// fwClient doubles as the payout-balance reader: the pre-check refuses
+		// to submit a transfer the payout account cannot fund, which the
+		// stablecoin sell leg does and the MCGP sell leg's absence of is the
+		// root of its stranded-value bug. A nil client simply skips the
+		// pre-check — the ledger ordering, not this check, is what makes the
+		// forward safe.
+		var balanceReader services.PayoutBalanceReader
+		if fwClient != nil {
+			balanceReader = fwClient
+		}
+		settlementForwarder := services.NewP2PSettlementForwarder(
+			config.DB, pmSvc, gateway, balanceReader, cfg.NombaSenderName)
+		pmAuto.SetSettlementForwarder(settlementForwarder)
+		scheduler.Register(jobs.NewP2PForwardSweepJob(settlementForwarder))
+		log.Printf("[pm] settlement forward wired (balance pre-check=%t); unanswered-transfer sweep registered",
+			balanceReader != nil)
+
+		// P2P joins the matcher here rather than alongside the IT sources,
+		// because only now do the trade service and release signer exist. The
+		// claim's user is the BUYER — they send the naira — while the merchant
+		// is credited and forwarded to; see inbound_claim_p2p.go.
+		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
+		p2pClaims.SetForwarder(settlementForwarder)
+		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
+		// Read below to decide whether P2P buyers may be sent to the company
+		// account at all. Set from the registration itself, never from the
+		// conditions that led here, so the two can't be reasoned about apart.
+		p2pClaimsRegistered = true
+		if inboundMatcher != nil {
+			log.Printf("[inbound] matcher gained the %s claim source", services.InboundClaimTypeP2PTrade)
+		} else {
+			// No matcher, so nothing auto-binds — but the hold queue still gets
+			// the source, so an operator can see and assign P2P candidates.
+			log.Printf("[inbound] no matcher wired; %s registered for the hold queue only",
+				services.InboundClaimTypeP2PTrade)
+		}
 		// NGN ledger drift reconciler (VA-only model): compares the SUM of all
 		// active PMs' off-chain available_ngn against the live single-parent Nomba
 		// balance every 5m and logs drift (pm_ngn_reconciler_drift_total).
@@ -1061,6 +1352,17 @@ func main() {
 		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
 	} else {
 		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")
+	}
+
+	// Both halves of P2P central attribution are now known, so decide here —
+	// after the claim source either registered or didn't — rather than beside
+	// the handler, where only half the answer exists.
+	if route, warning := p2pCentralRouting(itService != nil, p2pClaimsRegistered, cfg.InboundCentralEnabled()); route {
+		p2pHandler.SetInboundCentralSource(itService)
+		log.Printf("[inbound] P2P buyers routed to the company account (%s claim source registered)",
+			services.InboundClaimTypeP2PTrade)
+	} else if warning != "" {
+		log.Printf("[inbound] WARNING: %s", warning)
 	}
 
 	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
@@ -1182,8 +1484,10 @@ func main() {
 	}
 	disputeHandler := handlers.NewDisputeHandler(disputeService)
 
+	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
+
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
@@ -1250,6 +1554,30 @@ func (s *pmNGNLedgerSource) SumActiveAvailableNGN(ctx context.Context) (string, 
 
 func (s *pmNGNLedgerSource) FetchParentBalance(ctx context.Context) (string, error) {
 	return s.nomba.FetchParentBalance(ctx)
+}
+
+// inboundGapAlerts adapts the inbound alert channel onto the reconciler's
+// jobs.InboundGapNotifier, for the same reason pmNGNLedgerSource lives here:
+// jobs imports services, so the notifier cannot name jobs.InboundGap without
+// reversing that. The field copy is the price of the one-way dependency and is
+// cheaper than the alternative, which is moving mail composition into jobs
+// where the matcher — the notifier's primary caller — cannot reach it.
+type inboundGapAlerts struct {
+	to *services.InboundHoldNotifier
+}
+
+func (a inboundGapAlerts) NotifyInboundGap(ctx context.Context, gap jobs.InboundGap) error {
+	return a.to.NotifyGap(ctx, services.InboundGapAlert{
+		Currency:     gap.Currency,
+		From:         gap.From,
+		To:           gap.To,
+		IngestedKobo: gap.IngestedKobo,
+		ProviderKobo: gap.ProviderKobo,
+		GapKobo:      gap.GapKobo,
+		IngestedRows: gap.IngestedRows,
+		ProviderRows: gap.ProviderRows,
+		Streak:       gap.Streak,
+	})
 }
 
 // to validate statically here.

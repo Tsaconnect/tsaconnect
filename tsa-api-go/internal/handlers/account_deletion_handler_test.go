@@ -48,7 +48,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 		`CREATE TABLE account_deletion_requests (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, reason TEXT,
