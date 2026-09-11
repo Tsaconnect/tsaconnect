@@ -228,7 +228,7 @@ func TestInboundAdminCandidatesExplainsEveryRejection(t *testing.T) {
 	noNameClaim, unrelatedClaim := uuid.New(), uuid.New()
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: nameOnlyClaim, UserID: nameOnly, AmountKobo: 150000},
 		{Type: InboundClaimTypeITStable, ID: amountOnlyClaim, UserID: amountOnly, AmountKobo: 200000},
 		{Type: InboundClaimTypeP2PTrade, ID: noNameClaim, UserID: noKYCName, AmountKobo: 200000},
@@ -284,7 +284,7 @@ func TestInboundAdminCandidatesShowsMatcherTokens(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -319,7 +319,7 @@ func TestInboundAdminCandidatesFlagsContention(t *testing.T) {
 	second := insertAdminTestUser(t, db, "Ademu Emmanuel")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: first, AmountKobo: 200000},
 		{Type: InboundClaimTypeITStable, ID: uuid.New(), UserID: second, AmountKobo: 200000},
 	}})
@@ -347,7 +347,7 @@ func TestInboundAdminCandidatesMarksASoleMatchBindable(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -368,7 +368,7 @@ func TestInboundAdminCandidatesComparesAtNairaGranularity(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -392,8 +392,8 @@ func TestInboundAdminCandidatesSurvivesABrokenClaimSource(t *testing.T) {
 	user := insertAdminTestUser(t, db, "Emmanuel Ademu")
 
 	svc := NewInboundAdminService(db)
-	svc.AddClaimSource(&fakeAdminClaimSource{err: errors.New("p2p is down")})
-	svc.AddClaimSource(&fakeAdminClaimSource{claims: []InboundClaim{
+	svc.AddClaimSource(InboundClaimTypeP2PTrade, &fakeAdminClaimSource{err: errors.New("p2p is down")})
+	svc.AddClaimSource(InboundClaimTypeITMCGP, &fakeAdminClaimSource{claims: []InboundClaim{
 		{Type: InboundClaimTypeITMCGP, ID: uuid.New(), UserID: user, AmountKobo: 200000},
 	}})
 
@@ -617,8 +617,8 @@ func TestInboundAdminNairaRounding(t *testing.T) {
 		200050: 200100,
 	}
 	for in, want := range tests {
-		if got := inboundAdminRoundToNairaKobo(in); got != want {
-			t.Errorf("inboundAdminRoundToNairaKobo(%d) = %d, want %d", in, got, want)
+		if got := roundKoboToNaira(in); got != want {
+			t.Errorf("roundKoboToNaira(%d) = %d, want %d", in, got, want)
 		}
 	}
 }

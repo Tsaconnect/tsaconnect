@@ -834,7 +834,7 @@ func main() {
 		if inboundMatcher != nil {
 			inboundMatcher.Register(claimType, src)
 		}
-		inboundAdminService.AddClaimSource(src)
+		inboundAdminService.AddClaimSource(claimType, src)
 	}
 
 	if inboundPoller != nil && itService != nil {

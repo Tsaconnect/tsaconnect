@@ -99,9 +99,10 @@ type InboundAdminService struct {
 	db     *gorm.DB
 	binder InboundManualBinder
 	// sources are read only to explain a hold — this service never calls
-	// Accept. The claims carry their own Type, so there is no map here that
-	// could disagree with what a source returns.
-	sources []ClaimSource
+	// Accept. Each is kept with the claim type it was registered under so a
+	// source that fails can be named without surfacing its raw error, which on
+	// a GORM failure would carry SQL to the client.
+	sources []inboundAdminSource
 	now     func() time.Time
 }
 
@@ -115,12 +116,23 @@ func NewInboundAdminService(db *gorm.DB) *InboundAdminService {
 // Mirrors how the poller takes its matcher.
 func (s *InboundAdminService) SetBinder(b InboundManualBinder) { s.binder = b }
 
+// inboundAdminSource pairs a claim source with the type it serves, so a failing
+// product can be named in an operator-facing response.
+type inboundAdminSource struct {
+	claimType string
+	src       ClaimSource
+}
+
 // AddClaimSource registers a product whose open claims should be considered
 // when explaining a hold. Sources are additive and independent: one being
 // absent narrows the evidence, it never breaks the queue.
-func (s *InboundAdminService) AddClaimSource(src ClaimSource) {
+//
+// claimType is taken here rather than read off the returned claims because a
+// source that fails returns no claims at all — and naming which product went
+// missing is exactly what the operator needs in that case.
+func (s *InboundAdminService) AddClaimSource(claimType string, src ClaimSource) {
 	if src != nil {
-		s.sources = append(s.sources, src)
+		s.sources = append(s.sources, inboundAdminSource{claimType: claimType, src: src})
 	}
 }
 
@@ -267,19 +279,26 @@ func (s *InboundAdminService) Candidates(ctx context.Context, creditID uuid.UUID
 	view := &InboundCandidatesView{
 		Credit:           *credit,
 		SenderNameTokens: AccountNameTokens(credit.SenderName),
-		MatchedNairaKobo: inboundAdminRoundToNairaKobo(credit.GrossKobo),
+		MatchedNairaKobo: roundKoboToNaira(credit.GrossKobo),
 		Candidates:       []InboundCandidate{},
 	}
 
 	claims := make([]InboundClaim, 0, 16)
 	for _, src := range s.sources {
-		got, err := src.OpenClaims(ctx, credit.Currency)
+		got, err := src.src.OpenClaims(ctx, credit.Currency)
 		if err != nil {
 			// One product being down must not blank the queue. Record it and
 			// keep going — partial evidence beats none, as long as the caller
 			// is told it is partial.
-			log.Printf("[inbound-admin] open claims unavailable for credit=%s: %v", creditID, err)
-			view.SourceErrors = append(view.SourceErrors, err.Error())
+			//
+			// The client gets the claim type, never err.Error(): a GORM failure
+			// here would otherwise put SQL in an API response, which every
+			// other path in this handler deliberately avoids. The detail stays
+			// in the log line above it.
+			log.Printf("[inbound-admin] open claims unavailable for credit=%s source=%s: %v",
+				creditID, src.claimType, err)
+			view.SourceErrors = append(view.SourceErrors,
+				fmt.Sprintf("%s claims unavailable", src.claimType))
 			continue
 		}
 		claims = append(claims, got...)
@@ -608,16 +627,4 @@ func inboundAuditMetadata(meta map[string]any) datatypes.JSON {
 		return nil
 	}
 	return datatypes.JSON(blob)
-}
-
-// inboundAdminRoundToNairaKobo rounds minor units to whole naira, matching the
-// amount rule the matcher applies (design §5.4). Claims are minted at whole
-// naira, so sub-naira differences are provider rounding rather than a different
-// payment — and this view has to agree with the matcher about that or it will
-// explain a hold by a rule that did not cause it.
-func inboundAdminRoundToNairaKobo(kobo int64) int64 {
-	if kobo < 0 {
-		return -(((-kobo) + 50) / 100 * 100)
-	}
-	return (kobo + 50) / 100 * 100
 }

@@ -118,10 +118,6 @@ const (
 
 	// inboundReconcileDefaultCurrency — the central account collects NGN only.
 	inboundReconcileDefaultCurrency = "NGN"
-
-	// Statement row types. Only `funding` is customer money arriving; every
-	// other type is our own movement across the same account.
-	inboundRowTypeFunding = "funding"
 )
 
 // InboundReconcileResult is one tick's outcome, surfaced for logging and tests.
