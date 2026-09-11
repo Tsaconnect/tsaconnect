@@ -37,9 +37,16 @@ func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtu
 	}
 	// Raw insert to match the raw table above (GORM would write every column of
 	// models.User).
+	//
+	// verified_legal_name is set alongside the status because a real passed
+	// verification leaves both behind, and the money-in gate requires both: a
+	// verified user with no stored name is one the matcher cannot identify, so
+	// the gate refuses them. A fixture that set only the status would model a
+	// user who cannot actually transact.
 	if err := s.db.Exec(
-		`INSERT INTO users (id, name, email, phone_number, wallet_address, verification_status) VALUES (?, ?, ?, ?, ?, ?)`,
-		user.ID, user.Name, user.Email, "08031234567", user.WalletAddress, models.VerificationStatusVerified,
+		`INSERT INTO users (id, name, email, phone_number, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		user.ID, user.Name, user.Email, "08031234567", user.WalletAddress,
+		models.VerificationStatusVerified, user.Name,
 	).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

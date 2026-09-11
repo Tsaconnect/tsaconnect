@@ -520,6 +520,15 @@ func (h *ITHandler) Buy(c *gin.Context) {
 
 	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
 	if err != nil {
+		// The pre-check above already refused an unverified user, so reaching
+		// here means the status changed underneath the request. Still map it
+		// properly: a blanket 400 gives the app no code to route on and leaves
+		// the user on a payment screen with nowhere to go, which is the whole
+		// failure the machine code exists to prevent.
+		if errors.Is(err, services.ErrKYCVerificationRequired) {
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRequiredCode)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}

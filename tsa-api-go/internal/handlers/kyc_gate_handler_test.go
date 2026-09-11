@@ -25,7 +25,8 @@ func createHandlerUsersTable(t *testing.T, db *gorm.DB) {
 		name TEXT,
 		email TEXT,
 		wallet_address TEXT,
-		verification_status TEXT DEFAULT 'pending'
+		verification_status TEXT DEFAULT 'pending',
+		verified_legal_name TEXT
 	)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
 	}
@@ -39,9 +40,17 @@ func seedHandlerUserAt(t *testing.T, db *gorm.DB, status string) *models.User {
 		WalletAddress:      "0xWALLET",
 		VerificationStatus: status,
 	}
+	// A verified user carries a legal name, because the gate requires both: a
+	// passed verification with no stored name is one the matcher cannot
+	// identify, and it is refused. Seeding only the status would model a user
+	// who cannot actually transact.
+	legalName := ""
+	if status == models.VerificationStatusVerified {
+		legalName = u.Name
+	}
 	if err := db.Exec(
-		`INSERT INTO users (id, name, email, wallet_address, verification_status) VALUES (?, ?, ?, ?, ?)`,
-		u.ID, u.Name, u.ID.String()+"@test.com", u.WalletAddress, status,
+		`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Name, u.ID.String()+"@test.com", u.WalletAddress, status, legalName,
 	).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}

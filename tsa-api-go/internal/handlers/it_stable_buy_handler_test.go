@@ -130,7 +130,8 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 		email TEXT NOT NULL UNIQUE,
 		password TEXT NOT NULL,
 		wallet_address TEXT,
-		verification_status TEXT DEFAULT 'pending'
+		verification_status TEXT DEFAULT 'pending',
+		verified_legal_name TEXT
 	)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
 	}
@@ -153,8 +154,8 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 	// Verified: the buy leg refuses an unverified user outright, so an
 	// unverified fixture would make every test here fail at the KYC gate
 	// rather than at the behaviour it pins.
-	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address, verification_status)
-		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?, ?)`,
+	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address, verification_status, verified_legal_name)
+		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?, ?, 'Ada Okafor')`,
 		userID.String(), evmAddr, models.VerificationStatusVerified).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}

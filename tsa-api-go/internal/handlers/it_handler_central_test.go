@@ -82,8 +82,8 @@ func doITBuy(t *testing.T, h *ITHandler, user *models.User, ngnKobo string) *htt
 	// OR IGNORE: a test that seeded its own status (kyc_gate_handler_test.go)
 	// keeps it.
 	if err := h.db.Exec(
-		`INSERT OR IGNORE INTO users (id, name, wallet_address, verification_status) VALUES (?, ?, ?, ?)`,
-		user.ID, user.Name, user.WalletAddress, models.VerificationStatusVerified,
+		`INSERT OR IGNORE INTO users (id, name, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?)`,
+		user.ID, user.Name, user.WalletAddress, models.VerificationStatusVerified, user.Name,
 	).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -38,8 +39,25 @@ var ErrKYCVerificationRequired = errors.New("verify your identity before paying 
 // figure then has their own money held because an unverified stranger happened
 // to open an order for the same figure.
 //
+// BOTH clauses are required, and the second is the subtle one.
+//
+// A passed verification does not guarantee a stored legal name. The KYC webhook
+// deliberately lets an approval stand when the name lookup fails, and the
+// provider can withhold the attribute outright — which is exactly the set the
+// backfill endpoint exists to repair. Such a user is `verified` and still has
+// no name for the matcher to compare a sender against.
+//
+// The matcher's own test for "can this claim be identified?" is the stored name
+// being non-empty, not the status. Gate on the status alone and a verified user
+// with no name walks straight through, pays, has their credit held, and holds
+// every other credit at that amount alongside it — the precise harm this gate
+// exists to prevent, reached through a smaller door.
+//
+// So this must track whatever the MATCHER treats as identifiable. If that rule
+// changes and this does not, the gap reopens silently.
+//
 // Fails closed: a user row that cannot be read, or does not exist, is not
-// verified. The only way through is an explicit `verified`.
+// verified. The only way through is an explicit `verified` plus a name.
 //
 // Money-OUT paths (sells, withdrawals, payouts, escrow releases) must never
 // call this. Refusing an exit traps value the user already holds, which is a
@@ -47,12 +65,13 @@ var ErrKYCVerificationRequired = errors.New("verify your identity before paying 
 func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUID) error {
 	var row struct {
 		VerificationStatus sql.NullString
+		VerifiedLegalName  sql.NullString
 	}
-	// Table("users"), not Model(&models.User{}): this reads one column, and
+	// Table("users"), not Model(&models.User{}): this reads two columns, and
 	// going through the model drags in its PostgreSQL-only column defaults
 	// (mirrors the username lookup in p2p_trade_service.go).
 	res := db.WithContext(ctx).Table("users").
-		Select("verification_status").
+		Select("verification_status", "verified_legal_name").
 		Where("id = ?", userID).
 		Limit(1).
 		Scan(&row)
@@ -60,6 +79,9 @@ func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUI
 		return res.Error
 	}
 	if res.RowsAffected == 0 || row.VerificationStatus.String != models.VerificationStatusVerified {
+		return ErrKYCVerificationRequired
+	}
+	if strings.TrimSpace(row.VerifiedLegalName.String) == "" {
 		return ErrKYCVerificationRequired
 	}
 	return nil

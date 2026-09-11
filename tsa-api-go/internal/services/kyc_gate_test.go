@@ -46,11 +46,20 @@ func createTestUsersTable(t *testing.T, db *gorm.DB) {
 
 // seedUserAt inserts a user carrying the given verification status and returns
 // its id. Raw INSERT to match the raw table above.
+//
+// A verified user is seeded WITH a legal name, because that is what a real
+// passed verification leaves behind and what the matcher needs. The
+// name-less-but-verified case is a distinct fixture below — it is a real state
+// the provider can produce, not the ordinary one.
 func seedUserAt(t *testing.T, db *gorm.DB, id uuid.UUID, status string) uuid.UUID {
 	t.Helper()
+	legalName := ""
+	if status == models.VerificationStatusVerified {
+		legalName = "Ada Okafor"
+	}
 	if err := db.Exec(
-		`INSERT INTO users (id, name, email, wallet_address, verification_status) VALUES (?, ?, ?, ?, ?)`,
-		id, "Ada Okafor", id.String()+"@test.com", "0x000000000000000000000000000000000000dEaD", status,
+		`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, "Ada Okafor", id.String()+"@test.com", "0x000000000000000000000000000000000000dEaD", status, legalName,
 	).Error; err != nil {
 		t.Fatalf("seed user (%s): %v", status, err)
 	}
@@ -61,6 +70,22 @@ func seedUserAt(t *testing.T, db *gorm.DB, id uuid.UUID, status string) uuid.UUI
 func seedVerifiedUser(t *testing.T, db *gorm.DB) uuid.UUID {
 	t.Helper()
 	return seedUserAt(t, db, uuid.New(), models.VerificationStatusVerified)
+}
+
+// seedVerifiedWithoutLegalName is the state the gate's second clause exists
+// for: the provider approved the user but withheld or failed to return the
+// name, so there is nothing for the matcher to compare a sender against.
+func seedVerifiedWithoutLegalName(t *testing.T, db *gorm.DB, storedName string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	if err := db.Exec(
+		`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, "Ada Okafor", id.String()+"@test.com", "0x000000000000000000000000000000000000dEaD",
+		models.VerificationStatusVerified, storedName,
+	).Error; err != nil {
+		t.Fatalf("seed nameless verified user: %v", err)
+	}
+	return id
 }
 
 // unverifiedStatuses are every status that is not `verified`, plus the
@@ -283,5 +308,59 @@ func TestOpenTrade_BuyAdDepositorIsNotGated(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("OpenTrade(buy-ad): %v", err)
+	}
+}
+
+// A passed verification with no stored legal name must be refused at the gate.
+//
+// This is the gap the status-only check left open. Such a user is `verified`,
+// so a status check waves them through; they pay; the matcher then cannot
+// identify them, holds their credit, and — because an unidentifiable rival
+// claim can never be ruled out — holds every other credit at that amount too.
+// The gate exists to stop exactly that, so it has to refuse here.
+func TestRequireVerifiedForMoneyIn_RefusesVerifiedWithNoLegalName(t *testing.T) {
+	s := newITTestService(t)
+
+	for _, stored := range []string{"", "   ", "\t"} {
+		userID := seedVerifiedWithoutLegalName(t, s.db, stored)
+		err := requireVerifiedForMoneyIn(context.Background(), s.db, userID)
+		if !errors.Is(err, ErrKYCVerificationRequired) {
+			t.Errorf("stored legal name %q: err = %v, want ErrKYCVerificationRequired — "+
+				"a verified user the matcher cannot identify must not be able to pay in", stored, err)
+		}
+	}
+}
+
+func TestRequireVerifiedForMoneyIn_AdmitsVerifiedWithALegalName(t *testing.T) {
+	s := newITTestService(t)
+	userID := seedVerifiedUser(t, s.db)
+
+	if err := requireVerifiedForMoneyIn(context.Background(), s.db, userID); err != nil {
+		t.Fatalf("err = %v, want nil — a fully verified user must still be admitted", err)
+	}
+}
+
+// The gate must fail CLOSED on a database error, and must not report that
+// failure as the ordinary refusal.
+//
+// Distinguishing the two matters: the refusal is a 403 telling the user to go
+// and verify, while this is a 500 that should page somebody. A refactor that
+// swallowed the query error would turn an outage into "every user suddenly
+// needs to verify again", and the whole suite would still pass.
+func TestRequireVerifiedForMoneyIn_DatabaseErrorIsNotARefusal(t *testing.T) {
+	s := newITTestService(t)
+	userID := seedVerifiedUser(t, s.db)
+
+	if err := s.db.Exec(`DROP TABLE users`).Error; err != nil {
+		t.Fatalf("drop users: %v", err)
+	}
+
+	err := requireVerifiedForMoneyIn(context.Background(), s.db, userID)
+	if err == nil {
+		t.Fatal("err = nil — an unreadable users table must never read as verified")
+	}
+	if errors.Is(err, ErrKYCVerificationRequired) {
+		t.Fatal("a database failure was reported as the ordinary refusal; " +
+			"the user would be told to re-verify instead of the outage being surfaced")
 	}
 }
