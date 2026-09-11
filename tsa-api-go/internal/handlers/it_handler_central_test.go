@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -255,5 +256,52 @@ func TestBuy_ActivationRefusal_OnlyInVAMode(t *testing.T) {
 	}
 	if data["payTo"] != nil {
 		t.Fatalf("payTo = %v, want nil when activation is required", data["payTo"])
+	}
+}
+
+// The screen is the only instruction the payer gets, and the claim is the only
+// thing their transfer can be matched against. A pre-cutover order still
+// carries fractional kobo, so a screen that truncates where the matcher rounds
+// tells the buyer to send 1000 naira against a claim asking 1001 — a hold every
+// single time, with the money already gone.
+func TestCentralPayTo_HalfNaira_ShowsTheFigureTheMatcherWillAskFor(t *testing.T) {
+	_, db, it := newITBuyHandler(t)
+	it.SetInboundCentral(true, testCentralAccount())
+	user := &models.User{ID: uuid.New(), Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+
+	// Minted before OpenBuyOrder started snapping the ask to whole naira, which
+	// is the only way a fractional order still reaches this screen.
+	intent := &models.ITIntent{
+		ID:            uuid.New(),
+		UserID:        user.ID,
+		Direction:     models.ITDirectionBuy,
+		Status:        models.ITStatusPendingPayment,
+		Asset:         models.ITAssetMCGP,
+		Currency:      "NGN",
+		WalletAddress: user.WalletAddress,
+		NgnKobo:       "100050",
+		McgpAmount:    "1",
+		RateKobo:      "100050",
+		PaymentRef:    "IT-PRECUTOVER01",
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatalf("seed intent: %v", err)
+	}
+
+	shown, _ := centralPayTo(testCentralAccount(), intent.NgnKobo)["amountNgn"].(string)
+
+	claims, err := services.NewITMCGPClaimSource(db, it).OpenClaims(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want 1", len(claims))
+	}
+	asked := strconv.FormatInt(claims[0].AmountKobo/100, 10)
+	if shown != asked {
+		t.Fatalf("screen shows %s naira but the claim asks %s naira - the payer cannot satisfy both", shown, asked)
+	}
+	if shown != "1001" {
+		t.Fatalf("amountNgn = %q, want 1001 (half a naira rounds away from zero)", shown)
 	}
 }
