@@ -199,7 +199,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
 		// Repairs users verified before the Didit legal name was stored; run by
 		// hand, one bounded page at a time.
-		kycGroup.POST("/admin/backfill-legal-names", adminAuth, h.AdminBackfillVerifiedNames)
+		//
+		// RequireP2PAdmin on top of adminAuth because AdminAuth also admits
+		// `merchant` and `support`. This pulls identity-document names for up
+		// to a page of users from the KYC provider and writes them to `users` —
+		// a PII-processing action, not an inventory one, and it is the input to
+		// deciding whose bank transfer is whose.
+		kycGroup.POST("/admin/backfill-legal-names", adminAuth, middleware.RequireP2PAdmin(), h.AdminBackfillVerifiedNames)
 	}
 
 	// Nomba webhook — signature-verified (no auth middleware), mounted OUTSIDE
@@ -935,7 +941,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.GET("/orders", pch.ListOrders)
 				pc.GET("/orders/:id", pch.GetOrder)
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
-			pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
+				pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
 			}
 		}
 

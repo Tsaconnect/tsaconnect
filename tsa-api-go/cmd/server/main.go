@@ -59,6 +59,25 @@ func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwC
 	return nil
 }
 
+// isNUBAN reports whether s is a Nigerian NUBAN: exactly ten digits.
+//
+// Deliberately shape-only. It cannot catch a transposed digit — only a name
+// enquiry against the bank can — but every customer's money is routed by this
+// one string, so a truncated paste or a stray character is worth catching at
+// boot rather than from a support ticket.
+func isNUBAN(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) != 10 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	migrateFlag := flag.Bool("migrate", false,
 		"run database migrations and exit; used by the deploy between build and restart")
@@ -100,6 +119,22 @@ func main() {
 			log.Fatalf("[config] REFUSING TO START: INBOUND_MODE=central requires " +
 				"INBOUND_CENTRAL_ACCOUNT_NUMBER, INBOUND_CENTRAL_BANK_NAME and " +
 				"INBOUND_CENTRAL_ACCOUNT_NAME to all be set")
+		}
+		// A NUBAN is ten digits. This will not catch a transposition — only the
+		// bank can — but it catches a truncated paste, a stray space, or a sort
+		// code pasted into the wrong variable, and every one of those sends
+		// every customer's money to an account we do not own.
+		if !isNUBAN(central.AccountNumber) {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_CENTRAL_ACCOUNT_NUMBER %q "+
+				"is not a 10-digit NUBAN", central.AccountNumber)
+		}
+		// The wallet-statement poll is the ONLY way a central credit is ever
+		// seen — wallet funding fires no webhook. Booting central without
+		// Flutterwave credentials serves pay-into screens for an account
+		// nothing reads, so money arrives and not even a `held` row exists.
+		if strings.TrimSpace(cfg.FlutterwaveClientID) == "" || strings.TrimSpace(cfg.FlutterwaveClientSecret) == "" {
+			log.Fatalf("[config] REFUSING TO START: INBOUND_MODE=central requires Flutterwave " +
+				"credentials — the wallet-statement poll is the only way a credit is ever seen")
 		}
 		// A held credit is customer money nobody has been able to attribute,
 		// and by design nothing releases it automatically — no refund timer, no
