@@ -498,6 +498,23 @@ func (s *P2PTradeClaimSource) settleTrade(ctx context.Context, tradeID uuid.UUID
 // cancelled, disputed and resolved are the dangerous ones: AutoRelease refuses
 // them, RecoverStuckTrades' `status = paid` filter never selects them, and the
 // buyer's crypto stays escrowed for good.
+//
+// ── `releasing` can mean the escrow ALREADY paid out ──
+//
+// Not every `releasing` trade is a release that never landed. confirmReleaseCore
+// checks its money-invariant AFTER verifying the on-chain event, so a receipt
+// whose amounts do not add up aborts with the crypto already gone and the row
+// still `releasing`. Deferring that is right — the reconciler settles it against
+// on-chain truth — but it means a later Accept on the same trade (a replayed
+// credit, a manual bind) reaches AutoRelease, which skips its flip for a trade
+// already `releasing` and signs a SECOND adminRelease.
+//
+// Nothing on this side stops that. The guard is the escrow's own
+// `require(status == Pending || Paid)` in adminRelease: a trade the contract has
+// already marked Released reverts the second attempt, so the broadcast costs gas
+// and returns an error instead of paying the buyer twice. Weakening that require
+// — or routing a release through anything that does not have it — makes this
+// path a double release.
 func p2pReleaseIsRecoverable(status string) bool {
 	return status == models.P2PTradeStatusPaid || status == models.P2PTradeStatusReleasing
 }
@@ -822,17 +839,39 @@ func (f *P2PSettlementForwarder) ListNeedingAttention(ctx context.Context) ([]mo
 // fail marks a forward terminal and alerts. The balance is deliberately left
 // alone: the merchant keeps the ledger entry precisely because the money did
 // not reach them.
+//
+// Scoped to the status the caller actually observed, because "not paid" is only
+// ever true of that status. A caller whose read has since gone stale is
+// describing somebody else's row: most dangerously an attempt that read
+// `pending` while another one SUBMITTED, where an unscoped write would list a
+// merchant whose money is in flight as one nobody paid. That is the operator
+// queue's cue to pay by hand, and the merchant is then paid twice — the one
+// outcome the ledger-first ordering cannot undo, because the second payment is
+// real money out of a real account.
+//
+// The alarm follows the write rather than preceding it for the same reason: a
+// row this call did not resolve is not a merchant this call can say went
+// unpaid.
 func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
-	log.Printf("[p2p forward] ALARM forward=%s trade=%s pm=%s NOT paid: %s — merchant remains credited %s %s, ledger untouched",
-		fwd.ID, fwd.TradeID, fwd.PMID, reason, fwd.Currency, fwd.Amount)
 	now := f.now()
-	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
-		Where("id = ?", fwd.ID).
+	res := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("id = ? AND status = ?", fwd.ID, fwd.Status).
 		Updates(map[string]any{
 			"status":         models.P2PForwardFailed,
 			"failure_reason": truncateReason(reason),
 			"alerted_at":     now,
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("[p2p forward] forward=%s trade=%s pm=%s moved out of %q before it could be failed (%s); leaving it to whoever owns it now",
+			fwd.ID, fwd.TradeID, fwd.PMID, fwd.Status, reason)
+		return nil
+	}
+	log.Printf("[p2p forward] ALARM forward=%s trade=%s pm=%s NOT paid: %s — merchant remains credited %s %s, ledger untouched",
+		fwd.ID, fwd.TradeID, fwd.PMID, reason, fwd.Currency, fwd.Amount)
+	return nil
 }
 
 // hold leaves a forward retryable and records why it has not been sent. Unlike
@@ -851,10 +890,22 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 // with an identical number. The ceiling would then never arrive, and a
 // permanently unpayable forward would retry forever on no operator surface,
 // which is the one outcome the ceiling exists to rule out.
+//
+// The same database is what decides whether this attempt may act at all. Those
+// overlapping attempts do not all fail: one of them can SUBMIT, and from that
+// moment the merchant's money is in flight and nothing here is entitled to call
+// the transfer unsendable. Escalating on a count this attempt did not earn would
+// mark an in-flight transfer `failed`, which reads to an operator as a merchant
+// nobody paid — and paying them by hand pays them twice.
 func (f *P2PSettlementForwarder) hold(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
-	attempts, err := f.countAttempt(ctx, fwd, reason)
+	attempts, counted, err := f.countAttempt(ctx, fwd, reason)
 	if err != nil {
 		return err
+	}
+	if !counted {
+		log.Printf("[p2p forward] forward=%s trade=%s pm=%s left alone: it is no longer pending, so this attempt (%s) is not the one that owns it",
+			fwd.ID, fwd.TradeID, fwd.PMID, reason)
+		return nil
 	}
 	if attempts >= p2pForwardMaxAttempts {
 		return f.fail(ctx, fwd, fmt.Sprintf("held %d times and still unsendable: %s", attempts, reason))
@@ -869,11 +920,16 @@ func (f *P2PSettlementForwarder) hold(ctx context.Context, fwd *models.P2PSettle
 // than on a stale read. It reads back inside the same transaction because the
 // two supported drivers do not agree on UPDATE ... RETURNING.
 //
-// A row that is no longer `pending` was resolved by somebody else between the
-// caller's read and this write; there is nothing to count and nothing to
-// escalate, so its stored count is returned untouched.
-func (f *P2PSettlementForwarder) countAttempt(ctx context.Context, fwd *models.P2PSettlementForward, reason string) (int, error) {
+// A row that is no longer `pending` moved on between the caller's read and this
+// write, so nothing is counted and counted=false says so. The number returned
+// alongside it is zero rather than the row's stored one on purpose: the stored
+// count belongs to whoever owns the row now, and a caller that judged the
+// ceiling on it could escalate a forward that has since been SUBMITTED — a
+// merchant whose money is in flight, listed to an operator as unpaid, and paid
+// a second time by hand.
+func (f *P2PSettlementForwarder) countAttempt(ctx context.Context, fwd *models.P2PSettlementForward, reason string) (int, bool, error) {
 	var attempts int
+	var counted bool
 	err := f.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.P2PSettlementForward{}).
 			Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
@@ -884,6 +940,10 @@ func (f *P2PSettlementForwarder) countAttempt(ctx context.Context, fwd *models.P
 		if res.Error != nil {
 			return res.Error
 		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		counted = true
 		var fresh models.P2PSettlementForward
 		if err := tx.Select("attempts").First(&fresh, "id = ?", fwd.ID).Error; err != nil {
 			return err
@@ -891,7 +951,7 @@ func (f *P2PSettlementForwarder) countAttempt(ctx context.Context, fwd *models.P
 		attempts = fresh.Attempts
 		return nil
 	})
-	return attempts, err
+	return attempts, counted, err
 }
 
 // RedrivePending re-attempts the forwards that were held back, and is the thing

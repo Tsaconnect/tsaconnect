@@ -322,16 +322,26 @@ func TestP2PAccept_IsIdempotentOnProviderRef(t *testing.T) {
 	}
 }
 
+// A settle that fails AFTER the ledger credit must be finishable by replaying
+// the same credit. The credit is durable the moment it commits, so a replay
+// that short-circuited on the idempotency row would leave the trade wedged at
+// pending_payment with the money already booked, and nothing coming back for it.
+//
+// The failure is injected as a verify error, the way the sibling paid-orphan
+// tests inject it, because that is the only injection that produces the state
+// this test is about. Blanking the escrow's released event does NOT break the
+// release: the mock falls through to a default receipt, the escrow pays out,
+// and what fails is confirmReleaseCore's money-invariant — a check that returns
+// after the on-chain release has already happened. Replaying that is a SECOND
+// release of the same escrow, not a retry, which is why the intermediate state
+// is asserted exactly rather than as "anything but released".
 func TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit(t *testing.T) {
-	// The credit is durable the moment it commits, so a settle that fails after
-	// it must be finishable. If the replay short-circuited on the idempotency
-	// row it would leave the trade wedged at pending_payment with the money
-	// already booked, and nothing would ever come back for it.
 	r := newForwardRig(t, "1500.00")
 	credit := p2pInboundCredit("999000000015", "1500.00")
 
-	// Break the release, so the first Accept credits and then fails to settle.
-	r.esc.releasedEvent = nil
+	// markPaid commits, then the release fails at verify and AutoRelease rolls
+	// its `releasing` flip back to `paid`.
+	r.esc.verifyReleasedErr = errors.New("rpc timeout verifying the release")
 
 	// Accept still reports success: the credit IS attributed and markPaid has
 	// committed, so only the release is outstanding and PMRecoveryJob owns it.
@@ -342,15 +352,19 @@ func TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit(t *testing.T) {
 	}
 	var mid models.P2PTrade
 	r.db.First(&mid, "id = ?", r.trade.ID)
-	if mid.Status == models.P2PTradeStatusReleased {
-		t.Fatal("precondition: the release should not have succeeded")
+	if mid.Status != models.P2PTradeStatusPaid {
+		t.Fatalf("trade status = %q after the failed settle, want paid — the replay below is a retry only from the paid-orphan state; from any other one it re-releases an escrow that already paid out",
+			mid.Status)
+	}
+	if mid.ReleaseTxHash != "" {
+		t.Fatalf("release_tx_hash = %q — something was released, so replaying the settle would release it twice", mid.ReleaseTxHash)
 	}
 	if !ngnEqual(r.availableNGN(t), "1500.00") {
 		t.Fatalf("available_ngn = %q; the ledger credit must stand even when the settle fails", r.availableNGN(t))
 	}
 
 	// Repair and replay the same credit.
-	setReleasedEvent(r.esc, r.trade)
+	r.esc.verifyReleasedErr = nil
 	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
 		t.Fatalf("retry Accept: %v", err)
 	}
@@ -359,9 +373,12 @@ func TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit(t *testing.T) {
 	if done.Status != models.P2PTradeStatusReleased {
 		t.Fatalf("trade status = %q after retry, want released — the replay wedged it", done.Status)
 	}
-	// And still exactly one credit.
+	// And still exactly one credit, and exactly one transfer.
 	if !ngnEqual(r.availableNGN(t), "1500.00") {
 		t.Fatalf("available_ngn = %q, want 1500.00 — the retry credited twice", r.availableNGN(t))
+	}
+	if len(r.gateway.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1 — the retry paid the merchant twice", len(r.gateway.calls))
 	}
 }
 
@@ -1350,5 +1367,129 @@ func TestP2PForward_OverlappingHoldsBothCountTowardTheCeiling(t *testing.T) {
 
 	if got := r.forward(t).Attempts; got != 3 {
 		t.Fatalf("attempts = %d, want 3 — an overlapping re-drive was free, so the ceiling never arrives", got)
+	}
+}
+
+// ─── The overlap that pays a merchant twice ──────────────────────────────────
+//
+// The same overlap the ceiling tests describe has a second, worse outcome. Once
+// one of the two attempts SUBMITS, the merchant's money is in flight and the
+// other attempt is holding a read that predates it. Anything that attempt then
+// writes is a write to somebody else's row — and `failed` on a submitted row
+// puts an already-paid merchant into the operator queue as unpaid, which is an
+// invitation to pay them by hand a second time. The later disburse webhook then
+// arrives for a row that is no longer submitted and cannot debit it.
+
+// submitInFlightForward drives one forward all the way to `submitted` and hands
+// back the `pending` read a concurrent attempt would still be holding.
+//
+// The seeded attempt count is the state a hold that reached the ceiling and
+// then failed to write its escalation leaves behind: counted in the database,
+// still `pending`, and re-drivable.
+func submitInFlightForward(t *testing.T, r *fwdRig, ref string, attempts int) models.P2PSettlementForward {
+	t.Helper()
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit(ref, "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := r.db.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", r.trade.ID).
+		Update("attempts", attempts).Error; err != nil {
+		t.Fatalf("seed attempts: %v", err)
+	}
+	stale := *r.forward(t)
+	if stale.Status != models.P2PForwardPending {
+		t.Fatalf("precondition: forward status = %q, want pending", stale.Status)
+	}
+
+	// The balance recovers and the re-drive submits.
+	r.bal.err = nil
+	r.fwd.withClock(func() time.Time { return time.Now().Add(2 * p2pForwardRedriveAfter) })
+	if _, err := r.fwd.RedrivePending(ctx); err != nil {
+		t.Fatalf("RedrivePending: %v", err)
+	}
+	if got := r.forward(t).Status; got != models.P2PForwardSubmitted {
+		t.Fatalf("precondition: forward status = %q, want submitted — the merchant's money must be in flight", got)
+	}
+	return stale
+}
+
+// A forward that has been submitted is not `fail`'s to resolve, whatever the
+// caller read before it. Flipping it to `failed` lists a merchant whose money
+// is in flight as one nobody paid, and the ledger entry `fail` deliberately
+// leaves alone is then the only thing standing between them and a second,
+// manual payment.
+func TestP2PForward_FailDoesNotResolveAForwardThatMovedUnderIt(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	stale := submitInFlightForward(t, r, "999000000032", p2pForwardMaxAttempts)
+
+	if err := r.fwd.fail(ctx, &stale, "held 6 times and still unsendable: provider 503"); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	f := r.forward(t)
+	if f.Status != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted — a stale caller resolved an in-flight transfer, and the operator queue now invites a second payment", f.Status)
+	}
+	if f.AlertedAt != nil {
+		t.Fatal("alerted that an in-flight transfer was not paid")
+	}
+	if f.FailureReason != "" {
+		t.Fatalf("failure_reason = %q, want empty — a stale caller overwrote a row it does not own", f.FailureReason)
+	}
+}
+
+// And `hold` must not even try. Its whole premise is that nothing was sent, so
+// a later attempt is safe; the moment the row leaves `pending` that premise is
+// somebody else's to judge, and the attempt count it would escalate on is a
+// number this attempt did not earn.
+func TestP2PForward_HoldDoesNotEscalateAForwardItNoLongerOwns(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	stale := submitInFlightForward(t, r, "999000000033", p2pForwardMaxAttempts)
+	// The read the concurrent attempt holds has caught up on status but not on
+	// ownership — so `fail`'s own guard cannot be what saves this one.
+	stale.Status = models.P2PForwardSubmitted
+
+	if err := r.fwd.hold(ctx, &stale, "p2p forward: payout balance NGN short"); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+
+	f := r.forward(t)
+	if f.Status != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted — a hold escalated a transfer that was already in flight", f.Status)
+	}
+	if f.AlertedAt != nil {
+		t.Fatal("alerted that an in-flight transfer was not paid")
+	}
+	if f.Attempts != p2pForwardMaxAttempts {
+		t.Fatalf("attempts = %d, want %d — the hold counted against a row it does not own", f.Attempts, p2pForwardMaxAttempts)
+	}
+}
+
+// The race end to end, and the reason the two guards above are worth having:
+// the disburse webhook must still find the row it was promised.
+func TestP2PForward_ConcurrentHoldLeavesAnInFlightTransferConfirmable(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	stale := submitInFlightForward(t, r, "999000000034", p2pForwardMaxAttempts)
+
+	// The overlapping attempt finishes its short-balance read and holds.
+	if err := r.fwd.hold(ctx, &stale, "p2p forward: payout balance NGN short"); err != nil {
+		t.Fatalf("stale hold: %v", err)
+	}
+	if got := r.forward(t).Status; got != models.P2PForwardSubmitted {
+		t.Fatalf("forward status = %q, want submitted", got)
+	}
+
+	if err := r.fwd.Confirm(ctx, r.forward(t).Reference, true, ""); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if got := r.forward(t).Status; got != models.P2PForwardSettled {
+		t.Fatalf("forward status = %q after the disburse webhook, want settled — the merchant was paid and nothing recorded it", got)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "0") {
+		t.Fatalf("available_ngn = %q, want 0 — a confirmed disbursement must debit the ledger exactly once", got)
 	}
 }
