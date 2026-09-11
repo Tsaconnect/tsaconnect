@@ -316,12 +316,28 @@ func centralPayTo(a services.CentralAccount, ngnKobo string) gin.H {
 // wholeNairaFromKobo renders kobo as the naira figure a payer types into their
 // bank app. Unparseable input yields "" rather than a guess — a wrong number
 // here is money sent to an amount nothing will match.
+//
+// Rounds half away from zero because that is what the order was minted with
+// (wholeNairaKobo) and what the matcher rounds a credit's gross with
+// (roundKoboToNaira). Truncating instead showed a pre-cutover order of ₦1,000.50
+// as ₦1,000 while the claim offered for it asked ₦1,001: the payer sends what
+// the screen told them, the two figures disagree by a naira, and the credit
+// holds for an operator every single time with the money already gone.
 func wholeNairaFromKobo(ngnKobo string) string {
 	n, ok := new(big.Int).SetString(strings.TrimSpace(ngnKobo), 10)
 	if !ok {
 		return ""
 	}
-	return n.Quo(n, big.NewInt(100)).String()
+	hundred := big.NewInt(100)
+	q, r := new(big.Int).QuoRem(n, hundred, new(big.Int))
+	if r.CmpAbs(big.NewInt(50)) >= 0 {
+		if n.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	return q.String()
 }
 
 // fiatVAView is the client-safe projection of a FiatVirtualAccount. The raw

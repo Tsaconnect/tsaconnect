@@ -59,6 +59,43 @@ func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwC
 	return nil
 }
 
+// p2pCentralRouting decides whether P2P buy screens may send buyers to the
+// company account, and what to say when they may not.
+//
+// Telling a buyer where to send naira and being able to turn that naira back
+// into their trade are two halves of one thing, but boot wires them far apart:
+// routing needs only a live Instant Transfer service, while the P2P claim
+// source is registered inside the PM-automation block, which additionally needs
+// a release key and a chain client. With IT live, central mode on and PM
+// automation dormant the halves disagreed — every buyer was pointed at the
+// company account while nothing existed to attribute their transfer, so every
+// P2P payment held indefinitely, and the only boot warning covered the inverse
+// case.
+//
+// It REFUSES to route rather than warning and routing anyway. The fallback is
+// the merchant's own account, which still attributes the payment and still
+// settles the trade; a warning only records the loss after a night of holds
+// nobody was reading the log to prevent. Central mode is a boot-time config, so
+// the operator who set it can see the refusal at the same moment they set it.
+func p2pCentralRouting(itLive, p2pClaimsRegistered, centralEnabled bool) (route bool, warning string) {
+	if itLive && p2pClaimsRegistered {
+		return true, ""
+	}
+	// Off the cutover there is nothing to warn about: merchant accounts are
+	// where buyers are supposed to be sent, and staging INBOUND_CENTRAL_* with
+	// the mode off is how a cutover is prepared.
+	if !centralEnabled {
+		return false, ""
+	}
+	if !itLive {
+		return false, "Instant Transfer is dormant, so P2P cannot reach the company account and " +
+			"will keep showing merchant virtual accounts in central mode"
+	}
+	return false, "P2P buyers are being kept on merchant accounts in central mode: the P2P claim " +
+		"source did not register (PM automation is dormant — it needs PM_RELEASE_PRIVATE_KEY and a " +
+		"Sonic client), so a payment into the company account would have nothing to attribute it to"
+}
+
 // isNUBAN reports whether s is a Nigerian NUBAN: exactly ten digits.
 //
 // Deliberately shape-only. It cannot catch a transposed digit — only a name
@@ -1077,16 +1114,12 @@ func main() {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
-	// Without this the P2P buy screens keep showing the merchant's virtual
-	// account in central mode — the exact defect the cutover closes, and one
-	// that fails silently rather than at boot. ITService is the only holder of
-	// the company account; P2PHandler has no other route to it.
-	if itService != nil {
-		p2pHandler.SetInboundCentralSource(itService)
-	} else if cfg.InboundCentralEnabled() {
-		log.Printf("[inbound] WARNING: IT is dormant, so P2P cannot reach the company " +
-			"account and will keep showing merchant virtual accounts in central mode")
-	}
+	// Deliberately NOT wired here, even though ITService — the only holder of
+	// the company account — already exists. The P2P claim source is registered
+	// much further down, inside the PM-automation block, and until it is there
+	// is nothing to attribute a P2P payment to. Routing is decided after that
+	// block so the two cannot be enabled independently; see p2pCentralRouting.
+	p2pClaimsRegistered := false
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
@@ -1290,6 +1323,10 @@ func main() {
 		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
 		p2pClaims.SetForwarder(settlementForwarder)
 		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
+		// Read below to decide whether P2P buyers may be sent to the company
+		// account at all. Set from the registration itself, never from the
+		// conditions that led here, so the two can't be reasoned about apart.
+		p2pClaimsRegistered = true
 		if inboundMatcher != nil {
 			log.Printf("[inbound] matcher gained the %s claim source", services.InboundClaimTypeP2PTrade)
 		} else {
@@ -1315,6 +1352,17 @@ func main() {
 		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
 	} else {
 		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")
+	}
+
+	// Both halves of P2P central attribution are now known, so decide here —
+	// after the claim source either registered or didn't — rather than beside
+	// the handler, where only half the answer exists.
+	if route, warning := p2pCentralRouting(itService != nil, p2pClaimsRegistered, cfg.InboundCentralEnabled()); route {
+		p2pHandler.SetInboundCentralSource(itService)
+		log.Printf("[inbound] P2P buyers routed to the company account (%s claim source registered)",
+			services.InboundClaimTypeP2PTrade)
+	} else if warning != "" {
+		log.Printf("[inbound] WARNING: %s", warning)
 	}
 
 	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
