@@ -55,6 +55,10 @@ var (
 	ErrITVAWalletRequired = errors.New("set up a wallet before activating Instant Transfer")
 	ErrITVANotFound       = errors.New("no Instant Transfer account for this user")
 	ErrITKYCRequired      = errors.New("a BVN or NIN is required")
+	// ErrITVARetired is the cutover's answer to an activation request. Central
+	// mode retires virtual accounts as a class, so this is permanent for as long
+	// as the mode is on — not a "try again later" the caller should retry.
+	ErrITVARetired = errors.New("Instant Transfer accounts are retired — pay into the account shown on your order")
 )
 
 // SetFlutterwaveClient wires the Flutterwave API client used for per-user
@@ -87,6 +91,16 @@ func (s *ITService) GetFiatVA(ctx context.Context, userID uuid.UUID, currency st
 // Flutterwave customer. idType/idNumber are forwarded to FW and NEVER stored
 // or logged. Idempotent: an existing active row is returned unchanged.
 func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idType, idNumber string) (*models.FiatVirtualAccount, error) {
+	// Before every other check, including whether provisioning is even wired:
+	// under central inbound, nothing reads a virtual account's statement. A VA
+	// minted now would take the user's money into an account no ingestor polls
+	// and no claim can be matched against, and the user would have no way to
+	// tell that from a working one. Refusing is the only honest answer, and
+	// refusing FIRST means the answer does not change with whether a Flutterwave
+	// client happens to be configured.
+	if _, ok := s.ActiveCentralAccount(); ok {
+		return nil, ErrITVARetired
+	}
 	if !s.HasFiatVAProvisioning() {
 		return nil, ErrITVANotConfigured
 	}
