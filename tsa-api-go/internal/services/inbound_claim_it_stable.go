@@ -165,6 +165,13 @@ func (s *ITStableClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	if gross <= 0 {
 		return fmt.Errorf("it stable accept: credit %s has no usable amount", ref)
 	}
+	// Snapped to whole naira with the matcher's own helper, exactly as the MCGP
+	// sibling does. The bind was justified by the ROUNDED gross — that is the
+	// only figure ever compared with the intent's ask — so funding on the raw
+	// one delivers stablecoin for an amount nothing checked, up to 99 kobo away
+	// from the figure on the buyer's receipt. The two have to agree or the
+	// matcher's arbitration means nothing.
+	gross = roundKoboToNaira(gross)
 
 	// parkOnBadRate=false. A rate outage must NOT park this intent for an
 	// operator: the credit has a durable inbound_credits row and the poller

@@ -332,8 +332,12 @@ func TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit(t *testing.T) {
 	// Break the release, so the first Accept credits and then fails to settle.
 	r.esc.releasedEvent = nil
 
-	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err == nil {
-		t.Fatal("Accept reported success despite a failed settle")
+	// Accept still reports success: the credit IS attributed and markPaid has
+	// committed, so only the release is outstanding and PMRecoveryJob owns it.
+	// Reporting an error here would strand the credit — see
+	// TestP2PMatch_AFailedReleaseDoesNotHoldTheCreditOnAFalseReason.
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
+		t.Fatalf("Accept: %v", err)
 	}
 	var mid models.P2PTrade
 	r.db.First(&mid, "id = ?", r.trade.ID)
@@ -927,5 +931,211 @@ func TestP2POpenClaims_UnwiredSourceErrorsRatherThanPanicking(t *testing.T) {
 	}
 	if claims != nil {
 		t.Fatalf("got %d claims from an unwired source", len(claims))
+	}
+}
+
+// ─── A settle that dies after markPaid ───────────────────────────────────────
+
+// createInboundMatchTables adds the two tables the matcher reads to the trade
+// rig, so a test can drive the real poller sequence instead of calling Accept by
+// hand. Raw DDL for the same reason every other rig in this package uses it: the
+// models carry PostgreSQL-only defaults SQLite rejects.
+func createInboundMatchTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		`CREATE TABLE inbound_credits (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			provider_ref TEXT NOT NULL,
+			currency TEXT NOT NULL,
+			amount_kobo INTEGER NOT NULL,
+			fee_kobo INTEGER NOT NULL DEFAULT 0,
+			gross_kobo INTEGER NOT NULL,
+			sender_raw TEXT NOT NULL,
+			sender_bank TEXT,
+			sender_name TEXT,
+			transaction_date DATETIME NOT NULL,
+			seen_at DATETIME NOT NULL,
+			status TEXT NOT NULL DEFAULT 'unmatched',
+			hold_reason TEXT,
+			hold_reason_code TEXT,
+			matched_claim_type TEXT,
+			matched_claim_id TEXT,
+			matched_user_id TEXT,
+			matched_at DATETIME,
+			match_strength TEXT,
+			resolved_by TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE UNIQUE INDEX idx_fwd_rig_inbound_ref ON inbound_credits (provider_ref)`,
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			verified_legal_name TEXT,
+			verified_legal_name_at DATETIME
+		)`,
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatalf("inbound match ddl: %v\nSQL=%s", err, stmt)
+		}
+	}
+}
+
+// The sequence TestP2PAccept_RetryFinishesASettleThatFailedAfterTheCredit
+// cannot see. That test replays Accept by hand; the matcher never would.
+//
+// settleTrade marks the trade paid before it releases, so a release that fails
+// afterwards leaves the trade at `paid` — a status OpenClaims does not offer.
+// If Accept reported that as an error the credit would stay `unmatched`, and on
+// the next tick the matcher would find nothing asking its amount and hold it as
+// "no open claim at this amount". That reason is false, BindManually refuses the
+// credit because the claim is closed, and the only actions left to an operator
+// are refund and ignore — while PMRecoveryJob is about to release the buyer's
+// crypto. Refunding the naira then gives the crypto away for nothing.
+func TestP2PMatch_AFailedReleaseDoesNotHoldTheCreditOnAFalseReason(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	createInboundMatchTables(t, r.db)
+	ctx := context.Background()
+
+	// The BUYER sends the naira, so it is the buyer's verified name the matcher
+	// compares the transfer against.
+	if err := r.db.Exec(`INSERT INTO users (id, name, verified_legal_name) VALUES (?, ?, ?)`,
+		r.trade.BuyerID, "Display Name", "JOHN DOE").Error; err != nil {
+		t.Fatalf("seed buyer: %v", err)
+	}
+	credit := seedCredit(t, r.db, "999000000030", 150000, "JOHN DOE")
+
+	m := NewInboundMatcher(r.db)
+	m.Register(InboundClaimTypeP2PTrade, r.src)
+
+	// The release breaks after markPaid has already committed, leaving exactly
+	// the paid-orphan AutoRelease rolls a failed attempt back to.
+	r.esc.verifyReleasedErr = errors.New("rpc timeout verifying the release")
+
+	// Tick 1 binds and settles as far as it can get.
+	_, _ = m.MatchPending(ctx, 10)
+
+	// The precondition that makes this different from a replayable Accept: the
+	// trade is no longer on offer, so nothing will ever re-drive the credit.
+	claims, err := r.src.OpenClaims(ctx, "NGN")
+	if err != nil {
+		t.Fatalf("OpenClaims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("precondition: %d claim(s) still offered — the trade never left pending_payment", len(claims))
+	}
+
+	// Tick 2: the poller comes back 30 seconds later.
+	if _, err := m.MatchPending(ctx, 10); err != nil {
+		t.Fatalf("second MatchPending: %v", err)
+	}
+
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.Status == models.InboundCreditHeld {
+		t.Fatalf("credit held as %q — the trade it paid for is settled and awaiting release, so the refund this reason invites gives the crypto away",
+			got.HoldReasonCode)
+	}
+	if got.Status != models.InboundCreditMatched {
+		t.Fatalf("credit status = %q, want matched", got.Status)
+	}
+
+	// The recoverable shape, and the one PMRecoveryJob already owns: merchant
+	// credited, trade at `paid` with no release.
+	if bal := r.availableNGN(t); !ngnEqual(bal, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", bal)
+	}
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusPaid {
+		t.Fatalf("trade status = %q, want paid — the paid-orphan shape RecoverStuckTrades sweeps", trade.Status)
+	}
+}
+
+// ─── Bounded sweeps ──────────────────────────────────────────────────────────
+
+// seedForwardRow inserts one forward directly, bypassing Accept, so a test can
+// build a backlog without building a trade per row.
+func seedForwardRow(t *testing.T, db *gorm.DB, pmID uuid.UUID, status string, at time.Time) {
+	t.Helper()
+	id := uuid.New()
+	if err := db.Exec(`INSERT INTO p2p_settlement_forwards
+		(id, trade_id, pm_id, provider_ref, currency, amount, status, attempts, reference, submitted_at, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`,
+		id, uuid.New(), pmID, "ref-"+id.String(), "NGN", "1500.00", status,
+		p2pForwardRefPrefix+id.String(), at, at, at).Error; err != nil {
+		t.Fatalf("seed forward row: %v", err)
+	}
+}
+
+// The three sweeps run on a timer against a table that only ever grows, and two
+// of them then do per-row work. Loading the whole backlog on a single tick is
+// how one bad afternoon becomes an outage, so each takes a batch and leaves the
+// rest for the next tick.
+func TestP2PForward_SweepsTakeABatchRatherThanTheWholeTable(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	stale := time.Now().Add(-2 * p2pForwardStaleAfter)
+
+	over := p2pForwardSweepBatch + 5
+	for i := 0; i < over; i++ {
+		seedForwardRow(t, r.db, r.pm.ID, models.P2PForwardPending, stale)
+		seedForwardRow(t, r.db, r.pm.ID, models.P2PForwardSubmitted, stale)
+	}
+
+	swept, err := r.fwd.SweepUnconfirmed(ctx)
+	if err != nil {
+		t.Fatalf("SweepUnconfirmed: %v", err)
+	}
+	if swept != p2pForwardSweepBatch {
+		t.Fatalf("SweepUnconfirmed took %d of %d rows, want the %d-row batch", swept, over, p2pForwardSweepBatch)
+	}
+
+	queued, err := r.fwd.ListNeedingAttention(ctx)
+	if err != nil {
+		t.Fatalf("ListNeedingAttention: %v", err)
+	}
+	if len(queued) != p2pForwardSweepBatch {
+		t.Fatalf("ListNeedingAttention returned %d of %d rows, want the %d-row batch", len(queued), over, p2pForwardSweepBatch)
+	}
+
+	redrove, err := r.fwd.RedrivePending(ctx)
+	if err != nil {
+		t.Fatalf("RedrivePending: %v", err)
+	}
+	if redrove != p2pForwardSweepBatch {
+		t.Fatalf("RedrivePending took %d of %d rows, want the %d-row batch", redrove, over, p2pForwardSweepBatch)
+	}
+}
+
+// Two sweeps can overlap on the same row — RedrivePending reads its whole batch
+// up front, and a re-drive still talking to the provider has written nothing
+// yet. Both read the same Attempts, so a count computed in Go writes the same
+// number twice and the second hold costs nothing. A forward that can never be
+// paid then never reaches the ceiling, and so never reaches an operator, which
+// is the one thing the ceiling exists to prevent.
+func TestP2PForward_OverlappingHoldsBothCountTowardTheCeiling(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	ctx := context.Background()
+	r.bal.err = errors.New("provider 503")
+
+	if err := r.src.Accept(ctx, r.trade.ID, p2pInboundCredit("999000000031", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	read := *r.forward(t)
+	if read.Attempts != 1 {
+		t.Fatalf("precondition: attempts = %d after Accept's own hold, want 1", read.Attempts)
+	}
+
+	// The same read, held twice: what two overlapping re-drives do.
+	if err := r.fwd.hold(ctx, &read, "provider 503"); err != nil {
+		t.Fatalf("first hold: %v", err)
+	}
+	if err := r.fwd.hold(ctx, &read, "provider 503"); err != nil {
+		t.Fatalf("second hold: %v", err)
+	}
+
+	if got := r.forward(t).Attempts; got != 3 {
+		t.Fatalf("attempts = %d, want 3 — an overlapping re-drive was free, so the ceiling never arrives", got)
 	}
 }

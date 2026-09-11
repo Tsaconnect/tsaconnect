@@ -341,6 +341,38 @@ func TestITStableAccept_SettlesOnGrossNotNet(t *testing.T) {
 	}
 }
 
+func TestITStableAccept_SettlesOnTheFigureTheMatcherMatched(t *testing.T) {
+	// The bind was justified by roundKoboToNaira(GrossKobo), never by the raw
+	// gross — that is the only figure the matcher ever compared with the ask.
+	// Settling on the raw one delivers stablecoin for an amount nobody checked,
+	// up to 99 kobo away from the one on the receipt, and the MCGP sibling has
+	// rounded here for exactly that reason since it was written.
+	s, userID := newCentralStableBuyService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	src := NewITStableClaimSource(s)
+
+	var open models.ITIntent
+	s.db.First(&open, "id = ?", intent.ID)
+	ask := mustInt64(t, open.NgnKobo)
+
+	// A gross the provider's fee reconstruction landed 49 kobo over. The matcher
+	// still binds it, because it rounds before it compares.
+	credit := stableInboundCredit("100004250250000000000000000009", ask+49)
+	if roundKoboToNaira(credit.GrossKobo) != ask {
+		t.Fatalf("precondition: %d does not round onto the ask %d", credit.GrossKobo, ask)
+	}
+
+	if err := src.Accept(context.Background(), intent.ID, credit); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.ReceivedAmount != open.NgnKobo {
+		t.Fatalf("received = %q, want %q — settled on a figure the matcher never compared against the ask",
+			got.ReceivedAmount, open.NgnKobo)
+	}
+}
+
 func TestITStableAccept_DoesNotParkOnAnUnusableRate(t *testing.T) {
 	// The webhook path parks a purchase it cannot price, because a charge event
 	// is not redelivered forever and nothing else would come back for it. An
