@@ -66,10 +66,33 @@ const p2pForwardRedriveAfter = 2 * time.Minute
 // this whole file exists to prevent.
 const p2pForwardMaxAttempts = 6
 
+// p2pForwardSweepBatch caps how many rows a single sweep or operator listing
+// pulls back.
+//
+// The table only ever grows — nothing is deleted, and `failed` is terminal — so
+// an unbounded read is a query whose cost rises forever against a fixed
+// 5-minute cadence. A provider outage is precisely when the backlog is largest
+// and precisely when loading all of it would turn one bad afternoon into an
+// outage of ours. Whatever a tick leaves behind is still there for the next
+// one, because every one of these reads is ordered oldest-first.
+const p2pForwardSweepBatch = 200
+
 // ErrForwardNoSettlementAccount means the merchant has nowhere to be paid.
 // Their proceeds stay on the ledger; this is a merchant-record problem, not a
 // money problem.
 var ErrForwardNoSettlementAccount = errors.New("p2p forward: merchant has no settlement bank configured")
+
+// errP2PReleaseDeferred marks the one settle failure Accept must NOT report as
+// an error: markPaid has already committed, so the trade has left
+// pending_payment and OpenClaims will never offer it again.
+//
+// Surfacing it would leave the credit `unmatched` for a matcher that can no
+// longer find its claim, and the next tick would hold the credit as "no open
+// claim at this amount" — a reason that is false, that BindManually refuses to
+// act on because the claim is closed, and that leaves an operator only refund
+// or ignore. Refunding returns naira for crypto PMRecoveryJob is about to
+// release.
+var errP2PReleaseDeferred = errors.New("release deferred to pm recovery")
 
 // P2PTradeClaimSource implements ClaimSource for P2P trades awaiting a buyer's
 // naira. See the file header for the buyer/merchant distinction.
@@ -233,8 +256,18 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// buyer's crypto still escrowed — recoverable, and the safe direction: the
 	// alternative is releasing crypto against a ledger entry that does not
 	// exist yet.
+	//
+	// A failed RELEASE is not an Accept failure, for the same reason a failed
+	// forward is not one below. markPaid has committed by then, so the trade is
+	// at `paid` and PMRecoveryJob's paid-orphan sweep owns it — that job exists
+	// for precisely this. Returning the error instead would strand the credit
+	// on a hold reason that is not true; see errP2PReleaseDeferred.
 	if err := s.settleTrade(ctx, trade.ID, ref); err != nil {
-		return fmt.Errorf("p2p accept: settle trade %s: %w", trade.ID, err)
+		if !errors.Is(err, errP2PReleaseDeferred) {
+			return fmt.Errorf("p2p accept: settle trade %s: %w", trade.ID, err)
+		}
+		log.Printf("[inbound p2p] release deferred for trade=%s pm=%s; merchant credited, pm-recovery owns the release: %v",
+			trade.ID, pm.ID, err)
 	}
 
 	if s.forwarder == nil {
@@ -351,11 +384,19 @@ func (s *P2PTradeClaimSource) settleTrade(ctx context.Context, tradeID uuid.UUID
 		// Already advanced past pending_payment — a replay, or a concurrent
 		// operator action. AutoRelease below is idempotent, so continue.
 		if !errors.Is(err, ErrInvalidTransition) {
+			// The trade is still pending_payment, so it is still an open claim
+			// and the matcher can simply try again next tick. Reported as an
+			// ordinary error on purpose: nothing has been lost and nothing else
+			// needs to own it.
 			return err
 		}
 	}
-	_, err := s.trades.AutoRelease(ctx, tradeID, s.signer)
-	return err
+	if _, err := s.trades.AutoRelease(ctx, tradeID, s.signer); err != nil {
+		// Past this line the trade has left pending_payment whichever branch
+		// above ran, so the claim is gone and only PMRecoveryJob can finish it.
+		return fmt.Errorf("%w: trade %s: %v", errP2PReleaseDeferred, tradeID, err)
+	}
+	return nil
 }
 
 // ─── Instant forward ────────────────────────────────────────────────────────
@@ -623,6 +664,8 @@ func (f *P2PSettlementForwarder) SweepUnconfirmed(ctx context.Context) (int, err
 	if err := f.db.WithContext(ctx).
 		Where("status = ? AND submitted_at < ? AND alerted_at IS NULL",
 			models.P2PForwardSubmitted, cutoff).
+		Order("submitted_at ASC").
+		Limit(p2pForwardSweepBatch).
 		Find(&stale).Error; err != nil {
 		return 0, err
 	}
@@ -653,6 +696,7 @@ func (f *P2PSettlementForwarder) ListNeedingAttention(ctx context.Context) ([]mo
 			models.P2PForwardFailed,
 			models.P2PForwardPending, f.now().Add(-p2pForwardStaleAfter)).
 		Order("created_at ASC").
+		Limit(p2pForwardSweepBatch).
 		Find(&out).Error
 	return out, err
 }
@@ -681,18 +725,55 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 // invisible to every operator surface, so it is escalated to the failed queue
 // where a human can see it. Nothing about the money changes either way: the
 // merchant keeps the ledger entry because nothing reached their bank.
+//
+// The count is the DATABASE's, never the one read before the provider call.
+// Two attempts can overlap — RedrivePending reads its whole batch up front, and
+// a re-drive still waiting on the provider has written nothing yet — so both
+// would compute the same next value and the second would overwrite the first
+// with an identical number. The ceiling would then never arrive, and a
+// permanently unpayable forward would retry forever on no operator surface,
+// which is the one outcome the ceiling exists to rule out.
 func (f *P2PSettlementForwarder) hold(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
-	if fwd.Attempts+1 >= p2pForwardMaxAttempts {
-		return f.fail(ctx, fwd, fmt.Sprintf("held %d times and still unsendable: %s", fwd.Attempts+1, reason))
+	attempts, err := f.countAttempt(ctx, fwd, reason)
+	if err != nil {
+		return err
+	}
+	if attempts >= p2pForwardMaxAttempts {
+		return f.fail(ctx, fwd, fmt.Sprintf("held %d times and still unsendable: %s", attempts, reason))
 	}
 	log.Printf("[p2p forward] forward=%s trade=%s pm=%s deferred (attempt %d of %d): %s — merchant remains credited %s %s",
-		fwd.ID, fwd.TradeID, fwd.PMID, fwd.Attempts+1, p2pForwardMaxAttempts, reason, fwd.Currency, fwd.Amount)
-	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
-		Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
-		Updates(map[string]any{
-			"failure_reason": truncateReason(reason),
-			"attempts":       fwd.Attempts + 1,
-		}).Error
+		fwd.ID, fwd.TradeID, fwd.PMID, attempts, p2pForwardMaxAttempts, reason, fwd.Currency, fwd.Amount)
+	return nil
+}
+
+// countAttempt increments the row's attempt counter in the database and reports
+// what it now stands at, so the ceiling is judged on the stored number rather
+// than on a stale read. It reads back inside the same transaction because the
+// two supported drivers do not agree on UPDATE ... RETURNING.
+//
+// A row that is no longer `pending` was resolved by somebody else between the
+// caller's read and this write; there is nothing to count and nothing to
+// escalate, so its stored count is returned untouched.
+func (f *P2PSettlementForwarder) countAttempt(ctx context.Context, fwd *models.P2PSettlementForward, reason string) (int, error) {
+	var attempts int
+	err := f.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.P2PSettlementForward{}).
+			Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
+			Updates(map[string]any{
+				"failure_reason": truncateReason(reason),
+				"attempts":       gorm.Expr("attempts + 1"),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		var fresh models.P2PSettlementForward
+		if err := tx.Select("attempts").First(&fresh, "id = ?", fwd.ID).Error; err != nil {
+			return err
+		}
+		attempts = fresh.Attempts
+		return nil
+	})
+	return attempts, err
 }
 
 // RedrivePending re-attempts the forwards that were held back, and is the thing
@@ -714,6 +795,7 @@ func (f *P2PSettlementForwarder) RedrivePending(ctx context.Context) (int, error
 	if err := f.db.WithContext(ctx).
 		Where("status = ? AND created_at < ?", models.P2PForwardPending, cutoff).
 		Order("created_at ASC").
+		Limit(p2pForwardSweepBatch).
 		Find(&due).Error; err != nil {
 		return 0, err
 	}
