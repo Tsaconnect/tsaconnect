@@ -11,6 +11,8 @@ declare module 'react-test-renderer' {
     // test declares, and narrowing that here would mean restating each one.
     props: Record<string, any>;
     findAll(predicate: (node: ReactTestInstance) => boolean): ReactTestInstance[];
+    /** Query by a subset of props — how a test reaches an unlabelled input. */
+    findAllByProps(props: Record<string, unknown>): ReactTestInstance[];
   }
 
   export interface ReactTestRenderer {

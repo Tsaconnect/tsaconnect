@@ -398,3 +398,46 @@ describe('All Swap picker with no leg open', () => {
     expect(lifi.getLiFiTokens).not.toHaveBeenCalled();
   });
 });
+
+// A new pair arriving must invalidate everything priced against the old one.
+//
+// The tab stays mounted, so tapping a listing elsewhere pushes new params into
+// a screen that may already hold a quote. Picking a token by hand clears the
+// amount and quote; preselection did not. validate() only checks that A quote
+// exists, never that it matches these legs, so Review stayed enabled and the
+// swap handler would sign the PREVIOUS pair's route under the new pair's name.
+describe('All Swap preselection against a live quote', () => {
+  it('clears a quote priced for the pair it replaces', async () => {
+    lifi.__state.token = async (chainId: number, symbol: string) =>
+      ({ chainId, symbol, address: `0x${symbol}`, decimals: 18, name: symbol });
+
+    const tree = await mount({ preselect: { fromSymbol: 'USDT', fromChain: 'bsc', toSymbol: 'DAI', toChain: 'ethereum' } });
+    expect(rendered(tree)).toContain('USDT');
+
+    // The user types an amount, priced against THIS pair.
+    // Found by placeholder because the input carries no label — and asserted
+    // to exist, since a selector matching nothing would make this test pass
+    // whatever the code does. That is precisely how the first draft of this
+    // test was vacuous.
+    const amountInputs = tree.root.findAllByProps({ placeholder: '0.00' });
+    expect(amountInputs.length).toBeGreaterThan(0);
+    await act(async () => { amountInputs[0].props.onChangeText('1.5'); });
+    await flush();
+    // Read the input's own value: the amount lives in a prop, not a text node,
+    // so asserting over rendered text would never see it either way.
+    const amountValue = () => tree.root.findAllByProps({ placeholder: '0.00' })[0].props.value;
+    expect(amountValue()).toBe('1.5');
+
+    // Now a different listing is tapped: new params into the same instance.
+    await act(async () => {
+      tree.update(React.createElement(AllSwapScreen, {
+        preselect: { fromSymbol: 'BTC', fromChain: 'btc', toSymbol: 'USDT', toChain: 'ethereum' },
+      }));
+    });
+    await flush();
+
+    // The amount priced against the old pair must not survive into the new one.
+    expect(amountValue()).toBe('');
+    expect(rendered(tree)).toContain('BTC');
+  });
+});

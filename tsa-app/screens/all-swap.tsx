@@ -184,6 +184,11 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const [preselecting, setPreselecting] = useState(false);
   const [preselectNotice, setPreselectNotice] = useState('');
 
+  // Tracks `screen` for the preselection effect, which must consult it without
+  // taking a dependency on it.
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+
   const wantFromSymbol = preselect?.fromSymbol;
   const wantFromChain = preselect?.fromChain;
   const wantToSymbol = preselect?.toSymbol;
@@ -192,7 +197,23 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   useEffect(() => {
     // Nothing asked for: the screen starts on its defaults, as it always has.
     if (!wantFromSymbol && !wantToSymbol) return;
+    // Never disturb a swap that is already being signed. The tab stays mounted,
+    // so a listing tapped elsewhere pushes new params into THIS screen
+    // mid-flight. Read through a ref, not the state: depending on `screen`
+    // would re-run this effect on every screen change and wipe the form on the
+    // way to confirm.
+    if (screenRef.current === 'signing') return;
     let cancelled = false;
+
+    // A new pair invalidates everything priced against the old one, exactly as
+    // picking a token by hand does (see onSelect). Without this the tokens
+    // change while `quote` survives; validate() only checks that A quote
+    // exists, not that it matches these legs, so Review stays enabled and
+    // handleSwap signs the PREVIOUS pair's route under the new pair's name.
+    setFromAmount(''); setQuote(null); setQuoteStatus('idle'); setQuoteError('');
+    // Back to the form: the confirm card renders whatever tokens are current,
+    // so leaving it up would show the new pair over the old quote's terms.
+    setScreen('form');
     // A different pair in the params is a new instruction — from a listing the
     // user just tapped — so it outranks the legs they chose for the last one.
     // This effect only re-runs when those params actually change, which is why
@@ -215,7 +236,14 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     // balance read and the picker all key off them, so resolving symbols while
     // they still point at the defaults would fetch the wrong chain's data and
     // briefly offer the user the wrong chain's tokens.
-    legs.forEach((leg) => { if (leg.chainId != null) leg.setChainId(leg.chainId); });
+    // The token is cleared with the chain, not left for the resolver to
+    // overwrite: if the new leg never resolves, holding the PREVIOUS token
+    // against the NEW chain quotes a different asset under the old symbol,
+    // beneath a notice implying the leg is empty.
+    legs.forEach((leg) => {
+      if (leg.chainId != null) leg.setChainId(leg.chainId);
+      leg.setToken(null);
+    });
 
     setPreselectNotice('');
     setPreselecting(true);
