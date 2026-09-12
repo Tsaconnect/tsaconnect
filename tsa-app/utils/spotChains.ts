@@ -20,7 +20,9 @@
 import {
   CHAINS, CHAIN_KEYS, NONEVM_CHAINS, isNonEVMChain, type ChainKey, type NonEVMChainKey,
 } from '@/constants/chains';
-import { SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, type LiFiToken } from '@/services/lifi';
+import {
+  SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, type LiFiToken,
+} from '@/services/lifi';
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 
 /** VM family of a resolved listing chain — the axis the desk branches on. */
@@ -123,6 +125,23 @@ export function resolveSpotChain(chain: unknown): SpotChain | null {
   if (!(CHAIN_KEYS as string[]).includes(key)) return null;
   const evm = CHAINS[key as ChainKey];
   return { lifiChainId: evm.chainId, name: evm.name, family: 'evm', evmKey: key as ChainKey };
+}
+
+/**
+ * LiFi's id for a listing chain, for callers that can trade ACROSS chains.
+ *
+ * Deliberately more permissive than resolveSpotChain: All Swap quotes a route
+ * between two chains, so Bitcoin — rejected above because it has no same-chain
+ * pair — is a perfectly good endpoint here. It lives next to that resolver so
+ * the two cannot drift on what a chain key means.
+ *
+ * null still means "we have no LiFi id for this key" (an unknown key, or Tron,
+ * which LiFi does not route at all). A caller must then leave its selection
+ * alone rather than guess a chain the user never asked for.
+ */
+export function resolveLiFiChainId(chain: unknown): number | null {
+  if (isBitcoinSpotChain(chain)) return BTC_LIFI_CHAIN_ID;
+  return resolveSpotChain(chain)?.lifiChainId ?? null;
 }
 
 /** True when the key is Bitcoin's — the one chain we reject by design. */

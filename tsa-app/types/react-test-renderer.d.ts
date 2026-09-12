@@ -5,9 +5,20 @@
 declare module 'react-test-renderer' {
   import type { ReactElement } from 'react';
 
+  /** A node of the rendered tree — the slice tests query and drive. */
+  export interface ReactTestInstance {
+    // Deliberately loose: a test reaches for whatever prop the component under
+    // test declares, and narrowing that here would mean restating each one.
+    props: Record<string, any>;
+    findAll(predicate: (node: ReactTestInstance) => boolean): ReactTestInstance[];
+  }
+
   export interface ReactTestRenderer {
     toJSON(): unknown;
     unmount(): void;
+    /** Re-render the same tree, as a parent re-rendering would. */
+    update(element: ReactElement): void;
+    root: ReactTestInstance;
   }
 
   export function create(element: ReactElement): ReactTestRenderer;
