@@ -26,14 +26,17 @@ import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { CHAINS } from '@/constants/chains';
 import { getActiveWallet, ensureGas, readErc20BalanceOf, getProvider } from '@/services/wallet';
 import {
-  getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee, SOLANA_NATIVE_ADDRESS,
+  getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
-import { resolveSpotChain, isBitcoinSpotChain, type SpotChain } from '@/utils/spotChains';
+import {
+  resolveSpotChain, matchSpotBalance, unsupportedChainMessage, singleParam, unhandledFamily,
+  type SpotChain, type NonEvmSpotChainFamily,
+} from '@/utils/spotChains';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
@@ -52,24 +55,21 @@ function fmt(n: number, maxFrac = 6): string {
   return n.toLocaleString('en-US', { maximumFractionDigits: maxFrac });
 }
 
-// Bitcoin gets its own wording: it is not a gap in the user's wallet, it is
-// that a single-asset chain has no same-chain pair for this desk to trade.
-function unsupportedChainMessage(chain: string | undefined): string {
-  return isBitcoinSpotChain(chain)
-    ? 'Bitcoin pairs have to route across chains, which this desk doesn’t do yet. Use All Swap to trade BTC.'
-    : 'This pair’s network is not supported on this device.';
-}
+// Per-family lookups, typed as total records so that adding a VM family is a
+// compile error here rather than a silent fall into Solana's or EVM's rules.
+const NON_EVM_BALANCE_READERS: Record<
+  NonEvmSpotChainFamily, (address: string) => Promise<WalletBalanceWithChain[]>
+> = {
+  solana: getSolanaBalances,
+  sui: getSuiBalances,
+};
 
-/** Matches one leg against the wallet's rows — by mint on Solana (the native
- *  row carries no contract address), by symbol on Sui, whose coin types don't
- *  match LiFi's address form. A token the wallet doesn't hold reads as zero. */
-function matchRow(chain: SpotChain, rows: WalletBalanceWithChain[], token: LiFiToken): string {
-  if (chain.family === 'sui') {
-    return rows.find((b) => b.symbol.toUpperCase() === token.symbol.toUpperCase())?.balance ?? '0';
-  }
-  const isNative = token.address === SOLANA_NATIVE_ADDRESS;
-  return rows.find((b) => (isNative ? !b.contractAddress : b.contractAddress === token.address))?.balance ?? '0';
-}
+const NON_EVM_ADDRESS_DERIVERS: Record<
+  NonEvmSpotChainFamily, (evmAddress: string) => Promise<string | null>
+> = {
+  solana: getSolanaAddress,
+  sui: getSuiAddress,
+};
 
 /**
  * Live balances for the pair's two legs, in human units, or null where the read
@@ -81,39 +81,47 @@ function matchRow(chain: SpotChain, rows: WalletBalanceWithChain[], token: LiFiT
 async function readSpotBalances(
   chain: SpotChain, address: string, tokens: LiFiToken[],
 ): Promise<(string | null)[]> {
-  if (chain.family === 'solana' || chain.family === 'sui') {
-    try {
-      const rows = chain.family === 'solana'
-        ? await getSolanaBalances(address)
-        : await getSuiBalances(address);
-      return tokens.map((t) => matchRow(chain, rows, t));
-    } catch {
-      // One fetch backs both legs, so its failure means neither is known.
-      return tokens.map(() => null);
+  switch (chain.family) {
+    case 'evm':
+      return Promise.all(tokens.map(async (t) => {
+        try {
+          const raw = isNativeAddr(t.address)
+            ? await getProvider(chain.evmKey).getBalance(address)
+            : await readErc20BalanceOf(t.address, address, chain.evmKey);
+          return ethers.formatUnits(raw, t.decimals);
+        } catch {
+          return null;
+        }
+      }));
+    case 'solana':
+    case 'sui': {
+      try {
+        const rows = await NON_EVM_BALANCE_READERS[chain.family](address);
+        return tokens.map((t) => matchSpotBalance(chain.family, rows, t));
+      } catch {
+        // One fetch backs both legs, so its failure means neither is known.
+        return tokens.map(() => null);
+      }
     }
+    default:
+      return unhandledFamily(chain);
   }
-  const evmKey = chain.evmKey;
-  if (!evmKey) return tokens.map(() => null);
-  return Promise.all(tokens.map(async (t) => {
-    try {
-      const raw = isNativeAddr(t.address)
-        ? await getProvider(evmKey).getBalance(address)
-        : await readErc20BalanceOf(t.address, address, evmKey);
-      return ethers.formatUnits(raw, t.decimals);
-    } catch {
-      return null;
-    }
-  }));
 }
 
 export default function SpotTrade() {
   const { colors, spacing } = useTheme();
-  const params = useLocalSearchParams<{ side?: string; base?: string; quote?: string; chain?: string }>();
-  const side: 'buy' | 'sell' = params.side === 'sell' ? 'sell' : 'buy';
-  const baseSymbol = (params.base || '').toUpperCase();
-  const quoteSymbol = (params.quote || '').toUpperCase();
+  // Deliberately NOT typed as `{ chain?: string }`: expo-router really can hand
+  // back `string[]`, and the generic that promised otherwise is what let a
+  // repeated param reach a dependency list. Every param goes through
+  // singleParam, which is where the array case (and the render loop it causes)
+  // is dealt with — once, before anything can depend on it.
+  const params = useLocalSearchParams();
+  const side: 'buy' | 'sell' = singleParam(params.side) === 'sell' ? 'sell' : 'buy';
+  const baseSymbol = singleParam(params.base).toUpperCase();
+  const quoteSymbol = singleParam(params.quote).toUpperCase();
+  const chainParam = singleParam(params.chain);
   // Memoised: a fresh object each render would churn every callback below.
-  const spotChain = useMemo(() => resolveSpotChain(params.chain), [params.chain]);
+  const spotChain = useMemo(() => resolveSpotChain(chainParam), [chainParam]);
 
   // Buying the base means paying the quote token; selling is the reverse.
   const fromSymbol = side === 'buy' ? quoteSymbol : baseSymbol;
@@ -144,15 +152,14 @@ export default function SpotTrade() {
     setSetupLoading(true);
     setSetupError('');
     try {
-      if (!spotChain) throw new Error(unsupportedChainMessage(params.chain));
+      if (!spotChain) throw new Error(unsupportedChainMessage(chainParam));
       const evmAddr = await getActiveWallet();
       if (!evmAddr) throw new Error('No wallet found. Set up your wallet first.');
       // Every VM family derives its own key from the one mnemonic, so the
       // address that signs this route is not always the EVM one.
-      const addr =
-        spotChain.family === 'solana' ? await getSolanaAddress(evmAddr)
-        : spotChain.family === 'sui' ? await getSuiAddress(evmAddr)
-        : evmAddr;
+      const addr = spotChain.family === 'evm'
+        ? evmAddr
+        : await NON_EVM_ADDRESS_DERIVERS[spotChain.family](evmAddr);
       if (!addr) {
         throw new Error(`Your wallet has no ${spotChain.name} address yet. Re-import it with your recovery phrase to trade on ${spotChain.name}.`);
       }
@@ -191,7 +198,7 @@ export default function SpotTrade() {
     } finally {
       setSetupLoading(false);
     }
-  }, [spotChain, params.chain, fromSymbol, toSymbol]);
+  }, [spotChain, chainParam, fromSymbol, toSymbol]);
 
   useEffect(() => {
     setup();
@@ -228,7 +235,7 @@ export default function SpotTrade() {
       setLoading(true);
       // Gas is an EVM concern here: Solana fees come out of the SOL balance and
       // Sui's out of the SUI one, both of which ensureGas knows nothing about.
-      if (spotChain?.family === 'evm' && spotChain.evmKey && wallet) {
+      if (spotChain?.family === 'evm' && wallet) {
         const evmKey = spotChain.evmKey;
         let gasMsg = '';
         const ok = await ensureGas(evmKey, wallet, (title, message) => { gasMsg = `${title}: ${message}`; });
