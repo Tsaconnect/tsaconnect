@@ -159,9 +159,45 @@ describe('matchSpotBalance', () => {
       expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: '0x2::sui::SUI' })).toBe('7.5');
     });
 
+    // The gap the first attempt left: the fallback asked "does this ROW carry a
+    // coin type", a question that never looks at the leg, so a wrapped or
+    // spoofed SUI in LiFi's list — which the screen picks by first symbol match
+    // — still captured the user's real native balance by symbol.
+    it('denies a non-native coin called SUI the native row, however it is spelled', () => {
+      const rows = [row({ symbol: 'SUI', balance: '7.5', contractAddress: '' })];
+      const fakeSui = '0xbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad0::sui::SUI';
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: fakeSui })).toBe('0');
+      // Same package as native, different module: still not the native coin.
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: '0x2::wsui::SUI' })).toBe('0');
+    });
+
+    it('accepts both spellings of native SUI, short and zero-padded', () => {
+      const rows = [row({ symbol: 'SUI', balance: '7.5', contractAddress: '' })];
+      const padded = `0x${'0'.repeat(63)}2::sui::SUI`;
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: padded })).toBe('7.5');
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: '0x2::sui::SUI' })).toBe('7.5');
+    });
+
     it('ignores hex case, which differs between the sources a coin type comes from', () => {
       const rows = [row({ symbol: 'USDC', balance: '25', contractAddress: REAL_SUI_USDC.toUpperCase() })];
       expect(matchSpotBalance('sui', rows, { symbol: 'USDC', address: REAL_SUI_USDC })).toBe('25');
+    });
+
+    // Zero-padding is presentational on Sui, so a holding must not read zero
+    // just because LiFi and the RPC wrote the same package address differently.
+    it('ignores leading-zero padding, which the two sources also disagree on', () => {
+      const short = '0x2a::usdc::USDC';
+      const padded = `0x${'0'.repeat(62)}2a::usdc::USDC`;
+      expect(matchSpotBalance('sui', [row({ balance: '25', contractAddress: padded })],
+        { symbol: 'USDC', address: short })).toBe('25');
+      expect(matchSpotBalance('sui', [row({ balance: '25', contractAddress: short })],
+        { symbol: 'USDC', address: padded })).toBe('25');
+    });
+
+    it('reads zero for a leg LiFi returned with no address, rather than throwing', () => {
+      const rows = [row({ symbol: 'SUI', balance: '7.5', contractAddress: '' })];
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI' })).toBe('0');
+      expect(matchSpotBalance('sui', rows, { symbol: 'SUI', address: '  ' })).toBe('0');
     });
 
     it('reads zero for a leg the wallet does not hold at all', () => {
@@ -191,6 +227,12 @@ describe('matchSpotBalance', () => {
     it('keeps mints that differ only in case apart', () => {
       const rows = [row({ symbol: 'USDC', balance: '1000', contractAddress: REAL_USDC_MINT.toUpperCase() })];
       expect(matchSpotBalance('solana', rows, { symbol: 'USDC', address: REAL_USDC_MINT })).toBe('0');
+    });
+
+    // Same guard as Sui's: an id-less leg must not collide with the id-less row.
+    it('reads zero for a leg LiFi returned with no mint, not the native row', () => {
+      const rows = [row({ symbol: 'SOL', balance: '2.25', contractAddress: '' })];
+      expect(matchSpotBalance('solana', rows, { symbol: 'SOL' })).toBe('0');
     });
 
     it('matches native SOL to the row that carries no mint', () => {

@@ -140,8 +140,46 @@ export function unsupportedChainMessage(chain: unknown): string {
 
 /** The balance-row fields the matcher reads — a wallet row satisfies it. */
 export type SpotBalanceRow = Pick<WalletBalanceWithChain, 'symbol' | 'balance' | 'contractAddress'>;
-/** The leg fields the matcher reads — a LiFi token satisfies it. */
-export type SpotTokenLeg = Pick<LiFiToken, 'symbol' | 'address'>;
+/** The leg fields the matcher reads — a LiFi token satisfies it. `address` is
+ *  optional here although LiFiToken declares it required: the token list is an
+ *  unvalidated network response, so the field can simply be absent, and the
+ *  matcher is the last place that can still decide what that means. */
+export type SpotTokenLeg = Pick<LiFiToken, 'symbol'> & { address?: string };
+
+/** Hex characters in a Sui address — 32 bytes, as the RPC returns them. */
+const SUI_ADDRESS_HEX_LENGTH = 64;
+
+/**
+ * One spelling for one Sui coin type.
+ *
+ * A Sui package address is the same address whether it is written short
+ * ("0x2") or zero-padded to 32 bytes, and LiFi and our own RPC do not agree on
+ * which: comparing the raw strings reports a coin the user holds as a zero
+ * balance. Case is normalised for the same reason — the package address comes
+ * back in either case, and two struct tags differing only in case belong to
+ * the same package, so to the same publisher.
+ *
+ * The padded long form is the canonical one so that this agrees with the
+ * backend (`tsa-api-go/internal/chains/sui/client.go`, `normalizeCoinType`);
+ * a second, differently-shaped canonical form would be a place for the app and
+ * the API to disagree about what the user holds.
+ *
+ * Anything that is not a `<address>::<module>::<Struct>` tag is left alone but
+ * lowercased: guessing at a shape we do not recognise could merge two ids.
+ */
+function canonicalSuiCoinType(coinType: string | undefined): string {
+  const tag = (coinType ?? '').trim().toLowerCase();
+  const sep = tag.indexOf('::');
+  if (sep < 0) return tag;
+  const pkg = tag.slice(0, sep);
+  if (!/^0x[0-9a-f]+$/.test(pkg)) return tag;
+  const hex = pkg.slice(2).replace(/^0+/, '');
+  if (hex.length > SUI_ADDRESS_HEX_LENGTH) return tag;
+  return `0x${hex.padStart(SUI_ADDRESS_HEX_LENGTH, '0')}${tag.slice(sep)}`;
+}
+
+/** Native SUI, in the one spelling every other spelling reduces to. */
+const SUI_NATIVE_COIN_TYPE = canonicalSuiCoinType('0x2::sui::SUI');
 
 /**
  * Balance of one leg, picked out of the wallet's rows for this chain. A token
@@ -157,24 +195,38 @@ export type SpotTokenLeg = Pick<LiFiToken, 'symbol' | 'address'>;
 export function matchSpotBalance(
   family: NonEvmSpotChainFamily, rows: SpotBalanceRow[], token: SpotTokenLeg,
 ): string {
+  // A leg with no on-chain id cannot be identified, so it has to read zero.
+  // Matching it against the rows that also carry no id would hand it the
+  // native row's balance — the exact phantom balance this matcher exists to
+  // prevent — and reading the absent field outright would crash the desk.
+  const address = token.address?.trim() ?? '';
+  if (!address) return '0';
+
   switch (family) {
     case 'solana': {
       // LiFi gives native SOL a placeholder address and the wallet's native row
       // carries no mint at all, so those two only line up by their absence.
-      const isNative = token.address === SOLANA_NATIVE_ADDRESS;
-      const row = rows.find((r) => (isNative ? !r.contractAddress : r.contractAddress === token.address));
+      const isNative = address === SOLANA_NATIVE_ADDRESS;
+      const row = rows.find((r) => (isNative ? !r.contractAddress : r.contractAddress === address));
       return row?.balance ?? '0';
     }
     case 'sui': {
-      // Coin type decides it whenever the row carries one. Symbol is the
-      // fallback only for the native SUI row, which is the one row a wallet
-      // reports with no coin type — and the one row an impostor cannot forge.
-      // Hex case is the only normalisation: a coin type's package address may
-      // come back in either case, while two struct tags that differ in case
-      // belong to the same package and so to the same publisher.
-      const wanted = token.address.trim().toLowerCase();
+      // Nativeness is a property of the LEG, never of the row that happens to
+      // be under consideration. Scoping the symbol fallback to "the row with
+      // no coin type" instead let ANY leg called SUI reach the user's real
+      // native row by symbol, because that test is asked once per row and
+      // never looks at what is being matched — and a wrapped or spoofed SUI
+      // entry in LiFi's list is how the leg gets that symbol, since the screen
+      // picks the leg by first symbol match.
+      const wanted = canonicalSuiCoinType(address);
+      if (wanted !== SUI_NATIVE_COIN_TYPE) {
+        return rows.find((r) => canonicalSuiCoinType(r.contractAddress) === wanted)?.balance ?? '0';
+      }
+      // Only the genuine native leg may fall back to symbol, and only against
+      // the row a wallet reports with no coin type — the one row an impostor
+      // cannot publish.
       const row = rows.find((r) => (r.contractAddress
-        ? r.contractAddress.trim().toLowerCase() === wanted
+        ? canonicalSuiCoinType(r.contractAddress) === wanted
         : r.symbol.toUpperCase() === token.symbol.toUpperCase()));
       return row?.balance ?? '0';
     }
