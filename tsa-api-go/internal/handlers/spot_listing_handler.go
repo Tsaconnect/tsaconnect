@@ -33,9 +33,11 @@ type spotListingResponse struct {
 // spotListingInput is the admin create/update body. Pointer fields make partial
 // updates unambiguous (a missing field is left unchanged).
 type spotListingInput struct {
-	BaseSymbol   string `json:"baseSymbol"`
-	QuoteSymbol  string `json:"quoteSymbol"`
-	Chain        string `json:"chain"`
+	BaseSymbol  string `json:"baseSymbol"`
+	QuoteSymbol string `json:"quoteSymbol"`
+	Chain       string `json:"chain"`
+	// QuoteChain is only read for the allswap route; see models.NormalizeSpotLegs.
+	QuoteChain   string `json:"quoteChain"`
 	Route        string `json:"route"`
 	LogoURL      string `json:"logoUrl"`
 	Enabled      *bool  `json:"enabled"`
@@ -188,6 +190,11 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 	if !models.ValidSpotRoute(route) {
 		route = models.SpotRouteLiFi
 	}
+	quoteChain, err := models.NormalizeSpotLegs(chain, route, strings.ToLower(strings.TrimSpace(in.QuoteChain)))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	category := strings.ToLower(strings.TrimSpace(in.Category))
 	if category == "" {
 		category = models.SpotCategorySpot
@@ -200,6 +207,7 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 		BaseSymbol:  base,
 		QuoteSymbol: quote,
 		Chain:       chain,
+		QuoteChain:  quoteChain,
 		Route:       route,
 		LogoURL:     strings.TrimSpace(in.LogoURL),
 		Enabled:     true,
@@ -248,11 +256,17 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 	if s := strings.ToUpper(strings.TrimSpace(in.QuoteSymbol)); s != "" {
 		updates["quote_symbol"] = s
 	}
+	// chain, route and quoteChain are cross-checked as a set against the row as
+	// it will look AFTER the update: a PUT that changes only the route can still
+	// strand a stored btc chain, and validating each field on its own would let
+	// it through. Empty means "unchanged", matching every other field here.
+	chain, route := listing.Chain, listing.Route
 	if s := strings.ToLower(strings.TrimSpace(in.Chain)); s != "" {
 		if !models.ValidSpotChain(s) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported chain")
 			return
 		}
+		chain = s
 		updates["chain"] = s
 	}
 	if s := strings.ToLower(strings.TrimSpace(in.Route)); s != "" {
@@ -260,7 +274,20 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid route")
 			return
 		}
+		route = s
 		updates["route"] = s
+	}
+	quoteChain := listing.QuoteChain
+	if s := strings.ToLower(strings.TrimSpace(in.QuoteChain)); s != "" {
+		quoteChain = s
+	}
+	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteChain)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if quoteChain != listing.QuoteChain {
+		updates["quote_chain"] = quoteChain
 	}
 	if s := strings.TrimSpace(in.LogoURL); s != "" {
 		updates["logo_url"] = s
