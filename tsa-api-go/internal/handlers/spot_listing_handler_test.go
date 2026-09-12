@@ -300,6 +300,68 @@ func TestCreateSpotListing_AllSwapSameChainAllowed(t *testing.T) {
 	}
 }
 
+// A single-token chain cannot host both legs, whatever the route.
+//
+// The same-chain allowance above and the single-token rule are each correct
+// alone and wrong together: "both legs may share a chain" only holds for a
+// chain carrying two tokens. Bitcoin on ONE leg stays legal — that is the
+// entire reason allswap exists — so this pins both halves.
+func TestCreateSpotListing_AllSwapRefusesBitcoinOnBothLegs(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"BTC","quoteSymbol":"USDT","chain":"btc","route":"allswap","quoteChain":"btc"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	var n int64
+	config.DB.Model(&models.SpotListing{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d listing(s) written despite the refusal", n)
+	}
+}
+
+func TestCreateSpotListing_AllSwapAllowsBitcoinOnOneLeg(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"BTC","quoteSymbol":"USDT","chain":"btc","route":"allswap","quoteChain":"ethereum"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row)
+	if row.Chain != "btc" || row.QuoteChain != "ethereum" {
+		t.Fatalf("legs = %q/%q, want btc/ethereum", row.Chain, row.QuoteChain)
+	}
+}
+
+// The update path validates post-update state as a set, so it must refuse the
+// same combination reached one field at a time.
+func TestUpdateSpotListing_RefusesBitcoinOnBothLegs(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"BTC","quoteSymbol":"USDT","chain":"btc","route":"allswap","quoteChain":"ethereum"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed status = %d, want 201; body = %s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row)
+
+	uc, uw := spotCtx(t, http.MethodPut, `{"quoteChain":"btc"}`, adminUser())
+	uc.Params = gin.Params{{Key: "id", Value: row.ID.String()}}
+	h.UpdateSpotListing(uc)
+	if uw.Code != http.StatusBadRequest {
+		t.Fatalf("update status = %d, want 400; body = %s", uw.Code, uw.Body.String())
+	}
+	var after models.SpotListing
+	config.DB.First(&after, "id = ?", row.ID)
+	if after.QuoteChain != "ethereum" {
+		t.Fatalf("quoteChain = %q, want it unchanged at ethereum", after.QuoteChain)
+	}
+}
+
 func TestCreateSpotListing_DuplicatePair(t *testing.T) {
 	setupSpotTestDB(t)
 	h := newSpotHandlers()

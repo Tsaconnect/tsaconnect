@@ -106,11 +106,23 @@ func NormalizeSpotLegs(chain, route, quoteChain string) (string, error) {
 	if !ValidSpotChain(quoteChain) {
 		return "", errors.New("Unsupported quoteChain")
 	}
-	// chain == quoteChain is deliberately allowed. All Swap is cross-chain
-	// capable, not cross-chain only, so such a listing still quotes and still
-	// trades; refusing it would reject a working pair to enforce a preference
-	// about which route names it. The invariant worth defending is that every
-	// leg names a chain that carries its token, not that the two chains differ.
+	// A single-token chain cannot host BOTH legs, whatever the route. This is
+	// the invariant the comment below names, and it was previously enforced
+	// only on the non-allswap path — so btc/btc sailed through, saved, rendered
+	// with a price, and then asked the user to pick a quote token on a chain
+	// where none exists.
+	//
+	// Bitcoin on ONE leg is the entire point of allswap and stays legal; it is
+	// only both legs that cannot work.
+	if SpotSingleTokenChains[chain] && SpotSingleTokenChains[quoteChain] {
+		return "", fmt.Errorf("Chain %q holds only one tradeable token, so it cannot be both legs. Put the quote leg on another chain", chain)
+	}
+	// chain == quoteChain is otherwise deliberately allowed. All Swap is
+	// cross-chain capable, not cross-chain only, so such a listing still quotes
+	// and still trades; refusing it would reject a working pair to enforce a
+	// preference about which route names it. The invariant worth defending is
+	// that every leg names a chain that carries its token, not that the two
+	// chains differ — which is exactly what the check above enforces.
 	return quoteChain, nil
 }
 
