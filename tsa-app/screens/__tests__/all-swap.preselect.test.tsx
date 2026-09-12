@@ -216,6 +216,7 @@ beforeEach(() => {
 jest.setTimeout(30_000);
 
 const BTC_PAIR = { fromSymbol: 'USDT', fromChain: 'bsc', toSymbol: 'BTC', toChain: 'btc' };
+const POLYGON_CHAIN_ID = 137;
 
 describe('All Swap preselection', () => {
   it('selects a leg whose token list only arrives after mount', async () => {
@@ -327,5 +328,73 @@ describe('All Swap preselection', () => {
     expect(rendered(tree).filter(t => t === 'Select')).toHaveLength(2);
     expect(rendered(tree)).not.toContain('Selecting this pair…');
     expect(rendered(tree).some(t => t.startsWith('Couldn’t preselect'))).toBe(false);
+  });
+});
+
+/**
+ * Selection while no leg is open.
+ *
+ * The picker's handlers used to test only for 'from' and let everything else
+ * fall through to 'to', so an absent mode wrote the leg the user was not on.
+ * Nothing in the UI could reach that — the modal renders invisible — but it
+ * stays mounted across every close, and preselection now drives the same
+ * state from a timer the user does not control, so the handlers are reachable
+ * with no leg open and that is the state these pin down.
+ *
+ * The mocked picker here is exactly that shape: it keeps its last props
+ * forever, so calling `onSelect` off a closed picker is the real hazard, not
+ * an artefact. `visible` is asserted first every time — `mode` carries a
+ * 'from' fallback for the closed render and would pass either way.
+ */
+describe('All Swap picker with no leg open', () => {
+  it('ignores a selection made while the picker is closed', async () => {
+    // The "to" leg never resolves, which is what leaves a notice on screen for
+    // a stray selection to wipe.
+    lifi.__state.token = async (chainId, symbol) =>
+      (chainId === BSC_CHAIN_ID && symbol === 'USDT' ? USDT : null);
+    lifi.__state.tokens = () => Promise.resolve([]);
+
+    const tree = await mount({ preselect: BTC_PAIR });
+
+    const notice = 'Couldn\u2019t preselect BTC \u2014 pick it below to continue.';
+    expect(rendered(tree)).toContain(notice);
+
+    const amountInput = () => tree.root.findAll(n =>
+      n.props?.placeholder === '0.00' && typeof n.props?.onChangeText === 'function')[0];
+    await act(async () => { amountInput().props.onChangeText('1.5'); });
+    expect(amountInput().props.value).toBe('1.5');
+
+    // Nothing was tapped, so nothing is open.
+    expect(picker.__state.props.visible).toBe(false);
+    await act(async () => { picker.__state.props.onSelect(DAI, ETH_CHAIN_ID); });
+    await flush();
+
+    // The "to" leg is untouched, and so is everything the handler clears on
+    // its way past: the notice that leg still needs, and the typed amount.
+    expect(rendered(tree)).not.toContain('DAI');
+    expect(rendered(tree)).toContain('Select');
+    expect(rendered(tree)).toContain(notice);
+    expect(amountInput().props.value).toBe('1.5');
+    // The leg that did resolve is not collateral damage either.
+    expect(rendered(tree)).toContain('USDT');
+  });
+
+  it('ignores a chain change made while the picker is closed', async () => {
+    lifi.__state.token = async () => null;
+    lifi.__state.tokens = () => Promise.resolve([]);
+
+    const tree = await mount({});
+    expect(rendered(tree).filter(t => t === 'Select')).toHaveLength(2);
+
+    lifi.getLiFiTokens.mockClear();
+    expect(picker.__state.props.visible).toBe(false);
+    await act(async () => { picker.__state.props.onChainChange(POLYGON_CHAIN_ID); });
+    await flush();
+
+    // A moved chain is observable through the list it makes the screen fetch,
+    // which is the same fetch that would have offered the user the wrong
+    // chain's tokens on a leg they never opened.
+    expect(lifi.getLiFiTokens.mock.calls.map(c => c[0])).not.toContain(POLYGON_CHAIN_ID);
+    expect(lifi.getLiFiTokens).not.toHaveBeenCalled();
   });
 });

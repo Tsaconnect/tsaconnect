@@ -998,6 +998,12 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
 
         <TokenPickerModal
           visible={pickerMode !== null}
+          // Stays mounted while closed on purpose: the picker fetches the LiFi
+          // chain list once per mount and clears its own search/chain/paging
+          // state off `visible`, so unmounting it on close would refetch that
+          // whole list on every open. The fallback exists only to satisfy the
+          // non-nullable prop on that closed render, and says nothing about a
+          // leg being live — `visible` is the only signal that does.
           mode={pickerMode ?? 'from'}
           chainId={pickerMode === 'from' ? fromChainId : toChainId}
           userBalances={balances}
@@ -1009,14 +1015,21 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
           onAllChainsSearchChange={handleAllChainsSearchChange}
           tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
           onChainChange={(newChainId) => {
+            // No mode means no leg was ever opened, and an untaken `from`
+            // branch here re-chains `to` — the leg the user was not touching.
+            if (pickerMode === null) return;
             // Changing a chain is choosing a leg: whatever the preselection is
             // still fetching for this side is now the wrong chain's token.
-            if (pickerMode) userChoseLeg.current[pickerMode] = true;
+            userChoseLeg.current[pickerMode] = true;
             if (pickerMode === 'from') setFromChainId(newChainId);
             else setToChainId(newChainId);
           }}
           onSelect={(token, chainId) => {
-            if (pickerMode) userChoseLeg.current[pickerMode] = true;
+            // Same absent-leg guard, and it protects more here: a fall-through
+            // would not just write `to`, it would also drop the preselect
+            // notice and wipe an amount the user has already typed.
+            if (pickerMode === null) return;
+            userChoseLeg.current[pickerMode] = true;
             setPreselectNotice('');
             if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
             else { setToToken(token); setToChainId(chainId); }
