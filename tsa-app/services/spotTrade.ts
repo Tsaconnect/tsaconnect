@@ -14,6 +14,32 @@ export function openSpotTrade(listing: SpotListing, side: 'buy' | 'sell') {
     router.push(side === 'buy' ? '/wallet/mcgp/buy' : '/wallet/mcgp/sell');
     return;
   }
+  if (listing.route === 'allswap') {
+    // A cross-chain pair has no same-chain desk to open: with the legs on two
+    // chains there is no single chain to resolve them both against, and a BTC
+    // pair is always in that shape because Bitcoin carries one asset. All Swap
+    // already quotes and signs across chains, so the listing arrives there with
+    // both legs chosen rather than at a form that could only fail at quote time.
+    //
+    // `quoteChain` is absent on same-chain listings, where the base leg's chain
+    // is also the quote leg's — reading it that way keeps an admin from having
+    // to restate a chain that never differed.
+    const quoteChain = listing.quoteChain || listing.chain;
+    router.push({
+      pathname: '/easyswap',
+      params: {
+        tab: 'allswap',
+        // Buying the base is paying with the quote leg, which is the same
+        // reading of `side` the same-chain desk uses; All Swap's from/to is
+        // that pay/receive axis and nothing else.
+        fromSymbol: side === 'buy' ? listing.quoteSymbol : listing.baseSymbol,
+        fromChain: side === 'buy' ? quoteChain : listing.chain,
+        toSymbol: side === 'buy' ? listing.baseSymbol : listing.quoteSymbol,
+        toChain: side === 'buy' ? listing.chain : quoteChain,
+      },
+    } as any);
+    return;
+  }
   // Generic tokens open the Spot Trade desk — MCGP-style form with both legs'
   // balances, LiFi under the hood (see app/wallet/spot-trade).
   router.push({

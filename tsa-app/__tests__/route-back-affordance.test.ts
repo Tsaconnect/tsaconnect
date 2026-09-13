@@ -50,6 +50,11 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function walk(dir: string, match: (name: string) => boolean, acc: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
+    // expo-router does not route a test file, so neither may this. Scanning
+    // them found no missing back buttons and did crash the walk: a test's own
+    // import clause is not JSX and the identifier regex built from it is not
+    // always a valid pattern.
+    if (entry.name === '__tests__' || /\.test\.tsx?$/.test(entry.name)) continue;
     if (entry.isDirectory()) walk(full, match, acc);
     else if (match(entry.name)) acc.push(full);
   }
