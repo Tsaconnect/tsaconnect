@@ -500,30 +500,72 @@ export interface SendTxOps {
   sign: (tx: PreparedTransaction) => Promise<string>;
   /** Broadcast the signed tx via the backend. */
   submit: (signedTx: string) => Promise<ApiResponse<{ txHash: string }>>;
-  /** Pause before re-preparing on a nonce error (default 1500ms) — lets a lagging RPC node catch up. */
+  /** Pause before re-preparing after a stale-tx rejection (default 1500ms) — lets a lagging RPC node catch up. */
   retryDelayMs?: number;
 }
 
-const isNonceError = (message: string | undefined): boolean =>
-  (message ?? '').toLowerCase().includes('nonce too low');
+/**
+ * How a prepared transaction went stale between prepare and broadcast. The two
+ * kinds are cured by the same action — re-prepare, re-sign, resubmit — but they
+ * differ in what a SAFE recovery looks like, which is the whole point of
+ * distinguishing them:
+ *
+ * - 'nonce': something already occupies our nonce. Re-preparing MUST return a
+ *   higher one or the retry is pointless.
+ * - 'gas-price': the node refused the tx during pool validation, so it is not
+ *   in the mempool and cannot mine. Re-preparing must return the SAME nonce; if
+ *   it moved, a transaction of ours reached the pool after all and broadcasting
+ *   at the new nonce would send a SECOND one.
+ *
+ * Deliberately excluded: 'underpriced'. "replacement transaction underpriced"
+ * means a tx of ours is already pending at this nonce and WILL mine — retrying
+ * re-prepares at nonce+1 and broadcasts a second, different transaction. On a
+ * transfer that is the user's money sent twice. The plain "transaction
+ * underpriced" variant would be safe to retry, but the two are not reliably
+ * distinguishable by substring, so neither is.
+ */
+type StaleKind = 'nonce' | 'gas-price';
+
+const staleKind = (message: string | undefined): StaleKind | null => {
+  const low = (message ?? '').toLowerCase();
+  if (low.includes('nonce too low')) return 'nonce';
+  // Both spellings are in the wild: older geth says "fee cap less than block
+  // base fee", current geth and the L2 sequencers say "max fee per gas less
+  // than block base fee".
+  if (low.includes('less than block base fee')) return 'gas-price';
+  return null;
+};
 
 /**
- * Run the prepare → sign → submit send flow with one automatic retry on a
- * "nonce too low" broadcast failure.
+ * Run the prepare -> sign -> submit send flow with at most one automatic retry
+ * when the broadcast is rejected for having gone stale (see StaleKind).
  *
- * The nonce is computed server-side at prepare time (PendingNonceAt) and baked
- * into the tx the wallet signs. On Sonic's load-balanced public RPC the node
- * that served `prepare-tx` can lag the node that later accepts the broadcast,
- * so the signed nonce ends up below the confirmed count → "nonce too low". The
- * signed tx can't be patched after the fact, so recovery means re-preparing
- * (fresh nonce) and re-signing. We retry exactly once; only nonce errors are
- * retried — everything else (insufficient funds, revert, …) surfaces as-is.
+ * Nonce and gas price are both resolved server-side at prepare time and baked
+ * into the tx the wallet signs, but the user signs and broadcasts seconds
+ * later. By then the nonce can be below the confirmed count (Sonic's
+ * load-balanced public RPC lags between nodes) or the gas price below the
+ * current base fee (every chain reprices per block). A signed tx cannot be
+ * patched, so recovery means re-preparing and re-signing.
+ *
+ * The retry is guarded, because re-preparing is not free of consequence: it
+ * asks the backend for a fresh nonce, and a nonce that has MOVED means a
+ * transaction of ours is already in flight. Broadcasting then sends a second
+ * one. So after a gas-price rejection the retry is abandoned unless the nonce
+ * comes back unchanged.
+ *
+ * Residual hazard, unfixed and pre-existing: a 'nonce too low' rejection is
+ * indistinguishable from the case where the tx occupying that nonce is a
+ * duplicate of our own (a submit whose response was lost). Retrying then sends
+ * a second transfer. Closing that needs an idempotency key on the backend's
+ * submit endpoint, which does not exist yet.
  */
 export async function sendPreparedTransaction(
   ops: SendTxOps
 ): Promise<ApiResponse<{ txHash: string }>> {
   const retryDelayMs = ops.retryDelayMs ?? 1500;
   let lastResult: ApiResponse<{ txHash: string }> = { success: false, message: 'Failed' };
+  let rejection: StaleKind | null = null;
+  let firstNonce: number | null = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0 && retryDelayMs > 0) {
@@ -532,14 +574,25 @@ export async function sendPreparedTransaction(
 
     const prepared = await ops.prepare();
     if (!prepared.success || !prepared.data) {
+      // On a retry the broadcast error says more about what went wrong than
+      // "couldn't prepare" does, so it stays the reported one.
+      if (attempt > 0) return lastResult;
       return { success: false, message: prepared.message || 'Failed to prepare transaction' };
     }
+
+    if (rejection === 'gas-price' && firstNonce !== null && prepared.data.nonce !== firstNonce) {
+      // The tx we thought was refused is in the mempool after all. Signing this
+      // one would transfer the same amount a second time.
+      return lastResult;
+    }
+    if (firstNonce === null) firstNonce = prepared.data.nonce;
 
     const signed = await ops.sign(prepared.data);
     lastResult = await ops.submit(signed);
 
     if (lastResult.success) return lastResult;
-    if (!isNonceError(lastResult.message)) return lastResult;
+    rejection = staleKind(lastResult.message);
+    if (rejection === null) return lastResult;
   }
 
   return lastResult;

@@ -79,6 +79,104 @@ describe('sendPreparedTransaction', () => {
     expect(submit).toHaveBeenCalledTimes(2);
   });
 
+  // Observed on Arbitrum: the gas price is priced at prepare time and the chain
+  // reprices every block, so a user who pauses before confirming broadcasts a tx
+  // capped below the current base fee. Re-preparing refetches the price.
+  it('re-prepares with a fresh gas price and retries once on a stale base fee', async () => {
+    const BASE_FEE_ERR =
+      'Failed to submit transaction to blockchain on arbitrum: failed to send transaction: ' +
+      'max fee per gas less than block base fee: address 0xabc, maxFeePerGas: 20006000 baseFee: 20098000';
+    const prepare = jest
+      .fn()
+      .mockResolvedValueOnce({ success: true, data: { ...baseTx, gasPrice: '20006000' } })
+      .mockResolvedValueOnce({ success: true, data: { ...baseTx, gasPrice: '25125000' } });
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest
+      .fn()
+      .mockResolvedValueOnce(fail(BASE_FEE_ERR))
+      .mockResolvedValueOnce(ok('0xhash3'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(true);
+    expect(res.data?.txHash).toBe('0xhash3');
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(sign).toHaveBeenLastCalledWith(expect.objectContaining({ gasPrice: '25125000' }));
+  });
+
+  // "replacement transaction underpriced" means a tx of OURS is already pending
+  // at this nonce and will mine. Re-preparing would return nonce+1 and
+  // broadcast a SECOND transfer — the user's money sent twice.
+  it('never retries an underpriced replacement, which would double-send', async () => {
+    const prepare = jest.fn().mockResolvedValue(prepared(5));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail('replacement transaction underpriced'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  // The plain variant is safe in principle, but is not reliably distinguishable
+  // from the replacement one by substring, so it is not retried either.
+  it('does not retry a plain underpriced transaction', async () => {
+    const prepare = jest.fn().mockResolvedValue(prepared(5));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail('transaction underpriced'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  // A gas-price rejection means the tx never entered the pool, so the nonce must
+  // still be free. If re-preparing hands back a DIFFERENT nonce, a transaction
+  // of ours reached the mempool after all and signing this one sends a second.
+  it('abandons a gas-price retry when the nonce has moved', async () => {
+    const prepare = jest
+      .fn()
+      .mockResolvedValueOnce(prepared(5))
+      .mockResolvedValueOnce(prepared(6));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail('max fee per gas less than block base fee'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    // The second transaction is never signed and never broadcast.
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the broadcast error, not the prepare error, when a retry cannot re-prepare', async () => {
+    const prepare = jest
+      .fn()
+      .mockResolvedValueOnce(prepared(5))
+      .mockResolvedValueOnce(fail('Failed to prepare transaction'));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail(NONCE_ERR));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(res.message).toBe(NONCE_ERR);
+  });
+
+  it('does not retry a revert, which re-preparing cannot cure', async () => {
+    const prepare = jest.fn().mockResolvedValue(prepared(5));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail('execution reverted: 0xe450d38c'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces a failed prepare without attempting to sign or submit', async () => {
     const prepare = jest.fn().mockResolvedValue(fail('Failed to prepare'));
     const sign = jest.fn();

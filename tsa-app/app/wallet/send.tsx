@@ -42,6 +42,7 @@ import {
   submitTransaction,
   type WalletBalanceWithChain,
 } from '../../services/walletApi';
+import { txHashOrThrow } from '../../services/swapErrors';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
 import { useTheme } from '@/theme';
 import {
@@ -65,6 +66,7 @@ import {
 type BalanceEntry = WalletBalanceWithChain;
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
+
 
 // Round token-symbol badge. Color is sourced from the token registry's
 // iconColor (data-driven, like screens/wallet) and falls back to a neutral token.
@@ -533,10 +535,11 @@ const SendToken = () => {
       // nonce with this signature (queued-forever tx).
       const from = await getActiveWallet();
       if (!from) throw new Error('No wallet found. Set up your wallet first.');
-      // Nonce is computed server-side at prepare time and can go stale before
-      // broadcast on Sonic's load-balanced RPC ("nonce too low"). The signed tx
-      // can't be patched, so on a nonce error we re-prepare (fresh nonce),
-      // re-sign, and retry once.
+      // Nonce and gas price are both computed server-side at prepare time and
+      // can go stale before broadcast — the nonce on Sonic's load-balanced RPC,
+      // the gas price on any chain that reprices per block. The signed tx can't
+      // be patched, so sendPreparedTransaction re-prepares, re-signs and retries
+      // once on either.
       const res = await sendPreparedTransaction({
         prepare: () =>
           prepareSendTransaction(
@@ -562,8 +565,8 @@ const SendToken = () => {
         submit: (signed) =>
           submitTransaction(signed, 'send', selectedToken, recipient, tokenAmount, chainId, from),
       });
-      if (res.success && res.data?.txHash) { setTxHash(res.data.txHash); setScreen('success'); }
-      else throw new Error(res.message || 'Failed');
+      setTxHash(txHashOrThrow(res));
+      setScreen('success');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
   };
 

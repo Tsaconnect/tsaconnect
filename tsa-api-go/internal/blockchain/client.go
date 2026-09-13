@@ -98,8 +98,12 @@ func (c *EVMClient) EstimateGas(msg ethereum.CallMsg) (uint64, error) {
 	return gas, nil
 }
 
-// SuggestGasPrice returns the currently suggested gas price.
-func (c *EVMClient) SuggestGasPrice() (*big.Int, error) {
+// SuggestGasPriceRaw returns the node's own suggestion, unmodified.
+//
+// This is the price to QUOTE, not the price to SIGN. Use it only where the
+// number is shown to somebody as what the chain currently charges; anything
+// that builds a transaction wants SuggestGasPrice, which adds headroom.
+func (c *EVMClient) SuggestGasPriceRaw() (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -108,6 +112,57 @@ func (c *EVMClient) SuggestGasPrice() (*big.Int, error) {
 		return nil, fmt.Errorf("failed to suggest gas price: %w", err)
 	}
 	return price, nil
+}
+
+// gasPriceHeadroomPercent is how far above the node's suggestion a transaction
+// is priced.
+//
+// The suggestion is a snapshot taken when the tx is built, but these are legacy
+// (type-0) transactions signed and broadcast some time later — seconds, when a
+// user is reading a confirmation screen. Every chain here reprices per block,
+// so a tx priced at the old base fee is rejected outright with "max fee per gas
+// less than block base fee", and a signed tx cannot be repriced.
+//
+// 10% is deliberately modest, for two reasons. A type-0 tx pays its full gas
+// price — unlike an EIP-1559 fee cap, the surplus above the base fee is NOT
+// refunded — so on Ethereum mainnet at 30 gwei every 10% is real money, roughly
+// $0.15 a transfer. And headroom is no longer the only defence: the app
+// re-prepares and re-signs once when a broadcast is rejected this way
+// (STALE_TX_ERRORS in tsa-app/services/walletApi.ts), which costs a round trip
+// rather than a fee. Headroom covers the common small drift; the retry covers
+// the rest. Buying more of the first with real money to avoid the second would
+// be a bad trade.
+//
+// The real fix is to stop emitting type-0 transactions: with maxFeePerGas the
+// surplus comes back and the cap can be generous. That is a cross-repo change
+// (UnsignedTx, every signing call site in the app) and is tracked separately.
+const gasPriceHeadroomPercent = 10
+
+// SuggestGasPrice returns the price to build a transaction with: the node's
+// suggestion plus gasPriceHeadroomPercent.
+//
+// Headroom is the DEFAULT on purpose. Every tx builder in this codebase reaches
+// for this name, and a builder that silently prices at a stale base fee fails
+// in the user's hands, not in review — so the safe behaviour is the one you get
+// without knowing to ask. Reach for SuggestGasPriceRaw only to display a price.
+func (c *EVMClient) SuggestGasPrice() (*big.Int, error) {
+	price, err := c.SuggestGasPriceRaw()
+	if err != nil {
+		return nil, err
+	}
+	return applyGasHeadroom(price), nil
+}
+
+// applyGasHeadroom raises price by gasPriceHeadroomPercent, without mutating it.
+// A nil price reads as zero rather than panicking: this is a fee calculation on
+// a path that already has an error to report, and a panic in it would take down
+// the request handler.
+func applyGasHeadroom(price *big.Int) *big.Int {
+	if price == nil {
+		return big.NewInt(0)
+	}
+	buffered := new(big.Int).Mul(price, big.NewInt(100+gasPriceHeadroomPercent))
+	return buffered.Div(buffered, big.NewInt(100))
 }
 
 // SendRawTransaction submits an RLP-encoded signed transaction and returns the tx hash.
