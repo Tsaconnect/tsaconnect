@@ -37,7 +37,7 @@ import {
   Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
   ScreenHeader,
 } from '@/components/ui';
-import { mapSubmitError } from '@/services/swapErrors';
+import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
 import { OtcClosedSheet } from '@/components/otc/OtcClosedSheet';
 
 // ── Token config (extend this list as new tokens are added) ──
@@ -414,7 +414,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
         const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
         if (!approveHash) {
           console.error('[swap] approve rejected by backend', approveRes);
-          throw new Error(mapSubmitError(approveRes.message));
+          throw new Error(mapSubmitError(approveRes.message, SWAP_COPY));
         }
 
         // Wait for the approve to confirm before submitting the swap.
@@ -460,7 +460,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
         setTxHash(swapHash); setScreen('success'); loadBalances();
       } else {
         console.error('[swap] swap rejected by backend', res);
-        throw new Error(mapSubmitError(res.message));
+        throw new Error(mapSubmitError(res.message, SWAP_COPY));
       }
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);

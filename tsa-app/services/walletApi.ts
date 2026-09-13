@@ -539,14 +539,14 @@ export interface SendTxOps {
  * differ in what a SAFE recovery looks like, which is the whole point of
  * distinguishing them:
  *
- * - 'nonce': something already occupies our nonce. Re-preparing MUST return a
- *   higher one or the retry is pointless.
+ * - 'nonce': something already occupies our nonce. Re-preparing must return a
+ *   higher one — enforced below — or the retry is pointless.
  * - 'gas-price': the node refused the tx during pool validation, so it is not
  *   in the mempool and cannot mine. Re-preparing must return the SAME nonce; if
  *   it moved, a transaction of ours reached the pool after all and broadcasting
  *   at the new nonce would send a SECOND one.
  *
- * Deliberately excluded: 'underpriced'. "replacement transaction underpriced"
+ * Deliberately excluded from staleKind: 'underpriced'. "replacement transaction underpriced"
  * means a tx of ours is already pending at this nonce and WILL mine — retrying
  * re-prepares at nonce+1 and broadcasts a second, different transaction. On a
  * transfer that is the user's money sent twice. The plain "transaction
@@ -619,6 +619,13 @@ export async function sendPreparedTransaction(
       if (rejection === 'gas-price' && prepared.data.nonce !== first.nonce) {
         // The tx we thought was refused is in the mempool after all. Signing
         // this one would transfer the same amount a second time.
+        return lastResult;
+      }
+      if (rejection === 'nonce' && prepared.data.nonce <= first.nonce) {
+        // The node that served this prepare is as far behind as the one that
+        // rejected the broadcast. Re-signing the same nonce resubmits an
+        // identical transaction to fail identically; stop instead of spending
+        // a second round trip on it.
         return lastResult;
       }
       // A retry exists to re-price the SAME transfer. Re-pricing moves nonce,

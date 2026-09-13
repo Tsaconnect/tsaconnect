@@ -53,7 +53,7 @@ import {
   submitTransaction,
   type Transaction,
 } from '@/services/walletApi';
-import { mapSubmitError } from '@/services/swapErrors';
+import { mapSubmitError, UNCONFIRMED_COPY } from '@/services/submitErrors';
 import {
   IT_AGREEMENT_REQUIRED,
   IT_STABLE_DEPOSIT_CLAIMED,
@@ -955,7 +955,10 @@ export default function ITSellStable() {
           // transaction; it also returns the result as-is when the backend
           // succeeded but no hash could be extracted. Both land here, so this
           // branch is reachable with the user's funds already in flight.
-          setError(mapSubmitError(sent.message));
+          // UNCONFIRMED_COPY, not TRANSFER_COPY: per the comment above, we may
+          // be here with the transfer already on its way. Telling this user to
+          // try again is how one sale becomes two.
+          setError(mapSubmitError(sent.message, UNCONFIRMED_COPY));
           setRecoveryIntentId(sell.intentId);
           setScreen('error');
           return;

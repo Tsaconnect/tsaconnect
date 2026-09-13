@@ -45,7 +45,7 @@ jest.mock('../chains/suiLifi', () => ({
   executeLiFiSuiSwap: (...a: any[]) => mockExecuteLiFiSuiSwap(...a),
 }));
 
-jest.mock('../swapErrors', () => ({
+jest.mock('../submitErrors', () => ({
   mapSubmitError: (m?: string) => m || 'mapped error',
 }));
 

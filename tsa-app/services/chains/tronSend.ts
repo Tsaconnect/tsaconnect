@@ -2,7 +2,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
-import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../swapErrors';
+import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../submitErrors';
 import { deriveTronPrivateKey } from './derivation';
 import { signSecpDigest } from './sign';
 

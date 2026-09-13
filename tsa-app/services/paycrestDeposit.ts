@@ -8,7 +8,7 @@
 // (before an order and its countdown exist), the send runs on the deposit
 // screen — and because neither is testable inside a 500-line component.
 import { CHAINS, type ChainKey } from '@/constants/chains';
-import { txHashOrThrow, TRANSFER_COPY } from './swapErrors';
+import { txHashOrThrow, TRANSFER_COPY } from './submitErrors';
 import { signTransaction } from './wallet';
 import {
   prepareSendTransaction,

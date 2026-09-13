@@ -1,4 +1,10 @@
-import { mapSubmitError, txHashOrThrow, SWAP_COPY, TRANSFER_COPY } from '../swapErrors';
+import {
+  mapSubmitError,
+  txHashOrThrow,
+  SWAP_COPY,
+  TRANSFER_COPY,
+  UNCONFIRMED_COPY,
+} from '../submitErrors';
 
 // Verbatim from a production Arbitrum rejection, shown to a user in a red box
 // on the Sell for Naira screen.
@@ -13,7 +19,7 @@ const SHORT_BASE_FEE = 'err: fee cap less than block base fee';
 
 describe('mapSubmitError', () => {
   it('turns a stale base fee into copy with no RPC internals in it', () => {
-    const msg = mapSubmitError(RAW_BASE_FEE);
+    const msg = mapSubmitError(RAW_BASE_FEE, TRANSFER_COPY);
 
     expect(msg).toContain('Network fees rose while you were confirming.');
     expect(msg).not.toMatch(/0x[0-9a-fA-F]{8}/);
@@ -21,7 +27,7 @@ describe('mapSubmitError', () => {
   });
 
   it('matches the same rejection when it is short enough to pass the length guard', () => {
-    expect(mapSubmitError(SHORT_BASE_FEE)).toContain('Network fees rose while you were confirming.');
+    expect(mapSubmitError(SHORT_BASE_FEE, TRANSFER_COPY)).toContain('Network fees rose while you were confirming.');
   });
 
   it('never leaks an address or hex blob for any known error', () => {
@@ -35,14 +41,14 @@ describe('mapSubmitError', () => {
       'already known',
     ];
     for (const raw of raws) {
-      expect(mapSubmitError(raw)).not.toMatch(/0x[0-9a-fA-F]{6}/);
+      expect(mapSubmitError(raw, TRANSFER_COPY)).not.toMatch(/0x[0-9a-fA-F]{6}/);
     }
   });
 
   // The tx is in the mempool and will mine. Calling it a failure invites the
   // user to send a duplicate.
   it('does not report an already-submitted transaction as a failure', () => {
-    const msg = mapSubmitError('already known');
+    const msg = mapSubmitError('already known', TRANSFER_COPY);
 
     expect(msg).toContain('already been submitted');
     expect(msg.toLowerCase()).not.toContain('failed');
@@ -59,8 +65,22 @@ describe('mapSubmitError', () => {
       expect(mapSubmitError(SHORT_BASE_FEE, TRANSFER_COPY)).toContain('Please try again.');
     });
 
-    it('defaults to swap copy, so an un-migrated caller keeps its old wording', () => {
-      expect(mapSubmitError(SHORT_BASE_FEE)).toBe(mapSubmitError(SHORT_BASE_FEE, SWAP_COPY));
+    // The site this exists for is the IT stable sell, which can fail with the
+    // transfer already in flight. Both other variants invite a second one.
+    it('tells a send of unknown outcome to check history, never to retry', () => {
+      const msg = mapSubmitError(SHORT_BASE_FEE, UNCONFIRMED_COPY);
+
+      expect(msg).toContain('Check your transaction history');
+      expect(msg).not.toMatch(/try again\.$/);
+      expect(msg).not.toContain('quote');
+    });
+
+    it('gives each flow a distinct instruction', () => {
+      const variants = [SWAP_COPY, TRANSFER_COPY, UNCONFIRMED_COPY].map(
+        (copy) => mapSubmitError(SHORT_BASE_FEE, copy),
+      );
+
+      expect(new Set(variants).size).toBe(3);
     });
 
     it('uses the flow\'s own fallback, so a transfer is not called a swap', () => {
@@ -81,13 +101,13 @@ describe('mapSubmitError', () => {
   });
 
   it('passes a short unrecognised message through unchanged', () => {
-    expect(mapSubmitError('This order has no deposit address yet.')).toBe(
+    expect(mapSubmitError('This order has no deposit address yet.', TRANSFER_COPY)).toBe(
       'This order has no deposit address yet.',
     );
   });
 
   it('shows a revert reason but still caps an ABI blob', () => {
-    expect(mapSubmitError('execution reverted: transfer to the zero address')).toBe(
+    expect(mapSubmitError('execution reverted: transfer to the zero address', TRANSFER_COPY)).toBe(
       'execution reverted: transfer to the zero address',
     );
     expect(mapSubmitError('execution reverted: 0x' + 'a'.repeat(400), TRANSFER_COPY)).toBe(
@@ -98,17 +118,17 @@ describe('mapSubmitError', () => {
 
 describe('txHashOrThrow', () => {
   it('returns the hash when the broadcast succeeded', () => {
-    expect(txHashOrThrow({ success: true, data: { txHash: '0xdeadbeef' } })).toBe('0xdeadbeef');
+    expect(txHashOrThrow({ success: true, data: { txHash: '0xdeadbeef' } }, TRANSFER_COPY)).toBe('0xdeadbeef');
   });
 
   it('throws mapped copy, never the RPC message', () => {
-    expect(() => txHashOrThrow({ success: false, message: RAW_BASE_FEE })).toThrow(
+    expect(() => txHashOrThrow({ success: false, message: RAW_BASE_FEE }, TRANSFER_COPY)).toThrow(
       'Network fees rose while you were confirming. Please try again.',
     );
   });
 
   // A success with no hash is not a success — nothing downstream can track it.
   it('throws when the response claims success but carries no hash', () => {
-    expect(() => txHashOrThrow({ success: true, data: null })).toThrow(TRANSFER_COPY.fallback);
+    expect(() => txHashOrThrow({ success: true, data: null }, TRANSFER_COPY)).toThrow(TRANSFER_COPY.fallback);
   });
 });

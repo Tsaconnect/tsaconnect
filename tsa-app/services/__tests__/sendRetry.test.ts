@@ -67,8 +67,28 @@ describe('sendPreparedTransaction', () => {
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
-  it('gives up after one retry when the nonce error persists', async () => {
+  // A nonce recovery only works if re-preparing advances the nonce. When the
+  // node serving the prepare is as far behind as the one that rejected the
+  // broadcast, re-signing the identical transaction fails identically — so the
+  // retry stops before spending a second submit on it.
+  it('does not resubmit when re-preparing returns the same nonce', async () => {
     const prepare = jest.fn().mockResolvedValue(prepared(5));
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail('nonce too low'));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after one retry when the nonce error persists at a higher nonce', async () => {
+    const prepare = jest
+      .fn()
+      .mockResolvedValueOnce(prepared(5))
+      .mockResolvedValueOnce(prepared(6));
     const sign = jest.fn().mockResolvedValue('0xsigned');
     const submit = jest.fn().mockResolvedValue(fail('nonce too low'));
 

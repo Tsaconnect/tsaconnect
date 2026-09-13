@@ -4,6 +4,11 @@
  * unmatched is still safe to show, and guards against putting a stack trace,
  * an HTML blob or an RPC's internals in front of a user.
  *
+ * Sibling module: txErrors.ts decodes on-chain revert PAYLOADS (the ABI hex in
+ * an "execution reverted: 0x…" message) into named fields. This one decides
+ * what a user is told. Reach for that one to understand WHY a contract
+ * refused; this one to write the sentence.
+ *
  * Every flow that broadcasts through that endpoint shares these errors — both
  * swaps (LiFi cross-chain and the Sonic MCGP desk), the Paycrest sell, a plain
  * wallet send and instant pay — so the mapping is shared. What differs is the
@@ -35,10 +40,26 @@ export const TRANSFER_COPY: SubmitErrorCopy = {
   retry: 'Please try again.',
 };
 
-export function mapSubmitError(
-  raw: string | undefined | null,
-  copy: SubmitErrorCopy = SWAP_COPY,
-): string {
+/**
+ * A send whose outcome is genuinely UNKNOWN: no hash came back, but the
+ * broadcast may well have reached the chain — a response read that timed out
+ * after the backend already submitted, say.
+ *
+ * "Try again" is the wrong instruction here and "refresh the quote" is worse.
+ * Either invites a second transfer on top of one that may already be settling,
+ * which is the outcome the 'already known' mapping exists to prevent.
+ */
+export const UNCONFIRMED_COPY: SubmitErrorCopy = {
+  fallback:
+    'We could not confirm whether this went through. Check your transaction history before sending again.',
+  retry: 'Check your transaction history before trying again.',
+};
+
+// `copy` is REQUIRED, with no default. A default here is a trap: the wrong
+// variant does not fail a type check, does not fail a test, and only shows up
+// as a screen telling someone to refresh a quote they never had — or, worse,
+// to retry a transfer that may already have left.
+export function mapSubmitError(raw: string | undefined | null, copy: SubmitErrorCopy): string {
   const text = raw ?? '';
   const low = text.toLowerCase();
   if (low.includes('in-flight transaction limit')) {
@@ -66,19 +87,18 @@ export function mapSubmitError(
   }
   // Covers both "transaction underpriced" (below the pool's floor) and
   // "replacement transaction underpriced" (one of ours is already pending at
-  // this nonce). Neither is retried automatically — see STALE_TX_ERRORS.
+  // this nonce). Neither is retried automatically — see staleKind in walletApi.ts.
   if (low.includes('underpriced')) {
     return `Gas price too low for current network conditions. ${copy.retry}`;
   }
   if (low.includes('transfer amount exceeds allowance')) {
     return 'Approval didn\'t confirm in time — try again, the network should catch up.';
   }
-  // A revert reason is the most useful thing we can show, so it passes through
-  // — but through the same size and shape guard as everything else. An ABI blob
-  // is not copy, and callers that want to decode one read the raw message.
-  if (low.includes('execution reverted') && isShowable(text)) {
-    return text;
-  }
+  // Anything unmatched — a revert reason included — passes through when it is
+  // short and plain enough to read. A revert reason is often the most useful
+  // thing we can show, but it gets no exemption from the guard: an ABI blob is
+  // not copy, and a caller that wants to decode one reads the raw message and
+  // hands it to txErrors.ts.
   return isShowable(text) ? text : copy.fallback;
 }
 
@@ -105,7 +125,7 @@ function isShowable(text: string): boolean {
  */
 export function txHashOrThrow(
   res: { success?: boolean; message?: string; data?: { txHash?: string } | null },
-  copy: SubmitErrorCopy = TRANSFER_COPY,
+  copy: SubmitErrorCopy,
 ): string {
   const hash = res?.data?.txHash;
   if (!res?.success || !hash) {

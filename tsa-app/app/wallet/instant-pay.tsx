@@ -33,7 +33,7 @@ import {
   type WalletBalanceWithChain,
   type ResolvedUser,
 } from '../../services/walletApi';
-import { txHashOrThrow } from '../../services/swapErrors';
+import { txHashOrThrow, TRANSFER_COPY } from '../../services/submitErrors';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
 import { useTheme } from '@/theme';
 import {
@@ -267,7 +267,7 @@ const InstantPay = () => {
           }, from),
         submit: (signed) => submitTransaction(signed, 'send', selectedToken, to, amount, chainId, from),
       });
-      const txHash = txHashOrThrow(res);
+      const txHash = txHashOrThrow(res, TRANSFER_COPY);
       setTxHash(txHash);
 
       // "Sent" must mean MINED, not merely broadcast — an accepted tx can sit

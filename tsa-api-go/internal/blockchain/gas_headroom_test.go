@@ -53,9 +53,11 @@ func TestApplyGasHeadroomDoesNotMutateInput(t *testing.T) {
 	}
 }
 
-func TestApplyGasHeadroomHandlesNil(t *testing.T) {
+// The backstop, not a supported input: SuggestGasPrice raises an error before a
+// nil can reach here. This only pins that it cannot panic.
+func TestApplyGasHeadroomDoesNotPanicOnNil(t *testing.T) {
 	if got := applyGasHeadroom(nil); got == nil || got.Sign() != 0 {
-		t.Fatalf("expected zero for a nil price, got %v", got)
+		t.Fatalf("expected a zero rather than a panic for a nil price, got %v", got)
 	}
 }
 
@@ -86,6 +88,11 @@ func TestApplyGasHeadroomScales(t *testing.T) {
 // by the time the user signs.
 const rawAccessor = "SuggestGasPriceRaw"
 
+// Directories that build transactions. Handlers are included because one of
+// them does (reward_distribution_handler.go), which the first version of this
+// test missed entirely.
+var txBuildingDirs = []string{".", "../services", "../handlers"}
+
 // Every transaction builder must take the buffered default. This is a
 // structural test rather than a behavioural one because the builders reach the
 // network for a nonce and a gas estimate before they price anything, so there
@@ -95,13 +102,108 @@ const rawAccessor = "SuggestGasPriceRaw"
 //
 // Precedent: TestAutoMigrateHasNoDestructiveDDL guards a rule the same way.
 func TestTransactionBuildersDoNotUseTheRawGasPrice(t *testing.T) {
-	// The one legitimate caller: reporting a price, not signing one.
+	// Keyed on PATH, not base name: two directories can hold a client.go, and
+	// an allow-list that matches on file name alone would exempt both.
 	allowed := map[string]string{
-		"client.go":             "declares it, and SuggestGasPrice is the one caller that adds the headroom",
-		"blockchain_service.go": "GetGasPrices reports the chain's own price for display",
+		"client.go":                         "declares it, and SuggestGasPrice is the one caller that adds the headroom",
+		"../services/blockchain_service.go": "GetGasPrices reports the chain's own price for display",
 	}
 
-	for _, dir := range []string{".", "../services"} {
+	forEachGoFile(t, func(t *testing.T, path string, file *ast.File) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != rawAccessor {
+				return true
+			}
+			if why, ok := allowed[path]; ok {
+				t.Logf("%s uses %s as expected: %s", path, rawAccessor, why)
+				return true
+			}
+			t.Errorf("%s calls %s — a transaction priced this way is rejected once the base "+
+				"fee moves. Use SuggestGasPrice, or add this path to the allow-list with a reason.", path, rawAccessor)
+			return true
+		})
+	})
+}
+
+// unpricedBuilders are transactions built for a named chain but with no
+// GasPrice. They sidestep the headroom rather than opting out of it, so the
+// check above cannot see them: there is no raw accessor to catch. This one
+// predates the work and is left alone, but it is pinned so the set cannot
+// quietly grow — a new unpriced builder is a new instance of the bug this file
+// exists for.
+//
+// reward_distribution_handler.go builds the admin setMerkleRoot tx, which the
+// console signs. It carries no nonce either, so the client supplies both.
+var unpricedBuilders = map[string]bool{
+	"../handlers/reward_distribution_handler.go": true,
+}
+
+// ChainID is the marker for "this is meant to be signed and broadcast". A
+// literal without it is a partial: the five dev-only stubs in services/ return
+// To/Value/Data when no RPC client is configured, and hard-error in production
+// rather than being signed. Pricing those would be meaningless, so the rule is
+// scoped to transactions that name a chain.
+func TestNoNewUnpricedTransactionBuilders(t *testing.T) {
+	found := map[string]bool{}
+
+	forEachGoFile(t, func(t *testing.T, path string, file *ast.File) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || !isUnsignedTxLiteral(lit) {
+				return true
+			}
+			var named, priced bool
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				switch key.Name {
+				case "ChainID":
+					named = true
+				case "GasPrice":
+					priced = true
+				}
+			}
+			if named && !priced {
+				found[path] = true
+			}
+			return true
+		})
+	})
+
+	for path := range found {
+		if !unpricedBuilders[path] {
+			t.Errorf("%s builds an UnsignedTx for a specific chain with no GasPrice, so it is signed "+
+				"at whatever the client guesses and bypasses the headroom entirely. Set GasPrice from SuggestGasPrice.", path)
+		}
+	}
+	for path := range unpricedBuilders {
+		if !found[path] {
+			t.Errorf("%s now prices its transaction — drop it from unpricedBuilders so the rule "+
+				"stays tight.", path)
+		}
+	}
+}
+
+func isUnsignedTxLiteral(lit *ast.CompositeLit) bool {
+	switch t := lit.Type.(type) {
+	case *ast.Ident: // UnsignedTx{...}, inside this package
+		return t.Name == "UnsignedTx"
+	case *ast.SelectorExpr: // blockchain.UnsignedTx{...}
+		return t.Sel.Name == "UnsignedTx"
+	}
+	return false
+}
+
+func forEachGoFile(t *testing.T, fn func(*testing.T, string, *ast.File)) {
+	t.Helper()
+	for _, dir := range txBuildingDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir, err)
@@ -116,19 +218,7 @@ func TestTransactionBuildersDoNotUseTheRawGasPrice(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %s: %v", path, err)
 			}
-			ast.Inspect(file, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != rawAccessor {
-					return true
-				}
-				if why, ok := allowed[name]; ok {
-					t.Logf("%s uses %s as expected: %s", name, rawAccessor, why)
-					return true
-				}
-				t.Errorf("%s calls %s — a transaction priced this way is rejected once the base "+
-					"fee moves. Use SuggestGasPrice, or add this file to the allow-list with a reason.", path, rawAccessor)
-				return true
-			})
+			fn(t, path, file)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -128,7 +129,7 @@ func (c *EVMClient) SuggestGasPriceRaw() (*big.Int, error) {
 // refunded — so on Ethereum mainnet at 30 gwei every 10% is real money, roughly
 // $0.15 a transfer. And headroom is no longer the only defence: the app
 // re-prepares and re-signs once when a broadcast is rejected this way
-// (STALE_TX_ERRORS in tsa-app/services/walletApi.ts), which costs a round trip
+// (staleKind in tsa-app/services/walletApi.ts), which costs a round trip
 // rather than a fee. Headroom covers the common small drift; the retry covers
 // the rest. Buying more of the first with real money to avoid the second would
 // be a bad trade.
@@ -156,13 +157,22 @@ func (c *EVMClient) SuggestGasPrice() (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
+	if price == nil {
+		// No error and no price. Nothing in go-ethereum produces this today,
+		// but falling through would build a transaction priced at zero, which
+		// no node accepts — an error here is the honest outcome, and it keeps
+		// the failure at the point where the cause is still known.
+		return nil, errors.New("failed to suggest gas price: node returned no price")
+	}
 	return applyGasHeadroom(price), nil
 }
 
 // applyGasHeadroom raises price by gasPriceHeadroomPercent, without mutating it.
-// A nil price reads as zero rather than panicking: this is a fee calculation on
-// a path that already has an error to report, and a panic in it would take down
-// the request handler.
+//
+// price is expected to be non-nil; its one caller rejects nil with an error
+// before reaching here. The nil branch is a backstop so that a future caller
+// that forgets cannot panic inside a fee calculation and take a request handler
+// with it — it is not a meaningful price, and callers must not treat it as one.
 func applyGasHeadroom(price *big.Int) *big.Int {
 	if price == nil {
 		return big.NewInt(0)

@@ -10,7 +10,7 @@
 // message-agnostic and handles both legacy and v0 versioned messages).
 import { base58, base64 } from '@scure/base';
 import { bytesToHex } from '@noble/hashes/utils';
-import { txHashOrThrow, SWAP_COPY } from '../swapErrors';
+import { txHashOrThrow, SWAP_COPY } from '../submitErrors';
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAuthHeaders } from '../walletApi';
 import { getMnemonic } from '../wallet';

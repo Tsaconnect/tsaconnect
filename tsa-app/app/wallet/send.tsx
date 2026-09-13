@@ -42,7 +42,7 @@ import {
   submitTransaction,
   type WalletBalanceWithChain,
 } from '../../services/walletApi';
-import { txHashOrThrow } from '../../services/swapErrors';
+import { txHashOrThrow, TRANSFER_COPY } from '../../services/submitErrors';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
 import { useTheme } from '@/theme';
 import {
@@ -565,7 +565,7 @@ const SendToken = () => {
         submit: (signed) =>
           submitTransaction(signed, 'send', selectedToken, recipient, tokenAmount, chainId, from),
       });
-      setTxHash(txHashOrThrow(res));
+      setTxHash(txHashOrThrow(res, TRANSFER_COPY));
       setScreen('success');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
   };
