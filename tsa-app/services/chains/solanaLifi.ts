@@ -10,6 +10,7 @@
 // message-agnostic and handles both legacy and v0 versioned messages).
 import { base58, base64 } from '@scure/base';
 import { bytesToHex } from '@noble/hashes/utils';
+import { txHashOrThrow, SWAP_COPY } from '../swapErrors';
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAuthHeaders } from '../walletApi';
 import { getMnemonic } from '../wallet';
@@ -181,7 +182,11 @@ export async function executeLiFiSolanaSwap({
   try { json = text ? JSON.parse(text) : {}; } catch { json = { message: text.slice(0, 200) }; }
   if (!res.ok || !json?.data?.txHash) {
     console.error('[swap] solana submit-tx failed', { status: res.status, message: json?.message });
-    throw new Error(json?.message || 'Swap broadcast failed. The network may be congested — try again.');
   }
-  return json.data.txHash;
+  // SWAP_COPY, not TRANSFER_COPY: this leg is quoted, so "try again" without
+  // refreshing the quote can fill at a price the user never saw.
+  return txHashOrThrow(
+    { success: res.ok, message: json?.message, data: json?.data },
+    SWAP_COPY,
+  );
 }

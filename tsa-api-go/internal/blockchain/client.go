@@ -133,6 +133,12 @@ func (c *EVMClient) SuggestGasPriceRaw() (*big.Int, error) {
 // the rest. Buying more of the first with real money to avoid the second would
 // be a bad trade.
 //
+// Because headroom is the default, it also applies where the PLATFORM pays the
+// gas rather than the user — the relayer's own transactions (see
+// internal/services/relayer_adapters.go). That is a 10% uplift on a cost line
+// we carry, immaterial at Sonic prices but worth knowing before the percentage
+// is raised or the relayer moves to a chain where gas is not free.
+//
 // The real fix is to stop emitting type-0 transactions: with maxFeePerGas the
 // surplus comes back and the cap can be generous. That is a cross-repo change
 // (UnsignedTx, every signing call site in the app) and is tracked separately.

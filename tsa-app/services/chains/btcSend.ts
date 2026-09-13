@@ -8,6 +8,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
+import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../swapErrors';
 import { deriveBtcPrivateKey, type BtcNetwork } from './derivation';
 import { signSecpDigest } from './sign';
 
@@ -101,7 +102,7 @@ export async function prepareBtc(params: SendBtcParams): Promise<BtcPrepared> {
   const json = await readJson(res);
   if (!res.ok) {
     // 402 carries the friendly fee-preflight note in `message`.
-    throw new Error(json?.message || `prepare-tx failed (${res.status})`);
+    throw new Error(mapSubmitError(json?.message, TRANSFER_COPY) || `prepare-tx failed (${res.status})`);
   }
   if (!json?.data?.prepared) throw new Error(json?.message || 'prepare failed');
   return { prepared: json.data.prepared, fee: json.data.fee };
@@ -143,10 +144,14 @@ export async function broadcastBtc(
     }),
   });
   const json = await readJson(res);
-  if (!res.ok || !json?.data?.txHash) {
-    throw new Error(json?.message || `submit-tx failed (${res.status})`);
-  }
-  return { txHash: json.data.txHash };
+  // Same mapping as every EVM send: the server relays the node's own words, and
+  // whatever this throws is rendered verbatim on the failure screen.
+  return {
+    txHash: txHashOrThrow(
+      { success: res.ok, message: json?.message || `submit-tx failed (${res.status})`, data: json?.data },
+      TRANSFER_COPY,
+    ),
+  };
 }
 
 /** Prepare → sign → submit a BTC transfer in one call. */

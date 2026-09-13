@@ -151,6 +151,29 @@ describe('sendPreparedTransaction', () => {
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
+  // A retry re-prices the same transfer. The second prepare is a fresh server
+  // response that the user never approved and nothing else inspects, so a
+  // destination that moved between attempts must not be signed.
+  it.each([
+    ['recipient', { to: '0xsomewhere-else' }],
+    ['amount', { value: '999999999' }],
+    ['calldata', { data: '0xdeadbeef' }],
+  ])('abandons the retry when the re-prepared %s differs', async (_label, changed) => {
+    const prepare = jest
+      .fn()
+      .mockResolvedValueOnce({ success: true, data: { ...baseTx } })
+      .mockResolvedValueOnce({ success: true, data: { ...baseTx, ...changed } });
+    const sign = jest.fn().mockResolvedValue('0xsigned');
+    const submit = jest.fn().mockResolvedValue(fail(NONCE_ERR));
+
+    const res = await sendPreparedTransaction({ prepare, sign, submit, retryDelayMs: 0 });
+
+    expect(res.success).toBe(false);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
   it('reports the broadcast error, not the prepare error, when a retry cannot re-prepare', async () => {
     const prepare = jest
       .fn()
