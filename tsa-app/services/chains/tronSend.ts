@@ -61,9 +61,15 @@ export async function prepareTron(params: SendTronParams): Promise<TronPrepared>
   const json = await readJson(res);
   if (!res.ok) {
     // 402 carries the friendly gas-preflight note in `message`.
-    throw new Error(mapSubmitError(json?.message, TRANSFER_COPY) || `prepare-tx failed (${res.status})`);
+    throw new Error(
+      json?.message
+        ? mapSubmitError(json.message, TRANSFER_COPY)
+        : `prepare-tx failed (${res.status})`,
+    );
   }
-  if (!json?.data?.prepared) throw new Error(json?.message || 'prepare failed');
+  if (!json?.data?.prepared) {
+    throw new Error(json?.message ? mapSubmitError(json.message, TRANSFER_COPY) : 'prepare failed');
+  }
   return { prepared: json.data.prepared, fee: json.data.fee };
 }
 

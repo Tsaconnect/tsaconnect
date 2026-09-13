@@ -158,6 +158,8 @@ describe('sendPreparedTransaction', () => {
     ['recipient', { to: '0xsomewhere-else' }],
     ['amount', { value: '999999999' }],
     ['calldata', { data: '0xdeadbeef' }],
+    // The same address on another chain is usually a different contract.
+    ['chain', { chainId: 1 }],
   ])('abandons the retry when the re-prepared %s differs', async (_label, changed) => {
     const prepare = jest
       .fn()

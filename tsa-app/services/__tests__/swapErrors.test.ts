@@ -71,6 +71,15 @@ describe('mapSubmitError', () => {
     });
   });
 
+  // Callers write `json?.message ? mapSubmitError(...) : <status fallback>`
+  // rather than `mapSubmitError(...) || <status fallback>`, because this never
+  // returns something falsy for the `||` to catch.
+  it('always returns a non-empty string', () => {
+    for (const raw of ['', null, undefined, '   ', 'anything at all']) {
+      expect(mapSubmitError(raw, TRANSFER_COPY).length).toBeGreaterThan(0);
+    }
+  });
+
   it('passes a short unrecognised message through unchanged', () => {
     expect(mapSubmitError('This order has no deposit address yet.')).toBe(
       'This order has no deposit address yet.',

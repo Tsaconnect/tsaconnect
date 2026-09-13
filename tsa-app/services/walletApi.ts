@@ -621,14 +621,20 @@ export async function sendPreparedTransaction(
         // this one would transfer the same amount a second time.
         return lastResult;
       }
-      // A retry exists to re-price the SAME transfer. Everything that decides
-      // where the money goes must come back identical: the wallet authorised
-      // this send once (see the note on re-signing above), and the second
-      // prepare is a fresh server response that nothing else checks.
+      // A retry exists to re-price the SAME transfer. Re-pricing moves nonce,
+      // gasPrice and gasLimit; everything that decides WHERE the money goes
+      // must come back identical, because the wallet authorised this send once
+      // (see the note on re-signing above) and the second prepare is a fresh
+      // server response that nothing else inspects.
+      //
+      // chainId counts as destination, not price: the same `to` address on
+      // another chain is very often a different contract entirely, so a moved
+      // chainId sends the funds somewhere the user never approved.
       if (
         prepared.data.to !== first.to ||
         prepared.data.value !== first.value ||
-        prepared.data.data !== first.data
+        prepared.data.data !== first.data ||
+        prepared.data.chainId !== first.chainId
       ) {
         return lastResult;
       }
