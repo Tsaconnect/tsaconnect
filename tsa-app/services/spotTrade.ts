@@ -22,10 +22,13 @@ export function openSpotTrade(listing: SpotListing, side: 'buy' | 'sell') {
     // already quotes and signs across chains, so the listing arrives there with
     // both legs chosen rather than at a form that could only fail at quote time.
     //
-    // The quote leg goes wherever the user already holds the quote asset (see
-    // utils/quoteChain), so the chain sent here is only its fallback: the
-    // admin's quote chain, else the base chain — unless that is Bitcoin, which
-    // carries no stablecoin, in which case All Swap uses the asset's default.
+    // A quote chain the admin named is binding. Only an auto listing follows
+    // the user's balance (see utils/quoteChain), and for it the chain sent here
+    // is just the fallback. An empty quoteChain reads as auto too, which is how
+    // an API older than the quoteChainAuto flag reports it.
+    const auto = listing.quoteChainAuto === true || !listing.quoteChain;
+    // Bitcoin carries no stablecoin, so it is never a fallback for the quote leg;
+    // All Swap then uses the asset's default.
     const quoteChain = listing.quoteChain || (isBitcoinSpotChain(listing.chain) ? '' : listing.chain);
     router.push({
       pathname: '/easyswap',
@@ -38,7 +41,7 @@ export function openSpotTrade(listing: SpotListing, side: 'buy' | 'sell') {
         fromChain: side === 'buy' ? quoteChain : listing.chain,
         toSymbol: side === 'buy' ? listing.baseSymbol : listing.quoteSymbol,
         toChain: side === 'buy' ? listing.chain : quoteChain,
-        fundedLeg: side === 'buy' ? 'from' : 'to',
+        ...(auto ? { fundedLeg: side === 'buy' ? 'from' : 'to' } : {}),
       },
     } as any);
     return;

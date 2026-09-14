@@ -163,7 +163,7 @@ const lifi = Lifi as unknown as {
   getLiFiTokens: jest.Mock;
 };
 const picker = Picker as unknown as { __state: { props: any } };
-const walletApi = WalletApi as unknown as { normalizeWalletBalances: jest.Mock };
+const walletApi = WalletApi as unknown as { getWalletBalances: jest.Mock; normalizeWalletBalances: jest.Mock };
 const ARBITRUM_CHAIN_ID = 42161;
 
 const token = (symbol: string, address: string, decimals = 18) =>
@@ -211,6 +211,7 @@ beforeEach(() => {
   lifi.__state.tokens = async () => [];
   lifi.getLiFiToken.mockClear();
   lifi.getLiFiTokens.mockClear();
+  walletApi.getWalletBalances.mockImplementation(async () => ({ success: true, data: [] }));
   walletApi.normalizeWalletBalances.mockImplementation(() => []);
   picker.__state.props = null;
 });
@@ -354,6 +355,42 @@ describe('All Swap preselection', () => {
     expect(rendered(tree)).toEqual(expect.arrayContaining(['USDT', 'BTC', 'BEP20']));
   });
 
+  it('delivers a sold token to the chain where the user holds that token', async () => {
+    walletApi.normalizeWalletBalances.mockImplementation(() => [
+      { chainKey: 'polygon', symbol: 'USDT', balance: '90' },
+    ]);
+    lifi.__state.token = async (_chainId, symbol) => (symbol === 'USDT' ? USDT : null);
+    lifi.__state.tokens = async (chainId) => (chainId === BTC_CHAIN_ID ? [BTC] : []);
+
+    await mount({ preselect: { fromSymbol: 'BTC', fromChain: 'btc', toSymbol: 'USDT', toChain: 'bsc', fundedLeg: 'to' } });
+
+    expect(lifi.getLiFiToken).toHaveBeenCalledWith(POLYGON_CHAIN_ID, 'USDT');
+    expect(lifi.getLiFiToken).not.toHaveBeenCalledWith(BSC_CHAIN_ID, 'USDT');
+  });
+
+  it('keeps a token the user picked while the balance read was in flight', async () => {
+    const read = deferred<any>();
+    walletApi.getWalletBalances.mockImplementation(() => read.promise);
+    walletApi.normalizeWalletBalances.mockImplementation(() => [
+      { chainKey: 'polygon', symbol: 'USDT', balance: '90' },
+    ]);
+    lifi.__state.token = async (_chainId, symbol) => (symbol === 'USDT' ? USDT : null);
+    lifi.__state.tokens = async (chainId) => (chainId === BTC_CHAIN_ID ? [BTC] : []);
+
+    const tree = await mount({ preselect: { ...BTC_PAIR, fundedLeg: 'from' } });
+    const payPill = tree.root.findAll(n =>
+      n.props?.accessibilityLabel === 'Select token to pay' && typeof n.props?.onPress === 'function');
+    await act(async () => { payPill[0].props.onPress(); });
+    await act(async () => { picker.__state.props.onSelect(DAI, ETH_CHAIN_ID); });
+
+    await act(async () => { read.resolve({ success: true, data: {} }); });
+    await flush();
+
+    expect(rendered(tree)).toContain('DAI');
+    expect(rendered(tree)).not.toContain('USDT');
+    expect(lifi.getLiFiToken).not.toHaveBeenCalledWith(POLYGON_CHAIN_ID, 'USDT');
+  });
+
   it('finds USDT on Arbitrum, where LiFi lists it as USDT0', async () => {
     const USDT0 = token('USDT0', '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9', 6);
     lifi.__state.token = async (chainId, symbol) => (chainId === ARBITRUM_CHAIN_ID && symbol === 'USDT0' ? USDT0 : null);
@@ -363,6 +400,16 @@ describe('All Swap preselection', () => {
 
     expect(rendered(tree)).toContain('USDT0');
     expect(rendered(tree).some(t => t.startsWith('Couldn’t preselect'))).toBe(false);
+  });
+
+  it('does not alias USDT to USDT0 on chains where they are different tokens', async () => {
+    lifi.__state.token = async (chainId, symbol) => (chainId === BSC_CHAIN_ID && symbol === 'USDT0' ? token('USDT0', '0xother') : null);
+    lifi.__state.tokens = async (chainId) => (chainId === BTC_CHAIN_ID ? [BTC] : []);
+
+    const tree = await mount({ preselect: BTC_PAIR });
+
+    expect(lifi.getLiFiToken).not.toHaveBeenCalledWith(BSC_CHAIN_ID, 'USDT0');
+    expect(rendered(tree)).toContain('Couldn’t preselect USDT — pick it below to continue.');
   });
 
   it('starts on the defaults, and asks LiFi nothing, when no pair is given', async () => {

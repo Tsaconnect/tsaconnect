@@ -4,17 +4,18 @@
 // Swap opens it.
 //
 // LiFi needs a concrete token on a concrete chain, but for a cross-chain pair
-// like BTC/USDT the chain barely moves the price: measured 2026-09-14, $100 of
-// stablecoin → BTC cost 0.9–1.4% from every chain LiFi routes. What does matter
+// like BTC/USDT the chain barely moves the price: measured 2026-09-14, $100–$1000
+// of stablecoin → BTC cost about 0.6–1.4% from every chain LiFi routes. What does matter
 // is whether the user HOLDS the stablecoin there — open All Swap on BSC for a
 // user whose USDT sits on Polygon and the form shows a zero balance. So the leg
 // goes where the money already is, and a chain is only guessed for a user who
 // holds none.
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 
-/** Used when the user holds none of the quote asset and the listing names no chain. */
+/** Used when the user holds none of the quote asset and the listing names no chain.
+ *  Mirrors models.SpotDefaultQuoteChains in the Go API. */
 export const DEFAULT_QUOTE_CHAIN: Record<string, string> = {
-  // Cheapest gas among the chains our users already bridge through.
+  // The chain All Swap already opens paying from (DEFAULT_FROM_CHAIN_ID).
   USDT: 'bsc',
   // The cheapest USDC → BTC route in the 2026-09-14 comparison.
   USDC: 'base',

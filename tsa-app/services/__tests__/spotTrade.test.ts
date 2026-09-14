@@ -50,10 +50,25 @@ describe('openSpotTrade', () => {
         fromChain: 'bsc',
         toSymbol: 'BTC',
         toChain: 'btc',
-        // The paid leg follows the user's USDT; bsc is only its fallback.
-        fundedLeg: 'from',
       },
     });
+  });
+
+  it('keeps a quote chain the admin named, rather than following the balance', () => {
+    openSpotTrade(listing({ quoteChain: 'bsc' }), 'buy');
+
+    const { params } = push.mock.calls[0][0];
+    expect(params).not.toHaveProperty('fundedLeg');
+  });
+
+  it('follows the balance when the API flags the listing as auto', () => {
+    // The API names a default chain for apps that predate auto; the flag is
+    // what marks it as only a fallback.
+    openSpotTrade(listing({ quoteChain: 'bsc', quoteChainAuto: true }), 'sell');
+
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({ fromChain: 'btc', toChain: 'bsc', fundedLeg: 'to' }),
+    }));
   });
 
   it('leaves the quote chain to All Swap when the listing is on auto', () => {
@@ -70,7 +85,7 @@ describe('openSpotTrade', () => {
 
     expect(push).toHaveBeenCalledWith(expect.objectContaining({
       params: expect.objectContaining({
-        fromSymbol: 'BTC', fromChain: 'btc', toSymbol: 'USDT', toChain: 'bsc', fundedLeg: 'to',
+        fromSymbol: 'BTC', fromChain: 'btc', toSymbol: 'USDT', toChain: 'bsc',
       }),
     }));
   });

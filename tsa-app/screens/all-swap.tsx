@@ -87,9 +87,9 @@ interface AllSwapScreenProps {
 async function resolveLiFiSymbol(chainId: number, symbol: string): Promise<LiFiToken | null> {
   const wanted = symbol.trim().toUpperCase();
   if (!wanted) return null;
-  // The exact symbol first: Optimism lists both USDT and USDT0, and they are
-  // different contracts.
-  const candidates = [wanted, ...(LIFI_SYMBOL_ALIASES[wanted] ?? [])];
+  // The exact symbol first, and aliases only on the chain they were checked
+  // for: Optimism lists both USDT and USDT0, and they are different contracts.
+  const candidates = [wanted, ...(LIFI_SYMBOL_ALIASES[chainId]?.[wanted] ?? [])];
   for (const candidate of candidates) {
     try {
       const token = await getLiFiToken(chainId, candidate);
@@ -110,10 +110,13 @@ async function resolveLiFiSymbol(chainId: number, symbol: string): Promise<LiFiT
   }
 }
 
-// Other names LiFi lists a token under. On Arbitrum, Tether exists only as
-// USDT0 — the same contract (0xFd08…Cbb9) our wallet calls USDT — so a lookup
-// for "USDT" there finds nothing (checked 2026-09-14).
-const LIFI_SYMBOL_ALIASES: Record<string, string[]> = { USDT: ['USDT0'] };
+// Other names LiFi lists a token under, per LiFi chain id. On Arbitrum, Tether
+// exists only as USDT0 — the same contract (0xFd08…Cbb9) our wallet calls USDT
+// — so a lookup for "USDT" there finds nothing (checked 2026-09-14). Keyed by
+// chain because USDT0 elsewhere can be a different contract from USDT.
+const LIFI_SYMBOL_ALIASES: Record<number, Record<string, string[]>> = {
+  42161: { USDT: ['USDT0'] },
+};
 
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
@@ -259,8 +262,12 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     // overwrite: if the new leg never resolves, holding the PREVIOUS token
     // against the NEW chain quotes a different asset under the old symbol,
     // beneath a notice implying the leg is empty.
+    //
+    // A funded leg is the exception: its chain is not known until the wallet
+    // read answers, and moving it to the fallback first would fetch that
+    // chain's multi-MB token list only to throw it away.
     legs.forEach((leg) => {
-      if (leg.chainId != null) leg.setChainId(leg.chainId);
+      if (leg.chainId != null && leg.side !== wantFundedLeg) leg.setChainId(leg.chainId);
       leg.setToken(null);
     });
 
@@ -271,8 +278,8 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       // would let one chain's slow (or dead) token list hold the other leg
       // unselected, which is the failure this whole effect exists to avoid.
       const unresolved = (await Promise.all(legs.map(async (leg) => {
-        // A funded leg starts on its fallback chain (set above) and moves once
-        // the wallet read says where the user actually holds the token.
+        // A funded leg moves once the wallet read says where the user actually
+        // holds the token; that read falls back to the leg's own chain.
         let chainId = leg.chainId;
         if (leg.side === wantFundedLeg) {
           const funded = resolveLiFiChainId(await fundedQuoteChain(leg.symbol, leg.chainKey));
