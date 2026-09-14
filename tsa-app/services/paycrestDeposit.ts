@@ -39,7 +39,8 @@ export type FundingCheck =
     }
   | { ok: false; reason: 'no-gas'; nativeSymbol: string; chain: string };
 
-const balanceOf = (
+/** A token's balance on one chain; a token the wallet does not hold reads as 0. */
+export const balanceOf = (
   balances: WalletBalanceWithChain[],
   chain: string,
   symbol: string,
