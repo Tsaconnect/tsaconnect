@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +112,9 @@ type PaycrestQuoteService struct {
 	tokens []string
 	// chainKeys we will offer, in OUR vocabulary.
 	chainKeys []string
+	// senderFeePercent is our margin, priced into every rate we quote. Zero
+	// quotes provider rates verbatim.
+	senderFeePercent float64
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
@@ -119,6 +124,83 @@ type PaycrestQuoteService struct {
 	bookAt     time.Time
 	bookFailAt time.Time
 	bookSF     singleflight.Group
+}
+
+// SetSenderFeePercent prices our sender fee into every quoted rate, so the
+// rate the user sees is the rate they get. NewPaycrestOrderService calls this
+// with the fee it sends on orders, so the two cannot drift; anything
+// unusable means no fee.
+func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
+	s.senderFeePercent, _ = parseSenderFeePercent(pct)
+}
+
+// maxSenderFeePercent bounds what we accept from config. Well above any fee we
+// would charge, low enough that a typo ("5" for "0.5") is refused rather than
+// quietly charging users ten times over.
+const maxSenderFeePercent = 5
+
+// parseSenderFeePercent is the one reader of the fee percent. ok is false for
+// empty, unparseable, non-finite, zero/negative or implausibly large values —
+// ParseFloat happily accepts "NaN" and "Inf", which would otherwise flow into
+// rates and order amounts.
+func parseSenderFeePercent(pct string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(pct), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > maxSenderFeePercent {
+		return 0, false
+	}
+	return v, true
+}
+
+// effectiveRate folds the sender fee into a provider rate.
+//
+// Paycrest charges the fee in token, on top of the order: a buyer pays for
+// amount+fee, a seller's deposit has the fee taken out before conversion.
+// Either way the user gets fewer tokens per naira (buy) or fewer naira per
+// token (sell) than the provider quoted, so that is the rate they are shown.
+// Sell uses (1-p) rather than 1/(1+p): whichever base Paycrest takes the fee
+// on, the difference is p² and this way it lands in the user's favour.
+func effectiveRate(side string, rate, feePercent float64) float64 {
+	if feePercent <= 0 {
+		return rate
+	}
+	if side == "buy" {
+		return rate * (1 + feePercent/100)
+	}
+	return rate * (1 - feePercent/100)
+}
+
+// plainDecimal is the only shape an amount or rate may take: digits with an
+// optional fractional part. "800." and ".5" are allowed because the app's
+// amount field produces them mid-keystroke and quotes on every change.
+var plainDecimal = regexp.MustCompile(`^([0-9]+(\.[0-9]*)?|\.[0-9]+)$`)
+
+// parsePositiveDecimal reads a user amount or a Paycrest rate. ParseFloat alone
+// is not a boundary: it accepts "NaN", "Inf", hex floats and "1_000", and NaN
+// passes every "<= 0" check on its way into an order amount.
+func parsePositiveDecimal(v string) (float64, bool) {
+	v = strings.TrimSpace(v)
+	if !plainDecimal.MatchString(v) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsInf(f, 0) || f <= 0 {
+		return 0, false
+	}
+	return f, true
+}
+
+// quotedRate is effectiveRate for a provider's rate string. With no fee the
+// provider's string passes through untouched rather than being reformatted.
+func quotedRate(side, rate string, feePercent float64) (string, float64, error) {
+	r, ok := parsePositiveDecimal(rate)
+	if !ok {
+		return rate, 0, fmt.Errorf("paycrest: unusable rate %q", rate)
+	}
+	if feePercent <= 0 {
+		return rate, r, nil
+	}
+	eff := effectiveRate(side, r, feePercent)
+	return strconv.FormatFloat(eff, 'f', 2, 64), eff, nil
 }
 
 type marketRateEntry struct {
@@ -194,8 +276,8 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	if fiatCode == "" {
 		fiatCode = "NGN"
 	}
-	amt, err := strconv.ParseFloat(strings.TrimSpace(fiatAmount), 64)
-	if err != nil || amt <= 0 {
+	amt, ok := parsePositiveDecimal(fiatAmount)
+	if !ok {
 		return nil, fmt.Errorf("paycrest quote: unusable amount %q", fiatAmount)
 	}
 
@@ -264,8 +346,8 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 		if err1 != nil || err2 != nil || tokenAmt < min || tokenAmt > max {
 			continue
 		}
-		rate, err := strconv.ParseFloat(e.Rate, 64)
-		if err != nil || rate <= 0 {
+		rate, ok := parsePositiveDecimal(e.Rate)
+		if !ok {
 			continue
 		}
 		k := key{token, chainKey}
@@ -281,13 +363,14 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	}
 
 	for k, e := range best {
-		rate, _ := strconv.ParseFloat(e.Rate, 64)
+		// Already parsed once while choosing best, so this cannot fail.
+		rateStr, rate, _ := quotedRate(side, e.Rate, s.senderFeePercent)
 		network, _ := PaycrestNetwork(k.chainKey)
 		res.Venues = append(res.Venues, PaycrestVenue{
 			ChainKey:      k.chainKey,
 			Network:       network,
 			Token:         k.token,
-			Rate:          e.Rate,
+			Rate:          rateStr,
 			SpreadPercent: (rate/mkt - 1) * 100,
 			ProviderIDs:   []string{e.ProviderID},
 			TokenAmount:   amt / rate,
@@ -458,8 +541,8 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey)
 	}
 
-	amt, err := strconv.ParseFloat(strings.TrimSpace(fiatAmount), 64)
-	if err != nil || amt <= 0 {
+	amt, ok := parsePositiveDecimal(fiatAmount)
+	if !ok {
 		return nil, fmt.Errorf("paycrest venue: unusable amount %q", fiatAmount)
 	}
 	rates, err := s.pc.Rates(ctx, venue.Network, venue.Token, venue.TokenAmount, fiatCode)
@@ -483,14 +566,14 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 		return nil, fmt.Errorf("%w: %s on %s has no %s side right now",
 			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey, side)
 	}
-	rate, err := strconv.ParseFloat(q.Rate, 64)
-	if err != nil || rate <= 0 {
+	rateStr, rate, err := quotedRate(side, q.Rate, s.senderFeePercent)
+	if err != nil {
 		return nil, fmt.Errorf("paycrest venue: unusable rate %q", q.Rate)
 	}
 
 	// Bind to what the provider just said, not to the book.
 	bound := *venue
-	bound.Rate = q.Rate
+	bound.Rate = rateStr
 	bound.TokenAmount = amt / rate
 	bound.SpreadPercent = (rate/res.MarketRate - 1) * 100
 	if len(q.ProviderIDs) > 0 {

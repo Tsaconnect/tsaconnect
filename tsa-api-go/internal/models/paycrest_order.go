@@ -88,8 +88,9 @@ type PaycrestOrderRecord struct {
 	ChainKey string `gorm:"size:24;not null" json:"chain"`
 	Network  string `gorm:"size:32;not null" json:"-"`
 
-	// Rate is what we quoted and the order carries. TokenAmount is what the
-	// user receives (buy) or sends (sell).
+	// Rate is what we quoted: the provider's rate with our sender fee priced
+	// in (orders before 2026-09-14 hold the raw provider rate). TokenAmount is
+	// what the user receives (buy) or sends (sell).
 	Rate        string `gorm:"size:32" json:"rate"`
 	TokenAmount string `gorm:"size:40" json:"tokenAmount"`
 	// ProviderID is which liquidity provider took it. Stored because provider
