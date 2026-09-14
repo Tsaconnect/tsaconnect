@@ -960,7 +960,12 @@ export function p2pChainKey(chainId: number | undefined): ChainKey {
 /**
  * Adapt the backend's UnsignedTx (hex without 0x prefix; chainId as string)
  * to the shape ethers' Transaction.from() expects. Centralised so every
- * P2P screen's broadcast path produces the same wire format.
+ * P2P screen's broadcast path produces the same wire format — a screen that
+ * keeps a private copy of this defeats the point, which one did.
+ *
+ * Deliberately does NOT default a missing nonce or chainId. signTransaction
+ * refuses both, which is the single place all three unsigned-tx adapters in
+ * this app converge; filling them in here would hide that from two of them.
  */
 export function unsignedTxToTxLike(tx: UnsignedTx) {
   const ensure0x = (v?: string) => (!v ? undefined : v.startsWith('0x') ? v : `0x${v}`);

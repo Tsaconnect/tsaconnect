@@ -133,10 +133,23 @@ func TestTransactionBuildersDoNotUseTheRawGasPrice(t *testing.T) {
 // quietly grow — a new unpriced builder is a new instance of the bug this file
 // exists for.
 //
-// reward_distribution_handler.go builds the admin setMerkleRoot tx, which the
-// console signs. It carries no nonce either, so the client supplies both.
+// Both entries hand the client a tx with no nonce either, so the signer resolves
+// nonce and gas together against the live RPC at signing time. That is not the
+// bug this file guards — it is fresher than a prepare-time snapshot, since there
+// is no window for the base fee to move between pricing and signing. They are
+// listed so the shape stays deliberate: a chain-named tx that omits gas but
+// supplies a nonce would be neither design, and would fail here.
+//
+//   - reward_distribution_handler.go: admin setMerkleRoot, signed in the console
+//   - reward_merkle_service.go: the user's reward claim, priced by
+//     tsa-app/services/rewardsClaim.ts from provider.getFeeData()
+//   - fee_rate_intent_service.go: FeePlanTx, which tsa-admin either signs
+//     through the browser wallet (use-fee-signer.ts) or exports as a Gnosis
+//     Safe batch (buildFeeSafeBatch) — both supply their own gas
 var unpricedBuilders = map[string]bool{
 	"../handlers/reward_distribution_handler.go": true,
+	"../services/reward_merkle_service.go":       true,
+	"../services/fee_rate_intent_service.go":     true,
 }
 
 // ChainID is the marker for "this is meant to be signed and broadcast". A
@@ -153,24 +166,8 @@ func TestNoNewUnpricedTransactionBuilders(t *testing.T) {
 			if !ok || !isUnsignedTxLiteral(lit) {
 				return true
 			}
-			var named, priced bool
-			for _, elt := range lit.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				key, ok := kv.Key.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				switch key.Name {
-				case "ChainID":
-					named = true
-				case "GasPrice":
-					priced = true
-				}
-			}
-			if named && !priced {
+			keys := literalKeys(lit)
+			if keys["ChainID"] && !keys["GasPrice"] {
 				found[path] = true
 			}
 			return true
@@ -191,14 +188,52 @@ func TestNoNewUnpricedTransactionBuilders(t *testing.T) {
 	}
 }
 
+// Recognised by NAME or by SHAPE, because neither alone is enough.
+//
+// Name matching is a suffix, not equality: services/reward_merkle_service.go
+// declares its own blockchainUnsignedTx mirror to avoid importing the
+// blockchain package, and an exact match walked straight past it — a
+// chain-named, unpriced builder in a directory this test already scanned,
+// reported green. But a suffix only catches mirrors that happen to be named
+// after the original, so a shape match backs it up: To + Value + Data is an
+// unsigned transaction whatever its type is called.
 func isUnsignedTxLiteral(lit *ast.CompositeLit) bool {
 	switch t := lit.Type.(type) {
-	case *ast.Ident: // UnsignedTx{...}, inside this package
-		return t.Name == "UnsignedTx"
+	case *ast.Ident: // UnsignedTx{...} or a local mirror of it
+		if strings.HasSuffix(t.Name, "UnsignedTx") {
+			return true
+		}
 	case *ast.SelectorExpr: // blockchain.UnsignedTx{...}
-		return t.Sel.Name == "UnsignedTx"
+		if strings.HasSuffix(t.Sel.Name, "UnsignedTx") {
+			return true
+		}
 	}
-	return false
+	return hasKeys(lit, "To", "Value", "Data")
+}
+
+// hasKeys reports whether a composite literal sets every named field.
+func hasKeys(lit *ast.CompositeLit, names ...string) bool {
+	set := literalKeys(lit)
+	for _, name := range names {
+		if !set[name] {
+			return false
+		}
+	}
+	return true
+}
+
+func literalKeys(lit *ast.CompositeLit) map[string]bool {
+	set := make(map[string]bool, len(lit.Elts))
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok {
+			set[key.Name] = true
+		}
+	}
+	return set
 }
 
 func forEachGoFile(t *testing.T, fn func(*testing.T, string, *ast.File)) {

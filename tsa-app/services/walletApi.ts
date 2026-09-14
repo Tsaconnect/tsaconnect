@@ -5,6 +5,7 @@ import { API_BASE_URL } from '../constants/api/config';
 import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
 import { getActiveWallet } from './wallet';
+import { toFiniteNumber } from './txFields';
 
 export interface WalletBalance {
   symbol: string;
@@ -188,14 +189,6 @@ function normalizePreparedTransactionData(payload: unknown): PreparedTransaction
   };
 }
 
-/** A number that was actually present on the wire, or null. */
-function toFiniteNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') {
-    return null;
-  }
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
 
 function extractTransactionHash(payload: unknown): string | undefined {
   const data = isRecord(payload) ? payload : null;
