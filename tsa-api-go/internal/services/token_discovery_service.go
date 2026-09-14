@@ -55,6 +55,20 @@ type DiscoveredToken struct {
 	Balance         string  `json:"balance"`
 	UsdValue        float64 `json:"usdValue"`
 	Source          string  `json:"source"` // "ankr" | "moralis"
+	// LogoURL is the indexer's logo for this exact contract, when it has one.
+	// The app shows it instead of a lettered placeholder.
+	LogoURL string `json:"logoUrl,omitempty"`
+}
+
+// httpsLogo keeps an indexer-supplied logo URL only when it is https. The app
+// loads it straight into an image view, so anything else — http, data:, a
+// relative path — is dropped rather than passed on.
+func httpsLogo(raw string) string {
+	u := strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(u), "https://") {
+		return ""
+	}
+	return u
 }
 
 // TokenDiscoveryService aggregates ERC-20 holdings across chains using
@@ -195,10 +209,16 @@ func (s *TokenDiscoveryService) DiscoverTokens(ctx context.Context, address stri
 	if len(chainKeys) == 0 {
 		seen := make(map[string]bool)
 		for k := range ankrChainSlug {
-			if !seen[k] { chainKeys = append(chainKeys, k); seen[k] = true }
+			if !seen[k] {
+				chainKeys = append(chainKeys, k)
+				seen[k] = true
+			}
 		}
 		for k := range moralisChainSlug {
-			if !seen[k] { chainKeys = append(chainKeys, k); seen[k] = true }
+			if !seen[k] {
+				chainKeys = append(chainKeys, k)
+				seen[k] = true
+			}
 		}
 	}
 
@@ -440,6 +460,7 @@ func (s *TokenDiscoveryService) discoverViaAnkr(ctx context.Context, chainKeys [
 				Balance:         a.BalanceRawInteger,
 				UsdValue:        usd,
 				Source:          "ankr",
+				LogoURL:         httpsLogo(a.Thumbnail),
 			})
 		}
 
@@ -462,6 +483,7 @@ type moralisErc20Token struct {
 	Balance      string `json:"balance"` // raw integer string
 	PossibleSpam bool   `json:"possible_spam"`
 	Verified     bool   `json:"verified_contract"`
+	Logo         string `json:"logo"`
 }
 
 func (s *TokenDiscoveryService) discoverViaMoralis(ctx context.Context, chainKey, address string) ([]DiscoveredToken, error) {
@@ -505,6 +527,7 @@ func (s *TokenDiscoveryService) discoverViaMoralis(ctx context.Context, chainKey
 			Decimals:        t.Decimals,
 			Balance:         t.Balance,
 			Source:          "moralis",
+			LogoURL:         httpsLogo(t.Logo),
 		})
 	}
 	return out, nil

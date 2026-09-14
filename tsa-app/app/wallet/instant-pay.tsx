@@ -35,6 +35,7 @@ import {
 } from '../../services/walletApi';
 import { txHashOrThrow, TRANSFER_COPY } from '../../services/submitErrors';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
+import TokenAvatar from '../../components/wallet/TokenAvatar';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -57,44 +58,9 @@ type BalanceEntry = WalletBalanceWithChain;
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'pending' | 'failure';
 
-// Round token-symbol badge. Color is sourced from the token registry's
-// iconColor (data-driven, like screens/wallet & wallet/send) and falls back to a
-// neutral token instead of a hardcoded hex map.
-const TokenBadge = ({
-  symbol,
-  size = 36,
-  bg,
-}: {
-  symbol: string;
-  size?: number;
-  bg: string;
-}) => (
-  <View
-    style={{
-      width: size,
-      height: size,
-      borderRadius: size / 2,
-      justifyContent: 'center',
-      alignItems: 'center',
-      backgroundColor: bg,
-    }}
-  >
-    <Text variant="bodyMed" weight="700" style={{ fontSize: size * 0.38, color: '#FFFFFF' }}>
-      {symbol[0]}
-    </Text>
-  </View>
-);
-
 const InstantPay = () => {
   const { colors, spacing, radius } = useTheme();
   const { tokens, tokenList } = useTokens();
-
-  // Token-color map derived from the registry (matches screens/wallet & send), so
-  // badge colors stay data-driven instead of hardcoded hex.
-  const tokenColorFor = useCallback(
-    (symbol: string): string => tokens[symbol]?.iconColor || colors.textMuted,
-    [tokens, colors.textMuted],
-  );
 
   const [username, setUsername] = useState('');
   const [amount, setAmount] = useState('');
@@ -474,7 +440,7 @@ const InstantPay = () => {
               label="Amount"
               value={
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
-                  <TokenBadge symbol={selectedToken} size={24} bg={tokenColorFor(selectedToken)} />
+                  <TokenAvatar symbol={selectedToken} iconUrl={tokens[selectedToken]?.iconUrl} iconColor={tokens[selectedToken]?.iconColor} chainKey={selectedChain} size={24} />
                   <Text variant="title3" weight="700" numeric>
                     {amount} {selectedToken}
                   </Text>
@@ -637,7 +603,7 @@ const InstantPay = () => {
                   borderRadius: radius.pill,
                 }}
               >
-                <TokenBadge symbol={selectedToken} size={28} bg={tokenColorFor(selectedToken)} />
+                <TokenAvatar symbol={selectedToken} iconUrl={tokens[selectedToken]?.iconUrl} iconColor={tokens[selectedToken]?.iconColor} chainKey={selectedChain} size={30} />
                 <Text variant="bodyMed" weight="700">
                   {selectedToken}
                 </Text>
@@ -705,7 +671,7 @@ const InstantPay = () => {
                     backgroundColor: active ? colors.accentMuted : 'transparent',
                   }}
                 >
-                  <TokenBadge symbol={item.symbol} size={36} bg={tokenColorFor(item.symbol)} />
+                  <TokenAvatar symbol={item.symbol} iconUrl={tokens[item.symbol]?.iconUrl} iconColor={tokens[item.symbol]?.iconColor} chainKey={item.chainKey} size={38} />
                   <View style={{ flex: 1, marginLeft: spacing.md }}>
                     <Text variant="bodyMed" weight="700">
                       {item.symbol}

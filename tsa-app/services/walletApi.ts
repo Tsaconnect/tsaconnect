@@ -369,6 +369,8 @@ export interface DiscoveredToken {
   /** USD value if the price service knows the symbol; 0 otherwise. */
   usdValue: number;
   source: 'ankr' | 'moralis' | string;
+  /** The indexer's logo for this exact contract, when it has one. */
+  logoUrl?: string;
 }
 
 export interface DiscoveredTokensResponse {

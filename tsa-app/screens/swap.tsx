@@ -33,6 +33,7 @@ import {
 } from '@/services/walletApi';
 import { useTheme } from '@/theme';
 import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import {
   Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
   ScreenHeader,
@@ -46,13 +47,12 @@ interface TokenInfo {
   name: string;
   decimals: number;
   color: string;
-  icon: string; // first letter or symbol
 }
 
 const TOKENS: Record<string, TokenInfo> = {
-  MCGP: { symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, color: '#D4AF37', icon: 'M' },
-  USDC: { symbol: 'USDC', name: 'USD Coin', decimals: 6, color: '#2775CA', icon: '$' },
-  USDT: { symbol: 'USDT', name: 'Tether', decimals: 6, color: '#26A17B', icon: '₮' },
+  MCGP: { symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, color: '#D4AF37' },
+  USDC: { symbol: 'USDC', name: 'USD Coin', decimals: 6, color: '#2775CA' },
+  USDT: { symbol: 'USDT', name: 'Tether', decimals: 6, color: '#26A17B' },
 };
 
 // Available swap pairs: [fromToken, toToken]
@@ -96,22 +96,6 @@ function estimateGasFee(
   } catch { return null; }
 }
 
-// ── Token Badge ── (per-token brand color from config)
-const TokenBadge = ({ token, size = 40 }: { token: TokenInfo; size?: number }) => (
-  <View
-    style={{
-      width: size,
-      height: size,
-      borderRadius: size / 2,
-      backgroundColor: token.color,
-      justifyContent: 'center',
-      alignItems: 'center',
-    }}
-  >
-    <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#FFF' }}>{token.icon}</Text>
-  </View>
-);
-
 // ── Token Selector Button ──
 const TokenSelector = ({ token, onPress, disabled }: { token: TokenInfo; onPress: () => void; disabled?: boolean }) => {
   const { colors, spacing, radius } = useTheme();
@@ -129,7 +113,7 @@ const TokenSelector = ({ token, onPress, disabled }: { token: TokenInfo; onPress
         borderRadius: radius.xl,
       }}
     >
-      <TokenBadge token={token} size={32} />
+      <TokenAvatar symbol={token.symbol} iconColor={token.color} size={32} />
       <Text variant="bodyMed" weight="700">{token.symbol}</Text>
       {!disabled && <Icon name="chevronDown" size={16} color={colors.textMuted} />}
     </PressableScale>
@@ -168,7 +152,7 @@ const TokenPicker = ({
                 backgroundColor: isSelected ? colors.accentMuted : 'transparent',
               }}
             >
-              <TokenBadge token={item} size={36} />
+              <TokenAvatar symbol={item.symbol} iconColor={item.color} size={36} />
               <View style={{ flex: 1, marginLeft: spacing.md }}>
                 <Text variant="bodyMed" weight="700">{item.symbol}</Text>
                 <Text variant="caption" color="textMuted">{item.name}</Text>
@@ -558,7 +542,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
 
         <Card padding="lg">
           <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.md }}>
-            <TokenBadge token={fromToken} />
+            <TokenAvatar symbol={fromToken.symbol} iconColor={fromToken.color} size={40} />
             <View style={{ flex: 1, marginLeft: spacing.md }}>
               <Text variant="caption" color="textMuted" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>You Pay</Text>
               <Text variant="title2" weight="700" style={{ marginTop: 2 }}>{amount} {fromSymbol}</Text>
@@ -568,7 +552,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
             <Icon name="arrowDown" size={20} color={colors.accent} />
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.md }}>
-            <TokenBadge token={toToken} />
+            <TokenAvatar symbol={toToken.symbol} iconColor={toToken.color} size={40} />
             <View style={{ flex: 1, marginLeft: spacing.md }}>
               <Text variant="caption" color="textMuted" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>You Receive</Text>
               <Text variant="title2" weight="700" style={{ marginTop: 2 }}>{outputDisplay || '—'} {toSymbol}</Text>

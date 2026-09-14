@@ -42,7 +42,7 @@ import {
   Text,
 } from '@/components/ui';
 import ITActivityRow, { ACTIVITY_DIVIDER_INSET } from '@/components/it/ITActivityRow';
-import ITTokenAvatar, { TOKEN_AVATAR_SIZE } from '@/components/it/ITTokenAvatar';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import CurrencySelector from '@/components/currency/CurrencySelector';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
@@ -66,6 +66,9 @@ import { buildITActivity } from '@/utils/itActivity';
 
 /** Rows on the hub. The rest are one tap away on the activity screen. */
 const RECENT_LIMIT = 5;
+
+/** Asset-row icon edge; the row divider's inset lines up with it. */
+const TOKEN_AVATAR_SIZE = 40;
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -299,7 +302,7 @@ export default function ITHub() {
             <View key={a.token}>
               {idx > 0 ? <Divider spacing="md" inset={TOKEN_AVATAR_SIZE + spacing.md} /> : null}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <ITTokenAvatar token={a.token} />
+                <TokenAvatar symbol={a.token} size={TOKEN_AVATAR_SIZE} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text variant="caption" weight="600" style={{ color: colors.textSecondary }}>
                     {a.token}
