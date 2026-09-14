@@ -72,10 +72,10 @@ var SpotChains = map[string]bool{
 	"solana": true, "sui": true, "btc": true,
 }
 
-// SpotSingleTokenChains carries the chains that hold exactly one tradeable
-// token, so no pair can be resolved with both legs on them. They are legal only
-// on a route that names a second chain.
-var SpotSingleTokenChains = map[string]bool{"btc": true}
+// SpotSingleTokenChains maps each chain that holds exactly one tradeable token
+// to that token's symbol, so no pair can be resolved with both legs on them.
+// They are legal only on a route that names a second chain.
+var SpotSingleTokenChains = map[string]string{"btc": "BTC"}
 
 // ValidSpotChain reports whether chain is a recognised chain key (lowercase).
 func ValidSpotChain(chain string) bool {
@@ -89,22 +89,31 @@ func ValidSpotChain(chain string) bool {
 // trade desk can never quote: the listing renders, the user taps Buy, and the
 // route lookup fails on a chain that has no such token. Catching it at write
 // time is the difference between an admin seeing an error and a user seeing one.
-func NormalizeSpotLegs(chain, route, quoteChain string) (string, error) {
+//
+// quoteSymbol must already be trimmed and uppercased.
+func NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain string) (string, error) {
 	if route != SpotRouteAllSwap {
 		// quoteChain is dropped rather than refused. It describes a second leg
 		// that only allswap has, so keeping it would leave the row claiming a
 		// leg nothing routes; and refusing it would make moving a listing off
 		// allswap impossible for any console that PUTs the whole object back.
-		if SpotSingleTokenChains[chain] {
-			return "", fmt.Errorf("Chain %q holds only one tradeable token, so both legs cannot live on it. Use route %q and set quoteChain", chain, SpotRouteAllSwap)
+		if _, single := SpotSingleTokenChains[chain]; single {
+			return "", fmt.Errorf("Chain %q holds only one tradeable token, so both legs cannot live on it. Use route %q", chain, SpotRouteAllSwap)
 		}
 		return "", nil
 	}
+	// An empty quoteChain is "auto": the app pays from (or delivers to) the
+	// chain where the user already holds the quote asset. Every LiFi route
+	// quotes within about a point of the others, so which of the user's
+	// balances gets spent matters more than which chain an admin guessed.
 	if quoteChain == "" {
-		return "", fmt.Errorf("quoteChain is required for route %q", SpotRouteAllSwap)
+		return "", nil
 	}
 	if !ValidSpotChain(quoteChain) {
 		return "", errors.New("Unsupported quoteChain")
+	}
+	if native, single := SpotSingleTokenChains[quoteChain]; single && quoteSymbol != native {
+		return "", fmt.Errorf("%s does not exist on %q, which carries only %s. Pick the chain the %s is on, or leave quoteChain empty", quoteSymbol, quoteChain, native, quoteSymbol)
 	}
 	// A single-token chain cannot host BOTH legs, whatever the route. This is
 	// the invariant the comment below names, and it was previously enforced
@@ -114,7 +123,8 @@ func NormalizeSpotLegs(chain, route, quoteChain string) (string, error) {
 	//
 	// Bitcoin on ONE leg is the entire point of allswap and stays legal; it is
 	// only both legs that cannot work.
-	if SpotSingleTokenChains[chain] && SpotSingleTokenChains[quoteChain] {
+	_, baseSingle := SpotSingleTokenChains[chain]
+	if _, quoteSingle := SpotSingleTokenChains[quoteChain]; baseSingle && quoteSingle {
 		return "", fmt.Errorf("Chain %q holds only one tradeable token, so it cannot be both legs. Put the quote leg on another chain", chain)
 	}
 	// chain == quoteChain is otherwise deliberately allowed. All Swap is

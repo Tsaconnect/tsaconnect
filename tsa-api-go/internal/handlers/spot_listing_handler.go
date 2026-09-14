@@ -37,7 +37,8 @@ type spotListingInput struct {
 	QuoteSymbol string `json:"quoteSymbol"`
 	Chain       string `json:"chain"`
 	// QuoteChain is only read for the allswap route; see models.NormalizeSpotLegs.
-	QuoteChain   string `json:"quoteChain"`
+	// A pointer because "" is a real value there (auto), distinct from absent.
+	QuoteChain   *string `json:"quoteChain"`
 	Route        string `json:"route"`
 	LogoURL      string `json:"logoUrl"`
 	Enabled      *bool  `json:"enabled"`
@@ -190,7 +191,11 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 	if !models.ValidSpotRoute(route) {
 		route = models.SpotRouteLiFi
 	}
-	quoteChain, err := models.NormalizeSpotLegs(chain, route, strings.ToLower(strings.TrimSpace(in.QuoteChain)))
+	quoteChainIn := ""
+	if in.QuoteChain != nil {
+		quoteChainIn = strings.ToLower(strings.TrimSpace(*in.QuoteChain))
+	}
+	quoteChain, err := models.NormalizeSpotLegs(chain, route, quote, quoteChainIn)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
@@ -277,11 +282,17 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 		route = s
 		updates["route"] = s
 	}
+	// Unlike the fields above, an empty quoteChain is not "unchanged": it is how
+	// an admin moves a listing back to auto. Only an absent one is left alone.
 	quoteChain := listing.QuoteChain
-	if s := strings.ToLower(strings.TrimSpace(in.QuoteChain)); s != "" {
-		quoteChain = s
+	if in.QuoteChain != nil {
+		quoteChain = strings.ToLower(strings.TrimSpace(*in.QuoteChain))
 	}
-	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteChain)
+	quoteSymbol := listing.QuoteSymbol
+	if s, ok := updates["quote_symbol"].(string); ok {
+		quoteSymbol = s
+	}
+	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
