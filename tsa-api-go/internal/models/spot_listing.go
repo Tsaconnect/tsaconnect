@@ -77,6 +77,26 @@ var SpotChains = map[string]bool{
 // They are legal only on a route that names a second chain.
 var SpotSingleTokenChains = map[string]string{"btc": "BTC"}
 
+// SpotDefaultQuoteChains is where an auto listing's quote leg goes when its base
+// chain cannot carry the quote asset. BSC is the chain All Swap already opens
+// paying from; Base was the cheapest USDC → BTC route measured 2026-09-14.
+var SpotDefaultQuoteChains = map[string]string{"USDT": "bsc", "USDC": "base"}
+
+// DefaultSpotQuoteChain is the concrete quote chain served for an auto listing
+// (empty QuoteChain on the allswap route): the base chain when it can carry the
+// quote asset, else the asset's default. Apps that predate auto read quoteChain
+// and nothing else, so an auto listing must still name a chain that quotes.
+// quoteSymbol must already be uppercased.
+func DefaultSpotQuoteChain(chain, quoteSymbol string) string {
+	if _, single := SpotSingleTokenChains[chain]; !single {
+		return chain
+	}
+	if c, ok := SpotDefaultQuoteChains[quoteSymbol]; ok {
+		return c
+	}
+	return "bsc"
+}
+
 // ValidSpotChain reports whether chain is a recognised chain key (lowercase).
 func ValidSpotChain(chain string) bool {
 	return SpotChains[chain]

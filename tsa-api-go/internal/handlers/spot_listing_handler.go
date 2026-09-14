@@ -24,10 +24,16 @@ import (
 // null (UI shows "—") rather than a misleading $0 / +0.00%.
 type spotListingResponse struct {
 	models.SpotListing
-	Price     *float64 `json:"price"`
-	Change24h *float64 `json:"change24h"`
-	MarketCap *float64 `json:"marketCap"`
-	Volume24h *float64 `json:"volume24h"`
+	// QuoteChainAuto marks an allswap listing the admin left on auto. Its
+	// QuoteChain is then filled with models.DefaultSpotQuoteChain, because apps
+	// that predate auto read QuoteChain alone and would otherwise ask for the
+	// quote asset on the base chain (USDT on Bitcoin). Newer apps read this
+	// flag and pick the chain the user holds the quote asset on.
+	QuoteChainAuto bool     `json:"quoteChainAuto"`
+	Price          *float64 `json:"price"`
+	Change24h      *float64 `json:"change24h"`
+	MarketCap      *float64 `json:"marketCap"`
+	Volume24h      *float64 `json:"volume24h"`
 }
 
 // spotListingInput is the admin create/update body. Pointer fields make partial
@@ -39,11 +45,11 @@ type spotListingInput struct {
 	// QuoteChain is only read for the allswap route; see models.NormalizeSpotLegs.
 	// A pointer because "" is a real value there (auto), distinct from absent.
 	QuoteChain   *string `json:"quoteChain"`
-	Route        string `json:"route"`
-	LogoURL      string `json:"logoUrl"`
-	Enabled      *bool  `json:"enabled"`
-	DisplayOrder *int   `json:"displayOrder"`
-	Category     string `json:"category"`
+	Route        string  `json:"route"`
+	LogoURL      string  `json:"logoUrl"`
+	Enabled      *bool   `json:"enabled"`
+	DisplayOrder *int    `json:"displayOrder"`
+	Category     string  `json:"category"`
 	// PinnedPosition <= 0 clears the pin (stored as NULL).
 	PinnedPosition *int `json:"pinnedPosition"`
 }
@@ -102,6 +108,10 @@ func (h *Handlers) enrichSpotListings(rows []models.SpotListing) []spotListingRe
 	out := make([]spotListingResponse, 0, len(rows))
 	for _, r := range rows {
 		resp := spotListingResponse{SpotListing: r}
+		if r.Route == models.SpotRouteAllSwap && r.QuoteChain == "" {
+			resp.QuoteChainAuto = true
+			resp.QuoteChain = models.DefaultSpotQuoteChain(r.Chain, strings.ToUpper(r.QuoteSymbol))
+		}
 		if strings.ToUpper(r.BaseSymbol) == "MCGP" {
 			if !mcgpResolved {
 				mcgp = h.mcgpUsdPrice()

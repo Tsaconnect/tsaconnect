@@ -816,6 +816,61 @@ func TestUpdateSpotListing_BitcoinListingUnrelatedEdit(t *testing.T) {
 // The app decides cross-chain routing from quoteChain, so it has to be present
 // on both reads — and on a row written before the column existed, whose
 // quote_chain is NULL rather than an empty string.
+// An auto listing stores no quote chain, but apps that predate auto read
+// quoteChain alone and would ask for USDT on the base chain. The public read
+// therefore names a working default and flags it; the admin read keeps the
+// stored value so the console still shows Auto.
+func TestSpotListings_AutoQuoteChainServedWithDefault(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	config.DB.Create(&models.SpotListing{BaseSymbol: "BTC", QuoteSymbol: "USDT", Chain: "btc", Route: models.SpotRouteAllSwap, Enabled: true, Category: "spot"})
+	config.DB.Create(&models.SpotListing{BaseSymbol: "WBTC", QuoteSymbol: "USDC", Chain: "btc", Route: models.SpotRouteAllSwap, Enabled: true, Category: "spot"})
+	config.DB.Create(&models.SpotListing{BaseSymbol: "ETH", QuoteSymbol: "USDT", Chain: "ethereum", Route: models.SpotRouteAllSwap, Enabled: true, Category: "spot"})
+	config.DB.Create(&models.SpotListing{BaseSymbol: "SOL", QuoteSymbol: "USDC", Chain: "solana", QuoteChain: "polygon", Route: models.SpotRouteAllSwap, Enabled: true, Category: "spot"})
+
+	type row struct {
+		BaseSymbol     string `json:"baseSymbol"`
+		QuoteChain     string `json:"quoteChain"`
+		QuoteChainAuto bool   `json:"quoteChainAuto"`
+	}
+	decode := func(t *testing.T, w *httptest.ResponseRecorder) map[string]row {
+		t.Helper()
+		var resp struct {
+			Data struct {
+				Listings []row `json:"listings"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body = %s", err, w.Body.String())
+		}
+		out := map[string]row{}
+		for _, l := range resp.Data.Listings {
+			out[l.BaseSymbol] = l
+		}
+		return out
+	}
+
+	cPub, wPub := spotCtx(t, http.MethodGet, ``, adminUser())
+	h.GetSpotListings(cPub)
+	pub := decode(t, wPub)
+	for sym, want := range map[string]row{
+		"BTC":  {QuoteChain: "bsc", QuoteChainAuto: true},      // Bitcoin carries no USDT
+		"WBTC": {QuoteChain: "base", QuoteChainAuto: true},     // …nor USDC
+		"ETH":  {QuoteChain: "ethereum", QuoteChainAuto: true}, // base chain carries it
+		"SOL":  {QuoteChain: "polygon", QuoteChainAuto: false}, // admin-named, binding
+	} {
+		if got := pub[sym]; got.QuoteChain != want.QuoteChain || got.QuoteChainAuto != want.QuoteChainAuto {
+			t.Fatalf("public %s = %+v, want quoteChain %q auto %v", sym, got, want.QuoteChain, want.QuoteChainAuto)
+		}
+	}
+
+	cAdm, wAdm := spotCtx(t, http.MethodGet, ``, adminUser())
+	h.ListSpotListingsAdmin(cAdm)
+	if got := decode(t, wAdm)["BTC"]; got.QuoteChain != "" {
+		t.Fatalf("admin BTC quoteChain = %q, want empty so the console shows Auto", got.QuoteChain)
+	}
+}
+
 func TestSpotListings_QuoteChainSerialisedOnBothReads(t *testing.T) {
 	setupSpotTestDB(t)
 	h := newSpotHandlers()
