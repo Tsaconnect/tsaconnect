@@ -62,7 +62,12 @@ import {
   type PaycrestVenue,
   type PayoutInstitution,
 } from '@/services/paycrestApi';
-import { checkFunding, sendPaycrestDeposit, type FundingCheck } from '@/services/paycrestDeposit';
+import {
+  balanceOf,
+  checkFunding,
+  sendPaycrestDeposit,
+  type FundingCheck,
+} from '@/services/paycrestDeposit';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -85,6 +90,8 @@ const CHAIN_LABELS: Record<string, string> = {
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
+const fmtTokenAmount = (n: number) =>
+  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** The trailing half of a route's sublabel — silent when the route is fine. */
 function routeNote(check: FundingCheck): string {
@@ -315,6 +322,9 @@ export default function PaycrestSellScreen() {
       setCreating(false);
     }
   }, [venue, address, bank, accountNo, accountName, amount, currencyCode]);
+
+  const venueBalance =
+    venue && balances ? balanceOf(balances, venue.chain, venue.token) : null;
 
   const funding: FundingCheck | null = useMemo(
     () => (venue ? checkFunding(venue, balances) : null),
@@ -587,6 +597,13 @@ export default function PaycrestSellScreen() {
             symbol={symbol}
             symbolPosition="prefix"
             autoFocus
+            // Hidden while re-quoting: the previous route's figure belongs to
+            // the previous amount.
+            helper={
+              venue && !quoting
+                ? `≈ ${fmtTokenAmount(venue.tokenAmount)} ${venue.token}`
+                : undefined
+            }
           />
 
           {quoting && (
@@ -607,12 +624,26 @@ export default function PaycrestSellScreen() {
           )}
 
           {quote && quote.venues.length > 0 && (
-            <SelectRow
-              label="You send"
-              value={venue ? venueLabel(venue) : undefined}
-              placeholder="Choose a network"
-              onPress={() => setRouteOpen(true)}
-            />
+            <View style={{ gap: spacing.xs }}>
+              <SelectRow
+                label="You send"
+                value={venue ? venueLabel(venue) : undefined}
+                placeholder="Choose a network"
+                onPress={() => setRouteOpen(true)}
+              />
+              {/* Unknown balances show nothing rather than a misleading 0. */}
+              {venue && venueBalance !== null && (
+                <Text
+                  variant="caption"
+                  style={{
+                    color: venueBalance < venue.tokenAmount ? colors.warning : colors.textMuted,
+                    textAlign: 'right',
+                  }}
+                >
+                  Balance: {fmtTokenAmount(venueBalance)} {venue.token}
+                </Text>
+              )}
+            </View>
           )}
 
           <SelectRow
