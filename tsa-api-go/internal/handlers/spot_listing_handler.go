@@ -24,10 +24,16 @@ import (
 // null (UI shows "—") rather than a misleading $0 / +0.00%.
 type spotListingResponse struct {
 	models.SpotListing
-	Price     *float64 `json:"price"`
-	Change24h *float64 `json:"change24h"`
-	MarketCap *float64 `json:"marketCap"`
-	Volume24h *float64 `json:"volume24h"`
+	// QuoteChainAuto marks an allswap listing the admin left on auto. Its
+	// QuoteChain is then filled with models.DefaultSpotQuoteChain, because apps
+	// that predate auto read QuoteChain alone and would otherwise ask for the
+	// quote asset on the base chain (USDT on Bitcoin). Newer apps read this
+	// flag and pick the chain the user holds the quote asset on.
+	QuoteChainAuto bool     `json:"quoteChainAuto"`
+	Price          *float64 `json:"price"`
+	Change24h      *float64 `json:"change24h"`
+	MarketCap      *float64 `json:"marketCap"`
+	Volume24h      *float64 `json:"volume24h"`
 }
 
 // spotListingInput is the admin create/update body. Pointer fields make partial
@@ -37,12 +43,13 @@ type spotListingInput struct {
 	QuoteSymbol string `json:"quoteSymbol"`
 	Chain       string `json:"chain"`
 	// QuoteChain is only read for the allswap route; see models.NormalizeSpotLegs.
-	QuoteChain   string `json:"quoteChain"`
-	Route        string `json:"route"`
-	LogoURL      string `json:"logoUrl"`
-	Enabled      *bool  `json:"enabled"`
-	DisplayOrder *int   `json:"displayOrder"`
-	Category     string `json:"category"`
+	// A pointer because "" is a real value there (auto), distinct from absent.
+	QuoteChain   *string `json:"quoteChain"`
+	Route        string  `json:"route"`
+	LogoURL      string  `json:"logoUrl"`
+	Enabled      *bool   `json:"enabled"`
+	DisplayOrder *int    `json:"displayOrder"`
+	Category     string  `json:"category"`
 	// PinnedPosition <= 0 clears the pin (stored as NULL).
 	PinnedPosition *int `json:"pinnedPosition"`
 }
@@ -101,6 +108,10 @@ func (h *Handlers) enrichSpotListings(rows []models.SpotListing) []spotListingRe
 	out := make([]spotListingResponse, 0, len(rows))
 	for _, r := range rows {
 		resp := spotListingResponse{SpotListing: r}
+		if r.Route == models.SpotRouteAllSwap && r.QuoteChain == "" {
+			resp.QuoteChainAuto = true
+			resp.QuoteChain = models.DefaultSpotQuoteChain(r.Chain, strings.ToUpper(r.QuoteSymbol))
+		}
 		if strings.ToUpper(r.BaseSymbol) == "MCGP" {
 			if !mcgpResolved {
 				mcgp = h.mcgpUsdPrice()
@@ -190,7 +201,11 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 	if !models.ValidSpotRoute(route) {
 		route = models.SpotRouteLiFi
 	}
-	quoteChain, err := models.NormalizeSpotLegs(chain, route, strings.ToLower(strings.TrimSpace(in.QuoteChain)))
+	quoteChainIn := ""
+	if in.QuoteChain != nil {
+		quoteChainIn = strings.ToLower(strings.TrimSpace(*in.QuoteChain))
+	}
+	quoteChain, err := models.NormalizeSpotLegs(chain, route, quote, quoteChainIn)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
@@ -277,11 +292,17 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 		route = s
 		updates["route"] = s
 	}
+	// Unlike the fields above, an empty quoteChain is not "unchanged": it is how
+	// an admin moves a listing back to auto. Only an absent one is left alone.
 	quoteChain := listing.QuoteChain
-	if s := strings.ToLower(strings.TrimSpace(in.QuoteChain)); s != "" {
-		quoteChain = s
+	if in.QuoteChain != nil {
+		quoteChain = strings.ToLower(strings.TrimSpace(*in.QuoteChain))
 	}
-	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteChain)
+	quoteSymbol := listing.QuoteSymbol
+	if s, ok := updates["quote_symbol"].(string); ok {
+		quoteSymbol = s
+	}
+	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return

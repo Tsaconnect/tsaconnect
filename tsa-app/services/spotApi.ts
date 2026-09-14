@@ -27,6 +27,10 @@ export interface SpotListing {
   // backfilled: a missing value means "same chain as the base leg", and that
   // is the only reading that leaves existing listings meaning what they meant.
   quoteChain?: string;
+  // True when the admin left the quote chain on auto. The API then still sends
+  // a default `quoteChain` (for apps that predate auto), so this flag — not an
+  // empty quoteChain — is what says the leg should follow the user's balance.
+  quoteChainAuto?: boolean;
   route: SpotRoute;
   logoUrl?: string;
   enabled: boolean;

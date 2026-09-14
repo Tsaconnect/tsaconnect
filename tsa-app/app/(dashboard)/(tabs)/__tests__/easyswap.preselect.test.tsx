@@ -88,6 +88,14 @@ describe('Easyswap tab', () => {
     });
   });
 
+  it('hands All Swap the funded leg, and drops one it cannot read', async () => {
+    await mount({ tab: 'allswap', fromSymbol: 'USDT', fromChain: '', toSymbol: 'BTC', toChain: 'btc', fundedLeg: 'from' });
+    expect(lastProps().preselect.fundedLeg).toBe('from');
+
+    await mount({ tab: 'allswap', fromSymbol: 'USDT', toSymbol: 'BTC', toChain: 'btc', fundedLeg: 'sideways' });
+    expect(lastProps().preselect.fundedLeg).toBeUndefined();
+  });
+
   it('hands All Swap nothing when the tab is opened on its own', async () => {
     await mount({ tab: 'allswap' });
 

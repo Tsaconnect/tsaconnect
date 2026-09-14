@@ -10,6 +10,12 @@
  * pinned by the destination it produces, not by the branch it takes.
  */
 jest.mock('expo-router', () => ({ __esModule: true, router: { push: jest.fn() } }));
+// Reached transitively: the Bitcoin check sits in utils/spotChains, beside the
+// LiFi chain table, which pulls in the wallet API.
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: { getItem: jest.fn(), setItem: jest.fn(), removeItem: jest.fn() },
+}));
 
 import { router } from 'expo-router';
 import { openSpotTrade } from '../spotTrade';
@@ -46,6 +52,32 @@ describe('openSpotTrade', () => {
         toChain: 'btc',
       },
     });
+  });
+
+  it('keeps a quote chain the admin named, rather than following the balance', () => {
+    openSpotTrade(listing({ quoteChain: 'bsc' }), 'buy');
+
+    const { params } = push.mock.calls[0][0];
+    expect(params).not.toHaveProperty('fundedLeg');
+  });
+
+  it('follows the balance when the API flags the listing as auto', () => {
+    // The API names a default chain for apps that predate auto; the flag is
+    // what marks it as only a fallback.
+    openSpotTrade(listing({ quoteChain: 'bsc', quoteChainAuto: true }), 'sell');
+
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({ fromChain: 'btc', toChain: 'bsc', fundedLeg: 'to' }),
+    }));
+  });
+
+  it('leaves the quote chain to All Swap when the listing is on auto', () => {
+    openSpotTrade(listing({ quoteChain: '' }), 'buy');
+
+    // Bitcoin carries no USDT, so there is no base-chain fallback to offer.
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({ fromSymbol: 'USDT', fromChain: '', toChain: 'btc', fundedLeg: 'from' }),
+    }));
   });
 
   it('flips which leg is paid when the side is sell', () => {

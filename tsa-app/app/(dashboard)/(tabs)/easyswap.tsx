@@ -12,7 +12,7 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import OtcListingList from '@/components/otc/OtcListingList';
-import AllSwapScreen from '@/screens/all-swap';
+import AllSwapScreen, { type AllSwapPreselection } from '@/screens/all-swap';
 import SpotList from '@/components/spot/SpotList';
 import { singleParam } from '@/utils/spotChains';
 import { useTheme } from '@/theme';
@@ -39,15 +39,18 @@ const EasySwap = () => {
   const fromChain = singleParam(params.fromChain);
   const toSymbol = singleParam(params.toSymbol);
   const toChain = singleParam(params.toChain);
+  const fundedLegParam = singleParam(params.fundedLeg);
+  const fundedLeg: AllSwapPreselection['fundedLeg'] =
+    fundedLegParam === 'from' || fundedLegParam === 'to' ? fundedLegParam : undefined;
   const [activeTab, setActiveTab] = useState<Tab>('swap');
 
   // A fresh object each render would restart All Swap's preselection — and so
   // its token lookups — on every keystroke the swap form takes.
   const preselect = useMemo(
     () => (fromSymbol || toSymbol
-      ? { fromSymbol, fromChain, toSymbol, toChain }
+      ? { fromSymbol, fromChain, toSymbol, toChain, fundedLeg }
       : undefined),
-    [fromSymbol, fromChain, toSymbol, toChain],
+    [fromSymbol, fromChain, toSymbol, toChain, fundedLeg],
   );
 
   useEffect(() => {

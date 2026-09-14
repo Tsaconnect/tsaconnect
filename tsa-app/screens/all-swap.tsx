@@ -32,6 +32,7 @@ import {
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import { fundedQuoteChain } from '@/services/quoteChain';
 import { missingAddressNotice } from '@/utils/swapAddresses';
 import { resolveLiFiChainId } from '@/utils/spotChains';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
@@ -61,6 +62,9 @@ export interface AllSwapPreselection {
   fromChain?: string;
   toSymbol?: string;
   toChain?: string;
+  /** The leg to move onto the chain where the user holds its token. That leg's
+   *  chain above is then only the fallback — see utils/quoteChain. */
+  fundedLeg?: 'from' | 'to';
 }
 
 interface AllSwapScreenProps {
@@ -83,19 +87,36 @@ interface AllSwapScreenProps {
 async function resolveLiFiSymbol(chainId: number, symbol: string): Promise<LiFiToken | null> {
   const wanted = symbol.trim().toUpperCase();
   if (!wanted) return null;
-  try {
-    const token = await getLiFiToken(chainId, wanted);
-    if (token) return token;
-  } catch {
-    /* fall through to the list */
+  // The exact symbol first, and aliases only on the chain they were checked
+  // for: Optimism lists both USDT and USDT0, and they are different contracts.
+  const candidates = [wanted, ...(LIFI_SYMBOL_ALIASES[chainId]?.[wanted] ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const token = await getLiFiToken(chainId, candidate);
+      if (token) return token;
+    } catch {
+      /* try the next spelling, then the list */
+    }
   }
   try {
     const tokens = await getLiFiTokens(chainId);
-    return tokens.find(t => t.symbol?.toUpperCase() === wanted) ?? null;
+    for (const candidate of candidates) {
+      const token = tokens.find(t => t.symbol?.toUpperCase() === candidate);
+      if (token) return token;
+    }
+    return null;
   } catch {
     return null;
   }
 }
+
+// Other names LiFi lists a token under, per LiFi chain id. On Arbitrum, Tether
+// exists only as USDT0 — the same contract (0xFd08…Cbb9) our wallet calls USDT
+// — so a lookup for "USDT" there finds nothing (checked 2026-09-14). Keyed by
+// chain because USDT0 elsewhere can be a different contract from USDT.
+const LIFI_SYMBOL_ALIASES: Record<number, Record<string, string[]>> = {
+  42161: { USDT: ['USDT0'] },
+};
 
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
@@ -193,6 +214,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const wantFromChain = preselect?.fromChain;
   const wantToSymbol = preselect?.toSymbol;
   const wantToChain = preselect?.toChain;
+  const wantFundedLeg = preselect?.fundedLeg;
 
   useEffect(() => {
     // Nothing asked for: the screen starts on its defaults, as it always has.
@@ -221,12 +243,12 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     userChoseLeg.current = { from: false, to: false };
     const legs = [
       {
-        side: 'from' as const, symbol: wantFromSymbol,
+        side: 'from' as const, symbol: wantFromSymbol, chainKey: wantFromChain,
         chainId: resolveLiFiChainId(wantFromChain),
         setChainId: setFromChainId, setToken: setFromToken,
       },
       {
-        side: 'to' as const, symbol: wantToSymbol,
+        side: 'to' as const, symbol: wantToSymbol, chainKey: wantToChain,
         chainId: resolveLiFiChainId(wantToChain),
         setChainId: setToChainId, setToken: setToToken,
       },
@@ -240,8 +262,12 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     // overwrite: if the new leg never resolves, holding the PREVIOUS token
     // against the NEW chain quotes a different asset under the old symbol,
     // beneath a notice implying the leg is empty.
+    //
+    // A funded leg is the exception: its chain is not known until the wallet
+    // read answers, and moving it to the fallback first would fetch that
+    // chain's multi-MB token list only to throw it away.
     legs.forEach((leg) => {
-      if (leg.chainId != null) leg.setChainId(leg.chainId);
+      if (leg.chainId != null && leg.side !== wantFundedLeg) leg.setChainId(leg.chainId);
       leg.setToken(null);
     });
 
@@ -252,7 +278,18 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       // would let one chain's slow (or dead) token list hold the other leg
       // unselected, which is the failure this whole effect exists to avoid.
       const unresolved = (await Promise.all(legs.map(async (leg) => {
-        const token = leg.chainId == null ? null : await resolveLiFiSymbol(leg.chainId, leg.symbol);
+        // A funded leg moves once the wallet read says where the user actually
+        // holds the token; that read falls back to the leg's own chain.
+        let chainId = leg.chainId;
+        if (leg.side === wantFundedLeg) {
+          const funded = resolveLiFiChainId(await fundedQuoteChain(leg.symbol, leg.chainKey));
+          if (cancelled) return null;
+          if (funded != null && !userChoseLeg.current[leg.side]) {
+            chainId = funded;
+            leg.setChainId(funded);
+          }
+        }
+        const token = chainId == null ? null : await resolveLiFiSymbol(chainId, leg.symbol);
         if (cancelled) return null;
         // Checked again AFTER the await, not only before it: the tap that makes
         // a preselection stale is most likely to land while it is in flight.
@@ -268,7 +305,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
         unresolved.join(' and ')} — pick ${unresolved.length > 1 ? 'them' : 'it'} below to continue.`);
     })();
     return () => { cancelled = true; };
-  }, [wantFromSymbol, wantFromChain, wantToSymbol, wantToChain]);
+  }, [wantFromSymbol, wantFromChain, wantToSymbol, wantToChain, wantFundedLeg]);
 
   useEffect(() => {
     if (!walletAddress) return;

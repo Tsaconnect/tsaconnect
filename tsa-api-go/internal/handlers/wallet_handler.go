@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -400,62 +401,78 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		}
 	}
 
+	// Chains are read concurrently. Each has its own RPC endpoint, so this adds
+	// no load to any one of them, while reading them in turn made a full-wallet
+	// request one round trip per chain per token (~27 in a row) — and Spot's
+	// quote-chain pick waits on this. Tokens within a chain stay sequential so a
+	// single endpoint is never hit in parallel.
+	var (
+		wg       sync.WaitGroup
+		resultMu sync.Mutex
+	)
 	for _, cq := range chains {
-		client := h.BlockchainService.ClientForNetwork(network, cq.name)
-		chainBalances := make(map[string]tokenBalance)
+		wg.Add(1)
+		go func(cq chainQuery) {
+			defer wg.Done()
+			client := h.BlockchainService.ClientForNetwork(network, cq.name)
+			chainBalances := make(map[string]tokenBalance)
 
-		if client != nil {
-			if nativeBal, err := client.GetBalance(address); err == nil {
-				balStr := formatTokenBalance(nativeBal, 18)
-				balFloat, _ := strconv.ParseFloat(balStr, 64)
-				price := prices[cq.cfg.NativeCurrency]
-				chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
-					Balance:  balStr,
-					UsdPrice: price,
-					UsdValue: balFloat * price,
+			if client != nil {
+				if nativeBal, err := client.GetBalance(address); err == nil {
+					balStr := formatTokenBalance(nativeBal, 18)
+					balFloat, _ := strconv.ParseFloat(balStr, 64)
+					price := prices[cq.cfg.NativeCurrency]
+					chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
+						Balance:  balStr,
+						UsdPrice: price,
+						UsdValue: balFloat * price,
+					}
 				}
 			}
-		}
 
-		for _, tok := range supportedTokens {
-			var tokenChains []string
-			json.Unmarshal(tok.Chains, &tokenChains)
-			for _, tc := range tokenChains {
-				if tc == cq.name {
-					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
-					if tokenAddr != "" && client != nil {
-						if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
-							// Decimals are per-contract (USDT is 6 on
-							// Ethereum/Polygon but 18 on BSC). Query the
-							// contract directly; fall back to the DB row only
-							// if the RPC fails.
-							decimals := tok.Decimals
-							if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
-								decimals = onChainDec
+			for _, tok := range supportedTokens {
+				var tokenChains []string
+				json.Unmarshal(tok.Chains, &tokenChains)
+				for _, tc := range tokenChains {
+					if tc == cq.name {
+						tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
+						if tokenAddr != "" && client != nil {
+							if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
+								// Decimals are per-contract (USDT is 6 on
+								// Ethereum/Polygon but 18 on BSC). Query the
+								// contract directly; fall back to the DB row only
+								// if the RPC fails.
+								decimals := tok.Decimals
+								if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
+									decimals = onChainDec
+								} else {
+									log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
+										tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
+								}
+								balStr := formatTokenBalance(bal, decimals)
+								balFloat, _ := strconv.ParseFloat(balStr, 64)
+								price := prices[tok.Symbol]
+								chainBalances[tok.Symbol] = tokenBalance{
+									Balance:  balStr,
+									UsdPrice: price,
+									UsdValue: balFloat * price,
+								}
 							} else {
-								log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
-									tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
-							}
-							balStr := formatTokenBalance(bal, decimals)
-							balFloat, _ := strconv.ParseFloat(balStr, 64)
-							price := prices[tok.Symbol]
-							chainBalances[tok.Symbol] = tokenBalance{
-								Balance:  balStr,
-								UsdPrice: price,
-								UsdValue: balFloat * price,
+								chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 							}
 						} else {
 							chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 						}
-					} else {
-						chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 					}
 				}
 			}
-		}
 
-		result[cq.name] = chainBalances
+			resultMu.Lock()
+			result[cq.name] = chainBalances
+			resultMu.Unlock()
+		}(cq)
 	}
+	wg.Wait()
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
 		"walletAddress": address,
