@@ -1429,6 +1429,7 @@ func main() {
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
+		// Also sets the fee on paycrestQuotes, so quotes price in what orders send.
 		paycrestOrders := services.NewPaycrestOrderService(
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))

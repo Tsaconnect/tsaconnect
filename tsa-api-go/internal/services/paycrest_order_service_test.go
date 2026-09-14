@@ -283,6 +283,11 @@ func TestGrossDownForSenderFee(t *testing.T) {
 		{"unknown fee leaves the amount alone", "800", "", "800", false},
 		{"unparseable fee leaves the amount alone", "800", "abc", "800", false},
 		{"zero fee leaves the amount alone", "800", "0", "800", false},
+		// Config typos and ParseFloat's special values must never reach an amount.
+		{"NaN fee leaves the amount alone", "800", "NaN", "800", false},
+		{"infinite fee leaves the amount alone", "800", "Inf", "800", false},
+		{"negative fee leaves the amount alone", "800", "-0.5", "800", false},
+		{"implausible fee leaves the amount alone", "800", "50", "800", false},
 		{"unparseable amount is passed through", "abc", "0.5", "abc", false},
 	}
 	for _, tc := range cases {
