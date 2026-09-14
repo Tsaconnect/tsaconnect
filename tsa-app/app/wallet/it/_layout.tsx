@@ -71,6 +71,7 @@ export default function ITLayout() {
       <Stack.Screen name="sell" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="sell-stable" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="intent/[id]" options={{ title: 'Order' }} />
+      <Stack.Screen name="activity" options={{ title: 'Activity' }} />
     </Stack>
   );
 }
