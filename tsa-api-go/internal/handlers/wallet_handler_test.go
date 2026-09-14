@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -729,6 +730,46 @@ func TestParseTokenAmount(t *testing.T) {
 				t.Errorf("parseTokenAmount(%q, %d) = %s, want %s", tt.amount, tt.decimals, result.String(), tt.wantStr)
 			}
 		})
+	}
+}
+
+// ---------- erc20SendDecimals ----------
+
+// BSC's USDT and USDC are 18-decimal. Scaling a send by the 6 other chains use
+// transferred 10^-12 of the typed amount, so the contract must win over both
+// the symbol and a caller's override.
+func TestERC20SendDecimals(t *testing.T) {
+	six, eighteen, outOfRange := 6, 18, 99
+	rpcDown := errors.New("rpc down")
+	tests := []struct {
+		name     string
+		override *int
+		onChain  int
+		readErr  error
+		want     int
+		wantErr  bool
+	}{
+		{"contract decimals are used", nil, 18, nil, 18, false},
+		{"contract beats a disagreeing override", &six, 18, nil, 18, false},
+		{"override covers an unreadable contract", &eighteen, 0, rpcDown, 18, false},
+		{"out-of-range override is not a fallback", &outOfRange, 0, rpcDown, 0, true},
+		{"unreadable contract without override is refused", nil, 0, rpcDown, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := erc20SendDecimals(tt.override, func() (int, error) { return tt.onChain, tt.readErr })
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("decimals = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	amount, _ := parseTokenAmount("10", 18)
+	if amount.String() != "10000000000000000000" {
+		t.Errorf("10 BSC-USDT scaled to %s base units, want 10e18", amount)
 	}
 }
 

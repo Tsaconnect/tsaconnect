@@ -198,6 +198,24 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 	return result, true
 }
 
+// erc20SendDecimals returns the decimals a send amount is scaled by.
+//
+// The token contract is the authority, not the symbol: USDT and USDC are 6 on
+// Sonic and Ethereum but 18 on BSC, and scaling a BSC send by 6 moved 10^-12
+// of what the user typed — a mined "successful" transfer of dust. A caller
+// override (auto-discovered tokens) is only a fallback for an unreadable
+// contract; with neither there is no safe guess, so the send is refused.
+func erc20SendDecimals(override *int, readOnChain func() (int, error)) (int, error) {
+	onChain, err := readOnChain()
+	if err == nil {
+		return onChain, nil
+	}
+	if override != nil && *override >= 0 && *override <= 36 {
+		return *override, nil
+	}
+	return 0, err
+}
+
 // RegisterWalletAddress handles POST /api/wallet/register.
 // Associates a blockchain wallet address with the authenticated user.
 func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
@@ -600,25 +618,15 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		network = "mainnet"
 	}
 
-	// Decimals: caller override takes precedence (auto-discovered tokens
-	// can have any decimals — 6, 8, 9, 18 — and we won't have curated
-	// metadata for them). Otherwise fall back to the historical defaults.
-	decimals := 18
-	if req.Decimals != nil && *req.Decimals >= 0 && *req.Decimals <= 36 {
-		decimals = *req.Decimals
-	} else if tokenUpper == "USDT" || tokenUpper == "USDC" {
-		decimals = 6
-	}
-	amountWei, ok := parseTokenAmount(req.Amount, decimals)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
-		return
-	}
-
 	var txBytes []byte
 	var err error
 
 	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
+		amountWei, ok := parseTokenAmount(req.Amount, 18)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
+		}
 		txBytes, err = client.PrepareNativeTransfer(fromAddress, req.ToAddress, amountWei)
 	} else {
 		// Resolve token contract: explicit override (discovered tokens)
@@ -635,6 +643,19 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
 				return
 			}
+		}
+		decimals, derr := erc20SendDecimals(req.Decimals, func() (int, error) {
+			return client.GetTokenDecimals(tokenAddr)
+		})
+		if derr != nil {
+			log.Printf("prepare-tx: decimals unavailable for %s on %s (%s): %v", tokenUpper, chainName, tokenAddr, derr)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, fmt.Sprintf("Could not read the %s contract on %s. Please try again.", tokenUpper, chainName))
+			return
+		}
+		amountWei, ok := parseTokenAmount(req.Amount, decimals)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
 		}
 		txBytes, err = client.PrepareERC20Transfer(tokenAddr, fromAddress, req.ToAddress, amountWei)
 	}
