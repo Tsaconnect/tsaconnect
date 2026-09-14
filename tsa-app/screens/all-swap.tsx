@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
-  Modal, Pressable, Image, Linking, StyleSheet, TextInput as RNTextInput,
+  Modal, Pressable, Linking, StyleSheet, TextInput as RNTextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, {
@@ -36,6 +36,10 @@ import { fundedQuoteChain } from '@/services/quoteChain';
 import { missingAddressNotice } from '@/utils/swapAddresses';
 import { resolveLiFiChainId } from '@/utils/spotChains';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
+// LiFi tokens are identified by contract; only one we vouch for borrows a
+// registry logo when LiFi sends none.
+import { isKnownContract } from '@/utils/tokenLogo';
 import { useTheme } from '@/theme';
 import {
   Button,
@@ -120,17 +124,6 @@ const LIFI_SYMBOL_ALIASES: Record<number, Record<string, string[]>> = {
 
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
-
-function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
-  const { colors } = useTheme();
-  if (uri) return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
-  if (!symbol) return null;
-  return (
-    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: size * 0.38 }} weight="700" color="textSecondary">{symbol[0]}</Text>
-    </View>
-  );
-}
 
 export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const { colors, spacing, radius } = useTheme();
@@ -754,7 +747,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU PAY</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={40} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name} · {chainName(fromChainId)}</Text>
@@ -778,7 +771,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU RECEIVE</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={40} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name} · {chainName(toChainId)}</Text>
@@ -882,7 +875,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
                 onPress={() => setPickerMode('from')}
                 accessibilityLabel="Select token to pay"
               >
-                <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
+                {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{fromToken?.symbol ?? 'Select'}</Text>
                   {fromToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(fromChainId)}</Text>}
@@ -932,7 +925,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
                 onPress={() => setPickerMode('to')}
                 accessibilityLabel="Select token to receive"
               >
-                <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
+                {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{toToken?.symbol ?? 'Select'}</Text>
                   {toToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(toChainId)}</Text>}
@@ -1252,7 +1245,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
 
           <Card padding="lg" style={{ width: '100%' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name}</Text>
@@ -1264,7 +1257,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
               <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name}</Text>

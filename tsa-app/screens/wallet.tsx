@@ -11,6 +11,7 @@
 // network switching are unchanged — this is a visual/structural restyle only.
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -67,7 +68,6 @@ import { useTheme } from '@/theme';
 import {
   AccentCard,
   AmountText,
-  Avatar,
   Badge,
   Button,
   Divider,
@@ -177,6 +177,7 @@ async function mergeDiscoveredTokens(
         usdValue,
         usdPrice: balance > 0 && usdValue > 0 ? usdValue / balance : 0,
         iconColor: hashColor(t.symbol),
+        iconUrl: t.logoUrl,
         discovered: true,
         contractAddress: t.contractAddress,
         decimals: t.decimals,
@@ -362,6 +363,11 @@ const WalletBalanceCard: React.FC<{
   );
 };
 
+// An imported or indexer-discovered token names itself, so its symbol must not
+// borrow a curated logo (see utils/tokenLogo).
+const isCuratedAsset = (asset: WalletAsset) =>
+  !asset.discovered && asset.details?.type !== 'Imported';
+
 // ── Asset Row ──
 const AssetRow: React.FC<{
   asset: WalletAsset;
@@ -376,7 +382,7 @@ const AssetRow: React.FC<{
       onPress={onPress}
     >
       <View style={{ marginRight: spacing.md }}>
-        <Avatar name={asset.symbol} uri={asset.iconUrl} size={40} />
+        <TokenAvatar symbol={asset.symbol} iconUrl={asset.iconUrl} iconColor={asset.iconColor} curated={isCuratedAsset(asset)} size={40} />
       </View>
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
@@ -695,7 +701,7 @@ const ManageTokensModal: React.FC<{
                 onPress={() => onToggle(key)}
               >
                 <View style={{ marginRight: spacing.md }}>
-                  <Avatar name={item.symbol} uri={item.iconUrl} size={40} />
+                  <TokenAvatar symbol={item.symbol} iconUrl={item.iconUrl} iconColor={item.iconColor} curated={isCuratedAsset(item)} size={40} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text variant="bodyMed" weight="600">

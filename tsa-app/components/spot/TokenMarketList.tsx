@@ -11,14 +11,15 @@
 // This component owns NO vertical scroll view: Home mounts it inside the
 // dashboard scroller and Spot Trade inside its own pull-to-refresh scroller,
 // and nesting vertical scrollers breaks both.
-import React, { useState } from 'react';
-import { View, ScrollView, Image, type StyleProp, type ViewStyle } from 'react-native';
+import React from 'react';
+import { View, ScrollView, type StyleProp, type ViewStyle } from 'react-native';
 import { useTheme } from '@/theme';
 import { Chip, Divider, EmptyState, Icon, PressableScale, Surface, Text } from '@/components/ui';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import { SPOT_TABS, type SpotTabKey } from '@/utils/spotTabs';
 import type { TokenMarket } from '@/utils/spotTokens';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 
 // USD formatter that stays readable across BTC-scale and sub-cent prices.
 // The currency context's own formatter rounds to 2dp, which renders every
@@ -39,13 +40,6 @@ function formatUsd(v?: number | null): string {
 const AVATAR_SIZE = 36;
 /** Change-chip column width, shared by the rows and the column header. */
 const CHANGE_COL_WIDTH = 68;
-
-// Deterministic accent for the letter badge when a token has no logo URL.
-function badgeColor(symbol: string, palette: string[]): string {
-  let hash = 0;
-  for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) >>> 0;
-  return palette[hash % palette.length];
-}
 
 // Per-tab empty copy so a filtered-empty tab doesn't read like an outage.
 const TAB_EMPTY: Partial<Record<SpotTabKey, { title: string; subtitle: string }>> = {
@@ -68,15 +62,11 @@ const TokenRow = ({
 }) => {
   const { colors, spacing, radius } = useTheme();
   const { formatDualPrice } = useCurrency();
-  // Admin-entered logo URLs can be share-page links (ibb.co/…) or dead — fall
-  // back to the letter badge instead of rendering a blank circle.
-  const [logoFailed, setLogoFailed] = useState(false);
 
   const hasChange = token.change24h != null;
   const isUp = (token.change24h ?? 0) >= 0;
   const changeColor = isUp ? colors.success : colors.danger;
   const changeBg = isUp ? colors.successBg : colors.dangerBg;
-  const dotColor = badgeColor(token.symbol, [colors.accent, colors.success, colors.danger]);
 
   return (
     <PressableScale
@@ -91,34 +81,9 @@ const TokenRow = ({
         paddingVertical: spacing.md,
       }}
     >
-      {token.logoUrl && !logoFailed ? (
-        <Image
-          source={{ uri: token.logoUrl }}
-          onError={() => setLogoFailed(true)}
-          style={{
-            width: AVATAR_SIZE,
-            height: AVATAR_SIZE,
-            borderRadius: radius.pill,
-            backgroundColor: colors.surfaceAlt,
-          }}
-        />
-      ) : (
-        <View
-          style={{
-            width: AVATAR_SIZE,
-            height: AVATAR_SIZE,
-            borderRadius: radius.pill,
-            borderWidth: 2,
-            borderColor: dotColor,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text variant="bodyMed" weight="700" style={{ color: dotColor }}>
-            {token.symbol.charAt(0)}
-          </Text>
-        </View>
-      )}
+      {/* Admin-entered logo URLs can be share-page links or dead; TokenAvatar
+          falls back to the registry logo, then a letter. */}
+      <TokenAvatar symbol={token.symbol} iconUrl={token.logoUrl} size={AVATAR_SIZE} />
 
       {/* Name column — symbol, favourite toggle, and how it's listed */}
       <View style={{ flex: 1, gap: 2 }}>

@@ -14,7 +14,7 @@
 // letter-badge fallback) and AssetPairSheet (the Buy/Sell pills), because Spot
 // is the pattern this screen is meant to read as a sibling of.
 import React, { useCallback, useState } from 'react';
-import { View, Image, ScrollView, RefreshControl } from 'react-native';
+import { View, ScrollView, RefreshControl } from 'react-native';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '@/theme';
@@ -27,6 +27,7 @@ import {
   type OtcCategory, type OtcListing,
 } from '@/utils/otcListings';
 import { OtcClosedSheet } from './OtcClosedSheet';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 
 const CATEGORY_TABS: { key: OtcCategory; label: string }[] = [
   { key: 'direct', label: 'Direct' },
@@ -79,10 +80,7 @@ const TradePill = ({
 const ListingRow = ({
   listing, onTrade,
 }: { listing: OtcListing; onTrade: (side: 'buy' | 'sell') => void }) => {
-  const { colors, spacing, radius } = useTheme();
-  // Admin-entered logo URLs can be share-page links or dead — fall back to the
-  // letter badge rather than rendering a blank circle.
-  const [logoFailed, setLogoFailed] = useState(false);
+  const { colors, spacing } = useTheme();
 
   return (
     <View
@@ -94,32 +92,9 @@ const ListingRow = ({
         paddingVertical: spacing.md,
       }}
     >
-      {listing.logoUrl && !logoFailed ? (
-        <Image
-          source={{ uri: listing.logoUrl }}
-          onError={() => setLogoFailed(true)}
-          style={{
-            width: AVATAR, height: AVATAR,
-            borderRadius: radius.pill,
-            backgroundColor: colors.surfaceAlt,
-          }}
-        />
-      ) : (
-        <View
-          style={{
-            width: AVATAR, height: AVATAR,
-            borderRadius: radius.pill,
-            borderWidth: 2,
-            borderColor: colors.accent,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text variant="bodyMed" weight="700" color="accent">
-            {listing.baseSymbol.charAt(0)}
-          </Text>
-        </View>
-      )}
+      {/* Admin-entered logo URLs can be share-page links or dead; TokenAvatar
+          falls back to the registry logo, then a letter. */}
+      <TokenAvatar symbol={listing.baseSymbol} iconUrl={listing.logoUrl} size={AVATAR} />
 
       <View style={{ width: NAME_COL }}>
         <Text variant="bodyMed" weight="700" numberOfLines={1}>
