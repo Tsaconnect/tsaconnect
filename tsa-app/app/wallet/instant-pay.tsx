@@ -27,11 +27,13 @@ import {
   getWalletBalances,
   normalizeWalletBalances,
   prepareSendTransaction,
+  sendPreparedTransaction,
   submitTransaction,
   resolveUsername,
   type WalletBalanceWithChain,
   type ResolvedUser,
 } from '../../services/walletApi';
+import { txHashOrThrow, TRANSFER_COPY } from '../../services/submitErrors';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
 import { useTheme } from '@/theme';
 import {
@@ -249,24 +251,31 @@ const InstantPay = () => {
       // account's nonce with this signature (queued-forever tx).
       const from = await getActiveWallet();
       if (!from) throw new Error('No wallet found. Set up your wallet first.');
-      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId, { fromAddress: from });
-      if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
-      const signed = await signTransaction({
-        type: 0,
-        to: r.data.to, data: r.data.data, value: r.data.value,
-        gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
-        nonce: r.data.nonce, chainId: r.data.chainId,
-      }, from);
-      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId, from);
-      if (!res.success || !res.data?.txHash) throw new Error(res.message || 'Failed');
-      setTxHash(res.data.txHash);
+      const chainId = activeChain?.chainId || CHAINS.sonic.chainId;
+      const to = resolvedUser!.walletAddress;
+      // Nonce and gas price go stale between prepare and broadcast, so this
+      // goes through the shared flow that re-prepares and retries once rather
+      // than hand-rolling prepare/sign/submit and failing on a base-fee tick.
+      const res = await sendPreparedTransaction({
+        prepare: () => prepareSendTransaction(selectedToken, to, amount, chainId, { fromAddress: from }),
+        sign: (tx) =>
+          signTransaction({
+            type: 0,
+            to: tx.to, data: tx.data, value: tx.value,
+            gasLimit: tx.gasLimit, gasPrice: tx.gasPrice,
+            nonce: tx.nonce, chainId: tx.chainId,
+          }, from),
+        submit: (signed) => submitTransaction(signed, 'send', selectedToken, to, amount, chainId, from),
+      });
+      const txHash = txHashOrThrow(res, TRANSFER_COPY);
+      setTxHash(txHash);
 
       // "Sent" must mean MINED, not merely broadcast — an accepted tx can sit
       // in the mempool forever (nonce queue, underpriced gas) and the recipient
       // never receives it. Wait bounded; on timeout show the honest "pending"
       // state instead of claiming success.
       try {
-        const receipt = await getProvider(selectedChain).waitForTransaction(res.data.txHash, 1, 90_000);
+        const receipt = await getProvider(selectedChain).waitForTransaction(txHash, 1, 90_000);
         if (receipt && receipt.status === 0) {
           throw new Error('The transfer reverted on-chain. No funds were taken beyond gas.');
         }

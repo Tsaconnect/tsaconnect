@@ -5,6 +5,7 @@ import { API_BASE_URL } from '../constants/api/config';
 import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
 import { getActiveWallet } from './wallet';
+import { toFiniteNumber } from './txFields';
 
 export interface WalletBalance {
   symbol: string;
@@ -161,8 +162,21 @@ function normalizePreparedTransactionData(payload: unknown): PreparedTransaction
     return null;
   }
 
-  const nonce = Number(tx.nonce ?? 0);
-  const chainId = Number(tx.chainId ?? 0);
+  // Nonce and chain id FAIL CLOSED rather than defaulting to 0.
+  //
+  // A missing nonce read as 0 is not a harmless default: sendPreparedTransaction
+  // compares the re-prepared nonce against the first one to decide whether a
+  // transaction of ours is already in flight, and 0 === 0 waves that check
+  // through exactly when it must not — sending a second transfer. A missing
+  // chain id read as 0 signs for no network at all. Neither field is ever
+  // absent from a real prepare-tx response (both are non-optional on the Go
+  // UnsignedTx), so refusing the payload costs nothing and removes a silent
+  // failure mode from the one guard standing between a retry and a double-send.
+  const nonce = toFiniteNumber(tx.nonce);
+  const chainId = toFiniteNumber(tx.chainId);
+  if (nonce === null || chainId === null) {
+    return null;
+  }
 
   return {
     to: tx.to,
@@ -170,10 +184,11 @@ function normalizePreparedTransactionData(payload: unknown): PreparedTransaction
     value: String(tx.value ?? '0'),
     gasLimit: String(tx.gasLimit ?? '0'),
     gasPrice: String(tx.gasPrice ?? '0'),
-    nonce: Number.isFinite(nonce) ? nonce : 0,
-    chainId: Number.isFinite(chainId) ? chainId : 0,
+    nonce,
+    chainId,
   };
 }
+
 
 function extractTransactionHash(payload: unknown): string | undefined {
   const data = isRecord(payload) ? payload : null;
@@ -429,7 +444,14 @@ export async function prepareSendTransaction(
     });
     const result = await safeJson<any>(response);
     const normalizedTx = normalizePreparedTransactionData(result?.data);
-    if (result?.success && normalizedTx) {
+    if (result?.success) {
+      // A success we cannot normalise is NOT a success to pass on. Returning
+      // the raw payload here would hand the caller an object with no nonce,
+      // which the send flow reads as 0 — and 0 defeats the guard that keeps a
+      // retry from broadcasting a second transfer.
+      if (!normalizedTx) {
+        return { success: false, message: 'The server returned an incomplete transaction. Please try again.' };
+      }
       return { ...result, data: normalizedTx };
     }
     return result;
@@ -500,30 +522,78 @@ export interface SendTxOps {
   sign: (tx: PreparedTransaction) => Promise<string>;
   /** Broadcast the signed tx via the backend. */
   submit: (signedTx: string) => Promise<ApiResponse<{ txHash: string }>>;
-  /** Pause before re-preparing on a nonce error (default 1500ms) — lets a lagging RPC node catch up. */
+  /** Pause before re-preparing after a stale-tx rejection (default 1500ms) — lets a lagging RPC node catch up. */
   retryDelayMs?: number;
 }
 
-const isNonceError = (message: string | undefined): boolean =>
-  (message ?? '').toLowerCase().includes('nonce too low');
+/**
+ * How a prepared transaction went stale between prepare and broadcast. The two
+ * kinds are cured by the same action — re-prepare, re-sign, resubmit — but they
+ * differ in what a SAFE recovery looks like, which is the whole point of
+ * distinguishing them:
+ *
+ * - 'nonce': something already occupies our nonce. Re-preparing must return a
+ *   higher one — enforced below — or the retry is pointless.
+ * - 'gas-price': the node refused the tx during pool validation, so it is not
+ *   in the mempool and cannot mine. Re-preparing must return the SAME nonce; if
+ *   it moved, a transaction of ours reached the pool after all and broadcasting
+ *   at the new nonce would send a SECOND one.
+ *
+ * Deliberately excluded from staleKind: 'underpriced'. "replacement transaction underpriced"
+ * means a tx of ours is already pending at this nonce and WILL mine — retrying
+ * re-prepares at nonce+1 and broadcasts a second, different transaction. On a
+ * transfer that is the user's money sent twice. The plain "transaction
+ * underpriced" variant would be safe to retry, but the two are not reliably
+ * distinguishable by substring, so neither is.
+ */
+type StaleKind = 'nonce' | 'gas-price';
+
+const staleKind = (message: string | undefined): StaleKind | null => {
+  const low = (message ?? '').toLowerCase();
+  if (low.includes('nonce too low')) return 'nonce';
+  // Both spellings are in the wild: older geth says "fee cap less than block
+  // base fee", current geth and the L2 sequencers say "max fee per gas less
+  // than block base fee".
+  if (low.includes('less than block base fee')) return 'gas-price';
+  return null;
+};
 
 /**
- * Run the prepare → sign → submit send flow with one automatic retry on a
- * "nonce too low" broadcast failure.
+ * Run the prepare -> sign -> submit send flow with at most one automatic retry
+ * when the broadcast is rejected for having gone stale (see StaleKind).
  *
- * The nonce is computed server-side at prepare time (PendingNonceAt) and baked
- * into the tx the wallet signs. On Sonic's load-balanced public RPC the node
- * that served `prepare-tx` can lag the node that later accepts the broadcast,
- * so the signed nonce ends up below the confirmed count → "nonce too low". The
- * signed tx can't be patched after the fact, so recovery means re-preparing
- * (fresh nonce) and re-signing. We retry exactly once; only nonce errors are
- * retried — everything else (insufficient funds, revert, …) surfaces as-is.
+ * Nonce and gas price are both resolved server-side at prepare time and baked
+ * into the tx the wallet signs, but the user signs and broadcasts seconds
+ * later. By then the nonce can be below the confirmed count (Sonic's
+ * load-balanced public RPC lags between nodes) or the gas price below the
+ * current base fee (every chain reprices per block). A signed tx cannot be
+ * patched, so recovery means re-preparing and re-signing.
+ *
+ * The retry is guarded, because re-preparing is not free of consequence: it
+ * asks the backend for a fresh nonce, and a nonce that has MOVED means a
+ * transaction of ours is already in flight. Broadcasting then sends a second
+ * one. So after a gas-price rejection the retry is abandoned unless the nonce
+ * comes back unchanged.
+ *
+ * Note what the retry spends: signTransaction reads the key from storage and
+ * never re-prompts, and AuthorizationModal gates entry to the flow rather than
+ * each signature — so one authorisation covers both broadcasts. That is what
+ * makes the nonce check above load-bearing rather than belt-and-braces.
+ *
+ * Residual hazard, unfixed and pre-existing: a 'nonce too low' rejection is
+ * indistinguishable from the case where the tx occupying that nonce is a
+ * duplicate of our own (a submit whose response was lost). Retrying then sends
+ * a second transfer. Closing that needs an idempotency key on the backend's
+ * submit endpoint, which does not exist yet — and would also retire the
+ * single-authorisation concern above, since a replayed key cannot double-spend.
  */
 export async function sendPreparedTransaction(
   ops: SendTxOps
 ): Promise<ApiResponse<{ txHash: string }>> {
   const retryDelayMs = ops.retryDelayMs ?? 1500;
   let lastResult: ApiResponse<{ txHash: string }> = { success: false, message: 'Failed' };
+  let rejection: StaleKind | null = null;
+  let first: PreparedTransaction | null = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0 && retryDelayMs > 0) {
@@ -532,14 +602,51 @@ export async function sendPreparedTransaction(
 
     const prepared = await ops.prepare();
     if (!prepared.success || !prepared.data) {
+      // On a retry the broadcast error says more about what went wrong than
+      // "couldn't prepare" does, so it stays the reported one.
+      if (attempt > 0) return lastResult;
       return { success: false, message: prepared.message || 'Failed to prepare transaction' };
     }
+
+    if (first !== null) {
+      if (rejection === 'gas-price' && prepared.data.nonce !== first.nonce) {
+        // The tx we thought was refused is in the mempool after all. Signing
+        // this one would transfer the same amount a second time.
+        return lastResult;
+      }
+      if (rejection === 'nonce' && prepared.data.nonce <= first.nonce) {
+        // The node that served this prepare is as far behind as the one that
+        // rejected the broadcast. Re-signing the same nonce resubmits an
+        // identical transaction to fail identically; stop instead of spending
+        // a second round trip on it.
+        return lastResult;
+      }
+      // A retry exists to re-price the SAME transfer. Re-pricing moves nonce,
+      // gasPrice and gasLimit; everything that decides WHERE the money goes
+      // must come back identical, because the wallet authorised this send once
+      // (see the note on re-signing above) and the second prepare is a fresh
+      // server response that nothing else inspects.
+      //
+      // chainId counts as destination, not price: the same `to` address on
+      // another chain is very often a different contract entirely, so a moved
+      // chainId sends the funds somewhere the user never approved.
+      if (
+        prepared.data.to !== first.to ||
+        prepared.data.value !== first.value ||
+        prepared.data.data !== first.data ||
+        prepared.data.chainId !== first.chainId
+      ) {
+        return lastResult;
+      }
+    }
+    if (first === null) first = prepared.data;
 
     const signed = await ops.sign(prepared.data);
     lastResult = await ops.submit(signed);
 
     if (lastResult.success) return lastResult;
-    if (!isNonceError(lastResult.message)) return lastResult;
+    rejection = staleKind(lastResult.message);
+    if (rejection === null) return lastResult;
   }
 
   return lastResult;

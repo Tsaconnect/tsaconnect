@@ -20,7 +20,7 @@ import {
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
 import { executeLiFiSuiSwap } from '@/services/chains/suiLifi';
-import { mapSubmitError } from '@/services/swapErrors';
+import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
 
 export interface ExecuteLiFiSwapParams {
   quote: LiFiQuote;
@@ -149,7 +149,7 @@ export async function executeLiFiSwap({
     const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
     if (!approveHash) {
       console.error('[swap] approve rejected by backend', { chainKey, approveRes });
-      throw new Error(mapSubmitError(approveRes.message));
+      throw new Error(mapSubmitError(approveRes.message, SWAP_COPY));
     }
 
     // Wait for the approve to land before submitting the swap. Without
@@ -211,7 +211,7 @@ export async function executeLiFiSwap({
   const swapHash = res.success ? res.data?.txHash : undefined;
   if (!swapHash) {
     console.error('[swap] swap rejected by backend', { chainKey, res });
-    throw new Error(mapSubmitError(res.message));
+    throw new Error(mapSubmitError(res.message, SWAP_COPY));
   }
   return swapHash;
 }

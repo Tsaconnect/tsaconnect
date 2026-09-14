@@ -189,12 +189,46 @@ describe('sendPaycrestDeposit', () => {
     expect(mockPrepare).not.toHaveBeenCalled();
   });
 
-  it('surfaces the server message when the broadcast is rejected', async () => {
+  it('maps a rejected broadcast to display copy, not the RPC\'s own words', async () => {
     mockSubmit.mockResolvedValue({ success: false, message: 'insufficient funds for transfer' });
 
     await expect(sendPaycrestDeposit(order, '0xfrom')).rejects.toThrow(
-      'insufficient funds for transfer',
+      'Not enough native token to pay gas on this chain.',
     );
+  });
+
+  const BASE_FEE_ERR =
+    'Failed to submit transaction to blockchain on arbitrum: failed to send transaction: ' +
+    'max fee per gas less than block base fee: address 0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce, ' +
+    'maxFeePerGas: 20006000 baseFee: 20098000';
+
+  // The screen shows whatever this rejects with, verbatim, in a red box.
+  it('never puts a raw gas-fee rejection in front of the user', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: BASE_FEE_ERR });
+
+    await expect(sendPaycrestDeposit(order, '0xfrom')).rejects.toThrow(
+      'Network fees rose while you were confirming. Please try again.',
+    );
+    // It reached that message via the retry, not on the first rejection.
+    expect(mockSubmit).toHaveBeenCalledTimes(2);
+  });
+
+  // The whole point of the retry: a base-fee tick should cost a round trip, not
+  // the sale. Exactly one transfer must leave the wallet.
+  it('recovers from a stale base fee by re-pricing, sending once', async () => {
+    mockSubmit
+      .mockResolvedValueOnce({ success: false, message: BASE_FEE_ERR })
+      .mockResolvedValueOnce({ success: true, data: { txHash: '0xsecond' } });
+
+    const hash = await sendPaycrestDeposit(order, '0xfrom');
+
+    expect(hash).toBe('0xsecond');
+    expect(mockSubmit).toHaveBeenCalledTimes(2);
+    // Both attempts moved the same amount to the same address.
+    for (const call of mockSubmit.mock.calls) {
+      expect(call[3]).toBe('0xprovider');
+      expect(call[4]).toBe('36.4218');
+    }
   });
 
   it('names the gas shortfall instead of signing a tx that cannot pay for itself', async () => {

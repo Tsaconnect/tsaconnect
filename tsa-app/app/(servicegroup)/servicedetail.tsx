@@ -272,7 +272,10 @@ const ServiceDetail = () => {
         gasLimit: BigInt(approveTx.gasLimit || 100000),
         gasPrice: BigInt(approveTx.gasPrice || '0'),
         nonce: approveTx.nonce,
-        chainId: BigInt(approveTx.chainId || '14601'),
+        // No `|| '14601'`. That silently signed for Sonic TESTNET whenever the
+        // backend named no chain, in a flow that broadcasts to mainnet. Passed
+        // through raw so signTransaction refuses it by name instead.
+        chainId: approveTx.chainId,
         type: 0,
       };
 
@@ -298,7 +301,7 @@ const ServiceDetail = () => {
         gasLimit: BigInt(payFeeTx.gasLimit || 200000),
         gasPrice: BigInt(payFeeTx.gasPrice || '0'),
         nonce: approveTx.nonce + 1, // nonce after approve
-        chainId: BigInt(payFeeTx.chainId || '14601'),
+        chainId: payFeeTx.chainId,
         type: 0,
       };
 

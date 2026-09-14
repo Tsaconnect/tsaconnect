@@ -8,6 +8,7 @@
 // (before an order and its countdown exist), the send runs on the deposit
 // screen — and because neither is testable inside a 500-line component.
 import { CHAINS, type ChainKey } from '@/constants/chains';
+import { txHashOrThrow, TRANSFER_COPY } from './submitErrors';
 import { signTransaction } from './wallet';
 import {
   prepareSendTransaction,
@@ -112,8 +113,8 @@ export interface DepositOrder {
  * user can act on — the exact cost is not knowable until the tx is prepared.
  * Pass null when balances are unavailable and the send proceeds unguarded.
  *
- * Resolves to the broadcast hash; rejects with the server's own wording, which
- * screens can show verbatim.
+ * Resolves to the broadcast hash; rejects with a message already mapped for
+ * display, which screens can show verbatim.
  */
 export async function sendPaycrestDeposit(
   order: DepositOrder,
@@ -154,10 +155,10 @@ export async function sendPaycrestDeposit(
       submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress),
   });
 
-  if (!res.success || !res.data?.txHash) {
-    throw new Error(res.message || 'Could not broadcast your transfer.');
-  }
-  return res.data.txHash;
+  // The backend surfaces the RPC's own words here ("max fee per gas less than
+  // block base fee: address 0x…, maxFeePerGas: …"). Map before it reaches a
+  // screen — every caller of this function shows the message verbatim.
+  return txHashOrThrow(res, TRANSFER_COPY);
 }
 
 /**

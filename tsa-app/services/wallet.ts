@@ -3,6 +3,7 @@
 import 'react-native-get-random-values';
 import { Alert } from 'react-native';
 import { ethers } from 'ethers';
+import { toFiniteNumber } from './txFields';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CHAINS, type ChainKey, type ChainConfig } from '../constants/chains';
@@ -321,6 +322,37 @@ export async function signTransaction(
   unsignedTx: ethers.TransactionLike,
   expectedAddress?: string,
 ): Promise<string> {
+  // Nonce and chain id are REQUIRED, and this is the place to insist on it:
+  // three independent adapters feed this function (walletApi's normalizer, the
+  // P2P unsignedTxToTxLike, and the rewards claim path), and a guard in one of
+  // them leaves the other two defaulting.
+  //
+  // The old defaults were `nonce || 0` and `chainId || 146`. Neither is a safe
+  // fallback. A nonce of 0 is a real value — a wallet's first transaction — so
+  // substituting it for "absent" signs at a slot that is almost certainly
+  // already used; and silently signing for Sonic because no chain was named
+  // sends funds to whatever lives at that address on a chain the user never
+  // chose. Both fail at a point where the cause is long gone.
+  //
+  // Checked before the key is read: a malformed transaction is no reason to
+  // pull private key material out of storage.
+  //
+  // "Absent" is toFiniteNumber's definition, not `=== undefined`. Go serializes
+  // an unset `ChainID string` as '', not as a missing key, and Number('') is 0
+  // — so a looser check here signs for chain 0, which is worse than the default
+  // it replaced. NaN arrives the same way, from arithmetic on an absent nonce
+  // (`approveTx.nonce + 1`). Paths with no normalizer in front of them, like
+  // the order refund in transaction.ts, reach this function directly.
+  const nonce = toFiniteNumber(unsignedTx.nonce);
+  const chainId = toFiniteNumber(unsignedTx.chainId);
+  if (nonce === null) {
+    throw new Error('Cannot sign: this transaction has no nonce. Please try again.');
+  }
+  // Zero is a real nonce but not a real chain.
+  if (chainId === null || chainId <= 0) {
+    throw new Error('Cannot sign: this transaction names no network. Please try again.');
+  }
+
   const addr = expectedAddress || (await getActiveWallet()) || undefined;
   const privateKey = await getPrivateKey(addr);
   if (!privateKey) {
@@ -348,10 +380,10 @@ export async function signTransaction(
     to: unsignedTx.to,
     value: unsignedTx.value || '0x0',
     data: unsignedTx.data || '0x',
-    nonce: Number(unsignedTx.nonce || 0),
+    nonce,
     gasLimit: unsignedTx.gasLimit,
     gasPrice: unsignedTx.gasPrice,
-    chainId: Number(unsignedTx.chainId || 146),
+    chainId,
   });
 
   const signingKey = new ethers.SigningKey(privateKey);

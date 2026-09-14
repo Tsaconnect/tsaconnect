@@ -218,7 +218,9 @@ func (bs *BlockchainService) GetGasPrices(chain string) *GasPrices {
 		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
 
-	gasPrice, err := client.SuggestGasPrice()
+	// Raw: this figure is reported to a caller as what the chain charges, so it
+	// must not carry the headroom that transaction building adds.
+	gasPrice, err := client.SuggestGasPriceRaw()
 	if err != nil {
 		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
