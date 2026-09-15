@@ -39,7 +39,11 @@ func newStableBuyDBService(t *testing.T) (*ITService, uuid.UUID) {
 	if err := db.AutoMigrate(&models.ITIntent{}, &models.FiatVirtualAccount{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	userID := uuid.New()
+	// The buy leg reads users.verification_status before it writes anything,
+	// so the fixture user must exist and be verified or every test here would
+	// fail at the gate rather than at the behaviour it is pinning.
+	createTestUsersTable(t, db)
+	userID := seedVerifiedUser(t, db)
 	va := &models.FiatVirtualAccount{
 		ID: uuid.New(), UserID: userID, Currency: "NGN",
 		AccountNumber: "1234567890", BankName: "Wema Bank", AccountName: "TSA / Ada Okafor",
@@ -142,7 +146,10 @@ func TestCreateStableBuyIntent_FundedIntentDoesNotBlockANewOne(t *testing.T) {
 
 func TestCreateStableBuyIntent_RequiresAVirtualAccount(t *testing.T) {
 	s, _ := newStableBuyDBService(t)
-	_, _, err := s.CreateStableBuyIntent(context.Background(), uuid.New(), testBuyQuote(), "POLYGON", testBuyEVM)
+	// Verified, but with no VA of their own — the refusal under test is the
+	// missing account, which only becomes reachable once the KYC gate passes.
+	other := seedVerifiedUser(t, s.db)
+	_, _, err := s.CreateStableBuyIntent(context.Background(), other, testBuyQuote(), "POLYGON", testBuyEVM)
 	if !errors.Is(err, ErrStableBuyNoVA) {
 		t.Fatalf("err = %v, want ErrStableBuyNoVA", err)
 	}

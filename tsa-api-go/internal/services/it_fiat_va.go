@@ -107,6 +107,14 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 	if user == nil {
 		return nil, errors.New("it va: nil user")
 	}
+	// A virtual account is a standing pay-in account — AutoCreditFromVA credits
+	// whatever lands on it, order or no order — so minting one is a money-in
+	// entry point like any buy. After the retirement answer above (410 is the
+	// honest reply in central mode whatever the user's status) and before any
+	// provider call, so an unverified user never becomes a Flutterwave customer.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, user.ID); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(user.WalletAddress) == "" {
 		return nil, ErrITVAWalletRequired
 	}

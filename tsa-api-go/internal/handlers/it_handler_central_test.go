@@ -61,6 +61,7 @@ func newITBuyHandler(t *testing.T) (*ITHandler, *gorm.DB, *services.ITService) {
 		&models.FiatVirtualAccount{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	createHandlerUsersTable(t, db)
 	swap := services.NewMCGPSwapService(nil, &config.Config{
 		Env:              "development",
 		MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0",
@@ -77,6 +78,15 @@ func newITBuyHandler(t *testing.T) (*ITHandler, *gorm.DB, *services.ITService) {
 func doITBuy(t *testing.T, h *ITHandler, user *models.User, ngnKobo string) *httptest.ResponseRecorder {
 	t.Helper()
 	_ = h.it.AcceptITAgreement(context.Background(), user.ID, "", "")
+	// Buying is gated on verification, so these fixtures need a real users row.
+	// OR IGNORE: a test that seeded its own status (kyc_gate_handler_test.go)
+	// keeps it.
+	if err := h.db.Exec(
+		`INSERT OR IGNORE INTO users (id, name, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?)`,
+		user.ID, user.Name, user.WalletAddress, models.VerificationStatusVerified, user.Name,
+	).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
 	b, _ := json.Marshal(map[string]any{"ngnKobo": ngnKobo})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

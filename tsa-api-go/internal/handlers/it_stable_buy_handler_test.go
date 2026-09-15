@@ -129,7 +129,9 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 		username TEXT NOT NULL UNIQUE,
 		email TEXT NOT NULL UNIQUE,
 		password TEXT NOT NULL,
-		wallet_address TEXT
+		wallet_address TEXT,
+		verification_status TEXT DEFAULT 'pending',
+		verified_legal_name TEXT
 	)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
 	}
@@ -149,9 +151,12 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 
 	userID := uuid.New()
 	const evmAddr = "0x2222222222222222222222222222222222222222"
-	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address)
-		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?)`,
-		userID.String(), evmAddr).Error; err != nil {
+	// Verified: the buy leg refuses an unverified user outright, so an
+	// unverified fixture would make every test here fail at the KYC gate
+	// rather than at the behaviour it pins.
+	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address, verification_status, verified_legal_name)
+		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?, ?, 'Ada Okafor')`,
+		userID.String(), evmAddr, models.VerificationStatusVerified).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	if err := db.Create(&models.FiatVirtualAccount{

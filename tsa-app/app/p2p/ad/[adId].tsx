@@ -60,6 +60,7 @@ import {
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
+import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -319,6 +320,12 @@ const AdDetailScreen: React.FC = () => {
           "The seller's rate feed is temporarily down. Please try again in a few seconds — the ad will reactivate automatically once the feed recovers.",
         );
         load();
+        return;
+      }
+      // The buyer is about to pay in; the server refuses that until it can
+      // attribute their transfer. Only this take path — the deposit open below
+      // is the opener selling, which is not gated.
+      if (promptKycRefusal(openRes.code, openRes.message)) {
         return;
       }
       if (!openRes.success || !openRes.data) {

@@ -208,6 +208,14 @@ func (s *ITService) CreateStableBuyIntent(
 	if q == nil {
 		return nil, nil, errors.New("it stable buy: nil quote")
 	}
+	// Before the pay-into lookup, so an unverified user is told to verify
+	// rather than told to activate a virtual account — a dead end that sends
+	// them to a rail being retired. Opening only; settleStableBuyFromCharge
+	// deliberately has no such check, or money already in flight for a user
+	// who has not finished verification would strand.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, userID); err != nil {
+		return nil, nil, err
+	}
 	// Which provider serves this currency's ramp is a server fact. The app
 	// routes naira to Paycrest and leaves these screens in place but unlinked,
 	// which made the routing a client-side convention — an older build still

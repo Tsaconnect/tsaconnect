@@ -59,6 +59,10 @@ func newITTestService(t *testing.T) *ITService {
 	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}, &models.FiatVirtualAccount{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	// Every money-in path reads users.verification_status, so the table is part
+	// of the baseline fixture now — without it the gate fails on a missing
+	// table and reads as an implementation bug rather than a fixture gap.
+	createTestUsersTable(t, db)
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
 	swap.SetOperatorSigner(&fakeReleaseSigner{addr: "0x000000000000000000000000000000000000A11CE", hash: "0xdead"})
 	svc := NewITService(db, swap, stubFx{ngn: 1500}) // FX = ₦1500/$
@@ -407,7 +411,7 @@ func TestOpenBuyOrder_WorksWithoutPMAndSupersedesPrior(t *testing.T) {
 		t.Fatalf("set rate: %v", err)
 	}
 	// Spec 1 standing-VA buys do not require the company PM.
-	user := uuid.New()
+	user := seedVerifiedUser(t, s.db)
 	first, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "1000")
 	if err != nil {
 		t.Fatalf("open buy without PM: %v", err)

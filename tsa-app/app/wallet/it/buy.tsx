@@ -38,6 +38,7 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { RAILS } from '@/constants/rails';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
@@ -131,6 +132,12 @@ export default function ITBuy() {
       router.replace('/wallet/it');
       return;
     }
+    // Not verified (or verified with no legal name): a dead-end error screen is
+    // the failure the server's code exists to prevent — prompt the next step.
+    if (promptKycRefusal(r.code, r.message)) {
+      setScreen('form');
+      return;
+    }
     if (!r.success || !r.data) {
       setError(r.message || 'Could not open the buy order');
       setScreen('error');
@@ -153,6 +160,10 @@ export default function ITBuy() {
     }
     setScreen('submitting');
     const act = await activateITVA(idType, idNumber);
+    if (promptKycRefusal(act.code, act.message)) {
+      setScreen('form');
+      return;
+    }
     if (!act.success || !act.data) {
       setError(act.message || 'Activation failed');
       setScreen('activate');
