@@ -61,7 +61,7 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useFiatSymbol } from '@/hooks/useFiatSymbol';
 import { ngnToUsd } from '@/utils/currencyDisplay';
-import { stableRowActions } from '@/utils/rampRow';
+import { mcgpRowActions, stableRowActions } from '@/utils/rampRow';
 import { buildITActivity } from '@/utils/itActivity';
 
 /** Rows on the hub. The rest are one tap away on the activity screen. */
@@ -108,7 +108,7 @@ export default function ITHub() {
   const { colors, spacing } = useTheme();
   const { formatPrice, allRates } = useCurrency();
   const symbolFor = useFiatSymbol();
-  const { address } = useSignableWallet();
+  const { address, ready: walletReady } = useSignableWallet();
 
   const [bal, setBal] = useState<ITBalance | null>(null);
   const [rate, setRate] = useState<ITRate | null>(null);
@@ -196,10 +196,21 @@ export default function ITHub() {
   const legs = useMemo(() => rampLegsFor(currencies, code), [currencies, code]);
 
   const assets: AssetRow[] = useMemo(() => {
+    // Until the wallet check resolves, no row knows its balance or what it may
+    // offer. Treating that as "no wallet" flashed "Connect a wallet to trade"
+    // at users who have one.
+    if (!walletReady) {
+      return [
+        { token: 'MCGP', balance: null, balanceNote: '', rateLine: mcgpRateLine },
+        { token: 'USDC', balance: null, balanceNote: '' },
+        { token: 'USDT', balance: null, balanceNote: '' },
+      ];
+    }
+
     const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
       const base: AssetRow = {
         token,
-        balance: loading && !address ? null : fmtToken(stable[token] ?? 0),
+        balance: address && loading ? null : fmtToken(stable[token] ?? 0),
         balanceNote: address ? 'in your wallet' : 'connect a wallet',
       };
       // What this row may offer, and why not when it may not — see
@@ -226,30 +237,29 @@ export default function ITHub() {
         onSell: actions.sell ? () => router.push(route('sell') as never) : undefined,
       };
     };
-    // MCGP's own buy/sell screens are NGN-only — buy.tsx offers a single
-    // payment currency and sell.tsx raises the intent with Currency "NGN" —
-    // and neither is handed `code`. So the row says so rather than opening a
-    // naira form under another currency's name. Today the registry serves
-    // only NGN, so this never fires; it fires the day a second ramp currency
-    // is switched on before these screens are currency-aware.
+    // MCGP needs a wallet this device can sign for, like the stablecoins, and
+    // its buy/sell screens are NGN-only — see mcgpRowActions. Without a wallet
+    // the balance reads 0 rather than the registered wallet's balance, which
+    // this device holds no key to spend.
+    const mcgpActions = mcgpRowActions({ currency: code, hasWallet: !!address });
     const mcgpRow: AssetRow = {
       token: 'MCGP',
-      balance: loading ? null : fmtMcgp(spendable),
-      balanceNote: 'spendable',
+      balance: address && loading ? null : fmtMcgp(address ? spendable : '0'),
+      balanceNote: address ? 'spendable' : 'connect a wallet',
       rateLine: mcgpRateLine,
     };
     return [
-      code === 'NGN'
-        ? {
+      mcgpActions.unavailable
+        ? { ...mcgpRow, unavailable: mcgpActions.unavailable }
+        : {
             ...mcgpRow,
             onBuy: () => router.push('/wallet/it/buy'),
             onSell: () => router.push('/wallet/it/sell'),
-          }
-        : { ...mcgpRow, unavailable: `Not available in ${code}` },
+          },
       stableRow('USDC'),
       stableRow('USDT'),
     ];
-  }, [loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
+  }, [walletReady, loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
 
   const activity = useMemo(
     () => buildITActivity(intents, orders, symbolFor, { hideCancelledIntents: true }),

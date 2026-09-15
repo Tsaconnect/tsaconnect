@@ -1,4 +1,27 @@
-import { stableRowActions } from '@/utils/rampRow';
+import { mcgpRowActions, stableRowActions } from '@/utils/rampRow';
+
+describe('mcgpRowActions', () => {
+  it('offers both actions in NGN with a wallet', () => {
+    expect(mcgpRowActions({ currency: 'NGN', hasWallet: true })).toEqual({ buy: true, sell: true });
+  });
+
+  // MCGP trades against a wallet this device can sign for, exactly like the
+  // stablecoins, so the row must not offer Buy/Sell without one.
+  it('asks for a wallet before anything else', () => {
+    const noWallet = { buy: false, sell: false, unavailable: 'Connect a wallet to trade' };
+    expect(mcgpRowActions({ currency: 'NGN', hasWallet: false })).toEqual(noWallet);
+    expect(mcgpRowActions({ currency: 'UGX', hasWallet: false })).toEqual(noWallet);
+  });
+
+  // The MCGP buy/sell screens are NGN-only.
+  it('names a currency the MCGP screens do not serve', () => {
+    expect(mcgpRowActions({ currency: 'UGX', hasWallet: true })).toEqual({
+      buy: false,
+      sell: false,
+      unavailable: 'Not available in UGX',
+    });
+  });
+});
 
 const row = (over: Partial<Parameters<typeof stableRowActions>[0]> = {}) =>
   stableRowActions({
