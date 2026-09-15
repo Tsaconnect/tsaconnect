@@ -183,7 +183,13 @@ func mapServiceError(c *gin.Context, err error) bool {
 		// from a generic server bug.
 		status = http.StatusGone
 	}
-	c.AbortWithStatusJSON(status, gin.H{"success": false, "message": err.Error()})
+	body := gin.H{"success": false, "message": err.Error()}
+	// The KYC refusal is the one error here the app routes on rather than just
+	// displaying, so it carries the same machine code as the IT legs.
+	if code := kycRefusalCode(err); code != "" {
+		body["code"] = code
+	}
+	c.AbortWithStatusJSON(status, body)
 	return true
 }
 

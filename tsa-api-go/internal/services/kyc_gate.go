@@ -19,11 +19,33 @@ import (
 // The message is instructions, not a verdict: a user told only that they were
 // refused on a money screen contacts support, and support cannot do anything
 // for them either.
-var ErrKYCVerificationRequired = errors.New("verify your identity before paying in — finish verification in the app, then open this order again")
+var ErrKYCVerificationRequired = errors.New("verify your identity before paying in — finish verification in the app, then try again")
+
+// ErrKYCLegalNameMissing refuses a user whose verification PASSED but left no
+// legal name behind (see the second clause of requireVerifiedForMoneyIn).
+//
+// It is its own error because the user cannot fix it: the KYC screen already
+// reads "verified" and a new Didit session is refused as already verified, so
+// "finish verification" would send them in a circle. Support can — the admin
+// legal-name backfill exists for exactly this set.
+//
+// It still matches ErrKYCVerificationRequired under errors.Is, so any caller
+// that only checks the general sentinel refuses the user rather than letting
+// them through. Callers that care which refusal it was check this one first.
+var ErrKYCLegalNameMissing error = kycLegalNameMissingError{}
+
+type kycLegalNameMissingError struct{}
+
+func (kycLegalNameMissingError) Error() string {
+	return "your identity is verified, but we could not confirm the legal name on it — contact support to finish setting up payments"
+}
+
+func (kycLegalNameMissingError) Is(target error) bool { return target == ErrKYCVerificationRequired }
 
 // requireVerifiedForMoneyIn is the entry gate for every path where the user is
-// about to send us money: the MCGP buy order, the stablecoin buy intent, and
-// opening a P2P trade as the buyer.
+// about to send us money: the MCGP buy order, the stablecoin buy intent,
+// minting a virtual account (a standing pay-in account), and opening a P2P
+// trade as the buyer.
 //
 // It is deliberately NOT conditional on the inbound mode. Verification is the
 // entry requirement for transacting on a money app; it is not an implementation
@@ -82,7 +104,7 @@ func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUI
 		return ErrKYCVerificationRequired
 	}
 	if strings.TrimSpace(row.VerifiedLegalName.String) == "" {
-		return ErrKYCVerificationRequired
+		return ErrKYCLegalNameMissing
 	}
 	return nil
 }

@@ -364,3 +364,72 @@ func TestRequireVerifiedForMoneyIn_DatabaseErrorIsNotARefusal(t *testing.T) {
 			"the user would be told to re-verify instead of the outage being surfaced")
 	}
 }
+
+// A verified user with no stored legal name cannot fix that themselves: the
+// KYC screen already reads "verified" and a new Didit session is refused as
+// "Already verified". Telling them to "finish verification" is a dead end, so
+// the refusal must be distinguishable — while still being a money-in refusal
+// on every gated path.
+func TestRequireVerifiedForMoneyIn_NamelessVerifiedIsASupportRefusal(t *testing.T) {
+	s := newITTestService(t)
+	userID := seedVerifiedWithoutLegalName(t, s.db, "")
+
+	err := requireVerifiedForMoneyIn(context.Background(), s.db, userID)
+	if !errors.Is(err, ErrKYCLegalNameMissing) {
+		t.Fatalf("err = %v, want ErrKYCLegalNameMissing", err)
+	}
+	if !errors.Is(err, ErrKYCVerificationRequired) {
+		t.Fatal("ErrKYCLegalNameMissing must still read as a money-in refusal, or a caller checking only the general sentinel lets the user through")
+	}
+
+	pending := seedUserAt(t, s.db, uuid.New(), models.VerificationStatusPending)
+	if err := requireVerifiedForMoneyIn(context.Background(), s.db, pending); errors.Is(err, ErrKYCLegalNameMissing) {
+		t.Fatal("an unverified user was given the support refusal; they can verify themselves and must be told to")
+	}
+}
+
+// ─── Money in #4: minting a virtual account (VA mode) ───────────────────────
+
+// A virtual account is a standing pay-in account: AutoCreditFromVA credits
+// whatever lands on it, with or without an open order. Activating one is
+// therefore a money-in entry point, and the gate is unconditional on inbound
+// mode, so an unverified user must not be handed one.
+func TestActivateFiatVA_RefusesUnverifiedUser(t *testing.T) {
+	s := newITTestService(t)
+	s.SetInboundCentral(false, fullCentralAccount())
+	// Provisioning wired, so the refusal is proven to be the gate and not the
+	// not-configured early return. The gate runs before any provider call.
+	s.SetFlutterwaveClient(NewFlutterwaveClient("", "", "test-id", "test-secret"))
+
+	ids := []uuid.UUID{uuid.New()} // no user row at all
+	for _, status := range unverifiedStatuses {
+		ids = append(ids, seedUserAt(t, s.db, uuid.New(), status))
+	}
+	ids = append(ids, seedVerifiedWithoutLegalName(t, s.db, ""))
+
+	for _, id := range ids {
+		user := &models.User{ID: id, Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+		_, err := s.ActivateFiatVA(context.Background(), user, "BVN", "12345678901")
+		if !errors.Is(err, ErrKYCVerificationRequired) {
+			t.Fatalf("user %s: ActivateFiatVA err = %v, want ErrKYCVerificationRequired", id, err)
+		}
+		var n int64
+		s.db.Model(&models.FiatVirtualAccount{}).Where("user_id = ?", id).Count(&n)
+		if n != 0 {
+			t.Fatalf("user %s: %d virtual account(s) written despite the refusal", id, n)
+		}
+	}
+}
+
+// Under central inbound the retirement answer must still win: that user has
+// no VA to activate whatever their status, and 410 is the honest reply.
+func TestActivateFiatVA_CentralRetirementOutranksTheGate(t *testing.T) {
+	s := newITTestService(t)
+	s.SetInboundCentral(true, fullCentralAccount())
+	id := seedUserAt(t, s.db, uuid.New(), models.VerificationStatusPending)
+	user := &models.User{ID: id, Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+
+	if _, err := s.ActivateFiatVA(context.Background(), user, "BVN", "12345678901"); !errors.Is(err, ErrITVARetired) {
+		t.Fatalf("ActivateFiatVA err = %v, want ErrITVARetired", err)
+	}
+}

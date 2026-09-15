@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -139,5 +142,90 @@ func TestP2PMapServiceError_KYCRefusalIs403(t *testing.T) {
 	}
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+func seedHandlerNamelessVerified(t *testing.T, db *gorm.DB) *models.User {
+	t.Helper()
+	u := &models.User{ID: uuid.New(), Name: "JOHN DOE", WalletAddress: "0xWALLET",
+		VerificationStatus: models.VerificationStatusVerified}
+	if err := db.Exec(
+		`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, '')`,
+		u.ID, u.Name, u.ID.String()+"@test.com", u.WalletAddress, models.VerificationStatusVerified,
+	).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	return u
+}
+
+// A verified user with no stored legal name cannot re-verify (the KYC session
+// endpoint answers "Already verified"), so the app must not route them to
+// verification. They get their own code.
+func TestITBuy_NamelessVerifiedUserGetsTheSupportCode(t *testing.T) {
+	h, db, it := newITBuyHandler(t)
+	it.SetInboundCentral(true, testCentralAccount())
+	user := seedHandlerNamelessVerified(t, db)
+
+	w := doITBuy(t, h, user, "100000")
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("HTTP %d, want 403 (body=%s)", w.Code, w.Body.String())
+	}
+	if code := decodeITResponse(t, w)["code"]; code != "kyc_legal_name_missing" {
+		t.Fatalf("code = %v, want kyc_legal_name_missing (body=%s)", code, w.Body.String())
+	}
+}
+
+func TestStableMappers_LegalNameMissingIs403WithItsOwnCode(t *testing.T) {
+	if got := stableStatusFor(services.ErrKYCLegalNameMissing); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", got)
+	}
+	if got := stableCodeFor(services.ErrKYCLegalNameMissing); got != "kyc_legal_name_missing" {
+		t.Fatalf("code = %q, want kyc_legal_name_missing", got)
+	}
+}
+
+// Without the machine code the app has nothing to route on and the P2P screen
+// can only echo the message.
+func TestP2PMapServiceError_KYCRefusalCarriesTheCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for err, want := range map[error]string{
+		services.ErrKYCVerificationRequired: "kyc_verification_required",
+		services.ErrKYCLegalNameMissing:     "kyc_legal_name_missing",
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		mapServiceError(c, err)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%v: status = %d, want 403", err, w.Code)
+		}
+		if code := decodeITResponse(t, w)["code"]; code != want {
+			t.Fatalf("%v: code = %v, want %s (body=%s)", err, code, want, w.Body.String())
+		}
+	}
+}
+
+// VA mode, provisioning wired: an unverified user asking for a standing pay-in
+// account is refused with the routable code, not handed a Flutterwave call.
+func TestActivateVA_UnverifiedUserIsRefusedWithTheKYCCode(t *testing.T) {
+	h, db, it := newITBuyHandler(t)
+	it.SetFlutterwaveClient(services.NewFlutterwaveClient("", "", "test-id", "test-secret"))
+	it.SetInboundCentral(false, testCentralAccount())
+	user := seedHandlerUserAt(t, db, models.VerificationStatusPending)
+	_ = h.it.AcceptITAgreement(context.Background(), user.ID, "", "")
+
+	b, _ := json.Marshal(map[string]any{"idType": "BVN", "idNumber": "12345678901"})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/it/va/activate", bytes.NewReader(b))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", user)
+	h.ActivateVA(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("HTTP %d, want 403 (body=%s)", w.Code, w.Body.String())
+	}
+	if code := decodeITResponse(t, w)["code"]; code != "kyc_verification_required" {
+		t.Fatalf("code = %v, want kyc_verification_required (body=%s)", code, w.Body.String())
 	}
 }
