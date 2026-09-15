@@ -254,6 +254,25 @@ type Config struct {
 	RelayerBalanceFloorWei string // refuse to relay below this native balance
 	RelayerMinSponsored    string // smallest amount worth sponsoring (base units)
 
+	// Ramp gas sponsorship — Paycrest sells pay no gas on these chains.
+	// Dormant unless RAMP_GAS_SPONSORSHIP=true AND RAMP_SPONSOR_PRIVATE_KEY is set.
+	RampGasSponsorshipEnabled bool
+	RampSponsorPrivateKey     string   // MUST differ from relayer/IT operator/PM release keys
+	RampSponsorChains         []string // chain keys
+	// RampSponsorDailyGasBudget is gas units per UTC day, per chain. At ~120k
+	// gas per relay the old 50M default capped each chain at ~416 sponsored
+	// sales a day. It is a backstop against a runaway bug, not a spend control:
+	// the balance floor and float alert are what protect the money.
+	RampSponsorDailyGasBudget string
+	// RampSponsorTopUpUnusedDailyCap is how many gas top-ups a user may leave
+	// unused (their sell order expired, was cancelled or failed with nothing
+	// paid) in a rolling 24h before further top-ups are refused. Top-ups that
+	// led to a deposit never count, so users completing real sales are never
+	// capped. Ramp lanes have no per-user hourly window.
+	RampSponsorTopUpUnusedDailyCap int
+	RampSponsorBalanceFloorWei     map[string]string // chain -> wei; sponsoring stops below this
+	RampSponsorTopUpMaxWei         map[string]string // chain -> wei; largest single top-up
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -624,6 +643,35 @@ func Load() *Config {
 	cfg.RelayerDailyGasBudget = strings.TrimSpace(getEnv("RELAYER_DAILY_GAS_BUDGET", "200000000"))
 	cfg.RelayerBalanceFloorWei = strings.TrimSpace(getEnv("RELAYER_BALANCE_FLOOR_WEI", "1000000000000000000")) // 1 S
 	cfg.RelayerMinSponsored = strings.TrimSpace(getEnv("RELAYER_MIN_SPONSORED", "0"))
+
+	cfg.RampGasSponsorshipEnabled = getEnvBool("RAMP_GAS_SPONSORSHIP", false)
+	cfg.RampSponsorPrivateKey = strings.TrimSpace(getEnv("RAMP_SPONSOR_PRIVATE_KEY", ""))
+	cfg.RampSponsorChains = nil
+	for _, chain := range strings.Split(getEnv("RAMP_SPONSOR_CHAINS", "base,arbitrum,polygon,bsc"), ",") {
+		if chain = strings.ToLower(strings.TrimSpace(chain)); chain != "" {
+			cfg.RampSponsorChains = append(cfg.RampSponsorChains, chain)
+		}
+	}
+	cfg.RampSponsorDailyGasBudget = strings.TrimSpace(getEnv("RAMP_SPONSOR_DAILY_GAS_BUDGET", "500000000"))
+	cfg.RampSponsorTopUpUnusedDailyCap = int(getEnvInt64("RAMP_SPONSOR_TOPUP_UNUSED_DAILY_CAP", 2))
+	rampFloorDefaults := map[string]string{
+		"base": "2000000000000000", "arbitrum": "2000000000000000", // 0.002 ETH
+		"polygon": "5000000000000000000", // 5 POL
+		"bsc":     "10000000000000000",   // 0.01 BNB
+	}
+	rampTopUpMaxDefaults := map[string]string{
+		"base": "50000000000000", "arbitrum": "50000000000000", // 0.00005 ETH
+		"polygon": "500000000000000000", // 0.5 POL
+		"bsc":     "500000000000000",    // 0.0005 BNB
+	}
+	cfg.RampSponsorBalanceFloorWei = map[string]string{}
+	cfg.RampSponsorTopUpMaxWei = map[string]string{}
+	for _, chain := range cfg.RampSponsorChains {
+		up := strings.ToUpper(chain)
+		cfg.RampSponsorBalanceFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_BALANCE_FLOOR_WEI_"+up, rampFloorDefaults[chain]))
+		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
+	}
+
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
 	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))

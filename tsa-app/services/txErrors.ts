@@ -7,6 +7,10 @@
 //
 // Pure + framework-free: returns the decoded amounts as base-unit strings; the
 // caller formats them with the right per-chain decimals and writes the copy.
+//
+// Sibling module: submitErrors.ts turns a broadcast failure into the sentence a
+// user reads. This one answers the narrower question of what a contract's
+// revert payload actually said. Decode here, phrase there.
 
 export type RevertInfo =
   // OZ ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed)

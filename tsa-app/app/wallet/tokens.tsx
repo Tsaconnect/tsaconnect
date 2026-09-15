@@ -13,7 +13,7 @@
 // from token/chain config data, not the design tokens, so they stay as-is.
 import { router } from 'expo-router';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { View, FlatList, Image, RefreshControl } from 'react-native';
+import { View, FlatList, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
@@ -25,6 +25,7 @@ import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
 import { useTokens } from '@/hooks/useTokens';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import { useNetwork } from '@/hooks/useNetwork';
 import { useTheme } from '@/theme';
 import {
@@ -62,7 +63,7 @@ function cacheKey(address: string, network: string): string {
 }
 
 export default function AllTokensScreen() {
-  const { colors, spacing, radius } = useTheme();
+  const { colors, spacing } = useTheme();
   const { tokenList, customTokens } = useTokens();
   const { network } = useNetwork();
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -215,6 +216,7 @@ export default function AllTokensScreen() {
           balance,
           usdValue: Number.isFinite(t.usdValue) ? t.usdValue : 0,
           iconColor: '#888',
+          iconUrl: t.logoUrl,
           chainKey,
           chainName: chain.name,
           isNative: false,
@@ -435,25 +437,14 @@ export default function AllTokensScreen() {
         borderBottomColor: colors.hairline,
       }}
     >
-      <View
-        style={{
-          width: 40,
-          height: 40,
-          borderRadius: radius.pill,
-          justifyContent: 'center',
-          alignItems: 'center',
-          marginRight: spacing.md,
-          // Per-token brand tint comes from token/chain config data.
-          backgroundColor: item.iconColor + '20',
-        }}
-      >
-        {item.iconUrl ? (
-          <Image source={{ uri: item.iconUrl }} style={{ width: 24, height: 24, borderRadius: 12 }} />
-        ) : (
-          <Text variant="bodyMed" weight="700" style={{ color: item.iconColor }}>
-            {item.symbol.charAt(0)}
-          </Text>
-        )}
+      <View style={{ marginRight: spacing.md }}>
+        <TokenAvatar
+          symbol={item.symbol}
+          iconUrl={item.iconUrl}
+          iconColor={item.iconColor}
+          curated={!item.discovered && !item.imported}
+          size={40}
+        />
       </View>
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>

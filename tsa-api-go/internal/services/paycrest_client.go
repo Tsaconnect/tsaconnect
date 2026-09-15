@@ -296,8 +296,8 @@ func (c *PaycrestClient) MarketRate(ctx context.Context, fiat, side string) (flo
 		if strings.EqualFold(side, "sell") {
 			raw = x.MarketSellRate
 		}
-		v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-		if err != nil || v <= 0 {
+		v, ok := parsePositiveDecimal(raw)
+		if !ok {
 			return 0, fmt.Errorf("paycrest market rate: unusable %s rate %q", fiat, raw)
 		}
 		return v, nil
@@ -417,26 +417,27 @@ type PaycrestProviderAccount struct {
 // state. Treat AmountPaid=="0" on an expired order as an operator alarm, not
 // a normal outcome.
 type PaycrestOrder struct {
-	ID              string                   `json:"id"`
-	Status          string                   `json:"status"`
-	Direction       string                   `json:"direction"`
-	OrderType       string                   `json:"orderType"`
-	Currency        string                   `json:"currency"`
-	Amount          string                   `json:"amount"`
-	AmountInUSD     string                   `json:"amountInUsd"`
-	AmountPaid      string                   `json:"amountPaid"`
-	AmountReturned  string                   `json:"amountReturned"`
-	PercentSettled  string                   `json:"percentSettled"`
-	Rate            string                   `json:"rate"`
-	SenderFee       string                   `json:"senderFee"`
-	TransactionFee  string                   `json:"transactionFee"`
-	Reference       string                   `json:"reference"`
-	CreatedAt       string                   `json:"createdAt"`
-	UpdatedAt       string                   `json:"updatedAt"`
-	ProviderAccount *PaycrestProviderAccount `json:"providerAccount"`
-	Source          json.RawMessage          `json:"source"`
-	Destination     json.RawMessage          `json:"destination"`
-	TransactionLogs []PaycrestTxLog          `json:"transactionLogs"`
+	ID               string                   `json:"id"`
+	Status           string                   `json:"status"`
+	Direction        string                   `json:"direction"`
+	OrderType        string                   `json:"orderType"`
+	Currency         string                   `json:"currency"`
+	Amount           string                   `json:"amount"`
+	AmountInUSD      string                   `json:"amountInUsd"`
+	AmountPaid       string                   `json:"amountPaid"`
+	AmountReturned   string                   `json:"amountReturned"`
+	PercentSettled   string                   `json:"percentSettled"`
+	Rate             string                   `json:"rate"`
+	SenderFee        string                   `json:"senderFee"`
+	SenderFeePercent string                   `json:"senderFeePercent"` // what Paycrest applied; the dashboard default when the request omits it
+	TransactionFee   string                   `json:"transactionFee"`
+	Reference        string                   `json:"reference"`
+	CreatedAt        string                   `json:"createdAt"`
+	UpdatedAt        string                   `json:"updatedAt"`
+	ProviderAccount  *PaycrestProviderAccount `json:"providerAccount"`
+	Source           json.RawMessage          `json:"source"`
+	Destination      json.RawMessage          `json:"destination"`
+	TransactionLogs  []PaycrestTxLog          `json:"transactionLogs"`
 }
 
 // PaycrestTxLog is one entry in the order's audit trail. An order carrying

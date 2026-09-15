@@ -298,3 +298,6 @@ export function statusLabel(order: PaycrestOrder): string {
       return 'Cancelled';
   }
 }
+
+/** Shared with gasSponsorship.ts, which lives under the same /paycrest routes. */
+export { request as paycrestRequest };

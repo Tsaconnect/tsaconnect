@@ -16,8 +16,10 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 
 const mockSignTransaction = jest.fn();
+const mockSignTypedData = jest.fn();
 jest.mock('../wallet', () => ({
   signTransaction: (...a: any[]) => mockSignTransaction(...a),
+  signTypedData: (...a: any[]) => mockSignTypedData(...a),
   getActiveWallet: async () => '0xfrom',
 }));
 
@@ -32,8 +34,23 @@ jest.mock('../walletApi', () => {
   };
 });
 
+const mockGetOffer = jest.fn();
+const mockRelay = jest.fn();
+const mockTopUp = jest.fn();
+jest.mock('../gasSponsorship', () => {
+  const actual = jest.requireActual('../gasSponsorship');
+  return {
+    ...actual,
+    getSponsorshipOffer: (...a: any[]) => mockGetOffer(...a),
+    relayAuthorization: (...a: any[]) => mockRelay(...a),
+    requestGasTopUp: (...a: any[]) => mockTopUp(...a),
+  };
+});
+
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
-import { checkFunding, sendPaycrestDeposit } from '../paycrestDeposit';
+import { checkFunding, sendPaycrestDeposit, sendSponsoredPaycrestDeposit } from '../paycrestDeposit';
+// eslint-disable-next-line import/first
+import { PaycrestError } from '../paycrestApi';
 // eslint-disable-next-line import/first
 import type { WalletBalanceWithChain } from '../walletApi';
 
@@ -54,6 +71,16 @@ const bal = (
   }) as WalletBalanceWithChain;
 
 const venue = { chain: 'base', token: 'USDC', tokenAmount: 36.4218 };
+
+const prepared = {
+  to: '0xusdc',
+  data: '0xa9059cbb',
+  value: '0',
+  gasLimit: '65000',
+  gasPrice: '1000000000', // 1 gwei → 0.000065 ETH
+  nonce: 7,
+  chainId: 8453,
+};
 
 describe('checkFunding', () => {
   it('passes a route the wallet can cover', () => {
@@ -135,16 +162,6 @@ describe('sendPaycrestDeposit', () => {
     depositAddress: '0xprovider',
   };
 
-  const prepared = {
-    to: '0xusdc',
-    data: '0xa9059cbb',
-    value: '0',
-    gasLimit: '65000',
-    gasPrice: '1000000000', // 1 gwei → 0.000065 ETH
-    nonce: 7,
-    chainId: 8453,
-  };
-
   beforeEach(() => {
     mockPrepare.mockReset();
     mockSubmit.mockReset();
@@ -189,12 +206,46 @@ describe('sendPaycrestDeposit', () => {
     expect(mockPrepare).not.toHaveBeenCalled();
   });
 
-  it('surfaces the server message when the broadcast is rejected', async () => {
+  it('maps a rejected broadcast to display copy, not the RPC\'s own words', async () => {
     mockSubmit.mockResolvedValue({ success: false, message: 'insufficient funds for transfer' });
 
     await expect(sendPaycrestDeposit(order, '0xfrom')).rejects.toThrow(
-      'insufficient funds for transfer',
+      'Not enough native token to pay gas on this chain.',
     );
+  });
+
+  const BASE_FEE_ERR =
+    'Failed to submit transaction to blockchain on arbitrum: failed to send transaction: ' +
+    'max fee per gas less than block base fee: address 0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce, ' +
+    'maxFeePerGas: 20006000 baseFee: 20098000';
+
+  // The screen shows whatever this rejects with, verbatim, in a red box.
+  it('never puts a raw gas-fee rejection in front of the user', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: BASE_FEE_ERR });
+
+    await expect(sendPaycrestDeposit(order, '0xfrom')).rejects.toThrow(
+      'Network fees rose while you were confirming. Please try again.',
+    );
+    // It reached that message via the retry, not on the first rejection.
+    expect(mockSubmit).toHaveBeenCalledTimes(2);
+  });
+
+  // The whole point of the retry: a base-fee tick should cost a round trip, not
+  // the sale. Exactly one transfer must leave the wallet.
+  it('recovers from a stale base fee by re-pricing, sending once', async () => {
+    mockSubmit
+      .mockResolvedValueOnce({ success: false, message: BASE_FEE_ERR })
+      .mockResolvedValueOnce({ success: true, data: { txHash: '0xsecond' } });
+
+    const hash = await sendPaycrestDeposit(order, '0xfrom');
+
+    expect(hash).toBe('0xsecond');
+    expect(mockSubmit).toHaveBeenCalledTimes(2);
+    // Both attempts moved the same amount to the same address.
+    for (const call of mockSubmit.mock.calls) {
+      expect(call[3]).toBe('0xprovider');
+      expect(call[4]).toBe('36.4218');
+    }
   });
 
   it('names the gas shortfall instead of signing a tx that cannot pay for itself', async () => {
@@ -211,5 +262,130 @@ describe('sendPaycrestDeposit', () => {
   it('sends when the native balance is unknown', async () => {
     // Balances failed to load — the same rule as checkFunding: never block.
     await expect(sendPaycrestDeposit(order, '0xfrom', null)).resolves.toBe('0xhash');
+  });
+});
+
+describe('checkFunding with gas sponsorship', () => {
+  it('does not report no-gas on a sponsored route', () => {
+    const result = checkFunding(venue, [bal('base', 'USDC', '50')], { gasSponsored: true });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('still reports a token shortfall on a sponsored route', () => {
+    const result = checkFunding(venue, [bal('base', 'USDC', '1')], { gasSponsored: true });
+    expect(result).toMatchObject({ ok: false, reason: 'short-token' });
+  });
+});
+
+describe('sendSponsoredPaycrestDeposit', () => {
+  const SIGNER = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A';
+  const order = {
+    id: 'order-1',
+    chain: 'base',
+    token: 'USDC',
+    tokenAmount: '36.421800',
+    depositAddress: '0x2222222222222222222222222222222222222222',
+    walletAddress: SIGNER,
+  };
+  const authOffer = {
+    mode: 'authorization' as const,
+    chain: 'base',
+    token: 'USDC',
+    decimals: 6,
+    from: SIGNER,
+    to: order.depositAddress,
+    value: '36421800',
+    validBefore: 1790000000,
+    domain: { name: 'USD Coin', version: '2', chainId: '8453', verifyingContract: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockPrepare.mockResolvedValue({ success: true, data: prepared });
+    mockSubmit.mockResolvedValue({ success: true, data: { txHash: '0xhash' } });
+    mockSignTransaction.mockResolvedValue('0xsigned');
+  });
+
+  it('signs and relays an authorization without sending from the wallet', async () => {
+    mockGetOffer.mockResolvedValue(authOffer);
+    mockSignTypedData.mockResolvedValue('0x' + '00'.repeat(65));
+    mockRelay.mockResolvedValue({ txHash: '0xrelayed', alreadyUsed: false });
+
+    // The device's active wallet can differ from the one the order was made
+    // for; the authorization must be signed by the order's wallet.
+    const ACTIVE_WALLET = '0x4444444444444444444444444444444444444444';
+    await expect(sendSponsoredPaycrestDeposit(order, ACTIVE_WALLET, 0)).resolves.toBe('0xrelayed');
+
+    expect(mockSignTypedData).toHaveBeenCalledWith(
+      expect.objectContaining({ chainId: 8453 }),
+      expect.any(Object),
+      expect.objectContaining({ to: order.depositAddress, value: '36421800' }),
+      order.walletAddress,
+    );
+    const [, body] = mockRelay.mock.calls[0];
+    expect(body).toMatchObject({ validAfter: 0, validBefore: 1790000000 });
+    expect(body.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(mockPrepare).not.toHaveBeenCalled();
+  });
+
+  it('refuses to sign an offer that pays a different address', async () => {
+    mockGetOffer.mockResolvedValue({ ...authOffer, to: '0x3333333333333333333333333333333333333333' });
+    await expect(sendSponsoredPaycrestDeposit(order, SIGNER, 0)).rejects.toThrow(/don't match/);
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+    expect(mockRelay).not.toHaveBeenCalled();
+  });
+
+  it('tops up, then sends from the wallet', async () => {
+    mockGetOffer.mockResolvedValue({ mode: 'topup', chain: 'bsc', token: 'USDT' });
+    mockTopUp.mockResolvedValue({ txHash: '0xgas', amountWei: '1', skipped: false });
+
+    await expect(sendSponsoredPaycrestDeposit(order, SIGNER, 0)).resolves.toBe('0xhash');
+    expect(mockTopUp).toHaveBeenCalledWith('order-1');
+    expect(mockPrepare).toHaveBeenCalled();
+  });
+
+  it('propagates a top-up failure instead of self-paying with no gas', async () => {
+    mockGetOffer.mockResolvedValue({ mode: 'topup', chain: 'bsc', token: 'USDT' });
+    mockTopUp.mockRejectedValue(new Error('Verify your identity'));
+    await expect(sendSponsoredPaycrestDeposit(order, SIGNER, 0)).rejects.toThrow(/Verify/);
+    expect(mockPrepare).not.toHaveBeenCalled();
+  });
+
+  it('falls back to self-pay when the offer cannot be fetched', async () => {
+    mockGetOffer.mockRejectedValue(new PaycrestError('Naira transfers are not available right now.', 404));
+    await expect(sendSponsoredPaycrestDeposit(order, SIGNER, 1)).resolves.toBe('0xhash');
+    expect(mockTopUp).not.toHaveBeenCalled();
+    expect(mockRelay).not.toHaveBeenCalled();
+  });
+
+  it('propagates a non-404 offer error instead of self-paying', async () => {
+    // A 409 here can follow a relay whose response was lost: the deposit is
+    // already on its way, and self-paying would send it a second time.
+    mockGetOffer.mockRejectedValue(
+      new PaycrestError('This order is no longer waiting for your deposit.', 409),
+    );
+    await expect(sendSponsoredPaycrestDeposit(order, SIGNER, 1)).rejects.toThrow(/no longer waiting/);
+    expect(mockPrepare).not.toHaveBeenCalled();
+    expect(mockRelay).not.toHaveBeenCalled();
+  });
+
+  it('reuses the same signed authorization when a relay is retried', async () => {
+    const retryOrder = { ...order, id: 'order-retry' };
+    // Relative to the real clock: reuse depends on the authorization still
+    // having more than a minute left.
+    const validBefore = Math.floor(Date.now() / 1000) + 600;
+    mockGetOffer.mockResolvedValue({ ...authOffer, validBefore });
+    mockSignTypedData.mockResolvedValue('0x' + '11'.repeat(65));
+    mockRelay
+      .mockRejectedValueOnce(new PaycrestError('Already sending. Check the order in a moment.', 409))
+      .mockResolvedValueOnce({ txHash: '0xrelayed', alreadyUsed: false });
+
+    await expect(sendSponsoredPaycrestDeposit(retryOrder, SIGNER, 0)).rejects.toThrow(/Already sending/);
+    await expect(sendSponsoredPaycrestDeposit(retryOrder, SIGNER, 0)).resolves.toBe('0xrelayed');
+
+    expect(mockSignTypedData).toHaveBeenCalledTimes(1);
+    const [[, first], [, second]] = mockRelay.mock.calls;
+    expect(second.nonce).toBe(first.nonce);
+    expect(second.signature).toBe(first.signature);
   });
 });

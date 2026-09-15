@@ -791,11 +791,17 @@ type PreparedClaim struct {
 	Tx *blockchainUnsignedTx `json:"unsignedTx,omitempty"`
 }
 
-// blockchainUnsignedTx mirrors blockchain.UnsignedTx without importing the
-// blockchain package into services (services must not depend on handlers/
-// blockchain transport types). The JSON tags match blockchain.UnsignedTx so the
-// app sees one consistent unsigned-tx shape across P2P, reward-publish, and
-// reward-claim.
+// blockchainUnsignedTx mirrors the addressing half of blockchain.UnsignedTx
+// without importing the blockchain package into services (services must not
+// depend on handlers/blockchain transport types).
+//
+// It is a strict SUBSET, not a matching shape: Nonce, GasPrice and GasLimit are
+// deliberately absent, because the claim is priced and sequenced by the signer
+// against the live RPC (tsa-app/services/rewardsClaim.ts) rather than at
+// prepare time. That is why the app carries a separate adapter for this payload
+// — the JSON tags line up field for field, but the field SET does not, and an
+// earlier version of this comment claimed one consistent shape across P2P,
+// reward-publish and reward-claim when there are three.
 type blockchainUnsignedTx struct {
 	To      string `json:"to"`
 	Value   string `json:"value"`

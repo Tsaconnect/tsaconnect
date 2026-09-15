@@ -141,10 +141,18 @@ func AutoMigrate() error {
 		// current state — who acted, and on what, has to outlive it.
 		&models.InboundCreditAuditLog{},
 		&models.PaycrestOrderRecord{},
+		// One row per transaction we paid gas for on a user's behalf; the
+		// (order_id, kind) unique index is the once-per-order rule.
+		&models.GasSponsorship{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
+		// quote_chain arrives here as a plain additive column: it is nullable
+		// with no backfill because every pre-existing listing has both legs on
+		// `chain`, which is exactly what an empty quote chain means. Nothing is
+		// dropped or rewritten, so the older release still serving during a
+		// deploy keeps working against the same rows.
 		&models.SpotListing{},
 		// OTC listing controls — singleton row of per-direction kill-switches
 		// (buy/sell) + listing metadata for the app's Easyswap "OTC" tab.

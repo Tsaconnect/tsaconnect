@@ -8,7 +8,17 @@
 // (before an order and its countdown exist), the send runs on the deposit
 // screen — and because neither is testable inside a 500-line component.
 import { CHAINS, type ChainKey } from '@/constants/chains';
-import { signTransaction } from './wallet';
+import {
+  buildTransferAuthorization,
+  getSponsorshipOffer,
+  randomAuthorizationNonce,
+  relayAuthorization,
+  requestGasTopUp,
+  type SponsorshipOffer,
+} from './gasSponsorship';
+import { PaycrestError } from './paycrestApi';
+import { txHashOrThrow, TRANSFER_COPY } from './submitErrors';
+import { signTransaction, signTypedData } from './wallet';
 import {
   prepareSendTransaction,
   sendPreparedTransaction,
@@ -38,7 +48,8 @@ export type FundingCheck =
     }
   | { ok: false; reason: 'no-gas'; nativeSymbol: string; chain: string };
 
-const balanceOf = (
+/** A token's balance on one chain; a token the wallet does not hold reads as 0. */
+export const balanceOf = (
   balances: WalletBalanceWithChain[],
   chain: string,
   symbol: string,
@@ -65,6 +76,7 @@ const balanceOf = (
 export function checkFunding(
   route: DepositRoute,
   balances: WalletBalanceWithChain[] | null,
+  opts: { gasSponsored?: boolean } = {},
 ): FundingCheck {
   const chainCfg = CHAINS[route.chain as ChainKey];
   if (!chainCfg) return { ok: false, reason: 'unsupported-chain', chain: route.chain };
@@ -88,7 +100,9 @@ export function checkFunding(
   // send time — this catches the common case (never bridged any gas to this
   // chain) while the user can still pick a different route.
   const nativeSymbol = chainCfg.nativeCurrency.symbol;
-  if (balanceOf(balances, route.chain, nativeSymbol) <= 0) {
+  // A sponsored route needs no gas in the wallet: we relay the transfer or
+  // top up gas at send time.
+  if (!opts.gasSponsored && balanceOf(balances, route.chain, nativeSymbol) <= 0) {
     return { ok: false, reason: 'no-gas', nativeSymbol, chain: route.chain };
   }
 
@@ -112,8 +126,8 @@ export interface DepositOrder {
  * user can act on — the exact cost is not knowable until the tx is prepared.
  * Pass null when balances are unavailable and the send proceeds unguarded.
  *
- * Resolves to the broadcast hash; rejects with the server's own wording, which
- * screens can show verbatim.
+ * Resolves to the broadcast hash; rejects with a message already mapped for
+ * display, which screens can show verbatim.
  */
 export async function sendPaycrestDeposit(
   order: DepositOrder,
@@ -154,10 +168,92 @@ export async function sendPaycrestDeposit(
       submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress),
   });
 
-  if (!res.success || !res.data?.txHash) {
-    throw new Error(res.message || 'Could not broadcast your transfer.');
+  // The backend surfaces the RPC's own words here ("max fee per gas less than
+  // block base fee: address 0x…, maxFeePerGas: …"). Map before it reaches a
+  // screen — every caller of this function shows the message verbatim.
+  return txHashOrThrow(res, TRANSFER_COPY);
+}
+
+/** A created sell order, with what the sponsored path needs to verify it. */
+export interface SponsoredDepositOrder extends DepositOrder {
+  id: string;
+  walletAddress: string;
+}
+
+interface SignedAuthorization {
+  nonce: string;
+  signature: string;
+  validBefore: number;
+}
+
+// A signed authorization can be executed by anyone until validBefore, so a
+// retry must resubmit the same one — the token contract then makes a double
+// spend impossible. An expired one can no longer execute, so minting a new one
+// after expiry is safe. Keyed by order id; cleared once a relay resolves.
+const signedAuthorizations = new Map<string, SignedAuthorization>();
+
+/** Reuse only with time left for the relay to land before validBefore. */
+const AUTHORIZATION_REUSE_MARGIN_MS = 60_000;
+
+/**
+ * Send the deposit, letting the backend cover gas where it can.
+ *
+ * Errors from the relay or top-up propagate rather than falling back to a
+ * self-pay send: the user reaching this path typically holds no gas, so the
+ * fallback would only replace a clear message with a gas failure.
+ */
+export async function sendSponsoredPaycrestDeposit(
+  order: SponsoredDepositOrder,
+  fromAddress: string,
+  nativeBalance?: number | null,
+): Promise<string> {
+  let offer: SponsorshipOffer | null = null;
+  try {
+    offer = await getSponsorshipOffer(order.id);
+  } catch (err) {
+    // Only a 404 means sponsorship is off or the server predates it. Anything
+    // else — a 409 after a relay whose response was lost, a 403, a 5xx — must
+    // reach the user: self-paying then could send the deposit a second time.
+    if (!(err instanceof PaycrestError && err.status === 404)) throw err;
+    offer = null;
   }
-  return res.data.txHash;
+
+  if (offer?.mode === 'authorization') {
+    const cached = signedAuthorizations.get(order.id);
+    const reusable =
+      cached && cached.validBefore * 1000 > Date.now() + AUTHORIZATION_REUSE_MARGIN_MS
+        ? cached
+        : undefined;
+    // Built every time, reuse included: the order/offer safety checks inside
+    // must pass before anything is relayed.
+    const typed = buildTransferAuthorization(offer, order, reusable?.nonce ?? randomAuthorizationNonce());
+    let authorization = reusable;
+    if (!authorization) {
+      // Signed by the order's wallet, not whichever wallet is active: the
+      // message's `from` is the order's, and the server recovers against it.
+      const signature = await signTypedData(typed.domain, typed.types, typed.message, order.walletAddress);
+      authorization = { nonce: typed.message.nonce, signature, validBefore: offer.validBefore as number };
+      signedAuthorizations.set(order.id, authorization);
+    }
+    const res = await relayAuthorization(order.id, {
+      validAfter: 0,
+      validBefore: authorization.validBefore,
+      nonce: authorization.nonce,
+      signature: authorization.signature,
+    });
+    signedAuthorizations.delete(order.id);
+    // alreadyUsed: this same authorization already executed — typically a
+    // retry whose earlier relay landed but whose response was lost. There is
+    // no new hash; the order screen tracks the deposit from here.
+    return res.txHash ?? '';
+  }
+
+  if (offer?.mode === 'topup') {
+    await requestGasTopUp(order.id);
+    return sendPaycrestDeposit(order, fromAddress, null);
+  }
+
+  return sendPaycrestDeposit(order, fromAddress, nativeBalance);
 }
 
 /**

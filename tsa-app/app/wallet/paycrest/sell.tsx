@@ -62,7 +62,18 @@ import {
   type PaycrestVenue,
   type PayoutInstitution,
 } from '@/services/paycrestApi';
-import { checkFunding, sendPaycrestDeposit, type FundingCheck } from '@/services/paycrestDeposit';
+import {
+  balanceOf,
+  checkFunding,
+  sendSponsoredPaycrestDeposit,
+  type FundingCheck,
+} from '@/services/paycrestDeposit';
+import {
+  getSponsoredRoutes,
+  getSponsorshipOffer,
+  isGasSponsored,
+  type SponsorRoute,
+} from '@/services/gasSponsorship';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -85,6 +96,8 @@ const CHAIN_LABELS: Record<string, string> = {
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
+const fmtTokenAmount = (n: number) =>
+  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** The trailing half of a route's sublabel — silent when the route is fine. */
 function routeNote(check: FundingCheck): string {
@@ -212,6 +225,41 @@ export default function PaycrestSellScreen() {
     };
   }, [address]);
 
+  // Routes this user sells on without holding gas. An empty list — sponsorship
+  // off, an older server, a network error — keeps today's gas warning.
+  const [sponsoredRoutes, setSponsoredRoutes] = useState<SponsorRoute[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getSponsoredRoutes().then((routes) => {
+      if (!cancelled) setSponsoredRoutes(routes);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The routes list is a pre-order hint; the per-order offer can still come
+  // back 'none' (domain unverified, too little time left, lane switched off),
+  // and then the send self-pays. Only claim the fee is covered when it is.
+  const [orderSponsored, setOrderSponsored] = useState(false);
+  useEffect(() => {
+    if (!order?.id) {
+      setOrderSponsored(false);
+      return;
+    }
+    let cancelled = false;
+    getSponsorshipOffer(order.id)
+      .then((offer) => {
+        if (!cancelled) setOrderSponsored(offer.mode !== 'none');
+      })
+      .catch(() => {
+        if (!cancelled) setOrderSponsored(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.id]);
+
   // The server returns the list already in the right vocabulary for this
   // currency, so there is nothing to intersect. Outside Nigeria there is no
   // local list to intersect WITH. The previously selected bank is cleared on
@@ -316,9 +364,17 @@ export default function PaycrestSellScreen() {
     }
   }, [venue, address, bank, accountNo, accountName, amount, currencyCode]);
 
+  const venueBalance =
+    venue && balances ? balanceOf(balances, venue.chain, venue.token) : null;
+
   const funding: FundingCheck | null = useMemo(
-    () => (venue ? checkFunding(venue, balances) : null),
-    [venue, balances],
+    () =>
+      venue
+        ? checkFunding(venue, balances, {
+            gasSponsored: isGasSponsored(sponsoredRoutes, venue.chain, venue.token),
+          })
+        : null,
+    [venue, balances, sponsoredRoutes],
   );
 
   /** Hand the order off to the order screen, as "I've sent it" always has. */
@@ -338,7 +394,7 @@ export default function PaycrestSellScreen() {
     setSending(true);
     setSendError(null);
     try {
-      await sendPaycrestDeposit(order, address, nativeBalanceFor(order.chain, balances));
+      await sendSponsoredPaycrestDeposit(order, address, nativeBalanceFor(order.chain, balances));
       goToOrder(order.id);
     } catch (e) {
       // Server and RPC messages here are written to be read — show them.
@@ -389,14 +445,16 @@ export default function PaycrestSellScreen() {
     () =>
       (quote?.venues ?? []).map((v) => {
         const send = `Send ${v.tokenAmount.toFixed(4)} ${v.token}`;
-        const check = checkFunding(v, balances);
+        const check = checkFunding(v, balances, {
+          gasSponsored: isGasSponsored(sponsoredRoutes, v.chain, v.token),
+        });
         // Routes stay selectable when they are short — the user may top up,
         // and the reason is spelled out on the form once one is chosen. The
         // point of the annotation is that the user can see which route they
         // CAN take without poking each one blind.
         return { id: venueId(v), label: venueLabel(v), sublabel: `${send}${routeNote(check)}` };
       }),
-    [quote, balances],
+    [quote, balances, sponsoredRoutes],
   );
 
   const bankItems = useMemo(
@@ -512,6 +570,13 @@ export default function PaycrestSellScreen() {
             />
           )}
 
+          {canSendInApp && orderSponsored && (
+            <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+              Network fee covered — you don&apos;t need{' '}
+              {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
+            </Text>
+          )}
+
           {/* Kept for funds that live somewhere else — an exchange, a hardware
               wallet, MetaMask. Collapsed rather than removed. */}
           {manualOpen || !canSendInApp ? (
@@ -587,6 +652,13 @@ export default function PaycrestSellScreen() {
             symbol={symbol}
             symbolPosition="prefix"
             autoFocus
+            // Hidden while re-quoting: the previous route's figure belongs to
+            // the previous amount.
+            helper={
+              venue && !quoting
+                ? `≈ ${fmtTokenAmount(venue.tokenAmount)} ${venue.token}`
+                : undefined
+            }
           />
 
           {quoting && (
@@ -607,12 +679,26 @@ export default function PaycrestSellScreen() {
           )}
 
           {quote && quote.venues.length > 0 && (
-            <SelectRow
-              label="You send"
-              value={venue ? venueLabel(venue) : undefined}
-              placeholder="Choose a network"
-              onPress={() => setRouteOpen(true)}
-            />
+            <View style={{ gap: spacing.xs }}>
+              <SelectRow
+                label="You send"
+                value={venue ? venueLabel(venue) : undefined}
+                placeholder="Choose a network"
+                onPress={() => setRouteOpen(true)}
+              />
+              {/* Unknown balances show nothing rather than a misleading 0. */}
+              {venue && venueBalance !== null && (
+                <Text
+                  variant="caption"
+                  style={{
+                    color: venueBalance < venue.tokenAmount ? colors.warning : colors.textMuted,
+                    textAlign: 'right',
+                  }}
+                >
+                  Balance: {fmtTokenAmount(venueBalance)} {venue.token}
+                </Text>
+              )}
+            </View>
           )}
 
           <SelectRow

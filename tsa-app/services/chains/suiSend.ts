@@ -2,6 +2,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
+import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../submitErrors';
 import { deriveSuiPrivateKey, deriveSuiPublicKey } from './derivation';
 import { signEd25519Message } from './sign';
 
@@ -76,9 +77,15 @@ export async function prepareSui(params: SendSuiParams): Promise<SuiPrepared> {
   const json = await readJson(res);
   if (!res.ok) {
     // 402 carries the friendly gas-preflight note in `message`.
-    throw new Error(json?.message || `prepare-tx failed (${res.status})`);
+    throw new Error(
+      json?.message
+        ? mapSubmitError(json.message, TRANSFER_COPY)
+        : `prepare-tx failed (${res.status})`,
+    );
   }
-  if (!json?.data?.prepared) throw new Error(json?.message || 'prepare failed');
+  if (!json?.data?.prepared) {
+    throw new Error(json?.message ? mapSubmitError(json.message, TRANSFER_COPY) : 'prepare failed');
+  }
   return { prepared: json.data.prepared, fee: json.data.fee };
 }
 
@@ -129,10 +136,14 @@ export async function broadcastSui(
     }),
   });
   const json = await readJson(res);
-  if (!res.ok || !json?.data?.txHash) {
-    throw new Error(json?.message || `submit-tx failed (${res.status})`);
-  }
-  return { txHash: json.data.txHash };
+  // Same mapping as every EVM send: the server relays the node's own words, and
+  // whatever this throws is rendered verbatim on the failure screen.
+  return {
+    txHash: txHashOrThrow(
+      { success: res.ok, message: json?.message || `submit-tx failed (${res.status})`, data: json?.data },
+      TRANSFER_COPY,
+    ),
+  };
 }
 
 /** Prepare → sign → submit a Sui transfer in one call. */

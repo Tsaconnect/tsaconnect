@@ -38,11 +38,11 @@ import {
   Icon,
   PickerSheet,
   PressableScale,
-  Spinner,
-  SummaryCard,
-  SummaryRow,
+  Skeleton,
   Text,
 } from '@/components/ui';
+import ITActivityRow, { ACTIVITY_DIVIDER_INSET } from '@/components/it/ITActivityRow';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import CurrencySelector from '@/components/currency/CurrencySelector';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
 import {
@@ -55,16 +55,20 @@ import {
   type ITIntent,
   type ITRate,
 } from '@/services/itApi';
-import {
-  listOrders as listPaycrestOrders,
-  statusLabel as paycrestStatusLabel,
-  type PaycrestOrder,
-} from '@/services/paycrestApi';
+import { listOrders as listPaycrestOrders, type PaycrestOrder } from '@/services/paycrestApi';
 import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
+import { useFiatSymbol } from '@/hooks/useFiatSymbol';
 import { ngnToUsd } from '@/utils/currencyDisplay';
-import { stableRowActions } from '@/utils/rampRow';
+import { mcgpRowActions, stableRowActions } from '@/utils/rampRow';
+import { buildITActivity } from '@/utils/itActivity';
+
+/** Rows on the hub. The rest are one tap away on the activity screen. */
+const RECENT_LIMIT = 5;
+
+/** Asset-row icon edge; the row divider's inset lines up with it. */
+const TOKEN_AVATAR_SIZE = 40;
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -82,81 +86,8 @@ const fmtNairaPerMcgp = (kobo?: string) => {
     return '0';
   }
 };
-const fmtNaira = (kobo?: string) => {
-  try {
-    return (Number(kobo || '0') / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
-  } catch {
-    return '0';
-  }
-};
 const fmtToken = (n: number) =>
   n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 4 : 6 });
-
-function itStatusLabel(status: string, direction: string): string {
-  switch (status) {
-    case 'pending_payment':
-      return 'Awaiting transfer';
-    case 'processing':
-      return 'Processing';
-    case 'credited':
-    case 'settled':
-      return 'Complete';
-    case 'debited':
-      return 'Payout in progress';
-    case 'awaiting_rate':
-      return 'Awaiting rate';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    case 'reversed':
-      return 'Reversed';
-    default:
-      return status || (direction === 'buy' ? 'Buy' : 'Sell');
-  }
-}
-
-type Activity = {
-  key: string;
-  title: string;
-  status: string;
-  at: string;
-  onPress: () => void;
-};
-
-function itActivity(i: ITIntent): Activity {
-  // A stablecoin intent carries asset/assetAmount and leaves mcgpAmount empty.
-  // Formatting every sell as MCGP rendered those as "Sell · 0 MCGP".
-  const asset = i.asset && i.asset !== 'MCGP' ? i.asset : null;
-  const amt =
-    i.direction === 'buy'
-      ? `₦${fmtNaira(i.ngnKobo)}`
-      : asset
-        ? `${i.assetAmount ?? '—'} ${asset}`
-        : `${fmtMcgp(i.mcgpAmount)} MCGP`;
-  return {
-    key: `it-${i.id}`,
-    title: `${i.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}`,
-    status: itStatusLabel(i.status, i.direction),
-    at: i.createdAt,
-    onPress: () => router.push(`/wallet/it/intent/${i.id}`),
-  };
-}
-
-function paycrestActivity(o: PaycrestOrder): Activity {
-  const amt = o.direction === 'buy' ? `₦${o.amount}` : `${o.tokenAmount ?? o.amount} ${o.token}`;
-  return {
-    key: `pc-${o.id}`,
-    // Name the asset on a buy too, or "Buy · ₦1,000" is indistinguishable from
-    // an MCGP purchase sitting next to it in the same list.
-    title: `${o.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}${
-      o.direction === 'buy' ? ` ${o.token}` : ''
-    }`,
-    status: paycrestStatusLabel(o),
-    at: o.createdAt,
-    onPress: () => router.push(`/wallet/paycrest/order/${o.id}` as never),
-  };
-}
 
 /** One row of the asset list. */
 type AssetRow = {
@@ -176,7 +107,8 @@ type AssetRow = {
 export default function ITHub() {
   const { colors, spacing } = useTheme();
   const { formatPrice, allRates } = useCurrency();
-  const { address } = useSignableWallet();
+  const symbolFor = useFiatSymbol();
+  const { address, ready: walletReady } = useSignableWallet();
 
   const [bal, setBal] = useState<ITBalance | null>(null);
   const [rate, setRate] = useState<ITRate | null>(null);
@@ -264,10 +196,21 @@ export default function ITHub() {
   const legs = useMemo(() => rampLegsFor(currencies, code), [currencies, code]);
 
   const assets: AssetRow[] = useMemo(() => {
+    // Until the wallet check resolves, no row knows its balance or what it may
+    // offer. Treating that as "no wallet" flashed "Connect a wallet to trade"
+    // at users who have one.
+    if (!walletReady) {
+      return [
+        { token: 'MCGP', balance: null, balanceNote: '', rateLine: mcgpRateLine },
+        { token: 'USDC', balance: null, balanceNote: '' },
+        { token: 'USDT', balance: null, balanceNote: '' },
+      ];
+    }
+
     const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
       const base: AssetRow = {
         token,
-        balance: loading && !address ? null : fmtToken(stable[token] ?? 0),
+        balance: address && loading ? null : fmtToken(stable[token] ?? 0),
         balanceNote: address ? 'in your wallet' : 'connect a wallet',
       };
       // What this row may offer, and why not when it may not — see
@@ -294,41 +237,35 @@ export default function ITHub() {
         onSell: actions.sell ? () => router.push(route('sell') as never) : undefined,
       };
     };
-    // MCGP's own buy/sell screens are NGN-only — buy.tsx offers a single
-    // payment currency and sell.tsx raises the intent with Currency "NGN" —
-    // and neither is handed `code`. So the row says so rather than opening a
-    // naira form under another currency's name. Today the registry serves
-    // only NGN, so this never fires; it fires the day a second ramp currency
-    // is switched on before these screens are currency-aware.
+    // MCGP needs a wallet this device can sign for, like the stablecoins, and
+    // its buy/sell screens are NGN-only — see mcgpRowActions. Without a wallet
+    // the balance reads 0 rather than the registered wallet's balance, which
+    // this device holds no key to spend.
+    const mcgpActions = mcgpRowActions({ currency: code, hasWallet: !!address });
     const mcgpRow: AssetRow = {
       token: 'MCGP',
-      balance: loading ? null : fmtMcgp(spendable),
-      balanceNote: 'spendable',
+      balance: address && loading ? null : fmtMcgp(address ? spendable : '0'),
+      balanceNote: address ? 'spendable' : 'connect a wallet',
       rateLine: mcgpRateLine,
     };
     return [
-      code === 'NGN'
-        ? {
+      mcgpActions.unavailable
+        ? { ...mcgpRow, unavailable: mcgpActions.unavailable }
+        : {
             ...mcgpRow,
             onBuy: () => router.push('/wallet/it/buy'),
             onSell: () => router.push('/wallet/it/sell'),
-          }
-        : { ...mcgpRow, unavailable: `Not available in ${code}` },
+          },
       stableRow('USDC'),
       stableRow('USDT'),
     ];
-  }, [loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
+  }, [walletReady, loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
 
-  const recent = useMemo(() => {
-    const rows = [
-      ...intents.filter((i) => i.status !== 'cancelled').map(itActivity),
-      ...orders.map(paycrestActivity),
-    ];
-    // Newest first across both systems; an undated row sorts last rather than
-    // jumping to the top on a bad parse.
-    rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
-    return rows.slice(0, 8);
-  }, [intents, orders]);
+  const activity = useMemo(
+    () => buildITActivity(intents, orders, symbolFor, { hideCancelledIntents: true }),
+    [intents, orders, symbolFor],
+  );
+  const recent = activity.slice(0, RECENT_LIMIT);
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
@@ -367,37 +304,41 @@ export default function ITHub() {
           </Text>
         ) : null}
 
-        {/* One list, so no asset reads as an afterthought. Balance is the
-            anchor on each row; the actions sit under it rather than competing
-            with it for the eye. */}
+        {/* One list, so no asset reads as an afterthought. The logo names the
+            asset, the balance is the anchor, and the actions sit to the right
+            where the thumb already is. */}
         <Card>
           {assets.map((a, idx) => (
             <View key={a.token}>
-              {idx > 0 ? <Divider spacing="md" /> : null}
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'flex-start',
-                  justifyContent: 'space-between',
-                  gap: spacing.md,
-                }}
-              >
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+              {idx > 0 ? <Divider spacing="md" inset={TOKEN_AVATAR_SIZE + spacing.md} /> : null}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <TokenAvatar symbol={a.token} size={TOKEN_AVATAR_SIZE} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text variant="caption" weight="600" style={{ color: colors.textSecondary }}>
                     {a.token}
                   </Text>
-                  <Text
-                    variant="title3"
-                    weight="700"
-                    numeric
-                    style={{ color: colors.textPrimary }}
-                  >
-                    {a.balance ?? '—'}
-                  </Text>
-                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                  {a.balance === null ? (
+                    <Skeleton width={96} height={22} style={{ marginVertical: 2 }} />
+                  ) : (
+                    <Text
+                      variant="title3"
+                      weight="700"
+                      numeric
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      style={{ color: colors.textPrimary }}
+                    >
+                      {a.balance}
+                    </Text>
+                  )}
+                  <Text variant="caption" numberOfLines={1} style={{ color: colors.textMuted }}>
                     {a.balanceNote}
-                    {a.rateLine ? ` · ${a.rateLine}` : ''}
                   </Text>
+                  {a.rateLine ? (
+                    <Text variant="caption" numberOfLines={1} style={{ color: colors.textMuted }}>
+                      {a.rateLine}
+                    </Text>
+                  ) : null}
                 </View>
                 {a.unavailable ? (
                   <Text
@@ -410,7 +351,7 @@ export default function ITHub() {
                   // Only the directions that actually trade get a button. A
                   // disabled-looking Buy would still read as "try me"; absence
                   // is the honest rendering of a leg no provider quotes.
-                  <View style={{ flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.xs }}>
+                  <View style={{ flexDirection: 'row', gap: spacing.sm }}>
                     {a.onBuy ? <Button title="Buy" size="sm" onPress={a.onBuy} /> : null}
                     {a.onSell ? (
                       <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
@@ -422,37 +363,59 @@ export default function ITHub() {
           ))}
         </Card>
 
-        {recent.length > 0 ? (
-          <Card>
-            <Text
-              variant="title3"
-              weight="700"
-              style={{ color: colors.textPrimary, marginBottom: spacing.sm }}
-            >
+        <Card>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: spacing.xs,
+            }}
+          >
+            <Text variant="title3" weight="700" style={{ color: colors.textPrimary }}>
               Recent activity
             </Text>
-            <SummaryCard>
-              {recent.map((row, idx) => (
-                <View key={row.key}>
-                  {idx > 0 ? <Divider spacing="xs" /> : null}
-                  <PressableScale
-                    onPress={row.onPress}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${row.title}, ${row.status}`}
-                  >
-                    <SummaryRow label={row.title} value={row.status} />
-                  </PressableScale>
-                </View>
-              ))}
-            </SummaryCard>
-          </Card>
-        ) : !loading ? (
-          <Text variant="bodySm" style={{ color: colors.textMuted }}>
-            No orders yet. Buying opens an order you can track until payment clears.
-          </Text>
-        ) : null}
+            {/* Offered whenever the full list has anything the hub does not
+                show — including cancelled buys, which the hub hides. */}
+            {intents.length + orders.length > 0 ? (
+              <PressableScale
+                onPress={() => router.push('/wallet/it/activity' as never)}
+                accessibilityRole="button"
+                accessibilityLabel="View all activity"
+                hitSlop={8}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}
+              >
+                <Text variant="bodySm" weight="600" style={{ color: colors.accent }}>
+                  View all
+                </Text>
+                <Icon name="chevronRight" size={14} color={colors.accent} />
+              </PressableScale>
+            ) : null}
+          </View>
 
-        {loading ? <Spinner /> : null}
+          {loading && recent.length === 0 ? (
+            <View style={{ gap: spacing.md, paddingVertical: spacing.sm }}>
+              {[0, 1, 2].map((k) => (
+                <Skeleton key={k} height={40} radius="md" />
+              ))}
+            </View>
+          ) : recent.length > 0 ? (
+            recent.map((row, idx) => (
+              <View key={row.key}>
+                {idx > 0 ? <Divider inset={ACTIVITY_DIVIDER_INSET} /> : null}
+                <ITActivityRow item={row} />
+              </View>
+            ))
+          ) : (
+            <Text variant="bodySm" style={{ color: colors.textMuted, paddingVertical: spacing.sm }}>
+              {/* Cancelled buys are hidden here but still exist behind View all,
+                  so "no orders" would contradict the link above. */}
+              {intents.length + orders.length > 0
+                ? 'No active orders.'
+                : 'No orders yet. Buying opens an order you can track until payment clears.'}
+            </Text>
+          )}
+        </Card>
       </ScrollView>
 
       <PickerSheet

@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
-  Modal, Pressable, Image, Linking, StyleSheet, TextInput as RNTextInput,
+  Modal, Pressable, Linking, StyleSheet, TextInput as RNTextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, {
@@ -26,14 +26,20 @@ import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
+  getLiFiToken, getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
   type SwapDeliveryStatus,
   isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import { fundedQuoteChain } from '@/services/quoteChain';
 import { missingAddressNotice } from '@/utils/swapAddresses';
+import { resolveLiFiChainId } from '@/utils/spotChains';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
+// LiFi tokens are identified by contract; only one we vouch for borrows a
+// registry logo when LiFi sends none.
+import { isKnownContract } from '@/utils/tokenLogo';
 import { useTheme } from '@/theme';
 import {
   Button,
@@ -49,26 +55,90 @@ import {
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
+/**
+ * Both legs of a pair, named the way a Spot listing names them: a symbol plus
+ * OUR chain key ('btc', 'bsc'). Cross-chain Spot listings arrive here because
+ * their legs live on two chains and the same-chain desk cannot express that —
+ * see services/spotTrade.
+ */
+export interface AllSwapPreselection {
+  fromSymbol?: string;
+  fromChain?: string;
+  toSymbol?: string;
+  toChain?: string;
+  /** The leg to move onto the chain where the user holds its token. That leg's
+   *  chain above is then only the fallback — see utils/quoteChain. */
+  fundedLeg?: 'from' | 'to';
+}
+
+interface AllSwapScreenProps {
+  /** Absent for the plain swap entry, which must behave exactly as before. */
+  preselect?: AllSwapPreselection;
+}
+
+/**
+ * The LiFi token for a symbol on one chain.
+ *
+ * Same two-step shape as the Spot desk's lookup (app/wallet/spot-trade) and for
+ * the same reason: the single-token endpoint takes a symbol and answers small,
+ * while the per-chain list is multi-MB and flaky on mobile — but that list is
+ * the only fallback when LiFi's index does not answer for the symbol. Two
+ * different shapes for the one problem would drift, so this one follows it.
+ *
+ * null means the leg genuinely cannot be selected, which the caller has to SAY:
+ * a screen that keeps waiting on a symbol LiFi dropped never stops waiting.
+ */
+async function resolveLiFiSymbol(chainId: number, symbol: string): Promise<LiFiToken | null> {
+  const wanted = symbol.trim().toUpperCase();
+  if (!wanted) return null;
+  // The exact symbol first, and aliases only on the chain they were checked
+  // for: Optimism lists both USDT and USDT0, and they are different contracts.
+  const candidates = [wanted, ...(LIFI_SYMBOL_ALIASES[chainId]?.[wanted] ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const token = await getLiFiToken(chainId, candidate);
+      if (token) return token;
+    } catch {
+      /* try the next spelling, then the list */
+    }
+  }
+  try {
+    const tokens = await getLiFiTokens(chainId);
+    for (const candidate of candidates) {
+      const token = tokens.find(t => t.symbol?.toUpperCase() === candidate);
+      if (token) return token;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Other names LiFi lists a token under, per LiFi chain id. On Arbitrum, Tether
+// exists only as USDT0 — the same contract (0xFd08…Cbb9) our wallet calls USDT
+// — so a lookup for "USDT" there finds nothing (checked 2026-09-14). Keyed by
+// chain because USDT0 elsewhere can be a different contract from USDT.
+const LIFI_SYMBOL_ALIASES: Record<number, Record<string, string[]>> = {
+  42161: { USDT: ['USDT0'] },
+};
+
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
-function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
-  const { colors } = useTheme();
-  if (uri) return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
-  if (!symbol) return null;
-  return (
-    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: size * 0.38 }} weight="700" color="textSecondary">{symbol[0]}</Text>
-    </View>
-  );
-}
-
-export default function AllSwapScreen() {
+export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const { colors, spacing, radius } = useTheme();
   const [fromToken, setFromToken] = useState<LiFiToken | null>(null);
-  const [fromChainId, setFromChainId] = useState(DEFAULT_FROM_CHAIN_ID);
+  // Seeded from the preselection so the token-list, balance and picker effects
+  // never fire once against a default chain the user is not on. An unresolvable
+  // key (Tron, or anything unknown) keeps the default — see the effect below,
+  // which is where that becomes a message instead of a wrong chain.
+  const [fromChainId, setFromChainId] = useState(
+    () => resolveLiFiChainId(preselect?.fromChain) ?? DEFAULT_FROM_CHAIN_ID,
+  );
   const [toToken, setToToken] = useState<LiFiToken | null>(null);
-  const [toChainId, setToChainId] = useState(DEFAULT_TO_CHAIN_ID);
+  const [toChainId, setToChainId] = useState(
+    () => resolveLiFiChainId(preselect?.toChain) ?? DEFAULT_TO_CHAIN_ID,
+  );
   const [fromAmount, setFromAmount] = useState('');
   const [quote, setQuote] = useState<LiFiQuote | null>(null);
   const [quoteStatus, setQuoteStatus] = useState<QuoteStatus>('idle');
@@ -116,6 +186,119 @@ export default function AllSwapScreen() {
       .then(addr => { if (addr) setWalletAddress(addr); })
       .finally(() => setWalletLoading(false));
   }, []);
+
+  // Legs the user has since chosen (or re-chained) themselves. A preselection
+  // resolves over the network, so its answer can land AFTER a tap that already
+  // picked something else — applying it then silently undoes the user's choice.
+  const userChoseLeg = useRef({ from: false, to: false });
+  // Progress of the preselection, deliberately NOT a blocking loading state:
+  // the form renders and accepts input throughout. A token list can be slow,
+  // or never answer, and a screen that waits on one is a spinner with no way
+  // out — the user must always be left on a form they can finish by hand.
+  const [preselecting, setPreselecting] = useState(false);
+  const [preselectNotice, setPreselectNotice] = useState('');
+
+  // Tracks `screen` for the preselection effect, which must consult it without
+  // taking a dependency on it.
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+
+  const wantFromSymbol = preselect?.fromSymbol;
+  const wantFromChain = preselect?.fromChain;
+  const wantToSymbol = preselect?.toSymbol;
+  const wantToChain = preselect?.toChain;
+  const wantFundedLeg = preselect?.fundedLeg;
+
+  useEffect(() => {
+    // Nothing asked for: the screen starts on its defaults, as it always has.
+    if (!wantFromSymbol && !wantToSymbol) return;
+    // Never disturb a swap that is already being signed. The tab stays mounted,
+    // so a listing tapped elsewhere pushes new params into THIS screen
+    // mid-flight. Read through a ref, not the state: depending on `screen`
+    // would re-run this effect on every screen change and wipe the form on the
+    // way to confirm.
+    if (screenRef.current === 'signing') return;
+    let cancelled = false;
+
+    // A new pair invalidates everything priced against the old one, exactly as
+    // picking a token by hand does (see onSelect). Without this the tokens
+    // change while `quote` survives; validate() only checks that A quote
+    // exists, not that it matches these legs, so Review stays enabled and
+    // handleSwap signs the PREVIOUS pair's route under the new pair's name.
+    setFromAmount(''); setQuote(null); setQuoteStatus('idle'); setQuoteError('');
+    // Back to the form: the confirm card renders whatever tokens are current,
+    // so leaving it up would show the new pair over the old quote's terms.
+    setScreen('form');
+    // A different pair in the params is a new instruction — from a listing the
+    // user just tapped — so it outranks the legs they chose for the last one.
+    // This effect only re-runs when those params actually change, which is why
+    // clearing here cannot undo a choice made against the CURRENT request.
+    userChoseLeg.current = { from: false, to: false };
+    const legs = [
+      {
+        side: 'from' as const, symbol: wantFromSymbol, chainKey: wantFromChain,
+        chainId: resolveLiFiChainId(wantFromChain),
+        setChainId: setFromChainId, setToken: setFromToken,
+      },
+      {
+        side: 'to' as const, symbol: wantToSymbol, chainKey: wantToChain,
+        chainId: resolveLiFiChainId(wantToChain),
+        setChainId: setToChainId, setToken: setToToken,
+      },
+    ].filter((leg): leg is typeof leg & { symbol: string } => !!leg.symbol);
+
+    // Chains move first and synchronously. The per-chain token lists, the
+    // balance read and the picker all key off them, so resolving symbols while
+    // they still point at the defaults would fetch the wrong chain's data and
+    // briefly offer the user the wrong chain's tokens.
+    // The token is cleared with the chain, not left for the resolver to
+    // overwrite: if the new leg never resolves, holding the PREVIOUS token
+    // against the NEW chain quotes a different asset under the old symbol,
+    // beneath a notice implying the leg is empty.
+    //
+    // A funded leg is the exception: its chain is not known until the wallet
+    // read answers, and moving it to the fallback first would fetch that
+    // chain's multi-MB token list only to throw it away.
+    legs.forEach((leg) => {
+      if (leg.chainId != null && leg.side !== wantFundedLeg) leg.setChainId(leg.chainId);
+      leg.setToken(null);
+    });
+
+    setPreselectNotice('');
+    setPreselecting(true);
+    (async () => {
+      // Each leg applies the moment its own lookup lands. Waiting for both
+      // would let one chain's slow (or dead) token list hold the other leg
+      // unselected, which is the failure this whole effect exists to avoid.
+      const unresolved = (await Promise.all(legs.map(async (leg) => {
+        // A funded leg moves once the wallet read says where the user actually
+        // holds the token; that read falls back to the leg's own chain.
+        let chainId = leg.chainId;
+        if (leg.side === wantFundedLeg) {
+          const funded = resolveLiFiChainId(await fundedQuoteChain(leg.symbol, leg.chainKey));
+          if (cancelled) return null;
+          if (funded != null && !userChoseLeg.current[leg.side]) {
+            chainId = funded;
+            leg.setChainId(funded);
+          }
+        }
+        const token = chainId == null ? null : await resolveLiFiSymbol(chainId, leg.symbol);
+        if (cancelled) return null;
+        // Checked again AFTER the await, not only before it: the tap that makes
+        // a preselection stale is most likely to land while it is in flight.
+        if (token && !userChoseLeg.current[leg.side]) leg.setToken(token);
+        return token ? null : leg.symbol.toUpperCase();
+      }))).filter((symbol): symbol is string => symbol !== null);
+      if (cancelled) return;
+      setPreselecting(false);
+      // An unresolvable leg is the end of the preselection, not a retry loop:
+      // LiFi may have dropped the token, or the request may have failed, and
+      // either way the user is already on a form that can finish the job.
+      setPreselectNotice(unresolved.length === 0 ? '' : `Couldn’t preselect ${
+        unresolved.join(' and ')} — pick ${unresolved.length > 1 ? 'them' : 'it'} below to continue.`);
+    })();
+    return () => { cancelled = true; };
+  }, [wantFromSymbol, wantFromChain, wantToSymbol, wantToChain, wantFundedLeg]);
 
   useEffect(() => {
     if (!walletAddress) return;
@@ -377,6 +560,9 @@ export default function AllSwapScreen() {
   }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, addressForChain, slippageAuto, slippage, refreshKey]);
 
   const swapDirection = () => {
+    // Both legs are now the user's doing, so an in-flight preselection must
+    // not land on either of them.
+    userChoseLeg.current = { from: true, to: true };
     const [nf, nfc, nt, ntc] = [toToken, toChainId, fromToken, fromChainId];
     setFromToken(nf); setFromChainId(nfc);
     setToToken(nt); setToChainId(ntc);
@@ -561,7 +747,7 @@ export default function AllSwapScreen() {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU PAY</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={40} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name} · {chainName(fromChainId)}</Text>
@@ -585,7 +771,7 @@ export default function AllSwapScreen() {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU RECEIVE</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={40} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name} · {chainName(toChainId)}</Text>
@@ -687,8 +873,9 @@ export default function AllSwapScreen() {
                   borderRadius: radius.xl, maxWidth: '50%',
                 }}
                 onPress={() => setPickerMode('from')}
+                accessibilityLabel="Select token to pay"
               >
-                <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
+                {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{fromToken?.symbol ?? 'Select'}</Text>
                   {fromToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(fromChainId)}</Text>}
@@ -736,8 +923,9 @@ export default function AllSwapScreen() {
                   borderRadius: radius.xl, maxWidth: '50%',
                 }}
                 onPress={() => setPickerMode('to')}
+                accessibilityLabel="Select token to receive"
               >
-                <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
+                {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{toToken?.symbol ?? 'Select'}</Text>
                   {toToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(toChainId)}</Text>}
@@ -755,6 +943,28 @@ export default function AllSwapScreen() {
               }
             </View>
           </Card>
+
+          {/* Preselection progress. Rendered ABOVE the form's own messages and
+              never in place of the form: a listing that cannot be preselected
+              still leaves a usable swap. */}
+          {preselecting && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.md }}>
+              <ActivityIndicator size="small" color={colors.textMuted} />
+              <Text variant="caption" color="textMuted" style={{ flex: 1 }}>Selecting this pair…</Text>
+            </View>
+          )}
+          {!preselecting && !!preselectNotice && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.warningBg, borderWidth: 1, borderColor: colors.warning,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="warning" size={13} color={colors.warning} />
+              <Text variant="caption" style={{ flex: 1, color: colors.warning }}>{preselectNotice}</Text>
+            </View>
+          )}
 
           {/* Quote info / errors */}
           {(quoteStatus === 'quoted' || quoteStatus === 'expired') && quote && (
@@ -846,6 +1056,12 @@ export default function AllSwapScreen() {
 
         <TokenPickerModal
           visible={pickerMode !== null}
+          // Stays mounted while closed on purpose: the picker fetches the LiFi
+          // chain list once per mount and clears its own search/chain/paging
+          // state off `visible`, so unmounting it on close would refetch that
+          // whole list on every open. The fallback exists only to satisfy the
+          // non-nullable prop on that closed render, and says nothing about a
+          // leg being live — `visible` is the only signal that does.
           mode={pickerMode ?? 'from'}
           chainId={pickerMode === 'from' ? fromChainId : toChainId}
           userBalances={balances}
@@ -857,10 +1073,22 @@ export default function AllSwapScreen() {
           onAllChainsSearchChange={handleAllChainsSearchChange}
           tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
           onChainChange={(newChainId) => {
+            // No mode means no leg was ever opened, and an untaken `from`
+            // branch here re-chains `to` — the leg the user was not touching.
+            if (pickerMode === null) return;
+            // Changing a chain is choosing a leg: whatever the preselection is
+            // still fetching for this side is now the wrong chain's token.
+            userChoseLeg.current[pickerMode] = true;
             if (pickerMode === 'from') setFromChainId(newChainId);
             else setToChainId(newChainId);
           }}
           onSelect={(token, chainId) => {
+            // Same absent-leg guard, and it protects more here: a fall-through
+            // would not just write `to`, it would also drop the preselect
+            // notice and wipe an amount the user has already typed.
+            if (pickerMode === null) return;
+            userChoseLeg.current[pickerMode] = true;
+            setPreselectNotice('');
             if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
             else { setToToken(token); setToChainId(chainId); }
             setPickerMode(null);
@@ -1017,7 +1245,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
 
           <Card padding="lg" style={{ width: '100%' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name}</Text>
@@ -1029,7 +1257,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
               <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name}</Text>

@@ -68,6 +68,7 @@ import {
   p2pTokenDecimals,
   ratingsApi,
   tradesApi,
+  unsignedTxToTxLike,
   type P2PDispute,
   type P2PMessage,
   type P2PTrade,
@@ -379,7 +380,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), sellerAddress);
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), sellerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
@@ -415,7 +416,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), callerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
@@ -1214,20 +1215,6 @@ async function pickAndUploadImage(onStage: (s: string) => void): Promise<string 
   });
   if (result.canceled || !result.assets?.[0]) return null;
   return uploadImage(result.assets[0].uri, onStage);
-}
-
-function toTxLike(tx: UnsignedTx) {
-  const ensure0x = (v?: string) =>
-    !v ? undefined : v.startsWith('0x') ? v : `0x${v}`;
-  return {
-    to: tx.to,
-    value: tx.value || '0',
-    data: ensure0x(tx.data),
-    nonce: tx.nonce,
-    gasLimit: tx.gasLimit,
-    gasPrice: tx.gasPrice,
-    chainId: tx.chainId ? Number(tx.chainId) : undefined,
-  };
 }
 
 // A real 32-byte tx hash. The chain reconciler repairs a dropped confirm with a

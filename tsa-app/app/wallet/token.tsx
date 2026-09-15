@@ -12,11 +12,12 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import ActivityFeed from '@/components/activity/ActivityFeed';
-import { View, ScrollView, Dimensions, Image } from 'react-native';
+import { View, ScrollView, Dimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CHAINS, getChainDisplay, isNonEVMChain, type ChainKey, type AnyChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
+import TokenAvatar from '../../components/wallet/TokenAvatar';
 import { getWalletBalances, normalizeWalletBalances, getTokenPriceHistory } from '../../services/walletApi';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
@@ -322,24 +323,14 @@ const TokenDetailScreen: React.FC = () => {
       >
         {/* Identity row + 24h change pill */}
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <View
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: radius.pill,
-              justifyContent: 'center',
-              alignItems: 'center',
-              marginRight: spacing.md,
-              backgroundColor: displayColor + '20',
-            }}
-          >
-            {iconUrl ? (
-              <Image source={{ uri: iconUrl }} style={{ width: 28, height: 28, borderRadius: radius.pill }} />
-            ) : (
-              <Text variant="title3" weight="700" style={{ color: displayColor }}>
-                {symbol?.charAt(0)}
-              </Text>
-            )}
+          <View style={{ marginRight: spacing.md }}>
+            <TokenAvatar
+              symbol={symbol || ''}
+              iconUrl={iconUrl}
+              iconColor={displayColor}
+              curated={!isDiscovered && type !== 'Imported'}
+              size={44}
+            />
           </View>
           <View style={{ flex: 1 }}>
             <Text variant="title3" weight="700">

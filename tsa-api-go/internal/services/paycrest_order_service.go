@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -143,11 +145,55 @@ func NewPaycrestOrderService(db *gorm.DB, pc PaycrestOrderer, quotes *PaycrestQu
 	if db == nil || pc == nil || quotes == nil {
 		return nil
 	}
+	feePercent = strings.TrimSpace(feePercent)
+	if feePercent != "" {
+		if pct, ok := parseSenderFeePercent(feePercent); ok {
+			// Canonical form, so "0.50" compares equal to Paycrest's "0.5".
+			feePercent = strconv.FormatFloat(pct, 'f', -1, 64)
+		} else {
+			log.Printf("[paycrest] ALARM PAYCREST_SENDER_FEE_PERCENT=%q refused (want 0 < p <= %d); orders fall back to the dashboard fee and quotes show none",
+				feePercent, maxSenderFeePercent)
+			feePercent = ""
+		}
+	}
+	feeAddress = strings.TrimSpace(feeAddress)
+	if feeAddress != "" {
+		if addr, ok := validSenderFeeAddress(feeAddress); ok {
+			feeAddress = addr
+		} else {
+			log.Printf("[paycrest] ALARM PAYCREST_SENDER_FEE_ADDRESS=%q refused (not a valid, correctly checksummed EVM address); orders fall back to the dashboard fee address",
+				feeAddress)
+			feeAddress = ""
+		}
+	}
+	// One source for the fee: the quote must price in exactly what the order sends.
+	quotes.SetSenderFeePercent(feePercent)
 	return &PaycrestOrderService{
 		db: db, pc: pc, quotes: quotes, dir: dir,
-		senderFeePercent: strings.TrimSpace(feePercent),
-		senderFeeAddress: strings.TrimSpace(feeAddress),
+		senderFeePercent: feePercent,
+		senderFeeAddress: feeAddress,
 	}
+}
+
+// validSenderFeeAddress checks the address our fee is paid to. Nothing on-chain
+// would ever flag a typo here — every fee would simply land at an address
+// nobody controls — so it is refused at boot instead. A mixed-case address
+// carries an EIP-55 checksum and must match it; the zero address burns the fee.
+func validSenderFeeAddress(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "0x") || !common.IsHexAddress(raw) {
+		return "", false
+	}
+	addr := common.HexToAddress(raw)
+	if addr == (common.Address{}) {
+		return "", false
+	}
+	hex := raw[2:]
+	mixedCase := strings.ToLower(hex) != hex && strings.ToUpper(hex) != hex
+	if mixedCase && raw != addr.Hex() {
+		return "", false
+	}
+	return addr.Hex(), true
 }
 
 // ─── Buy (onramp) ──────────────────────────────────────────────────────────
@@ -187,19 +233,54 @@ type PaycrestBuyRequest struct {
 // transfer a few kobo off the amount the provider is waiting for, and an
 // inexact transfer is exactly what strands a payment.
 func grossDownForSenderFee(requested, feePercent string) (string, bool) {
-	feePercent = strings.TrimSpace(feePercent)
-	if feePercent == "" {
+	pct, ok := parseSenderFeePercent(feePercent)
+	if !ok {
 		return requested, false
 	}
-	pct, err := strconv.ParseFloat(feePercent, 64)
-	if err != nil || pct <= 0 {
-		return requested, false
-	}
-	amt, err := strconv.ParseFloat(strings.TrimSpace(requested), 64)
-	if err != nil || amt <= 0 {
+	amt, ok := parsePositiveDecimal(requested)
+	if !ok {
 		return requested, false
 	}
 	return strconv.FormatFloat(amt/(1+pct/100), 'f', 2, 64), true
+}
+
+// userRate is the rate stored on the order and shown to the user: the
+// provider's rate with the fee Paycrest charged priced in. The provider's own
+// rate stays recoverable from the row's SenderFeePercent.
+func userRate(side, providerRate, feePercent string) string {
+	pct, _ := parseSenderFeePercent(feePercent)
+	rate, _, err := quotedRate(side, providerRate, pct)
+	if err != nil {
+		return providerRate
+	}
+	return rate
+}
+
+// chargedFeePercent is the fee Paycrest reports on the order, falling back to
+// ours when it reports none.
+//
+// A mismatch is an operator alarm, not a rounding note: the quote priced in
+// our percent, so a different charge means the user was shown one amount and
+// paid or received another. It happens when PAYCREST_SENDER_FEE_PERCENT is
+// unset or refused — the request then omits the fee and the dashboard default
+// applies — or when the dashboard changes under a set env var.
+func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref string) string {
+	reported := strings.TrimSpace(order.SenderFeePercent)
+	if reported == "" {
+		return s.senderFeePercent
+	}
+	want, _ := parseSenderFeePercent(s.senderFeePercent)
+	got, ok := parseSenderFeePercent(reported)
+	if !ok || math.Abs(got-want) > 1e-9 {
+		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s configured=%q paycrest_charged=%q — quoted amounts are off for this order",
+			ref, s.senderFeePercent, reported)
+	}
+	if !ok {
+		// Never store what we could not read: the column is varchar(16), and a
+		// failed insert here strands an order that already exists upstream.
+		return s.senderFeePercent
+	}
+	return strconv.FormatFloat(got, 'f', -1, 64)
 }
 
 // CreateBuy prices the chosen venue afresh, opens the order, and returns the
@@ -272,22 +353,24 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, err
 	}
 
+	feePercent := s.chargedFeePercent(order, ref)
 	row := &models.PaycrestOrderRecord{
-		UserID:        req.UserID,
-		Direction:     models.PaycrestDirectionBuy,
-		Status:        models.PaycrestStatusAwaitingPayment,
-		Reference:     ref,
-		PaycrestID:    order.ID,
-		FiatCode:      fiat,
-		FiatAmount:    req.FiatAmount,
-		Token:         venue.Token,
-		ChainKey:      venue.ChainKey,
-		Network:       venue.Network,
-		Rate:          order.Rate,
-		TokenAmount:   order.Amount,
-		ProviderID:    paycrestProviderOf(order, venue),
-		SenderFee:     order.SenderFee,
-		WalletAddress: req.WalletAddress,
+		UserID:           req.UserID,
+		Direction:        models.PaycrestDirectionBuy,
+		Status:           models.PaycrestStatusAwaitingPayment,
+		Reference:        ref,
+		PaycrestID:       order.ID,
+		FiatCode:         fiat,
+		FiatAmount:       req.FiatAmount,
+		Token:            venue.Token,
+		ChainKey:         venue.ChainKey,
+		Network:          venue.Network,
+		Rate:             userRate("buy", order.Rate, feePercent),
+		TokenAmount:      order.Amount,
+		ProviderID:       paycrestProviderOf(order, venue),
+		SenderFee:        order.SenderFee,
+		SenderFeePercent: feePercent,
+		WalletAddress:    req.WalletAddress,
 		// Refund destination is recorded so an operator chasing a stranded
 		// deposit knows where the money was supposed to come back to.
 		PayoutBankCode:    req.RefundBankCode,
@@ -390,7 +473,9 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
 	}
 
-	// Paycrest prices an offramp in token units.
+	// Paycrest prices an offramp in token units. venue.TokenAmount is sized at
+	// the fee-inclusive rate, so the deposit covers our fee and the payout is
+	// still the naira the user entered.
 	tokenAmount := strconv.FormatFloat(venue.TokenAmount, 'f', 6, 64)
 
 	ref := paycrestReference("PCS", req.UserID)
@@ -415,6 +500,7 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		return nil, err
 	}
 
+	feePercent := s.chargedFeePercent(order, ref)
 	row := &models.PaycrestOrderRecord{
 		UserID:            req.UserID,
 		Direction:         models.PaycrestDirectionSell,
@@ -426,10 +512,11 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		Token:             venue.Token,
 		ChainKey:          venue.ChainKey,
 		Network:           venue.Network,
-		Rate:              order.Rate,
+		Rate:              userRate("sell", order.Rate, feePercent),
 		TokenAmount:       tokenAmount,
 		ProviderID:        paycrestProviderOf(order, venue),
 		SenderFee:         order.SenderFee,
+		SenderFeePercent:  feePercent,
 		WalletAddress:     req.WalletAddress,
 		PayoutBankCode:    req.BankCode,
 		PayoutInstitution: payoutInst,

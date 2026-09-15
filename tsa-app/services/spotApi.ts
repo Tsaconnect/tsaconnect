@@ -7,7 +7,11 @@
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
 
-export type SpotRoute = 'mcgp' | 'lifi';
+// 'allswap' is for pairs whose two legs do not share a chain — Bitcoin above
+// all, where LiFi lists exactly one token and so no same-chain pair can exist.
+// Such a pair is only tradeable as a cross-chain route, which the same-chain
+// Spot desk cannot build.
+export type SpotRoute = 'mcgp' | 'lifi' | 'allswap';
 
 // Admin-assigned taxonomy bucket. Computed tabs (Hot/New/Gainers/Losers/
 // Favorites) are derived client-side — see utils/spotTabs.
@@ -18,6 +22,15 @@ export interface SpotListing {
   baseSymbol: string;
   quoteSymbol: string;
   chain: string;
+  // The chain the QUOTE leg lives on, when it is not `chain`. Absent on every
+  // same-chain listing, which is why it stays optional rather than being
+  // backfilled: a missing value means "same chain as the base leg", and that
+  // is the only reading that leaves existing listings meaning what they meant.
+  quoteChain?: string;
+  // True when the admin left the quote chain on auto. The API then still sends
+  // a default `quoteChain` (for apps that predate auto), so this flag — not an
+  // empty quoteChain — is what says the leg should follow the user's balance.
+  quoteChainAuto?: boolean;
   route: SpotRoute;
   logoUrl?: string;
   enabled: boolean;

@@ -942,6 +942,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.GET("/orders/:id", pch.GetOrder)
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
 				pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
+
+				// Gas sponsorship. The status route is always registered so the
+				// app can tell "off" from "old server"; the rest exist only
+				// when RAMP_GAS_SPONSORSHIP built at least one lane. No itIdem:
+				// both writes are idempotent server-side (one row per order and
+				// kind), and a cached replay would hide a top-up that has since
+				// confirmed.
+				pc.GET("/sponsorship", pch.SponsorshipRoutes)
+				if pch.SponsorshipEnabled() {
+					pc.GET("/orders/:id/sponsorship", pch.SponsorshipOffer)
+					pc.POST("/orders/:id/relay-authorization", paycrestWriteLimit, pch.RelayAuthorization)
+					pc.POST("/orders/:id/gas-topup", paycrestWriteLimit, pch.GasTopUp)
+				}
 			}
 		}
 

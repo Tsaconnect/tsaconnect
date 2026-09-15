@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -195,6 +196,24 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 		return nil, false
 	}
 	return result, true
+}
+
+// erc20SendDecimals returns the decimals a send amount is scaled by.
+//
+// The token contract is the authority, not the symbol: USDT and USDC are 6 on
+// Sonic and Ethereum but 18 on BSC, and scaling a BSC send by 6 moved 10^-12
+// of what the user typed — a mined "successful" transfer of dust. A caller
+// override (auto-discovered tokens) is only a fallback for an unreadable
+// contract; with neither there is no safe guess, so the send is refused.
+func erc20SendDecimals(override *int, readOnChain func() (int, error)) (int, error) {
+	onChain, err := readOnChain()
+	if err == nil {
+		return onChain, nil
+	}
+	if override != nil && *override >= 0 && *override <= 36 {
+		return *override, nil
+	}
+	return 0, err
 }
 
 // RegisterWalletAddress handles POST /api/wallet/register.
@@ -400,62 +419,78 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		}
 	}
 
+	// Chains are read concurrently. Each has its own RPC endpoint, so this adds
+	// no load to any one of them, while reading them in turn made a full-wallet
+	// request one round trip per chain per token (~27 in a row) — and Spot's
+	// quote-chain pick waits on this. Tokens within a chain stay sequential so a
+	// single endpoint is never hit in parallel.
+	var (
+		wg       sync.WaitGroup
+		resultMu sync.Mutex
+	)
 	for _, cq := range chains {
-		client := h.BlockchainService.ClientForNetwork(network, cq.name)
-		chainBalances := make(map[string]tokenBalance)
+		wg.Add(1)
+		go func(cq chainQuery) {
+			defer wg.Done()
+			client := h.BlockchainService.ClientForNetwork(network, cq.name)
+			chainBalances := make(map[string]tokenBalance)
 
-		if client != nil {
-			if nativeBal, err := client.GetBalance(address); err == nil {
-				balStr := formatTokenBalance(nativeBal, 18)
-				balFloat, _ := strconv.ParseFloat(balStr, 64)
-				price := prices[cq.cfg.NativeCurrency]
-				chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
-					Balance:  balStr,
-					UsdPrice: price,
-					UsdValue: balFloat * price,
+			if client != nil {
+				if nativeBal, err := client.GetBalance(address); err == nil {
+					balStr := formatTokenBalance(nativeBal, 18)
+					balFloat, _ := strconv.ParseFloat(balStr, 64)
+					price := prices[cq.cfg.NativeCurrency]
+					chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
+						Balance:  balStr,
+						UsdPrice: price,
+						UsdValue: balFloat * price,
+					}
 				}
 			}
-		}
 
-		for _, tok := range supportedTokens {
-			var tokenChains []string
-			json.Unmarshal(tok.Chains, &tokenChains)
-			for _, tc := range tokenChains {
-				if tc == cq.name {
-					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
-					if tokenAddr != "" && client != nil {
-						if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
-							// Decimals are per-contract (USDT is 6 on
-							// Ethereum/Polygon but 18 on BSC). Query the
-							// contract directly; fall back to the DB row only
-							// if the RPC fails.
-							decimals := tok.Decimals
-							if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
-								decimals = onChainDec
+			for _, tok := range supportedTokens {
+				var tokenChains []string
+				json.Unmarshal(tok.Chains, &tokenChains)
+				for _, tc := range tokenChains {
+					if tc == cq.name {
+						tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
+						if tokenAddr != "" && client != nil {
+							if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
+								// Decimals are per-contract (USDT is 6 on
+								// Ethereum/Polygon but 18 on BSC). Query the
+								// contract directly; fall back to the DB row only
+								// if the RPC fails.
+								decimals := tok.Decimals
+								if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
+									decimals = onChainDec
+								} else {
+									log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
+										tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
+								}
+								balStr := formatTokenBalance(bal, decimals)
+								balFloat, _ := strconv.ParseFloat(balStr, 64)
+								price := prices[tok.Symbol]
+								chainBalances[tok.Symbol] = tokenBalance{
+									Balance:  balStr,
+									UsdPrice: price,
+									UsdValue: balFloat * price,
+								}
 							} else {
-								log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
-									tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
-							}
-							balStr := formatTokenBalance(bal, decimals)
-							balFloat, _ := strconv.ParseFloat(balStr, 64)
-							price := prices[tok.Symbol]
-							chainBalances[tok.Symbol] = tokenBalance{
-								Balance:  balStr,
-								UsdPrice: price,
-								UsdValue: balFloat * price,
+								chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 							}
 						} else {
 							chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 						}
-					} else {
-						chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 					}
 				}
 			}
-		}
 
-		result[cq.name] = chainBalances
+			resultMu.Lock()
+			result[cq.name] = chainBalances
+			resultMu.Unlock()
+		}(cq)
 	}
+	wg.Wait()
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
 		"walletAddress": address,
@@ -583,25 +618,15 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		network = "mainnet"
 	}
 
-	// Decimals: caller override takes precedence (auto-discovered tokens
-	// can have any decimals — 6, 8, 9, 18 — and we won't have curated
-	// metadata for them). Otherwise fall back to the historical defaults.
-	decimals := 18
-	if req.Decimals != nil && *req.Decimals >= 0 && *req.Decimals <= 36 {
-		decimals = *req.Decimals
-	} else if tokenUpper == "USDT" || tokenUpper == "USDC" {
-		decimals = 6
-	}
-	amountWei, ok := parseTokenAmount(req.Amount, decimals)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
-		return
-	}
-
 	var txBytes []byte
 	var err error
 
 	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
+		amountWei, ok := parseTokenAmount(req.Amount, 18)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
+		}
 		txBytes, err = client.PrepareNativeTransfer(fromAddress, req.ToAddress, amountWei)
 	} else {
 		// Resolve token contract: explicit override (discovered tokens)
@@ -618,6 +643,19 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
 				return
 			}
+		}
+		decimals, derr := erc20SendDecimals(req.Decimals, func() (int, error) {
+			return client.GetTokenDecimals(tokenAddr)
+		})
+		if derr != nil {
+			log.Printf("prepare-tx: decimals unavailable for %s on %s (%s): %v", tokenUpper, chainName, tokenAddr, derr)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, fmt.Sprintf("Could not read the %s contract on %s. Please try again.", tokenUpper, chainName))
+			return
+		}
+		amountWei, ok := parseTokenAmount(req.Amount, decimals)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
 		}
 		txBytes, err = client.PrepareERC20Transfer(tokenAddr, fromAddress, req.ToAddress, amountWei)
 	}
