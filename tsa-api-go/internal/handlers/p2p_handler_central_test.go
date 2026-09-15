@@ -47,6 +47,11 @@ func assertCentralPayTo(t *testing.T, payTo map[string]any) {
 		payTo["accountName"] != want.AccountName {
 		t.Fatalf("pmPayTo = %v, want the company account %+v", payTo, want)
 	}
+	// The company account is only safe to show with the own-name notice beside
+	// it — on the ad screen as much as the trade screen, since both render it.
+	if payTo["payerInstruction"] != want.PayerInstruction() {
+		t.Fatalf("pmPayTo.payerInstruction = %v, want %q", payTo["payerInstruction"], want.PayerInstruction())
+	}
 }
 
 // The buyer of a PM trade must be sent to the company account once the cutover
@@ -112,5 +117,8 @@ func TestGetAd_PMPayTo_ConfiguredButVAMode(t *testing.T) {
 	payTo := pmPayToOf(t, r, "/api/p2p/ads/"+adID.String())
 	if payTo["accountNumber"] != "1234567890" || payTo["bank"] != "Nomba" {
 		t.Fatalf("pmPayTo = %v, want the merchant's own account", payTo)
+	}
+	if _, present := payTo["payerInstruction"]; present {
+		t.Fatalf("pmPayTo carries payerInstruction for a merchant's own account: %v", payTo)
 	}
 }

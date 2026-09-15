@@ -39,6 +39,8 @@ import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { RAILS } from '@/constants/rails';
 import { promptKycRefusal } from '@/utils/kycRefusal';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { exactNairaOf, payerInstructionOf } from '@/utils/payInto';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
@@ -189,6 +191,12 @@ export default function ITBuy() {
   // lands. Absent (hasFees false) on an API that predates fee deduction.
   const fees = useMemo(() => (quote ? buyFeeBreakdown(quote) : null), [quote]);
 
+  // Central mode (one company account, credited by payer name + exact amount)
+  // is signalled by the card itself. The VA-era "any amount, permanent account"
+  // copy is false there, and would contradict the instruction beside it.
+  const payerInstruction = payerInstructionOf(payTo);
+  const exactNaira = exactNairaOf(payTo);
+
   if (screen === 'submitting') {
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
@@ -261,7 +269,7 @@ export default function ITBuy() {
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
           <Card>
             <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
-              Transfer any amount to this account
+              {exactNaira ? `Transfer exactly ₦${exactNaira}` : 'Transfer any amount to this account'}
             </Text>
             {showPaySecondary ? (
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
@@ -305,6 +313,11 @@ export default function ITBuy() {
                   <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
                     Pay into this account
                   </Text>
+                  {payerInstruction ? (
+                    <View style={{ marginBottom: spacing.sm }}>
+                      <PayerInstructionNotice instruction={payerInstruction} />
+                    </View>
+                  ) : null}
                   <SummaryCard>
                     <SummaryRow label="Bank" value={payTo.bank || '—'} />
                     <SummaryRow label="Account name" value={payTo.accountName || '—'} />
@@ -317,9 +330,9 @@ export default function ITBuy() {
                   </View>
                 </View>
                 <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-                  This is your permanent Instant Transfer account — no reference to type, no
-                  expiry. Transfer any Naira amount; your spendable MCGP appears when the payment
-                  is confirmed, priced at the live rate and net of transfer fees.
+                  {payerInstruction
+                    ? 'Your spendable MCGP appears once your transfer is matched to this order, priced at the live rate and net of transfer fees. Sending a different amount holds your purchase for review.'
+                    : 'This is your permanent Instant Transfer account — no reference to type, no expiry. Transfer any Naira amount; your spendable MCGP appears when the payment is confirmed, priced at the live rate and net of transfer fees.'}
                 </Text>
               </>
             ) : (

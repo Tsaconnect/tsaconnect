@@ -54,6 +54,8 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { payerInstructionOf } from '@/utils/payInto';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
@@ -984,6 +986,12 @@ const PmPayToCard: React.FC<{
   payTo: NonNullable<P2PTrade['pmPayTo']>;
 }> = ({ trade, payTo }) => {
   const { colors, spacing } = useTheme();
+  // Central mode: the card points at the shared company account and the API
+  // supplies the own-name notice. The local copy below predates it and is only
+  // right for a merchant's own account — in central mode a mismatched name does
+  // not reliably route to review (a partial match can credit another order),
+  // and payerName is the free-text signup name, not the verified name matched.
+  const payerInstruction = payerInstructionOf(payTo);
   return (
     <Card style={{ gap: spacing.md }}>
       <View style={{ alignItems: 'center', gap: spacing.xs }}>
@@ -996,11 +1004,20 @@ const PmPayToCard: React.FC<{
           variant="title2"
         />
       </View>
-      <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
-        {trade.payerName
-          ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
-          : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
-      </Text>
+      {payerInstruction ? (
+        <>
+          <PayerInstructionNotice instruction={payerInstruction} />
+          <Text variant="bodySm" color="textSecondary">
+            We release your crypto automatically once your transfer lands — no further action needed.
+          </Text>
+        </>
+      ) : (
+        <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
+          {trade.payerName
+            ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
+            : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
+        </Text>
+      )}
       <View style={{ gap: spacing.sm }}>
         <CopyableField
           label="Account number"
