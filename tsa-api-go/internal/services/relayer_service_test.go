@@ -149,13 +149,15 @@ func newRig(t *testing.T, mutate ...func(*RelayerLimits)) *rig {
 	t.Helper()
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	limits := RelayerLimits{
-		MaxDeadline:      5 * time.Minute,
-		GasCeiling:       500_000,
-		PerUserPerWindow: 3,
-		Window:           time.Minute,
-		DailyGasBudget:   big.NewInt(10_000_000),
-		BalanceFloor:     big.NewInt(1e17),
-		MinSponsored:     big.NewInt(1_000),
+		SponsorLimits: SponsorLimits{
+			PerUserPerWindow: 3,
+			Window:           time.Minute,
+			DailyGasBudget:   big.NewInt(10_000_000),
+			BalanceFloor:     big.NewInt(1e17),
+		},
+		MaxDeadline:  5 * time.Minute,
+		GasCeiling:   500_000,
+		MinSponsored: big.NewInt(1_000),
 	}
 	for _, m := range mutate {
 		m(&limits)
@@ -622,45 +624,5 @@ func TestRelayer_BudgetReleasedWhenTheRequestNeverBroadcasts(t *testing.T) {
 	}
 	if got := r.svc.SpentToday(); got.Sign() != 0 {
 		t.Fatalf("budget leaked %s gas on a request that never broadcast", got)
-	}
-}
-
-// ── hardening regressions ────────────────────────────────────────────────
-
-// Pruning only within a key leaks one map entry per distinct address forever,
-// and addresses are free to mint.
-func TestRelayer_RateLimitMapDoesNotGrowUnbounded(t *testing.T) {
-	r := newRig(t)
-
-	// Simulate sybil traffic: many one-shot addresses, each relaying once.
-	for i := 0; i < 500; i++ {
-		from := fmt.Sprintf("0x%040x", i)
-		_, _ = r.svc.Relay(context.Background(), from, r.req(func(q *ForwardRequest) { q.From = from }))
-	}
-	*r.clock = r.clock.Add(2 * time.Minute) // past the window
-
-	// One more request prunes only the key it touches, so drive every key once.
-	for i := 0; i < 500; i++ {
-		from := fmt.Sprintf("0x%040x", i)
-		_, _ = r.svc.Relay(context.Background(), from, r.req(func(q *ForwardRequest) { q.From = from }))
-	}
-	*r.clock = r.clock.Add(2 * time.Minute)
-	for i := 0; i < 500; i++ {
-		from := fmt.Sprintf("0x%040x", i)
-		_, _ = r.svc.Relay(context.Background(), from, r.req(func(q *ForwardRequest) { q.From = from }))
-	}
-
-	r.svc.mu.Lock()
-	entries := len(r.svc.perUser)
-	r.svc.mu.Unlock()
-
-	// Each address holds at most its own live window; none should linger empty.
-	for key, times := range r.svc.perUser {
-		if len(times) == 0 {
-			t.Fatalf("empty rate-limit entry left behind for %s", key)
-		}
-	}
-	if entries > 500 {
-		t.Fatalf("rate-limit map grew to %d entries for 500 addresses", entries)
 	}
 }

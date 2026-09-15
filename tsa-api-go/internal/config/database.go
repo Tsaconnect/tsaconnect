@@ -141,6 +141,9 @@ func AutoMigrate() error {
 		// current state — who acted, and on what, has to outlive it.
 		&models.InboundCreditAuditLog{},
 		&models.PaycrestOrderRecord{},
+		// One row per transaction we paid gas for on a user's behalf; the
+		// (order_id, kind) unique index is the once-per-order rule.
+		&models.GasSponsorship{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse

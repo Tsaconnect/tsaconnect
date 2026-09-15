@@ -65,9 +65,15 @@ import {
 import {
   balanceOf,
   checkFunding,
-  sendPaycrestDeposit,
+  sendSponsoredPaycrestDeposit,
   type FundingCheck,
 } from '@/services/paycrestDeposit';
+import {
+  getSponsoredRoutes,
+  getSponsorshipOffer,
+  isGasSponsored,
+  type SponsorRoute,
+} from '@/services/gasSponsorship';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -219,6 +225,41 @@ export default function PaycrestSellScreen() {
     };
   }, [address]);
 
+  // Routes this user sells on without holding gas. An empty list — sponsorship
+  // off, an older server, a network error — keeps today's gas warning.
+  const [sponsoredRoutes, setSponsoredRoutes] = useState<SponsorRoute[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getSponsoredRoutes().then((routes) => {
+      if (!cancelled) setSponsoredRoutes(routes);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The routes list is a pre-order hint; the per-order offer can still come
+  // back 'none' (domain unverified, too little time left, lane switched off),
+  // and then the send self-pays. Only claim the fee is covered when it is.
+  const [orderSponsored, setOrderSponsored] = useState(false);
+  useEffect(() => {
+    if (!order?.id) {
+      setOrderSponsored(false);
+      return;
+    }
+    let cancelled = false;
+    getSponsorshipOffer(order.id)
+      .then((offer) => {
+        if (!cancelled) setOrderSponsored(offer.mode !== 'none');
+      })
+      .catch(() => {
+        if (!cancelled) setOrderSponsored(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.id]);
+
   // The server returns the list already in the right vocabulary for this
   // currency, so there is nothing to intersect. Outside Nigeria there is no
   // local list to intersect WITH. The previously selected bank is cleared on
@@ -327,8 +368,13 @@ export default function PaycrestSellScreen() {
     venue && balances ? balanceOf(balances, venue.chain, venue.token) : null;
 
   const funding: FundingCheck | null = useMemo(
-    () => (venue ? checkFunding(venue, balances) : null),
-    [venue, balances],
+    () =>
+      venue
+        ? checkFunding(venue, balances, {
+            gasSponsored: isGasSponsored(sponsoredRoutes, venue.chain, venue.token),
+          })
+        : null,
+    [venue, balances, sponsoredRoutes],
   );
 
   /** Hand the order off to the order screen, as "I've sent it" always has. */
@@ -348,7 +394,7 @@ export default function PaycrestSellScreen() {
     setSending(true);
     setSendError(null);
     try {
-      await sendPaycrestDeposit(order, address, nativeBalanceFor(order.chain, balances));
+      await sendSponsoredPaycrestDeposit(order, address, nativeBalanceFor(order.chain, balances));
       goToOrder(order.id);
     } catch (e) {
       // Server and RPC messages here are written to be read — show them.
@@ -399,14 +445,16 @@ export default function PaycrestSellScreen() {
     () =>
       (quote?.venues ?? []).map((v) => {
         const send = `Send ${v.tokenAmount.toFixed(4)} ${v.token}`;
-        const check = checkFunding(v, balances);
+        const check = checkFunding(v, balances, {
+          gasSponsored: isGasSponsored(sponsoredRoutes, v.chain, v.token),
+        });
         // Routes stay selectable when they are short — the user may top up,
         // and the reason is spelled out on the form once one is chosen. The
         // point of the annotation is that the user can see which route they
         // CAN take without poking each one blind.
         return { id: venueId(v), label: venueLabel(v), sublabel: `${send}${routeNote(check)}` };
       }),
-    [quote, balances],
+    [quote, balances, sponsoredRoutes],
   );
 
   const bankItems = useMemo(
@@ -520,6 +568,13 @@ export default function PaycrestSellScreen() {
               disabled={expired || sending}
               fullWidth
             />
+          )}
+
+          {canSendInApp && orderSponsored && (
+            <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+              Network fee covered — you don&apos;t need{' '}
+              {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
+            </Text>
           )}
 
           {/* Kept for funds that live somewhere else — an exchange, a hardware

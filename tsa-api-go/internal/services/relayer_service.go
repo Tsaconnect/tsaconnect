@@ -76,13 +76,12 @@ type AllowedCall struct {
 // RelayerLimits are the budget controls. All are required; zero values would
 // disable the protection they exist to provide.
 type RelayerLimits struct {
-	MaxDeadline      time.Duration // reject requests valid for longer than this
-	GasCeiling       uint64        // per-request gas cap
-	PerUserPerWindow int           // sponsored requests per user per window
-	Window           time.Duration
-	DailyGasBudget   *big.Int // GAS UNITS per UTC day across all users (not wei)
-	BalanceFloor     *big.Int // refuse to relay below this balance
-	MinSponsored     *big.Int // minimum amount (token base units) worth sponsoring
+	// SponsorLimits (per-user window, daily gas budget, balance floor) are
+	// enforced by the SponsorGuard.
+	SponsorLimits
+	MaxDeadline  time.Duration // reject requests valid for longer than this
+	GasCeiling   uint64        // per-request gas cap
+	MinSponsored *big.Int      // minimum amount (token base units) worth sponsoring
 }
 
 // relayChain is the slice of the EVM client the relayer needs.
@@ -165,12 +164,10 @@ type RelayerService struct {
 	now       func() time.Time
 	fwdABI    abi.ABI
 
-	mu       sync.Mutex
-	perUser  map[string][]time.Time // rolling window of sponsored requests
-	spentDay string                 // UTC date of spentGas
-	spentGas *big.Int
-	killed   bool
-	domain   EIP712Domain // cached after the first read from the forwarder
+	guard *SponsorGuard
+
+	mu     sync.Mutex
+	domain EIP712Domain // cached after the first read from the forwarder
 }
 
 func NewRelayerService(
@@ -197,7 +194,7 @@ func NewRelayerService(
 		signer: signer, chain: chain, builder: builder,
 		forwarder: strings.ToLower(strings.TrimSpace(forwarder)),
 		allow:     allow, limits: limits, metrics: metrics, now: now, fwdABI: parsed,
-		perUser: map[string][]time.Time{}, spentGas: new(big.Int),
+		guard: NewSponsorGuard("relayer", limits.SponsorLimits, now),
 	}, nil
 }
 
@@ -211,18 +208,14 @@ func (r *RelayerService) IsEnabled() bool {
 	if r == nil || r.signer == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return !r.killed
+	return !r.guard.Killed()
 }
 
 // SetKillSwitch forces every request to self-pay regardless of configuration.
 // For a relayer that is up but misbehaving — bad nonces, unexpected spend — where
 // removing the key is slower than flipping a flag.
 func (r *RelayerService) SetKillSwitch(on bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.killed = on
+	r.guard.SetKillSwitch(on)
 }
 
 // AssertRoleSeparation fails startup if the relayer key also holds a privileged
@@ -285,13 +278,15 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 
 	// Reserve the user's slot and the day's gas BEFORE doing anything that can
 	// broadcast, then hand back whatever the request did not consume.
-	slot, err := r.reserveRateLimit(req.From)
+	slot, err := r.guard.ReserveUser(req.From)
 	if err != nil {
+		r.metrics.RelayAttempt("rejected", "rate_limit")
 		return "", err
 	}
-	res, err := r.reserveBudget(req.Gas)
+	res, err := r.guard.ReserveGas(req.Gas)
 	if err != nil {
-		r.releaseRateLimit(slot)
+		r.guard.ReleaseUser(slot)
+		r.metrics.RelayAttempt("rejected", "daily_cap")
 		return "", err
 	}
 
@@ -300,15 +295,15 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 	// failure was OURS: a request that would revert is the caller's doing, and
 	// letting it retry for free is a griefing vector once relaying is gasless.
 	releaseOurFault := func() {
-		r.releaseBudget(res)
-		r.releaseRateLimit(slot)
+		r.guard.ReleaseGas(res)
+		r.guard.ReleaseUser(slot)
 	}
 
 	if err := r.simulate(ctx, execData); err != nil {
 		if errors.Is(err, ErrSimulationUnavailable) {
 			releaseOurFault()
 		} else {
-			r.releaseBudget(res)
+			r.guard.ReleaseGas(res)
 		}
 		return "", err
 	}
@@ -418,141 +413,17 @@ func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
 	return nil
 }
 
-// reserveRateLimit prunes the window and claims a slot in one critical section.
-func (r *RelayerService) reserveRateLimit(from string) (reservation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	key := strings.ToLower(strings.TrimSpace(from))
-	now := r.now()
-	cutoff := now.Add(-r.limits.Window)
-
-	kept := r.perUser[key][:0]
-	for _, t := range r.perUser[key] {
-		if t.After(cutoff) {
-			kept = append(kept, t)
-		}
-	}
-	if len(kept) == 0 {
-		// Drop the key rather than leaving an empty slice behind. Pruning only
-		// WITHIN a key leaks one map entry per distinct address forever, and
-		// addresses are free to mint — cheap signups would grow this without
-		// bound.
-		delete(r.perUser, key)
-	} else {
-		r.perUser[key] = kept
-	}
-
-	if len(kept) >= r.limits.PerUserPerWindow {
-		r.metrics.RelayAttempt("rejected", "rate_limit")
-		log.Printf("[relayer] relayer_rate_limited_total=1 from=%s", key)
-		return reservation{}, ErrRateLimited
-	}
-	r.perUser[key] = append(kept, now)
-	return reservation{user: key, at: now}, nil
-}
-
-// releaseRateLimit gives a slot back when the request failed through no fault
-// of the caller — a relayer outage should not burn the user's hourly quota.
-func (r *RelayerService) releaseRateLimit(res reservation) {
-	if res.user == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	entries := r.perUser[res.user]
-	for i, t := range entries {
-		if t.Equal(res.at) {
-			remaining := append(entries[:i], entries[i+1:]...)
-			if len(remaining) == 0 {
-				// Refunding the only slot must drop the key too, or every
-				// refunded request leaves an empty entry behind — the same
-				// unbounded growth the prune path guards against.
-				delete(r.perUser, res.user)
-			} else {
-				r.perUser[res.user] = remaining
-			}
-			return
-		}
-	}
-}
-
 func (r *RelayerService) checkBalance(ctx context.Context) error {
 	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
 	if err != nil {
 		r.metrics.RelayAttempt("error", "balance")
 		return fmt.Errorf("relayer: read balance: %w", err)
 	}
-	if r.limits.BalanceFloor != nil && bal.Cmp(r.limits.BalanceFloor) < 0 {
-		// Refuse rather than broadcast transactions that will fail for gas.
+	if err := r.guard.CheckFloor(bal); err != nil {
 		r.metrics.RelayAttempt("rejected", "underfunded")
-		return ErrRelayerUnderfunded
+		return err
 	}
 	return nil
-}
-
-// reservation records what a request consumed so it can be handed back if the
-// request never reaches the chain.
-type reservation struct {
-	day  string
-	gas  uint64
-	user string
-	at   time.Time
-}
-
-// reserveBudget checks AND reserves in ONE critical section.
-//
-// Checking in one lock acquisition and recording in another is check-then-act:
-// concurrent requests all observe the pre-spend total, all pass, and all
-// broadcast. Measured at 2x the cap with 50 goroutines against a 5-request
-// budget — and the overrun scales with concurrency, not with a fixed factor.
-// The daily cap is the only defence against sybil signups bypassing the
-// per-user limit, so it has to hold under load or it defends nothing.
-func (r *RelayerService) reserveBudget(requestGas uint64) (reservation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rollDayLocked()
-
-	if r.limits.DailyGasBudget != nil {
-		projected := new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
-		if projected.Cmp(r.limits.DailyGasBudget) > 0 {
-			r.metrics.RelayAttempt("rejected", "daily_cap")
-			// Budget exhaustion means gasless is DOWN for every user until UTC
-			// midnight, so it needs to page someone rather than only increment.
-			log.Printf("[relayer] ALERT relayer_daily_cap_exhausted_total=1 spent=%s budget=%s",
-				r.spentGas, r.limits.DailyGasBudget)
-			return reservation{}, ErrDailyCapExceeded
-		}
-	}
-	r.spentGas = new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
-	return reservation{day: r.spentDay, gas: requestGas}, nil
-}
-
-// releaseBudget hands back gas for a request that never broadcast. Skipped if
-// the UTC day rolled in between, because the counter it would decrement is a
-// different day's.
-func (r *RelayerService) releaseBudget(res reservation) {
-	if res.gas == 0 {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.spentDay != res.day {
-		return
-	}
-	r.spentGas = new(big.Int).Sub(r.spentGas, new(big.Int).SetUint64(res.gas))
-	if r.spentGas.Sign() < 0 {
-		r.spentGas = new(big.Int)
-	}
-}
-
-func (r *RelayerService) rollDayLocked() {
-	day := r.now().UTC().Format("2006-01-02")
-	if r.spentDay != day {
-		r.spentDay = day
-		r.spentGas = new(big.Int)
-	}
 }
 
 // simulate runs the exact call through eth_call first. A revert here means the
@@ -615,10 +486,7 @@ func (r *RelayerService) packExecute(req ForwardRequest) ([]byte, error) {
 
 // SpentToday exposes the running daily total, in gas units, for monitoring.
 func (r *RelayerService) SpentToday() *big.Int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rollDayLocked()
-	return new(big.Int).Set(r.spentGas)
+	return r.guard.SpentToday()
 }
 
 // Nonce reads the forwarder's per-`from` nonce. Requests are only valid at the

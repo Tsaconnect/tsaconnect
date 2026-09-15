@@ -220,18 +220,34 @@ const receiptPollInterval = 1500 * time.Millisecond
 // error (NotFound or a transient RPC blip) and returns the last error only after
 // the deadline passes.
 func (c *EVMClient) WaitForReceipt(txHash string, timeout time.Duration) (*types.Receipt, error) {
+	return c.WaitForReceiptContext(context.Background(), txHash, timeout)
+}
+
+// WaitForReceiptContext is WaitForReceipt bound to ctx: it stops polling and
+// returns an error wrapping ctx.Err() as soon as ctx is done, so a caller whose
+// request went away does not hold a goroutine for the whole timeout.
+func (c *EVMClient) WaitForReceiptContext(ctx context.Context, txHash string, timeout time.Duration) (*types.Receipt, error) {
 	hash := common.HexToHash(txHash)
 	deadline := time.Now().Add(timeout)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		receipt, err := c.Client.TransactionReceipt(ctx, hash)
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		receipt, err := c.Client.TransactionReceipt(callCtx, hash)
 		cancel()
 		if err == nil {
 			return receipt, nil
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("stopped waiting for receipt of %s: %w", txHash, ctxErr)
+		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("failed to get receipt for %s within %s: %w", txHash, timeout, err)
 		}
-		time.Sleep(receiptPollInterval)
+		timer := time.NewTimer(receiptPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("stopped waiting for receipt of %s: %w", txHash, ctx.Err())
+		case <-timer.C:
+		}
 	}
 }

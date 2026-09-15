@@ -31,6 +31,13 @@ func (a EVMRelayChain) BalanceAt(ctx context.Context, account common.Address, bl
 	return a.Client.Client.BalanceAt(ctx, account, block)
 }
 
+func (a EVMRelayChain) CodeAt(ctx context.Context, account common.Address, block *big.Int) ([]byte, error) {
+	if a.Client == nil || a.Client.Client == nil {
+		return nil, fmt.Errorf("relayer: no chain client")
+	}
+	return a.Client.Client.CodeAt(ctx, account, block)
+}
+
 func (a EVMRelayChain) ChainID() *big.Int {
 	if a.Client == nil {
 		return new(big.Int)

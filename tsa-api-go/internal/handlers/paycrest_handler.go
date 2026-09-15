@@ -21,9 +21,10 @@ import (
 // device holding a different key must not be able to point a purchase at it.
 
 type PaycrestHandler struct {
-	orders *services.PaycrestOrderService
-	quotes *services.PaycrestQuoteService
-	dir    *services.PaycrestDirectory
+	orders  *services.PaycrestOrderService
+	quotes  *services.PaycrestQuoteService
+	dir     *services.PaycrestDirectory
+	sponsor rampSponsorshipPort // nil unless RAMP_GAS_SPONSORSHIP is on
 }
 
 func NewPaycrestHandler(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, dir *services.PaycrestDirectory) *PaycrestHandler {

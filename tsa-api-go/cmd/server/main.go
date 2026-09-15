@@ -397,13 +397,15 @@ func main() {
 			} else {
 				signer := services.NewLocalKeyReleaseSigner(key, sonicClient)
 				limits := services.RelayerLimits{
-					MaxDeadline:      cfg.RelayerMaxDeadline,
-					GasCeiling:       cfg.RelayerGasCeiling,
-					PerUserPerWindow: cfg.RelayerPerUserPerHour,
-					Window:           time.Hour,
-					DailyGasBudget:   bigFromDecimal(cfg.RelayerDailyGasBudget),
-					BalanceFloor:     bigFromDecimal(cfg.RelayerBalanceFloorWei),
-					MinSponsored:     bigFromDecimal(cfg.RelayerMinSponsored),
+					SponsorLimits: services.SponsorLimits{
+						PerUserPerWindow: cfg.RelayerPerUserPerHour,
+						Window:           time.Hour,
+						DailyGasBudget:   bigFromDecimal(cfg.RelayerDailyGasBudget),
+						BalanceFloor:     bigFromDecimal(cfg.RelayerBalanceFloorWei),
+					},
+					MaxDeadline:  cfg.RelayerMaxDeadline,
+					GasCeiling:   cfg.RelayerGasCeiling,
+					MinSponsored: bigFromDecimal(cfg.RelayerMinSponsored),
 				}
 				allow := []services.AllowedCall{
 					// spend(to, amount, ref) — amount is calldata word 1.
@@ -1448,6 +1450,10 @@ func main() {
 			itHandler.SetRampLegs(paycrestQuotes)
 		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		if rampSponsor := buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
+			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
+			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
+		}
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
