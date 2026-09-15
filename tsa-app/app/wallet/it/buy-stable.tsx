@@ -47,6 +47,7 @@ import {
   type StableAsset,
 } from '@/services/itApi';
 import { formatAssetUnits, formatMinorAsNaira } from '@/utils/stableBuyQuote';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 
 export default function ITBuyStable() {
   const { colors, spacing, radius } = useTheme();
@@ -228,6 +229,7 @@ export default function ITBuyStable() {
         setError('Buying is temporarily unavailable.');
         return;
       default:
+        if (promptKycRefusal(code, message)) return;
         setError(message || 'Something went wrong.');
     }
   };

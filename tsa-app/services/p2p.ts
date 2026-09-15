@@ -241,6 +241,9 @@ export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
   data?: T;
+  /** Machine error code, when the server sends one (e.g.
+   *  "kyc_verification_required"). Branch on this, not on message. */
+  code?: string;
   /** HTTP status code of the underlying response (when reachable). Useful
    *  for status-specific UX, e.g. distinguishing 503 STALE_FEED from generic
    *  failure. Absent on network errors. */
