@@ -4,8 +4,9 @@
 // screen. Payments into that account are credited by matching the sender's
 // bank-account name, so a transfer from someone else's account can land on the
 // wrong order — telling the payer is the mitigation that risk was accepted on.
-// The recipient's registered name is also not "TSA Connect", and a payer who
-// meets it unexplained reads the transfer as a scam.
+// The API names the payer's own verified legal name where it has one, and
+// explains the company account's registered name, which is not "TSA Connect" —
+// unexplained, a payer reads the transfer as a scam.
 //
 // The wording is the API's (CentralAccount.PayerInstruction), rendered verbatim
 // so it can change without an app release and cannot drift between products.

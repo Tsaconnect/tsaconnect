@@ -2,8 +2,8 @@
    replace; writing them first documents which import each one stands in for. */
 
 /**
- * The notice is the only thing telling a payer that the company account credits
- * them by their own name and does not read "TSA Connect". It must show the
+ * The notice is the only thing telling a payer which account holder to send
+ * from, and why the company account's registered name is not "TSA Connect". It must show the
  * server's wording exactly and announce itself to a screen reader.
  */
 jest.mock('@/theme', () => ({
@@ -35,7 +35,8 @@ import { PayerInstructionNotice } from '../PayerInstructionNotice';
 const TestRenderer = require('react-test-renderer');
 
 const INSTRUCTION =
-  'Pay from a bank account in your own name. The account name reads SOME COMPANY LTD, not TSA Connect — that is us.';
+  'Pay from a bank account named JOHN DOE. The account name shows as SOME COMPANY LTD. ' +
+  "This is TSA Connect's registered company account.";
 
 function render(instruction: string): any {
   let tree: any;

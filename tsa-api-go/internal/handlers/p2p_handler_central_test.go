@@ -49,8 +49,9 @@ func assertCentralPayTo(t *testing.T, payTo map[string]any) {
 	}
 	// The company account is only safe to show with the own-name notice beside
 	// it — on the ad screen as much as the trade screen, since both render it.
-	if payTo["payerInstruction"] != want.PayerInstruction() {
-		t.Fatalf("pmPayTo.payerInstruction = %v, want %q", payTo["payerInstruction"], want.PayerInstruction())
+	// These fixtures store no verified legal name, so the generic wording.
+	if payTo["payerInstruction"] != want.PayerInstruction("") {
+		t.Fatalf("pmPayTo.payerInstruction = %v, want %q", payTo["payerInstruction"], want.PayerInstruction(""))
 	}
 }
 

@@ -4,46 +4,75 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
-// wantPayerInstruction is the wording spelled out in full, on purpose.
+// The wording is spelled out in full, on purpose.
 //
-// Comparing against the constant would pass no matter what the constant said,
-// and this text is the only thing standing between the accepted partial-match
-// risk and a credit landing on a stranger. Changing it has to be a deliberate
-// edit here as well, where a reviewer sees the new words next to the old.
-const wantPayerInstruction = "Pay from a bank account in your own name. " +
-	"We match your transfer by that name, so money sent from someone else's account cannot reach you. " +
-	"Send the exact amount shown. " +
-	"The account name reads TSA CONNECT LTD, not TSA Connect — that is us."
+// Comparing against the constants would pass no matter what they said, and this
+// text is the mitigation the accepted partial-match risk rests on. Changing it
+// has to be a deliberate edit here as well, where a reviewer sees the new words
+// next to the old. Owner-approved copy, 2026-09-15.
+const (
+	wantPayerInstructionNamed = "Pay from a bank account named Ada Okafor. " +
+		"Payments from other accounts can be delayed for review or credited to the wrong person. " +
+		"Send the exact amount shown. " +
+		"The account name shows as TSA CONNECT LTD. This is TSA Connect's registered company account."
+	wantPayerInstructionGeneric = "Pay from a bank account in your own name. " +
+		"Payments from other accounts can be delayed for review or credited to the wrong person. " +
+		"Send the exact amount shown. " +
+		"The account name shows as TSA CONNECT LTD. This is TSA Connect's registered company account."
+)
 
-func TestPayerInstruction_Wording(t *testing.T) {
-	got := testCentralAccount().PayerInstruction()
-
-	if got != wantPayerInstruction {
-		t.Fatalf("PayerInstruction() =\n  %q\nwant\n  %q", got, wantPayerInstruction)
+func TestPayerInstruction_Wording_NamesTheVerifiedPayer(t *testing.T) {
+	got := testCentralAccount().PayerInstruction("Ada Okafor")
+	if got != wantPayerInstructionNamed {
+		t.Fatalf("PayerInstruction(name) =\n  %q\nwant\n  %q", got, wantPayerInstructionNamed)
 	}
-	// Each clause carries one of the three things a payer has to act on. Named
-	// separately so a rewrite that drops one fails on the clause it dropped
-	// rather than on an opaque string diff.
-	for _, must := range []string{"your own name", "exact amount", "TSA CONNECT LTD"} {
-		if !strings.Contains(got, must) {
-			t.Errorf("instruction no longer mentions %q: %q", must, got)
+}
+
+// No stored legal name — rare, since money-in already refuses a verified user
+// without one — must still warn, just without a name to quote.
+func TestPayerInstruction_Wording_FallsBackWithoutAName(t *testing.T) {
+	for _, name := range []string{"", "   ", "\n\t"} {
+		if got := testCentralAccount().PayerInstruction(name); got != wantPayerInstructionGeneric {
+			t.Fatalf("PayerInstruction(%q) =\n  %q\nwant\n  %q", name, got, wantPayerInstructionGeneric)
 		}
 	}
 }
 
-// The account name is interpolated, not a placeholder: a payer who sees a
-// company name they do not recognise and no explanation for it reads the
-// transfer as fraud.
+// A provider-supplied name with stray whitespace or a newline renders as one
+// clean line rather than breaking the sentence.
+func TestPayerInstruction_NormalisesTheName(t *testing.T) {
+	got := testCentralAccount().PayerInstruction("  ADA \n  OKAFOR ")
+	if !strings.HasPrefix(got, "Pay from a bank account named ADA OKAFOR. ") {
+		t.Fatalf("name not normalised: %q", got)
+	}
+}
+
+// The account name is interpolated from config, never a hardcoded company name.
 func TestPayerInstruction_NamesTheActualAccount(t *testing.T) {
 	acct := testCentralAccount()
 	acct.AccountName = "  SOME OTHER LTD  "
 
-	got := acct.PayerInstruction()
+	got := acct.PayerInstruction("")
 
-	if !strings.Contains(got, "reads SOME OTHER LTD, not") {
+	if !strings.Contains(got, "The account name shows as SOME OTHER LTD. This is") {
 		t.Fatalf("instruction does not name the account it is shown beside: %q", got)
+	}
+}
+
+func TestVerifiedLegalNameOf(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	if got := VerifiedLegalNameOf(context.Background(), s.db, userID); got != "Ada Okafor" {
+		t.Fatalf("VerifiedLegalNameOf(verified user) = %q, want %q", got, "Ada Okafor")
+	}
+	if got := VerifiedLegalNameOf(context.Background(), s.db, uuid.New()); got != "" {
+		t.Fatalf("VerifiedLegalNameOf(unknown user) = %q, want empty", got)
+	}
+	if got := VerifiedLegalNameOf(context.Background(), nil, userID); got != "" {
+		t.Fatalf("VerifiedLegalNameOf(nil db) = %q, want empty", got)
 	}
 }
 
@@ -54,14 +83,14 @@ func TestCreateStableBuyIntent_CentralModeCarriesThePayerInstruction(t *testing.
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if pay.PayerInstruction != wantPayerInstruction {
-		t.Fatalf("PayerInstruction = %q, want %q", pay.PayerInstruction, wantPayerInstruction)
+	// The fixture user is verified as "Ada Okafor" (seedVerifiedUser).
+	if pay.PayerInstruction != wantPayerInstructionNamed {
+		t.Fatalf("PayerInstruction = %q, want %q", pay.PayerInstruction, wantPayerInstructionNamed)
 	}
 }
 
 // In VA mode the account already bears the payer's own name, so every sentence
-// of the instruction is false there — and the first one would have them hunting
-// for a problem that does not exist.
+// of the instruction is false there.
 func TestCreateStableBuyIntent_VAModeCarriesNoPayerInstruction(t *testing.T) {
 	s, userID := newStableBuyDBService(t)
 

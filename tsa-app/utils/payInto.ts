@@ -11,8 +11,9 @@
 // off their presence rather than guess the mode.
 
 export interface CentralPayToFields {
-  /** Server-authored notice: pay from an account in your own name, and why the
-   *  recipient name is not "TSA Connect". Present only in central mode. */
+  /** Server-authored notice: which account holder to pay from (the user's
+   *  verified name when known), and why the recipient name is not "TSA Connect".
+   *  Present only in central mode. */
   payerInstruction?: string | null;
   /** Whole naira the matcher compares against. Present only in central mode. */
   amountNgn?: string | null;

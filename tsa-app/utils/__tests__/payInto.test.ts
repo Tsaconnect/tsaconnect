@@ -8,9 +8,9 @@
 import { exactNairaOf, payerInstructionOf } from '@/utils/payInto';
 
 const INSTRUCTION =
-  'Pay from a bank account in your own name. We match your transfer by that name, so money sent from ' +
-  "someone else's account cannot reach you. Send the exact amount shown. The account name reads " +
-  'SOME COMPANY LTD, not TSA Connect — that is us.';
+  'Pay from a bank account named JOHN DOE. Payments from other accounts can be delayed for review or ' +
+  'credited to the wrong person. Send the exact amount shown. The account name shows as SOME COMPANY LTD. ' +
+  "This is TSA Connect's registered company account.";
 
 describe('payerInstructionOf', () => {
   it('returns the server wording verbatim in central mode', () => {

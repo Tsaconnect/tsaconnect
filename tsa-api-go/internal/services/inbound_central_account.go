@@ -1,8 +1,14 @@
 package services
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"strings"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // CentralAccount is the single company bank account every user pays into once
@@ -32,7 +38,7 @@ func (c CentralAccount) IsConfigured() bool {
 		strings.TrimSpace(c.AccountName) != ""
 }
 
-// payerInstructionFormat is the mitigation the central-account attribution risk
+// The payer instruction is the mitigation the central-account attribution risk
 // rests on. Do not soften it without reopening that decision.
 //
 // A credit binds by matching the sender's bank-account name against a payer's
@@ -41,26 +47,69 @@ func (c CentralAccount) IsConfigured() bool {
 // has no open order — superseded, expired, or not a user at all — the credit
 // can bind to a stranger whose verified name is a token-subset of the sender's.
 // We chose to keep crediting on a partial match rather than hold, ON THE
-// UNDERSTANDING that payers are told to pay from their own account. Weaken this
-// text and that trade becomes one nobody actually made.
+// UNDERSTANDING that payers are told to pay from their own account.
 //
-// The last sentence is not politeness. The account name is a company name the
-// payer has never seen; with no warning they either abandon the transfer as
-// fraud or send it and dispute afterwards.
-const payerInstructionFormat = "Pay from a bank account in your own name. " +
-	"We match your transfer by that name, so money sent from someone else's account cannot reach you. " +
-	"Send the exact amount shown. " +
-	"The account name reads %s, not TSA Connect — that is us."
+// Wording decided by the owner on 2026-09-15. "Delayed for review or credited
+// to the wrong person" is what actually happens to a mismatched transfer — an
+// earlier "cannot reach you" overstated it. The closing sentences explain the
+// registered company name the payer's bank shows, which is not "TSA Connect";
+// unexplained, a payer reads it as fraud and abandons or disputes the transfer.
+const (
+	payerInstructionNamed   = "Pay from a bank account named %s."
+	payerInstructionOwnName = "Pay from a bank account in your own name."
+	payerInstructionRest    = " Payments from other accounts can be delayed for review or credited to the wrong person." +
+		" Send the exact amount shown." +
+		" The account name shows as %s. This is TSA Connect's registered company account."
+)
 
 // PayerInstruction is the one wording every pay-into screen shows. A method on
-// the account rather than a loose helper so the three products that display it
-// cannot drift into saying different things, and so no caller can render it
-// without the account name it has to name.
+// the account rather than a loose helper so the products that display it cannot
+// drift into saying different things, and so no caller can render it without
+// the account name it has to name.
+//
+// verifiedLegalName is the PAYER'S OWN Didit name — the exact string the matcher
+// compares the sender against — so the payer is told precisely which account
+// holder to send from. Pass it only on a response to that same user; empty
+// falls back to "in your own name". Never log the result: it carries the name.
 //
 // CENTRAL MODE ONLY. In VA mode the payer is already paying into an account in
 // their own name, which makes every sentence of this wrong.
-func (c CentralAccount) PayerInstruction() string {
-	return fmt.Sprintf(payerInstructionFormat, strings.TrimSpace(c.AccountName))
+func (c CentralAccount) PayerInstruction(verifiedLegalName string) string {
+	// Fields+Join also flattens any newline or run of spaces the provider
+	// returned, so the name renders as one line of plain text.
+	name := strings.Join(strings.Fields(verifiedLegalName), " ")
+	opening := payerInstructionOwnName
+	if name != "" {
+		opening = fmt.Sprintf(payerInstructionNamed, name)
+	}
+	return opening + fmt.Sprintf(payerInstructionRest, strings.TrimSpace(c.AccountName))
+}
+
+// VerifiedLegalNameOf reads a user's Didit legal name for their own payer
+// instruction. Best-effort by design: any failure yields "", which renders the
+// generic "in your own name" wording rather than failing the pay-into screen.
+// Only the user id and the error are logged, never the name.
+func VerifiedLegalNameOf(ctx context.Context, db *gorm.DB, userID uuid.UUID) string {
+	if db == nil || userID == uuid.Nil {
+		return ""
+	}
+	var row struct{ VerifiedLegalName sql.NullString }
+	// Table("users") rather than the model, as requireVerifiedForMoneyIn does:
+	// one column, without the model's PostgreSQL-only defaults.
+	if err := db.WithContext(ctx).Table("users").
+		Select("verified_legal_name").
+		Where("id = ?", userID).
+		Limit(1).
+		Scan(&row).Error; err != nil {
+		log.Printf("[payer instruction] legal name lookup failed for user=%s: %v", userID, err)
+		return ""
+	}
+	return strings.TrimSpace(row.VerifiedLegalName.String)
+}
+
+// VerifiedLegalName is VerifiedLegalNameOf against the IT service's database.
+func (s *ITService) VerifiedLegalName(ctx context.Context, userID uuid.UUID) string {
+	return VerifiedLegalNameOf(ctx, s.db, userID)
 }
 
 // SetInboundCentral wires both the mode and the account together.

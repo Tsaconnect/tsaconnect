@@ -386,7 +386,7 @@ func (s *ITService) payIntoForStableBuy(
 			// No Reference: nothing we mint survives a bank transfer into the
 			// company account. The name and the amount ARE the reference.
 			AmountNGN:        minorToMajor(asked.Int64(), 2),
-			PayerInstruction: central.PayerInstruction(),
+			PayerInstruction: central.PayerInstruction(VerifiedLegalNameOf(ctx, s.db, userID)),
 		}, asked, nil
 	}
 
