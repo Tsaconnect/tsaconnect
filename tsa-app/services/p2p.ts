@@ -34,6 +34,16 @@ export interface SellerStats {
   isNew: boolean;
 }
 
+/** Fiat destination for a payment-merchant ad/trade. In central mode it is the
+ *  shared company account and carries `payerInstruction`; pointed at a
+ *  merchant's own account it does not. */
+export interface PmPayTo {
+  accountNumber: string;
+  bank: string;
+  accountName: string;
+  payerInstruction?: string;
+}
+
 /**
  * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
  * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
@@ -102,7 +112,7 @@ export interface P2PAd {
   pmId?: string;
   /** For a PM ad, the merchant's Nomba VA the buyer pays into (auto-settled).
    *  Surfaced on the ad detail so a buyer sees the pay-to before opening. */
-  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
+  pmPayTo?: PmPayTo | null;
   status: 'pending' | 'active' | 'paused' | 'exhausted' | 'cancelled';
   expiresAt?: string;
   createdAt: string;
@@ -165,7 +175,7 @@ export interface P2PTrade {
   // markPaid + release — the user never does so manually. pmPayTo is the
   // Nomba inbound account a buyer pays into; payerName is the buyer's KYC name.
   isPm?: boolean;
-  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
+  pmPayTo?: PmPayTo | null;
   payerName?: string;
 }
 

@@ -304,12 +304,19 @@ func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
 //
 // Key names match fiatVAPayTo's ("bank", not "bankName") so the buy screen
 // renders one card either side of the cutover.
-func centralPayTo(a services.CentralAccount, ngnKobo string) gin.H {
+//
+// payerLegalName is the requesting user's own verified name, so the instruction
+// can name the account holder to pay from; "" gives the generic wording.
+func centralPayTo(a services.CentralAccount, ngnKobo, payerLegalName string) gin.H {
 	return gin.H{
 		"accountNumber": a.AccountNumber,
 		"bank":          a.BankName,
 		"accountName":   a.AccountName,
 		"amountNgn":     wholeNairaFromKobo(ngnKobo),
+		// Absent from fiatVAPayTo on purpose: a VA is already in the payer's
+		// own name, so the warning would be telling them to fix what is not
+		// broken.
+		"payerInstruction": a.PayerInstruction(payerLegalName),
 	}
 }
 
@@ -536,7 +543,9 @@ func (h *ITHandler) Buy(c *gin.Context) {
 	}
 	var payTo gin.H
 	if centralMode {
-		payTo = centralPayTo(central, intent.NgnKobo)
+		// Read from the row, not the context user: the matcher compares against
+		// the stored column, so the name shown must be that same value.
+		payTo = centralPayTo(central, intent.NgnKobo, h.it.VerifiedLegalName(c.Request.Context(), user.ID))
 	} else {
 		payTo = fiatVAPayTo(va, user.Name)
 	}

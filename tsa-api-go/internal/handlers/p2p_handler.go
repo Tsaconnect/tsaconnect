@@ -63,13 +63,24 @@ func (h *P2PHandler) SetInboundCentralSource(src CentralAccountSource) { h.centr
 // credit that will never arrive. The merchant is credited from that account and
 // forwarded to separately (see P2PSettlementForwarder), so nothing they are owed
 // changes; only where the buyer sends it does.
-func (h *P2PHandler) pmPayTo(accountNumber, bank, merchantName string) *models.PmPayTo {
+//
+// payerID is the user who will send the transfer, and only when they are the
+// one receiving this response: the instruction names their verified legal name,
+// which must never reach anyone else (a trade is also fetched by its seller).
+// Nil gives the generic "in your own name" wording. The name is looked up only
+// in central mode, where it is used.
+func (h *P2PHandler) pmPayTo(ctx context.Context, accountNumber, bank, merchantName string, payerID *uuid.UUID) *models.PmPayTo {
 	if h.central != nil {
 		if central, ok := h.central.ActiveCentralAccount(); ok {
+			legalName := ""
+			if payerID != nil {
+				legalName = services.VerifiedLegalNameOf(ctx, h.db, *payerID)
+			}
 			return &models.PmPayTo{
-				AccountNumber: central.AccountNumber,
-				Bank:          central.BankName,
-				AccountName:   central.AccountName,
+				AccountNumber:    central.AccountNumber,
+				Bank:             central.BankName,
+				AccountName:      central.AccountName,
+				PayerInstruction: central.PayerInstruction(legalName),
 			}
 		}
 	}
@@ -787,7 +798,8 @@ func (h *P2PHandler) SignAd(c *gin.Context) {
 }
 
 func (h *P2PHandler) GetAd(c *gin.Context) {
-	if _, ok := h.require(c); !ok {
+	user, ok := h.require(c)
+	if !ok {
 		return
 	}
 	id, ok := parseUUIDParam(c, "id")
@@ -829,7 +841,8 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 			log.Printf("[p2p GetAd] PM lookup failed for ad=%s pm=%s: %v", ad.ID, *ad.PMID, err)
 		} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 			detail.IsPm = true
-			detail.PmPayTo = h.pmPayTo(pm.InboundAccountNumber, pm.InboundBank, pm.Name)
+			// The viewer is the prospective buyer — the one who would pay.
+			detail.PmPayTo = h.pmPayTo(c.Request.Context(), pm.InboundAccountNumber, pm.InboundBank, pm.Name, &user.ID)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
@@ -1664,7 +1677,7 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	h.enrichTradeWithPM(trade)
+	h.enrichTradeWithPM(c.Request.Context(), trade, user.ID)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
 }
 
@@ -1672,7 +1685,7 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 // PmPayTo, PayerName) for the buy screen. Best-effort: any query error is
 // logged and the fields are left unset — the PM enrichment must never fail
 // the trade endpoint. Adds ≤2 lightweight queries.
-func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
+func (h *P2PHandler) enrichTradeWithPM(ctx context.Context, trade *models.P2PTrade, callerID uuid.UUID) {
 	if trade == nil || h.db == nil {
 		return
 	}
@@ -1690,7 +1703,12 @@ func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
 		log.Printf("[p2p GetTrade] PM lookup failed for trade=%s ad=%s: %v", trade.ID, trade.AdID, err)
 	} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 		trade.IsPM = true
-		trade.PmPayTo = h.pmPayTo(pm.InboundAccountNumber, pm.InboundBank, pm.Name)
+		// Name the buyer only to the buyer; the seller sees the generic wording.
+		var payerID *uuid.UUID
+		if callerID == trade.BuyerID {
+			payerID = &trade.BuyerID
+		}
+		trade.PmPayTo = h.pmPayTo(ctx, pm.InboundAccountNumber, pm.InboundBank, pm.Name, payerID)
 	}
 
 	var payerName string

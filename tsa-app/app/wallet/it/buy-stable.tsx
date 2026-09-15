@@ -48,6 +48,8 @@ import {
 } from '@/services/itApi';
 import { formatAssetUnits, formatMinorAsNaira } from '@/utils/stableBuyQuote';
 import { promptKycRefusal } from '@/utils/kycRefusal';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { payerInstructionOf } from '@/utils/payInto';
 
 export default function ITBuyStable() {
   const { colors, spacing, radius } = useTheme();
@@ -301,6 +303,7 @@ export default function ITBuyStable() {
     const destChain = result.intent.destChain || chain;
     const destAddress = result.intent.destAddress || '';
     const gotAsset = result.intent.asset || asset;
+    const payerInstruction = payerInstructionOf(result.payInto);
     return (
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
@@ -362,6 +365,11 @@ export default function ITBuyStable() {
             </Text>
 
             <View style={{ marginTop: spacing.md }}>
+              {payerInstruction ? (
+                <View style={{ marginBottom: spacing.sm }}>
+                  <PayerInstructionNotice instruction={payerInstruction} />
+                </View>
+              ) : null}
               <SummaryCard>
                 <SummaryRow label="Bank" value={result.payInto.bankName || '—'} />
                 <SummaryRow label="Account name" value={result.payInto.accountName || '—'} />

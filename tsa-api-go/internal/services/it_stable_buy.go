@@ -188,6 +188,10 @@ type StableBuyInstructions struct {
 	// credit against this number, so a payer who rounds it themselves is a hold
 	// for an operator rather than an instant settlement.
 	AmountNGN string `json:"amountNgn,omitempty"`
+	// PayerInstruction is what the payer must be told before they transfer.
+	// Set only in central mode — in VA mode the account is already in their own
+	// name and the wording would be wrong. See CentralAccount.PayerInstruction.
+	PayerInstruction string `json:"payerInstruction,omitempty"`
 }
 
 // CreateStableBuyIntent opens a purchase and tells the user where to pay.
@@ -381,7 +385,8 @@ func (s *ITService) payIntoForStableBuy(
 			AccountName:   central.AccountName,
 			// No Reference: nothing we mint survives a bank transfer into the
 			// company account. The name and the amount ARE the reference.
-			AmountNGN: minorToMajor(asked.Int64(), 2),
+			AmountNGN:        minorToMajor(asked.Int64(), 2),
+			PayerInstruction: central.PayerInstruction(VerifiedLegalNameOf(ctx, s.db, userID)),
 		}, asked, nil
 	}
 
