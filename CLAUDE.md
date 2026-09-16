@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Sibling repos (admin console, landing site, MCGP OTC contracts) and the shared `docs/` are mapped
+in `../CLAUDE.md`.
+
 ## Monorepo layout
 
 Three independent projects that together make up **TSA Connect**, a marketplace + multi-chain
@@ -23,8 +26,8 @@ The app calls the Go API over HTTPS/WebSocket; the Go API is the only thing that
 smart contracts (RPC reads + building unsigned txs). Contracts are deployed once to Sonic/BSC;
 the API's config hardcodes the deployed proxy addresses per network.
 
-The **P2P trading feature** (current focus, branch `feat/p2p-trading`) is the clearest example of
-all three working together — read `docs/p2p-smoke-test.md` for the full end-to-end flow. In short:
+The **P2P trading feature** is the clearest example of all three working together — read
+`docs/p2p-smoke-test.md` for the full end-to-end flow. In short:
 
 - **`P2PEscrow.sol`** is a pool-based escrow. A seller `deposit()`s once into a per-(seller,token)
   `available` balance, then publishes unlimited ads *off-chain* by signing **EIP-712 `AdVoucher`s**
@@ -46,6 +49,20 @@ all three working together — read `docs/p2p-smoke-test.md` for the full end-to
   `eth_chainId` at boot and uses that for the voucher domain, *not* the configured `SONIC_CHAIN_ID`
   — a mismatch makes every `ecrecover` resolve to a wrong address and rejects all signatures with
   "recovered 0x… expected 0x…". When touching P2P signing, preserve this.
+- **A Bitcoin swap route is signed as given, never reconstructed.** Probed live 2026-09-07: LiFi's
+  UTXO routes (Layerswap) return `transactionRequest.data` as a **whole PSBT** built from the
+  user's own UTXOs — deposit output, an OP_RETURN tag identifying the swap, the bridge's own
+  output, and change. `value` is the total leaving the wallet, which is *more* than the deposit
+  output alone, so paying `value` to `to` and calling it a deposit drops outputs the bridge is
+  looking for and strands the funds. Other tools may still return a bare memo, so
+  `tsa-app/services/chains/btcLifi.ts` identifies the payload by its BIP-174 magic and
+  `internal/chains/btc` supports both shapes. A PSBT is validated before a single digest is handed
+  out (`prepareFromPSBT`): every input must be ours with its witness value supplied, nothing
+  pre-signed, the quoted deposit address actually paid, everything leaving the wallet exactly the
+  quoted amount, and the fee inside the normal ceiling. Families that cannot carry a memo or sign
+  a PSBT reject those fields rather than ignoring them. Re-run
+  `tsa-api-go/scripts/lifi-btc-probe.sh` (needs a `fromAddress` holding UTXOs — LiFi builds the
+  spend from them) whenever LiFi changes UTXO tools.
 - **Money invariant.** Sum of `token_amount` over active `p2p_trades` must equal on-chain
   `P2PEscrow.balanceOf(token)` minus the live ad-pool `remaining`. Drift is logged as
   `p2p_reconciler_drift_total`.
@@ -65,7 +82,7 @@ Base, Optimism, Avalanche, Linea). Token addresses are keyed `"chain:symbol"` (e
 
 Several integrations are **dormant-by-default**: if their credentials are absent the service boots
 and the relevant routes return a clear error (Nomba bank directory, P2P trade routes when
-`P2P_ESCROW_ADDRESS` is unset, Cloudinary, LiFi, Persona KYC). Don't add hard failures for missing
+`P2P_ESCROW_ADDRESS` is unset, Cloudinary, LiFi, Didit KYC). Don't add hard failures for missing
 optional credentials — keep dev environments bootable.
 
 ## Commands cheat-sheet

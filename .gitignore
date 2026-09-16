@@ -35,3 +35,7 @@ tsa-app/android/build/
 .vscode/
 *.swp
 *.swo
+
+# Claude Code local state. .claude/worktrees/ holds full git worktrees with
+# their own .git files — committing this directory would nest repositories.
+.claude/

@@ -3,9 +3,11 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -22,11 +24,47 @@ import (
 //
 // Dormant-by-default: when MCGP_SWAP_B_ADDRESS is unset, IsConfigured() is false
 // and the routes are not registered.
+// chainTxBuilder is the slice of *blockchain.EVMClient that buildUnsignedTx
+// needs. An interface so a test can observe when the nonce is read — the whole
+// point of signMu is that the read happens inside it, and a fake signer alone
+// cannot see that.
+type chainTxBuilder interface {
+	GetNonce(address string) (uint64, error)
+	SuggestGasPrice() (*big.Int, error)
+	EstimateGas(msg ethereum.CallMsg) (uint64, error)
+	ChainID() *big.Int
+}
+
 type MCGPSwapService struct {
 	client   *blockchain.EVMClient
+	chain    chainTxBuilder // == client in production; nil when there is no client
 	address  string
 	cfg      *config.Config
 	operator ReleaseSigner // signs+broadcasts the IT operator ops; nil = IT dormant
+
+	// signMu serialises build+sign+broadcast for the operator EOA.
+	//
+	// buildUnsignedTx reads the nonce with PendingNonceAt, which reflects only
+	// what the node has already seen. Two concurrent callers receive the same
+	// value while the first transaction is still un-mined, sign different
+	// payloads with it, and the node silently drops one — after which the caller
+	// burns a 60s WaitForReceipt on a transaction that will never exist. The
+	// scheduler's bill-reconciler settles and reverses on this key while the HTTP
+	// request path debits on it, so this races in production today.
+	//
+	// NOTE: this lock covers this service's signer only. The PM release key has
+	// the same unguarded race via P2PTradeService.AutoRelease, on a different
+	// EOA, and is NOT fixed here.
+	//
+	// Holding the lock across the read is what fixes it: the nonce is read only
+	// after the previous broadcast has returned.
+	//
+	// Deliberately NOT an in-process nonce counter. A counter advances even when
+	// buildUnsignedTx fails at EstimateGas — a duplicate debitRef ("Debit exists")
+	// and an over-draw both revert there, routinely — and one burned nonce leaves
+	// every later transaction queued at the node forever, each reporting a tx hash
+	// that never mines. PendingNonceAt self-heals from a gap; a counter does not.
+	signMu sync.Mutex
 }
 
 // NewMCGPSwapService returns a service bound to cfg.MCGPSwapBAddress on the
@@ -36,7 +74,14 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 	if cfg != nil {
 		addr = cfg.MCGPSwapBAddress
 	}
-	return &MCGPSwapService{client: client, address: addr, cfg: cfg}
+	svc := &MCGPSwapService{client: client, address: addr, cfg: cfg}
+	// Guard against storing a typed-nil in the interface: a nil *EVMClient
+	// assigned to chainTxBuilder would compare non-nil and defeat the
+	// no-client short-circuit in buildUnsignedTx.
+	if client != nil {
+		svc.chain = client
+	}
+	return svc
 }
 
 // SetOperatorSigner wires the operator EOA signer used for the IT/NGN path
@@ -69,8 +114,8 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 	if s.address == "" {
 		return nil, fmt.Errorf("MCGP swap contract address is empty")
 	}
-	if s.client == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+	if s.chain == nil {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{To: s.address, Value: "0", Data: common.Bytes2Hex(callData)}
@@ -80,15 +125,15 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 	fromAddr := common.HexToAddress(from)
 	contractAddr := common.HexToAddress(s.address)
 
-	nonce, err := s.client.GetNonce(from)
+	nonce, err := s.chain.GetNonce(from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
-	gasPrice, err := s.client.SuggestGasPrice()
+	gasPrice, err := s.chain.SuggestGasPrice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
-	gasLimit, err := s.client.EstimateGas(ethereum.CallMsg{From: fromAddr, To: &contractAddr, Data: callData})
+	gasLimit, err := s.chain.EstimateGas(ethereum.CallMsg{From: fromAddr, To: &contractAddr, Data: callData})
 	if err != nil {
 		return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
 	}
@@ -100,7 +145,7 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 		To:       s.address,
 		Value:    "0",
 		Data:     common.Bytes2Hex(callData),
-		ChainID:  s.client.ChainID().String(),
+		ChainID:  s.chain.ChainID().String(),
 	}
 	return json.Marshal(tx)
 }
@@ -234,6 +279,59 @@ func (s *MCGPSwapService) callUint(method string, args ...interface{}) (*big.Int
 	return v, nil
 }
 
+// callAddress and callBool mirror callUint for the V2 role/config reads used by
+// the relayer's boot-time separation check and by ops tooling.
+func (s *MCGPSwapService) callRaw(ctx context.Context, method string, args ...interface{}) ([]interface{}, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("blockchain client not available")
+	}
+	data, err := s.pack(method, args...)
+	if err != nil {
+		return nil, err
+	}
+	addr := common.HexToAddress(s.address)
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := s.client.Client.CallContract(cctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s call failed: %w", method, err)
+	}
+	vals, err := parsedMCGPSwapABI.Unpack(method, out)
+	if err != nil || len(vals) == 0 {
+		return nil, fmt.Errorf("decode %s: %w", method, err)
+	}
+	return vals, nil
+}
+
+func (s *MCGPSwapService) callAddress(ctx context.Context, method string, args ...interface{}) (string, error) {
+	vals, err := s.callRaw(ctx, method, args...)
+	if err != nil {
+		return "", err
+	}
+	a, ok := vals[0].(common.Address)
+	if !ok {
+		return "", fmt.Errorf("%s returned unexpected type %T", method, vals[0])
+	}
+	return a.Hex(), nil
+}
+
+func (s *MCGPSwapService) callBool(ctx context.Context, method string, args ...interface{}) (bool, error) {
+	vals, err := s.callRaw(ctx, method, args...)
+	if err != nil {
+		return false, err
+	}
+	b, ok := vals[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("%s returned unexpected type %T", method, vals[0])
+	}
+	return b, nil
+}
+
+// TrustedForwarder reports the forwarder V2 currently trusts (zero = gasless off).
+func (s *MCGPSwapService) TrustedForwarder(ctx context.Context) (string, error) {
+	return s.callAddress(ctx, "trustedForwarder")
+}
+
 // PremiumBalance returns the total spendable premium (bought + credited, 18dp).
 func (s *MCGPSwapService) PremiumBalance(user string) (*big.Int, error) {
 	return s.callUint("premiumBalanceOf", common.HexToAddress(user))
@@ -311,13 +409,75 @@ func (s *MCGPSwapService) Backing() (held, owed *big.Int, err error) {
 
 func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte) (string, error) {
 	if s.operator == nil {
-		return "", fmt.Errorf("IT operator signer not configured")
+		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
 	}
+
+	// The nonce read inside buildUnsignedTx and the broadcast must not interleave
+	// with another caller's — see signMu.
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+
 	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 	if err != nil {
-		return "", err
+		// Nonce, gas price and gas estimate are all reads: nothing was sent.
+		return "", notBroadcast(err)
 	}
 	return s.operator.SignAndBroadcast(ctx, unsigned)
+}
+
+// ErrTxNotBroadcast marks an operator-transaction error raised BEFORE the
+// transaction could have reached the network (build, estimate, sign). Only
+// these may be read as "the on-chain op definitely did not happen". Any other
+// error from a broadcast — a send that timed out, a node that answered with an
+// error after accepting the bytes — leaves the outcome unknown, and the caller
+// must resolve it from chain state rather than assume failure.
+var ErrTxNotBroadcast = errors.New("transaction was not broadcast")
+
+type notBroadcastError struct{ err error }
+
+func (e notBroadcastError) Error() string   { return e.err.Error() }
+func (e notBroadcastError) Unwrap() []error { return []error{e.err, ErrTxNotBroadcast} }
+
+func notBroadcast(err error) error { return notBroadcastError{err: err} }
+
+// DebitState mirrors the contract's DebitState enum for a debitRef.
+type DebitState uint8
+
+const (
+	DebitStateNone     DebitState = 0 // no debit was ever recorded for the ref
+	DebitStatePending  DebitState = 1 // debited, awaiting settle or reverse
+	DebitStateResolved DebitState = 2 // settled or reversed
+)
+
+// DebitRecord is the contract's per-ref debit entry (`debits(bytes32)`).
+type DebitRecord struct {
+	User   common.Address
+	Amount *big.Int
+	State  DebitState
+}
+
+// DebitRecord reads the on-chain debit keyed by debitRef. It is the positive
+// evidence the reconcilers use to decide whether a debit whose broadcast or
+// verification was lost actually landed: Pending means it did, None means it
+// has not (yet). Both V1 and V2 of the swap expose this public mapping.
+func (s *MCGPSwapService) DebitRecord(ctx context.Context, debitRef [32]byte) (DebitRecord, error) {
+	vals, err := s.callRaw(ctx, "debits", debitRef)
+	if err != nil {
+		return DebitRecord{}, err
+	}
+	if len(vals) != 3 {
+		return DebitRecord{}, fmt.Errorf("debits returned %d values, want 3", len(vals))
+	}
+	user, ok1 := vals[0].(common.Address)
+	amount, ok2 := vals[1].(*big.Int)
+	state, ok3 := vals[2].(uint8)
+	if !ok1 || !ok2 || !ok3 {
+		return DebitRecord{}, fmt.Errorf("debits returned unexpected types %T/%T/%T", vals[0], vals[1], vals[2])
+	}
+	if state > uint8(DebitStateResolved) {
+		return DebitRecord{}, fmt.Errorf("debits returned unknown state %d", state)
+	}
+	return DebitRecord{User: user, Amount: amount, State: DebitState(state)}, nil
 }
 
 // OperatorCreditPremium credits spend-only premium after an NGN payment settles.
@@ -336,6 +496,25 @@ func (s *MCGPSwapService) OperatorDebitPremium(ctx context.Context, user string,
 		return "", err
 	}
 	return s.operatorBroadcast(ctx, data)
+}
+
+// OperatorDebitSpendable begins a debit that may draw on the user's BOUGHT
+// premium, up to maxFromBought. The contract drains credited first.
+//
+// Product rule: spendable MCGP is spendable everywhere — bills and IT sell
+// both use this. OperatorDebitPremium remains for callers that must be
+// confined to the credited bucket.
+func (s *MCGPSwapService) OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error) {
+	data, err := s.pack("debitSpendable", common.HexToAddress(user), amount, maxFromBought, debitRef)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// DebitFromBought reports how much of a pending debit came from bought premium.
+func (s *MCGPSwapService) DebitFromBought(debitRef [32]byte) (*big.Int, error) {
+	return s.callUint("debitFromBought", debitRef)
 }
 
 // OperatorSettleDebit finalizes a debit after a confirmed Nomba payout.

@@ -1,0 +1,991 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"math"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+)
+
+// paycrest_order_service.go — the brokered ramp lifecycle.
+//
+// Both legs are non-custodial. On a buy the user transfers naira straight to
+// the liquidity provider's bank account and the stablecoin lands in their own
+// connected wallet; on a sell they send from that same wallet and the provider
+// pays their bank. We never hold either side, so this service brokers and
+// records rather than settling.
+//
+// Consequences that shape the code below:
+//
+//   - We cannot make a user whole ourselves. When a provider fails, the money
+//     is at a bank we have no relationship with, and there is no refund
+//     endpoint. So the one thing this service must never do is let such an
+//     order look like an ordinary expiry — see markUnmatched.
+//   - There is no webhook endpoint yet, so progress comes from polling. Orders
+//     are therefore designed to be safely re-read: Sync is idempotent and only
+//     ever moves a row forward.
+
+var (
+	// ErrPaycrestOrderOpen enforces one open order per user per direction. A
+	// second concurrent buy would leave the user staring at two provider
+	// accounts with two countdowns and no way to tell which one to pay.
+	ErrPaycrestOrderOpen = errors.New("you already have an order awaiting payment")
+	// ErrPaycrestBankUnsupported means the user's bank exists for us but not
+	// for Paycrest. Explicit, because the alternative is a payout that
+	// silently goes nowhere.
+	ErrPaycrestBankUnsupported = errors.New("this bank cannot receive payouts through this route")
+
+	// ErrPaycrestAccountShape means the identifier does not match the kind of
+	// destination it is aimed at — a bank account number sent to a mobile-money
+	// code, or a number too short to be either. Refused before the order
+	// exists, because after the on-chain leg it is not correctable.
+	ErrPaycrestAccountShape  = errors.New("that account number does not match the destination you chose")
+	ErrPaycrestOrderNotYours = errors.New("order not found")
+	// ErrPaycrestNotCancellable covers both "too late" and "already gone": an
+	// order past the waiting-for-the-user stage, and one whose payment the user
+	// has already claimed to have sent.
+	ErrPaycrestNotCancellable = errors.New("this order can no longer be cancelled")
+)
+
+// PaycrestOrderer is the client surface this service needs.
+type PaycrestOrderer interface {
+	CreateOnrampOrder(ctx context.Context, req PaycrestOnrampRequest) (*PaycrestOrder, error)
+	CreateOfframpOrder(ctx context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error)
+	GetOrder(ctx context.Context, id string) (*PaycrestOrder, error)
+}
+
+// PaycrestOrderService brokers ramp orders.
+type PaycrestOrderService struct {
+	db     *gorm.DB
+	pc     PaycrestOrderer
+	quotes *PaycrestQuoteService
+	dir    *PaycrestDirectory
+
+	// currencies gates order creation against the live ramp-provider column —
+	// see SetCurrencyRegistry.
+	currencies *CurrencyRegistry
+
+	// senderFeePercent is our margin. Empty defers to the dashboard profile
+	// default, which is what produced the 0.5% observed on live orders.
+	senderFeePercent string
+	senderFeeAddress string
+}
+
+// SetCurrencyRegistry wires the server-side kill switch: CreateBuy and
+// CreateSell refuse with ErrPaycrestDisabled when the order's currency does
+// not resolve to RampProviderPaycrest. Optional — without it (nil), no gate
+// is applied, so existing tests and any other construction site keep
+// working. This is what makes flipping a currency's ramp_provider column
+// actually stop the rail during an incident, rather than only changing what
+// GET /it/currencies advertises to not-yet-updated app builds.
+func (s *PaycrestOrderService) SetCurrencyRegistry(r *CurrencyRegistry) { s.currencies = r }
+
+// requirePaycrestEnabled refuses when the registry says this currency's ramp
+// provider is not (or no longer) paycrest. A nil registry is "no gate" —
+// see SetCurrencyRegistry.
+func (s *PaycrestOrderService) requirePaycrestEnabled(fiat string) error {
+	if s.currencies == nil {
+		return nil
+	}
+	if s.currencies.RampProvider(fiat) != RampProviderPaycrest {
+		return ErrPaycrestDisabled
+	}
+	return nil
+}
+
+// explainMissingVenue separates "nobody fills THIS amount" from "this currency
+// does not trade this way at all".
+//
+// Both arrive as ErrPaycrestNoVenue, and the difference matters to the person
+// reading it: the first is answered by trying another amount, the second never
+// is. UGX and TZS have offramp providers only, so a UGX buy is permanently
+// empty rather than momentarily unlucky.
+//
+// The app already hides a dead direction (GET /it/currencies reports the legs),
+// so reaching this means a stale client or a leg that closed mid-session — the
+// order is refused either way; only the wording changes.
+func (s *PaycrestOrderService) explainMissingVenue(ctx context.Context, side, fiat string, err error) error {
+	if !errors.Is(err, ErrPaycrestNoVenue) || s.quotes == nil {
+		return err
+	}
+	legs, legErr := s.quotes.RampLegs(ctx)
+	if legErr != nil {
+		return err
+	}
+	l := legs[strings.ToUpper(strings.TrimSpace(fiat))]
+	if (side == "buy" && !l.Buy) || (side == "sell" && !l.Sell) {
+		verb := "Buying"
+		if side == "sell" {
+			verb = "Selling"
+		}
+		// Wrapped, because the handler maps sentinels to status codes with
+		// errors.Is: an unwrapped error here falls to its default branch and
+		// tells the user the provider is unreachable — "broken, try again" —
+		// when the truth is that this direction is permanently closed.
+		return fmt.Errorf("%w: %s is not available in %s right now",
+			ErrPaycrestLegClosed, verb, strings.ToUpper(fiat))
+	}
+	return err
+}
+
+// NewPaycrestOrderService returns nil unless everything it needs is wired, so
+// routes can be gated the same way the rest of the package is.
+func NewPaycrestOrderService(db *gorm.DB, pc PaycrestOrderer, quotes *PaycrestQuoteService, dir *PaycrestDirectory, feePercent, feeAddress string) *PaycrestOrderService {
+	if db == nil || pc == nil || quotes == nil {
+		return nil
+	}
+	feePercent = strings.TrimSpace(feePercent)
+	if feePercent != "" {
+		if pct, ok := parseSenderFeePercent(feePercent); ok {
+			// Canonical form, so "0.50" compares equal to Paycrest's "0.5".
+			feePercent = strconv.FormatFloat(pct, 'f', -1, 64)
+		} else {
+			log.Printf("[paycrest] ALARM PAYCREST_SENDER_FEE_PERCENT=%q refused (want 0 < p <= %d); orders fall back to the dashboard fee and quotes show none",
+				feePercent, maxSenderFeePercent)
+			feePercent = ""
+		}
+	}
+	feeAddress = strings.TrimSpace(feeAddress)
+	if feeAddress != "" {
+		if addr, ok := validSenderFeeAddress(feeAddress); ok {
+			feeAddress = addr
+		} else {
+			log.Printf("[paycrest] ALARM PAYCREST_SENDER_FEE_ADDRESS=%q refused (not a valid, correctly checksummed EVM address); orders fall back to the dashboard fee address",
+				feeAddress)
+			feeAddress = ""
+		}
+	}
+	// One source for the fee: the quote must price in exactly what the order sends.
+	quotes.SetSenderFeePercent(feePercent)
+	return &PaycrestOrderService{
+		db: db, pc: pc, quotes: quotes, dir: dir,
+		senderFeePercent: feePercent,
+		senderFeeAddress: feeAddress,
+	}
+}
+
+// validSenderFeeAddress checks the address our fee is paid to. Nothing on-chain
+// would ever flag a typo here — every fee would simply land at an address
+// nobody controls — so it is refused at boot instead. A mixed-case address
+// carries an EIP-55 checksum and must match it; the zero address burns the fee.
+func validSenderFeeAddress(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "0x") || !common.IsHexAddress(raw) {
+		return "", false
+	}
+	addr := common.HexToAddress(raw)
+	if addr == (common.Address{}) {
+		return "", false
+	}
+	hex := raw[2:]
+	mixedCase := strings.ToLower(hex) != hex && strings.ToUpper(hex) != hex
+	if mixedCase && raw != addr.Hex() {
+		return "", false
+	}
+	return addr.Hex(), true
+}
+
+// ─── Buy (onramp) ──────────────────────────────────────────────────────────
+
+// PaycrestBuyRequest is what the app sends to start a purchase.
+type PaycrestBuyRequest struct {
+	UserID uuid.UUID
+	// WalletAddress is the user's connected wallet — where the stablecoin is
+	// delivered. Already reconciled against the account by the handler.
+	WalletAddress string
+	FiatCode      string
+	FiatAmount    string
+	// ChainKey and Token name the venue the user picked from a fresh quote.
+	ChainKey string
+	Token    string
+	// RefundAccount is where naira returns if the order fails. Defaults to the
+	// user's own bank, so a refund goes back to whoever paid.
+	RefundBankCode    string // NIBSS
+	RefundAccount     string
+	RefundAccountName string
+}
+
+// grossDownForSenderFee converts the amount the user asked to pay into the
+// amount we submit, so that Paycrest's own fee arithmetic lands back on the
+// user's number.
+//
+// Paycrest computes amountToTransfer = amount x (1 + senderFeePercent/100) —
+// the fee is added ON TOP. Submitting the user's figure directly means someone
+// who types 800 is told to transfer 804.02, and the screen ends up asserting
+// both "you pay 800" and "transfer 804.02", which cannot both be true. Dividing
+// first puts the fee in the rate instead: the user sends exactly what they
+// typed and receives correspondingly less token. Same margin, one number.
+//
+// Returns the requested amount unchanged when the fee percent is unknown —
+// which is the case when PAYCREST_SENDER_FEE_PERCENT is unset and the value
+// comes from the dashboard profile instead. Guessing it would put the user's
+// transfer a few kobo off the amount the provider is waiting for, and an
+// inexact transfer is exactly what strands a payment.
+func grossDownForSenderFee(requested, feePercent string) (string, bool) {
+	pct, ok := parseSenderFeePercent(feePercent)
+	if !ok {
+		return requested, false
+	}
+	amt, ok := parsePositiveDecimal(requested)
+	if !ok {
+		return requested, false
+	}
+	return strconv.FormatFloat(amt/(1+pct/100), 'f', 2, 64), true
+}
+
+// userRate is the rate stored on the order and shown to the user: the
+// provider's rate with the fee Paycrest charged priced in. The provider's own
+// rate stays recoverable from the row's SenderFeePercent.
+func userRate(side, providerRate, feePercent string) string {
+	pct, _ := parseSenderFeePercent(feePercent)
+	rate, _, err := quotedRate(side, providerRate, pct)
+	if err != nil {
+		return providerRate
+	}
+	return rate
+}
+
+// chargedFeePercent is the fee Paycrest reports on the order, falling back to
+// ours when it reports none.
+//
+// A mismatch is an operator alarm, not a rounding note: the quote priced in
+// our percent, so a different charge means the user was shown one amount and
+// paid or received another. It happens when PAYCREST_SENDER_FEE_PERCENT is
+// unset or refused — the request then omits the fee and the dashboard default
+// applies — or when the dashboard changes under a set env var.
+func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref string) string {
+	reported := strings.TrimSpace(order.SenderFeePercent)
+	if reported == "" {
+		return s.senderFeePercent
+	}
+	want, _ := parseSenderFeePercent(s.senderFeePercent)
+	got, ok := parseSenderFeePercent(reported)
+	if !ok || math.Abs(got-want) > 1e-9 {
+		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s configured=%q paycrest_charged=%q — quoted amounts are off for this order",
+			ref, s.senderFeePercent, reported)
+	}
+	if !ok {
+		// Never store what we could not read: the column is varchar(16), and a
+		// failed insert here strands an order that already exists upstream.
+		return s.senderFeePercent
+	}
+	return strconv.FormatFloat(got, 'f', -1, 64)
+}
+
+// CreateBuy prices the chosen venue afresh, opens the order, and returns the
+// provider account for the user to pay.
+//
+// The re-quote is not defensive padding: liquidity moved 4× overnight in
+// testing, so a venue chosen even a minute ago may no longer be fillable at
+// this size. Binding the order to a price we just confirmed is the only way to
+// avoid showing a rate the order will not carry.
+func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyRequest) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		return nil, errors.New("connect a wallet before buying")
+	}
+	if req.RefundBankCode == "" || req.RefundAccount == "" {
+		return nil, errors.New("a refund account is required in case the order fails")
+	}
+	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionBuy); err != nil {
+		return nil, err
+	}
+
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
+	}
+	// Money in: the order hands the user a bank account to pay. Refuse an
+	// unverified buyer before anything below spends a provider call (non-NGN
+	// destination lookup, rates, the order itself). After the kill switch, so a
+	// ramp that is switched off says so to everyone rather than sending an
+	// unverified user off to verify for a route that is not there.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, req.UserID); err != nil {
+		if !errors.Is(err, ErrKYCVerificationRequired) {
+			// Fails closed either way; log so an outage is not mistaken for a
+			// run of provider errors.
+			log.Printf("[paycrest] kyc gate user=%s: %v", req.UserID, err)
+		}
+		return nil, err
+	}
+	// Destination first, then price. Resolving the refund account is cheap and
+	// cached, while VenueFor spends the slow, concurrency-throttled /v2/rates
+	// call — no reason to spend it on a request a malformed destination is
+	// about to refuse. The refund account only matters when an order fails,
+	// which is exactly when a bad one cannot be corrected.
+	refundInst, refundKind, err := s.paycrestBankCode(ctx, fiat, req.RefundBankCode)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePayoutIdentifier(refundKind, fiat, req.RefundAccount); err != nil {
+		return nil, err
+	}
+
+	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "buy", fiat, err)
+	}
+
+	// Submit the grossed-down figure so the provider asks the user for exactly
+	// the amount they entered. FiatAmount on the row stays the user's number.
+	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, s.senderFeePercent)
+
+	ref := paycrestReference("PCB", req.UserID)
+	order, err := s.pc.CreateOnrampOrder(ctx, PaycrestOnrampRequest{
+		AmountNGN:        submitAmount,
+		FiatCode:         fiat,
+		Token:            venue.Token,
+		Network:          venue.Network,
+		RecipientAddress: req.WalletAddress,
+		RefundAccount: PaycrestBankAccount{
+			Institution:       refundInst,
+			AccountIdentifier: req.RefundAccount,
+			AccountName:       req.RefundAccountName,
+		},
+		Reference:        ref,
+		SenderFeePercent: s.senderFeePercent,
+		SenderFeeAddress: s.senderFeeAddress,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	feePercent := s.chargedFeePercent(order, ref)
+	row := &models.PaycrestOrderRecord{
+		UserID:           req.UserID,
+		Direction:        models.PaycrestDirectionBuy,
+		Status:           models.PaycrestStatusAwaitingPayment,
+		Reference:        ref,
+		PaycrestID:       order.ID,
+		FiatCode:         fiat,
+		FiatAmount:       req.FiatAmount,
+		Token:            venue.Token,
+		ChainKey:         venue.ChainKey,
+		Network:          venue.Network,
+		Rate:             userRate("buy", order.Rate, feePercent),
+		TokenAmount:      order.Amount,
+		ProviderID:       paycrestProviderOf(order, venue),
+		SenderFee:        order.SenderFee,
+		SenderFeePercent: feePercent,
+		WalletAddress:    req.WalletAddress,
+		// Refund destination is recorded so an operator chasing a stranded
+		// deposit knows where the money was supposed to come back to.
+		PayoutBankCode:    req.RefundBankCode,
+		PayoutInstitution: refundInst,
+		PayoutAccount:     req.RefundAccount,
+		PayoutAccountName: req.RefundAccountName,
+	}
+	if pa := order.ProviderAccount; pa != nil {
+		row.PayInstitution = pa.Institution
+		row.PayAccountNumber = pa.AccountIdentifier
+		row.PayAccountName = pa.AccountName
+		// PayAmount is ALWAYS the provider's figure, never our prediction — it
+		// is what the user must transfer exactly, and being a kobo out is what
+		// strands a payment.
+		row.PayAmount = pa.AmountToTransfer
+		row.ValidUntil = parsePaycrestTime(pa.ValidUntil)
+
+		// We divided; they multiplied. Rounding at two decimals can leave the
+		// two a kobo apart, and the user would then see "pay 800" beside
+		// "transfer 800.01". Log the drift rather than hide it: the transfer
+		// amount above is still correct, but the screen's two numbers stop
+		// agreeing and someone should know why.
+		if grossedDown {
+			if want, err1 := strconv.ParseFloat(req.FiatAmount, 64); err1 == nil {
+				if got, err2 := strconv.ParseFloat(pa.AmountToTransfer, 64); err2 == nil {
+					if diff := got - want; diff > 0.01 || diff < -0.01 {
+						log.Printf("[paycrest] gross-down drift ref=%s requested=%s submitted=%s provider_wants=%s (%.2f off)",
+							ref, req.FiatAmount, submitAmount, pa.AmountToTransfer, diff)
+					}
+				}
+			}
+		}
+	}
+	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+		// The order exists at Paycrest but we failed to record it. Log loudly
+		// with the reference: without this line the user could pay an account
+		// nothing on our side knows about.
+		log.Printf("[paycrest] ALARM created order %s (ref=%s) but could not persist it: %v",
+			order.ID, ref, err)
+		return nil, err
+	}
+	return row, nil
+}
+
+// ─── Sell (offramp) ────────────────────────────────────────────────────────
+
+// PaycrestSellRequest starts a sale. The user sends the stablecoin themselves
+// from their connected wallet.
+type PaycrestSellRequest struct {
+	UserID uuid.UUID
+	// WalletAddress funds the sale and receives the refund if it fails.
+	WalletAddress string
+	FiatCode      string
+	// FiatAmount is what the user wants to receive; the token amount is
+	// derived from the live quote.
+	FiatAmount string
+	ChainKey   string
+	Token      string
+	// Payout bank, in OUR (NIBSS) vocabulary.
+	BankCode    string
+	AccountNo   string
+	AccountName string
+}
+
+// CreateSell opens an offramp and returns the address the user must send to.
+func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellRequest) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		return nil, errors.New("connect a wallet before selling")
+	}
+	if req.BankCode == "" || req.AccountNo == "" {
+		return nil, errors.New("a payout bank account is required")
+	}
+	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
+		return nil, err
+	}
+
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
+	}
+	// Destination before price, for the same reason as the buy path — and here
+	// it matters more: this is where the user's money is pointed somewhere, and
+	// after the on-chain leg there is nothing to correct.
+	payoutInst, payoutKind, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePayoutIdentifier(payoutKind, fiat, req.AccountNo); err != nil {
+		return nil, err
+	}
+
+	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+	}
+
+	// Paycrest prices an offramp in token units. venue.TokenAmount is sized at
+	// the fee-inclusive rate, so the deposit covers our fee and the payout is
+	// still the naira the user entered.
+	tokenAmount := strconv.FormatFloat(venue.TokenAmount, 'f', 6, 64)
+
+	ref := paycrestReference("PCS", req.UserID)
+	order, err := s.pc.CreateOfframpOrder(ctx, PaycrestOfframpRequest{
+		AmountToken: tokenAmount,
+		Token:       venue.Token,
+		Network:     venue.Network,
+		FiatCode:    fiat,
+		Recipient: PaycrestBankAccount{
+			Institution:       payoutInst,
+			AccountIdentifier: req.AccountNo,
+			AccountName:       req.AccountName,
+		},
+		// Refunds return to the user's own wallet — the same one they send
+		// from — so a failed sale leaves them exactly where they started.
+		RefundAddress:    req.WalletAddress,
+		Reference:        ref,
+		SenderFeePercent: s.senderFeePercent,
+		SenderFeeAddress: s.senderFeeAddress,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	feePercent := s.chargedFeePercent(order, ref)
+	row := &models.PaycrestOrderRecord{
+		UserID:            req.UserID,
+		Direction:         models.PaycrestDirectionSell,
+		Status:            models.PaycrestStatusAwaitingDeposit,
+		Reference:         ref,
+		PaycrestID:        order.ID,
+		FiatCode:          fiat,
+		FiatAmount:        req.FiatAmount,
+		Token:             venue.Token,
+		ChainKey:          venue.ChainKey,
+		Network:           venue.Network,
+		Rate:              userRate("sell", order.Rate, feePercent),
+		TokenAmount:       tokenAmount,
+		ProviderID:        paycrestProviderOf(order, venue),
+		SenderFee:         order.SenderFee,
+		SenderFeePercent:  feePercent,
+		WalletAddress:     req.WalletAddress,
+		PayoutBankCode:    req.BankCode,
+		PayoutInstitution: payoutInst,
+		PayoutAccount:     req.AccountNo,
+		PayoutAccountName: req.AccountName,
+	}
+	if pa := order.ProviderAccount; pa != nil {
+		row.DepositAddress = pa.ReceiveAddress
+		row.ValidUntil = parsePaycrestTime(pa.ValidUntil)
+	}
+	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+		log.Printf("[paycrest] ALARM created offramp %s (ref=%s) but could not persist it: %v",
+			order.ID, ref, err)
+		return nil, err
+	}
+	return row, nil
+}
+
+// ─── Progress ──────────────────────────────────────────────────────────────
+
+// Sync re-reads one order from Paycrest and moves our row forward. Idempotent
+// and safe to call from both the poller and a user refresh.
+func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrderRecord) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	if row == nil || row.PaycrestID == "" {
+		return row, nil
+	}
+	if models.PaycrestOrderTerminal(row.Status) {
+		return row, nil // nothing upstream can change it
+	}
+
+	remote, err := s.pc.GetOrder(ctx, row.PaycrestID)
+	if err != nil {
+		// A 404 shortly after creation is read-after-write lag; later it means
+		// the order never existed. Either way, do not mutate the row on a read
+		// failure — the poller will come back.
+		return row, err
+	}
+
+	now := time.Now()
+	updates := map[string]any{"last_checked_at": &now}
+	if remote.AmountPaid != "" {
+		updates["amount_paid"] = remote.AmountPaid
+	}
+	if remote.AmountReturned != "" {
+		updates["amount_returned"] = remote.AmountReturned
+	}
+	if h := latestPaycrestTxHash(remote); h != "" {
+		updates["tx_hash"] = h
+	}
+
+	next := mapPaycrestStatus(remote, row.Direction, row.PaymentClaimedAt != nil)
+	if next == models.PaycrestStatusUnmatched {
+		// The user paid, the bank confirmed, and the protocol never saw it.
+		// Loud, because nothing automated can resolve this.
+		log.Printf("[paycrest] ALARM unmatched deposit order=%s ref=%s user=%s amount=%s %s "+
+			"— funds are at the provider's bank with no API remedy; manual recovery required",
+			remote.ID, row.Reference, row.UserID, row.PayAmount, row.FiatCode)
+		updates["failure_reason"] = "Payment reached the provider but was never registered against the order. Manual recovery required."
+	}
+	if next != "" && next != row.Status {
+		updates["status"] = next
+		if next == models.PaycrestStatusSettled {
+			updates["settled_at"] = &now
+		}
+	}
+
+	if err := s.db.WithContext(ctx).Model(row).Updates(updates).Error; err != nil {
+		return row, err
+	}
+	return s.Get(ctx, row.UserID, row.ID)
+}
+
+// ClaimPayment records that the user asserts they completed their side of
+// the order — the bank transfer on a buy, the on-chain send on a sell —
+// after tapping "I've sent the money"/"I've sent it". Scoped to the caller's
+// own order via Get's ownership check (returns ErrPaycrestOrderNotYours
+// otherwise) and idempotent: a retried tap, or one that lands after another
+// request already recorded the claim, is a no-op past the first call, and
+// the original claim time is preserved rather than bumped forward.
+//
+// Deliberately does NOT touch Status. Only mapPaycrestStatus (via Sync) moves
+// an order's status; this just leaves evidence for the next Sync to read.
+func (s *PaycrestOrderService) ClaimPayment(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	row, err := s.Get(ctx, userID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if row.PaymentClaimedAt != nil {
+		return row, nil
+	}
+	now := time.Now()
+	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND user_id = ? AND payment_claimed_at IS NULL", orderID, userID).
+		Update("payment_claimed_at", &now).Error; err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, userID, orderID)
+}
+
+// mapPaycrestStatus translates their vocabulary into ours, and detects the one
+// state they have no word for.
+//
+// claimed is row.PaymentClaimedAt != nil — whether THIS user tapped "I've
+// sent the money"/"I've sent it" on THIS order. It has to come from our row,
+// not from PaycrestOrder: that type is only Paycrest's API response and
+// carries no memory of what our app showed the user. o.UnmatchedDeposit()
+// reports a fact about their response (expired + amountPaid=0); whether that
+// fact means "genuine unmatched deposit, page an operator" or "the user
+// abandoned this before paying, which looks identical to Paycrest" is a
+// judgment only our claim record can make — so the gate lives here, at the
+// point where both pieces of information are in scope, rather than on
+// PaycrestOrder itself.
+func mapPaycrestStatus(o *PaycrestOrder, direction string, claimed bool) string {
+	if o == nil {
+		return ""
+	}
+	if o.UnmatchedDeposit() && claimed {
+		return models.PaycrestStatusUnmatched
+	}
+	switch strings.ToLower(strings.TrimSpace(o.Status)) {
+	case PaycrestStatusSettled:
+		return models.PaycrestStatusSettled
+	case PaycrestStatusSettling:
+		return models.PaycrestStatusSettling
+	case PaycrestStatusRefunded:
+		return models.PaycrestStatusRefunded
+	case PaycrestStatusExpired:
+		return models.PaycrestStatusExpired
+	case PaycrestStatusCancelled:
+		return models.PaycrestStatusFailed
+	case PaycrestStatusPending:
+		// "pending" covers both "waiting for the user" and "provider assigned,
+		// funds seen". amountPaid is what separates them.
+		if paid := strings.TrimSpace(o.AmountPaid); paid != "" && paid != "0" {
+			return models.PaycrestStatusPending
+		}
+		if direction == models.PaycrestDirectionSell {
+			return models.PaycrestStatusAwaitingDeposit
+		}
+		return models.PaycrestStatusAwaitingPayment
+	}
+	return ""
+}
+
+// ─── Reads ─────────────────────────────────────────────────────────────────
+
+// Get fetches one of the user's own orders.
+func (s *PaycrestOrderService) Get(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	var row models.PaycrestOrderRecord
+	err := s.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", orderID, userID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPaycrestOrderNotYours
+	}
+	return &row, err
+}
+
+// Cancel abandons an order the user has not paid or funded yet.
+//
+// It is local by necessity: Paycrest has no cancel endpoint (all 404 — see the
+// PaycrestClient doc comment), so their copy of the order stays live until its
+// own window closes. What this actually buys the user is the one-open-order
+// lock in assertNoOpenOrder, which otherwise holds them for the full 30-minute
+// validUntil before the poller can mark the order expired.
+//
+// Cancelling is refused once PaymentClaimedAt is set. That claim is the user
+// saying money is on its way to a provider address; marking the order dead
+// underneath it would tell them nothing is coming while the deposit is still
+// in flight — the stranded-funds case that has no recovery path.
+//
+// The write is status-guarded rather than read-then-write so a poller sync (or
+// a second tap) landing in the same instant wins, and this call reports the
+// truth: the order is no longer cancellable.
+func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	row, err := s.Get(ctx, userID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if row.PaymentClaimedAt != nil {
+		return nil, ErrPaycrestNotCancellable
+	}
+
+	res := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND user_id = ? AND payment_claimed_at IS NULL AND status IN ?",
+			orderID, userID, []string{
+				models.PaycrestStatusAwaitingPayment,
+				models.PaycrestStatusAwaitingDeposit,
+			}).
+		Updates(map[string]any{
+			"status":         models.PaycrestStatusCancelled,
+			"failure_reason": "cancelled by user",
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrPaycrestNotCancellable
+	}
+	return s.Get(ctx, userID, orderID)
+}
+
+// List returns the user's recent orders, newest first.
+func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit int) ([]models.PaycrestOrderRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	var rows []models.PaycrestOrderRecord
+	err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("created_at DESC").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// DueForSync selects non-terminal orders for the poller, oldest check first.
+func (s *PaycrestOrderService) DueForSync(ctx context.Context, limit int) ([]models.PaycrestOrderRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	// Shared with PaycrestOrderTerminal: a status listed in one and not the
+	// other lets the poller refresh a row Sync considers settled — which for a
+	// user-cancelled order means overwriting our status with Paycrest's still-
+	// live copy and re-locking the user out of the direction.
+	terminal := models.PaycrestTerminalStatuses()
+	var rows []models.PaycrestOrderRecord
+	err := s.db.WithContext(ctx).
+		Where("status NOT IN ? AND paycrest_id <> ''", terminal).
+		Order("last_checked_at ASC NULLS FIRST").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+// assertNoOpenOrder keeps one live order per direction per user.
+func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uuid.UUID, direction string) error {
+	open := []string{
+		models.PaycrestStatusAwaitingPayment, models.PaycrestStatusAwaitingDeposit,
+		models.PaycrestStatusPending, models.PaycrestStatusSettling,
+	}
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("user_id = ? AND direction = ? AND status IN ?", userID, direction, open).
+		Count(&n).Error; err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrPaycrestOrderOpen
+	}
+	return nil
+}
+
+// paycrestBankCode resolves the bank/institution code the app sent into
+// Paycrest's own vocabulary, refusing rather than guessing — a wrong
+// institution sends someone's payout to another bank.
+//
+// NGN is the only currency whose picker speaks NIBSS codes (see
+// PaycrestDirectory.Institutions, which predates Paycrest and still matches
+// the app's ngBanks.ts list) — so only NGN needs translating through the
+// NIBSS<->Paycrest map. Every other currency's picker already sent Paycrest's
+// own code straight from that same Institutions() call, so running it through
+// the NIBSS map here would look up a Paycrest code as if it were a NIBSS one
+// and always miss. For those currencies, confirm the code is a real
+// institution for this fiat (via the same Institutions() the picker used) and
+// pass it through unchanged.
+// Returns the provider's code AND the destination kind, because the kind
+// decides what a valid identifier looks like and this is the only place that
+// already knows it.
+func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code string) (string, string, error) {
+	if s.dir == nil {
+		return "", "", ErrPaycrestDisabled
+	}
+	code = strings.TrimSpace(code)
+	if strings.ToUpper(strings.TrimSpace(fiat)) != "NGN" {
+		institutions, err := s.dir.Institutions(ctx, fiat)
+		if err != nil {
+			return "", "", err
+		}
+		for _, inst := range institutions {
+			if inst.Code == code {
+				return code, inst.Type, nil
+			}
+		}
+		return "", "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
+	}
+	m, err := s.dir.BankMap(ctx, fiat)
+	if err != nil {
+		return "", "", err
+	}
+	paycrestCode, ok := m.NIBSSToPaycrest[code]
+	if !ok {
+		return "", "", fmt.Errorf("%w (bank %s)", ErrPaycrestBankUnsupported, code)
+	}
+	// NIBSS is a bank registry; every code in it takes a NUBAN account number.
+	return paycrestCode, PaycrestInstitutionBank, nil
+}
+
+// msisdnPattern and nubanPattern are the only two identifier shapes we can
+// state with confidence. Everything else stays "non-empty" rather than being
+// forced through a rule we would be guessing at.
+var (
+	msisdnPattern = regexp.MustCompile(`^\d{9,15}$`)
+	nubanPattern  = regexp.MustCompile(`^\d{10}$`)
+)
+
+// validatePayoutIdentifier checks the account identifier against the KIND of
+// destination it is going to.
+//
+// The app already asks for the right thing per destination, but the app is not
+// a trust boundary: an older build, or any direct API caller, can post a
+// 10-digit bank account number against an MTN mobile-money code. The payout
+// then fails at the provider AFTER the on-chain leg has moved, which is the
+// one failure this whole area exists to prevent — and a short-but-real number
+// does not fail at all, it pays a stranger.
+func validatePayoutIdentifier(kind, fiat, identifier string) error {
+	id := strings.TrimSpace(identifier)
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case PaycrestInstitutionMobileMoney:
+		if !msisdnPattern.MatchString(id) {
+			return fmt.Errorf("%w: a mobile money destination needs a phone number (9-15 digits)",
+				ErrPaycrestAccountShape)
+		}
+	default:
+		// NUBAN is the one bank format we know. Other currencies' account
+		// numbers vary by country and bank, so requiring a length there would
+		// reject real accounts — non-empty is enforced by the caller.
+		if strings.EqualFold(strings.TrimSpace(fiat), "NGN") && !nubanPattern.MatchString(id) {
+			return fmt.Errorf("%w: a Nigerian bank account number is 10 digits",
+				ErrPaycrestAccountShape)
+		}
+	}
+	return nil
+}
+
+// paycrestReference mints our idempotency key. The user id is embedded so an
+// operator reading a Paycrest dashboard row can identify the customer without
+// our database.
+func paycrestReference(prefix string, userID uuid.UUID) string {
+	return fmt.Sprintf("%s-%s-%s", prefix,
+		strings.ReplaceAll(userID.String(), "-", "")[:12],
+		strings.ReplaceAll(uuid.NewString(), "-", "")[:10])
+}
+
+// paycrestProviderOf prefers the provider the order actually landed on, and
+// falls back to the quote's first ranked provider.
+func paycrestProviderOf(o *PaycrestOrder, v *PaycrestVenue) string {
+	if o != nil {
+		var dest struct {
+			ProviderID string `json:"providerId"`
+		}
+		if len(o.Destination) > 0 {
+			_ = json.Unmarshal(o.Destination, &dest)
+		}
+		if dest.ProviderID != "" {
+			return dest.ProviderID
+		}
+	}
+	if v != nil && len(v.ProviderIDs) > 0 {
+		return v.ProviderIDs[0]
+	}
+	return ""
+}
+
+// latestPaycrestTxHash returns the most recent on-chain hash in the audit log.
+func latestPaycrestTxHash(o *PaycrestOrder) string {
+	for i := len(o.TransactionLogs) - 1; i >= 0; i-- {
+		if h := strings.TrimSpace(o.TransactionLogs[i].TxHash); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
+// parsePaycrestTime accepts the RFC3339 variants their API mixes (with and
+// without sub-second precision). An unparseable value yields nil rather than a
+// zero time, so a bad expiry never reads as "already expired".
+func parsePaycrestTime(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			u := t.UTC()
+			return &u
+		}
+	}
+	return nil
+}
+
+// ─── Webhooks ──────────────────────────────────────────────────────────────
+
+// ErrPaycrestOrderUnknown means an event named an order we have no row for.
+// Not retryable: a redelivery cannot make the row appear, and the likeliest
+// cause is an order created by another environment sharing the API key.
+var ErrPaycrestOrderUnknown = errors.New("paycrest: webhook names an order we do not have")
+
+// HandleWebhook advances an order from a verified webhook.
+//
+// The event is a HINT, never an authority. It tells us which order moved; Sync
+// then re-reads that order from the API and decides. That matters here more
+// than usual: the failure this integration must never mishandle is an expired
+// order whose deposit was never registered, and only the API's amountPaid can
+// distinguish it from an ordinary expiry.
+//
+// Looking up by OUR reference rather than their order id is deliberate — the
+// reference exists on our row from the moment we create it, whereas their id
+// only arrives with the response, so a webhook racing our own persist still
+// finds its order.
+func (s *PaycrestOrderService) HandleWebhook(ctx context.Context, ev *PaycrestWebhookEvent) error {
+	if s == nil {
+		return ErrPaycrestDisabled
+	}
+	if ev == nil {
+		return errors.New("paycrest webhook: nil event")
+	}
+
+	var row models.PaycrestOrderRecord
+	q := s.db.WithContext(ctx)
+	var err error
+	switch {
+	case strings.TrimSpace(ev.Reference) != "":
+		err = q.Where("reference = ?", ev.Reference).First(&row).Error
+	case strings.TrimSpace(ev.OrderID) != "":
+		err = q.Where("paycrest_id = ?", ev.OrderID).First(&row).Error
+	default:
+		return errors.New("paycrest webhook: event carries no identifier")
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("%w (ref=%q id=%q)", ErrPaycrestOrderUnknown, ev.Reference, ev.OrderID)
+	}
+	if err != nil {
+		return err
+	}
+
+	// An event can arrive before our own create call has finished persisting
+	// the provider's id. Fill it in so the poller and any later event agree on
+	// which remote order this row is.
+	if row.PaycrestID == "" && strings.TrimSpace(ev.OrderID) != "" {
+		row.PaycrestID = ev.OrderID
+		if err := s.db.WithContext(ctx).Model(&row).
+			Update("paycrest_id", ev.OrderID).Error; err != nil {
+			return err
+		}
+	}
+	if models.PaycrestOrderTerminal(row.Status) {
+		return nil // nothing an event can add
+	}
+
+	_, err = s.Sync(ctx, &row)
+	return err
+}

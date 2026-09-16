@@ -44,7 +44,7 @@ import type { PickerItem } from '@/components/ui';
 const BUSINESS_TYPES = [
   { label: 'General Products', value: 'general_products' },
   { label: 'Digital Products', value: 'digital_products' },
-  { label: 'P2P Merchant', value: 'p2p_merchant' },
+  { label: 'Payment Merchant (PM)', value: 'p2p_merchant' },
   { label: 'Service Provider', value: 'service_provider' },
 ];
 
@@ -541,7 +541,7 @@ export default function MerchantRequestScreen() {
             // Locked single-chip: entered via ?type=p2p_merchant — cannot be changed.
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
               <Chip
-                label="P2P Merchant"
+                label="Payment Merchant (PM)"
                 selected
               />
             </View>

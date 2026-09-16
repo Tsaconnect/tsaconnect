@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,16 +23,15 @@ import (
 func newAllSwapHandler(t *testing.T, db *gorm.DB, fromAmountUSD float64, reachable bool) *SwapLiFiHandler {
 	t.Helper()
 	cfg := &config.Config{
-		TPPerUSD:                  1.0,
-		AllSwapFeeDeviationMax:    0.10,
-		AllSwapNominalFeeBps:      300, // 3%
-		AllSwapConservativeFeeBps: 350, // 3.5%
+		TPPerUSD:               1.0,
+		AllSwapFeeDeviationMax: 0.10,
+		AllSwapNominalFeeBps:   300, // 3%
 	}
 	h := NewSwapLiFiHandler("", "", "")
 	h.Config = cfg
 	h.FeeService = services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
-		return fromAmountUSD, reachable
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
+		return requeryResult{FromAmountUSD: fromAmountUSD, Reachable: reachable, FeeCollectable: true}
 	}
 	return h
 }
@@ -51,7 +51,7 @@ func doSettle(t *testing.T, h *SwapLiFiHandler, user models.User, body map[strin
 // (a) accrues the VERIFIED fee (3% of the re-queried fromAmountUSD), idempotent.
 func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true) // LiFi reachable, $1000 from-amount
 	user := mkWUser(t, db, "asuser", nil)
 
@@ -96,7 +96,7 @@ func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 // (b) rejects (422) a FORGED client fee that deviates >10% from the verified fee.
 func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true) // verified fee = $30
 	user := mkWUser(t, db, "asforge", nil)
 
@@ -115,32 +115,39 @@ func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 	}
 }
 
-// (c) LiFi unreachable → conservative default (3.5%), NOT 0 and NOT the client
-// value; still accrues the verified (conservative) fee.
-func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
+// (c) LiFi unreachable → still books a fee, from a basis priced here: NOT 0,
+// and NOT the client's number.
+//
+// The rate is the same as the verified path. This accrual mirrors a fixed cut
+// LiFi already took, so a higher "conservative" rate would record income that
+// was never received and fund TP and cashback out of nothing.
+func TestAllSwap_LiFiUnreachableIgnoresTheClientsNumber(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
+	h.PriceService = services.NewPriceService()
+	h.PriceService.SeedPriceForTest("USDC", services.PriceData{USD: 1.0})
 	user := mkWUser(t, db, "asdown", nil)
 
-	// Client claims $1 (tiny). LiFi down → we ignore the client and charge the
-	// conservative 3.5% of the face from-amount ($1000) = $35.
+	// Client claims $1 (tiny). LiFi down → we ignore the client and book 3% of
+	// the priced from-amount (1,000 USDC = $1000) = $30.
 	w := doSettle(t, h, user, map[string]interface{}{
 		"quoteId": "down-1", "fromToken": "USDC", "toToken": "ETH",
-		"fromAmount": "1000", "chainId": 1, "clientFeeUsd": 1.0,
+		"fromAmount": "1000000000", "fromSymbol": "USDC", "fromDecimals": 6,
+		"chainId": 1, "clientFeeUsd": 1.0,
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("settle status=%d body=%s", w.Code, w.Body.String())
 	}
 	sourceID := deterministicUUID("allswap:down-1")
 	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
-		t.Fatalf("want 1 conservative guard row, got %d", got)
+		t.Fatalf("want 1 guard row, got %d", got)
 	}
 	var fd models.FeeDistribution
 	db.Where("source_type = ? AND source_id = ?", "allswap", sourceID).First(&fd)
-	// 3.5% of $1000 = $35 — never 0, never the client's $1.
-	if fd.FeeUSD < 34.999 || fd.FeeUSD > 35.001 {
-		t.Errorf("conservative feeUSD=%v want 35 (3.5%% of 1000)", fd.FeeUSD)
+	// 3% of $1000 = $30 — never 0, never the client's $1.
+	if fd.FeeUSD < 29.999 || fd.FeeUSD > 30.001 {
+		t.Errorf("feeUSD=%v want 30 (3%% of 1000)", fd.FeeUSD)
 	}
 }
 
@@ -149,15 +156,15 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 // exact decimal string, and the verified fee must accrue like any EVM route.
 func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true)
 	user := mkWUser(t, db, "assol", nil)
 
 	const svmChainID int64 = 1151111081099710
 	var gotFromChain, gotToChain string
-	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
 		gotFromChain, gotToChain = p.FromChain, p.ToChain
-		return 1000.0, true
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
 	}
 
 	w := doSettle(t, h, user, map[string]interface{}{
@@ -173,6 +180,151 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	sourceID := deterministicUUID("allswap:sol-1")
 	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
 		t.Fatalf("want 1 allswap guard row, got %d", got)
+	}
+}
+
+// FromAmount is in base units. Reading it as dollars — which the fallback
+// used to do — turns a 1,000 USDC swap (fromAmount "1000000000") into
+// a $35,000,000 fee event, and every split, TP award and reward computed from
+// it inherits that. With a price available the basis is priced properly.
+func TestAllSwap_UnreachableLiFiPricesTheBasis(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
+	h.PriceService = services.NewPriceService()
+	h.PriceService.SeedPriceForTest("USDC", services.PriceData{USD: 1.0})
+	user := mkWUser(t, db, "asprice", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "priced-1", "fromToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+		"toToken": "ETH", "fromAmount": "1000000000", "chainId": 42161,
+		"fromSymbol": "USDC", "fromDecimals": 6,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 1,000 USDC at $1 → 3% → $30. NOT $35,000,000, and not the 3.5% that would
+	// over-record against what LiFi actually collected.
+	if got := settledFee(t, db, "priced-1").FeeUSD; got < 29.999 || got > 30.001 {
+		t.Fatalf("feeUSD=%v, want 30 (3%% of a $1,000 basis)", got)
+	}
+}
+
+// With neither LiFi nor a price, there is no honest basis. Accruing a guess
+// would corrupt the ledger, so nothing is accrued and the caller is told.
+func TestAllSwap_UnpricedFeeIsDeferredNotInvented(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 0, false)
+	h.PriceService = services.NewPriceService() // no seeded price for WOOF
+	user := mkWUser(t, db, "asunpriced", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "unpriced-1", "fromToken": "0xdead", "toToken": "ETH",
+		"fromAmount": "2000000000000000000000000", "chainId": 1,
+		"fromSymbol": "WOOF", "fromDecimals": 18,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"deferred":true`) {
+		t.Errorf("response should say the fee was deferred: %s", w.Body.String())
+	}
+	sourceID := deterministicUUID("allswap:unpriced-1")
+	if got := feeGuardCount(db, "allswap", sourceID); got != 0 {
+		t.Fatalf("an unpriced settle must accrue nothing, got %d rows", got)
+	}
+}
+
+// LiFi refuses a quote without fromAddress, so the re-query has to carry the
+// route's endpoints or it fails 400 every time — silently sending every settle
+// down the unreachable path.
+func TestAllSwap_RequeryCarriesRouteAddresses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "asaddr", nil)
+
+	var got settleQuoteParams
+	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {
+		got = p
+		return requeryResult{FromAmountUSD: 1000.0, Reachable: true, FeeCollectable: true}
+	}
+	doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "addr-1", "fromToken": "bitcoin", "toToken": "USDC",
+		"fromAmount": "200000", "chainId": 20000000000001, "toChainId": 42161,
+		"fromAddress": "bc1qsender", "toAddress": "0xrecipient",
+	})
+	if got.FromAddress != "bc1qsender" || got.ToAddress != "0xrecipient" {
+		t.Fatalf("re-query lost the route addresses: %+v", got)
+	}
+}
+
+// settledFee loads the guard row a settle call produced.
+func settledFee(t *testing.T, db *gorm.DB, quoteID string) models.FeeDistribution {
+	t.Helper()
+	sourceID := deterministicUUID("allswap:" + quoteID)
+	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
+		t.Fatalf("want 1 guard row for %s, got %d", quoteID, got)
+	}
+	var fd models.FeeDistribution
+	if err := db.Where("source_type = ? AND source_id = ?", "allswap", sourceID).First(&fd).Error; err != nil {
+		t.Fatalf("load guard: %v", err)
+	}
+	return fd
+}
+
+// The same-chain trading desk and the cross-chain bridge settle through this
+// one endpoint but are reported as separate lines, so the caller names its
+// bucket. Anything unrecognised books as allswap rather than inventing a
+// feature the fee config has no rate for.
+func TestAllSwap_BooksTheRequestedFeature(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "featureuser", nil)
+
+	for _, tc := range []struct{ requested, want string }{
+		{"spot", models.FeatureSpot},
+		{"allswap", models.FeatureAllswap},
+		{"", models.FeatureAllswap},
+		{"product_merchant", models.FeatureAllswap}, // not this endpoint's to write
+	} {
+		quoteID := "feature-" + tc.requested
+		w := doSettle(t, h, user, map[string]interface{}{
+			"quoteId": quoteID, "fromToken": "USDC", "toToken": "ETH",
+			"fromAmount": "1000", "chainId": 1, "feature": tc.requested,
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("%q: status=%d body=%s", tc.requested, w.Code, w.Body.String())
+		}
+		if got := settledFee(t, db, quoteID).Feature; got != tc.want {
+			t.Errorf("feature %q booked as %q, want %q", tc.requested, got, tc.want)
+		}
+	}
+}
+
+// The fee event's token is a settlement SYMBOL — SP5 resolves payouts from it,
+// and the column holds 16 characters. The route is named by contract address,
+// so an address here would both mean nothing downstream and overflow the
+// column.
+func TestAllSwap_LabelsFeeWithSymbolNotAddress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "symboluser", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId":    "symbol-1",
+		"fromToken":  "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC on Arbitrum
+		"toToken":    "0x0000000000000000000000000000000000000000",
+		"fromAmount": "1000000000", "chainId": 42161, "fromSymbol": "usdc",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := settledFee(t, db, "symbol-1").Token; got != "USDC" {
+		t.Errorf("fee token=%q, want the uppercased symbol USDC", got)
 	}
 }
 

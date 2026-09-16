@@ -25,6 +25,9 @@ type chainEscrow struct {
 	// configured chainID when the probe fails — a mismatch with what the
 	// contract hashes makes every ecrecover resolve to a wrong address.
 	domainChainID int64
+	// chainKey names the chain for diagnostics ("sonic", "bsc"); empty for the
+	// test/ops map constructor, which has no config to read it from.
+	chainKey string
 	// assets is the curated allow-list of token symbols tradeable on this chain.
 	// An empty slice means "allow all" (used by NewP2PEscrowRegistryFromMap so
 	// tests and ops maps stay permissive). An unconfigured chain returns false.
@@ -130,6 +133,58 @@ func (r *P2PEscrowRegistry) Chains() []P2PChainInfo {
 	return out
 }
 
+// systemWalletReader is the read an escrow adapter must support to be included
+// in SystemWallets. Adapters that don't (test mocks) are reported as unreadable
+// rather than skipped, so a caller never mistakes "not checked" for "agrees".
+type systemWalletReader interface {
+	ReadSystemWallet() (string, error)
+}
+
+// FeeSinkStatus is one escrow's answer to "where do your fees go?".
+// Reason is set when the read could not be made; SystemWallet is then empty.
+type FeeSinkStatus struct {
+	ChainID  int64  `json:"chainId"`
+	ChainKey string `json:"chainKey"`
+	Contract string `json:"contract"`
+	// SystemWallet is the address this contract pays trade fees to.
+	SystemWallet string `json:"systemWallet,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// SystemWallets reads systemWallet() from every enabled P2P escrow, so the
+// admin fee-wallet panel can state per contract — not in aggregate — whether
+// fees actually land at the assigned address. A failed read yields a Reason
+// instead of dropping the row: an unread contract must stay visible, since
+// "we couldn't check" and "it matches" are very different answers.
+// Sorted by chainID for stable output.
+func (r *P2PEscrowRegistry) SystemWallets() []FeeSinkStatus {
+	if r == nil {
+		return nil
+	}
+	out := make([]FeeSinkStatus, 0, len(r.byChain))
+	for id, e := range r.byChain {
+		row := FeeSinkStatus{ChainID: id, ChainKey: e.chainKey, Contract: e.service.ContractAddress()}
+		reader, ok := e.service.(systemWalletReader)
+		if !ok {
+			row.Reason = "escrow adapter cannot read systemWallet"
+			out = append(out, row)
+			continue
+		}
+		addr, err := reader.ReadSystemWallet()
+		switch {
+		case err != nil:
+			row.Reason = err.Error()
+		case addr == "":
+			row.Reason = "contract returned an empty systemWallet"
+		default:
+			row.SystemWallet = addr
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChainID < out[j].ChainID })
+	return out
+}
+
 // AssetAllowed reports whether symbol may be traded on chainID per the
 // per-chain curation. An empty allow-list means "allow all" (used by the
 // test/ops map constructor). An unconfigured chain returns false.
@@ -172,6 +227,7 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 		}
 		reg.byChain[chainID] = &chainEscrow{
 			service:       NewP2PEscrowServiceForChain(client, cfg, cc.EscrowAddress),
+			chainKey:      cc.ChainKey,
 			eip712Version: cc.EIP712Version,
 			domainChainID: verifyP2PChainAtBoot(client, chainID, cc),
 			assets:        cc.Assets,

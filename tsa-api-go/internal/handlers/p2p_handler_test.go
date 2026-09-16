@@ -39,9 +39,9 @@ import (
 // ─── Mock escrow (handler-scoped; matches services.P2PEscrowAdapter) ──────
 
 type mockEscrow struct {
-	contractAddress string
-	balance         services.OnChainBalance
-	allowance       *big.Int
+	contractAddress    string
+	balance            services.OnChainBalance
+	allowance          *big.Int
 	depositedEvent     *services.P2PDepositedEvent
 	withdrawnEvent     *services.P2PWithdrawnEvent
 	cancelledEvent     *services.P2PVoucherCancelledEvent
@@ -334,7 +334,12 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			reviewed_by TEXT, reviewed_at DATETIME, review_note TEXT,
 			created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS users (
-			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT)`,
+			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
+		)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
@@ -1418,3 +1423,28 @@ func TestGetAd_PMFields(t *testing.T) {
 // Compile-time guard: mockEscrow implements P2PEscrowAdapter so we catch
 // interface drift if the adapter surface ever changes.
 var _ services.P2PEscrowAdapter = (*mockEscrow)(nil)
+
+// TestIsISO2Country bounds the country parameter's shape. It is user input that
+// reaches an outbound provider call; url.Values encodes it so there is no
+// injection, but an unbounded string still lets a caller drive arbitrary
+// upstream requests.
+func TestIsISO2Country(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"NG", true},
+		{"GH", true},
+		{"N", false},
+		{"NGA", false},
+		{"", false},
+		{"N1", false},
+		{"ng", false}, // callers upper-case before this check
+		{"N ", false},
+		{"../", false},
+	} {
+		if got := isISO2Country(c.in); got != c.want {
+			t.Errorf("isISO2Country(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

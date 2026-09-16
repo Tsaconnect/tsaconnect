@@ -2,7 +2,9 @@
 //
 // P2P marketplace — browse sell-ads (user buys crypto) and buy-ads (user sells
 // crypto to a merchant). Restyled onto the TSA Signature design system.
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { goBack } from '@/utils/back';
+import { SERVICES_TAB } from '@/constants/routes';
 import React, { useCallback, useEffect, useState } from 'react';
 import { BackHandler, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,7 +20,8 @@ import {
 import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
-import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from './pm-cta';
+import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
+import { RAILS, railLabel } from '../../constants/rails';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';
@@ -141,19 +144,18 @@ const P2PMarketScreen: React.FC = () => {
   }, [load]);
 
   // The P2P marketplace is entered as a section takeover (the marketplace tab
-  // redirects here via router.replace), so the root back-stack is empty on this
-  // screen — without this, Android's hardware back would exit the app. Route a
-  // hardware-back press to the main app home instead (or pop if real history
-  // exists). Detail/flow screens are pushed onto this stack and keep their
-  // normal back behaviour, so the handler only runs while the index is focused.
+  // redirects here via router.replace), so the root back-stack can be empty on
+  // this screen — without this, Android's hardware back would exit the app.
+  // Detail/flow screens are pushed onto this stack and keep their normal back
+  // behaviour, so the handler only runs while the index is focused.
+  //
+  // iOS has no hardware back, which is why this screen also needs the shared
+  // header chevron from app/p2p/_layout.tsx: for a long time this handler was
+  // the app's only way out of the P2P marketplace, and iOS users had none.
   useFocusEffect(
     useCallback(() => {
       const onBackPress = () => {
-        if (router.canGoBack()) {
-          router.back();
-        } else {
-          router.replace('/home');
-        }
+        goBack(SERVICES_TAB);
         return true;
       };
       const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
@@ -189,6 +191,8 @@ const P2PMarketScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      {/* One screen, two rails — the header names whichever feed is showing. */}
+      <Stack.Screen options={{ title: isPmView ? railLabel('pm') : railLabel('p2p') }} />
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
@@ -205,13 +209,11 @@ const P2PMarketScreen: React.FC = () => {
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View style={{ flex: 1 }}>
             <Text variant="title1" weight="700">
-              {isPmView ? 'Payment Merchant' : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
+              {isPmView ? railLabel('pm') : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
             </Text>
-            {isPmView && (
-              <Text variant="caption" color="textSecondary">
-                Instant buy / sell with verified merchants
-              </Text>
-            )}
+            <Text variant="caption" color="textSecondary">
+              {isPmView ? RAILS.pm.tagline : RAILS.p2p.tagline}
+            </Text>
           </View>
           <CurrencySelector variant="header" selectedCode={currency.code} onSelectCode={setMarketCurrency} />
         </View>
@@ -256,7 +258,7 @@ const P2PMarketScreen: React.FC = () => {
                     Want to sell?
                   </Text>
                   <Text variant="caption" color="textSecondary">
-                    Become a merchant to publish P2P ads.
+                    Become a merchant to publish {RAILS.p2p.name} ({RAILS.p2p.acronym}) ads.
                   </Text>
                 </View>
                 <Icon name="chevronRight" size={20} color={colors.textMuted} />

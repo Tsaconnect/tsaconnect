@@ -497,25 +497,6 @@ const MerchantOrderDetail = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      {/* Header */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: spacing.sm,
-          paddingVertical: spacing.sm,
-          borderBottomWidth: 1,
-          borderBottomColor: colors.hairline,
-        }}
-      >
-        <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
-        <Text variant="title3" weight="700">
-          Order Detail
-        </Text>
-        <View style={{ width: 44 }} />
-      </View>
-
       <ScrollView
         contentContainerStyle={{
           padding: spacing.lg,

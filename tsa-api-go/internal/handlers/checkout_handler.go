@@ -261,6 +261,10 @@ func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) in
 // inside a configured weekly availability window, and returns the matched
 // window's start-minute (for grid-alignment checks). windowStart is -1 when no
 // window covers the slot.
+//
+// slotStart MUST already be expressed in the service's own timezone: the stored
+// windows are wall-clock there, so both the weekday and the time-of-day read
+// below are only meaningful in that zone.
 func slotWithinAvailability(tx *gorm.DB, productID uuid.UUID, slotStart time.Time, durationMin int) (ok bool, windowStart int) {
 	dow := int(slotStart.Weekday())
 	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
@@ -347,21 +351,26 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 	slotStart := req.SlotStart.UTC()
 	slotEnd := slotStart.Add(time.Duration(duration) * time.Minute)
 
+	// The instant is what gets stored and compared for capacity, but the
+	// availability windows are wall-clock in the service's own zone — so the
+	// weekday and time-of-day checks below have to read the slot there.
+	local := slotStart.In(profile.Location())
+
 	// Reject slots in the past (a booking must be for a future time).
 	if !slotStart.After(time.Now().UTC()) {
-		return nil, fmt.Sprintf("%s is in the past", formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is in the past", formatSlot(local))
 	}
 
-	within, windowStart := slotWithinAvailability(tx, product.ID, slotStart, duration)
+	within, windowStart := slotWithinAvailability(tx, product.ID, local, duration)
 	if !within {
-		return nil, fmt.Sprintf("%s is not available at %s", product.Name, formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is not available at %s", product.Name, formatSlot(local))
 	}
 	// Grid alignment: the slot must sit on the duration grid measured from the
 	// window start, otherwise a buyer could send offset starts (10:00, 10:01, …)
 	// that each count as a distinct slot and bypass per-slot capacity entirely.
-	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
+	slotStartMin := local.Hour()*60 + local.Minute()
 	if (slotStartMin-windowStart)%duration != 0 {
-		return nil, fmt.Sprintf("%s is not a valid slot time", formatSlot(slotStart))
+		return nil, fmt.Sprintf("%s is not a valid slot time", formatSlot(local))
 	}
 
 	if profile.MaxCapacityPerSlot > 0 {
@@ -375,7 +384,7 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 		}
 		booked := slotBookedCountTx(tx, product.ID, slotStart)
 		if booked+partySize > profile.MaxCapacityPerSlot {
-			return nil, fmt.Sprintf("The %s slot is full", formatSlot(slotStart))
+			return nil, fmt.Sprintf("The %s slot is full", formatSlot(local))
 		}
 	}
 	return &models.ServiceBooking{
@@ -729,6 +738,24 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
+			// Re-checked at order time, not just at add-to-cart: the listing or its
+			// seller can be suspended while it sits in someone's cart, and that
+			// must stop the purchase rather than escrow funds against a listing
+			// nobody can fulfil.
+			var listingSeller models.User
+			if err := tx.First(&listingSeller, "id = ?", product.UserID).Error; err != nil {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest,
+					fmt.Sprintf("%s is no longer available for purchase", product.Name))
+				return
+			}
+			if !product.IsVisibleToPublic(&listingSeller) {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest,
+					fmt.Sprintf("%s is no longer available for purchase", product.Name))
+				return
+			}
+
 			// Listing kind: a service skips stock + shipping. The three service
 			// types (contact/order/booking) branch on the category's ServiceType.
 			isService := product.Type == models.ProductTypeService
@@ -1069,11 +1096,18 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Not a service listing")
 		return
 	}
-
 	var seller models.User
 	if err := tx.First(&seller, "id = ?", product.UserID).Error; err != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusBadRequest, "Seller not found")
+		return
+	}
+
+	// Same guard as the cart path: a suspended or deleted service — or one whose
+	// provider's account is suspended — cannot be booked.
+	if !product.IsVisibleToPublic(&seller) {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "This service is no longer available")
 		return
 	}
 
@@ -2378,7 +2412,10 @@ func enrichOrdersWithPreview(orders []models.Order) []orderPreview {
 
 	var products []models.Product
 	if len(productIDs) > 0 {
-		_ = config.DB.Where("id IN ?", toSlice(productIDs)).Find(&products).Error
+		// Unscoped: an order's product may since have been deleted, and the order
+		// still has to render its name, price and image. Keeping order history
+		// readable is the whole reason deletion is soft.
+		_ = config.DB.Unscoped().Where("id IN ?", toSlice(productIDs)).Find(&products).Error
 	}
 	productByID := make(map[uuid.UUID]*productPreview, len(products))
 	for i := range products {

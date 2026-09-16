@@ -27,7 +27,6 @@ import {
   Divider,
   EmptyState,
   Icon,
-  IconButton,
   PressableScale,
   Spinner,
   Surface,
@@ -35,6 +34,7 @@ import {
 } from '@/components/ui';
 import type { IconName } from '@/components/ui';
 import api from '../components/services/api';
+import { RAILS, railLabel } from '@/constants/rails';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,15 +46,19 @@ interface ActivityRow {
 
 // ── Activity label / icon mapping (SourceType → user-facing) ────────────────
 
+// Both counterparty rails settle through the same P2P escrow, so cashback
+// reports them as one line.
+const PM_P2P_TRADE_LABEL = `${RAILS.p2p.name} & ${RAILS.pm.name} trades`;
+
 const ACTIVITY_META: Record<string, { label: string; icon: IconName }> = {
   checkout: { label: 'Product purchases', icon: 'cart' },
   order: { label: 'Product purchases', icon: 'cart' },
   service_contact: { label: 'Service orders', icon: 'construction' },
   service: { label: 'Service orders', icon: 'construction' },
-  p2p_release: { label: 'P2P & PM trades', icon: 'send' },
-  p2p_trade: { label: 'P2P & PM trades', icon: 'send' },
-  p2p: { label: 'P2P & PM trades', icon: 'send' },
-  instant_transfer: { label: 'Instant transfers', icon: 'bolt' },
+  p2p_release: { label: PM_P2P_TRADE_LABEL, icon: 'send' },
+  p2p_trade: { label: PM_P2P_TRADE_LABEL, icon: 'send' },
+  p2p: { label: PM_P2P_TRADE_LABEL, icon: 'send' },
+  instant_transfer: { label: railLabel('it'), icon: 'bolt' },
 };
 
 function activityMeta(sourceType: string): { label: string; icon: IconName } {
@@ -94,13 +98,13 @@ const CASHBACK_RULES: CashbackRule[] = [
   },
   {
     icon: 'send',
-    title: 'P2P & PM trades',
+    title: PM_P2P_TRADE_LABEL,
     you: '0.15% cashback on every trade you complete',
     upline: 'Your direct upline also earns 0.15%',
   },
   {
     icon: 'bolt',
-    title: 'Instant transfers',
+    title: railLabel('it'),
     you: '0.125% cashback on every transfer you complete',
     upline: 'Your direct upline also earns 0.125%',
   },
@@ -176,18 +180,6 @@ const CashbackScreen: React.FC = () => {
           />
         }
       >
-        {/* Header */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
-          <IconButton
-            icon="chevronLeft"
-            onPress={() => router.back()}
-            accessibilityLabel="Go back"
-            style={{ marginLeft: -spacing.sm }}
-          />
-          <Text variant="title2" weight="700">
-            Cashback
-          </Text>
-        </View>
 
         {/* ── Hero: total cashback ── */}
         <AccentCard padding="xl">

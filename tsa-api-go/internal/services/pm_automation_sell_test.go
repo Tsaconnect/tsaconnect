@@ -16,10 +16,17 @@ type fakeNombaGateway struct {
 	payoutID string
 	err      error
 	calls    []PayoutRequest
+	// onCall runs at the moment the gateway is asked to move money, so a test
+	// can observe the rest of the world's state at exactly that instant —
+	// which is how the P2P forward proves the ledger credit came first.
+	onCall func()
 }
 
 func (f *fakeNombaGateway) InitiatePayout(_ context.Context, r PayoutRequest) (string, error) {
 	f.calls = append(f.calls, r)
+	if f.onCall != nil {
+		f.onCall()
+	}
 	if f.err != nil {
 		return "", f.err
 	}

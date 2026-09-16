@@ -23,6 +23,8 @@ import {
   Icon,
   PressableScale,
 } from '@/components/ui';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
+import { isKnownContract } from '@/utils/tokenLogo';
 
 // Reliable chain logos by chain ID — LiFi's nativeToken.logoURI for L2s
 // all resolve to the ETH logo (their native token IS ETH), so we maintain
@@ -294,7 +296,6 @@ function TokenRow({
 }) {
   const theme = useTheme();
   const { colors, spacing, radius } = theme;
-  const initial = token.symbol[0] ?? '?';
   const displayBalance = balance !== undefined ? formatBalance(balance) : undefined;
   const displayUSD = balance !== undefined ? formatUSD(balance, usdValue ?? '0', token.priceUSD) : null;
 
@@ -303,26 +304,12 @@ function TokenRow({
       onPress={onPress}
       style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.md, gap: spacing.md }}
     >
-      <View style={{ width: 36, height: 36 }}>
-        {token.logoURI ? (
-          <Image source={{ uri: token.logoURI }} style={{ width: 36, height: 36, borderRadius: 18 }} />
-        ) : (
-          <View
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 18,
-              justifyContent: 'center',
-              alignItems: 'center',
-              backgroundColor: colors.accent,
-            }}
-          >
-            <Text variant="bodySm" weight="700" style={{ color: colors.onAccent }}>
-              {initial}
-            </Text>
-          </View>
-        )}
-      </View>
+      <TokenAvatar
+        symbol={token.symbol}
+        iconUrl={token.logoURI}
+        curated={isKnownContract(token.chainId, token.address, token.symbol)}
+        size={36}
+      />
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
           <Text variant="bodySm" weight="700">{token.symbol}</Text>
@@ -691,23 +678,9 @@ export default function TokenPickerModal({
                 style={addrRowStyle(theme)}
                 onPress={() => { onSelect(addrToken, addrChainId ?? chainId); onClose(); }}
               >
-                {addrToken.logoURI
-                  ? <Image source={{ uri: addrToken.logoURI }} style={{ width: 40, height: 40, borderRadius: 20 }} />
-                  : (
-                    <View
-                      style={{
-                        width: 40,
-                        height: 40,
-                        borderRadius: 20,
-                        backgroundColor: colors.accent,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}
-                    >
-                      <Text variant="bodyMed" weight="700" style={{ color: colors.onAccent }}>{addrToken.symbol[0]}</Text>
-                    </View>
-                  )
-                }
+                {/* Looked up by a pasted contract address: its symbol is
+                    whatever the contract claims, so no registry logo. */}
+                <TokenAvatar symbol={addrToken.symbol} iconUrl={addrToken.logoURI} curated={false} size={40} />
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
                     <Text variant="bodySm" weight="700">{addrToken.symbol}</Text>

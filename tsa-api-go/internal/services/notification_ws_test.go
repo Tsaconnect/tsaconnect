@@ -43,7 +43,11 @@ func openNotifWSTestDB(t *testing.T) *gorm.DB {
 			email TEXT,
 			mute_notifications INTEGER NOT NULL DEFAULT 0,
 			mute_email INTEGER NOT NULL DEFAULT 0,
-			deleted_at DATETIME
+			deleted_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 		`CREATE TABLE notifications (
 			id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),

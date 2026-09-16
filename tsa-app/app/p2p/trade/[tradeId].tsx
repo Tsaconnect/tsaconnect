@@ -54,6 +54,8 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { payerInstructionOf } from '@/utils/payInto';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
@@ -68,6 +70,7 @@ import {
   p2pTokenDecimals,
   ratingsApi,
   tradesApi,
+  unsignedTxToTxLike,
   type P2PDispute,
   type P2PMessage,
   type P2PTrade,
@@ -379,7 +382,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), sellerAddress);
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), sellerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
@@ -415,7 +418,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), callerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
@@ -983,6 +986,12 @@ const PmPayToCard: React.FC<{
   payTo: NonNullable<P2PTrade['pmPayTo']>;
 }> = ({ trade, payTo }) => {
   const { colors, spacing } = useTheme();
+  // Central mode: the card points at the shared company account and the API
+  // supplies the own-name notice. The local copy below predates it and is only
+  // right for a merchant's own account — in central mode a mismatched name does
+  // not reliably route to review (a partial match can credit another order),
+  // and payerName is the free-text signup name, not the verified name matched.
+  const payerInstruction = payerInstructionOf(payTo);
   return (
     <Card style={{ gap: spacing.md }}>
       <View style={{ alignItems: 'center', gap: spacing.xs }}>
@@ -995,11 +1004,20 @@ const PmPayToCard: React.FC<{
           variant="title2"
         />
       </View>
-      <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
-        {trade.payerName
-          ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
-          : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
-      </Text>
+      {payerInstruction ? (
+        <>
+          <PayerInstructionNotice instruction={payerInstruction} />
+          <Text variant="bodySm" color="textSecondary">
+            We release your crypto automatically once your transfer lands — no further action needed.
+          </Text>
+        </>
+      ) : (
+        <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
+          {trade.payerName
+            ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
+            : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
+        </Text>
+      )}
       <View style={{ gap: spacing.sm }}>
         <CopyableField
           label="Account number"
@@ -1214,20 +1232,6 @@ async function pickAndUploadImage(onStage: (s: string) => void): Promise<string 
   });
   if (result.canceled || !result.assets?.[0]) return null;
   return uploadImage(result.assets[0].uri, onStage);
-}
-
-function toTxLike(tx: UnsignedTx) {
-  const ensure0x = (v?: string) =>
-    !v ? undefined : v.startsWith('0x') ? v : `0x${v}`;
-  return {
-    to: tx.to,
-    value: tx.value || '0',
-    data: ensure0x(tx.data),
-    nonce: tx.nonce,
-    gasLimit: tx.gasLimit,
-    gasPrice: tx.gasPrice,
-    chainId: tx.chainId ? Number(tx.chainId) : undefined,
-  };
 }
 
 // A real 32-byte tx hash. The chain reconciler repairs a dropped confirm with a

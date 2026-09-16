@@ -47,7 +47,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 				profile_photo TEXT,
 				referral_code TEXT,
 				referred_by TEXT,
-				persona_inquiry_id TEXT,
+				didit_session_id TEXT,
 				documents TEXT,
 				facial_verification TEXT,
 				verification_status TEXT DEFAULT 'pending',
@@ -67,7 +67,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 				deleted_at DATETIME,
 				submitted_for_verification_at DATETIME,
 				created_at DATETIME,
-			updated_at DATETIME
+			updated_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 	}
 	for _, s := range baseSqls {
@@ -105,6 +109,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_same_state REAL DEFAULT 0,
 			shipping_same_country REAL DEFAULT 0,
 			shipping_international REAL DEFAULT 0,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME,
+			deleted_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
@@ -224,6 +233,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			service_address TEXT,
 			coverage_area TEXT,
 			operating_company TEXT,
+			timezone TEXT DEFAULT 'Africa/Lagos',
 			cancellation_policy TEXT,
 			reschedule_policy TEXT,
 			refund_policy TEXT,
@@ -311,6 +321,19 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 		TokenAddresses: map[string]string{
 			"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
 			"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
+		},
+		// BlockchainService.TokenAddress resolves via Networks["mainnet"], NOT the
+		// top-level TokenAddresses map above (which predates multi-network config).
+		// Without this, every token lookup returns "" and handlers fail with
+		// "Token X not configured" before reaching the behaviour under test.
+		Networks: map[string]config.NetworkConfig{
+			"mainnet": {
+				Chains: map[string]config.ChainConfig{},
+				TokenAddresses: map[string]string{
+					"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
+					"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
+				},
+			},
 		},
 	}
 	// Create a blockchain service with no real clients (avoids RPC connections)
@@ -462,10 +485,15 @@ func TestDetectShippingZone_StateSuffixNormalization(t *testing.T) {
 
 // ---------- Fee calculation tests ----------
 
+// The platform fee is no longer a hardcoded 10%: calculateFeeForFeature reads
+// the global fee_config row for models.FeatureProductMerchant, documented as the
+// 2% product_merchant rate. These expectations are pinned to that rate on
+// purpose — if the configured rate changes, these tests SHOULD fail, because
+// that is a deliberate product decision and not an incidental refactor.
 func TestCalculatePlatformFee_USDC(t *testing.T) {
 	productAmount := big.NewInt(10000000) // 10 USDC (6 decimals)
 	fee := CalculatePlatformFee(productAmount, "USDC")
-	expected := big.NewInt(1000000) // 10% = 1 USDC
+	expected := big.NewInt(200000) // 2% = 0.2 USDC
 	if fee.Cmp(expected) != 0 {
 		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
 	}
@@ -483,8 +511,8 @@ func TestCalculatePlatformFee_WeiMath(t *testing.T) {
 	// 15.5 USDC = 15500000 (6 decimals)
 	productAmount := big.NewInt(15500000)
 	fee := CalculatePlatformFee(productAmount, "USDT")
-	// 10% of 15500000 = 1550000
-	expected := big.NewInt(1550000)
+	// 2% of 15500000 = 310000 (product_merchant rate; see note above)
+	expected := big.NewInt(310000)
 	if fee.Cmp(expected) != 0 {
 		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
 	}
@@ -983,7 +1011,17 @@ func TestAdminResolveDispute_RequiresRefundRequestedStatus(t *testing.T) {
 
 // ---------- Prepare escrow tests ----------
 
-func TestPrepareEscrow_Returns503WhenNoClient(t *testing.T) {
+// TestPrepareApprove_Returns503WhenNoClient pins the "no blockchain client →
+// 503" guard on the endpoint that still has one.
+//
+// This test previously targeted PrepareEscrow, which no longer touches
+// BlockchainService: it delegates to EscrowService.PrepareCreateOrder, which
+// builds calldata offline and needs no RPC. So PrepareEscrow now legitimately
+// returns 200 without a client, and the assertion was failing against a guard
+// that had moved rather than a regression. PrepareApprove still needs a client
+// (nonce + gas estimation for the ERC-20 approve), so the guard — and this
+// coverage — belongs there.
+func TestPrepareApprove_Returns503WhenNoClient(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
 
@@ -1002,7 +1040,7 @@ func TestPrepareEscrow_Returns503WhenNoClient(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
 	c.Request, _ = http.NewRequest("POST", "/", nil)
 
-	ch.PrepareEscrow(c)
+	ch.PrepareApprove(c)
 
 	// Without a blockchain client, should return 503 Service Unavailable
 	if w.Code != http.StatusServiceUnavailable {
@@ -1648,5 +1686,136 @@ func TestGenerateOrderID_Deterministic(t *testing.T) {
 	result3 := services.GenerateOrderID(id2)
 	if result1 == result3 {
 		t.Error("expected different order IDs for different UUIDs")
+	}
+}
+
+// A listing can be suspended or deleted while it sits in a buyer's cart. The
+// order path re-checks visibility so funds are never escrowed against a pulled
+// listing — add-to-cart's check alone is not enough.
+func TestCreateOrderFromCart_RejectsUnavailableListing(t *testing.T) {
+	cases := []struct {
+		name string
+		pull func(db *gorm.DB, productID uuid.UUID)
+	}{
+		{"suspended", func(db *gorm.DB, id uuid.UUID) {
+			db.Model(&models.Product{}).Where("id = ?", id).
+				Update("status", models.ProductStatusSuspended)
+		}},
+		{"soft deleted", func(db *gorm.DB, id uuid.UUID) {
+			db.Delete(&models.Product{}, "id = ?", id)
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupCheckoutTestDB(t)
+			ch := setupCheckoutHandler(t)
+
+			buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+
+			product := createTestProduct(t, db, seller.ID, 10.0)
+			items := []models.CartItem{{
+				ID: uuid.New(), Product: product.ID, Seller: seller.ID,
+				Quantity: 1, Price: 10.0, AddedAt: time.Now(),
+			}}
+			createTestCart(t, db, buyer.ID, items)
+
+			// Pulled after the item was already in the cart.
+			tc.pull(db, product.ID)
+
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("user", buyer)
+			body, _ := json.Marshal(map[string]interface{}{"token": "USDC"})
+			c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			ch.CreateOrderFromCart(c)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for a %s listing, got %d: %s", tc.name, w.Code, w.Body.String())
+			}
+			var orders int64
+			db.Model(&models.Order{}).Count(&orders)
+			if orders != 0 {
+				t.Fatalf("an order was created for a %s listing", tc.name)
+			}
+		})
+	}
+}
+
+// Soft delete exists so order history survives. enrichOrdersWithPreview used a
+// plain query, so GORM filtered the deleted product out and every past order of
+// it serialized `product: null` — losing its name, price and image.
+func TestOrderPreviewSurvivesProductDeletion(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 42.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusCompleted, "USDC")
+
+	if err := db.Delete(&models.Product{}, "id = ?", product.ID).Error; err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	enriched := enrichOrdersWithPreview([]models.Order{*order})
+	if len(enriched) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(enriched))
+	}
+	if enriched[0].Product == nil {
+		t.Fatal("order lost its product preview after the product was deleted")
+	}
+	if enriched[0].Product.Name != product.Name {
+		t.Fatalf("product name = %q, want %q", enriched[0].Product.Name, product.Name)
+	}
+	if enriched[0].Product.Price != 42.0 {
+		t.Fatalf("product price = %v, want 42", enriched[0].Product.Price)
+	}
+}
+
+// A seller can be suspended while their listing sits in a buyer's cart. The
+// order path re-checks the SELLER too, not just the listing: a suspended seller
+// is locked out of shipping and confirming, so escrowing against them would
+// strand the buyer's funds.
+func TestCreateOrderFromCart_RejectsSuspendedSeller(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	items := []models.CartItem{{
+		ID: uuid.New(), Product: product.ID, Seller: seller.ID,
+		Quantity: 1, Price: 10.0, AddedAt: time.Now(),
+	}}
+	createTestCart(t, db, buyer.ID, items)
+
+	// Suspended after the item was already in the cart. The listing stays active.
+	db.Model(&models.User{}).Where("id = ?", seller.ID).
+		Update("account_status", models.AccountStatusSuspended)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	body, _ := json.Marshal(map[string]interface{}{"token": "USDC"})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.CreateOrderFromCart(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a suspended seller, got %d: %s", w.Code, w.Body.String())
+	}
+	var orders int64
+	db.Model(&models.Order{}).Count(&orders)
+	if orders != 0 {
+		t.Fatal("an order was escrowed against a suspended seller")
 	}
 }

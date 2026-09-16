@@ -1,15 +1,16 @@
 // screens/dashboard2.tsx
 //
-// Home dashboard — total portfolio balance, quick actions, asset list, the
-// Real World Marketplace (RWM) widget, and trade shortcuts. Built on the TSA
-// Signature design system (@/theme tokens + @/components/ui primitives). The
-// RWM widget replaced the Recent Activity transactions card; balance reads,
-// the portfolio/TP/cashback fetches, the auth-token bootstrap, the value-hide
-// toggle, navigation routes, and money formatting are preserved verbatim.
-import React, { useState, useEffect, useCallback } from 'react';
+// Home dashboard — total portfolio balance, quick actions, the token market
+// list, the Real World Marketplace (RWM) widget, and trade shortcuts. Built on
+// the TSA Signature design system (@/theme tokens + @/components/ui primitives).
+//
+// The market list shows PLATFORM-LISTED TOKENS with price and 24h change (PM
+// spec) — not the user's holdings, which live on the Wallet tab. The balance
+// fetch below survives only to feed BalanceCard's portfolio total.
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { api, Asset } from '@/components/services/api';
+import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import CartIconBadge from '@/components/common/CartIconBadge';
@@ -19,14 +20,18 @@ import {
   normalizeWalletBalances,
 } from '../services/walletApi';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
+import { getSignableWallet } from '@/services/wallet';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
-import { AssetList } from '@/components/dashboard/AssetList';
 import { RWMWidget } from '@/components/dashboard/RWMWidget';
 import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
 import AssetPairSheet from '@/components/spot/AssetPairSheet';
+import TokenMarketList from '@/components/spot/TokenMarketList';
 import { listingsForSymbol } from '@/utils/spotPairs';
+import { buildTokenMarkets, tokensForTab } from '@/utils/spotTokens';
+import { type SpotTabKey } from '@/utils/spotTabs';
+import { useSpotFavorites } from '@/hooks/useSpotFavorites';
 import { useSpotListings } from '@/hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
 import { useCurrency } from '@/contexts/CurrencyContext';
@@ -41,37 +46,27 @@ import {
   Text,
 } from '@/components/ui';
 
-// The three transactable assets shown on the dashboard
-const DEFAULT_ASSETS: Asset[] = [
-  {
-    _id: 'mcgp-001', id: 'mcgp-001', symbol: 'MCGP', name: 'MCG Protocol',
-    balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Gold-Backed Token', chain: 'Sonic' }, currentPrice: 0, priceChange24h: 0,
-  },
-  {
-    _id: 'usdc-001', id: 'usdc-001', symbol: 'USDC', name: 'USD Coin',
-    balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Stablecoin', chain: 'Sonic' }, currentPrice: 1.0, priceChange24h: 0,
-  },
-  {
-    _id: 'usdt-001', id: 'usdt-001', symbol: 'USDT', name: 'Tether USD',
-    balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Stablecoin', chain: 'Sonic' }, currentPrice: 1.0, priceChange24h: 0,
-  },
-];
+// Symbols the portfolio total is summed over. Not a display list — the market
+// list below is driven entirely by the platform's spot listings.
+const BALANCE_SYMBOLS = ['MCGP', 'USDC', 'USDT'] as const;
+
+/** Tokens shown on Home before "View all" hands off to the Spot Trade tab. */
+const HOME_TOKEN_PREVIEW = 5;
 
 const Dashboard: React.FC = () => {
   const { colors, spacing } = useTheme();
   const { network } = useNetwork();
   const { formatDualPrice } = useCurrency();
-  const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
-  // Spot listings back the pair/chain picker opened by tapping an asset.
-  // Shared cache — the wallet and Spot tabs read the same dataset.
+  // Spot listings drive the token market list AND the pair/chain picker opened
+  // by tapping a token. Shared cache — the wallet and Spot tabs read the same
+  // dataset.
   const {
     listings: spotListings,
     error: listingsError,
     reload: reloadListings,
   } = useSpotListings();
+  const [tab, setTab] = useState<SpotTabKey>('all');
+  const { favoriteSymbols, toggleFavorite } = useSpotFavorites();
   const [pickerSymbol, setPickerSymbol] = useState<string | null>(null);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
@@ -84,6 +79,14 @@ const Dashboard: React.FC = () => {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [tpBalance, setTpBalance] = useState(0);
   const [cashbackBalance, setCashbackBalance] = useState(0);
+
+  // Pairs collapse to one row per token; the active tab decides the order and
+  // pins MCGP to #1 where the spec calls for it.
+  const tokens = useMemo(() => buildTokenMarkets(spotListings), [spotListings]);
+  const visibleTokens = useMemo(
+    () => tokensForTab(tokens, tab, favoriteSymbols),
+    [tokens, tab, favoriteSymbols],
+  );
 
   // ── Auth token ──
   useEffect(() => {
@@ -109,57 +112,31 @@ const Dashboard: React.FC = () => {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
-      // Fetch balances from active network
-      const balResult = await getWalletBalances();
-      let updatedAssets = [...DEFAULT_ASSETS];
+      // Balances for the wallet this device holds a key for. Without one the
+      // backend would answer for the account's REGISTERED address, and the home
+      // total would show funds the user cannot touch on this device.
+      const signer = await getSignableWallet();
+      const balResult = signer
+        ? await getWalletBalances(undefined, signer)
+        : { success: false as const, data: undefined };
+      // Flatten all chains into symbol -> usdValue
+      const usdBySymbol: Record<string, number> = {};
       if (balResult.success && balResult.data) {
-        // Flatten all chains into symbol -> { balance, usdValue, usdPrice }
-        const symbolData: Record<string, { balance: number; usdValue: number; usdPrice: number }> = {};
         for (const entry of normalizeWalletBalances(balResult.data)) {
-          const bal = Number.isFinite(parseFloat(entry.balance)) ? parseFloat(entry.balance) : 0;
           const usd = Number.isFinite(parseFloat(entry.usdValue)) ? parseFloat(entry.usdValue) : 0;
-          const price = Number.isFinite(entry.usdPrice || NaN) ? Number(entry.usdPrice) : 0;
-          const prev = symbolData[entry.symbol];
-          symbolData[entry.symbol] = {
-            balance: (prev?.balance || 0) + bal,
-            usdValue: (prev?.usdValue || 0) + usd,
-            usdPrice: price || prev?.usdPrice || 0,
-          };
+          usdBySymbol[entry.symbol] = (usdBySymbol[entry.symbol] || 0) + usd;
         }
-        updatedAssets = DEFAULT_ASSETS.map(a => {
-          const d = symbolData[a.symbol];
-          if (!d) return a;
-          return { ...a, balance: d.balance, usdValue: d.usdValue, currentPrice: d.usdPrice };
-        });
       }
 
       // MCGP in the wallet is the spendable premium entitlement (Contract B),
       // not an ERC-20, so getWalletBalances reports 0. Overlay the premium
-      // balance so the dashboard shows what the user actually holds.
+      // value so the total reflects what the user actually holds.
       try {
         const { balance: premium, usdValue } = await getPremiumMcgpAsset();
-        if (premium > 0) {
-          updatedAssets = updatedAssets.map(a =>
-            a.symbol === 'MCGP'
-              ? { ...a, balance: premium, usdValue, currentPrice: premium > 0 ? usdValue / premium : 0 }
-              : a,
-          );
-        }
+        if (premium > 0) usdBySymbol.MCGP = usdValue;
       } catch { /* MCGP swap unavailable — leave at 0 */ }
 
-      // Select first asset with balance, or first
-      const selected = updatedAssets.find(a => a.balance > 0) || updatedAssets[0];
-      if (selected) selected.isSelected = true;
-      setAssets(updatedAssets);
-      setTotalUsdValue(updatedAssets.reduce((s, a) => s + (Number.isFinite(a.usdValue) ? a.usdValue : 0), 0));
-
-      // Try portfolio API for dailyChange
-      try {
-        const portRes = await api.getPortfolioAssets();
-        if (portRes.success && portRes.data?.totals?.dailyChange) {
-          setDailyChange(portRes.data.totals.dailyChange);
-        }
-      } catch {}
+      setTotalUsdValue(BALANCE_SYMBOLS.reduce((s, sym) => s + (usdBySymbol[sym] || 0), 0));
 
       // Fetch TP and cashback balances
       try {
@@ -263,41 +240,58 @@ const Dashboard: React.FC = () => {
         />
 
         {/* TP & Cashback Summary */}
+        {/* Each half taps through to where that balance is explained: TP to
+            Trade & Earn (Trade Points), cashback to the cashback breakdown. */}
         {(tpBalance > 0 || cashbackBalance > 0) && (
-          <PressableScale onPress={() => router.push('/cashback')} style={{ marginTop: spacing.md }}>
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
-                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
-                  <Icon name="star" size={16} color={colors.accent} />
-                  <Text variant="bodyMed" weight="700" numeric>
-                    {tpBalance.toFixed(2)}
-                  </Text>
-                  <Text variant="caption" color="textMuted">
-                    TP
-                  </Text>
-                </View>
-                <Divider vertical spacing="md" />
-                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
-                  <Icon name="wallet" size={16} color={colors.success} />
-                  <Text variant="bodyMed" weight="700" numeric>
-                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
-                  </Text>
-                  <Text variant="caption" color="textMuted">
-                    Cashback
-                  </Text>
-                </View>
-              </View>
-            </AccentCard>
-          </PressableScale>
+          <AccentCard padding="md" style={{ marginTop: spacing.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
+              <PressableScale
+                onPress={() => router.push('/trade')}
+                accessibilityLabel="View Trade Points"
+                style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}
+              >
+                <Icon name="star" size={16} color={colors.accent} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {tpBalance.toFixed(2)}
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  TP
+                </Text>
+              </PressableScale>
+              <Divider vertical spacing="md" />
+              <PressableScale
+                onPress={() => router.push('/cashback')}
+                accessibilityLabel="View cashback"
+                style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}
+              >
+                <Icon name="wallet" size={16} color={colors.success} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  Cashback
+                </Text>
+              </PressableScale>
+            </View>
+          </AccentCard>
         )}
 
-        <AssetList
-          assets={assets}
-          isValuesHidden={isValuesHidden}
-          onAssetPress={(symbol) => setPickerSymbol(symbol)}
+        <TokenMarketList
+          title="Assets"
+          tokens={visibleTokens}
+          tab={tab}
+          onTabChange={setTab}
+          favoriteSymbols={favoriteSymbols}
+          onToggleFavorite={toggleFavorite}
+          onTokenPress={setPickerSymbol}
+          limit={HOME_TOKEN_PREVIEW}
+          onSeeAll={() => router.push('/easyswap?tab=spot')}
+          error={listingsError ?? undefined}
+          onRetry={reloadListings}
+          style={{ marginTop: spacing.lg }}
         />
 
         <RWMWidget isValuesHidden={isValuesHidden} refreshSignal={rwmRefresh} />

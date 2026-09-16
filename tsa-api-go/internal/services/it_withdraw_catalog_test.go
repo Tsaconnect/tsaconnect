@@ -2,24 +2,42 @@ package services
 
 import "testing"
 
-// TestWithdrawalDestinationCatalog pins the product catalog: NGN/bank only
-// until multi-currency withdrawal is re-enabled.
+// TestWithdrawalDestinationCatalog pins the product catalog: the five payout
+// currencies on bank rails.
+//
+// Mobile money is deliberately absent even though the gateway supports it —
+// it needs per-network verification of the provider's `network` and `country`
+// values, and an unverified network fails at payout time, AFTER the on-chain
+// debit has already left the user's premium in limbo.
 func TestWithdrawalDestinationCatalog(t *testing.T) {
-	if len(WithdrawalDestinationCatalog) != 1 {
-		t.Fatalf("catalog has %d entries, want 1: %+v", len(WithdrawalDestinationCatalog), WithdrawalDestinationCatalog)
+	want := map[string]string{
+		"NGN": "bank", "GHS": "bank", "USD": "bank", "EUR": "bank", "GBP": "bank",
 	}
-	got := WithdrawalDestinationCatalog[0]
-	if got.Currency != "NGN" || got.Rail != "bank" || got.Network != "" {
-		t.Fatalf("catalog entry = %+v, want NGN/bank", got)
+	if len(WithdrawalDestinationCatalog) != len(want) {
+		t.Fatalf("catalog has %d entries, want %d: %+v", len(WithdrawalDestinationCatalog), len(want), WithdrawalDestinationCatalog)
 	}
-	if got.Label == "" {
-		t.Fatal("catalog entry for NGN has no label")
+	for _, got := range WithdrawalDestinationCatalog {
+		rail, ok := want[got.Currency]
+		if !ok {
+			t.Errorf("unexpected catalog currency %q", got.Currency)
+			continue
+		}
+		if got.Rail != rail || got.Network != "" {
+			t.Errorf("catalog entry %+v: want rail %q with no network", got, rail)
+		}
+		if got.Label == "" {
+			t.Errorf("catalog entry %q has no label — the app renders this", got.Currency)
+		}
 	}
 }
 
 // TestSupportedWithdrawalQuoteCurrencies_DerivesFromCatalog confirms the FX
-// quote allowlist is exactly "the catalog's currencies minus NGN" — empty
-// while the product catalog is NGN-only.
+// quote allowlist is exactly "the catalog's currencies minus NGN".
+//
+// NGN is excluded because it is the source currency: a naira payout funded from
+// naira has no FX leg and is paid out 1:1, so quoting it would invent a
+// conversion that does not happen. The derivation keeps the allowlist from
+// drifting away from what Sell will actually accept.
 func TestSupportedWithdrawalQuoteCurrencies_DerivesFromCatalog(t *testing.T) {
 	want := map[string]bool{}
 	for _, d := range WithdrawalDestinationCatalog {
@@ -51,9 +69,10 @@ func TestIsSupportedWithdrawalDestination(t *testing.T) {
 	}{
 		{"NGN bank accepted", "NGN", "bank", "", true},
 		{"case-insensitive currency+rail", "ngn", "BANK", "", true},
-		{"GHS bank rejected (not in product catalog)", "GHS", "bank", "", false},
 		{"XOF mobile_money wave rejected (not in product catalog)", "XOF", "mobile_money", "wave", false},
-		{"USD bank rejected", "USD", "bank", "", false},
+		{"USD bank accepted", "USD", "bank", "", true},
+		{"GHS bank accepted", "GHS", "bank", "", true},
+		{"GHS mobile_money rejected (rail not offered yet)", "GHS", "mobile_money", "mtn", false},
 		{"NGN mobile_money rejected", "NGN", "mobile_money", "", false},
 		{"empty currency rejected", "", "bank", "", false},
 		{"empty rail rejected", "NGN", "", "", false},

@@ -16,7 +16,26 @@ type NombaGateway interface {
 type PayoutRequest struct {
 	BankCode      string
 	AccountNumber string
-	AmountNGN     string // decimal string, e.g. "1500.00"
+	// AmountNGN is the legacy amount field, retained because it is read in a
+	// dozen files including the dormant Nomba client and the out-of-scope bills
+	// service. New code sets Amount + SourceCurrency; both are populated during
+	// the transition and the gateway prefers the explicit pair.
+	//
+	// Deprecated: use Amount with SourceCurrency.
+	AmountNGN string // decimal string, e.g. "1500.00"
+
+	// Amount is what the RECIPIENT receives, denominated in DestinationCurrency
+	// (empty destination ⇒ NGN). The gateway sends applies_to=destination_currency
+	// on every transfer, so the provider debits our source balance with whatever
+	// that costs and bills its fee separately.
+	//
+	// Callers converting from another currency must therefore convert BEFORE
+	// setting this. Getting the denomination wrong is not a rounding error — a
+	// naira figure sent as cedis is off by roughly 100x.
+	Amount string
+	// SourceCurrency is the balance the payout draws FROM. Empty means NGN.
+	// It does not describe Amount; see above.
+	SourceCurrency string
 	Reference     string // our trade reference (idempotency)
 	AccountName   string // recipient account name (used by live gateway)
 	SenderName    string // sender display name (used by live gateway)

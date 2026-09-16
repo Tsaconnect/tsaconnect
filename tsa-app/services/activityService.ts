@@ -5,7 +5,7 @@ import { getTronAddress } from './chains/tronWallet';
 import { getBtcAddress } from './chains/btcWallet';
 import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
 
-export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service';
+export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service' | 'bill';
 
 export interface ActivityItem {
   id: string;
@@ -199,6 +199,59 @@ function fromServicePayment(p: any): ActivityItem {
   };
 }
 
+const BILL_CATEGORY_LABEL: Record<string, string> = {
+  airtime: 'Airtime',
+  data: 'Data',
+  electricity: 'Electricity',
+  cabletv: 'Cable TV',
+  betting: 'Betting',
+  epin: 'Exam PIN',
+};
+
+// Bill orders sit in a non-terminal `vending` state for minutes at a time —
+// ClubKonnect accepts first and confirms later — so the feed must show that
+// honestly rather than implying success or failure.
+function fromBillOrder(o: any): ActivityItem {
+  const label = BILL_CATEGORY_LABEL[o.category] ?? 'Bill';
+  const target = o.customerId || o.phoneNumber || '';
+  const failed = o.status === 'vend_failed' || o.status === 'failed' || o.status === 'expired';
+  const refunded = o.status === 'refunded';
+  // `quoted` counts as pending: the API returns every order including quotes the
+  // user abandoned, and falling through to the 'completed' default would show a
+  // bill they never paid for as a completed payment.
+  const pending =
+    o.status === 'vending' || o.status === 'paid' || o.status === 'paying' || o.status === 'quoted';
+  const unpaid = o.status === 'quoted';
+
+  let status = 'completed';
+  if (pending) status = 'pending';
+  else if (refunded) status = 'refunded';
+  else if (failed) status = 'failed';
+
+  return {
+    id: o.id,
+    type: 'bill',
+    subtype: o.category,
+    title: `${label}${o.providerName ? ` — ${o.providerName}` : ''}`,
+    subtitle: unpaid
+      ? 'Not paid'
+      : pending
+        ? 'Processing…'
+        : refunded
+        ? 'Refunded to your MCGP balance'
+        : failed
+          ? o.failureReason || 'Could not be completed'
+          : target || o.planName || 'Delivered',
+    amount: `₦${Number(o.ngnAmount ?? 0).toLocaleString()}`,
+    positive: refunded,
+    status,
+    timestamp: o.createdAt,
+    iconName: 'flash',
+    iconColor: '#F59E0B',
+    iconBg: '#FFFBEB',
+  };
+}
+
 // ── Fetchers ───────────────────────────────────────────────────
 
 async function fetchWalletItems(page: number, limit: number, txType?: string): Promise<ActivityItem[]> {
@@ -285,9 +338,17 @@ async function fetchServiceItems(page: number, limit: number): Promise<ActivityI
   return (Array.isArray(items) ? items : []).map(fromServicePayment);
 }
 
+// Bills are returned newest-first and capped server-side at 50, with no
+// pagination — fetch once on the first page, like the non-EVM histories.
+async function fetchBillItems(): Promise<ActivityItem[]> {
+  const data = await get<any>('/bills/orders');
+  const orders = data?.data ?? [];
+  return (Array.isArray(orders) ? orders : []).map(fromBillOrder);
+}
+
 // ── Public API ─────────────────────────────────────────────────
 
-export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'service'];
+export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'service', 'bill'];
 
 export async function fetchActivityItems(
   types: ActivityType[],
@@ -313,6 +374,7 @@ export async function fetchActivityItems(
   if (active.includes('cashback')) fetchers.push(fetchCashbackItems(page, perSource));
   if (active.includes('order'))  fetchers.push(fetchOrderItems(page, perSource));
   if (active.includes('service')) fetchers.push(fetchServiceItems(page, perSource));
+  if (active.includes('bill') && page === 1) fetchers.push(fetchBillItems());
 
   const results = await Promise.allSettled(fetchers);
   const merged = results
@@ -333,4 +395,5 @@ export const TYPE_META: Record<ActivityType, { label: string; iconName: string; 
   cashback: { label: 'Cashback', iconName: 'gift-outline',        color: '#8B5CF6' },
   order:    { label: 'Orders',   iconName: 'bag-handle-outline',  color: '#3B82F6' },
   service:  { label: 'Services', iconName: 'call-outline',        color: '#0EA5E9' },
+  bill:     { label: 'Bills',    iconName: 'flash-outline',       color: '#F59E0B' },
 };

@@ -1,7 +1,11 @@
 package blockchain
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -70,4 +74,25 @@ func TestSuggestGasPrice(t *testing.T) {
 		t.Errorf("expected positive gas price, got %s", gasPrice.String())
 	}
 	t.Logf("Suggested gas price: %s wei", gasPrice.String())
+}
+
+func TestWaitForReceiptContext_ReturnsWhenCancelled(t *testing.T) {
+	client, err := NewEVMClient("http://127.0.0.1:1", 1)
+	if err != nil {
+		t.Skipf("NewEVMClient needs a live dial here: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, err = client.WaitForReceiptContext(ctx, "0x"+strings.Repeat("ab", 32), 30*time.Second)
+	if err == nil {
+		t.Fatal("want an error from a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("returned after %s, want within 2s of cancellation", elapsed)
+	}
 }

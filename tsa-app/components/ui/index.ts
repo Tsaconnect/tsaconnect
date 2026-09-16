@@ -69,3 +69,5 @@ export { Wizard } from './Wizard';
 export type { WizardProps, WizardStep } from './Wizard';
 export { PhotoPickerTile } from './PhotoPickerTile';
 export type { PhotoPickerTileProps } from './PhotoPickerTile';
+export { HeaderBackButton, headerBackLeft } from './HeaderBackButton';
+export type { HeaderBackButtonProps } from './HeaderBackButton';

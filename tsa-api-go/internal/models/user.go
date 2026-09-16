@@ -17,33 +17,60 @@ type ProfilePhoto struct {
 
 // User represents a user record in PostgreSQL.
 type User struct {
-	ID                         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Name                       string         `gorm:"not null" json:"name"`
-	Username                   string         `gorm:"uniqueIndex;not null" json:"username"`
-	Email                      string         `gorm:"uniqueIndex;not null" json:"email"`
-	Password                   string         `gorm:"not null" json:"-"`
-	Role                       string         `gorm:"default:'user'" json:"role"`
-	PhoneNumber                string         `gorm:"uniqueIndex" json:"phoneNumber"`
-	Country                    string         `json:"country"`
-	State                      string         `json:"state,omitempty"`
-	City                       string         `json:"city,omitempty"`
-	Address                    string         `json:"address"`
-	ProfilePhoto               datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
-	ReferralCode               string         `json:"referralCode,omitempty"`
-	ReferredBy                 *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
-	PersonaInquiryID               string         `json:"personaInquiryId,omitempty"`
-	VerificationStatus         string         `gorm:"default:'pending'" json:"verificationStatus"`
-	VerificationNotes          string         `json:"verificationNotes,omitempty"`
-	AccountStatus              string         `gorm:"default:'active'" json:"accountStatus"`
-	LastLogin                  *time.Time     `json:"lastLogin,omitempty"`
-	LoginAttempts              int            `gorm:"default:0" json:"loginAttempts"`
-	LockUntil                  *time.Time     `json:"lockUntil,omitempty"`
-	WalletAddress              string         `json:"walletAddress,omitempty"`
-	SeedPhraseBackedUp         bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
-	MuteNotifications          bool           `gorm:"default:false" json:"muteNotifications"`
-	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
-	TPBalance                  float64    `gorm:"default:0" json:"tpBalance"`
-	CashbackBalance            float64    `gorm:"default:0" json:"cashbackBalance"`
+	ID                 uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name               string         `gorm:"not null" json:"name"`
+	Username           string         `gorm:"uniqueIndex;not null" json:"username"`
+	Email              string         `gorm:"uniqueIndex;not null" json:"email"`
+	Password           string         `gorm:"not null" json:"-"`
+	Role               string         `gorm:"default:'user'" json:"role"`
+	PhoneNumber        string         `gorm:"uniqueIndex" json:"phoneNumber"`
+	Country            string         `json:"country"`
+	State              string         `json:"state,omitempty"`
+	City               string         `json:"city,omitempty"`
+	Address            string         `json:"address"`
+	ProfilePhoto       datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
+	ReferralCode       string         `json:"referralCode,omitempty"`
+	ReferredBy         *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
+	DiditSessionID     string         `json:"diditSessionId,omitempty"`
+	VerificationStatus string         `gorm:"default:'pending'" json:"verificationStatus"`
+	VerificationNotes  string         `json:"verificationNotes,omitempty"`
+	// VerifiedLegalName is the name Didit read off the identity document. It is
+	// the only name on this record that was checked against anything — `Name` is
+	// free text typed at signup — which is why inbound bank transfers into the
+	// central account are attributed against this field and never against `Name`.
+	// Written only by the KYC paths; profile edits must not touch it.
+	//
+	// `json:"-"` is deliberate. The whole User struct rides along on payloads it
+	// was never designed for (the `user` association on merchant and
+	// account-deletion requests, every admin listing that selects a User), so a
+	// tagged field leaks by default. The two surfaces that should show it — the
+	// user's own KYC status and the admin verification queue — opt in by name.
+	VerifiedLegalName string `json:"-"`
+	// VerifiedLegalNameAt dates the capture so a name backfilled from an old
+	// session can be told apart from one written live at approval, and so a row
+	// predating a re-verification can be spotted and re-pulled.
+	VerifiedLegalNameAt *time.Time `json:"-"`
+	// AccountStatus gates every authenticated request: the auth middleware
+	// re-reads the user per request and rejects anything but "active", so a
+	// change here takes effect immediately. Indexed because public product
+	// queries filter listings by their seller's status.
+	AccountStatus string `gorm:"default:'active';index" json:"accountStatus"`
+	// Admin moderation of the account itself, mirroring the product fields.
+	SuspensionReason string     `json:"suspensionReason,omitempty"`
+	SuspendedAt      *time.Time `json:"suspendedAt,omitempty"`
+	SuspendedBy      *uuid.UUID `gorm:"type:uuid" json:"-"`
+	// SuspendedFromStatus is the status to restore on reactivation, so lifting a
+	// suspension cannot silently reactivate an account that was already inactive.
+	SuspendedFromStatus string     `json:"-"`
+	LastLogin           *time.Time `json:"lastLogin,omitempty"`
+	LoginAttempts       int        `gorm:"default:0" json:"loginAttempts"`
+	LockUntil           *time.Time `json:"lockUntil,omitempty"`
+	WalletAddress       string     `json:"walletAddress,omitempty"`
+	SeedPhraseBackedUp  bool       `gorm:"default:false" json:"seedPhraseBackedUp"`
+	MuteNotifications   bool       `gorm:"default:false" json:"muteNotifications"`
+	MuteEmail           bool       `gorm:"default:false" json:"muteEmail"`
+	TPBalance           float64    `gorm:"default:0" json:"tpBalance"`
+	CashbackBalance     float64    `gorm:"default:0" json:"cashbackBalance"`
 
 	// LastSettledGlobalIndex is the user's checkpoint into the global-pool
 	// cumulative index (models.GlobalTPPool.PerUserIndexScaled, same scaled-int
@@ -55,12 +82,12 @@ type User struct {
 	// user is owed 0 for all epochs before they existed; they only share epochs
 	// AFTER they join). A non-nil 0 would wrongly grant the user every epoch's
 	// share since the index began.
-	LastSettledGlobalIndex     *int64     `gorm:"default:null" json:"lastSettledGlobalIndex,omitempty"`
+	LastSettledGlobalIndex *int64 `gorm:"default:null" json:"lastSettledGlobalIndex,omitempty"`
 
-	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
-	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
-	CreatedAt                  time.Time      `json:"createdAt"`
-	UpdatedAt                  time.Time      `json:"updatedAt"`
+	EmailVerified bool       `gorm:"default:false" json:"emailVerified"`
+	DeletedAt     *time.Time `json:"deletedAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.
@@ -170,4 +197,18 @@ func (u User) MarshalJSON() ([]byte, error) {
 		userAlias:      userAlias(u),
 		ProfilePicture: pic,
 	})
+}
+
+// SuspendableAccountStatuses are the statuses an account may be restored to when
+// a suspension is lifted. "deleted" is absent on purpose: reactivating a deleted
+// account is account-restoration, which has its own flow.
+var SuspendableAccountStatuses = map[string]bool{
+	AccountStatusActive:   true,
+	AccountStatusInactive: true,
+}
+
+// IsActive reports whether the account may authenticate and whether its listings
+// are shown to buyers.
+func (u *User) IsActive() bool {
+	return u.AccountStatus == AccountStatusActive
 }

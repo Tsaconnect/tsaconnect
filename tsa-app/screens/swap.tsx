@@ -7,30 +7,39 @@
 // (USDC blue, USDT green, MCGP gold) come from the TOKENS data config, not ad-hoc
 // styling, so they're preserved as token identity.
 //
-// OTC listing controls (admin-set, /api/otc/settings, fail OPEN): Direct |
-// Presale sub-tabs (Presale is a coming-soon placeholder), per-direction
-// buy/sell pause (Review button dimmed + press blocked with a toast), and an
-// asset-class chip next to the pair title when set.
+// This is the OTC desk's TRADE FORM. The catalogue that leads here — the
+// Direct/Presale sub-tabs, the listing rows, the admin's logo and asset class —
+// lives in components/otc/OtcListingList; this screen is pushed once the user
+// has picked a row and a side, so it opens on `side` and no longer owns the
+// pair-selection chrome.
+//
+// It still re-checks the admin pause (/api/otc/settings, fail OPEN) rather than
+// trusting the list: the route is addressable, so a deep link can reach the
+// form directly. A paused direction dims Review and explains itself in the
+// same sheet the list uses.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, TextInput, ScrollView, KeyboardAvoidingView, Platform, FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS } from '@/constants/chains';
-import { signTransaction, withRpcFallback, getActiveWallet } from '@/services/wallet';
+import { signTransaction, withRpcFallback } from '@/services/wallet';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
   getOtcSettings, type OtcSettings, type WalletBalance,
 } from '@/services/walletApi';
 import { useTheme } from '@/theme';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import {
-  Text, Badge, Button, Card, EmptyState, Icon, PressableScale, SegmentedControl, Sheet, Spinner,
-  useToast,
+  Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
   ScreenHeader,
 } from '@/components/ui';
-import { mapSubmitError } from '@/services/swapErrors';
+import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
+import { OtcClosedSheet } from '@/components/otc/OtcClosedSheet';
 
 // ── Token config (extend this list as new tokens are added) ──
 interface TokenInfo {
@@ -38,13 +47,12 @@ interface TokenInfo {
   name: string;
   decimals: number;
   color: string;
-  icon: string; // first letter or symbol
 }
 
 const TOKENS: Record<string, TokenInfo> = {
-  MCGP: { symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, color: '#D4AF37', icon: 'M' },
-  USDC: { symbol: 'USDC', name: 'USD Coin', decimals: 6, color: '#2775CA', icon: '$' },
-  USDT: { symbol: 'USDT', name: 'Tether', decimals: 6, color: '#26A17B', icon: '₮' },
+  MCGP: { symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, color: '#D4AF37' },
+  USDC: { symbol: 'USDC', name: 'USD Coin', decimals: 6, color: '#2775CA' },
+  USDT: { symbol: 'USDT', name: 'Tether', decimals: 6, color: '#26A17B' },
 };
 
 // Available swap pairs: [fromToken, toToken]
@@ -56,15 +64,6 @@ const SWAP_PAIRS: Array<{ from: string; to: string; label: string }> = [
 ];
 
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
-
-// OTC sub-tabs. Direct hosts the live MCGP/USDC desk; Presale is a
-// coming-soon placeholder until presale listings exist.
-type OtcTab = 'direct' | 'presale';
-
-const OTC_TABS: { key: OtcTab; label: string }[] = [
-  { key: 'direct', label: 'Direct' },
-  { key: 'presale', label: 'Presale' },
-];
 
 function toWei(amount: string, d: number): bigint {
   try {
@@ -97,22 +96,6 @@ function estimateGasFee(
   } catch { return null; }
 }
 
-// ── Token Badge ── (per-token brand color from config)
-const TokenBadge = ({ token, size = 40 }: { token: TokenInfo; size?: number }) => (
-  <View
-    style={{
-      width: size,
-      height: size,
-      borderRadius: size / 2,
-      backgroundColor: token.color,
-      justifyContent: 'center',
-      alignItems: 'center',
-    }}
-  >
-    <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#FFF' }}>{token.icon}</Text>
-  </View>
-);
-
 // ── Token Selector Button ──
 const TokenSelector = ({ token, onPress, disabled }: { token: TokenInfo; onPress: () => void; disabled?: boolean }) => {
   const { colors, spacing, radius } = useTheme();
@@ -130,7 +113,7 @@ const TokenSelector = ({ token, onPress, disabled }: { token: TokenInfo; onPress
         borderRadius: radius.xl,
       }}
     >
-      <TokenBadge token={token} size={32} />
+      <TokenAvatar symbol={token.symbol} iconColor={token.color} size={32} />
       <Text variant="bodyMed" weight="700">{token.symbol}</Text>
       {!disabled && <Icon name="chevronDown" size={16} color={colors.textMuted} />}
     </PressableScale>
@@ -169,7 +152,7 @@ const TokenPicker = ({
                 backgroundColor: isSelected ? colors.accentMuted : 'transparent',
               }}
             >
-              <TokenBadge token={item} size={36} />
+              <TokenAvatar symbol={item.symbol} iconColor={item.color} size={36} />
               <View style={{ flex: 1, marginLeft: spacing.md }}>
                 <Text variant="bodyMed" weight="700">{item.symbol}</Text>
                 <Text variant="caption" color="textMuted">{item.name}</Text>
@@ -183,19 +166,28 @@ const TokenPicker = ({
   );
 };
 
-// ── Main Screen ──
-const SwapScreen = () => {
-  const { colors, spacing, radius, fonts } = useTheme();
-  const toast = useToast();
+export interface SwapScreenProps {
+  /** Which way the user chose to trade in the listing. Buying MCGP pays USDC. */
+  initialSide?: 'buy' | 'sell';
+}
 
-  const [otcTab, setOtcTab] = useState<OtcTab>('direct');
+// ── Main Screen ──
+const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
+  const { colors, spacing, radius, fonts } = useTheme();
+
   // null until loaded — treated as everything-enabled (fail OPEN).
   const [otcSettings, setOtcSettings] = useState<OtcSettings | null>(null);
-  const [fromSymbol, setFromSymbol] = useState('USDC');
-  const [toSymbol, setToSymbol] = useState('MCGP');
+  // `direction` is derived from which side is being paid, so the side the user
+  // picked is expressed by seeding the pair rather than by a separate flag.
+  const [fromSymbol, setFromSymbol] = useState(initialSide === 'sell' ? 'MCGP' : 'USDC');
+  const [toSymbol, setToSymbol] = useState(initialSide === 'sell' ? 'USDC' : 'MCGP');
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loadingBal, setLoadingBal] = useState(true);
+  // Balances are only ever read for the wallet this device holds a key for.
+  // Falling back to the account's registered address would render MCGP the
+  // user cannot sign for — the screen that made us look custodial.
+  const { address: signer, ready: signerReady } = useSignableWallet();
   const [priceLoading, setPriceLoading] = useState(false);
   const [quote, setQuote] = useState<{ mcgp: string; usdc: string; rate: string } | null>(null);
   const [priceErr, setPriceErr] = useState('');
@@ -204,6 +196,8 @@ const SwapScreen = () => {
   const [txHash, setTxHash] = useState('');
   const [status, setStatus] = useState('');
   const [pickerFor, setPickerFor] = useState<'from' | 'to' | null>(null);
+  // Set when a paused direction's Review is pressed — drives the closed notice.
+  const [closedSide, setClosedSide] = useState<'buy' | 'sell' | null>(null);
   // Prepared swap (fetched on Review so the confirm screen can show real gas).
   const [prepared, setPrepared] = useState<Awaited<ReturnType<typeof prepareSwap>>['data'] | null>(null);
   // Wallet the prepared txs' nonces belong to — sign/submit must reuse it.
@@ -217,11 +211,12 @@ const SwapScreen = () => {
   const direction = fromSymbol === 'MCGP' ? 'sell' as const : 'buy' as const;
 
   const loadBalances = useCallback(async () => {
+    if (!signer) { setBalances([]); setLoadingBal(false); return; }
     try {
       setLoadingBal(true);
       // Query Sonic chain specifically since swaps happen on Sonic
       const sonicChainId = CHAINS.sonic.chainId;
-      const r = await getWalletBalances(sonicChainId);
+      const r = await getWalletBalances(sonicChainId, signer);
       if (r.success && r.data) {
         const fetched: WalletBalance[] = normalizeWalletBalances(r.data, 'sonic').map(
           ({ chainKey, chainName, ...balance }) => balance
@@ -240,7 +235,7 @@ const SwapScreen = () => {
     } catch (err) {
       console.error('Swap: load balances error:', err);
     } finally { setLoadingBal(false); }
-  }, []);
+  }, [signer]);
 
   // Refresh balances every time the screen gains focus
   useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
@@ -332,8 +327,8 @@ const SwapScreen = () => {
       const params = direction === 'buy'
         ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
         : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
-      const from = await getActiveWallet();
-      if (!from) throw new Error('No wallet found. Set up your wallet first.');
+      const from = signer;
+      if (!from) throw new Error('No wallet on this device. Import your recovery phrase to swap.');
       const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare swap');
       setPrepared(prep.data);
@@ -351,11 +346,11 @@ const SwapScreen = () => {
     ? otcSettings?.buyEnabled === false
     : otcSettings?.sellEnabled === false;
 
-  // Review press while paused: no navigation, just a toast. The button stays
-  // pressable (dimmed via style) so the tap can explain itself.
+  // Review press while paused: no navigation, just the explanation. The button
+  // stays pressable (dimmed via style) so the tap can explain itself.
   const onReviewPress = () => {
     if (directionPaused) {
-      toast.info(direction === 'buy' ? 'Buying is temporarily paused' : 'Selling is temporarily paused');
+      setClosedSide(direction);
       return;
     }
     goToConfirm();
@@ -377,8 +372,8 @@ const SwapScreen = () => {
       let from = preparedFor;
       if (!prepData || !from) {
         setStatus('Preparing swap...');
-        from = (await getActiveWallet()) || '';
-        if (!from) throw new Error('No wallet found. Set up your wallet first.');
+        from = signer || '';
+        if (!from) throw new Error('No wallet on this device. Import your recovery phrase to swap.');
         const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
         if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare');
         prepData = prep.data;
@@ -403,7 +398,7 @@ const SwapScreen = () => {
         const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
         if (!approveHash) {
           console.error('[swap] approve rejected by backend', approveRes);
-          throw new Error(mapSubmitError(approveRes.message));
+          throw new Error(mapSubmitError(approveRes.message, SWAP_COPY));
         }
 
         // Wait for the approve to confirm before submitting the swap.
@@ -449,7 +444,7 @@ const SwapScreen = () => {
         setTxHash(swapHash); setScreen('success'); loadBalances();
       } else {
         console.error('[swap] swap rejected by backend', res);
-        throw new Error(mapSubmitError(res.message));
+        throw new Error(mapSubmitError(res.message, SWAP_COPY));
       }
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);
@@ -547,7 +542,7 @@ const SwapScreen = () => {
 
         <Card padding="lg">
           <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.md }}>
-            <TokenBadge token={fromToken} />
+            <TokenAvatar symbol={fromToken.symbol} iconColor={fromToken.color} size={40} />
             <View style={{ flex: 1, marginLeft: spacing.md }}>
               <Text variant="caption" color="textMuted" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>You Pay</Text>
               <Text variant="title2" weight="700" style={{ marginTop: 2 }}>{amount} {fromSymbol}</Text>
@@ -557,7 +552,7 @@ const SwapScreen = () => {
             <Icon name="arrowDown" size={20} color={colors.accent} />
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.md }}>
-            <TokenBadge token={toToken} />
+            <TokenAvatar symbol={toToken.symbol} iconColor={toToken.color} size={40} />
             <View style={{ flex: 1, marginLeft: spacing.md }}>
               <Text variant="caption" color="textMuted" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>You Receive</Text>
               <Text variant="title2" weight="700" style={{ marginTop: 2 }}>{outputDisplay || '—'} {toSymbol}</Text>
@@ -598,25 +593,15 @@ const SwapScreen = () => {
     </SafeAreaView>
   );
 
-  // ── Presale sub-tab: coming-soon placeholder (no listings yet) ──
-  if (otcTab === 'presale') return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <View style={{ paddingHorizontal: spacing.xl, paddingTop: spacing.xl }}>
-        <SegmentedControl
-          segments={OTC_TABS}
-          value={otcTab}
-          onChange={(k) => setOtcTab(k as OtcTab)}
-        />
-      </View>
-      <View style={{ flex: 1, justifyContent: 'center' }}>
-        <EmptyState
-          icon="clock"
-          title="Presale coming soon"
-          subtitle="Presale listings will appear here once they go live."
-        />
-      </View>
-    </SafeAreaView>
-  );
+  // ── No wallet on this device ──
+  // Deliberately not a zero balance: a zero reads as "your wallet is empty",
+  // which sends the user looking for missing funds instead of for their seed
+  // phrase. MCGP lives on-chain against a key we do not have here.
+  //
+  // The shared component, not the inline copy this screen used to carry: that
+  // copy existed only to keep the OTC tab header above it, and this branch
+  // removed those tabs. Every other MCGP screen already gates this way.
+  if (signerReady && !signer) return <NoLocalWalletScreen action="swap" />;
 
   // ── Form ──
   return (
@@ -627,31 +612,10 @@ const SwapScreen = () => {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Direct | Presale sub-tabs */}
-          <View style={{ marginBottom: spacing.lg }}>
-            <SegmentedControl
-              segments={OTC_TABS}
-              value={otcTab}
-              onChange={(k) => setOtcTab(k as OtcTab)}
-            />
-          </View>
-
-          {/* Header */}
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
-            <View>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                <Text variant="title1" weight="700">Swap</Text>
-                {otcSettings?.assetClass ? (
-                  <Badge
-                    label={otcSettings.assetClass}
-                    size="sm"
-                    color={colors.accent}
-                    background={colors.accentMuted}
-                  />
-                ) : null}
-              </View>
-              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>OTC Marketplace</Text>
-            </View>
+          {/* Title and asset class live on the native header and the listing row
+              respectively; the live rate is the only chrome this form owns. */}
+          <Stack.Screen options={{ title: direction === 'buy' ? 'Buy MCGP' : 'Sell MCGP' }} />
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
             {rateDisplay ? (
               <View
                 style={{
@@ -808,7 +772,7 @@ const SwapScreen = () => {
           ) : null}
 
           {/* Action — while the active direction is admin-paused the button is
-              dimmed but stays pressable so the tap can toast the reason. */}
+              dimmed but stays pressable so the tap can explain the reason. */}
           <Button
             title={preparing ? 'Calculating fees…' : 'Review Swap'}
             onPress={onReviewPress}
@@ -833,6 +797,7 @@ const SwapScreen = () => {
           onSelect={selectTo}
           onClose={() => setPickerFor(null)}
         />
+        <OtcClosedSheet side={closedSide} onClose={() => setClosedSide(null)} />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

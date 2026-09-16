@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -27,8 +29,15 @@ import (
 var ethAddressRegex = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 // registerWalletRequest is the request body for RegisterWalletAddress.
+//
+// WalletAddress is a POINTER so the handler can tell an absent field from an
+// explicit empty one. Empty means unlink (the user deleted their last wallet),
+// and unlinking is destructive — clearing users.wallet_address on a request
+// that simply forgot the field would silently detach the account from its
+// wallet. `binding:"required"` cannot express this: it rejects "" as well as
+// absent, which is what made the unlink path unreachable before.
 type registerWalletRequest struct {
-	WalletAddress string `json:"walletAddress" binding:"required"`
+	WalletAddress *string `json:"walletAddress"`
 }
 
 // prepareTxRequest is the request body for PrepareSendTransaction.
@@ -62,6 +71,82 @@ type submitTxRequest struct {
 	// FromAddress is the wallet the tx was PREPARED for (the app's active
 	// wallet). The signature must recover to it. Empty = the registered wallet.
 	FromAddress string `json:"fromAddress,omitempty"`
+	// FeeDeferred says another path owns this transaction's fee, so this one
+	// must not guess at it. Aggregator swaps set it: the amount here is a
+	// quantity of the from-token, not dollars, and the fallback below would
+	// read it as USD — pennies on a WETH swap, thousands on a memecoin one.
+	// POST /swap/lifi/settle re-queries the aggregator and accrues the
+	// verified figure instead.
+	FeeDeferred bool `json:"feeDeferred,omitempty"`
+	// FeeFeature is the bucket a deferred fee will be booked to: "allswap"
+	// (default), "spot", or "none" for a swap that owes no platform fee at all
+	// — the brokered stablecoin ramp, whose whole point is being free.
+	FeeFeature string `json:"feeFeature,omitempty"`
+}
+
+// feeFeatureNone marks a deferred swap that owes nothing, so the sweeper does
+// not later charge a flow that is deliberately free.
+const feeFeatureNone = "none"
+
+// recordPendingSwapFee notes that a broadcast swap owes a fee this path cannot
+// compute, so the debt survives a client that never makes the settle call.
+// Best-effort by design: the swap is already on-chain and must be reported as
+// succeeded either way, so a failure here is logged for reconciliation rather
+// than surfaced. Idempotent on TxHash.
+func recordPendingSwapFee(userID uuid.UUID, txHash, feature, symbol, amount string, chainID int64) {
+	amountHuman, err := strconv.ParseFloat(strings.TrimSpace(amount), 64)
+	if err != nil || amountHuman <= 0 {
+		log.Printf("[fees] ALERT swap_fee_unrecorded_total=1 tx=%s: unparseable amount %q — "+
+			"fee cannot be swept if the client never settles", txHash, amount)
+		return
+	}
+	row := models.PendingSwapFee{
+		// Explicit rather than leaning on the column default: whether GORM omits
+		// a zero UUID so Postgres can fill it is a detail to not bet a fee row on.
+		ID:          uuid.New(),
+		UserID:      userID,
+		TxHash:      txHash,
+		Feature:     feature,
+		TokenSymbol: strings.ToUpper(strings.TrimSpace(symbol)),
+		AmountHuman: amountHuman,
+		ChainID:     chainID,
+		Status:      models.PendingSwapFeePending,
+	}
+	// Ignore a duplicate: one fee per executed swap, however many times submit
+	// is retried for the same hash.
+	if err := config.DB.Where("tx_hash = ?", txHash).FirstOrCreate(&row).Error; err != nil {
+		log.Printf("[fees] ALERT swap_fee_unrecorded_total=1 tx=%s: %v — "+
+			"fee cannot be swept if the client never settles", txHash, err)
+	}
+}
+
+// markPendingSwapFeeSettled clears the debt for a swap whose fee has just been
+// accrued. Best-effort: the accrual itself is idempotent on the same key, so a
+// stale row costs a wasted sweep, not a double charge.
+func markPendingSwapFeeSettled(txHash string) {
+	now := time.Now()
+	if err := config.DB.Model(&models.PendingSwapFee{}).
+		Where("tx_hash = ? AND status = ?", txHash, models.PendingSwapFeePending).
+		Updates(map[string]interface{}{
+			"status": models.PendingSwapFeeSettled, "settled_at": now,
+		}).Error; err != nil {
+		log.Printf("[fees] failed to clear pending swap fee for %s: %v", txHash, err)
+	}
+}
+
+// shouldAccrueSubmitFee reports whether a submitted transaction settles its own
+// fee here. Swaps and sends normally do. A fee-deferred one never does: its fee
+// is accrued against a server-verified USD value by POST /swap/lifi/settle, and
+// charging here as well would bill the user twice and double-count TP.
+func shouldAccrueSubmitFee(req submitTxRequest) bool {
+	// Only a swap may defer: its amount is a token quantity that this path
+	// cannot value. A send's fee is a flat nominal charge that is always
+	// computable here, so honouring the flag there would just be a way for a
+	// client to opt out of paying.
+	if req.FeeDeferred && req.TxType == models.TxTypeSwap {
+		return false
+	}
+	return req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -113,6 +198,24 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 	return result, true
 }
 
+// erc20SendDecimals returns the decimals a send amount is scaled by.
+//
+// The token contract is the authority, not the symbol: USDT and USDC are 6 on
+// Sonic and Ethereum but 18 on BSC, and scaling a BSC send by 6 moved 10^-12
+// of what the user typed — a mined "successful" transfer of dust. A caller
+// override (auto-discovered tokens) is only a fallback for an unreadable
+// contract; with neither there is no safe guess, so the send is refused.
+func erc20SendDecimals(override *int, readOnChain func() (int, error)) (int, error) {
+	onChain, err := readOnChain()
+	if err == nil {
+		return onChain, nil
+	}
+	if override != nil && *override >= 0 && *override <= 36 {
+		return *override, nil
+	}
+	return 0, err
+}
+
 // RegisterWalletAddress handles POST /api/wallet/register.
 // Associates a blockchain wallet address with the authenticated user.
 func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
@@ -127,8 +230,32 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "walletAddress is required")
 		return
 	}
+	if req.WalletAddress == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "walletAddress is required")
+		return
+	}
+	walletAddress := strings.TrimSpace(*req.WalletAddress)
 
-	if !isValidEthAddress(req.WalletAddress) {
+	// An explicit empty address is an UNLINK — the app sends it when the user
+	// deletes their last wallet. It was previously rejected as malformed and the
+	// rejection was swallowed client-side, so the account kept pointing at a
+	// wallet whose key had just been erased from the device: every balance read
+	// then answered for an address nobody could sign for.
+	if walletAddress == "" {
+		if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).
+			Update("wallet_address", "").Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to unlink wallet address")
+			return
+		}
+		log.Printf("User %s unlinked wallet %s", user.ID, user.WalletAddress)
+		user.WalletAddress = ""
+		utils.SuccessResponse(c, http.StatusOK, "Wallet address unlinked", gin.H{
+			"walletAddress": "",
+		})
+		return
+	}
+
+	if !isValidEthAddress(walletAddress) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address format. Must be a valid Ethereum address (0x followed by 40 hex characters)")
 		return
 	}
@@ -136,25 +263,25 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 	// Check if user already has a wallet address set.
 	if user.WalletAddress != "" {
 		// If the new address is the same, no-op.
-		if user.WalletAddress == req.WalletAddress {
+		if user.WalletAddress == walletAddress {
 			utils.SuccessResponse(c, http.StatusOK, "Wallet address already registered", gin.H{
 				"walletAddress": user.WalletAddress,
 			})
 			return
 		}
 		// Allow update to a different address; log the change for audit.
-		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, req.WalletAddress)
+		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, walletAddress)
 	}
 
 	// Check if the address is already taken by another user.
 	var existingUser models.User
-	if err := config.DB.Where("wallet_address = ?", req.WalletAddress).First(&existingUser).Error; err == nil {
+	if err := config.DB.Where("wallet_address = ?", walletAddress).First(&existingUser).Error; err == nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
 		return
 	}
 
 	// Update user's wallet address.
-	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", req.WalletAddress).Error; err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", walletAddress).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to register wallet address")
 		return
 	}
@@ -166,8 +293,6 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		wallet = models.Wallet{
 			ID:               uuid.New(),
 			UserID:           user.ID,
-			TotalBalance:     0,
-			TotalUSDValue:    0,
 			TransactionLimit: models.DefaultTransactionLimit,
 			DailyLimit:       models.DefaultDailyLimit,
 			CreatedAt:        now,
@@ -178,7 +303,7 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		}
 	}
 
-	user.WalletAddress = req.WalletAddress
+	user.WalletAddress = walletAddress
 	utils.SuccessResponse(c, http.StatusOK, "Wallet address registered successfully", gin.H{
 		"walletAddress": user.WalletAddress,
 	})
@@ -294,62 +419,78 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		}
 	}
 
+	// Chains are read concurrently. Each has its own RPC endpoint, so this adds
+	// no load to any one of them, while reading them in turn made a full-wallet
+	// request one round trip per chain per token (~27 in a row) — and Spot's
+	// quote-chain pick waits on this. Tokens within a chain stay sequential so a
+	// single endpoint is never hit in parallel.
+	var (
+		wg       sync.WaitGroup
+		resultMu sync.Mutex
+	)
 	for _, cq := range chains {
-		client := h.BlockchainService.ClientForNetwork(network, cq.name)
-		chainBalances := make(map[string]tokenBalance)
+		wg.Add(1)
+		go func(cq chainQuery) {
+			defer wg.Done()
+			client := h.BlockchainService.ClientForNetwork(network, cq.name)
+			chainBalances := make(map[string]tokenBalance)
 
-		if client != nil {
-			if nativeBal, err := client.GetBalance(address); err == nil {
-				balStr := formatTokenBalance(nativeBal, 18)
-				balFloat, _ := strconv.ParseFloat(balStr, 64)
-				price := prices[cq.cfg.NativeCurrency]
-				chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
-					Balance:  balStr,
-					UsdPrice: price,
-					UsdValue: balFloat * price,
+			if client != nil {
+				if nativeBal, err := client.GetBalance(address); err == nil {
+					balStr := formatTokenBalance(nativeBal, 18)
+					balFloat, _ := strconv.ParseFloat(balStr, 64)
+					price := prices[cq.cfg.NativeCurrency]
+					chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
+						Balance:  balStr,
+						UsdPrice: price,
+						UsdValue: balFloat * price,
+					}
 				}
 			}
-		}
 
-		for _, tok := range supportedTokens {
-			var tokenChains []string
-			json.Unmarshal(tok.Chains, &tokenChains)
-			for _, tc := range tokenChains {
-				if tc == cq.name {
-					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
-					if tokenAddr != "" && client != nil {
-						if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
-							// Decimals are per-contract (USDT is 6 on
-							// Ethereum/Polygon but 18 on BSC). Query the
-							// contract directly; fall back to the DB row only
-							// if the RPC fails.
-							decimals := tok.Decimals
-							if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
-								decimals = onChainDec
+			for _, tok := range supportedTokens {
+				var tokenChains []string
+				json.Unmarshal(tok.Chains, &tokenChains)
+				for _, tc := range tokenChains {
+					if tc == cq.name {
+						tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
+						if tokenAddr != "" && client != nil {
+							if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
+								// Decimals are per-contract (USDT is 6 on
+								// Ethereum/Polygon but 18 on BSC). Query the
+								// contract directly; fall back to the DB row only
+								// if the RPC fails.
+								decimals := tok.Decimals
+								if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
+									decimals = onChainDec
+								} else {
+									log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
+										tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
+								}
+								balStr := formatTokenBalance(bal, decimals)
+								balFloat, _ := strconv.ParseFloat(balStr, 64)
+								price := prices[tok.Symbol]
+								chainBalances[tok.Symbol] = tokenBalance{
+									Balance:  balStr,
+									UsdPrice: price,
+									UsdValue: balFloat * price,
+								}
 							} else {
-								log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
-									tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
-							}
-							balStr := formatTokenBalance(bal, decimals)
-							balFloat, _ := strconv.ParseFloat(balStr, 64)
-							price := prices[tok.Symbol]
-							chainBalances[tok.Symbol] = tokenBalance{
-								Balance:  balStr,
-								UsdPrice: price,
-								UsdValue: balFloat * price,
+								chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 							}
 						} else {
 							chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 						}
-					} else {
-						chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 					}
 				}
 			}
-		}
 
-		result[cq.name] = chainBalances
+			resultMu.Lock()
+			result[cq.name] = chainBalances
+			resultMu.Unlock()
+		}(cq)
 	}
+	wg.Wait()
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
 		"walletAddress": address,
@@ -477,25 +618,15 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		network = "mainnet"
 	}
 
-	// Decimals: caller override takes precedence (auto-discovered tokens
-	// can have any decimals — 6, 8, 9, 18 — and we won't have curated
-	// metadata for them). Otherwise fall back to the historical defaults.
-	decimals := 18
-	if req.Decimals != nil && *req.Decimals >= 0 && *req.Decimals <= 36 {
-		decimals = *req.Decimals
-	} else if tokenUpper == "USDT" || tokenUpper == "USDC" {
-		decimals = 6
-	}
-	amountWei, ok := parseTokenAmount(req.Amount, decimals)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
-		return
-	}
-
 	var txBytes []byte
 	var err error
 
 	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
+		amountWei, ok := parseTokenAmount(req.Amount, 18)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
+		}
 		txBytes, err = client.PrepareNativeTransfer(fromAddress, req.ToAddress, amountWei)
 	} else {
 		// Resolve token contract: explicit override (discovered tokens)
@@ -512,6 +643,19 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
 				return
 			}
+		}
+		decimals, derr := erc20SendDecimals(req.Decimals, func() (int, error) {
+			return client.GetTokenDecimals(tokenAddr)
+		})
+		if derr != nil {
+			log.Printf("prepare-tx: decimals unavailable for %s on %s (%s): %v", tokenUpper, chainName, tokenAddr, derr)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, fmt.Sprintf("Could not read the %s contract on %s. Please try again.", tokenUpper, chainName))
+			return
+		}
+		amountWei, ok := parseTokenAmount(req.Amount, decimals)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+			return
 		}
 		txBytes, err = client.PrepareERC20Transfer(tokenAddr, fromAddress, req.ToAddress, amountWei)
 	}
@@ -650,12 +794,21 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
+	// A deferred swap owes a fee that only the settle path can value. Record the
+	// debt now, while we still know who owes it and for what — the client that
+	// owes the follow-up call may never make it.
+	if req.FeeDeferred && req.TxType == models.TxTypeSwap && !strings.EqualFold(req.FeeFeature, feeFeatureNone) {
+		recordPendingSwapFee(user.ID, txHash, settleFeature(req.FeeFeature), req.TokenSymbol, req.Amount, req.ChainID)
+	}
+
 	// Distribute TP for swap and send transaction types.
 	// Escrow TP is handled separately by the checkout handler on order resolution.
-	if req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend {
+	if shouldAccrueSubmitFee(req) {
 		systemFeeUSD := req.FeeUSD
 		if systemFeeUSD <= 0 {
-			// Fallback: estimate system fee from transaction amount
+			// Fallback: estimate system fee from transaction amount. Only sound
+			// when the amount is denominated in something near $1 — see
+			// FeeDeferred on submitTxRequest.
 			amountFloat, _ := strconv.ParseFloat(req.Amount, 64)
 			switch req.TxType {
 			case models.TxTypeSwap:
@@ -860,24 +1013,45 @@ func (h *Handlers) GetSupportedTokens(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Supported tokens retrieved", result)
 }
 
-// seedDefaultTokens inserts the default token set into the database.
-func seedDefaultTokens() []models.SupportedToken {
-	type tokenDef struct {
-		Symbol    string
-		Name      string
-		Decimals  int
-		IconColor string
-		Chains    []string
-	}
+// tokenDef is one row of the compiled-in default token set — the definitive
+// list of which chains a symbol is supposed to be readable on. Both
+// seedDefaultTokens (first-time setup) and ensureSupportedTokenChains
+// (backfill for rows that already exist) read from defaultTokenDefs so the
+// two never drift apart from each other again the way the seed once drifted
+// from config.go.
+type tokenDef struct {
+	Symbol    string
+	Name      string
+	Decimals  int
+	IconColor string
+	Chains    []string
+}
 
-	defaults := []tokenDef{
-		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc"}},
-		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc"}},
+// defaultTokenDefs is the compiled-in default token set.
+//
+// USDT/USDC listed only "sonic", "bsc" until 2026-09 — commit 25d14842 added
+// Arbitrum/Base token addresses to config.go's network config, but nobody
+// updated this list to match. GetWalletBalances gates its per-chain ERC-20
+// lookup on a token's Chains membership (see the loop below), so on Base/
+// Arbitrum the lookup was never attempted at all — not "$0", just silently
+// absent from the response. A wallet holding 1.29 USDC split across
+// Base/Arbitrum/Sonic showed 0.2 (the Sonic leg alone) on the IT hub because
+// of exactly this. Keep this list a superset of every chain config.go has a
+// "<chain>:<symbol>" address for.
+func defaultTokenDefs() []tokenDef {
+	return []tokenDef{
+		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc", "arbitrum", "base"}},
+		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc", "arbitrum", "base"}},
 		{"MCGP", "MCG Protocol", 18, "#FFD700", []string{"sonic"}},
 		// Robinhood Chain's canonical stablecoin (Paxos Global Dollar). Decimals
 		// are read on-chain at balance time; 6 here is the fallback.
 		{"USDG", "Global Dollar", 6, "#00C805", []string{"robinhood"}},
 	}
+}
+
+// seedDefaultTokens inserts the default token set into the database.
+func seedDefaultTokens() []models.SupportedToken {
+	defaults := defaultTokenDefs()
 
 	var created []models.SupportedToken
 	for _, d := range defaults {
@@ -898,6 +1072,66 @@ func seedDefaultTokens() []models.SupportedToken {
 		created = append(created, token)
 	}
 	return created
+}
+
+// EnsureSupportedTokenChains backfills supported_tokens.chains for rows that
+// already exist, adding any chain defaultTokenDefs lists for that symbol but
+// the row doesn't have yet. Called once at boot (see cmd/server/main.go),
+// after AutoMigrate.
+//
+// seedDefaultTokens only fires when the table is completely empty, so a
+// symbol added later to defaultTokenDefs' chain list (as arbitrum/base were
+// for USDT/USDC) never reaches a production row on its own — the row was
+// created back when the list was shorter and nothing ever revisits it. This
+// is deliberately additive-only (union, never replace or remove): it treats
+// defaultTokenDefs as a floor, not a source of truth to overwrite from, so
+// hitting this after an operator has manually curated a row's Chains (there's
+// no admin UI for it today, but the column is data, not code) can only ever
+// add a chain a token is genuinely deployed on, never drop one.
+func EnsureSupportedTokenChains() {
+	if config.DB == nil {
+		return
+	}
+	for _, d := range defaultTokenDefs() {
+		var tok models.SupportedToken
+		if err := config.DB.Where("symbol = ?", d.Symbol).First(&tok).Error; err != nil {
+			// Not created yet (fresh DB) — seedDefaultTokens' job, not this one.
+			continue
+		}
+
+		var have []string
+		_ = json.Unmarshal(tok.Chains, &have)
+		seen := make(map[string]bool, len(have))
+		for _, c := range have {
+			seen[c] = true
+		}
+
+		merged := have
+		changed := false
+		for _, c := range d.Chains {
+			if !seen[c] {
+				merged = append(merged, c)
+				seen[c] = true
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+
+		chainsJSON, err := json.Marshal(merged)
+		if err != nil {
+			log.Printf("[wallet] failed to marshal backfilled chains for %s: %v", d.Symbol, err)
+			continue
+		}
+		if err := config.DB.Model(&models.SupportedToken{}).
+			Where("id = ?", tok.ID).
+			Update("chains", chainsJSON).Error; err != nil {
+			log.Printf("[wallet] failed to backfill chains for %s: %v", d.Symbol, err)
+			continue
+		}
+		log.Printf("[wallet] backfilled supported_tokens chains for %s -> %v", d.Symbol, merged)
+	}
 }
 
 // ConfirmSeedPhraseBackup handles POST /api/wallet/seed-phrase-backed-up.
@@ -1081,6 +1315,16 @@ func rawToFloat(raw string, decimals int) float64 {
 	return f
 }
 
+// invalidRequestReason reports whether err is a caller-fixable
+// chains.InvalidRequestError and returns its message.
+func invalidRequestReason(err error) (string, bool) {
+	var invalid *chains.InvalidRequestError
+	if errors.As(err, &invalid) {
+		return invalid.Reason, true
+	}
+	return "", false
+}
+
 // PrepareNonEVMTx handles POST /api/wallet/nonevm/prepare-tx.
 // Estimates fee and builds an unsigned tx for a non-EVM send.
 // Query param: ?chain=tron
@@ -1103,6 +1347,14 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 	}
 	fee, err := client.EstimateFee(c.Request.Context(), req)
 	if err != nil {
+		// A request the caller can fix (bad memo, bad address) keeps its
+		// message; an upstream RPC/indexer failure stays generic. Without the
+		// split, "memo is 81 bytes; the limit is 80" reaches the app as "fee
+		// estimate failed" on a path that is about to move money.
+		if reason, ok := invalidRequestReason(err); ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, reason)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadGateway, "fee estimate failed")
 		return
 	}
@@ -1112,6 +1364,10 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 	}
 	prepared, err := client.PrepareTransfer(c.Request.Context(), req)
 	if err != nil {
+		if reason, ok := invalidRequestReason(err); ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, reason)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -1124,6 +1380,18 @@ type submitNonEVMRequest struct {
 	From     string             `json:"from"`
 	Amount   string             `json:"amount"`
 	Symbol   string             `json:"symbol"`
+	// Fee fields mirror submitTxRequest for aggregator swaps signed off-chain
+	// (Solana, Bitcoin). This path never accrued a fee of its own, so there is
+	// nothing to suppress — but the debt still has to be recorded, or a Solana
+	// or Bitcoin swap whose client never settles is invisible.
+	//
+	// FeeAmountHuman is in WHOLE TOKENS, unlike Amount, which is base units on
+	// this path. Naming it separately is deliberate: silently reusing Amount is
+	// exactly the confusion that turned a 1,000 USDC swap into a $35,000,000 fee.
+	FeeDeferred    bool   `json:"feeDeferred,omitempty"`
+	FeeFeature     string `json:"feeFeature,omitempty"`
+	FeeAmountHuman string `json:"feeAmountHuman,omitempty"`
+	FeeChainID     int64  `json:"feeChainId,omitempty"`
 }
 
 // SubmitNonEVMTx handles POST /api/wallet/nonevm/submit-tx.
@@ -1195,6 +1463,14 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	}
 	if err := config.DB.Create(&activity).Error; err != nil {
 		log.Printf("nonevm: failed to record activity for tx %s: %v", hash, err)
+	}
+
+	// Same debt record as the EVM path: an aggregator swap owes a fee this
+	// request cannot value, and the client that owes the settle call may never
+	// make it.
+	if req.FeeDeferred && !strings.EqualFold(req.FeeFeature, feeFeatureNone) {
+		recordPendingSwapFee(user.ID, hash, settleFeature(req.FeeFeature),
+			req.Symbol, req.FeeAmountHuman, req.FeeChainID)
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})

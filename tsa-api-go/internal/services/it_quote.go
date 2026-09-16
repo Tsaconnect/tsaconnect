@@ -68,9 +68,10 @@ func (s *ITService) SetRateQuoter(q FXRateQuoter) { s.rateQuoter = q }
 // ── Direction-robust derivation ──
 // FlutterwaveClient.QuoteRate POSTs a DESTINATION amount to /transfers/rates
 // (source currency + {destination currency, amount}) and gets back
-// FWRate{Rate, Source, Destination}. Rather than trust the ambiguous top-level
-// Rate field (its unit direction — source-per-destination vs the inverse — is
-// not documented anywhere we've found), we derive the rate from the
+// FWRate{Source, Destination}. Rather than trust the ambiguous top-level rate
+// field FW also returns (its unit direction — source-per-destination vs the
+// inverse — is not documented anywhere we've found, so it isn't even modeled;
+// see FWRate's doc comment), we derive the rate from the
 // Source/Destination amounts FW echoes back, which are unambiguous: "to
 // receive Destination.Amount units of destCurrency, you pay Source.Amount
 // units of NGN". We probe with a 1-unit destination amount, so:
@@ -105,10 +106,11 @@ func (s *ITService) QuoteWithdrawal(ctx context.Context, ngnAmount float64, dest
 	if err != nil {
 		return 0, 0, err
 	}
-	if fw.Source.Amount <= 0 || fw.Destination.Amount <= 0 {
+	srcAmt, dstAmt := fw.Source.Amount.Float64(), fw.Destination.Amount.Float64()
+	if srcAmt <= 0 || dstAmt <= 0 {
 		return 0, 0, ErrITQuoteUnavailable
 	}
-	ngnPerDestUnit := fw.Source.Amount / fw.Destination.Amount
+	ngnPerDestUnit := srcAmt / dstAmt
 	s.cacheQuoteRate(destCurrency, ngnPerDestUnit)
 	return ngnAmount / ngnPerDestUnit, ngnPerDestUnit, nil
 }

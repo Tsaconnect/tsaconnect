@@ -1,0 +1,30 @@
+
+{
+	"MOBILE_NETWORK":
+	{
+		"MTN":
+		[
+			{
+				"ID":"01","PRODUCT_NAME":"MTN","PRODUCT_DISCOUNT_AMOUNT":"0.97","PRODUCT_DISCOUNT":"3%","MINAMOUNT":50,"MAXAMOUNT":200000
+			}
+		],
+		"Glo":
+		[
+			{
+				"ID":"02","PRODUCT_NAME":"GLO","PRODUCT_DISCOUNT_AMOUNT":"0.92","PRODUCT_DISCOUNT":"8%","MINAMOUNT":50,"MAXAMOUNT":200000
+			}					
+		],
+		"m_9mobile":
+		[
+			{
+				"ID":"03","PRODUCT_NAME":"9mobile","PRODUCT_DISCOUNT_AMOUNT":"0.93","PRODUCT_DISCOUNT":"7%","MINAMOUNT":50,"MAXAMOUNT":200000
+			}					
+		],
+		"Airtel":
+		[
+			{
+				"ID":"04","PRODUCT_NAME":"Airtel","PRODUCT_DISCOUNT_AMOUNT":"0.97","PRODUCT_DISCOUNT":"3%","MINAMOUNT":50,"MAXAMOUNT":200000
+			}					
+		]
+	}
+}

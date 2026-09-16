@@ -9,7 +9,14 @@ import React, { useState, useRef } from 'react';
 import { View, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { setPin as savePin, setBiometricEnabled, isBiometricAvailable, getBiometricType } from '@/services/localAuth';
+import { HOME_TAB } from '@/constants/routes';
+import {
+  setPin as savePin,
+  setBiometricEnabled,
+  isBiometricAvailable,
+  getBiometricType,
+  authenticateWithBiometric,
+} from '@/services/localAuth';
 import { useTheme } from '@/theme';
 import { Text, Button, Icon, PressableScale, ScreenHeader } from '@/components/ui';
 
@@ -69,12 +76,13 @@ const PinSetupScreen = () => {
   const handleBiometricChoice = async (enable: boolean) => {
     if (enable) {
       // Verify biometric works before enabling
-      const LocalAuth = await import('expo-local-authentication');
-      const result = await LocalAuth.authenticateAsync({
-        promptMessage: 'Verify your fingerprint or face',
-        disableDeviceFallback: true,
-      });
-      if (!result.success) {
+      let verified = false;
+      try {
+        verified = await authenticateWithBiometric('Verify your fingerprint or face');
+      } catch {
+        verified = false;
+      }
+      if (!verified) {
         Alert.alert('Verification Failed', 'Could not verify biometric. Please try again.');
         return;
       }
@@ -124,7 +132,7 @@ const PinSetupScreen = () => {
   if (step === 'biometric') {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <ScreenHeader />
+        <ScreenHeader fallbackRoute={HOME_TAB} />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.lg }}>
           {iconCircle('shield', colors.accent, colors.accentMuted)}
           <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
@@ -151,6 +159,7 @@ const PinSetupScreen = () => {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScreenHeader
+        fallbackRoute={HOME_TAB}
         onBack={
           isConfirm
             ? () => {

@@ -60,6 +60,7 @@ import {
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
+import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -81,6 +82,8 @@ import {
   Text,
 } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { payerInstructionOf } from '@/utils/payInto';
 
 // TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
@@ -160,6 +163,8 @@ const AdDetailScreen: React.FC = () => {
   // manual payment method to pick — the picker is replaced by the VA card and
   // the method requirement is waived.
   const isPmSellAd = ad?.side === 'sell' && !!ad?.isPm;
+  // Central mode: pmPayTo is the shared company account and carries the own-name notice.
+  const adPayerInstruction = payerInstructionOf(ad?.pmPayTo);
   useEffect(() => {
     if (!isPmBuyAd) return;
     let cancelled = false;
@@ -319,6 +324,12 @@ const AdDetailScreen: React.FC = () => {
           "The seller's rate feed is temporarily down. Please try again in a few seconds — the ad will reactivate automatically once the feed recovers.",
         );
         load();
+        return;
+      }
+      // The buyer is about to pay in; the server refuses that until it can
+      // attribute their transfer. Only this take path — the deposit open below
+      // is the opener selling, which is not gated.
+      if (promptKycRefusal(openRes.code, openRes.message)) {
         return;
       }
       if (!openRes.success || !openRes.data) {
@@ -744,7 +755,11 @@ const AdDetailScreen: React.FC = () => {
             <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted, gap: spacing.xs }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                 <Icon name="checkCircle" size={20} color={colors.accent} />
-                <Text variant="bodyMed" weight="700">Auto-settled · pay the merchant&apos;s account</Text>
+                <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
+                  {adPayerInstruction
+                    ? 'Auto-settled · pay our collection account'
+                    : 'Auto-settled · pay the merchant\u2019s account'}
+                </Text>
               </View>
               {ad?.pmPayTo ? (
                 <View style={{ marginLeft: spacing.lg + spacing.sm }}>
@@ -754,8 +769,11 @@ const AdDetailScreen: React.FC = () => {
                   </Text>
                 </View>
               ) : null}
+              {adPayerInstruction ? (
+                <PayerInstructionNotice instruction={adPayerInstruction} />
+              ) : null}
               <Text variant="caption" color="textMuted">
-                After you open the trade, send the exact amount to this account. Your {ad?.token ?? 'crypto'} releases automatically once the merchant receives it.
+                After you open the trade, send the exact amount to this account. Your {ad?.token ?? 'crypto'} releases automatically once your transfer is confirmed.
               </Text>
             </Card>
           ) : loadingUserPms ? (

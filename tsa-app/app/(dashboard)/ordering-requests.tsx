@@ -108,7 +108,7 @@ export default function OrderingRequestsScreen() {
               return (
                 <PressableScale
                   key={order.id}
-                  onPress={() => router.push(`/(dashboard)/orderdetail?id=${order.id}`)}
+                  onPress={() => router.push(`/orderdetail?id=${order.id}`)}
                 >
                   <Card padding="lg" style={{ gap: spacing.sm }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>

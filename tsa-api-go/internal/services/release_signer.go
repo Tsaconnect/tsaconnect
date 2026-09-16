@@ -50,11 +50,11 @@ func (s *LocalKeyReleaseSigner) Address() string {
 func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx []byte) (string, error) {
 	var u blockchain.UnsignedTx
 	if err := json.Unmarshal(unsignedTx, &u); err != nil {
-		return "", fmt.Errorf("decode unsigned tx: %w", err)
+		return "", notBroadcast(fmt.Errorf("decode unsigned tx: %w", err))
 	}
 	gasPrice, ok := new(big.Int).SetString(u.GasPrice, 10)
 	if !ok {
-		return "", fmt.Errorf("bad gasPrice %q", u.GasPrice)
+		return "", notBroadcast(fmt.Errorf("bad gasPrice %q", u.GasPrice))
 	}
 	value, ok := new(big.Int).SetString(u.Value, 10)
 	if !ok {
@@ -66,7 +66,7 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	}
 	data, err := hexutil.Decode("0x" + u.Data)
 	if err != nil {
-		return "", fmt.Errorf("decode call data: %w", err)
+		return "", notBroadcast(fmt.Errorf("decode call data: %w", err))
 	}
 	to := common.HexToAddress(u.To)
 	tx := types.NewTx(&types.LegacyTx{
@@ -79,11 +79,11 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	})
 	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), s.key)
 	if err != nil {
-		return "", fmt.Errorf("sign tx: %w", err)
+		return "", notBroadcast(fmt.Errorf("sign tx: %w", err))
 	}
 	raw, err := rlp.EncodeToBytes(signed)
 	if err != nil {
-		return "", fmt.Errorf("rlp encode: %w", err)
+		return "", notBroadcast(fmt.Errorf("rlp encode: %w", err))
 	}
 	return s.bc.SendRawTransaction(raw)
 }

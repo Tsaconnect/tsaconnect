@@ -1202,6 +1202,14 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return s.openTradeWithDeposit(ctx, &ad, buyerID, buyerAddress, params)
 	}
 
+	// Below the buy-ad branch on purpose. From here down `buyerID` really is
+	// the buyer: they are about to send fiat. On the branch above the opener is
+	// depositing crypto to SELL it, and gating that would trap a balance they
+	// already hold.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
+		return nil, nil, err
+	}
+
 	// Effective rate is recomputed live for float ads (snapshotted onto the
 	// trade row below), and returned verbatim for fixed ads. ErrRateStale on
 	// float ads is surfaced unchanged so the handler maps it to 503.
@@ -1525,7 +1533,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		// ErrInsufficientPMLiquidity (no trade row, no crypto-capacity change
 		// leak). nil pm (non-PM ad, or PM dormant) → skip.
 		if ad.PMID != nil && s.pm != nil {
-			ok, rerr := s.pm.ReserveNGNTx(tx, *ad.PMID, trade.FiatAmount)
+			ok, rerr := s.pm.ReserveInTx(tx, *ad.PMID, trade.FiatCurrency, trade.FiatAmount)
 			if rerr != nil {
 				return rerr
 			}
@@ -2087,7 +2095,7 @@ func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *go
 	if row.PMID == nil {
 		return nil // not a PM ad — nothing reserved
 	}
-	if err := s.pm.ReleaseNGNTx(tx, *row.PMID, trade.FiatAmount); err != nil {
+	if err := s.pm.ReleaseInTx(tx, *row.PMID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 		return err
 	}
 	// Set the marker so a redundant later release (e.g. reconciler re-running on a

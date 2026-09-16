@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,13 +17,38 @@ import (
 
 // stubFx is a fixed NGN/USD source for tests; fields are set directly on the
 // service (s.fx) to simulate stale or unavailable feeds.
+//
+// It also satisfies FxRateProvider, but PER CURRENCY rather than by returning
+// the same number for every code. That distinction is the whole point: a stub
+// that ignores its currency argument cannot fail on the bug worth catching —
+// an amount denominated in one currency converted at another's rate. With
+// NGN≈1400 and GHS≈12 that is a ~100x error, and a single-rate stub would let
+// it pass every test.
 type stubFx struct {
 	ngn   float64
 	stale bool
 	err   error
+	// rates optionally overrides per currency. When nil, only NGN resolves —
+	// so a test that reaches for a second currency without saying what it is
+	// worth fails loudly instead of silently reusing the naira rate.
+	rates map[string]float64
 }
 
 func (f stubFx) NgnPerUsd(context.Context) (float64, bool, error) { return f.ngn, f.stale, f.err }
+
+func (f stubFx) RatePerUsd(_ context.Context, currency string) (float64, bool, error) {
+	if f.err != nil {
+		return 0, f.stale, f.err
+	}
+	code := strings.ToUpper(strings.TrimSpace(currency))
+	if r, ok := f.rates[code]; ok {
+		return r, f.stale, nil
+	}
+	if code == "NGN" {
+		return f.ngn, f.stale, nil
+	}
+	return 0, false, fmt.Errorf("%w: stubFx has no rate for %s", ErrNoMarketAnchor, code)
+}
 
 func newITTestService(t *testing.T) *ITService {
 	t.Helper()
@@ -32,9 +59,19 @@ func newITTestService(t *testing.T) *ITService {
 	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}, &models.FiatVirtualAccount{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	// Every money-in path reads users.verification_status, so the table is part
+	// of the baseline fixture now — without it the gate fails on a missing
+	// table and reads as an implementation bug rather than a fixture gap.
+	createTestUsersTable(t, db)
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
 	swap.SetOperatorSigner(&fakeReleaseSigner{addr: "0x000000000000000000000000000000000000A11CE", hash: "0xdead"})
-	return NewITService(db, swap, stubFx{ngn: 1500}) // FX = ₦1500/$
+	svc := NewITService(db, swap, stubFx{ngn: 1500}) // FX = ₦1500/$
+	// Fees are deducted on both legs, so a service with no quoter refuses every
+	// transfer (ErrITFeeQuoteUnavailable). Wire the live-config engine here so
+	// the existing pricing tests exercise the real deduction; tests that care
+	// about the unpriced path build their own service.
+	svc.SetFeeQuoter(feeQuoterForTest())
+	return svc
 }
 
 func TestRateMath_RoundsDown(t *testing.T) {
@@ -157,10 +194,28 @@ func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create buy: %v", err)
 	}
-	// ₦50 (5000 kobo) at 3000 kobo/MCGP, rounded down to wei.
-	want := new(big.Int).Div(new(big.Int).Mul(big.NewInt(5000), oneE18), big.NewInt(3000)).String()
+	// ₦50 in, minus deposit fees: platform 0.5% = 25 kobo, provider 2% = 100
+	// kobo, then tax on the provider fee — VAT 7.5% floors to 7 kobo and the
+	// 0.5% platform tax floors to 0, so 132 kobo total (each component floors
+	// independently, never the sum). ₦48.68 buys MCGP at 3000 kobo/MCGP. The
+	// withheld ₦1.32 buys nothing — that MCGP is never minted and stays with
+	// the contract float, which is where the platform's 25 kobo is retained.
+	if intent.NetNgnKobo != "4868" || intent.FeeNgnKobo != "132" {
+		t.Fatalf("fee/net recorded as %s/%s, want 132/4868", intent.FeeNgnKobo, intent.NetNgnKobo)
+	}
+	if intent.PlatformKeptKobo != "25" {
+		t.Fatalf("platformKept = %s, want 25 (the 0.5%% NGN platform fee)", intent.PlatformKeptKobo)
+	}
+	want := new(big.Int).Div(new(big.Int).Mul(big.NewInt(4868), oneE18), big.NewInt(3000)).String()
 	if intent.McgpAmount != want {
-		t.Fatalf("mcgp = %s want %s", intent.McgpAmount, want)
+		t.Fatalf("mcgp = %s want %s (net-priced, not gross)", intent.McgpAmount, want)
+	}
+	gross := new(big.Int).Div(new(big.Int).Mul(big.NewInt(5000), oneE18), big.NewInt(3000)).String()
+	if intent.McgpAmount == gross {
+		t.Fatal("credited the gross-priced amount — the deposit fee was not applied")
+	}
+	if intent.NgnKobo != "5000" {
+		t.Fatalf("ngnKobo = %s, want the gross 5000 (what the user transfers)", intent.NgnKobo)
 	}
 	if intent.RateKobo != "3000" {
 		t.Fatalf("rate not locked: %s want 3000", intent.RateKobo)
@@ -248,8 +303,8 @@ func TestCompanyPM_AlwaysConfiguredNoFallback(t *testing.T) {
 
 // ─── Sell: destination currency + rail (Task 2.4) ──────────────────────────
 //
-// CreateSellIntent's happy path calls the live chain (PremiumCredited, then
-// OperatorDebitPremium/VerifyOperatorEvent) before it ever persists the
+// CreateSellIntent's happy path calls the live chain (PremiumBalance, then
+// OperatorDebitSpendable/VerifyOperatorEvent) before it ever persists the
 // intent, and nothing in this package mocks that client (client=nil errors
 // "blockchain client not available" — true of every IT sell path today, not
 // new to this task). So the mapping CreateSellIntent uses to build the
@@ -356,7 +411,7 @@ func TestOpenBuyOrder_WorksWithoutPMAndSupersedesPrior(t *testing.T) {
 		t.Fatalf("set rate: %v", err)
 	}
 	// Spec 1 standing-VA buys do not require the company PM.
-	user := uuid.New()
+	user := seedVerifiedUser(t, s.db)
 	first, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "1000")
 	if err != nil {
 		t.Fatalf("open buy without PM: %v", err)

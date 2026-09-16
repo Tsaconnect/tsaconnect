@@ -5,7 +5,7 @@
 // permanent standing VA (any amount accepted). First-time users complete a
 // one-time BVN/NIN gate to mint the VA. Settlement happens when funds land —
 // no payment reference to type, no per-intent expiry.
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -35,10 +35,23 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
+import { buyFeeBreakdown } from '@/utils/buyQuote';
+import { RAILS } from '@/constants/rails';
+import { promptKycRefusal } from '@/utils/kycRefusal';
+import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
+import { exactNairaOf, payerInstructionOf } from '@/utils/payInto';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
+
+// Stablecoins navigate away to the dedicated buy-stable screen rather than
+// being rendered here, so this form only ever needs to hold the MCGP asset.
+const ASSET_OPTIONS: PickerItem[] = [
+  { id: 'MCGP', label: 'MCGP', icon: 'wallet' },
+  { id: 'USDC', label: 'USDC', icon: 'wallet' },
+  { id: 'USDT', label: 'USDT', icon: 'wallet' },
+];
 
 const CURRENCY_OPTIONS: PickerItem[] = [
   { id: 'NGN', label: 'NGN · Nigerian Naira', icon: 'wallet' },
@@ -52,6 +65,10 @@ export default function ITBuy() {
   const { colors, spacing, radius, fonts, type } = useTheme();
   const { formatPrice, allRates, currency } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
+  // The picker's selection. MCGP is the only value this screen ever holds;
+  // the stablecoins navigate away rather than being rendered here.
+  const [asset, setAsset] = useState<'MCGP'>('MCGP');
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
   const [naira, setNaira] = useState('');
   const [error, setError] = useState('');
   const [quote, setQuote] = useState<ITBuyQuote | null>(null);
@@ -73,6 +90,18 @@ export default function ITBuy() {
     CURRENCY_OPTIONS.find((o) => o.id === paymentCurrency)?.label ?? paymentCurrency;
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === paymentMethod)?.label ?? paymentMethod;
+
+  const onAssetChange = (next: string) => {
+    if (next === 'USDC' || next === 'USDT') {
+      // NGN stablecoin trades route through Paycrest, not Flutterwave: ~0.24-1.1%
+      // against 2.15%, and ~73s against a next-morning settlement window. The
+      // buy-stable / sell-stable screens are deliberately left in place but
+      // unlinked, so reverting is a one-line change if Paycrest misbehaves.
+      router.push(`/wallet/paycrest/buy?asset=${next}` as never);
+      return;
+    }
+    setAsset('MCGP');
+  };
 
   const applyQuote = (q: ITBuyQuote, to: ITPayTo | null, nextIntent?: ITIntent | null) => {
     setQuote(q);
@@ -105,6 +134,12 @@ export default function ITBuy() {
       router.replace('/wallet/it');
       return;
     }
+    // Not verified (or verified with no legal name): a dead-end error screen is
+    // the failure the server's code exists to prevent — prompt the next step.
+    if (promptKycRefusal(r.code, r.message)) {
+      setScreen('form');
+      return;
+    }
     if (!r.success || !r.data) {
       setError(r.message || 'Could not open the buy order');
       setScreen('error');
@@ -127,6 +162,10 @@ export default function ITBuy() {
     }
     setScreen('submitting');
     const act = await activateITVA(idType, idNumber);
+    if (promptKycRefusal(act.code, act.message)) {
+      setScreen('form');
+      return;
+    }
     if (!act.success || !act.data) {
       setError(act.message || 'Activation failed');
       setScreen('activate');
@@ -147,6 +186,16 @@ export default function ITBuy() {
   const ngnRate = allRates.NGN?.midRate ?? null;
   const payUsd = ngnToUsd(Number(naira) || 0, ngnRate);
   const showPaySecondary = payUsd != null && shouldShowNgnSecondary(currency.code);
+
+  // The same quote restated in MCGP — what you pay for, what covers fees, what
+  // lands. Absent (hasFees false) on an API that predates fee deduction.
+  const fees = useMemo(() => (quote ? buyFeeBreakdown(quote) : null), [quote]);
+
+  // Central mode (one company account, credited by payer name + exact amount)
+  // is signalled by the card itself. The VA-era "any amount, permanent account"
+  // copy is false there, and would contradict the instruction beside it.
+  const payerInstruction = payerInstructionOf(payTo);
+  const exactNaira = exactNairaOf(payTo);
 
   if (screen === 'submitting') {
     return (
@@ -220,7 +269,7 @@ export default function ITBuy() {
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
           <Card>
             <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
-              Transfer any amount to this account
+              {exactNaira ? `Transfer exactly ₦${exactNaira}` : 'Transfer any amount to this account'}
             </Text>
             {showPaySecondary ? (
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
@@ -232,13 +281,31 @@ export default function ITBuy() {
               </Text>
             )}
             <SummaryCard>
-              <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
+              {fees?.hasFees ? (
+                <>
+                  <SummaryRow label="You pay for" value={`${fees.grossMcgp} MCGP`} />
+                  <SummaryRow
+                    label="Fees"
+                    value={`−${fees.feeMcgp} MCGP`}
+                    hint={`≈ ₦${fees.feeNgn}`}
+                  />
+                  <Divider spacing="xs" />
+                  <SummaryRow label="You receive" value={`${fees.netMcgp} MCGP`} />
+                </>
+              ) : (
+                <SummaryRow label="You get" value={`${estMcgp} MCGP`} hint="After fees" />
+              )}
               <Divider spacing="xs" />
               <SummaryRow
                 label="Status"
                 value={intent?.status === 'pending_payment' ? 'Awaiting transfer' : (intent?.status || 'Awaiting transfer')}
               />
             </SummaryCard>
+            {fees?.hasFees ? (
+              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
+                Fees are taken in MCGP — that portion is never issued to your wallet.
+              </Text>
+            ) : null}
 
             {payTo ? (
               <>
@@ -246,6 +313,11 @@ export default function ITBuy() {
                   <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
                     Pay into this account
                   </Text>
+                  {payerInstruction ? (
+                    <View style={{ marginBottom: spacing.sm }}>
+                      <PayerInstructionNotice instruction={payerInstruction} />
+                    </View>
+                  ) : null}
                   <SummaryCard>
                     <SummaryRow label="Bank" value={payTo.bank || '—'} />
                     <SummaryRow label="Account name" value={payTo.accountName || '—'} />
@@ -258,9 +330,9 @@ export default function ITBuy() {
                   </View>
                 </View>
                 <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-                  This is your permanent Instant Transfer account — no reference to type, no
-                  expiry. Transfer any Naira amount; your spendable MCGP appears when the
-                  payment is confirmed at the live rate.
+                  {payerInstruction
+                    ? 'Your spendable MCGP appears once your transfer is matched to this order, priced at the live rate and net of transfer fees. Sending a different amount holds your purchase for review.'
+                    : 'This is your permanent Instant Transfer account — no reference to type, no expiry. Transfer any Naira amount; your spendable MCGP appears when the payment is confirmed, priced at the live rate and net of transfer fees.'}
                 </Text>
               </>
             ) : (
@@ -291,10 +363,17 @@ export default function ITBuy() {
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }} keyboardShouldPersistTaps="handled">
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Buy spendable MCGP with a Naira bank transfer into your permanent account. More payment
+          Buy spendable MCGP with a Naira bank transfer into your permanent account. Transfer fees
+          come out of the amount you send — the MCGP shown next is what you receive. More payment
           currencies will open later.
         </Text>
 
+        <SelectRow
+          label="Asset"
+          value={asset}
+          leftIcon="wallet"
+          onPress={() => setShowAssetPicker(true)}
+        />
         <SelectRow
           label="Payment currency"
           value={currencyLabel}
@@ -316,9 +395,39 @@ export default function ITBuy() {
           symbolPosition="prefix"
           error={error || undefined}
         />
+        <Text variant="caption" style={{ color: colors.textMuted }}>
+          MCGP bought with naira can be spent in the app or sold back for naira.
+        </Text>
         <Button title="Continue" onPress={submit} />
+
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: spacing.sm,
+            backgroundColor: colors.infoBg,
+            borderRadius: radius.sm,
+            padding: spacing.md,
+          }}
+        >
+          <Icon name="info" size={16} color={colors.info} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            Note: All {RAILS.it.name} ({RAILS.it.acronym}) buys are received instantly.
+          </Text>
+        </View>
       </ScrollView>
 
+      <PickerSheet
+        visible={showAssetPicker}
+        onClose={() => setShowAssetPicker(false)}
+        title="Asset"
+        items={ASSET_OPTIONS}
+        selectedId={asset}
+        onSelect={(item) => {
+          setShowAssetPicker(false);
+          onAssetChange(item.id);
+        }}
+      />
       <PickerSheet
         visible={showCurrencyPicker}
         onClose={() => setShowCurrencyPicker(false)}

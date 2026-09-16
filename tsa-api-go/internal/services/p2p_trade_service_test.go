@@ -405,6 +405,9 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			sender_id TEXT, type TEXT NOT NULL,
 			body TEXT, image_url TEXT, created_at DATETIME
 		)`,
+		// Opening a trade as the buyer is a money-in path and reads
+		// users.verification_status; a buyer with no row here is unverified.
+		testUsersDDL,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
@@ -800,7 +803,7 @@ func TestOpenTrade_RequiresSignedAd(t *testing.T) {
 	// Ad is pending (unsigned). OpenTrade should reject — but also need an
 	// active status to even reach the voucher path. The service's first
 	// guard is ad.Status != Active.
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	buyerPm := seedPaymentMethod(t, db, buyerID, "NGN")
 	_, _, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xbeef",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: buyerPm})
@@ -827,7 +830,7 @@ func TestOpenTrade_HappyPath(t *testing.T) {
 
 	// Buyer picks one of the seller's payment methods (which is what the
 	// ad's allowlist contains).
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	trade, raw, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xbeef",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if err != nil {
@@ -844,9 +847,11 @@ func TestOpenTrade_HappyPath(t *testing.T) {
 // setupSignedAd creates + signs an ad with a funded pool, then returns the ad
 // id, payment-method id, and the escrow mock so the caller can mutate the pool
 // balance / inject a prepare error before opening a trade.
-func setupSignedAd(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, adID, pmID uuid.UUID) {
+// Returns db so callers can seed the buyer: opening a trade as the buyer is a
+// money-in path and reads users.verification_status.
+func setupSignedAd(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, adID, pmID uuid.UUID, db *gorm.DB) {
 	t.Helper()
-	db := setupTradeDB(t)
+	db = setupTradeDB(t)
 	svc, esc, _ = newService(t, db)
 	sellerID := uuid.New()
 	pmID = seedPaymentMethod(t, db, sellerID, "NGN")
@@ -862,18 +867,18 @@ func setupSignedAd(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, adID, p
 	if _, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig); err != nil {
 		t.Fatalf("SignAd: %v", err)
 	}
-	return svc, esc, res.Ad.ID, pmID
+	return svc, esc, res.Ad.ID, pmID, db
 }
 
 // A buyer opening a trade on a maker whose pool can no longer cover it (e.g. the
 // seller withdrew after posting) gets a clear ErrSellerPoolInsufficient (→409),
 // caught by the pre-check before the gas estimate — not an opaque 500.
 func TestOpenTrade_RejectsInsufficientSellerPool(t *testing.T) {
-	svc, esc, adID, pmID := setupSignedAd(t)
+	svc, esc, adID, pmID, db := setupSignedAd(t)
 	// Seller drained the pool after posting the ad.
 	esc.balance = OnChainBalance{Available: big.NewInt(1), Locked: big.NewInt(0)}
 
-	_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+	_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrSellerPoolInsufficient) {
 		t.Fatalf("expected ErrSellerPoolInsufficient, got %v", err)
@@ -886,9 +891,9 @@ func TestOpenTrade_RejectsInsufficientSellerPool(t *testing.T) {
 // (→503). Neither is an opaque 500.
 func TestOpenTrade_MapsPrepareFailures(t *testing.T) {
 	t.Run("revert -> ErrTradePrepareReverted", func(t *testing.T) {
-		svc, esc, adID, pmID := setupSignedAd(t)
+		svc, esc, adID, pmID, db := setupSignedAd(t)
 		esc.openTradeErr = errors.New("estimate gas (would revert): execution reverted: Bad voucher signature")
-		_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
 			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 		if !errors.Is(err, ErrTradePrepareReverted) {
 			t.Fatalf("expected ErrTradePrepareReverted, got %v", err)
@@ -898,9 +903,9 @@ func TestOpenTrade_MapsPrepareFailures(t *testing.T) {
 		}
 	})
 	t.Run("transport -> ErrChainUnavailable", func(t *testing.T) {
-		svc, esc, adID, pmID := setupSignedAd(t)
+		svc, esc, adID, pmID, db := setupSignedAd(t)
 		esc.openTradeErr = errors.New("get nonce: failed to get nonce for 0xbeef: connection refused")
-		_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
 			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 		if !errors.Is(err, ErrChainUnavailable) {
 			t.Fatalf("expected ErrChainUnavailable, got %v", err)
@@ -1076,7 +1081,7 @@ func TestOpenTrade_RejectsExpiredVoucher(t *testing.T) {
 	// Move clock past the 30-day voucher TTL.
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)})
 	// Re-seed an active rate snapshot via the same mock for OpenTrade.
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	// Look up the ad's stored seller PM from the ad's payment_method_ids
 	// (CreateAd populated it from makeCreateAdParams).
 	var ad models.P2PAd
@@ -1147,7 +1152,7 @@ func TestOpenTrade_RejectsCorruptStoredSignature(t *testing.T) {
 	if len(ad.PaymentMethodIDs) > 0 {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xb000",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrInvalidTransition) {
@@ -1238,7 +1243,7 @@ func TestPrepareOpenTrade_PassesVoucherAndSigToAdapter(t *testing.T) {
 	if len(ad.PaymentMethodIDs) > 0 {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
-	if _, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xb000",
+	if _, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xb000",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID}); err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1560,7 +1565,7 @@ func TestPrepareRelease_NotifiesBothParties(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, _, bus := newService(t, db)
 	sellerID := uuid.New()
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	_, sellerAddr := newSellerKey(t)
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	trade := &models.P2PTrade{

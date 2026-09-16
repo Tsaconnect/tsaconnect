@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -48,6 +49,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 			profile_photo TEXT,
 			referral_code TEXT,
 			referred_by TEXT,
+			didit_session_id TEXT,
 			documents TEXT,
 			facial_verification TEXT,
 			verification_status TEXT DEFAULT 'pending',
@@ -58,7 +60,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 			lock_until DATETIME,
 			wallet_address TEXT UNIQUE,
 			seed_phrase_backed_up INTEGER DEFAULT 0,
-			persona_inquiry_id TEXT,
 			mute_notifications INTEGER DEFAULT 0,
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
@@ -68,7 +69,11 @@ func setupTestDB(t *testing.T) *gorm.DB {
 			deleted_at DATETIME,
 			submitted_for_verification_at DATETIME,
 			created_at DATETIME,
-			updated_at DATETIME
+			updated_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS wallets (
 			id TEXT PRIMARY KEY,
@@ -553,6 +558,150 @@ func TestGetSupportedTokens_AutoSeed(t *testing.T) {
 	}
 }
 
+// TestSeedDefaultTokens_StablecoinsCoverEveryConfiguredChain guards against
+// the exact drift that caused the IT hub to show 0.2 USDC for a wallet
+// holding 1.29 (split across Base/Arbitrum/Sonic): config.go grew Arbitrum
+// and Base token addresses (commit 25d14842) but the USDT/USDC seed rows
+// stayed at ["sonic", "bsc"], so GetWalletBalances' per-chain lookup — gated
+// on SupportedToken.Chains — never ran on Base/Arbitrum for those symbols.
+func TestSeedDefaultTokens_StablecoinsCoverEveryConfiguredChain(t *testing.T) {
+	setupTestDB(t)
+
+	created := seedDefaultTokens()
+
+	want := map[string][]string{
+		"USDT": {"sonic", "bsc", "arbitrum", "base"},
+		"USDC": {"sonic", "bsc", "arbitrum", "base"},
+	}
+	found := map[string]bool{}
+	for _, tok := range created {
+		wantChains, ok := want[tok.Symbol]
+		if !ok {
+			continue
+		}
+		found[tok.Symbol] = true
+		var chains []string
+		if err := json.Unmarshal(tok.Chains, &chains); err != nil {
+			t.Fatalf("failed to unmarshal chains for %s: %v", tok.Symbol, err)
+		}
+		have := map[string]bool{}
+		for _, c := range chains {
+			have[c] = true
+		}
+		for _, c := range wantChains {
+			if !have[c] {
+				t.Errorf("%s: expected chain %q in seeded Chains, got %v", tok.Symbol, c, chains)
+			}
+		}
+	}
+	for sym := range want {
+		if !found[sym] {
+			t.Errorf("expected seedDefaultTokens to create a %s row", sym)
+		}
+	}
+}
+
+// ---------- EnsureSupportedTokenChains ----------
+
+// TestEnsureSupportedTokenChains_BackfillsMissingChains reproduces the
+// production state directly: a supported_tokens row created back when the
+// seed only knew about sonic/bsc, before Arbitrum/Base were added to
+// config.go. EnsureSupportedTokenChains must add the missing chains so
+// GetWalletBalances stops silently skipping them.
+func TestEnsureSupportedTokenChains_BackfillsMissingChains(t *testing.T) {
+	db := setupTestDB(t)
+
+	staleChains, _ := json.Marshal([]string{"sonic", "bsc"})
+	stale := models.SupportedToken{
+		ID:        uuid.New(),
+		Symbol:    "USDC",
+		Name:      "USD Coin",
+		Decimals:  6,
+		IconColor: "#2775CA",
+		Chains:    staleChains,
+		IsActive:  true,
+	}
+	if err := db.Create(&stale).Error; err != nil {
+		t.Fatalf("failed to seed stale row: %v", err)
+	}
+
+	EnsureSupportedTokenChains()
+
+	var got models.SupportedToken
+	if err := db.Where("symbol = ?", "USDC").First(&got).Error; err != nil {
+		t.Fatalf("failed to reload row: %v", err)
+	}
+	var chains []string
+	if err := json.Unmarshal(got.Chains, &chains); err != nil {
+		t.Fatalf("failed to unmarshal chains: %v", err)
+	}
+	have := map[string]bool{}
+	for _, c := range chains {
+		have[c] = true
+	}
+	for _, want := range []string{"sonic", "bsc", "arbitrum", "base"} {
+		if !have[want] {
+			t.Errorf("expected backfilled chains to include %q, got %v", want, chains)
+		}
+	}
+
+	// The row's other fields — and its ID — must be untouched.
+	if got.ID != stale.ID || got.Name != "USD Coin" || got.Decimals != 6 {
+		t.Errorf("backfill must only touch the chains column, got %+v", got)
+	}
+}
+
+// TestEnsureSupportedTokenChains_PreservesOperatorAddedChain checks the
+// union is genuinely additive: a chain already present that ISN'T in
+// defaultTokenDefs (there's no admin UI for this today, but the column is
+// still just data) must survive the backfill rather than being replaced by
+// the compiled-in list.
+func TestEnsureSupportedTokenChains_PreservesOperatorAddedChain(t *testing.T) {
+	db := setupTestDB(t)
+
+	chainsJSON, _ := json.Marshal([]string{"sonic", "bsc", "polygon"})
+	tok := models.SupportedToken{
+		ID:        uuid.New(),
+		Symbol:    "USDT",
+		Name:      "Tether",
+		Decimals:  6,
+		IconColor: "#26A17B",
+		Chains:    chainsJSON,
+		IsActive:  true,
+	}
+	if err := db.Create(&tok).Error; err != nil {
+		t.Fatalf("failed to seed row: %v", err)
+	}
+
+	EnsureSupportedTokenChains()
+
+	var got models.SupportedToken
+	if err := db.Where("symbol = ?", "USDT").First(&got).Error; err != nil {
+		t.Fatalf("failed to reload row: %v", err)
+	}
+	var chains []string
+	json.Unmarshal(got.Chains, &chains)
+	have := map[string]bool{}
+	for _, c := range chains {
+		have[c] = true
+	}
+	if !have["polygon"] {
+		t.Errorf("expected the pre-existing 'polygon' chain to survive the backfill, got %v", chains)
+	}
+	if !have["arbitrum"] || !have["base"] {
+		t.Errorf("expected arbitrum/base to be added by the backfill, got %v", chains)
+	}
+}
+
+// TestEnsureSupportedTokenChains_NoRowsIsNoOp guards against a boot-time
+// panic/error when the table has no matching rows yet (fresh DB, before
+// seedDefaultTokens has ever run).
+func TestEnsureSupportedTokenChains_NoRowsIsNoOp(t *testing.T) {
+	setupTestDB(t)
+
+	EnsureSupportedTokenChains() // must not panic or error
+}
+
 // ---------- parseTokenAmount ----------
 
 func TestParseTokenAmount(t *testing.T) {
@@ -581,6 +730,46 @@ func TestParseTokenAmount(t *testing.T) {
 				t.Errorf("parseTokenAmount(%q, %d) = %s, want %s", tt.amount, tt.decimals, result.String(), tt.wantStr)
 			}
 		})
+	}
+}
+
+// ---------- erc20SendDecimals ----------
+
+// BSC's USDT and USDC are 18-decimal. Scaling a send by the 6 other chains use
+// transferred 10^-12 of the typed amount, so the contract must win over both
+// the symbol and a caller's override.
+func TestERC20SendDecimals(t *testing.T) {
+	six, eighteen, outOfRange := 6, 18, 99
+	rpcDown := errors.New("rpc down")
+	tests := []struct {
+		name     string
+		override *int
+		onChain  int
+		readErr  error
+		want     int
+		wantErr  bool
+	}{
+		{"contract decimals are used", nil, 18, nil, 18, false},
+		{"contract beats a disagreeing override", &six, 18, nil, 18, false},
+		{"override covers an unreadable contract", &eighteen, 0, rpcDown, 18, false},
+		{"out-of-range override is not a fallback", &outOfRange, 0, rpcDown, 0, true},
+		{"unreadable contract without override is refused", nil, 0, rpcDown, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := erc20SendDecimals(tt.override, func() (int, error) { return tt.onChain, tt.readErr })
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("decimals = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	amount, _ := parseTokenAmount("10", 18)
+	if amount.String() != "10000000000000000000" {
+		t.Errorf("10 BSC-USDT scaled to %s base units, want 10e18", amount)
 	}
 }
 

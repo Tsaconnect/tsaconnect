@@ -76,7 +76,7 @@ const LeaderboardScreen = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Leaderboard" />
+      <ScreenHeader title="Leaderboard" fallbackRoute="/reward" />
       {loading ? (
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <Spinner label="Loading leaderboard…" />

@@ -23,18 +23,9 @@ const testChargeID = "chg_test_0001"
 func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtualAccount) {
 	t.Helper()
 	s := newITTestService(t)
-	// Raw DDL, not AutoMigrate — models.User carries PostgreSQL-specific
-	// defaults SQLite rejects (repo convention, see tsa-api-go/CLAUDE.md). Only
-	// the columns settlement reads are needed.
-	if err := s.db.Exec(`CREATE TABLE users (
-		id TEXT PRIMARY KEY,
-		name TEXT,
-		email TEXT,
-		phone_number TEXT,
-		wallet_address TEXT
-	)`).Error; err != nil {
-		t.Fatalf("create users: %v", err)
-	}
+	// The users table comes from newITTestService (testUsersDDL) — settlement
+	// reads the payer from it, and the money-in gate reads
+	// verification_status.
 	if _, err := s.SetRate(context.Background(), uuid.New(), 20000, 0); err != nil {
 		t.Fatalf("set rate: %v", err)
 	}
@@ -46,9 +37,16 @@ func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtu
 	}
 	// Raw insert to match the raw table above (GORM would write every column of
 	// models.User).
+	//
+	// verified_legal_name is set alongside the status because a real passed
+	// verification leaves both behind, and the money-in gate requires both: a
+	// verified user with no stored name is one the matcher cannot identify, so
+	// the gate refuses them. A fixture that set only the status would model a
+	// user who cannot actually transact.
 	if err := s.db.Exec(
-		`INSERT INTO users (id, name, email, phone_number, wallet_address) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO users (id, name, email, phone_number, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		user.ID, user.Name, user.Email, "08031234567", user.WalletAddress,
+		models.VerificationStatusVerified, user.Name,
 	).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

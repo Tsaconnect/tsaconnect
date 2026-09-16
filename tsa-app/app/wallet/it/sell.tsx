@@ -5,7 +5,7 @@
 // Flow: form → Review (fee quote) → AuthorizationModal PIN → itSell.
 // Bank list comes from GET /p2p/banks (Flutterwave-backed when FW is the
 // directory provider) via getNigerianBanks — Nigeria only for now.
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -19,9 +19,7 @@ import {
   Card,
   Divider,
   Icon,
-  Input,
   PickerSheet,
-  PressableScale,
   SelectRow,
   Spinner,
   SummaryCard,
@@ -36,22 +34,44 @@ import {
   itSell,
   IT_AGREEMENT_REQUIRED,
   type ITFeeQuote,
+  getWithdrawDestinations,
 } from '@/services/itApi';
-import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
-import { mcgpAmountToNgn } from './sell-quote';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { BankDestination, type BankDestinationValue } from '@/components/it/BankDestination';
+import { mcgpAmountToNgn } from '@/utils/sellQuote';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
+import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
 
 // Product-available options only (more currencies/rails/countries later).
-const CURRENCY_OPTIONS: PickerItem[] = [
-  { id: 'NGN', label: 'NGN · Nigerian Naira', icon: 'wallet' },
-];
+// Payout destinations come from GET /it/withdraw/destinations, never a literal
+// list. That endpoint is the same source Sell validates against, so anything
+// rendered here is guaranteed to be accepted — a hardcoded option could offer a
+// rail the API would reject, and the user would only find out after committing.
+const CURRENCY_META: Record<string, { label: string; country: string }> = {
+  NGN: { label: 'NGN · Nigerian Naira', country: 'NG' },
+  GHS: { label: 'GHS · Ghanaian Cedi', country: 'GH' },
+  USD: { label: 'USD · US Dollar', country: 'US' },
+  EUR: { label: 'EUR · Euro', country: '' },
+  GBP: { label: 'GBP · Pound Sterling', country: 'GB' },
+};
+
+function currencyLabelFor(code: string): string {
+  return CURRENCY_META[code]?.label ?? code;
+}
+function countryFor(code: string): string {
+  return CURRENCY_META[code]?.country ?? '';
+}
 const METHOD_OPTIONS: PickerItem[] = [
   { id: 'bank', label: 'Bank transfer', icon: 'bank' },
 ];
-const COUNTRY_OPTIONS: PickerItem[] = [
-  { id: 'NG', label: 'Nigeria', icon: 'location' },
+
+// Stablecoins navigate away to the dedicated sell-stable screen rather than
+// being rendered here, so this form only ever needs to hold the MCGP asset.
+const ASSET_OPTIONS: PickerItem[] = [
+  { id: 'MCGP', label: 'MCGP', icon: 'wallet' },
+  { id: 'USDC', label: 'USDC', icon: 'wallet' },
+  { id: 'USDT', label: 'USDT', icon: 'wallet' },
 ];
 
 function feeDisplay(line?: { display?: string } | null): string {
@@ -60,34 +80,44 @@ function feeDisplay(line?: { display?: string } | null): string {
 }
 
 export default function ITSell() {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
   const { currency: displayCurrency, formatPrice, allRates } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
+  // The picker's selection. MCGP is the only value this screen ever holds;
+  // the stablecoins navigate away rather than being rendered here.
+  const [asset, setAsset] = useState<'MCGP'>('MCGP');
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
-  const [credited, setCredited] = useState('0'); // wei
+  const [spendable, setSpendable] = useState('0'); // wei, bought + credited
   const [sellRateKobo, setSellRateKobo] = useState('0');
   const [receiveLabel, setReceiveLabel] = useState('');
   const [ngnOutValue, setNgnOutValue] = useState<number | null>(null);
 
-  const [banks, setBanks] = useState<NgBank[]>([]);
-  const [banksLoading, setBanksLoading] = useState(true);
-  const [showBankPicker, setShowBankPicker] = useState(false);
-  const [bank, setBank] = useState<NgBank | null>(null);
-  const [accountNumber, setAccountNumber] = useState('');
-  const [accountName, setAccountName] = useState('');
-  // NUBAN name enquiry — validates the account number against the selected
-  // bank (GET /p2p/banks/resolve → Flutterwave account-resolve when FW is live).
-  const [resolving, setResolving] = useState(false);
-  const [resolved, setResolved] = useState(false);
-  const [resolveError, setResolveError] = useState<null | 'not_found' | 'unavailable'>(null);
+  const [dest, setDest] = useState<BankDestinationValue>({
+    bankCode: '',
+    bankName: '',
+    accountNumber: '',
+    accountName: '',
+    ready: false,
+  });
+  // BankDestination's onChange must be referentially stable (see its own
+  // doc) — wrapped instead of passing setDest directly so we can also clear
+  // the stale form error on any bank/account edit, matching every other
+  // field's onChangeText below.
+  const handleDestChange = useCallback((next: BankDestinationValue) => {
+    setDest(next);
+    setError('');
+  }, []);
 
   const [payoutCurrency, setPayoutCurrency] = useState('NGN');
-  const [transferMethod, setTransferMethod] = useState('bank');
+  const [transferMethod, setTransferMethod] = useState<'bank' | 'mobile_money'>('bank');
   const [country, setCountry] = useState('NG');
   const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
+  const [currencyOptions, setCurrencyOptions] = useState<PickerItem[]>([
+    { id: 'NGN', label: currencyLabelFor('NGN'), icon: 'wallet' },
+  ]);
   const [showMethodPicker, setShowMethodPicker] = useState(false);
-  const [showCountryPicker, setShowCountryPicker] = useState(false);
 
   // Frozen snapshot for the Review screen — set when leaving the form so a
   // late fee response can't pair with a different amount the user edited.
@@ -106,80 +136,57 @@ export default function ITSell() {
   useEffect(() => {
     (async () => {
       const [b, r] = await Promise.all([getITBalance(), getITRate()]);
-      if (b.success && b.data) setCredited(b.data.premiumCredited);
+      // Spendable MCGP is spendable everywhere: IT sell draws on credited
+      // first, then USDC-bought, exactly like stores and bills.
+      if (b.success && b.data) {
+        setSpendable((BigInt(b.data.premiumBought || '0') + BigInt(b.data.premiumCredited || '0')).toString());
+      }
       if (r.success && r.data) setSellRateKobo(r.data.sellRateKobo);
     })();
   }, []);
 
+  // Payout destinations, straight from the catalog Sell validates against.
+  // On failure we keep the NGN-only default rather than showing nothing: a
+  // Nigerian user can still cash out, which is the overwhelmingly common case.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Nigeria-only for now (locked country). getNigerianBanks prefers
-      // GET /p2p/banks — Flutterwave ListBanks(NG) when FW is the directory.
-      const list = await getNigerianBanks();
-      if (!cancelled) {
-        setBanks(list);
-        setBanksLoading(false);
-      }
+      const res = await getWithdrawDestinations();
+      if (cancelled || !res.success || !res.data?.destinations?.length) return;
+      const banksOnly = res.data.destinations.filter((d) => d.rail === 'bank');
+      if (banksOnly.length === 0) return;
+      setCurrencyOptions(
+        banksOnly.map((d) => ({
+          id: d.currency,
+          label: currencyLabelFor(d.currency),
+          icon: 'wallet' as const,
+        }))
+      );
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Debounced account-name lookup. Fires when a bank is selected and the
-  // account number is a full 10-digit NUBAN — validates the number and
-  // auto-fills the holder name. On provider outage the user can type the name.
-  useEffect(() => {
-    if (!bank || accountNumber.length !== 10) {
-      setResolving(false);
-      setResolved(false);
-      setResolveError(null);
-      return;
-    }
-    let cancelled = false;
-    setResolving(true);
-    setResolved(false);
-    setResolveError(null);
-    const timer = setTimeout(async () => {
-      const res = await resolveAccountName(bank.code, accountNumber);
-      if (cancelled) return;
-      setResolving(false);
-      if (res.ok) {
-        setAccountName(res.accountName);
-        setResolved(true);
-        setError('');
-      } else {
-        setAccountName('');
-        setResolveError(res.reason);
-      }
-    }, 400);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [bank, accountNumber]);
-
-  const bankItems: PickerItem[] = banks.map((b) => ({
-    id: b.code,
-    label: b.name,
-    icon: 'bank' as const,
-  }));
-
   const currencyLabel =
-    CURRENCY_OPTIONS.find((o) => o.id === payoutCurrency)?.label ?? payoutCurrency;
+    currencyOptions.find((o) => o.id === payoutCurrency)?.label ?? currencyLabelFor(payoutCurrency);
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === transferMethod)?.label ?? transferMethod;
-  const countryLabel =
-    COUNTRY_OPTIONS.find((o) => o.id === country)?.label ?? country;
+  const countryLabel = country || '—';
 
   const ngnPayout = mcgpAmountToNgn(amount, sellRateKobo);
-  const bankReady =
-    !!bank?.code &&
-    accountNumber.trim().length === 10 &&
-    accountName.trim().length >= 2 &&
-    !resolving &&
-    resolveError !== 'not_found';
+
+  const onAssetChange = (next: string) => {
+    if (next === 'USDC' || next === 'USDT') {
+      // NGN stablecoin trades route through Paycrest, not Flutterwave: ~0.24-1.1%
+      // against 2.15%, and ~73s against a next-morning settlement window. The
+      // buy-stable / sell-stable screens are deliberately left in place but
+      // unlinked, so reverting is a one-line change if Paycrest misbehaves.
+      router.push(`/wallet/paycrest/sell?asset=${next}` as never);
+      return;
+    }
+    setAsset('MCGP');
+  };
 
   const goReview = async () => {
     setError('');
@@ -195,15 +202,11 @@ export default function ITSell() {
       setError('Invalid amount');
       return;
     }
-    if (wei > BigInt(credited || '0')) {
-      setError('More than your spendable (credited) balance');
+    if (wei > BigInt(spendable || '0')) {
+      setError('More than your spendable balance');
       return;
     }
-    if (resolveError === 'not_found') {
-      setError('Account number does not match the selected bank');
-      return;
-    }
-    if (!bankReady || !bank) {
+    if (!dest.ready) {
       setError('Select a bank and enter a valid account number');
       return;
     }
@@ -217,10 +220,10 @@ export default function ITSell() {
     // with a different amount).
     const snapAmount = amount;
     const snapNgn = ngnPayout;
-    const snapBankCode = bank.code.trim();
-    const snapBankName = bank.name.trim();
-    const snapAccountNumber = accountNumber.trim();
-    const snapAccountName = accountName.trim();
+    const snapBankCode = dest.bankCode.trim();
+    const snapBankName = dest.bankName.trim();
+    const snapAccountNumber = dest.accountNumber.trim();
+    const snapAccountName = dest.accountName.trim();
     setReviewAmount(snapAmount);
     setReviewNgnGross(snapNgn);
     setReviewBankCode(snapBankCode);
@@ -234,7 +237,7 @@ export default function ITSell() {
 
     const res = await getITFeeQuote({
       flow: 'withdraw',
-      asset: 'MCGP',
+      asset,
       amount: snapNgn.toFixed(2),
       currency: 'NGN',
     });
@@ -263,8 +266,8 @@ export default function ITSell() {
     }
 
     const r = await itSell(wei.toString(), {
-      destinationCurrency: 'NGN',
-      railType: 'bank',
+      destinationCurrency: payoutCurrency,
+      railType: transferMethod,
       bankCode: reviewBankCode,
       accountNumber: reviewAccountNumber,
       accountName: reviewAccountName,
@@ -281,12 +284,15 @@ export default function ITSell() {
       return;
     }
 
-    // Settlement pays the gross NgnKobo — /api/it/quote is display-only and is
-    // not deducted from the payout (yet). Never promise feeQuote.netAmount here.
-    setReceiveLabel(
-      `₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-    );
-    setNgnOutValue(reviewNgnGross);
+    // The payout disburses the NET the backend computed and echoed on the
+    // intent; fall back to the local quote, then to gross, so the confirmation
+    // never overstates what will land.
+    const netKobo = Number(r.data.intent?.netNgnKobo ?? '');
+    const net = Number.isFinite(netKobo) && netKobo > 0
+      ? netKobo / 100
+      : Number(feeQuote?.netAmount?.minor ?? 0) / 100 || reviewNgnGross;
+    setReceiveLabel(`₦${net.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+    setNgnOutValue(net);
     setScreen('done');
   };
 
@@ -335,10 +341,12 @@ export default function ITSell() {
   }
 
   if (screen === 'review') {
-    // Fees are quote-only (not deducted from settlement). Wait for the quote
-    // attempt to finish for a complete Review, but never block Transfer on
-    // viable/net — payout is the gross NGN amount.
-    const transferBlocked = feeLoading;
+    // Fees ARE deducted at settlement (backend quotes the same engine), so the
+    // Review must wait for a quote and refuse to continue without one.
+    // Fees are deducted at settlement, so a transfer can't be authorized on an
+    // unknown quote: the backend refuses to price it and the user would have
+    // confirmed an amount nobody could compute.
+    const transferBlocked = feeLoading || !feeQuote;
     return (
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
@@ -349,10 +357,15 @@ export default function ITSell() {
           <Card>
             <SummaryCard>
               <SummaryRow label="You sell" value={`${reviewAmount} MCGP`} />
+              <SummaryRow
+                label="Sale value"
+                value={`₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+              />
+              <SummaryRow label="Fees" value={feeQuote ? `−₦${feeDisplay(feeQuote.totalFees)}` : '—'} />
               <Divider spacing="xs" />
               <SummaryRow
                 label="You receive (NGN)"
-                value={`₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                value={feeQuote ? `₦${feeDisplay(feeQuote.netAmount)}` : '—'}
               />
               <Divider spacing="xs" />
               <SummaryRow label="Payout currency" value={currencyLabel} />
@@ -370,7 +383,7 @@ export default function ITSell() {
               Estimated fees
             </Text>
             <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
-              Informational only — not deducted from this payout yet.
+              Deducted from this payout — your bank receives the amount below.
             </Text>
             {feeLoading ? (
               <Spinner inline label="Loading fee quote…" />
@@ -388,10 +401,7 @@ export default function ITSell() {
                 <SummaryRow label="Swap fee" value={`₦${feeDisplay(feeQuote.swapFee.fee)}`} />
                 <Divider spacing="xs" />
                 <SummaryRow label="Total fees" value={`₦${feeDisplay(feeQuote.totalFees)}`} />
-                <SummaryRow
-                  label="Est. net if deducted"
-                  value={`₦${feeDisplay(feeQuote.netAmount)}`}
-                />
+                <SummaryRow label="You receive" value={`₦${feeDisplay(feeQuote.netAmount)}`} />
               </SummaryCard>
             ) : null}
           </Card>
@@ -432,15 +442,22 @@ export default function ITSell() {
         <Card>
           <SummaryCard>
             <SummaryRow
-              label="Spendable (credited)"
-              value={`${Number(ethers.formatUnits(credited || '0', 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} MCGP`}
+              label="Spendable MCGP"
+              value={`${Number(ethers.formatUnits(spendable || '0', 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} MCGP`}
             />
           </SummaryCard>
         </Card>
 
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Sell credited MCGP for Naira. More payout currencies will open later.
+          Sell spendable MCGP for Naira. More payout currencies will open later.
         </Text>
+
+        <SelectRow
+          label="Asset"
+          value={asset}
+          leftIcon="wallet"
+          onPress={() => setShowAssetPicker(true)}
+        />
 
         <AmountInput
           label="Amount of MCGP to sell"
@@ -465,76 +482,13 @@ export default function ITSell() {
           leftIcon="bank"
           onPress={() => setShowMethodPicker(true)}
         />
-        <SelectRow
-          label="Country / region"
-          value={countryLabel}
-          leftIcon="location"
-          onPress={() => setShowCountryPicker(true)}
-        />
+        {/* Country is DERIVED from the payout currency rather than chosen.
+            Two independent pickers can disagree, and a currency/country
+            mismatch is only discovered by the provider at payout — after the
+            on-chain debit. Read-only keeps them impossible to desync. */}
+        <SummaryRow label="Country / region" value={countryLabel} />
 
-        <SelectRow
-          label="Bank"
-          placeholder={banksLoading ? 'Loading banks…' : 'Select bank'}
-          value={bank?.name}
-          leftIcon="bank"
-          disabled={banksLoading && banks.length === 0}
-          onPress={() => setShowBankPicker(true)}
-        />
-        <Input
-          label="Account number"
-          placeholder="10-digit NUBAN"
-          keyboardType="number-pad"
-          maxLength={10}
-          value={accountNumber}
-          onChangeText={(v) => {
-            setAccountNumber(v.replace(/\D/g, '').slice(0, 10));
-            setError('');
-          }}
-        />
-        <Input
-          label="Account holder name"
-          placeholder={
-            bank && accountNumber.length === 10
-              ? 'Looking up account…'
-              : 'Auto-fills when account number is valid'
-          }
-          autoCapitalize="words"
-          value={accountName}
-          onChangeText={(v) => {
-            setAccountName(v);
-            if (resolved) setResolved(false);
-            setError('');
-          }}
-          editable={!resolving && !resolved}
-          error={
-            resolveError === 'not_found'
-              ? 'We couldn’t find this account at the selected bank. Check the digits or bank.'
-              : undefined
-          }
-          helper={
-            resolveError === 'unavailable'
-              ? 'Account verification is offline. You can type the name manually.'
-              : resolved
-                ? 'Account verified'
-                : undefined
-          }
-          rightAdornment={
-            resolving ? (
-              <Spinner size="small" />
-            ) : resolved ? (
-              <PressableScale
-                onPress={() => {
-                  setResolved(false);
-                  setAccountName('');
-                }}
-                hitSlop={10}
-                accessibilityLabel="Clear and edit name"
-              >
-                <Icon name="checkCircle" size={20} color={colors.success} />
-              </PressableScale>
-            ) : undefined
-          }
-        />
+        <BankDestination currency={payoutCurrency} value={dest} onChange={handleDestChange} />
 
         {error ? (
           <Text variant="bodySm" style={{ color: colors.danger }}>{error}</Text>
@@ -549,17 +503,46 @@ export default function ITSell() {
           </Text>
         ) : null}
 
-        <Button title="Review" onPress={goReview} disabled={!amount || !bankReady} />
+        <Button title="Review" onPress={goReview} disabled={!amount || !dest.ready} />
+
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: spacing.sm,
+            backgroundColor: colors.warningBg,
+            borderRadius: radius.sm,
+            padding: spacing.md,
+          }}
+        >
+          <Icon name="warning" size={16} color={colors.warning} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            Note: {RAILS.it.name} ({RAILS.it.acronym}) payouts are not always received instantly —
+            payout limits from our partner or settlement differences can delay them.
+          </Text>
+        </View>
       </ScrollView>
 
+      <PickerSheet
+        visible={showAssetPicker}
+        onClose={() => setShowAssetPicker(false)}
+        title="Asset"
+        items={ASSET_OPTIONS}
+        selectedId={asset}
+        onSelect={(item) => {
+          setShowAssetPicker(false);
+          onAssetChange(item.id);
+        }}
+      />
       <PickerSheet
         visible={showCurrencyPicker}
         onClose={() => setShowCurrencyPicker(false)}
         title="Payout currency"
-        items={CURRENCY_OPTIONS}
+        items={currencyOptions}
         selectedId={payoutCurrency}
         onSelect={(item) => {
           setPayoutCurrency(item.id);
+          setCountry(countryFor(item.id));
           setShowCurrencyPicker(false);
         }}
       />
@@ -570,37 +553,8 @@ export default function ITSell() {
         items={METHOD_OPTIONS}
         selectedId={transferMethod}
         onSelect={(item) => {
-          setTransferMethod(item.id);
+          setTransferMethod(item.id as 'bank' | 'mobile_money');
           setShowMethodPicker(false);
-        }}
-      />
-      <PickerSheet
-        visible={showCountryPicker}
-        onClose={() => setShowCountryPicker(false)}
-        title="Country / region"
-        items={COUNTRY_OPTIONS}
-        selectedId={country}
-        onSelect={(item) => {
-          setCountry(item.id);
-          setShowCountryPicker(false);
-        }}
-      />
-      <PickerSheet
-        visible={showBankPicker}
-        onClose={() => setShowBankPicker(false)}
-        title="Select bank"
-        items={bankItems}
-        loading={banksLoading && banks.length === 0}
-        selectedId={bank?.code}
-        emptyText="No banks available right now."
-        onSelect={(item) => {
-          const b = banks.find((x) => x.code === item.id) ?? null;
-          setBank(b);
-          setShowBankPicker(false);
-          setAccountName('');
-          setResolved(false);
-          setResolveError(null);
-          setError('');
         }}
       />
     </SafeAreaView>

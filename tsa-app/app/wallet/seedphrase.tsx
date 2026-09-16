@@ -190,11 +190,20 @@ const SeedPhrase = () => {
     setError('');
     try {
       const wallet = await generateWallet();
+      // Register BEFORE storing anything locally. A failed registration used to
+      // be swallowed, leaving the account pointing at a different address than
+      // this device holds the key for — which surfaces much later as a balance
+      // the user cannot spend and a prepare they cannot sign. Registering first
+      // means a failure leaves no half-state: nothing was written, and pressing
+      // create again is a clean retry.
+      const registered = await registerWalletAddress(wallet.address);
+      if (!registered.success) {
+        throw new Error(
+          registered.message || 'Could not link this wallet to your account. Please try again.',
+        );
+      }
       const list = await getWalletList();
       await addWallet(wallet, `Wallet ${list.length + 1}`);
-      try {
-        await registerWalletAddress(wallet.address);
-      } catch (_) {}
       setWords(wallet.mnemonic.split(' '));
       setStep('display');
     } catch (err: any) {
@@ -225,12 +234,18 @@ const SeedPhrase = () => {
     setError('');
     try {
       const walletInfo = await importWalletFromMnemonic(phrase);
+      // Register first — see handleCreateNewWallet. This is also where a wallet
+      // already claimed by another account is caught, instead of the user
+      // reaching a balance screen that answers for someone else's address.
+      const registered = await registerWalletAddress(walletInfo.address);
+      if (!registered.success) {
+        throw new Error(
+          registered.message || 'Could not link this wallet to your account. Please try again.',
+        );
+      }
       const list = await getWalletList();
       await addWallet(walletInfo, `Wallet ${list.length + 1}`);
       await markWalletBackedUp(walletInfo.address);
-      try {
-        await registerWalletAddress(walletInfo.address);
-      } catch (_) {}
       router.replace('/tokenization');
     } catch (err: any) {
       setError(err.message || 'Failed to import wallet. Check your seed phrase.');

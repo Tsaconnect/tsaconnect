@@ -28,12 +28,20 @@ func NewFlutterwaveGateway(client *FlutterwaveClient, senderName string) *Flutte
 // trade reference doubles as transfer reference AND idempotency key, so a
 // duplicated call cannot double-pay.
 func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutRequest) (string, error) {
+	// Refusals that happen before any request is sent are rejections: no
+	// transfer can exist.
 	if !g.client.IsEnabled() {
-		return "", ErrFlutterwaveDisabled
+		return "", &ProviderRejectedError{Err: ErrFlutterwaveDisabled}
 	}
-	amount, err := strconv.ParseFloat(strings.TrimSpace(req.AmountNGN), 64)
+	// Prefer the explicit Amount/SourceCurrency pair; fall back to the legacy
+	// naira-only field so callers that have not migrated keep working unchanged.
+	rawAmount := strings.TrimSpace(req.Amount)
+	if rawAmount == "" {
+		rawAmount = strings.TrimSpace(req.AmountNGN)
+	}
+	amount, err := strconv.ParseFloat(rawAmount, 64)
 	if err != nil || amount <= 0 {
-		return "", fmt.Errorf("flutterwave payout: invalid amount %q", req.AmountNGN)
+		return "", &ProviderRejectedError{Err: fmt.Errorf("flutterwave payout: invalid amount %q", rawAmount)}
 	}
 	narration := g.senderName
 	if narration == "" {
@@ -51,21 +59,35 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	}
 	rail = strings.ToLower(strings.TrimSpace(rail))
 
-	// applies_to governs fee incidence. For NGN→NGN payouts (source ==
-	// destination) we must keep the legacy behavior: the recipient gets
-	// exactly `value`, fees come out of our source balance separately —
-	// that's "destination_currency". For cross-currency payouts we hold
-	// NGN and send a known NGN amount for FW to convert, so fees must be
-	// taken from the source side — "source_currency".
-	appliesTo := "source_currency"
-	if strings.EqualFold(destCur, "NGN") {
-		appliesTo = "destination_currency"
+	srcCur := strings.ToUpper(strings.TrimSpace(req.SourceCurrency))
+	if srcCur == "" {
+		srcCur = "NGN"
 	}
 
+	// applies_to is ALWAYS destination_currency: `value` is what the recipient
+	// receives, and Flutterwave debits our source balance with whatever that
+	// costs, billing its own fee separately.
+	//
+	// This was previously source_currency for cross-currency payouts, on the
+	// reasoning that we hold naira and should send a known naira amount. That
+	// reasoning double-charged the user. Our fee engine already withholds a
+	// provider-fee passthrough line and disburses the NET; sending that net as
+	// the SOURCE amount meant Flutterwave then took its own fee out of it
+	// before converting, so the user paid the provider fee twice — once to us,
+	// once off the top — and received less than the amount they were quoted.
+	//
+	// Flutterwave's own on/off-ramp blueprint uses destination_currency for
+	// every transfer including its two cross-currency conversions, so this is
+	// the documented pattern rather than a workaround.
+	//
+	// The trade-off is deliberate: TSA now absorbs rate movement between quote
+	// and execution, because we are committing to what the recipient gets. That
+	// window is seconds, and a bounded FX exposure is a better thing to carry
+	// than telling a user they will receive an amount that then arrives short.
 	pi := FWPaymentInstruction{
-		SourceCurrency:      "NGN",
+		SourceCurrency:      srcCur,
 		DestinationCurrency: destCur,
-		Amount:              FWAmount{Value: amount, AppliesTo: appliesTo},
+		Amount:              FWAmount{Value: amount, AppliesTo: "destination_currency"},
 	}
 	switch rail {
 	case "mobile_money":
@@ -96,6 +118,17 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	})
 	if err != nil {
 		return "", err
+	}
+	// A transfer that is already FAILED when it is created is a refusal, not a
+	// payout in flight: no webhook will ever turn it into a success, and handing
+	// its id back as live left sells waiting forever. Checked here rather than in
+	// DirectTransfer because conversions and crypto deliveries depend on getting
+	// the FAILED transfer back to mint their next attempt.
+	if strings.EqualFold(strings.TrimSpace(transfer.Status), "FAILED") {
+		return "", &ProviderRejectedError{
+			Err:      fmt.Errorf("flutterwave payout: transfer %s was created FAILED", transfer.ID),
+			Replayed: transfer.CacheHit,
+		}
 	}
 	return transfer.ID, nil
 }

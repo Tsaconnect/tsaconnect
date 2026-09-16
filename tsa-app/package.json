@@ -4,15 +4,18 @@
   "scripts": {
     "start": "expo start",
     "restart": "expo start --dev-client",
+    "dev:android": "adb reverse tcp:8081 tcp:8081; expo start --dev-client --scheme tsaconnect --localhost",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "test": "jest --watchAll",
+    "test:ci": "jest --ci",
+    "typecheck": "tsc --noEmit",
     "lint": "expo lint",
-    "build:android": "EXPO_TOKEN=EXPO_TOKEN_REMOVED_FROM_HISTORY eas build --platform android --profile preview",
-    "build:ios": "EXPO_TOKEN=EXPO_TOKEN_REMOVED_FROM_HISTORY eas build --platform ios --profile preview",
-    "update": "EXPO_TOKEN=EXPO_TOKEN_REMOVED_FROM_HISTORY eas update"
+    "build:android": "eas build --platform android --profile preview",
+    "build:ios": "eas build --platform ios --profile preview",
+    "update": "eas update"
   },
   "jest": {
     "preset": "jest-expo",
@@ -41,6 +44,7 @@
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.13",
+    "expo-dev-client": "~6.0.21",
     "expo-device": "~8.0.10",
     "expo-file-system": "~19.0.21",
     "expo-font": "~14.0.11",

@@ -126,7 +126,16 @@ type PMAutomationService struct {
 	// charge.completed webhook before crediting (see flutterwave_dispatch.go).
 	// nil → charge settlement is refused (fail-closed).
 	fwCharges FlutterwaveChargeGetter
+	// forwards resolves disburse results for P2P settlement forwards, which
+	// share this webhook but are keyed by their own reference prefix. nil when
+	// the instant forward is not wired — see HandlePayoutStatus.
+	forwards *P2PSettlementForwarder
 }
+
+// SetSettlementForwarder routes settlement-forward disburse results to the
+// forwarder. Without it a confirmed forward is never debited from the
+// merchant's ledger, which over-credits them — the safe direction, but wrong.
+func (s *PMAutomationService) SetSettlementForwarder(f *P2PSettlementForwarder) { s.forwards = f }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
 // is the per-PM Nomba boundary used by the sell flow to pay the user's bank.
@@ -206,7 +215,13 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 	//     once-per-event), so no extra idempotency guard is needed here: a given
 	//     EventID is dispatched at most once, so the ledger credit fires exactly
 	//     once per settled inbound.
-	if err := s.pm.CreditNGN(ctx, pm.ID, p.AmountNGN); err != nil {
+	// Credit the currency the money actually arrived in. InboundPayment.Currency
+	// is empty for legacy Nomba payloads, which were always naira.
+	inboundCurrency := p.Currency
+	if strings.TrimSpace(inboundCurrency) == "" {
+		inboundCurrency = "NGN"
+	}
+	if err := s.pm.CreditIn(ctx, pm.ID, inboundCurrency, p.AmountNGN); err != nil {
 		// A bad/unparseable amount fails the credit but must not abort the
 		// webhook — failing causes 5xx + retries that never recover. Log and
 		// continue (consistent with unknown-walletId → no-op above). A genuine
@@ -502,11 +517,23 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 			!r.ReceivedAt.IsZero() &&
 			time.Since(r.ReceivedAt) > fwChargeNotFoundGrace
 
-		if err != nil && (errors.Is(err, ErrChargeRejected) || agedOutNotFound) {
+		// Same shape for a payout webhook the provider never finalises: past the
+		// grace it stops being read-after-write lag, and re-driving it every tick
+		// would hold a slot in this oldest-first pool forever.
+		agedOutNotFinal := err != nil &&
+			errors.Is(err, ErrITPayoutNotFinal) &&
+			!r.ReceivedAt.IsZero() &&
+			time.Since(r.ReceivedAt) > itPayoutWebhookGrace
+
+		if err != nil && (errors.Is(err, ErrChargeRejected) || agedOutNotFound || agedOutNotFinal) {
 			// Terminal — a retry can never settle it. Mark 'rejected' so it drops
 			// out of the failed pool instead of being re-driven every tick.
 			if agedOutNotFound {
 				log.Printf("[pm recovery] ALARM event=%s charge still not found %s after arrival — marking rejected, NOT settled: %v",
+					r.EventID, time.Since(r.ReceivedAt).Round(time.Minute), err)
+			}
+			if agedOutNotFinal {
+				log.Printf("[pm recovery] ALERT it_payout_webhook_never_final event=%s still not final %s after arrival — marking rejected, NOT settled: %v",
 					r.EventID, time.Since(r.ReceivedAt).Round(time.Minute), err)
 			}
 			if uerr := s.db.WithContext(ctx).
@@ -624,6 +651,23 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 // TODO(pm-phase2): automated bounded-retry + on-chain refund once
 // adminResolve-from-pending semantics are confirmed.
 func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutStatus) error {
+	// A settlement forward is not a sell payout, and its reference is not a
+	// trade UUID — so without this branch a disburse result for one would fall
+	// through to the "untracked payout, ignoring" log below, and the merchant's
+	// ledger would never be debited for money that actually reached their bank.
+	// Routed on the reference prefix, which no trade id can carry.
+	if s.forwards != nil && strings.HasPrefix(strings.TrimSpace(p.MerchantTxRef), p2pForwardRefPrefix) {
+		status := strings.ToLower(strings.TrimSpace(p.Status))
+		switch status {
+		case "success":
+			return s.forwards.Confirm(ctx, p.MerchantTxRef, true, "")
+		case "failed":
+			return s.forwards.Confirm(ctx, p.MerchantTxRef, false, "payout "+p.PayoutID+" (event "+p.EventID+")")
+		default:
+			return nil // pending or unknown — await a terminal result
+		}
+	}
+
 	// Resolve the trade. The deterministic key is merchantTxRef (= the trade UUID
 	// we sent when initiating the payout). Fall back to the stored nomba_payout_id
 	// only if merchantTxRef is empty/unparseable. Require at least one usable key:
@@ -676,7 +720,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// guarded (reserved >= amount); a missing/short reservation surfaces as an
 		// error rather than silently releasing crypto against an unbacked ledger.
 		if pm != nil {
-			if err := s.pm.ConsumeNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+			if err := s.pm.ConsumeIn(ctx, pm.ID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 				if errors.Is(err, ErrNGNAlreadySettled) {
 					// Retry-tolerant: a re-dispatched success event (its first
 					// dispatch consumed the reservation but its release failed
@@ -698,7 +742,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// operator sees it, and WARN-log for alerting. Leave the trade in
 		// pending_payment so the timeout watchdog refunds the deposit on expiry.
 		if pm != nil {
-			if err := s.pm.ReleaseNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+			if err := s.pm.ReleaseIn(ctx, pm.ID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 				return fmt.Errorf("release PM ledger on payout failure (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
 			}
 		}

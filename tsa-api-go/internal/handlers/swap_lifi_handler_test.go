@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,8 +43,8 @@ func TestGetChains_ReturnsLiFiResponse(t *testing.T) {
 		if r.URL.Path != "/chains" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("chainTypes") != "EVM,SVM" {
-			t.Errorf("expected chainTypes=EVM,SVM, got %s", r.URL.Query().Get("chainTypes"))
+		if r.URL.Query().Get("chainTypes") != lifiChainTypes {
+			t.Errorf("expected chainTypes=%s, got %s", lifiChainTypes, r.URL.Query().Get("chainTypes"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -310,14 +311,14 @@ func TestGetQuote_ForwardsSolanaChainAndToAddress(t *testing.T) {
 
 // The all-chains search blob must request SVM explicitly — LiFi's /tokens
 // defaults to EVM only, which silently drops every SPL token from search.
-func TestGetAllChainTokens_RequestsSVMAndFlattensSolana(t *testing.T) {
+func TestGetAllChainTokens_RequestsNonEVMTypesAndFlattensSolana(t *testing.T) {
 	const svmChainID = "1151111081099710"
 	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tokens" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("chainTypes") != "EVM,SVM" {
-			t.Errorf("expected chainTypes=EVM,SVM, got %s", r.URL.Query().Get("chainTypes"))
+		if r.URL.Query().Get("chainTypes") != lifiChainTypes {
+			t.Errorf("expected chainTypes=%s, got %s", lifiChainTypes, r.URL.Query().Get("chainTypes"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -565,14 +566,14 @@ func TestLiveRequeryQuoteUSD_Malformed200_NotReachable(t *testing.T) {
 			defer mockLiFi.Close()
 
 			h := newTestLiFiHandler(mockLiFi.URL)
-			usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+			got := h.liveRequeryQuoteUSD(settleQuoteParams{
 				FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
 			})
-			if reachable {
-				t.Fatalf("malformed 200 must yield reachable=false, got reachable=true usd=%v", usd)
+			if got.Reachable {
+				t.Fatalf("malformed 200 must not count as reachable, got %+v", got)
 			}
-			if usd != 0 {
-				t.Fatalf("malformed 200 must yield usd=0, got %v", usd)
+			if got.FromAmountUSD != 0 {
+				t.Fatalf("malformed 200 must yield usd=0, got %v", got.FromAmountUSD)
 			}
 		})
 	}
@@ -589,11 +590,11 @@ func TestLiveRequeryQuoteUSD_Valid200_Reachable(t *testing.T) {
 	defer mockLiFi.Close()
 
 	h := newTestLiFiHandler(mockLiFi.URL)
-	usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+	got := h.liveRequeryQuoteUSD(settleQuoteParams{
 		FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
 	})
-	if !reachable || usd != 123.45 {
-		t.Fatalf("valid 200 want (123.45,true), got (%v,%v)", usd, reachable)
+	if !got.Reachable || !got.FeeCollectable || got.FromAmountUSD != 123.45 {
+		t.Fatalf("valid 200 want usd=123.45 reachable+collectable, got %+v", got)
 	}
 }
 
@@ -611,5 +612,16 @@ func TestGetQuote_LiFiUnreachable_Returns502(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+// Bitcoin and Solana are the two non-EVM families the app can sign for, and
+// LiFi omits both unless the chain type is named. A regression here empties
+// them out of the swap picker with no error anywhere.
+func TestLiFiChainTypes_CoverSignableNonEVMFamilies(t *testing.T) {
+	for _, want := range []string{"EVM", "SVM", "UTXO"} {
+		if !strings.Contains(lifiChainTypes, want) {
+			t.Errorf("lifiChainTypes %q is missing %s", lifiChainTypes, want)
+		}
 	}
 }

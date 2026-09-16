@@ -1,13 +1,8 @@
 // app/profile/kyc.tsx
 //
-// KYC identity-verification flow (Persona inquiry in a WebView). Restyled onto the
-// TSA Signature design system (@/theme tokens + @/components/ui primitives).
-//
-// VERIFICATION screen: the KYC status check (api.getKYCStatus), session creation
-// (api.createKYCSession), camera-permission request, Persona WebView (document /
-// selfie capture) and its completion-redirect detection, and all status gating
-// (loading / not_started / webview_active / in_progress / verified / rejected) are
-// preserved verbatim — this is a visual/structural restyle only.
+// KYC identity-verification flow (Didit hosted session in a WebView).
+// Status check → create session → camera permission → Didit WebView →
+// callback/completion detection → poll status.
 import React, { useState, useCallback } from "react";
 import { View, ActivityIndicator, Alert, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -17,28 +12,37 @@ import { WebView } from "react-native-webview";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
 import { useTheme } from "@/theme";
-import { Text, Button, IconButton, Icon } from "@/components/ui";
+import { Text, Button, Icon, ScreenHeader } from "@/components/ui";
 
-type KYCState = "not_started" | "loading" | "webview_active" | "in_progress" | "verified" | "rejected";
+type KYCState =
+  | "not_started"
+  | "loading"
+  | "webview_active"
+  | "in_progress"
+  | "action_required"
+  | "verified"
+  | "rejected";
 
 export default function KYCScreen() {
   const { colors, spacing, radius } = useTheme();
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
-  const [inquiryUrl, setInquiryUrl] = useState<string | null>(null);
+  const [sessionUrl, setSessionUrl] = useState<string | null>(null);
 
   const checkStatus = useCallback(async () => {
     try {
       const response = await api.getKYCStatus();
       if (response.success && response.data) {
-        const { verificationStatus } = response.data;
+        const { verificationStatus, actionRequired } = response.data;
         if (verificationStatus === "verified") {
           setState("verified");
         } else if (verificationStatus === "rejected") {
           setState("rejected");
           setNotes(response.data.verificationNotes || "Verification failed. Please try again.");
         } else if (verificationStatus === "in_review") {
-          setState("in_progress");
+          // in_review covers both "Didit is reviewing" and "Didit sent a step
+          // back for resubmission" — only the latter needs the user to act.
+          setState(actionRequired ? "action_required" : "in_progress");
         } else {
           setState("not_started");
         }
@@ -83,7 +87,13 @@ export default function KYCScreen() {
         return;
       }
 
-      setInquiryUrl(response.data.inquiryUrl);
+      const url = response.data.sessionUrl || response.data.inquiryUrl;
+      if (!url) {
+        Alert.alert("Error", "Failed to start verification");
+        setState("not_started");
+        return;
+      }
+      setSessionUrl(url);
       setState("webview_active");
     } catch (error: any) {
       Alert.alert("Error", api.getErrorMessage(error) || "Something went wrong");
@@ -92,35 +102,30 @@ export default function KYCScreen() {
   };
 
   const handleWebViewNavigationChange = (navState: { url: string }) => {
-    // Persona redirects to a completion page when the inquiry is done
-    if (navState.url.includes("/done") || navState.url.includes("completed")) {
-      setInquiryUrl(null);
-      setState("in_progress");
+    // Didit redirects to callback with verificationSessionId + status,
+    // or to our tsaconnect://kyc/callback deep link.
+    const url = navState.url.toLowerCase();
+    const finished =
+      url.includes("verificationsessionid=") ||
+      url.includes("tsaconnect://kyc/callback") ||
+      url.includes("/kyc/callback") ||
+      url.includes("status=approved") ||
+      url.includes("status=declined") ||
+      url.includes("status=in%20review") ||
+      url.includes("status=in+review");
+    if (finished) {
+      // Ask the API what the session actually ended as — hard-coding
+      // "in progress" hides a resubmission request behind a wait screen.
+      setSessionUrl(null);
+      setState("loading");
+      checkStatus();
     }
   };
 
+  // Reachable cold from the Didit deep link (/kyc/callback redirects here), so
+  // back needs a real destination rather than a no-op pop.
   const Header = () => (
-    <View
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        paddingHorizontal: spacing.lg,
-        paddingVertical: spacing.sm,
-        borderBottomWidth: 1,
-        borderBottomColor: colors.hairline,
-      }}
-    >
-      <IconButton
-        icon="chevronLeft"
-        accessibilityLabel="Go back"
-        onPress={() => router.back()}
-      />
-      <Text variant="title3" weight="700">
-        KYC Verification
-      </Text>
-      <View style={{ width: 44 }} />
-    </View>
+    <ScreenHeader title="KYC Verification" fallbackRoute="/profile" />
   );
 
   // Reusable centered status panel: hero icon ring + title + subtitle + actions.
@@ -191,11 +196,11 @@ export default function KYCScreen() {
     );
   }
 
-  if (state === "webview_active" && inquiryUrl) {
+  if (state === "webview_active" && sessionUrl) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <WebView
-          source={{ uri: inquiryUrl }}
+          source={{ uri: sessionUrl }}
           onNavigationStateChange={handleWebViewNavigationChange}
           javaScriptEnabled
           domStorageEnabled
@@ -222,6 +227,27 @@ export default function KYCScreen() {
           subtitle="Your identity has been successfully verified."
         >
           <Button title="Go Back" onPress={() => router.back()} fullWidth />
+        </StatusPanel>
+      </SafeAreaView>
+    );
+  }
+
+  if (state === "action_required") {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <Header />
+        <StatusPanel
+          icon="upload"
+          iconColor={colors.warning}
+          iconBg={colors.warningBg}
+          title="One More Step"
+          subtitle="Your documents need another look — usually a clearer photo. Continue where you left off to resubmit."
+        >
+          <View style={{ width: "100%", gap: spacing.md }}>
+            <Button title="Resubmit Documents" onPress={startVerification} fullWidth />
+            <Button title="Refresh Status" variant="secondary" onPress={checkStatus} fullWidth />
+            <Button title="Go Back" variant="ghost" onPress={() => router.back()} fullWidth />
+          </View>
         </StatusPanel>
       </SafeAreaView>
     );

@@ -104,11 +104,17 @@ func buildP2PTradeEmail(event events.Event, trade *models.P2PTrade) (p2pEmailCon
 		return p2pEmailContent{}, false
 	}
 
-	// NOTE: EmailService.Send injects the body into the HTML template WITHOUT
-	// escaping. Every value interpolated below is a constrained, non-free-text
-	// field — token symbol (size:16), fiat currency (size:3), numeric amounts,
-	// and a truncated UUID. Do NOT add a user-authored field (chat text, display
-	// name, ad notes) to the body without HTML-escaping it first.
+	// NOTE: EmailService.Send now renders the body through html/template, so it
+	// escapes everything interpolated below. Do NOT escape by hand on the way
+	// in — that double-escapes, and an "&" in a name arrives as "&amp;".
+	//
+	// This comment used to say the opposite, and said so correctly until the
+	// template migration. It is kept rather than deleted because the old advice
+	// is the intuitive one and someone will reach for it again.
+	//
+	// The values here are still constrained, non-free-text fields — token
+	// symbol, fiat currency, numeric amounts and a truncated UUID — but that is
+	// no longer what makes them safe.
 	amt := humanizeTokenAmount(trade.TokenAmount, p2pTokenDecimalsForChain(trade.ChainID))
 	tok := trade.Token
 	fiat := trade.FiatAmount

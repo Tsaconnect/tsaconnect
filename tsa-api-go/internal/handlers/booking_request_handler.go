@@ -290,6 +290,24 @@ type rejectBookingRequestBody struct {
 	Reason string `json:"reason"`
 }
 
+// maxBookingReasonLen bounds the free-text reason a party can attach when
+// declining or cancelling. It lands in an unbounded TEXT column, so without a
+// cap a crafted client could persist arbitrarily large rows — the same reason
+// models.ValidateAnswers bounds booking-form answers.
+const maxBookingReasonLen = 500
+
+// reasonOrError returns the trimmed reason, or false after writing a 400 when
+// it exceeds the cap.
+func reasonOrError(c *gin.Context, raw string) (string, bool) {
+	reason := strings.TrimSpace(raw)
+	if len(reason) > maxBookingReasonLen {
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Reason is too long (max %d characters)", maxBookingReasonLen))
+		return "", false
+	}
+	return reason, true
+}
+
 // RejectBookingRequest handles POST /api/services/requests/:reqId/reject (seller).
 func (ch *CheckoutHandler) RejectBookingRequest(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -307,8 +325,12 @@ func (ch *CheckoutHandler) RejectBookingRequest(c *gin.Context) {
 	}
 	var body rejectBookingRequestBody
 	_ = c.ShouldBindJSON(&body)
+	reason, ok := reasonOrError(c, body.Reason)
+	if !ok {
+		return
+	}
 	r.Status = models.BookingRequestRejected
-	r.RejectReason = body.Reason
+	r.RejectReason = reason
 	r.UpdatedAt = time.Now()
 	if err := config.DB.Save(r).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decline request")
@@ -320,6 +342,84 @@ func (ch *CheckoutHandler) RejectBookingRequest(c *gin.Context) {
 		Data:    map[string]interface{}{"bookingRequestId": r.ID.String(), "status": r.Status, "role": "buyer"},
 	})
 	utils.SuccessResponse(c, http.StatusOK, "Booking request declined", r)
+}
+
+// CancelBookingRequest handles POST /api/services/requests/:reqId/cancel.
+//
+// Either party may cancel, which is why it does not reuse loadBookingRequest's
+// single-role check: the buyer withdraws a request they no longer want, and the
+// provider backs out of one they already approved. Reject only covers the
+// not-yet-approved case and is provider-only, so without this an approved
+// booking had no exit at all — the buyer could still pay it weeks later.
+func (ch *CheckoutHandler) CancelBookingRequest(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	reqID, err := uuid.Parse(c.Param("reqId"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request ID")
+		return
+	}
+	var r models.BookingRequest
+	if err := config.DB.First(&r, "id = ?", reqID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, "Booking request not found")
+		} else {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
+		}
+		return
+	}
+	if r.BuyerID != user.ID && r.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Not your booking request")
+		return
+	}
+	if !models.CanTransitionBookingRequest(r.Status, models.BookingRequestCancelled) {
+		utils.ErrorResponse(c, http.StatusConflict, fmt.Sprintf("Cannot cancel a %s request", r.Status))
+		return
+	}
+
+	var body rejectBookingRequestBody
+	_ = c.ShouldBindJSON(&body)
+	reason, ok := reasonOrError(c, body.Reason)
+	if !ok {
+		return
+	}
+
+	// Conditional update on the status we read, so two concurrent cancels (or a
+	// cancel racing a pay) cannot both win.
+	claim := config.DB.Model(&models.BookingRequest{}).
+		Where("id = ? AND status = ?", r.ID, r.Status).
+		Updates(map[string]interface{}{
+			"status":        models.BookingRequestCancelled,
+			"reject_reason": reason,
+			"updated_at":    time.Now(),
+		})
+	if claim.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel request")
+		return
+	}
+	if claim.RowsAffected == 0 {
+		utils.ErrorResponse(c, http.StatusConflict, "This request is no longer cancellable")
+		return
+	}
+	r.Status = models.BookingRequestCancelled
+	r.RejectReason = reason
+	r.UpdatedAt = time.Now()
+
+	// Tell the other side, whichever side that is.
+	notify, title := r.SellerID, "Booking Cancelled"
+	message := "The buyer cancelled their booking request."
+	if user.ID == r.SellerID {
+		notify = r.BuyerID
+		message = "The provider cancelled your booking request."
+	}
+	ch.EventBus.Publish(events.Event{
+		Type: events.OrderPlaced, UserID: notify, Title: title, Message: message,
+		Data: map[string]interface{}{"bookingRequestId": r.ID.String(), "status": r.Status},
+	})
+	utils.SuccessResponse(c, http.StatusOK, "Booking request cancelled", r)
 }
 
 // PayBookingRequest handles POST /api/services/requests/:reqId/pay (buyer) — for

@@ -32,6 +32,7 @@ app/
 ├── index.tsx                    # Entry: auth check → role-based redirect
 ├── login.tsx / signup.tsx       # Auth screens
 ├── (dashboard)/(tabs)/          # User tabs: Home, Marketplace, Services, Easyswap, Wallet
+├── (detail)/                    # Screens owned by NO tab — see "Tab ownership" below
 ├── merchants/                   # Merchant panel
 │   └── dashboard, inventory, profile, buy-usdt, sell-usdt, digital
 ├── profile/                     # User profile management
@@ -46,8 +47,39 @@ Role-based routing: `index.tsx` checks stored role → redirects to `/merchants/
 #### Navigation Gotchas
 
 - **Route groups `()` are transparent in URLs** — Always navigate with simplified paths: `` router.push(`/product/${id}`) `` NOT `router.push('/(dashboard)/(tabs)/(home)/product/[productId]')`. Use string template URLs, not `{ pathname, params }` objects.
-- **Dynamic routes in `(home)`** — `product/[productId]`, `seller/[sellerId]`, `subcategory/[subcategoryId]` are registered in `app/(dashboard)/(tabs)/(home)/_layout.tsx`
-- **Typed routes generated at** `.expo/types/router.d.ts` — regenerate with `npx expo start` if routes seem missing
+- **Typed routes generated at** `.expo/types/router.d.ts` — regenerate with `npx expo start` if routes seem missing.
+
+#### Back navigation — three rules
+
+These were all violated at once before `feat/nav-back-flow`; `__tests__/route-back-affordance.test.ts`
+now fails the build if the first two regress.
+
+**1. Tab ownership decides where back goes.** expo-router resolves a push by navigating to the
+navigator that OWNS the route. A screen inside `(tabs)/(home)` pushed from the Marketplace tab
+switches to Home first, so back returns to Home — not to the marketplace the user came from.
+Anything reachable from more than one tab therefore lives in **`app/(detail)/`**, a root-level
+group: `product/[productId]`, `seller/[sellerId]`, `subcategory/[subcategoryId]`, `checkout`,
+`fund`, `send`, `swap`, `multiswap`, `transfer`, `trade`, `rewards`, `cashback`, `service`,
+`serviceaction`. A tab group should contain its root screen and little else. Group parentheses
+keep URLs identical, so moving a screen in or out of `(detail)` needs no call-site changes —
+verify with `.expo/types/router.d.ts` before and after.
+
+**2. A nested stack entered from outside has no native back button.** `getStateFromPath` builds a
+single-route state for the target group (expo-router `fork/getStateFromPath.js` → `createStateObject`),
+so native-stack draws nothing at index 0 even though `router.back()` unwinds correctly. Every Stack
+layout therefore takes its `screenOptions` from **`useDefaultScreenOptions()`**
+(`constants/navigation.ts`), which supplies a shared `headerLeft`. Do not hand-roll `screenOptions`
+in a layout, and do not re-declare `headerTintColor` / `headerTitleStyle` anywhere.
+
+**3. Back is `goBack(fallback)`, never a fixed route.** `utils/back.ts` pops when there is history
+and only falls back on a cold start (deep link, notification tap, OAuth callback). The fallback
+names the SECTION (`WALLET_TAB`, `SERVICES_TAB`, `MARKETPLACE_TAB` from `constants/routes.ts`) —
+defaulting it to `/home` is what produced the "back takes me to main" reports. Screens that hide
+their header must render **`<ScreenHeader>`**; never add a tenth hand-rolled chevron row.
+
+Drawer screens (`app/(dashboard)/*`) get a hamburger, never a back chevron, so a push-only
+destination does not belong there — `orderdetail` and `add-category` are root Stack routes for
+exactly this reason.
 
 ### State Management
 

@@ -12,6 +12,7 @@ import { Alert, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { OtpInput } from 'react-native-otp-entry';
 import { router, useLocalSearchParams } from 'expo-router';
+import { goBack } from '@/utils/back';
 import api from '../services/api';
 import { useTheme } from '@/theme';
 import {
@@ -127,7 +128,7 @@ const RecoveryOTP = () => {
             if (step === 'password') {
               setStep('otp');
             } else {
-              router.back();
+              goBack('/login');
             }
           }}
         />

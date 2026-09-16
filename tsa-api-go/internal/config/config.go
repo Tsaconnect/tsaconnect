@@ -150,9 +150,9 @@ type NetworkConfig struct {
 type NonEVMChainConfig struct {
 	ChainKey       string
 	Family         string
-	Network        string            // "mainnet" | "testnet"
-	RPCURL         string            // TronGrid base, mempool base, or Solana RPC
-	APIKey         string            // optional provider key
+	Network        string // "mainnet" | "testnet"
+	RPCURL         string // TronGrid base, mempool base, or Solana RPC
+	APIKey         string // optional provider key
 	NativeSymbol   string
 	NativeDecimals int
 	Tokens         map[string]string // symbol → on-chain token contract/mint
@@ -163,10 +163,21 @@ type NonEVMChainConfig struct {
 // the calculator never touches float64 for money.
 type FeeQuoteConfig struct {
 	// PlatformStableUSD is the flat platform fee on stablecoin (USDC/USDT)
-	// flows, in whole USD. MCGP flows always carry a $0 platform fee.
+	// flows, in whole USD.
 	// PM-UNRESOLVED: the spec gives both $1 and $2 — default $2 until the PM
 	// settles it (FEE_PLATFORM_STABLE_USD).
 	PlatformStableUSD int64
+	// PlatformNgnBps / PlatformFxBps are the platform's own cut on the MCGP
+	// fiat ramps, tiered by PAYMENT CURRENCY (PM spec, 28/07): 0.5% on NGN,
+	// 2% on every other currency. This is the only line the platform keeps —
+	// the provider fee is passthrough and the tax is remitted — so it is what
+	// funds cashback, TradePoints and the ecosystem generally.
+	//
+	// It applies to BOTH legs ("same fees apply"): withheld as un-issued MCGP
+	// on the contract for deposits, and left in the payout balance as fiat for
+	// withdrawals. FEE_PLATFORM_NGN_BPS / FEE_PLATFORM_FX_BPS.
+	PlatformNgnBps int64
+	PlatformFxBps  int64
 	// ProviderFallbackBps prices the provider (Flutterwave) fee when a live
 	// GetFees quote is unavailable (client dormant or the call fails).
 	ProviderFallbackBps int64
@@ -191,13 +202,21 @@ type FeeQuoteConfig struct {
 }
 
 type Config struct {
-	DatabaseURL         string
-	JWTSecret           string
-	FrontendURL         string
-	AdminURL            string
-	LandingURL          string
-	Port                string
-	Env                 string
+	DatabaseURL string
+	JWTSecret   string
+	FrontendURL string
+	AdminURL    string
+	LandingURL  string
+	Port        string
+	// Env is normalised at Load() time (trim, lower-case, "prod" -> "production")
+	// so a stray space or differing case can never desync the checks below —
+	// call IsProduction() rather than comparing this field directly.
+	Env string
+	// AllowRawSignerKeys opts a production process back into raw-env-var private
+	// keys (IT operator, relayer, ramp sponsor, PM release local signer) until a
+	// KMS-backed signer exists. Ignored outside production. See
+	// rawSignerKeyAllowed in cmd/server for the single place this is consumed.
+	AllowRawSignerKeys  bool
 	CloudinaryCloudName string
 	CloudinaryAPIKey    string
 	CloudinaryAPISecret string
@@ -227,6 +246,41 @@ type Config struct {
 	// and project memory project_mcgp-differentiated-swap.
 	MCGPSwapBAddress string
 
+	// Gasless relaying (EIP-2771). All dormant unless BOTH the forwarder address
+	// and the relayer key are set — with either missing the /mcgp/relay endpoints
+	// report relayerEnabled:false and the app self-pays, exactly as before.
+	//
+	// RelayerPrivateKey MUST NOT be the owner, operator or guardian key: it is a
+	// hot key broadcasting from a server, and sharing it would turn a relayer
+	// compromise into an operator one. Asserted on-chain at boot.
+	MCGPForwarderAddress   string
+	RelayerPrivateKey      string
+	RelayerMaxDeadline     time.Duration
+	RelayerGasCeiling      uint64
+	RelayerPerUserPerHour  int
+	RelayerDailyGasBudget  string // decimal gas units per UTC day
+	RelayerBalanceFloorWei string // refuse to relay below this native balance
+	RelayerMinSponsored    string // smallest amount worth sponsoring (base units)
+
+	// Ramp gas sponsorship — Paycrest sells pay no gas on these chains.
+	// Dormant unless RAMP_GAS_SPONSORSHIP=true AND RAMP_SPONSOR_PRIVATE_KEY is set.
+	RampGasSponsorshipEnabled bool
+	RampSponsorPrivateKey     string   // MUST differ from relayer/IT operator/PM release keys
+	RampSponsorChains         []string // chain keys
+	// RampSponsorDailyGasBudget is gas units per UTC day, per chain. At ~120k
+	// gas per relay the old 50M default capped each chain at ~416 sponsored
+	// sales a day. It is a backstop against a runaway bug, not a spend control:
+	// the balance floor and float alert are what protect the money.
+	RampSponsorDailyGasBudget string
+	// RampSponsorTopUpUnusedDailyCap is how many gas top-ups a user may leave
+	// unused (their sell order expired, was cancelled or failed with nothing
+	// paid) in a rolling 24h before further top-ups are refused. Top-ups that
+	// led to a deposit never count, so users completing real sales are never
+	// capped. Ramp lanes have no per-user hourly window.
+	RampSponsorTopUpUnusedDailyCap int
+	RampSponsorBalanceFloorWei     map[string]string // chain -> wei; sponsoring stops below this
+	RampSponsorTopUpMaxWei         map[string]string // chain -> wei; largest single top-up
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -242,6 +296,37 @@ type Config struct {
 	// (default ₦100 = 10000, Flutterwave's TRANSFER_AMOUNT_LIMIT floor). Raise to
 	// tighten the dust-sell guard without a code change.
 	ITMinSellNgnKobo int64
+	// ITSellFWAbsenceTrusted lets IT sell recovery act on "Flutterwave has no
+	// transfer for this reference": the reconciler re-sends a previously
+	// attempted payout (and reverses a sell whose retry was refused), and an
+	// admin may reverse or retry a sell on that evidence. Off by default until
+	// the /transfers listing shape is confirmed against the live API — a wrong
+	// "absent" pays the user twice. IT_SELL_FW_ABSENCE_TRUSTED.
+	ITSellFWAbsenceTrusted bool
+
+	// ClubKonnect (Nellobyte) — prepaid utility-bill vendor. Bills are dormant
+	// unless BOTH ClubkonnectUserID and ClubkonnectAPIKey are set AND the MCGP
+	// operator signer (ITOperatorPrivateKey) is wired: users pay bills with
+	// spendable MCGP via the operator debit path, so no operator ⇒ no bills.
+	// The API key rides in the query string on every call — it must never be
+	// logged (the client redacts it from errors).
+	ClubkonnectUserID  string
+	ClubkonnectAPIKey  string
+	ClubkonnectBaseURL string
+	// ClubkonnectDataplanField picks which catalog field is sent as the vend's
+	// DataPlan param: "code" (PRODUCT_CODE) or "id" (PRODUCT_ID). The gated API
+	// docs don't say which; the default is validated by the live smoke test and
+	// this switch avoids a redeploy if it proves wrong.
+	ClubkonnectDataplanField string
+
+	// BillsDataMarkupBps is retail markup on data bundles, in basis points over
+	// ClubKonnect's cost price (other categories charge face value and earn the
+	// provider discount). BillsQuoteTTL bounds how long a ₦→MCGP quote stays
+	// payable. BillsFloatAlertNgn is the ClubKonnect wallet balance (whole ₦)
+	// below which the float monitor starts alerting.
+	BillsDataMarkupBps int
+	BillsQuoteTTL      time.Duration
+	BillsFloatAlertNgn int64
 
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
@@ -282,11 +367,12 @@ type Config struct {
 	// enable Expo's enhanced push security. Dormant if unset.
 	ExpoAccessToken string
 
-	// Persona KYC verification
-	PersonaAPIKey        string
-	PersonaTemplateID    string
-	PersonaBaseURL       string
-	PersonaWebhookSecret string
+	// Didit KYC verification
+	DiditAPIKey        string
+	DiditWorkflowID    string
+	DiditBaseURL       string
+	DiditWebhookSecret string
+	DiditCallbackURL   string
 
 	// LiFi swap aggregator
 	LiFiAPIKey        string
@@ -297,10 +383,9 @@ type Config struct {
 	// to recompute the integrator fee, then rejects a client-supplied fee that
 	// deviates by more than AllSwapFeeDeviationMax (fraction, default 0.10 = 10%).
 	// When LiFi is unreachable it does NOT trust the client or charge 0: it
-	// charges AllSwapConservativeFeeBps of the from-amount (default 350 = 3.5% vs
-	// the nominal 3%) and emits a warning metric.
-	AllSwapFeeDeviationMax    float64
-	AllSwapConservativeFeeBps int
+	// prices the from-amount itself and books the SAME rate, because the accrual
+	// mirrors a fixed cut LiFi already took.
+	AllSwapFeeDeviationMax float64
 	// AllSwapNominalFeeBps is the integrator fee the backend recomputes when LiFi
 	// is reachable but the response carries no usable fee figure (default 300 =
 	// 3%). It is the verified-fee basis, never the client value.
@@ -361,10 +446,10 @@ type Config struct {
 	// API access, 2026-07). Dormant-by-default: missing creds ⇒ nil client,
 	// routes surface "not configured". The production base URL is mid-migration
 	// on Flutterwave's side, so it is ALWAYS config-driven.
-	FlutterwaveBaseURL       string
-	FlutterwaveIdpURL        string
-	FlutterwaveClientID      string
-	FlutterwaveClientSecret  string
+	FlutterwaveBaseURL      string
+	FlutterwaveIdpURL       string
+	FlutterwaveClientID     string
+	FlutterwaveClientSecret string
 	// FlutterwaveWebhookSecret verifies the flutterwave-signature header
 	// (Base64 HMAC-SHA256 of the raw body). UNSET ⇒ FW webhook route dormant.
 	FlutterwaveWebhookSecret string
@@ -380,6 +465,86 @@ type Config struct {
 	FlutterwaveCompanyName  string
 	FlutterwaveCompanyEmail string
 	FlutterwaveCompanyPhone string
+
+	// InboundMode selects how inbound naira is attributed (central-account
+	// design §9). "va" is today's behaviour: a per-user Flutterwave virtual
+	// account, attribution by charge.completed webhook. "central" routes every
+	// payer to the one company account, where attribution comes from polling
+	// the wallet statement instead.
+	//
+	// It is a single global flag by decision 10 — a per-user rollout would put
+	// two attribution paths over the ONE company account, where a sender name
+	// is all there is to tell a rolled-out payer from a not-yet one, and a
+	// credit both or neither path claims is the result.
+	//
+	// It does not retire the virtual accounts that already exist: nothing here
+	// or anywhere else deactivates them at Flutterwave, and the charge-webhook
+	// credit path is not gated on the mode, so a payer who kept an old account
+	// number is still credited through it. Central mode only refuses to mint
+	// NEW accounts (ITService.ActivateFiatVA) and stops the app showing the old
+	// ones. The two paths cannot claim each other's money — they settle under
+	// different on-chain ref domains (IT:va: vs IT:inbound:) — but they are both
+	// live, and closing the accounts at the provider is a deliberate follow-up
+	// with its own review, not something this flag does.
+	//
+	// Flipping back is this variable plus a restart.
+	InboundMode string
+	// InboundPollInterval is the wallet-statement poll period (default 30s,
+	// decision 8). This is not a reconciler cadence: wallet funding fires no
+	// webhook at all, so the poll is the ONLY way a credit is ever noticed and
+	// the interval is the user's wait.
+	InboundPollInterval time.Duration
+	// InboundStatementLookback is how far back each poll reads. Overlap is free
+	// (ingestion is idempotent on the NIP session id) whereas a window shorter
+	// than an outage silently loses every credit that arrived during it — so
+	// this is deliberately far wider than the poll interval.
+	InboundStatementLookback time.Duration
+	// InboundAlertEmails are the operator mailboxes told, one email per credit,
+	// whenever the matcher declines to attribute money and holds it.
+	//
+	// This is the first admin alert address in config, and it exists because a
+	// held credit has NO automatic exit (decision 9): nothing expires it, nothing
+	// refunds it, and the customer who sent the money is already waiting. Until
+	// a human looks, the queue is only discoverable by someone choosing to open
+	// it. Unset is a legitimate state — the queue still fills, nobody is paged.
+	InboundAlertEmails []string
+
+	// InboundCentralAccount* are the company bank account every payer is sent
+	// to in central mode. They are config rather than constants because the
+	// account is an operational fact that can be replaced without a code
+	// change, and because a wrong hardcoded number is money sent to a stranger.
+	//
+	// Unset in VA mode, which is why consumers must check IsConfigured before
+	// rendering them — see services.CentralAccount.
+	InboundCentralAccountNumber string
+	InboundCentralBankName      string
+	InboundCentralAccountName   string
+
+	// StableSpreadBps is the company margin on brokered stablecoin trades, in
+	// basis points. It REPLACES the swap/routing bps legs for these flows
+	// rather than stacking on them, and it is the buffer that absorbs FX drift
+	// inside the rate-lock window and provider-fee estimation error.
+	StableSpreadBps int64
+	// StableRateLockTTL bounds how long a quoted rate is honoured. The lock is
+	// ours, not Flutterwave's — /transfers/rates carries no expiry.
+	StableRateLockTTL time.Duration
+	// StableOverDeliveryTolBps bounds how far a sell deposit may exceed the
+	// amount it was quoted for and still be paid out automatically. Beyond it
+	// the intent is parked for an operator rather than paid: the payout scales
+	// with what actually arrived, and an unbounded ratio would let a small
+	// quote claim an arbitrarily large deposit.
+	StableOverDeliveryTolBps int64
+	// StableMinSell is the provider floor for a stablecoin sell, in major
+	// units (e.g. "10"). Flutterwave rejects a conversion below its floor
+	// AFTER the user has irreversibly sent funds, so the quote refuses first.
+	// Empty leaves services.DefaultStableMinSellMajor in place; the floor
+	// cannot be removed by config, only raised or lowered.
+	StableMinSell string
+	// FWStableDepositAddressPolygon is Flutterwave's own Polygon address that
+	// user sell deposits are routed to. Flutterwave exposes it on the dashboard
+	// only, so it is fetched once by hand and configured here. The platform
+	// never holds an address in this flow.
+	FWStableDepositAddressPolygon string
 
 	// FeeQuote — deposit/withdrawal fee-quote engine (PM fee spec, batch 11).
 	// Quote-only: powers GET /api/it/quote so the app can show the itemized
@@ -459,7 +624,8 @@ func Load() *Config {
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
 		Port:                getEnv("PORT", "5000"),
-		Env:                 getEnv("ENV", "development"),
+		Env:                 normalizeEnv(getEnv("ENV", "development")),
+		AllowRawSignerKeys:  getEnvBool("ALLOW_RAW_SIGNER_KEYS", false),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),
@@ -483,11 +649,63 @@ func Load() *Config {
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
 	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
+	// Gasless relaying — dormant unless both of the first two are set.
+	cfg.MCGPForwarderAddress = strings.TrimSpace(getEnv("MCGP_FORWARDER_ADDRESS", ""))
+	cfg.RelayerPrivateKey = strings.TrimSpace(getEnv("RELAYER_PRIVATE_KEY", ""))
+	// Short by design: a signed request is executable by ANYONE until it expires.
+	cfg.RelayerMaxDeadline = time.Duration(getEnvInt64("RELAYER_MAX_DEADLINE_SECONDS", 300)) * time.Second
+	cfg.RelayerGasCeiling = uint64(getEnvInt64("RELAYER_GAS_CEILING", 500_000))
+	cfg.RelayerPerUserPerHour = int(getEnvInt64("RELAYER_PER_USER_PER_HOUR", 20))
+	cfg.RelayerDailyGasBudget = strings.TrimSpace(getEnv("RELAYER_DAILY_GAS_BUDGET", "200000000"))
+	cfg.RelayerBalanceFloorWei = strings.TrimSpace(getEnv("RELAYER_BALANCE_FLOOR_WEI", "1000000000000000000")) // 1 S
+	cfg.RelayerMinSponsored = strings.TrimSpace(getEnv("RELAYER_MIN_SPONSORED", "0"))
+
+	cfg.RampGasSponsorshipEnabled = getEnvBool("RAMP_GAS_SPONSORSHIP", false)
+	cfg.RampSponsorPrivateKey = strings.TrimSpace(getEnv("RAMP_SPONSOR_PRIVATE_KEY", ""))
+	cfg.RampSponsorChains = nil
+	for _, chain := range strings.Split(getEnv("RAMP_SPONSOR_CHAINS", "base,arbitrum,polygon,bsc"), ",") {
+		if chain = strings.ToLower(strings.TrimSpace(chain)); chain != "" {
+			cfg.RampSponsorChains = append(cfg.RampSponsorChains, chain)
+		}
+	}
+	cfg.RampSponsorDailyGasBudget = strings.TrimSpace(getEnv("RAMP_SPONSOR_DAILY_GAS_BUDGET", "500000000"))
+	cfg.RampSponsorTopUpUnusedDailyCap = int(getEnvInt64("RAMP_SPONSOR_TOPUP_UNUSED_DAILY_CAP", 2))
+	rampFloorDefaults := map[string]string{
+		"base": "2000000000000000", "arbitrum": "2000000000000000", // 0.002 ETH
+		"polygon": "5000000000000000000", // 5 POL
+		"bsc":     "10000000000000000",   // 0.01 BNB
+	}
+	rampTopUpMaxDefaults := map[string]string{
+		"base": "50000000000000", "arbitrum": "50000000000000", // 0.00005 ETH
+		"polygon": "500000000000000000", // 0.5 POL
+		"bsc":     "500000000000000",    // 0.0005 BNB
+	}
+	cfg.RampSponsorBalanceFloorWei = map[string]string{}
+	cfg.RampSponsorTopUpMaxWei = map[string]string{}
+	for _, chain := range cfg.RampSponsorChains {
+		up := strings.ToUpper(chain)
+		cfg.RampSponsorBalanceFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_BALANCE_FLOOR_WEI_"+up, rampFloorDefaults[chain]))
+		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
+	}
+
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
-	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
+	// TrimPrefix "0x": crypto.HexToECDSA rejects a 0x-prefixed string outright,
+	// so an operator who pastes a key with the prefix (as ramp/PM keys already
+	// tolerate) would otherwise leave IT — and utility bills, which need the
+	// same operator signer — silently dormant.
+	cfg.ITOperatorPrivateKey = strings.TrimPrefix(strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", "")), "0x")
 	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
 	cfg.ITMinSellNgnKobo = getEnvInt64("IT_MIN_SELL_NGN_KOBO", 10000) // ₦100
+	cfg.ITSellFWAbsenceTrusted = getEnvBool("IT_SELL_FW_ABSENCE_TRUSTED", false)
+
+	cfg.ClubkonnectUserID = strings.TrimSpace(getEnv("CLUBKONNECT_USER_ID", ""))
+	cfg.ClubkonnectAPIKey = strings.TrimSpace(getEnv("CLUBKONNECT_API_KEY", ""))
+	cfg.ClubkonnectBaseURL = strings.TrimSpace(getEnv("CLUBKONNECT_BASE_URL", "https://www.nellobytesystems.com"))
+	cfg.ClubkonnectDataplanField = strings.TrimSpace(getEnv("CLUBKONNECT_DATAPLAN_FIELD", "code"))
+	cfg.BillsDataMarkupBps = int(getEnvInt64("BILLS_DATA_MARKUP_BPS", 300))
+	cfg.BillsQuoteTTL = time.Duration(getEnvInt64("BILLS_QUOTE_TTL_SECONDS", 300)) * time.Second
+	cfg.BillsFloatAlertNgn = getEnvInt64("BILLS_FLOAT_ALERT_NGN", 100000)
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
@@ -579,11 +797,12 @@ func Load() *Config {
 	// Expo push notifications (optional)
 	cfg.ExpoAccessToken = os.Getenv("EXPO_ACCESS_TOKEN")
 
-	// Persona KYC
-	cfg.PersonaAPIKey = os.Getenv("PERSONA_API_KEY")
-	cfg.PersonaTemplateID = os.Getenv("PERSONA_TEMPLATE_ID")
-	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
-	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
+	// Didit KYC
+	cfg.DiditAPIKey = os.Getenv("DIDIT_API_KEY")
+	cfg.DiditWorkflowID = os.Getenv("DIDIT_WORKFLOW_ID")
+	cfg.DiditBaseURL = getEnv("DIDIT_BASE_URL", "https://verification.didit.me/v3")
+	cfg.DiditWebhookSecret = os.Getenv("DIDIT_WEBHOOK_SECRET")
+	cfg.DiditCallbackURL = getEnv("DIDIT_CALLBACK_URL", "tsaconnect://kyc/callback")
 
 	// LiFi swap aggregator. API key is optional — without it we hit the
 	// anonymous tier (rate-limited). Integrator + fee are also optional;
@@ -595,7 +814,6 @@ func Load() *Config {
 
 	// AllSwap server-verified settle thresholds (design §8, I8).
 	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
-	cfg.AllSwapConservativeFeeBps = int(getEnvFloat64("ALLSWAP_CONSERVATIVE_FEE_BPS", 350))
 	cfg.AllSwapNominalFeeBps = int(getEnvFloat64("ALLSWAP_NOMINAL_FEE_BPS", 300))
 
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
@@ -604,13 +822,27 @@ func Load() *Config {
 	currenciesStr := getEnv("SUPPORTED_CURRENCIES", "*")
 	cfg.SupportedCurrencies = splitAndTrim(currenciesStr, ",")
 
-	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
-	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
+	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real
+	// market rates. GHS joins NGN here: Bybit has quoted a GHS book since 2022
+	// and a live probe found it comfortably past the depth floor, so pricing it
+	// off the parallel market rather than OER's official cedi rate avoids a
+	// systematic margin error on every Ghanaian trade.
+	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN,GHS")
 	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
 
-	// Bybit probe amounts — "CUR:AMT,CUR:AMT". NGN→5000 (~$3) by default.
-	// Add others as new currencies are routed through Bybit.
-	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000"))
+	// Bybit probe amounts — "CUR:AMT,CUR:AMT", each roughly a $3–5 retail ticket.
+	// NGN→5000, GHS→50 (~$4 at ~12 GHS/USD).
+	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000,GHS:50"))
+
+	// A Bybit-routed currency with no probe amount is a silent mispricing, not a
+	// missing nicety: fetchBybitSide omits the amount filter entirely when the
+	// probe is absent, which reads the merchant tier of the book instead of the
+	// retail tier. Worse, parseProbeAmounts skips malformed entries silently, so
+	// a typo in BYBIT_PROBE_AMOUNTS looks identical to a correct config. Drop
+	// the currency from the anchored set rather than price it off the wrong tier.
+	if kept := keepProbedCurrencies(cfg.BybitP2PCurrencies, cfg.BybitProbeAmounts); len(kept) != len(cfg.BybitP2PCurrencies) {
+		cfg.BybitP2PCurrencies = kept
+	}
 
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
@@ -651,6 +883,26 @@ func Load() *Config {
 	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
 	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
 
+	// Central-account inbound attribution. Defaults to `va` — the mode that is
+	// live today — so a deploy that forgets this variable changes nothing.
+	// An unrecognised value is treated as `va` for the same reason: a typo must
+	// not silently move every payer onto the company account and stop the app
+	// showing the virtual accounts they have been paying into.
+	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
+	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
+	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
+	cfg.InboundCentralAccountNumber = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NUMBER")
+	cfg.InboundCentralBankName = os.Getenv("INBOUND_CENTRAL_BANK_NAME")
+	cfg.InboundCentralAccountName = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NAME")
+	cfg.InboundAlertEmails = dedupeEmails(splitAndTrim(getEnv("INBOUND_ALERT_EMAILS", ""), ","))
+
+	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
+	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
+	cfg.StableRateLockTTL = time.Duration(getEnvInt64("IT_STABLE_RATE_LOCK_SECONDS", 900)) * time.Second
+	cfg.StableOverDeliveryTolBps = getEnvInt64("IT_STABLE_OVER_DELIVERY_TOL_BPS", 200)
+	cfg.StableMinSell = strings.TrimSpace(getEnv("IT_STABLE_MIN_SELL", "10"))
+	cfg.FWStableDepositAddressPolygon = strings.TrimSpace(getEnv("FW_STABLE_DEPOSIT_ADDRESS_POLYGON", ""))
+
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values
 	// are PM-UNRESOLVED and intentionally config-first so flipping them is an
 	// env change, not a deploy:
@@ -660,6 +912,8 @@ func Load() *Config {
 	//                             prose. Default "fee" (receipt evidence).
 	cfg.FeeQuote = FeeQuoteConfig{
 		PlatformStableUSD:    getEnvInt64("FEE_PLATFORM_STABLE_USD", 2),
+		PlatformNgnBps:       getEnvInt64("FEE_PLATFORM_NGN_BPS", 50),
+		PlatformFxBps:        getEnvInt64("FEE_PLATFORM_FX_BPS", 200),
 		ProviderFallbackBps:  getEnvInt64("FEE_PROVIDER_FALLBACK_BPS", 200),
 		TaxBasis:             strings.ToLower(strings.TrimSpace(getEnv("FEE_TAX_BASIS", "fee"))),
 		VATBps:               getEnvInt64("FEE_VAT_BPS", 750),
@@ -984,6 +1238,31 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// normalizeEnv trims whitespace, lower-cases, and canonicalises "prod" to
+// "production" so ENV="Production", " production ", or "prod" are all
+// detected identically to the exact string "production". Every other value
+// (including "development", "staging", "") passes through unchanged.
+func normalizeEnv(raw string) string {
+	e := strings.ToLower(strings.TrimSpace(raw))
+	if e == "prod" {
+		return "production"
+	}
+	return e
+}
+
+// IsProduction reports whether this process is running in production. It
+// re-normalises c.Env so it is correct even for a Config built by hand (e.g.
+// in a test) rather than via Load(). Every raw-signer-key guard and the gin
+// release-mode switch must call this rather than comparing c.Env directly —
+// see rawSignerKeyAllowed in cmd/server for the raw-key-specific guard built
+// on top of it.
+func (c *Config) IsProduction() bool {
+	if c == nil {
+		return false
+	}
+	return normalizeEnv(c.Env) == "production"
+}
+
 // getEnvDuration parses a Go duration env var (e.g. "24h", "15m", "1h30m"). An
 // unset, unparseable, or non-positive value yields the fallback.
 func getEnvDuration(key string, fallback time.Duration) time.Duration {
@@ -1016,15 +1295,6 @@ func (c *Config) AllSwapFeeDeviationMaxOrDefault() float64 {
 	return c.AllSwapFeeDeviationMax
 }
 
-// AllSwapConservativeFeeBpsOrDefault returns the conservative fee bps charged
-// when LiFi is unreachable (never 0, never the client value), default 350 (3.5%).
-func (c *Config) AllSwapConservativeFeeBpsOrDefault() int {
-	if c == nil || c.AllSwapConservativeFeeBps <= 0 {
-		return 350
-	}
-	return c.AllSwapConservativeFeeBps
-}
-
 // AllSwapNominalFeeBpsOrDefault returns the nominal integrator fee bps used as
 // the verified-fee basis when LiFi is reachable but reports no usable fee figure,
 // default 300 (3%).
@@ -1054,6 +1324,89 @@ func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 	return c.GlobalPoolSettleInterval
 }
 
+// Inbound attribution modes (central-account design §9).
+const (
+	// InboundModeVA — per-user Flutterwave virtual accounts, attribution by
+	// charge.completed webhook. Today's behaviour and the default.
+	InboundModeVA = "va"
+	// InboundModeCentral — one company account; attribution by polling the
+	// wallet statement and matching sender name + amount.
+	InboundModeCentral = "central"
+)
+
+// normalizeInboundMode maps an env value onto a known mode, defaulting to `va`.
+// Unknown values do NOT fail the boot: the safe reading of a typo is "leave the
+// live behaviour alone". Guessing `central` from a near-miss is the far worse
+// failure — every payer redirected onto the company account on the strength of
+// a typo, or, with that account unconfigured, a fleet that refuses to boot.
+func normalizeInboundMode(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), InboundModeCentral) {
+		return InboundModeCentral
+	}
+	return InboundModeVA
+}
+
+// InboundCentralEnabled reports whether inbound naira is attributed through the
+// central account. Read it rather than comparing InboundMode by hand so the
+// pay-into paths (IT buy, stablecoin buy, P2P) and the virtual-account guards
+// cannot drift apart on which account a payer is being sent to.
+func (c *Config) InboundCentralEnabled() bool {
+	return c != nil && c.InboundMode == InboundModeCentral
+}
+
+// dedupeEmails drops repeats from an operator-maintained address list,
+// comparing case-insensitively because a mailbox is the same mailbox however
+// it was typed. The first spelling is kept so the configured order — which is
+// usually the escalation order — survives.
+func dedupeEmails(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, addr := range in {
+		key := strings.ToLower(addr)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// AdminConsoleBaseURL returns one origin an operator can actually click.
+//
+// ADMIN_URL is a comma-separated CORS allow-list, not a single site address,
+// and it is ordered dev-first because that is convenient for CORS. A hold alert
+// linking an on-call operator to http://localhost:5173 is worse than no link at
+// all, so an https origin wins over anything else; the first entry is the
+// fallback for a single-origin deployment.
+func (c *Config) AdminConsoleBaseURL() string {
+	if c == nil {
+		return ""
+	}
+	origins := splitAndTrim(c.AdminURL, ",")
+	for _, o := range origins {
+		if strings.HasPrefix(strings.ToLower(o), "https://") {
+			return strings.TrimRight(o, "/")
+		}
+	}
+	if len(origins) == 0 {
+		return ""
+	}
+	return strings.TrimRight(origins[0], "/")
+}
+
+// InboundPollIntervalOrDefault returns the statement poll period, falling back
+// to the 30s of decision 8 when unset or non-positive.
+func (c *Config) InboundPollIntervalOrDefault() time.Duration {
+	if c == nil || c.InboundPollInterval <= 0 {
+		return 30 * time.Second
+	}
+	return c.InboundPollInterval
+}
+
 // ResolveFiatProvider names the active fiat gateway. Flutterwave is the sole
 // provider: Nomba never granted prod API access and is being retired, so the
 // resolver hard-returns "flutterwave" and can never select Nomba — even when FW
@@ -1071,6 +1424,34 @@ func (c *Config) ResolveFiatProvider() string {
 // missing a colon or with empty key/value are skipped silently — better
 // than failing boot over a typo, since the caller treats absence as
 // "no amount filter for this currency".
+// keepProbedCurrencies returns the subset of currencies that have a usable
+// probe amount, logging (loudly) any it drops.
+//
+// The pairing between BYBIT_P2P_CURRENCIES and BYBIT_PROBE_AMOUNTS is easy to
+// break and impossible to notice: a missing or typo'd probe makes
+// fetchBybitSide skip the amount filter, silently reading a different tier of
+// the order book than every other anchored currency. Failing the boot would be
+// worse — one bad env var should not take the service down — so the currency
+// simply stops being treated as anchored and falls back to OER, which is the
+// same posture as any other unanchored currency.
+func keepProbedCurrencies(currencies []string, probes map[string]string) []string {
+	kept := make([]string, 0, len(currencies))
+	for _, c := range currencies {
+		code := strings.ToUpper(strings.TrimSpace(c))
+		if code == "" {
+			continue
+		}
+		if strings.TrimSpace(probes[code]) == "" {
+			log.Printf("[config] ALERT bybit_probe_missing_total=1 %s is in BYBIT_P2P_CURRENCIES "+
+				"but has no BYBIT_PROBE_AMOUNTS entry — dropping it from the anchored set "+
+				"(it would otherwise be priced off the merchant tier, not the retail tier)", code)
+			continue
+		}
+		kept = append(kept, code)
+	}
+	return kept
+}
+
 func parseProbeAmounts(s string) map[string]string {
 	out := map[string]string{}
 	for _, part := range splitAndTrim(s, ",") {

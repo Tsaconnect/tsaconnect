@@ -1,18 +1,20 @@
 // app/(dashboard)/(tabs)/easyswap.tsx
 //
 // Easyswap — token swap entry. Hosts three sub-views (OTC / Spot Trade / All
-// Swap) behind a tab selector. Restyled onto the TSA Signature design system
+// Swap) behind a tab selector. The OTC pane is a listing CATALOGUE; picking a
+// row's Buy/Sell pushes the trade form at /otc-trade. Restyled onto the TSA Signature design system
 // (theme tokens + @/components/ui primitives): the legacy numbered-pill tab bar
 // is now a SegmentedControl and the "Coming Soon" placeholder is rebuilt on
 // EmptyState + Badge. The swap quote/amount/token-selection/submit flows live
 // inside SwapScreen / AllSwapScreen and are rendered verbatim — unchanged.
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
-import SwapScreen from '@/screens/swap';
-import AllSwapScreen from '@/screens/all-swap';
+import OtcListingList from '@/components/otc/OtcListingList';
+import AllSwapScreen, { type AllSwapPreselection } from '@/screens/all-swap';
 import SpotList from '@/components/spot/SpotList';
+import { singleParam } from '@/utils/spotChains';
 import { useTheme } from '@/theme';
 import { SegmentedControl } from '@/components/ui';
 
@@ -27,8 +29,29 @@ const TABS: { key: Tab; label: string }[] = [
 
 const EasySwap = () => {
   const { colors, spacing } = useTheme();
-  const { tab } = useLocalSearchParams<{ tab?: string }>();
+  // Not typed as `{ tab?: string }` for the new params: expo-router really can
+  // hand back `string[]` for a repeated query param, and it rebuilds that array
+  // every render. singleParam collapses both hazards at the edge, before the
+  // preselection memo can depend on the value — see the note on it.
+  const params = useLocalSearchParams();
+  const tab = singleParam(params.tab);
+  const fromSymbol = singleParam(params.fromSymbol);
+  const fromChain = singleParam(params.fromChain);
+  const toSymbol = singleParam(params.toSymbol);
+  const toChain = singleParam(params.toChain);
+  const fundedLegParam = singleParam(params.fundedLeg);
+  const fundedLeg: AllSwapPreselection['fundedLeg'] =
+    fundedLegParam === 'from' || fundedLegParam === 'to' ? fundedLegParam : undefined;
   const [activeTab, setActiveTab] = useState<Tab>('swap');
+
+  // A fresh object each render would restart All Swap's preselection — and so
+  // its token lookups — on every keystroke the swap form takes.
+  const preselect = useMemo(
+    () => (fromSymbol || toSymbol
+      ? { fromSymbol, fromChain, toSymbol, toChain, fundedLeg }
+      : undefined),
+    [fromSymbol, fromChain, toSymbol, toChain, fundedLeg],
+  );
 
   useEffect(() => {
     if (tab === 'swap' || tab === 'spot' || tab === 'allswap') {
@@ -48,9 +71,9 @@ const EasySwap = () => {
         />
       </View>
 
-      {activeTab === 'swap' && <SwapScreen />}
+      {activeTab === 'swap' && <OtcListingList />}
       {activeTab === 'spot' && <SpotList />}
-      {activeTab === 'allswap' && <AllSwapScreen />}
+      {activeTab === 'allswap' && <AllSwapScreen preselect={preselect} />}
     </SafeAreaView>
   );
 };

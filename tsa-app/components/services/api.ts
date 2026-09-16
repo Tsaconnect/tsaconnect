@@ -204,53 +204,6 @@ export interface CategoryWithDetails extends Category {
 }
 
 
-// Dashboard-specific interfaces
-export interface Asset {
-  _id: string;
-  id: string;
-  symbol: string;
-  name: string;
-  balance: number;
-  usdValue: number;
-  isSelected: boolean;
-  isHidden: boolean;
-  details?: {
-    type: string;
-    chain?: string;
-    address?: string;
-  };
-  currentPrice?: number;
-  priceChange24h?: number;
-}
-
-export interface PortfolioTotals {
-  balance: number;
-  usdValue: number;
-  dailyChange: number;
-}
-
-export interface AssetsResponse {
-  assets: Asset[];
-  totals: PortfolioTotals;
-  lastUpdated: string;
-}
-
-export interface SelectAssetRequest {
-  assetId: string;
-}
-
-export interface RefreshResponse {
-  success: boolean;
-  message: string;
-  data?: any;
-}
-
-export interface AssetVisibilityResponse {
-  success: boolean;
-  message: string;
-  data?: any;
-}
-
 export interface Notification {
   id: string;
   userId: string;
@@ -434,83 +387,6 @@ class APIService {
     });
   }
 
-  // ==================== DASHBOARD ENDPOINTS ====================
-
-  // Get portfolio assets
-  async getPortfolioAssets(): Promise<ApiResponse<AssetsResponse>> {
-    this.getHeaders();
-    console.log('Fetching portfolio assets with headers:', this.getHeaders());
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets`, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<AssetsResponse>(response);
-    } catch (error: any) {
-      console.error('Get portfolio assets error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to load portfolio data.',
-      };
-    }
-  }
-
-  // Refresh portfolio assets
-  async refreshPortfolioAssets(): Promise<ApiResponse<RefreshResponse>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/refresh`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<RefreshResponse>(response);
-    } catch (error: any) {
-      console.error('Refresh portfolio assets error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to refresh assets.',
-      };
-    }
-  }
-
-  // Select an asset
-  async selectAsset(assetId: string): Promise<ApiResponse<SelectAssetRequest>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/select`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({ assetId }),
-      });
-
-      return this.handleResponse<SelectAssetRequest>(response);
-    } catch (error: any) {
-      console.error('Select asset error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to select asset.',
-      };
-    }
-  }
-
-  // Toggle asset visibility
-  async toggleAssetVisibility(assetId: string): Promise<ApiResponse<AssetVisibilityResponse>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/${assetId}/visibility`, {
-        method: 'PUT',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<AssetVisibilityResponse>(response);
-    } catch (error: any) {
-      console.error('Toggle asset visibility error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to update asset visibility.',
-      };
-    }
-  }
-
   // ==================== AUTH ENDPOINTS ====================
 
   // Signup (Screen 1)
@@ -626,24 +502,40 @@ class APIService {
 
   // ==================== SIGNUP FLOW ENDPOINTS ====================
 
-  // Create a KYC session via Persona
+  // Create a KYC session via Didit
   async createKYCSession(): Promise<ApiResponse<{
-    inquiryId: string;
-    inquiryUrl: string;
+    sessionId: string;
+    sessionUrl: string;
+    // True when the API handed back a session already in flight rather than
+    // starting (and billing for) a new one.
+    resumed?: boolean;
+    inquiryId?: string;
+    inquiryUrl?: string;
   }>> {
     const headers = this.getHeaders();
     const response = await fetch(`${API_BASE_URL}/kyc/session`, {
       method: 'POST',
       headers,
     });
-    return this.handleResponse<{ inquiryId: string; inquiryUrl: string }>(response);
+    return this.handleResponse<{
+      sessionId: string;
+      sessionUrl: string;
+      resumed?: boolean;
+      inquiryId?: string;
+      inquiryUrl?: string;
+    }>(response);
   }
 
   // Get KYC verification status
   async getKYCStatus(): Promise<ApiResponse<{
     verificationStatus: string;
     verificationNotes: string;
-    personaInquiryId: string;
+    diditSessionId: string;
+    // Raw Didit status behind in_review — "In Review" means wait, "Resubmitted"
+    // means the user has to redo a step.
+    diditStatus: string;
+    sessionUrl: string;
+    actionRequired: boolean;
     lastAction: string;
     lastActionAt: string;
   }>> {
@@ -655,7 +547,10 @@ class APIService {
     return this.handleResponse<{
       verificationStatus: string;
       verificationNotes: string;
-      personaInquiryId: string;
+      diditSessionId: string;
+      diditStatus: string;
+      sessionUrl: string;
+      actionRequired: boolean;
       lastAction: string;
       lastActionAt: string;
     }>(response);
@@ -1397,6 +1292,13 @@ class APIService {
     category?: string;
     subcategory?: string;
     type?: 'Product' | 'Service';
+    /**
+     * Narrows services to one category serviceType. The server classifies by
+     * CATEGORY, not by the listing's merchant-entered `type`, so `type: 'Product'`
+     * excludes listings sitting in a service category even when they claim
+     * otherwise — and `serviceType` picks a single service bucket.
+     */
+    serviceType?: 'contact' | 'order' | 'booking';
     location?: string;
     minPrice?: number;
     maxPrice?: number;

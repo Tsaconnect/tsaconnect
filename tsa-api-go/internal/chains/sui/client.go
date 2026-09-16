@@ -21,9 +21,13 @@ import (
 const (
 	suiDecimals = 9
 
+	// nativeCoinPackage is the Sui framework's own address, padded as the RPC
+	// returns it; "0x2" is the same package written short.
+	nativeCoinPackage = "0x0000000000000000000000000000000000000000000000000000000000000002"
+
 	// nativeCoinType is the fully-qualified type of the native SUI coin. Sui also
 	// reports the short form "0x2::sui::SUI"; both normalize to this.
-	nativeCoinType      = "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+	nativeCoinType      = nativeCoinPackage + "::sui::SUI"
 	nativeCoinTypeShort = "0x2::sui::SUI"
 
 	// defaultGasBudgetMist is the gas budget (a CAP, not a charge — only actual
@@ -225,6 +229,13 @@ func (c *Client) resolveMetas(ctx context.Context, types []string) (map[string]c
 }
 
 func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (chains.FeeQuote, error) {
+	// An aggregator-built transaction carries its own gas budget; there is
+	// nothing for us to estimate, and no recipient of ours to validate.
+	if req.TxBytesB64 != "" {
+		return chains.FeeQuote{
+			GasSymbol: c.cfg.NativeSymbol, GasDecimals: c.cfg.NativeDecimals, HasEnoughGas: true,
+		}, nil
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.FeeQuote{}, err
 	}
@@ -281,6 +292,18 @@ func buildFeeQuote(suiBalance *big.Int, isNative bool, nativeAmount uint64, symb
 }
 
 func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
+	if req.MemoHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("sui transfers cannot carry a bridge memo")
+	}
+	if req.PSBTHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a PSBT is a Bitcoin transaction; it cannot be signed on sui")
+	}
+	// An aggregator-built transaction is signed as given, once the network has
+	// confirmed what it would move (see prepareFromTxBytes). There is no `To`
+	// to validate on that path: the route decides its own recipients.
+	if req.TxBytesB64 != "" {
+		return c.prepareFromTxBytes(ctx, req)
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

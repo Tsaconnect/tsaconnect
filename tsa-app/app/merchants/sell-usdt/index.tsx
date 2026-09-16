@@ -11,14 +11,12 @@
 // restyle only.
 import React, { useState } from 'react';
 import { View, ScrollView } from 'react-native';
-import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import {
     AccentCard,
     Button,
     Icon,
-    IconButton,
     Text,
     AmountInput,
     SelectRow,
@@ -36,24 +34,6 @@ const SellUSDTScreen = () => {
 
     return (
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-            {/* Header */}
-            <View
-                style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: spacing.sm,
-                    paddingHorizontal: spacing.lg,
-                    paddingVertical: spacing.md,
-                    borderBottomWidth: 1,
-                    borderBottomColor: colors.hairline,
-                }}
-            >
-                <IconButton icon="chevronLeft" onPress={() => router.back()} accessibilityLabel="Go back" />
-                <Text variant="title2" weight="700">
-                    Sell USDT
-                </Text>
-            </View>
-
             <ScrollView
                 contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
                 keyboardShouldPersistTaps="handled"

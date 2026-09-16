@@ -30,6 +30,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import NotificationBell from "../../components/NotificationBell";
 import { useTheme, fontFamily } from "@/theme";
 import { Avatar, Divider, Text } from "@/components/ui";
+import { showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
 
 interface UserProfile {
   _id: string;
@@ -344,6 +345,13 @@ const Layout = () => {
                 </Pressable>
               </View>
               ),
+              // The drawer header owns the tab ROOTS only. Once a tab pushes a
+              // screen, that screen's own header (back · title · actions) takes
+              // over — rendering both stacked two nav bars on every detail page.
+              //
+              // React Navigation populates `state` on a route hosting a nested
+              // navigator, but leaves it off the public RouteProp type.
+              headerShown: showDrawerHeader((route as { state?: NestedNavState }).state),
               headerTitle: "TSA Connect",
               title: "Dashboard",
               headerTitleAlign: "center",
@@ -431,27 +439,6 @@ const Layout = () => {
           options={{
             title: "Reward",
             drawerActiveTintColor: colors.accent,
-          }}
-        />
-        <Drawer.Screen
-          name="orderdetail"
-          options={{
-            title: "Order Detail",
-            drawerItemStyle: { display: "none" },
-          }}
-        />
-        <Drawer.Screen
-          name="kyc"
-          options={{
-            title: "KYC Verification",
-            drawerItemStyle: { display: "none" },
-          }}
-        />
-        <Drawer.Screen
-          name="add-category"
-          options={{
-            title: "Add Category",
-            drawerItemStyle: { display: "none" },
           }}
         />
       </Drawer>

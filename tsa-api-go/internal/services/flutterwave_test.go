@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -386,5 +387,371 @@ func TestGetChargeNotFoundIsDistinguishable(t *testing.T) {
 	}
 	if errors.Is(err, ErrFWChargeNotFound) {
 		t.Errorf("a 500 must NOT be treated as charge-not-found: %v", err)
+	}
+}
+
+// ─── FWAmount (production: /transfers/rates strings) ───────────────────────
+
+// fwRatesHandler stands up a /transfers/rates handler that always answers
+// with body, regardless of the requested pair — good enough to pin a decode
+// shape without caring what QuoteRate's caller asked for.
+func fwRatesHandler(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+// TestQuoteRate_DecodesStringNumbersFromProduction pins the exact shape
+// production Flutterwave sends: 2026-08-31, "rate" AND both "amount" fields
+// arrived as JSON strings, not numbers as the sandbox returns, and broke the
+// whole decode with "cannot unmarshal string into Go struct field". Both the
+// sell probe shape (source=asset, destination=fiat — QuoteStableSell's call)
+// and the buy probe shape (source=fiat, destination=asset — QuoteStableBuy's
+// call) must decode and derive the same rate a numeric wire would give.
+func TestQuoteRate_DecodesStringNumbersFromProduction(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/transfers/rates", fwRatesHandler(`{
+		"status": "success",
+		"data": {
+			"rate": "0.000707",
+			"source": {"currency": "USDC", "amount": "1"},
+			"destination": {"currency": "NGN", "amount": "1650.25"}
+		}
+	}`))
+	c, _ := newFWTestServer(t, mux)
+
+	rate, err := c.QuoteRate(context.Background(), "USDC", "NGN", 1650.25)
+	if err != nil {
+		t.Fatalf("QuoteRate: %v", err)
+	}
+	if rate.Source.Amount.Float64() != 1 || rate.Destination.Amount.Float64() != 1650.25 {
+		t.Fatalf("decoded amounts wrong: source=%v destination=%v",
+			rate.Source.Amount.Float64(), rate.Destination.Amount.Float64())
+	}
+
+	// Sell-shaped: source is the asset, so DeriveFiatPerUnit (dst/src) applies.
+	sell, err := DeriveFiatPerUnit(rate)
+	if err != nil {
+		t.Fatalf("DeriveFiatPerUnit: %v", err)
+	}
+	if want := new(big.Rat).SetFloat64(1650.25); sell.Cmp(want) != 0 {
+		t.Fatalf("DeriveFiatPerUnit = %s, want %s", sell.FloatString(6), want.FloatString(6))
+	}
+
+	// Buy-shaped: source is the fiat, destination the asset, so
+	// DeriveBuyFiatPerUnit (src/dst) applies to a mirror-image response.
+	buyRate := FWRate{
+		Source:      FWMoney{Currency: "NGN", Amount: rate.Destination.Amount},
+		Destination: FWMoney{Currency: "USDC", Amount: rate.Source.Amount},
+	}
+	buy, err := DeriveBuyFiatPerUnit(buyRate)
+	if err != nil {
+		t.Fatalf("DeriveBuyFiatPerUnit: %v", err)
+	}
+	if buy.Cmp(sell) != 0 {
+		t.Fatalf("DeriveBuyFiatPerUnit = %s, want %s (same underlying rate, mirrored)",
+			buy.FloatString(6), sell.FloatString(6))
+	}
+}
+
+// TestQuoteRate_DecodesNumericWireNoRegression pins the sandbox's numeric
+// wire shape still decodes, so the tolerant type doesn't regress the
+// previously-working case.
+func TestQuoteRate_DecodesNumericWireNoRegression(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/transfers/rates", fwRatesHandler(`{
+		"status": "success",
+		"data": {
+			"rate": 0.000707,
+			"source": {"currency": "USDC", "amount": 1},
+			"destination": {"currency": "NGN", "amount": 1650.25}
+		}
+	}`))
+	c, _ := newFWTestServer(t, mux)
+
+	rate, err := c.QuoteRate(context.Background(), "USDC", "NGN", 1650.25)
+	if err != nil {
+		t.Fatalf("QuoteRate: %v", err)
+	}
+	got, err := DeriveFiatPerUnit(rate)
+	if err != nil {
+		t.Fatalf("DeriveFiatPerUnit: %v", err)
+	}
+	if want := new(big.Rat).SetFloat64(1650.25); got.Cmp(want) != 0 {
+		t.Fatalf("DeriveFiatPerUnit = %s, want %s", got.FloatString(6), want.FloatString(6))
+	}
+}
+
+// TestQuoteRate_DecodesMixedStringAndNumericAmounts pins the mixed shape —
+// string rate, numeric amounts — which is what production appears to send
+// on at least some responses; the two amounts must not need to agree on
+// representation with each other or with rate.
+func TestQuoteRate_DecodesMixedStringAndNumericAmounts(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/transfers/rates", fwRatesHandler(`{
+		"status": "success",
+		"data": {
+			"rate": "0.000707",
+			"source": {"currency": "USDC", "amount": 1},
+			"destination": {"currency": "NGN", "amount": 1650.25}
+		}
+	}`))
+	c, _ := newFWTestServer(t, mux)
+
+	rate, err := c.QuoteRate(context.Background(), "USDC", "NGN", 1650.25)
+	if err != nil {
+		t.Fatalf("QuoteRate: %v", err)
+	}
+	got, err := DeriveFiatPerUnit(rate)
+	if err != nil {
+		t.Fatalf("DeriveFiatPerUnit: %v", err)
+	}
+	if want := new(big.Rat).SetFloat64(1650.25); got.Cmp(want) != 0 {
+		t.Fatalf("DeriveFiatPerUnit = %s, want %s", got.FloatString(6), want.FloatString(6))
+	}
+}
+
+// TestFWQuoteAmount_UnmarshalJSON exercises the type directly for the wire
+// shapes DeriveFiatPerUnit/ErrBadFxProbe depend on: null and "" must yield a
+// usable zero (never an error — a missing optional amount must not fail the
+// whole response), while a non-numeric string must error rather than
+// silently becoming a zero that ErrBadFxProbe's guard would then miss.
+func TestFWQuoteAmount_UnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		wire    string
+		want    float64
+		wantErr bool
+	}{
+		{"number", `1650.25`, 1650.25, false},
+		{"numeric string", `"1650.25"`, 1650.25, false},
+		{"null", `null`, 0, false},
+		{"empty string", `""`, 0, false},
+		{"whitespace string", `"  "`, 0, false},
+		{"garbage string", `"abc"`, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a FWQuoteAmount
+			err := json.Unmarshal([]byte(tc.wire), &a)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("wire %q: want error, got amount=%v", tc.wire, a.Float64())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wire %q: unexpected error: %v", tc.wire, err)
+			}
+			if a.Float64() != tc.want {
+				t.Fatalf("wire %q: got %v, want %v", tc.wire, a.Float64(), tc.want)
+			}
+		})
+	}
+}
+
+// TestQuoteRate_NullAmountDoesNotFailTheWholeQuote pins that a null amount on
+// one side decodes to zero rather than failing the decode outright — the
+// zero is then what ErrBadFxProbe's positive-amount guard catches downstream,
+// not a decode error masking that guard's job.
+func TestQuoteRate_NullAmountDoesNotFailTheWholeQuote(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/transfers/rates", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {
+				"rate": "0.000707",
+				"source": {"currency": "NGN", "amount": null},
+				"destination": {"currency": "USDC", "amount": ""}
+			}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	rate, err := c.QuoteRate(context.Background(), "NGN", "USDC", 1)
+	if err != nil {
+		t.Fatalf("QuoteRate: %v", err)
+	}
+	if rate.Source.Amount.Float64() != 0 || rate.Destination.Amount.Float64() != 0 {
+		t.Fatalf("null/empty amounts should decode to zero, got source=%v destination=%v",
+			rate.Source.Amount.Float64(), rate.Destination.Amount.Float64())
+	}
+	if _, err := DeriveFiatPerUnit(rate); !errors.Is(err, ErrBadFxProbe) {
+		t.Fatalf("DeriveFiatPerUnit on a zero probe: want ErrBadFxProbe, got %v", err)
+	}
+}
+
+// TestQuoteRate_UnparseableAmountStringIsAnError pins that a genuinely
+// unparseable amount fails the decode loudly rather than being coerced to a
+// zero that would then read as a merely-implausible (not corrupt) quote.
+func TestQuoteRate_UnparseableAmountStringIsAnError(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/transfers/rates", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {
+				"rate": "0.000707",
+				"source": {"currency": "NGN", "amount": "abc"},
+				"destination": {"currency": "USDC", "amount": "1"}
+			}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	if _, err := c.QuoteRate(context.Background(), "NGN", "USDC", 1); err == nil {
+		t.Fatal("QuoteRate: want an error for an unparseable amount string, got nil")
+	}
+}
+
+// ─── FWFeeAmount / GetFees ──────────────────────────────────────────────────
+
+// TestFWFeeAmount_UnmarshalJSON exercises the type directly for the wire
+// shapes GetFees depends on: the historical scalar/numeric-string/null shape
+// must keep working unchanged, the production array shape (inferred: numeric
+// elements summed — see FWFeeAmount's doc comment) must decode instead of
+// failing the whole /fees response, and anything genuinely unparseable
+// (garbage string, or an array holding a non-numeric element such as an
+// object) must error rather than silently becoming a zero fee.
+func TestFWFeeAmount_UnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		wire    string
+		want    float64
+		wantErr bool
+	}{
+		{"scalar number (legacy shape)", `53.75`, 53.75, false},
+		{"numeric string", `"53.75"`, 53.75, false},
+		{"null", `null`, 0, false},
+		{"empty string", `""`, 0, false},
+		{"array of numbers (production shape, inferred)", `[10, 5.5]`, 15.5, false},
+		{"array of numeric strings", `["10", "5.5"]`, 15.5, false},
+		{"single-element array", `[53.75]`, 53.75, false},
+		{"empty array", `[]`, 0, false},
+		{"garbage string", `"abc"`, 0, true},
+		{"array with non-numeric element", `[10, {"amount": 5}]`, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a FWFeeAmount
+			err := json.Unmarshal([]byte(tc.wire), &a)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("wire %q: want error, got amount=%v", tc.wire, a.Float64())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wire %q: unexpected error: %v", tc.wire, err)
+			}
+			if a.Float64() != tc.want {
+				t.Fatalf("wire %q: got %v, want %v", tc.wire, a.Float64(), tc.want)
+			}
+		})
+	}
+}
+
+// TestGetFees_ScalarFeeShape pins the historical shape (fee/vat as bare
+// numbers) still decodes exactly as before — no regression from adding array
+// support.
+func TestGetFees_ScalarFeeShape(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": 53.75, "vat": 4.03}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 53.75 || fees[0].VAT.Float64() != 4.03 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_ArrayFeeShape pins the fix for the production bug: Flutterwave
+// production was observed returning "fee" as a JSON array (see FWFeeAmount's
+// doc comment for what was and wasn't directly observed), which previously
+// failed decode outright with "cannot unmarshal array into Go struct field
+// FWFee.fee of type float64" — silently falling back to the uncalibrated
+// config estimate on every live payout quote. It must now decode.
+func TestGetFees_ArrayFeeShape(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": [45, 8.75], "vat": [4.03]}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 53.75 || fees[0].VAT.Float64() != 4.03 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_NullFee pins that a null fee decodes to a usable zero rather
+// than failing the response, matching FWQuoteAmount's null handling.
+func TestGetFees_NullFee(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": null, "vat": ""}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 0 || fees[0].VAT.Float64() != 0 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_UnparseableFeeIsAnError pins that a fee value which cannot be
+// interpreted as a number at all (not scalar, not numeric string, not a
+// numeric array) fails the decode rather than silently becoming a zero fee —
+// a zero provider fee is a plausible-looking number that would under-charge
+// a live payout.
+func TestGetFees_UnparseableFeeIsAnError(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": "abc", "vat": 0}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	if _, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG"); err == nil {
+		t.Fatal("GetFees: want an error for an unparseable fee, got nil")
 	}
 }

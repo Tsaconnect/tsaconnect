@@ -159,7 +159,7 @@ func (s *OTCService) callView(method string, args ...interface{}) (*big.Int, err
 // buildUnsignedTx creates an UnsignedTx JSON for the OtcMarketplace contract.
 func (s *OTCService) buildUnsignedTx(from string, callData []byte, allowEstimateFallback bool) ([]byte, error) {
 	if s.client == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{

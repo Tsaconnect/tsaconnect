@@ -10,6 +10,7 @@
 // message-agnostic and handles both legacy and v0 versioned messages).
 import { base58, base64 } from '@scure/base';
 import { bytesToHex } from '@noble/hashes/utils';
+import { txHashOrThrow, SWAP_COPY } from '../submitErrors';
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAuthHeaders } from '../walletApi';
 import { getMnemonic } from '../wallet';
@@ -97,6 +98,12 @@ export interface ExecuteLiFiSolanaSwapParams {
   fromSymbol: string;
   /** EVM wallet id — used to look up the mnemonic + derived Solana address. */
   walletAddress: string;
+  /**
+   * Fee bucket + human-units amount, recorded server-side at broadcast so the
+   * platform fee survives a client that never calls settle. Omitted for a swap
+   * that owes nothing.
+   */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
   onStage?: (label: string) => void;
 }
 
@@ -109,6 +116,7 @@ export async function executeLiFiSolanaSwap({
   fromAmountRaw,
   fromSymbol,
   walletAddress,
+  fee,
   onStage,
 }: ExecuteLiFiSolanaSwapParams): Promise<string> {
   // The broadcast is pinned to mainnet, so refuse to execute while the app is
@@ -157,6 +165,16 @@ export async function executeLiFiSolanaSwap({
       from: solAddress,
       amount: fromAmountRaw,
       symbol: fromSymbol,
+      // amount above is base units; the fee amount is whole tokens, hence a
+      // separate field rather than reusing it.
+      ...(fee && fee.feature !== 'none'
+        ? {
+            feeDeferred: true,
+            feeFeature: fee.feature,
+            feeAmountHuman: fee.amountHuman,
+            feeChainId: fee.chainId ?? 0,
+          }
+        : {}),
     }),
   });
   const text = await res.text();
@@ -164,7 +182,11 @@ export async function executeLiFiSolanaSwap({
   try { json = text ? JSON.parse(text) : {}; } catch { json = { message: text.slice(0, 200) }; }
   if (!res.ok || !json?.data?.txHash) {
     console.error('[swap] solana submit-tx failed', { status: res.status, message: json?.message });
-    throw new Error(json?.message || 'Swap broadcast failed. The network may be congested — try again.');
   }
-  return json.data.txHash;
+  // SWAP_COPY, not TRANSFER_COPY: this leg is quoted, so "try again" without
+  // refreshing the quote can fill at a price the user never saw.
+  return txHashOrThrow(
+    { success: res.ok, message: json?.message, data: json?.data },
+    SWAP_COPY,
+  );
 }

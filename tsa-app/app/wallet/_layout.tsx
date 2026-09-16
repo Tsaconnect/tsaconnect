@@ -1,37 +1,21 @@
 // app/wallet/_layout.tsx
 //
-// Stack layout for the Wallet section (home, token details, manage, send,
-// receive, instant pay, seed phrase, history, all tokens, import crypto).
-// Migrated onto the TSA Signature design system: header chrome (background /
-// tint / title color / font) is now sourced from useTheme() tokens instead of
-// the legacy `defaultScreenOptions` constant, so it tracks light & dark
-// automatically. Screen registrations, names, order, and titles are preserved
-// verbatim — `home` still hides its header (`headerShown: false`) exactly as
-// before; the themed options apply to every screen that renders a header.
+// Stack layout for the Wallet section (token details, manage, send, receive,
+// instant pay, seed phrase, history, all tokens, import crypto) plus the MCGP
+// and Instant Transfer sub-stacks.
+//
+// Header chrome comes from the shared useDefaultScreenOptions() so this section
+// cannot drift from the rest of the app. Note there is deliberately no `index`
+// route here: the wallet's home IS the tokenization tab, which is why every
+// screen below is entered from outside this group and why the shared back
+// chevron (and the WALLET_TAB fallback) matters so much here.
 import React from 'react';
 import { Stack } from 'expo-router';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
+import { WALLET_TAB } from '@/constants/routes';
 
 const WalletLayout = () => {
-  const { colors, type } = useTheme();
-
-  const screenOptions: NativeStackNavigationOptions = {
-    headerTitleAlign: 'center',
-    headerTintColor: colors.accent,
-    headerTitleStyle: {
-      fontSize: type.title3.fontSize,
-      fontFamily: fontFamily['600'],
-      color: colors.textPrimary,
-    },
-    headerStyle: {
-      backgroundColor: colors.surface,
-    },
-    headerShadowVisible: false,
-    contentStyle: {
-      backgroundColor: colors.background,
-    },
-  };
+  const screenOptions = useDefaultScreenOptions({ backFallback: WALLET_TAB });
 
   return (
     <Stack screenOptions={screenOptions}>
@@ -43,6 +27,7 @@ const WalletLayout = () => {
       <Stack.Screen name="mcgp" options={{ headerShown: false }} />
       <Stack.Screen name="spot-trade" options={{ title: 'Spot Trade' }} />
       <Stack.Screen name="it" options={{ headerShown: false }} />
+      <Stack.Screen name="paycrest" options={{ headerShown: false }} />
       <Stack.Screen name="seedphrase" options={{ title: 'Seed Phrase' }} />
       <Stack.Screen name="history" options={{ title: 'Transaction History' }} />
       <Stack.Screen name="tokens" options={{ title: 'All Tokens' }} />

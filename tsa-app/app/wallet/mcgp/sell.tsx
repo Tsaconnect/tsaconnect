@@ -16,6 +16,8 @@ import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getMcgpQuote } from '@/services/mcgpSwapApi';
 import { executeSellPremium } from '@/services/mcgpFlow';
 import { useMcgpBalances } from '@/hooks/useMcgpBalances';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
+import { checkSellableForUsdc, mapMcgpSellError } from '@/services/mcgpSellGuard';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
@@ -23,7 +25,13 @@ const fromUsdc = (b: string) => Number(ethers.formatUnits(b || '0', 6)).toFixed(
 
 export default function SellMcgp() {
   const { colors, spacing } = useTheme();
-  const { usdc, mcgpPremium, mcgpPremiumStr } = useMcgpBalances();
+  const {
+    usdc,
+    mcgpSellableForUsdc,
+    mcgpSellableForUsdcStr,
+    loading: balLoading,
+    walletMissing,
+  } = useMcgpBalances();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [usdcOut, setUsdcOut] = useState('0');
@@ -45,14 +53,22 @@ export default function SellMcgp() {
       setError('Enter an amount');
       return;
     }
+    // Naira-bought MCGP cannot be sold for USDC (sellPremium reverts
+    // "Insufficient bought premium") — catch it before any network call
+    // instead of surfacing a raw gas-estimation error.
+    const blocked = checkSellableForUsdc(base, mcgpSellableForUsdcStr);
+    if (blocked) {
+      setError(blocked);
+      return;
+    }
     try {
       setLoading(true);
       const q = await getMcgpQuote('premiumSell', base);
-      if (!q.success || !q.data) throw new Error(q.message || 'Quote failed');
+      if (!q.success || !q.data) throw new Error(mapMcgpSellError(q.message) || 'Quote failed');
       setUsdcOut(q.data.usdcAmount);
       setScreen('confirm');
     } catch (e: any) {
-      setError(e.message || 'Could not get a quote');
+      setError(mapMcgpSellError(e.message) || 'Could not get a quote');
     } finally {
       setLoading(false);
     }
@@ -66,7 +82,7 @@ export default function SellMcgp() {
       await executeSellPremium(base, usdcOut);
       setScreen('success');
     } catch (e: any) {
-      setError(e.message || 'Transaction failed');
+      setError(mapMcgpSellError(e.message) || 'Transaction failed');
       setScreen('failure');
     }
   };
@@ -131,18 +147,22 @@ export default function SellMcgp() {
     );
   }
 
+  // No signing key here — never render a balance the user cannot spend.
+  if (!balLoading && walletMissing) return <NoLocalWalletScreen action="sell MCGP" />;
+
   // form
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Sell spendable premium MCGP back for USDC.
+          Sell MCGP bought with USDC back for USDC. MCGP bought with naira can be spent in the
+          app or sold for naira on Instant Transfer, but not sold for USDC.
         </Text>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text variant="bodySm" color="textSecondary">
-            Balance: {mcgpPremium.toLocaleString(undefined, { maximumFractionDigits: 2 })} MCGP · ${usdc.toFixed(2)} USDC
+            Sellable for USDC: {mcgpSellableForUsdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} MCGP · ${usdc.toFixed(2)} USDC
           </Text>
-          <PressableScale onPress={() => { setAmount(mcgpPremiumStr); setError(''); }} accessibilityLabel="Use max">
+          <PressableScale onPress={() => { setAmount(mcgpSellableForUsdcStr); setError(''); }} accessibilityLabel="Use max">
             <Text variant="bodySm" weight="700" color="accent">Max</Text>
           </PressableScale>
         </View>

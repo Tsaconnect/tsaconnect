@@ -1,11 +1,16 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
+	"math/big"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -22,13 +27,29 @@ import (
 // In this phase the NGN legs are admin-approved (buy credit / sell settle /
 // reverse) because auto-credit is gated on the confirmed strong attribution key.
 type ITHandler struct {
-	db *gorm.DB
-	it *services.ITService
+	db         *gorm.DB
+	it         *services.ITService
+	currencies *services.CurrencyRegistry
+	// legs answers which DIRECTIONS a ramp currency can trade right now. Set
+	// separately because the Paycrest stack is built later in boot (and is
+	// dormant without a key) — see SetRampLegs.
+	legs RampLegSource
 }
 
-func NewITHandler(db *gorm.DB, it *services.ITService) *ITHandler {
-	return &ITHandler{db: db, it: it}
+// RampLegSource is the narrow seam over PaycrestQuoteService this handler
+// needs. *services.PaycrestQuoteService satisfies it as-is.
+type RampLegSource interface {
+	RampLegs(ctx context.Context) (map[string]services.RampLegs, error)
 }
+
+func NewITHandler(db *gorm.DB, it *services.ITService, currencies *services.CurrencyRegistry) *ITHandler {
+	return &ITHandler{db: db, it: it, currencies: currencies}
+}
+
+// SetRampLegs wires the live direction source. Without it, and whenever it
+// cannot answer, Currencies falls back to advertising both directions for any
+// currency that has a provider — see the reasoning there.
+func (h *ITHandler) SetRampLegs(src RampLegSource) { h.legs = src }
 
 func (h *ITHandler) userWallet(userID uuid.UUID) string {
 	var u models.User
@@ -58,6 +79,117 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 		"buyRateKobo": buyKobo.String(), "sellRateKobo": sellKobo.String(),
 		"stale": fx.Stale,
 	})
+}
+
+// rampLegsTimeout bounds the live direction lookup on the currency list. The
+// fallback (both directions for provider-backed currencies) is correct and
+// instant, so there is no reason to make a user wait on Paycrest to reach it.
+const rampLegsTimeout = 2 * time.Second
+
+// GET /api/it/currencies — every currency the ramp knows about, and who serves
+// it.
+//
+// Payout-only currencies are LISTED with an empty rampProvider rather than
+// omitted. The app should be able to say "not available in USD" instead of
+// silently lacking the option, which reads as a bug to the user.
+//
+// rampProvider says WHO serves the currency; rampBuy/rampSell say WHICH WAY it
+// can trade at this moment. The two are separate because they change for
+// different reasons — a provider is a product decision an operator makes, a
+// direction is provider liquidity that moves on its own.
+func (h *ITHandler) Currencies(c *gin.Context) {
+	if h.currencies == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Currency list unavailable")
+		return
+	}
+	type row struct {
+		Code           string `json:"code"`
+		Exponent       int    `json:"exponent"`
+		RampProvider   string `json:"rampProvider"`
+		RampBuy        bool   `json:"rampBuy"`
+		RampSell       bool   `json:"rampSell"`
+		DepositEnabled bool   `json:"depositEnabled"`
+		PayoutEnabled  bool   `json:"payoutEnabled"`
+		MinPayoutMinor int64  `json:"minPayoutMinor"`
+	}
+
+	// Which directions actually have liquidity right now. A currency can have a
+	// provider and still trade one way only: UGX and TZS are offramp-only
+	// today, so the app must show Sell without Buy.
+	//
+	// legs == nil means we could not find out — the Paycrest stack is dormant,
+	// or its order book has never loaded. Then every currency WITH a provider
+	// is reported as trading both ways, which is what this endpoint said before
+	// directions existed.
+	//
+	// That fallback is deliberately optimistic, and the choice is asymmetric:
+	// reporting "no legs" would take the live NGN rail out of the app because a
+	// public book was briefly unreachable, while an over-reported leg costs the
+	// user one error at quote time and nothing more — CreateBuy/CreateSell
+	// still refuse an order no venue can fill.
+	var legs map[string]services.RampLegs
+	if h.legs != nil {
+		// Bounded well under the Paycrest client's own 30s timeout: this runs
+		// on every hub focus, the answer is cached for 20s, and the fallback
+		// below is both cheap and safe — so waiting on a slow upstream buys
+		// nothing a user would want.
+		ctx, cancel := context.WithTimeout(c.Request.Context(), rampLegsTimeout)
+		defer cancel()
+
+		var err error
+		if legs, err = h.legs.RampLegs(ctx); err != nil {
+			log.Printf("[IT] ramp_legs_unavailable err=%v — reporting both directions for provider-backed currencies", err)
+			legs = nil
+		}
+		// An EMPTY map is not the same as a nil one in Go, and reading it as
+		// "nothing trades" would take every currency dark. RampLegs already
+		// refuses to return one, so this is the guard for a future source that
+		// does not — the distinction is too costly to leave to one caller.
+		if len(legs) == 0 {
+			legs = nil
+		}
+	}
+
+	all := h.currencies.All()
+	out := make([]row, 0, len(all))
+	for _, cur := range all {
+		provider := h.currencies.RampProvider(cur.Code)
+		buy, sell := false, false
+		// Paycrest specifically, not "any non-empty provider". Two reasons,
+		// both silent failures otherwise:
+		//
+		//   The kill switch. An operator disables a rail by setting
+		//   ramp_provider to something unrecognised, and requirePaycrestEnabled
+		//   then refuses every order. A != none test would keep reporting the
+		//   legs Paycrest's book still lists, so the app would show live
+		//   buttons for a rail that refuses everything.
+		//
+		//   A second provider. The legs come from PAYCREST's book; looking a
+		//   Flutterwave currency up in it would report closed with no error and
+		//   no log. Any other provider stays false until it has a leg source of
+		//   its own, which is the honest answer and matches what the order path
+		//   will actually do.
+		if provider == services.RampProviderPaycrest {
+			if legs == nil {
+				buy, sell = true, true
+			} else {
+				l := legs[strings.ToUpper(cur.Code)]
+				buy, sell = l.Buy, l.Sell
+			}
+		}
+		out = append(out, row{
+			Code:           cur.Code,
+			Exponent:       cur.Exponent,
+			RampProvider:   provider,
+			RampBuy:        buy,
+			RampSell:       sell,
+			DepositEnabled: cur.DepositEnabled,
+			PayoutEnabled:  cur.PayoutEnabled,
+			MinPayoutMinor: cur.MinPayoutMinor,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	utils.SuccessResponse(c, http.StatusOK, "Currencies", out)
 }
 
 // GET /api/it/withdraw/quote?ngn=<amt>&currency=<ISO> — live FX preview for a
@@ -120,18 +252,18 @@ func (h *ITHandler) GetBalance(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, c.Query("address"))
+	if !ok {
 		return
 	}
 	swap := h.it.Swap()
-	bought, _ := swap.PremiumBought(user.WalletAddress)
-	credited, _ := swap.PremiumCredited(user.WalletAddress)
-	pending, _ := swap.PendingSettle(user.WalletAddress)
-	legacy, _ := swap.LegacyRemaining(user.WalletAddress)
+	bought, _ := swap.PremiumBought(wallet)
+	credited, _ := swap.PremiumCredited(wallet)
+	pending, _ := swap.PendingSettle(wallet)
+	legacy, _ := swap.LegacyRemaining(wallet)
 	utils.SuccessResponse(c, http.StatusOK, "Balance", gin.H{
 		"premiumBought":   bigOrZero(bought),   // self-exitable (USDC-bought)
-		"premiumCredited": bigOrZero(credited), // IT/NGN, spend-only
+		"premiumCredited": bigOrZero(credited), // IT/NGN-credited
 		"pendingSettle":   bigOrZero(pending),  // in-flight NGN sell
 		"legacyRemaining": bigOrZero(legacy),
 	})
@@ -158,6 +290,63 @@ func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
 	}
 }
 
+// centralPayTo is the same card as fiatVAPayTo, filled from the one company
+// account every payer is sent to after the cutover — plus the figure to send.
+//
+// The amount is not a display convenience. Nothing we mint survives a bank
+// transfer into a shared account, so the payer's name and this exact number are
+// the whole attribution key (design §5.3): a buyer who sends a different figure
+// is a hold for an operator instead of an instant settlement. It is taken from
+// the MINTED order rather than from what the user asked for, because
+// OpenBuyOrder snaps the ask to whole naira and the screen must never disagree
+// with the row the matcher compares against — which is also why the kobo divide
+// exactly here.
+//
+// Key names match fiatVAPayTo's ("bank", not "bankName") so the buy screen
+// renders one card either side of the cutover.
+//
+// payerLegalName is the requesting user's own verified name, so the instruction
+// can name the account holder to pay from; "" gives the generic wording.
+func centralPayTo(a services.CentralAccount, ngnKobo, payerLegalName string) gin.H {
+	return gin.H{
+		"accountNumber": a.AccountNumber,
+		"bank":          a.BankName,
+		"accountName":   a.AccountName,
+		"amountNgn":     wholeNairaFromKobo(ngnKobo),
+		// Absent from fiatVAPayTo on purpose: a VA is already in the payer's
+		// own name, so the warning would be telling them to fix what is not
+		// broken.
+		"payerInstruction": a.PayerInstruction(payerLegalName),
+	}
+}
+
+// wholeNairaFromKobo renders kobo as the naira figure a payer types into their
+// bank app. Unparseable input yields "" rather than a guess — a wrong number
+// here is money sent to an amount nothing will match.
+//
+// Rounds half away from zero because that is what the order was minted with
+// (wholeNairaKobo) and what the matcher rounds a credit's gross with
+// (roundKoboToNaira). Truncating instead showed a pre-cutover order of ₦1,000.50
+// as ₦1,000 while the claim offered for it asked ₦1,001: the payer sends what
+// the screen told them, the two figures disagree by a naira, and the credit
+// holds for an operator every single time with the money already gone.
+func wholeNairaFromKobo(ngnKobo string) string {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(ngnKobo), 10)
+	if !ok {
+		return ""
+	}
+	hundred := big.NewInt(100)
+	q, r := new(big.Int).QuoRem(n, hundred, new(big.Int))
+	if r.CmpAbs(big.NewInt(50)) >= 0 {
+		if n.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	return q.String()
+}
+
 // fiatVAView is the client-safe projection of a FiatVirtualAccount. The raw
 // model is deliberately NOT serialized: fw_customer_id and reference are the
 // keys webhook settlement attributes payments on, and clients have no use for
@@ -179,6 +368,15 @@ func (h *ITHandler) GetVA(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	// A pre-cutover user still has a virtual-account row, and after the cutover
+	// nothing reads its statement — so returning it is a pay-into card for an
+	// account that swallows transfers. Gone rather than 404: this is not "you
+	// have not activated yet", which is what would send them to an activation
+	// that now refuses. The account to pay into comes with the order.
+	if _, ok := h.it.ActiveCentralAccount(); ok {
+		utils.ErrorResponse(c, http.StatusGone, services.ErrITVARetired.Error())
 		return
 	}
 	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
@@ -235,10 +433,17 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 	va, err := h.it.ActivateFiatVA(c.Request.Context(), user, idType, idNumber)
 	if err != nil {
 		switch {
+		case errors.Is(err, services.ErrITVARetired):
+			// Gone, not 5xx: the cutover removed the feature, so a retry can
+			// only fail again. The default branch below would answer "please try
+			// again", which is how a user ends up hammering a dead path.
+			utils.ErrorResponse(c, http.StatusGone, err.Error())
 		case errors.Is(err, services.ErrITVANotConfigured):
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
 		case errors.Is(err, services.ErrITVAWalletRequired):
 			utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		case errors.Is(err, services.ErrKYCVerificationRequired):
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
 		case errors.Is(err, services.ErrITKYCRequired):
 			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
 		default:
@@ -280,45 +485,82 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-
-	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
-	if errors.Is(err, services.ErrITVANotFound) {
-		mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
-		if qerr != nil {
-			utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
-			return
-		}
-		utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
-			"needsActivation": true,
-			"quote": gin.H{
-				"ngnKobo":    strings.TrimSpace(req.NgnKobo),
-				"mcgpAmount": mcgp.String(),
-				"rateKobo":   rate.String(),
-			},
-			"payTo":  nil,
-			"intent": nil,
-		})
+	// Ahead of the VA branch below, which answers a user with no virtual
+	// account by telling them to activate one. An unverified user must be sent
+	// to verification instead of onto a rail that is being retired.
+	if !h.requireVerifiedForMoneyIn(c, user.ID) {
 		return
 	}
-	if err != nil {
-		log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
-		return
+
+	// Central mode has no per-user account to find, so the VA lookup — and the
+	// activation refusal hanging off it — must not run at all. Left in place it
+	// locks every user without a legacy virtual account out of buying MCGP
+	// entirely, for an activation that ActivateFiatVA now refuses anyway.
+	central, centralMode := h.it.ActiveCentralAccount()
+
+	var va *models.FiatVirtualAccount
+	if !centralMode {
+		var err error
+		va, err = h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+		if errors.Is(err, services.ErrITVANotFound) {
+			mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
+			if qerr != nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
+				return
+			}
+			utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
+				"needsActivation": true,
+				"quote": gin.H{
+					"ngnKobo":    strings.TrimSpace(req.NgnKobo),
+					"mcgpAmount": mcgp.String(),
+					"rateKobo":   rate.String(),
+				},
+				"payTo":  nil,
+				"intent": nil,
+			})
+			return
+		}
+		if err != nil {
+			log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+			return
+		}
 	}
 
 	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
 	if err != nil {
+		// The pre-check above already refused an unverified user, so reaching
+		// here means the status changed underneath the request. Still map it
+		// properly: a blanket 400 gives the app no code to route on and leaves
+		// the user on a payment screen with nowhere to go, which is the whole
+		// failure the machine code exists to prevent.
+		if code := kycRefusalCode(err); code != "" {
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), code)
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
+	}
+	var payTo gin.H
+	if centralMode {
+		// Read from the row, not the context user: the matcher compares against
+		// the stored column, so the name shown must be that same value.
+		payTo = centralPayTo(central, intent.NgnKobo, h.it.VerifiedLegalName(c.Request.Context(), user.ID))
+	} else {
+		payTo = fiatVAPayTo(va, user.Name)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
 		"needsActivation": false,
 		"quote": gin.H{
+			// ngnKobo is what the user transfers; mcgpAmount is what they get
+			// AFTER fees — feeNgnKobo is the difference, in naira.
 			"ngnKobo":    intent.NgnKobo,
 			"mcgpAmount": intent.McgpAmount,
 			"rateKobo":   intent.RateKobo,
+			"feeNgnKobo": intent.FeeNgnKobo,
+			"netNgnKobo": intent.NetNgnKobo,
 		},
-		"payTo":  fiatVAPayTo(va, user.Name),
+		"payTo":  payTo,
 		"intent": intent,
 	})
 }
@@ -343,7 +585,7 @@ type itSellReq struct {
 	MobileMsisdn        string `json:"mobileMsisdn"`
 }
 
-// POST /api/it/sell — debit credited premium (on-chain) and open the NGN payout.
+// POST /api/it/sell — debit spendable premium (credited first, then bought) and open the NGN payout.
 func (h *ITHandler) Sell(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -413,12 +655,74 @@ func (h *ITHandler) Sell(c *gin.Context) {
 		bank.DestinationCurrency = req.DestinationCurrency
 		bank.RailType = req.RailType
 	}
+	// The service detaches the sell from this request's cancellation: once the
+	// debit is broadcast, a client hanging up must not stop it half way.
 	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		r := sellFailureResponse(err, intent)
+		if r.accepted && intent != nil {
+			intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
+			c.JSON(r.status, gin.H{"success": true, "message": r.message, "code": r.code, "data": gin.H{"intent": intent}})
+			return
+		}
+		if r.code != "" {
+			utils.ErrorResponseWithCode(c, r.status, r.message, r.code)
+			return
+		}
+		utils.ErrorResponse(c, r.status, r.message)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Sell submitted", gin.H{"intent": intent})
+}
+
+type sellOutcome struct {
+	status   int
+	code     string
+	message  string
+	accepted bool // the sell exists and is still progressing
+}
+
+// sellFailureResponse maps a CreateSellIntent error to what the user is told.
+// The two sell-outcome errors carry chain/provider detail that stays in logs.
+func sellFailureResponse(err error, intent *models.ITIntent) sellOutcome {
+	switch {
+	case errors.Is(err, services.ErrITSellPayoutRejected):
+		message := "We couldn't send your payout, so this sale was cancelled. Your MCGP is being returned to your balance — this can take a few minutes."
+		if intent != nil && intent.Status == models.ITStatusReversed {
+			message = "We couldn't send your payout, so this sale was cancelled. Your MCGP has been returned to your balance (it can take a few minutes to show)."
+		}
+		return sellOutcome{
+			status:  http.StatusUnprocessableEntity,
+			code:    "it_sell_payout_rejected",
+			message: message,
+		}
+	case errors.Is(err, services.ErrITSellDebitPending):
+		return sellOutcome{
+			status:   http.StatusAccepted,
+			code:     "it_sell_processing",
+			message:  "Your sale is processing. We're confirming it on-chain and will pay out as soon as it's confirmed.",
+			accepted: true,
+		}
+	default:
+		return sellOutcome{status: http.StatusBadRequest, message: err.Error()}
+	}
+}
+
+// adminSellActionStatus maps an admin sell settle/reverse/retry refusal to an
+// HTTP status an operator can act on.
+func adminSellActionStatus(err error) int {
+	switch {
+	case errors.Is(err, services.ErrITSellPayoutConflict):
+		return http.StatusConflict
+	case errors.Is(err, services.ErrITSellPayoutUnverified),
+		// The chain has not shown the debit yet: transient, try again shortly.
+		errors.Is(err, services.ErrITSellDebitPending):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrITSellPayoutRejected):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // GET /api/it/intents — caller's IT history.
@@ -524,18 +828,116 @@ func (h *ITHandler) AdminRepriceCredit(c *gin.Context) {
 	})
 }
 
-// POST /api/it/admin/settle/:id — finalize a sell after a confirmed NGN payout.
+// POST /api/it/admin/stable/buy/:id/reprice — resume a stablecoin buy parked
+// as `buy_awaiting_rate` (money landed but could not be priced). Prices the
+// naira that arrived at the CURRENT live rate.
+//
+// Does not use adminIntentAction: a stablecoin buy is delivered to
+// intent.DestAddress, not users.wallet_address, so requiring the latter here
+// (as the MCGP admin actions do) would block recovery for a buyer who never
+// registered an on-chain MCGP wallet.
+func (h *ITHandler) PostRepriceParkedStableBuy(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	intent, err := h.it.RepriceParkedStableBuy(c.Request.Context(), id)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": intent})
+}
+
+// POST /api/it/admin/settle/:id — finalize an MCGP sell. With automated
+// payouts, refused unless Flutterwave reports the transfer SUCCESSFUL: settling
+// a payout that failed takes the user's MCGP.
 func (h *ITHandler) AdminSettle(c *gin.Context) {
-	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
-		return h.it.SettleSell(c.Request.Context(), intentID, wallet)
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.AdminSettleSell(c.Request.Context(), intentID)
 	})
 }
 
-// POST /api/it/admin/reverse/:id — reverse a sell whose NGN payout failed.
+// POST /api/it/admin/reverse/:id — reverse an MCGP sell whose payout did not
+// happen. Refused unless Flutterwave reports the transfer FAILED, the payout
+// was rejected, or the provider has no transfer for it: reversing a payout
+// that went out pays the user twice.
 func (h *ITHandler) AdminReverse(c *gin.Context) {
-	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
-		return h.it.ReverseSell(c.Request.Context(), intentID, wallet)
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.AdminReverseSell(c.Request.Context(), intentID)
 	})
+}
+
+// POST /api/it/admin/sell/:id/retry-payout — re-drive the payout of a debited
+// MCGP sell. An existing transfer for the sell's reference is adopted rather
+// than sent again.
+func (h *ITHandler) AdminRetrySellPayout(c *gin.Context) {
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.RetrySellPayout(c.Request.Context(), intentID)
+	})
+}
+
+// POST /api/it/admin/sell/:id/reevaluate — re-read the chain (and the payout
+// transfer) for a sell parked in `needs_review` and close it whichever way the
+// evidence points. The exit door for a parked sell.
+func (h *ITHandler) AdminReevaluateSell(c *gin.Context) {
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.ReevaluateSell(c.Request.Context(), intentID)
+	})
+}
+
+// POST /api/it/admin/stable/:id/repay — pay a parked stablecoin sell again on
+// a fresh payout reference. Refused unless Flutterwave confirms the previous
+// transfer FAILED.
+func (h *ITHandler) AdminRepayStableSell(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	out, err := h.it.RepayStableSell(c.Request.Context(), id)
+	if err != nil {
+		utils.ErrorResponse(c, adminSellActionStatus(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
+}
+
+// GET /api/it/admin/sell/stuck?minutes= — MCGP sells still processing,
+// debiting or debited past the threshold (default 30m), with the evidence an
+// operator needs: debit ref and tx, payout id, attempts, rejection, reason.
+func (h *ITHandler) GetStuckMCGPSells(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckMCGPSells(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+func (h *ITHandler) adminSellAction(c *gin.Context, fn func(uuid.UUID) (*models.ITIntent, error)) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	if _, err := h.it.GetIntent(c.Request.Context(), id); err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
+		return
+	}
+	out, err := fn(id)
+	if err != nil {
+		utils.ErrorResponse(c, adminSellActionStatus(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
 }
 
 // GET /api/it/admin/intents?direction=&status=&limit=&offset= — the operator
@@ -661,6 +1063,328 @@ func (h *ITHandler) AcceptAgreement(c *gin.Context) {
 	})
 }
 
+// ──────────────────────────── stablecoin sell (brokered) ──────────────────
+
+type stableQuoteRequest struct {
+	Asset    string `json:"asset" binding:"required"`
+	Amount   string `json:"amount" binding:"required"`
+	Currency string `json:"currency" binding:"required"`
+}
+
+type stableSellRequest struct {
+	stableQuoteRequest
+	SourceChain string `json:"sourceChain" binding:"required"`
+	Bank        struct {
+		Code                string `json:"code"`
+		Number              string `json:"number"`
+		Name                string `json:"name"`
+		DestinationCurrency string `json:"destinationCurrency"`
+		RailType            string `json:"railType"`
+		MobileNetwork       string `json:"mobileNetwork"`
+		MobileCountry       string `json:"mobileCountry"`
+		MobileMsisdn        string `json:"mobileMsisdn"`
+	} `json:"bank"`
+}
+
+type stableDepositRequest struct {
+	TxHash string `json:"txHash" binding:"required"`
+}
+
+// POST /api/it/stable/quote — prices a brokered stablecoin sell.
+func (h *ITHandler) PostStableQuote(c *gin.Context) {
+	var req stableQuoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	q, err := h.it.QuoteStableSell(c.Request.Context(), req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	// Spread AND fee are both itemised: the spread replaces only the
+	// swap/routing bps legs, so the fee line is a separate charge the user is
+	// entitled to see — collapsing them would hide the platform fee inside
+	// what looks like pure FX margin.
+	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
+		"asset":       q.Asset,
+		"currency":    q.Currency,
+		"amount":      fmt.Sprintf("%.6f", services.StableFromBaseUnits(q.AssetAmount)),
+		"gross":       q.GrossMinor.String(),
+		"afterSpread": q.SpreadMinor.String(),
+		"fee":         q.FeeMinor.String(),
+		"net":         q.NetMinor.String(),
+		"rate":        q.RatePerUnitMinor.String(),
+		"expiresAt":   q.ExpiresAt,
+	})
+}
+
+// POST /api/it/stable/sell — creates the sell and returns where to send the funds.
+func (h *ITHandler) PostStableSell(c *gin.Context) {
+	var req stableSellRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	// The same trade gate ActivateVA/Buy/Sell use. This ramp routes real user
+	// funds to a third party under the CBN VASP pilot, so it is squarely a
+	// trade and must not be reachable without the accepted agreement.
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
+	ctx := c.Request.Context()
+	q, err := h.it.QuoteStableSell(ctx, req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	bank := &services.ITSellBank{
+		Code: req.Bank.Code, Number: req.Bank.Number, Name: req.Bank.Name,
+		DestinationCurrency: req.Bank.DestinationCurrency,
+		RailType:            req.Bank.RailType,
+		MobileNetwork:       req.Bank.MobileNetwork,
+		MobileCountry:       req.Bank.MobileCountry,
+		MobileMsisdn:        req.Bank.MobileMsisdn,
+	}
+	intent, deposit, err := h.it.CreateStableSellIntent(ctx, user.ID, q, req.SourceChain, bank)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Sell created", gin.H{"intent": intent, "deposit": deposit})
+}
+
+// POST /api/it/stable/sell/:id/deposit — records the transaction the user broadcast.
+func (h *ITHandler) PostStableDeposit(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
+		return
+	}
+	var req stableDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.it.ReportStableDeposit(c.Request.Context(), user.ID, id, req.TxHash); err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
+}
+
+// POST /api/it/stable/buy/:id/cancel — the user's own self-service exit from
+// a stablecoin buy still awaiting payment. Without this, an abandoned intent
+// has no way out of pending_payment short of the 24h claim window lapsing
+// (stableBuyClaimWindow) — see CancelStableBuy for why one is needed.
+func (h *ITHandler) PostCancelStableBuy(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
+		return
+	}
+	if err := h.it.CancelStableBuy(c.Request.Context(), user.ID, id); err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Cancelled", gin.H{"cancelled": true})
+}
+
+// GetStuckStableSells lists brokered sells that have not advanced.
+//
+// The platform holds no float, so a stall never costs it money — but it does
+// leave a user's funds parked at a hop they cannot see. The transaction
+// hashes on each row are the operator's leverage against a provider that has
+// not credited the funds.
+func (h *ITHandler) GetStuckStableSells(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckStableSells(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+// GetStuckStableBuys lists brokered buys that have not advanced.
+//
+// Every row here is user money we are holding mid-flight — naira not yet
+// converted, or a stablecoin transfer not yet settled. buy_awaiting_rate rows
+// are the most urgent: the watcher deliberately never auto-advances that
+// park, so this list is the only way an operator learns one exists.
+func (h *ITHandler) GetStuckStableBuys(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckStableBuys(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck buys", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+// The machine codes every money-in refusal carries, on every gated path. The
+// app routes kycRequiredCode to the verification flow and shows
+// kycLegalNameMissingCode as a contact-support message, so a second spelling
+// of either would silently lose an entry point on the client.
+const (
+	kycRequiredCode         = "kyc_verification_required"
+	kycLegalNameMissingCode = "kyc_legal_name_missing"
+)
+
+// kycRefusalCode names the money-in refusal err carries, or "" when it is not
+// one. The name-missing case is checked first because it also matches the
+// general sentinel.
+func kycRefusalCode(err error) string {
+	switch {
+	case errors.Is(err, services.ErrKYCLegalNameMissing):
+		return kycLegalNameMissingCode
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		return kycRequiredCode
+	default:
+		return ""
+	}
+}
+
+// stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
+// is a 400; a missing provider or unconfigured deposit address is a 503,
+// because the request was fine and the platform was not.
+func stableStatusFor(err error) int {
+	switch {
+	case errors.Is(err, services.ErrStableNotAnAsset),
+		errors.Is(err, services.ErrStablePrecision),
+		errors.Is(err, services.ErrStableBelowMinimum),
+		errors.Is(err, services.ErrStableQuoteExpired),
+		errors.Is(err, services.ErrStableNoDestination),
+		errors.Is(err, services.ErrStableFeeExceedsProceeds),
+		errors.Is(err, services.ErrStableRateImplausible),
+		errors.Is(err, services.ErrBadDeliveryAddress),
+		errors.Is(err, services.ErrUnsupportedStableChain),
+		// Both mapped to 400 (not 404/409): a 404 here would tell a probing
+		// caller "this id doesn't exist" vs "it exists but isn't yours" by
+		// process of elimination against ErrStableDepositAlreadyClaimed's
+		// code, and a 409 on the claimed case would confirm the hash is
+		// live/valid to someone who doesn't own it. Same status, same shape
+		// as every other client-fixable input error.
+		errors.Is(err, services.ErrStableIntentNotFound),
+		errors.Is(err, services.ErrStableDepositAlreadyClaimed),
+		// Shared bad-state guard for RepriceParkedStableBuy (not currently
+		// parked) and CancelStableBuy (not pending_payment). Client-fixable in
+		// the sense that acting on the wrong id/state is the caller's mistake,
+		// not a server fault — a DB error below still falls through to 500.
+		errors.Is(err, services.ErrITBadState),
+		errors.Is(err, services.ErrStableBuyBelowMinimum),
+		errors.Is(err, services.ErrStableBuyAlreadyOpen),
+		errors.Is(err, services.ErrStableBuyNoVA),
+		errors.Is(err, services.ErrStableBuyNoWallet),
+		// The caller asked for a rail this currency does not use. 400, not 503:
+		// the ramp is up, this client is simply out of date, and a 5xx would
+		// have it retry a request that can never succeed.
+		errors.Is(err, services.ErrStableBuyWrongRamp),
+		errors.Is(err, services.ErrUnsupportedChainAsset):
+		return http.StatusBadRequest
+	case errors.Is(err, services.ErrStableQuoteUnavailable),
+		errors.Is(err, services.ErrStableNoDepositAddress),
+		errors.Is(err, services.ErrStableNoTokenAddress),
+		// The stablecoin is safely in our Flutterwave balance, not lost — but
+		// it needs an operator, not a retry from the caller. Ours, not theirs.
+		errors.Is(err, services.ErrStableDeliveryExhausted):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		// 403, alongside the agreement gate: the caller is authenticated and
+		// the request is well-formed, but they are not permitted to transact
+		// yet. A 400 would read as "fix your input" on a screen where there is
+		// no input to fix.
+		return http.StatusForbidden
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// stableCodeFor maps a ramp error to a stable, snake_case machine code so the
+// app can branch on WHY a request failed instead of matching message strings.
+// ErrStableDepositAlreadyClaimed is the one that matters most: it means the
+// user's deposit was claimed by someone else's intent, and the app must show
+// that prominently rather than as a generic error. Returns "" for anything
+// unmapped — callers should treat that as "no specific code, use the message".
+func stableCodeFor(err error) string {
+	switch {
+	case errors.Is(err, services.ErrStableDepositAlreadyClaimed):
+		return "stable_deposit_already_claimed"
+	case errors.Is(err, services.ErrStableIntentNotFound):
+		return "stable_intent_not_found"
+	case errors.Is(err, services.ErrStableQuoteExpired):
+		return "stable_quote_expired"
+	case errors.Is(err, services.ErrStableRateImplausible):
+		return "stable_rate_implausible"
+	case errors.Is(err, services.ErrStableBelowMinimum):
+		return "stable_below_minimum"
+	case errors.Is(err, services.ErrStableNotAnAsset):
+		return "stable_not_an_asset"
+	case errors.Is(err, services.ErrStableNoDepositAddress),
+		errors.Is(err, services.ErrStableNoTokenAddress),
+		// Also raised by the whole buy path when HasStableBuy is not
+		// satisfied, so the app can say "not available right now" rather than
+		// showing a bare message on a money screen.
+		errors.Is(err, services.ErrStableQuoteUnavailable):
+		return "stable_not_configured"
+	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
+		return "stable_fee_exceeds_proceeds"
+	case errors.Is(err, services.ErrITBadState):
+		// "this action does not apply to the intent's current state", one
+		// machine code for every ramp endpoint that can raise it. NOT
+		// buy-specific: it_stable_sell.go raises ErrITBadState at seven sites,
+		// so a bad-state SELL deposit would otherwise report a BUY code.
+		return "stable_bad_state"
+	case errors.Is(err, services.ErrStableBuyBelowMinimum):
+		return "stable_buy_below_minimum"
+	case errors.Is(err, services.ErrStableBuyAlreadyOpen):
+		return "stable_buy_already_open"
+	case errors.Is(err, services.ErrStableBuyNoVA):
+		return "stable_buy_no_va"
+	case errors.Is(err, services.ErrStableBuyNoWallet):
+		return "stable_buy_no_wallet"
+	case errors.Is(err, services.ErrStableBuyWrongRamp):
+		// The client asked for a rail this currency does not use — an app build
+		// older than the Paycrest cutover. Distinct from stable_not_configured
+		// so the app can send the user to the right screen rather than tell
+		// them buying is unavailable.
+		return "stable_buy_wrong_ramp"
+	case errors.Is(err, services.ErrUnsupportedChainAsset):
+		return "stable_unsupported_chain_asset"
+	case errors.Is(err, services.ErrStableDeliveryExhausted):
+		return "stable_delivery_exhausted"
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		return kycRefusalCode(err)
+	default:
+		return ""
+	}
+}
+
 // requireITAgreement is the shared trade gate for ActivateVA/Buy/Sell. It writes
 // a 403 with a machine code the app matches on to show the agreement, and
 // returns false when the caller is blocked (handler must stop).
@@ -680,4 +1404,140 @@ func (h *ITHandler) requireITAgreement(c *gin.Context, userID uuid.UUID) bool {
 	log.Printf("[it] agreement gate user=%s: %v", userID, err)
 	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify the trading agreement")
 	return false
+}
+
+// requireVerifiedForMoneyIn writes the 403 + machine code and returns false
+// when the caller may not pay in yet (handler must stop). Money-out endpoints
+// must not call it — see the note on services.ErrKYCVerificationRequired.
+func (h *ITHandler) requireVerifiedForMoneyIn(c *gin.Context, userID uuid.UUID) bool {
+	err := h.it.RequireVerifiedForMoneyIn(c.Request.Context(), userID)
+	if err == nil {
+		return true
+	}
+	if code := kycRefusalCode(err); code != "" {
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), code)
+		return false
+	}
+	// Fail closed, loudly. A DB error here must not read as "verified".
+	log.Printf("[it] kyc gate user=%s: %v", userID, err)
+	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not check your verification status")
+	return false
+}
+
+type stableBuyQuoteRequest struct {
+	Asset    string `json:"asset" binding:"required"`
+	Amount   string `json:"amount" binding:"required"` // fiat MINOR units
+	Currency string `json:"currency" binding:"required"`
+}
+
+// stableBuyCurrency normalises the caller-supplied currency and rejects
+// anything Phase B1 does not support. NGN is the only one: the money arrives
+// through the user's standing NGN virtual account. Without this, a EUR request
+// is priced, quoted and only fails much later at the VA lookup, with a message
+// about a missing virtual account rather than an unsupported currency.
+func stableBuyCurrency(c *gin.Context, raw string) (string, bool) {
+	currency := strings.ToUpper(strings.TrimSpace(raw))
+	if currency != "NGN" {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"Stablecoin purchases are NGN-only", "stable_buy_unsupported_currency")
+		return "", false
+	}
+	return currency, true
+}
+
+type stableBuyRequest struct {
+	stableBuyQuoteRequest
+	DestChain string `json:"destChain" binding:"required"`
+}
+
+// PostStableBuyQuote — POST /api/it/stable/buy/quote — prices an indicative
+// stablecoin purchase.
+func (h *ITHandler) PostStableBuyQuote(c *gin.Context) {
+	var req stableBuyQuoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	currency, ok := stableBuyCurrency(c, req.Currency)
+	if !ok {
+		return
+	}
+	q, err := h.it.QuoteStableBuy(c.Request.Context(), req.Asset, req.Amount, currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
+		"asset":       q.Asset,
+		"currency":    q.Currency,
+		"fiatMinor":   q.FiatMinor.String(),
+		"grossUnits":  q.GrossAssetUnits.String(),
+		"assetUnits":  q.AssetUnits.String(),
+		"ratePerUnit": q.RatePerUnitMinor.String(),
+		"expiresAt":   q.ExpiresAt,
+		// Indicative, not locked: the binding price is struck when the naira
+		// lands. Say so in the payload so the app cannot present it as firm.
+		"indicative": true,
+	})
+}
+
+// PostStableBuy — POST /api/it/stable/buy — opens a purchase and returns
+// where to pay.
+func (h *ITHandler) PostStableBuy(c *gin.Context) {
+	var req stableBuyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	currency, ok := stableBuyCurrency(c, req.Currency)
+	if !ok {
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
+	ctx := c.Request.Context()
+
+	q, err := h.it.QuoteStableBuy(ctx, req.Asset, req.Amount, currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	// The address is OURS to supply, never the caller's to send: it is read
+	// from the user's wallet. There is deliberately no address field on the
+	// request body.
+	addr, err := h.it.UserDeliveryAddress(ctx, user.ID, req.DestChain)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	intent, payInto, err := h.it.CreateStableBuyIntent(ctx, user.ID, q, req.DestChain, addr)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Purchase created", gin.H{
+		"intent": intent, "payInto": payInto,
+	})
+}
+
+// GetStableBuyChains — GET /api/it/stable/buy/chains?asset=USDC — the chains
+// this user can receive `asset` on.
+func (h *ITHandler) GetStableBuyChains(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	chains, err := h.it.DeliverableChainsForUser(c.Request.Context(), user.ID, c.Query("asset"))
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Chains", gin.H{"chains": chains})
 }

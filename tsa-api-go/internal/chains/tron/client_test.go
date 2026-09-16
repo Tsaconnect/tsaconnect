@@ -2,6 +2,7 @@ package tron
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,5 +92,28 @@ func chainsTransfer(symbol, tokenAddr string) chains.TransferRequest {
 	return chains.TransferRequest{
 		From: "TSenderaddressbase58xxxxxxxxxxxxxxx", To: "TRecipientbase58xxxxxxxxxxxxxxxxxx",
 		Amount: "1000000", Symbol: symbol, TokenAddr: tokenAddr,
+	}
+}
+
+// A bridge memo has no home in a Tron transfer. Dropping it silently would send
+// real funds to a bridge with nothing tying the payment to the user's swap, so
+// the guard must reject the request outright — and as a caller-fixable error,
+// which is what the prepare handler turns into a useful message.
+func TestPrepareRejectsBridgeMemo(t *testing.T) {
+	c := newTestClient("http://unused")
+	req := chains.TransferRequest{
+		From:    "TQ5NMqJjW8b1cM7yUqEbNvxjHU3sJvQqbT",
+		To:      "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+		Amount:  "1000000",
+		Symbol:  "TRX",
+		MemoHex: "3d3a4554482e455448",
+	}
+	_, err := c.PrepareTransfer(context.Background(), req)
+	if err == nil {
+		t.Fatal("want an error for a memo Tron cannot carry")
+	}
+	var invalid *chains.InvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("want chains.InvalidRequestError, got %T (%v)", err, err)
 	}
 }

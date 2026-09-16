@@ -1,13 +1,16 @@
 package sui
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
@@ -209,4 +212,27 @@ func hexRepeat(s string, n int) string {
 		out = append(out, s[0])
 	}
 	return string(out)
+}
+
+// Sui transfers carry no bridge memo through this path. Silently dropping one
+// would strand a bridge deposit — real funds sent with nothing tying them to
+// the user's swap — so the guard rejects the request as caller-fixable rather
+// than building a tx that loses the tag.
+func TestPrepareRejectsBridgeMemo(t *testing.T) {
+	c := NewClient(config.NonEVMChainConfig{NativeSymbol: "SUI"}, nil)
+	req := chains.TransferRequest{
+		From:    vecAddr,
+		To:      vecAddr,
+		Amount:  "1000000",
+		Symbol:  "SUI",
+		MemoHex: "3d3a4554482e455448",
+	}
+	_, err := c.PrepareTransfer(context.Background(), req)
+	if err == nil {
+		t.Fatal("want an error for a memo this path cannot carry")
+	}
+	var invalid *chains.InvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("want chains.InvalidRequestError, got %T (%v)", err, err)
+	}
 }

@@ -29,7 +29,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
@@ -430,30 +430,21 @@ const EditProduct = () => {
         style={{ flex: 1 }}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
-        {/* Header */}
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            paddingHorizontal: spacing.lg,
-            paddingVertical: spacing.sm,
-            borderBottomWidth: 1,
-            borderBottomColor: colors.hairline,
+        {/* Title and back live in the native header (app/merchants/_layout.tsx);
+            only the trailing action belongs to this screen. */}
+        <Stack.Screen
+          options={{
+            headerRight: () => (
+              <IconButton
+                icon="trash"
+                accessibilityLabel="Delete product"
+                color={colors.danger}
+                disabled={loading}
+                onPress={handleDeleteProduct}
+              />
+            ),
           }}
-        >
-          <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
-          <Text variant="title3" weight="700">
-            Edit Product
-          </Text>
-          <IconButton
-            icon="trash"
-            accessibilityLabel="Delete product"
-            color={colors.danger}
-            disabled={loading}
-            onPress={handleDeleteProduct}
-          />
-        </View>
+        />
 
         <ScrollView
           ref={scrollRef}

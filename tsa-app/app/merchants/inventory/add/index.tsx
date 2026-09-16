@@ -328,11 +328,8 @@ const AddProduct = () => {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
-          <Text variant="title1" weight="700">
-            Add Product
-          </Text>
-          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+          {/* "Add Product" is the header title now. */}
+          <Text variant="bodySm" color="textSecondary">
             Fill in the details to list your product
           </Text>
 

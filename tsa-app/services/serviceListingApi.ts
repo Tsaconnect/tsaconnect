@@ -51,6 +51,10 @@ export interface ServiceProfile {
   serviceAddress?: string;
   coverageArea?: string;
   operatingCompany?: string;
+  // IANA zone the availability windows are written in. The server defaults it
+  // to Africa/Lagos and rejects an unloadable name; there is no picker yet, so
+  // in practice every listing uses the default.
+  timezone?: string;
   cancellationPolicy?: string;
   reschedulePolicy?: string;
   refundPolicy?: string;

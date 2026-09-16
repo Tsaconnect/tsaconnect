@@ -1,15 +1,14 @@
 // app/(dashboard)/(tabs)/(marketplace)/products.tsx
 //
-// The `/products` route now renders the canonical MarketplaceScreen (the
-// double-column, tabbed browser used by the Marketplace tab) instead of a
-// separate single-column list. This de-duplicates the two marketplace screens:
-// every "browse products" entry point (checkout confirmation, home widgets,
-// service tab) lands on the same screen. The route is kept — several places
-// still push to `/products` — but the standalone single-column implementation
-// (HeaderSearch + ProductListCard) is retired.
-import React from "react";
-import MarketplaceScreen from "@/screens/marketplace";
+// LEGACY ALIAS. `/products` rendered the same MarketplaceScreen as the
+// marketplace tab ROOT, so pushing it stacked an identical Marketplace on top of
+// that root and back dropped the user on a screen that looked unchanged, in a
+// tab they never opened. In-app callers use MARKETPLACE_TAB
+// (constants/routes.ts); the route survives only so existing deep links and any
+// bookmarked `/products` URL still resolve — as a redirect to the real tab.
+import { Redirect } from 'expo-router';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 
 export default function Products() {
-  return <MarketplaceScreen />;
+  return <Redirect href={MARKETPLACE_TAB} />;
 }

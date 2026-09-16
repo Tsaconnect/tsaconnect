@@ -40,21 +40,17 @@ func AutoMigrate() error {
 	// Existing rows keep direction = NULL and resolve exactly as before.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token_chain")
 
-	// IT rates moved from Naira columns (buy_rate_kobo / sell_rate_kobo) to an
-	// admin-set USD price + sell-discount, with Naira derived live from FX. The
-	// legacy row carries no USD value and the new columns are NOT NULL, so drop
-	// the legacy table and let AutoMigrate recreate it; the admin re-sets the
-	// price after deploy (no data migration — dev feature). Guarded on the legacy
-	// column so this runs once and never wipes a USD-priced row on later boots.
-	if DB.Migrator().HasTable("it_rates") && DB.Migrator().HasColumn(&models.ITRate{}, "buy_rate_kobo") {
-		if err := DB.Migrator().DropTable("it_rates"); err != nil {
-			return err
-		}
-	}
-
 	if err := DB.AutoMigrate(
+		// Currency registry — the sole validation authority for any currency
+		// reaching a money path. Rows are seeded per-row (never overwritten) by
+		// services.NewCurrencyRegistry at boot, so operator-tuned payout floors
+		// survive a deploy.
+		&models.Currency{},
+		// Per-currency PM fiat balances. Supersedes payment_merchants'
+		// available_ngn/reserved_ngn, which can only express one implicit NGN
+		// balance; both are written until the legacy columns are dropped.
+		&models.PMBalance{},
 		&models.User{},
-		&models.Asset{},
 		&models.Product{},
 		&models.Cart{},
 		&models.Category{},
@@ -66,7 +62,6 @@ func AutoMigrate() error {
 		&models.ServiceAvailability{},
 		&models.ServiceBooking{},
 		&models.BookingRequest{},
-		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},
 		&models.WalletTransaction{},
@@ -78,6 +73,8 @@ func AutoMigrate() error {
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
+		// Self-service account deletion audit trail (Apple 5.1.1(v)).
+		&models.AccountDeletionRequest{},
 		&models.Notification{},
 		&models.DeviceToken{},
 		&models.EmailVerification{},
@@ -90,6 +87,7 @@ func AutoMigrate() error {
 		&models.CashbackEarning{},
 		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.
 		&models.FeeDistribution{},
+		&models.PendingSwapFee{},
 		&models.GlobalTPPool{},
 		&models.GlobalTPAccrual{},
 		// SP4 — global-pool cumulative-index settlement ledger. The new
@@ -121,6 +119,10 @@ func AutoMigrate() error {
 		&models.P2PAuditLog{},
 		&models.P2PMerchantStats{},
 		&models.P2PRating{},
+		// Instant per-trade sweep of a merchant's naira proceeds to their own
+		// bank (central-account design decision 7). Also the idempotency claim
+		// that stops a replayed inbound credit crediting the ledger twice.
+		&models.P2PSettlementForward{},
 		// PM (Payment Merchant) — automated P2P liquidity provider (Phase 1: TSA).
 		&models.PaymentMerchant{},
 		// MCGP Swap Contract B — entitlement-ledger swap (premium buy/spend/sell,
@@ -128,17 +130,47 @@ func AutoMigrate() error {
 		&models.MCGPSwapLedgerEntry{},
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
+		&models.JobRunMarker{},
+		&models.BillPayment{},
+		// Utility bills v2 — what was bought (ClubKonnect vend); the MCGP money
+		// leg lives in BillPayment, keyed by order ID.
+		&models.BillOrder{},
+		// User complaints about bill orders, reviewed by admins. One per order.
+		&models.BillReport{},
+		&models.Dispute{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},
+		// Central-account inbound attribution — the immutable record of every
+		// credit into the company account, written by the statement poller
+		// before any matching runs.
+		&models.InboundCredit{},
+		// Append-only record of every operator decision on a held credit.
+		// Separate from inbound_credits because that row only ever shows the
+		// current state — who acted, and on what, has to outlive it.
+		&models.InboundCreditAuditLog{},
+		&models.PaycrestOrderRecord{},
+		// One row per transaction we paid gas for on a user's behalf; the
+		// (order_id, kind) unique index is the once-per-order rule.
+		&models.GasSponsorship{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
+		// quote_chain arrives here as a plain additive column: it is nullable
+		// with no backfill because every pre-existing listing has both legs on
+		// `chain`, which is exactly what an empty quote chain means. Nothing is
+		// dropped or rewritten, so the older release still serving during a
+		// deploy keeps working against the same rows.
 		&models.SpotListing{},
 		// OTC listing controls — singleton row of per-direction kill-switches
 		// (buy/sell) + listing metadata for the app's Easyswap "OTC" tab.
 		&models.OTCSettings{},
+		// Fee wallet — singleton record of the admin-assigned destination for
+		// system fees (seeded from SYSTEM_WALLET_ADDRESS on first read), plus
+		// the append-only history of every reassignment.
+		&models.FeeWalletSetting{},
+		&models.FeeWalletAssignment{},
 		// Non-EVM chains — per-wallet derived addresses (keyed wallet_id+chain_key)
 		// and cached normalized tx history.
 		&models.WalletAddress{},
@@ -146,6 +178,12 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+
+	// The admin fee tracker filters and aggregates fee_distributions by date
+	// (list ORDER BY created_at DESC, summary WHERE created_at >= ?); without
+	// this index both are sequential scans that grow with every settled fee.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_fee_distributions_created_at
+		ON fee_distributions (created_at DESC)`)
 
 	// TP leaderboard ranks by users.tp_balance; without this index it's a full
 	// scan once the table grows. Partial: only rows the leaderboard can return.
@@ -207,11 +245,28 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS p2p_ratings_trade_rater_uq
 	         ON p2p_ratings (trade_id, rater_id)`)
 
-	// Rename smile_job_id → persona_inquiry_id (Persona KYC migration)
-	DB.Exec("ALTER TABLE users RENAME COLUMN smile_job_id TO persona_inquiry_id")
+	// KYC provider column lineage: smile_job_id → persona_inquiry_id → didit_session_id.
+	// AutoMigrate above has already added didit_session_id from the model, so a
+	// RENAME would fail ("column already exists") and — because the error is
+	// swallowed — leave the stale column behind forever, re-running the
+	// in_review reset on every boot and wiping legitimate Didit sessions.
+	// The old provider IDs are dead data: DROP the stale columns instead. The
+	// drop is what makes the guarded reset genuinely one-time.
+	if DB.Migrator().HasColumn(&models.User{}, "smile_job_id") {
+		DB.Exec("ALTER TABLE users DROP COLUMN smile_job_id")
+	}
+	if DB.Migrator().HasColumn(&models.User{}, "persona_inquiry_id") {
+		DB.Exec("ALTER TABLE users DROP COLUMN persona_inquiry_id")
+		DB.Exec("UPDATE users SET verification_status = 'pending', didit_session_id = '' WHERE verification_status = 'in_review'")
+	}
 
-	// Reset any in_review users from old provider to pending
-	DB.Exec("UPDATE users SET verification_status = 'pending', persona_inquiry_id = '' WHERE verification_status = 'in_review'")
+	// NOTE: the `assets` and `portfolios` tables and the wallets balance columns
+	// are retired by deploy/one-off/2026-09-01-drop-db-balance-mirrors.sql, NOT
+	// here. Crypto balances are read from the chain, so the mirrors are dead —
+	// but dropping them at boot would break the older release still serving from
+	// this database mid-deploy. The models are gone, so AutoMigrate simply stops
+	// maintaining them; leftover tables are inert until an operator runs that
+	// script.
 
 	// Replace the default unique index on wallet_address with a partial
 	// unique index that only enforces uniqueness for non-empty values.
@@ -265,6 +320,46 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_account_ref
 	    ON payment_merchants (nomba_account_ref) WHERE nomba_account_ref <> ''`)
 
+	// Per-currency PM balances carry the SAME integrity guarantee as the NGN
+	// columns they replace. Porting this is not optional: it is the last line of
+	// defence under every ledger operation, and without it the multi-currency
+	// table would silently hold a weaker invariant than the single-currency one
+	// it supersedes — a regression that would only surface as a negative or
+	// over-reserved balance in production.
+	DB.Exec(`ALTER TABLE pm_balances
+		DROP CONSTRAINT IF EXISTS chk_pm_balances_ledger`)
+	DB.Exec(`ALTER TABLE pm_balances
+		ADD CONSTRAINT chk_pm_balances_ledger CHECK (
+			CAST(available AS NUMERIC) >= 0 AND
+			CAST(reserved AS NUMERIC) >= 0 AND
+			CAST(reserved AS NUMERIC) <= CAST(available AS NUMERIC)
+		)`)
+
+	// One-time backfill: every existing PM gets an NGN row mirroring its legacy
+	// columns. Guarded on absence rather than on an empty table so a PM created
+	// between deploys is still picked up. Dual-write (pm_ngn_ledger.go) keeps
+	// the two representations in step until the legacy columns are dropped.
+	DB.Exec(`INSERT INTO pm_balances (pm_id, currency, available, reserved, created_at, updated_at)
+		SELECT id, 'NGN', available_ngn, reserved_ngn, NOW(), NOW()
+		FROM payment_merchants pm
+		WHERE NOT EXISTS (
+			SELECT 1 FROM pm_balances b WHERE b.pm_id = pm.id AND b.currency = 'NGN'
+		)`)
+
+	// IT intents gain a currency + minor-unit columns. Backfill marks every
+	// existing intent NGN and copies each kobo column into its minor twin —
+	// identical values, since minor units ARE kobo for naira. Guarded on
+	// currency being unset so it runs once and never rewrites a row that a
+	// later release has denominated in something else.
+	DB.Exec(`UPDATE it_intents SET
+			currency            = 'NGN',
+			amount_minor        = ngn_kobo,
+			rate_minor          = rate_kobo,
+			fee_minor           = fee_ngn_kobo,
+			net_minor           = net_ngn_kobo,
+			platform_kept_minor = platform_kept_kobo
+		WHERE currency IS NULL OR currency = ''`)
+
 	// NGN ledger integrity: available_ngn and reserved_ngn must be non-negative,
 	// and reserved_ngn must never exceed available_ngn. The DROP+ADD pattern
 	// (like other constraints above) keeps repeat boots idempotent.
@@ -294,6 +389,29 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_payment_ref
 	    ON it_intents (payment_ref) WHERE payment_ref <> ''`)
 
+	// IT stablecoin-sell deposits: the on-chain fact that a transfer landed at
+	// Flutterwave's shared merchant address proves the transfer happened, NOT
+	// which user sent it — the chain is public and the address is the same for
+	// everyone. Without this, the SAME deposit tx could be attached to multiple
+	// intents and each would verify successfully. One deposit funds at most one
+	// intent. Partial over non-blank hashes, since both columns are empty for
+	// buy intents and for sells that have not reported/confirmed yet.
+	// Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_deposit_tx_hash
+	    ON it_intents (deposit_tx_hash) WHERE deposit_tx_hash <> ''`)
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_settled_tx_hash
+	    ON it_intents (settled_tx_hash) WHERE settled_tx_hash <> ''`)
+
+	// IT stablecoin-buy "one open purchase per user": CreateStableBuyIntent's
+	// Count-then-Create is not atomic, so a losing race must fail at the
+	// database rather than mint a second claimable intent for the same
+	// standing VA reference. Partial over pending_payment stablecoin buys.
+	// Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_stable_buy
+	    ON it_intents (user_id)
+	    WHERE direction = 'buy' AND status = 'pending_payment'
+	      AND asset IN ('USDC','USDT')`)
+
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
 	// flow. All other Service categories default to 'contact' (the AutoMigrate
@@ -302,6 +420,13 @@ func AutoMigrate() error {
 	DB.Exec(`UPDATE categories SET service_type = 'booking'
 	         WHERE service_fee_mode = 'booking'
 	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
+
+	// Booking timezone backfill: availability windows were always wall-clock in
+	// the merchant's own zone, but were read as UTC, so every slot surfaced an
+	// hour early in Lagos. Existing profiles adopt the platform default rather
+	// than being migrated — stored booking instants are left alone. Idempotent.
+	DB.Exec(`UPDATE service_profiles SET timezone = 'Africa/Lagos'
+	         WHERE timezone IS NULL OR timezone = ''`)
 
 	// Seed the first Spot Trade listing (MCGP/USDC on Sonic) once, at startup —
 	// NOT on every read, so an admin who deletes it stays deleted. Guarded on an

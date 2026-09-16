@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	btcecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -41,6 +42,13 @@ const (
 	// will. 500 P2WPKH inputs (~34k vB) is far above any tx we prepare.
 	maxTxInputs  = 500
 	maxTxOutputs = 100
+
+	// maxMemoBytes is the standard relay limit for a nulldata (OP_RETURN)
+	// payload. Bridge memos (THORChain-style swap instructions, which is how
+	// LiFi's Bitcoin routes identify a deposit) sit well inside it; anything
+	// larger would be non-standard and never relayed, so reject it up front
+	// rather than build a tx no node will accept.
+	maxMemoBytes = 80
 
 	// maxFeeSat rejects a broadcast whose implied fee (inputs - outputs)
 	// exceeds 0.01 BTC. The user signs their own tx so only their funds are at
@@ -86,6 +94,18 @@ type rawInput struct {
 	Txid     string `json:"txid"`
 	Vout     uint32 `json:"vout"`
 	ValueSat int64  `json:"valueSat"`
+	// Sequence carries an aggregator-supplied nSequence through to the digest.
+	// Zero means "unset" — the txs we build ourselves all opt into RBF, and a
+	// prepared tx from before this field existed has to keep hashing the same.
+	Sequence uint32 `json:"sequence,omitempty"`
+}
+
+// sequenceOr returns the input's nSequence, defaulting to RBF.
+func (in rawInput) sequenceOr() uint32 {
+	if in.Sequence == 0 {
+		return rbfSequence
+	}
+	return in.Sequence
 }
 
 type rawOutput struct {
@@ -97,6 +117,17 @@ func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (c
 	quote := chains.FeeQuote{GasSymbol: "BTC", GasDecimals: 8}
 	if req.TokenAddr != "" {
 		return quote, fmt.Errorf("btc has no token transfers")
+	}
+	// An aggregator-built spend already chose its inputs and its fee; there is
+	// nothing to estimate, only to validate.
+	if req.PSBTHex != "" {
+		spend, err := c.prepareFromPSBT(req)
+		if err != nil {
+			return quote, err
+		}
+		quote.EstFeeRaw = strconv.FormatInt(spend.feeSat, 10)
+		quote.HasEnoughGas = true
+		return quote, nil
 	}
 	amountSat, err := parseSat(req.Amount)
 	if err != nil {
@@ -121,6 +152,18 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	params := netParams(c.cfg.Network)
 	if req.TokenAddr != "" {
 		return chains.PreparedTx{}, fmt.Errorf("btc has no token transfers")
+	}
+	if req.TxBytesB64 != "" {
+		return chains.PreparedTx{}, chains.Invalid("a Sui transaction cannot be signed on bitcoin")
+	}
+	// An aggregator-built spend is signed as given, once it has been proven to
+	// be ours to sign and to match the quote (see prepareFromPSBT).
+	if req.PSBTHex != "" {
+		spend, err := c.prepareFromPSBT(req)
+		if err != nil {
+			return chains.PreparedTx{}, err
+		}
+		return preparedFromRaw(spend.raw)
 	}
 	amountSat, err := parseSat(req.Amount)
 	if err != nil {
@@ -150,10 +193,20 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 		return chains.PreparedTx{}, fmt.Errorf("insufficient BTC: balance does not cover amount plus network fee")
 	}
 
+	memoScript, err := memoPkScript(req.MemoHex)
+	if err != nil {
+		return chains.PreparedTx{}, err
+	}
+
 	raw := rawTx{
 		Version:        2,
 		SenderPkScript: hex.EncodeToString(senderScript),
 		Outputs:        []rawOutput{{PkScript: hex.EncodeToString(recipientScript), ValueSat: amountSat}},
+	}
+	// Memo before change: bridges scan for the nulldata output, and keeping
+	// change last matches what every other wallet produces.
+	if len(memoScript) > 0 {
+		raw.Outputs = append(raw.Outputs, rawOutput{PkScript: hex.EncodeToString(memoScript), ValueSat: 0})
 	}
 	for _, u := range sel.inputs {
 		raw.Inputs = append(raw.Inputs, rawInput{Txid: u.Txid, Vout: u.Vout, ValueSat: u.Value})
@@ -162,6 +215,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 		raw.Outputs = append(raw.Outputs, rawOutput{PkScript: hex.EncodeToString(senderScript), ValueSat: sel.changeSat})
 	}
 
+	return preparedFromRaw(raw)
+}
+
+// preparedFromRaw turns an unsigned tx into the digests the app signs. Shared
+// by both ways one is arrived at: coin selection here, or an aggregator's PSBT.
+func preparedFromRaw(raw rawTx) (chains.PreparedTx, error) {
 	digests, _, err := computeDigests(raw)
 	if err != nil {
 		return chains.PreparedTx{}, err
@@ -354,6 +413,12 @@ func (c *Client) selectCoins(ctx context.Context, req chains.TransferRequest) (c
 	if err != nil {
 		return coinSelection{}, nil, err
 	}
+	// Validate the memo before touching the network: a request we are going to
+	// reject should not cost two upstream calls first.
+	memoScript, err := memoPkScript(req.MemoHex)
+	if err != nil {
+		return coinSelection{}, nil, err
+	}
 	utxos, err := c.esp.GetUTXOs(ctx, req.From)
 	if err != nil {
 		return coinSelection{}, nil, err
@@ -363,9 +428,14 @@ func (c *Client) selectCoins(ctx context.Context, req chains.TransferRequest) (c
 		return coinSelection{}, nil, err
 	}
 
-	recipientOutVB := 9 + len(recipientScript)
+	// The memo rides along as a second output, so its bytes must be in the fee
+	// estimate — otherwise a memo send underpays and stalls in the mempool.
+	fixedOutVB := outputVB(recipientScript)
+	if len(memoScript) > 0 {
+		fixedOutVB += outputVB(memoScript)
+	}
 	feeFor := func(nIn int, withChange bool) int64 {
-		vb := overheadVB + inputVB*nIn + recipientOutVB
+		vb := overheadVB + inputVB*nIn + fixedOutVB
 		if withChange {
 			vb += changeVB
 		}
@@ -413,7 +483,7 @@ func computeDigests(raw rawTx) ([][]byte, *wire.MsgTx, error) {
 			return nil, nil, fmt.Errorf("bad input txid: %v", err)
 		}
 		op := wire.OutPoint{Hash: *h, Index: in.Vout}
-		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: op, Sequence: rbfSequence})
+		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: op, Sequence: in.sequenceOr()})
 		prevOuts[op] = wire.NewTxOut(in.ValueSat, senderScript)
 	}
 	for _, out := range raw.Outputs {
@@ -502,6 +572,43 @@ func verifyTx(tx *wire.MsgTx, raw rawTx, senderScript []byte) error {
 	}
 	return nil
 }
+
+// memoPkScript builds the zero-value OP_RETURN output that carries a bridge
+// memo, returning nil when there is no memo. The memo is what a Bitcoin bridge
+// reads to know which swap a deposit belongs to, so a malformed one is a hard
+// error: dropping it silently would send real BTC to the bridge with nothing
+// tying it to the user's route.
+func memoPkScript(memoHex string) ([]byte, error) {
+	memoHex = strings.TrimPrefix(strings.TrimSpace(memoHex), "0x")
+	if memoHex == "" {
+		return nil, nil
+	}
+	// A whole transaction arriving in the memo field means the caller branched
+	// wrongly on the route's payload. Say so, rather than reporting it as an
+	// oversized memo and sending the reader looking for the wrong bug.
+	if IsPSBT(memoHex) {
+		return nil, chains.Invalid("this is a transaction to sign, not a memo — send it as psbtHex")
+	}
+	data, err := hex.DecodeString(memoHex)
+	if err != nil {
+		return nil, chains.Invalid("memo is not valid hex")
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data) > maxMemoBytes {
+		return nil, chains.Invalid("memo is %d bytes; the OP_RETURN standardness limit is %d", len(data), maxMemoBytes)
+	}
+	script, err := txscript.NewScriptBuilder().AddOp(txscript.OP_RETURN).AddData(data).Script()
+	if err != nil {
+		return nil, chains.Invalid("memo script: %v", err)
+	}
+	return script, nil
+}
+
+// outputVB is the serialized size of one output: 8-byte value + 1-byte script
+// length (every script we build is far under 253 bytes) + the script itself.
+func outputVB(script []byte) int { return 9 + len(script) }
 
 func parseSat(amount string) (int64, error) {
 	v, err := strconv.ParseInt(amount, 10, 64)

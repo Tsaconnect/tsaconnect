@@ -98,6 +98,39 @@ func EffectiveServiceType(cat Category) string {
 	return ServiceTypeContact
 }
 
+// HostsServices reports whether a category can hold service listings. "Both"
+// counts: such a category hosts services alongside products.
+func HostsServices(cat Category) bool {
+	return cat.Type == CategoryTypeService || cat.Type == CategoryTypeBoth
+}
+
+// ServiceCategoryIDs selects the categories that host services, optionally
+// narrowed to a single effective service type. Pass "" for every service
+// category.
+//
+// Callers use this to bucket LISTINGS by service type: a listing's own Type
+// field is merchant-entered and frequently says "Product" for what is plainly a
+// service, so the category is the reliable classifier. Resolution goes through
+// EffectiveServiceType, which keeps legacy fare-mode categories in the booking
+// bucket. An unrecognised serviceType matches nothing rather than everything —
+// a typo'd filter should return an empty list, not the whole catalogue.
+func ServiceCategoryIDs(categories []Category, serviceType string) []uuid.UUID {
+	if serviceType != "" && !ValidServiceType(serviceType) {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(categories))
+	for _, cat := range categories {
+		if !HostsServices(cat) {
+			continue
+		}
+		if serviceType != "" && EffectiveServiceType(cat) != serviceType {
+			continue
+		}
+		ids = append(ids, cat.ID)
+	}
+	return ids
+}
+
 // Booking-fee area tiers (Category booking mode). Ordered coarsest-last for UI.
 const (
 	BookingTierResidential    = "residential"

@@ -6,9 +6,13 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
+  Linking,
 } from "react-native";
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
+import Constants from "expo-constants";
+import * as Updates from "expo-updates";
+import { COMPANY } from "@/constants/legal";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "../../AuthContext/AuthContext";
 import CurrencySelector from "../../components/currency/CurrencySelector";
@@ -17,7 +21,7 @@ import { useThemeControls, useTheme, type SchemePreference } from "@/theme";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
-  authenticateWithBiometric,
+  authenticateWithBiometric, authenticateWithDeviceFallback,
 } from "@/services/localAuth";
 
 interface SettingsItem {
@@ -31,6 +35,33 @@ interface SettingsItem {
 interface SettingsSection {
   title: string;
   items: SettingsItem[];
+}
+
+/**
+ * What the user is actually running, for support.
+ *
+ * The marketing version alone cannot answer "did the fix reach you": it only
+ * moves when app.json changes, so every over-the-air bundle published between
+ * two releases reports the same number. The update id and its publish date are
+ * what identify the JS bundle, and the runtime version is what decides which
+ * updates this binary is even eligible for.
+ */
+function buildInfo(): string {
+  const lines = [`Version ${Constants.expoConfig?.version ?? "1.0.0"}`];
+  if (Updates.runtimeVersion) {
+    const channel = Updates.channel ? ` · ${Updates.channel}` : "";
+    lines.push(`Runtime ${Updates.runtimeVersion}${channel}`);
+  }
+  // updateId stays null until an update replaces the bundle the binary shipped
+  // with — that state is the answer to "the update never arrived", so name it.
+  lines.push(
+    Updates.isEmbeddedLaunch || !Updates.updateId
+      ? "Update: none (bundled with the app)"
+      : `Update ${Updates.updateId.slice(0, 8)} · ${
+          Updates.createdAt?.toLocaleString() ?? "date unknown"
+        }`
+  );
+  return lines.join("\n");
 }
 
 const SettingsScreen = () => {
@@ -64,17 +95,10 @@ const SettingsScreen = () => {
       const success = await authenticateWithBiometric();
       if (success) return true;
     }
-    // On Android, Alert.prompt doesn't exist — use biometric with device fallback
+    // On Android, Alert.prompt doesn't exist — use the system biometric prompt,
+    // which includes the device PIN/pattern fallback.
     if (pinSet) {
-      // Use system biometric prompt which includes device PIN/pattern fallback
-      const result = await import('expo-local-authentication').then(m =>
-        m.authenticateAsync({
-          promptMessage: 'Verify your identity',
-          fallbackLabel: 'Use device passcode',
-          disableDeviceFallback: false,
-        })
-      );
-      return result.success;
+      return authenticateWithDeviceFallback('Verify your identity');
     }
     return true;
   };
@@ -104,21 +128,21 @@ const SettingsScreen = () => {
   };
 
   const handleToggleBiometric = async () => {
-    // Verify with biometric before toggling
-    if (bioEnabled) {
-      // Disabling — verify with biometric first
-      const success = await authenticateWithBiometric();
-      if (!success) {
-        Alert.alert('Verification Failed', `${bioType} verification required to disable.`);
-        return;
-      }
-    } else {
-      // Enabling — verify biometric works
-      const success = await authenticateWithBiometric();
-      if (!success) {
-        Alert.alert('Verification Failed', `Could not verify ${bioType}. Please try again.`);
-        return;
-      }
+    // Verify with biometric before toggling, both to enable and to disable
+    let success = false;
+    try {
+      success = await authenticateWithBiometric();
+    } catch {
+      success = false;
+    }
+    if (!success) {
+      Alert.alert(
+        'Verification Failed',
+        bioEnabled
+          ? `${bioType} verification required to disable.`
+          : `Could not verify ${bioType}. Please try again.`
+      );
+      return;
     }
     const newVal = !bioEnabled;
     await setBiometricEnabled(newVal);
@@ -155,23 +179,10 @@ const SettingsScreen = () => {
     );
   };
 
-  const handleDeleteAccount = () => {
-    Alert.alert(
-      "Delete Account",
-      "This action is permanent and cannot be undone. All your data will be lost.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            // TODO: Implement account deletion API call
-            Alert.alert("Coming Soon", "Account deletion will be available soon.");
-          },
-        },
-      ]
-    );
-  };
+  // The confirmation, password re-auth and consequences live on the dedicated
+  // screen — an Alert can't carry the non-custodial-wallet caveat or the
+  // retention notice, and both matter before someone deletes.
+  const handleDeleteAccount = () => router.push("/delete-account");
 
   const sections: SettingsSection[] = [
     {
@@ -263,15 +274,40 @@ const SettingsScreen = () => {
         {
           icon: "help-outline",
           label: "Contact Support",
-          description: "Get in touch with our support team",
-          onPress: () =>
-            Alert.alert("Support", "Email us at support@tsaconnect.com"),
+          description: `Email ${COMPANY.supportEmail}`,
+          onPress: () => {
+            Linking.openURL(`mailto:${COMPANY.supportEmail}`).catch(() =>
+              Alert.alert("Support", `Email us at ${COMPANY.supportEmail}`)
+            );
+          },
         },
         {
           icon: "info-outline",
           label: "About TSA Connect",
           description: "App version and information",
-          onPress: () => Alert.alert("TSA Connect", "Version 1.0.0"),
+          onPress: () =>
+            Alert.alert(
+              "TSA Connect",
+              `${buildInfo()}` +
+                `\n\nOperated by ${COMPANY.legalName} (${COMPANY.registrationNumber}).`
+            ),
+        },
+      ],
+    },
+    {
+      title: "Legal",
+      items: [
+        {
+          icon: "privacy-tip",
+          label: "Privacy Policy",
+          description: "How we collect, use and protect your data",
+          onPress: () => router.push("/legal/privacy"),
+        },
+        {
+          icon: "gavel",
+          label: "Terms of Service",
+          description: "The agreement governing your use of TSA Connect",
+          onPress: () => router.push("/legal/terms"),
         },
       ],
     },

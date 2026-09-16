@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -32,11 +33,32 @@ const (
 	itVARefDomain = "IT:va:"
 )
 
+// buyOrderClaimWindow bounds how long an unpaid MCGP buy order may claim an
+// incoming charge.
+//
+// Nothing else expires one. OpenBuyOrder supersedes a previous MCGP order, but
+// only when the user opens another MCGP buy — opening a stablecoin purchase
+// runs through CreateStableBuyIntent and leaves the MCGP row untouched. So an
+// abandoned order sits in pending_payment indefinitely and silently swallows
+// the user's next unrelated transfer, which is precisely the complaint this
+// window answers.
+//
+// Deliberately the same 24h as stableBuyClaimWindow: the question is identical
+// (how long may an unpaid order lie in wait for money?) and two different
+// answers on the two legs would be a difference nobody could justify later.
+// Past the window the charge creates a fresh order at the live rate, which is
+// the same thing that happens for a user with no open order at all.
+const buyOrderClaimWindow = stableBuyClaimWindow
+
 var (
 	ErrITVANotConfigured  = errors.New("IT virtual account provisioning unavailable")
 	ErrITVAWalletRequired = errors.New("set up a wallet before activating Instant Transfer")
 	ErrITVANotFound       = errors.New("no Instant Transfer account for this user")
 	ErrITKYCRequired      = errors.New("a BVN or NIN is required")
+	// ErrITVARetired is the cutover's answer to an activation request. Central
+	// mode retires virtual accounts as a class, so this is permanent for as long
+	// as the mode is on — not a "try again later" the caller should retry.
+	ErrITVARetired = errors.New("Instant Transfer accounts are retired — pay into the account shown on your order")
 )
 
 // SetFlutterwaveClient wires the Flutterwave API client used for per-user
@@ -69,14 +91,42 @@ func (s *ITService) GetFiatVA(ctx context.Context, userID uuid.UUID, currency st
 // Flutterwave customer. idType/idNumber are forwarded to FW and NEVER stored
 // or logged. Idempotent: an existing active row is returned unchanged.
 func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idType, idNumber string) (*models.FiatVirtualAccount, error) {
+	// Before every other check, including whether provisioning is even wired:
+	// under central inbound, nothing reads a virtual account's statement. A VA
+	// minted now would take the user's money into an account no ingestor polls
+	// and no claim can be matched against, and the user would have no way to
+	// tell that from a working one. Refusing is the only honest answer, and
+	// refusing FIRST means the answer does not change with whether a Flutterwave
+	// client happens to be configured.
+	if _, ok := s.ActiveCentralAccount(); ok {
+		return nil, ErrITVARetired
+	}
 	if !s.HasFiatVAProvisioning() {
 		return nil, ErrITVANotConfigured
 	}
 	if user == nil {
 		return nil, errors.New("it va: nil user")
 	}
+	// A virtual account is a standing pay-in account — AutoCreditFromVA credits
+	// whatever lands on it, order or no order — so minting one is a money-in
+	// entry point like any buy. After the retirement answer above (410 is the
+	// honest reply in central mode whatever the user's status) and before any
+	// provider call, so an unverified user never becomes a Flutterwave customer.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, user.ID); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(user.WalletAddress) == "" {
 		return nil, ErrITVAWalletRequired
+	}
+	// A virtual account is a COLLECTION account, so provisioning one in a
+	// currency we cannot collect in creates an account nobody can usefully pay
+	// into. The registry is the authority on that — USD, EUR and GBP have no
+	// virtual-account product at the provider and can never be deposit
+	// currencies, so this is a permanent distinction rather than a staging one.
+	if s.currencies != nil {
+		if _, err := s.currencies.RequireDeposit(itDepositCurrency); err != nil {
+			return nil, err
+		}
 	}
 	idType = strings.ToUpper(strings.TrimSpace(idType))
 	idNumber = strings.TrimSpace(idNumber)
@@ -201,6 +251,35 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		case models.ITStatusPendingPayment, models.ITStatusFailed:
 			_, err = s.approveBuyCreditWithRef(ctx, existing.ID, "", &chargeRef)
 			return err
+		case models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds,
+			models.ITStatusConverting, models.ITStatusDelivering,
+			models.ITStatusBuyAwaitingRate, models.ITStatusSettled:
+			// A stablecoin buy already claimed this charge. The buy watcher owns
+			// it from here; the webhook's job is done — EXCEPT when the claim
+			// crashed before pricing: `payment_received` + `!Repriced` means the
+			// charge was claimed but never priced (see priceStableBuy). That
+			// intent still carries its creation-time quote, which is the rate
+			// lock the design removed — reappearing in exactly this crash
+			// window. `break` falls through to the fork below, which is
+			// idempotent for the already-priced case and completes pricing for
+			// the unpriced one.
+			//
+			// `ITStatusSettled` is safe to add here despite being shared with
+			// the MCGP sell/debit leg: for direction=buy (this whole switch is
+			// scoped to `direction = ?` = buy in the query above) `settled` is
+			// unreachable by MCGP, whose buy terminal is `credited` — it only
+			// occurs on a completed stablecoin delivery.
+			//
+			// Gated on HasStableBuy for the same reason the fork below is: with
+			// buy unconfigured there is no fork to fall through TO, so control
+			// would reach the MCGP path holding a charge id a stablecoin intent
+			// already owns — and payment_ref carries a partial unique index.
+			if s.HasStableBuy() &&
+				models.ITIntentAsset(&existing) != models.ITAssetMCGP &&
+				existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+				break
+			}
+			return nil
 		case models.ITStatusCancelled:
 			// The order was superseded in the window between our reading it and
 			// claiming it. The money is real and is this user's — detach the charge
@@ -240,18 +319,51 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if err := s.db.WithContext(ctx).First(&user, "id = ?", va.UserID).Error; err != nil {
 		return fmt.Errorf("it va credit: user: %w", err)
 	}
+
+	// Fork: a stablecoin purchase awaiting payment claims this charge. If the
+	// user has none, fall through to the MCGP credit path below, unchanged.
+	//
+	// amountNGN is a naira decimal string ("165025.00"), NOT kobo — the MCGP
+	// path below converts it the same way at :259. settleStableBuyFromCharge
+	// takes minor units, so the conversion happens HERE, at the boundary.
+	//
+	// This must run BEFORE the wallet guard below: a stablecoin buy is
+	// delivered by Flutterwave to a chain address, not an on-chain MCGP
+	// credit, so it needs no users.wallet_address. Putting the fork after that
+	// guard would strand the money of any buyer who never registered one.
+	paidMinor, err := nairaToKobo(amountNGN)
+	if err != nil {
+		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
+	}
+	if paidMinor.Sign() <= 0 {
+		// Checked before the fork, not just the MCGP path below: a "0.00"
+		// charge reaching settleStableBuyFromCharge would claim and then fail
+		// to price a legitimate open purchase, parking it in
+		// buy_awaiting_rate and burning its payment_ref for nothing.
+		return fmt.Errorf("it va credit: non-positive amount")
+	}
+	//
+	// HasStableBuy is the gate that matters most in this function. With the
+	// buy leg unconfigured — Flutterwave present but no converter, merchant
+	// id, rate source or deliverer — claiming here would suppress the MCGP
+	// credit and hand the money to a state machine no watcher is driving. The
+	// user's naira would sit indefinitely with nothing able to fulfil it. Fall
+	// through to the MCGP path instead: the user gets a credit rather than a
+	// hold, which is the recoverable failure of the two.
+	if s.HasStableBuy() {
+		claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
+		if err != nil {
+			return fmt.Errorf("it va credit: stable buy: %w", err)
+		}
+		if claimed {
+			return nil
+		}
+	}
+
 	wallet := strings.TrimSpace(user.WalletAddress)
 	if wallet == "" {
 		log.Printf("[it va] ALARM credit with no wallet user=%s charge=%s — parking", va.UserID, chargeID)
 		return fmt.Errorf("it va credit: user %s has no wallet", va.UserID)
-	}
-
-	paidKobo, err := nairaToKobo(amountNGN)
-	if err != nil {
-		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
-	}
-	if paidKobo.Sign() <= 0 {
-		return fmt.Errorf("it va credit: non-positive amount")
 	}
 
 	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
@@ -266,10 +378,20 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 
 	// Prefer the user's open buy order so the hub "Awaiting transfer" row
 	// progresses to credited instead of leaving an orphan pending + a new intent.
+	//
+	// Scoped to MCGP (or the pre-Asset-column legacy rows): the fork above
+	// already claims a stablecoin buy before this point, but scoping here too
+	// makes correctness structural rather than order-dependent — nothing on
+	// this path can overwrite mcgp_amount/rate_kobo on a USDC/USDT intent.
+	//
+	// Bounded by buyOrderClaimWindow for the reason that constant records: an
+	// abandoned order never expires on its own, and an unbounded match lets one
+	// swallow a payment made days later for something else entirely.
 	var pending models.ITIntent
 	pendErr := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ?",
-			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment).
+		Where("user_id = ? AND direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?) AND created_at >= ?",
+			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP,
+			time.Now().Add(-buyOrderClaimWindow)).
 		Order("created_at DESC").
 		First(&pending).Error
 
@@ -281,14 +403,24 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 				UserID:        va.UserID,
 				WalletAddress: wallet,
 				Direction:     models.ITDirectionBuy,
-				PMID:          pmID,
+				// The VA's own currency, never a default: this parked intent is
+				// repriced later by an operator, and inheriting NGN here would
+				// have it repriced at the naira rate.
+				Currency: va.Currency,
+				PMID:     pmID,
+				// net_ngn_kobo carries no column default (see the numeric-column
+				// rule on models.ITIntent): "" there means "settle at the gross"
+				// and PostgreSQL rejects it outright. Nothing has been deducted
+				// from a parked credit, so net IS the gross until
+				// RepriceAndCreditAwaitingRate applies the real fee.
+				NetNgnKobo: paidMinor.String(),
 			}
 		} else if pendErr != nil {
 			return pendErr
 		}
 		intent.Status = models.ITStatusAwaitingRate
 		intent.FailureReason = "fx stale at settlement — operator must reprice"
-		intent.NgnKobo = paidKobo.String()
+		intent.NgnKobo = paidMinor.String()
 		intent.PaymentRef = chargeID
 		intent.RateKobo = "0"
 		intent.McgpAmount = "0"
@@ -307,18 +439,22 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		return nil
 	}
 
-	mcgp := mcgpForNgn(paidKobo, buyRate)
-	if mcgp.Sign() <= 0 {
-		return fmt.Errorf("it va credit: amount too small after pricing")
+	// Fees come off the naira that landed; only the net buys MCGP.
+	mcgp, fees, err := s.creditableMcgp(ctx, paidMinor, buyRate, va.Currency)
+	if err != nil {
+		return fmt.Errorf("it va credit: %w", err)
 	}
 
 	if pendErr == nil {
 		if err := s.db.WithContext(ctx).Model(&pending).Updates(map[string]any{
-			"payment_ref":    chargeID,
-			"ngn_kobo":       paidKobo.String(),
-			"rate_kobo":      buyRate.String(),
-			"mcgp_amount":    mcgp.String(),
-			"wallet_address": firstNonEmpty(pending.WalletAddress, wallet),
+			"payment_ref":        chargeID,
+			"ngn_kobo":           paidMinor.String(),
+			"rate_kobo":          buyRate.String(),
+			"mcgp_amount":        mcgp.String(),
+			"fee_ngn_kobo":       fees.Fee.String(),
+			"net_ngn_kobo":       fees.Net.String(),
+			"platform_kept_kobo": fees.PlatformKept.String(),
+			"wallet_address":     firstNonEmpty(pending.WalletAddress, wallet),
 		}).Error; err != nil {
 			return err
 		}
@@ -335,12 +471,18 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		WalletAddress: wallet,
 		Direction:     models.ITDirectionBuy,
 		Status:        models.ITStatusPendingPayment,
-		NgnKobo:       paidKobo.String(),
+		Currency:      va.Currency,
+		NgnKobo:       paidMinor.String(),
 		RateKobo:      buyRate.String(),
 		McgpAmount:    mcgp.String(),
 		PaymentRef:    chargeID,
 		PMID:          pmID,
 	}
+	// The credited MCGP above is already NET of fees, so the fee columns must
+	// record what was taken — exactly as the update branch a few lines up does
+	// for an existing pending order. Without this the row credits net but reads
+	// as a fee-free purchase, and settleITFee has no platform-kept base.
+	applyFees(intent, fees)
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		if isUniqueViolation(err) {
 			// A concurrent delivery of this charge won the race and owns the
@@ -440,4 +582,166 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate")
+}
+
+// ─── central-account settlement (inbound attribution design §6.1) ──────────
+
+// itInboundRefDomain namespaces the on-chain credit ref for a buy settled from
+// the CENTRAL account rather than a per-user virtual account. The ref becomes
+// keccak256("IT:inbound:" || NIBSS session id), replacing the charge-keyed
+// keccak256(itVARefDomain || chargeID) that VA settlement uses.
+//
+// The property being carried over verbatim from the VA path: the ref is derived
+// from THE MONEY, not from the order. Every route that can settle one credit —
+// the poller's first attempt, its 30-second replay after a crash, an operator
+// assigning the credit by hand from the admin queue — presents the SAME ref to
+// the contract, so `usedRef` refuses the second and only one can ever succeed.
+// Keying on the intent instead would let two intents for one transfer credit
+// twice, and the session id is the only identifier the central account gives us
+// that is unique per credit.
+//
+// The domain differs from itVARefDomain so the two rails can never collide on a
+// shared identifier, and so an on-chain ref stays traceable to the rail that
+// produced it.
+const itInboundRefDomain = "IT:inbound:"
+
+// CreditBuyOrderFromInbound settles an MCGP buy order against a credit into the
+// central account. It is the sibling of AutoCreditFromVA: same live-rate
+// pricing, same fee deduction, same approveBuyCreditWithRef broadcast — keyed
+// on the NIBSS session id instead of the Flutterwave charge id.
+//
+// It is deliberately NARROWER than AutoCreditFromVA. That function has to work
+// out who paid, whether a stablecoin purchase wants the money first, and which
+// of several orders to settle into, because a webhook arrives carrying nothing
+// but a charge. Here the matcher has already decided all of that and names one
+// specific intent, so this only has to make the credit happen exactly once.
+//
+// paidKobo is what the SENDER transferred (the credit's gross, snapped to whole
+// naira), not what landed after the provider's cut. The user is credited for the
+// money they actually sent; the funding charge is a platform cost covered by the
+// platform fee, exactly as the 2.15% VA charge was.
+func (s *ITService) CreditBuyOrderFromInbound(ctx context.Context, intentID uuid.UUID, providerRef string, paidKobo *big.Int) error {
+	if !s.IsConfigured() {
+		return ErrITNotConfigured
+	}
+	providerRef = strings.TrimSpace(providerRef)
+	if providerRef == "" {
+		return errors.New("it inbound credit: empty provider ref")
+	}
+	if paidKobo == nil || paidKobo.Sign() <= 0 {
+		return errors.New("it inbound credit: non-positive amount")
+	}
+	onChainRef := itRefKey(itInboundRefDomain, providerRef)
+
+	// Layer 1 of three: has this session id already been attributed? The other
+	// two are the partial unique index on payment_ref and the contract's
+	// usedRef. All three key on the money, so a replay cannot slip past them by
+	// arriving through a different route.
+	var existing models.ITIntent
+	err := s.db.WithContext(ctx).
+		Where("payment_ref = ? AND direction = ?", providerRef, models.ITDirectionBuy).
+		First(&existing).Error
+	switch {
+	case err == nil:
+		switch existing.Status {
+		case models.ITStatusCredited:
+			return nil
+		case models.ITStatusPendingPayment, models.ITStatusFailed:
+			// Priced and attributed, but the broadcast never landed. Re-drive
+			// with the SAME ref — the contract rejects it if it did land.
+			_, err = s.approveBuyCreditWithRef(ctx, existing.ID, "", &onChainRef)
+			return err
+		default:
+			// `processing` (broadcast with no reported outcome) or anything
+			// else. The money is real and is not credited, so this stays
+			// retryable rather than reporting success — a nil here would let
+			// the matcher mark the inbound credit `matched` with nothing
+			// behind it.
+			return fmt.Errorf("it inbound credit: intent %s already owns ref %s in state %q",
+				existing.ID, providerRef, existing.Status)
+		}
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return err
+	}
+
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: %w", err)
+	}
+	// Asset check as well as direction+status, for the reason
+	// RepriceAndCreditAwaitingRate gives: crediting a non-MCGP buy here would
+	// issue MCGP from company supply for a purchase made in something else.
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusPendingPayment ||
+		models.ITIntentAsset(intent) != models.ITAssetMCGP {
+		return fmt.Errorf("it inbound credit: intent %s is not an open MCGP buy (%s/%s)",
+			intent.ID, intent.Direction, intent.Status)
+	}
+	// Only an order still carrying its MINTED reference may be settled. A row
+	// whose payment_ref is already a provider identifier has other money
+	// landing against it, and payment_ref carries a partial unique index.
+	if !strings.HasPrefix(intent.PaymentRef, mintedRefPrefix) {
+		return fmt.Errorf("it inbound credit: intent %s already carries payment ref %q",
+			intent.ID, intent.PaymentRef)
+	}
+
+	wallet := s.intentWallet(intent, "")
+	if wallet == "" {
+		var user models.User
+		if err := s.db.WithContext(ctx).First(&user, "id = ?", intent.UserID).Error; err != nil {
+			return fmt.Errorf("it inbound credit: user: %w", err)
+		}
+		wallet = strings.TrimSpace(user.WalletAddress)
+	}
+	if wallet == "" {
+		return fmt.Errorf("it inbound credit: user %s has no wallet", intent.UserID)
+	}
+
+	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: rate: %w", err)
+	}
+	if fx.Stale {
+		// The VA path parks a stale-FX credit as `awaiting_rate` because a
+		// webhook is delivered once and cannot be asked for again. Here the
+		// inbound_credits row IS durable and the poller re-reads it every 30
+		// seconds, so a retryable error is the better answer: no operator
+		// ticket, and — the part that matters — no second on-chain ref domain.
+		// RepriceAndCreditAwaitingRate derives its ref from itVARefDomain, so
+		// parking here would hand the operator recovery a DIFFERENT ref for the
+		// same money and usedRef would no longer be able to refuse the double
+		// credit.
+		return ErrITFxUnavailable
+	}
+
+	// Fees come off the naira that landed; only the net buys MCGP.
+	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate, itDepositCurrency)
+	if err != nil {
+		return fmt.Errorf("it inbound credit: %w", err)
+	}
+
+	// Repriced at the LIVE rate on the amount actually sent, not at the quote
+	// the order was minted with — identical to VA settlement, and the reason
+	// the order's own figure is never trusted here.
+	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"payment_ref":        providerRef,
+		"ngn_kobo":           paidKobo.String(),
+		"rate_kobo":          buyRate.String(),
+		"mcgp_amount":        mcgp.String(),
+		"fee_ngn_kobo":       fees.Fee.String(),
+		"net_ngn_kobo":       fees.Net.String(),
+		"platform_kept_kobo": fees.PlatformKept.String(),
+		"wallet_address":     wallet,
+	}).Error; err != nil {
+		if isUniqueViolation(err) {
+			// Another route claimed this session id between our lookup and our
+			// write. Retryable: the re-drive takes the idempotency branch above
+			// and observes the winner's outcome.
+			return fmt.Errorf("it inbound credit: concurrent settlement of ref %s", providerRef)
+		}
+		return err
+	}
+
+	_, err = s.approveBuyCreditWithRef(ctx, intent.ID, wallet, &onChainRef)
+	return err
 }

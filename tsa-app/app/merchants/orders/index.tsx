@@ -30,7 +30,6 @@ import {
   EmptyState,
   ErrorState,
   Icon,
-  IconButton,
   PressableScale,
   Spinner,
   Text,
@@ -331,22 +330,6 @@ const MerchantOrders = () => {
 
   const renderHeader = () => (
     <>
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: spacing.lg,
-          paddingVertical: spacing.sm,
-        }}
-      >
-        <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
-        <Text variant="title3" weight="700">
-          Orders
-        </Text>
-        <View style={{ width: 44 }} />
-      </View>
-
       {/* Mode tabs: Products (escrow) vs Services (contact-fee) */}
       <View
         style={{

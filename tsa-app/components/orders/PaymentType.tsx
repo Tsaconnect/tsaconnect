@@ -27,6 +27,7 @@ import {
   SegmentedControl,
   Text,
 } from "@/components/ui";
+import TokenAvatar from "@/components/wallet/TokenAvatar";
 
 interface PaymentSelectionProps {
   address: string;
@@ -99,9 +100,8 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
   // brand token logo (not in the Icon registry) while staying on theme tokens.
   const CryptoOption: React.FC<{
     symbol: string;
-    logo: any;
     onPress: () => void;
-  }> = ({ symbol, logo, onPress }) => {
+  }> = ({ symbol, onPress }) => {
     const selected = currency === symbol;
     return (
       <PressableScale
@@ -119,11 +119,7 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
           backgroundColor: selected ? colors.accentMuted : colors.surface,
         }}
       >
-        <Image
-          source={logo}
-          style={{ width: 28, height: 28 }}
-          resizeMode="contain"
-        />
+        <TokenAvatar symbol={symbol} size={28} />
         <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
           {symbol}
         </Text>
@@ -216,7 +212,6 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
         <View style={{ gap: spacing.md }}>
           <CryptoOption
             symbol="USDT"
-            logo={require("../../assets/icons/usdt.png")}
             onPress={() => {
               if (countUSDT > 0) {
                 setCurrency("");
@@ -230,7 +225,6 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
           />
           <CryptoOption
             symbol="MCGP"
-            logo={require("../../assets/digital/mcgp.png")}
             onPress={() => {
               if (countMCGP > 0) {
                 setCurrency("");

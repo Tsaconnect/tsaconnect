@@ -26,6 +26,9 @@ export interface SheetProps {
   visible: boolean;
   onClose: () => void;
   title?: string;
+  /** Show a back chevron left of the title, for sheets with a second step.
+   *  Omit on single-step sheets — the header then looks exactly as before. */
+  onBack?: () => void;
   children: React.ReactNode;
   /** Cap panel height as a fraction of the screen (default 0.85). */
   maxHeightRatio?: number;
@@ -42,6 +45,7 @@ export const Sheet: React.FC<SheetProps> = ({
   visible,
   onClose,
   title,
+  onBack,
   children,
   maxHeightRatio = 0.85,
   scrollable = false,
@@ -115,13 +119,16 @@ export const Sheet: React.FC<SheetProps> = ({
               paddingTop: spacing.sm,
             }}
           >
-            {title ? (
-              <Text variant="title3" weight="700">
-                {title}
-              </Text>
-            ) : (
-              <View />
-            )}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexShrink: 1 }}>
+              {onBack ? (
+                <IconButton icon="chevronLeft" accessibilityLabel="Back" onPress={onBack} size={20} />
+              ) : null}
+              {title ? (
+                <Text variant="title3" weight="700">
+                  {title}
+                </Text>
+              ) : null}
+            </View>
             <IconButton icon="close" accessibilityLabel="Close" onPress={onClose} size={20} />
           </View>
           {scrollable ? (

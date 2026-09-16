@@ -22,12 +22,12 @@ import { getBtcAddress } from '@/services/chains/btcWallet';
 import { getSolanaAddress } from '@/services/chains/solanaWallet';
 import { getSuiAddress } from '@/services/chains/suiWallet';
 import { useTokens } from '@/hooks/useTokens';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import { useTheme } from '@/theme';
 import {
   Text,
   Icon,
   Button,
-  Avatar,
   Badge,
   EmptyState,
   PressableScale,
@@ -51,6 +51,8 @@ interface ReceiveItem {
   chainShortName: string;
   chainIconColor: string;
   chainIconUrl?: string;
+  /** A user-imported contract: its symbol never borrows a curated logo. */
+  custom?: boolean;
 }
 
 // Static non-EVM receive items — TRX (native) + USDT (TRC-20) + BTC. Their
@@ -183,30 +185,15 @@ function ReceiveRow({
         borderBottomColor: colors.hairline,
       }}
     >
-      {/* Token icon with chain overlay */}
-      <View style={{ position: 'relative', width: 44, height: 44 }}>
-        <Avatar name={item.symbol} uri={item.iconUrl} size={40} />
-        <View
-          style={{
-            position: 'absolute',
-            bottom: -2,
-            right: -2,
-            width: 18,
-            height: 18,
-            borderRadius: 9,
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderWidth: 1.5,
-            borderColor: colors.surface,
-            backgroundColor: item.chainIconColor,
-          }}
-        >
-          {item.chainIconUrl
-            ? <Image source={{ uri: item.chainIconUrl }} style={{ width: 14, height: 14, borderRadius: 7 }} />
-            : <Text style={{ fontSize: 7, fontWeight: '700', color: colors.textInverse }}>{item.chainShortName[0]}</Text>
-          }
-        </View>
-      </View>
+      {/* Token icon with its chain badge */}
+      <TokenAvatar
+        symbol={item.symbol}
+        iconUrl={item.iconUrl}
+        iconColor={item.iconColor}
+        chainKey={item.chainKey}
+        curated={!item.custom}
+        size={40}
+      />
 
       {/* Info */}
       <View style={{ flex: 1 }}>
@@ -278,7 +265,7 @@ function QRModal({ target, onClose }: { target: QRTarget | null; onClose: () => 
 
           {/* Token + chain header */}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, alignSelf: 'flex-start', marginBottom: spacing['2xl'] }}>
-            <Avatar name={item.symbol} uri={item.iconUrl} size={44} />
+            <TokenAvatar symbol={item.symbol} iconUrl={item.iconUrl} iconColor={item.iconColor} chainKey={item.chainKey} curated={!item.custom} size={44} />
             <View>
               <Text variant="title3" weight="700">{item.symbol}</Text>
               <Text variant="bodySm" color="textMuted" style={{ marginTop: 2 }}>{item.chainName}</Text>
@@ -396,6 +383,7 @@ export default function FundScreen() {
           chainShortName: chain.shortName,
           chainIconColor: chain.iconColor,
           chainIconUrl: chain.iconUrl,
+          custom: 'custom' in token,
         });
       }
     }

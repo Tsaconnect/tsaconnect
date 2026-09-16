@@ -1,7 +1,9 @@
 package solana
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -156,4 +158,27 @@ func TestFamily(t *testing.T) {
 		t.Errorf("Family() = %q, want solana", c.Family())
 	}
 	var _ chains.ChainClient = c // compile-time: Client satisfies the interface
+}
+
+// Solana transfers carry no bridge memo through this path. Silently dropping
+// one would strand a bridge deposit — real funds sent with nothing tying them
+// to the user's swap — so the guard rejects the request as caller-fixable
+// rather than building a tx that loses the tag.
+func TestPrepareRejectsBridgeMemo(t *testing.T) {
+	c := NewClient(config.NonEVMChainConfig{NativeSymbol: "SOL"}, nil)
+	req := chains.TransferRequest{
+		From:    usdcMint,
+		To:      usdcMint,
+		Amount:  "1000000",
+		Symbol:  "SOL",
+		MemoHex: "3d3a4554482e455448",
+	}
+	_, err := c.PrepareTransfer(context.Background(), req)
+	if err == nil {
+		t.Fatal("want an error for a memo this path cannot carry")
+	}
+	var invalid *chains.InvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("want chains.InvalidRequestError, got %T (%v)", err, err)
+	}
 }

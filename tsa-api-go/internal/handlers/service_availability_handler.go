@@ -150,6 +150,9 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 		return
 	}
 	capacity := profile.MaxCapacityPerSlot
+	// Availability is wall-clock in the service's own zone; slots are the
+	// instants those wall-clock times name there.
+	loc := profile.Location()
 
 	var windows []models.ServiceAvailability
 	config.DB.Where("product_id = ?", productID).Find(&windows)
@@ -160,7 +163,10 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 
 	// One grouped query for all booked counts in the range (avoids an N+1 of one
 	// query per generated slot on this public endpoint). Keyed by slot start Unix.
-	booked := bookedBySlot(productID, from, to.AddDate(0, 0, 1))
+	// Widened a day either side: the range is calendar dates but slots are
+	// instants in loc, so a window running near midnight lands outside a
+	// UTC-bounded query. Extra rows are keyed by exact slot start and ignored.
+	booked := bookedBySlot(productID, from.AddDate(0, 0, -1), to.AddDate(0, 0, 2))
 
 	slots := []openSlot{}
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
@@ -172,7 +178,18 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 				continue
 			}
 			for m := startMin; m+slotMin <= endMin; m += slotMin {
-				start := time.Date(d.Year(), d.Month(), d.Day(), m/60, m%60, 0, 0, time.UTC)
+				start := time.Date(d.Year(), d.Month(), d.Day(), m/60, m%60, 0, 0, loc)
+				// A wall-clock time inside a DST spring-forward gap does not
+				// exist, and time.Date normalises it onto a neighbouring hour —
+				// which would advertise two slots resolving to one instant, so
+				// they would share capacity and book the buyer at the wrong
+				// time. If the clock did not round-trip, the hour is not real:
+				// skip it. (The autumn fall-back repeat is the opposite case —
+				// two instants share a wall clock and we offer the first, which
+				// under-offers rather than double-books.)
+				if start.Hour()*60+start.Minute() != m {
+					continue
+				}
 				end := start.Add(time.Duration(slotMin) * time.Minute)
 				b := booked[start.Unix()]
 				remaining := -1

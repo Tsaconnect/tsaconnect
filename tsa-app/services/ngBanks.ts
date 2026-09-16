@@ -94,6 +94,24 @@ async function refreshAndCache(): Promise<NgBank[]> {
   return sorted;
 }
 
+// getBanksForCountry fetches a specific country's directory.
+//
+// Deliberately uncached and without the public-source or hardcoded fallbacks
+// getNigerianBanks carries: those are Nigeria-specific, and serving a Nigerian
+// bank list for a Ghanaian payout would be worse than showing none — the user
+// would pick a bank that cannot receive the transfer, and the failure would
+// surface only after the on-chain debit.
+export async function getBanksForCountry(country: string): Promise<NgBank[]> {
+  const code = (country || '').trim().toUpperCase();
+  if (!code || code === 'NG') return getNigerianBanks();
+
+  const res = await banksApi.listIn(code);
+  if (res.success && res.data && res.data.length > 0) {
+    return [...res.data].sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return [];
+}
+
 async function fetchFromBackend(): Promise<NgBank[] | null> {
   const res = await banksApi.list();
   if (res.success && res.data && res.data.length > 0) return res.data;

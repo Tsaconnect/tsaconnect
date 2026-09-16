@@ -29,7 +29,7 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -76,6 +76,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
+
+		// Self-service account deletion (Apple 5.1.1(v)). Soft-deletes the
+		// caller immediately and files an admin review row — see
+		// account_deletion_handler.go.
+		userGroup.POST("/account/deletion-request", h.RequestAccountDeletion)
 	}
 
 	// Admin routes
@@ -83,6 +88,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	adminGroup.Use(adminAuth)
 	{
 		adminGroup.GET("/stats", h.GetAdminStats)
+
+		// Account-deletion review queue. The handlers re-check for a true admin
+		// role on top of adminAuth (which also admits merchant/support) because
+		// restoring an account is a security-sensitive action.
+		adminGroup.GET("/account-deletion-requests", h.ListAccountDeletionRequests)
+		adminGroup.POST("/account-deletion-requests/:id/complete", h.CompleteAccountDeletionRequest)
+		adminGroup.POST("/account-deletion-requests/:id/restore", h.RestoreAccountDeletionRequest)
 	}
 
 	// Admin fee-config routes — unified, tunable fee-rate table. These mutate the
@@ -185,6 +197,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		kycGroup.GET("/admin/verifications", adminAuth, h.GetAllVerifications)
 		kycGroup.POST("/admin/override/:id", adminAuth, h.AdminOverrideKYC)
 		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
+		// Repairs users verified before the Didit legal name was stored; run by
+		// hand, one bounded page at a time.
+		//
+		// RequireP2PAdmin on top of adminAuth because AdminAuth also admits
+		// `merchant` and `support`. This pulls identity-document names for up
+		// to a page of users from the KYC provider and writes them to `users` —
+		// a PII-processing action, not an inventory one, and it is the input to
+		// deciding whose bank transfer is whose.
+		kycGroup.POST("/admin/backfill-legal-names", adminAuth, middleware.RequireP2PAdmin(), h.AdminBackfillVerifiedNames)
 	}
 
 	// Nomba webhook — signature-verified (no auth middleware), mounted OUTSIDE
@@ -208,6 +229,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			return
 		}
 		fwh.Handle(c)
+	})
+
+	// Paycrest webhook — same contract as the Nomba and Flutterwave routes:
+	// signature-verified (no auth middleware), and the path is ALWAYS present so
+	// a dashboard-configured URL never 404s. It 404'd for days while the handler
+	// did not exist, which is silent from our side and looks like an outage from
+	// theirs.
+	api.POST("/webhooks/paycrest", func(c *gin.Context) {
+		if pcw == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Paycrest webhook not configured"})
+			return
+		}
+		pcw.Handle(c)
 	})
 
 	// Admin PM operator routes (manual-release queue + release/decline/payout).
@@ -240,30 +274,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		uploadGroup.POST("/base64", h.UploadBase64)
 	}
 
-	// Asset routes
-	assetGroup := api.Group("/assets")
-	assetGroup.Use(auth)
-	{
-		assetGroup.GET("", h.GetAssets)
-		assetGroup.GET("/:id", h.GetAssetByID)
-		assetGroup.POST("", h.CreateAsset)
-	}
-
-	// Transaction routes
+	// Transaction routes. Read-only: the write paths debited a DB-held balance
+	// and were removed with the assets table — crypto balances live on-chain.
 	transactionGroup := api.Group("/transactions")
 	transactionGroup.Use(auth)
 	{
 		transactionGroup.GET("", h.GetTransactions)
 		transactionGroup.GET("/:id", h.GetTransactionByID)
-		transactionGroup.POST("", h.CreateTransaction)
-	}
-
-	// Portfolio routes
-	portfolioGroup := api.Group("/portfolio")
-	portfolioGroup.Use(auth)
-	{
-		portfolioGroup.GET("", h.GetPortfolio)
-		portfolioGroup.GET("/summary", h.GetPortfolioSummary)
 	}
 
 	// Market routes (mix of public and authenticated)
@@ -273,8 +290,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		marketGroup.GET("/history/:symbol", h.GetAssetPriceHistory)
 		marketGroup.GET("/assets/:symbol", h.GetAssetMarketDetails)
 		marketGroup.GET("/search/:query", h.SearchAssets)
-		marketGroup.GET("/watchlist", auth, h.GetWatchlist)
-		marketGroup.POST("/watchlist", auth, h.AddToWatchlist)
 	}
 
 	// Fee configuration (public)
@@ -327,6 +342,30 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
 		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
 		productGroup.PATCH("/:id/status", auth, h.UpdateStatus)
+	}
+
+	// Admin product moderation. Separate from /products, which stays owner-scoped:
+	// widening those handlers to admins would put moderation and the merchant's
+	// own edit path on the same query.
+	adminProductGroup := api.Group("/admin/products")
+	adminProductGroup.Use(adminAuth)
+	{
+		adminProductGroup.GET("", h.AdminListProducts)
+		adminProductGroup.GET("/:id", h.AdminGetProduct)
+		adminProductGroup.POST("/:id/suspend", h.SuspendProduct)
+		adminProductGroup.POST("/:id/unsuspend", h.UnsuspendProduct)
+		adminProductGroup.DELETE("/:id", h.AdminDeleteProduct)
+		adminProductGroup.POST("/:id/restore", h.RestoreProduct)
+	}
+
+	// Admin account moderation. AccountStatus was already enforced by
+	// middleware.Auth on every request; these are the endpoints that set it.
+	adminUserGroup := api.Group("/admin/users")
+	adminUserGroup.Use(adminAuth)
+	{
+		adminUserGroup.GET("/:id", h.AdminGetUser)
+		adminUserGroup.POST("/:id/suspend", h.SuspendUser)
+		adminUserGroup.POST("/:id/unsuspend", h.UnsuspendUser)
 	}
 
 	// Deposit routes (admin)
@@ -466,6 +505,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			lifiGroup.GET("/tokens/all", slh.GetAllChainTokens)
 			lifiGroup.GET("/token", slh.GetToken)
 			lifiGroup.GET("/quote", slh.GetQuote)
+			// Follows a broadcast swap to the destination chain: a cross-chain
+			// route is not done when its source tx confirms.
+			lifiGroup.GET("/status", slh.GetSwapStatus)
 			// AllSwap server-verified settle (design §8, I8): authenticated user,
 			// NOT super-admin. Backend re-queries LiFi + accrues the verified fee.
 			lifiGroup.POST("/settle", slh.SettleAllSwap)
@@ -530,6 +572,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		svc.GET("/requests", auth, ch.ListBookingRequests)
 		svc.POST("/requests/:reqId/approve", auth, ch.ApproveBookingRequest)
 		svc.POST("/requests/:reqId/reject", auth, ch.RejectBookingRequest)
+		// Cancel is open to either party (buyer withdraws, provider backs out).
+		svc.POST("/requests/:reqId/cancel", auth, ch.CancelBookingRequest)
 		svc.POST("/requests/:reqId/pay", auth, ch.PayBookingRequest)
 	}
 
@@ -581,7 +625,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminTP.PUT("/splits/:feature", middleware.RequireP2PAdmin(), tph.UpsertFeeSplit)
 			adminTP.GET("/distributions", tph.ListFeeDistributions)
 			adminTP.GET("/distributions/:sourceType/:sourceId", tph.GetFeeDistributionDetail)
+			adminTP.GET("/fee-summary", tph.GetFeeSummary)
 			adminTP.GET("/global-pool", tph.GetGlobalPool)
+		}
+	}
+
+	// Fee wallet — which wallet system fees are assigned to. Any admin may read
+	// the panel; reassigning it re-points where every section's fees are meant
+	// to land, so the write is super_admin only (same boundary as IT money
+	// actions).
+	if fwlh != nil {
+		adminFeeWallet := api.Group("/admin/fees")
+		adminFeeWallet.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminFeeWallet.GET("/wallet", fwlh.GetFeeWallet)
+			adminFeeWallet.PUT("/wallet", middleware.RequireSuperAdmin(), fwlh.UpdateFeeWallet)
 		}
 	}
 
@@ -645,7 +703,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
-	// P2P routes — every endpoint requires JWT auth + Persona-verified KYC
+	// P2P routes — every endpoint requires JWT auth + Didit-verified KYC
 	// (the handler itself enforces verification via the require() helper).
 	// Idempotency is applied to the write paths so retries are safe.
 	if p2p != nil && p2p.IsConfigured() {
@@ -826,6 +884,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			mcgp.POST("/confirm", msh.ConfirmSwap)
 			mcgp.POST("/pay/prepare", msh.PreparePay)
 			mcgp.POST("/pay/confirm", msh.ConfirmPay)
+			// Gasless relaying. Registered unconditionally: /relay/status must be
+			// answerable even when relaying is off, because that answer is how the
+			// app knows to self-pay.
+			mcgp.GET("/relay/status", msh.RelayStatus)
+			mcgp.POST("/relay", msh.SubmitRelay)
 		}
 	} else {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
@@ -835,21 +898,131 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// Registered only when IT is configured (operator signer present); admin
 	// endpoints (rate, approve credit, settle/reverse) gated to P2P admins.
 	if ith != nil {
+		// Idempotency is applied to the write paths so retries are safe — a
+		// stablecoin sell intent is a claim on a deposit, so a retried
+		// create must not mint a second one. Follows the same wiring as the
+		// P2P group above.
+		itIdem := middleware.Idempotency(config.DB)
+
+		// Paycrest ramp — dormant unless the API key is configured, so a missing
+		// credential leaves the routes unregistered rather than 500ing.
+		if pch.Enabled() {
+			pc := api.Group("/paycrest")
+			// Quoting stays public: it is a price, it is Paycrest's own public
+			// endpoint behind our cache, and the app shows rates before login.
+			pc.GET("/quote", pch.Quote)
+			pc.Use(auth)
+			{
+				// Behind auth: every caller is a signed-in screen (the app
+				// sends a token on this call already), and for a non-NGN
+				// currency it reaches Paycrest, so leaving it open let anyone
+				// drive one upstream request per HTTP request.
+				pc.GET("/banks", pch.Banks)
+				// Per user, not per IP. Order creation is the most sensitive
+				// write here and the only one that spends a /v2/rates call —
+				// slow and concurrency-throttled at the provider. One order at
+				// a time is already enforced by assertNoOpenOrder, and an
+				// idempotency key only collapses IDENTICAL retries, so a
+				// single account can otherwise loop failing creates and burn
+				// provider quota for everyone. Ten a minute is far above any
+				// real user's pace. Mirrors the dispute and bill write limits.
+				paycrestWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
+					v, _ := c.Get("user")
+					switch u := v.(type) {
+					case models.User:
+						return "paycrest:" + u.ID.String()
+					case *models.User:
+						return "paycrest:" + u.ID.String()
+					}
+					return "" // falls back to client IP inside RateLimiterBy
+				})
+				pc.POST("/buy", itIdem, paycrestWriteLimit, pch.Buy)
+				pc.POST("/sell", itIdem, paycrestWriteLimit, pch.Sell)
+				pc.GET("/orders", pch.ListOrders)
+				pc.GET("/orders/:id", pch.GetOrder)
+				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
+				pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
+
+				// Gas sponsorship. The status route is always registered so the
+				// app can tell "off" from "old server"; the rest exist only
+				// when RAMP_GAS_SPONSORSHIP built at least one lane. No itIdem:
+				// both writes are idempotent server-side (one row per order and
+				// kind), and a cached replay would hide a top-up that has since
+				// confirmed.
+				pc.GET("/sponsorship", pch.SponsorshipRoutes)
+				if pch.SponsorshipEnabled() {
+					pc.GET("/orders/:id/sponsorship", pch.SponsorshipOffer)
+					pc.POST("/orders/:id/relay-authorization", paycrestWriteLimit, pch.RelayAuthorization)
+					pc.POST("/orders/:id/gas-topup", paycrestWriteLimit, pch.GasTopUp)
+				}
+			}
+		}
+
+		// One dispute queue for every order type that cannot resolve itself.
+		// Registered only when at least one order stack is wired — see
+		// DisputeService.RegisterSubject.
+		if dh.Enabled() {
+			// The unique index bounds how many disputes one user can hold, but
+			// nothing bounds the RATE of attempts, and each carries up to four
+			// URLs and a kilobyte of text. The bills report route this
+			// supersedes was rate limited; keep that.
+			disputeWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
+				v, _ := c.Get("user")
+				switch u := v.(type) {
+				case models.User:
+					return "dispute:" + u.ID.String()
+				case *models.User:
+					return "dispute:" + u.ID.String()
+				}
+				return "dispute:" + c.ClientIP()
+			})
+			d := api.Group("/disputes")
+			d.Use(auth)
+			{
+				d.POST("", disputeWriteLimit, dh.File)
+				d.GET("", dh.List)
+				d.GET("/:id", dh.Get)
+				d.GET("/subject/:type/:id", dh.ForSubject)
+			}
+
+			// Disputes carry the reporter's identity and, for bills, customer
+			// phone numbers and meter ids. The bill-reports queue this replaces
+			// was gated adminAuth + RequireP2PAdmin, so anything looser would
+			// widen who can read that data — match it rather than inherit the
+			// weaker default.
+			adminDisputes := api.Group("/admin/disputes")
+			adminDisputes.Use(auth, adminAuth, middleware.RequireP2PAdmin())
+			{
+				adminDisputes.GET("", dh.ListAdmin)
+				adminDisputes.GET("/:id", dh.GetAdmin)
+				adminDisputes.POST("/:id/escalate", dh.EscalateAdmin)
+				adminDisputes.POST("/:id/resolve", dh.ResolveAdmin)
+			}
+		}
+
 		it := api.Group("/it")
 		it.Use(auth)
 		{
 			it.GET("/rate", ith.GetRate)
+			it.GET("/currencies", ith.Currencies)
 			it.GET("/agreement", ith.GetAgreement)
-			it.POST("/agreement/accept", ith.AcceptAgreement)
+			it.POST("/agreement/accept", itIdem, ith.AcceptAgreement)
 			it.GET("/withdraw/quote", ith.QuoteWithdrawal)
 			it.GET("/withdraw/destinations", ith.WithdrawalDestinations)
 			it.GET("/balance", ith.GetBalance)
 			it.GET("/va", ith.GetVA)
-			it.POST("/va/activate", ith.ActivateVA)
-			it.POST("/buy", ith.Buy)
-			it.POST("/sell", ith.Sell)
+			it.POST("/va/activate", itIdem, ith.ActivateVA)
+			it.POST("/buy", itIdem, ith.Buy)
+			it.POST("/sell", itIdem, ith.Sell)
 			it.GET("/intents", ith.ListIntents)
 			it.GET("/intents/:id", ith.GetIntent)
+			it.POST("/stable/quote", ith.PostStableQuote)
+			it.POST("/stable/sell", itIdem, ith.PostStableSell)
+			it.POST("/stable/sell/:id/deposit", itIdem, ith.PostStableDeposit)
+			it.POST("/stable/buy/:id/cancel", itIdem, ith.PostCancelStableBuy)
+			it.POST("/stable/buy/quote", ith.PostStableBuyQuote)
+			it.POST("/stable/buy", itIdem, ith.PostStableBuy)
+			it.GET("/stable/buy/chains", ith.GetStableBuyChains)
 		}
 		adminIT := api.Group("/it/admin")
 		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())
@@ -857,6 +1030,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.GET("/rate", ith.AdminGetRate)
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.GET("/intents", ith.AdminListIntents)
+			adminIT.GET("/stable/stuck", ith.GetStuckStableSells)
+			adminIT.GET("/stable/buy/stuck", ith.GetStuckStableBuys)
+			adminIT.GET("/sell/stuck", ith.GetStuckMCGPSells)
 			// Money-movement actions are super_admin only — a plain admin may
 			// view the orders console but not credit/reprice/settle/reverse.
 			// The admin UI hides these buttons for non-super_admins; this is the
@@ -866,9 +1042,66 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superIT.POST("/reprice/:id", ith.AdminRepriceCredit)
 			superIT.POST("/settle/:id", ith.AdminSettle)
 			superIT.POST("/reverse/:id", ith.AdminReverse)
+			superIT.POST("/sell/:id/retry-payout", ith.AdminRetrySellPayout)
+			superIT.POST("/sell/:id/reevaluate", ith.AdminReevaluateSell)
+			superIT.POST("/stable/:id/repay", ith.AdminRepayStableSell)
+			// RepriceParkedStableBuy resumes a purchase still holding the
+			// user's naira, same class of action as AdminRepriceCredit above —
+			// it belongs behind the same super_admin gate, not plain admin.
+			superIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
+	}
+
+	// Utility bills — airtime/data/electricity/cable/betting/exam e-PINs paid
+	// with spendable MCGP (operator debit path) and vended via ClubKonnect.
+	// Registered only when the bill stack is fully wired (bh != nil).
+	if bh != nil {
+		bills := api.Group("/bills")
+		bills.Use(auth)
+		// Per-USER limiter on the endpoints that hit the paid vendor API or
+		// write rows. The global IP limiter is weak cover here: mobile users
+		// share carrier NAT IPs, and /validate is a name-lookup oracle for
+		// meter/smartcard numbers if left open to enumeration.
+		billWriteLimit := middleware.RateLimiterBy(20, time.Minute, func(c *gin.Context) string {
+			v, _ := c.Get("user")
+			switch u := v.(type) {
+			case models.User:
+				return "bills:" + u.ID.String()
+			case *models.User:
+				return "bills:" + u.ID.String()
+			}
+			return "" // falls back to client IP inside RateLimiterBy
+		})
+		{
+			bills.GET("/catalog/:category", bh.GetProviders)
+			bills.GET("/catalog/:category/:provider/plans", bh.GetPlans)
+			bills.POST("/validate", billWriteLimit, bh.Validate)
+			bills.POST("/quote", billWriteLimit, bh.Quote)
+			bills.GET("/orders", bh.ListOrders)
+			bills.GET("/orders/:id", bh.GetOrder)
+			bills.POST("/orders/:id/pay", billWriteLimit, bh.Pay)
+			bills.POST("/orders/:id/report", billWriteLimit, bh.ReportOrder)
+			bills.GET("/orders/:id/report", bh.GetOrderReport)
+		}
+
+		// Admin review of user-reported bill orders. Inside the same gate:
+		// reports can only exist where the bill stack is wired.
+		adminBills := api.Group("/admin/bills")
+		adminBills.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminBills.GET("/reports", bh.ListReportsAdmin)
+			adminBills.POST("/reports/:id/resolve", bh.ResolveReportAdmin)
+			adminBills.GET("/payments/stuck", bh.ListStuckPaymentsAdmin)
+			// Moving a bill's MCGP is super_admin only, like the IT
+			// settle/reverse actions.
+			superBills := adminBills.Group("", middleware.RequireSuperAdmin())
+			superBills.POST("/orders/:id/reverse-payment", bh.ReversePaymentAdmin)
+			superBills.POST("/orders/:id/settle-payment", bh.SettlePaymentAdmin)
+		}
+	} else {
+		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")
 	}
 
 	// Deposit/withdrawal fee quotes — ALWAYS registered, independent of the IT
@@ -878,5 +1111,32 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		quote := api.Group("/it")
 		quote.Use(auth)
 		quote.GET("/quote", fqh.GetQuote)
+	}
+
+	// Held inbound credits — the operator queue for money that landed in the
+	// central account and could not be attributed (central-account design §8).
+	//
+	// ALWAYS registered, independent of INBOUND_MODE and of whether Flutterwave
+	// is configured: the ingestor records credits in either mode, and a held
+	// credit has no automatic exit, so a queue that disappears with the poller
+	// is a queue nobody can drain after an outage.
+	//
+	// Funds-adjacent, so AdminAuth + RequireP2PAdmin, matching /admin/fees and
+	// /admin/bills. The three actions that decide where real money ends up take
+	// the stricter super_admin gate on top, exactly like the IT orders console:
+	// a plain admin may read the queue and the evidence, only a super_admin may
+	// move the money.
+	if iah != nil {
+		adminInbound := api.Group("/admin/inbound")
+		adminInbound.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminInbound.GET("/credits", iah.ListCredits)
+			adminInbound.GET("/credits/:id/candidates", iah.GetCandidates)
+
+			superInbound := adminInbound.Group("", middleware.RequireSuperAdmin())
+			superInbound.POST("/credits/:id/assign", iah.AssignCredit)
+			superInbound.POST("/credits/:id/refund", iah.MarkRefunded)
+			superInbound.POST("/credits/:id/ignore", iah.MarkIgnored)
+		}
 	}
 }

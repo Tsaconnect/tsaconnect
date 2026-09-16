@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
-  Modal, Pressable, Image, Linking, StyleSheet, TextInput as RNTextInput,
+  Modal, Pressable, Linking, StyleSheet, TextInput as RNTextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, {
@@ -22,14 +22,24 @@ import { getChainByChainId, CHAINS, NONEVM_CHAINS, txExplorerUrl } from '@/const
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, getProvider } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
+import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
+import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote,
-  isSolanaLiFiChain, SOLANA_NATIVE_ADDRESS,
+  getLiFiToken, getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
+  type SwapDeliveryStatus,
+  isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import { fundedQuoteChain } from '@/services/quoteChain';
+import { missingAddressNotice } from '@/utils/swapAddresses';
+import { resolveLiFiChainId } from '@/utils/spotChains';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
+// LiFi tokens are identified by contract; only one we vouch for borrows a
+// registry logo when LiFi sends none.
+import { isKnownContract } from '@/utils/tokenLogo';
 import { useTheme } from '@/theme';
 import {
   Button,
@@ -42,30 +52,93 @@ import {
   ScreenHeader,
 } from '@/components/ui';
 
-const FEE_PCT = 3;
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
+
+/**
+ * Both legs of a pair, named the way a Spot listing names them: a symbol plus
+ * OUR chain key ('btc', 'bsc'). Cross-chain Spot listings arrive here because
+ * their legs live on two chains and the same-chain desk cannot express that —
+ * see services/spotTrade.
+ */
+export interface AllSwapPreselection {
+  fromSymbol?: string;
+  fromChain?: string;
+  toSymbol?: string;
+  toChain?: string;
+  /** The leg to move onto the chain where the user holds its token. That leg's
+   *  chain above is then only the fallback — see utils/quoteChain. */
+  fundedLeg?: 'from' | 'to';
+}
+
+interface AllSwapScreenProps {
+  /** Absent for the plain swap entry, which must behave exactly as before. */
+  preselect?: AllSwapPreselection;
+}
+
+/**
+ * The LiFi token for a symbol on one chain.
+ *
+ * Same two-step shape as the Spot desk's lookup (app/wallet/spot-trade) and for
+ * the same reason: the single-token endpoint takes a symbol and answers small,
+ * while the per-chain list is multi-MB and flaky on mobile — but that list is
+ * the only fallback when LiFi's index does not answer for the symbol. Two
+ * different shapes for the one problem would drift, so this one follows it.
+ *
+ * null means the leg genuinely cannot be selected, which the caller has to SAY:
+ * a screen that keeps waiting on a symbol LiFi dropped never stops waiting.
+ */
+async function resolveLiFiSymbol(chainId: number, symbol: string): Promise<LiFiToken | null> {
+  const wanted = symbol.trim().toUpperCase();
+  if (!wanted) return null;
+  // The exact symbol first, and aliases only on the chain they were checked
+  // for: Optimism lists both USDT and USDT0, and they are different contracts.
+  const candidates = [wanted, ...(LIFI_SYMBOL_ALIASES[chainId]?.[wanted] ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const token = await getLiFiToken(chainId, candidate);
+      if (token) return token;
+    } catch {
+      /* try the next spelling, then the list */
+    }
+  }
+  try {
+    const tokens = await getLiFiTokens(chainId);
+    for (const candidate of candidates) {
+      const token = tokens.find(t => t.symbol?.toUpperCase() === candidate);
+      if (token) return token;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Other names LiFi lists a token under, per LiFi chain id. On Arbitrum, Tether
+// exists only as USDT0 — the same contract (0xFd08…Cbb9) our wallet calls USDT
+// — so a lookup for "USDT" there finds nothing (checked 2026-09-14). Keyed by
+// chain because USDT0 elsewhere can be a different contract from USDT.
+const LIFI_SYMBOL_ALIASES: Record<number, Record<string, string[]>> = {
+  42161: { USDT: ['USDT0'] },
+};
 
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
-function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
-  const { colors } = useTheme();
-  if (uri) return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
-  if (!symbol) return null;
-  return (
-    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: size * 0.38 }} weight="700" color="textSecondary">{symbol[0]}</Text>
-    </View>
-  );
-}
-
-export default function AllSwapScreen() {
+export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const { colors, spacing, radius } = useTheme();
   const [fromToken, setFromToken] = useState<LiFiToken | null>(null);
-  const [fromChainId, setFromChainId] = useState(DEFAULT_FROM_CHAIN_ID);
+  // Seeded from the preselection so the token-list, balance and picker effects
+  // never fire once against a default chain the user is not on. An unresolvable
+  // key (Tron, or anything unknown) keeps the default — see the effect below,
+  // which is where that becomes a message instead of a wrong chain.
+  const [fromChainId, setFromChainId] = useState(
+    () => resolveLiFiChainId(preselect?.fromChain) ?? DEFAULT_FROM_CHAIN_ID,
+  );
   const [toToken, setToToken] = useState<LiFiToken | null>(null);
-  const [toChainId, setToChainId] = useState(DEFAULT_TO_CHAIN_ID);
+  const [toChainId, setToChainId] = useState(
+    () => resolveLiFiChainId(preselect?.toChain) ?? DEFAULT_TO_CHAIN_ID,
+  );
   const [fromAmount, setFromAmount] = useState('');
   const [quote, setQuote] = useState<LiFiQuote | null>(null);
   const [quoteStatus, setQuoteStatus] = useState<QuoteStatus>('idle');
@@ -96,9 +169,17 @@ export default function AllSwapScreen() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Derived Solana address for the active wallet — the from/to address on
-  // Solana-side routes. null until derived (or when no mnemonic exists).
+  // Derived non-EVM addresses for the active wallet — the from/to address on
+  // Solana-, Bitcoin- and Sui-side routes. Every family comes off the same
+  // mnemonic, so a cross-VM swap needs no address input from the user.
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
+  const [btcAddress, setBtcAddress] = useState<string | null>(null);
+  const [suiAddress, setSuiAddress] = useState<string | null>(null);
+  // Whether derivation has finished. A null address means "still deriving"
+  // before this flips and "this wallet has no key for that chain" after — a
+  // key-only or watch-only wallet has no mnemonic to derive from, and telling
+  // that user we are still preparing an address is a promise we never keep.
+  const [addressesDerived, setAddressesDerived] = useState(false);
 
   useEffect(() => {
     getActiveWallet()
@@ -106,14 +187,148 @@ export default function AllSwapScreen() {
       .finally(() => setWalletLoading(false));
   }, []);
 
+  // Legs the user has since chosen (or re-chained) themselves. A preselection
+  // resolves over the network, so its answer can land AFTER a tap that already
+  // picked something else — applying it then silently undoes the user's choice.
+  const userChoseLeg = useRef({ from: false, to: false });
+  // Progress of the preselection, deliberately NOT a blocking loading state:
+  // the form renders and accepts input throughout. A token list can be slow,
+  // or never answer, and a screen that waits on one is a spinner with no way
+  // out — the user must always be left on a form they can finish by hand.
+  const [preselecting, setPreselecting] = useState(false);
+  const [preselectNotice, setPreselectNotice] = useState('');
+
+  // Tracks `screen` for the preselection effect, which must consult it without
+  // taking a dependency on it.
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+
+  const wantFromSymbol = preselect?.fromSymbol;
+  const wantFromChain = preselect?.fromChain;
+  const wantToSymbol = preselect?.toSymbol;
+  const wantToChain = preselect?.toChain;
+  const wantFundedLeg = preselect?.fundedLeg;
+
+  useEffect(() => {
+    // Nothing asked for: the screen starts on its defaults, as it always has.
+    if (!wantFromSymbol && !wantToSymbol) return;
+    // Never disturb a swap that is already being signed. The tab stays mounted,
+    // so a listing tapped elsewhere pushes new params into THIS screen
+    // mid-flight. Read through a ref, not the state: depending on `screen`
+    // would re-run this effect on every screen change and wipe the form on the
+    // way to confirm.
+    if (screenRef.current === 'signing') return;
+    let cancelled = false;
+
+    // A new pair invalidates everything priced against the old one, exactly as
+    // picking a token by hand does (see onSelect). Without this the tokens
+    // change while `quote` survives; validate() only checks that A quote
+    // exists, not that it matches these legs, so Review stays enabled and
+    // handleSwap signs the PREVIOUS pair's route under the new pair's name.
+    setFromAmount(''); setQuote(null); setQuoteStatus('idle'); setQuoteError('');
+    // Back to the form: the confirm card renders whatever tokens are current,
+    // so leaving it up would show the new pair over the old quote's terms.
+    setScreen('form');
+    // A different pair in the params is a new instruction — from a listing the
+    // user just tapped — so it outranks the legs they chose for the last one.
+    // This effect only re-runs when those params actually change, which is why
+    // clearing here cannot undo a choice made against the CURRENT request.
+    userChoseLeg.current = { from: false, to: false };
+    const legs = [
+      {
+        side: 'from' as const, symbol: wantFromSymbol, chainKey: wantFromChain,
+        chainId: resolveLiFiChainId(wantFromChain),
+        setChainId: setFromChainId, setToken: setFromToken,
+      },
+      {
+        side: 'to' as const, symbol: wantToSymbol, chainKey: wantToChain,
+        chainId: resolveLiFiChainId(wantToChain),
+        setChainId: setToChainId, setToken: setToToken,
+      },
+    ].filter((leg): leg is typeof leg & { symbol: string } => !!leg.symbol);
+
+    // Chains move first and synchronously. The per-chain token lists, the
+    // balance read and the picker all key off them, so resolving symbols while
+    // they still point at the defaults would fetch the wrong chain's data and
+    // briefly offer the user the wrong chain's tokens.
+    // The token is cleared with the chain, not left for the resolver to
+    // overwrite: if the new leg never resolves, holding the PREVIOUS token
+    // against the NEW chain quotes a different asset under the old symbol,
+    // beneath a notice implying the leg is empty.
+    //
+    // A funded leg is the exception: its chain is not known until the wallet
+    // read answers, and moving it to the fallback first would fetch that
+    // chain's multi-MB token list only to throw it away.
+    legs.forEach((leg) => {
+      if (leg.chainId != null && leg.side !== wantFundedLeg) leg.setChainId(leg.chainId);
+      leg.setToken(null);
+    });
+
+    setPreselectNotice('');
+    setPreselecting(true);
+    (async () => {
+      // Each leg applies the moment its own lookup lands. Waiting for both
+      // would let one chain's slow (or dead) token list hold the other leg
+      // unselected, which is the failure this whole effect exists to avoid.
+      const unresolved = (await Promise.all(legs.map(async (leg) => {
+        // A funded leg moves once the wallet read says where the user actually
+        // holds the token; that read falls back to the leg's own chain.
+        let chainId = leg.chainId;
+        if (leg.side === wantFundedLeg) {
+          const funded = resolveLiFiChainId(await fundedQuoteChain(leg.symbol, leg.chainKey));
+          if (cancelled) return null;
+          if (funded != null && !userChoseLeg.current[leg.side]) {
+            chainId = funded;
+            leg.setChainId(funded);
+          }
+        }
+        const token = chainId == null ? null : await resolveLiFiSymbol(chainId, leg.symbol);
+        if (cancelled) return null;
+        // Checked again AFTER the await, not only before it: the tap that makes
+        // a preselection stale is most likely to land while it is in flight.
+        if (token && !userChoseLeg.current[leg.side]) leg.setToken(token);
+        return token ? null : leg.symbol.toUpperCase();
+      }))).filter((symbol): symbol is string => symbol !== null);
+      if (cancelled) return;
+      setPreselecting(false);
+      // An unresolvable leg is the end of the preselection, not a retry loop:
+      // LiFi may have dropped the token, or the request may have failed, and
+      // either way the user is already on a form that can finish the job.
+      setPreselectNotice(unresolved.length === 0 ? '' : `Couldn’t preselect ${
+        unresolved.join(' and ')} — pick ${unresolved.length > 1 ? 'them' : 'it'} below to continue.`);
+    })();
+    return () => { cancelled = true; };
+  }, [wantFromSymbol, wantFromChain, wantToSymbol, wantToChain, wantFundedLeg]);
+
   useEffect(() => {
     if (!walletAddress) return;
     let cancelled = false;
-    getSolanaAddress(walletAddress)
-      .then(addr => { if (!cancelled) setSolanaAddress(addr); })
-      .catch(() => {});
+    setAddressesDerived(false);
+    Promise.allSettled([
+      getSolanaAddress(walletAddress), getBtcAddress(walletAddress), getSuiAddress(walletAddress),
+    ]).then(([sol, btc, sui]) => {
+      if (cancelled) return;
+      setSolanaAddress(sol.status === 'fulfilled' ? sol.value : null);
+      setBtcAddress(btc.status === 'fulfilled' ? btc.value : null);
+      setSuiAddress(sui.status === 'fulfilled' ? sui.value : null);
+      setAddressesDerived(true);
+    });
     return () => { cancelled = true; };
   }, [walletAddress]);
+
+  /**
+   * The address that signs (and receives) on a given LiFi chain. Each VM family
+   * derives its own key from the one mnemonic, so this is the single place the
+   * screen decides "whose address is this route's side". null while a non-EVM
+   * address is still deriving, or when the wallet has no mnemonic to derive it —
+   * `addressesDerived` tells those two apart.
+   */
+  const addressForChain = useCallback((chainId: number): string | null => {
+    if (isSolanaLiFiChain(chainId)) return solanaAddress;
+    if (isBtcLiFiChain(chainId)) return btcAddress;
+    if (isSuiLiFiChain(chainId)) return suiAddress;
+    return walletAddress || null;
+  }, [walletAddress, solanaAddress, btcAddress, suiAddress]);
 
   // Lazy-load all-chain tokens paginated. Initial page is fetched the first
   // time the picker is opened in "All" mode (see `loadAllChainsPage`); we don't
@@ -166,7 +381,7 @@ export default function AllSwapScreen() {
   useFocusEffect(useCallback(() => {
     loadBalances();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fromChainId, solanaAddress]));
+  }, [fromChainId, solanaAddress, btcAddress, suiAddress]));
 
   useEffect(() => {
     let active = true;
@@ -190,13 +405,23 @@ export default function AllSwapScreen() {
 
   const loadBalances = async () => {
     try {
-      // /wallet/balances is EVM-only — it 400s on the Solana pseudo chain-id
+      // /wallet/balances is EVM-only — it 400s on the Solana/Bitcoin pseudo chain-id
       // and would leave the previous EVM chain's rows in place, which the
       // picker's "your tokens" section then matches BY SYMBOL against SPL
       // tokens. Read the SPL rows instead (or clear while the address derives).
       if (isSolanaLiFiChain(fromChainId)) {
         if (!solanaAddress) { setBalances([]); return; }
         setBalances(await getSolanaBalances(solanaAddress));
+        return;
+      }
+      if (isBtcLiFiChain(fromChainId)) {
+        if (!btcAddress) { setBalances([]); return; }
+        setBalances(await getBtcBalances(btcAddress));
+        return;
+      }
+      if (isSuiLiFiChain(fromChainId)) {
+        if (!suiAddress) { setBalances([]); return; }
+        setBalances(await getSuiBalances(suiAddress));
         return;
       }
       const res = await getWalletBalances(fromChainId);
@@ -232,6 +457,25 @@ export default function AllSwapScreen() {
           setLiveFromBalance(row?.balance ?? '0');
           return;
         }
+        if (isBtcLiFiChain(fromChainId)) {
+          if (!btcAddress) return;
+          // Bitcoin carries exactly one asset, so there is no token row to
+          // match — the native balance IS the from-token balance.
+          const rows = await getBtcBalances(btcAddress);
+          if (cancelled) return;
+          setLiveFromBalance(rows[0]?.balance ?? '0');
+          return;
+        }
+        if (isSuiLiFiChain(fromChainId)) {
+          if (!suiAddress) return;
+          // Sui carries many coin types, so match the selected one by symbol
+          // against the wallet's rows rather than assuming the native coin.
+          const rows = await getSuiBalances(suiAddress);
+          if (cancelled) return;
+          const row = rows.find(b => b.symbol.toUpperCase() === fromToken.symbol.toUpperCase());
+          setLiveFromBalance(row?.balance ?? '0');
+          return;
+        }
         const chain = getChainByChainId(fromChainId);
         if (!chain) return;
         const addr = fromToken.address.toLowerCase();
@@ -250,7 +494,7 @@ export default function AllSwapScreen() {
     return () => {
       cancelled = true;
     };
-  }, [fromToken, fromChainId, walletAddress, solanaAddress, refreshKey]);
+  }, [fromToken, fromChainId, walletAddress, solanaAddress, btcAddress, suiAddress, refreshKey]);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -258,11 +502,11 @@ export default function AllSwapScreen() {
       setQuote(null); setQuoteStatus('idle'); setQuoteError('');
       return;
     }
-    // Solana-side routes quote against the derived Solana address; skip until
-    // it's available (derivation is near-instant once the wallet loads).
-    const fromSolana = isSolanaLiFiChain(fromChainId);
-    const toSolana = isSolanaLiFiChain(toChainId);
-    if ((fromSolana || toSolana) && !solanaAddress) {
+    // Each side quotes against the address of its own VM family; skip until
+    // both have derived (near-instant once the wallet loads).
+    const fromAddress = addressForChain(fromChainId);
+    const toAddress = addressForChain(toChainId);
+    if (!fromAddress || !toAddress) {
       setQuote(null); setQuoteStatus('idle'); setQuoteError('');
       return;
     }
@@ -270,18 +514,18 @@ export default function AllSwapScreen() {
     timer.current = setTimeout(async () => {
       try {
         const amountWei = ethers.parseUnits(fromAmount, fromToken.decimals).toString();
-        // Cross-VM routes must name the destination-chain recipient explicitly;
-        // both sides derive from the same mnemonic, so no user input needed.
+        // Cross-VM routes (EVM↔Solana, EVM↔Bitcoin, Solana↔Bitcoin) must name
+        // the destination-chain recipient explicitly — the sending address
+        // cannot receive there. Both sides derive from the same mnemonic, so no
+        // user input is needed.
         const q = await getLiFiQuote({
           fromChain: fromChainId,
           toChain: toChainId,
           fromToken: fromToken.address,
           toToken: toToken.address,
           fromAmount: amountWei,
-          fromAddress: fromSolana ? solanaAddress! : walletAddress,
-          ...(fromSolana !== toSolana
-            ? { toAddress: toSolana ? solanaAddress! : walletAddress }
-            : {}),
+          fromAddress,
+          ...(toAddress !== fromAddress ? { toAddress } : {}),
           slippage: slippageAuto ? '0.005' : slippage,
         });
         setQuote(q); setQuoteStatus('quoted'); setQuoteError('');
@@ -313,20 +557,24 @@ export default function AllSwapScreen() {
       if (timer.current) clearTimeout(timer.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, solanaAddress, slippageAuto, slippage, refreshKey]);
+  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, addressForChain, slippageAuto, slippage, refreshKey]);
 
   const swapDirection = () => {
+    // Both legs are now the user's doing, so an in-flight preselection must
+    // not land on either of them.
+    userChoseLeg.current = { from: true, to: true };
     const [nf, nfc, nt, ntc] = [toToken, toChainId, fromToken, fromChainId];
     setFromToken(nf); setFromChainId(nfc);
     setToToken(nt); setToChainId(ntc);
     setFromAmount(''); setQuote(null); setQuoteStatus('idle');
   };
 
-  // `balances` holds EVM rows from /wallet/balances — never let a Solana
-  // from-token fall through to them by symbol (EVM USDC ≠ SPL USDC).
+  // `balances` holds EVM rows from /wallet/balances — never let a non-EVM
+  // from-token fall through to them by symbol (EVM USDC ≠ SPL USDC, and an
+  // EVM-wrapped BTC ≠ real BTC).
   const fromBalance =
     liveFromBalance ??
-    (isSolanaLiFiChain(fromChainId)
+    (isNonEVMLiFiChain(fromChainId)
       ? '0'
       : balances.find(b => b.symbol === fromToken?.symbol)?.balance ?? '0');
 
@@ -334,6 +582,13 @@ export default function AllSwapScreen() {
     if (!fromToken) return 'Select a token to send';
     if (!toToken) return 'Select a token to receive';
     if (!fromAmount || Number(fromAmount) <= 0) return 'Enter an amount';
+    // A non-EVM side needs its own derived address before LiFi can be quoted;
+    // say so rather than sit on "Waiting for price…" forever.
+    const addressNotice = missingAddressNotice([
+      { chainName: chainName(fromChainId), address: addressForChain(fromChainId) },
+      { chainName: chainName(toChainId), address: addressForChain(toChainId) },
+    ], addressesDerived);
+    if (addressNotice) return addressNotice;
     try {
       const amountUnits = ethers.parseUnits(fromAmount, fromToken.decimals);
       const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
@@ -349,23 +604,50 @@ export default function AllSwapScreen() {
   // Approve→wait→swap execution lives in services/lifiFlow (shared with the
   // Spot Trade desk); this handler only owns the screen-state wiring.
   const handleSwap = async () => {
-    if (!quote || !fromToken || !walletAddress) return;
+    if (!quote || !fromToken || !toToken || !walletAddress) return;
     setScreen('signing'); setError('');
+
+    // Built BEFORE the swap runs, so that nothing about reporting the fee can
+    // throw after the swap is on-chain — a completed swap must never land on
+    // the failure screen. The backend also records the fee as owed at submit
+    // time, so this call is the fast path, not the only one.
+    const feeReport = {
+      fromChainId,
+      toChainId,
+      fromToken: fromToken.address,
+      toToken: toToken.address,
+      fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
+      toAmount: quote.toAmount,
+      fromSymbol: fromToken.symbol,
+      fromDecimals: fromToken.decimals,
+      // The same endpoints the quote used — LiFi will not re-quote without
+      // them, and a UTXO route needs the funded sender specifically.
+      fromAddress: addressForChain(fromChainId) ?? walletAddress,
+      toAddress: addressForChain(toChainId) ?? walletAddress,
+      feature: 'allswap' as const,
+    };
+
+    let swapHash: string;
     try {
-      const swapHash = await executeLiFiSwap({
+      swapHash = await executeLiFiSwap({
         quote,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
+        fromTokenAddress: fromToken.address,
         fromAmount,
         walletAddress,
         fromChainId,
         onStage: setSigningStatus,
       });
-      setTxHash(swapHash); setScreen('success');
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);
       setError(e?.message || 'Swap failed'); setScreen('failure');
+      return;
     }
+
+    setTxHash(swapHash); setScreen('success');
+    settleSwapFee({ ...feeReport, quoteId: swapHash })
+      .catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
   };
 
   const outputAmount = quote && toToken
@@ -395,6 +677,8 @@ export default function AllSwapScreen() {
 
   const chainName = (chainId: number) => {
     if (isSolanaLiFiChain(chainId)) return NONEVM_CHAINS.solana.shortName;
+    if (isBtcLiFiChain(chainId)) return NONEVM_CHAINS.btc.shortName;
+    if (isSuiLiFiChain(chainId)) return NONEVM_CHAINS.sui.shortName;
     const entry = Object.values(CHAINS).find(c => c.chainId === chainId);
     return entry?.shortName ?? String(chainId);
   };
@@ -436,6 +720,7 @@ export default function AllSwapScreen() {
       outputAmount={outputAmount}
       txHash={txHash}
       chainId={quote?.transactionRequest.chainId ?? fromChainId}
+      crossChain={fromChainId !== toChainId}
       onDone={() => router.back()}
     />
   );
@@ -462,7 +747,7 @@ export default function AllSwapScreen() {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU PAY</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={40} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name} · {chainName(fromChainId)}</Text>
@@ -486,7 +771,7 @@ export default function AllSwapScreen() {
           <View style={{ paddingVertical: spacing.md }}>
             <Text variant="overline" color="textMuted">YOU RECEIVE</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={40} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={40} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title2" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name} · {chainName(toChainId)}</Text>
@@ -500,7 +785,7 @@ export default function AllSwapScreen() {
           <DetailRow label="Route" value={quote?.tool ?? '—'} />
           <DetailRow label="Est. time" value={quote ? `~${Math.ceil(quote.estimatedDuration / 60)} min` : '—'} />
           <DetailRow label="Gas cost" value={`$${quote?.gasCostUSD ?? '0'}`} />
-          <DetailRow label="Fee" value={`${FEE_PCT}%`} highlight />
+          {quote?.feeCostUSD ? <DetailRow label="Fee" value={`$${quote.feeCostUSD}`} highlight /> : null}
           <DetailRow label="Slippage" value={slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`} last />
         </Card>
 
@@ -588,8 +873,9 @@ export default function AllSwapScreen() {
                   borderRadius: radius.xl, maxWidth: '50%',
                 }}
                 onPress={() => setPickerMode('from')}
+                accessibilityLabel="Select token to pay"
               >
-                <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
+                {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{fromToken?.symbol ?? 'Select'}</Text>
                   {fromToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(fromChainId)}</Text>}
@@ -637,8 +923,9 @@ export default function AllSwapScreen() {
                   borderRadius: radius.xl, maxWidth: '50%',
                 }}
                 onPress={() => setPickerMode('to')}
+                accessibilityLabel="Select token to receive"
               >
-                <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
+                {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={24} /> : null}
                 <View>
                   <Text variant="bodySm" weight="700">{toToken?.symbol ?? 'Select'}</Text>
                   {toToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(toChainId)}</Text>}
@@ -657,6 +944,28 @@ export default function AllSwapScreen() {
             </View>
           </Card>
 
+          {/* Preselection progress. Rendered ABOVE the form's own messages and
+              never in place of the form: a listing that cannot be preselected
+              still leaves a usable swap. */}
+          {preselecting && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.md }}>
+              <ActivityIndicator size="small" color={colors.textMuted} />
+              <Text variant="caption" color="textMuted" style={{ flex: 1 }}>Selecting this pair…</Text>
+            </View>
+          )}
+          {!preselecting && !!preselectNotice && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.warningBg, borderWidth: 1, borderColor: colors.warning,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="warning" size={13} color={colors.warning} />
+              <Text variant="caption" style={{ flex: 1, color: colors.warning }}>{preselectNotice}</Text>
+            </View>
+          )}
+
           {/* Quote info / errors */}
           {(quoteStatus === 'quoted' || quoteStatus === 'expired') && quote && (
             <View
@@ -668,7 +977,8 @@ export default function AllSwapScreen() {
             >
               <Icon name="bolt" size={13} color={colors.accent} />
               <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
+                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min
+                {quote.feeCostUSD ? ` · $${quote.feeCostUSD} fee` : ''} · ${quote.gasCostUSD} gas
               </Text>
               {quoteStatus === 'expired' ? (
                 <PressableScale onPress={refreshQuote} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
@@ -746,6 +1056,12 @@ export default function AllSwapScreen() {
 
         <TokenPickerModal
           visible={pickerMode !== null}
+          // Stays mounted while closed on purpose: the picker fetches the LiFi
+          // chain list once per mount and clears its own search/chain/paging
+          // state off `visible`, so unmounting it on close would refetch that
+          // whole list on every open. The fallback exists only to satisfy the
+          // non-nullable prop on that closed render, and says nothing about a
+          // leg being live — `visible` is the only signal that does.
           mode={pickerMode ?? 'from'}
           chainId={pickerMode === 'from' ? fromChainId : toChainId}
           userBalances={balances}
@@ -757,10 +1073,22 @@ export default function AllSwapScreen() {
           onAllChainsSearchChange={handleAllChainsSearchChange}
           tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
           onChainChange={(newChainId) => {
+            // No mode means no leg was ever opened, and an untaken `from`
+            // branch here re-chains `to` — the leg the user was not touching.
+            if (pickerMode === null) return;
+            // Changing a chain is choosing a leg: whatever the preselection is
+            // still fetching for this side is now the wrong chain's token.
+            userChoseLeg.current[pickerMode] = true;
             if (pickerMode === 'from') setFromChainId(newChainId);
             else setToChainId(newChainId);
           }}
           onSelect={(token, chainId) => {
+            // Same absent-leg guard, and it protects more here: a fall-through
+            // would not just write `to`, it would also drop the preselect
+            // notice and wipe an amount the user has already typed.
+            if (pickerMode === null) return;
+            userChoseLeg.current[pickerMode] = true;
+            setPreselectNotice('');
             if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
             else { setToToken(token); setToChainId(chainId); }
             setPickerMode(null);
@@ -813,12 +1141,51 @@ export default function AllSwapScreen() {
   );
 }
 
-function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, chainId, onDone }: {
+function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, chainId, crossChain, onDone }: {
   fromToken: LiFiToken | null; toToken: LiFiToken | null;
   fromAmount: string; outputAmount: string | null;
-  txHash: string; chainId: number; onDone: () => void;
+  txHash: string; chainId: number; crossChain: boolean; onDone: () => void;
 }) {
   const { colors, spacing, radius } = useTheme();
+
+  // A same-chain swap is done when its transaction confirms. A cross-chain one
+  // is not: the bridge still has to deliver on the far side, so saying
+  // "complete" at broadcast tells the user their funds have arrived when they
+  // are still in flight — and says nothing at all when the bridge fails.
+  const [delivery, setDelivery] = useState<SwapDeliveryStatus>(crossChain ? 'PENDING' : 'DONE');
+  const [gaveUpWaiting, setGaveUpWaiting] = useState(false);
+  useEffect(() => {
+    if (!crossChain || !txHash) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    // A bridge leg runs to minutes, so keep asking — but not forever. Past this
+    // the screen stops polling and points at the explorer rather than holding a
+    // spinner (and a LiFi call every 15s) open indefinitely.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 40; // ~10 minutes
+    const poll = async () => {
+      const { status } = await getSwapDelivery(txHash);
+      if (cancelled) return;
+      setDelivery(status);
+      if (status === 'PENDING' && ++attempts < MAX_ATTEMPTS) {
+        timer = setTimeout(poll, 15_000);
+      } else if (status === 'PENDING') {
+        setGaveUpWaiting(true);
+      }
+    };
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [crossChain, txHash]);
+
+  const title =
+    delivery === 'DONE' ? 'Swap Complete'
+      : delivery === 'FAILED' ? 'Bridge Failed'
+        : 'Swap Sent';
+  const subtitle =
+    delivery === 'FAILED' ? 'The bridge could not complete this route. Bridges refund to your address when they fail — check the explorer link below.'
+      : delivery !== 'PENDING' ? null
+        : gaveUpWaiting ? 'Still bridging. This one is taking longer than usual — follow the explorer link below for the latest.'
+          : 'Bridging to the destination chain — this can take a few minutes. You can close this screen; it will keep going.';
   const iconScale = useSharedValue(0);
   const ringScale = useSharedValue(1);
   const ringOpacity = useSharedValue(0);
@@ -869,11 +1236,16 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
 
         {/* Title + swap summary */}
         <Animated.View style={[{ alignItems: 'center' }, contentStyle]}>
-          <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing['2xl'] }}>Swap Complete</Text>
+          <Text variant="title1" weight="700" align="center" style={{ marginBottom: subtitle ? spacing.sm : spacing['2xl'] }}>{title}</Text>
+          {subtitle ? (
+            <Text variant="caption" color="textMuted" align="center" style={{ marginBottom: spacing['2xl'] }}>
+              {subtitle}
+            </Text>
+          ) : null}
 
           <Card padding="lg" style={{ width: '100%' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
+              {fromToken ? <TokenAvatar symbol={fromToken.symbol} iconUrl={fromToken.logoURI} curated={isKnownContract(fromToken.chainId, fromToken.address, fromToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700">{fromAmount} {fromToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name}</Text>
@@ -885,7 +1257,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
               <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
+              {toToken ? <TokenAvatar symbol={toToken.symbol} iconUrl={toToken.logoURI} curated={isKnownContract(toToken.chainId, toToken.address, toToken.symbol)} size={36} /> : null}
               <View style={{ flex: 1 }}>
                 <Text variant="title3" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
                 <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name}</Text>
@@ -894,8 +1266,10 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
           </Card>
 
           {txHash ? (() => {
-            const url = isSolanaLiFiChain(chainId)
-              ? txExplorerUrl(txHash, { chainKey: 'solana' }) ?? null
+            const url = isNonEVMLiFiChain(chainId)
+              ? txExplorerUrl(txHash, {
+                  chainKey: isSolanaLiFiChain(chainId) ? 'solana' : isSuiLiFiChain(chainId) ? 'sui' : 'btc',
+                }) ?? null
               : (() => {
                   const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
                   return explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;

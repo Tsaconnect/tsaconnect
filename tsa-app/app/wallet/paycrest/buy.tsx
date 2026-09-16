@@ -1,0 +1,578 @@
+// app/wallet/paycrest/buy.tsx
+//
+// Buy stablecoins with Naira through Paycrest's provider network.
+//
+// Non-custodial end to end: the user transfers Naira straight to a liquidity
+// provider's bank account, and the stablecoin lands in their own connected
+// wallet. TSA brokers and records; it never holds either side.
+//
+// Two things drive the design, both learned from live testing:
+//
+//   1. Liquidity is not fixed. Providers join and leave the book and price by
+//      order size — the same pair moved 4x overnight, and one day a whole
+//      token had no onramp provider at all. So the route list is built from a
+//      quote for the amount actually typed, never a hardcoded list. A route
+//      the user can see is one the order will succeed on.
+//   2. An order that expires while the user is still transferring can strand
+//      their money at the provider's bank with no automatic refund. Hence the
+//      prominent countdown and the warning well before it runs out.
+//
+// Flow: amount -> live routes -> confirm -> provider account + countdown ->
+// the user pays in their bank app -> the order screen takes over.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useTheme } from '@/theme';
+import {
+  AmountInput,
+  Button,
+  Card,
+  CopyableField,
+  Input,
+  PickerSheet,
+  SelectRow,
+  Spinner,
+  SummaryCard,
+  SummaryRow,
+  Text,
+} from '@/components/ui';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { useCountdown } from '@/hooks/useCountdown';
+import { useRampCurrency } from '@/hooks/useRampCurrency';
+import {
+  accountFieldLabel,
+  accountFieldPlaceholder,
+  accountValueSurvivesKindChange,
+  accountNumberMaxLength,
+  isDigitsOnlyAccountField,
+  isValidAccountNumber,
+  sanitizeAccountNumberInput,
+} from '@/utils/payoutAccount';
+import {
+  claimPayment,
+  createBuy,
+  getPayoutInstitutions,
+  getQuote,
+  PaycrestError,
+  type PayoutInstitution,
+  type PaycrestOrder,
+  type PaycrestQuote,
+  type PaycrestVenue,
+} from '@/services/paycrestApi';
+import { promptKycRefusal } from '@/utils/kycRefusal';
+
+/** Debounce on the amount field: every keystroke would otherwise fan a live
+ *  quote out across every network we support. */
+const QUOTE_DEBOUNCE_MS = 450;
+
+/** Warn while there is still time to act, not once it is hopeless. A transfer
+ *  confirmed in ~10s in testing, but the user still has to open their bank app
+ *  and type. */
+const EXPIRY_WARNING_SECONDS = 300;
+
+const CHAIN_LABELS: Record<string, string> = {
+  base: 'Base',
+  polygon: 'Polygon',
+  bsc: 'BNB Smart Chain',
+  arbitrum: 'Arbitrum',
+  ethereum: 'Ethereum',
+};
+
+/** The refund account is insurance against a rare failure, not part of the
+ *  purchase — asking for it on every buy is friction for something most users
+ *  will never use. Remembered after the first time and shown as one line.
+ *  Scoped per currency: a NGN account number is meaningless as a GHS refund
+ *  destination. */
+const REFUND_STORE_KEY = (currency: string) => `paycrest.refundAccount.v1.${currency}`;
+
+const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
+const venueLabel = (v: PaycrestVenue) =>
+  `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
+
+export default function PaycrestBuyScreen() {
+  const { colors, spacing } = useTheme();
+  const { address, ready: walletReady } = useSignableWallet();
+  // The asset the user picked upstream. A PREFERENCE, not a filter: a token
+  // with no provider today must not leave them with an empty screen, so we
+  // fall back to whatever the book can actually fill.
+  const { asset, currency: currencyParam } = useLocalSearchParams<{
+    asset?: string;
+    currency?: string;
+  }>();
+
+  // The currency this order settles in — NOT the display currency (see
+  // hooks/useRampCurrency.ts). Restricted to 'paycrest' so the picker below
+  // can never offer a currency this screen would fail to quote — provider AND
+  // direction, since Paycrest sells UGX and TZS but does not buy them, so a
+  // provider-only filter would default a Ugandan user into a currency this
+  // screen can never price. A currency arriving via the route
+  // param (the hub already resolved one) is applied immediately so the first
+  // render doesn't briefly show a different default while AsyncStorage loads.
+  const {
+    code: currencyCode,
+    currency: currencyConfig,
+    setCode: setCurrencyCode,
+    options: currencyOptions,
+  } = useRampCurrency('paycrest', 'buy');
+  const symbol = currencyConfig.symbol;
+  useEffect(() => {
+    if (currencyParam) setCurrencyCode(currencyParam);
+    // Applying the hub's choice is a one-time sync on arrival, not a binding —
+    // re-running on every setCurrencyCode identity change would fight the
+    // user's own in-screen picker selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currencyParam]);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+
+  const [amount, setAmount] = useState('');
+  const [quote, setQuote] = useState<PaycrestQuote | null>(null);
+  const [venue, setVenue] = useState<PaycrestVenue | null>(null);
+  const [quoting, setQuoting] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Refund destination. Paycrest requires one on every onramp, because it
+  // cannot know who will pay until the transfer arrives — so this is the only
+  // thing that decides where money goes back to if the order fails. Asked
+  // once and kept, rather than per purchase.
+  //
+  // The list itself comes from getPayoutInstitutions, already in the
+  // vocabulary the order expects: NIBSS codes for NGN, Paycrest's own codes
+  // elsewhere. Re-fetched (and the remembered selection re-validated) whenever
+  // the currency changes, since a NGN refund bank is meaningless once the
+  // order settles in GHS.
+  const [banks, setBanks] = useState<PayoutInstitution[]>([]);
+  const [refundBank, setRefundBank] = useState<PayoutInstitution | null>(null);
+  const [refundOpen, setRefundOpen] = useState(false);
+  // The refund destination can be mobile money too — in Uganda it always is —
+  // and the field must ask for a phone number when it is. Missing type reads
+  // as a bank, which is what every currency's majority destination is.
+  const refundKind = refundBank?.type ?? 'bank';
+  const [refundAccount, setRefundAccount] = useState('');
+
+  const [order, setOrder] = useState<PaycrestOrder | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  // Guards a late quote response from overwriting a newer one — the user types
+  // faster than the network answers, and a stale route list would let them
+  // pick something that cannot fill their current amount.
+  const quoteSeq = useRef(0);
+
+  const [editingRefund, setEditingRefund] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRefundBank(null);
+    getPayoutInstitutions(currencyCode)
+      .then(async (list) => {
+        if (cancelled) return;
+        setBanks(list);
+        try {
+          const saved = await AsyncStorage.getItem(REFUND_STORE_KEY(currencyCode));
+          if (!saved) {
+            setEditingRefund(true); // first time: ask
+            return;
+          }
+          const { code, account } = JSON.parse(saved) as { code: string; account: string };
+          const found = list.find((b) => b.code === code);
+          if (found && account) {
+            setRefundBank(found);
+            setRefundAccount(account);
+            setEditingRefund(false);
+          } else {
+            setEditingRefund(true);
+          }
+        } catch {
+          setEditingRefund(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setEditingRefund(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currencyCode]);
+
+  useEffect(() => {
+    const raw = amount.trim();
+    if (!raw || Number(raw) <= 0) {
+      setQuote(null);
+      setVenue(null);
+      setQuoteError(null);
+      return;
+    }
+    const seq = ++quoteSeq.current;
+    setQuoting(true);
+    const t = setTimeout(async () => {
+      try {
+        const q = await getQuote('buy', raw, currencyCode);
+        if (seq !== quoteSeq.current) return;
+        setQuote(q);
+        setQuoteError(null);
+        // Default to the cheapest, but keep the user's own pick if it survived
+        // the amount change.
+        setVenue((prev) => {
+          const kept = prev && q.venues.find((v) => venueId(v) === venueId(prev));
+          const preferred = asset
+            ? q.venues.find((v) => v.token.toUpperCase() === asset.toUpperCase())
+            : undefined;
+          return kept ?? preferred ?? q.best ?? null;
+        });
+      } catch (e) {
+        if (seq !== quoteSeq.current) return;
+        setQuote(null);
+        setVenue(null);
+        // The server's wording is written for users — "no provider can fill
+        // that amount right now" is actionable in a way "error" is not.
+        setQuoteError(
+          e instanceof PaycrestError
+            ? e.message
+            : 'Could not fetch a rate. Check your connection.',
+        );
+      } finally {
+        if (seq === quoteSeq.current) setQuoting(false);
+      }
+    }, QUOTE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [amount, asset, currencyCode]);
+
+  const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
+  const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
+
+  const onConfirm = useCallback(async () => {
+    if (!venue || !address || !refundBank) return;
+    setCreating(true);
+    try {
+      const created = await createBuy({
+        amount: amount.trim(),
+        chain: venue.chain,
+        token: venue.token,
+        walletAddress: address,
+        refundBankCode: refundBank.code,
+        refundAccount,
+        currency: currencyCode,
+      });
+      // Remember it only once an order actually succeeded with it.
+      AsyncStorage.setItem(
+        REFUND_STORE_KEY(currencyCode),
+        JSON.stringify({ code: refundBank.code, account: refundAccount }),
+      ).catch(() => {});
+      setOrder(created);
+    } catch (e) {
+      // Not verified (or verified with no legal name): offer the next step
+      // instead of a dead-end "could not start" alert.
+      if (e instanceof PaycrestError && promptKycRefusal(e.code, e.message)) return;
+      Alert.alert(
+        'Could not start your purchase',
+        e instanceof PaycrestError ? e.message : 'Please try again.',
+      );
+    } finally {
+      setCreating(false);
+    }
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode]);
+
+  const pickerItems = useMemo(
+    () =>
+      (quote?.venues ?? []).map((v) => ({
+        id: venueId(v),
+        label: venueLabel(v),
+        sublabel: `${v.tokenAmount.toFixed(4)} ${v.token}`,
+      })),
+    [quote],
+  );
+
+  // ── Payment instructions ────────────────────────────────────────────────
+  if (order) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+        <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          <Card>
+            <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+              Transfer exactly
+            </Text>
+            <Text variant="display" weight="700" style={{ color: colors.textPrimary }}>
+              {symbol}{order.payAmount}
+            </Text>
+            <Text variant="caption" style={{ color: colors.textMuted }}>
+              The service fee is already priced into your rate, so this is exactly the amount
+              you entered.
+            </Text>
+          </Card>
+
+          <Card
+            style={{
+              borderWidth: 1,
+              borderColor: expired
+                ? colors.danger
+                : expiringSoon
+                  ? colors.warning
+                  : colors.border,
+            }}
+          >
+            {expired ? (
+              <>
+                <Text variant="bodyMed" weight="700" style={{ color: colors.danger }}>
+                  This order has expired
+                </Text>
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  Do not send money to this account. If you already sent it, open the order and
+                  tap Get help — we will trace it for you.
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text
+                  variant="bodySm"
+                  style={{ color: expiringSoon ? colors.warning : colors.textSecondary }}
+                >
+                  Time left to pay
+                </Text>
+                <Text
+                  variant="title1"
+                  weight="700"
+                  style={{ color: expiringSoon ? colors.warning : colors.textPrimary }}
+                >
+                  {countdown}
+                </Text>
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  Send the transfer now. Paying after this runs out can leave your money with the
+                  provider, and it will not arrive automatically.
+                </Text>
+              </>
+            )}
+          </Card>
+
+          <Card>
+            <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
+              Pay into
+            </Text>
+            {/* Copyable, because a mistyped account number on a live transfer
+                is not something we can undo. */}
+            <CopyableField label="Bank" value={order.payInstitution ?? ''} />
+            <CopyableField label="Account number" value={order.payAccountNumber ?? ''} />
+            <CopyableField label="Account name" value={order.payAccountName ?? ''} />
+            <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+              This account belongs to the liquidity provider filling your order, not to TSA. It is
+              valid for this order only — never reuse it.
+            </Text>
+          </Card>
+
+          <SummaryCard>
+            <SummaryRow label="You receive" value={`${order.tokenAmount} ${order.token}`} />
+            <SummaryRow label="Rate" value={`${symbol}${order.rate} / ${order.token}`} />
+            <SummaryRow label="Network" value={CHAIN_LABELS[order.chain] ?? order.chain} />
+          </SummaryCard>
+
+          <Card>
+            <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
+              Delivered to your wallet
+            </Text>
+            {/* Full address, never truncated — the user is entitled to verify
+                where their crypto is going. */}
+            <CopyableField value={order.walletAddress} />
+          </Card>
+
+          <Button
+            title="I've sent the money"
+            onPress={() => {
+              // Tell the server the user asserts they paid — the only signal
+              // that lets an order which later expires with amountPaid=0 read
+              // as a genuine unmatched-deposit alarm instead of an ordinary
+              // abandoned checkout. Fire-and-forget: the user has already
+              // sent the money, so a failed claim must not block navigation —
+              // it just means this order degrades to a plain "expired" if it
+              // never matches, the same as before this existed.
+              claimPayment(order.id).catch(() => {});
+              router.replace(`/wallet/paycrest/order/${order.id}` as never);
+            }}
+            disabled={expired}
+            fullWidth
+          />
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Amount + route ──────────────────────────────────────────────────────
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          {/* Only offer a choice when there is one — today that's true for
+              every Paycrest-ramped currency (just NGN), but the picker grows
+              on its own the day a second one is added to the registry. */}
+          {currencyOptions.length > 1 && (
+            <SelectRow
+              label="Currency"
+              value={currencyCode}
+              onPress={() => setCurrencyPickerOpen(true)}
+            />
+          )}
+
+          <AmountInput
+            label="You pay"
+            value={amount}
+            onChangeText={setAmount}
+            symbol={symbol}
+            symbolPosition="prefix"
+            autoFocus
+          />
+
+          {/* The payoff sits directly under the input, because "what do I get"
+              is the question the amount field is asking. Everything else on
+              this screen is secondary to it. */}
+          {(quoting || venue || quoteError) && (
+            <Card>
+              {quoting ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Spinner size="small" />
+                  <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                    Finding the best rate…
+                  </Text>
+                </View>
+              ) : quoteError ? (
+                <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+                  {quoteError}
+                </Text>
+              ) : venue ? (
+                <>
+                  <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+                    You receive
+                  </Text>
+                  <Text variant="title1" weight="700" style={{ color: colors.textPrimary }}>
+                    {venue.tokenAmount.toFixed(6)} {venue.token}
+                  </Text>
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · {symbol}
+                    {venue.rate} per {venue.token}
+                  </Text>
+                  {/* Only offer a choice when there is one. A picker with a
+                      single option is noise. */}
+                  {quote && quote.venues.length > 1 && (
+                    <Button
+                      title={`Change route (${quote.venues.length} available)`}
+                      variant="ghost"
+                      size="sm"
+                      onPress={() => setPickerOpen(true)}
+                    />
+                  )}
+                </>
+              ) : null}
+            </Card>
+          )}
+
+          {/* Demoted: insurance, not part of the purchase. One line once known. */}
+          {!editingRefund && refundBank ? (
+            <SelectRow
+              label="Refund account"
+              value={`${refundBank.name} · ${refundAccount}`}
+              onPress={() => setEditingRefund(true)}
+            />
+          ) : (
+            <>
+              <SelectRow
+                label="Refund account"
+                value={refundBank?.name}
+                placeholder="Where should we refund you?"
+                onPress={() => setRefundOpen(true)}
+              />
+              <Input
+                label={accountFieldLabel(refundKind)}
+                value={refundAccount}
+                onChangeText={(v: string) =>
+                  setRefundAccount(sanitizeAccountNumberInput(currencyCode, v, refundKind))
+                }
+                keyboardType={
+                  isDigitsOnlyAccountField(currencyCode, refundKind) ? 'number-pad' : 'default'
+                }
+                placeholder={accountFieldPlaceholder(currencyCode, refundKind)}
+                maxLength={accountNumberMaxLength(currencyCode, refundKind)}
+              />
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Used only if your order fails. Pay from this account so a refund reaches you.
+              </Text>
+            </>
+          )}
+
+          <Button
+            title="Continue"
+            onPress={onConfirm}
+            loading={creating}
+            disabled={
+              !venue ||
+              !address ||
+              !refundBank ||
+              !isValidAccountNumber(currencyCode, refundAccount, refundKind) ||
+              quoting ||
+              creating
+            }
+            fullWidth
+          />
+          {walletReady && !address && (
+            <Text variant="caption" style={{ color: colors.textMuted }}>
+              Connect a wallet on this device first — your crypto is delivered straight to it.
+            </Text>
+          )}
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      <PickerSheet
+        visible={currencyPickerOpen}
+        onClose={() => setCurrencyPickerOpen(false)}
+        title="Currency"
+        items={currencyOptions}
+        selectedId={currencyCode}
+        onSelect={(item) => {
+          setCurrencyCode(item.id);
+          // A new currency means a fresh route and refund bank — the ones
+          // held over would either belong to the wrong currency's quote or
+          // (for the refund bank) simply not exist in the new list.
+          setAmount('');
+          setVenue(null);
+          setRefundAccount('');
+          setCurrencyPickerOpen(false);
+        }}
+        emptyText="No currencies available."
+      />
+      <PickerSheet
+        visible={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        title="Choose a network"
+        items={pickerItems}
+        selectedId={venue ? venueId(venue) : undefined}
+        onSelect={(item) => {
+          const picked = quote?.venues.find((v) => venueId(v) === item.id);
+          if (picked) setVenue(picked);
+          setPickerOpen(false);
+        }}
+        emptyText="No routes can fill this amount right now."
+      />
+      <PickerSheet
+        visible={refundOpen}
+        onClose={() => setRefundOpen(false)}
+        title="Refund account"
+        items={banks.map((b) => ({ id: b.code, label: b.name }))}
+        selectedId={refundBank?.code}
+        searchable
+        onSelect={(item) => {
+          const next = banks.find((b) => b.code === item.id) ?? null;
+          // Same reasoning as the sell screen's payout picker: a value typed
+          // for one kind of destination is meaningless — and dangerously
+          // plausible — against the other.
+          if (!accountValueSurvivesKindChange(refundKind, next?.type)) {
+            setRefundAccount('');
+          }
+          setRefundBank(next);
+          setRefundOpen(false);
+        }}
+        emptyText="No banks available."
+      />
+    </SafeAreaView>
+  );
+}

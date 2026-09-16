@@ -42,7 +42,7 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			profile_photo TEXT,
 			referral_code TEXT,
 			referred_by TEXT,
-			persona_inquiry_id TEXT,
+			didit_session_id TEXT,
 			verification_status TEXT DEFAULT 'pending',
 			verification_notes TEXT,
 			account_status TEXT DEFAULT 'active',
@@ -59,7 +59,11 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
-			updated_at DATETIME
+			updated_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS tp_earnings (
 			id TEXT PRIMARY KEY,

@@ -28,10 +28,10 @@ func markAdAsPM(t *testing.T, svc *P2PTradeService, adID uuid.UUID) {
 // VA (pmPayTo), so the sell-ad open path must skip the payment-method allowlist
 // check when the ad is a PM ad.
 func TestOpenTrade_PMSellAd_NoPaymentMethod_OK(t *testing.T) {
-	svc, _, adID, _ := setupSignedAd(t)
+	svc, _, adID, _, db := setupSignedAd(t)
 	markAdAsPM(t, svc, adID) // stamp pm_id → treat as a PM ad
 
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	trade, raw, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
 		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
 	if err != nil {
@@ -49,9 +49,9 @@ func TestOpenTrade_PMSellAd_NoPaymentMethod_OK(t *testing.T) {
 // normal sell-ad still requires the buyer to reference a method in the ad's
 // allowlist.
 func TestOpenTrade_NonPMSellAd_NoPaymentMethod_Rejected(t *testing.T) {
-	svc, _, adID, _ := setupSignedAd(t) // pm_id stays NULL
+	svc, _, adID, _, db := setupSignedAd(t) // pm_id stays NULL
 
-	buyerID := uuid.New()
+	buyerID := seedVerifiedUser(t, db)
 	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
 		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
 	if !errors.Is(err, ErrInvalidParams) {

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // IT automation — the Flutterwave-era NGN legs. The legacy flow is fully
@@ -36,6 +38,38 @@ const ITPayoutRefPrefix = "IT-SELL-"
 // keep these two in lockstep.
 func itPayoutRef(intentID uuid.UUID) string {
 	return ITPayoutRefPrefix + strings.ReplaceAll(intentID.String(), "-", "")
+}
+
+// itPayoutRefMaxGen is the last reference generation that fits Flutterwave's
+// 42-char limit: the base reference is 40 chars, leaving room for "-N".
+const itPayoutRefMaxGen = 9
+
+// itPayoutRefFor is the intent's CURRENT payout reference. Generation 0 is the
+// original reference (every MCGP sell, and every sell before repay existed);
+// a stablecoin repay moves to "<base>-<gen>".
+func itPayoutRefFor(intent *models.ITIntent) string {
+	if intent.PayoutRefGen <= 0 {
+		return itPayoutRef(intent.ID)
+	}
+	return fmt.Sprintf("%s-%d", itPayoutRef(intent.ID), intent.PayoutRefGen)
+}
+
+// parseITPayoutRef reverses itPayoutRefFor.
+func parseITPayoutRef(ref string) (uuid.UUID, int, error) {
+	body := strings.TrimPrefix(strings.TrimSpace(ref), ITPayoutRefPrefix)
+	gen := 0
+	if i := strings.LastIndex(body, "-"); i >= 0 && len(body)-i <= 2 {
+		n, err := strconv.Atoi(body[i+1:])
+		if err != nil || n < 1 || n > itPayoutRefMaxGen {
+			return uuid.Nil, 0, fmt.Errorf("bad payout reference generation in %q", ref)
+		}
+		gen, body = n, body[:i]
+	}
+	id, err := uuid.Parse(body)
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	return id, gen, nil
 }
 
 // ITSellBank is the payout destination captured at sell creation. Bank fields
@@ -209,8 +243,26 @@ func (s *ITService) AutoCreditFromInbound(ctx context.Context, paymentRef, amoun
 
 // AutoPayout fires the fiat leg for a debited sell intent through the payout
 // gateway and records the provider's transfer id. Idempotent: an intent that
-// already has a PayoutID is not re-sent (the reference-derived idempotency key
-// at the provider is the second line of defense).
+// already has a PayoutID is not re-sent, and every send of one reference
+// generation reuses the same reference, which is also the provider's
+// idempotency key.
+//
+// The error classifies the outcome, because the money invariant depends on it:
+//
+//   - ErrITSellPayoutRejected (MCGP only): positive evidence no transfer
+//     exists — nothing was ever sent, or the provider refused the FIRST request
+//     for the reference. The intent is marked PayoutRejected; the caller
+//     reverses.
+//   - a refusal of a RETRY proves nothing (the reference may be taken because
+//     the first attempt went out). It is recorded as PayoutRefusedOnRetry and
+//     the reconciler reverses only once the provider confirms no transfer.
+//   - a brokered stablecoin sell's refusals are only recorded: its watcher
+//     retries, and only a provider-confirmed FAILED transfer parks it.
+//   - any other error: outcome unknown, nothing marked.
+//
+// An MCGP sell is only paid out while its debit is still Pending on-chain: a
+// debit already settled or reversed means the row is stale, and paying it
+// would pay a user whose MCGP was returned.
 func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) error {
 	if s.payout == nil {
 		return errors.New("it: no payout gateway configured")
@@ -221,61 +273,269 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if intent.PayoutID != "" {
 		return nil
 	}
-	if !sellIntentHasPayoutDestination(intent) {
-		return errors.New("it: sell intent has no payout destination")
+	if intent.PayoutRejected {
+		// The provider would only replay its refusal for this reference.
+		return fmt.Errorf("%w: payout already rejected for intent %s", ErrITSellPayoutRejected, intent.ID)
 	}
-	naira, err := koboToNairaString(intent.NgnKobo)
+	if intent.PayoutRefusedOnRetry {
+		return fmt.Errorf("%w: a retry of this payout was refused; awaiting provider confirmation", ErrITBadState)
+	}
+	isMCGP := models.ITIntentAsset(intent) == models.ITAssetMCGP
+	firstAttempt := payoutNeverSubmitted(intent)
+
+	payoutReq, err := s.buildSellPayoutRequest(ctx, intent)
 	if err != nil {
-		return fmt.Errorf("it payout: bad intent amount: %w", err)
+		return s.payoutNotSent(ctx, intent, firstAttempt, err)
 	}
-	// AmountNGN is always our locked NGN amount — for a cross-currency/mobile
-	// rail the gateway converts via DestinationCurrency; for legacy NGN bank
-	// (DestinationCurrency empty) it pays it out as-is. See FlutterwaveGateway.
-	payoutID, err := s.payout.InitiatePayout(ctx, PayoutRequest{
-		BankCode:            intent.BankCode,
-		AccountNumber:       intent.AccountNumber,
-		AccountName:         intent.AccountName,
+	if isMCGP {
+		if err := s.requireDebitPending(ctx, intent); err != nil {
+			return err
+		}
+	}
+
+	// Claim the attempt BEFORE the request leaves: a crash mid-request must
+	// still read as "may have been sent". The guard makes concurrent callers
+	// (request, reconciler, admin retry) take turns, and loses to a reverse
+	// that has already claimed the row (payout_rejected).
+	// The attempt time is stamped by the DATABASE: the reverse guard compares it
+	// there too, and mixing an app clock into one side of that comparison is
+	// exactly the skew the guard must not be weakened by.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = '' AND payout_rejected = ? AND payout_refused_on_retry = ? AND payout_attempts = ? AND payout_ref_gen = ?",
+			intent.ID, models.ITStatusDebited, false, false, intent.PayoutAttempts, intent.PayoutRefGen).
+		Updates(map[string]any{
+			"payout_attempts":        gorm.Expr("payout_attempts + 1"),
+			"last_payout_attempt_at": dbNowExpr(s.db),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("it payout: record attempt: %w", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("%w: payout for intent %s is being handled elsewhere", ErrITBadState, intent.ID)
+	}
+	intent.PayoutAttempts++
+	if fresh, ferr := s.getIntent(ctx, intent.ID); ferr == nil {
+		intent.LastPayoutAttemptAt = fresh.LastPayoutAttemptAt
+	}
+
+	payoutID, err := s.payout.InitiatePayout(ctx, payoutReq)
+	if err != nil {
+		var rej *ProviderRejectedError
+		switch {
+		case errors.As(err, &rej) && isMCGP && firstAttempt:
+			if s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error()) {
+				return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
+			}
+			return err
+		case errors.As(err, &rej) && isMCGP:
+			reason := truncateReason(itPayoutReasonPrefix + " refused on retry: " + err.Error())
+			intent.PayoutRefusedOnRetry, intent.FailureReason = true, reason
+			if uerr := s.db.WithContext(ctx).Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+				Updates(map[string]any{"payout_refused_on_retry": true, "failure_reason": reason}).Error; uerr != nil {
+				log.Printf("[it] ALERT it_sell_retry_refusal_unrecorded intent=%s: %v", intent.ID, uerr)
+			}
+			return err
+		}
+		reason := truncateReason(itPayoutReasonPrefix + " unknown: " + err.Error())
+		if errors.As(err, &rej) {
+			reason = truncateReason(itPayoutReasonPrefix + " refused: " + err.Error())
+		}
+		intent.FailureReason = reason
+		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
+			Where("id = ?", intent.ID).
+			Update("failure_reason", reason).Error
+		return err
+	}
+	intent.PayoutID = payoutID
+	intent.FailureReason = ""
+	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ?", intent.ID).
+		Updates(map[string]any{"payout_id": payoutID, "failure_reason": ""}).Error
+}
+
+// requireDebitPending refuses a payout unless the sell's debit is Pending
+// on-chain for this wallet and amount.
+//
+// Only a debit that is already RESOLVED, or one that belongs to a different
+// wallet or amount, parks the row: those are facts that cannot un-happen. "No
+// debit at this ref" is NOT one of them — a load-balanced RPC node a block or
+// two behind answers exactly that for a debit that just mined, and parking on
+// it stranded healthy sells. An unreadable chain is the same: unknown, not
+// false. Both leave the row where it is for a later tick, and only alert once
+// the debit has been invisible past the abandon window.
+func (s *ITService) requireDebitPending(ctx context.Context, intent *models.ITIntent) error {
+	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", intent.ID))
+	if err != nil {
+		return fmt.Errorf("it payout: cannot confirm the debit is pending: %w", err)
+	}
+	switch {
+	case rec.State == DebitStatePending && debitMatchesIntent(rec, intent):
+		return nil
+	case rec.State == DebitStateNone:
+		if s.rowOlderThan(ctx, intent.ID, "updated_at", itDebitAbandonAfter) {
+			alertf("sell-debit-invisible:"+intent.ID.String(),
+				"[it] ALERT it_sell_debit_not_visible intent=%s — no debit at this ref for over %s; payout held", intent.ID, itDebitAbandonAfter)
+		}
+		return fmt.Errorf("%w: debit for intent %s is not visible on-chain yet", ErrITSellDebitPending, intent.ID)
+	default:
+		s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+			fmt.Sprintf("payout blocked: on-chain debit state %d does not match a pending debit for this sell", rec.State))
+		return fmt.Errorf("%w: debit for intent %s is not pending on-chain", ErrITBadState, intent.ID)
+	}
+}
+
+// fwTerminalTransferStatus reports whether a provider transfer status is final.
+func fwTerminalTransferStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "SUCCESSFUL", "SUCCESS", "SUCCEEDED", "FAILED", "CANCELLED", "CANCELED":
+		return true
+	}
+	return false
+}
+
+// itPayoutReasonPrefix starts every failure_reason AutoPayout writes. Rows
+// from before PayoutAttempts existed carry "auto-payout: …", and that prefix
+// is the only trace that they were ever submitted — payoutNeverSubmitted keys
+// on it so a legacy row can never be mistaken for an unused reference.
+const itPayoutReasonPrefix = "auto-payout"
+
+// payoutNeverSubmitted reports whether the intent's payout reference has
+// provably never been sent to the provider.
+func payoutNeverSubmitted(intent *models.ITIntent) bool {
+	return intent.PayoutAttempts == 0 && intent.PayoutID == "" &&
+		!strings.HasPrefix(intent.FailureReason, itPayoutReasonPrefix)
+}
+
+// payoutNotSent handles a payout that failed before any request was made. On
+// the first attempt that is a definite rejection for an MCGP sell — but only if
+// the row still looks the way this caller read it, because "first attempt" is
+// read from a copy that may already be stale. A brokered stablecoin sell is
+// left to its watcher to retry: nothing was sent, and the user's fiat is still
+// sitting in the provider balance.
+func (s *ITService) payoutNotSent(ctx context.Context, intent *models.ITIntent, firstAttempt bool, cause error) error {
+	if firstAttempt && models.ITIntentAsset(intent) == models.ITAssetMCGP {
+		if s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected (not sent): "+cause.Error()) {
+			return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, cause)
+		}
+		log.Printf("[it] intent=%s payout not sent (%v) but the row moved on; not marking it rejected", intent.ID, cause)
+	}
+	return cause
+}
+
+// markPayoutRejected records a rejection, guarded on the payout state the
+// caller read. It is also the reverse claim: a send cannot win the row
+// afterwards. Reports whether it moved the row — a caller whose read was stale
+// must not go on to reverse a payout someone else is sending.
+func (s *ITService) markPayoutRejected(ctx context.Context, intent *models.ITIntent, reason string) bool {
+	reason = truncateReason(reason)
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND payout_attempts = ? AND COALESCE(payout_id, '') = '' AND payout_rejected = ? AND payout_ref_gen = ?",
+			intent.ID, intent.PayoutAttempts, false, intent.PayoutRefGen).
+		Updates(map[string]any{"payout_rejected": true, "failure_reason": reason})
+	if res.Error != nil {
+		log.Printf("[it] ALERT it_sell_payout_rejection_unrecorded intent=%s: %v", intent.ID, res.Error)
+		return false
+	}
+	if res.RowsAffected != 1 {
+		return false
+	}
+	intent.PayoutRejected = true
+	intent.FailureReason = reason
+	return true
+}
+
+// buildSellPayoutRequest prices the payout (the NET, converted to the
+// destination currency when it differs) without sending anything.
+func (s *ITService) buildSellPayoutRequest(ctx context.Context, intent *models.ITIntent) (PayoutRequest, error) {
+	if !sellIntentHasPayoutDestination(intent) {
+		return PayoutRequest{}, errors.New("it: sell intent has no payout destination")
+	}
+	// Disburse the NET — the fee stays behind in the payout balance as fiat.
+	// Pre-deduction intents carry no net and settle at their gross terms.
+	net, err := payoutKobo(intent)
+	if err != nil {
+		return PayoutRequest{}, fmt.Errorf("it payout: %w", err)
+	}
+	naira, err := koboToNairaString(net.String())
+	if err != nil {
+		return PayoutRequest{}, fmt.Errorf("it payout: bad intent amount: %w", err)
+	}
+	// PayoutRequest.Amount is what the RECIPIENT receives, denominated in the
+	// destination currency — the gateway sends applies_to=destination_currency
+	// on every transfer. So a cross-currency payout has to be converted HERE;
+	// passing the source-currency figure through would send a naira number as
+	// cedis, off by roughly 100x.
+	sourceCurrency := models.ITIntentCurrency(intent)
+	destCurrency := strings.ToUpper(strings.TrimSpace(intent.DestinationCurrency))
+	if destCurrency == "" {
+		destCurrency = sourceCurrency
+	}
+
+	payoutAmount := naira
+	if !strings.EqualFold(destCurrency, sourceCurrency) {
+		sourceMajor, cErr := koboToNairaFloat(net.String())
+		if cErr != nil {
+			return PayoutRequest{}, fmt.Errorf("it payout: bad intent amount: %w", cErr)
+		}
+		// NOTE: QuoteWithdrawal hardcodes NGN as the quote's SOURCE currency
+		// (it_quote.go). That is correct only while every sell is denominated in
+		// naira, which is true today. A sell raised in another currency would be
+		// converted using an NGN→dest rate — the same class of bug as valuing a
+		// cedi fee at the naira rate. Guard it here rather than let it become
+		// silently wrong when sells gain a currency.
+		if !strings.EqualFold(sourceCurrency, "NGN") {
+			return PayoutRequest{}, fmt.Errorf("it payout: cannot convert %s→%s: the FX quote is NGN-sourced; "+
+				"QuoteWithdrawal must take a source currency before non-NGN sells can pay out cross-currency",
+				sourceCurrency, destCurrency)
+		}
+		destMajor, _, qErr := s.QuoteWithdrawal(ctx, sourceMajor, destCurrency)
+		if qErr != nil {
+			// Refusing beats guessing: paying out an unconverted figure would
+			// send the wrong amount irrecoverably.
+			return PayoutRequest{}, fmt.Errorf("it payout: cannot convert %s→%s: %w", sourceCurrency, destCurrency, qErr)
+		}
+		payoutAmount = strconv.FormatFloat(destMajor, 'f', 2, 64)
+	}
+
+	return PayoutRequest{
+		BankCode:      intent.BankCode,
+		AccountNumber: intent.AccountNumber,
+		AccountName:   intent.AccountName,
+		// Both are set during the transition: Amount/SourceCurrency is what the
+		// gateway reads, AmountNGN keeps unmigrated consumers working.
+		Amount:              payoutAmount,
+		SourceCurrency:      sourceCurrency,
 		AmountNGN:           naira,
-		Reference:           itPayoutRef(intent.ID),
+		Reference:           itPayoutRefFor(intent),
 		SenderName:          "TSA Connect",
 		DestinationCurrency: intent.DestinationCurrency,
 		RailType:            intent.RailType,
 		MobileNetwork:       intent.MobileNetwork,
 		MobileCountry:       intent.MobileCountry,
 		MobileMsisdn:        intent.MobileMsisdn,
-	})
-	if err != nil {
-		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
-			Where("id = ?", intent.ID).
-			Update("failure_reason", "auto-payout: "+err.Error()).Error
-		return err
-	}
-	intent.PayoutID = payoutID
-	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ?", intent.ID).
-		Updates(map[string]any{"payout_id": payoutID, "failure_reason": ""}).Error
+	}, nil
 }
 
 // ResolvePayoutFromWebhook closes a sell intent from a transfer-status
-// webhook. merchantTxRef must carry the ITPayoutRefPrefix. Mapping:
-// success → settle (frees the on-chain backing), failed → reverse (restores
-// the user's premium), pending → no-op, reversed → operator case.
-func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, status string) error {
+// webhook. merchantTxRef must carry the ITPayoutRefPrefix; payoutID is the
+// provider transfer id the webhook names. Mapping: success → settle, failed →
+// reverse (MCGP) or park (stablecoin), pending → no-op, reversed → operator.
+//
+// A signed webhook alone never moves money: the transfer is read back from the
+// provider and its status must match. A webhook for another transfer id, or
+// for a superseded reference generation, is acknowledged and ignored with an
+// ALERT.
+func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, payoutID, status string) error {
 	if !s.IsConfigured() {
 		return ErrITNotConfigured
 	}
-	idStr := strings.TrimPrefix(strings.TrimSpace(merchantTxRef), ITPayoutRefPrefix)
-	intentID, err := uuid.Parse(idStr)
+	intentID, gen, err := parseITPayoutRef(merchantTxRef)
 	if err != nil {
 		return fmt.Errorf("it payout webhook: bad ref %q: %w", merchantTxRef, err)
 	}
-	switch strings.ToLower(status) {
-	case "success":
-		_, err = s.SettleSell(ctx, intentID, "")
-		return err
-	case "failed":
-		_, err = s.ReverseSell(ctx, intentID, "")
-		return err
+	status = strings.ToLower(status)
+	switch status {
+	case "success", "failed":
 	case "pending":
 		return nil
 	case "reversed":
@@ -284,6 +544,92 @@ func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef,
 	default:
 		return fmt.Errorf("it payout webhook: unknown status %q for intent %s", status, intentID)
 	}
+	settle := status == "success"
+
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Status == models.ITStatusSettled || intent.Status == models.ITStatusReversed {
+		_, err = s.resolveSell(ctx, intentID, "", settle) // no-op; alerts on a contradiction
+		return err
+	}
+	if intent.Status == models.ITStatusNeedsReview {
+		// Nothing automated may move a parked sell, and re-driving the webhook
+		// would only fail forever: acknowledge it and say so.
+		alertf("webhook-review:"+intentID.String()+":"+status,
+			"[it] ALERT it_payout_webhook_on_parked_sell intent=%s status=%s webhook=%s transfer=%s — acknowledged, operator must reevaluate",
+			intentID, intent.Status, status, payoutID)
+		return fmt.Errorf("%w: sell is parked for review", ErrNonSettlingEvent)
+	}
+	if gen != intent.PayoutRefGen {
+		alertf("webhook-gen:"+intentID.String()+":"+merchantTxRef,
+			"[it] ALERT it_payout_webhook_superseded intent=%s ref=%s current_gen=%d — ignored", intentID, merchantTxRef, intent.PayoutRefGen)
+		if settle {
+			// A superseded reference that PAID is a double payout: this sell was
+			// repaid on a fresh reference because the old one was confirmed
+			// failed. Park it — no automated settle or reverse may follow.
+			s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+				fmt.Sprintf("superseded payout reference %s reported SUCCESS after a repay — possible double payout", merchantTxRef))
+		}
+		return fmt.Errorf("%w: superseded payout reference", ErrNonSettlingEvent)
+	}
+	payoutID = strings.TrimSpace(payoutID)
+	if payoutID != "" && intent.PayoutID != "" && payoutID != intent.PayoutID {
+		alertf("webhook-id:"+intentID.String()+":"+payoutID,
+			"[it] ALERT it_payout_webhook_id_mismatch intent=%s webhook_transfer=%s recorded_transfer=%s — ignored", intentID, payoutID, intent.PayoutID)
+		return fmt.Errorf("%w: payout id mismatch", ErrNonSettlingEvent)
+	}
+	transferID := intent.PayoutID
+	if transferID == "" {
+		transferID = payoutID
+	}
+	if transferID == "" {
+		return fmt.Errorf("it payout webhook: no transfer id to confirm for intent %s", intentID)
+	}
+	if s.payoutTransfers == nil {
+		return fmt.Errorf("it payout webhook: no provider reader configured to confirm transfer %s", transferID)
+	}
+	tr, err := s.payoutTransfers.GetTransfer(ctx, transferID)
+	if err != nil {
+		return fmt.Errorf("it payout webhook: confirm transfer %s: %w", transferID, err)
+	}
+	confirmed := strings.EqualFold(tr.Status, "FAILED")
+	if settle {
+		confirmed = fwSucceeded(tr.Status)
+	}
+	if !confirmed {
+		// A provider that is merely not final yet (NEW/PENDING/INITIATED) is
+		// read-after-write lag, not a contradiction: the webhook must come back,
+		// or a settled payout is lost — stablecoin sells have no reconciler to
+		// catch it. Only a genuine contradiction is acknowledged as terminal.
+		if !fwTerminalTransferStatus(tr.Status) {
+			log.Printf("[it] intent=%s transfer=%s webhook=%s but provider still reports %s — retrying later",
+				intentID, transferID, status, tr.Status)
+			return fmt.Errorf("%w: transfer %s for %s is %s", ErrITPayoutNotFinal, transferID, merchantTxRef, tr.Status)
+		}
+		alertf("webhook-status:"+transferID+":"+status,
+			"[it] ALERT it_payout_webhook_contradiction intent=%s transfer=%s webhook=%s provider=%s — no action", intentID, transferID, status, tr.Status)
+		return fmt.Errorf("%w: provider reports transfer %s as %s", ErrNonSettlingEvent, transferID, tr.Status)
+	}
+	if intent.PayoutID == "" {
+		// The webhook beat the send to recording the id. Adopt it only if the
+		// provider ties the transfer to this reference.
+		if tr.Reference != merchantTxRef {
+			alertf("webhook-ref:"+transferID,
+				"[it] ALERT it_payout_webhook_reference_mismatch intent=%s transfer=%s provider_ref=%q webhook_ref=%q — ignored", intentID, transferID, tr.Reference, merchantTxRef)
+			return fmt.Errorf("%w: transfer reference mismatch", ErrNonSettlingEvent)
+		}
+		if !s.adoptPayoutID(ctx, intent, transferID) {
+			return fmt.Errorf("it payout webhook: could not record transfer %s for intent %s", transferID, intentID)
+		}
+	}
+	if settle {
+		_, err = s.SettleSell(ctx, intentID, "")
+	} else {
+		_, err = s.ReverseSell(ctx, intentID, "")
+	}
+	return err
 }
 
 // ─── Flutterwave VA provisioner ────────────────────────────────────────────

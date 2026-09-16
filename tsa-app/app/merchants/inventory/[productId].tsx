@@ -19,7 +19,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import api, { Product } from '@/components/services/api';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
@@ -237,30 +237,20 @@ const MerchantProductDetail = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      {/* Header */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: spacing.sm,
-          paddingVertical: spacing.sm,
-          borderBottomWidth: 1,
-          borderBottomColor: colors.hairline,
-          backgroundColor: colors.surface,
+      {/* Title and back live in the native header (app/merchants/_layout.tsx);
+          only the trailing action belongs to this screen. */}
+      <Stack.Screen
+        options={{
+          headerRight: () => (
+            <IconButton
+              icon="edit"
+              color={colors.accent}
+              accessibilityLabel="Edit product"
+              onPress={() => router.push(`/merchants/inventory/edit/${product.id}`)}
+            />
+          ),
         }}
-      >
-        <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
-        <Text variant="title3" weight="700" numberOfLines={1} style={{ flex: 1, textAlign: 'center', marginHorizontal: spacing.sm }}>
-          Product Details
-        </Text>
-        <IconButton
-          icon="edit"
-          color={colors.accent}
-          accessibilityLabel="Edit product"
-          onPress={() => router.push(`/merchants/inventory/edit/${product.id}`)}
-        />
-      </View>
+      />
 
       <ScrollView
         contentContainerStyle={{ paddingBottom: spacing['4xl'] * 2 }}

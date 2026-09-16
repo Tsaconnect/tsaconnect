@@ -34,6 +34,57 @@ type P2PHandler struct {
 	// active (Flutterwave since 2026-07; Nomba as fallback).
 	banks services.BankDirectory
 	stats *services.MerchantStatsService
+	// central answers where PM buyers are being sent right now. Optional only
+	// because it is wired after construction (SetInboundCentralSource); leaving
+	// it nil once INBOUND_MODE=central is on hands buyers the merchant's own
+	// account, which no longer feeds the statement the ingestor reads.
+	central CentralAccountSource
+}
+
+// CentralAccountSource is the single thing the PM buy screens need from the IT
+// service: the account payers must be sent to right now. Narrow interface
+// rather than *services.ITService because P2P has no other business with that
+// service, and because the one method carries the mode with it — there is no
+// way to ask this seam for an account without asking whether it is live.
+type CentralAccountSource interface {
+	ActiveCentralAccount() (services.CentralAccount, bool)
+}
+
+// SetInboundCentralSource wires the pay-into surface to the cutover, from
+// main.go. Separate from the constructor because the IT service is built later
+// in boot than the P2P handler.
+func (h *P2PHandler) SetInboundCentralSource(src CentralAccountSource) { h.central = src }
+
+// pmPayTo picks the account a PM buyer must send fiat to.
+//
+// After the cutover that is the company account and NOT the merchant's: the
+// buyer's transfer has to land on the statement the ingestor reads, or the
+// trade — which is offered to the matcher as a claim either way — waits on a
+// credit that will never arrive. The merchant is credited from that account and
+// forwarded to separately (see P2PSettlementForwarder), so nothing they are owed
+// changes; only where the buyer sends it does.
+//
+// payerID is the user who will send the transfer, and only when they are the
+// one receiving this response: the instruction names their verified legal name,
+// which must never reach anyone else (a trade is also fetched by its seller).
+// Nil gives the generic "in your own name" wording. The name is looked up only
+// in central mode, where it is used.
+func (h *P2PHandler) pmPayTo(ctx context.Context, accountNumber, bank, merchantName string, payerID *uuid.UUID) *models.PmPayTo {
+	if h.central != nil {
+		if central, ok := h.central.ActiveCentralAccount(); ok {
+			legalName := ""
+			if payerID != nil {
+				legalName = services.VerifiedLegalNameOf(ctx, h.db, *payerID)
+			}
+			return &models.PmPayTo{
+				AccountNumber:    central.AccountNumber,
+				Bank:             central.BankName,
+				AccountName:      central.AccountName,
+				PayerInstruction: central.PayerInstruction(legalName),
+			}
+		}
+	}
+	return &models.PmPayTo{AccountNumber: accountNumber, Bank: bank, AccountName: merchantName}
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
@@ -106,7 +157,12 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrPaymentMethodMissing),
 		errors.Is(err, services.ErrDisputeNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, services.ErrForbidden):
+	case errors.Is(err, services.ErrForbidden),
+		// The buyer has not finished verification. The blanket P2P check in
+		// require() normally catches this first; the service raises it too so
+		// a caller that reaches OpenTrade by any other route is refused the
+		// same way rather than opening a trade nobody can attribute.
+		errors.Is(err, services.ErrKYCVerificationRequired):
 		status = http.StatusForbidden
 	case errors.Is(err, services.ErrInvalidParams),
 		errors.Is(err, services.ErrAmountOutOfRange),
@@ -138,7 +194,13 @@ func mapServiceError(c *gin.Context, err error) bool {
 		// from a generic server bug.
 		status = http.StatusGone
 	}
-	c.AbortWithStatusJSON(status, gin.H{"success": false, "message": err.Error()})
+	body := gin.H{"success": false, "message": err.Error()}
+	// The KYC refusal is the one error here the app routes on rather than just
+	// displaying, so it carries the same machine code as the IT legs.
+	if code := kycRefusalCode(err); code != "" {
+		body["code"] = code
+	}
+	c.AbortWithStatusJSON(status, body)
 	return true
 }
 
@@ -307,7 +369,43 @@ func (h *P2PHandler) ListNigerianBanks(c *gin.Context) {
 		})
 		return
 	}
-	banks, err := h.banks.ListBanks(c.Request.Context())
+	// ?country=GH selects another market's directory. A payout to a Ghanaian
+	// account needs Ghanaian bank codes, and a directory pinned to one country
+	// at construction can only ever serve one. Omitted ⇒ the configured default
+	// (NG), so existing callers are unaffected.
+	country := strings.ToUpper(strings.TrimSpace(c.Query("country")))
+	// Bound the shape before forwarding it to the provider. This is user input
+	// reaching an outbound API call, and while url.Values encodes it (so there
+	// is no injection), an unbounded string still lets a caller drive arbitrary
+	// upstream requests. ISO-3166-1 alpha-2 is the only thing the endpoint
+	// means, so anything else is a client bug worth reporting as one.
+	if country != "" && !isISO2Country(country) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "country must be a two-letter ISO country code",
+		})
+		return
+	}
+
+	var (
+		banks []services.NombaBank
+		err   error
+	)
+	if country != "" {
+		scoped, ok := h.banks.(interface {
+			ListBanksIn(ctx context.Context, country string) ([]services.NombaBank, error)
+		})
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Bank directory for other countries is unavailable",
+			})
+			return
+		}
+		banks, err = scoped.ListBanksIn(c.Request.Context(), country)
+	} else {
+		banks, err = h.banks.ListBanks(c.Request.Context())
+	}
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
 		return
@@ -582,12 +680,12 @@ type createAdRequest struct {
 	// for float-rate ads. The service-layer validator enforces this; we
 	// can't use `binding:"required"` here because Gin would reject float
 	// requests before the service sees them.
-	Rate             string   `json:"rate"`
-	RateType         string   `json:"rateType"`
-	FloatOffsetBps   *int     `json:"floatOffsetBps"`
-	FloatAnchor      string   `json:"floatAnchor"`
-	MinLimit         string   `json:"minLimit"`
-	MaxLimit         string   `json:"maxLimit"`
+	Rate           string `json:"rate"`
+	RateType       string `json:"rateType"`
+	FloatOffsetBps *int   `json:"floatOffsetBps"`
+	FloatAnchor    string `json:"floatAnchor"`
+	MinLimit       string `json:"minLimit"`
+	MaxLimit       string `json:"maxLimit"`
 	// Optional at the binding layer: PM ads settle via the merchant's Nomba VA
 	// and need no manual method. The service requires >=1 for non-PM ads.
 	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"omitempty"`
@@ -700,7 +798,8 @@ func (h *P2PHandler) SignAd(c *gin.Context) {
 }
 
 func (h *P2PHandler) GetAd(c *gin.Context) {
-	if _, ok := h.require(c); !ok {
+	user, ok := h.require(c)
+	if !ok {
 		return
 	}
 	id, ok := parseUUIDParam(c, "id")
@@ -742,11 +841,8 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 			log.Printf("[p2p GetAd] PM lookup failed for ad=%s pm=%s: %v", ad.ID, *ad.PMID, err)
 		} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 			detail.IsPm = true
-			detail.PmPayTo = &models.PmPayTo{
-				AccountNumber: pm.InboundAccountNumber,
-				Bank:          pm.InboundBank,
-				AccountName:   pm.Name,
-			}
+			// The viewer is the prospective buyer — the one who would pay.
+			detail.PmPayTo = h.pmPayTo(c.Request.Context(), pm.InboundAccountNumber, pm.InboundBank, pm.Name, &user.ID)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
@@ -1581,7 +1677,7 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	h.enrichTradeWithPM(trade)
+	h.enrichTradeWithPM(c.Request.Context(), trade, user.ID)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
 }
 
@@ -1589,7 +1685,7 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 // PmPayTo, PayerName) for the buy screen. Best-effort: any query error is
 // logged and the fields are left unset — the PM enrichment must never fail
 // the trade endpoint. Adds ≤2 lightweight queries.
-func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
+func (h *P2PHandler) enrichTradeWithPM(ctx context.Context, trade *models.P2PTrade, callerID uuid.UUID) {
 	if trade == nil || h.db == nil {
 		return
 	}
@@ -1607,11 +1703,12 @@ func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
 		log.Printf("[p2p GetTrade] PM lookup failed for trade=%s ad=%s: %v", trade.ID, trade.AdID, err)
 	} else if pm.InboundAccountNumber != "" || pm.Name != "" {
 		trade.IsPM = true
-		trade.PmPayTo = &models.PmPayTo{
-			AccountNumber: pm.InboundAccountNumber,
-			Bank:          pm.InboundBank,
-			AccountName:   pm.Name,
+		// Name the buyer only to the buyer; the seller sees the generic wording.
+		var payerID *uuid.UUID
+		if callerID == trade.BuyerID {
+			payerID = &trade.BuyerID
 		}
+		trade.PmPayTo = h.pmPayTo(ctx, pm.InboundAccountNumber, pm.InboundBank, pm.Name, payerID)
 	}
 
 	var payerName string
@@ -1734,4 +1831,19 @@ func parseUUIDList(in []string) ([]uuid.UUID, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// isISO2Country reports whether s is two ASCII letters. Shape only — the
+// provider is the authority on which countries it actually serves, and
+// duplicating that list here would just drift.
+func isISO2Country(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for _, r := range s {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
 }

@@ -141,7 +141,7 @@ func TestRetryFailedWebhooks(t *testing.T) {
 		"requestId": "REQ-retry-1",
 		"data": {
 			"merchant": {"walletId": "` + pm.NombaWalletID + `", "userId": "u1"},
-			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},
+			"transaction": {"accountRef": "` + pm.NombaAccountRef + `", "transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},
 			"customer": {"senderName": "JOHN DOE", "accountNumber": "0987654321"}
 		}
 	}`)
@@ -407,7 +407,7 @@ func TestDispatch_RoutesInboundAndPayout(t *testing.T) {
 		"requestId": "REQ-in-1",
 		"data": {
 			"merchant": {"walletId": "` + pm.NombaWalletID + `", "userId": "u1"},
-			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},
+			"transaction": {"accountRef": "` + pm.NombaAccountRef + `", "transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},
 			"customer": {"senderName": "JOHN DOE", "accountNumber": "0987654321"}
 		}
 	}`)
@@ -432,7 +432,7 @@ func TestDispatch_RoutesInboundAndPayout(t *testing.T) {
 		"requestId": "REQ-po-1",
 		"data": {
 			"merchant": {"walletId": "` + pm.NombaWalletID + `", "userId": "u1"},
-			"transaction": {"transactionId": "po-1", "type": "transfer", "time": "2026-06-16T09:00:00Z", "responseCode": "00", "merchantTxRef": "` + sell.ID.String() + `"},
+			"transaction": {"accountRef": "` + pm.NombaAccountRef + `", "transactionId": "po-1", "type": "transfer", "time": "2026-06-16T09:00:00Z", "responseCode": "00", "merchantTxRef": "` + sell.ID.String() + `"},
 			"customer": {}
 		}
 	}`)

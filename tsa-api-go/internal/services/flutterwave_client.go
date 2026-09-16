@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -660,6 +661,41 @@ type FWTransfer struct {
 	Reference string          `json:"reference"`
 	Status    string          `json:"status"` // NEW | PENDING | SUCCESSFUL | FAILED
 	Fee       json.RawMessage `json:"fee,omitempty"`
+	// CacheHit is set on a DirectTransfer result Flutterwave served from its
+	// idempotency cache (X-Idempotency-Cache-Hit) — the answer to the FIRST
+	// request that used this reference, not a new transfer.
+	CacheHit bool `json:"-"`
+}
+
+// ProviderRejectedError means the provider answered a money-moving request
+// and refused it, so that request moved no money. It is deliberately narrow:
+// a timeout, a 5xx, a 409 or a 429 is NOT one, because none of those say
+// whether a transfer exists.
+//
+// On its own it only describes THIS request. If an earlier request with the
+// same reference may have reached the provider, a refusal of the retry can be
+// "that reference is already taken" — i.e. the first attempt went through.
+// Replayed is what closes that gap: it is set when the provider served the
+// answer from its idempotency cache, which makes the refusal the outcome of the
+// first request as well.
+type ProviderRejectedError struct {
+	Err      error
+	Replayed bool
+}
+
+func (e *ProviderRejectedError) Error() string { return e.Err.Error() }
+func (e *ProviderRejectedError) Unwrap() error { return e.Err }
+
+// fwTransferRefusedStatus lists the HTTP statuses on which Flutterwave has
+// refused to create a transfer: malformed, unauthenticated, forbidden, unknown
+// route, unprocessable (the validation and insufficient-balance class).
+func fwTransferRefusedStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired,
+		http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // DirectTransfer initiates a transfer via the v4 orchestrator. The caller's
@@ -683,8 +719,13 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 	if err != nil {
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer: %w", err)
 	}
+	cacheHit := strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Idempotency-Cache-Hit")), "true")
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return FWTransfer{}, fwError("direct-transfer", resp.StatusCode, body)
+		herr := fwError("direct-transfer", resp.StatusCode, body)
+		if fwTransferRefusedStatus(resp.StatusCode) {
+			return FWTransfer{}, &ProviderRejectedError{Err: herr, Replayed: cacheHit}
+		}
+		return FWTransfer{}, herr
 	}
 	var env fwEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -695,8 +736,12 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer decode data: %w", err)
 	}
 	if env.failed() {
-		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message)
+		return FWTransfer{}, &ProviderRejectedError{
+			Err:      fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message),
+			Replayed: cacheHit,
+		}
 	}
+	parsed.CacheHit = cacheHit
 	if parsed.ID == "" {
 		return FWTransfer{}, errors.New("flutterwave direct-transfer: empty transfer id in response")
 	}
@@ -728,6 +773,144 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 		return FWTransfer{}, fmt.Errorf("flutterwave get-transfer decode data: %w", err)
 	}
 	return parsed, nil
+}
+
+// ErrFWTransferShape marks a /transfers response this code does not
+// positively recognise. It is the signal that the live listing differs from
+// the schema FindTransferByReference was built against — the thing
+// IT_SELL_FW_ABSENCE_TRUSTED is waiting on — so callers alert on it by name.
+var ErrFWTransferShape = errors.New("flutterwave list-transfers: unrecognised response shape")
+
+// fwTransferListMaxPages bounds a reference scan: 20 pages of 50 is a thousand
+// transfers, far more than two days of payouts. Hitting it is an error, not
+// "not found".
+const fwTransferListMaxPages = 20
+
+// fwTransferSearchSpan is how far either side of the attempt time a reference
+// is searched for.
+const fwTransferSearchSpan = 24 * time.Hour
+
+// FindTransferByReference looks for the transfer carrying reference among
+// transfers created within a day either side of around.
+//
+// v4 has no reference filter, so GET /transfers is paged by cursor over a
+// date-only window (the convention FW listing endpoints use; `to` is pushed a
+// day out so the window's last day is included) and rows are filtered here by
+// created_datetime.
+//
+// found=false with a nil error is a claim that the transfer does not exist, and
+// callers act on it, so it is only returned after a complete scan of a response
+// shape this code positively recognises. Everything else is an error: a missing
+// cursor, has_more_items, transfer list, reference or created_datetime; a
+// cursor that does not advance; the page cap; or more than one transfer on the
+// reference (references are meant to be unique, so two means something is
+// wrong and neither may be picked).
+//
+// The shape was built from Flutterwave's published v4 schema and has not been
+// confirmed against the live API; see IT_SELL_FW_ABSENCE_TRUSTED.
+func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error) {
+	if !c.IsEnabled() {
+		return FWTransfer{}, false, ErrFlutterwaveDisabled
+	}
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return FWTransfer{}, false, errors.New("flutterwave list-transfers: reference required")
+	}
+	lo, hi := around.Add(-fwTransferSearchSpan).UTC(), around.Add(fwTransferSearchSpan).UTC()
+	var match *FWTransfer
+	cursor := ""
+	for page := 0; page < fwTransferListMaxPages; page++ {
+		q := url.Values{}
+		q.Set("from", lo.Format("2006-01-02"))
+		q.Set("to", hi.AddDate(0, 0, 1).Format("2006-01-02"))
+		q.Set("size", "50")
+		if cursor != "" {
+			q.Set("next", cursor)
+		}
+		resp, body, err := c.authedRequest(ctx, http.MethodGet, "/transfers?"+q.Encode(), nil, "")
+		if err != nil {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: %w", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return FWTransfer{}, false, fwError("list-transfers", resp.StatusCode, body)
+		}
+		rows, hasMore, next, err := decodeFWTransferPage(body)
+		if err != nil {
+			return FWTransfer{}, false, err
+		}
+		for i := range rows {
+			tr := rows[i]
+			if tr.Reference != reference || tr.createdAt.Before(lo) || tr.createdAt.After(hi) {
+				continue
+			}
+			if match != nil {
+				return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: reference %s carried by transfers %s and %s", reference, match.ID, tr.ID)
+			}
+			found := tr.FWTransfer
+			match = &found
+		}
+		if !hasMore {
+			if match == nil {
+				return FWTransfer{}, false, nil
+			}
+			return *match, true, nil
+		}
+		if next == "" || next == cursor {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: cursor did not advance after page %d; scan incomplete", page+1)
+		}
+		cursor = next
+	}
+	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", fwTransferListMaxPages)
+}
+
+type fwListedTransfer struct {
+	FWTransfer
+	createdAt time.Time
+}
+
+// decodeFWTransferPage decodes one /transfers page, rejecting any shape that
+// is not exactly the documented one.
+func decodeFWTransferPage(body []byte) ([]fwListedTransfer, bool, string, error) {
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, false, "", fmt.Errorf("flutterwave list-transfers decode: %w", err)
+	}
+	var data struct {
+		Cursor *struct {
+			Next         string `json:"next"`
+			HasMoreItems *bool  `json:"has_more_items"`
+		} `json:"cursor"`
+		Transfers *[]struct {
+			ID              string  `json:"id"`
+			Reference       *string `json:"reference"`
+			Status          string  `json:"status"`
+			CreatedDatetime *string `json:"created_datetime"`
+		} `json:"transfers"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, false, "", fmt.Errorf("%w: data: %v", ErrFWTransferShape, err)
+	}
+	if data.Cursor == nil || data.Cursor.HasMoreItems == nil {
+		return nil, false, "", fmt.Errorf("%w: no cursor.has_more_items; cannot tell whether the scan is complete", ErrFWTransferShape)
+	}
+	if data.Transfers == nil {
+		return nil, false, "", fmt.Errorf("%w: no transfers list", ErrFWTransferShape)
+	}
+	out := make([]fwListedTransfer, 0, len(*data.Transfers))
+	for _, t := range *data.Transfers {
+		if t.Reference == nil || t.CreatedDatetime == nil {
+			return nil, false, "", fmt.Errorf("%w: transfer %q lacks reference or created_datetime", ErrFWTransferShape, t.ID)
+		}
+		at, err := time.Parse(time.RFC3339, *t.CreatedDatetime)
+		if err != nil {
+			return nil, false, "", fmt.Errorf("%w: transfer %q created_datetime %q: %v", ErrFWTransferShape, t.ID, *t.CreatedDatetime, err)
+		}
+		out = append(out, fwListedTransfer{
+			FWTransfer: FWTransfer{ID: t.ID, Reference: *t.Reference, Status: t.Status},
+			createdAt:  at,
+		})
+	}
+	return out, *data.Cursor.HasMoreItems, data.Cursor.Next, nil
 }
 
 // ─── Charges (collection verification) ─────────────────────────────────────
@@ -780,10 +963,86 @@ func (c *FlutterwaveClient) GetCharge(ctx context.Context, id string) (FWCharge,
 
 // FWFee is a provider fee quote for a prospective transfer/collection.
 type FWFee struct {
-	Currency string  `json:"currency"`
-	Fee      float64 `json:"fee"`
-	VAT      float64 `json:"vat"`
+	Currency string      `json:"currency"`
+	Fee      FWFeeAmount `json:"fee"`
+	VAT      FWFeeAmount `json:"vat"`
 }
+
+// FWFeeAmount is a fee/VAT amount from Flutterwave's v4 GET /fees endpoint.
+//
+// PRODUCTION OBSERVED (2026-08-31): GET /fees?payment_method=bank_transfer
+// returned "fee" as a JSON ARRAY where the field was previously typed
+// float64, failing the whole response with "cannot unmarshal array into Go
+// struct field FWFee.fee of type float64" — silently, since GetFees' only
+// caller (fee_quote_service.go QuoteProviderFee) treats any error as "no live
+// quote" and falls back to the config percentage. This repo's Flutterwave
+// credentials are sandbox-only and returned 403/500 against production for
+// every endpoint tried (see fwfee-fix-report.md), so the array's ELEMENT
+// SHAPE could not be observed directly and is INFERRED here, not observed:
+// it assumes the array holds per-tier numeric fee components (bare numbers
+// or numeric strings, mirroring the scalar shape) and sums them into a
+// single total. If production's array elements turn out to be objects
+// instead, this decoder still does the safe thing — it ERRORs rather than
+// silently returning zero, which the next paragraph explains why that
+// matters.
+//
+// Accepts, like FWQuoteAmount: a number, a numeric string, or null/""
+// (-> 0). Additionally accepts an array of numbers/numeric strings, summed.
+// Any element that isn't itself a number/numeric string/array is a decode
+// ERROR, not a silent zero — a zero provider fee is a plausible-looking
+// number that would under-charge on a live payout, the same reasoning
+// FWQuoteAmount applies to a bad FX amount.
+type FWFeeAmount float64
+
+func (a *FWFeeAmount) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*a = 0
+		return nil
+	}
+	if b[0] == '[' {
+		var elems []json.RawMessage
+		if err := json.Unmarshal(b, &elems); err != nil {
+			return fmt.Errorf("FWFeeAmount: invalid array %s: %w", b, err)
+		}
+		var sum float64
+		for _, e := range elems {
+			var v FWFeeAmount
+			if err := v.UnmarshalJSON(e); err != nil {
+				return fmt.Errorf("FWFeeAmount: invalid array element %s: %w", e, err)
+			}
+			sum += float64(v)
+		}
+		*a = FWFeeAmount(sum)
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*a = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("FWFeeAmount: invalid numeric string %q: %w", s, err)
+		}
+		*a = FWFeeAmount(f)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return fmt.Errorf("FWFeeAmount: invalid value %s: %w", b, err)
+	}
+	*a = FWFeeAmount(f)
+	return nil
+}
+
+// Float64 returns the amount as a plain float64 for arithmetic call sites.
+func (a FWFeeAmount) Float64() float64 { return float64(a) }
 
 // GetFees quotes Flutterwave's own fee for a payment. paymentMethod follows
 // the v4 vocabulary (e.g. "bank_transfer", "mobile_money"); network/country
@@ -830,16 +1089,71 @@ func (c *FlutterwaveClient) GetFees(ctx context.Context, amount float64, currenc
 }
 
 // FWRate is an FX quote between two currencies (incl. stablecoins).
+//
+// The vendor's top-level "rate" field is deliberately not modeled: nothing
+// in this codebase reads it — DeriveFiatPerUnit/DeriveBuyFiatPerUnit (see
+// stable_spread.go) compute the rate from Source/Destination instead, since
+// FW's own docs never define the field's unit direction and the example is
+// self-contradictory. Keeping an unused field around only to fight its wire
+// type (see FWQuoteAmount) isn't worth it.
 type FWRate struct {
-	Rate        float64 `json:"rate"`
 	Source      FWMoney `json:"source"`
 	Destination FWMoney `json:"destination"`
 }
 
 type FWMoney struct {
-	Currency string  `json:"currency"`
-	Amount   float64 `json:"amount"`
+	Currency string        `json:"currency"`
+	Amount   FWQuoteAmount `json:"amount"`
 }
+
+// FWQuoteAmount is a monetary amount from Flutterwave's v4 API. Observed in
+// production on 2026-08-31: POST /transfers/rates returns "amount" (and
+// "rate") as a JSON STRING, while the sandbox returns a JSON number for the
+// same field — decoding straight into float64 fails the whole response with
+// "cannot unmarshal string into Go struct field". FWQuoteAmount accepts either
+// wire shape so a provider inconsistency on one field doesn't take down
+// every quote.
+//
+// null and "" both decode to zero — a missing optional amount must not fail
+// the whole response — but a non-numeric string (e.g. "abc") is a genuine
+// decode error, not a silent zero: DeriveFiatPerUnit/DeriveBuyFiatPerUnit
+// reject a non-positive amount via ErrBadFxProbe, and that guard only works
+// if a bad value can't arrive disguised as a plausible zero.
+type FWQuoteAmount float64
+
+func (a *FWQuoteAmount) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*a = 0
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*a = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("FWQuoteAmount: invalid numeric string %q: %w", s, err)
+		}
+		*a = FWQuoteAmount(f)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*a = FWQuoteAmount(f)
+	return nil
+}
+
+// Float64 returns the amount as a plain float64 for arithmetic call sites.
+func (a FWQuoteAmount) Float64() float64 { return float64(a) }
 
 // QuoteRate previews the FX applied to a cross-currency transfer via
 // POST /transfers/rates.
@@ -926,4 +1240,226 @@ func (c *FlutterwaveClient) ConvertBalance(ctx context.Context, merchantID, sour
 			},
 		},
 	})
+}
+
+// ─── Wallet statement ──────────────────────────────────────────────────────
+
+// fwStatementDateLayout is the window format sent to /wallets/statement. The
+// parameter names and layout are UNVERIFIED — Flutterwave documents neither —
+// but date-only from/to is its convention on every other listing endpoint.
+const fwStatementDateLayout = "2006-01-02"
+
+const (
+	// fwStatementPageSize is how many rows one request asks for. Also the
+	// signal that a page is the last one: a short page ends the walk.
+	fwStatementPageSize = 100
+	// fwStatementMaxPages bounds the walk so a provider that keeps handing
+	// back full pages cannot spin the poll forever. Reaching it means the
+	// window was NOT fully read, which is why it is logged rather than
+	// absorbed.
+	fwStatementMaxPages = 50
+)
+
+// FWStatementTime is a statement timestamp.
+//
+// It is a bespoke type rather than a plain time.Time because the layout is
+// unverified, and a strict decode would fail the WHOLE page on one oddly
+// formatted row. A dropped page is a dropped credit — the single outcome the
+// inbound pipeline exists to prevent. An unparseable value therefore decodes
+// to the zero time and the ingestor falls back to its own clock.
+type FWStatementTime struct{ time.Time }
+
+func (t *FWStatementTime) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		t.Time = time.Time{}
+		return nil
+	}
+	var s string
+	if b[0] == '"' {
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+	} else {
+		// Epoch seconds/millis are a plausible alternative shape and cost
+		// nothing to accept.
+		n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		if err != nil {
+			t.Time = time.Time{}
+			return nil
+		}
+		if n > 1e12 {
+			t.Time = time.UnixMilli(n).UTC()
+		} else {
+			t.Time = time.Unix(n, 0).UTC()
+		}
+		return nil
+	}
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		fwStatementDateLayout,
+	} {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			t.Time = parsed.UTC()
+			return nil
+		}
+	}
+	t.Time = time.Time{}
+	return nil
+}
+
+// FWStatementBalance is the running wallet balance either side of one
+// statement row. A row that actually moves the wallet leaves before != after;
+// a row that is only a memo of value which never landed leaves them equal.
+type FWStatementBalance struct {
+	Before FWQuoteAmount `json:"before"`
+	After  FWQuoteAmount `json:"after"`
+}
+
+// FWStatementEntry is one row of the merchant wallet statement.
+//
+// The shape is production-measured (2026-09-02), not documented — Flutterwave
+// publishes no schema for this endpoint. Two measured facts drive the whole
+// central-account attribution design:
+//
+//   - Reference on a `funding` row is the NIBSS NIP session id (30 digits),
+//     unique per credit. It is the ONLY viable dedupe key: funding rows carry
+//     no account number and no `transfer` sub-object (transfer and fee rows
+//     do carry one).
+//   - Remarks is free text — "Received Money from GTBANK|ADEMU EMMANUEL O." —
+//     bank left of the pipe, account name right. Unstable by construction, so
+//     nothing downstream may depend on it parsing.
+//
+// Unknown fields are ignored rather than rejected so a provider that starts
+// returning more does not break the poll.
+type FWStatementEntry struct {
+	// Direction is "credit" | "debit".
+	Direction string `json:"direction"`
+	// Type is one of transfer | fee | reversal | settlement | funding | bill |
+	// chargeback | card. Only `funding` is customer money arriving.
+	Type      string             `json:"type"`
+	Amount    FWQuoteAmount      `json:"amount"`
+	Balance   FWStatementBalance `json:"balance"`
+	Reference string             `json:"reference"`
+	Remarks   string             `json:"remarks"`
+	// Currency is absent on some measured rows; callers fall back to the
+	// currency they asked for.
+	Currency        string          `json:"currency"`
+	TransactionDate FWStatementTime `json:"transaction_date"`
+}
+
+// FetchWalletStatement reads the merchant wallet's transaction statement via
+// GET /wallets/statement (production-measured 2026-09-02, undocumented).
+//
+// This is the ONLY detection channel for money paid into the central account:
+// wallet funding fires no webhook at all, so a credit nobody polled for is a
+// credit nobody ever sees. from/to bound the window and are omitted when zero.
+//
+// The window is walked page by page. One request returns one page, and a busy
+// day does not fit in one: everything past it is money that was never seen,
+// and the reconciler — which proves coverage by finding a row older than the
+// window start — has to decline every tick instead of catching it, so the
+// ingest path and its safety net fail at the same threshold.
+//
+// The paging parameter names are as unverified as everything else here, so the
+// walk never trusts them: it stops on a short page, stops when a page comes
+// back identical to the one before it (the shape of a provider ignoring `page`
+// entirely, which would otherwise multiply the window rather than extend it),
+// and stops at a hard bound with a warning rather than spinning.
+//
+// The end bound is pushed a day past `to` because the parameters are date-only
+// and we do not know whether the provider reads them as inclusive. Read as
+// exclusive, "to = today" hides every credit that arrived today. Over-fetching
+// is free — ingestion is idempotent on the NIP session id and the reconciler
+// filters by timestamp — while under-fetching loses money.
+func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency string, from, to time.Time) ([]FWStatementEntry, error) {
+	if !c.IsEnabled() {
+		return nil, ErrFlutterwaveDisabled
+	}
+	pageQuery := func(page int) url.Values {
+		q := url.Values{}
+		if cur := strings.ToUpper(strings.TrimSpace(currency)); cur != "" {
+			q.Set("currency", cur)
+		}
+		if !from.IsZero() {
+			q.Set("from", from.UTC().Format(fwStatementDateLayout))
+		}
+		if !to.IsZero() {
+			q.Set("to", to.UTC().AddDate(0, 0, 1).Format(fwStatementDateLayout))
+		}
+		q.Set("page", strconv.Itoa(page))
+		q.Set("size", strconv.Itoa(fwStatementPageSize))
+		return q
+	}
+
+	var all, prev []FWStatementEntry
+	for page := 1; page <= fwStatementMaxPages; page++ {
+		// A failed page is not returned as a short window: partial results
+		// would read downstream as "the rest of the window is empty", and the
+		// row order the provider uses is unverified, so there is no telling
+		// which part is missing. The poll retries in seconds.
+		rows, err := c.fetchStatementPage(ctx, pageQuery(page))
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			return all, nil
+		}
+		if page > 1 && sameStatementPage(prev, rows) {
+			return all, nil
+		}
+		all = append(all, rows...)
+		if len(rows) < fwStatementPageSize {
+			return all, nil
+		}
+		prev = rows
+	}
+	log.Printf("[flutterwave] WARNING statement page bound reached: %d pages of %d rows read and the provider still has more; the window is truncated and older credits may be unseen",
+		fwStatementMaxPages, fwStatementPageSize)
+	return all, nil
+}
+
+func (c *FlutterwaveClient) fetchStatementPage(ctx context.Context, q url.Values) ([]FWStatementEntry, error) {
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/statement?"+q.Encode(), nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("flutterwave statement: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fwError("statement", resp.StatusCode, body)
+	}
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("flutterwave statement decode: %w", err)
+	}
+	var parsed []FWStatementEntry
+	if err := json.Unmarshal(env.Data, &parsed); err != nil {
+		return nil, fmt.Errorf("flutterwave statement decode data: %w", err)
+	}
+	return parsed, nil
+}
+
+// sameStatementPage reports whether two consecutive pages are the same rows —
+// the only evidence we can get that the provider is ignoring `page`. Rows are
+// compared rather than deduped because two genuinely identical rows do occur,
+// and dropping one would understate the provider's side and raise a phantom
+// surplus at the reconciler.
+func sameStatementPage(a, b []FWStatementEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		switch {
+		case a[i].Reference != b[i].Reference,
+			a[i].Amount != b[i].Amount,
+			a[i].Remarks != b[i].Remarks,
+			a[i].Balance.After != b[i].Balance.After,
+			!a[i].TransactionDate.Equal(b[i].TransactionDate.Time):
+			return false
+		}
+	}
+	return true
 }

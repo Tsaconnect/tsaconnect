@@ -34,6 +34,16 @@ export interface SellerStats {
   isNew: boolean;
 }
 
+/** Fiat destination for a payment-merchant ad/trade. In central mode it is the
+ *  shared company account and carries `payerInstruction`; pointed at a
+ *  merchant's own account it does not. */
+export interface PmPayTo {
+  accountNumber: string;
+  bank: string;
+  accountName: string;
+  payerInstruction?: string;
+}
+
 /**
  * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
  * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
@@ -102,7 +112,7 @@ export interface P2PAd {
   pmId?: string;
   /** For a PM ad, the merchant's Nomba VA the buyer pays into (auto-settled).
    *  Surfaced on the ad detail so a buyer sees the pay-to before opening. */
-  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
+  pmPayTo?: PmPayTo | null;
   status: 'pending' | 'active' | 'paused' | 'exhausted' | 'cancelled';
   expiresAt?: string;
   createdAt: string;
@@ -165,7 +175,7 @@ export interface P2PTrade {
   // markPaid + release — the user never does so manually. pmPayTo is the
   // Nomba inbound account a buyer pays into; payerName is the buyer's KYC name.
   isPm?: boolean;
-  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
+  pmPayTo?: PmPayTo | null;
   payerName?: string;
 }
 
@@ -241,6 +251,9 @@ export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
   data?: T;
+  /** Machine error code, when the server sends one (e.g.
+   *  "kyc_verification_required"). Branch on this, not on message. */
+  code?: string;
   /** HTTP status code of the underlying response (when reachable). Useful
    *  for status-specific UX, e.g. distinguishing 503 STALE_FEED from generic
    *  failure. Absent on network errors. */
@@ -359,6 +372,14 @@ export interface AccountResolveResult {
 export const banksApi = {
   /** Fetch the Nomba-supported Nigerian bank directory. Server caches 24h. */
   list: () => request<NgBank[]>('GET', '/p2p/banks'),
+
+  /**
+   * Bank directory for a specific country (ISO-3166-1 alpha-2, e.g. "GH").
+   * A payout to a Ghanaian account needs Ghanaian bank codes; the default
+   * directory only ever returns Nigerian ones.
+   */
+  listIn: (country: string) =>
+    request<NgBank[]>('GET', `/p2p/banks?country=${encodeURIComponent(country)}`),
 
   /**
    * NUBAN name enquiry. Resolves the account holder name for a 10-digit
@@ -952,7 +973,12 @@ export function p2pChainKey(chainId: number | undefined): ChainKey {
 /**
  * Adapt the backend's UnsignedTx (hex without 0x prefix; chainId as string)
  * to the shape ethers' Transaction.from() expects. Centralised so every
- * P2P screen's broadcast path produces the same wire format.
+ * P2P screen's broadcast path produces the same wire format — a screen that
+ * keeps a private copy of this defeats the point, which one did.
+ *
+ * Deliberately does NOT default a missing nonce or chainId. signTransaction
+ * refuses both, which is the single place all three unsigned-tx adapters in
+ * this app converge; filling them in here would hide that from two of them.
  */
 export function unsignedTxToTxLike(tx: UnsignedTx) {
   const ensure0x = (v?: string) => (!v ? undefined : v.startsWith('0x') ? v : `0x${v}`);

@@ -23,7 +23,9 @@ internal/
     config.go                  # Config struct from env vars, multi-chain config
     database.go                # PostgreSQL connection (GORM), AutoMigrate
     cloudinary.go              # Cloudinary client init
-  models/                      # GORM models (User, Product, Asset, Cart, Category, Portfolio, Transaction, Wallet, WalletTransaction, SupportedToken, VerificationLog)
+  models/                      # GORM models (User, Product, Cart, Category, Transaction, Wallet, WalletTransaction, SupportedToken, VerificationLog)
+                               # NOTE: no model stores a crypto balance. Wallet balances are read from
+                               # the chain per request; the Asset/Portfolio mirrors were removed 2026-09-01.
   blockchain/
     client.go                  # EVMClient - chain-agnostic Ethereum RPC wrapper
     token.go                   # ERC-20 token operations, native transfer prep
@@ -45,14 +47,12 @@ internal/
     product_handler.go         # Product CRUD, marketplace, category filtering
     category_handler.go        # Category CRUD with tree structure
     cart_handler.go            # Cart operations, checkout, coupon, shipping
-    asset_handler.go           # Asset CRUD with real-time pricing
-    transaction_handler.go     # Deposit/withdrawal/swap with fee calculation
-    portfolio_handler.go       # Portfolio analytics, goals
-    market_handler.go          # Market overview, price history, watchlist
+    transaction_handler.go     # Transaction history (read-only)
+    market_handler.go          # Market overview, price history, search
     upload_handler.go          # File upload handlers
     wallet_handler.go          # Multi-chain wallet: register, balances, send, history
     wallet_handler_test.go     # Wallet handler unit tests (SQLite in-memory)
-    common.go                  # getUserFromContext helper
+    common.go                  # getUserFromContext + callerWallet (device/account wallet reconciliation)
   services/
     price_service.go           # CoinGecko API with 60s cache
     blockchain_service.go      # Multi-chain BlockchainService registry
@@ -78,7 +78,7 @@ All routes prefixed with `/api/`:
 - `/users` - user profile management
 - `/verification` - document/identity verification
 - `/upload` - image uploads via Cloudinary
-- `/assets`, `/transactions`, `/portfolio`, `/market` - trading/asset features
+- `/transactions` (read-only), `/market` - transaction history, market data
 - `/products`, `/cart` - marketplace/e-commerce features
 - `/wallet` - multi-chain wallet (register address, balances, send, history, supported tokens)
 - `/health` - health check (root level)
@@ -87,10 +87,17 @@ All routes prefixed with `/api/`:
 
 - **Response format**: `{"success": bool, "message": string, "data": object}` or `{"success": false, "errors": array}`
 - **Auth**: JWT tokens with 7-day expiry. `Authorization: Bearer <token>` header
-- **Rate limiting**: 100 requests per 15 minutes per IP on `/api/` routes
+- **Rate limiting**: 500 requests per 15 minutes per IP on `/api/` routes (`routes.go`), with tighter per-route limits on some groups
 - **Handler structure**: `WalletHandler` has its own struct with `DB`, `Config`, `BlockchainService` fields. Other handlers use `*Handlers` struct.
 - **ORM**: GORM with PostgreSQL driver
 - **Wallet tests**: Use SQLite in-memory DB (raw DDL, not AutoMigrate) to avoid PostgreSQL-specific defaults
+- **Balances are never stored**: crypto balances come from the chain on every request and
+  entitlement balances from the swap contract. Endpoints that display one take the caller's
+  device wallet address and reconcile it against `users.wallet_address` via `callerWallet`
+  (409 on mismatch) — never silently substitute the registered address, which makes a device
+  with no key look as though the platform is custodying the user's assets.
+- **Destructive DDL**: never in `AutoMigrate` (enforced by `TestAutoMigrateHasNoDestructiveDDL`).
+  It goes in `deploy/one-off/`, run deliberately by an operator after the release is live.
 
 ## Environment Variables
 
@@ -99,8 +106,78 @@ Required (set in `.env`):
 - `JWT_SECRET` - JWT signing secret
 - `FRONTEND_URL` - CORS allowed origin (defaults to `http://localhost:3000`)
 - `PORT` - Server port (defaults to `5000`)
-- `ENV` - `development` or `production`
+- `ENV` - `development` or `production`. Normalised at load (trim, lower-case, "prod" ->
+  "production") — call `cfg.IsProduction()`, never compare `cfg.Env` directly, so a stray
+  space or differing case can't desync a guard.
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
+- `MIGRATE_ON_BOOT` - run schema migration during boot. Leave unset wherever a deploy
+  script exists: the deploy runs `tsa-api -migrate` once, before starting the service,
+  so processes never race on DDL. Set `true` for local development.
+
+Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release local signer —
+`IT_OPERATOR_PRIVATE_KEY`, `RELAYER_PRIVATE_KEY`, `RAMP_SPONSOR_PRIVATE_KEY`,
+`PM_RELEASE_PRIVATE_KEY`):
+- Each is a dev/staging convenience: the key lives in process env, not a key store. In
+  production every one of them is refused by default — `cmd/server/signer_guard.go`'s
+  `rawSignerKeyAllowed(cfg)` is the single guard all four (and the PM local signer branch)
+  go through, and the corresponding feature (IT + utility bills, gasless relaying, ramp gas
+  sponsorship, PM auto-settle) stays dormant rather than signing with a key that shouldn't
+  be there.
+- `ALLOW_RAW_SIGNER_KEYS` (bool, default `false`) is the interim opt-in until a KMS-backed
+  `ReleaseSigner` exists (`internal/services/release_signer.go` — `PM_RELEASE_SIGNER=kms` is
+  not yet implemented). Ignored outside production. When it lets a raw key through in
+  production, boot logs `ALERT raw_signer_key_in_production=1 key=<NAME>` once per key —
+  never the key material — so the exposure is visible in every log sink.
+- **Rollout order matters.** As of 2026-09, production runs with `ENV` not exactly
+  `"production"` — that is what currently keeps IT/bills/gasless/ramp-sponsorship alive with
+  their raw keys. Flipping `ENV=production` alone would silently take all of them dormant.
+  Set `ENV=production` and `ALLOW_RAW_SIGNER_KEYS=true` together in the same deploy, and
+  before doing so review the other things gated on `cfg.IsProduction()`: gin switches to
+  `ReleaseMode`, and the nil-chain-client fallbacks in `escrow_service.go`,
+  `mcgp_swap_service.go`, `otc_service.go` and `service_contact_service.go` start refusing to
+  build a partial unsigned tx instead of returning one for local tooling.
+
+IT sell recovery (`internal/services/it_sell_recovery.go`, `it-sell-reconciler` job):
+- `IT_SELL_FW_ABSENCE_TRUSTED` (bool, default `false`) - whether "Flutterwave's
+  `GET /transfers` listing has no transfer for this payout reference" may be acted on:
+  the reconciler re-sending an already-attempted payout or reversing a sell whose retry
+  was refused, and an admin reverse / retry-payout on that evidence. Leave `false` until
+  the listing's response shape is confirmed against the live API — a wrong "absent" pays
+  the user twice. While `false` those sells ALERT and wait in `GET /api/it/admin/sell/stuck`;
+  provider-confirmed SUCCESSFUL/FAILED transfers and first sends still resolve normally.
+- Money rule for every sell path: a payout send and a debit reverse claim the same row
+  (`payout_rejected`), so exactly one can win; a payout is only sent while the on-chain
+  debit is Pending; a settle/reverse that did not verify but whose debit is already
+  resolved on-chain parks the sell as `needs_review`.
+- **A sell is parked only on facts that cannot un-happen** — a debit already RESOLVED, or
+  one for another wallet/amount. "No debit at this ref" is a lagging RPC node as often as
+  it is a missing debit, so it (and an unreadable chain) holds the payout for a later tick
+  and alerts past the 30-minute abandon window. `POST /api/it/admin/sell/:id/reevaluate`
+  (super_admin) is the exit from `needs_review`: it re-reads the chain and the payout
+  transfer and closes the row the way the evidence points, refusing when they disagree.
+
+Central-account inbound attribution (default `va` — a deploy that omits all of these changes nothing):
+- `INBOUND_MODE` - `va`: per-user Flutterwave virtual account, attributed by the charge
+  webhook. `central`: every payer is sent to one company account, attributed by polling the
+  wallet statement and matching the sender's name. Anything unrecognised reads as `va`.
+- These are the only variables here that can REFUSE TO BOOT. `central` requires
+  `INBOUND_CENTRAL_ACCOUNT_NUMBER` (validated as a 10-digit NUBAN), `INBOUND_CENTRAL_BANK_NAME`,
+  `INBOUND_CENTRAL_ACCOUNT_NAME` and Flutterwave credentials. The usual dormant-if-unset
+  pattern is wrong for them: a pay-into screen with a blank or unwatched account number takes
+  real customer money that nothing can attribute afterwards.
+- `INBOUND_POLL_INTERVAL`, `INBOUND_STATEMENT_LOOKBACK` - wallet funding fires no webhook, so
+  the poll is the only thing that ever notices a credit and the interval is the payer's wait.
+- `INBOUND_ALERT_EMAILS` - who is paged when the matcher holds a credit. Nothing releases a
+  held credit automatically; unset is legitimate but means the admin queue is the only place
+  it is ever seen.
+- Per-variable rationale is in `.env.example`; read it before changing any of them.
+
+Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
+- `DIDIT_API_KEY` - Application API key from https://business.didit.me
+- `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID
+- `DIDIT_WEBHOOK_SECRET` - Destination `secret_shared_key` from webhook setup
+- `DIDIT_CALLBACK_URL` - Hosted-flow redirect after completion (default `tsaconnect://kyc/callback`)
+- `DIDIT_BASE_URL` - Defaults to `https://verification.didit.me/v3`
 
 Blockchain (wallet feature):
 - `SONIC_RPC_URL` - Sonic testnet RPC (default: `https://rpc.testnet.soniclabs.com`)

@@ -1,4 +1,7 @@
-import { getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, SOLANA_LIFI_CHAIN_ID } from './lifi';
+import {
+  getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
+  isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
+} from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue('Bearer test-token'),
@@ -36,21 +39,96 @@ describe('getLiFiChains', () => {
     chains: [
       { id: 56, name: 'BSC', key: 'bsc', coin: 'BNB', chainType: 'EVM' },
       { id: SOLANA_LIFI_CHAIN_ID, name: 'Solana', key: 'sol', coin: 'SOL', chainType: 'SVM' },
+      { id: BTC_LIFI_CHAIN_ID, name: 'Bitcoin', key: 'btc', coin: 'BTC', chainType: 'UTXO' },
     ],
   };
 
-  it('fetches through the backend proxy and includes Solana on mainnet', async () => {
+  it('fetches through the backend proxy and includes Solana and Bitcoin on mainnet', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
     const chains = await getLiFiChains();
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/swap/lifi/chains'), expect.any(Object));
-    expect(chains.map(c => c.id)).toEqual([56, SOLANA_LIFI_CHAIN_ID]);
+    expect(chains.map(c => c.id)).toEqual([56, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID]);
   });
 
-  it('hides Solana in testnet mode (swaps are mainnet-only)', async () => {
+  it('hides both non-EVM chains in testnet mode (swaps are mainnet-only)', async () => {
     mockGetNetwork.mockReturnValue('testnet');
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
     const chains = await getLiFiChains();
     expect(chains.map(c => c.id)).toEqual([56]);
+  });
+
+  // The Bitcoin chain id is a LiFi-side constant, so trust LiFi's own answer
+  // over ours: a UTXO chain we did not know about must still route down the
+  // Bitcoin signer rather than be treated as an EVM chain.
+  it('learns UTXO chain ids from the chain list', async () => {
+    const UNKNOWN_UTXO = 20000000000009;
+    expect(isBtcLiFiChain(UNKNOWN_UTXO)).toBe(false);
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ chains: [{ id: UNKNOWN_UTXO, name: 'Bitcoin', key: 'btc', coin: 'BTC', chainType: 'UTXO' }] }),
+    });
+    await getLiFiChains();
+    expect(isBtcLiFiChain(UNKNOWN_UTXO)).toBe(true);
+    expect(isNonEVMLiFiChain(UNKNOWN_UTXO)).toBe(true);
+  });
+});
+
+describe('settleSwapFee', () => {
+  const params = {
+    quoteId: '0xswaphash',
+    fromChainId: 42161,
+    toChainId: 1,
+    fromToken: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    toToken: '0x0000000000000000000000000000000000000000',
+    fromAmount: '1000000000',
+    toAmount: '250957',
+    fromSymbol: 'USDC',
+    fromDecimals: 6,
+    fromAddress: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    toAddress: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    feature: 'allswap' as const,
+  };
+
+  it('reports the executed route and never claims a fee figure', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => '{}' });
+    await settleSwapFee(params);
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/swap/lifi/settle');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({
+      quoteId: '0xswaphash',
+      chainId: 42161,
+      toChainId: 1,
+      fromToken: params.fromToken,
+      fromAmount: '1000000000',
+      fromSymbol: 'USDC',
+      fromDecimals: 6,
+      feature: 'allswap',
+    });
+    // LiFi refuses to quote without fromAddress, so the backend cannot verify
+    // the fee without the route's endpoints.
+    expect(body.fromAddress).toBe(params.fromAddress);
+    expect(body.toAddress).toBe(params.toAddress);
+    // The server recomputes the fee from a fresh quote; a number from here is
+    // precisely what it is built not to trust.
+    expect(body).not.toHaveProperty('clientFeeUsd');
+  });
+
+  it('throws on a rejected settle so the caller can log it', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 422, text: async () => 'fee deviation' });
+    await expect(settleSwapFee(params)).rejects.toThrow(/422/);
+  });
+});
+
+describe('chain family helpers', () => {
+  it('separates EVM chains from the families that sign off-chain', () => {
+    expect(isBtcLiFiChain(BTC_LIFI_CHAIN_ID)).toBe(true);
+    expect(isBtcLiFiChain(56)).toBe(false);
+    expect(isNonEVMLiFiChain(SOLANA_LIFI_CHAIN_ID)).toBe(true);
+    expect(isNonEVMLiFiChain(BTC_LIFI_CHAIN_ID)).toBe(true);
+    expect(isNonEVMLiFiChain(1)).toBe(false);
   });
 });
 

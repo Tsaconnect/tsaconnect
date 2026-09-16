@@ -16,6 +16,45 @@ export function isSolanaLiFiChain(chainId: number): boolean {
   return chainId === SOLANA_LIFI_CHAIN_ID;
 }
 
+// LiFi's non-numeric chain id for Bitcoin (UTXO family). Safe as a JS number
+// (2e13 < 2^53) and, like Solana's, absent from the EVM CHAINS map — branch on
+// it before any getChainByChainId lookup.
+export const BTC_LIFI_CHAIN_ID = 20000000000001;
+
+// Ids LiFi reports as chainType 'UTXO'. Seeded with the known Bitcoin id and
+// re-learned from every /chains response (see getLiFiChains) so the app follows
+// LiFi's own answer rather than a constant that can go stale.
+const utxoChainIds = new Set<number>([BTC_LIFI_CHAIN_ID]);
+
+export function isBtcLiFiChain(chainId: number): boolean {
+  return utxoChainIds.has(chainId);
+}
+
+// LiFi's chain id for Sui (MVM family).
+//
+// NOTE this one exceeds Number.MAX_SAFE_INTEGER (9007199254740991). It survives
+// JSON and String() exactly because it is even and the float64 gap at that
+// magnitude is 2 — but `Number.isSafeInteger` is false for it and arithmetic is
+// lossy (id + 1 === id). Compare it and pass it through; never compute with it.
+export const SUI_LIFI_CHAIN_ID = 9270000000000000;
+
+// Ids LiFi reports as chainType 'MVM', re-learned from its own answer like the
+// UTXO set below.
+const mvmChainIds = new Set<number>([SUI_LIFI_CHAIN_ID]);
+
+export function isSuiLiFiChain(chainId: number): boolean {
+  return mvmChainIds.has(chainId);
+}
+
+/**
+ * True for any chain the swap flow signs through the non-EVM path (Bitcoin,
+ * Solana or Sui). These have no entry in the EVM CHAINS map and no ERC-20
+ * balances, so every EVM-shaped lookup must be guarded by this.
+ */
+export function isNonEVMLiFiChain(chainId: number): boolean {
+  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId);
+}
+
 export interface LiFiChain {
   id: number;
   name: string;
@@ -70,6 +109,16 @@ export interface LiFiQuote {
   toAmountUSD: string;
   estimatedDuration: number;
   gasCostUSD: string;
+  /**
+   * Total platform + protocol fees LiFi reports for this route, in USD
+   * (estimate.feeCosts).
+   *
+   * The UI shows THIS rather than a percentage of its own: the rate lives at
+   * portal.li.fi, is configured per chain, and a number hardcoded in the app
+   * becomes a lie the moment it is changed there. Undefined when the route
+   * reports no fee, in which case the UI shows nothing at all.
+   */
+  feeCostUSD?: string;
   tool: string;
   transactionRequest: LiFiTransactionRequest;
   approvalAddress?: string;
@@ -84,10 +133,18 @@ export async function getLiFiChains(): Promise<LiFiChain[]> {
   if (!res.ok) throw new Error('Failed to fetch LiFi chains');
   const data = await res.json();
   const chains: LiFiChain[] = Array.isArray(data?.chains) ? data.chains : [];
+  // Learn LiFi's UTXO chain ids from its own answer so isBtcLiFiChain stays
+  // right even if the id changes or a second UTXO chain is added upstream.
+  for (const c of chains) {
+    if (typeof c.id !== 'number') continue;
+    if (c.chainType === 'UTXO') utxoChainIds.add(c.id);
+    if (c.chainType === 'MVM') mvmChainIds.add(c.id);
+  }
   // Swaps are mainnet-only (LiFi has no testnets). In testnet mode the wallet's
-  // Solana side points at devnet, so hide Solana from the swap surface rather
-  // than let a mainnet swap draw on a devnet-displayed balance.
-  return getNetwork() === 'testnet' ? chains.filter(c => !isSolanaLiFiChain(c.id)) : chains;
+  // Solana side points at devnet and its BTC address is a tb1… testnet one, so
+  // hide both from the swap surface rather than let a mainnet swap draw on a
+  // testnet-displayed balance.
+  return getNetwork() === 'testnet' ? chains.filter(c => !isNonEVMLiFiChain(c.id)) : chains;
 }
 
 export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
@@ -186,12 +243,128 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,
     gasCostUSD: data.estimate?.gasCosts?.[0]?.amountUSD ?? '0',
+    feeCostUSD: sumFeeCostsUSD(data.estimate?.feeCosts),
     tool: data.toolDetails?.name ?? data.tool ?? 'LiFi',
     transactionRequest: data.transactionRequest,
     approvalAddress: data.estimate?.approvalAddress || undefined,
     approvalToken: data.action?.fromToken?.address || undefined,
     validUntil: data.estimate?.validUntil ?? undefined,
   };
+}
+
+export interface SettleSwapFeeParams {
+  /**
+   * What makes this swap unique, for idempotency. The source-chain tx hash:
+   * it exists only once the swap actually happened, is stable across retries
+   * of this call, and differs for every execution — so a retry never
+   * double-charges and two real swaps are never collapsed into one.
+   */
+  quoteId: string;
+  /** Route as quoted — the backend re-queries LiFi with exactly these. */
+  fromChainId: number;
+  toChainId: number;
+  fromToken: string; // contract address (what LiFi resolves reliably)
+  toToken: string;
+  fromAmount: string; // base units
+  toAmount?: string;
+  /** Settlement token symbol for the fee ledger (the address means nothing there). */
+  fromSymbol: string;
+  /**
+   * Route endpoints. LiFi rejects a quote without fromAddress, so the backend
+   * cannot re-query — and cannot verify the fee — without them.
+   */
+  fromAddress: string;
+  toAddress: string;
+  /** Lets the backend turn fromAmount (base units) back into whole tokens. */
+  fromDecimals: number;
+  /** Fee bucket: the cross-chain bridge, or the same-chain trading desk. */
+  feature: 'allswap' | 'spot';
+}
+
+/**
+ * Report an executed swap so the backend can accrue its platform fee.
+ *
+ * The fee is computed server-side from a fresh LiFi quote — we deliberately
+ * send no fee figure, because the client's opinion of it is exactly what the
+ * endpoint is designed not to trust.
+ *
+ * The swap has already happened on-chain by the time this runs, so a failure
+ * here must never reach the user as a failed swap; callers fire it and log.
+ */
+export async function settleSwapFee(params: SettleSwapFeeParams): Promise<void> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/settle`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      quoteId: params.quoteId,
+      fromToken: params.fromToken,
+      toToken: params.toToken,
+      fromAmount: params.fromAmount,
+      toAmount: params.toAmount ?? '',
+      chainId: params.fromChainId,
+      toChainId: params.toChainId,
+      fromSymbol: params.fromSymbol,
+      feature: params.feature,
+      fromAddress: params.fromAddress,
+      toAddress: params.toAddress,
+      fromDecimals: params.fromDecimals,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`settle failed (${res.status}): ${body.slice(0, 200)}`);
+  }
+}
+
+export type SwapDeliveryStatus = 'PENDING' | 'DONE' | 'FAILED';
+
+export interface SwapDelivery {
+  status: SwapDeliveryStatus;
+  destTxHash?: string;
+  receivedAmount?: string;
+}
+
+/**
+ * Ask the backend what became of a broadcast swap on the DESTINATION chain.
+ *
+ * A cross-chain route is not finished when its source transaction confirms —
+ * the bridge still has to deliver, which takes minutes and can fail. Any error
+ * reads as still-pending: right after a broadcast LiFi does not know the hash
+ * yet, and that is indistinguishable from a transient failure, so "not yet" is
+ * the honest answer rather than "it failed".
+ */
+export async function getSwapDelivery(txHash: string): Promise<SwapDelivery> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${API_BASE_URL}/swap/lifi/status?txHash=${encodeURIComponent(txHash)}`, { headers });
+    if (!res.ok) return { status: 'PENDING' };
+    const body = await res.json();
+    const d = body?.data ?? {};
+    const status: SwapDeliveryStatus =
+      d.status === 'DONE' || d.status === 'FAILED' ? d.status : 'PENDING';
+    return { status, destTxHash: d.destTxHash, receivedAmount: d.receivedAmount };
+  } catch {
+    return { status: 'PENDING' };
+  }
+}
+
+/**
+ * Total of a quote's feeCosts in USD. Returns undefined when the route reports
+ * none, so callers can tell "no fee reported" from "zero fee".
+ */
+function sumFeeCostsUSD(feeCosts: { amountUSD?: string }[] | undefined): string | undefined {
+  if (!Array.isArray(feeCosts) || feeCosts.length === 0) return undefined;
+  let total = 0;
+  let sawOne = false;
+  for (const fc of feeCosts) {
+    const amount = Number(fc?.amountUSD);
+    if (Number.isFinite(amount)) {
+      total += amount;
+      sawOne = true;
+    }
+  }
+  return sawOne ? total.toFixed(2) : undefined;
 }
 
 /** ABI-encodes approve(address,uint256) calldata for ERC-20 token approval. */
