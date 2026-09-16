@@ -253,6 +253,7 @@ func newBillServiceRig(t *testing.T) *billRig {
 			vend_ngn_amount INTEGER, mcgp_amount TEXT, rate_kobo TEXT,
 			vendor_order_id TEXT, vendor_status_code INTEGER, delivery_payload TEXT,
 			failure_reason TEXT, status TEXT, quote_expires_at DATETIME,
+			claim_seq INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE bill_payments (

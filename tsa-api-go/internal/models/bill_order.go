@@ -95,7 +95,13 @@ type BillOrder struct {
 
 	FailureReason string `gorm:"size:256" json:"failureReason,omitempty"`
 
-	Status         string    `gorm:"size:16;not null;default:'quoted';index" json:"status"`
+	Status string `gorm:"size:16;not null;default:'quoted';index" json:"status"`
+	// ClaimSeq is the row's version: every guarded transition bumps it, and a
+	// caller claims the order by writing the version it read. That is what
+	// stops two reconcile passes both re-vending an order neither of them
+	// moved — and, unlike comparing updated_at, it does not depend on how
+	// precisely the database stores timestamps.
+	ClaimSeq       int       `gorm:"not null;default:0" json:"-"`
 	QuoteExpiresAt time.Time `json:"quoteExpiresAt"`
 
 	CreatedAt time.Time `json:"createdAt"`

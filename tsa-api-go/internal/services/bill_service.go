@@ -549,6 +549,9 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 // the pay/vend/reconcile paths goes through here: a full-row Save from a stale
 // copy could overwrite a concurrent delivery (and its token/PIN).
 func (s *BillService) moveOrder(ctx context.Context, o *models.BillOrder, from []string, updates map[string]any) bool {
+	if _, taken := updates["claim_seq"]; !taken {
+		updates["claim_seq"] = gorm.Expr("claim_seq + 1")
+	}
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("id = ? AND status IN ?", o.ID, from).
 		Updates(updates)
@@ -562,6 +565,20 @@ func (s *BillService) moveOrder(ctx context.Context, o *models.BillOrder, from [
 	if err := s.db.WithContext(ctx).First(o, "id = ?", o.ID).Error; err != nil {
 		log.Printf("[bills] order=%s reload after transition failed: %v", o.ID, err)
 	}
+	return true
+}
+
+// claimOrder takes an order for work that must happen once (a re-vend), by
+// writing the exact version the caller read. Exactly one concurrent caller
+// wins; the rest see the bumped version and stand down.
+func (s *BillService) claimOrder(ctx context.Context, o *models.BillOrder, status string) bool {
+	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Where("id = ? AND status = ? AND claim_seq = ?", o.ID, status, o.ClaimSeq).
+		Update("claim_seq", gorm.Expr("claim_seq + 1"))
+	if res.Error != nil || res.RowsAffected != 1 {
+		return false
+	}
+	o.ClaimSeq++
 	return true
 }
 
@@ -973,10 +990,7 @@ func (s *BillService) reconcileOrder(ctx context.Context, o *models.BillOrder) b
 		// (a CAS on the exact row version read) so two passes cannot both
 		// re-vend, then ask ClubKonnect; if it has never seen the RequestID, the
 		// vend was never sent — send it.
-		claim := s.db.WithContext(ctx).Model(&models.BillOrder{}).
-			Where("id = ? AND status = ? AND updated_at = ?", o.ID, models.BillStatusPaid, o.UpdatedAt).
-			Update("updated_at", time.Now())
-		if claim.Error != nil || claim.RowsAffected != 1 {
+		if !s.claimOrder(ctx, o, models.BillStatusPaid) {
 			return false
 		}
 		res, err := s.vendor.QueryOrder(ctx, o.ID.String())

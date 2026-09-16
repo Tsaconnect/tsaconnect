@@ -384,6 +384,31 @@ func TestC4_OrderClaimBlocksStaleVendEvenAfterPaymentWin(t *testing.T) {
 	}
 }
 
+// N6: the paid-branch claim is an explicit version column, not a timestamp
+// comparison whose precision depends on the database.
+func TestN6_GuardedMovesBumpTheClaimVersion(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusPaying, models.BillPayStatusDebited, time.Hour)
+	before := r.order(t, id).ClaimSeq
+	o := r.order(t, id)
+	if !r.svc.moveOrder(context.Background(), &o, []string{models.BillStatusPaying}, map[string]any{"status": models.BillStatusPaid}) {
+		t.Fatal("move should have applied")
+	}
+	after := r.order(t, id)
+	if after.ClaimSeq != before+1 {
+		t.Fatalf("claim_seq = %d, want %d", after.ClaimSeq, before+1)
+	}
+	// A caller holding the old version can no longer claim the row.
+	stale := models.BillOrder{ID: id, Status: models.BillStatusPaid, ClaimSeq: before}
+	if r.svc.claimOrder(context.Background(), &stale, models.BillStatusPaid) {
+		t.Fatal("a stale claim version must not win the claim")
+	}
+	current := r.order(t, id)
+	if !r.svc.claimOrder(context.Background(), &current, models.BillStatusPaid) {
+		t.Fatal("the current version must win the claim")
+	}
+}
+
 func TestC4_PaidBranchClaimsBeforeRevend(t *testing.T) {
 	r := newBillServiceRig(t)
 	id := r.seedOrder(t, models.BillStatusPaid, models.BillPayStatusDebited, time.Hour)
