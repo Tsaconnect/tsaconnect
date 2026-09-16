@@ -94,16 +94,59 @@ func (f *fakeBillVendor) EpinPlans(context.Context, string) ([]BillPlan, error) 
 }
 
 type fakeBillPayer struct {
-	db          *gorm.DB
-	debitErr    error
-	settleErr   error
-	reverseErr  error
-	debits      int
-	settles     int
-	reverses    int
-	disabled    bool
+	db            *gorm.DB
+	debitErr      error
+	settleErr     error
+	reverseErr    error
+	debits        int
+	settles       int
+	reverses      int
+	disabled      bool
 	leaveDebiting bool // simulate broadcast-without-verify
 	leaveFailed   bool // simulate a failed broadcast (row persisted as failed)
+
+	resolveDebitingTo  string // ResolveDebiting outcome ("" = unchanged)
+	resolveDebitingWon *bool  // override: did this call win the transition
+	resolveDebitingErr error
+	lateDebit          bool               // AdoptLateDebit finds a debit on-chain (every order)
+	lateDebitOrders    map[uuid.UUID]bool // or only these orders
+	stuck              []models.BillPayment
+	deepAudits         int
+}
+
+func (f *fakeBillPayer) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, bool, error) {
+	if f.resolveDebitingErr != nil {
+		return models.BillPayStatusDebiting, false, f.resolveDebitingErr
+	}
+	var pay models.BillPayment
+	if err := f.db.WithContext(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
+		return "", false, err
+	}
+	if pay.Status != models.BillPayStatusDebiting || f.resolveDebitingTo == "" {
+		return pay.Status, false, nil
+	}
+	f.db.WithContext(ctx).Model(&pay).Update("status", f.resolveDebitingTo)
+	won := f.resolveDebitingTo != models.BillPayStatusDebiting
+	if f.resolveDebitingWon != nil {
+		won = *f.resolveDebitingWon
+	}
+	return f.resolveDebitingTo, won, nil
+}
+func (f *fakeBillPayer) AdoptLateDebit(ctx context.Context, orderID uuid.UUID) (bool, error) {
+	if !f.lateDebit && !f.lateDebitOrders[orderID] {
+		return false, nil
+	}
+	res := f.db.WithContext(ctx).Model(&models.BillPayment{}).
+		Where("order_id = ? AND status = ?", orderID, models.BillPayStatusFailed).
+		Update("status", models.BillPayStatusDebited)
+	return res.RowsAffected == 1, res.Error
+}
+func (f *fakeBillPayer) AlertLateDebitsBeyondWindow(context.Context) (int, error) {
+	f.deepAudits++
+	return 0, nil
+}
+func (f *fakeBillPayer) StuckPayments(context.Context, time.Duration, int) ([]models.BillPayment, error) {
+	return f.stuck, nil
 }
 
 func (f *fakeBillPayer) IsEnabled() bool { return !f.disabled }
@@ -210,6 +253,7 @@ func newBillServiceRig(t *testing.T) *billRig {
 			vend_ngn_amount INTEGER, mcgp_amount TEXT, rate_kobo TEXT,
 			vendor_order_id TEXT, vendor_status_code INTEGER, delivery_payload TEXT,
 			failure_reason TEXT, status TEXT, quote_expires_at DATETIME,
+			claim_seq INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE bill_payments (
@@ -246,6 +290,10 @@ func newBillServiceRig(t *testing.T) *billRig {
 	// prove the old report API still behaves identically over the new storage.
 	if err := db.AutoMigrate(&models.Dispute{}); err != nil {
 		t.Fatalf("migrate disputes: %v", err)
+	}
+	// The daily late-debit audit claims its run in this table (claimDailyRun).
+	if err := db.AutoMigrate(&models.JobRunMarker{}); err != nil {
+		t.Fatalf("migrate job run markers: %v", err)
 	}
 	disputes := NewDisputeService(db, nil)
 	disputes.RegisterSubject(models.DisputeSubjectBillOrder, BillDisputeSubject(db))
@@ -321,12 +369,12 @@ func TestBillQuoteValidation(t *testing.T) {
 	r := newBillServiceRig(t)
 	cases := []BillQuoteInput{
 		{Category: "unknown", Provider: "01", NgnAmount: 100},
-		{Category: models.BillCategoryAirtime, Provider: "99", PhoneNumber: "08030001111", NgnAmount: 100},  // unknown provider
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "0803", NgnAmount: 100},         // bad phone
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 10},   // below min
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 1e9},  // above max
+		{Category: models.BillCategoryAirtime, Provider: "99", PhoneNumber: "08030001111", NgnAmount: 100}, // unknown provider
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "0803", NgnAmount: 100},        // bad phone
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 10},  // below min
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 1e9}, // above max
 		{Category: models.BillCategoryElectricity, Provider: "01", CustomerID: "123", MeterType: "wrong", NgnAmount: 2000},
-		{Category: models.BillCategoryEpin, Provider: "waec", PhoneNumber: "08030001111", PlanRef: "nope"},  // unknown plan
+		{Category: models.BillCategoryEpin, Provider: "waec", PhoneNumber: "08030001111", PlanRef: "nope"}, // unknown plan
 	}
 	for i, in := range cases {
 		in.UserID = r.userID
