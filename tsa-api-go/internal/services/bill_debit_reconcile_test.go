@@ -70,9 +70,13 @@ func TestBillPayment_ResolveDebiting(t *testing.T) {
 	t.Run("on-chain pending promotes to debited", func(t *testing.T) {
 		svc, swap, orderID := setup(t)
 		swap.fromBought = mcgpBig(2)
-		status, err := svc.ResolveDebiting(context.Background(), orderID)
-		if err != nil || status != models.BillPayStatusDebited {
-			t.Fatalf("status=%s err=%v, want debited", status, err)
+		status, won, err := svc.ResolveDebiting(context.Background(), orderID)
+		if err != nil || status != models.BillPayStatusDebited || !won {
+			t.Fatalf("status=%s won=%v err=%v, want debited by this call", status, won, err)
+		}
+		// A second caller finds it already moved and must not think it won.
+		if status, won, _ := svc.ResolveDebiting(context.Background(), orderID); status != models.BillPayStatusDebited || won {
+			t.Fatalf("second call: status=%s won=%v, want debited and not won", status, won)
 		}
 		if got := loadPayment(t, svc.db, orderID); got.Status != models.BillPayStatusDebited || got.FromBought != mcgpBig(2).String() {
 			t.Fatalf("row = %+v", got)
@@ -82,7 +86,7 @@ func TestBillPayment_ResolveDebiting(t *testing.T) {
 	t.Run("debit for another wallet is not adopted", func(t *testing.T) {
 		svc, swap, orderID := setup(t)
 		swap.records[billDebitRef(orderID)] = DebitRecord{User: common.HexToAddress("0x00000000000000000000000000000000000000CD"), Amount: mcgpBig(10), State: DebitStatePending}
-		status, _ := svc.ResolveDebiting(context.Background(), orderID)
+		status, _, _ := svc.ResolveDebiting(context.Background(), orderID)
 		if status != models.BillPayStatusDebiting {
 			t.Fatalf("status = %s, want debiting left for an operator", status)
 		}
@@ -91,11 +95,11 @@ func TestBillPayment_ResolveDebiting(t *testing.T) {
 	t.Run("no on-chain debit fails only after the abandon window", func(t *testing.T) {
 		svc, swap, orderID := setup(t)
 		delete(swap.records, billDebitRef(orderID))
-		if status, _ := svc.ResolveDebiting(context.Background(), orderID); status != models.BillPayStatusDebiting {
+		if status, _, _ := svc.ResolveDebiting(context.Background(), orderID); status != models.BillPayStatusDebiting {
 			t.Fatalf("fresh: status = %s, want debiting (a broadcast may still mine)", status)
 		}
 		agePayment(t, svc.db, orderID, time.Hour)
-		if status, _ := svc.ResolveDebiting(context.Background(), orderID); status != models.BillPayStatusFailed {
+		if status, _, _ := svc.ResolveDebiting(context.Background(), orderID); status != models.BillPayStatusFailed {
 			t.Fatalf("old: status = %s, want failed", status)
 		}
 	})
@@ -104,7 +108,7 @@ func TestBillPayment_ResolveDebiting(t *testing.T) {
 		svc, swap, orderID := setup(t)
 		swap.readErr = errors.New("rpc down")
 		agePayment(t, svc.db, orderID, time.Hour)
-		if status, err := svc.ResolveDebiting(context.Background(), orderID); err == nil || status != models.BillPayStatusDebiting {
+		if status, _, err := svc.ResolveDebiting(context.Background(), orderID); err == nil || status != models.BillPayStatusDebiting {
 			t.Fatalf("status=%s err=%v", status, err)
 		}
 	})
@@ -236,7 +240,9 @@ func TestAdminReverseBillPayment(t *testing.T) {
 		{name: "vendor reports success", order: models.BillStatusVending, query: BillVendResult{StatusCode: 200}, wantErr: ErrBillPaymentConflict, wantOrder: models.BillStatusVending},
 		{name: "vendor reports pending", order: models.BillStatusVending, query: BillVendResult{StatusCode: 300}, wantErr: ErrBillPaymentConflict, wantOrder: models.BillStatusVending},
 		{name: "vendor unreachable", order: models.BillStatusPaid, queryErr: errors.New("timeout"), wantErr: ErrBillVendUnverified, wantOrder: models.BillStatusPaid},
-		{name: "vendor reports terminal failure", order: models.BillStatusVending, query: BillVendResult{StatusCode: 510, Status: "ORDER_CANCELLED"}, wantOrder: models.BillStatusRefunded, wantRevers: 1},
+		{name: "vendor reports terminal failure", order: models.BillStatusVending, query: BillVendResult{OrderID: "904", StatusCode: 510, Status: "ORDER_CANCELLED"}, wantOrder: models.BillStatusRefunded, wantRevers: 1},
+		{name: "vendor 4xx on the query", order: models.BillStatusVending, query: BillVendResult{OrderID: "904", StatusCode: 400, Status: "INVALID_REQUEST"}, wantErr: ErrBillVendUnverified, wantOrder: models.BillStatusVending},
+		{name: "vendor failure without an order id", order: models.BillStatusVending, query: BillVendResult{StatusCode: 510, Status: "ORDER_CANCELLED"}, wantErr: ErrBillVendUnverified, wantOrder: models.BillStatusVending},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -280,7 +286,7 @@ func TestAdminSettleBillPayment(t *testing.T) {
 		settles   int
 	}{
 		{name: "delivered", order: models.BillStatusDelivered, wantOrder: models.BillStatusDelivered, settles: 1},
-		{name: "vendor reports success", order: models.BillStatusVending, query: BillVendResult{StatusCode: 200, Delivery: "TOKEN-1"}, wantOrder: models.BillStatusDelivered, settles: 1},
+		{name: "vendor reports success", order: models.BillStatusVending, query: BillVendResult{OrderID: "905", StatusCode: 200, Delivery: "TOKEN-1"}, wantOrder: models.BillStatusDelivered, settles: 1},
 		{name: "vendor reports pending", order: models.BillStatusVending, query: BillVendResult{StatusCode: 300}, wantErr: ErrBillPaymentConflict, wantOrder: models.BillStatusVending},
 		{name: "vend failed", order: models.BillStatusVendFail, wantErr: ErrBillPaymentConflict, wantOrder: models.BillStatusVendFail},
 		{name: "never vended", order: models.BillStatusFailed, wantErr: ErrBillPaymentConflict, wantOrder: models.BillStatusFailed},
@@ -321,4 +327,185 @@ func TestListStuckBillPayments(t *testing.T) {
 		t.Fatalf("row lacks order evidence: %+v", rows[0])
 	}
 	_ = big.NewInt
+}
+
+// ─── review round ───────────────────────────────────────────────────────────
+
+// C4: a second reconcile pass holding a stale copy of the order must neither
+// vend again nor overwrite what the first pass delivered.
+func TestC4_StaleReconcilePassVendsOnce(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusPaying, models.BillPayStatusDebiting, time.Hour)
+	r.vendor.vendResult = BillVendResult{OrderID: "910", StatusCode: 200, Status: "ORDER_COMPLETED", Delivery: "PIN-FIRST"}
+	stale := r.order(t, id)
+	first := r.order(t, id)
+
+	r.payer.resolveDebitingTo = models.BillPayStatusDebited
+	r.svc.reconcileOrder(context.Background(), &first)
+	if o := r.order(t, id); o.Status != models.BillStatusDelivered || o.DeliveryPayload != "PIN-FIRST" {
+		t.Fatalf("first pass: %+v", o)
+	}
+
+	// The stale pass read the payment before the first pass moved it and lost
+	// the payment transition.
+	r.db.Exec(`UPDATE bill_payments SET status = ? WHERE order_id = ?`, models.BillPayStatusDebiting, id)
+	lost := false
+	r.payer.resolveDebitingWon = &lost
+	r.vendor.vendResult = BillVendResult{OrderID: "911", StatusCode: 200, Status: "ORDER_COMPLETED", Delivery: "PIN-SECOND"}
+	r.svc.reconcileOrder(context.Background(), &stale)
+
+	if r.vendor.vendCalls != 1 {
+		t.Fatalf("vendCalls = %d, want exactly one vend", r.vendor.vendCalls)
+	}
+	if o := r.order(t, id); o.Status != models.BillStatusDelivered || o.DeliveryPayload != "PIN-FIRST" {
+		t.Fatalf("delivered order overwritten by the stale pass: %+v", o)
+	}
+}
+
+// C4: the payment transition alone must not be enough — a stale pass that
+// did win it still cannot vend an order another pass already moved.
+func TestC4_OrderClaimBlocksStaleVendEvenAfterPaymentWin(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusPaying, models.BillPayStatusDebited, time.Hour)
+	stale := r.order(t, id)
+	first := r.order(t, id)
+	r.vendor.vendResult = BillVendResult{OrderID: "912", StatusCode: 200, Status: "ORDER_COMPLETED", Delivery: "PIN-A"}
+	// A deferred settle keeps the payment `debited`, so the stale pass still
+	// takes the debited branch and only the order claim can stop it.
+	r.payer.settleErr = errors.New("rpc down")
+
+	r.svc.reconcileOrder(context.Background(), &first)
+	r.svc.reconcileOrder(context.Background(), &stale)
+	if r.vendor.vendCalls != 1 {
+		t.Fatalf("vendCalls = %d, want 1", r.vendor.vendCalls)
+	}
+	if o := r.order(t, id); o.DeliveryPayload != "PIN-A" {
+		t.Fatalf("payload = %q", o.DeliveryPayload)
+	}
+}
+
+func TestC4_PaidBranchClaimsBeforeRevend(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusPaid, models.BillPayStatusDebited, time.Hour)
+	r.vendor.queryErr = fmt.Errorf("ORDER_NOT_FOUND")
+	r.vendor.vendResult = BillVendResult{OrderID: "913", StatusCode: 300, Status: "ORDER_PROCESSED"}
+	first := r.order(t, id)
+	stale := r.order(t, id)
+
+	r.svc.reconcileOrder(context.Background(), &first)
+	r.svc.reconcileOrder(context.Background(), &stale)
+	if r.vendor.vendCalls != 1 {
+		t.Fatalf("vendCalls = %d, want one re-vend", r.vendor.vendCalls)
+	}
+}
+
+func TestC4_AdoptVendResultNeverOverwritesATerminalOrder(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusVending, models.BillPayStatusDebited, time.Hour)
+	stale := r.order(t, id)
+	r.db.Exec(`UPDATE bill_orders SET status = ?, delivery_payload = ? WHERE id = ?`, models.BillStatusDelivered, "TOKEN-REAL", id)
+
+	_ = r.svc.adoptVendResult(context.Background(), &stale, BillVendResult{OrderID: "914", StatusCode: 510, Status: "ORDER_CANCELLED"})
+	if o := r.order(t, id); o.Status != models.BillStatusDelivered || o.DeliveryPayload != "TOKEN-REAL" {
+		t.Fatalf("order = %+v, want the delivered row untouched", o)
+	}
+	if r.payer.reverses != 0 {
+		t.Fatal("a stale failure result must not reverse a delivered bill")
+	}
+}
+
+// I1: rows the reconciler can only alert on must not starve the queue.
+func TestI1Bills_AlertOnlyOrdersDoNotBlockNewOnes(t *testing.T) {
+	r := newBillServiceRig(t)
+	for i := 0; i < 105; i++ {
+		r.seedOrder(t, models.BillStatusPaying, models.BillPayStatusDebiting, 2*time.Hour)
+	}
+	id := r.seedOrder(t, models.BillStatusPaying, models.BillPayStatusDebited, time.Hour)
+	r.vendor.vendResult = BillVendResult{OrderID: "920", StatusCode: 200, Status: "ORDER_COMPLETED"}
+
+	for tick := 0; tick < 2 && r.order(t, id).Status != models.BillStatusDelivered; tick++ {
+		if _, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o := r.order(t, id); o.Status != models.BillStatusDelivered {
+		t.Fatalf("status = %s, want the actionable order reached within two ticks", o.Status)
+	}
+}
+
+func TestI1Bills_LateDebitScanIsPaged(t *testing.T) {
+	r := newBillServiceRig(t)
+	for i := 0; i < 55; i++ {
+		r.seedOrder(t, models.BillStatusFailed, models.BillPayStatusFailed, 2*time.Hour)
+	}
+	id := r.seedOrder(t, models.BillStatusFailed, models.BillPayStatusFailed, time.Hour)
+	r.payer.lateDebitOrders = map[uuid.UUID]bool{id: true}
+
+	for tick := 0; tick < 2 && r.payer.reverses == 0; tick++ {
+		if _, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.payer.reverses != 1 {
+		t.Fatalf("reverses = %d, want the late debit found and reversed within two ticks", r.payer.reverses)
+	}
+}
+
+// I4: an admin reverse must not race a vend that may still be in flight.
+func TestI4_AdminReverseRefusesRecentVend(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusVending, models.BillPayStatusDebited, time.Minute)
+	r.vendor.queryResult = BillVendResult{OrderID: "930", StatusCode: 510, Status: "ORDER_CANCELLED"}
+	if _, err := r.svc.AdminReversePayment(context.Background(), id); !errors.Is(err, ErrBillVendUnverified) {
+		t.Fatalf("err = %v, want unverified while the vend may be in flight", err)
+	}
+	if r.payer.reverses != 0 {
+		t.Fatal("must not reverse")
+	}
+}
+
+func TestAdminSettleBillPayment_SettleFailureIsReturned(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusVending, models.BillPayStatusDebited, time.Hour)
+	r.vendor.queryResult = BillVendResult{OrderID: "940", StatusCode: 200, Status: "ORDER_COMPLETED"}
+	r.payer.settleErr = errors.New("rpc down")
+	if _, err := r.svc.AdminSettlePayment(context.Background(), id); err == nil {
+		t.Fatal("a settle that failed must be reported to the operator")
+	}
+}
+
+func TestAdminBillPayment_ChainReadErrorIsUnverified(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusVendFail, models.BillPayStatusDebiting, time.Hour)
+	r.payer.resolveDebitingErr = errors.New("rpc down")
+	if _, err := r.svc.AdminReversePayment(context.Background(), id); !errors.Is(err, ErrBillDebitUnverified) {
+		t.Fatalf("err = %v, want ErrBillDebitUnverified", err)
+	}
+}
+
+// I6: a debit landing after the 48h window is still reported.
+func TestI6Bills_LateDebitBeyondWindowIsReported(t *testing.T) {
+	svc, swap := newBillRig(t)
+	orderID := uuid.New()
+	swap.debitErr = notBroadcast(errors.New("gas estimation failed"))
+	_, _ = svc.Debit(context.Background(), debitInput(orderID, 10))
+	swap.records = map[[32]byte]DebitRecord{billDebitRef(orderID): {User: common.HexToAddress(billWallet), Amount: mcgpBig(10), State: DebitStatePending}}
+	agePayment(t, svc.db, orderID, 72*time.Hour)
+
+	n, err := svc.AlertLateDebitsBeyondWindow(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v, want one alert", n, err)
+	}
+	if got := loadPayment(t, svc.db, orderID); got.Status != models.BillPayStatusFailed {
+		t.Fatalf("status = %s — beyond the window the audit only alerts", got.Status)
+	}
+}
+
+func TestI6Bills_ReconcileRunsTheDailyAudit(t *testing.T) {
+	r := newBillServiceRig(t)
+	_, _ = r.svc.Reconcile(context.Background(), 5*time.Minute)
+	_, _ = r.svc.Reconcile(context.Background(), 5*time.Minute)
+	if r.payer.deepAudits != 1 {
+		t.Fatalf("audits = %d, want exactly one per day", r.payer.deepAudits)
+	}
 }

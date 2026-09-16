@@ -347,7 +347,7 @@ func billAdminPaymentStatus(err error) (int, bool) {
 	switch {
 	case errors.Is(err, services.ErrBillPaymentConflict), errors.Is(err, services.ErrBillPayBadState):
 		return http.StatusConflict, true
-	case errors.Is(err, services.ErrBillVendUnverified):
+	case errors.Is(err, services.ErrBillVendUnverified), errors.Is(err, services.ErrBillDebitUnverified):
 		return http.StatusServiceUnavailable, true
 	}
 	return 0, false

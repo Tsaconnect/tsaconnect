@@ -105,30 +105,45 @@ type fakeBillPayer struct {
 	leaveDebiting bool // simulate broadcast-without-verify
 	leaveFailed   bool // simulate a failed broadcast (row persisted as failed)
 
-	resolveDebitingTo string // ResolveDebiting outcome ("" = unchanged)
-	lateDebit         bool   // AdoptLateDebit finds a debit on-chain
-	stuck             []models.BillPayment
+	resolveDebitingTo  string // ResolveDebiting outcome ("" = unchanged)
+	resolveDebitingWon *bool  // override: did this call win the transition
+	resolveDebitingErr error
+	lateDebit          bool               // AdoptLateDebit finds a debit on-chain (every order)
+	lateDebitOrders    map[uuid.UUID]bool // or only these orders
+	stuck              []models.BillPayment
+	deepAudits         int
 }
 
-func (f *fakeBillPayer) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, error) {
+func (f *fakeBillPayer) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, bool, error) {
+	if f.resolveDebitingErr != nil {
+		return models.BillPayStatusDebiting, false, f.resolveDebitingErr
+	}
 	var pay models.BillPayment
 	if err := f.db.WithContext(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
-		return "", err
+		return "", false, err
 	}
 	if pay.Status != models.BillPayStatusDebiting || f.resolveDebitingTo == "" {
-		return pay.Status, nil
+		return pay.Status, false, nil
 	}
 	f.db.WithContext(ctx).Model(&pay).Update("status", f.resolveDebitingTo)
-	return f.resolveDebitingTo, nil
+	won := f.resolveDebitingTo != models.BillPayStatusDebiting
+	if f.resolveDebitingWon != nil {
+		won = *f.resolveDebitingWon
+	}
+	return f.resolveDebitingTo, won, nil
 }
 func (f *fakeBillPayer) AdoptLateDebit(ctx context.Context, orderID uuid.UUID) (bool, error) {
-	if !f.lateDebit {
+	if !f.lateDebit && !f.lateDebitOrders[orderID] {
 		return false, nil
 	}
 	res := f.db.WithContext(ctx).Model(&models.BillPayment{}).
 		Where("order_id = ? AND status = ?", orderID, models.BillPayStatusFailed).
 		Update("status", models.BillPayStatusDebited)
 	return res.RowsAffected == 1, res.Error
+}
+func (f *fakeBillPayer) AlertLateDebitsBeyondWindow(context.Context) (int, error) {
+	f.deepAudits++
+	return 0, nil
 }
 func (f *fakeBillPayer) StuckPayments(context.Context, time.Duration, int) ([]models.BillPayment, error) {
 	return f.stuck, nil

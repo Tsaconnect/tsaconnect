@@ -349,6 +349,7 @@ func TestBillHandlerAdminPaymentRefusals(t *testing.T) {
 	}{
 		{fmt.Errorf("%w: the vendor reports this bill delivered", services.ErrBillPaymentConflict), http.StatusConflict},
 		{fmt.Errorf("%w: timeout", services.ErrBillVendUnverified), http.StatusServiceUnavailable},
+		{fmt.Errorf("%w: rpc down", services.ErrBillDebitUnverified), http.StatusServiceUnavailable},
 		{fmt.Errorf("%w: the debit is not confirmed on-chain yet", services.ErrBillPayBadState), http.StatusConflict},
 	}
 	for _, tc := range cases {

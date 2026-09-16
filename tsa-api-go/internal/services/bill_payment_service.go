@@ -286,60 +286,101 @@ func (s *BillPaymentService) StuckPayments(ctx context.Context, olderThan time.D
 
 // ResolveDebiting settles a `debiting` payment's uncertainty from the swap
 // contract's debit record for the order's ref, and returns the payment's
-// status afterwards:
+// status afterwards plus whether THIS call made the transition:
 //
 //	debit Pending for this wallet+amount → debited
 //	no debit, and the row is older than billDebitAbandonAfter → failed
 //	anything else (too fresh, resolved, mismatched, read error) → unchanged
 //
-// Only positive chain evidence moves the row. A payment not in `debiting` is
-// returned as-is.
-func (s *BillPaymentService) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, error) {
+// Only positive chain evidence moves the row, and only the caller that won
+// the guarded transition may act on it (vend, fail the order): a concurrent
+// caller sees won=false. A payment not in `debiting` is returned as-is.
+func (s *BillPaymentService) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, bool, error) {
 	if !s.IsEnabled() {
-		return "", ErrBillPayDisabled
+		return "", false, ErrBillPayDisabled
 	}
 	pay, err := s.paymentForOrder(ctx, orderID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if pay.Status != models.BillPayStatusDebiting {
-		return pay.Status, nil
+		return pay.Status, false, nil
 	}
 	ref := billDebitRef(orderID)
 	rec, err := s.swap.DebitRecord(ctx, ref)
 	if err != nil {
-		return pay.Status, fmt.Errorf("bill payment: read debit: %w", err)
+		return pay.Status, false, fmt.Errorf("bill payment: read debit: %w", err)
 	}
 	switch rec.State {
 	case DebitStatePending:
 		if !billDebitMatches(rec, pay) {
-			log.Printf("[bills] ALERT bill_debit_mismatch order=%s on-chain user=%s amount=%s payment wallet=%s amount=%s",
+			alertf("bill-mismatch:"+orderID.String(),
+				"[bills] ALERT bill_debit_mismatch order=%s on-chain user=%s amount=%s payment wallet=%s amount=%s",
 				orderID, rec.User.Hex(), rec.Amount, pay.WalletAddress, pay.McgpAmount)
-			return pay.Status, nil
+			return pay.Status, false, nil
 		}
 		updates := map[string]any{"status": models.BillPayStatusDebited, "failure_reason": ""}
 		if fromBought, ferr := s.swap.DebitFromBought(ref); ferr == nil {
 			updates["from_bought"] = fromBought.String()
 		}
-		if moved, err := s.transition(ctx, pay.ID, models.BillPayStatusDebiting, updates); err != nil || !moved {
-			return s.currentStatus(ctx, orderID, pay.Status), err
+		moved, err := s.transition(ctx, pay.ID, models.BillPayStatusDebiting, updates)
+		if err != nil || !moved {
+			return s.currentStatus(ctx, orderID, pay.Status), false, err
 		}
 		log.Printf("[bills] payment order=%s debit confirmed on-chain → debited", orderID)
-		return models.BillPayStatusDebited, nil
+		return models.BillPayStatusDebited, true, nil
 	case DebitStateNone:
 		if time.Since(pay.UpdatedAt) < billDebitAbandonAfter {
-			return pay.Status, nil // a broadcast may still mine
+			return pay.Status, false, nil // a broadcast may still mine
 		}
 		reason := truncateReason("debit never landed on-chain (was: " + pay.FailureReason + ")")
-		if moved, err := s.transition(ctx, pay.ID, models.BillPayStatusDebiting,
-			map[string]any{"status": models.BillPayStatusFailed, "failure_reason": reason}); err != nil || !moved {
-			return s.currentStatus(ctx, orderID, pay.Status), err
+		moved, err := s.transition(ctx, pay.ID, models.BillPayStatusDebiting,
+			map[string]any{"status": models.BillPayStatusFailed, "failure_reason": reason})
+		if err != nil || !moved {
+			return s.currentStatus(ctx, orderID, pay.Status), false, err
 		}
-		return models.BillPayStatusFailed, nil
+		return models.BillPayStatusFailed, true, nil
 	default:
-		log.Printf("[bills] ALERT bill_debit_resolved_unrecorded order=%s — debit already settled or reversed on-chain while the payment reads debiting", orderID)
-		return pay.Status, nil
+		alertf("bill-resolved:"+orderID.String(),
+			"[bills] ALERT bill_debit_resolved_unrecorded order=%s — debit already settled or reversed on-chain while the payment reads debiting", orderID)
+		return pay.Status, false, nil
 	}
+}
+
+// AlertLateDebitsBeyondWindow audits failed payments older than the 48h
+// late-debit window whose debit is nonetheless pending on-chain. Alert only:
+// that far out an operator decides. Returns how many it reported.
+func (s *BillPaymentService) AlertLateDebitsBeyondWindow(ctx context.Context) (int, error) {
+	if !s.IsEnabled() {
+		return 0, ErrBillPayDisabled
+	}
+	cutoff := time.Now().Add(-billLateDebitScanWindow)
+	reported := 0
+	var cursor reconcileCursor
+	const batch = 200
+	for page := 0; page < 50; page++ {
+		var rows []models.BillPayment
+		q := s.db.WithContext(ctx).Model(&models.BillPayment{}).
+			Where("status = ? AND updated_at <= ?", models.BillPayStatusFailed, cutoff)
+		if err := cursor.page("deep", "", q, batch).Find(&rows).Error; err != nil {
+			return reported, err
+		}
+		for i := range rows {
+			pay := &rows[i]
+			rec, err := s.swap.DebitRecord(ctx, billDebitRef(pay.OrderID))
+			if err != nil || rec.State != DebitStatePending {
+				continue
+			}
+			reported++
+			log.Printf("[bills] ALERT bill_late_debit_beyond_window order=%s failed_at=%s on-chain user=%s amount=%s — operator review required",
+				pay.OrderID, pay.UpdatedAt.Format(time.RFC3339), rec.User.Hex(), rec.Amount)
+		}
+		if len(rows) < batch {
+			return reported, nil
+		}
+		cursor.advance("deep", len(rows), batch, rows[len(rows)-1].UpdatedAt, rows[len(rows)-1].ID)
+	}
+	return reported, nil
 }
 
 // AdoptLateDebit moves a `failed` payment back to `debited` when its debit is
@@ -365,7 +406,8 @@ func (s *BillPaymentService) AdoptLateDebit(ctx context.Context, orderID uuid.UU
 		return false, nil
 	}
 	if !billDebitMatches(rec, pay) {
-		log.Printf("[bills] ALERT bill_debit_mismatch order=%s (failed payment) on-chain user=%s amount=%s", orderID, rec.User.Hex(), rec.Amount)
+		alertf("bill-mismatch:"+orderID.String(),
+			"[bills] ALERT bill_debit_mismatch order=%s (failed payment) on-chain user=%s amount=%s", orderID, rec.User.Hex(), rec.Amount)
 		return false, nil
 	}
 	moved, err := s.transition(ctx, pay.ID, models.BillPayStatusFailed, map[string]any{
