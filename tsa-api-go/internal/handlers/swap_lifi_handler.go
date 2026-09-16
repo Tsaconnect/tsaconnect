@@ -23,8 +23,6 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
-const defaultLiFiBaseURL = "https://li.quest/v1"
-
 const (
 	lifiDefaultSlippage = "0.005"
 
@@ -116,6 +114,12 @@ type SwapLiFiHandler struct {
 
 // NewSwapLiFiHandler creates a production SwapLiFiHandler.
 //
+// `baseURL` is resolved through config.ResolveLiFiBaseURL — an empty string
+// (the common case: callers pass cfg.LiFiBaseURL, which is already resolved,
+// but tests often pass "") defaults to LiFi's public API. This is the one
+// place the handler's base URL is decided; lifiGet and quoteClient both
+// share it.
+//
 // `apiKey` is forwarded as the `x-lifi-api-key` header on every upstream
 // call (empty = anonymous tier, rate-limited).
 //
@@ -123,15 +127,16 @@ type SwapLiFiHandler struct {
 // are non-empty. Collecting an integrator fee requires the matching name
 // to be registered on portal.li.fi with a fee wallet configured; quoting
 // with an unregistered integrator + fee returns a 400 from LiFi.
-func NewSwapLiFiHandler(apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
+func NewSwapLiFiHandler(baseURL, apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
+	resolvedBaseURL := config.ResolveLiFiBaseURL(baseURL)
 	h := &SwapLiFiHandler{
 		tokenCache:    make(map[string]tokenCacheEntry),
-		lifiBaseURL:   defaultLiFiBaseURL,
+		lifiBaseURL:   resolvedBaseURL,
 		apiKey:        apiKey,
 		integratorID:  integratorID,
 		integratorFee: integratorFee,
 	}
-	h.quoteClient = services.NewLiFiQuoteClient(defaultLiFiBaseURL, apiKey, integratorID)
+	h.quoteClient = services.NewLiFiQuoteClient(resolvedBaseURL, apiKey, integratorID)
 	h.requeryQuoteUSD = h.liveRequeryQuoteUSD
 	return h
 }

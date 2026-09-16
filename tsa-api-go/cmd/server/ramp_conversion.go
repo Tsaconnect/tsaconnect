@@ -113,10 +113,12 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 
-	// li.quest/v1 is LiFi's public API base — same default the AllSwap
-	// handler and the IT stable-sell verifier use.
-	lifiQuoteClient := services.NewLiFiQuoteClient("https://li.quest/v1", cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
-	statusClient := services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey)
+	// cfg.LiFiBaseURL is the same resolved base every LiFi client in the
+	// backend uses (AllSwap handler, IT stable-sell verifier) — defaults to
+	// LiFi's public API but can be overridden (LIFI_BASE_URL) to point a
+	// local rehearsal at a stand-in server.
+	lifiQuoteClient := services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
+	statusClient := services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey)
 
 	transfers := map[string]services.ERC20TransferVerifier{}
 	for chain := range lanes {

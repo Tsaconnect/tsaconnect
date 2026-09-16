@@ -406,6 +406,9 @@ type Config struct {
 	LiFiAPIKey        string
 	LiFiIntegratorID  string
 	LiFiIntegratorFee string
+	// LiFiBaseURL is always resolved (never raw/empty) via ResolveLiFiBaseURL —
+	// see that function's doc for why this exists and what it defaults to.
+	LiFiBaseURL string
 
 	// AllSwap server-verified settle (design §8, I8). The backend re-queries LiFi
 	// to recompute the integrator fee, then rejects a client-supplied fee that
@@ -887,6 +890,11 @@ func Load() *Config {
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
+	// LIFI_BASE_URL exists so a local rehearsal can point every LiFi client at
+	// a stand-in server — production must leave it unset. Resolved through
+	// ResolveLiFiBaseURL so this is the one place the default/normalisation
+	// logic lives; every call site downstream uses cfg.LiFiBaseURL directly.
+	cfg.LiFiBaseURL = ResolveLiFiBaseURL(os.Getenv("LIFI_BASE_URL"))
 
 	// AllSwap server-verified settle thresholds (design §8, I8).
 	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
@@ -1312,6 +1320,29 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// DefaultLiFiBaseURL is LiFi's public API base. It is the single source of
+// truth for every LiFi client the backend builds (AllSwap, ramp-conversion
+// treasury, IT stable verifier) — none of them hardcode the literal
+// themselves, they all resolve through ResolveLiFiBaseURL.
+const DefaultLiFiBaseURL = "https://li.quest/v1"
+
+// ResolveLiFiBaseURL normalises a raw LIFI_BASE_URL value: trims surrounding
+// whitespace, strips a trailing slash, and falls back to DefaultLiFiBaseURL
+// when the result is empty. LIFI_BASE_URL exists purely to let a local
+// rehearsal point every LiFi client at a stand-in server — the real API
+// cannot satisfy a status check for a transaction that only exists on a
+// local chain fork — and must be left unset in production. A malformed value
+// (blank, whitespace-only) falling through to the default rather than being
+// used verbatim keeps a typo from silently sending real requests to a
+// nonsense host.
+func ResolveLiFiBaseURL(raw string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return DefaultLiFiBaseURL
+	}
+	return trimmed
 }
 
 // getEnvDuration parses a Go duration env var (e.g. "24h", "15m", "1h30m"). An

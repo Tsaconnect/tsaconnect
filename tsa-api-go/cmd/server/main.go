@@ -591,7 +591,7 @@ func main() {
 	feeSplitConfigService := services.NewFeeSplitConfigService(config.DB)
 	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
 	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
-	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
+	slh := handlers.NewSwapLiFiHandler(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
 	slh.Config = cfg
@@ -600,7 +600,7 @@ func main() {
 	slh.PriceService = priceService
 	// Rates come from fee_config (what admins edit), not the env constant.
 	slh.FeeConfigService = feeConfigService
-	slh.StatusClient = services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey)
+	slh.StatusClient = services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey)
 	if cfg.FeeModelV2Enabled {
 		slh.FeeService = feeDistributionService
 	}
@@ -957,9 +957,11 @@ func main() {
 		default:
 			itService.SetStableDepositAddress("POLYGON", cfg.FWStableDepositAddressPolygon)
 			itService.SetStableVerifier(
-				// li.quest/v1 is LiFi's public API base — same default the
-				// AllSwap handler uses (handlers/swap_lifi_handler.go).
-				services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey),
+				// cfg.LiFiBaseURL is the same resolved base the AllSwap
+				// handler uses (handlers/swap_lifi_handler.go) — defaults to
+				// LiFi's public API, overridable via LIFI_BASE_URL for a
+				// local rehearsal against a stand-in server.
+				services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
 				services.NewLogTransferVerifier(polygonClient.Client),
 				map[string]string{
 					models.ITAssetUSDC: cfg.Networks["mainnet"].TokenAddresses["polygon:USDC"],
