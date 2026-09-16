@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,13 +130,14 @@ func (f *fakeSponsorStore) onlyRow() *models.GasSponsorship {
 // fakeSponsorChain answers by selector so each test controls the
 // authorizationState read and the simulation independently.
 type fakeSponsorChain struct {
-	mu       sync.Mutex
-	used     bool
-	simErr   error
-	balances map[string]*big.Int // lowercase address -> wei; default 1 ether
-	extra    map[string][]byte   // selector hex -> canned return, checked first
-	code     map[string][]byte   // lowercase address -> code; default none (an EOA)
-	codeErr  error
+	mu         sync.Mutex
+	used       bool
+	simErr     error
+	balances   map[string]*big.Int // lowercase address -> wei; default 1 ether
+	extra      map[string][]byte   // selector hex -> canned return, checked first
+	code       map[string][]byte   // lowercase address -> code; default none (an EOA)
+	codeErr    error
+	balanceErr error // BalanceAt failure, for FloatBalances "carry on past a bad RPC" tests
 }
 
 func (f *fakeSponsorChain) CodeAt(_ context.Context, account common.Address, _ *big.Int) ([]byte, error) {
@@ -173,6 +175,9 @@ func (f *fakeSponsorChain) CallContract(_ context.Context, msg ethereum.CallMsg,
 func (f *fakeSponsorChain) BalanceAt(_ context.Context, account common.Address, _ *big.Int) (*big.Int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.balanceErr != nil {
+		return nil, f.balanceErr
+	}
 	if b, ok := f.balances[strings.ToLower(account.Hex())]; ok {
 		return b, nil
 	}
@@ -204,6 +209,15 @@ func (f *fakeSponsorBuilder) BuildUnsignedCall(_, to string, callData []byte, va
 	return []byte(`{"unsigned":true}`), nil
 }
 
+// lastCall is the mutex-guarded accessor for what BuildUnsignedCall was last
+// invoked with — reads the same fields under the same lock BuildUnsignedCall
+// writes them under, instead of a data race waiting to happen under -race.
+func (f *fakeSponsorBuilder) lastCall() (to string, data []byte, value *big.Int, gasLimit uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.to, f.data, f.value, f.gasLimit
+}
+
 type fakeSponsorNative struct {
 	mu            sync.Mutex
 	decimals      int
@@ -221,6 +235,13 @@ type fakeSponsorNative struct {
 	// exercised unless a test sets one high enough to skip it.
 	allowance    *big.Int
 	allowanceErr error
+	// allowanceDelay artificially widens the read-then-decide window inside
+	// GetTokenAllowance, for the TreasuryLane.convertMu regression test: two
+	// concurrent ExecuteRoute calls on one lane must not both observe the
+	// same stale allowance.
+	allowanceDelay time.Duration
+	inFlight       int32 // atomic: calls currently inside GetTokenAllowance
+	maxInFlight    int32 // atomic: high-water mark of the above
 
 	approveToken   string
 	approveOwner   string
@@ -262,6 +283,17 @@ func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string,
 }
 
 func (f *fakeSponsorNative) GetTokenAllowance(_, _, _ string) (*big.Int, error) {
+	n := atomic.AddInt32(&f.inFlight, 1)
+	defer atomic.AddInt32(&f.inFlight, -1)
+	for {
+		old := atomic.LoadInt32(&f.maxInFlight)
+		if n <= old || atomic.CompareAndSwapInt32(&f.maxInFlight, old, n) {
+			break
+		}
+	}
+	if f.allowanceDelay > 0 {
+		time.Sleep(f.allowanceDelay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.allowanceErr != nil {
@@ -271,6 +303,13 @@ func (f *fakeSponsorNative) GetTokenAllowance(_, _, _ string) (*big.Int, error) 
 		return new(big.Int).Set(f.allowance), nil
 	}
 	return big.NewInt(0), nil
+}
+
+// maxAllowanceConcurrency is the high-water mark of concurrent
+// GetTokenAllowance calls observed — 1 proves a caller-side lock (e.g.
+// TreasuryLane.convertMu) serialised the allowance-read-then-decide section.
+func (f *fakeSponsorNative) maxAllowanceConcurrency() int32 {
+	return atomic.LoadInt32(&f.maxInFlight)
 }
 
 func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
@@ -284,6 +323,14 @@ func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender str
 	return []byte(`{"approve":true}`), nil
 }
 
+// approveCall is the mutex-guarded accessor for the last PrepareERC20Approve
+// call, mirroring PrepareERC20Approve's own lock.
+func (f *fakeSponsorNative) approveCall() (token, owner, spender string, amount *big.Int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approveToken, f.approveOwner, f.approveSpender, f.approveAmount
+}
+
 func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -293,6 +340,14 @@ func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, 
 		return nil, f.transferErr
 	}
 	return []byte(`{"transfer":true}`), nil
+}
+
+// transferCall is the mutex-guarded accessor for the last
+// PrepareERC20Transfer call, mirroring PrepareERC20Transfer's own lock.
+func (f *fakeSponsorNative) transferCall() (token, from, to string, amount *big.Int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.transferToken, f.transferFrom, f.transferTo, f.transferAmt
 }
 
 type sponsorRig struct {
