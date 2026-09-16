@@ -28,6 +28,10 @@ const defaultMaxShortfallUSD = 50
 // conversionTickLimit is the default batch size for one Tick.
 const conversionTickLimit = 20
 
+// defaultStallWindow is how long an order may sit in converting without moving
+// before an operator is asked to look at it.
+const defaultStallWindow = 6 * time.Hour
+
 // lifiQuoter is the quote side of LiFi this state machine needs.
 // *LiFiQuoteClient satisfies it.
 type lifiQuoter interface {
@@ -57,7 +61,13 @@ type ConversionOrchestrator struct {
 	retryWindow time.Duration
 	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
 	maxShortfallUSD float64
-	now             func() time.Time
+	// stallWindow is how long an order may sit in converting without moving
+	// before it is treated as stuck. Several shapes can stall without any single
+	// step deciding to park them — a lost SetTxHash write, a DONE LiFi never
+	// qualifies, a pending deliver leg with no oracle, a chain with no verifier
+	// — and each of those would otherwise live only in a log line.
+	stallWindow time.Duration
+	now         func() time.Time
 }
 
 func NewConversionOrchestrator(
@@ -78,7 +88,7 @@ func NewConversionOrchestrator(
 	return &ConversionOrchestrator{
 		db: db, treasury: treasury, legs: legs, lifi: lifi, status: status,
 		transfers: keyed, chains: chains, retryWindow: retryWindow,
-		maxShortfallUSD: defaultMaxShortfallUSD, now: now,
+		maxShortfallUSD: defaultMaxShortfallUSD, stallWindow: defaultStallWindow, now: now,
 	}
 }
 
@@ -96,7 +106,9 @@ func (o *ConversionOrchestrator) Tick(ctx context.Context, limit int) error {
 		Where("route_kind = ? AND direction = ? AND status IN ?",
 			models.RouteKindConverted, models.PaycrestDirectionBuy,
 			[]string{models.PaycrestStatusConverting, models.PaycrestStatusRefunding}).
-		Order("updated_at ASC").Limit(limit).Find(&orders).Error
+		// Ordered by when we last LOOKED, not when the order last moved, so a
+		// row that cannot progress still yields its turn to the ones behind it.
+		Order("ramp_checked_at ASC NULLS FIRST").Limit(limit).Find(&orders).Error
 	if err != nil {
 		return err
 	}
@@ -109,22 +121,38 @@ func (o *ConversionOrchestrator) Tick(ctx context.Context, limit int) error {
 			log.Printf("[ramp-conversion] order=%s advance: %v", orders[i].ID, err)
 			errs = append(errs, err)
 		}
-		o.rotateIfIdle(ctx, orders[i].ID, before)
+		o.afterStep(ctx, &orders[i], before)
 	}
 	return errors.Join(errs...)
 }
 
-// rotateIfIdle pushes an order that made no progress to the back of the queue.
-// Without it, orders parked on a stalled leg sit at the head of
-// "ORDER BY updated_at ASC" forever and starve every order behind them out of
-// the batch limit. The guard on updated_at makes it a no-op when the step DID
-// write, so a real transition is never overwritten by this.
-func (o *ConversionOrchestrator) rotateIfIdle(ctx context.Context, id uuid.UUID, before time.Time) {
-	err := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
-		Where("id = ? AND updated_at = ?", id, before).
-		UpdateColumn("updated_at", o.now().UTC()).Error
-	if err != nil {
-		log.Printf("[ramp-conversion] order=%s rotate: %v", id, err)
+// afterStep records that we looked, and notices when looking has stopped
+// helping. It bumps ONLY ramp_checked_at, so the order yields its turn in the
+// queue while updated_at stays the honest answer to "when did this last move".
+//
+// The conditional update doubles as the progress test: the row still carries
+// the updated_at we read, so this UPDATE matches exactly when the step wrote
+// nothing. RowsAffected of 0 means the step DID move the order.
+func (o *ConversionOrchestrator) afterStep(ctx context.Context, order *models.PaycrestOrderRecord, before time.Time) {
+	res := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND updated_at = ?", order.ID, before).
+		UpdateColumn("ramp_checked_at", o.now().UTC())
+	if res.Error != nil {
+		log.Printf("[ramp-conversion] order=%s rotate: %v", order.ID, res.Error)
+		return
+	}
+	if res.RowsAffected == 0 {
+		return // the step moved the order; it is not stalled
+	}
+	// Idle. An order that has been idle this long is not waiting, it is stuck,
+	// and it belongs in front of a human rather than in a log line.
+	if order.Status == models.PaycrestStatusConverting && o.now().After(before.Add(o.stallWindow)) {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_stalled_total=1 order=%s idle_since=%s holder=%s",
+			order.ID, before.UTC().Format(time.RFC3339), order.Holder)
+		if err := o.toRecovery(ctx, order,
+			fmt.Sprintf("no progress since %s", before.UTC().Format(time.RFC3339)), nil); err != nil {
+			log.Printf("[ramp-conversion] order=%s park stalled: %v", order.ID, err)
+		}
 	}
 }
 
@@ -152,7 +180,21 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 
 	// 1. Paycrest's own delivery must be PROVEN before we treat the funds as
 	//    ours to move — a mined receipt is not proof the treasury was paid.
-	if order.Holder == models.HolderPaycrest {
+	//
+	//    The test is "not known to be PAST custody", not "explicitly
+	//    Paycrest's": custody is also where the promise is restated into the
+	//    destination token's units, so any holder we do not recognise —
+	//    including the zero value on a row written before Holder was set — has
+	//    to come through here. Letting one slip past would leave a SOURCE-unit
+	//    promise to be compared against destination-unit landings, which on a
+	//    6dp->18dp pair settles about a trillion times early.
+	//
+	//    Treasury and user are the two states that can only be REACHED through
+	//    custody, so they are the two that may skip it. In particular an order
+	//    whose money already reached the user must fall through to the leg
+	//    ledger below — sending it back through custody would hide the
+	//    already-paid check that stops a second payment.
+	if order.Holder != models.HolderTreasury && order.Holder != models.HolderUser {
 		return o.takeCustody(ctx, order, lane)
 	}
 
@@ -388,9 +430,11 @@ func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *model
 	}
 }
 
-// observeDone decides whether a DONE report is good enough to settle on. Three
-// separate things have to hold, because "DONE" alone says nothing about who was
-// paid or how much.
+// observeDone decides whether a DONE report is good enough to settle on.
+// Several things have to hold, because "DONE" alone says nothing about who was
+// paid or how much — and the last of them is the chain itself. LiFi is the
+// LOOKUP that tells us WHICH transaction to go and read; the ERC-20 Transfer
+// log in that transaction is the only thing that says what the user received.
 func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg, st *LiFiTransferStatus) error {
 	switch st.Substatus {
 	case LiFiSubstatusCompleted:
@@ -421,19 +465,71 @@ func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.
 		return fmt.Errorf("conversion: bridge for order %s reported a landing at %s, not the user's wallet", order.ID, st.ToAddress)
 	}
 
-	landed := st.ReceivedBaseUnits
+	landed, err := o.verifyLanding(ctx, order, leg, st)
+	if err != nil || landed == nil {
+		return err // alerted inside; nothing settles on an unverified landing
+	}
 	if err := o.legs.Confirm(detached(ctx), leg.ID, landed.String(), o.now()); err != nil {
 		if errors.Is(err, ErrLegNotPending) {
 			return nil // another tick confirmed it and will settle it
 		}
 		return err
 	}
-	log.Printf("[ramp-conversion] order=%s bridge#%d landed tx=%s amount=%s", order.ID, leg.Attempt, leg.TxHash, landed)
+	log.Printf("[ramp-conversion] order=%s bridge#%d landed tx=%s dest_tx=%s amount=%s (verified on-chain)",
+		order.ID, leg.Attempt, leg.TxHash, st.DestTxHash, landed)
 
 	confirmed := *leg
 	confirmed.Status = models.RampLegStatusConfirmed
 	confirmed.AmountReceived = landed.String()
 	return o.settleOrTopUp(ctx, order, &confirmed)
+}
+
+// verifyLanding reads the destination transaction LiFi named and returns what
+// the user's wallet was ACTUALLY credited, or nil when that cannot be
+// established yet. Returning (nil, nil) means "wait and look again": every such
+// path alerts, and none of them settles anything.
+//
+// This is the difference between believing a bridge and checking it.
+// LiFiTransferStatus's own doc comment promises the destination tx is verified
+// independently on-chain before any money moves; for this caller that promise
+// was not being kept until now.
+func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg, st *LiFiTransferStatus) (*big.Int, error) {
+	if st.DestTxHash == "" {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_dest_tx_total=1 order=%s tx=%s", order.ID, leg.TxHash)
+		return nil, nil
+	}
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		return nil, o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	verifier := o.verifierFor(order.RequestedChain)
+	if verifier == nil {
+		// Same reasoning as taking custody: with no verifier the alternative is
+		// settling on a number nobody checked.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=landing",
+			order.ID, order.RequestedChain)
+		return nil, nil
+	}
+	credited, err := verifier.VerifyTransfer(ctx, st.DestTxHash, dst.token, order.WalletAddress)
+	if err != nil {
+		// Not mined yet, or not the transfer we were promised. Either way this
+		// is not a settlement, and the next tick looks again.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_unverified_total=1 order=%s dest_tx=%s err=%v",
+			order.ID, st.DestTxHash, err)
+		return nil, nil
+	}
+	if credited == nil || credited.Sign() <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_zero_total=1 order=%s dest_tx=%s", order.ID, st.DestTxHash)
+		return nil, nil
+	}
+	// The chain outranks LiFi. Where they disagree, what the wallet was credited
+	// is what the user has, and the shortfall logic works from that.
+	if st.ReceivedBaseUnits != nil && credited.Cmp(st.ReceivedBaseUnits) != 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_mismatch_total=1 order=%s dest_tx=%s lifi=%s chain=%s",
+			order.ID, st.DestTxHash, st.ReceivedBaseUnits, credited)
+	}
+	return credited, nil
 }
 
 // settleOrTopUp compares what the user actually holds against the promise
@@ -476,8 +572,8 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 		return o.toRecovery(ctx, order, err.Error(), map[string]any{"holder": models.HolderUser})
 	}
 	if usd := unitsToUSD(shortfall, dst.decimals); usd > o.maxShortfallUSD {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_shortfall_over_ceiling_total=1 order=%s bridge#%d shortfall=%s (~$%.2f) ceiling=$%.2f",
-			order.ID, bridge.Attempt, shortfall, usd, o.maxShortfallUSD)
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_shortfall_over_ceiling_total=1 order=%s bridge#%d tx=%s shortfall=%s (~$%.2f) ceiling=$%.2f",
+			order.ID, bridge.Attempt, bridge.TxHash, shortfall, usd, o.maxShortfallUSD)
 		return o.toRecovery(ctx, order,
 			fmt.Sprintf("shortfall of ~$%.2f exceeds the $%.2f automatic top-up ceiling", usd, o.maxShortfallUSD),
 			map[string]any{"holder": models.HolderUser})
@@ -676,10 +772,11 @@ func owedFromLegs(order *models.PaycrestOrderRecord, legs []models.RampLeg) stri
 // to "have we paid them yet", so a lost status write cannot turn one payment
 // into two.
 //
-// A confirmed leg with no recorded AmountReceived is SKIPPED rather than
-// falling back to leg.Amount: Amount is what we sent in SOURCE units, and
-// counting it as if it had arrived in destination units would credit the user
-// with money that may never have landed.
+// A confirmed BRIDGE leg with no recorded AmountReceived is skipped: its Amount
+// is what we sent in SOURCE units, and counting that as destination units would
+// credit money that may never have landed. A confirmed DELIVER leg falls back
+// to its Amount, which we denominated in destination units ourselves — skipping
+// that one would under-count what the user holds and re-pay them.
 func creditedToUser(order *models.PaycrestOrderRecord, legs []models.RampLeg) *big.Int {
 	credited := new(big.Int)
 	for _, leg := range legs {
@@ -692,12 +789,21 @@ func creditedToUser(order *models.PaycrestOrderRecord, legs []models.RampLeg) *b
 		if !strings.EqualFold(leg.ToAddr, order.WalletAddress) {
 			continue
 		}
-		if leg.AmountReceived == "" {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_without_amount_total=1 order=%s leg=%s kind=%s",
-				order.ID, leg.ID, leg.Kind)
-			continue
+		raw := leg.AmountReceived
+		if raw == "" {
+			// A deliver leg's Amount is ALREADY in destination units — we chose
+			// it — so it is a safe stand-in and counting it is what stops a
+			// re-pay. A bridge leg's Amount is what we SENT in source units,
+			// which would credit money that may never have landed, so that one
+			// is skipped instead.
+			if leg.Kind != models.RampLegKindDeliver {
+				log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_without_amount_total=1 order=%s leg=%s kind=%s",
+					order.ID, leg.ID, leg.Kind)
+				continue
+			}
+			raw = leg.Amount
 		}
-		if v, ok := new(big.Int).SetString(leg.AmountReceived, 10); ok {
+		if v, ok := new(big.Int).SetString(raw, 10); ok {
 			credited.Add(credited, v)
 		}
 	}
@@ -911,6 +1017,12 @@ func bridgeLegByAttempt(legs []models.RampLeg, attempt int) *models.RampLeg {
 // broadcastBridgeLeg is any bridge attempt that put a transaction on the chain
 // without reaching a confirmed outcome. Its funds are unaccounted for, so
 // nothing else may spend against the same money.
+//
+// NOTE: as the state machine currently stands this is unreachable — a leg with
+// a hash is either pending (caught by step 2) or has already been sent to
+// recovery by observeBridge. It is kept as defence in depth against a future
+// path that fails a broadcast leg, which is the one mistake that would cost a
+// user a second payment. Do not read it as a live guard.
 func broadcastBridgeLeg(legs []models.RampLeg) *models.RampLeg {
 	for i := range legs {
 		leg := &legs[i]

@@ -177,6 +177,13 @@ type PaycrestOrderRecord struct {
 	// LastCheckedAt drives the poller's ordering. Paycrest webhooks require a
 	// public endpoint; until one exists this is how orders progress at all.
 	LastCheckedAt *time.Time `json:"-"`
+	// RampCheckedAt is when the conversion orchestrator last LOOKED at this
+	// order, which is a different question from when the order last moved.
+	// It exists so a tick that makes no progress can rotate the row to the back
+	// of its queue without touching UpdatedAt — because UpdatedAt going stale is
+	// the only evidence that an order is stuck, and a fair-scheduling bump would
+	// erase exactly the signal the stall detector needs.
+	RampCheckedAt *time.Time `json:"-"`
 	SettledAt     *time.Time `json:"settledAt,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`

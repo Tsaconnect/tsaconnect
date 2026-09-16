@@ -71,6 +71,9 @@ func (f *fakeTransferVerifier) VerifyTransfer(_ context.Context, _, _, _ string)
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.amount == nil {
+		return new(big.Int), nil
+	}
 	return new(big.Int).Set(f.amount), nil
 }
 
@@ -169,14 +172,17 @@ type conversionRig struct {
 	svc       *ConversionOrchestrator
 	legStore  *GormRampLegStore
 	lifi      *fakeLiFiQuoter
-	transfers *fakeTransferVerifier
-	status    *fakeLiFiStatus
-	treasury  *Treasury
-	chains    *BlockchainService
-	src       *sponsorRig // base: where Paycrest delivered
-	dst       *sponsorRig // polygon: where the user is paid
-	order     *models.PaycrestOrderRecord
-	clock     time.Time
+	transfers *fakeTransferVerifier // base: proves Paycrest's delivery
+	// dstTransfers is polygon: proves what the BRIDGE actually credited the
+	// user. A separate verifier because each one wraps a single chain's RPC.
+	dstTransfers *fakeTransferVerifier
+	status       *fakeLiFiStatus
+	treasury     *Treasury
+	chains       *BlockchainService
+	src          *sponsorRig // base: where Paycrest delivered
+	dst          *sponsorRig // polygon: where the user is paid
+	order        *models.PaycrestOrderRecord
+	clock        time.Time
 }
 
 func newConversionRig(t *testing.T) *conversionRig {
@@ -200,6 +206,7 @@ func newConversionRig(t *testing.T) *conversionRig {
 		To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
 	}}
 	r.transfers = &fakeTransferVerifier{amount: big.NewInt(100_000000)}
+	r.dstTransfers = &fakeTransferVerifier{amount: new(big.Int)}
 	r.status = newFakeLiFiStatus(t, sponsorTestUser)
 	r.legStore = &GormRampLegStore{DB: db}
 
@@ -234,7 +241,7 @@ func newConversionRig(t *testing.T) *conversionRig {
 func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrator {
 	return NewConversionOrchestrator(r.db, r.treasury, legs, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
-		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.transfers},
+		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.dstTransfers},
 		r.chains, 30*time.Minute, func() time.Time { return r.clock })
 }
 
@@ -268,11 +275,21 @@ func (r *conversionRig) broadcasts() int {
 	return r.src.signer.calls() + r.dst.signer.calls()
 }
 
-// completeBridge makes LiFi report the bridge as DONE/COMPLETED with what landed.
+// completeBridge makes LiFi report the bridge as DONE/COMPLETED with what
+// landed AND makes the destination chain agree, which is the normal case. A
+// settlement needs both: LiFi only names the transaction, the chain says what
+// the wallet was credited.
 func (r *conversionRig) completeBridge(t *testing.T, amount string) {
 	t.Helper()
 	r.status.set(LiFiStatusDone, amount)
 	r.status.setSubstatus(LiFiSubstatusCompleted)
+	v, ok := new(big.Int).SetString(amount, 10)
+	if !ok {
+		t.Fatalf("bad amount %q", amount)
+	}
+	r.dstTransfers.mu.Lock()
+	r.dstTransfers.amount = v
+	r.dstTransfers.mu.Unlock()
 }
 
 // mustAdvance runs one step against the CURRENT row and fails the test on
@@ -1060,14 +1077,20 @@ func TestOrchestrator_TickRotatesAnIdleOrderToTheBackOfTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := r.reload(t).UpdatedAt
-	r.clock = r.clock.Add(time.Hour)
+	r.clock = r.clock.Add(time.Hour) // well inside the 6h stall window
 
 	if err := r.svc.Tick(context.Background(), 10); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	if after := r.reload(t).UpdatedAt; !after.After(before) {
-		t.Fatalf("updatedAt = %v, was %v; a stalled order must rotate to the back of the queue", after, before)
+	got := r.reload(t)
+	if got.RampCheckedAt == nil || !got.RampCheckedAt.After(before) {
+		t.Fatalf("rampCheckedAt = %v; a stalled order must rotate to the back of the queue", got.RampCheckedAt)
+	}
+	// And updated_at must NOT move: it is the only evidence the order is stuck,
+	// and the stall detector reads it.
+	if !got.UpdatedAt.Equal(before) {
+		t.Fatalf("updatedAt = %v, was %v; rotating must not forge progress", got.UpdatedAt, before)
 	}
 }
 
@@ -1099,5 +1122,184 @@ func TestOrchestrator_ReportsWhatIsOwedWhileARefundIsInFlight(t *testing.T) {
 	order.Status = models.PaycrestStatusRefunding
 	if got := owedFromLegs(order, nil); got != "99500000" {
 		t.Fatalf("owed while refunding = %q, want the full promise still outstanding", got)
+	}
+}
+
+// ── round 2: the gates that were not fail-closed ───────────────────────────
+
+// Custody is selected by "NOT yet ours", not by "explicitly Paycrest's".
+// A row with an unset Holder — the zero value — would otherwise skip both the
+// delivery proof AND the rescale of the promise into destination units, after
+// which a 6dp source against an 18dp destination settles about a trillion
+// times early.
+func TestOrchestrator_TakesCustodyWhenTheHolderIsUnset(t *testing.T) {
+	r := newConversionRig(t)
+	r.dst.native.decimalsByToken = map[string]int{strings.ToLower(sponsorTestBscUSDT): 18}
+	if err := r.db.Model(r.order).UpdateColumn("holder", "").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %q; an unrecognised holder must go through the delivery proof", got.Holder)
+	}
+	if r.transfers.calls == 0 {
+		t.Fatal("the delivery was never verified")
+	}
+	want := PromisedAmount(mustBig(t, "100000000000000000000"), 50).String()
+	if got.PromisedAmount != want {
+		t.Fatalf("promisedAmount = %q, want %q — the rescale must not be skippable", got.PromisedAmount, want)
+	}
+	// And nothing was converted on this step: custody is its own step.
+	if r.lifi.quoteCalls() != 0 {
+		t.Fatalf("quotes = %d, want 0", r.lifi.quoteCalls())
+	}
+}
+
+// Several shapes stall in converting without any single step deciding to park
+// them. The deadline is what turns "it is only in the logs" into something
+// NeedsOperator() can see.
+func TestOrchestrator_ParksAnOrderThatHasStalledTooLong(t *testing.T) {
+	r := newConversionRig(t)
+	// A pending deliver leg: no oracle to ask, so every tick is a no-op.
+	stalled := &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
+		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
+		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
+	}
+	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Model(r.order).UpdateColumn("updated_at", r.clock.UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Inside the window it is left alone.
+	r.clock = r.clock.Add(5 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; an order inside the stall window is still just waiting", got.Status)
+	}
+
+	// Past it, a human is asked to look.
+	r.clock = r.clock.Add(2 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || got.Fault != models.FaultPlatform {
+		t.Fatalf("order = %s fault=%s; a stalled order must park for an operator", got.Status, got.Fault)
+	}
+	if !got.NeedsOperator() {
+		t.Fatal("a stalled order must reach the operator queue")
+	}
+}
+
+// ── round 2: the chain outranks LiFi ───────────────────────────────────────
+
+// LiFi names the transaction; the ERC-20 Transfer log in it says what the user
+// received. Settlement is on the verified figure.
+func TestOrchestrator_SettlesOnTheVerifiedLandingNotLiFisNumber(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	// The chain disagrees with LiFi: slightly less actually arrived.
+	r.dstTransfers.amount = big.NewInt(99_600000)
+
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if legs[0].AmountReceived != "99600000" {
+		t.Fatalf("amountReceived = %q; the ledger records what the CHAIN says, not LiFi",
+			legs[0].AmountReceived)
+	}
+	if r.dstTransfers.calls == 0 {
+		t.Fatal("the landing was never verified on the destination chain")
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; a verified landing over the promise settles", got.Status)
+	}
+}
+
+// A DONE whose destination transfer cannot be read is not a settlement.
+func TestOrchestrator_NeverSettlesALandingItCannotVerify(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	r.dstTransfers.err = ErrTransferNotFound
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; an unverified landing must leave the order open", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge leg = %+v; want it left pending for the next tick", legs[0])
+	}
+
+	// Once the destination transaction is readable, it settles.
+	r.dstTransfers.err = nil
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; want settled once the landing verifies", got.Status)
+	}
+}
+
+// With no verifier for the destination chain there is nothing to check the
+// bridge against, so nothing settles.
+func TestOrchestrator_NeverSettlesWithNoVerifierForTheDestination(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	svc := NewConversionOrchestrator(r.db, r.treasury, r.legStore, r.lifi,
+		NewLiFiStatusClient(r.status.srv.URL, ""),
+		map[string]ERC20TransferVerifier{"base": r.transfers}, // nothing for polygon
+		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+
+	if err := svc.Advance(context.Background(), r.reload(t)); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; want it left open", got.Status)
+	}
+}
+
+// ── round 2: the ledger must count a deliver leg it wrote itself ───────────
+
+// A deliver leg's Amount is already in DESTINATION units — we chose it — so a
+// confirmed deliver row with no AmountReceived still counts. Skipping it would
+// under-count what the user holds and top them up a second time. A bridge leg's
+// Amount is source units and must NOT be counted.
+func TestCreditedToUser_CountsADeliverLegByItsAmount(t *testing.T) {
+	order := &models.PaycrestOrderRecord{WalletAddress: sponsorTestUser}
+	legs := []models.RampLeg{
+		{
+			Kind: models.RampLegKindBridge, Status: models.RampLegStatusConfirmed,
+			ToAddr: sponsorTestUser, Amount: "100000000", AmountReceived: "99400000",
+		},
+		{
+			// Confirmed, but the amount_received write was lost.
+			Kind: models.RampLegKindDeliver, Status: models.RampLegStatusConfirmed,
+			ToAddr: sponsorTestUser, Amount: "100000", AmountReceived: "",
+		},
+	}
+	if got := creditedToUser(order, legs).String(); got != "99500000" {
+		t.Fatalf("credited = %s, want 99500000 — the deliver leg must count by its Amount", got)
+	}
+}
+
+func TestCreditedToUser_NeverCountsABridgeLegBySourceAmount(t *testing.T) {
+	order := &models.PaycrestOrderRecord{WalletAddress: sponsorTestUser}
+	legs := []models.RampLeg{{
+		Kind: models.RampLegKindBridge, Status: models.RampLegStatusConfirmed,
+		ToAddr: sponsorTestUser, Amount: "100000000", AmountReceived: "",
+	}}
+	if got := creditedToUser(order, legs).String(); got != "0" {
+		t.Fatalf("credited = %s, want 0 — a bridge Amount is source units and may never have landed", got)
 	}
 }
