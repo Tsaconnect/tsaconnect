@@ -27,3 +27,10 @@ func TestConversionOrchestratorWorker_TicksAndSurvivesAnError(t *testing.T) {
 		t.Fatalf("worker = %s/%s calls=%d", w.Name(), w.Interval(), fake.calls)
 	}
 }
+
+func TestConversionOrchestratorWorker_NilSvcIsDormantNotPanic(t *testing.T) {
+	w := NewConversionOrchestratorWorker(nil, 30*time.Second)
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("unconfigured orchestrator should be dormant, got err: %v", err)
+	}
+}
