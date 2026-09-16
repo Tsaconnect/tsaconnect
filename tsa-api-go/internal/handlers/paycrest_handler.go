@@ -62,6 +62,9 @@ func paycrestError(c *gin.Context, err error) {
 		// than assuming the feature is broken.
 		utils.ErrorResponse(c, http.StatusConflict,
 			"No provider can fill that amount right now. Try a different amount or network.")
+	case errors.Is(err, services.ErrConversionUnavailable):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"We can't deliver to that network right now. Try a supported network, or try again shortly.")
 	case errors.Is(err, services.ErrPaycrestOrderOpen):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"You already have an order awaiting payment. Finish it, or cancel it from your orders.")
@@ -162,6 +165,12 @@ type paycrestBuyBody struct {
 	Chain         string `json:"chain" binding:"required"`
 	Token         string `json:"token" binding:"required"`
 	WalletAddress string `json:"walletAddress"`
+	// RequestedChain/RequestedToken are what the user actually wants
+	// delivered — omitted (or equal to Chain/Token) means a direct buy.
+	// Defaulted to Chain/Token below so an older app build that has never
+	// heard of a converted buy keeps getting exactly what it asks for.
+	RequestedChain string `json:"requestedChain"`
+	RequestedToken string `json:"requestedToken"`
 	// Refund destination — where naira returns if the order fails. The app
 	// prefills this from the user's saved payout account.
 	RefundBankCode    string `json:"refundBankCode" binding:"required"`
@@ -186,6 +195,17 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Default to the fillable route itself, so an app build that has never
+	// heard of a converted buy (or one that simply didn't set these) still
+	// gets a plain direct order, unchanged.
+	requestedChain := body.RequestedChain
+	if requestedChain == "" {
+		requestedChain = body.Chain
+	}
+	requestedToken := body.RequestedToken
+	if requestedToken == "" {
+		requestedToken = body.Token
+	}
 	row, err := h.orders.CreateBuy(c.Request.Context(), services.PaycrestBuyRequest{
 		UserID:            user.ID,
 		WalletAddress:     wallet,
@@ -193,6 +213,8 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 		FiatAmount:        body.Amount,
 		ChainKey:          body.Chain,
 		Token:             body.Token,
+		RequestedChain:    requestedChain,
+		RequestedToken:    requestedToken,
 		RefundBankCode:    body.RefundBankCode,
 		RefundAccount:     body.RefundAccount,
 		RefundAccountName: body.RefundAccountName,

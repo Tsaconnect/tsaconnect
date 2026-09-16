@@ -80,7 +80,50 @@ type PaycrestOrderService struct {
 	// default, which is what produced the 0.5% observed on live orders.
 	senderFeePercent string
 	senderFeeAddress string
+
+	// ── Conversion (Phase 2, Task 9). Both dormant by default: conversionEnabled
+	// false and treasuryAddr "" together mean every buy is created exactly as
+	// before this feature existed — direct only, delivered to the user's own
+	// wallet. Wiring calls SetConversionEnabled(true) and SetTreasury with
+	// Treasury.Address() to turn it on.
+	conversionEnabled bool
+	treasuryAddr      string
+	// treasuryCaps is an optional early gate: when wired, CreateBuy refuses an
+	// obviously oversized converted order up front rather than only
+	// discovering it once the background conversion orchestrator tries to
+	// execute it. Nil applies no gate, same pattern as SetCurrencyRegistry —
+	// the orchestrator itself still runs the authoritative CheckCaps (priced
+	// off real on-chain decimals and actual in-flight exposure) immediately
+	// before moving any money, so this is advisory, not the only check.
+	treasuryCaps treasuryCapsChecker
 }
+
+// treasuryCapsChecker is the treasury surface CreateBuy consults for the
+// early converted-order gate described above. *Treasury satisfies it.
+type treasuryCapsChecker interface {
+	CheckCaps(chainKey string, orderUSD, inFlightUSD float64) error
+}
+
+// SetConversionEnabled is the server-side kill switch for converted buys —
+// off (the default) means CreateBuy never routes through the treasury.
+func (s *PaycrestOrderService) SetConversionEnabled(on bool) { s.conversionEnabled = on }
+
+// SetTreasury wires the address a converted buy tells Paycrest to deliver
+// to. Callers pass Treasury.Address(), which is "" when the configured lanes
+// disagree on their signer or none are configured at all — CreateBuy refuses
+// a converted order rather than hand Paycrest an empty delivery address.
+func (s *PaycrestOrderService) SetTreasury(addr string) { s.treasuryAddr = strings.TrimSpace(addr) }
+
+// SetTreasuryCaps wires the optional early caps gate — see treasuryCaps'
+// doc comment.
+func (s *PaycrestOrderService) SetTreasuryCaps(c treasuryCapsChecker) { s.treasuryCaps = c }
+
+// ErrConversionUnavailable refuses a converted buy: the feature is off, no
+// treasury is configured (or its lanes disagree on an address), or the
+// treasury's exposure caps would refuse this order before the background
+// orchestrator even tried to run it. Always a user-facing message, never a
+// raw internal error surfacing as a 500.
+var ErrConversionUnavailable = errors.New("delivering to that network isn't available for this purchase right now")
 
 // SetCurrencyRegistry wires the server-side kill switch: CreateBuy and
 // CreateSell refuse with ErrPaycrestDisabled when the order's currency does
@@ -209,6 +252,15 @@ type PaycrestBuyRequest struct {
 	// ChainKey and Token name the venue the user picked from a fresh quote.
 	ChainKey string
 	Token    string
+	// RequestedChain/RequestedToken are what the user actually wants
+	// delivered. Equal to ChainKey/Token (or empty) means a direct buy —
+	// Paycrest fills it as-is. Different means a converted buy: Paycrest
+	// settles ChainKey/Token to the treasury and a background conversion
+	// delivers RequestedChain/RequestedToken to the user instead. The
+	// handler defaults both to ChainKey/Token when the app omits them, so
+	// older builds keep behaving exactly as before this field existed.
+	RequestedChain string
+	RequestedToken string
 	// RefundAccount is where naira returns if the order fails. Defaults to the
 	// user's own bank, so a refund goes back to whoever paid.
 	RefundBankCode    string // NIBSS
@@ -337,9 +389,62 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, err
 	}
 
-	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
-	if err != nil {
-		return nil, s.explainMissingVenue(ctx, "buy", fiat, err)
+	// A converted buy is requested whenever the caller names a destination
+	// asset different from the one Paycrest is being asked to fill — the
+	// handler defaults RequestedChain/Token to ChainKey/Token when the app
+	// omits them, so an unset pair (or one equal to ChainKey/Token) always
+	// reads as a direct buy, exactly as before this field existed.
+	requestedChain := strings.ToLower(strings.TrimSpace(req.RequestedChain))
+	requestedToken := strings.ToUpper(strings.TrimSpace(req.RequestedToken))
+	converting := requestedChain != "" && requestedToken != "" &&
+		(requestedChain != strings.ToLower(strings.TrimSpace(req.ChainKey)) ||
+			requestedToken != strings.ToUpper(strings.TrimSpace(req.Token)))
+
+	var venue *PaycrestVenue
+	recipient := req.WalletAddress // direct: Paycrest pays the user directly
+	if converting {
+		// Binding ruling 5: refuse before spending a LiFi call, let alone
+		// opening an order, when the feature is off or no treasury is wired.
+		if !s.conversionEnabled {
+			return nil, ErrConversionUnavailable
+		}
+		treasuryAddr := s.treasuryAddr
+		// Binding ruling 3: Treasury.Address() == "" means the configured
+		// lanes disagree on their signer, or none are configured. Never hand
+		// Paycrest an empty (== burn) delivery address.
+		if treasuryAddr == "" {
+			return nil, ErrConversionUnavailable
+		}
+		venues, cerr := s.quotes.ConvertedVenues(ctx, "buy", fiat, req.FiatAmount,
+			[]RequestedAsset{{Chain: req.RequestedChain, Token: req.RequestedToken}})
+		if cerr != nil {
+			return nil, s.explainMissingVenue(ctx, "buy", fiat, cerr)
+		}
+		if len(venues) == 0 {
+			return nil, fmt.Errorf("%w: no route can deliver %s on %s right now",
+				ErrConversionUnavailable, requestedToken, req.RequestedChain)
+		}
+		v := venues[0]
+		if s.treasuryCaps != nil {
+			// Phase 2 moves only stablecoins, so the venue's own TokenAmount
+			// is already close enough to USD for this early, advisory check.
+			// The orchestrator still runs the authoritative CheckCaps, priced
+			// off real on-chain decimals and actual in-flight exposure,
+			// immediately before it moves any money.
+			if err := s.treasuryCaps.CheckCaps(v.ChainKey, v.TokenAmount, 0); err != nil {
+				log.Printf("[paycrest] converted buy refused by treasury caps chain=%s amount=%.2f: %v",
+					v.ChainKey, v.TokenAmount, err)
+				return nil, ErrConversionUnavailable
+			}
+		}
+		venue = &v
+		recipient = treasuryAddr
+	} else {
+		v, verr := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
+		if verr != nil {
+			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
+		}
+		venue = v
 	}
 
 	// Submit the grossed-down figure so the provider asks the user for exactly
@@ -352,7 +457,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		FiatCode:         fiat,
 		Token:            venue.Token,
 		Network:          venue.Network,
-		RecipientAddress: req.WalletAddress,
+		RecipientAddress: recipient,
 		RefundAccount: PaycrestBankAccount{
 			Institution:       refundInst,
 			AccountIdentifier: req.RefundAccount,
@@ -383,13 +488,32 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		ProviderID:       paycrestProviderOf(order, venue),
 		SenderFee:        order.SenderFee,
 		SenderFeePercent: feePercent,
-		WalletAddress:    req.WalletAddress,
+		// The user's own wallet is always recorded here, converted or not —
+		// it is where the money is ultimately meant to land. Holder (below)
+		// is what tracks who actually has it right now.
+		WalletAddress: req.WalletAddress,
 		// Refund destination is recorded so an operator chasing a stranded
 		// deposit knows where the money was supposed to come back to.
 		PayoutBankCode:    req.RefundBankCode,
 		PayoutInstitution: refundInst,
 		PayoutAccount:     req.RefundAccount,
 		PayoutAccountName: req.RefundAccountName,
+	}
+	if converting {
+		row.RouteKind = models.RouteKindConverted
+		row.RequestedChain = venue.RequestedChain
+		row.RequestedToken = venue.RequestedToken
+		row.MarkupBps = venue.MarkupBps
+		row.PromisedAmount = venue.PromisedAmount
+		// Paycrest holds the money until it delivers to the treasury — see
+		// the Sync doc comment for how that maps onto our own statuses. Set
+		// explicitly rather than relying on the zero value: the orchestrator's
+		// custody gate treats anything that is not HolderTreasury/HolderUser
+		// as still needing custody, so an unset Holder would happen to work
+		// today but is not the same thing as stating it.
+		row.Holder = models.HolderPaycrest
+	} else {
+		row.RouteKind = models.RouteKindDirect
 	}
 	if pa := order.ProviderAccount; pa != nil {
 		row.PayInstitution = pa.Institution
@@ -584,6 +708,22 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 	}
 
 	next := mapPaycrestStatus(remote, row.Direction, row.PaymentClaimedAt != nil)
+	if row.Converted() {
+		switch {
+		case row.Holder != models.HolderPaycrest:
+			// Custody has already moved off Paycrest (to the treasury, then
+			// eventually the user); the conversion orchestrator now owns this
+			// order's status. DueForSync still selects it — converting and
+			// refunding are both non-terminal — so without this guard the next
+			// poll would resurrect Paycrest's own (by now stale) "settled" over
+			// whatever the orchestrator has since written.
+			next = ""
+		case next == models.PaycrestStatusSettled:
+			// Paycrest delivered to the TREASURY, not the user — the order is
+			// not done, it has only started converting.
+			next = models.PaycrestStatusConverting
+		}
+	}
 	if next == models.PaycrestStatusUnmatched {
 		// The user paid, the bank confirmed, and the protocol never saw it.
 		// Loud, because nothing automated can resolve this.

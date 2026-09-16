@@ -753,9 +753,12 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		}
 		out = append(out, PaycrestVenue{
 			Kind: models.RouteKindConverted,
-			// ChainKey/Token stay the PAYCREST leg: that is what the order is
-			// created against (Task 9). ViaChain/ViaToken say so explicitly.
-			ChainKey: src.ChainKey, Token: src.Token,
+			// ChainKey/Token/Network stay the PAYCREST leg: that is what the
+			// order is created against (Task 9). ViaChain/ViaToken say so
+			// explicitly. Network carries through from src so CreateBuy has
+			// Paycrest's own network name to submit — without it a converted
+			// order would be created with an empty network.
+			ChainKey: src.ChainKey, Token: src.Token, Network: src.Network,
 			ViaChain: src.ChainKey, ViaToken: src.Token,
 			RequestedChain: req.Chain, RequestedToken: req.Token,
 			Rate: src.Rate, TokenAmount: src.TokenAmount, TokenAmountBaseUnits: src.TokenAmountBaseUnits,
