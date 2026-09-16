@@ -254,7 +254,7 @@ func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrat
 	return NewConversionOrchestrator(r.db, r.treasury, legs, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.dstTransfers},
-		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+		r.chains, 30*time.Minute, 0, 0, 0, func() time.Time { return r.clock })
 }
 
 // seedLeg inserts a leg stamped on the INJECTED clock. GORM would otherwise
@@ -566,7 +566,7 @@ func TestOrchestrator_RefusesWhenNoVerifierCoversTheChain(t *testing.T) {
 	svc := NewConversionOrchestrator(r.db, r.treasury, r.legStore, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"polygon": r.transfers}, // nothing for base
-		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+		r.chains, 30*time.Minute, 0, 0, 0, func() time.Time { return r.clock })
 
 	err := svc.Advance(context.Background(), r.reload(t))
 	if !errors.Is(err, ErrSponsorNotAvailable) {
@@ -1386,7 +1386,7 @@ func TestOrchestrator_NeverSettlesWithNoVerifierForTheDestination(t *testing.T) 
 	svc := NewConversionOrchestrator(r.db, r.treasury, r.legStore, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"base": r.transfers}, // nothing for polygon
-		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+		r.chains, 30*time.Minute, 0, 0, 0, func() time.Time { return r.clock })
 
 	if err := svc.Advance(context.Background(), r.reload(t)); err != nil {
 		t.Fatalf("Advance: %v", err)

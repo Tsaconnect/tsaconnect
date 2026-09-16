@@ -150,9 +150,9 @@ type NetworkConfig struct {
 type NonEVMChainConfig struct {
 	ChainKey       string
 	Family         string
-	Network        string            // "mainnet" | "testnet"
-	RPCURL         string            // TronGrid base, mempool base, or Solana RPC
-	APIKey         string            // optional provider key
+	Network        string // "mainnet" | "testnet"
+	RPCURL         string // TronGrid base, mempool base, or Solana RPC
+	APIKey         string // optional provider key
 	NativeSymbol   string
 	NativeDecimals int
 	Tokens         map[string]string // symbol → on-chain token contract/mint
@@ -272,6 +272,49 @@ type Config struct {
 	RampSponsorTopUpUnusedDailyCap int
 	RampSponsorBalanceFloorWei     map[string]string // chain -> wei; sponsoring stops below this
 	RampSponsorTopUpMaxWei         map[string]string // chain -> wei; largest single top-up
+
+	// Ramp treasury / converted buys — Paycrest delivers into our own
+	// treasury instead of the user's wallet, and the treasury bridges it to
+	// the requested chain/token via LiFi. Dormant unless RAMP_CONVERSION_BUY
+	// is true AND RAMP_TREASURY_PRIVATE_KEY is set.
+	//
+	// RampTreasuryPrivateKey MUST differ from the relayer, IT operator, PM
+	// release AND ramp sponsor keys: unlike the sponsor (which only ever
+	// pays gas), the treasury holds USER FUNDS in transit, so sharing its
+	// key with any other hot signer turns a single compromise into one that
+	// drains customer money. Asserted at boot (assertDistinctKey).
+	RampConversionBuyEnabled bool
+	RampTreasuryPrivateKey   string
+	RampTreasuryChains       []string
+	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
+	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
+	// across every converted buy the treasury has not yet settled.
+	RampTreasuryMaxInflightUSDPerOrder float64
+	RampTreasuryMaxInflightUSDPerChain float64
+	// RampTreasuryNativeFloorWei is the native balance below which a lane
+	// refuses to execute a conversion — same shape as
+	// RampSponsorBalanceFloorWei but a separate map: a treasury lane signs a
+	// bridge tx, not a simple relay, so the floor that matters is different.
+	RampTreasuryNativeFloorWei map[string]string
+	// RampConversionRetryWindow (Decision 10) is how long a converted buy may
+	// sit with no broadcast bridge attempt before it is refunded instead of
+	// retried again.
+	RampConversionRetryWindow time.Duration
+	// RampConversionMinUSD/RampConversionMinUSDByChain are Decision 6's floor
+	// on a converted buy, measured on the settlement leg's stablecoin amount.
+	// ByChain always holds an entry for every chain in RampTreasuryChains
+	// (defaulting to RampConversionMinUSD unless overridden), so
+	// PaycrestQuoteService.SetConversionMinimums never has to guess a chain
+	// it wasn't told about.
+	RampConversionMinUSD        float64
+	RampConversionMinUSDByChain map[string]float64
+	// RampConversionStallWindow/RampConversionLegCeiling/
+	// RampConversionMaxShortfallUSD retune ConversionOrchestrator's own code
+	// defaults (defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD)
+	// via env instead of a code change.
+	RampConversionStallWindow     time.Duration
+	RampConversionLegCeiling      time.Duration
+	RampConversionMaxShortfallUSD float64
 
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
@@ -431,10 +474,10 @@ type Config struct {
 	// API access, 2026-07). Dormant-by-default: missing creds ⇒ nil client,
 	// routes surface "not configured". The production base URL is mid-migration
 	// on Flutterwave's side, so it is ALWAYS config-driven.
-	FlutterwaveBaseURL       string
-	FlutterwaveIdpURL        string
-	FlutterwaveClientID      string
-	FlutterwaveClientSecret  string
+	FlutterwaveBaseURL      string
+	FlutterwaveIdpURL       string
+	FlutterwaveClientID     string
+	FlutterwaveClientSecret string
 	// FlutterwaveWebhookSecret verifies the flutterwave-signature header
 	// (Base64 HMAC-SHA256 of the raw body). UNSET ⇒ FW webhook route dormant.
 	FlutterwaveWebhookSecret string
@@ -671,6 +714,60 @@ func Load() *Config {
 		cfg.RampSponsorBalanceFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_BALANCE_FLOOR_WEI_"+up, rampFloorDefaults[chain]))
 		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
 	}
+
+	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
+	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
+	cfg.RampTreasuryChains = nil
+	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {
+		if chain = strings.ToLower(strings.TrimSpace(chain)); chain != "" {
+			cfg.RampTreasuryChains = append(cfg.RampTreasuryChains, chain)
+		}
+	}
+	cfg.RampTreasuryMaxInflightUSDPerOrder = getEnvFloat64("RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER", 2000)
+	cfg.RampTreasuryMaxInflightUSDPerChain = getEnvFloat64("RAMP_TREASURY_MAX_INFLIGHT_USD_PER_CHAIN", 10000)
+	// Order-of-magnitude placeholders (~0.005-0.01 of the chain's native gas
+	// token, ~$5-10 at typical prices) covering a bridge transaction, which
+	// costs more gas than the simple relay RampSponsorBalanceFloorWei bounds.
+	// Retune per chain once real bridge gas costs are observed in production.
+	rampTreasuryFloorDefaults := map[string]string{
+		"base": "5000000000000000", "arbitrum": "5000000000000000", // 0.005 ETH
+		"optimism": "5000000000000000", "linea": "5000000000000000", // 0.005 ETH
+		"polygon":   "5000000000000000000", // 5 POL
+		"bsc":       "10000000000000000",   // 0.01 BNB
+		"avalanche": "100000000000000000",  // 0.1 AVAX
+		"sonic":     "5000000000000000000", // 5 S
+		"ethereum":  "10000000000000000",   // 0.01 ETH — mainnet gas is pricier
+	}
+	cfg.RampTreasuryNativeFloorWei = map[string]string{}
+	for _, chain := range cfg.RampTreasuryChains {
+		up := strings.ToUpper(chain)
+		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
+	}
+	cfg.RampConversionRetryWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_RETRY_MINUTES", 30)) * time.Minute
+	cfg.RampConversionMinUSD = getEnvFloat64("RAMP_CONVERSION_MIN_USD", 1)
+	// Decision 6: Ethereum and Linea cost enough in gas that a $1 minimum
+	// order would not be worth converting; every other chain uses the
+	// RampConversionMinUSD default unless explicitly overridden below.
+	rampConversionMinDefaults := map[string]float64{
+		"ethereum": 5,
+		"linea":    25,
+	}
+	cfg.RampConversionMinUSDByChain = map[string]float64{}
+	for _, chain := range cfg.RampTreasuryChains {
+		up := strings.ToUpper(chain)
+		def := cfg.RampConversionMinUSD
+		if d, ok := rampConversionMinDefaults[chain]; ok {
+			def = d
+		}
+		cfg.RampConversionMinUSDByChain[chain] = getEnvFloat64("RAMP_CONVERSION_MIN_USD_"+up, def)
+	}
+	// ConversionOrchestrator's own code defaults are 6h/24h/$50 — see
+	// defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD in
+	// internal/services/conversion_orchestrator.go. Reading them from env
+	// here means retuning never needs a code change.
+	cfg.RampConversionStallWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_STALL_MINUTES", 360)) * time.Minute
+	cfg.RampConversionLegCeiling = time.Duration(getEnvInt64("RAMP_CONVERSION_LEG_CEILING_HOURS", 24)) * time.Hour
+	cfg.RampConversionMaxShortfallUSD = getEnvFloat64("RAMP_CONVERSION_MAX_SHORTFALL_USD", 50)
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.

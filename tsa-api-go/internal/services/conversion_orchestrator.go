@@ -86,16 +86,32 @@ type ConversionOrchestrator struct {
 	now        func() time.Time
 }
 
+// NewConversionOrchestrator wires one converted-buy state machine.
+// stallWindow, legCeiling and maxShortfallUSD are the orchestrator's tunables
+// (see their field docs above); a zero value for any of them keeps that
+// tunable's code default (defaultStallWindow, defaultLegCeiling,
+// defaultMaxShortfallUSD) rather than disabling the check, the same
+// zero-means-default convention retryWindow already uses.
 func NewConversionOrchestrator(
 	db *gorm.DB, treasury *Treasury, legs rampLegStore,
 	lifi lifiQuoter, status *LiFiStatusClient, transfers map[string]ERC20TransferVerifier,
-	chains *BlockchainService, retryWindow time.Duration, now func() time.Time,
+	chains *BlockchainService, retryWindow, stallWindow, legCeiling time.Duration,
+	maxShortfallUSD float64, now func() time.Time,
 ) *ConversionOrchestrator {
 	if now == nil {
 		now = time.Now
 	}
 	if retryWindow <= 0 {
 		retryWindow = 30 * time.Minute
+	}
+	if stallWindow <= 0 {
+		stallWindow = defaultStallWindow
+	}
+	if legCeiling <= 0 {
+		legCeiling = defaultLegCeiling
+	}
+	if maxShortfallUSD <= 0 {
+		maxShortfallUSD = defaultMaxShortfallUSD
 	}
 	keyed := make(map[string]ERC20TransferVerifier, len(transfers))
 	for k, v := range transfers {
@@ -104,8 +120,8 @@ func NewConversionOrchestrator(
 	return &ConversionOrchestrator{
 		db: db, treasury: treasury, legs: legs, lifi: lifi, status: status,
 		transfers: keyed, chains: chains, retryWindow: retryWindow,
-		maxShortfallUSD: defaultMaxShortfallUSD, stallWindow: defaultStallWindow,
-		legCeiling: defaultLegCeiling, now: now,
+		maxShortfallUSD: maxShortfallUSD, stallWindow: stallWindow,
+		legCeiling: legCeiling, now: now,
 	}
 }
 
