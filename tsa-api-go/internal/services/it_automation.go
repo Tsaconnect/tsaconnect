@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -298,13 +297,15 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	// still read as "may have been sent". The guard makes concurrent callers
 	// (request, reconciler, admin retry) take turns, and loses to a reverse
 	// that has already claimed the row (payout_rejected).
-	now := time.Now()
+	// The attempt time is stamped by the DATABASE: the reverse guard compares it
+	// there too, and mixing an app clock into one side of that comparison is
+	// exactly the skew the guard must not be weakened by.
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = '' AND payout_rejected = ? AND payout_refused_on_retry = ? AND payout_attempts = ? AND payout_ref_gen = ?",
 			intent.ID, models.ITStatusDebited, false, false, intent.PayoutAttempts, intent.PayoutRefGen).
 		Updates(map[string]any{
 			"payout_attempts":        gorm.Expr("payout_attempts + 1"),
-			"last_payout_attempt_at": now,
+			"last_payout_attempt_at": dbNowExpr(s.db),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("it payout: record attempt: %w", res.Error)
@@ -313,7 +314,9 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		return fmt.Errorf("%w: payout for intent %s is being handled elsewhere", ErrITBadState, intent.ID)
 	}
 	intent.PayoutAttempts++
-	intent.LastPayoutAttemptAt = &now
+	if fresh, ferr := s.getIntent(ctx, intent.ID); ferr == nil {
+		intent.LastPayoutAttemptAt = fresh.LastPayoutAttemptAt
+	}
 
 	payoutID, err := s.payout.InitiatePayout(ctx, payoutReq)
 	if err != nil {
@@ -369,7 +372,7 @@ func (s *ITService) requireDebitPending(ctx context.Context, intent *models.ITIn
 	case rec.State == DebitStatePending && debitMatchesIntent(rec, intent):
 		return nil
 	case rec.State == DebitStateNone:
-		if time.Since(intent.UpdatedAt) > itDebitAbandonAfter {
+		if s.rowOlderThan(ctx, intent.ID, "updated_at", itDebitAbandonAfter) {
 			alertf("sell-debit-invisible:"+intent.ID.String(),
 				"[it] ALERT it_sell_debit_not_visible intent=%s — no debit at this ref for over %s; payout held", intent.ID, itDebitAbandonAfter)
 		}
@@ -603,7 +606,7 @@ func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef,
 		if !fwTerminalTransferStatus(tr.Status) {
 			log.Printf("[it] intent=%s transfer=%s webhook=%s but provider still reports %s — retrying later",
 				intentID, transferID, status, tr.Status)
-			return fmt.Errorf("it payout webhook: provider has not finalised transfer %s (%s); retry", transferID, tr.Status)
+			return fmt.Errorf("%w: transfer %s for %s is %s", ErrITPayoutNotFinal, transferID, merchantTxRef, tr.Status)
 		}
 		alertf("webhook-status:"+transferID+":"+status,
 			"[it] ALERT it_payout_webhook_contradiction intent=%s transfer=%s webhook=%s provider=%s — no action", intentID, transferID, status, tr.Status)

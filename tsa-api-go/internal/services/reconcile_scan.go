@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // reconcileCursor pages a reconciler scan across ticks.
@@ -154,4 +155,14 @@ func olderThanExpr(db *gorm.DB, column string, d time.Duration) (string, []any) 
 		return fmt.Sprintf("julianday('now') - julianday(%s) > ?", column), []any{d.Hours() / 24}
 	}
 	return fmt.Sprintf("%s < NOW() - (? * interval '1 second')", column), []any{int64(d.Seconds())}
+}
+
+// dbNowExpr is the database's own "now", used where a stored timestamp is
+// later compared database-side: writing one side with the app's clock and
+// reading the other with the database's is how skew gets into a money guard.
+func dbNowExpr(db *gorm.DB) clause.Expr {
+	if db != nil && db.Dialector != nil && db.Dialector.Name() == "sqlite" {
+		return gorm.Expr("datetime('now')")
+	}
+	return gorm.Expr("NOW()")
 }

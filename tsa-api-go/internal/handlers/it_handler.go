@@ -714,7 +714,9 @@ func adminSellActionStatus(err error) int {
 	switch {
 	case errors.Is(err, services.ErrITSellPayoutConflict):
 		return http.StatusConflict
-	case errors.Is(err, services.ErrITSellPayoutUnverified):
+	case errors.Is(err, services.ErrITSellPayoutUnverified),
+		// The chain has not shown the debit yet: transient, try again shortly.
+		errors.Is(err, services.ErrITSellDebitPending):
 		return http.StatusServiceUnavailable
 	case errors.Is(err, services.ErrITSellPayoutRejected):
 		return http.StatusUnprocessableEntity

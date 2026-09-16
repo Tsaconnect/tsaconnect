@@ -43,6 +43,10 @@ var (
 	// ErrITSellPayoutUnverified: an admin settle/reverse was refused because the
 	// provider could not confirm the payout's outcome.
 	ErrITSellPayoutUnverified = errors.New("payout outcome could not be verified with the provider")
+	// ErrITPayoutNotFinal: a transfer webhook arrived for a transfer the
+	// provider has not finalised yet (read-after-write lag). Retryable — the
+	// event must be re-driven, not acknowledged — until it ages out.
+	ErrITPayoutNotFinal = errors.New("provider has not finalised this transfer")
 	// ErrITSellPayoutConflict: the provider's record (or the row's own state)
 	// contradicts the requested action (e.g. reversing a sell whose transfer
 	// succeeded, or one with a payout in flight).
@@ -68,6 +72,11 @@ const (
 	itPayoutMaxAttempts = 3
 	// itPayoutPendingAlertAfter is when a payout still not final is escalated.
 	itPayoutPendingAlertAfter = 24 * time.Hour
+	// itPayoutWebhookGrace is how long a transfer webhook may keep coming back
+	// "not final yet" before it is acknowledged as terminal. It mirrors
+	// fwChargeNotFoundGrace: re-driving forever would hold a slot in the
+	// oldest-first retry pool and never resolve.
+	itPayoutWebhookGrace = 48 * time.Hour
 	// itPayoutAbsentSettle is how long after the last payout attempt a reference
 	// missing from the provider's transfer list counts as "never created", and
 	// how long a reverse waits behind a payout attempt that may be in flight.
@@ -111,6 +120,19 @@ func payoutAttemptTime(in *models.ITIntent) time.Time {
 		return *in.LastPayoutAttemptAt
 	}
 	return in.CreatedAt
+}
+
+// rowOlderThan asks the DATABASE whether a row's timestamp column is older
+// than d, so an age that gates an alert or a guard never depends on the
+// calling process's clock.
+func (s *ITService) rowOlderThan(ctx context.Context, id uuid.UUID, column string, d time.Duration) bool {
+	expr, args := olderThanExpr(s.db, column, d)
+	var n int64
+	q := s.db.WithContext(ctx).Model(&models.ITIntent{}).Where("id = ?", id).Where(expr, args...)
+	if err := q.Count(&n).Error; err != nil {
+		return false
+	}
+	return n == 1
 }
 
 // reverseRejectedSell reverses a sell whose payout was rejected and returns
@@ -804,14 +826,26 @@ func (s *ITService) RepayStableSell(ctx context.Context, intentID uuid.UUID) (*m
 // It never broadcasts anything: the debit is already resolved on-chain, so
 // this only records which way it went.
 func (s *ITService) ReevaluateSell(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
-	in, err := s.adminMCGPSell(ctx, intentID)
+	if !s.IsConfigured() {
+		return nil, ErrITNotConfigured
+	}
+	in, err := s.getIntent(ctx, intentID)
 	if err != nil {
 		return nil, err
+	}
+	if in.Direction != models.ITDirectionSell {
+		return nil, fmt.Errorf("%w: not a sell", ErrITBadState)
 	}
 	switch in.Status {
 	case models.ITStatusNeedsReview, models.ITStatusDebited, models.ITStatusDebiting, models.ITStatusProcessing:
 	default:
 		return nil, fmt.Errorf("%w: sell is %s; nothing to reevaluate", ErrITBadState, in.Status)
+	}
+	// A brokered stablecoin sell has no swap debit to read: the provider's
+	// transfer is the only evidence there is. The superseded-generation park
+	// only ever happens to these, so without this branch they had no exit.
+	if !isMCGPSell(in) {
+		return s.reevaluateStableSell(ctx, in)
 	}
 	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", in.ID))
 	if err != nil {
@@ -854,7 +888,18 @@ func (s *ITService) ReevaluateSell(ctx context.Context, intentID uuid.UUID) (*mo
 		}
 		s.settleITFee(ctx, in)
 		return s.getIntent(ctx, in.ID)
-	case reversed, notPaid, !haveTransfer && payoutNeverSubmitted(in):
+	case reversed, notPaid:
+		if !s.moveSellStatus(ctx, in, from, models.ITStatusReversed, "closed by operator reevaluation") {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		return s.getIntent(ctx, in.ID)
+	case !haveTransfer && payoutNeverSubmitted(in):
+		// Inference of last resort: the debit is resolved, no payout was ever
+		// sent, so the only operation that could have resolved it is a reverse.
+		// It moves no money — it records what already happened on-chain — but it
+		// is a guess, so it is never silent.
+		alertf("reevaluate-inferred:"+in.ID.String(),
+			"[it] ALERT it_sell_reevaluate_inferred_reverse intent=%s — debit resolved with no payout ever sent; recording it as reversed", in.ID)
 		if !s.moveSellStatus(ctx, in, from, models.ITStatusReversed, "closed by operator reevaluation") {
 			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
 		}
@@ -864,6 +909,89 @@ func (s *ITService) ReevaluateSell(ctx context.Context, intentID uuid.UUID) (*mo
 			"[it] ALERT it_sell_reevaluate_inconclusive intent=%s — debit resolved on-chain but neither the row nor the provider says which way; left parked", in.ID)
 		return nil, fmt.Errorf("%w: cannot tell whether this sell settled or reversed", ErrITSellPayoutUnverified)
 	}
+}
+
+// reevaluateStableSell closes a parked brokered stablecoin sell on provider
+// evidence alone — there is no swap debit, so it reads no chain and broadcasts
+// nothing:
+//
+//	transfer SUCCESSFUL            → settled (the fee is booked by the one
+//	                                 caller that moves the row)
+//	transfer FAILED                → back to the parked-for-repay state the
+//	                                 confirmed-failure path uses, so
+//	                                 RepayStableSell can pay it again
+//	two generations SUCCESSFUL     → refused, distinct ALERT naming both: the
+//	                                 user may have been paid twice and that is
+//	                                 human accounting, never an automatic settle
+//	anything else                  → refused, left parked, ALERT
+func (s *ITService) reevaluateStableSell(ctx context.Context, in *models.ITIntent) (*models.ITIntent, error) {
+	tr, haveTransfer, err := s.reevaluateTransfer(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	from := []string{models.ITStatusNeedsReview, models.ITStatusDebited}
+	paid := haveTransfer && fwSucceeded(tr.Status)
+
+	// A repay supersedes the previous reference; if one of those also paid, the
+	// sell may have gone out twice.
+	if paid || in.PayoutRefGen > 0 {
+		if prior, ok := s.priorGenerationPaid(ctx, in); ok {
+			alertf("reevaluate-double:"+in.ID.String(),
+				"[it] ALERT it_stable_sell_possible_double_payment intent=%s superseded_transfer=%s current_transfer=%s — both report success; operator accounting required",
+				in.ID, prior.ID, tr.ID)
+			return nil, fmt.Errorf("%w: transfers %s and %s both report success for this sell", ErrITSellPayoutConflict, prior.ID, tr.ID)
+		}
+	}
+
+	switch {
+	case paid:
+		if !s.moveSellStatus(ctx, in, from, models.ITStatusSettled, "closed by operator reevaluation") {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		s.settleITFee(ctx, in)
+		return s.getIntent(ctx, in.ID)
+	case haveTransfer && strings.EqualFold(tr.Status, "FAILED"):
+		res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+			Where("id = ? AND status IN ?", in.ID, from).
+			Updates(map[string]any{
+				"status":          models.ITStatusDebited,
+				"payout_rejected": true,
+				"failure_reason":  truncateReason("payout FAILED at provider (transfer " + tr.ID + ") — operator payout required"),
+			})
+		if res.Error != nil || res.RowsAffected != 1 {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		return s.getIntent(ctx, in.ID)
+	default:
+		status := "none"
+		if haveTransfer {
+			status = tr.Status
+		}
+		alertf("reevaluate-stable:"+in.ID.String(),
+			"[it] ALERT it_stable_sell_reevaluate_inconclusive intent=%s transfer_status=%s — left parked", in.ID, status)
+		return nil, fmt.Errorf("%w: the provider does not report a final outcome for this sell (%s)", ErrITSellPayoutUnverified, status)
+	}
+}
+
+// priorGenerationPaid reports whether any superseded payout reference for this
+// sell has a successful transfer at the provider.
+func (s *ITService) priorGenerationPaid(ctx context.Context, in *models.ITIntent) (FWTransfer, bool) {
+	if s.payoutTransfers == nil || in.PayoutRefGen == 0 {
+		return FWTransfer{}, false
+	}
+	for gen := 0; gen < in.PayoutRefGen; gen++ {
+		probe := *in
+		probe.PayoutRefGen = gen
+		tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(&probe), payoutAttemptTime(in))
+		if err != nil {
+			s.alertLookupFailure(in, err)
+			continue
+		}
+		if found && fwSucceeded(tr.Status) {
+			return tr, true
+		}
+	}
+	return FWTransfer{}, false
 }
 
 // reevaluateTransfer reads whatever the provider holds for the sell's payout
