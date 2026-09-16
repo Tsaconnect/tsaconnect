@@ -32,6 +32,14 @@ func AutoMigrate() error {
 	// keep chain_id = NULL (the legacy global), so this is a safe backfill.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token")
 
+	// Same move again for the transaction-tax work: fee_configs gained a
+	// nullable direction column and the unique index widened from
+	// (feature, token_symbol, chain_id) → (..., direction) so a per-leg rate can
+	// coexist with the NULL any-direction row. The 3-col UNIQUE would reject the
+	// new rows, so drop it explicitly before AutoMigrate adds the 4-col one.
+	// Existing rows keep direction = NULL and resolve exactly as before.
+	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token_chain")
+
 	if err := DB.AutoMigrate(
 		// Currency registry — the sole validation authority for any currency
 		// reaching a money path. Rows are seeded per-row (never overwritten) by
@@ -169,6 +177,22 @@ func AutoMigrate() error {
 		&models.WalletActivity{},
 	); err != nil {
 		return err
+	}
+
+	// The 4-column UNIQUE GORM builds from the struct tags does NOT make a
+	// fee rate unique in Postgres: NULLs compare as DISTINCT in a unique index,
+	// so two identical (feature, token, NULL chain, NULL direction) rows both
+	// insert cleanly. Every row written to date carries both NULLs, so nothing
+	// in this table is actually deduplicated — and a duplicate is a money bug:
+	// the cache keeps whichever row Load() saw last, and the replica writer /
+	// drift reconciler pick one by UUID order.
+	//
+	// This expression index restores the invariant the column list only implies.
+	// It is additive: on a table that already holds duplicates it simply fails
+	// to build, logged below, and the operator de-duplicates before it takes.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_fee_config_feature_token_chain_direction
+		ON fee_configs (feature, token_symbol, COALESCE(chain_id, -1), lower(COALESCE(direction, '')))`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_fee_config_feature_token_chain_direction: %v — fee_configs most likely holds DUPLICATE (feature, token, chain, direction) rows, which resolve non-deterministically. De-duplicate it.", err)
 	}
 
 	// The admin fee tracker filters and aggregates fee_distributions by date

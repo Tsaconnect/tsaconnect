@@ -98,7 +98,7 @@ func (s *FeeConfigService) ReconcileChains(ctx context.Context, cfg *config.Conf
 		// Add chain-scoped replica rows so admin-set per-token overrides are checked.
 		var chainRows []models.FeeConfig
 		if err := s.db.WithContext(ctx).
-			Where("chain_id = ?", chainID).
+			Where("chain_id = ? AND direction IS NULL", chainID).
 			Find(&chainRows).Error; err != nil {
 			return res, err
 		}
@@ -160,7 +160,12 @@ func (s *FeeConfigService) ReconcileChains(ctx context.Context, cfg *config.Conf
 // no chain-specific row exists.
 func (s *FeeConfigService) replicaRowFor(feature, token string, chainID *int64) (bps int, flatUnits uint64, exempt, active, hasRow bool) {
 	var row models.FeeConfig
-	q := s.db.Where("feature = ? AND token_symbol = ?", feature, token)
+	// direction IS NULL is load-bearing, not defensive: the on-chain FeeManager
+	// keys by (feature, token) alone, so a per-leg tax row has no counterpart to
+	// compare against. Without this filter First() picks a row by UUID order,
+	// and a directional row winning the coin flip reads as drift — which this
+	// reconciler resolves by overwriting the replica from chain, wiping the tax.
+	q := s.db.Where("feature = ? AND token_symbol = ? AND direction IS NULL", feature, token)
 	if chainID == nil {
 		q = q.Where("chain_id IS NULL")
 	} else {

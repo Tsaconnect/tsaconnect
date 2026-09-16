@@ -73,9 +73,10 @@ func setupFeeAdminTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.Exec(`CREATE TABLE fee_configs (
 		id TEXT PRIMARY KEY, feature TEXT NOT NULL, token_symbol TEXT NOT NULL, chain_id INTEGER,
+		direction TEXT,
 		bps INTEGER NOT NULL DEFAULT 0, flat_amount_usd REAL NOT NULL DEFAULT 0,
 		mcgp_exempt INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME, updated_at DATETIME, UNIQUE(feature, token_symbol, chain_id))`).Error; err != nil {
+		created_at DATETIME, updated_at DATETIME, UNIQUE(feature, token_symbol, chain_id, direction))`).Error; err != nil {
 		t.Fatalf("create fee_configs: %v", err)
 	}
 	return db

@@ -35,6 +35,7 @@ func setupFeeConfigHandlerDB(t *testing.T) *gorm.DB {
 		feature TEXT NOT NULL,
 		token_symbol TEXT NOT NULL,
 		chain_id INTEGER,
+		direction TEXT,
 		bps INTEGER NOT NULL DEFAULT 0,
 		flat_amount_usd REAL NOT NULL DEFAULT 0,
 		mcgp_exempt INTEGER NOT NULL DEFAULT 0,
