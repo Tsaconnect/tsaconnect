@@ -47,6 +47,24 @@ const (
 	// have stopped treating it as the user's open order. Distinct from
 	// PaycrestStatusFailed, which is where Paycrest's own "cancelled" lands.
 	PaycrestStatusCancelled = "cancelled"
+
+	// Converted-order states. converting: Paycrest delivered to the treasury
+	// and the conversion has not finished. refunding: a refund leg is in
+	// flight. recovery_pending: S6, funds stranded at Paycrest, worked through
+	// a dispute. None of them are terminal.
+	PaycrestStatusConverting      = "converting"
+	PaycrestStatusRefunding       = "refunding"
+	PaycrestStatusRecoveryPending = "recovery_pending"
+
+	RouteKindDirect    = "direct"
+	RouteKindConverted = "converted"
+
+	HolderUser     = "user"
+	HolderTreasury = "treasury"
+	HolderPaycrest = "paycrest"
+
+	FaultPlatform = "platform"
+	FaultUser     = "user"
 )
 
 // paycrestTerminalStatuses is the single list of states nothing can move on
@@ -101,6 +119,20 @@ type PaycrestOrderRecord struct {
 	// SenderFee is our margin as reported by Paycrest, settled on-chain.
 	SenderFee        string `gorm:"size:32" json:"senderFee,omitempty"`
 	SenderFeePercent string `gorm:"size:16" json:"senderFeePercent,omitempty"`
+
+	// ── Conversion (Phase 2). RouteKind is direct for every pre-Phase-2 row,
+	// which is what the zero value must mean, so reads treat "" as direct.
+	RouteKind      string `gorm:"size:12;index" json:"routeKind,omitempty"`
+	RequestedToken string `gorm:"size:16" json:"requestedToken,omitempty"`
+	RequestedChain string `gorm:"size:24" json:"requestedChain,omitempty"`
+	MarkupBps      int    `gorm:"default:0" json:"markupBps,omitempty"`
+	// PromisedAmount is what we guaranteed the user receives: token base units
+	// on a buy. The conversion must land at least this much.
+	PromisedAmount string `gorm:"size:64" json:"promisedAmount,omitempty"`
+	Holder         string `gorm:"size:12" json:"holder,omitempty"`
+	// OwedToUser is computed from the legs, never entered by hand.
+	OwedToUser string `gorm:"size:64" json:"owedToUser,omitempty"`
+	Fault      string `gorm:"size:12" json:"fault,omitempty"`
 
 	// WalletAddress is the user's own connected wallet: the delivery target on
 	// a buy, the funding source on a sell. We never custody the asset.
@@ -175,3 +207,7 @@ func PaycrestOrderTerminal(status string) bool {
 func (o *PaycrestOrderRecord) NeedsOperator() bool {
 	return o != nil && o.Status == PaycrestStatusUnmatched
 }
+
+// Converted reports whether this order routes through the treasury. Rows
+// written before Phase 2 have an empty RouteKind and are direct.
+func (o *PaycrestOrderRecord) Converted() bool { return o.RouteKind == RouteKindConverted }

@@ -144,6 +144,10 @@ func AutoMigrate() error {
 		// One row per transaction we paid gas for on a user's behalf; the
 		// (order_id, kind) unique index is the once-per-order rule.
 		&models.GasSponsorship{},
+		// Ramp conversion (Phase 2) — one row per on-chain leg of a converted
+		// Paycrest order. (order_id, kind, attempt) unique index is the
+		// once-per-attempt rule.
+		&models.RampLeg{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
