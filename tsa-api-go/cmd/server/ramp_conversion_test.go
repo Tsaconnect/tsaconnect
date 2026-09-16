@@ -114,33 +114,49 @@ func TestRegisterRampConversionWorkers_NilOrchestratorRegistersNothing(t *testin
 }
 
 // Treasury.CheckCaps treats a cap <= 0 as UNLIMITED (its own, already-tested
-// convention), so a boot-time value of 0 must refuse to build the treasury —
-// otherwise RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER=0 would silently mean
-// "no limit" instead of "no orders".
-func TestBuildRampConversion_RefusesAZeroPerOrderCap(t *testing.T) {
+// convention), so rampTreasuryCaps — the boot-time gate in front of it — must
+// refuse a zero per-order cap rather than let it through as "no limit".
+//
+// This tests rampTreasuryCaps DIRECTLY rather than through
+// buildRampConversion: a version of this test that called
+// buildRampConversion(cfg, nil, nil, nil) and asserted a nil/nil return would
+// be vacuous, because the pre-existing `if chains == nil` guard immediately
+// after the caps check returns that exact same (nil, nil) regardless of
+// whether the caps check ever ran. Asserting on rampTreasuryCaps' own return
+// value is what actually proves the cap refusal fired.
+func TestRampTreasuryCaps_RefusesAZeroPerOrderCap(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.RampConversionBuyEnabled = true
-	cfg.RampTreasuryPrivateKey = testKeyB
 	cfg.RampTreasuryMaxInflightUSDPerOrder = 0
 	cfg.RampTreasuryMaxInflightUSDPerChain = 10000
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
-	if treasury != nil || orch != nil {
-		t.Fatal("a zero per-order cap must refuse to build the treasury, not mean unlimited")
+	if caps, ok := rampTreasuryCaps(cfg); ok {
+		t.Fatalf("a zero per-order cap must not validate, got caps=%+v ok=%v", caps, ok)
 	}
 }
 
 // Same as above for the per-chain cap, and with a negative value rather than
 // zero, so both caps and both "not a valid positive number" shapes are
 // covered.
-func TestBuildRampConversion_RefusesANegativePerChainCap(t *testing.T) {
+func TestRampTreasuryCaps_RefusesANegativePerChainCap(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.RampConversionBuyEnabled = true
-	cfg.RampTreasuryPrivateKey = testKeyB
 	cfg.RampTreasuryMaxInflightUSDPerOrder = 2000
 	cfg.RampTreasuryMaxInflightUSDPerChain = -1
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
-	if treasury != nil || orch != nil {
-		t.Fatal("a negative per-chain cap must refuse to build the treasury, not mean unlimited")
+	if caps, ok := rampTreasuryCaps(cfg); ok {
+		t.Fatalf("a negative per-chain cap must not validate, got caps=%+v ok=%v", caps, ok)
+	}
+}
+
+// The positive case, so a future change to the <= 0 boundary (e.g. an
+// off-by-one to < 0) is caught from both directions.
+func TestRampTreasuryCaps_AcceptsBothValidCaps(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.RampTreasuryMaxInflightUSDPerOrder = 2000
+	cfg.RampTreasuryMaxInflightUSDPerChain = 10000
+	caps, ok := rampTreasuryCaps(cfg)
+	if !ok {
+		t.Fatal("two valid positive caps must validate")
+	}
+	if caps.MaxInFlightUSDPerOrder != 2000 || caps.MaxInFlightUSDPerChain != 10000 {
+		t.Fatalf("caps = %+v, want order=2000 chain=10000", caps)
 	}
 }
 
