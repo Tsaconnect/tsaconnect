@@ -37,6 +37,7 @@ import {
   SummaryRow,
   Text,
 } from '@/components/ui';
+import { DepositProgress } from '@/components/paycrest/DepositProgress';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import { useRampCurrency } from '@/hooks/useRampCurrency';
@@ -377,8 +378,13 @@ export default function PaycrestSellScreen() {
     [venue, balances, sponsoredRoutes],
   );
 
-  /** Hand the order off to the order screen, as "I've sent it" always has. */
-  const goToOrder = useCallback((id: string) => {
+  /** Hand the order off to the order screen, as "I've sent it" always has.
+   *
+   *  `sentTx` carries the deposit we just broadcast, so the order screen shows
+   *  progress instead of re-asking for a transfer that has already left. It is
+   *  route state, so it does not survive the app being killed — the order
+   *  screen falls back to the server's paymentClaimedAt for that. */
+  const goToOrder = useCallback((id: string, sentTx?: string) => {
     // Tell the server the user asserts they sent the deposit — the only
     // signal that lets an order which later expires with amountPaid=0 read as
     // a genuine unmatched-deposit alarm instead of an ordinary abandoned
@@ -386,7 +392,10 @@ export default function PaycrestSellScreen() {
     // must not block navigation — it just means this order degrades to a
     // plain "expired" if it never matches, the same as before.
     claimPayment(id).catch(() => {});
-    router.replace(`/wallet/paycrest/order/${id}` as never);
+    const to = sentTx
+      ? `/wallet/paycrest/order/${id}?sentTx=${encodeURIComponent(sentTx)}`
+      : `/wallet/paycrest/order/${id}`;
+    router.replace(to as never);
   }, []);
 
   const onSend = useCallback(async () => {
@@ -394,8 +403,12 @@ export default function PaycrestSellScreen() {
     setSending(true);
     setSendError(null);
     try {
-      await sendSponsoredPaycrestDeposit(order, address, nativeBalanceFor(order.chain, balances));
-      goToOrder(order.id);
+      const txHash = await sendSponsoredPaycrestDeposit(
+        order,
+        address,
+        nativeBalanceFor(order.chain, balances),
+      );
+      goToOrder(order.id, txHash);
     } catch (e) {
       // Server and RPC messages here are written to be read — show them.
       setSendError(e instanceof Error ? e.message : 'Could not send. Please try again.');
@@ -558,6 +571,15 @@ export default function PaycrestSellScreen() {
             </Card>
           )}
 
+          {/* Once we are broadcasting, the address is the wrong thing to look
+              at: the transfer is already leaving. Show what is happening. */}
+          {sending && (
+            <DepositProgress
+              amountLabel={`${order.tokenAmount} ${order.token}`}
+              chainLabel={CHAIN_LABELS[order.chain] ?? order.chain}
+            />
+          )}
+
           {/* The wallet holding the key is right here — asking the user to
               copy an address into another app was never the shorter path. */}
           {canSendInApp && (
@@ -578,8 +600,9 @@ export default function PaycrestSellScreen() {
           )}
 
           {/* Kept for funds that live somewhere else — an exchange, a hardware
-              wallet, MetaMask. Collapsed rather than removed. */}
-          {manualOpen || !canSendInApp ? (
+              wallet, MetaMask. Collapsed rather than removed, and out of the
+              way entirely while we are sending from this device. */}
+          {(manualOpen || !canSendInApp) && !sending ? (
             <Card>
               <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
                 To this address
