@@ -347,3 +347,17 @@ func TestLoad_StripsITOperatorKeyPrefix(t *testing.T) {
 		t.Errorf("ITOperatorPrivateKey without 0x = %q, want unchanged %q", got, raw)
 	}
 }
+
+// Acting on "Flutterwave has no transfer for this reference" can pay a user
+// twice if the listing is misread, so it must stay off unless asked for.
+func TestLoad_ITSellFWAbsenceTrustedDefaultsOff(t *testing.T) {
+	t.Setenv("SONIC_NETWORK", "testnet")
+	t.Setenv("IT_SELL_FW_ABSENCE_TRUSTED", "")
+	if Load().ITSellFWAbsenceTrusted {
+		t.Fatal("IT_SELL_FW_ABSENCE_TRUSTED must default to false")
+	}
+	t.Setenv("IT_SELL_FW_ABSENCE_TRUSTED", "true")
+	if !Load().ITSellFWAbsenceTrusted {
+		t.Fatal("IT_SELL_FW_ABSENCE_TRUSTED=true must enable it")
+	}
+}

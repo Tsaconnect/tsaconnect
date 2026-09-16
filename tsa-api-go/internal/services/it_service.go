@@ -143,6 +143,14 @@ type ITService struct {
 	// the sell reconciler and the admin settle/reverse guards act on. See
 	// it_sell_recovery.go.
 	payoutTransfers itPayoutTransfers
+	// fwAbsenceTrusted: whether "no transfer at Flutterwave" may be acted on
+	// (IT_SELL_FW_ABSENCE_TRUSTED).
+	fwAbsenceTrusted bool
+	// sellScan pages the sell reconciler's scans; deepScanMu/lastDeepScan run
+	// the unwindowed late-debit audit once a day.
+	sellScan     reconcileCursor
+	deepScanMu   sync.Mutex
+	lastDeepScan time.Time
 }
 
 // itSellChain is the slice of the swap contract the MCGP sell leg drives.
@@ -817,13 +825,21 @@ func (s *ITService) resolveSell(ctx context.Context, intentID uuid.UUID, walletA
 		txHash, err = s.chain().OperatorSettleDebit(ctx, debitRef)
 		event, doneStatus = "PremiumDebitSettled", models.ITStatusSettled
 	} else {
+		// Claim the row for the reverse BEFORE broadcasting it. The payout send
+		// claims the same row with payout_rejected=false, so exactly one of
+		// "send the naira" and "return the MCGP" can ever win.
+		if cerr := s.claimReverse(ctx, intent); cerr != nil {
+			return nil, cerr
+		}
 		txHash, err = s.chain().OperatorReverseDebit(ctx, debitRef)
 		event, doneStatus = "PremiumDebitReversed", models.ITStatusReversed
 	}
 	if err != nil {
+		s.afterResolveFailure(ctx, intent, settle, err)
 		return nil, err
 	}
 	if _, err := s.chain().VerifyOperatorEvent(event, txHash, common.HexToAddress(wallet), debitRef); err != nil {
+		s.afterResolveFailure(ctx, intent, settle, fmt.Errorf("tx %s: %w", txHash, err))
 		return nil, err
 	}
 	intent.TxHash = txHash
@@ -845,9 +861,18 @@ func (s *ITService) resolveSell(ctx context.Context, intentID uuid.UUID, walletA
 // operator to pay out.
 func (s *ITService) resolveStableSellPayout(ctx context.Context, intent *models.ITIntent, settle bool) (*models.ITIntent, error) {
 	if settle {
-		if err := s.setStatus(ctx, intent, models.ITStatusSettled, ""); err != nil {
-			return nil, err
+		// Status CAS: only the caller that moves the row books the fee, so a
+		// redelivered or concurrent success cannot pay the carve twice.
+		res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+			Where("id = ? AND status = ?", intent.ID, models.ITStatusDebited).
+			Updates(map[string]any{"status": models.ITStatusSettled, "failure_reason": ""})
+		if res.Error != nil {
+			return nil, res.Error
 		}
+		if res.RowsAffected != 1 {
+			return s.getIntent(ctx, intent.ID)
+		}
+		intent.Status, intent.FailureReason = models.ITStatusSettled, ""
 		s.settleITFee(ctx, intent)
 		return intent, nil
 	}
@@ -861,6 +886,62 @@ func (s *ITService) resolveStableSellPayout(ctx context.Context, intent *models.
 	log.Printf("[it] ALERT it_stable_sell_payout_failed intent=%s asset=%s payout=%s — parked for operator payout",
 		intent.ID, models.ITIntentAsset(intent), intent.PayoutID)
 	return intent, nil
+}
+
+// claimReverse takes a debited MCGP sell for reversal. A row already marked
+// payout_rejected is already claimed (a send can no longer win it). Otherwise
+// the claim is a CAS on exactly the payout state that was read, and — when a
+// payout was sent with no transfer id recorded — on the last attempt being old
+// enough that it is not still in flight.
+func (s *ITService) claimReverse(ctx context.Context, intent *models.ITIntent) error {
+	if intent.PayoutRejected {
+		return nil
+	}
+	q := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = ? AND payout_attempts = ? AND payout_rejected = ? AND payout_ref_gen = ?",
+			intent.ID, models.ITStatusDebited, intent.PayoutID, intent.PayoutAttempts, false, intent.PayoutRefGen)
+	if intent.PayoutID == "" && intent.PayoutAttempts > 0 {
+		q = q.Where("(last_payout_attempt_at IS NULL OR last_payout_attempt_at < ?)", time.Now().Add(-itPayoutAbsentSettle))
+	}
+	res := q.Update("payout_rejected", true)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("%w: sell %s changed or has a payout in flight; not reversing", ErrITSellPayoutConflict, intent.ID)
+	}
+	intent.PayoutRejected = true
+	return nil
+}
+
+// afterResolveFailure runs when a settle or reverse did not verify. If the
+// debit is nonetheless already resolved on-chain, the operation (or another)
+// took effect and the row can no longer say which: it moves to needs_review so
+// nothing retries the call or pays the sell. A debit still Pending is left as
+// is — a reverse keeps its claim, so the row stays unsendable.
+func (s *ITService) afterResolveFailure(ctx context.Context, intent *models.ITIntent, settle bool, cause error) {
+	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", intent.ID))
+	if err != nil || rec.State != DebitStateResolved {
+		return
+	}
+	op := "reverse"
+	if settle {
+		op = "settle"
+	}
+	s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+		fmt.Sprintf("%s did not verify but the debit is already resolved on-chain: %v", op, cause))
+}
+
+// moveToReview parks a sell whose on-chain debit contradicts its row.
+func (s *ITService) moveToReview(ctx context.Context, intent *models.ITIntent, from []string, reason string) {
+	reason = truncateReason(reason)
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status IN ?", intent.ID, from).
+		Updates(map[string]any{"status": models.ITStatusNeedsReview, "failure_reason": reason})
+	if res.Error == nil && res.RowsAffected == 1 {
+		intent.Status, intent.FailureReason = models.ITStatusNeedsReview, reason
+		log.Printf("[it] ALERT it_sell_needs_review intent=%s: %s", intent.ID, reason)
+	}
 }
 
 // ─────────────────────────────── reads/helpers ────────────────────────────

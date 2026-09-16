@@ -137,6 +137,19 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   `mcgp_swap_service.go`, `otc_service.go` and `service_contact_service.go` start refusing to
   build a partial unsigned tx instead of returning one for local tooling.
 
+IT sell recovery (`internal/services/it_sell_recovery.go`, `it-sell-reconciler` job):
+- `IT_SELL_FW_ABSENCE_TRUSTED` (bool, default `false`) - whether "Flutterwave's
+  `GET /transfers` listing has no transfer for this payout reference" may be acted on:
+  the reconciler re-sending an already-attempted payout or reversing a sell whose retry
+  was refused, and an admin reverse / retry-payout on that evidence. Leave `false` until
+  the listing's response shape is confirmed against the live API — a wrong "absent" pays
+  the user twice. While `false` those sells ALERT and wait in `GET /api/it/admin/sell/stuck`;
+  provider-confirmed SUCCESSFUL/FAILED transfers and first sends still resolve normally.
+- Money rule for every sell path: a payout send and a debit reverse claim the same row
+  (`payout_rejected`), so exactly one can win; a payout is only sent while the on-chain
+  debit is Pending; a settle/reverse that did not verify but whose debit is already
+  resolved on-chain parks the sell as `needs_review`.
+
 Central-account inbound attribution (default `va` — a deploy that omits all of these changes nothing):
 - `INBOUND_MODE` - `va`: per-user Flutterwave virtual account, attributed by the charge
   webhook. `central`: every payer is sent to one company account, attributed by polling the

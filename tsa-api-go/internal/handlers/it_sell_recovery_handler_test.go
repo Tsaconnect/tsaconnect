@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -25,7 +26,7 @@ func TestSellFailureResponse(t *testing.T) {
 		{errors.New("insufficient spendable premium"), http.StatusBadRequest, "", "insufficient", false},
 	}
 	for _, tc := range cases {
-		r := sellFailureResponse(tc.err)
+		r := sellFailureResponse(tc.err, &models.ITIntent{Status: models.ITStatusReversed})
 		if r.status != tc.status || r.code != tc.code || r.accepted != tc.accepted ||
 			!strings.Contains(strings.ToLower(r.message), tc.msgHas) {
 			t.Errorf("%v → %+v, want status=%d code=%q accepted=%v message containing %q", tc.err, r, tc.status, tc.code, tc.accepted, tc.msgHas)
@@ -47,5 +48,19 @@ func TestAdminSellActionStatus(t *testing.T) {
 		if got := adminSellActionStatus(err); got != want {
 			t.Errorf("%v → %d, want %d", err, got, want)
 		}
+	}
+}
+
+// When the immediate reverse did not complete, the user must not be told the
+// MCGP is already back.
+func TestSellFailureResponse_ReturnInProgress(t *testing.T) {
+	err := fmt.Errorf("%w: HTTP 400", services.ErrITSellPayoutRejected)
+	pending := sellFailureResponse(err, &models.ITIntent{Status: models.ITStatusDebited})
+	if strings.Contains(strings.ToLower(pending.message), "has been returned") || !strings.Contains(strings.ToLower(pending.message), "being returned") {
+		t.Fatalf("message = %q, want a return-in-progress message", pending.message)
+	}
+	done := sellFailureResponse(err, &models.ITIntent{Status: models.ITStatusReversed})
+	if !strings.Contains(strings.ToLower(done.message), "has been returned") {
+		t.Fatalf("message = %q, want the completed-return message", done.message)
 	}
 }

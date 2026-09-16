@@ -43,8 +43,9 @@ var (
 	// ErrITSellPayoutUnverified: an admin settle/reverse was refused because the
 	// provider could not confirm the payout's outcome.
 	ErrITSellPayoutUnverified = errors.New("payout outcome could not be verified with the provider")
-	// ErrITSellPayoutConflict: the provider's record contradicts the requested
-	// admin action (e.g. reversing a sell whose transfer succeeded).
+	// ErrITSellPayoutConflict: the provider's record (or the row's own state)
+	// contradicts the requested action (e.g. reversing a sell whose transfer
+	// succeeded, or one with a payout in flight).
 	ErrITSellPayoutConflict = errors.New("provider payout state does not allow this action")
 )
 
@@ -67,24 +68,30 @@ const (
 	itPayoutMaxAttempts = 3
 	// itPayoutPendingAlertAfter is when a payout still not final is escalated.
 	itPayoutPendingAlertAfter = 24 * time.Hour
-	// itPayoutLookupSlack widens the provider search window before the intent
-	// was created, for clock skew between us and the provider.
-	itPayoutLookupSlack = 10 * time.Minute
 	// itPayoutAbsentSettle is how long after the last payout attempt a reference
-	// missing from the provider's transfer list counts as "never created" for an
-	// admin reverse — a request that just timed out may not be listed yet.
+	// missing from the provider's transfer list counts as "never created", and
+	// how long a reverse waits behind a payout attempt that may be in flight.
 	itPayoutAbsentSettle = 10 * time.Minute
+	// itSellScanLimit is the page size of each reconciler scan.
+	itSellScanLimit = 50
+	// itDeepScanEvery spaces the unwindowed late-debit audit.
+	itDeepScanEvery = 24 * time.Hour
 )
 
 // itPayoutTransfers reads sell payouts back from the provider.
 type itPayoutTransfers interface {
 	GetTransfer(ctx context.Context, id string) (FWTransfer, error)
-	FindTransferByReference(ctx context.Context, reference string, from, to time.Time) (FWTransfer, bool, error)
+	FindTransferByReference(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error)
 }
 
 // SetPayoutTransfers wires the provider transfer reader used as evidence by
 // the sell reconciler and the admin settle/reverse guards.
 func (s *ITService) SetPayoutTransfers(r itPayoutTransfers) { s.payoutTransfers = r }
+
+// SetFWAbsenceTrusted sets whether "Flutterwave has no transfer for this
+// reference" may be acted on (IT_SELL_FW_ABSENCE_TRUSTED). Off: those rows
+// alert and wait for an operator.
+func (s *ITService) SetFWAbsenceTrusted(trusted bool) { s.fwAbsenceTrusted = trusted }
 
 // mcgpSells scopes a query to MCGP sells (rows predating the asset column are
 // MCGP). Stablecoin sells never touch the swap contract.
@@ -95,6 +102,15 @@ func (s *ITService) mcgpSells(ctx context.Context) *gorm.DB {
 
 func isMCGPSell(in *models.ITIntent) bool {
 	return in.Direction == models.ITDirectionSell && models.ITIntentAsset(in) == models.ITAssetMCGP
+}
+
+// payoutAttemptTime is when the current payout reference was last sent, or
+// the intent's creation for rows from before attempts were timestamped.
+func payoutAttemptTime(in *models.ITIntent) time.Time {
+	if in.LastPayoutAttemptAt != nil {
+		return *in.LastPayoutAttemptAt
+	}
+	return in.CreatedAt
 }
 
 // reverseRejectedSell reverses a sell whose payout was rejected and returns
@@ -119,18 +135,23 @@ func (s *ITService) reverseRejectedSell(ctx context.Context, intent *models.ITIn
 // terminal state, acting only on evidence:
 //
 //	processing/debiting past grace — read the debit by ref: Pending → debited;
-//	    none after itDebitAbandonAfter → failed; resolved/mismatched → ALERT
-//	failed (recent), never paid out — a debit that mined late → reverse
+//	    none after itDebitAbandonAfter → failed; resolved → needs_review;
+//	    mismatched → ALERT
+//	failed (48h), never paid out — a debit that mined late → reverse
 //	debited past grace —
-//	    payout rejected                          → reverse
-//	    payout id known                          → provider SUCCESSFUL settle,
-//	                                               FAILED reverse, else wait/ALERT
-//	    payout never sent                        → send it (within the window)
-//	    payout sent, id unknown                  → look the reference up: found →
-//	                                               adopt + resolve; absent → re-send
-//	                                               (same reference, bounded) or ALERT
+//	    claimed/rejected                   → reverse
+//	    payout id known                    → provider SUCCESSFUL settle,
+//	                                         FAILED reverse, else wait/ALERT
+//	    retry refused                      → provider has it: adopt + resolve;
+//	                                         absent (trusted) → reverse
+//	    payout never sent                  → send it (within the window)
+//	    payout sent, id unknown            → provider has it: adopt + resolve;
+//	                                         absent (trusted) → re-send the same
+//	                                         reference (bounded) or ALERT
 //
-// Idempotent and safe to run on several instances: every write is guarded on
+// Scans are cursor-paged so rows that can only alert never starve new ones.
+// Once a day it also audits failed sells older than the 48h window (alert
+// only). Idempotent and safe on several instances: every write is guarded on
 // the state it read, and every chain op is keyed by the intent's single-use ref.
 func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration) (int, error) {
 	if !s.IsConfigured() {
@@ -139,10 +160,9 @@ func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration
 	now := time.Now()
 	changed := 0
 
-	var inflight []models.ITIntent
-	if err := s.mcgpSells(ctx).
-		Where("status IN ? AND updated_at < ?", []string{models.ITStatusProcessing, models.ITStatusDebiting}, now.Add(-grace)).
-		Order("updated_at asc").Limit(50).Find(&inflight).Error; err != nil {
+	inflight, err := s.scanSells(ctx, "inflight", s.mcgpSells(ctx).
+		Where("status IN ? AND updated_at < ?", []string{models.ITStatusProcessing, models.ITStatusDebiting}, now.Add(-grace)))
+	if err != nil {
 		return changed, err
 	}
 	for i := range inflight {
@@ -151,11 +171,10 @@ func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration
 		}
 	}
 
-	var failed []models.ITIntent
-	if err := s.mcgpSells(ctx).
-		Where("status = ? AND updated_at > ? AND payout_id = '' AND payout_attempts = 0 AND debit_ref <> ''",
-			models.ITStatusFailed, now.Add(-itLateDebitScanWindow)).
-		Order("updated_at asc").Limit(50).Find(&failed).Error; err != nil {
+	failed, err := s.scanSells(ctx, "failed", s.mcgpSells(ctx).
+		Where("status = ? AND updated_at > ? AND COALESCE(payout_id, '') = '' AND payout_attempts = 0 AND COALESCE(debit_ref, '') <> ''",
+			models.ITStatusFailed, now.Add(-itLateDebitScanWindow)))
+	if err != nil {
 		return changed, err
 	}
 	for i := range failed {
@@ -164,10 +183,9 @@ func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration
 		}
 	}
 
-	var debited []models.ITIntent
-	if err := s.mcgpSells(ctx).
-		Where("status = ? AND updated_at < ?", models.ITStatusDebited, now.Add(-grace)).
-		Order("updated_at asc").Limit(50).Find(&debited).Error; err != nil {
+	debited, err := s.scanSells(ctx, "debited", s.mcgpSells(ctx).
+		Where("status = ? AND updated_at < ?", models.ITStatusDebited, now.Add(-grace)))
+	if err != nil {
 		return changed, err
 	}
 	for i := range debited {
@@ -175,7 +193,36 @@ func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration
 			changed++
 		}
 	}
+
+	if s.deepScanDue(now) {
+		if _, err := s.AlertLateDebitsBeyondWindow(ctx); err != nil {
+			log.Printf("[it-sell-reconciler] late-debit audit failed: %v", err)
+		}
+	}
 	return changed, nil
+}
+
+func (s *ITService) scanSells(ctx context.Context, key string, q *gorm.DB) ([]models.ITIntent, error) {
+	var rows []models.ITIntent
+	if err := s.sellScan.page(key, "", q, itSellScanLimit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if n := len(rows); n > 0 {
+		s.sellScan.advance(key, n, itSellScanLimit, rows[n-1].UpdatedAt, rows[n-1].ID)
+	} else {
+		s.sellScan.advance(key, 0, itSellScanLimit, time.Time{}, uuid.Nil)
+	}
+	return rows, nil
+}
+
+func (s *ITService) deepScanDue(now time.Time) bool {
+	s.deepScanMu.Lock()
+	defer s.deepScanMu.Unlock()
+	if now.Sub(s.lastDeepScan) < itDeepScanEvery {
+		return false
+	}
+	s.lastDeepScan = now
+	return true
 }
 
 // debitMatchesIntent checks that an on-chain debit record is this intent's:
@@ -212,7 +259,8 @@ func (s *ITService) reconcileInflightSell(ctx context.Context, in *models.ITInte
 	switch rec.State {
 	case DebitStatePending:
 		if !debitMatchesIntent(rec, in) {
-			log.Printf("[it-sell-reconciler] ALERT it_sell_debit_mismatch intent=%s on-chain user=%s amount=%s intent wallet=%s amount=%s",
+			alertf("sell-mismatch:"+in.ID.String(),
+				"[it-sell-reconciler] ALERT it_sell_debit_mismatch intent=%s on-chain user=%s amount=%s intent wallet=%s amount=%s",
 				in.ID, rec.User.Hex(), rec.Amount, in.WalletAddress, in.McgpAmount)
 			return false
 		}
@@ -234,9 +282,8 @@ func (s *ITService) reconcileInflightSell(ctx context.Context, in *models.ITInte
 				"failure_reason": truncateReason("debit never landed on-chain (was: " + in.FailureReason + ")")})
 		return res.Error == nil && res.RowsAffected == 1
 	default:
-		log.Printf("[it-sell-reconciler] ALERT it_sell_debit_resolved_unrecorded intent=%s status=%s — the debit was already settled or reversed on-chain",
-			in.ID, in.Status)
-		return false
+		s.moveToReview(ctx, in, inflight, "debit already settled or reversed on-chain while the sell read "+in.Status)
+		return in.Status == models.ITStatusNeedsReview
 	}
 }
 
@@ -249,12 +296,14 @@ func (s *ITService) reconcileFailedSell(ctx context.Context, in *models.ITIntent
 		return false
 	}
 	if !debitMatchesIntent(rec, in) {
-		log.Printf("[it-sell-reconciler] ALERT it_sell_debit_mismatch intent=%s (failed row) on-chain user=%s amount=%s",
+		alertf("sell-mismatch:"+in.ID.String(),
+			"[it-sell-reconciler] ALERT it_sell_debit_mismatch intent=%s (failed row) on-chain user=%s amount=%s",
 			in.ID, rec.User.Hex(), rec.Amount)
 		return false
 	}
+	// payout_rejected=true is the reverse claim: no send can take this row.
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ? AND payout_id = '' AND payout_attempts = 0", in.ID, models.ITStatusFailed).
+		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = '' AND payout_attempts = 0", in.ID, models.ITStatusFailed).
 		Updates(map[string]any{
 			"status":          models.ITStatusDebited,
 			"payout_rejected": true,
@@ -264,8 +313,7 @@ func (s *ITService) reconcileFailedSell(ctx context.Context, in *models.ITIntent
 		return false
 	}
 	log.Printf("[it-sell-reconciler] ALERT it_sell_late_debit intent=%s — debit mined after failure; reversing", in.ID)
-	_, err = s.ReverseSell(ctx, in.ID, "")
-	if err != nil {
+	if _, err := s.ReverseSell(ctx, in.ID, ""); err != nil {
 		log.Printf("[it-sell-reconciler] intent=%s late-debit reverse failed (will retry): %v", in.ID, err)
 	}
 	return true
@@ -274,10 +322,10 @@ func (s *ITService) reconcileFailedSell(ctx context.Context, in *models.ITIntent
 func (s *ITService) reconcileDebitedSell(ctx context.Context, in *models.ITIntent, now time.Time) bool {
 	if in.PayoutRejected {
 		if _, err := s.ReverseSell(ctx, in.ID, ""); err != nil {
-			log.Printf("[it-sell-reconciler] intent=%s reverse of rejected payout failed: %v", in.ID, err)
+			log.Printf("[it-sell-reconciler] intent=%s reverse of rejected/claimed payout failed: %v", in.ID, err)
 			return false
 		}
-		log.Printf("[it-sell-reconciler] intent=%s payout was rejected → reversed", in.ID)
+		log.Printf("[it-sell-reconciler] intent=%s payout rejected → reversed", in.ID)
 		return true
 	}
 	if in.PayoutID != "" {
@@ -291,32 +339,35 @@ func (s *ITService) reconcileDebitedSell(ctx context.Context, in *models.ITInten
 		}
 		return s.resolveSellFromTransfer(ctx, in, tr, now)
 	}
+	if in.PayoutRefusedOnRetry {
+		return s.resolveRefusedRetry(ctx, in, now)
+	}
 	if s.payout == nil || !sellIntentHasPayoutDestination(in) {
 		if in.CreatedAt.Before(now.Add(-itPayoutPendingAlertAfter)) {
-			log.Printf("[it-sell-reconciler] ALERT it_sell_manual_payout_outstanding intent=%s — debited with no automated payout", in.ID)
+			alertf("sell-manual:"+in.ID.String(),
+				"[it-sell-reconciler] ALERT it_sell_manual_payout_outstanding intent=%s — debited with no automated payout", in.ID)
 		}
 		return false
 	}
-	withinWindow := in.CreatedAt.After(now.Add(-itPayoutAutoRetryWindow))
 	if payoutNeverSubmitted(in) {
-		if !withinWindow {
-			log.Printf("[it-sell-reconciler] ALERT it_sell_payout_never_sent intent=%s — too old to send automatically", in.ID)
+		if in.CreatedAt.Before(now.Add(-itPayoutAutoRetryWindow)) {
+			alertf("sell-never-sent:"+in.ID.String(),
+				"[it-sell-reconciler] ALERT it_sell_payout_never_sent intent=%s — too old to send automatically", in.ID)
 			return false
 		}
 		return s.submitSellPayout(ctx, in)
 	}
-	if !withinWindow {
+	withinWindow := payoutAttemptTime(in).After(now.Add(-itPayoutAutoRetryWindow))
+	if !withinWindow || s.payoutTransfers == nil {
 		// Past the window only an operator acts (retry-payout / reverse both
 		// search the provider first); scanning every tick would be load for no
 		// automatic action.
-		log.Printf("[it-sell-reconciler] ALERT it_sell_payout_unresolved intent=%s attempts=%d — outcome unknown; operator retry-payout or reverse required",
+		alertf("sell-unresolved:"+in.ID.String(),
+			"[it-sell-reconciler] ALERT it_sell_payout_unresolved intent=%s attempts=%d — outcome unknown; operator retry-payout or reverse required",
 			in.ID, in.PayoutAttempts)
 		return false
 	}
-	if s.payoutTransfers == nil {
-		return false
-	}
-	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRef(in.ID), in.CreatedAt.Add(-itPayoutLookupSlack), now)
+	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(in), payoutAttemptTime(in))
 	if err != nil {
 		log.Printf("[it-sell-reconciler] intent=%s payout lookup failed: %v", in.ID, err)
 		return false
@@ -327,12 +378,45 @@ func (s *ITService) reconcileDebitedSell(ctx context.Context, in *models.ITInten
 		}
 		return s.resolveSellFromTransfer(ctx, in, tr, now)
 	}
-	if in.PayoutAttempts >= itPayoutMaxAttempts {
-		log.Printf("[it-sell-reconciler] ALERT it_sell_payout_unresolved intent=%s attempts=%d — no transfer found at provider; operator retry-payout or reverse required",
-			in.ID, in.PayoutAttempts)
+	if !s.fwAbsenceTrusted || in.PayoutAttempts >= itPayoutMaxAttempts {
+		alertf("sell-unresolved:"+in.ID.String(),
+			"[it-sell-reconciler] ALERT it_sell_payout_unresolved intent=%s attempts=%d absence_trusted=%v — no transfer found at provider; operator action required",
+			in.ID, in.PayoutAttempts, s.fwAbsenceTrusted)
 		return false
 	}
 	return s.submitSellPayout(ctx, in)
+}
+
+// resolveRefusedRetry handles a sell whose payout retry was refused. The first
+// attempt may have gone out (a refusal can mean "reference already used"), so
+// the provider is asked: a transfer is adopted and resolved on its status; no
+// transfer (only when absence is trusted) means nothing was paid and the sell
+// is reversed. It is never re-sent.
+func (s *ITService) resolveRefusedRetry(ctx context.Context, in *models.ITIntent, now time.Time) bool {
+	if s.payoutTransfers == nil {
+		return false
+	}
+	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(in), payoutAttemptTime(in))
+	if err != nil {
+		log.Printf("[it-sell-reconciler] intent=%s refused-retry lookup failed: %v", in.ID, err)
+		return false
+	}
+	if found {
+		if !s.adoptPayoutID(ctx, in, tr.ID) {
+			return false
+		}
+		return s.resolveSellFromTransfer(ctx, in, tr, now)
+	}
+	if !s.fwAbsenceTrusted {
+		alertf("sell-refused:"+in.ID.String(),
+			"[it-sell-reconciler] ALERT it_sell_retry_refused_unconfirmed intent=%s — provider refused a retry and absence is not trusted; operator action required", in.ID)
+		return false
+	}
+	if _, err := s.ReverseSell(ctx, in.ID, ""); err != nil {
+		log.Printf("[it-sell-reconciler] intent=%s reverse after confirmed absence failed: %v", in.ID, err)
+		return false
+	}
+	return true
 }
 
 func (s *ITService) submitSellPayout(ctx context.Context, in *models.ITIntent) bool {
@@ -346,7 +430,7 @@ func (s *ITService) submitSellPayout(ctx context.Context, in *models.ITIntent) b
 		_, _ = s.reverseRejectedSell(ctx, in, err)
 		return true
 	default:
-		log.Printf("[it-sell-reconciler] intent=%s payout outcome unknown: %v", in.ID, err)
+		log.Printf("[it-sell-reconciler] intent=%s payout not sent / outcome unknown: %v", in.ID, err)
 		return false
 	}
 }
@@ -358,7 +442,7 @@ func (s *ITService) adoptPayoutID(ctx context.Context, in *models.ITIntent, id s
 		return false
 	}
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND payout_id = ''", in.ID).
+		Where("id = ? AND COALESCE(payout_id, '') = ''", in.ID).
 		Updates(map[string]any{"payout_id": id, "failure_reason": ""})
 	if res.Error != nil || res.RowsAffected != 1 {
 		return false
@@ -383,17 +467,55 @@ func (s *ITService) resolveSellFromTransfer(ctx context.Context, in *models.ITIn
 		return true
 	default:
 		if in.CreatedAt.Before(now.Add(-itPayoutPendingAlertAfter)) {
-			log.Printf("[it-sell-reconciler] ALERT it_sell_payout_not_final intent=%s transfer=%s status=%s", in.ID, tr.ID, tr.Status)
+			alertf("sell-not-final:"+in.ID.String(),
+				"[it-sell-reconciler] ALERT it_sell_payout_not_final intent=%s transfer=%s status=%s", in.ID, tr.ID, tr.Status)
 		}
 		return false
 	}
 }
 
+// AlertLateDebitsBeyondWindow audits failed MCGP sells older than the 48h
+// late-debit window whose debit is nonetheless pending on-chain. Alert only:
+// that far out an operator decides. Returns how many it reported.
+func (s *ITService) AlertLateDebitsBeyondWindow(ctx context.Context) (int, error) {
+	if !s.IsConfigured() {
+		return 0, ErrITNotConfigured
+	}
+	cutoff := time.Now().Add(-itLateDebitScanWindow)
+	reported := 0
+	var cursor reconcileCursor
+	const batch = 200
+	for page := 0; page < 50; page++ {
+		var rows []models.ITIntent
+		q := s.mcgpSells(ctx).Where("status = ? AND updated_at <= ? AND COALESCE(payout_id, '') = '' AND payout_attempts = 0 AND COALESCE(debit_ref, '') <> ''",
+			models.ITStatusFailed, cutoff)
+		if err := cursor.page("deep", "", q, batch).Find(&rows).Error; err != nil {
+			return reported, err
+		}
+		for i := range rows {
+			in := &rows[i]
+			rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", in.ID))
+			if err != nil || rec.State != DebitStatePending {
+				continue
+			}
+			reported++
+			log.Printf("[it-sell-reconciler] ALERT it_sell_late_debit_beyond_window intent=%s failed_at=%s on-chain user=%s amount=%s — operator reverse required",
+				in.ID, in.UpdatedAt.Format(time.RFC3339), rec.User.Hex(), rec.Amount)
+		}
+		if len(rows) < batch {
+			return reported, nil
+		}
+		cursor.advance("deep", len(rows), batch, rows[len(rows)-1].UpdatedAt, rows[len(rows)-1].ID)
+	}
+	return reported, nil
+}
+
 // ─── Admin ──────────────────────────────────────────────────────────────────
 
-// AdminReverseSell reverses an MCGP sell only once the provider confirms the
-// payout did not happen: the transfer is FAILED, the payout was rejected, or
-// the reference was never sent / is absent from the provider's transfer list.
+// AdminReverseSell reverses an MCGP sell only once the payout is shown not to
+// have happened: the transfer is FAILED, the payout was rejected, the
+// reference was never sent, or (only while absence is trusted) the provider
+// has no transfer for it well after the last attempt.
 func (s *ITService) AdminReverseSell(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
 	in, err := s.adminMCGPSell(ctx, intentID)
 	if err != nil {
@@ -408,8 +530,8 @@ func (s *ITService) AdminReverseSell(ctx context.Context, intentID uuid.UUID) (*
 }
 
 // AdminSettleSell settles an MCGP sell only once the provider confirms the
-// payout succeeded. With no automated payout gateway (the manual payout flow)
-// the operator's own confirmation stands, as before.
+// payout succeeded. With no automated payout gateway and no payout ever sent
+// (the manual flow) the operator's own confirmation stands, as before.
 func (s *ITService) AdminSettleSell(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
 	in, err := s.adminMCGPSell(ctx, intentID)
 	if err != nil {
@@ -423,10 +545,10 @@ func (s *ITService) AdminSettleSell(ctx context.Context, intentID uuid.UUID) (*m
 	return s.SettleSell(ctx, intentID, "")
 }
 
-// RetrySellPayout re-drives the payout of a debited MCGP sell. A reference that
-// may already have been sent is looked up first and adopted if it exists; only
-// a reference the provider has no record of is sent again (reusing the same
-// reference, which is the provider's idempotency key).
+// RetrySellPayout re-drives the payout of a debited MCGP sell. A reference
+// that may already have been sent is looked up first and adopted if it
+// exists; it is only sent again when the provider has no record of it and
+// that absence is trusted.
 func (s *ITService) RetrySellPayout(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
 	in, err := s.adminMCGPSell(ctx, intentID)
 	if err != nil {
@@ -436,24 +558,27 @@ func (s *ITService) RetrySellPayout(ctx context.Context, intentID uuid.UUID) (*m
 		return nil, fmt.Errorf("%w: only a debited sell with no recorded payout can be retried", ErrITBadState)
 	}
 	if in.PayoutRejected {
-		return nil, fmt.Errorf("%w: the payout was rejected; reverse this sell instead", ErrITBadState)
+		return nil, fmt.Errorf("%w: the payout was rejected or the sell is being reversed; reverse it instead", ErrITBadState)
 	}
 	if s.payout == nil {
 		return nil, errors.New("it: no payout gateway configured")
 	}
 	if !payoutNeverSubmitted(in) {
-		if s.payoutTransfers == nil {
-			return nil, fmt.Errorf("%w: no provider reader configured", ErrITSellPayoutUnverified)
-		}
-		tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRef(in.ID), in.CreatedAt.Add(-itPayoutLookupSlack), time.Now())
+		tr, found, err := s.findPayout(ctx, in)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrITSellPayoutUnverified, err)
+			return nil, err
 		}
 		if found {
 			if !s.adoptPayoutID(ctx, in, tr.ID) {
 				return nil, fmt.Errorf("%w: could not record transfer %s", ErrITBadState, tr.ID)
 			}
 			return s.getIntent(ctx, in.ID)
+		}
+		if in.PayoutRefusedOnRetry {
+			return nil, fmt.Errorf("%w: the provider refused this reference; reverse the sell instead", ErrITBadState)
+		}
+		if !s.fwAbsenceTrusted {
+			return nil, fmt.Errorf("%w: no transfer found at Flutterwave, but absence is not trusted (IT_SELL_FW_ABSENCE_TRUSTED)", ErrITSellPayoutUnverified)
 		}
 	}
 	if err := s.AutoPayout(ctx, in); err != nil {
@@ -493,30 +618,34 @@ func (s *ITService) requirePayoutDidNotHappen(ctx context.Context, in *models.IT
 		}
 		return nil
 	}
-	// Manual payout flow: no automated transfer was ever made.
-	if s.payout == nil || payoutNeverSubmitted(in) {
+	// Only a payout provably never sent needs no provider evidence — with or
+	// without a gateway wired.
+	if payoutNeverSubmitted(in) {
 		return nil
 	}
-	if time.Since(in.UpdatedAt) < itPayoutAbsentSettle {
+	if time.Since(payoutAttemptTime(in)) < itPayoutAbsentSettle || time.Since(in.UpdatedAt) < itPayoutAbsentSettle {
 		return fmt.Errorf("%w: the last payout attempt is too recent to rule out; try again in a few minutes", ErrITSellPayoutUnverified)
 	}
 	tr, found, err := s.findPayout(ctx, in)
 	if err != nil {
 		return err
 	}
-	if !found {
+	if found {
+		s.adoptPayoutID(ctx, in, tr.ID)
+		if !strings.EqualFold(tr.Status, "FAILED") {
+			return fmt.Errorf("%w: transfer %s is %s — reversing would pay the user twice", ErrITSellPayoutConflict, tr.ID, tr.Status)
+		}
 		return nil
 	}
-	s.adoptPayoutID(ctx, in, tr.ID)
-	if !strings.EqualFold(tr.Status, "FAILED") {
-		return fmt.Errorf("%w: transfer %s is %s — reversing would pay the user twice", ErrITSellPayoutConflict, tr.ID, tr.Status)
+	if !s.fwAbsenceTrusted {
+		return fmt.Errorf("%w: no transfer found at Flutterwave, but absence is not trusted (IT_SELL_FW_ABSENCE_TRUSTED)", ErrITSellPayoutUnverified)
 	}
 	return nil
 }
 
 func (s *ITService) requirePayoutSucceeded(ctx context.Context, in *models.ITIntent) error {
 	if in.PayoutRejected {
-		return fmt.Errorf("%w: the payout was rejected — settling would take the user's MCGP", ErrITSellPayoutConflict)
+		return fmt.Errorf("%w: the payout was rejected or the sell is being reversed — settling would take the user's MCGP", ErrITSellPayoutConflict)
 	}
 	if in.PayoutID != "" {
 		tr, err := s.readTransfer(ctx, in.PayoutID)
@@ -528,10 +657,10 @@ func (s *ITService) requirePayoutSucceeded(ctx context.Context, in *models.ITInt
 		}
 		return nil
 	}
-	if s.payout == nil {
-		return nil // manual payout flow: the operator paid and confirms it
-	}
 	if payoutNeverSubmitted(in) {
+		if s.payout == nil {
+			return nil // manual payout flow: the operator paid and confirms it
+		}
 		return fmt.Errorf("%w: no payout was ever sent for this sell", ErrITSellPayoutConflict)
 	}
 	tr, found, err := s.findPayout(ctx, in)
@@ -563,41 +692,111 @@ func (s *ITService) findPayout(ctx context.Context, in *models.ITIntent) (FWTran
 	if s.payoutTransfers == nil {
 		return FWTransfer{}, false, fmt.Errorf("%w: no provider reader configured", ErrITSellPayoutUnverified)
 	}
-	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRef(in.ID), in.CreatedAt.Add(-itPayoutLookupSlack), time.Now())
+	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(in), payoutAttemptTime(in))
 	if err != nil {
 		return FWTransfer{}, false, fmt.Errorf("%w: %v", ErrITSellPayoutUnverified, err)
 	}
 	return tr, found, nil
 }
 
+// RepayStableSell pays out a parked stablecoin sell again on a fresh payout
+// reference. Allowed only once the provider confirms the previous transfer
+// FAILED — the user's fiat is then still in our balance, and re-sending the old
+// reference would only replay the failure.
+func (s *ITService) RepayStableSell(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
+	in, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	asset := models.ITIntentAsset(in)
+	if in.Direction != models.ITDirectionSell || (asset != models.ITAssetUSDC && asset != models.ITAssetUSDT) {
+		return nil, fmt.Errorf("%w: not a stablecoin sell", ErrITBadState)
+	}
+	if in.Status != models.ITStatusDebited || !in.PayoutRejected {
+		return nil, fmt.Errorf("%w: only a parked (payout failed) stablecoin sell can be repaid", ErrITBadState)
+	}
+	if s.payout == nil {
+		return nil, errors.New("it: no payout gateway configured")
+	}
+	if in.PayoutRefGen >= itPayoutRefMaxGen {
+		return nil, fmt.Errorf("%w: payout reference generations exhausted", ErrITBadState)
+	}
+	var tr FWTransfer
+	if in.PayoutID != "" {
+		if tr, err = s.readTransfer(ctx, in.PayoutID); err != nil {
+			return nil, err
+		}
+	} else {
+		var found bool
+		if tr, found, err = s.findPayout(ctx, in); err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: no previous transfer found to confirm as failed", ErrITSellPayoutUnverified)
+		}
+	}
+	if !strings.EqualFold(tr.Status, "FAILED") {
+		return nil, fmt.Errorf("%w: previous transfer %s is %s, not FAILED", ErrITSellPayoutConflict, tr.ID, tr.Status)
+	}
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ? AND payout_rejected = ? AND payout_ref_gen = ? AND COALESCE(payout_id, '') = ?",
+			in.ID, models.ITStatusDebited, true, in.PayoutRefGen, in.PayoutID).
+		Updates(map[string]any{
+			"payout_ref_gen":          in.PayoutRefGen + 1,
+			"payout_id":               "",
+			"payout_rejected":         false,
+			"payout_refused_on_retry": false,
+			"payout_attempts":         0,
+			"last_payout_attempt_at":  nil,
+			"failure_reason":          "",
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return nil, fmt.Errorf("%w: sell %s changed; not repaying", ErrITSellPayoutConflict, in.ID)
+	}
+	fresh, err := s.getIntent(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[it] stable sell intent=%s repaid on reference generation %d after transfer %s FAILED", in.ID, fresh.PayoutRefGen, tr.ID)
+	if err := s.AutoPayout(ctx, fresh); err != nil {
+		return nil, err
+	}
+	return s.getIntent(ctx, in.ID)
+}
+
 // StuckMCGPSell is an MCGP sell that has not reached a terminal state, with
 // the evidence an operator needs to resolve it.
 type StuckMCGPSell struct {
-	IntentID       uuid.UUID `json:"intentId"`
-	UserID         uuid.UUID `json:"userId"`
-	Status         string    `json:"status"`
-	WalletAddress  string    `json:"walletAddress"`
-	McgpAmount     string    `json:"mcgpAmount"`
-	NgnKobo        string    `json:"ngnKobo"`
-	NetNgnKobo     string    `json:"netNgnKobo,omitempty"`
-	DebitRef       string    `json:"debitRef,omitempty"`
-	TxHash         string    `json:"txHash,omitempty"`
-	PayoutID       string    `json:"payoutId,omitempty"`
-	PayoutAttempts int       `json:"payoutAttempts"`
-	PayoutRejected bool      `json:"payoutRejected"`
-	FailureReason  string    `json:"failureReason,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	StuckSince     time.Time `json:"stuckSince"`
+	IntentID             uuid.UUID  `json:"intentId"`
+	UserID               uuid.UUID  `json:"userId"`
+	Status               string     `json:"status"`
+	WalletAddress        string     `json:"walletAddress"`
+	McgpAmount           string     `json:"mcgpAmount"`
+	NgnKobo              string     `json:"ngnKobo"`
+	NetNgnKobo           string     `json:"netNgnKobo,omitempty"`
+	DebitRef             string     `json:"debitRef,omitempty"`
+	TxHash               string     `json:"txHash,omitempty"`
+	PayoutID             string     `json:"payoutId,omitempty"`
+	PayoutAttempts       int        `json:"payoutAttempts"`
+	PayoutRejected       bool       `json:"payoutRejected"`
+	PayoutRefusedOnRetry bool       `json:"payoutRefusedOnRetry"`
+	LastPayoutAttemptAt  *time.Time `json:"lastPayoutAttemptAt,omitempty"`
+	FailureReason        string     `json:"failureReason,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	StuckSince           time.Time  `json:"stuckSince"`
 }
 
-// ListStuckMCGPSells lists MCGP sells still processing, debiting or debited
-// after olderThan — each one is MCGP held in pendingSettle, or a debit whose
-// fate is not yet known.
+// ListStuckMCGPSells lists MCGP sells still processing, debiting, debited or
+// needing review after olderThan — each one is MCGP held in pendingSettle, or a
+// debit whose fate is not yet recorded.
 func (s *ITService) ListStuckMCGPSells(ctx context.Context, olderThan time.Duration) ([]StuckMCGPSell, error) {
 	var rows []models.ITIntent
 	if err := s.mcgpSells(ctx).
 		Where("status IN ? AND updated_at < ?",
-			[]string{models.ITStatusProcessing, models.ITStatusDebiting, models.ITStatusDebited}, time.Now().Add(-olderThan)).
+			[]string{models.ITStatusProcessing, models.ITStatusDebiting, models.ITStatusDebited, models.ITStatusNeedsReview}, time.Now().Add(-olderThan)).
 		Order("updated_at asc").Limit(200).Find(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -609,6 +808,7 @@ func (s *ITService) ListStuckMCGPSells(ctx context.Context, olderThan time.Durat
 			McgpAmount: in.McgpAmount, NgnKobo: in.NgnKobo, NetNgnKobo: in.NetNgnKobo,
 			DebitRef: in.DebitRef, TxHash: in.TxHash, PayoutID: in.PayoutID,
 			PayoutAttempts: in.PayoutAttempts, PayoutRejected: in.PayoutRejected,
+			PayoutRefusedOnRetry: in.PayoutRefusedOnRetry, LastPayoutAttemptAt: in.LastPayoutAttemptAt,
 			FailureReason: in.FailureReason, CreatedAt: in.CreatedAt, StuckSince: in.UpdatedAt,
 		})
 	}

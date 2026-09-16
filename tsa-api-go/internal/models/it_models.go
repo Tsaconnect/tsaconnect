@@ -22,10 +22,14 @@ const (
 	ITStatusCredited       = "credited"        // buy complete (premium credited)
 	ITStatusDebiting       = "debiting"        // sell: debit broadcast (or attempted) but not confirmed — resolved from chain state
 	ITStatusDebited        = "debited"         // sell: on-chain debit done, NGN payout in flight
-	ITStatusSettled        = "settled"         // sell complete (NGN paid, backing freed)
-	ITStatusReversed       = "reversed"        // sell payout failed, premium restored
-	ITStatusFailed         = "failed"
-	ITStatusCancelled      = "cancelled"
+	// ITStatusNeedsReview: a sell whose debit is already settled or reversed
+	// on-chain but whose row never recorded which — nothing automated may send
+	// or resolve it again; an operator reads the chain and closes it.
+	ITStatusNeedsReview = "needs_review"
+	ITStatusSettled     = "settled"  // sell complete (NGN paid, backing freed)
+	ITStatusReversed    = "reversed" // sell payout failed, premium restored
+	ITStatusFailed      = "failed"
+	ITStatusCancelled   = "cancelled"
 	// ITStatusAwaitingRate parks a VA credit when FX is stale at settlement —
 	// money already landed; never credit at a stale rate (Spec 1).
 	ITStatusAwaitingRate = "awaiting_rate"
@@ -264,6 +268,20 @@ type ITIntent struct {
 	// transfer webhook reported FAILED. An MCGP sell carrying it is reversed; a
 	// stablecoin sell is parked for an operator.
 	PayoutRejected bool `gorm:"not null;default:false" json:"payoutRejected,omitempty"`
+	// PayoutRefusedOnRetry records that the provider refused a RETRY of the
+	// payout reference. Unlike a first-attempt refusal this proves nothing — it
+	// can mean the reference is taken because the first attempt went out — so
+	// the sell is reversed only after the provider confirms no transfer exists.
+	PayoutRefusedOnRetry bool `gorm:"not null;default:false" json:"payoutRefusedOnRetry,omitempty"`
+	// LastPayoutAttemptAt is when the current reference was last sent. The
+	// provider transfer search is centred on it, and a reverse is refused while
+	// an attempt is recent enough to still be in flight. NULL on rows from
+	// before the column existed.
+	LastPayoutAttemptAt *time.Time `json:"lastPayoutAttemptAt,omitempty"`
+	// PayoutRefGen is the payout reference generation. 0 is the original
+	// reference; an operator repay of a provider-confirmed FAILED stablecoin
+	// payout moves to a fresh one. MCGP sells never leave generation 0.
+	PayoutRefGen int `gorm:"not null;default:0" json:"payoutRefGen,omitempty"`
 	// ConversionID is the Flutterwave transfer id of the stablecoin→fiat
 	// conversion. Conversion is asynchronous, so the intent waits in
 	// `converting` on this id until the transfer settles.

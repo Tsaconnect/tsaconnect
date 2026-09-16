@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -38,6 +39,38 @@ const ITPayoutRefPrefix = "IT-SELL-"
 // keep these two in lockstep.
 func itPayoutRef(intentID uuid.UUID) string {
 	return ITPayoutRefPrefix + strings.ReplaceAll(intentID.String(), "-", "")
+}
+
+// itPayoutRefMaxGen is the last reference generation that fits Flutterwave's
+// 42-char limit: the base reference is 40 chars, leaving room for "-N".
+const itPayoutRefMaxGen = 9
+
+// itPayoutRefFor is the intent's CURRENT payout reference. Generation 0 is the
+// original reference (every MCGP sell, and every sell before repay existed);
+// a stablecoin repay moves to "<base>-<gen>".
+func itPayoutRefFor(intent *models.ITIntent) string {
+	if intent.PayoutRefGen <= 0 {
+		return itPayoutRef(intent.ID)
+	}
+	return fmt.Sprintf("%s-%d", itPayoutRef(intent.ID), intent.PayoutRefGen)
+}
+
+// parseITPayoutRef reverses itPayoutRefFor.
+func parseITPayoutRef(ref string) (uuid.UUID, int, error) {
+	body := strings.TrimPrefix(strings.TrimSpace(ref), ITPayoutRefPrefix)
+	gen := 0
+	if i := strings.LastIndex(body, "-"); i >= 0 && len(body)-i <= 2 {
+		n, err := strconv.Atoi(body[i+1:])
+		if err != nil || n < 1 || n > itPayoutRefMaxGen {
+			return uuid.Nil, 0, fmt.Errorf("bad payout reference generation in %q", ref)
+		}
+		gen, body = n, body[:i]
+	}
+	id, err := uuid.Parse(body)
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	return id, gen, nil
 }
 
 // ITSellBank is the payout destination captured at sell creation. Bank fields
@@ -211,17 +244,26 @@ func (s *ITService) AutoCreditFromInbound(ctx context.Context, paymentRef, amoun
 
 // AutoPayout fires the fiat leg for a debited sell intent through the payout
 // gateway and records the provider's transfer id. Idempotent: an intent that
-// already has a PayoutID is not re-sent, and every send reuses the intent's one
-// payout reference, which is also the provider's idempotency key.
+// already has a PayoutID is not re-sent, and every send of one reference
+// generation reuses the same reference, which is also the provider's
+// idempotency key.
 //
 // The error classifies the outcome, because the money invariant depends on it:
 //
-//   - ErrITSellPayoutRejected: positive evidence no transfer exists — nothing
-//     was sent on the first attempt, or the provider refused the first request
-//     (directly, or by replaying that refusal from its idempotency cache). The
-//     intent is marked PayoutRejected; for an MCGP sell the caller reverses.
-//   - any other error: the outcome is unknown. Nothing is marked; the sell
-//     reconciler resolves it from the provider before anything else happens.
+//   - ErrITSellPayoutRejected (MCGP only): positive evidence no transfer
+//     exists — nothing was ever sent, or the provider refused the FIRST request
+//     for the reference. The intent is marked PayoutRejected; the caller
+//     reverses.
+//   - a refusal of a RETRY proves nothing (the reference may be taken because
+//     the first attempt went out). It is recorded as PayoutRefusedOnRetry and
+//     the reconciler reverses only once the provider confirms no transfer.
+//   - a brokered stablecoin sell's refusals are only recorded: its watcher
+//     retries, and only a provider-confirmed FAILED transfer parks it.
+//   - any other error: outcome unknown, nothing marked.
+//
+// An MCGP sell is only paid out while its debit is still Pending on-chain: a
+// debit already settled or reversed means the row is stale, and paying it
+// would pay a user whose MCGP was returned.
 func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) error {
 	if s.payout == nil {
 		return errors.New("it: no payout gateway configured")
@@ -236,20 +278,34 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		// The provider would only replay its refusal for this reference.
 		return fmt.Errorf("%w: payout already rejected for intent %s", ErrITSellPayoutRejected, intent.ID)
 	}
+	if intent.PayoutRefusedOnRetry {
+		return fmt.Errorf("%w: a retry of this payout was refused; awaiting provider confirmation", ErrITBadState)
+	}
+	isMCGP := models.ITIntentAsset(intent) == models.ITAssetMCGP
 	firstAttempt := payoutNeverSubmitted(intent)
 
 	payoutReq, err := s.buildSellPayoutRequest(ctx, intent)
 	if err != nil {
 		return s.payoutNotSent(ctx, intent, firstAttempt, err)
 	}
+	if isMCGP {
+		if err := s.requireDebitPending(ctx, intent); err != nil {
+			return err
+		}
+	}
 
-	// Count the attempt BEFORE the request leaves: a crash mid-request must
-	// still read as "may have been sent". The attempts guard makes concurrent
-	// callers (request, reconciler, admin) take turns instead of both sending.
+	// Claim the attempt BEFORE the request leaves: a crash mid-request must
+	// still read as "may have been sent". The guard makes concurrent callers
+	// (request, reconciler, admin retry) take turns, and loses to a reverse
+	// that has already claimed the row (payout_rejected).
+	now := time.Now()
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ? AND payout_id = '' AND payout_rejected = ? AND payout_attempts = ?",
-			intent.ID, models.ITStatusDebited, false, intent.PayoutAttempts).
-		Update("payout_attempts", gorm.Expr("payout_attempts + 1"))
+		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = '' AND payout_rejected = ? AND payout_refused_on_retry = ? AND payout_attempts = ? AND payout_ref_gen = ?",
+			intent.ID, models.ITStatusDebited, false, false, intent.PayoutAttempts, intent.PayoutRefGen).
+		Updates(map[string]any{
+			"payout_attempts":        gorm.Expr("payout_attempts + 1"),
+			"last_payout_attempt_at": now,
+		})
 	if res.Error != nil {
 		return fmt.Errorf("it payout: record attempt: %w", res.Error)
 	}
@@ -257,15 +313,28 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		return fmt.Errorf("%w: payout for intent %s is being handled elsewhere", ErrITBadState, intent.ID)
 	}
 	intent.PayoutAttempts++
+	intent.LastPayoutAttemptAt = &now
 
 	payoutID, err := s.payout.InitiatePayout(ctx, payoutReq)
 	if err != nil {
 		var rej *ProviderRejectedError
-		if errors.As(err, &rej) && (firstAttempt || rej.Replayed) {
+		switch {
+		case errors.As(err, &rej) && isMCGP && firstAttempt:
 			s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error())
 			return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
+		case errors.As(err, &rej) && isMCGP:
+			reason := truncateReason(itPayoutReasonPrefix + " refused on retry: " + err.Error())
+			intent.PayoutRefusedOnRetry, intent.FailureReason = true, reason
+			if uerr := s.db.WithContext(ctx).Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+				Updates(map[string]any{"payout_refused_on_retry": true, "failure_reason": reason}).Error; uerr != nil {
+				log.Printf("[it] ALERT it_sell_retry_refusal_unrecorded intent=%s: %v", intent.ID, uerr)
+			}
+			return err
 		}
 		reason := truncateReason(itPayoutReasonPrefix + " unknown: " + err.Error())
+		if errors.As(err, &rej) {
+			reason = truncateReason(itPayoutReasonPrefix + " refused: " + err.Error())
+		}
 		intent.FailureReason = reason
 		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
 			Where("id = ?", intent.ID).
@@ -277,6 +346,22 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("id = ?", intent.ID).
 		Updates(map[string]any{"payout_id": payoutID, "failure_reason": ""}).Error
+}
+
+// requireDebitPending refuses a payout unless the sell's debit is Pending
+// on-chain for this wallet and amount. A debit that is already resolved moves
+// the row to needs_review: nothing may pay or reverse it automatically.
+func (s *ITService) requireDebitPending(ctx context.Context, intent *models.ITIntent) error {
+	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", intent.ID))
+	if err != nil {
+		return fmt.Errorf("it payout: cannot confirm the debit is pending: %w", err)
+	}
+	if rec.State == DebitStatePending && debitMatchesIntent(rec, intent) {
+		return nil
+	}
+	s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+		fmt.Sprintf("payout blocked: on-chain debit state %d does not match a pending debit for this sell", rec.State))
+	return fmt.Errorf("%w: debit for intent %s is not pending on-chain", ErrITBadState, intent.ID)
 }
 
 // itPayoutReasonPrefix starts every failure_reason AutoPayout writes. Rows
@@ -377,7 +462,7 @@ func (s *ITService) buildSellPayoutRequest(ctx context.Context, intent *models.I
 		Amount:              payoutAmount,
 		SourceCurrency:      sourceCurrency,
 		AmountNGN:           naira,
-		Reference:           itPayoutRef(intent.ID),
+		Reference:           itPayoutRefFor(intent),
 		SenderName:          "TSA Connect",
 		DestinationCurrency: intent.DestinationCurrency,
 		RailType:            intent.RailType,
@@ -388,25 +473,25 @@ func (s *ITService) buildSellPayoutRequest(ctx context.Context, intent *models.I
 }
 
 // ResolvePayoutFromWebhook closes a sell intent from a transfer-status
-// webhook. merchantTxRef must carry the ITPayoutRefPrefix. Mapping:
-// success → settle (frees the on-chain backing), failed → reverse (restores
-// the user's premium), pending → no-op, reversed → operator case.
-func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, status string) error {
+// webhook. merchantTxRef must carry the ITPayoutRefPrefix; payoutID is the
+// provider transfer id the webhook names. Mapping: success → settle, failed →
+// reverse (MCGP) or park (stablecoin), pending → no-op, reversed → operator.
+//
+// A signed webhook alone never moves money: the transfer is read back from the
+// provider and its status must match. A webhook for another transfer id, or
+// for a superseded reference generation, is acknowledged and ignored with an
+// ALERT.
+func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, payoutID, status string) error {
 	if !s.IsConfigured() {
 		return ErrITNotConfigured
 	}
-	idStr := strings.TrimPrefix(strings.TrimSpace(merchantTxRef), ITPayoutRefPrefix)
-	intentID, err := uuid.Parse(idStr)
+	intentID, gen, err := parseITPayoutRef(merchantTxRef)
 	if err != nil {
 		return fmt.Errorf("it payout webhook: bad ref %q: %w", merchantTxRef, err)
 	}
-	switch strings.ToLower(status) {
-	case "success":
-		_, err = s.SettleSell(ctx, intentID, "")
-		return err
-	case "failed":
-		_, err = s.ReverseSell(ctx, intentID, "")
-		return err
+	status = strings.ToLower(status)
+	switch status {
+	case "success", "failed":
 	case "pending":
 		return nil
 	case "reversed":
@@ -415,6 +500,68 @@ func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef,
 	default:
 		return fmt.Errorf("it payout webhook: unknown status %q for intent %s", status, intentID)
 	}
+	settle := status == "success"
+
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Status == models.ITStatusSettled || intent.Status == models.ITStatusReversed {
+		_, err = s.resolveSell(ctx, intentID, "", settle) // no-op; alerts on a contradiction
+		return err
+	}
+	if gen != intent.PayoutRefGen {
+		alertf("webhook-gen:"+intentID.String()+":"+merchantTxRef,
+			"[it] ALERT it_payout_webhook_superseded intent=%s ref=%s current_gen=%d — ignored", intentID, merchantTxRef, intent.PayoutRefGen)
+		return fmt.Errorf("%w: superseded payout reference", ErrNonSettlingEvent)
+	}
+	payoutID = strings.TrimSpace(payoutID)
+	if payoutID != "" && intent.PayoutID != "" && payoutID != intent.PayoutID {
+		alertf("webhook-id:"+intentID.String()+":"+payoutID,
+			"[it] ALERT it_payout_webhook_id_mismatch intent=%s webhook_transfer=%s recorded_transfer=%s — ignored", intentID, payoutID, intent.PayoutID)
+		return fmt.Errorf("%w: payout id mismatch", ErrNonSettlingEvent)
+	}
+	transferID := intent.PayoutID
+	if transferID == "" {
+		transferID = payoutID
+	}
+	if transferID == "" {
+		return fmt.Errorf("it payout webhook: no transfer id to confirm for intent %s", intentID)
+	}
+	if s.payoutTransfers == nil {
+		return fmt.Errorf("it payout webhook: no provider reader configured to confirm transfer %s", transferID)
+	}
+	tr, err := s.payoutTransfers.GetTransfer(ctx, transferID)
+	if err != nil {
+		return fmt.Errorf("it payout webhook: confirm transfer %s: %w", transferID, err)
+	}
+	confirmed := strings.EqualFold(tr.Status, "FAILED")
+	if settle {
+		confirmed = fwSucceeded(tr.Status)
+	}
+	if !confirmed {
+		alertf("webhook-status:"+transferID+":"+status,
+			"[it] ALERT it_payout_webhook_unconfirmed intent=%s transfer=%s webhook=%s provider=%s — no action", intentID, transferID, status, tr.Status)
+		return fmt.Errorf("%w: provider reports transfer %s as %s", ErrNonSettlingEvent, transferID, tr.Status)
+	}
+	if intent.PayoutID == "" {
+		// The webhook beat the send to recording the id. Adopt it only if the
+		// provider ties the transfer to this reference.
+		if tr.Reference != merchantTxRef {
+			alertf("webhook-ref:"+transferID,
+				"[it] ALERT it_payout_webhook_reference_mismatch intent=%s transfer=%s provider_ref=%q webhook_ref=%q — ignored", intentID, transferID, tr.Reference, merchantTxRef)
+			return fmt.Errorf("%w: transfer reference mismatch", ErrNonSettlingEvent)
+		}
+		if !s.adoptPayoutID(ctx, intent, transferID) {
+			return fmt.Errorf("it payout webhook: could not record transfer %s for intent %s", transferID, intentID)
+		}
+	}
+	if settle {
+		_, err = s.SettleSell(ctx, intentID, "")
+	} else {
+		_, err = s.ReverseSell(ctx, intentID, "")
+	}
+	return err
 }
 
 // ─── Flutterwave VA provisioner ────────────────────────────────────────────

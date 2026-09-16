@@ -776,17 +776,33 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 }
 
 // fwTransferListMaxPages bounds a reference scan: 20 pages of 50 is a thousand
-// transfers, far more than a sell window holds. Hitting it is an error, not
+// transfers, far more than two days of payouts. Hitting it is an error, not
 // "not found".
 const fwTransferListMaxPages = 20
 
-// FindTransferByReference scans GET /transfers over [from, to] for a transfer
-// carrying reference. v4 has no reference filter, so the window is paged by
-// cursor. found=false with a nil error means every page in the window was read
-// and none matched; any doubt about completeness (a failed page, a cursor that
-// does not advance, the page cap) is an error, never a silent "not found" —
-// callers use absence as evidence that no payout was ever created.
-func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, from, to time.Time) (FWTransfer, bool, error) {
+// fwTransferSearchSpan is how far either side of the attempt time a reference
+// is searched for.
+const fwTransferSearchSpan = 24 * time.Hour
+
+// FindTransferByReference looks for the transfer carrying reference among
+// transfers created within a day either side of around.
+//
+// v4 has no reference filter, so GET /transfers is paged by cursor over a
+// date-only window (the convention FW listing endpoints use; `to` is pushed a
+// day out so the window's last day is included) and rows are filtered here by
+// created_datetime.
+//
+// found=false with a nil error is a claim that the transfer does not exist, and
+// callers act on it, so it is only returned after a complete scan of a response
+// shape this code positively recognises. Everything else is an error: a missing
+// cursor, has_more_items, transfer list, reference or created_datetime; a
+// cursor that does not advance; the page cap; or more than one transfer on the
+// reference (references are meant to be unique, so two means something is
+// wrong and neither may be picked).
+//
+// The shape was built from Flutterwave's published v4 schema and has not been
+// confirmed against the live API; see IT_SELL_FW_ABSENCE_TRUSTED.
+func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error) {
 	if !c.IsEnabled() {
 		return FWTransfer{}, false, ErrFlutterwaveDisabled
 	}
@@ -794,11 +810,13 @@ func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, referen
 	if reference == "" {
 		return FWTransfer{}, false, errors.New("flutterwave list-transfers: reference required")
 	}
+	lo, hi := around.Add(-fwTransferSearchSpan).UTC(), around.Add(fwTransferSearchSpan).UTC()
+	var match *FWTransfer
 	cursor := ""
 	for page := 0; page < fwTransferListMaxPages; page++ {
 		q := url.Values{}
-		q.Set("from", from.UTC().Format(time.RFC3339))
-		q.Set("to", to.UTC().Format(time.RFC3339))
+		q.Set("from", lo.Format("2006-01-02"))
+		q.Set("to", hi.AddDate(0, 0, 1).Format("2006-01-02"))
 		q.Set("size", "50")
 		if cursor != "" {
 			q.Set("next", cursor)
@@ -810,34 +828,83 @@ func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, referen
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return FWTransfer{}, false, fwError("list-transfers", resp.StatusCode, body)
 		}
-		var env fwEnvelope
-		if err := json.Unmarshal(body, &env); err != nil {
-			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers decode: %w", err)
+		rows, hasMore, next, err := decodeFWTransferPage(body)
+		if err != nil {
+			return FWTransfer{}, false, err
 		}
-		var data struct {
-			Cursor struct {
-				Next         string `json:"next"`
-				HasMoreItems bool   `json:"has_more_items"`
-			} `json:"cursor"`
-			Transfers []FWTransfer `json:"transfers"`
-		}
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers decode data: %w", err)
-		}
-		for _, tr := range data.Transfers {
-			if tr.Reference == reference {
-				return tr, true, nil
+		for i := range rows {
+			tr := rows[i]
+			if tr.Reference != reference || tr.createdAt.Before(lo) || tr.createdAt.After(hi) {
+				continue
 			}
+			if match != nil {
+				return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: reference %s carried by transfers %s and %s", reference, match.ID, tr.ID)
+			}
+			found := tr.FWTransfer
+			match = &found
 		}
-		if !data.Cursor.HasMoreItems {
-			return FWTransfer{}, false, nil
+		if !hasMore {
+			if match == nil {
+				return FWTransfer{}, false, nil
+			}
+			return *match, true, nil
 		}
-		if data.Cursor.Next == "" || data.Cursor.Next == cursor {
+		if next == "" || next == cursor {
 			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: cursor did not advance after page %d; scan incomplete", page+1)
 		}
-		cursor = data.Cursor.Next
+		cursor = next
 	}
 	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", fwTransferListMaxPages)
+}
+
+type fwListedTransfer struct {
+	FWTransfer
+	createdAt time.Time
+}
+
+// decodeFWTransferPage decodes one /transfers page, rejecting any shape that
+// is not exactly the documented one.
+func decodeFWTransferPage(body []byte) ([]fwListedTransfer, bool, string, error) {
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, false, "", fmt.Errorf("flutterwave list-transfers decode: %w", err)
+	}
+	var data struct {
+		Cursor *struct {
+			Next         string `json:"next"`
+			HasMoreItems *bool  `json:"has_more_items"`
+		} `json:"cursor"`
+		Transfers *[]struct {
+			ID              string  `json:"id"`
+			Reference       *string `json:"reference"`
+			Status          string  `json:"status"`
+			CreatedDatetime *string `json:"created_datetime"`
+		} `json:"transfers"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, false, "", fmt.Errorf("flutterwave list-transfers: unrecognised data shape: %w", err)
+	}
+	if data.Cursor == nil || data.Cursor.HasMoreItems == nil {
+		return nil, false, "", errors.New("flutterwave list-transfers: response has no cursor.has_more_items; cannot tell whether the scan is complete")
+	}
+	if data.Transfers == nil {
+		return nil, false, "", errors.New("flutterwave list-transfers: response has no transfers list")
+	}
+	out := make([]fwListedTransfer, 0, len(*data.Transfers))
+	for _, t := range *data.Transfers {
+		if t.Reference == nil || t.CreatedDatetime == nil {
+			return nil, false, "", fmt.Errorf("flutterwave list-transfers: transfer %q lacks reference or created_datetime", t.ID)
+		}
+		at, err := time.Parse(time.RFC3339, *t.CreatedDatetime)
+		if err != nil {
+			return nil, false, "", fmt.Errorf("flutterwave list-transfers: transfer %q created_datetime %q: %w", t.ID, *t.CreatedDatetime, err)
+		}
+		out = append(out, fwListedTransfer{
+			FWTransfer: FWTransfer{ID: t.ID, Reference: *t.Reference, Status: t.Status},
+			createdAt:  at,
+		})
+	}
+	return out, *data.Cursor.HasMoreItems, data.Cursor.Next, nil
 }
 
 // ─── Charges (collection verification) ─────────────────────────────────────

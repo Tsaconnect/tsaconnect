@@ -1043,6 +1043,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superIT.POST("/settle/:id", ith.AdminSettle)
 			superIT.POST("/reverse/:id", ith.AdminReverse)
 			superIT.POST("/sell/:id/retry-payout", ith.AdminRetrySellPayout)
+			superIT.POST("/stable/:id/repay", ith.AdminRepayStableSell)
 			// RepriceParkedStableBuy resumes a purchase still holding the
 			// user's naira, same class of action as AdminRepriceCredit above —
 			// it belongs behind the same super_admin gate, not plain admin.

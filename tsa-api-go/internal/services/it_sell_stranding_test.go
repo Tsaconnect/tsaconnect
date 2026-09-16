@@ -26,6 +26,8 @@ type fakeSellChain struct {
 	reverse   error
 	readErr   error
 	records   map[[32]byte]DebitRecord
+	// holdResolves leaves a broadcast settle/reverse unmined (still Pending).
+	holdResolves bool
 
 	debitCalls, settleCalls, reverseCalls int
 }
@@ -57,9 +59,11 @@ func (f *fakeSellChain) OperatorSettleDebit(ctx context.Context, ref [32]byte) (
 	if f.settleErr != nil {
 		return "", f.settleErr
 	}
-	r := f.records[ref]
-	r.State = DebitStateResolved
-	f.records[ref] = r
+	if !f.holdResolves {
+		r := f.records[ref]
+		r.State = DebitStateResolved
+		f.records[ref] = r
+	}
 	return "0xsettle", nil
 }
 
@@ -68,9 +72,11 @@ func (f *fakeSellChain) OperatorReverseDebit(ctx context.Context, ref [32]byte) 
 	if f.reverse != nil {
 		return "", f.reverse
 	}
-	r := f.records[ref]
-	r.State = DebitStateResolved
-	f.records[ref] = r
+	if !f.holdResolves {
+		r := f.records[ref]
+		r.State = DebitStateResolved
+		f.records[ref] = r
+	}
 	return "0xreverse", nil
 }
 
@@ -98,6 +104,7 @@ type fakePayoutTransfers struct {
 	findErr error
 
 	getCalls, findCalls int
+	lastAround          time.Time
 }
 
 func newFakePayoutTransfers() *fakePayoutTransfers {
@@ -116,8 +123,9 @@ func (f *fakePayoutTransfers) GetTransfer(_ context.Context, id string) (FWTrans
 	return tr, nil
 }
 
-func (f *fakePayoutTransfers) FindTransferByReference(_ context.Context, ref string, _, _ time.Time) (FWTransfer, bool, error) {
+func (f *fakePayoutTransfers) FindTransferByReference(_ context.Context, ref string, around time.Time) (FWTransfer, bool, error) {
 	f.findCalls++
+	f.lastAround = around
 	if f.findErr != nil {
 		return FWTransfer{}, false, f.findErr
 	}
@@ -126,6 +134,18 @@ func (f *fakePayoutTransfers) FindTransferByReference(_ context.Context, ref str
 }
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
+
+// withPendingDebit gives a directly-seeded MCGP sell the Pending on-chain
+// debit a real sell would have, which AutoPayout requires before paying.
+func withPendingDebit(s *ITService, in *models.ITIntent) {
+	chain, ok := s.sellChain.(*fakeSellChain)
+	if !ok {
+		chain = newFakeSellChain()
+		s.sellChain = chain
+	}
+	amount, _ := parseStoredWei(in.McgpAmount)
+	chain.records[itRef("IT:debit:", in.ID)] = DebitRecord{User: common.HexToAddress(in.WalletAddress), Amount: amount, State: DebitStatePending}
+}
 
 const sellWallet = "0x00000000000000000000000000000000000000AB"
 
@@ -185,6 +205,9 @@ func (f *sellFixture) age(t *testing.T, id uuid.UUID, by time.Duration) {
 	if err := f.s.db.Model(&models.ITIntent{}).Where("id = ?", id).
 		UpdateColumns(map[string]any{"created_at": ts, "updated_at": ts}).Error; err != nil {
 		t.Fatalf("age intent: %v", err)
+	}
+	if err := f.s.db.Exec(`UPDATE it_intents SET last_payout_attempt_at = ? WHERE id = ? AND payout_attempts > 0`, ts, id).Error; err != nil {
+		t.Fatalf("age attempt: %v", err)
 	}
 }
 
@@ -346,22 +369,20 @@ func TestAutoPayout_PreflightFailureOnFirstAttemptIsRejection(t *testing.T) {
 }
 
 // On a retry, a refusal can mean "that reference already exists" — i.e. the
-// first attempt went out. Only a replayed answer describes the first attempt.
-func TestAutoPayout_RetryRefusalIsOnlyRejectionWhenReplayed(t *testing.T) {
-	f := newSellFixture(t)
-	in := f.seedSell(t, func(in *models.ITIntent) { in.PayoutAttempts = 1 })
-	f.gw.err = rejected("HTTP 400: reference already exists")
-	if err := f.s.AutoPayout(context.Background(), in); errors.Is(err, ErrITSellPayoutRejected) {
-		t.Fatal("a fresh refusal of a retried reference is not evidence the payout failed")
-	}
-	if got := f.reload(t, in.ID); got.PayoutRejected {
-		t.Fatal("must not mark rejected")
-	}
-
-	in2 := f.seedSell(t, func(in *models.ITIntent) { in.PayoutAttempts = 1 })
-	f.gw.err = &ProviderRejectedError{Err: errors.New("HTTP 400: Insufficient balance"), Replayed: true}
-	if err := f.s.AutoPayout(context.Background(), in2); !errors.Is(err, ErrITSellPayoutRejected) {
-		t.Fatalf("err = %v, want a rejection for a replayed refusal", err)
+// first attempt went out. Replayed or not, it is never an immediate rejection:
+// it is recorded as an unconfirmed refusal for the reconciler to check.
+func TestAutoPayout_RetryRefusalIsNeverAnImmediateRejection(t *testing.T) {
+	for _, replayed := range []bool{false, true} {
+		f := newSellFixture(t)
+		in := f.seedSell(t, func(in *models.ITIntent) { in.PayoutAttempts = 1 })
+		f.gw.err = &ProviderRejectedError{Err: errors.New("HTTP 400"), Replayed: replayed}
+		if err := f.s.AutoPayout(context.Background(), in); errors.Is(err, ErrITSellPayoutRejected) {
+			t.Fatalf("replayed=%v: a refusal of a retried reference must not read as a rejection", replayed)
+		}
+		got := f.reload(t, in.ID)
+		if got.PayoutRejected || !got.PayoutRefusedOnRetry || f.chain.reverseCalls != 0 {
+			t.Fatalf("replayed=%v: rejected=%v refused=%v reverse=%d", replayed, got.PayoutRejected, got.PayoutRefusedOnRetry, f.chain.reverseCalls)
+		}
 	}
 }
 
@@ -538,6 +559,7 @@ func TestReconcileSells_UnknownSubmissionAdoptsExistingTransfer(t *testing.T) {
 
 func TestReconcileSells_UnknownSubmissionAbsentRetriesSameReference(t *testing.T) {
 	f := newSellFixture(t)
+	f.s.SetFWAbsenceTrusted(true)
 	in := f.seedSell(t, func(in *models.ITIntent) { in.PayoutAttempts = 1; in.FailureReason = "auto-payout unknown: timeout" })
 	f.age(t, in.ID, 10*time.Minute)
 
@@ -613,7 +635,9 @@ func TestAdminReverseSell_RequiresEvidenceThePayoutDidNotHappen(t *testing.T) {
 			func(f *sellFixture, in *models.ITIntent) {
 				f.transfers.byRef[itPayoutRef(in.ID)] = FWTransfer{ID: "trf_2", Status: "SUCCESSFUL"}
 			}, false},
-		{"unknown submission absent at provider", func(in *models.ITIntent) { in.PayoutAttempts = 1 }, nil, true},
+		{"unknown submission absent at provider (absence trusted)", func(in *models.ITIntent) { in.PayoutAttempts = 1 },
+			func(f *sellFixture, _ *models.ITIntent) { f.s.SetFWAbsenceTrusted(true) }, true},
+		{"unknown submission absent at provider (absence not trusted)", func(in *models.ITIntent) { in.PayoutAttempts = 1 }, nil, false},
 		{"reference scan failed", func(in *models.ITIntent) { in.PayoutAttempts = 1 },
 			func(f *sellFixture, _ *models.ITIntent) { f.transfers.findErr = errors.New("scan incomplete") }, false},
 		{"recorded rejection", func(in *models.ITIntent) { in.PayoutRejected = true }, nil, true},
@@ -675,6 +699,7 @@ func TestRetrySellPayout(t *testing.T) {
 	})
 	t.Run("sends when no transfer exists", func(t *testing.T) {
 		f := newSellFixture(t)
+		f.s.SetFWAbsenceTrusted(true)
 		in := f.seedSell(t, func(in *models.ITIntent) { in.PayoutAttempts = 1 })
 		got, err := f.s.RetrySellPayout(context.Background(), in.ID)
 		if err != nil || got.PayoutID != "trf_ok" || len(f.gw.calls) != 1 {
@@ -751,7 +776,8 @@ func TestResolvePayoutWebhook_StableFailedDoesNotTouchSwap(t *testing.T) {
 		in.PayoutAttempts = 1
 	})
 
-	if err := f.s.ResolvePayoutFromWebhook(context.Background(), itPayoutRef(in.ID), "failed"); err != nil {
+	f.transfers.byID["trf_s1"] = FWTransfer{ID: "trf_s1", Reference: itPayoutRef(in.ID), Status: "FAILED"}
+	if err := f.s.ResolvePayoutFromWebhook(context.Background(), itPayoutRef(in.ID), "trf_s1", "failed"); err != nil {
 		t.Fatalf("webhook must be acknowledged: %v", err)
 	}
 	got := f.reload(t, in.ID)
@@ -773,7 +799,8 @@ func TestResolvePayoutWebhook_StableSuccessSettlesWithoutSwap(t *testing.T) {
 		in.PayoutAttempts = 1
 	})
 
-	if err := f.s.ResolvePayoutFromWebhook(context.Background(), itPayoutRef(in.ID), "success"); err != nil {
+	f.transfers.byID["trf_s2"] = FWTransfer{ID: "trf_s2", Reference: itPayoutRef(in.ID), Status: "SUCCESSFUL"}
+	if err := f.s.ResolvePayoutFromWebhook(context.Background(), itPayoutRef(in.ID), "trf_s2", "success"); err != nil {
 		t.Fatalf("webhook: %v", err)
 	}
 	if got := f.reload(t, in.ID); f.chain.settleCalls != 0 || got.Status != models.ITStatusSettled {

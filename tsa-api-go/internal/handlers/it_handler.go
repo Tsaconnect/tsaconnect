@@ -659,7 +659,7 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	// debit is broadcast, a client hanging up must not stop it half way.
 	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
 	if err != nil {
-		r := sellFailureResponse(err)
+		r := sellFailureResponse(err, intent)
 		if r.accepted && intent != nil {
 			intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
 			c.JSON(r.status, gin.H{"success": true, "message": r.message, "code": r.code, "data": gin.H{"intent": intent}})
@@ -684,13 +684,17 @@ type sellOutcome struct {
 
 // sellFailureResponse maps a CreateSellIntent error to what the user is told.
 // The two sell-outcome errors carry chain/provider detail that stays in logs.
-func sellFailureResponse(err error) sellOutcome {
+func sellFailureResponse(err error, intent *models.ITIntent) sellOutcome {
 	switch {
 	case errors.Is(err, services.ErrITSellPayoutRejected):
+		message := "We couldn't send your payout, so this sale was cancelled. Your MCGP is being returned to your balance — this can take a few minutes."
+		if intent != nil && intent.Status == models.ITStatusReversed {
+			message = "We couldn't send your payout, so this sale was cancelled. Your MCGP has been returned to your balance (it can take a few minutes to show)."
+		}
 		return sellOutcome{
 			status:  http.StatusUnprocessableEntity,
 			code:    "it_sell_payout_rejected",
-			message: "We couldn't send your payout, so this sale was cancelled. Your MCGP has been returned to your balance (it can take a few minutes to show).",
+			message: message,
 		}
 	case errors.Is(err, services.ErrITSellDebitPending):
 		return sellOutcome{
@@ -870,6 +874,23 @@ func (h *ITHandler) AdminRetrySellPayout(c *gin.Context) {
 	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
 		return h.it.RetrySellPayout(c.Request.Context(), intentID)
 	})
+}
+
+// POST /api/it/admin/stable/:id/repay — pay a parked stablecoin sell again on
+// a fresh payout reference. Refused unless Flutterwave confirms the previous
+// transfer FAILED.
+func (h *ITHandler) AdminRepayStableSell(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	out, err := h.it.RepayStableSell(c.Request.Context(), id)
+	if err != nil {
+		utils.ErrorResponse(c, adminSellActionStatus(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
 }
 
 // GET /api/it/admin/sell/stuck?minutes= — MCGP sells still processing,

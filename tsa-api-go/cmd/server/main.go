@@ -1261,6 +1261,7 @@ func main() {
 					// Transfer read-back: the evidence the sell reconciler and the
 					// admin settle/reverse guards act on.
 					itService.SetPayoutTransfers(fwClient)
+					itService.SetFWAbsenceTrusted(cfg.ITSellFWAbsenceTrusted)
 				}
 				log.Printf("[it] sell auto-payout ACTIVE (gateway live)")
 			} else {
