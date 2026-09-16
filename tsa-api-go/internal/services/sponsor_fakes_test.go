@@ -215,6 +215,24 @@ type fakeSponsorNative struct {
 	receiptStatus uint64
 	receiptErr    error
 	prepareErr    error
+
+	// ERC-20 fields, for the treasury lane (Task 6). allowance is what
+	// GetTokenAllowance answers with; nil means zero, so an approve is always
+	// exercised unless a test sets one high enough to skip it.
+	allowance    *big.Int
+	allowanceErr error
+
+	approveToken   string
+	approveOwner   string
+	approveSpender string
+	approveAmount  *big.Int
+	approveErr     error
+
+	transferToken string
+	transferFrom  string
+	transferTo    string
+	transferAmt   *big.Int
+	transferErr   error
 }
 
 func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.Int) ([]byte, error) {
@@ -241,6 +259,40 @@ func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string,
 		return nil, f.receiptErr
 	}
 	return &types.Receipt{Status: f.receiptStatus}, nil
+}
+
+func (f *fakeSponsorNative) GetTokenAllowance(_, _, _ string) (*big.Int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.allowanceErr != nil {
+		return nil, f.allowanceErr
+	}
+	if f.allowance != nil {
+		return new(big.Int).Set(f.allowance), nil
+	}
+	return big.NewInt(0), nil
+}
+
+func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approveToken, f.approveOwner, f.approveSpender = tokenAddress, owner, spender
+	f.approveAmount = new(big.Int).Set(amount)
+	if f.approveErr != nil {
+		return nil, f.approveErr
+	}
+	return []byte(`{"approve":true}`), nil
+}
+
+func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.transferToken, f.transferFrom, f.transferTo = tokenAddress, from, to
+	f.transferAmt = new(big.Int).Set(amount)
+	if f.transferErr != nil {
+		return nil, f.transferErr
+	}
+	return []byte(`{"transfer":true}`), nil
 }
 
 type sponsorRig struct {

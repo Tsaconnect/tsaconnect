@@ -42,12 +42,22 @@ type sponsorTxBuilder interface {
 }
 
 // sponsorNativeSender is the rest of *blockchain.EVMClient a lane needs.
+//
+// The ERC-20 methods (GetTokenAllowance/PrepareERC20Approve/PrepareERC20Transfer)
+// exist for the treasury lane, which reuses this exact interface — and this
+// exact SponsorLane.Native field — rather than defining a second one:
+// *blockchain.EVMClient already implements all three, so widening the
+// interface costs nothing in production and only requires extending the one
+// test fake (fakeSponsorNative).
 type sponsorNativeSender interface {
 	PrepareNativeTransfer(from, to string, amountWei *big.Int) ([]byte, error)
 	EstimateGas(msg ethereum.CallMsg) (uint64, error)
 	SuggestGasPrice() (*big.Int, error)
 	WaitForReceiptContext(ctx context.Context, txHash string, timeout time.Duration) (*types.Receipt, error)
 	GetTokenDecimals(tokenAddress string) (int, error)
+	GetTokenAllowance(tokenAddress, owner, spender string) (*big.Int, error)
+	PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error)
+	PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error)
 }
 
 type sponsorOrderReader interface {
