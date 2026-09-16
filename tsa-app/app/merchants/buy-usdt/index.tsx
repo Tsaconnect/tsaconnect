@@ -47,10 +47,7 @@ const BuyUSDTScreen = () => {
                     keyboardShouldPersistTaps="handled"
                 >
                     <View style={{ marginBottom: spacing['2xl'] }}>
-                        <Text variant="title1" weight="700">
-                            Buy USDT
-                        </Text>
-                        <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                        <Text variant="bodySm" color="textSecondary">
                             Enter the amount of USD you want to spend
                         </Text>
                     </View>

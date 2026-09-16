@@ -1,4 +1,4 @@
-// app/(dashboard)/(tabs)/(home)/seller/[sellerId].tsx
+// app/(detail)/seller/[sellerId].tsx
 //
 // Seller public profile + their product/service catalogue. Restyled onto the TSA
 // Signature design system (@/theme tokens + @/components/ui primitives). All data
@@ -348,15 +348,7 @@ export default function SellerCatalogueScreen() {
   if (loading && !sellerData) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
-        <Stack.Screen
-          options={{
-            title: 'Loading...',
-            headerShown: true,
-            headerBackTitle: 'Back',
-            headerTintColor: colors.accent,
-            headerStyle: { backgroundColor: colors.surface },
-          }}
-        />
+        <Stack.Screen options={{ title: 'Loading…' }} />
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl }}>
           <Spinner size="large" label="Loading seller information..." />
         </View>
@@ -367,12 +359,7 @@ export default function SellerCatalogueScreen() {
   if (error && !sellerData) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
-        <Stack.Screen
-          options={{
-            title: 'Error',
-            headerShown: true,
-          }}
-        />
+        <Stack.Screen options={{ title: 'Error' }} />
         <View style={{ flex: 1, justifyContent: 'center' }}>
           <ErrorState subtitle={error} onRetry={handleRefresh} />
         </View>
@@ -382,18 +369,11 @@ export default function SellerCatalogueScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
+      {/* Dynamic seller-name title + share action; back + chrome come from the
+          (detail) layout's standard header. */}
       <Stack.Screen
         options={{
           title: sellerData?.name || 'Seller',
-          headerShown: true,
-          headerBackTitle: 'Back',
-          headerTintColor: colors.accent,
-          headerStyle: { backgroundColor: colors.surface },
-          headerTitleStyle: {
-            fontWeight: '600',
-            color: colors.textPrimary,
-            fontSize: 16,
-          },
           headerRight: () => (
             <IconButton
               icon="send"
