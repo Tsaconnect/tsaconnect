@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -24,6 +25,28 @@ type fakeBillSvc struct {
 	reportIn  *fakeBillReportIn
 	resolveIn *fakeBillResolveIn
 	err       error
+
+	paymentAction string // "reverse" | "settle" — which admin payment action ran
+	paymentOrder  uuid.UUID
+	stuck         []services.BillStuckPayment
+}
+
+func (f *fakeBillSvc) AdminReversePayment(_ context.Context, orderID uuid.UUID) (*models.BillOrder, error) {
+	f.paymentAction, f.paymentOrder = "reverse", orderID
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &f.order, nil
+}
+func (f *fakeBillSvc) AdminSettlePayment(_ context.Context, orderID uuid.UUID) (*models.BillOrder, error) {
+	f.paymentAction, f.paymentOrder = "settle", orderID
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &f.order, nil
+}
+func (f *fakeBillSvc) ListStuckPayments(context.Context, time.Duration, int) ([]services.BillStuckPayment, error) {
+	return f.stuck, f.err
 }
 
 func (f *fakeBillSvc) Quote(_ context.Context, in services.BillQuoteInput) (*services.BillQuoteResult, error) {
@@ -117,6 +140,9 @@ func billTestRouter(svc billService, user *models.User) *gin.Engine {
 	a := r.Group("/admin/bills", inject)
 	a.GET("/reports", h.ListReportsAdmin)
 	a.POST("/reports/:id/resolve", h.ResolveReportAdmin)
+	a.GET("/payments/stuck", h.ListStuckPaymentsAdmin)
+	a.POST("/orders/:id/reverse-payment", h.ReversePaymentAdmin)
+	a.POST("/orders/:id/settle-payment", h.SettlePaymentAdmin)
 	return r
 }
 
@@ -298,6 +324,55 @@ func TestBillHandlerListReportsAdmin(t *testing.T) {
 	}
 	data, _ := out["data"].(map[string]any)
 	if data == nil || data["total"] != float64(1) {
+		t.Fatalf("payload: %v", out["data"])
+	}
+}
+
+func TestBillHandlerAdminPaymentActions(t *testing.T) {
+	for _, action := range []string{"reverse", "settle"} {
+		svc := &fakeBillSvc{order: models.BillOrder{ID: uuid.New(), Status: models.BillStatusRefunded}}
+		r := billTestRouter(svc, billTestUser())
+		orderID := uuid.New()
+		w, out := billDo(t, r, http.MethodPost, "/admin/bills/orders/"+orderID.String()+"/"+action+"-payment", nil)
+		if w.Code != http.StatusOK || out["success"] != true || svc.paymentAction != action || svc.paymentOrder != orderID {
+			t.Fatalf("%s: %d %s action=%q order=%s", action, w.Code, w.Body.String(), svc.paymentAction, svc.paymentOrder)
+		}
+	}
+}
+
+// An operator must be able to tell "refused: the bill was delivered" from
+// "could not reach the vendor", and see why.
+func TestBillHandlerAdminPaymentRefusals(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{fmt.Errorf("%w: the vendor reports this bill delivered", services.ErrBillPaymentConflict), http.StatusConflict},
+		{fmt.Errorf("%w: timeout", services.ErrBillVendUnverified), http.StatusServiceUnavailable},
+		{fmt.Errorf("%w: the debit is not confirmed on-chain yet", services.ErrBillPayBadState), http.StatusConflict},
+	}
+	for _, tc := range cases {
+		svc := &fakeBillSvc{err: tc.err}
+		r := billTestRouter(svc, billTestUser())
+		w, out := billDo(t, r, http.MethodPost, "/admin/bills/orders/"+uuid.New().String()+"/reverse-payment", nil)
+		if w.Code != tc.want {
+			t.Errorf("%v → %d, want %d", tc.err, w.Code, tc.want)
+		}
+		if msg, _ := out["message"].(string); msg != tc.err.Error() {
+			t.Errorf("message = %q, want the reason %q", msg, tc.err.Error())
+		}
+	}
+}
+
+func TestBillHandlerListStuckPayments(t *testing.T) {
+	svc := &fakeBillSvc{stuck: []services.BillStuckPayment{{OrderStatus: models.BillStatusVending}}}
+	r := billTestRouter(svc, billTestUser())
+	w, out := billDo(t, r, http.MethodGet, "/admin/bills/payments/stuck?minutes=60", nil)
+	if w.Code != http.StatusOK || out["success"] != true {
+		t.Fatalf("stuck: %d %s", w.Code, w.Body.String())
+	}
+	data, _ := out["data"].(map[string]any)
+	if rows, _ := data["stuck"].([]any); len(rows) != 1 || data["thresholdMinutes"] != float64(60) {
 		t.Fatalf("payload: %v", out["data"])
 	}
 }

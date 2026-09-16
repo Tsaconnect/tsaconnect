@@ -1093,6 +1093,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminBills.GET("/reports", bh.ListReportsAdmin)
 			adminBills.POST("/reports/:id/resolve", bh.ResolveReportAdmin)
+			adminBills.GET("/payments/stuck", bh.ListStuckPaymentsAdmin)
+			// Moving a bill's MCGP is super_admin only, like the IT
+			// settle/reverse actions.
+			superBills := adminBills.Group("", middleware.RequireSuperAdmin())
+			superBills.POST("/orders/:id/reverse-payment", bh.ReversePaymentAdmin)
+			superBills.POST("/orders/:id/settle-payment", bh.SettlePaymentAdmin)
 		}
 	} else {
 		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")

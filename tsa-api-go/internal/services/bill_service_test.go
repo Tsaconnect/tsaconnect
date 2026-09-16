@@ -94,16 +94,44 @@ func (f *fakeBillVendor) EpinPlans(context.Context, string) ([]BillPlan, error) 
 }
 
 type fakeBillPayer struct {
-	db          *gorm.DB
-	debitErr    error
-	settleErr   error
-	reverseErr  error
-	debits      int
-	settles     int
-	reverses    int
-	disabled    bool
+	db            *gorm.DB
+	debitErr      error
+	settleErr     error
+	reverseErr    error
+	debits        int
+	settles       int
+	reverses      int
+	disabled      bool
 	leaveDebiting bool // simulate broadcast-without-verify
 	leaveFailed   bool // simulate a failed broadcast (row persisted as failed)
+
+	resolveDebitingTo string // ResolveDebiting outcome ("" = unchanged)
+	lateDebit         bool   // AdoptLateDebit finds a debit on-chain
+	stuck             []models.BillPayment
+}
+
+func (f *fakeBillPayer) ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, error) {
+	var pay models.BillPayment
+	if err := f.db.WithContext(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
+		return "", err
+	}
+	if pay.Status != models.BillPayStatusDebiting || f.resolveDebitingTo == "" {
+		return pay.Status, nil
+	}
+	f.db.WithContext(ctx).Model(&pay).Update("status", f.resolveDebitingTo)
+	return f.resolveDebitingTo, nil
+}
+func (f *fakeBillPayer) AdoptLateDebit(ctx context.Context, orderID uuid.UUID) (bool, error) {
+	if !f.lateDebit {
+		return false, nil
+	}
+	res := f.db.WithContext(ctx).Model(&models.BillPayment{}).
+		Where("order_id = ? AND status = ?", orderID, models.BillPayStatusFailed).
+		Update("status", models.BillPayStatusDebited)
+	return res.RowsAffected == 1, res.Error
+}
+func (f *fakeBillPayer) StuckPayments(context.Context, time.Duration, int) ([]models.BillPayment, error) {
+	return f.stuck, nil
 }
 
 func (f *fakeBillPayer) IsEnabled() bool { return !f.disabled }
@@ -321,12 +349,12 @@ func TestBillQuoteValidation(t *testing.T) {
 	r := newBillServiceRig(t)
 	cases := []BillQuoteInput{
 		{Category: "unknown", Provider: "01", NgnAmount: 100},
-		{Category: models.BillCategoryAirtime, Provider: "99", PhoneNumber: "08030001111", NgnAmount: 100},  // unknown provider
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "0803", NgnAmount: 100},         // bad phone
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 10},   // below min
-		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 1e9},  // above max
+		{Category: models.BillCategoryAirtime, Provider: "99", PhoneNumber: "08030001111", NgnAmount: 100}, // unknown provider
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "0803", NgnAmount: 100},        // bad phone
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 10},  // below min
+		{Category: models.BillCategoryAirtime, Provider: "01", PhoneNumber: "08030001111", NgnAmount: 1e9}, // above max
 		{Category: models.BillCategoryElectricity, Provider: "01", CustomerID: "123", MeterType: "wrong", NgnAmount: 2000},
-		{Category: models.BillCategoryEpin, Provider: "waec", PhoneNumber: "08030001111", PlanRef: "nope"},  // unknown plan
+		{Category: models.BillCategoryEpin, Provider: "waec", PhoneNumber: "08030001111", PlanRef: "nope"}, // unknown plan
 	}
 	for i, in := range cases {
 		in.UserID = r.userID

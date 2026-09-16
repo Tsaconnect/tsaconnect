@@ -29,6 +29,20 @@ type fakeBillSwap struct {
 	verifyErr  error
 	resolveErr error
 	noOperator bool
+
+	// records mirrors the contract's per-ref `debits` mapping.
+	records map[[32]byte]DebitRecord
+	readErr error
+}
+
+func (f *fakeBillSwap) DebitRecord(_ context.Context, ref [32]byte) (DebitRecord, error) {
+	if f.readErr != nil {
+		return DebitRecord{}, f.readErr
+	}
+	if r, ok := f.records[ref]; ok {
+		return r, nil
+	}
+	return DebitRecord{Amount: big.NewInt(0), State: DebitStateNone}, nil
 }
 
 func (f *fakeBillSwap) HasOperator() bool { return !f.noOperator }
@@ -38,13 +52,17 @@ func (f *fakeBillSwap) PremiumBalance(string) (*big.Int, error) {
 	}
 	return f.balance, nil
 }
-func (f *fakeBillSwap) OperatorDebitSpendable(_ context.Context, _ string, _, maxFromBought *big.Int, ref [32]byte) (string, error) {
+func (f *fakeBillSwap) OperatorDebitSpendable(_ context.Context, user string, amount, maxFromBought *big.Int, ref [32]byte) (string, error) {
 	f.debitCalls++
 	f.lastAllow = maxFromBought
 	f.lastRef = ref
 	if f.debitErr != nil {
 		return "", f.debitErr
 	}
+	if f.records == nil {
+		f.records = map[[32]byte]DebitRecord{}
+	}
+	f.records[ref] = DebitRecord{User: common.HexToAddress(user), Amount: amount, State: DebitStatePending}
 	return "0xdebit", nil
 }
 func (f *fakeBillSwap) OperatorSettleDebit(_ context.Context, _ [32]byte) (string, error) {
@@ -285,7 +303,7 @@ func TestBillPayment_UnverifiedDebitStaysReconcilable(t *testing.T) {
 		t.Fatal("expected the verify failure to surface")
 	}
 
-	stuck, err := svc.StuckPayments(context.Background(), 10)
+	stuck, err := svc.StuckPayments(context.Background(), 0, 10)
 	if err != nil {
 		t.Fatalf("stuck: %v", err)
 	}
@@ -298,14 +316,17 @@ func TestBillPayment_UnverifiedDebitStaysReconcilable(t *testing.T) {
 }
 
 // A debit that never broadcast is a real failure and must not look reconcilable.
+// Only errors raised before the transaction could reach the network count: a
+// node answering eth_sendRawTransaction with an error is not proof the bytes
+// went nowhere (see TestBillPayment_SendErrorLeavesDebiting).
 func TestBillPayment_UnbroadcastDebitIsFailedNotStuck(t *testing.T) {
 	svc, swap := newBillRig(t)
-	swap.debitErr = fmt.Errorf("nonce too low")
+	swap.debitErr = notBroadcast(fmt.Errorf("failed to get nonce: connection refused"))
 
 	if _, err := svc.Debit(context.Background(), debitInput(uuid.New(), 10)); err == nil {
 		t.Fatal("expected the broadcast failure to surface")
 	}
-	stuck, err := svc.StuckPayments(context.Background(), 10)
+	stuck, err := svc.StuckPayments(context.Background(), 0, 10)
 	if err != nil {
 		t.Fatalf("stuck: %v", err)
 	}
