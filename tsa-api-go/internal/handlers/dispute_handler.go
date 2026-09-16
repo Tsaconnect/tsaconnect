@@ -72,10 +72,12 @@ func (h *DisputeHandler) WithRampAdmin(orch *services.ConversionOrchestrator) *D
 func (h *DisputeHandler) RampAdminEnabled() bool { return h != nil && h.ramp != nil }
 
 // rampAdminError maps the refund tooling's sentinels onto status codes. The
-// two Decision-2 refusals — nothing owed vs. undetermined — are BOTH 409s
-// (nothing about them is a client-input error) but keep their own distinct,
-// explicit message, because collapsing them into one string is exactly the
-// confusion Decision 2 exists to prevent.
+// business-rule refusals — nothing owed, undetermined, in flight, not
+// applicable, an invalid recipient — are all 409s (nothing about any of them
+// is a malformed request) but each keeps its OWN distinct, explicit message:
+// collapsing "nothing owed" and "undetermined" into one string is exactly the
+// confusion Decision 2 exists to prevent, and the same reasoning extends to
+// every other sentinel here.
 func rampAdminError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
@@ -86,7 +88,13 @@ func rampAdminError(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrRefundInFlight):
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
-	case errors.Is(err, services.ErrSponsorNotAvailable), errors.Is(err, services.ErrTreasuryKilled):
+	case errors.Is(err, services.ErrRefundNotApplicable):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrTreasuryInvalidRecipient):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrSponsorNotAvailable),
+		errors.Is(err, services.ErrTreasuryKilled),
+		errors.Is(err, services.ErrRelayerUnderfunded):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Treasury is not available for this chain right now")
 	default:
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong. Please try again.")

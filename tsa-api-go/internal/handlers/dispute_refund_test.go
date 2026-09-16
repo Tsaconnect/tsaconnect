@@ -153,6 +153,8 @@ func TestDisputeHandler_RampRefundErrorMapping(t *testing.T) {
 		{"nothing owed", services.ErrNothingOwed, http.StatusConflict},
 		{"undetermined", services.ErrOwedUndetermined, http.StatusConflict},
 		{"in flight", services.ErrRefundInFlight, http.StatusConflict},
+		{"not applicable", services.ErrRefundNotApplicable, http.StatusConflict},
+		{"invalid recipient", services.ErrTreasuryInvalidRecipient, http.StatusConflict},
 		{"not found", gorm.ErrRecordNotFound, http.StatusNotFound},
 	}
 	var seen = map[string]bool{}
@@ -174,6 +176,32 @@ func TestDisputeHandler_RampRefundErrorMapping(t *testing.T) {
 				t.Fatalf("message %q reused across sentinels; ErrNothingOwed and ErrOwedUndetermined must read differently", msg)
 			}
 			seen[msg] = true
+		})
+	}
+}
+
+// A killed or underfunded treasury is unavailability, not a business refusal
+// about THIS order — both map to 503, sharing a message, unlike the sentinels
+// above which must each read differently.
+func TestDisputeHandler_RampRefundTreasuryUnavailableMapsTo503(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"killed", services.ErrTreasuryKilled},
+		{"underfunded", services.ErrRelayerUnderfunded},
+		{"no lane", services.ErrSponsorNotAvailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRampAdmin{err: tc.err}
+			r := rampAdminTestRouter(fake, disputeUser())
+
+			w, _ := disputeDo(t, r, http.MethodPost, "/admin/ramp/orders/"+uuid.New().String()+"/refund", nil)
+
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", w.Code)
+			}
 		})
 	}
 }

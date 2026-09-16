@@ -89,7 +89,11 @@ func TestRefundFromTreasury_RefusesWhenUndetermined(t *testing.T) {
 }
 
 // The refund handler takes only an order id: the destination is always the
-// order's own wallet, never anything a caller could supply.
+// order's own wallet, never anything a caller could supply. Asserted against
+// what TransferToken actually handed the signer to sign (r.src.native's
+// recorded PrepareERC20Transfer call) — the struct RefundFromTreasury builds
+// and returns is not proof of what left the treasury; the prepared calldata
+// is.
 func TestRefundFromTreasury_AlwaysPaysTheOrdersOwnWallet(t *testing.T) {
 	r := newConversionRig(t)
 	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
@@ -98,7 +102,14 @@ func TestRefundFromTreasury_AlwaysPaysTheOrdersOwnWallet(t *testing.T) {
 		t.Fatal(err)
 	}
 	if legRow.ToAddr != r.order.WalletAddress {
-		t.Fatalf("refund went to %s, want the order's wallet %s", legRow.ToAddr, r.order.WalletAddress)
+		t.Fatalf("refund leg records %s, want the order's wallet %s", legRow.ToAddr, r.order.WalletAddress)
+	}
+	_, _, to, amount := r.src.native.transferCall()
+	if to != r.order.WalletAddress {
+		t.Fatalf("TransferToken actually sent to %s, want the order's own wallet %s", to, r.order.WalletAddress)
+	}
+	if amount == nil || amount.String() != "100000000" {
+		t.Fatalf("TransferToken amount = %v, want 100000000", amount)
 	}
 }
 
@@ -129,11 +140,9 @@ func TestRefundFromTreasury_RefusesWhileATopUpIsInFlight(t *testing.T) {
 			Amount: "9500000", TxHash: "0xtopup",
 		},
 	)
-	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err == nil {
-		t.Fatal("want a refusal while the top-up leg is still in flight")
-	}
-	if errors.Is(context.Canceled, ErrNothingOwed) { // sanity: keep the sentinels distinct
-		t.Fatal("sentinels must stay distinct")
+	_, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID)
+	if !errors.Is(err, ErrOwedUndetermined) {
+		t.Fatalf("want ErrOwedUndetermined while the top-up leg is still in flight, got %v", err)
 	}
 	if r.broadcasts() != 0 {
 		t.Fatalf("broadcasts = %d; must not race the orchestrator's own top-up", r.broadcasts())
@@ -150,5 +159,196 @@ func TestRefundFromTreasury_RefusesOnASettledOrder(t *testing.T) {
 	}
 	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrNothingOwed) {
 		t.Fatalf("want ErrNothingOwed on a settled order, got %v", err)
+	}
+}
+
+// ── Custody gate (C1) ────────────────────────────────────────────────────────
+//
+// This tool only ever answers for a converted BUY whose funds the treasury
+// actually took custody of — mirroring Advance's own step-1 gate exactly.
+// Without this, OwedToUser's origin branch (no legs, or none confirmed) would
+// happily hand back order.TokenAmount for money that was never the
+// treasury's to give: a direct order's payout, a sell's incoming deposit, or
+// a converted buy the user has not even paid for yet.
+
+// A direct order is paid by Paycrest straight to the user; the treasury was
+// never involved.
+func TestRefundFromTreasury_RefusesADirectOrder(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Update("route_kind", models.RouteKindDirect).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrRefundNotApplicable) {
+		t.Fatalf("want ErrRefundNotApplicable, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a direct order's money was never the treasury's to refund", r.broadcasts())
+	}
+}
+
+// A sell order's TokenAmount is what the user SENDS, not something the
+// treasury ever held.
+func TestRefundFromTreasury_RefusesASellOrder(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Update("direction", models.PaycrestDirectionSell).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrRefundNotApplicable) {
+		t.Fatalf("want ErrRefundNotApplicable, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a sell order's TokenAmount is the user's money, not the treasury's", r.broadcasts())
+	}
+}
+
+// A converted buy still awaiting the user's bank payment: Paycrest has
+// delivered nothing, Holder is still Paycrest's, and there are zero legs.
+func TestRefundFromTreasury_RefusesAConvertedBuyStillAwaitingPayment(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"holder": models.HolderPaycrest, "status": models.PaycrestStatusAwaitingPayment,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrRefundNotApplicable) {
+		t.Fatalf("want ErrRefundNotApplicable, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; custody was never taken, there is nothing here to refund", r.broadcasts())
+	}
+}
+
+// ── Stranded bridge (I3) ─────────────────────────────────────────────────────
+
+// A bridge leg that broadcast a transaction but was left neither confirmed
+// nor pending (LiFi reported it dead, or the row was simply left dangling)
+// is stranded, not refundable: that money may still land. Mirrors Advance's
+// own step 4 (broadcastBridgeLeg) — refunding the origin deposit on top of a
+// bridge that could still deliver would pay the user twice.
+func TestRefundFromTreasury_RefusesAStrandedBridge(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, &models.RampLeg{
+		Kind: models.RampLegKindBridge, Attempt: 1, Status: models.RampLegStatusFailed,
+		ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: sponsorTestUser,
+		Amount: "100000000", TxHash: "0xbroadcastbutneverconfirmed",
+	})
+	_, _, amount, err := r.svc.OwedToUser(context.Background(), r.order)
+	if err != nil || amount != "" {
+		t.Fatalf("owed = %q, err = %v; a stranded bridge must be undetermined, not a refundable number", amount, err)
+	}
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrOwedUndetermined) {
+		t.Fatalf("want ErrOwedUndetermined, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; must not refund the origin deposit while a bridge might still land", r.broadcasts())
+	}
+}
+
+// ── Concurrency with the state machine's own refund (I5) ────────────────────
+
+// A refund leg already pending — whatever put it there, the scheduler's own
+// automatic refund() or a concurrent admin call — must block a second one
+// outright, rather than RefundFromTreasury computing its own non-colliding
+// NextAttempt and broadcasting alongside it. The unique (order_id, kind,
+// attempt) index only rejects two callers landing on the SAME attempt
+// number; it does nothing to stop two DIFFERENT numbers both going out.
+func TestRefundFromTreasury_RefusesWhenARefundIsAlreadyPending(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t,
+		leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""),
+		&models.RampLeg{
+			Kind: models.RampLegKindRefund, Attempt: 1, Status: models.RampLegStatusPending,
+			ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: sponsorTestUser,
+			Amount: "100000000", TxHash: "0xalreadysentbysomeoneelse",
+		},
+	)
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrRefundInFlight) {
+		t.Fatalf("want ErrRefundInFlight, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a second refund attempt must never be created alongside a pending one", r.broadcasts())
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 1 {
+		t.Fatalf("refund legs = %d, want exactly the 1 already pending", len(legs))
+	}
+}
+
+// ── Caps and the treasury's own guard ────────────────────────────────────────
+
+// A refund returns money the treasury ALREADY holds — it creates no new
+// exposure — so the value caps that gate a NEW bridge/deliver must never
+// block it. Proven with a cap so tiny a fresh conversion of this size would
+// be refused outright.
+func TestRefundFromTreasury_CapsDoNotBlockARefund(t *testing.T) {
+	r := newConversionRig(t)
+	r.treasury.caps = TreasuryCaps{MaxInFlightUSDPerOrder: 1, MaxInFlightUSDPerChain: 1}
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err != nil {
+		t.Fatalf("a refund must not be capped: %v", err)
+	}
+	if r.broadcasts() != 1 {
+		t.Fatalf("broadcasts = %d, want 1", r.broadcasts())
+	}
+}
+
+// The treasury's own kill switch must still fail the refund closed, exactly
+// like every other treasury-guarded transfer — and the leg it briefly
+// reserved must be freed (failed), not left pending, so a retry once the
+// treasury is unpaused is not blocked by a transfer that never actually sent.
+func TestRefundFromTreasury_KilledTreasuryFailsClosed(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	r.treasury.SetKillSwitch(true)
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrTreasuryKilled) {
+		t.Fatalf("want ErrTreasuryKilled, got %v", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
+	}
+}
+
+// ── RefundPreview (I4) ───────────────────────────────────────────────────────
+
+// RefundPreview is a DIFFERENT figure from RampLegsInfo.OwedToUser (the
+// destination-denominated promise): on an order whose bridge never
+// confirmed, the preview names the ORIGIN token/chain/decimals a refund
+// would actually move — not the destination one OwedToUser tracks. A console
+// reading the wrong one, or guessing at decimals, would show a number the
+// refund button does not actually send.
+func TestLegsAndOwed_RefundPreviewCarriesTheActualRefundFigure(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+
+	info, err := r.svc.LegsAndOwed(context.Background(), r.order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.OwedToUser != "99500000" {
+		t.Fatalf("OwedToUser (promise) = %q, want the destination-denominated 99500000", info.OwedToUser)
+	}
+	if info.RefundPreview == nil {
+		t.Fatal("no refund preview attached")
+	}
+	if info.RefundPreview.Token != "USDC" || info.RefundPreview.Chain != "base" || info.RefundPreview.Amount != "100000000" {
+		t.Fatalf("refund preview = %+v, want the ORIGIN 100000000 USDC on base", info.RefundPreview)
+	}
+	if info.RefundPreview.Decimals != 6 {
+		t.Fatalf("decimals = %d, want 6", info.RefundPreview.Decimals)
+	}
+}
+
+// An order this tool cannot refund (never custodied) still returns its legs
+// view — the preview is simply absent, not an error that hides the ledger.
+func TestLegsAndOwed_NoRefundPreviewForANonCustodiedOrder(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Update("route_kind", models.RouteKindDirect).Error; err != nil {
+		t.Fatal(err)
+	}
+	info, err := r.svc.LegsAndOwed(context.Background(), r.order)
+	if err != nil {
+		t.Fatalf("LegsAndOwed must not fail over a direct order: %v", err)
+	}
+	if info.RefundPreview != nil {
+		t.Fatalf("refund preview = %+v, want nil for a direct order", info.RefundPreview)
 	}
 }

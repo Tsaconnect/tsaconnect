@@ -1254,6 +1254,27 @@ func latestPendingLeg(legs []models.RampLeg) *models.RampLeg {
 	return out
 }
 
+// pendingLegOfKinds is latestPendingLeg scoped to a specific set of kinds.
+// latestPendingLeg orders by attempt ACROSS every kind, but attempt numbers
+// are sequenced independently PER KIND (see RampLeg.Attempt) — so "the
+// highest-attempt pending leg happens to be a refund" must never hide a
+// lower-attempt-numbered bridge or deliver leg that is just as pending. Any
+// caller that cares about a specific kind (or set of kinds) being pending
+// must use this, not latestPendingLeg filtered after the fact.
+func pendingLegOfKinds(legs []models.RampLeg, kinds ...string) *models.RampLeg {
+	want := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		want[k] = true
+	}
+	for i := range legs {
+		leg := &legs[i]
+		if leg.Status == models.RampLegStatusPending && want[leg.Kind] {
+			return leg
+		}
+	}
+	return nil
+}
+
 // bridgeLegByAttempt finds one specific bridge attempt, whatever its status.
 func bridgeLegByAttempt(legs []models.RampLeg, attempt int) *models.RampLeg {
 	for i := range legs {
@@ -1310,6 +1331,15 @@ var (
 	// top-up leg is live or pending, or a refund is already under way), so an
 	// admin refund must refuse rather than run alongside it.
 	ErrRefundInFlight = errors.New("this order has a transfer already in flight; refund refused until it resolves")
+	// ErrRefundNotApplicable is refused BEFORE any of the above questions are
+	// even asked: this tool only ever answers for a converted BUY whose funds
+	// the treasury actually took custody of. A direct order (Paycrest pays
+	// the user itself — the treasury was never involved), a SELL order
+	// (TokenAmount is what the user SENDS, not something the treasury ever
+	// held), or a converted buy still awaiting payment (zero legs, custody
+	// never taken) would otherwise fall through OwedToUser's origin branch
+	// and refund platform float that was never this order's money.
+	ErrRefundNotApplicable = errors.New("this order is not a converted buy the treasury took custody of")
 )
 
 // RampLegsInfo is one order's leg ledger plus what it currently owes,
@@ -1324,6 +1354,30 @@ var (
 type RampLegsInfo struct {
 	Legs       []models.RampLeg `json:"legs"`
 	OwedToUser string           `json:"owedToUser"`
+	// RefundPreview is the DIFFERENT figure a refund button would actually
+	// move — see RefundPreview's own doc comment for why this is not the
+	// same number as OwedToUser above. nil whenever there is nothing safe to
+	// preview: the order isn't a refundable converted buy, or OwedToUser
+	// itself reads "" (undetermined) or "0" (nothing owed).
+	RefundPreview *RefundPreview `json:"refundPreview,omitempty"`
+}
+
+// RefundPreview is the exact triple (and its decimals) a treasury refund
+// would move for one order, straight from ConversionOrchestrator.OwedToUser
+// — the wire object an admin console's refund button must read.
+//
+// It is deliberately NOT the same figure as RampLegsInfo.OwedToUser above,
+// which tracks the destination-denominated PROMISE (owedFromLegs). On an
+// order whose bridge never confirmed, OwedToUser answers with the ORIGIN
+// deposit instead — a different token, on a different chain, at a different
+// decimal count (a 6dp/18dp pair differs by 1e12). A console that reads one
+// field and assumes it is the other — or worse, guesses at decimals when
+// none is given — will show a number the refund does not actually move.
+type RefundPreview struct {
+	Token    string `json:"token"`
+	Chain    string `json:"chain"`
+	Amount   string `json:"amount"`
+	Decimals int    `json:"decimals"`
 }
 
 // LegsAndOwed is the read-only view behind both the admin /legs endpoint and
@@ -1339,7 +1393,43 @@ func (o *ConversionOrchestrator) LegsAndOwed(ctx context.Context, order *models.
 	if err != nil {
 		return nil, err
 	}
-	return &RampLegsInfo{Legs: legs, OwedToUser: owedFromLegs(order, legs)}, nil
+	info := &RampLegsInfo{Legs: legs, OwedToUser: owedFromLegs(order, legs)}
+	// A refund preview is a convenience, never a reason to fail the legs
+	// view: an order this tool cannot refund (direct, sell, not yet
+	// custodied, undetermined, nothing owed) simply carries no preview.
+	if preview, perr := o.refundPreview(ctx, order); perr == nil {
+		info.RefundPreview = preview
+	}
+	return info, nil
+}
+
+// refundPreview resolves OwedToUser into the wire object an admin console's
+// refund button must actually read — see RefundPreview's doc comment for why
+// this cannot be inferred from RampLegsInfo.OwedToUser alone.
+func (o *ConversionOrchestrator) refundPreview(ctx context.Context, order *models.PaycrestOrderRecord) (*RefundPreview, error) {
+	if o == nil || o.treasury == nil {
+		return nil, ErrSponsorNotAvailable
+	}
+	token, chainKey, amount, err := o.OwedToUser(ctx, order)
+	if err != nil {
+		return nil, err
+	}
+	if amount == "" || amount == "0" {
+		return nil, ErrNothingOwed
+	}
+	lane := o.treasury.Lane(chainKey)
+	if lane == nil {
+		return nil, ErrSponsorNotAvailable
+	}
+	addr := lane.tokenAddress(token)
+	if addr == "" {
+		return nil, ErrSponsorNotAvailable
+	}
+	decimals, err := lane.Native.GetTokenDecimals(addr)
+	if err != nil {
+		return nil, err
+	}
+	return &RefundPreview{Token: token, Chain: lane.ChainKey, Amount: amount, Decimals: decimals}, nil
 }
 
 // LegsAndOwedByOrderID is LegsAndOwed for a caller that only has the order id
@@ -1374,9 +1464,23 @@ func (o *ConversionOrchestrator) LegsAndOwedByOrderID(ctx context.Context, order
 // nothing owed, or "" for UNDETERMINED — see owedFromLegs and the package
 // doc on models.PaycrestOrderRecord.OwedToUser. token/chain are meaningless
 // (and left blank) whenever amount is "0" or "".
+//
+// Returns ErrRefundNotApplicable for anything that is not a converted BUY
+// the treasury actually took custody of — see that sentinel's doc comment.
 func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.PaycrestOrderRecord) (token, chain, amount string, err error) {
 	if o == nil || order == nil {
 		return "", "", "", ErrSponsorNotAvailable
+	}
+	// Custody gate, mirroring Advance's own step 1: Holder==Treasury/User is
+	// exactly the pair of states reachable only by the treasury actually
+	// having taken custody (takeCustody sets Treasury; settle/refund/topup
+	// set User). Anything else — a direct order, a sell, or a converted buy
+	// still sitting with Paycrest — is refused outright, before any of the
+	// leg arithmetic below runs, so it can never fall through to the origin
+	// branch and refund money the treasury never held.
+	if !order.Converted() || order.Direction != models.PaycrestDirectionBuy ||
+		(order.Holder != models.HolderTreasury && order.Holder != models.HolderUser) {
+		return "", "", "", ErrRefundNotApplicable
 	}
 	switch order.Status {
 	case models.PaycrestStatusSettled, models.PaycrestStatusRefunded:
@@ -1397,8 +1501,19 @@ func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.P
 	// deliberately broader than liveBridgeLeg (which only counts a pending
 	// bridge WITH a hash): a reserved-but-hashless leg here is likewise not
 	// safe to pay through, only safe to leave for the stall detector.
-	if pending := latestPendingLeg(legs); pending != nil &&
-		(pending.Kind == models.RampLegKindBridge || pending.Kind == models.RampLegKindDeliver) {
+	// Scoped PER KIND via pendingLegOfKinds, not latestPendingLeg: attempts
+	// are numbered independently per kind, so a pending refund at a higher
+	// attempt number must never hide a pending bridge at a lower one.
+	if pendingLegOfKinds(legs, models.RampLegKindBridge, models.RampLegKindDeliver) != nil {
+		return "", "", "", nil
+	}
+	// A bridge attempt that broadcast a transaction but never reached a
+	// terminal (confirmed) outcome is likewise UNDETERMINED, not refundable
+	// — Advance's own step 4 treats this exact shape (LiFi reported FAILED,
+	// or the row was simply left dangling) as money that can still land, for
+	// the same reason. Refunding the origin deposit on top of a bridge that
+	// might yet deliver would pay the user twice.
+	if broadcastBridgeLeg(legs) != nil {
 		return "", "", "", nil
 	}
 	if confirmedBridge := latestLeg(legs, models.RampLegKindBridge, models.RampLegStatusConfirmed); confirmedBridge != nil {
@@ -1406,7 +1521,16 @@ func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.P
 		if owed == "" || owed == "0" {
 			return "", "", owed, nil
 		}
-		return strings.ToUpper(strings.TrimSpace(order.RequestedToken)), order.RequestedChain, owed, nil
+		// Reuse o.destination() rather than trusting order.RequestedToken/
+		// RequestedChain directly: it is the same resolution+validation the
+		// state machine itself uses to route a top-up, so an unroutable
+		// destination surfaces as a real error here too, instead of handing
+		// back a token/chain pair no treasury lane can actually pay through.
+		dst, derr := o.destination(order)
+		if derr != nil {
+			return "", "", "", derr
+		}
+		return dst.symbol, dst.lane.ChainKey, owed, nil
 	}
 	// Nothing ever bridged out: the treasury still holds the ORIGIN deposit
 	// untouched, in the token and on the chain it actually landed in.
@@ -1438,17 +1562,20 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return nil, err
 	}
 	// Idempotent: a refund that already landed finishes the question without
-	// sending anything a second time.
+	// sending anything a second time. (This read can be stale by the time we
+	// reach Reserve below — see the fresh re-check right before it — but it
+	// is a correct, cheap early exit for the overwhelmingly common case.)
 	if existing := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusConfirmed); existing != nil {
 		return existing, nil
 	}
 
-	// OwedToUser is the single gate on Rule 5 for a bridge or top-up: it
-	// already refuses with ErrOwedUndetermined the moment either kind is
-	// still pending, because the user may already hold the money. Asked
-	// FIRST, and separately from the pending-refund check below, so that
-	// specific refusal — the one an operator must never mistake for "nothing
-	// owed" — is never masked by the more generic ErrRefundInFlight.
+	// OwedToUser is the single gate on custody (refuses ErrRefundNotApplicable
+	// for a direct order, a sell, or a converted buy never taken into
+	// custody) and on Rule 5 for a bridge or top-up (refuses "" the moment
+	// either kind is still pending, or a bridge broadcast without landing —
+	// the user may already hold the money). Asked FIRST, and separately from
+	// the in-flight re-check below, so neither of THESE refusals is ever
+	// masked by the more generic ErrRefundInFlight.
 	token, chainKey, amountStr, err := o.OwedToUser(ctx, &order)
 	if err != nil {
 		return nil, err
@@ -1457,13 +1584,14 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return nil, ErrOwedUndetermined
 	}
 	amount, ok := new(big.Int).SetString(amountStr, 10)
-	if !ok || amount.Sign() <= 0 {
-		return nil, ErrNothingOwed
+	if !ok {
+		// A malformed figure is a bug in OwedToUser's own arithmetic, not a
+		// business answer of "nothing owed" — conflating the two is exactly
+		// the kind of error-sentinel confusion this task exists to prevent.
+		return nil, fmt.Errorf("conversion: unreadable owed amount %q for order %s", amountStr, order.ID)
 	}
-	// A refund already broadcast by another call, whose outcome is not yet
-	// known, must not be joined by a second one.
-	if pending := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusPending); pending != nil {
-		return nil, ErrRefundInFlight
+	if amount.Sign() <= 0 {
+		return nil, ErrNothingOwed
 	}
 	if o.treasury == nil || o.treasury.Address() == "" {
 		return nil, ErrSponsorNotAvailable
@@ -1471,6 +1599,38 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 	lane := o.treasury.Lane(chainKey)
 	if lane == nil {
 		return nil, ErrSponsorNotAvailable
+	}
+
+	// Mark the intent BEFORE broadcasting, exactly as the automatic refund()
+	// above does: a crash between here and the broadcast must read as "a
+	// refund was under way", never as an order still waiting to convert.
+	if order.Status != models.PaycrestStatusRefunding {
+		if err := o.setOrder(ctx, &order, map[string]any{
+			"status": models.PaycrestStatusRefunding, "fault": models.FaultPlatform,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// A FRESH, LAST-MOMENT read, immediately before reserving. The `legs`
+	// fetched above can be stale by now — OwedToUser and the status write
+	// each did their own round trip — and in that window the orchestrator's
+	// OWN automatic refund() could have reserved an attempt of its own.
+	// Refusing on ANY refund leg (pending OR confirmed) rather than trusting
+	// NextAttempt to serialise the two callers is what actually closes that
+	// race: two independent NextAttempt calls can each compute a different,
+	// non-colliding attempt number and both go on to broadcast, which the
+	// (order_id, kind, attempt) unique index does nothing to stop — it only
+	// rejects two callers landing on the SAME attempt number.
+	freshLegs, err := o.legs.ForOrder(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+	if again := latestLeg(freshLegs, models.RampLegKindRefund, models.RampLegStatusConfirmed); again != nil {
+		return again, nil
+	}
+	if pending := latestLeg(freshLegs, models.RampLegKindRefund, models.RampLegStatusPending); pending != nil {
+		return nil, ErrRefundInFlight
 	}
 
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindRefund)
@@ -1507,15 +1667,23 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 				order.ID, adminID, newLeg.ID, err)
 			return nil, err
 		}
-		if ferr := o.failLeg(ctx, newLeg.ID, err.Error()); ferr != nil {
+		// Nothing was broadcast (attempted=false), but this write MUST still
+		// land even if the caller's own request context is what is about to
+		// be cancelled — a lost "failed" write here would leave the leg row
+		// permanently pending, blocking every future refund attempt on this
+		// order. Same detached(ctx) pattern refund() and startBridge use.
+		if ferr := o.failLeg(detached(ctx), newLeg.ID, err.Error()); ferr != nil {
 			return nil, ferr
 		}
 		return nil, err
 	}
-	if err := o.legs.SetTxHash(ctx, newLeg.ID, txHash, ""); err != nil {
+	// Detached from here on: the transfer already broadcast, so every
+	// remaining write must survive the caller's own context ending —
+	// exactly refund()'s own pattern.
+	if err := o.legs.SetTxHash(detached(ctx), newLeg.ID, txHash, ""); err != nil {
 		return nil, err
 	}
-	if err := o.legs.Confirm(ctx, newLeg.ID, amount.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
+	if err := o.legs.Confirm(detached(ctx), newLeg.ID, amount.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
 		return nil, err
 	}
 	log.Printf("[ramp-conversion] ALERT ramp_treasury_refund_total=1 order=%s admin=%s amount=%s tx=%s",
@@ -1529,7 +1697,7 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 
 	// Close the order out: the ledger now shows a confirmed refund, and
 	// nothing else may act on this order once it has been paid back.
-	if err := o.setOrder(ctx, &order, map[string]any{
+	if err := o.setOrder(detached(ctx), &order, map[string]any{
 		"status": models.PaycrestStatusRefunded, "holder": models.HolderUser, "fault": models.FaultPlatform,
 	}); err != nil {
 		return nil, err
