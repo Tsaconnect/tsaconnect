@@ -106,11 +106,36 @@ Required (set in `.env`):
 - `JWT_SECRET` - JWT signing secret
 - `FRONTEND_URL` - CORS allowed origin (defaults to `http://localhost:3000`)
 - `PORT` - Server port (defaults to `5000`)
-- `ENV` - `development` or `production`
+- `ENV` - `development` or `production`. Normalised at load (trim, lower-case, "prod" ->
+  "production") — call `cfg.IsProduction()`, never compare `cfg.Env` directly, so a stray
+  space or differing case can't desync a guard.
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 - `MIGRATE_ON_BOOT` - run schema migration during boot. Leave unset wherever a deploy
   script exists: the deploy runs `tsa-api -migrate` once, before starting the service,
   so processes never race on DDL. Set `true` for local development.
+
+Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release local signer —
+`IT_OPERATOR_PRIVATE_KEY`, `RELAYER_PRIVATE_KEY`, `RAMP_SPONSOR_PRIVATE_KEY`,
+`PM_RELEASE_PRIVATE_KEY`):
+- Each is a dev/staging convenience: the key lives in process env, not a key store. In
+  production every one of them is refused by default — `cmd/server/signer_guard.go`'s
+  `rawSignerKeyAllowed(cfg)` is the single guard all four (and the PM local signer branch)
+  go through, and the corresponding feature (IT + utility bills, gasless relaying, ramp gas
+  sponsorship, PM auto-settle) stays dormant rather than signing with a key that shouldn't
+  be there.
+- `ALLOW_RAW_SIGNER_KEYS` (bool, default `false`) is the interim opt-in until a KMS-backed
+  `ReleaseSigner` exists (`internal/services/release_signer.go` — `PM_RELEASE_SIGNER=kms` is
+  not yet implemented). Ignored outside production. When it lets a raw key through in
+  production, boot logs `ALERT raw_signer_key_in_production=1 key=<NAME>` once per key —
+  never the key material — so the exposure is visible in every log sink.
+- **Rollout order matters.** As of 2026-09, production runs with `ENV` not exactly
+  `"production"` — that is what currently keeps IT/bills/gasless/ramp-sponsorship alive with
+  their raw keys. Flipping `ENV=production` alone would silently take all of them dormant.
+  Set `ENV=production` and `ALLOW_RAW_SIGNER_KEYS=true` together in the same deploy, and
+  before doing so review the other things gated on `cfg.IsProduction()`: gin switches to
+  `ReleaseMode`, and the nil-chain-client fallbacks in `escrow_service.go`,
+  `mcgp_swap_service.go`, `otc_service.go` and `service_contact_service.go` start refusing to
+  build a partial unsigned tx instead of returning one for local tooling.
 
 Central-account inbound attribution (default `va` — a deploy that omits all of these changes nothing):
 - `INBOUND_MODE` - `va`: per-user Flutterwave virtual account, attributed by the charge

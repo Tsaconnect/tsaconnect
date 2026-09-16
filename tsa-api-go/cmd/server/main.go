@@ -356,14 +356,16 @@ func main() {
 		// IT (Instant Transfer) operator signer — dev path uses the local key
 		// (prod MUST use KMS). Built only when the key is set AND a chain client
 		// exists; otherwise IT stays dormant.
-		if cfg.Env == "production" && cfg.ITOperatorPrivateKey != "" {
-			// The raw-env-key local signer is dev-only. Refuse it in production —
-			// the operator key MUST come from KMS (review L4). IT stays dormant.
-			log.Printf("[config] IT dormant: raw IT_OPERATOR_PRIVATE_KEY refused in production (use KMS)")
+		if !rawSignerKeyAllowed(cfg) && cfg.ITOperatorPrivateKey != "" {
+			// The raw-env-key local signer is a dev/staging convenience. Refuse it
+			// in production unless ALLOW_RAW_SIGNER_KEYS opts back in — the
+			// interim path until the operator key comes from KMS. IT stays dormant.
+			log.Printf("[config] IT dormant: raw IT_OPERATOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
 		} else if cfg.ITOperatorPrivateKey != "" && sonicClient != nil {
 			if key, kerr := crypto.HexToECDSA(cfg.ITOperatorPrivateKey); kerr != nil {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
+				alertRawSignerKeyInProduction(cfg, "IT_OPERATOR_PRIVATE_KEY")
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
 				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
@@ -383,18 +385,19 @@ func main() {
 
 		// Gasless relaying (EIP-2771). Dormant unless BOTH the forwarder address
 		// and a relayer key are configured; with either missing the app self-pays.
-		if cfg.Env == "production" && cfg.RelayerPrivateKey != "" {
-			// Same rule the IT operator key already follows (review L4): a raw key
-			// out of the environment is a dev convenience, not a production key
-			// store. The relayer key is HOTTER than the operator key — it signs
-			// continuously from a network-facing process — so if anything it
-			// deserves the stricter treatment. Gasless stays dormant; the app
-			// self-pays.
-			log.Printf("[config] gasless dormant: raw RELAYER_PRIVATE_KEY refused in production (use KMS)")
+		if !rawSignerKeyAllowed(cfg) && cfg.RelayerPrivateKey != "" {
+			// Same rule the IT operator key already follows: a raw key out of the
+			// environment is a dev/staging convenience, refused in production
+			// unless ALLOW_RAW_SIGNER_KEYS opts back in. The relayer key is
+			// HOTTER than the operator key — it signs continuously from a
+			// network-facing process — so if anything it deserves the stricter
+			// treatment. Gasless stays dormant; the app self-pays.
+			log.Printf("[config] gasless dormant: raw RELAYER_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
 		} else if cfg.MCGPForwarderAddress != "" && cfg.RelayerPrivateKey != "" && sonicClient != nil {
 			if key, kerr := crypto.HexToECDSA(cfg.RelayerPrivateKey); kerr != nil {
 				log.Printf("[config] relayer key invalid; gasless dormant: %v", kerr)
 			} else {
+				alertRawSignerKeyInProduction(cfg, "RELAYER_PRIVATE_KEY")
 				signer := services.NewLocalKeyReleaseSigner(key, sonicClient)
 				limits := services.RelayerLimits{
 					SponsorLimits: services.SponsorLimits{
@@ -1167,12 +1170,20 @@ func main() {
 	case "kms":
 		log.Printf("[pm] KMS signer not yet implemented; PM release disabled")
 	default:
-		if cfg.PMReleasePrivateKey != "" && sonicClient != nil {
+		if !rawSignerKeyAllowed(cfg) && cfg.PMReleasePrivateKey != "" {
+			// Same rule as the IT operator, relayer and ramp sponsor keys: a raw
+			// key out of the environment is a dev/staging convenience, refused in
+			// production unless ALLOW_RAW_SIGNER_KEYS opts back in. PM release
+			// stays disabled — automation/webhook/admin PM routes surface "not
+			// configured" rather than signing with a key that shouldn't be here.
+			log.Printf("[pm] PM release disabled: raw PM_RELEASE_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
+		} else if cfg.PMReleasePrivateKey != "" && sonicClient != nil {
 			keyHex := strings.TrimPrefix(cfg.PMReleasePrivateKey, "0x")
 			key, kerr := crypto.HexToECDSA(keyHex)
 			if kerr != nil {
 				log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", kerr)
 			} else {
+				alertRawSignerKeyInProduction(cfg, "PM_RELEASE_PRIVATE_KEY")
 				releaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
 				log.Printf("[pm] local release signer ready (admin EOA %s)", releaseSigner.Address())
 				// Catch a signer/admin-EOA misconfig at boot rather than at the
@@ -1397,7 +1408,7 @@ func main() {
 	go handlers.BackfillPendingTransactions(blockchainService)
 
 	// Set Gin mode based on environment
-	if cfg.Env == "production" {
+	if cfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
