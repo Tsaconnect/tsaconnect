@@ -182,16 +182,22 @@ func (f *fakeSponsorChain) BalanceAt(_ context.Context, account common.Address, 
 func (f *fakeSponsorChain) ChainID() *big.Int { return big.NewInt(8453) }
 
 type fakeSponsorBuilder struct {
-	mu   sync.Mutex
-	to   string
-	data []byte
-	err  error
+	mu       sync.Mutex
+	to       string
+	data     []byte
+	value    *big.Int
+	gasLimit uint64
+	err      error
 }
 
-func (f *fakeSponsorBuilder) BuildUnsignedTx(_, to string, callData []byte) ([]byte, error) {
+func (f *fakeSponsorBuilder) BuildUnsignedTx(from, to string, callData []byte) ([]byte, error) {
+	return f.BuildUnsignedCall(from, to, callData, nil, 0)
+}
+
+func (f *fakeSponsorBuilder) BuildUnsignedCall(_, to string, callData []byte, value *big.Int, gasLimit uint64) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.to, f.data = to, callData
+	f.to, f.data, f.value, f.gasLimit = to, callData, value, gasLimit
 	if f.err != nil {
 		return nil, f.err
 	}

@@ -35,6 +35,10 @@ type sponsorChain interface {
 // sponsorTxBuilder builds a contract-call tx. EVMRelayTxBuilder satisfies it.
 type sponsorTxBuilder interface {
 	BuildUnsignedTx(from, to string, callData []byte) ([]byte, error)
+	// BuildUnsignedCall is BuildUnsignedTx with an explicit value and gas
+	// limit, for signing a LiFi route's transactionRequest as given. A zero
+	// gasLimit means estimate.
+	BuildUnsignedCall(from, to string, callData []byte, value *big.Int, gasLimit uint64) ([]byte, error)
 }
 
 // sponsorNativeSender is the rest of *blockchain.EVMClient a lane needs.
