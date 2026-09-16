@@ -32,6 +32,14 @@ const conversionTickLimit = 20
 // before an operator is asked to look at it.
 const defaultStallWindow = 6 * time.Hour
 
+// defaultLegCeiling is the HARD outer bound on a single leg, measured from that
+// leg's OWN CreatedAt. The stall window exempts a bridge that is pending with a
+// transaction hash, because it may still be in flight — and no answer LiFi
+// gives can be trusted to say when it has stopped being. This ceiling closes
+// that exemption from the other end: a leg pending this long is a human's
+// problem whatever it looks like.
+const defaultLegCeiling = 24 * time.Hour
+
 // lifiQuoter is the quote side of LiFi this state machine needs.
 // *LiFiQuoteClient satisfies it.
 type lifiQuoter interface {
@@ -62,13 +70,20 @@ type ConversionOrchestrator struct {
 	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
 	maxShortfallUSD float64
 	// stallWindow is how long an order's LEG LEDGER may go without moving before
-	// the order is treated as stuck. Several shapes can stall without any single
-	// step deciding to park them — a lost SetTxHash write, a DONE LiFi never
-	// qualifies, a pending refund with no oracle, a chain with no verifier — and
-	// each of those would otherwise live only in a log line. It covers refunding
-	// as well as converting: a refund stuck on a pending leg is just as silent.
+	// the order is treated as stuck. It is read from the legs, NEVER from
+	// updated_at: the Paycrest poller bumps that column on every cycle, so it
+	// says nothing about whether a conversion is progressing. It catches the
+	// shapes that look dead — a lost SetTxHash write, a pending refund with no
+	// oracle — and covers refunding as well as converting, because a refund
+	// stuck on a pending leg is just as silent as a stuck conversion.
+	//
+	// It deliberately does NOT catch a bridge that is pending with a hash; that
+	// set may still be in flight, and legCeiling is what bounds it.
 	stallWindow time.Duration
-	now         func() time.Time
+	// legCeiling is the outer bound on ANY pending leg, liveness included.
+	// See defaultLegCeiling.
+	legCeiling time.Duration
+	now        func() time.Time
 }
 
 func NewConversionOrchestrator(
@@ -89,7 +104,8 @@ func NewConversionOrchestrator(
 	return &ConversionOrchestrator{
 		db: db, treasury: treasury, legs: legs, lifi: lifi, status: status,
 		transfers: keyed, chains: chains, retryWindow: retryWindow,
-		maxShortfallUSD: defaultMaxShortfallUSD, stallWindow: defaultStallWindow, now: now,
+		maxShortfallUSD: defaultMaxShortfallUSD, stallWindow: defaultStallWindow,
+		legCeiling: defaultLegCeiling, now: now,
 	}
 }
 
@@ -153,19 +169,43 @@ func (o *ConversionOrchestrator) afterStep(ctx context.Context, order *models.Pa
 		log.Printf("[ramp-conversion] order=%s stall check: %v", order.ID, err)
 		return
 	}
-	// A bridge that is genuinely in flight is not a stall, however long it
-	// takes. Parking it would strand a user who may be about to be paid, and —
-	// because nothing is confirmed yet — would record the FULL promise as owed
-	// on an order where the money may already be moving.
+	// An order with NO legs has never been driven by this state machine, so
+	// there is nothing here to call stuck. Its only available clock would be
+	// order.CreatedAt, which measures the user's bank payment and Paycrest's
+	// matching window — neither of which this orchestrator owns. Parking on it
+	// would hand an operator an order the user may not have paid for, record
+	// the FULL promise as owed against it, and then never recover: Advance
+	// early-returns on NeedsOperator(), so the delivery that arrives an hour
+	// later would never be seen.
+	if len(legs) == 0 {
+		return
+	}
+	// The outer ceiling is asked FIRST, because it is the one question that does
+	// not care whether the leg looks alive. Everything below exempts a live
+	// bridge, and several genuinely dead shapes — a DONE with a substatus we
+	// cannot qualify, a NOT_FOUND, a landing no verifier will ever read — are
+	// indistinguishable from a live one without this bound.
+	if stuck := legPastCeiling(legs, o.now().Add(-o.legCeiling)); stuck != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_over_ceiling_total=1 order=%s leg=%s kind=%s attempt=%d tx=%s",
+			order.ID, stuck.ID, stuck.Kind, stuck.Attempt, stuck.TxHash)
+		reason := fmt.Sprintf("%s leg attempt %d (tx %q) pending since %s, past the %s ceiling",
+			stuck.Kind, stuck.Attempt, stuck.TxHash,
+			stuck.CreatedAt.UTC().Format(time.RFC3339), o.legCeiling)
+		if err := o.toRecovery(ctx, order, reason, nil); err != nil {
+			log.Printf("[ramp-conversion] order=%s park over-ceiling leg: %v", order.ID, err)
+		}
+		return
+	}
+	// Inside the ceiling, a bridge that is genuinely in flight is not a stall,
+	// however long it takes. Parking it would strand a user who may be about to
+	// be paid, and — because nothing is confirmed yet — would record the FULL
+	// promise as owed on an order where the money may already be moving.
 	if live := liveBridgeLeg(legs); live != nil {
 		return
 	}
 	since := lastLegActivity(legs)
 	if since.IsZero() {
-		// No legs at all: the clock runs from the order's own creation, the last
-		// moment we know anything happened to it. CreatedAt is immutable and
-		// owned by nobody else, which is the point.
-		since = order.CreatedAt
+		return // a ledger with no usable clock is not evidence of anything
 	}
 	if !o.now().After(since.Add(o.stallWindow)) {
 		return
@@ -200,6 +240,27 @@ func liveBridgeLeg(legs []models.RampLeg) *models.RampLeg {
 		}
 	}
 	return nil
+}
+
+// legPastCeiling is the oldest leg still pending since before `deadline` — the
+// hard backstop behind every liveness exemption in this file. Liveness is
+// deliberately NOT consulted: the whole point is the shapes that look alive and
+// are not.
+func legPastCeiling(legs []models.RampLeg, deadline time.Time) *models.RampLeg {
+	var out *models.RampLeg
+	for i := range legs {
+		leg := &legs[i]
+		if leg.Status != models.RampLegStatusPending || leg.CreatedAt.IsZero() {
+			continue
+		}
+		if !leg.CreatedAt.Before(deadline) {
+			continue
+		}
+		if out == nil || leg.CreatedAt.Before(out.CreatedAt) {
+			out = leg
+		}
+	}
+	return out
 }
 
 // lastLegActivity is the most recent moment anything happened on this order's
@@ -577,6 +638,13 @@ func (o *ConversionOrchestrator) verifyOnDestination(ctx context.Context, order 
 		// question with a bad answer — it will never become true by waiting, so
 		// polling it until the stall deadline just costs hours before a human
 		// hears about it.
+		//
+		// NOTE: LogTransferVerifier never actually returns ErrTransferWrongRecipient.
+		// It filters the Transfer logs by recipient and reports a landing that
+		// paid someone else as ErrTransferNotFound — which lands in the "wait
+		// and look again" branch below, and is then bounded by legCeiling. The
+		// ErrTransferWrongRecipient arm is defensive only, for a future
+		// verifier that does distinguish the two.
 		if errors.Is(err, ErrTransferReverted) || errors.Is(err, ErrTransferWrongRecipient) {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_transfer_bad_total=1 order=%s stage=%s tx=%s err=%v",
 				order.ID, stage, txHash, err)
@@ -641,6 +709,19 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 		return o.setOrder(ctx, order, map[string]any{
 			"status": models.PaycrestStatusSettled, "holder": models.HolderUser,
 		})
+	}
+
+	// A top-up already in flight may not be joined by a second one. Its amount
+	// is NOT counted above — creditedToUser counts confirmed legs only, and a
+	// deliver leg now stays pending across ticks until its receipt is readable
+	// — so recomputing the gap here would broadcast the same top-up again.
+	// Counting unconfirmed top-ups as credited would be the other way to close
+	// this, and it is the wrong one: a top-up that later fails would leave the
+	// user permanently short. Wait instead; observeDeliver finishes this leg.
+	if inFlight := latestLeg(legs, models.RampLegKindDeliver, models.RampLegStatusPending); inFlight != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_topup_in_flight_total=1 order=%s deliver#%d tx=%s shortfall=%s",
+			order.ID, inFlight.Attempt, inFlight.TxHash, shortfall)
+		return nil
 	}
 
 	missBps := new(big.Int).Quo(new(big.Int).Mul(shortfall, big.NewInt(10_000)), promised)
@@ -744,6 +825,27 @@ func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.
 	}
 	log.Printf("[ramp-conversion] order=%s deliver#%d confirmed tx=%s credited=%s (verified on-chain)",
 		order.ID, leg.Attempt, leg.TxHash, credited)
+
+	// The same question settleOrTopUp asks, asked again here: a credit that is
+	// POSITIVE is not necessarily a SUFFICIENT one. A top-up that delivered
+	// less than it was sent for leaves the user short, and settling on it would
+	// close the order against them.
+	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
+	if !ok {
+		return fmt.Errorf("conversion: unreadable promise %q for order %s", order.PromisedAmount, order.ID)
+	}
+	legs, err := o.legs.ForOrder(ctx, order.ID)
+	if err != nil {
+		return err
+	}
+	if outstanding := new(big.Int).Sub(promised, creditedToUser(order, legs)); outstanding.Sign() > 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_topup_short_total=1 order=%s deliver#%d tx=%s credited=%s outstanding=%s",
+			order.ID, leg.Attempt, leg.TxHash, credited, outstanding)
+		// No status write: the order stays open and the next tick tops up what
+		// is still owed. setOrder with no columns of its own still recomputes
+		// owed_to_user, so the remaining balance is on the record meanwhile.
+		return o.setOrder(detached(ctx), order, map[string]any{})
+	}
 	// Detached: the top-up is already on-chain, so this write must not be lost
 	// with a cancelled request.
 	return o.setOrder(detached(ctx), order, map[string]any{

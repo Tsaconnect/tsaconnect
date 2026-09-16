@@ -130,8 +130,14 @@ type PaycrestOrderRecord struct {
 	// on a buy. The conversion must land at least this much.
 	PromisedAmount string `gorm:"size:64" json:"promisedAmount,omitempty"`
 	Holder         string `gorm:"size:12" json:"holder,omitempty"`
-	// OwedToUser is computed from the legs, never entered by hand.
-	OwedToUser string `gorm:"size:64" json:"owedToUser,omitempty"`
+	// OwedToUser is computed from the legs, never entered by hand. It has three
+	// states and they are not interchangeable: a number is what we still owe,
+	// "0" means nothing is owed, and "" means UNDETERMINED — a transfer is in
+	// flight, so the user may already hold the money and NOBODY MAY PAY against
+	// this field until it resolves. It carries no omitempty for exactly that
+	// reason: dropping "" would make the one value that forbids a payout look
+	// identical to a direct order that never had the field.
+	OwedToUser string `gorm:"size:64" json:"owedToUser"`
 	Fault      string `gorm:"size:12" json:"fault,omitempty"`
 
 	// WalletAddress is the user's own connected wallet: the delivery target on
@@ -180,9 +186,9 @@ type PaycrestOrderRecord struct {
 	// RampCheckedAt is when the conversion orchestrator last LOOKED at this
 	// order, which is a different question from when the order last moved.
 	// It exists so a tick that makes no progress can rotate the row to the back
-	// of its queue without touching UpdatedAt — because UpdatedAt going stale is
-	// the only evidence that an order is stuck, and a fair-scheduling bump would
-	// erase exactly the signal the stall detector needs.
+	// of its queue without touching UpdatedAt. Staleness itself is read from the
+	// LEG LEDGER, never from UpdatedAt: the Paycrest poller bumps UpdatedAt on
+	// every cycle, so it says nothing about whether a conversion is stuck.
 	RampCheckedAt *time.Time `json:"-"`
 	SettledAt     *time.Time `json:"settledAt,omitempty"`
 

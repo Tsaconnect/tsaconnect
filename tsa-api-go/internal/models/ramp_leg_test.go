@@ -1,6 +1,10 @@
 package models
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestRampLegTerminalStatuses(t *testing.T) {
 	if !RampLegTerminal(RampLegStatusConfirmed) || !RampLegTerminal(RampLegStatusFailed) {
@@ -41,5 +45,23 @@ func TestNeedsOperator_CoversRecoveryPending(t *testing.T) {
 		if (&PaycrestOrderRecord{Status: status}).NeedsOperator() {
 			t.Errorf("status %q does not need an operator", status)
 		}
+	}
+}
+
+// owed_to_user has THREE states on a converted order, and the difference
+// between two of them is whether anyone may be paid: "0" means nothing is owed,
+// a number is what is owed, and "" means UNDETERMINED — a transfer is in flight
+// and the user may already hold the money. `omitempty` would drop the empty
+// one, making it indistinguishable over the API from a direct order that never
+// had the field at all.
+func TestPaycrestOrderRecord_UndeterminedOwedToUserSurvivesJSON(t *testing.T) {
+	blob, err := json.Marshal(&PaycrestOrderRecord{
+		Status: PaycrestStatusRecoveryPending, RouteKind: RouteKindConverted, OwedToUser: "",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"owedToUser":""`) {
+		t.Fatalf("json = %s; UNDETERMINED must cross the API, not be dropped", blob)
 	}
 }

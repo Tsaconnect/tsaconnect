@@ -1107,8 +1107,9 @@ func TestOrchestrator_TickRotatesAnIdleOrderToTheBackOfTheQueue(t *testing.T) {
 	if got.RampCheckedAt == nil || !got.RampCheckedAt.After(before) {
 		t.Fatalf("rampCheckedAt = %v; a stalled order must rotate to the back of the queue", got.RampCheckedAt)
 	}
-	// And updated_at must NOT move: it is the only evidence the order is stuck,
-	// and the stall detector reads it.
+	// And updated_at must NOT move: rotating is not progress, and forging it
+	// here would mislead every other reader of the column. (The stall detector
+	// itself reads the leg ledger, never this.)
 	if !got.UpdatedAt.Equal(before) {
 		t.Fatalf("updatedAt = %v, was %v; rotating must not forge progress", got.UpdatedAt, before)
 	}
@@ -1503,5 +1504,208 @@ func TestOrchestrator_ParksAtOnceWhenTheLandingPaidSomeoneElse(t *testing.T) {
 
 	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
 		t.Fatalf("status = %s; a transfer that paid someone else must park immediately", got.Status)
+	}
+}
+
+// ── round 4: the outer ceiling, and never paying a top-up twice ────────────
+
+// A bridge leg that is pending WITH a hash is never parked by the stall
+// deadline, because it might still be in flight. That exemption has no floor of
+// its own, so a DONE LiFi never qualifies would sit in converting forever: the
+// order is not settled, not refunded, and reaches no operator queue. The outer
+// ceiling is the backstop — measured from the pending leg's own CreatedAt, and
+// blind to whatever LiFi last said.
+func TestOrchestrator_ParksAnUnqualifiedDoneAtTheOuterCeiling(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r) // bridge#1 broadcast, pending with a hash
+	r.status.set(LiFiStatusDone, "99800000")
+	r.status.setSubstatus("") // DONE, but nothing says the user was paid
+
+	// Inside the ceiling it is left alone: the bridge may still be live.
+	r.clock = r.clock.Add(7 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; a bridge inside the ceiling is still just waiting", got.Status)
+	}
+
+	// Past it, a human is asked to look, whatever LiFi last answered.
+	r.clock = r.clock.Add(18 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("order = %s; a leg pending past the outer ceiling must reach an operator", got.Status)
+	}
+	if got.FailureReason == "" {
+		t.Fatal("the reason must name the leg that never resolved")
+	}
+	// The liability is still UNDETERMINED: the money may already be with the
+	// user. Nobody may pay against a figure here.
+	if got.OwedToUser != "" {
+		t.Fatalf("owedToUser = %q; an in-flight bridge is undetermined, not a number", got.OwedToUser)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); len(legs) != 1 {
+		t.Fatalf("bridge legs = %+v; parking must never start a second attempt", legs)
+	}
+}
+
+// LiFi not knowing the transaction is not evidence the bridge is alive. The
+// ceiling runs on the leg's own age, so this shape surfaces too.
+func TestOrchestrator_ParksABridgeLiFiCannotFindAtTheOuterCeiling(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.set("NOT_FOUND", "")
+
+	r.clock = r.clock.Add(25 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("order = %s; a bridge LiFi cannot find must not sit forever", got.Status)
+	}
+	if r.dst.signer.calls() != 0 || r.src.signer.calls() != 1 {
+		t.Fatalf("broadcasts = src:%d dst:%d; parking must move no money",
+			r.src.signer.calls(), r.dst.signer.calls())
+	}
+}
+
+// A landing that can never be verified — a dead destination RPC, or a transfer
+// that paid someone else and so reads as ErrTransferNotFound — leaves the leg
+// pending with its hash on every tick. The ceiling is what ends it.
+func TestOrchestrator_ParksALandingItCanNeverVerifyAtTheOuterCeiling(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	r.dstTransfers.err = ErrTransferNotFound // never readable
+
+	r.clock = r.clock.Add(25 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("order = %s; an unverifiable landing must not sit forever", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge leg = %+v; parking must not forge an outcome for it", legs[0])
+	}
+}
+
+// An order with NO legs has never been touched by this state machine. Its clock
+// measures the user's bank payment and Paycrest's matching window — neither of
+// which this orchestrator owns — so parking it would hand an operator an order
+// on which the user may not even have paid us yet, and record the FULL promise
+// as owed against it. Worse, the park is one-way: Advance early-returns on
+// NeedsOperator(), so the delivery that arrives an hour later is never seen.
+func TestOrchestrator_NeverParksAnOrderWithNoLegs(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"holder":  models.HolderPaycrest,
+		"tx_hash": "", // Paycrest has not delivered
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	for _, after := range []time.Duration{7 * time.Hour, 18 * time.Hour} {
+		r.clock = r.clock.Add(after)
+		if err := r.svc.Tick(context.Background(), 10); err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		got := r.reload(t)
+		if got.Status != models.PaycrestStatusConverting || got.NeedsOperator() {
+			t.Fatalf("order = %s after %s; a pre-custody order must never be parked", got.Status, after)
+		}
+		if got.OwedToUser == got.PromisedAmount {
+			t.Fatalf("owedToUser = %q; we cannot owe the full promise on an order nobody has paid us for",
+				got.OwedToUser)
+		}
+	}
+
+	// And it still completes normally when Paycrest finally delivers.
+	if err := r.db.Model(r.order).UpdateColumn("tx_hash", "0xpaycrestdelivery").Error; err != nil {
+		t.Fatal(err)
+	}
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %q; a late delivery must still be taken into custody", got.Holder)
+	}
+}
+
+// creditedToUser counts CONFIRMED legs only, and a top-up now stays pending
+// across ticks while its receipt is unreadable. Recomputing the shortfall in
+// that window would broadcast the same top-up a second time.
+func TestOrchestrator_NeverStartsASecondTopUpWhileOneIsPending(t *testing.T) {
+	r := newConversionRig(t)
+	// A top-up already in flight, and a bridge attempt still pending. (The
+	// attempt numbers are what sequence the two; the invariant under test is
+	// about the deliver leg, however the pair came to exist.)
+	r.seedLeg(t, &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
+		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
+		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xsponsored",
+	})
+	r.seedLeg(t, &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindBridge, Attempt: 2,
+		ChainKey: "base", Token: "USDC", ToAddr: r.order.WalletAddress,
+		Amount: "100000000", Status: models.RampLegStatusPending, TxHash: "0xbridge2",
+	})
+	r.completeBridge(t, "99400000") // lands 0.1 short of the promise
+
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 1 {
+		t.Fatalf("deliver legs = %+v; the user must never be topped up twice for one shortfall", legs)
+	}
+	if r.dst.signer.calls() != 0 {
+		t.Fatalf("destination broadcasts = %d; nothing may be sent while a top-up is unresolved",
+			r.dst.signer.calls())
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled && got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; want the order left open for the pending top-up", got.Status)
+	}
+}
+
+// settleTopUp must ask the same question settleOrTopUp does: is the user whole?
+// A verified credit that is merely POSITIVE is not the same as a sufficient
+// one, and settling on it closes an order the user is still short on.
+func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	mustAdvance(t, r)
+	r.completeBridge(t, "99400000") // 0.1 short; the top-up is for 100000
+	// The top-up transaction credits only part of what it was sent for.
+	r.dstTransfers.amountByTx = map[string]*big.Int{"0xsponsored": big.NewInt(40_000)}
+
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusConfirmed || legs[0].AmountReceived != "40000" {
+		t.Fatalf("deliver legs = %+v; want one confirmed on the verified 40000", legs)
+	}
+	got := r.reload(t)
+	if got.Status == models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; 40000 of a 100000 shortfall does not make the user whole", got.Status)
+	}
+	if got.OwedToUser != "60000" {
+		t.Fatalf("owedToUser = %q; the balance the user is still short must be on the record", got.OwedToUser)
+	}
+
+	// The next tick pays the REMAINING 60000 — not the whole shortfall again.
+	r.dstTransfers.amountByTx = map[string]*big.Int{"0xsponsored": big.NewInt(60_000)}
+	mustAdvance(t, r)
+
+	legs = r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 2 || legs[1].Amount != "60000" {
+		t.Fatalf("deliver legs = %+v; want a second leg for the 60000 still owed", legs)
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; want settled once the user actually holds the promise", got.Status)
 	}
 }
