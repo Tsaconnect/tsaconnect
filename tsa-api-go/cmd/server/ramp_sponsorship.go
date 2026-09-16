@@ -17,6 +17,10 @@ import (
 // direct log.Fatalf call — purely so a test can intercept a boot-time
 // refusal (assertDistinctKey's callers) without exec'ing a subprocess.
 // Production always runs the real log.Fatalf, which never returns.
+//
+// WARNING: tests that swap this var (see refusesToStart) are NOT safe under
+// t.Parallel() — two parallel tests would race on the same package-level
+// variable and could each restore the other's swap mid-test.
 var fatalf = log.Fatalf
 
 // assertDistinctKey refuses to start when key's address matches any entry in

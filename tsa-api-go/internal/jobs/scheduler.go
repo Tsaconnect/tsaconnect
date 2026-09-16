@@ -78,6 +78,15 @@ func (s *Scheduler) Register(w Worker) {
 	s.workers = append(s.workers, w)
 }
 
+// Count returns how many workers are currently registered. Mainly for tests
+// that need to assert a dormant feature registered nothing, without reaching
+// into the unexported workers slice.
+func (s *Scheduler) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.workers)
+}
+
 // Start spawns one goroutine per registered worker. Returns immediately.
 // Calling Start twice is a programmer error and panics.
 func (s *Scheduler) Start(ctx context.Context) {

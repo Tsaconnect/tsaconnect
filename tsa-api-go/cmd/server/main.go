@@ -1456,14 +1456,11 @@ func main() {
 		}
 		// Converted buys: Paycrest delivers into our own treasury instead of
 		// the user's wallet, then the treasury bridges it via LiFi. Dormant
-		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion.
-		if treasury, conversionOrch := buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes); conversionOrch != nil {
-			scheduler.Register(jobs.NewConversionOrchestratorWorker(conversionOrch, 30*time.Second))
-			// Registered a second time under its own metric prefix, alongside
-			// the gas sponsor's own registration above: same job type, two
-			// independent floats to watch.
-			scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute))
-		}
+		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
+		// nil-orchestrator gate itself lives in registerRampConversionWorkers
+		// (and is unit-tested there), not inlined here.
+		treasury, conversionOrch := buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
+		registerRampConversionWorkers(scheduler, treasury, conversionOrch)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {

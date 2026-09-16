@@ -4,9 +4,11 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -16,9 +18,12 @@ import (
 // A key shared with any other privileged signer is fatal, not merely
 // dormant: unlike the gas sponsor (which only ever pays gas), the treasury
 // holds USER FUNDS in transit, so a compromise of a shared key would be a
-// compromise of customer money. That check runs BEFORE anything else here,
-// including before chains/orders/quotes are even consulted, so a
-// misconfigured key is caught even if the rest of the wiring is unavailable.
+// compromise of customer money. The collision check (assertDistinctKey) runs
+// as soon as a key is available to check — after the flag, key-presence,
+// production and parse checks that necessarily come first (there is no key
+// to check before then) — but still well before chains/orders/quotes are
+// ever consulted, so a misconfigured key is caught even when the rest of the
+// wiring is unavailable.
 func buildRampConversion(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) (*services.Treasury, *services.ConversionOrchestrator) {
 	if !cfg.RampConversionBuyEnabled {
 		log.Printf("[ramp-conversion] dormant: RAMP_CONVERSION_BUY is off")
@@ -47,16 +52,24 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 
+	caps, ok := rampTreasuryCaps(cfg)
+	if !ok {
+		log.Printf("[ramp-conversion] dormant: refusing to start with an invalid exposure cap")
+		return nil, nil
+	}
+
 	if chains == nil {
 		log.Printf("[ramp-conversion] dormant: no chain registry available")
 		return nil, nil
 	}
 
 	lanes := map[string]*services.TreasuryLane{}
+	var missing []string
 	for _, chain := range cfg.RampTreasuryChains {
 		floor, skipReason := rampTreasuryLaneFloor(cfg, chain)
 		if skipReason != "" {
 			log.Printf("[ramp-conversion] ALERT ramp_treasury_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
+			missing = append(missing, chain)
 			continue
 		}
 		lane := buildSponsorLane(chains, chain, key, "ramp_treasury_"+chain, services.SponsorLimits{
@@ -64,24 +77,32 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		}, nil)
 		if lane == nil {
 			log.Printf("[ramp-conversion] skipping %s: no chain client", chain)
+			missing = append(missing, chain)
 			continue
 		}
-		chainID, ok := chains.ChainIDForName(chain)
-		if !ok {
+		chainID, idOK := chains.ChainIDForName(chain)
+		if !idOK {
 			log.Printf("[ramp-conversion] skipping %s: no chain id configured", chain)
+			missing = append(missing, chain)
 			continue
 		}
 		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID}
+	}
+	if len(missing) > 0 {
+		// Named once, in one line, rather than only inferred from the
+		// per-chain skip lines above: RampConversionMinUSDByChain is
+		// populated for every configured chain regardless of whether it got
+		// a lane, so without this a chain here would otherwise be quotable
+		// (SetConversionMinimums below would have an entry for it) but
+		// unexecutable — a quote the treasury can never fulfil.
+		log.Printf("[ramp-conversion] chains configured but without a usable treasury lane (not offered as a converted-buy destination): %v", missing)
 	}
 	if len(lanes) == 0 {
 		log.Printf("[ramp-conversion] dormant: no usable chains in RAMP_TREASURY_CHAINS")
 		return nil, nil
 	}
 
-	treasury := services.NewTreasury(lanes, services.TreasuryCaps{
-		MaxInFlightUSDPerOrder: cfg.RampTreasuryMaxInflightUSDPerOrder,
-		MaxInFlightUSDPerChain: cfg.RampTreasuryMaxInflightUSDPerChain,
-	}, nil)
+	treasury := services.NewTreasury(lanes, caps, nil)
 	// An empty address means the configured lanes disagree about their
 	// signer (NewTreasury already logged the mismatch ALERT) — a hard
 	// refusal, not a silent proceed, because an empty address would
@@ -115,7 +136,13 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		quotes.SetLiFiQuoter(lifiQuoteClient)
 		quotes.SetChainRegistry(chains)
 		quotes.SetTreasuryAddress(addr)
-		quotes.SetConversionMinimums(cfg.RampConversionMinUSDByChain, cfg.RampConversionMinUSD)
+		// Quotable chains and treasury lanes are independent sets —
+		// RampConversionMinUSDByChain covers every chain in
+		// RAMP_TREASURY_CHAINS, but `lanes` can be a strict subset (missing
+		// floor, no chain client, no chain id). Filtering here means the
+		// quote service never offers a converted venue on a chain this
+		// treasury cannot actually execute on.
+		quotes.SetConversionMinimums(rampQuotableConversionMinimums(cfg.RampConversionMinUSDByChain, lanes), cfg.RampConversionMinUSD)
 	}
 	if orders != nil {
 		orders.SetTreasury(addr)
@@ -139,4 +166,62 @@ func rampTreasuryLaneFloor(cfg *config.Config, chain string) (floor *big.Int, sk
 		return nil, "invalid or missing RAMP_TREASURY_NATIVE_FLOOR_WEI_" + strings.ToUpper(chain)
 	}
 	return floor, ""
+}
+
+// rampQuotableConversionMinimums restricts mins (populated for every chain in
+// RAMP_TREASURY_CHAINS by config.Load) to the chains that actually got a
+// treasury lane. Quotable chains and treasury lanes are independent sets — a
+// missing floor, no chain client, or no chain id can drop a configured chain
+// from lanes — so passing the unfiltered map to
+// PaycrestQuoteService.SetConversionMinimums would let it offer a converted
+// venue on a chain this treasury can never execute on: the user would see a
+// quote and then an error at order time.
+func rampQuotableConversionMinimums(mins map[string]float64, lanes map[string]*services.TreasuryLane) map[string]float64 {
+	out := make(map[string]float64, len(lanes))
+	for chain := range lanes {
+		if v, ok := mins[chain]; ok {
+			out[chain] = v
+		}
+	}
+	return out
+}
+
+// rampTreasuryCaps validates the two exposure caps before they ever reach
+// Treasury.CheckCaps. CheckCaps treats a cap <= 0 as "no cap" (its own,
+// already-tested convention) — which is the OPPOSITE of what a boot-time
+// misconfiguration here must mean: RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER
+// or _PER_CHAIN parsing to zero or negative must refuse to start, not
+// silently remove the guard it names. Same ALERT shape as a missing/
+// malformed native floor (rampTreasuryLaneFloor) — fail closed, not open.
+func rampTreasuryCaps(cfg *config.Config) (caps services.TreasuryCaps, ok bool) {
+	if cfg.RampTreasuryMaxInflightUSDPerOrder <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_cap_invalid_total=1 var=RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER value=%.2f",
+			cfg.RampTreasuryMaxInflightUSDPerOrder)
+		return services.TreasuryCaps{}, false
+	}
+	if cfg.RampTreasuryMaxInflightUSDPerChain <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_cap_invalid_total=1 var=RAMP_TREASURY_MAX_INFLIGHT_USD_PER_CHAIN value=%.2f",
+			cfg.RampTreasuryMaxInflightUSDPerChain)
+		return services.TreasuryCaps{}, false
+	}
+	return services.TreasuryCaps{
+		MaxInFlightUSDPerOrder: cfg.RampTreasuryMaxInflightUSDPerOrder,
+		MaxInFlightUSDPerChain: cfg.RampTreasuryMaxInflightUSDPerChain,
+	}, true
+}
+
+// registerRampConversionWorkers registers the converted-buy workers with
+// scheduler ONLY when buildRampConversion actually built something. Split
+// out of main() so the exact gate that keeps the flag-off path from
+// registering anything is itself unit-testable, independent of the full
+// server boot.
+func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services.Treasury, orch *services.ConversionOrchestrator) {
+	if orch == nil {
+		return
+	}
+	scheduler.Register(jobs.NewConversionOrchestratorWorker(orch, 30*time.Second))
+	// Registered a second time under its own metric prefix, alongside the
+	// gas sponsor's own float-monitor registration: same job type, two
+	// independent floats to watch.
+	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute))
 }
