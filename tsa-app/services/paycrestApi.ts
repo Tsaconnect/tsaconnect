@@ -19,6 +19,12 @@ import { getAuthHeaders } from '@/services/walletApi';
 import { makeIdempotencyKey } from '@/services/itApi';
 import { getChain, type ChainKey } from '@/constants/chains';
 import { p2pTokenDecimals, formatTokenAmount } from '@/services/p2p';
+// The multi-hop ramp progress UI's own types — reused verbatim, not
+// redeclared. The status→hop MAPPING below is new (Paycrest's converted-order
+// statuses have no overlap with the stablecoin sell/buy ones that file maps),
+// but the shape it renders through is the same one already wired into
+// app/wallet/it/intent/[id].tsx.
+import type { Hop } from '@/utils/stableSellQuote';
 
 /** One fillable (token, network) with its live price. */
 export interface PaycrestVenue {
@@ -396,6 +402,37 @@ export function isConvertedOrder(o: Pick<PaycrestOrder, 'routeKind'>): boolean {
 }
 
 /**
+ * The single rule this whole phase exists to enforce: pick the venue that
+ * fills the user's exact requested (chainKey, symbol) — or nothing.
+ *
+ * An exact DIRECT match always wins over a converted one for the same pair
+ * (mirrors the backend's own Decision 3: never convert what Paycrest can
+ * already deliver). A converted match is used only when no direct match
+ * exists. When NEITHER exists this returns `null` — never `venues[0]`,
+ * never "best", never anything the user did not explicitly ask for. A
+ * caller with nothing to show must render "no route" and offer an
+ * alternative as a choice, not silently substitute one here.
+ */
+export function selectVenue(
+  venues: PaycrestVenue[],
+  wantChainKey: string,
+  wantSymbol: string,
+): PaycrestVenue | null {
+  const matchesWanted = (v: PaycrestVenue) =>
+    v.chain.toLowerCase() === wantChainKey.toLowerCase() &&
+    v.token.toUpperCase() === wantSymbol.toUpperCase();
+  const direct = venues.find((v) => matchesWanted(v) && !isConvertedVenue(v));
+  if (direct) return direct;
+  const converted = venues.find(
+    (v) =>
+      isConvertedVenue(v) &&
+      v.requestedChain?.toLowerCase() === wantChainKey.toLowerCase() &&
+      v.requestedToken?.toUpperCase() === wantSymbol.toUpperCase(),
+  );
+  return converted ?? null;
+}
+
+/**
  * On-chain decimals for a (chainKey, symbol) pair, resolved through the
  * app's own chain registry — the same source `p2pTokenDecimals` already
  * gets right for BSC's 18-decimal stables vs everywhere else's 6. Falls back
@@ -448,9 +485,6 @@ export function describeConvertedVenue(
   const via = `${v.viaToken ?? '?'} on ${chainLabel(v.viaChain ?? '')}`;
   return `${to} — includes a conversion from ${via}, arrives in ${formatEta(v.etaSeconds)}`;
 }
-
-export type HopState = 'done' | 'active' | 'pending' | 'failed';
-export type Hop = { key: string; label: string; state: HopState };
 
 /**
  * The order-screen timeline for a CONVERTED order: Received → Converting →

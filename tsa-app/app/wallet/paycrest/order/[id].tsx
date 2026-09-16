@@ -189,6 +189,13 @@ export default function PaycrestOrderScreen() {
   const refunded = order.status === 'refunded';
   const refunding = order.status === 'refunding';
   const conversionHops = converted ? paycrestConversionHops(order.status, order.holder) : [];
+  // Same shape of problem as `unmatched` — funds are stranded in a way no
+  // retry fixes, and a human is already on it (see NeedsOperator on the
+  // backend) — so it gets the same "needs explaining, not just labelling"
+  // treatment rather than the default border/copy of an ordinary in-flight
+  // order.
+  const recoveryPending = order.status === 'recovery_pending';
+  const needsOperator = unmatched || recoveryPending;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
@@ -196,7 +203,7 @@ export default function PaycrestOrderScreen() {
         <Card
           style={{
             borderWidth: 1,
-            borderColor: unmatched
+            borderColor: needsOperator
               ? colors.warning
               : settled
                 ? colors.success
@@ -207,7 +214,7 @@ export default function PaycrestOrderScreen() {
             variant="title3"
             weight="700"
             style={{
-              color: unmatched
+              color: needsOperator
                 ? colors.warning
                 : settled
                   ? colors.success
@@ -217,7 +224,7 @@ export default function PaycrestOrderScreen() {
             {statusLabel(order)}
           </Text>
 
-          {/* The one state that needs explaining rather than labelling. The
+          {/* The two states that need explaining rather than labelling. The
               user did nothing wrong and cannot fix it themselves, so say both
               things plainly instead of showing a generic failure. */}
           {unmatched && (
@@ -225,6 +232,12 @@ export default function PaycrestOrderScreen() {
               Your transfer reached the provider but was never matched to this order. Your money is
               not lost — recovering it needs a person, and we have started that. Send us your bank
               receipt to speed it up.
+            </Text>
+          )}
+          {recoveryPending && (
+            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+              Your funds are stranded at the provider in a way we can&apos;t retry automatically. Nothing
+              is lost — recovering it needs a person, and we have started that.
             </Text>
           )}
           {awaiting && !expired && (
@@ -343,7 +356,13 @@ export default function PaycrestOrderScreen() {
                   refund reads as returned rather than delivered: the money
                   is going back to the SAME wallet, just never converted. */}
               <SummaryRow
-                label={refunded || refunding ? 'Returned to your wallet' : 'You receive'}
+                label={
+                  refunded
+                    ? 'Returned to your wallet'
+                    : refunding
+                      ? 'Returning to your wallet'
+                      : 'You receive'
+                }
                 value={`${formatPromisedAmount(order) ?? order.tokenAmount ?? '—'} ${order.requestedToken ?? order.token}`}
                 hint={refunded || refunding ? undefined : 'Guaranteed minimum — includes a conversion'}
               />

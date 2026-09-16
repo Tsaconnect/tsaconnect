@@ -15,6 +15,7 @@ import {
   getQuote,
   isConvertedVenue,
   isConvertedOrder,
+  selectVenue,
   requestedAssetDecimals,
   formatPromisedAmount,
   formatEta,
@@ -136,6 +137,63 @@ describe('telling a converted venue apart from a direct one', () => {
     expect(isConvertedOrder({ routeKind: 'converted' })).toBe(true);
     expect(isConvertedOrder({ routeKind: 'direct' })).toBe(false);
     expect(isConvertedOrder({})).toBe(false);
+  });
+});
+
+// A third, unrelated direct venue — present in every "no match" case below to
+// prove selectVenue doesn't fall back to SOMETHING just because the list is
+// non-empty.
+const otherDirectVenue: PaycrestVenue = {
+  kind: 'direct',
+  chain: 'polygon',
+  token: 'USDT',
+  rate: '1640.00',
+  spreadPercent: 0.3,
+  tokenAmount: 91.5,
+};
+
+describe('selectVenue — the one rule this phase exists to enforce', () => {
+  it('picks the exact direct match for what was asked', () => {
+    expect(selectVenue([directVenue, otherDirectVenue], 'base', 'USDC')).toBe(directVenue);
+  });
+
+  it('is case-insensitive on chain and token', () => {
+    expect(selectVenue([directVenue], 'BASE', 'usdc')).toBe(directVenue);
+  });
+
+  it('uses the converted match only when no direct match exists for that pair', () => {
+    expect(selectVenue([otherDirectVenue, convertedVenue], 'optimism', 'USDT')).toBe(convertedVenue);
+  });
+
+  it('a direct match for the SAME pair always wins over a converted one', () => {
+    // Mirrors the backend's Decision 3: never convert what Paycrest can
+    // already deliver directly.
+    const directOptimismUsdt: PaycrestVenue = {
+      kind: 'direct',
+      chain: 'optimism',
+      token: 'USDT',
+      rate: '1645.00',
+      spreadPercent: 0.4,
+      tokenAmount: 91.2,
+    };
+    const conflictingConverted: PaycrestVenue = { ...convertedVenue, chain: 'optimism', token: 'USDT' };
+    expect(selectVenue([conflictingConverted, directOptimismUsdt], 'optimism', 'USDT')).toBe(
+      directOptimismUsdt,
+    );
+  });
+
+  it('returns null — never venues[0], never "best" — when nothing matches at all', () => {
+    expect(selectVenue([otherDirectVenue, convertedVenue], 'arbitrum', 'DAI')).toBeNull();
+  });
+
+  it('returns null on an empty venue list', () => {
+    expect(selectVenue([], 'base', 'USDC')).toBeNull();
+  });
+
+  it('never matches a converted venue whose requestedChain/requestedToken is a different pair', () => {
+    // convertedVenue converts TO optimism/USDT — asking for base/USDT (its
+    // OWN settlement chain, different token) must not match it.
+    expect(selectVenue([convertedVenue], 'base', 'USDT')).toBeNull();
   });
 });
 

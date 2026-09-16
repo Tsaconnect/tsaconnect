@@ -65,6 +65,7 @@ import {
   getPayoutInstitutions,
   getQuote,
   isConvertedVenue,
+  selectVenue,
   describeConvertedVenue,
   formatPromisedAmount,
   formatEta,
@@ -355,17 +356,10 @@ export default function PaycrestBuyScreen() {
         // for is fillable — directly or via a labelled conversion — or venue
         // stays null and the screen says so, offering the alternative as a
         // choice rather than silently swapping it in (see the render below).
-        const matchesWanted = (v: PaycrestVenue) =>
-          v.chain.toLowerCase() === wantChainKey.toLowerCase() &&
-          v.token.toUpperCase() === wantSymbol.toUpperCase();
-        const direct = q.venues.find((v) => matchesWanted(v) && !isConvertedVenue(v));
-        const converted = q.venues.find(
-          (v) =>
-            isConvertedVenue(v) &&
-            v.requestedChain?.toLowerCase() === wantChainKey.toLowerCase() &&
-            v.requestedToken?.toUpperCase() === wantSymbol.toUpperCase(),
-        );
-        setVenue(direct ?? converted ?? null);
+        // selectVenue is the one thing that guarantees this, and it is
+        // unit-tested on its own in services/__tests__/paycrestApi.conversion.test.ts
+        // — nothing here re-implements or shadows that rule.
+        setVenue(selectVenue(q.venues, wantChainKey, wantSymbol));
       } catch (e) {
         if (seq !== quoteSeq.current) return;
         setQuote(null);
@@ -430,10 +424,12 @@ export default function PaycrestBuyScreen() {
   // user asked for, even with a conversion — never auto-selected, only
   // switched to on a deliberate tap (see the "Use X instead" button below).
   const pickAlternativeVenue = useCallback((v: PaycrestVenue) => {
-    // Every venue the quote returns is one of Paycrest's own settlement
-    // chains, always a known ChainKey — same assumption CHAIN_LABELS already
-    // makes above.
-    setWantChainId(getChain(v.chain as ChainKey).chainId);
+    // v.chain is a raw string off the wire, not a type-checked ChainKey —
+    // matches DEFAULT_CHAIN_ID's own guard above rather than assuming every
+    // value the backend ever sends is one of the keys this build knows about.
+    const chainId = getChain(v.chain as ChainKey)?.chainId;
+    if (chainId == null) return;
+    setWantChainId(chainId);
     setWantSymbol(v.token.toUpperCase());
     setWantTokenMeta(null);
   }, []);
@@ -650,8 +646,19 @@ export default function PaycrestBuyScreen() {
                       : `${venue.tokenAmount.toFixed(6)} ${venue.token}`}
                   </Text>
                   <Text variant="caption" style={{ color: colors.textMuted }}>
-                    on {chainLabel(isConvertedVenue(venue) ? venue.requestedChain : venue.chain)} ·{' '}
-                    {symbol}
+                    {/* The rate is always priced against the SETTLEMENT leg
+                        (Paycrest quotes ₦ per venue.token, not per the
+                        requested token), so chain and token must be paired
+                        from the same leg here — pairing venue.chain's rate
+                        with the requested chain read as "₦1650 per USDC" on
+                        a line that says "on Optimism" when USDC never
+                        touches Optimism. The Route line below already states
+                        the requested side; this one is explicitly labelled
+                        as the settlement leg. */}
+                    {isConvertedVenue(venue)
+                      ? `Settles as ${venue.token} on ${chainLabel(venue.chain)}`
+                      : `on ${chainLabel(venue.chain)}`}{' '}
+                    · {symbol}
                     {venue.rate} per {venue.token}
                   </Text>
                   {/* A converted route is labelled honestly, every time — this
