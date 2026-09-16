@@ -61,11 +61,12 @@ type ConversionOrchestrator struct {
 	retryWindow time.Duration
 	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
 	maxShortfallUSD float64
-	// stallWindow is how long an order may sit in converting without moving
-	// before it is treated as stuck. Several shapes can stall without any single
+	// stallWindow is how long an order's LEG LEDGER may go without moving before
+	// the order is treated as stuck. Several shapes can stall without any single
 	// step deciding to park them — a lost SetTxHash write, a DONE LiFi never
-	// qualifies, a pending deliver leg with no oracle, a chain with no verifier
-	// — and each of those would otherwise live only in a log line.
+	// qualifies, a pending refund with no oracle, a chain with no verifier — and
+	// each of those would otherwise live only in a log line. It covers refunding
+	// as well as converting: a refund stuck on a pending leg is just as silent.
 	stallWindow time.Duration
 	now         func() time.Time
 }
@@ -114,46 +115,107 @@ func (o *ConversionOrchestrator) Tick(ctx context.Context, limit int) error {
 	}
 	var errs []error
 	for i := range orders {
-		// Captured BEFORE the step: Advance writes through this same row, so
-		// reading UpdatedAt afterwards would not tell us whether it moved.
-		before := orders[i].UpdatedAt
 		if err := o.Advance(ctx, &orders[i]); err != nil {
 			log.Printf("[ramp-conversion] order=%s advance: %v", orders[i].ID, err)
 			errs = append(errs, err)
 		}
-		o.afterStep(ctx, &orders[i], before)
+		o.afterStep(ctx, &orders[i])
 	}
 	return errors.Join(errs...)
 }
 
 // afterStep records that we looked, and notices when looking has stopped
-// helping. It bumps ONLY ramp_checked_at, so the order yields its turn in the
-// queue while updated_at stays the honest answer to "when did this last move".
+// helping.
 //
-// The conditional update doubles as the progress test: the row still carries
-// the updated_at we read, so this UPDATE matches exactly when the step wrote
-// nothing. RowsAffected of 0 means the step DID move the order.
-func (o *ConversionOrchestrator) afterStep(ctx context.Context, order *models.PaycrestOrderRecord, before time.Time) {
-	res := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
-		Where("id = ? AND updated_at = ?", order.ID, before).
-		UpdateColumn("ramp_checked_at", o.now().UTC())
-	if res.Error != nil {
-		log.Printf("[ramp-conversion] order=%s rotate: %v", order.ID, res.Error)
+// Rotation and staleness are deliberately different questions asked of
+// different columns. Rotation bumps ramp_checked_at unconditionally, so an
+// order that cannot progress still yields its turn in the queue. Staleness is
+// read from the LEG LEDGER, never from updated_at: nothing writes the order row
+// between custody and settlement, so "updated_at is old" would be a hard
+// deadline on the whole conversion — and PaycrestOrderService.Sync bumps
+// updated_at on every poll anyway, which would both suppress the detector and
+// leave ramp_checked_at permanently NULL at the head of the queue.
+func (o *ConversionOrchestrator) afterStep(ctx context.Context, order *models.PaycrestOrderRecord) {
+	err := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ?", order.ID).
+		UpdateColumn("ramp_checked_at", o.now().UTC()).Error
+	if err != nil {
+		log.Printf("[ramp-conversion] order=%s rotate: %v", order.ID, err)
 		return
 	}
-	if res.RowsAffected == 0 {
-		return // the step moved the order; it is not stalled
+	// Advance may have just moved this order (GORM writes back through the same
+	// struct), so a terminal or parked status here means there is nothing stuck.
+	if order.Status != models.PaycrestStatusConverting && order.Status != models.PaycrestStatusRefunding {
+		return
 	}
-	// Idle. An order that has been idle this long is not waiting, it is stuck,
-	// and it belongs in front of a human rather than in a log line.
-	if order.Status == models.PaycrestStatusConverting && o.now().After(before.Add(o.stallWindow)) {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_stalled_total=1 order=%s idle_since=%s holder=%s",
-			order.ID, before.UTC().Format(time.RFC3339), order.Holder)
-		if err := o.toRecovery(ctx, order,
-			fmt.Sprintf("no progress since %s", before.UTC().Format(time.RFC3339)), nil); err != nil {
-			log.Printf("[ramp-conversion] order=%s park stalled: %v", order.ID, err)
+	legs, err := o.legs.ForOrder(ctx, order.ID)
+	if err != nil {
+		log.Printf("[ramp-conversion] order=%s stall check: %v", order.ID, err)
+		return
+	}
+	// A bridge that is genuinely in flight is not a stall, however long it
+	// takes. Parking it would strand a user who may be about to be paid, and —
+	// because nothing is confirmed yet — would record the FULL promise as owed
+	// on an order where the money may already be moving.
+	if live := liveBridgeLeg(legs); live != nil {
+		return
+	}
+	since := lastLegActivity(legs)
+	if since.IsZero() {
+		// No legs at all: the clock runs from the order's own creation, the last
+		// moment we know anything happened to it. CreatedAt is immutable and
+		// owned by nobody else, which is the point.
+		since = order.CreatedAt
+	}
+	if !o.now().After(since.Add(o.stallWindow)) {
+		return
+	}
+	reason := fmt.Sprintf("no leg activity since %s", since.UTC().Format(time.RFC3339))
+	if stuck := latestPendingLeg(legs); stuck != nil {
+		reason = fmt.Sprintf("%s; %s leg attempt %d (tx %q) never resolved",
+			reason, stuck.Kind, stuck.Attempt, stuck.TxHash)
+	}
+	log.Printf("[ramp-conversion] ALERT ramp_conversion_stalled_total=1 order=%s status=%s holder=%s since=%s",
+		order.ID, order.Status, order.Holder, since.UTC().Format(time.RFC3339))
+	if err := o.toRecovery(ctx, order, reason, nil); err != nil {
+		log.Printf("[ramp-conversion] order=%s park stalled: %v", order.ID, err)
+	}
+}
+
+// liveBridgeLeg is a bridge attempt that is still pending AND has a transaction
+// on the chain — the set LiFi can still report PENDING, or DONE awaiting
+// verification, for.
+//
+// A pending bridge with NO hash is deliberately NOT live: that is the
+// lost-SetTxHash shape the stall deadline exists to surface. A pending bridge
+// whose hash LiFi has already called FAILED never reaches here either, because
+// observeBridge parks it first. So "pending with a hash" is exactly the set
+// that must never be parked by a timer, and it costs no extra LiFi call.
+func liveBridgeLeg(legs []models.RampLeg) *models.RampLeg {
+	for i := range legs {
+		leg := &legs[i]
+		if leg.Kind == models.RampLegKindBridge &&
+			leg.Status == models.RampLegStatusPending && leg.TxHash != "" {
+			return leg
 		}
 	}
+	return nil
+}
+
+// lastLegActivity is the most recent moment anything happened on this order's
+// ledger: a leg reserved, or a leg confirmed. Zero when there are no legs.
+func lastLegActivity(legs []models.RampLeg) time.Time {
+	var out time.Time
+	for i := range legs {
+		leg := &legs[i]
+		if leg.CreatedAt.After(out) {
+			out = leg.CreatedAt
+		}
+		if leg.ConfirmedAt != nil && leg.ConfirmedAt.After(out) {
+			out = *leg.ConfirmedAt
+		}
+	}
+	return out
 }
 
 // Advance moves one converted buy forward by at most ONE step. It is safe to
@@ -206,12 +268,15 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 	// 2. A pending leg of any kind means one leg is already in flight for this
 	//    order, and nothing else may move until it resolves.
 	if pending := latestPendingLeg(legs); pending != nil {
-		if pending.Kind == models.RampLegKindBridge {
+		switch pending.Kind {
+		case models.RampLegKindBridge:
 			return o.observeBridge(ctx, order, pending)
+		case models.RampLegKindDeliver:
+			return o.observeDeliver(ctx, order, pending)
 		}
-		// A deliver/refund transfer we broadcast ourselves but could not record
-		// an outcome for. Its fate is unknown, so this order stops here for an
-		// operator rather than risking a second payment.
+		// A refund we broadcast ourselves but could not record an outcome for.
+		// Its fate is unknown, so this order stops here rather than risking a
+		// second payment; the stall deadline surfaces it to an operator.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d tx=%s",
 			order.ID, pending.ID, pending.Kind, pending.Attempt, pending.TxHash)
 		return nil
@@ -484,44 +549,64 @@ func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.
 	return o.settleOrTopUp(ctx, order, &confirmed)
 }
 
-// verifyLanding reads the destination transaction LiFi named and returns what
-// the user's wallet was ACTUALLY credited, or nil when that cannot be
-// established yet. Returning (nil, nil) means "wait and look again": every such
-// path alerts, and none of them settles anything.
+// verifyOnDestination reads ONE transaction on the destination chain and
+// returns what the order's wallet was actually credited by it.
 //
-// This is the difference between believing a bridge and checking it.
-// LiFiTransferStatus's own doc comment promises the destination tx is verified
-// independently on-chain before any money moves; for this caller that promise
-// was not being kept until now.
-func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg, st *LiFiTransferStatus) (*big.Int, error) {
-	if st.DestTxHash == "" {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_dest_tx_total=1 order=%s tx=%s", order.ID, leg.TxHash)
+//	(amount, nil) — proven; this is the only shape that may settle anything
+//	(nil, nil)    — cannot be established YET; wait and look again (alerted)
+//	(nil, err)    — parked for a human, or a real error
+//
+// It is the single gate for "never settle on a number nobody checked", shared
+// by the bridge landing and the top-up, so neither can drift from the other.
+func (o *ConversionOrchestrator) verifyOnDestination(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, txHash, stage string) (*big.Int, error) {
+	if txHash == "" {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_dest_tx_total=1 order=%s stage=%s", order.ID, stage)
 		return nil, nil
-	}
-	dst, err := o.destination(order)
-	if err != nil {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
-		return nil, o.toRecovery(ctx, order, err.Error(), nil)
 	}
 	verifier := o.verifierFor(order.RequestedChain)
 	if verifier == nil {
 		// Same reasoning as taking custody: with no verifier the alternative is
 		// settling on a number nobody checked.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=landing",
-			order.ID, order.RequestedChain)
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=%s",
+			order.ID, order.RequestedChain, stage)
 		return nil, nil
 	}
-	credited, err := verifier.VerifyTransfer(ctx, st.DestTxHash, dst.token, order.WalletAddress)
+	credited, err := verifier.VerifyTransfer(ctx, txHash, dst.token, order.WalletAddress)
 	if err != nil {
-		// Not mined yet, or not the transfer we were promised. Either way this
-		// is not a settlement, and the next tick looks again.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_unverified_total=1 order=%s dest_tx=%s err=%v",
-			order.ID, st.DestTxHash, err)
+		// A REVERTED transfer, or one that paid someone else, is a settled
+		// question with a bad answer — it will never become true by waiting, so
+		// polling it until the stall deadline just costs hours before a human
+		// hears about it.
+		if errors.Is(err, ErrTransferReverted) || errors.Is(err, ErrTransferWrongRecipient) {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_transfer_bad_total=1 order=%s stage=%s tx=%s err=%v",
+				order.ID, stage, txHash, err)
+			return nil, o.toRecovery(ctx, order,
+				fmt.Sprintf("%s transfer %s did not credit the user: %v", stage, txHash, err), nil)
+		}
+		// Not mined yet, or not readable. The next tick looks again.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_unverified_total=1 order=%s stage=%s tx=%s err=%v",
+			order.ID, stage, txHash, err)
 		return nil, nil
 	}
 	if credited == nil || credited.Sign() <= 0 {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_zero_total=1 order=%s dest_tx=%s", order.ID, st.DestTxHash)
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_zero_total=1 order=%s stage=%s tx=%s", order.ID, stage, txHash)
 		return nil, nil
+	}
+	return credited, nil
+}
+
+// verifyLanding proves the bridge landing LiFi named. LiFi is the LOOKUP that
+// says WHICH transaction to read; the ERC-20 Transfer log in it is the only
+// thing that says what the user received.
+func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg, st *LiFiTransferStatus) (*big.Int, error) {
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		return nil, o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	credited, err := o.verifyOnDestination(ctx, order, dst, st.DestTxHash, "landing")
+	if err != nil || credited == nil {
+		return nil, err
 	}
 	// The chain outranks LiFi. Where they disagree, what the wallet was credited
 	// is what the user has, and the shortfall logic works from that.
@@ -617,11 +702,48 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, ""); err != nil {
 		return err
 	}
-	if err := o.legs.Confirm(detached(ctx), leg.ID, shortfall.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
-		return err
-	}
 	log.Printf("[ramp-conversion] order=%s deliver#%d chain=%s token=%s amount=%s tx=%s",
 		order.ID, attempt, dst.lane.ChainKey, dst.symbol, shortfall, txHash)
+	leg.TxHash = txHash
+	// The broadcast is not the proof. If the receipt is not readable yet the leg
+	// stays pending and observeDeliver finishes it on a later tick.
+	return o.settleTopUp(ctx, order, dst, leg)
+}
+
+// observeDeliver resolves a top-up leg we already broadcast. It exists because
+// a top-up, like a bridge, is only finished when the destination chain says so
+// — and a receipt is rarely readable in the same instant we send.
+func (o *ConversionOrchestrator) observeDeliver(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if leg.TxHash == "" {
+		// Reserved, but no broadcast outcome was ever recorded. Nothing to read;
+		// the stall deadline is what eventually surfaces this.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d",
+			order.ID, leg.ID, leg.Kind, leg.Attempt)
+		return nil
+	}
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		return o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	return o.settleTopUp(ctx, order, dst, leg)
+}
+
+// settleTopUp confirms a top-up leg on the strength of the destination chain
+// and settles the order. Unverified means wait — never settle.
+func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, leg *models.RampLeg) error {
+	credited, err := o.verifyOnDestination(ctx, order, dst, leg.TxHash, "topup")
+	if err != nil || credited == nil {
+		return err // alerted inside; the leg stays pending for the next tick
+	}
+	if err := o.legs.Confirm(detached(ctx), leg.ID, credited.String(), o.now()); err != nil {
+		if errors.Is(err, ErrLegNotPending) {
+			return nil // another tick confirmed it and will settle it
+		}
+		return err
+	}
+	log.Printf("[ramp-conversion] order=%s deliver#%d confirmed tx=%s credited=%s (verified on-chain)",
+		order.ID, leg.Attempt, leg.TxHash, credited)
 	// Detached: the top-up is already on-chain, so this write must not be lost
 	// with a cancelled request.
 	return o.setOrder(detached(ctx), order, map[string]any{
@@ -751,10 +873,20 @@ func (o *ConversionOrchestrator) setOrder(ctx context.Context, order *models.Pay
 //
 // A refunding order still owes: the refund has not landed yet, and reporting
 // zero would hide a live liability for exactly as long as it matters.
+//
+// An empty string means UNDETERMINED, not zero — see the in-flight case below.
 func owedFromLegs(order *models.PaycrestOrderRecord, legs []models.RampLeg) string {
 	switch order.Status {
 	case models.PaycrestStatusSettled, models.PaycrestStatusRefunded:
 		return "0"
+	}
+	// While a bridge is in flight the liability is genuinely UNDETERMINED: the
+	// user may already hold the money, or may never receive it. Reporting the
+	// full promise here would be the figure a human pays against, on an order
+	// that might already be paid. An empty value is the honest answer, and the
+	// failure_reason names the transaction still outstanding.
+	if liveBridgeLeg(legs) != nil {
+		return ""
 	}
 	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
 	if !ok {

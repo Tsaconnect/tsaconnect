@@ -62,12 +62,24 @@ type fakeTransferVerifier struct {
 	amount *big.Int
 	err    error
 	calls  int
+	// errByTx / amountByTx answer for ONE transaction, overriding the defaults.
+	// The bridge landing and the top-up are different transactions on the same
+	// chain, so a test that needs one to verify and the other not has to be able
+	// to say which is which.
+	errByTx    map[string]error
+	amountByTx map[string]*big.Int
 }
 
-func (f *fakeTransferVerifier) VerifyTransfer(_ context.Context, _, _, _ string) (*big.Int, error) {
+func (f *fakeTransferVerifier) VerifyTransfer(_ context.Context, txHash, _, _ string) (*big.Int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if err, ok := f.errByTx[txHash]; ok {
+		return nil, err
+	}
+	if amount, ok := f.amountByTx[txHash]; ok {
+		return new(big.Int).Set(amount), nil
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -243,6 +255,18 @@ func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrat
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.dstTransfers},
 		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+}
+
+// seedLeg inserts a leg stamped on the INJECTED clock. GORM would otherwise
+// stamp CreatedAt from the wall clock, and the stall detector reads leg
+// timestamps — so a wall-clock row would sit permanently in the future.
+func (r *conversionRig) seedLeg(t *testing.T, leg *models.RampLeg) *models.RampLeg {
+	t.Helper()
+	leg.CreatedAt = r.clock.UTC()
+	if _, err := r.legStore.Reserve(context.Background(), leg); err != nil {
+		t.Fatalf("seed leg: %v", err)
+	}
+	return leg
 }
 
 func (r *conversionRig) reload(t *testing.T) *models.PaycrestOrderRecord {
@@ -448,14 +472,12 @@ func TestOrchestrator_DoesNothingWhenAnotherTickOwnsTheAttempt(t *testing.T) {
 // human rather than guessing whether the transfer landed.
 func TestOrchestrator_StopsWhenADeliverLegIsStalled(t *testing.T) {
 	r := newConversionRig(t)
-	stalled := &models.RampLeg{
+	r.seedLeg(t, &models.RampLeg{
 		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
 		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
 		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
-	}
-	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
-		t.Fatal(err)
-	}
+	})
+	r.dstTransfers.err = ErrTransferNotFound // the receipt is not readable
 
 	mustAdvance(t, r)
 
@@ -1062,14 +1084,12 @@ func TestOrchestrator_TickOnlyPicksUpConvertedBuysInFlight(t *testing.T) {
 // to the back so the orders behind it still get their turn.
 func TestOrchestrator_TickRotatesAnIdleOrderToTheBackOfTheQueue(t *testing.T) {
 	r := newConversionRig(t)
-	stalled := &models.RampLeg{
+	r.seedLeg(t, &models.RampLeg{
 		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
 		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
 		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
-	}
-	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
-		t.Fatal(err)
-	}
+	})
+	r.dstTransfers.err = ErrTransferNotFound
 	// Put the row's clock on the orchestrator's clock: GORM stamps UpdatedAt
 	// from the wall clock on create, and comparing that against an injected
 	// clock would measure the gap between the two, not whether we rotated.
@@ -1158,23 +1178,19 @@ func TestOrchestrator_TakesCustodyWhenTheHolderIsUnset(t *testing.T) {
 	}
 }
 
-// Several shapes stall in converting without any single step deciding to park
-// them. The deadline is what turns "it is only in the logs" into something
-// NeedsOperator() can see.
-func TestOrchestrator_ParksAnOrderThatHasStalledTooLong(t *testing.T) {
+// Staleness is measured on the LEG LEDGER, not the order row. Nothing writes
+// the order between custody and settlement, so an updated_at deadline would be
+// a hard deadline on the whole conversion.
+func TestOrchestrator_ParksAnOrderWhoseLedgerHasNotMoved(t *testing.T) {
 	r := newConversionRig(t)
-	// A pending deliver leg: no oracle to ask, so every tick is a no-op.
-	stalled := &models.RampLeg{
+	// A pending deliver leg whose receipt never becomes readable: every tick is
+	// a no-op, and no bridge is live.
+	r.seedLeg(t, &models.RampLeg{
 		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
 		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
 		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
-	}
-	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.db.Model(r.order).UpdateColumn("updated_at", r.clock.UTC()).Error; err != nil {
-		t.Fatal(err)
-	}
+	})
+	r.dstTransfers.err = ErrTransferNotFound
 
 	// Inside the window it is left alone.
 	r.clock = r.clock.Add(5 * time.Hour)
@@ -1196,6 +1212,116 @@ func TestOrchestrator_ParksAnOrderThatHasStalledTooLong(t *testing.T) {
 	}
 	if !got.NeedsOperator() {
 		t.Fatal("a stalled order must reach the operator queue")
+	}
+}
+
+// A bridge that is genuinely in flight is not a stall, however long it takes.
+// Parking it would strand a user who may be about to be paid.
+func TestOrchestrator_NeverParksWhileABridgeIsStillInFlight(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r) // broadcasts the bridge; LiFi still reports PENDING
+
+	r.clock = r.clock.Add(7 * time.Hour) // well past the 6h stall window
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; a bridge still in flight is not a stall", got.Status)
+	}
+	if got.NeedsOperator() {
+		t.Fatal("a live bridge must not be handed to an operator on a timer")
+	}
+	// A slow bridge eventually lands, and still settles.
+	r.completeBridge(t, "99800000")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; a slow bridge must still be able to settle", got.Status)
+	}
+}
+
+// Parking an order whose bridge broadcast must NOT report the full promise as
+// owed: the user may already hold the money, and that figure is what a human
+// would pay against.
+func TestOrchestrator_ParkedWithABridgeInFlightDoesNotClaimTheFullPromise(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusFailed, "") // parks, leg left pending WITH its hash
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending", got.Status)
+	}
+	if got.OwedToUser == got.PromisedAmount {
+		t.Fatalf("owedToUser = %q; the full promise must not be claimed while %q is unresolved",
+			got.OwedToUser, got.TxHash)
+	}
+	if got.OwedToUser != "" {
+		t.Fatalf("owedToUser = %q; an in-flight bridge makes the liability undetermined, not a number",
+			got.OwedToUser)
+	}
+	if got.FailureReason == "" {
+		t.Fatal("the reason must name what is outstanding")
+	}
+}
+
+// A refund stuck on a pending leg is just as silent as a stuck conversion.
+func TestOrchestrator_ParksAStalledRefund(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"status": models.PaycrestStatusRefunding,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.seedLeg(t, &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindRefund, Attempt: 1,
+		ChainKey: "base", Token: "USDC", ToAddr: r.order.WalletAddress,
+		Amount: "100000000", Status: models.RampLegStatusPending, TxHash: "0xstuckrefund",
+	})
+
+	r.clock = r.clock.Add(7 * time.Hour)
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a refunding order can stall too", got.Status)
+	}
+}
+
+// The staleness signal must not depend on a column another service owns.
+// PaycrestOrderService.Sync bumps updated_at on every poll of a non-terminal
+// order, which would otherwise suppress the detector forever and leave
+// ramp_checked_at NULL at the head of the queue.
+func TestOrchestrator_StallDetectionSurvivesThePollerTouchingTheOrder(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLeg(t, &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
+		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
+		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
+	})
+	r.dstTransfers.err = ErrTransferNotFound
+	r.clock = r.clock.Add(7 * time.Hour)
+
+	// The poller touches the row, exactly as Sync's Updates(...) would.
+	if err := r.db.Model(r.order).UpdateColumn("updated_at", r.clock.UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a fresh updated_at must not hide a stalled ledger", got.Status)
+	}
+	if got.RampCheckedAt == nil {
+		t.Fatal("rotation must still happen when updated_at was written by someone else")
 	}
 }
 
@@ -1301,5 +1427,81 @@ func TestCreditedToUser_NeverCountsABridgeLegBySourceAmount(t *testing.T) {
 	}}
 	if got := creditedToUser(order, legs).String(); got != "0" {
 		t.Fatalf("credited = %s, want 0 — a bridge Amount is source units and may never have landed", got)
+	}
+}
+
+// ── round 3: the top-up is checked too ─────────────────────────────────────
+
+// "Never settle on a number nobody checked" has to hold for the top-up as well
+// as the bridge: a broadcast is not a delivery.
+func TestOrchestrator_VerifiesTheTopUpOnChainBeforeSettling(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	mustAdvance(t, r)
+	r.completeBridge(t, "99400000") // 0.1 short
+
+	// The landing verifies (tx 0xdest); the top-up's own transaction
+	// (tx 0xsponsored) is broadcast but not readable yet.
+	r.dstTransfers.errByTx = map[string]error{"0xsponsored": ErrTransferNotFound}
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("deliver legs = %+v; an unverified top-up must stay pending", legs)
+	}
+	if got := r.reload(t); got.Status == models.PaycrestStatusSettled {
+		t.Fatal("an unverified top-up must not settle the order")
+	}
+
+	// Once the transfer is readable, the leg confirms and the order settles —
+	// on the CHAIN's figure.
+	r.dstTransfers.errByTx = nil
+	r.dstTransfers.amountByTx = map[string]*big.Int{"0xsponsored": big.NewInt(100_000)}
+	mustAdvance(t, r)
+
+	legs = r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusConfirmed || legs[0].AmountReceived != "100000" {
+		t.Fatalf("deliver legs = %+v; want one confirmed on the verified amount", legs)
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; want settled once the top-up is proven", got.Status)
+	}
+	// And it was never sent twice while it was unverified.
+	if r.dst.signer.calls() != 1 {
+		t.Fatalf("destination broadcasts = %d, want 1", r.dst.signer.calls())
+	}
+}
+
+// ── round 3: a reverted transfer is a settled question with a bad answer ───
+
+// Polling a reverted transaction until the stall deadline just costs hours
+// before a human hears about it.
+func TestOrchestrator_ParksAtOnceWhenTheLandingReverted(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	r.dstTransfers.err = ErrTransferReverted
+
+	mustAdvance(t, r) // one tick, no waiting
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || got.Fault != models.FaultPlatform {
+		t.Fatalf("order = %s fault=%s; a reverted landing must park immediately", got.Status, got.Fault)
+	}
+	if !got.NeedsOperator() {
+		t.Fatal("a reverted landing must reach the operator queue")
+	}
+}
+
+func TestOrchestrator_ParksAtOnceWhenTheLandingPaidSomeoneElse(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+	r.dstTransfers.err = ErrTransferWrongRecipient
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a transfer that paid someone else must park immediately", got.Status)
 	}
 }
