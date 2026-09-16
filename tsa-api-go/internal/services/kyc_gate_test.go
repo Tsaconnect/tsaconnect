@@ -433,3 +433,96 @@ func TestActivateFiatVA_CentralRetirementOutranksTheGate(t *testing.T) {
 		t.Fatalf("ActivateFiatVA err = %v, want ErrITVARetired", err)
 	}
 }
+
+// ─── Money in #5: the Paycrest onramp ───────────────────────────────────────
+
+func paycrestGateBuyRequest(userID uuid.UUID) PaycrestBuyRequest {
+	return PaycrestBuyRequest{
+		UserID:            userID,
+		WalletAddress:     "0xabc",
+		FiatCode:          "NGN",
+		FiatAmount:        "800",
+		ChainKey:          "base",
+		Token:             "USDC",
+		RefundBankCode:    "044",
+		RefundAccount:     "0123456789",
+		RefundAccountName: "Test User",
+	}
+}
+
+// A Paycrest buy hands the user a provider bank account to pay, so it is money
+// in. The refusal must land before any provider call: this fixture's quoter and
+// orderer panic when reached, so a gate placed too late fails the test instead
+// of passing it.
+func TestPaycrestCreateBuy_RefusesUnverifiedBuyer(t *testing.T) {
+	svc, registry := newPaycrestOrderTestService(t)
+	svc.SetCurrencyRegistry(registry)
+	ctx := context.Background()
+
+	ids := []uuid.UUID{uuid.New()} // no user row at all
+	for _, status := range unverifiedStatuses {
+		ids = append(ids, seedUserAt(t, svc.db, uuid.New(), status))
+	}
+
+	for _, id := range ids {
+		_, err := svc.CreateBuy(ctx, paycrestGateBuyRequest(id))
+		if !errors.Is(err, ErrKYCVerificationRequired) {
+			t.Fatalf("user %s: CreateBuy err = %v, want ErrKYCVerificationRequired", id, err)
+		}
+		if errors.Is(err, ErrKYCLegalNameMissing) {
+			t.Fatalf("user %s: an unverified buyer was given the support refusal; they can verify themselves", id)
+		}
+		var n int64
+		svc.db.Model(&models.PaycrestOrderRecord{}).Where("user_id = ?", id).Count(&n)
+		if n != 0 {
+			t.Fatalf("user %s: %d order(s) written despite the refusal", id, n)
+		}
+	}
+}
+
+func TestPaycrestCreateBuy_NamelessVerifiedIsASupportRefusal(t *testing.T) {
+	svc, registry := newPaycrestOrderTestService(t)
+	svc.SetCurrencyRegistry(registry)
+	id := seedVerifiedWithoutLegalName(t, svc.db, "")
+
+	_, err := svc.CreateBuy(context.Background(), paycrestGateBuyRequest(id))
+	if !errors.Is(err, ErrKYCLegalNameMissing) {
+		t.Fatalf("CreateBuy err = %v, want ErrKYCLegalNameMissing", err)
+	}
+}
+
+func TestPaycrestCreateBuy_AdmitsVerifiedBuyer(t *testing.T) {
+	pc := &capturingOrderer{rate: "1390.64", feePercent: "0.5"}
+	svc := newFeeTestService(t, "0.5", pc, "buy", "1390.64")
+	id := seedVerifiedUser(t, svc.db)
+
+	row, err := svc.CreateBuy(context.Background(), paycrestGateBuyRequest(id))
+	if err != nil {
+		t.Fatalf("verified buyer refused: %v", err)
+	}
+	if row == nil || pc.onramp.Reference == "" {
+		t.Fatal("verified buyer's order never reached the provider")
+	}
+}
+
+// Selling to Paycrest is an exit: the user sends stablecoin they already hold
+// and receives fiat. Refusing it would trap the balance, so an unverified
+// seller — or one with no user row at all — must still get an order.
+func TestPaycrestCreateSell_IsNotGatedOnVerification(t *testing.T) {
+	pc := &capturingOrderer{rate: "1360.05", feePercent: "0.5"}
+	svc := newFeeTestService(t, "0.5", pc, "sell", "1360.05")
+
+	sellers := []uuid.UUID{uuid.New()}
+	for _, status := range unverifiedStatuses {
+		sellers = append(sellers, seedUserAt(t, svc.db, uuid.New(), status))
+	}
+	sellers = append(sellers, seedVerifiedWithoutLegalName(t, svc.db, ""))
+
+	for _, id := range sellers {
+		req := sellRequest()
+		req.UserID = id
+		if _, err := svc.CreateSell(context.Background(), req); err != nil {
+			t.Fatalf("seller %s: CreateSell err = %v — money-out must not be gated", id, err)
+		}
+	}
+}

@@ -311,6 +311,19 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	if err := s.requirePaycrestEnabled(fiat); err != nil {
 		return nil, err
 	}
+	// Money in: the order hands the user a bank account to pay. Refuse an
+	// unverified buyer before anything below spends a provider call (non-NGN
+	// destination lookup, rates, the order itself). After the kill switch, so a
+	// ramp that is switched off says so to everyone rather than sending an
+	// unverified user off to verify for a route that is not there.
+	if err := requireVerifiedForMoneyIn(ctx, s.db, req.UserID); err != nil {
+		if !errors.Is(err, ErrKYCVerificationRequired) {
+			// Fails closed either way; log so an outage is not mistaken for a
+			// run of provider errors.
+			log.Printf("[paycrest] kyc gate user=%s: %v", req.UserID, err)
+		}
+		return nil, err
+	}
 	// Destination first, then price. Resolving the refund account is cheap and
 	// cached, while VenueFor spends the slow, concurrency-throttled /v2/rates
 	// call — no reason to spend it on a request a malformed destination is
