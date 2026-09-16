@@ -13,7 +13,7 @@
 // rendered as an ordinary "expired" or "failed". It gets its own copy and a
 // direct route to support.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, Alert, Linking } from 'react-native';
+import { ScrollView, View, Alert, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -21,6 +21,7 @@ import {
   Button,
   Card,
   CopyableField,
+  Icon,
   Spinner,
   SummaryCard,
   SummaryRow,
@@ -32,11 +33,15 @@ import {
   cancelOrder,
   getOrder,
   isAwaitingUser,
+  isConvertedOrder,
   isTerminal,
   statusLabel,
+  formatPromisedAmount,
+  paycrestConversionHops,
   PaycrestError,
   type PaycrestOrder,
 } from '@/services/paycrestApi';
+import { getChainDisplay, type ChainKey } from '@/constants/chains';
 
 /** Delivery landed in ~73s end to end in live testing, so a 5s poll shows the
  *  result within a tick or two of it actually happening without hammering. */
@@ -50,6 +55,14 @@ const CHAIN_LABELS: Record<string, string> = {
   bsc: 'BNB Smart Chain',
   arbitrum: 'Arbitrum',
   ethereum: 'Ethereum',
+};
+
+/** requestedChain on a converted order can be anywhere LiFi routes to, not
+ *  just one of the five chains above — fall back to the chain registry's own
+ *  name rather than printing the raw key. */
+const chainLabel = (key?: string): string => {
+  if (!key) return '—';
+  return CHAIN_LABELS[key] ?? getChainDisplay(key as ChainKey)?.name ?? key;
 };
 
 export default function PaycrestOrderScreen() {
@@ -172,6 +185,10 @@ export default function PaycrestOrderScreen() {
   const awaiting = isAwaitingUser(order.status);
   const unmatched = order.status === 'unmatched';
   const settled = order.status === 'settled';
+  const converted = isConvertedOrder(order);
+  const refunded = order.status === 'refunded';
+  const refunding = order.status === 'refunding';
+  const conversionHops = converted ? paycrestConversionHops(order.status, order.holder) : [];
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
@@ -224,6 +241,56 @@ export default function PaycrestOrderScreen() {
           )}
         </Card>
 
+        {/* Converted orders route through our treasury before the user's
+            wallet ever sees anything, which a plain status line does not
+            convey — this timeline is what makes "why hasn't it arrived yet"
+            visible instead of a black box. Reuses the same Hop/HopState
+            rendering the stablecoin sell/buy progress screens already use
+            (intent/[id].tsx), not a new stepper. */}
+        {converted && (
+          <Card>
+            <Text
+              variant="bodySm"
+              weight="600"
+              style={{ color: colors.textSecondary, marginBottom: spacing.sm }}
+            >
+              Progress
+            </Text>
+            <View style={{ gap: spacing.sm }}>
+              {conversionHops.map((hop) => (
+                <View
+                  key={hop.key}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}
+                >
+                  {hop.state === 'done' ? (
+                    <Icon name="checkCircle" size={20} color={colors.success} />
+                  ) : hop.state === 'failed' ? (
+                    <Icon name="closeCircle" size={20} color={colors.danger} />
+                  ) : hop.state === 'active' ? (
+                    <Spinner size="small" />
+                  ) : (
+                    <View
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: 9,
+                        borderWidth: 2,
+                        borderColor: colors.border,
+                      }}
+                    />
+                  )}
+                  <Text
+                    variant="bodySm"
+                    style={{ color: hop.state === 'pending' ? colors.textMuted : colors.textPrimary }}
+                  >
+                    {hop.label}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </Card>
+        )}
+
         {/* Payment instructions stay visible while the order is still waiting
             on the user — this screen is where they land after tapping "I've
             sent the money", and they may not have actually sent it yet. */}
@@ -251,7 +318,7 @@ export default function PaycrestOrderScreen() {
             <CopyableField value={order.depositAddress ?? ''} />
             <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
               Send exactly {order.tokenAmount} {order.token} on{' '}
-              {CHAIN_LABELS[order.chain] ?? order.chain}. Sending a different token or a different
+              {chainLabel(order.chain)}. Sending a different token or a different
               network will not reach the provider.
             </Text>
           </Card>
@@ -267,12 +334,32 @@ export default function PaycrestOrderScreen() {
           {order.direction === 'sell' ? (
             <SummaryRow label="You receive" value={`₦${order.amount}`} />
           ) : null}
-          <SummaryRow
-            label={order.direction === 'buy' ? 'You receive' : 'You send'}
-            value={`${order.tokenAmount ?? '—'} ${order.token}`}
-          />
+          {converted ? (
+            <>
+              {/* order.tokenAmount/order.token are the SETTLEMENT leg — what
+                  Paycrest itself filled, to our treasury — never what lands
+                  in the user's wallet. Showing that here would be exactly
+                  the silent substitution this phase exists to remove. A
+                  refund reads as returned rather than delivered: the money
+                  is going back to the SAME wallet, just never converted. */}
+              <SummaryRow
+                label={refunded || refunding ? 'Returned to your wallet' : 'You receive'}
+                value={`${formatPromisedAmount(order) ?? order.tokenAmount ?? '—'} ${order.requestedToken ?? order.token}`}
+                hint={refunded || refunding ? undefined : 'Guaranteed minimum — includes a conversion'}
+              />
+              <SummaryRow label="Network" value={chainLabel(order.requestedChain)} />
+              <SummaryRow label="Route" value={`via ${order.token} on ${chainLabel(order.chain)}`} />
+            </>
+          ) : (
+            <>
+              <SummaryRow
+                label={order.direction === 'buy' ? 'You receive' : 'You send'}
+                value={`${order.tokenAmount ?? '—'} ${order.token}`}
+              />
+              <SummaryRow label="Network" value={chainLabel(order.chain)} />
+            </>
+          )}
           {order.rate ? <SummaryRow label="Rate" value={`₦${order.rate}`} /> : null}
-          <SummaryRow label="Network" value={CHAIN_LABELS[order.chain] ?? order.chain} />
           {order.settledAt ? <SummaryRow label="Completed" value={order.settledAt} /> : null}
           {/* Last, and deliberately: the reference means nothing to the user
               until something goes wrong, at which point support asks for it. */}
@@ -282,7 +369,11 @@ export default function PaycrestOrderScreen() {
         {order.txHash ? (
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-              Transaction
+              {/* Best-effort label: on a converted order in/after a refund,
+                  this is the only transaction-shaped field the API exposes
+                  today, so it is read as the refund's — see Task 13's report
+                  for the gap (no dedicated refund-tx field on the order yet). */}
+              {converted && (refunded || refunding) ? 'Refund transaction' : 'Transaction'}
             </Text>
             <CopyableField value={order.txHash} />
           </Card>
