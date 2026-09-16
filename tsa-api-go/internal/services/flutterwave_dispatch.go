@@ -13,7 +13,7 @@ import (
 type ITWebhookHooks interface {
 	AutoCreditFromInbound(ctx context.Context, paymentRef, amountNGN string) error
 	AutoCreditFromVA(ctx context.Context, fwCustomerID, reference, chargeID, amountNGN string) error
-	ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, status string) error
+	ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, payoutID, status string) error
 }
 
 // SetITHooks wires IT webhook routing (buy auto-credit + sell payout close).
@@ -186,7 +186,7 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 		// IT sell payouts route to the IT settle/reverse; bare-UUID refs are
 		// PM-trade payouts.
 		if s.itHooks != nil && strings.HasPrefix(p.MerchantTxRef, ITPayoutRefPrefix) {
-			return s.itHooks.ResolvePayoutFromWebhook(ctx, p.MerchantTxRef, p.Status)
+			return s.itHooks.ResolvePayoutFromWebhook(ctx, p.MerchantTxRef, p.PayoutID, p.Status)
 		}
 		return s.HandlePayoutStatus(ctx, *p)
 	case fwEventTransferReversal:

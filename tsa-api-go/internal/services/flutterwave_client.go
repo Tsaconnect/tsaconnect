@@ -661,6 +661,41 @@ type FWTransfer struct {
 	Reference string          `json:"reference"`
 	Status    string          `json:"status"` // NEW | PENDING | SUCCESSFUL | FAILED
 	Fee       json.RawMessage `json:"fee,omitempty"`
+	// CacheHit is set on a DirectTransfer result Flutterwave served from its
+	// idempotency cache (X-Idempotency-Cache-Hit) — the answer to the FIRST
+	// request that used this reference, not a new transfer.
+	CacheHit bool `json:"-"`
+}
+
+// ProviderRejectedError means the provider answered a money-moving request
+// and refused it, so that request moved no money. It is deliberately narrow:
+// a timeout, a 5xx, a 409 or a 429 is NOT one, because none of those say
+// whether a transfer exists.
+//
+// On its own it only describes THIS request. If an earlier request with the
+// same reference may have reached the provider, a refusal of the retry can be
+// "that reference is already taken" — i.e. the first attempt went through.
+// Replayed is what closes that gap: it is set when the provider served the
+// answer from its idempotency cache, which makes the refusal the outcome of the
+// first request as well.
+type ProviderRejectedError struct {
+	Err      error
+	Replayed bool
+}
+
+func (e *ProviderRejectedError) Error() string { return e.Err.Error() }
+func (e *ProviderRejectedError) Unwrap() error { return e.Err }
+
+// fwTransferRefusedStatus lists the HTTP statuses on which Flutterwave has
+// refused to create a transfer: malformed, unauthenticated, forbidden, unknown
+// route, unprocessable (the validation and insufficient-balance class).
+func fwTransferRefusedStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired,
+		http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // DirectTransfer initiates a transfer via the v4 orchestrator. The caller's
@@ -684,8 +719,13 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 	if err != nil {
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer: %w", err)
 	}
+	cacheHit := strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Idempotency-Cache-Hit")), "true")
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return FWTransfer{}, fwError("direct-transfer", resp.StatusCode, body)
+		herr := fwError("direct-transfer", resp.StatusCode, body)
+		if fwTransferRefusedStatus(resp.StatusCode) {
+			return FWTransfer{}, &ProviderRejectedError{Err: herr, Replayed: cacheHit}
+		}
+		return FWTransfer{}, herr
 	}
 	var env fwEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -696,8 +736,12 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer decode data: %w", err)
 	}
 	if env.failed() {
-		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message)
+		return FWTransfer{}, &ProviderRejectedError{
+			Err:      fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message),
+			Replayed: cacheHit,
+		}
 	}
+	parsed.CacheHit = cacheHit
 	if parsed.ID == "" {
 		return FWTransfer{}, errors.New("flutterwave direct-transfer: empty transfer id in response")
 	}
@@ -729,6 +773,144 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 		return FWTransfer{}, fmt.Errorf("flutterwave get-transfer decode data: %w", err)
 	}
 	return parsed, nil
+}
+
+// ErrFWTransferShape marks a /transfers response this code does not
+// positively recognise. It is the signal that the live listing differs from
+// the schema FindTransferByReference was built against — the thing
+// IT_SELL_FW_ABSENCE_TRUSTED is waiting on — so callers alert on it by name.
+var ErrFWTransferShape = errors.New("flutterwave list-transfers: unrecognised response shape")
+
+// fwTransferListMaxPages bounds a reference scan: 20 pages of 50 is a thousand
+// transfers, far more than two days of payouts. Hitting it is an error, not
+// "not found".
+const fwTransferListMaxPages = 20
+
+// fwTransferSearchSpan is how far either side of the attempt time a reference
+// is searched for.
+const fwTransferSearchSpan = 24 * time.Hour
+
+// FindTransferByReference looks for the transfer carrying reference among
+// transfers created within a day either side of around.
+//
+// v4 has no reference filter, so GET /transfers is paged by cursor over a
+// date-only window (the convention FW listing endpoints use; `to` is pushed a
+// day out so the window's last day is included) and rows are filtered here by
+// created_datetime.
+//
+// found=false with a nil error is a claim that the transfer does not exist, and
+// callers act on it, so it is only returned after a complete scan of a response
+// shape this code positively recognises. Everything else is an error: a missing
+// cursor, has_more_items, transfer list, reference or created_datetime; a
+// cursor that does not advance; the page cap; or more than one transfer on the
+// reference (references are meant to be unique, so two means something is
+// wrong and neither may be picked).
+//
+// The shape was built from Flutterwave's published v4 schema and has not been
+// confirmed against the live API; see IT_SELL_FW_ABSENCE_TRUSTED.
+func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error) {
+	if !c.IsEnabled() {
+		return FWTransfer{}, false, ErrFlutterwaveDisabled
+	}
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return FWTransfer{}, false, errors.New("flutterwave list-transfers: reference required")
+	}
+	lo, hi := around.Add(-fwTransferSearchSpan).UTC(), around.Add(fwTransferSearchSpan).UTC()
+	var match *FWTransfer
+	cursor := ""
+	for page := 0; page < fwTransferListMaxPages; page++ {
+		q := url.Values{}
+		q.Set("from", lo.Format("2006-01-02"))
+		q.Set("to", hi.AddDate(0, 0, 1).Format("2006-01-02"))
+		q.Set("size", "50")
+		if cursor != "" {
+			q.Set("next", cursor)
+		}
+		resp, body, err := c.authedRequest(ctx, http.MethodGet, "/transfers?"+q.Encode(), nil, "")
+		if err != nil {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: %w", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return FWTransfer{}, false, fwError("list-transfers", resp.StatusCode, body)
+		}
+		rows, hasMore, next, err := decodeFWTransferPage(body)
+		if err != nil {
+			return FWTransfer{}, false, err
+		}
+		for i := range rows {
+			tr := rows[i]
+			if tr.Reference != reference || tr.createdAt.Before(lo) || tr.createdAt.After(hi) {
+				continue
+			}
+			if match != nil {
+				return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: reference %s carried by transfers %s and %s", reference, match.ID, tr.ID)
+			}
+			found := tr.FWTransfer
+			match = &found
+		}
+		if !hasMore {
+			if match == nil {
+				return FWTransfer{}, false, nil
+			}
+			return *match, true, nil
+		}
+		if next == "" || next == cursor {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: cursor did not advance after page %d; scan incomplete", page+1)
+		}
+		cursor = next
+	}
+	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", fwTransferListMaxPages)
+}
+
+type fwListedTransfer struct {
+	FWTransfer
+	createdAt time.Time
+}
+
+// decodeFWTransferPage decodes one /transfers page, rejecting any shape that
+// is not exactly the documented one.
+func decodeFWTransferPage(body []byte) ([]fwListedTransfer, bool, string, error) {
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, false, "", fmt.Errorf("flutterwave list-transfers decode: %w", err)
+	}
+	var data struct {
+		Cursor *struct {
+			Next         string `json:"next"`
+			HasMoreItems *bool  `json:"has_more_items"`
+		} `json:"cursor"`
+		Transfers *[]struct {
+			ID              string  `json:"id"`
+			Reference       *string `json:"reference"`
+			Status          string  `json:"status"`
+			CreatedDatetime *string `json:"created_datetime"`
+		} `json:"transfers"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, false, "", fmt.Errorf("%w: data: %v", ErrFWTransferShape, err)
+	}
+	if data.Cursor == nil || data.Cursor.HasMoreItems == nil {
+		return nil, false, "", fmt.Errorf("%w: no cursor.has_more_items; cannot tell whether the scan is complete", ErrFWTransferShape)
+	}
+	if data.Transfers == nil {
+		return nil, false, "", fmt.Errorf("%w: no transfers list", ErrFWTransferShape)
+	}
+	out := make([]fwListedTransfer, 0, len(*data.Transfers))
+	for _, t := range *data.Transfers {
+		if t.Reference == nil || t.CreatedDatetime == nil {
+			return nil, false, "", fmt.Errorf("%w: transfer %q lacks reference or created_datetime", ErrFWTransferShape, t.ID)
+		}
+		at, err := time.Parse(time.RFC3339, *t.CreatedDatetime)
+		if err != nil {
+			return nil, false, "", fmt.Errorf("%w: transfer %q created_datetime %q: %v", ErrFWTransferShape, t.ID, *t.CreatedDatetime, err)
+		}
+		out = append(out, fwListedTransfer{
+			FWTransfer: FWTransfer{ID: t.ID, Reference: *t.Reference, Status: t.Status},
+			createdAt:  at,
+		})
+	}
+	return out, *data.Cursor.HasMoreItems, data.Cursor.Next, nil
 }
 
 // ─── Charges (collection verification) ─────────────────────────────────────

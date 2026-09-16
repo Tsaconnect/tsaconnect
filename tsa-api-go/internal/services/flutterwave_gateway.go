@@ -28,8 +28,10 @@ func NewFlutterwaveGateway(client *FlutterwaveClient, senderName string) *Flutte
 // trade reference doubles as transfer reference AND idempotency key, so a
 // duplicated call cannot double-pay.
 func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutRequest) (string, error) {
+	// Refusals that happen before any request is sent are rejections: no
+	// transfer can exist.
 	if !g.client.IsEnabled() {
-		return "", ErrFlutterwaveDisabled
+		return "", &ProviderRejectedError{Err: ErrFlutterwaveDisabled}
 	}
 	// Prefer the explicit Amount/SourceCurrency pair; fall back to the legacy
 	// naira-only field so callers that have not migrated keep working unchanged.
@@ -39,7 +41,7 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	}
 	amount, err := strconv.ParseFloat(rawAmount, 64)
 	if err != nil || amount <= 0 {
-		return "", fmt.Errorf("flutterwave payout: invalid amount %q", rawAmount)
+		return "", &ProviderRejectedError{Err: fmt.Errorf("flutterwave payout: invalid amount %q", rawAmount)}
 	}
 	narration := g.senderName
 	if narration == "" {
@@ -116,6 +118,17 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	})
 	if err != nil {
 		return "", err
+	}
+	// A transfer that is already FAILED when it is created is a refusal, not a
+	// payout in flight: no webhook will ever turn it into a success, and handing
+	// its id back as live left sells waiting forever. Checked here rather than in
+	// DirectTransfer because conversions and crypto deliveries depend on getting
+	// the FAILED transfer back to mint their next attempt.
+	if strings.EqualFold(strings.TrimSpace(transfer.Status), "FAILED") {
+		return "", &ProviderRejectedError{
+			Err:      fmt.Errorf("flutterwave payout: transfer %s was created FAILED", transfer.ID),
+			Replayed: transfer.CacheHit,
+		}
 	}
 	return transfer.ID, nil
 }

@@ -296,6 +296,13 @@ type Config struct {
 	// (default ₦100 = 10000, Flutterwave's TRANSFER_AMOUNT_LIMIT floor). Raise to
 	// tighten the dust-sell guard without a code change.
 	ITMinSellNgnKobo int64
+	// ITSellFWAbsenceTrusted lets IT sell recovery act on "Flutterwave has no
+	// transfer for this reference": the reconciler re-sends a previously
+	// attempted payout (and reverses a sell whose retry was refused), and an
+	// admin may reverse or retry a sell on that evidence. Off by default until
+	// the /transfers listing shape is confirmed against the live API — a wrong
+	// "absent" pays the user twice. IT_SELL_FW_ABSENCE_TRUSTED.
+	ITSellFWAbsenceTrusted bool
 
 	// ClubKonnect (Nellobyte) — prepaid utility-bill vendor. Bills are dormant
 	// unless BOTH ClubkonnectUserID and ClubkonnectAPIKey are set AND the MCGP
@@ -690,6 +697,7 @@ func Load() *Config {
 	cfg.ITOperatorPrivateKey = strings.TrimPrefix(strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", "")), "0x")
 	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
 	cfg.ITMinSellNgnKobo = getEnvInt64("IT_MIN_SELL_NGN_KOBO", 10000) // ₦100
+	cfg.ITSellFWAbsenceTrusted = getEnvBool("IT_SELL_FW_ABSENCE_TRUSTED", false)
 
 	cfg.ClubkonnectUserID = strings.TrimSpace(getEnv("CLUBKONNECT_USER_ID", ""))
 	cfg.ClubkonnectAPIKey = strings.TrimSpace(getEnv("CLUBKONNECT_API_KEY", ""))

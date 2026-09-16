@@ -495,6 +495,9 @@ func main() {
 	// provider, only the database.
 	if itService != nil {
 		scheduler.Register(jobs.NewBuyOrderExpiry(itService, time.Hour))
+		// MCGP sells stopped between the on-chain debit and the naira payout:
+		// resolved from the debit record and Flutterwave's transfer record only.
+		scheduler.Register(jobs.NewITSellReconciler(itService, 2*time.Minute))
 	}
 
 	// Booking requests: close the ones nobody answered, and — the reason this
@@ -1254,6 +1257,12 @@ func main() {
 			_, fwLive := gateway.(*services.FlutterwaveGateway)
 			if fwLive || pmNombaClient != nil {
 				itService.SetPayoutGateway(gateway)
+				if fwLive {
+					// Transfer read-back: the evidence the sell reconciler and the
+					// admin settle/reverse guards act on.
+					itService.SetPayoutTransfers(fwClient)
+					itService.SetFWAbsenceTrusted(cfg.ITSellFWAbsenceTrusted)
+				}
 				log.Printf("[it] sell auto-payout ACTIVE (gateway live)")
 			} else {
 				log.Printf("[it] sell auto-payout dormant: no live payout gateway")

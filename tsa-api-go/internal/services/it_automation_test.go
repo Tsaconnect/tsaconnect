@@ -67,7 +67,7 @@ func (f *fakeITHooks) AutoCreditFromVA(_ context.Context, fwCustomerID, referenc
 	return ErrITVANotFound
 }
 
-func (f *fakeITHooks) ResolvePayoutFromWebhook(_ context.Context, ref, status string) error {
+func (f *fakeITHooks) ResolvePayoutFromWebhook(_ context.Context, ref, _, status string) error {
 	f.resolved = append(f.resolved, ref+"|"+status)
 	return nil
 }
@@ -157,6 +157,7 @@ func TestSellPayoutRequest_MobileMoneyRail(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err != nil {
 		t.Fatalf("AutoPayout: %v", err)
 	}
@@ -207,6 +208,7 @@ func TestSellPayoutRef_WithinFlutterwaveLimitAndRoundTrips(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err != nil {
 		t.Fatalf("AutoPayout: %v", err)
 	}
@@ -241,6 +243,7 @@ func TestSellPayoutRequest_LegacyBankUnchanged(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err != nil {
 		t.Fatalf("AutoPayout: %v", err)
 	}
@@ -270,6 +273,7 @@ func TestSellPayoutGuard_MobileMoneyAcceptedWithoutBankFields(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err != nil {
 		t.Fatalf("mobile-money sell wrongly rejected by the payout-destination guard: %v", err)
 	}
@@ -286,6 +290,7 @@ func TestSellPayoutGuard_MobileMoneyMissingFieldsRejected(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err == nil {
 		t.Fatal("expected error for incomplete mobile-money destination")
 	}
@@ -303,6 +308,7 @@ func TestSellPayoutGuard_LegacyBankMissingFieldsRejected(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 	if err := s.AutoPayout(context.Background(), intent); err == nil {
 		t.Fatal("expected error for legacy sell with no bank destination")
 	}
@@ -346,6 +352,7 @@ func TestSellPayout_CrossCurrencyRefusesWithoutQuote(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 
 	if err := s.AutoPayout(context.Background(), intent); err == nil {
 		t.Fatal("AutoPayout succeeded without an FX quote — it must refuse rather than " +
@@ -374,6 +381,7 @@ func TestSellPayout_SameCurrencyNeedsNoQuote(t *testing.T) {
 	if err := s.db.Create(intent).Error; err != nil {
 		t.Fatalf("seed intent: %v", err)
 	}
+	withPendingDebit(s, intent)
 
 	if err := s.AutoPayout(context.Background(), intent); err != nil {
 		t.Fatalf("AutoPayout: %v", err)

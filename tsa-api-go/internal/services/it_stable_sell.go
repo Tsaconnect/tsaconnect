@@ -802,8 +802,22 @@ func (s *ITService) PayoutStableSell(ctx context.Context, intentID uuid.UUID) er
 	if intent.Direction != models.ITDirectionSell || intent.Status != models.ITStatusDebited {
 		return ErrITBadState
 	}
-	if intent.PayoutID != "" {
+	// A rejected payout is parked for an operator: re-sending the same
+	// reference would only replay the provider's refusal.
+	if intent.PayoutID != "" || intent.PayoutRejected {
 		return nil
+	}
+	// A reference the provider keeps refusing cannot heal by being sent again
+	// on the same tick forever: say so, and slow down to one attempt per
+	// abandon window until an operator repays it on a fresh reference
+	// (POST /it/admin/stable/:id/repay).
+	if strings.HasPrefix(intent.FailureReason, itPayoutReasonPrefix+" refused") && intent.PayoutAttempts >= itPayoutMaxAttempts {
+		alertf("stable-refused:"+intent.ID.String(),
+			"[it] ALERT it_stable_payout_refused intent=%s attempts=%d reason=%q — operator repay required (POST /it/admin/stable/%s/repay)",
+			intent.ID, intent.PayoutAttempts, intent.FailureReason, intent.ID)
+		if intent.LastPayoutAttemptAt != nil && time.Since(*intent.LastPayoutAttemptAt) < itDebitAbandonAfter {
+			return nil
+		}
 	}
 	if s.payout == nil || !sellIntentHasPayoutDestination(intent) {
 		return nil

@@ -122,6 +122,7 @@ func AutoMigrate() error {
 		&models.MCGPSwapLedgerEntry{},
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
+		&models.JobRunMarker{},
 		&models.BillPayment{},
 		// Utility bills v2 — what was bought (ClubKonnect vend); the MCGP money
 		// leg lives in BillPayment, keyed by order ID.
