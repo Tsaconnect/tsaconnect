@@ -88,11 +88,25 @@ func paycrestError(c *gin.Context, err error) {
 	}
 }
 
-// GET /api/paycrest/quote?side=buy&amount=1000&currency=NGN
+// GET /api/paycrest/quote?side=buy&amount=1000&currency=NGN[&requestedChain=&requestedToken=]
 //
 // Returns only venues that can actually fill this amount right now, cheapest
 // first. The app renders this as the network picker, so a network the user can
 // see is always one the order will succeed on.
+//
+// requestedChain/requestedToken (tsa-app/services/paycrestApi.ts getQuote,
+// mirroring the POST /buy body) name the pair the user actually wants
+// delivered. When Paycrest cannot fill that pair directly, a converted venue
+// (Phase 2) is appended alongside the direct ones — see ConvertedVenues.
+// Conversion is a buy-only capability (paycrestSellBody has no requested
+// fields), so a sell quote never gains one even if the params are sent.
+//
+// This is purely additive: with no requestedChain/requestedToken, or with
+// RAMP_CONVERSION_BUY off (ConvertedVenues is then a documented no-op, since
+// SetLiFiQuoter/SetTreasuryAddress/SetChainRegistry were never called), the
+// response is byte-identical to what this handler returned before converted
+// buys existed. A LiFi failure or an unservable chain never fails the quote —
+// it just means no converted venue is on offer today.
 func (h *PaycrestHandler) Quote(c *gin.Context) {
 	side := c.DefaultQuery("side", "buy")
 	amount := c.Query("amount")
@@ -106,6 +120,17 @@ func (h *PaycrestHandler) Quote(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
+
+	requestedChain := strings.TrimSpace(c.Query("requestedChain"))
+	requestedToken := strings.TrimSpace(c.Query("requestedToken"))
+	if res.Side == "buy" && requestedChain != "" && requestedToken != "" {
+		converted, cerr := h.quotes.ConvertedVenues(c.Request.Context(), res.Side, res.FiatCode, res.FiatAmount,
+			[]services.RequestedAsset{{Chain: requestedChain, Token: requestedToken}})
+		if cerr == nil {
+			res.Venues = append(res.Venues, converted...)
+		}
+	}
+
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
 }
 
