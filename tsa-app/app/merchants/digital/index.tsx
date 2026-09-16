@@ -9,7 +9,7 @@ import React, { useState } from 'react';
 import { Alert, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
-import { Button, Card, Input, Text } from '@/components/ui';
+import { Button, Card, Input } from '@/components/ui';
 
 const DigitalAssetCreationScreen = () => {
   const { colors, spacing } = useTheme();
@@ -36,10 +36,6 @@ const DigitalAssetCreationScreen = () => {
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         keyboardShouldPersistTaps="handled"
       >
-        <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>
-          Create Digital Asset
-        </Text>
-
         <Card padding="lg" style={{ gap: spacing.lg }}>
           <Input
             label="Asset Title *"

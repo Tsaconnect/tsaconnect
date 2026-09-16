@@ -527,10 +527,7 @@ export default function MerchantRequestScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
         >
-          <Text variant="title1" weight="700">
-            Become a Merchant
-          </Text>
-          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.xl }}>
+          <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.xl }}>
             Fill in your business details to apply
           </Text>
 
