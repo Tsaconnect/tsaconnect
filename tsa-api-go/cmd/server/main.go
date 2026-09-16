@@ -1428,6 +1428,10 @@ func main() {
 		os.Getenv("PAYCREST_BASE_URL"), os.Getenv("PAYCREST_API_KEY"))
 	var paycrestHandler *handlers.PaycrestHandler
 	var paycrestWebhookHandler *handlers.PaycrestWebhookHandler
+	// Hoisted out of the `if paycrestClient.IsEnabled()` block below (where
+	// buildRampConversion actually runs) so the dispute service and handler,
+	// wired further down, can pick it up whether or not it ended up nil.
+	var conversionOrch *services.ConversionOrchestrator
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1459,7 +1463,8 @@ func main() {
 		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
 		// nil-orchestrator gate itself lives in registerRampConversionWorkers
 		// (and is unit-tested there), not inlined here.
-		treasury, conversionOrch := buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
+		var treasury *services.Treasury
+		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
 		registerRampConversionWorkers(scheduler, treasury, conversionOrch)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
@@ -1496,7 +1501,12 @@ func main() {
 		// the unified queue.
 		billService.SetDisputes(disputeService)
 	}
-	disputeHandler := handlers.NewDisputeHandler(disputeService)
+	if conversionOrch != nil {
+		// A converted-buy dispute's detail carries its own leg ledger and
+		// what it owes, straight from the ledger a refund would use.
+		disputeService.SetRampLegsReader(conversionOrch)
+	}
+	disputeHandler := handlers.NewDisputeHandler(disputeService).WithRampAdmin(conversionOrch)
 
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 

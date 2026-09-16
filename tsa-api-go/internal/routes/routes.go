@@ -998,6 +998,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				adminDisputes.POST("/:id/escalate", dh.EscalateAdmin)
 				adminDisputes.POST("/:id/resolve", dh.ResolveAdmin)
 			}
+
+			// The treasury refund tooling: what a converted buy owes, computed
+			// from its own leg ledger, and the admin action that pays it.
+			// Funds-moving, so the same boundary as the dispute admin group
+			// above — AdminAuth + RequireP2PAdmin. Dormant (RampAdminEnabled
+			// false) unless RAMP_CONVERSION_BUY actually built a treasury.
+			if dh.RampAdminEnabled() {
+				adminRamp := api.Group("/admin/ramp/orders")
+				adminRamp.Use(auth, adminAuth, middleware.RequireP2PAdmin())
+				{
+					adminRamp.GET("/:id/legs", dh.RampLegs)
+					adminRamp.POST("/:id/refund", dh.RampRefund)
+				}
+			}
 		}
 
 		it := api.Group("/it")

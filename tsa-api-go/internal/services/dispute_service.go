@@ -19,7 +19,7 @@ var (
 	ErrDisputeAlreadyExists   = errors.New("this order has already been disputed")
 	ErrDisputeSubjectNotFound = errors.New("order not found")
 	ErrDisputeNotDisputable   = errors.New("this order cannot be disputed")
-	ErrOrderDisputeNotFound        = errors.New("dispute not found")
+	ErrOrderDisputeNotFound   = errors.New("dispute not found")
 	ErrDisputeClosed          = errors.New("this dispute has already been closed")
 )
 
@@ -123,6 +123,20 @@ type DisputeAdminRow struct {
 	Dispute models.Dispute `json:"dispute"`
 	User    *DisputeUser   `json:"user,omitempty"`
 	Subject string         `json:"subject,omitempty"`
+	// Ramp is populated only for a paycrest_order dispute whose order is a
+	// converted buy — the leg ledger and what it currently owes, so an
+	// operator sees exactly what an admin refund would use BEFORE triggering
+	// one. Absent (nil, omitted) for every other dispute; see RampLegsInfo
+	// for why the OwedToUser field inside it never omits its own empty value.
+	Ramp *RampLegsInfo `json:"ramp,omitempty"`
+}
+
+// rampLegsReader is what DisputeService needs from the converted-buy engine:
+// an order's leg ledger and what it currently owes, by order id alone.
+// *ConversionOrchestrator satisfies it (LegsAndOwedByOrderID); kept as an
+// interface so GetAdmin's enrichment can be tested without a live treasury.
+type rampLegsReader interface {
+	LegsAndOwedByOrderID(ctx context.Context, orderID uuid.UUID) (*models.PaycrestOrderRecord, *RampLegsInfo, error)
 }
 
 // DisputeService owns every order dispute in the product except the two that
@@ -132,10 +146,24 @@ type DisputeService struct {
 	db       *gorm.DB
 	bus      *events.Bus
 	subjects map[string]DisputeSubject
+	// ramp is dormant (nil) unless SetRampLegsReader is called, which main.go
+	// only does when the ramp treasury itself is built — the same
+	// dormant-if-unwired pattern as billService.SetDisputes.
+	ramp rampLegsReader
 }
 
 func NewDisputeService(db *gorm.DB, bus *events.Bus) *DisputeService {
 	return &DisputeService{db: db, bus: bus, subjects: map[string]DisputeSubject{}}
+}
+
+// SetRampLegsReader wires the converted-buy leg ledger into the dispute
+// detail view. Nil-safe and optional: without it, a paycrest_order dispute's
+// detail simply carries no Ramp field, same as today.
+func (s *DisputeService) SetRampLegsReader(r rampLegsReader) {
+	if s == nil {
+		return
+	}
+	s.ramp = r
 }
 
 // RegisterSubject wires one order type in. Called at boot for each type whose
@@ -327,6 +355,13 @@ func (s *DisputeService) GetAdmin(ctx context.Context, id uuid.UUID) (*DisputeAd
 	if err := s.db.WithContext(ctx).Select("id", "name", "username", "email").
 		First(&u, "id = ?", d.UserID).Error; err == nil {
 		row.User = &DisputeUser{ID: u.ID, Name: u.Name, Username: u.Username, Email: u.Email}
+	}
+	if d.SubjectType == models.DisputeSubjectPaycrestOrder && s.ramp != nil {
+		if order, info, err := s.ramp.LegsAndOwedByOrderID(ctx, d.SubjectID); err == nil && order.Converted() {
+			row.Ramp = info
+		}
+		// A lookup failure (order not converted, or gone) leaves Ramp nil —
+		// the dispute detail must never fail to load over a ramp-only read.
 	}
 	return row, nil
 }

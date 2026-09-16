@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -526,6 +527,90 @@ func TestGetAdmin_DescribesTheOrder(t *testing.T) {
 	}
 	if row.Subject == "" {
 		t.Fatal("no subject label on the detail view")
+	}
+}
+
+// fakeRampLegsReader stands in for *ConversionOrchestrator so GetAdmin's
+// enrichment can be tested without a live treasury.
+type fakeRampLegsReader struct {
+	order *models.PaycrestOrderRecord
+	info  *RampLegsInfo
+	err   error
+}
+
+func (f *fakeRampLegsReader) LegsAndOwedByOrderID(context.Context, uuid.UUID) (*models.PaycrestOrderRecord, *RampLegsInfo, error) {
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	return f.order, f.info, nil
+}
+
+// A converted paycrest_order dispute's detail carries the leg ledger and what
+// it owes, straight from the same source a refund would use — so an operator
+// never has to cross-reference a separate screen before deciding to pay.
+func TestGetAdmin_AttachesRampLegsForAConvertedPaycrestOrder(t *testing.T) {
+	svc, db := newDisputeSvc(t)
+	user := uuid.New()
+	order := seedPaycrestOrder(t, db, user, models.PaycrestStatusRecoveryPending)
+	if err := db.Model(&models.PaycrestOrderRecord{}).Where("id = ?", order).
+		Update("route_kind", models.RouteKindConverted).Error; err != nil {
+		t.Fatalf("mark converted: %v", err)
+	}
+	d, _ := svc.File(context.Background(), user, DisputeInput{
+		SubjectType: models.DisputeSubjectPaycrestOrder, SubjectID: order, Reason: "x",
+	})
+	svc.SetRampLegsReader(&fakeRampLegsReader{
+		order: &models.PaycrestOrderRecord{ID: order, RouteKind: models.RouteKindConverted},
+		info: &RampLegsInfo{
+			Legs:       []models.RampLeg{{OrderID: order, Kind: models.RampLegKindBridge}},
+			OwedToUser: "",
+		},
+	})
+
+	row, err := svc.GetAdmin(context.Background(), d.ID)
+	if err != nil {
+		t.Fatalf("GetAdmin: %v", err)
+	}
+	if row.Ramp == nil {
+		t.Fatal("no ramp info attached to a converted order's dispute")
+	}
+	if row.Ramp.OwedToUser != "" {
+		t.Errorf("owedToUser = %q, want the UNDETERMINED empty string preserved", row.Ramp.OwedToUser)
+	}
+	if len(row.Ramp.Legs) != 1 {
+		t.Errorf("legs = %v, want the ledger threaded through", row.Ramp.Legs)
+	}
+
+	blob, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"owedToUser":""`) {
+		t.Fatalf("json = %s; UNDETERMINED must survive serialisation, not be dropped", blob)
+	}
+}
+
+// A direct (non-converted) paycrest order carries no ramp ledger at all —
+// Ramp must be absent, not a zero-valued struct that looks like a converted
+// order with nothing going on.
+func TestGetAdmin_NoRampInfoForADirectOrder(t *testing.T) {
+	svc, db := newDisputeSvc(t)
+	user := uuid.New()
+	order := seedPaycrestOrder(t, db, user, models.PaycrestStatusUnmatched) // RouteKind left "" (direct)
+	d, _ := svc.File(context.Background(), user, DisputeInput{
+		SubjectType: models.DisputeSubjectPaycrestOrder, SubjectID: order, Reason: "x",
+	})
+	svc.SetRampLegsReader(&fakeRampLegsReader{
+		order: &models.PaycrestOrderRecord{ID: order}, // RouteKind "" — direct
+		info:  &RampLegsInfo{OwedToUser: "0"},
+	})
+
+	row, err := svc.GetAdmin(context.Background(), d.ID)
+	if err != nil {
+		t.Fatalf("GetAdmin: %v", err)
+	}
+	if row.Ramp != nil {
+		t.Fatalf("ramp info attached to a direct order: %+v", row.Ramp)
 	}
 }
 
