@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // IT automation — the Flutterwave-era NGN legs. The legacy flow is fully
@@ -210,8 +211,17 @@ func (s *ITService) AutoCreditFromInbound(ctx context.Context, paymentRef, amoun
 
 // AutoPayout fires the fiat leg for a debited sell intent through the payout
 // gateway and records the provider's transfer id. Idempotent: an intent that
-// already has a PayoutID is not re-sent (the reference-derived idempotency key
-// at the provider is the second line of defense).
+// already has a PayoutID is not re-sent, and every send reuses the intent's one
+// payout reference, which is also the provider's idempotency key.
+//
+// The error classifies the outcome, because the money invariant depends on it:
+//
+//   - ErrITSellPayoutRejected: positive evidence no transfer exists — nothing
+//     was sent on the first attempt, or the provider refused the first request
+//     (directly, or by replaying that refusal from its idempotency cache). The
+//     intent is marked PayoutRejected; for an MCGP sell the caller reverses.
+//   - any other error: the outcome is unknown. Nothing is marked; the sell
+//     reconciler resolves it from the provider before anything else happens.
 func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) error {
 	if s.payout == nil {
 		return errors.New("it: no payout gateway configured")
@@ -222,18 +232,104 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if intent.PayoutID != "" {
 		return nil
 	}
+	if intent.PayoutRejected {
+		// The provider would only replay its refusal for this reference.
+		return fmt.Errorf("%w: payout already rejected for intent %s", ErrITSellPayoutRejected, intent.ID)
+	}
+	firstAttempt := payoutNeverSubmitted(intent)
+
+	payoutReq, err := s.buildSellPayoutRequest(ctx, intent)
+	if err != nil {
+		return s.payoutNotSent(ctx, intent, firstAttempt, err)
+	}
+
+	// Count the attempt BEFORE the request leaves: a crash mid-request must
+	// still read as "may have been sent". The attempts guard makes concurrent
+	// callers (request, reconciler, admin) take turns instead of both sending.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ? AND payout_id = '' AND payout_rejected = ? AND payout_attempts = ?",
+			intent.ID, models.ITStatusDebited, false, intent.PayoutAttempts).
+		Update("payout_attempts", gorm.Expr("payout_attempts + 1"))
+	if res.Error != nil {
+		return fmt.Errorf("it payout: record attempt: %w", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("%w: payout for intent %s is being handled elsewhere", ErrITBadState, intent.ID)
+	}
+	intent.PayoutAttempts++
+
+	payoutID, err := s.payout.InitiatePayout(ctx, payoutReq)
+	if err != nil {
+		var rej *ProviderRejectedError
+		if errors.As(err, &rej) && (firstAttempt || rej.Replayed) {
+			s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error())
+			return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
+		}
+		reason := truncateReason(itPayoutReasonPrefix + " unknown: " + err.Error())
+		intent.FailureReason = reason
+		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
+			Where("id = ?", intent.ID).
+			Update("failure_reason", reason).Error
+		return err
+	}
+	intent.PayoutID = payoutID
+	intent.FailureReason = ""
+	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ?", intent.ID).
+		Updates(map[string]any{"payout_id": payoutID, "failure_reason": ""}).Error
+}
+
+// itPayoutReasonPrefix starts every failure_reason AutoPayout writes. Rows
+// from before PayoutAttempts existed carry "auto-payout: …", and that prefix
+// is the only trace that they were ever submitted — payoutNeverSubmitted keys
+// on it so a legacy row can never be mistaken for an unused reference.
+const itPayoutReasonPrefix = "auto-payout"
+
+// payoutNeverSubmitted reports whether the intent's payout reference has
+// provably never been sent to the provider.
+func payoutNeverSubmitted(intent *models.ITIntent) bool {
+	return intent.PayoutAttempts == 0 && intent.PayoutID == "" &&
+		!strings.HasPrefix(intent.FailureReason, itPayoutReasonPrefix)
+}
+
+// payoutNotSent handles a payout that failed before any request was made. On
+// the first attempt that is a definite rejection for an MCGP sell. A brokered
+// stablecoin sell is left to its watcher to retry, as before: nothing was sent,
+// and the user's fiat is still sitting in the provider balance.
+func (s *ITService) payoutNotSent(ctx context.Context, intent *models.ITIntent, firstAttempt bool, cause error) error {
+	if firstAttempt && models.ITIntentAsset(intent) == models.ITAssetMCGP {
+		s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected (not sent): "+cause.Error())
+		return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, cause)
+	}
+	return cause
+}
+
+func (s *ITService) markPayoutRejected(ctx context.Context, intent *models.ITIntent, reason string) {
+	reason = truncateReason(reason)
+	intent.PayoutRejected = true
+	intent.FailureReason = reason
+	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ?", intent.ID).
+		Updates(map[string]any{"payout_rejected": true, "failure_reason": reason}).Error; err != nil {
+		log.Printf("[it] ALERT it_sell_payout_rejection_unrecorded intent=%s: %v", intent.ID, err)
+	}
+}
+
+// buildSellPayoutRequest prices the payout (the NET, converted to the
+// destination currency when it differs) without sending anything.
+func (s *ITService) buildSellPayoutRequest(ctx context.Context, intent *models.ITIntent) (PayoutRequest, error) {
 	if !sellIntentHasPayoutDestination(intent) {
-		return errors.New("it: sell intent has no payout destination")
+		return PayoutRequest{}, errors.New("it: sell intent has no payout destination")
 	}
 	// Disburse the NET — the fee stays behind in the payout balance as fiat.
 	// Pre-deduction intents carry no net and settle at their gross terms.
 	net, err := payoutKobo(intent)
 	if err != nil {
-		return fmt.Errorf("it payout: %w", err)
+		return PayoutRequest{}, fmt.Errorf("it payout: %w", err)
 	}
 	naira, err := koboToNairaString(net.String())
 	if err != nil {
-		return fmt.Errorf("it payout: bad intent amount: %w", err)
+		return PayoutRequest{}, fmt.Errorf("it payout: bad intent amount: %w", err)
 	}
 	// PayoutRequest.Amount is what the RECIPIENT receives, denominated in the
 	// destination currency — the gateway sends applies_to=destination_currency
@@ -250,7 +346,7 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if !strings.EqualFold(destCurrency, sourceCurrency) {
 		sourceMajor, cErr := koboToNairaFloat(net.String())
 		if cErr != nil {
-			return fmt.Errorf("it payout: bad intent amount: %w", cErr)
+			return PayoutRequest{}, fmt.Errorf("it payout: bad intent amount: %w", cErr)
 		}
 		// NOTE: QuoteWithdrawal hardcodes NGN as the quote's SOURCE currency
 		// (it_quote.go). That is correct only while every sell is denominated in
@@ -259,21 +355,20 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		// cedi fee at the naira rate. Guard it here rather than let it become
 		// silently wrong when sells gain a currency.
 		if !strings.EqualFold(sourceCurrency, "NGN") {
-			return fmt.Errorf("it payout: cannot convert %s→%s: the FX quote is NGN-sourced; "+
+			return PayoutRequest{}, fmt.Errorf("it payout: cannot convert %s→%s: the FX quote is NGN-sourced; "+
 				"QuoteWithdrawal must take a source currency before non-NGN sells can pay out cross-currency",
 				sourceCurrency, destCurrency)
 		}
 		destMajor, _, qErr := s.QuoteWithdrawal(ctx, sourceMajor, destCurrency)
 		if qErr != nil {
-			// Refusing beats guessing. The debit has already happened, so this
-			// strands the premium until the operator retries — but paying out an
-			// unconverted figure would send the wrong amount irrecoverably.
-			return fmt.Errorf("it payout: cannot convert %s→%s: %w", sourceCurrency, destCurrency, qErr)
+			// Refusing beats guessing: paying out an unconverted figure would
+			// send the wrong amount irrecoverably.
+			return PayoutRequest{}, fmt.Errorf("it payout: cannot convert %s→%s: %w", sourceCurrency, destCurrency, qErr)
 		}
 		payoutAmount = strconv.FormatFloat(destMajor, 'f', 2, 64)
 	}
 
-	payoutID, err := s.payout.InitiatePayout(ctx, PayoutRequest{
+	return PayoutRequest{
 		BankCode:      intent.BankCode,
 		AccountNumber: intent.AccountNumber,
 		AccountName:   intent.AccountName,
@@ -289,17 +384,7 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		MobileNetwork:       intent.MobileNetwork,
 		MobileCountry:       intent.MobileCountry,
 		MobileMsisdn:        intent.MobileMsisdn,
-	})
-	if err != nil {
-		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
-			Where("id = ?", intent.ID).
-			Update("failure_reason", "auto-payout: "+err.Error()).Error
-		return err
-	}
-	intent.PayoutID = payoutID
-	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ?", intent.ID).
-		Updates(map[string]any{"payout_id": payoutID, "failure_reason": ""}).Error
+	}, nil
 }
 
 // ResolvePayoutFromWebhook closes a sell intent from a transfer-status

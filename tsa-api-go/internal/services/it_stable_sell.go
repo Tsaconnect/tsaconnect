@@ -802,7 +802,9 @@ func (s *ITService) PayoutStableSell(ctx context.Context, intentID uuid.UUID) er
 	if intent.Direction != models.ITDirectionSell || intent.Status != models.ITStatusDebited {
 		return ErrITBadState
 	}
-	if intent.PayoutID != "" {
+	// A rejected payout is parked for an operator: re-sending the same
+	// reference would only replay the provider's refusal.
+	if intent.PayoutID != "" || intent.PayoutRejected {
 		return nil
 	}
 	if s.payout == nil || !sellIntentHasPayoutDestination(intent) {

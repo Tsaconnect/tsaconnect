@@ -661,6 +661,41 @@ type FWTransfer struct {
 	Reference string          `json:"reference"`
 	Status    string          `json:"status"` // NEW | PENDING | SUCCESSFUL | FAILED
 	Fee       json.RawMessage `json:"fee,omitempty"`
+	// CacheHit is set on a DirectTransfer result Flutterwave served from its
+	// idempotency cache (X-Idempotency-Cache-Hit) — the answer to the FIRST
+	// request that used this reference, not a new transfer.
+	CacheHit bool `json:"-"`
+}
+
+// ProviderRejectedError means the provider answered a money-moving request
+// and refused it, so that request moved no money. It is deliberately narrow:
+// a timeout, a 5xx, a 409 or a 429 is NOT one, because none of those say
+// whether a transfer exists.
+//
+// On its own it only describes THIS request. If an earlier request with the
+// same reference may have reached the provider, a refusal of the retry can be
+// "that reference is already taken" — i.e. the first attempt went through.
+// Replayed is what closes that gap: it is set when the provider served the
+// answer from its idempotency cache, which makes the refusal the outcome of the
+// first request as well.
+type ProviderRejectedError struct {
+	Err      error
+	Replayed bool
+}
+
+func (e *ProviderRejectedError) Error() string { return e.Err.Error() }
+func (e *ProviderRejectedError) Unwrap() error { return e.Err }
+
+// fwTransferRefusedStatus lists the HTTP statuses on which Flutterwave has
+// refused to create a transfer: malformed, unauthenticated, forbidden, unknown
+// route, unprocessable (the validation and insufficient-balance class).
+func fwTransferRefusedStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired,
+		http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // DirectTransfer initiates a transfer via the v4 orchestrator. The caller's
@@ -684,8 +719,13 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 	if err != nil {
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer: %w", err)
 	}
+	cacheHit := strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Idempotency-Cache-Hit")), "true")
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return FWTransfer{}, fwError("direct-transfer", resp.StatusCode, body)
+		herr := fwError("direct-transfer", resp.StatusCode, body)
+		if fwTransferRefusedStatus(resp.StatusCode) {
+			return FWTransfer{}, &ProviderRejectedError{Err: herr, Replayed: cacheHit}
+		}
+		return FWTransfer{}, herr
 	}
 	var env fwEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -696,8 +736,12 @@ func (c *FlutterwaveClient) DirectTransfer(ctx context.Context, req FWDirectTran
 		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer decode data: %w", err)
 	}
 	if env.failed() {
-		return FWTransfer{}, fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message)
+		return FWTransfer{}, &ProviderRejectedError{
+			Err:      fmt.Errorf("flutterwave direct-transfer failed: %s", env.Message),
+			Replayed: cacheHit,
+		}
 	}
+	parsed.CacheHit = cacheHit
 	if parsed.ID == "" {
 		return FWTransfer{}, errors.New("flutterwave direct-transfer: empty transfer id in response")
 	}
@@ -729,6 +773,71 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 		return FWTransfer{}, fmt.Errorf("flutterwave get-transfer decode data: %w", err)
 	}
 	return parsed, nil
+}
+
+// fwTransferListMaxPages bounds a reference scan: 20 pages of 50 is a thousand
+// transfers, far more than a sell window holds. Hitting it is an error, not
+// "not found".
+const fwTransferListMaxPages = 20
+
+// FindTransferByReference scans GET /transfers over [from, to] for a transfer
+// carrying reference. v4 has no reference filter, so the window is paged by
+// cursor. found=false with a nil error means every page in the window was read
+// and none matched; any doubt about completeness (a failed page, a cursor that
+// does not advance, the page cap) is an error, never a silent "not found" —
+// callers use absence as evidence that no payout was ever created.
+func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, from, to time.Time) (FWTransfer, bool, error) {
+	if !c.IsEnabled() {
+		return FWTransfer{}, false, ErrFlutterwaveDisabled
+	}
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return FWTransfer{}, false, errors.New("flutterwave list-transfers: reference required")
+	}
+	cursor := ""
+	for page := 0; page < fwTransferListMaxPages; page++ {
+		q := url.Values{}
+		q.Set("from", from.UTC().Format(time.RFC3339))
+		q.Set("to", to.UTC().Format(time.RFC3339))
+		q.Set("size", "50")
+		if cursor != "" {
+			q.Set("next", cursor)
+		}
+		resp, body, err := c.authedRequest(ctx, http.MethodGet, "/transfers?"+q.Encode(), nil, "")
+		if err != nil {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: %w", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return FWTransfer{}, false, fwError("list-transfers", resp.StatusCode, body)
+		}
+		var env fwEnvelope
+		if err := json.Unmarshal(body, &env); err != nil {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers decode: %w", err)
+		}
+		var data struct {
+			Cursor struct {
+				Next         string `json:"next"`
+				HasMoreItems bool   `json:"has_more_items"`
+			} `json:"cursor"`
+			Transfers []FWTransfer `json:"transfers"`
+		}
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers decode data: %w", err)
+		}
+		for _, tr := range data.Transfers {
+			if tr.Reference == reference {
+				return tr, true, nil
+			}
+		}
+		if !data.Cursor.HasMoreItems {
+			return FWTransfer{}, false, nil
+		}
+		if data.Cursor.Next == "" || data.Cursor.Next == cursor {
+			return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: cursor did not advance after page %d; scan incomplete", page+1)
+		}
+		cursor = data.Cursor.Next
+	}
+	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", fwTransferListMaxPages)
 }
 
 // ─── Charges (collection verification) ─────────────────────────────────────

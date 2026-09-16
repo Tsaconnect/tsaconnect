@@ -135,6 +135,31 @@ type ITService struct {
 	// stableDeliverer sends the purchased stablecoin to the buyer's own
 	// address. See it_stable_buy.go.
 	stableDeliverer stableDeliverer
+
+	// sellChain overrides the swap for the MCGP sell debit path (tests only);
+	// nil means s.swap. See chain().
+	sellChain itSellChain
+	// payoutTransfers reads sell payouts back from the provider — the evidence
+	// the sell reconciler and the admin settle/reverse guards act on. See
+	// it_sell_recovery.go.
+	payoutTransfers itPayoutTransfers
+}
+
+// itSellChain is the slice of the swap contract the MCGP sell leg drives.
+type itSellChain interface {
+	PremiumBalance(user string) (*big.Int, error)
+	OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error)
+	OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error)
+	OperatorReverseDebit(ctx context.Context, debitRef [32]byte) (string, error)
+	VerifyOperatorEvent(eventName, txHash string, user common.Address, ref [32]byte) (*big.Int, error)
+	DebitRecord(ctx context.Context, debitRef [32]byte) (DebitRecord, error)
+}
+
+func (s *ITService) chain() itSellChain {
+	if s.sellChain != nil {
+		return s.sellChain
+	}
+	return s.swap
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
@@ -598,6 +623,12 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	if !s.IsConfigured() {
 		return nil, ErrITNotConfigured
 	}
+	// Once the debit is broadcast, stopping half way strands the user's MCGP,
+	// so the sell must not die with the HTTP request that started it. Detached
+	// from the caller's cancellation, bounded by its own deadline; anything
+	// still unresolved at the deadline is picked up by the sell reconciler.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), itSellCreateTimeout)
+	defer cancel()
 	amount, ok := new(big.Int).SetString(strings.TrimSpace(mcgpWei), 10)
 	if !ok || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("invalid mcgpAmount")
@@ -613,7 +644,7 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	var inflight int64
 	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("user_id = ? AND direction = ? AND status IN ?", userID, models.ITDirectionSell,
-			[]string{models.ITStatusProcessing, models.ITStatusDebited}).
+			[]string{models.ITStatusProcessing, models.ITStatusDebiting, models.ITStatusDebited}).
 		Count(&inflight).Error; err != nil {
 		return nil, err
 	}
@@ -623,7 +654,7 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	// Spendable MCGP is spendable everywhere — IT sell, stores, bills — so the
 	// sell may draw on the USDC-bought bucket once credited is exhausted, the
 	// same way spend()/bills already do. The contract drains credited first.
-	spendable, err := s.swap.PremiumBalance(walletAddr)
+	spendable, err := s.chain().PremiumBalance(walletAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -695,25 +726,46 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	// maxFromBought = amount: the whole sell may come from bought premium when
 	// the user holds no credited premium. The contract records the bought draw
 	// per debitRef, so a reversal restores each bucket exactly.
-	txHash, err := s.swap.OperatorDebitSpendable(ctx, walletAddr, amount, amount, debitRef)
+	txHash, err := s.chain().OperatorDebitSpendable(ctx, walletAddr, amount, amount, debitRef)
 	if err != nil {
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "debit broadcast: "+err.Error())
-		return nil, err
+		if errors.Is(err, ErrTxNotBroadcast) {
+			_ = s.setStatus(ctx, intent, models.ITStatusFailed, "debit broadcast: "+err.Error())
+			return nil, err
+		}
+		// The send itself failed or timed out: the transaction may still be in
+		// the mempool. Only chain state can say, so the reconciler decides.
+		_ = s.setStatus(ctx, intent, models.ITStatusDebiting, "debit broadcast unknown: "+err.Error())
+		log.Printf("[it] sell intent=%s debit outcome unknown (left debiting for the reconciler): %v", intent.ID, err)
+		return intent, fmt.Errorf("%w: %v", ErrITSellDebitPending, err)
 	}
-	if _, err := s.swap.VerifyOperatorEvent("PremiumDebitPending", txHash, common.HexToAddress(walletAddr), debitRef); err != nil {
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "debit verify: "+err.Error())
-		return nil, err
-	}
+	// Keep the hash before verifying: if verification never returns, it is the
+	// operator's pointer to the transaction.
 	intent.TxHash = txHash
+	_ = s.setStatus(ctx, intent, models.ITStatusDebiting, "")
+	if _, err := s.chain().VerifyOperatorEvent("PremiumDebitPending", txHash, common.HexToAddress(walletAddr), debitRef); err != nil {
+		// Broadcast but unverified (the receipt wait is capped): the debit may
+		// still mine. Marking it failed here is what let a user be told "failed"
+		// while their MCGP sat debited.
+		_ = s.setStatus(ctx, intent, models.ITStatusDebiting, "debit verify: "+err.Error())
+		log.Printf("[it] sell intent=%s debit unverified (left debiting for the reconciler): %v", intent.ID, err)
+		return intent, fmt.Errorf("%w: %v", ErrITSellDebitPending, err)
+	}
 	_ = s.setStatus(ctx, intent, models.ITStatusDebited, "")
 
 	// Auto-payout: fire the fiat leg immediately when the gateway is wired and
-	// the intent carries a destination. A payout error is NOT a sell failure —
-	// the debit stands and the operator settles manually (legacy path); the
-	// error is recorded on the intent for visibility.
+	// the intent carries a destination. Three outcomes:
+	//   sent     — the transfer webhook (or the reconciler) closes the sell;
+	//   rejected — no transfer exists and none is coming, so the debit is
+	//              reversed now and the caller is told the sale did not go
+	//              through (a failed reverse stays marked for the reconciler);
+	//   unknown  — left `debited` for the reconciler to resolve from the
+	//              provider. Never reversed on a guess: the money may have gone.
 	if s.payout != nil && sellIntentHasPayoutDestination(intent) {
 		if err := s.AutoPayout(ctx, intent); err != nil {
-			log.Printf("[it] auto-payout intent=%s failed (operator fallback): %v", intent.ID, err)
+			if errors.Is(err, ErrITSellPayoutRejected) {
+				return s.reverseRejectedSell(ctx, intent, err)
+			}
+			log.Printf("[it] auto-payout intent=%s outcome unknown (reconciler will resolve): %v", intent.ID, err)
 		}
 	}
 	return intent, nil
@@ -738,26 +790,40 @@ func (s *ITService) resolveSell(ctx context.Context, intentID uuid.UUID, walletA
 		return nil, err
 	}
 	if intent.Status == models.ITStatusSettled || intent.Status == models.ITStatusReversed {
+		if (intent.Status == models.ITStatusSettled) != settle {
+			// E.g. a success webhook for a sell already reversed: the user may
+			// now hold both the naira and the MCGP. Acknowledged (nothing left to
+			// do on-chain) but never silent.
+			log.Printf("[it] ALERT it_sell_resolution_conflict intent=%s status=%s requested_settle=%v — operator review required",
+				intent.ID, intent.Status, settle)
+		}
 		return intent, nil // idempotent
 	}
 	if intent.Direction != models.ITDirectionSell || intent.Status != models.ITStatusDebited {
 		return nil, ErrITBadState
+	}
+	// A brokered stablecoin sell never debited the swap contract — the user's
+	// asset went straight to the provider — so there is nothing on-chain to
+	// settle or reverse. Calling the contract anyway reverts on the unknown ref,
+	// which failed the webhook and had it redelivered forever.
+	if models.ITIntentAsset(intent) != models.ITAssetMCGP {
+		return s.resolveStableSellPayout(ctx, intent, settle)
 	}
 	wallet := s.intentWallet(intent, walletAddr)
 	debitRef := itRef("IT:debit:", intent.ID)
 	var txHash string
 	var event, doneStatus string
 	if settle {
-		txHash, err = s.swap.OperatorSettleDebit(ctx, debitRef)
+		txHash, err = s.chain().OperatorSettleDebit(ctx, debitRef)
 		event, doneStatus = "PremiumDebitSettled", models.ITStatusSettled
 	} else {
-		txHash, err = s.swap.OperatorReverseDebit(ctx, debitRef)
+		txHash, err = s.chain().OperatorReverseDebit(ctx, debitRef)
 		event, doneStatus = "PremiumDebitReversed", models.ITStatusReversed
 	}
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.swap.VerifyOperatorEvent(event, txHash, common.HexToAddress(wallet), debitRef); err != nil {
+	if _, err := s.chain().VerifyOperatorEvent(event, txHash, common.HexToAddress(wallet), debitRef); err != nil {
 		return nil, err
 	}
 	intent.TxHash = txHash
@@ -768,6 +834,32 @@ func (s *ITService) resolveSell(ctx context.Context, intentID uuid.UUID, walletA
 	if settle {
 		s.settleITFee(ctx, intent)
 	}
+	return intent, nil
+}
+
+// resolveStableSellPayout closes the payout hop of a brokered stablecoin sell.
+// Success settles it. Failure parks it: the user's fiat is still in the
+// provider balance, and re-sending the same reference would only replay the
+// failure, so it stays `debited` with the rejection recorded — visible in the
+// stuck-stablecoin-sell list, and skipped by the stable watcher — for an
+// operator to pay out.
+func (s *ITService) resolveStableSellPayout(ctx context.Context, intent *models.ITIntent, settle bool) (*models.ITIntent, error) {
+	if settle {
+		if err := s.setStatus(ctx, intent, models.ITStatusSettled, ""); err != nil {
+			return nil, err
+		}
+		s.settleITFee(ctx, intent)
+		return intent, nil
+	}
+	reason := truncateReason("payout FAILED at provider (transfer " + intent.PayoutID + ") — operator payout required")
+	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Updates(map[string]any{"payout_rejected": true, "failure_reason": reason}).Error; err != nil {
+		return nil, err
+	}
+	intent.PayoutRejected = true
+	intent.FailureReason = reason
+	log.Printf("[it] ALERT it_stable_sell_payout_failed intent=%s asset=%s payout=%s — parked for operator payout",
+		intent.ID, models.ITIntentAsset(intent), intent.PayoutID)
 	return intent, nil
 }
 
