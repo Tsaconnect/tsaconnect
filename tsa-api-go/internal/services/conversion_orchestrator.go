@@ -454,7 +454,20 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	}
 	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
 	if err != nil {
-		return fmt.Errorf("conversion: read decimals of %s on %s: %w", order.Token, lane.ChainKey, err)
+		// Holder is ALREADY Treasury as of the write above, which is exactly
+		// what makes a bare error here fatal rather than merely annoying: no
+		// LATER tick ever re-enters takeCustody once Holder is Treasury (step
+		// 1's own gate), so a transient RPC failure at this exact point would
+		// otherwise leave promised_amount permanently unreadable and repeat
+		// this same error, silently, on every tick forever — invisible to the
+		// stall detector too, since afterStep never looks at an order with no
+		// legs. Park it instead, exactly like the destination failure above,
+		// so a human sees money the treasury already holds instead of a log
+		// line nobody is paged on.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_decimals_total=1 order=%s token=%s chain=%s err=%v",
+			order.ID, order.Token, lane.ChainKey, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err), nil)
 	}
 	promise := PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
 	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
@@ -473,7 +486,16 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 	}
 	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
 	if !ok {
-		return fmt.Errorf("conversion: unreadable promise %q for order %s", order.PromisedAmount, order.ID)
+		// Defence in depth: takeCustody now parks rather than leaving this
+		// state behind (see its own decimals-read failure handling), but if
+		// anything else ever left an in-custody order with no readable
+		// promise (a lost write, a corrupted row), a bare error here would
+		// repeat on every tick forever — a leg-less order is invisible to
+		// the stall detector (afterStep returns early when len(legs)==0),
+		// so nothing else would ever surface it. Park it instead.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_promise_total=1 order=%s promise=%q", order.ID, order.PromisedAmount)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("unreadable promise %q for order %s", order.PromisedAmount, order.ID), nil)
 	}
 	// Resolved before anything is reserved: an unroutable destination is a
 	// configuration fault that will never fix itself, and burning the whole

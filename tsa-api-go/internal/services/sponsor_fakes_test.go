@@ -224,14 +224,18 @@ type fakeSponsorNative struct {
 	// decimalsByToken overrides `decimals` for specific token addresses, so one
 	// lane can hold a 6dp and an 18dp stable at once.
 	decimalsByToken map[string]int
-	estimate        uint64
-	estimateErr     error
-	gasPrice        *big.Int
-	sentTo          string
-	sentWei         *big.Int
-	receiptStatus   uint64
-	receiptErr      error
-	prepareErr      error
+	// decimalsErr simulates a transient RPC failure reading a token's
+	// decimals (e.g. custody's own source-side read) — separate from
+	// prepareErr, which is the send-side failure.
+	decimalsErr   error
+	estimate      uint64
+	estimateErr   error
+	gasPrice      *big.Int
+	sentTo        string
+	sentWei       *big.Int
+	receiptStatus uint64
+	receiptErr    error
+	prepareErr    error
 
 	// ERC-20 fields, for the treasury lane (Task 6). allowance is what
 	// GetTokenAllowance answers with; nil means zero, so an approve is always
@@ -280,6 +284,9 @@ func (f *fakeSponsorNative) SuggestGasPrice() (*big.Int, error) { return f.gasPr
 func (f *fakeSponsorNative) GetTokenDecimals(token string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.decimalsErr != nil {
+		return 0, f.decimalsErr
+	}
 	if d, ok := f.decimalsByToken[strings.ToLower(token)]; ok {
 		return d, nil
 	}

@@ -197,3 +197,53 @@ func TestQuote_ConvertedVenue_EighteenToSixDecimals(t *testing.T) {
 		t.Fatalf("venue must record both legs: %+v", v)
 	}
 }
+
+// ── Fix round 3: cost amplification against LiFi ────────────────────────────
+//
+// GET /api/paycrest/quote is deliberately public and unauthenticated (see
+// the handler's own doc comment). An unresolvable requested chain or token
+// must never reach LiFi: that is a live HTTP call to a paid third-party API,
+// spendable once per request just by naming a chain or token that does not
+// exist, and it used to be swallowed silently as "no route" only AFTER the
+// call was made.
+
+func TestQuote_UnknownRequestedChainNeverCallsLiFi(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{Chain: "not-a-real-chain", Token: "USDC"}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v, err = %v; an unresolvable chain must offer nothing", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent a LiFi call on a chain id that does not resolve")
+	}
+}
+
+func TestQuote_UnknownRequestedTokenNeverCallsLiFi(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{Chain: "optimism", Token: "NOTREAL"}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v, err = %v; an unconfigured token must offer nothing", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent a LiFi call on a token address that does not resolve")
+	}
+}
+
+// Conversion is a buy-only capability. The handler already gates on
+// res.Side == "buy" before calling in, but ConvertedVenues must refuse on
+// its own too, so a future direct caller cannot get a converted SELL venue
+// just by skipping that gate.
+func TestQuote_ConvertedVenuesRefusesASellSide(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000)}
+	venues, err := s.svc.ConvertedVenues(context.Background(), "sell", "NGN", "150000",
+		[]RequestedAsset{{Chain: "optimism", Token: "USDT"}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v, err = %v; conversion is buy-only", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent a LiFi call on a sell-side request")
+	}
+}

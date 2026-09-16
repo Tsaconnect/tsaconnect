@@ -704,6 +704,13 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 	if s == nil || s.lifi == nil || s.chains == nil || s.treasuryAddress == "" || len(want) == 0 {
 		return nil, nil
 	}
+	// Conversion is a buy-only capability (the handler already gates on this
+	// before calling in, but a future direct caller — another handler, a
+	// job, a test — must not be able to get a converted SELL venue just by
+	// skipping that gate).
+	if !strings.EqualFold(side, models.PaycrestDirectionBuy) {
+		return nil, nil
+	}
 	base, err := s.Quote(ctx, side, fiatCode, fiatAmount)
 	if err != nil {
 		return nil, err
@@ -728,9 +735,21 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		if !MeetsMinimumOrder(req.Chain, src.TokenAmount, s.conversionMins, s.conversionMinDefault) {
 			continue
 		}
+		// GET /api/paycrest/quote is deliberately public and unauthenticated,
+		// so an unresolvable requested chain/token must never reach LiFi —
+		// that is a live, cost-amplifying HTTP call to a paid third-party
+		// API, spendable once per request just by naming a chain that does
+		// not exist. chainID()/tokenAddress() already say "0"/"" mean
+		// "cannot price this leg" everywhere else in this file; check that
+		// BEFORE quoting, not after swallowing whatever LiFi says about it.
+		destChainID := s.chainID(req.Chain)
+		destToken := s.tokenAddress(req.Chain, req.Token)
+		if destChainID == 0 || destToken == "" {
+			continue
+		}
 		route, rerr := s.lifi.Quote(ctx, LiFiQuoteRequest{
-			FromChainID: s.chainID(src.ChainKey), ToChainID: s.chainID(req.Chain),
-			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: s.tokenAddress(req.Chain, req.Token),
+			FromChainID: s.chainID(src.ChainKey), ToChainID: destChainID,
+			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: destToken,
 			FromAddress: s.treasuryAddress, ToAddress: s.treasuryAddress, // pricing only
 			FromAmount: routeAmount.String(),
 		})

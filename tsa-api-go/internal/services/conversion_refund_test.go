@@ -473,3 +473,103 @@ func TestOwedToUser_APendingRefundAtAHigherAttemptDoesNotHideAPendingBridge(t *t
 		t.Fatalf("owed = %q, err = %v; a live bridge must be undetermined even behind a higher-attempt-numbered pending refund", amount, err)
 	}
 }
+
+// ── Fix round 3 ──────────────────────────────────────────────────────────────
+
+// The custody fix (round 2) introduced a non-atomic window: holder=treasury
+// is persisted, then the decimals read, then promised_amount. A transient
+// failure in between — most realistically the source-decimals RPC read —
+// used to leave the order stuck FOREVER: Holder is already Treasury, so no
+// LATER tick ever re-enters takeCustody (Advance's own step-1 gate), and a
+// bare error repeated silently on every tick with no leg for the stall
+// detector to ever notice (afterStep returns early when len(legs)==0). It
+// must park instead, so a human sees it — and STAYS parked, since
+// recovery_pending only ever clears by an operator's own action, never by
+// the RPC happening to recover on a later tick.
+func TestOrchestrator_ParksWhenTheSourceDecimalsReadFails(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.src.native.decimalsErr = errors.New("rpc timeout")
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %s, want treasury — VerifyTransfer already proved the money landed", got.Holder)
+	}
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending — a transient decimals failure must park, not loop silently forever", got.Status)
+	}
+	if r.lifi.quoteCalls() != 0 {
+		t.Fatalf("quotes = %d, want 0 — must not reach the bridge with no readable promise", r.lifi.quoteCalls())
+	}
+
+	// The RPC "recovering" on a later tick must not resurrect it into the
+	// automated pipeline on its own — Advance's own NeedsOperator() gate now
+	// owns this order until a human acts.
+	r.src.native.decimalsErr = nil
+	if err := r.svc.Advance(context.Background(), r.reload(t)); err != nil {
+		t.Fatal(err)
+	}
+	still := r.reload(t)
+	if still.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s after a later tick, want it to stay parked until an operator acts", still.Status)
+	}
+}
+
+// Defence in depth for startBridge itself: whatever might leave an
+// in-custody order (Holder==Treasury) with no readable promise, looping
+// forever on a bare error is worse than parking it — the same "invisible to
+// the stall detector" reasoning as the decimals-read fix above.
+func TestOrchestrator_ParksWhenTheOrderHasNoReadablePromise(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Update("promised_amount", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	// Holder is already Treasury (the rig's default) — this must reach
+	// startBridge directly, not takeCustody.
+
+	if err := r.svc.Advance(context.Background(), r.reload(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending", got.Status)
+	}
+	if r.lifi.quoteCalls() != 0 {
+		t.Fatalf("quotes = %d, want 0", r.lifi.quoteCalls())
+	}
+}
+
+// The pre-broadcast "refunding" status write is only proven by testing the
+// SKIP branch (recovery_pending) so far — deleting the write entirely still
+// leaves that test green. This pins the WRITE branch directly: a `converting`
+// order must have its status flipped to `refunding` BEFORE the broadcast, so
+// a crash between the write and the broadcast reads as "a refund was under
+// way", not as an order still waiting to convert.
+func TestRefundFromTreasury_SetsRefundingStatusBeforeTheBroadcast(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	// r.order.Status is "converting" (the rig's default) — NOT recovery_pending.
+
+	// Fail the broadcast build itself, so the write under test — which must
+	// happen BEFORE the broadcast — is observable without the order also
+	// reaching its post-success "refunded" state.
+	r.src.native.transferErr = errors.New("rpc rejected the transfer")
+
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err == nil {
+		t.Fatal("expected the transfer build to fail")
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRefunding {
+		t.Fatalf("status = %s, want refunding — the intent must be written before the broadcast, even one that then fails", got.Status)
+	}
+	if got.Fault != models.FaultPlatform {
+		t.Fatalf("fault = %s, want platform", got.Fault)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
+	}
+}
