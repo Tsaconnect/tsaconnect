@@ -513,6 +513,10 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		// today but is not the same thing as stating it.
 		row.Holder = models.HolderPaycrest
 	} else {
+		// Deliberate, not required: leaving RouteKind at its zero value would
+		// read identically (Converted() treats "" the same as "direct"), and
+		// every row written before this field existed is already "". Stamping
+		// it explicitly going forward is just a clearer row to read later.
 		row.RouteKind = models.RouteKindDirect
 	}
 	if pa := order.ProviderAccount; pa != nil {

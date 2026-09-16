@@ -99,6 +99,12 @@ func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testin
 	if v.RequestedChain != "optimism" || v.RequestedToken != "USDT" {
 		t.Fatalf("venue must say what it converts to: %+v", v)
 	}
+	// The settlement leg's Network must carry through: CreateBuy (Task 9)
+	// submits this straight to Paycrest, and an empty value there means an
+	// order created with no network at all.
+	if v.Network == "" {
+		t.Fatalf("venue must carry the settlement leg's network, got empty: %+v", v)
+	}
 }
 
 func TestQuote_CostlyRouteIsNotOffered(t *testing.T) {

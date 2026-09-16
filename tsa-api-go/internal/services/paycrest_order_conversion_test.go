@@ -179,6 +179,13 @@ func TestCreateBuy_ConvertedOrderDeliversToTheTreasuryAndRecordsThePromise(t *te
 	if s.client.lastCreate.WalletAddress != "0xTreasury" {
 		t.Fatalf("Paycrest must deliver to the treasury, got %s", s.client.lastCreate.WalletAddress)
 	}
+	// ConvertedVenues must carry the settlement leg's Network through, and
+	// CreateBuy must submit that same network to Paycrest — an empty value
+	// here means the real onramp request would have named no network at all.
+	if s.client.lastCreate.Network == "" || s.client.lastCreate.Network != row.Network {
+		t.Fatalf("submitted network = %q, row network = %q; the settlement leg's network must reach Paycrest",
+			s.client.lastCreate.Network, row.Network)
+	}
 	if row.RouteKind != models.RouteKindConverted || row.RequestedChain != "optimism" || row.PromisedAmount == "" {
 		t.Fatalf("row = %+v", row)
 	}
