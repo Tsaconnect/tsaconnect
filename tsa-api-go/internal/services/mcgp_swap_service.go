@@ -114,7 +114,7 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 		return nil, fmt.Errorf("MCGP swap contract address is empty")
 	}
 	if s.chain == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{To: s.address, Value: "0", Data: common.Bytes2Hex(callData)}
