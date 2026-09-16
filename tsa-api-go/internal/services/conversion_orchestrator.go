@@ -14,9 +14,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// shortfallToleranceBps is B3: a landing under the promise by this much is
-// topped up from margin rather than retried. Anything larger is a real miss.
+// shortfallToleranceBps is B3: a landing short of the promise by more than this
+// is still topped up — the user is always made whole — but it is a margin loss
+// finance has to see, so crossing it raises an alert.
 const shortfallToleranceBps = 20
+
+// defaultMaxShortfallUSD is the ceiling on an AUTOMATIC top-up. Below it, a
+// shortfall is a rounding-scale cost of doing business and is paid silently.
+// Above it, something is wrong in a way no top-up should paper over, so the
+// order stops for a human with the balance recorded.
+const defaultMaxShortfallUSD = 50
 
 // conversionTickLimit is the default batch size for one Tick.
 const conversionTickLimit = 20
@@ -29,26 +36,33 @@ type lifiQuoter interface {
 
 // ConversionOrchestrator drives one converted buy from "Paycrest paid our
 // treasury" to "the user holds at least what we promised" — or, failing that,
-// to a refund.
+// to a refund or to a human.
 //
-// Every step either observes chain/provider state or reserves a leg BEFORE it
-// broadcasts, so the whole thing is safe to re-run: a crash, a duplicate tick
-// or a cancelled request can cost a wasted quote, never a second conversion.
+// The ordering rule throughout is: RESERVE THE LEG ROW FIRST, then do anything
+// slow, then broadcast. The reservation is what makes a duplicate tick safe —
+// not the read of the leg list, which is stale the moment it returns. Two ticks
+// racing here both call Reserve; exactly one wins the (order_id, kind, attempt)
+// row and the loser returns without quoting or sending.
 type ConversionOrchestrator struct {
-	db          *gorm.DB
-	treasury    *Treasury
-	legs        rampLegStore
-	lifi        lifiQuoter
-	status      *LiFiStatusClient
-	transfers   ERC20TransferVerifier
+	db       *gorm.DB
+	treasury *Treasury
+	legs     rampLegStore
+	lifi     lifiQuoter
+	status   *LiFiStatusClient
+	// transfers is keyed by chain key: LogTransferVerifier wraps ONE RPC
+	// client, so a single verifier could only ever prove a delivery on its own
+	// chain and would silently never confirm anything on any other.
+	transfers   map[string]ERC20TransferVerifier
 	chains      *BlockchainService
 	retryWindow time.Duration
-	now         func() time.Time
+	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
+	maxShortfallUSD float64
+	now             func() time.Time
 }
 
 func NewConversionOrchestrator(
 	db *gorm.DB, treasury *Treasury, legs rampLegStore,
-	lifi lifiQuoter, status *LiFiStatusClient, transfers ERC20TransferVerifier,
+	lifi lifiQuoter, status *LiFiStatusClient, transfers map[string]ERC20TransferVerifier,
 	chains *BlockchainService, retryWindow time.Duration, now func() time.Time,
 ) *ConversionOrchestrator {
 	if now == nil {
@@ -57,9 +71,14 @@ func NewConversionOrchestrator(
 	if retryWindow <= 0 {
 		retryWindow = 30 * time.Minute
 	}
+	keyed := make(map[string]ERC20TransferVerifier, len(transfers))
+	for k, v := range transfers {
+		keyed[strings.ToLower(strings.TrimSpace(k))] = v
+	}
 	return &ConversionOrchestrator{
 		db: db, treasury: treasury, legs: legs, lifi: lifi, status: status,
-		transfers: transfers, chains: chains, retryWindow: retryWindow, now: now,
+		transfers: keyed, chains: chains, retryWindow: retryWindow,
+		maxShortfallUSD: defaultMaxShortfallUSD, now: now,
 	}
 }
 
@@ -83,22 +102,40 @@ func (o *ConversionOrchestrator) Tick(ctx context.Context, limit int) error {
 	}
 	var errs []error
 	for i := range orders {
+		// Captured BEFORE the step: Advance writes through this same row, so
+		// reading UpdatedAt afterwards would not tell us whether it moved.
+		before := orders[i].UpdatedAt
 		if err := o.Advance(ctx, &orders[i]); err != nil {
 			log.Printf("[ramp-conversion] order=%s advance: %v", orders[i].ID, err)
 			errs = append(errs, err)
 		}
+		o.rotateIfIdle(ctx, orders[i].ID, before)
 	}
 	return errors.Join(errs...)
 }
 
+// rotateIfIdle pushes an order that made no progress to the back of the queue.
+// Without it, orders parked on a stalled leg sit at the head of
+// "ORDER BY updated_at ASC" forever and starve every order behind them out of
+// the batch limit. The guard on updated_at makes it a no-op when the step DID
+// write, so a real transition is never overwritten by this.
+func (o *ConversionOrchestrator) rotateIfIdle(ctx context.Context, id uuid.UUID, before time.Time) {
+	err := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND updated_at = ?", id, before).
+		UpdateColumn("updated_at", o.now().UTC()).Error
+	if err != nil {
+		log.Printf("[ramp-conversion] order=%s rotate: %v", id, err)
+	}
+}
+
 // Advance moves one converted buy forward by at most ONE step. It is safe to
 // call repeatedly: every step either observes chain state or reserves a leg
-// before broadcasting, so a re-tick during a pending leg does nothing.
+// before doing anything slow or irreversible.
 func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.PaycrestOrderRecord) error {
 	if !order.Converted() || order.Direction != models.PaycrestDirectionBuy {
 		return nil
 	}
-	if models.PaycrestOrderTerminal(order.Status) {
+	if models.PaycrestOrderTerminal(order.Status) || order.NeedsOperator() {
 		return nil
 	}
 	// An empty treasury address means the lanes disagree about their signer
@@ -115,8 +152,6 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 
 	// 1. Paycrest's own delivery must be PROVEN before we treat the funds as
 	//    ours to move — a mined receipt is not proof the treasury was paid.
-	//    LogTransferVerifier already parses the Transfer log, checks the token
-	//    and recipient, and sums the amount; reuse it rather than re-parsing.
 	if order.Holder == models.HolderPaycrest {
 		return o.takeCustody(ctx, order, lane)
 	}
@@ -130,84 +165,127 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 	//    order, and nothing else may move until it resolves.
 	if pending := latestPendingLeg(legs); pending != nil {
 		if pending.Kind == models.RampLegKindBridge {
-			return o.observeBridge(ctx, order, lane, pending)
+			return o.observeBridge(ctx, order, pending)
 		}
-		// A deliver/refund transfer we broadcast ourselves but could not
-		// record an outcome for. Its fate is unknown, so this order stops
-		// here for an operator rather than risking a second payment.
+		// A deliver/refund transfer we broadcast ourselves but could not record
+		// an outcome for. Its fate is unknown, so this order stops here for an
+		// operator rather than risking a second payment.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d tx=%s",
 			order.ID, pending.ID, pending.Kind, pending.Attempt, pending.TxHash)
 		return nil
 	}
 
-	// 3. A confirmed bridge leg: settle, or top up a small shortfall.
+	// 3. A confirmed bridge leg: settle, or top up the shortfall.
 	if done := latestLeg(legs, models.RampLegKindBridge, models.RampLegStatusConfirmed); done != nil {
 		return o.settleOrTopUp(ctx, order, done)
 	}
 
-	// 4. No live bridge leg. Retry while inside the window, else refund.
-	if o.now().After(order.CreatedAt.Add(o.retryWindow)) {
+	// 4. A bridge attempt that BROADCAST but never confirmed may never be
+	//    retried and may never be refunded: both would move the money a second
+	//    time while the first transfer can still land.
+	if stranded := broadcastBridgeLeg(legs); stranded != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_bridge_stranded_total=1 order=%s leg=%s attempt=%d tx=%s",
+			order.ID, stranded.ID, stranded.Attempt, stranded.TxHash)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("bridge attempt %d broadcast as %s but never confirmed", stranded.Attempt, stranded.TxHash), nil)
+	}
+
+	// 5. No bridge has ever broadcast. The retry window runs from the FIRST
+	//    BRIDGE ATTEMPT, not from order creation: a bank payment that took an
+	//    hour to clear must still get its conversion attempted, not refunded
+	//    before it was ever tried. Attempt 1 is therefore always allowed.
+	if first := bridgeLegByAttempt(legs, 1); first != nil &&
+		o.now().After(first.CreatedAt.Add(o.retryWindow)) {
 		return o.refund(ctx, order, lane, models.FaultPlatform)
 	}
 	return o.startBridge(ctx, order, lane)
 }
 
 // takeCustody proves Paycrest's delivery landed in the treasury before the
-// order is allowed to move. A short delivery reprices BOTH the amount and the
-// promise: a promise computed from money that never arrived would commit us to
-// paying out more than we hold.
+// order is allowed to move, and restates the promise in the units the USER will
+// actually receive.
 func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane) error {
 	if order.TxHash == "" {
 		return nil // nothing delivered yet
 	}
-	received, err := o.transfers.VerifyTransfer(ctx, order.TxHash, lane.tokenAddress(order.Token), o.treasury.Address())
+	verifier := o.verifierFor(order.ChainKey)
+	if verifier == nil {
+		// Failing closed matters more here than anywhere: with no verifier the
+		// alternative is an order that silently never confirms.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s", order.ID, order.ChainKey)
+		return ErrSponsorNotAvailable
+	}
+	// VerifyTransfer sums EVERY matching Transfer log in the transaction, so a
+	// delivery split across several transfers in one tx is credited in full.
+	received, err := verifier.VerifyTransfer(ctx, order.TxHash, lane.tokenAddress(order.Token), o.treasury.Address())
 	if err != nil {
 		if errors.Is(err, ErrTransferReverted) || errors.Is(err, ErrTransferWrongRecipient) {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_bad_total=1 order=%s tx=%s err=%v", order.ID, order.TxHash, err)
 		}
 		return nil // not yet, or not ours; the next tick looks again
 	}
-	expected, _ := new(big.Int).SetString(order.TokenAmount, 10)
-	if expected != nil && received.Cmp(expected) < 0 {
+	if received == nil || received.Sign() <= 0 {
+		return nil
+	}
+
+	// The promise is what the user RECEIVES, so it is denominated in the
+	// destination token's base units. Source and destination precision differ
+	// (BSC stables are 18dp against 6dp on base/polygon), and comparing a
+	// promise in source units against a landing in destination units would make
+	// every cross-precision route settle wrong by twelve orders of magnitude.
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		return o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
+	if err != nil {
+		return fmt.Errorf("conversion: read decimals of %s on %s: %w", order.Token, lane.ChainKey, err)
+	}
+	promise := PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
+
+	updates := map[string]any{
+		"holder":          models.HolderTreasury,
+		"promised_amount": promise.String(),
+	}
+	if expected, ok := new(big.Int).SetString(order.TokenAmount, 10); ok && received.Cmp(expected) < 0 {
 		// Short delivery: never convert more than actually landed, and never
 		// promise more than what landed can cover.
 		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s — repricing the promise",
 			order.ID, expected, received)
-		return o.setOrder(ctx, order, map[string]any{
-			"token_amount":    received.String(),
-			"promised_amount": PromisedAmount(received, order.MarkupBps).String(),
-			"holder":          models.HolderTreasury,
-		})
+		updates["token_amount"] = received.String()
 	}
-	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s", order.ID, order.TxHash, received)
-	return o.setOrder(ctx, order, map[string]any{"holder": models.HolderTreasury})
+	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
+		order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
+	return o.setOrder(ctx, order, updates)
 }
 
-// startBridge quotes FRESH (never a cached or reused route), reserves the next
-// attempt, then broadcasts. The reservation happens before the broadcast so a
-// crash in between cannot produce a second conversion.
+// startBridge reserves the attempt FIRST, then quotes, then broadcasts. The
+// quote is a network round-trip long enough for a second tick to enter this
+// function, so reserving after it would let both ticks broadcast; reserving
+// before it means the loser never even asks for a route.
 func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane) error {
 	amount, ok := new(big.Int).SetString(order.TokenAmount, 10)
 	if !ok {
 		return fmt.Errorf("conversion: unreadable order amount %q", order.TokenAmount)
 	}
-	// Caps first: the treasury documents that obligation but cannot enforce it,
-	// and everything past this point can move real money.
+	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
+	if !ok {
+		return fmt.Errorf("conversion: unreadable promise %q for order %s", order.PromisedAmount, order.ID)
+	}
+	// Resolved before anything is reserved: an unroutable destination is a
+	// configuration fault that will never fix itself, and burning the whole
+	// retry window rediscovering that just delays the human.
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		return o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	// Caps gate NEW exposure, and this is the only path that creates any.
 	if err := o.checkCaps(ctx, lane, order, order.Token, amount); err != nil {
 		return err
 	}
-	route, err := o.lifi.Quote(ctx, LiFiQuoteRequest{
-		FromChainID: lane.ChainID,
-		ToChainID:   o.chainID(order.RequestedChain),
-		FromToken:   lane.tokenAddress(order.Token),
-		ToToken:     o.tokenAddress(order.RequestedChain, order.RequestedToken),
-		FromAddress: o.treasury.Address(),
-		ToAddress:   order.WalletAddress, // LiFi delivers straight to the user
-		FromAmount:  amount.String(),
-	})
-	if err != nil {
-		return err // the next tick retries until the window closes
-	}
+
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindBridge)
 	if err != nil {
 		return err
@@ -217,6 +295,10 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		ChainKey: lane.ChainKey, Token: strings.ToUpper(order.Token),
 		FromAddr: o.treasury.Address(), ToAddr: order.WalletAddress,
 		Amount: amount.String(), Status: models.RampLegStatusPending,
+		// Stamped from the orchestrator's own clock, not the database's: this
+		// row is the anchor for the retry window, so the whole state machine
+		// has to agree on what time it is.
+		CreatedAt: o.now().UTC(),
 	}
 	existing, err := o.legs.Reserve(ctx, leg)
 	if err != nil {
@@ -225,6 +307,32 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 	if existing != nil {
 		return nil // another tick already claimed this attempt
 	}
+
+	route, err := o.lifi.Quote(ctx, LiFiQuoteRequest{
+		FromChainID: lane.ChainID,
+		ToChainID:   o.chainID(order.RequestedChain),
+		FromToken:   lane.tokenAddress(order.Token),
+		ToToken:     dst.token,
+		FromAddress: o.treasury.Address(),
+		ToAddress:   order.WalletAddress, // LiFi delivers straight to the user
+		FromAmount:  amount.String(),
+	})
+	if err != nil {
+		// Nothing was broadcast, so this attempt is provably dead: fail it so
+		// the next tick starts a clean attempt inside the window.
+		if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+			return ferr
+		}
+		return err
+	}
+	// Decision 5, applied at execution time: a route whose guaranteed minimum
+	// is below the promise cannot honour it, so it is not a route we may take.
+	if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promised) < 0 {
+		log.Printf("[ramp-conversion] order=%s bridge#%d rejected route: toAmountMin=%v < promise=%s",
+			order.ID, attempt, route.ToAmountMin, promised)
+		return o.failLeg(detached(ctx), leg.ID, "route guarantees less than the promised amount")
+	}
+
 	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, amount, route)
 	if err != nil {
 		if broadcastAttempted {
@@ -246,14 +354,16 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 }
 
 // observeBridge asks LiFi what became of a pending bridge, and nothing else.
-// A DONE report is followed straight into the settle decision: confirming a
-// landing is an observation, not a money movement, so the two belong to the
-// same step.
-func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane, leg *models.RampLeg) error {
+//
+// LiFi is the LOOKUP, never the proof — the same rule the IT sell path states.
+// In particular a FAILED verdict on a transaction that DID broadcast is not
+// permission to send again: LiFi reports FAILED for tool stalls and
+// source-side ambiguity while the funds can still reach the user later.
+func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
 	if leg.TxHash == "" {
-		// Reserved, then the broadcast outcome was never recorded. There is
-		// nothing to ask LiFi about; an operator has to resolve it.
-		if o.now().After(order.CreatedAt.Add(o.retryWindow)) {
+		// Reserved, but no broadcast outcome was ever recorded. There is
+		// nothing to ask LiFi about.
+		if o.now().After(leg.CreatedAt.Add(o.retryWindow)) {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_hashless_total=1 order=%s leg=%s attempt=%d",
 				order.ID, leg.ID, leg.Attempt)
 		}
@@ -265,45 +375,75 @@ func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *model
 	}
 	switch st.Status {
 	case LiFiStatusDone:
-		if st.ReceivedBaseUnits == nil || st.ReceivedBaseUnits.Sign() <= 0 {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_amount_total=1 order=%s tx=%s", order.ID, leg.TxHash)
-			return nil
-		}
-		// A DONE that credited someone else is not this order's settlement.
-		if st.ToAddress != "" && !strings.EqualFold(st.ToAddress, order.WalletAddress) {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_recipient_total=1 order=%s tx=%s reported=%s wallet=%s",
-				order.ID, leg.TxHash, st.ToAddress, order.WalletAddress)
-			return fmt.Errorf("conversion: bridge for order %s reported a landing at %s, not the user's wallet", order.ID, st.ToAddress)
-		}
-		landed := st.ReceivedBaseUnits
-		if err := o.legs.Confirm(detached(ctx), leg.ID, landed.String(), o.now()); err != nil {
-			if errors.Is(err, ErrLegNotPending) {
-				return nil // another tick confirmed it and will settle it
-			}
-			return err
-		}
-		log.Printf("[ramp-conversion] order=%s bridge#%d landed tx=%s amount=%s", order.ID, leg.Attempt, leg.TxHash, landed)
-		confirmed := *leg
-		confirmed.Status = models.RampLegStatusConfirmed
-		confirmed.AmountReceived = landed.String()
-		return o.settleOrTopUp(ctx, order, &confirmed)
+		return o.observeDone(ctx, order, leg, st)
 
 	case LiFiStatusFailed:
-		log.Printf("[ramp-conversion] order=%s bridge#%d failed tx=%s", order.ID, leg.Attempt, leg.TxHash)
-		return o.failLeg(detached(ctx), leg.ID, "lifi reported the transfer failed")
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_bridge_failed_total=1 order=%s bridge#%d tx=%s",
+			order.ID, leg.Attempt, leg.TxHash)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("lifi reported bridge attempt %d (%s) failed after it broadcast", leg.Attempt, leg.TxHash), nil)
 
 	default:
 		return nil // still in flight
 	}
 }
 
-// settleOrTopUp compares what landed against the promise (base units, never
-// floats). Short by <= 20 bps is made whole from margin; more is a miss.
+// observeDone decides whether a DONE report is good enough to settle on. Three
+// separate things have to hold, because "DONE" alone says nothing about who was
+// paid or how much.
+func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg, st *LiFiTransferStatus) error {
+	switch st.Substatus {
+	case LiFiSubstatusCompleted:
+		// The only substatus that means the recipient got what was quoted.
+	case LiFiSubstatusPartial, LiFiSubstatusRefunded:
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_bridge_not_completed_total=1 order=%s bridge#%d tx=%s substatus=%s",
+			order.ID, leg.Attempt, leg.TxHash, st.Substatus)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("bridge %s reported DONE/%s, not a completed delivery", leg.TxHash, st.Substatus), nil)
+	default:
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_unqualified_total=1 order=%s tx=%s substatus=%q",
+			order.ID, leg.TxHash, st.Substatus)
+		return nil // never settle on a DONE we cannot qualify
+	}
+	if st.ReceivedBaseUnits == nil || st.ReceivedBaseUnits.Sign() <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_amount_total=1 order=%s tx=%s", order.ID, leg.TxHash)
+		return nil
+	}
+	// An unstated recipient is not the user's wallet; it is an unknown, and an
+	// unknown recipient must never settle an order.
+	if st.ToAddress == "" {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_recipient_total=1 order=%s tx=%s", order.ID, leg.TxHash)
+		return nil
+	}
+	if !strings.EqualFold(st.ToAddress, order.WalletAddress) {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_recipient_total=1 order=%s tx=%s reported=%s wallet=%s",
+			order.ID, leg.TxHash, st.ToAddress, order.WalletAddress)
+		return fmt.Errorf("conversion: bridge for order %s reported a landing at %s, not the user's wallet", order.ID, st.ToAddress)
+	}
+
+	landed := st.ReceivedBaseUnits
+	if err := o.legs.Confirm(detached(ctx), leg.ID, landed.String(), o.now()); err != nil {
+		if errors.Is(err, ErrLegNotPending) {
+			return nil // another tick confirmed it and will settle it
+		}
+		return err
+	}
+	log.Printf("[ramp-conversion] order=%s bridge#%d landed tx=%s amount=%s", order.ID, leg.Attempt, leg.TxHash, landed)
+
+	confirmed := *leg
+	confirmed.Status = models.RampLegStatusConfirmed
+	confirmed.AmountReceived = landed.String()
+	return o.settleOrTopUp(ctx, order, &confirmed)
+}
+
+// settleOrTopUp compares what the user actually holds against the promise
+// (base units, never floats) and makes up ANY difference from margin. A user
+// who was promised an amount gets that amount; the size of the gap changes who
+// gets told about it, not whether they are paid.
 func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *models.PaycrestOrderRecord, bridge *models.RampLeg) error {
-	promised, _ := new(big.Int).SetString(order.PromisedAmount, 10)
-	landed, _ := new(big.Int).SetString(bridge.AmountReceived, 10)
-	if promised == nil || landed == nil {
-		return fmt.Errorf("conversion: unreadable promise/landing for order %s", order.ID)
+	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
+	if !ok {
+		return fmt.Errorf("conversion: unreadable promise %q for order %s", order.PromisedAmount, order.ID)
 	}
 	// What the user is still short is a question about the WHOLE ledger, not
 	// about the bridge alone. A top-up that landed but whose settle write was
@@ -315,51 +455,53 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 	}
 	shortfall := new(big.Int).Sub(promised, creditedToUser(order, legs))
 	if shortfall.Sign() <= 0 {
-		log.Printf("[ramp-conversion] order=%s settled landed=%s promised=%s", order.ID, landed, promised)
+		log.Printf("[ramp-conversion] order=%s settled via bridge#%d tx=%s promised=%s",
+			order.ID, bridge.Attempt, bridge.TxHash, promised)
 		return o.setOrder(ctx, order, map[string]any{
 			"status": models.PaycrestStatusSettled, "holder": models.HolderUser,
 		})
 	}
-	missBps := new(big.Int).Mul(shortfall, big.NewInt(10_000))
-	missBps.Div(missBps, promised)
+
+	missBps := new(big.Int).Quo(new(big.Int).Mul(shortfall, big.NewInt(10_000)), promised)
 	if missBps.Int64() > shortfallToleranceBps {
-		// A real miss — and NOT something a retry can fix: the money already
-		// reached the user's wallet, so re-bridging would pay twice. The leg
-		// stays confirmed (it did land), the balance is recorded as owed, and
-		// the order leaves the automated path for an operator.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_promise_missed_total=1 order=%s landed=%s promised=%s miss_bps=%s",
-			order.ID, landed, promised, missBps)
-		return o.setOrder(ctx, order, map[string]any{
-			"status": models.PaycrestStatusRecoveryPending,
-			"holder": models.HolderUser,
-			"fault":  models.FaultPlatform,
-		})
+		// Still topped up below — the user is made whole either way — but this
+		// is margin we did not plan to spend, and finance has to see it.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_promise_missed_total=1 order=%s bridge#%d tx=%s shortfall=%s promised=%s miss_bps=%s",
+			order.ID, bridge.Attempt, bridge.TxHash, shortfall, promised, missBps)
 	}
-	// Top up the difference in the token the user actually received.
-	return o.deliverShortfall(ctx, order, shortfall)
+
+	dst, err := o.destination(order)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_topup_lane_total=1 order=%s err=%v", order.ID, err)
+		return o.toRecovery(ctx, order, err.Error(), map[string]any{"holder": models.HolderUser})
+	}
+	if usd := unitsToUSD(shortfall, dst.decimals); usd > o.maxShortfallUSD {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_shortfall_over_ceiling_total=1 order=%s bridge#%d shortfall=%s (~$%.2f) ceiling=$%.2f",
+			order.ID, bridge.Attempt, shortfall, usd, o.maxShortfallUSD)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("shortfall of ~$%.2f exceeds the $%.2f automatic top-up ceiling", usd, o.maxShortfallUSD),
+			map[string]any{"holder": models.HolderUser})
+	}
+	return o.deliverShortfall(ctx, order, dst, shortfall)
 }
 
 // deliverShortfall pays the gap from the treasury in the token the user
 // actually received, on the chain they received it — which is the REQUESTED
 // chain/token, not the one Paycrest delivered to us.
-func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *models.PaycrestOrderRecord, shortfall *big.Int) error {
-	lane := o.treasury.Lane(order.RequestedChain)
-	if lane == nil {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_topup_lane_total=1 order=%s chain=%s", order.ID, order.RequestedChain)
-		return fmt.Errorf("conversion: no treasury lane on %s to top up order %s", order.RequestedChain, order.ID)
-	}
-	if err := o.checkCaps(ctx, lane, order, order.RequestedToken, shortfall); err != nil {
-		return err
-	}
+//
+// No cap check: a top-up completes an order the treasury is already exposed to.
+// It creates no new exposure, and refusing it would leave the user short.
+func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, shortfall *big.Int) error {
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindDeliver)
 	if err != nil {
 		return err
 	}
 	leg := &models.RampLeg{
 		OrderID: order.ID, Kind: models.RampLegKindDeliver, Attempt: attempt,
-		ChainKey: lane.ChainKey, Token: strings.ToUpper(order.RequestedToken),
+		ChainKey: dst.lane.ChainKey, Token: dst.symbol,
 		FromAddr: o.treasury.Address(), ToAddr: order.WalletAddress,
 		Amount: shortfall.String(), Status: models.RampLegStatusPending,
+		CreatedAt: o.now().UTC(),
 	}
 	existing, err := o.legs.Reserve(ctx, leg)
 	if err != nil {
@@ -368,7 +510,7 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 	if existing != nil {
 		return nil
 	}
-	txHash, attempted, err := o.treasury.TransferToken(ctx, lane, order.RequestedToken, order.WalletAddress, shortfall)
+	txHash, attempted, err := o.treasury.TransferToken(ctx, dst.lane, dst.symbol, order.WalletAddress, shortfall)
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_broadcast_uncertain_total=1 order=%s leg=%s err=%v", order.ID, leg.ID, err)
@@ -383,7 +525,7 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 		return err
 	}
 	log.Printf("[ramp-conversion] order=%s deliver#%d chain=%s token=%s amount=%s tx=%s",
-		order.ID, attempt, lane.ChainKey, leg.Token, shortfall, txHash)
+		order.ID, attempt, dst.lane.ChainKey, dst.symbol, shortfall, txHash)
 	// Detached: the top-up is already on-chain, so this write must not be lost
 	// with a cancelled request.
 	return o.setOrder(detached(ctx), order, map[string]any{
@@ -394,6 +536,8 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 // refund returns the FULL Paycrest amount — markup included — in the token the
 // treasury actually holds, on the chain Paycrest delivered to, to the wallet
 // the order itself names.
+//
+// No cap check: a refund returns money the treasury already holds.
 func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane, fault string) error {
 	amount, ok := new(big.Int).SetString(order.TokenAmount, 10)
 	if !ok {
@@ -408,9 +552,6 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 	}
 	if done := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusConfirmed); done != nil {
 		return o.finishRefund(ctx, order, fault)
-	}
-	if err := o.checkCaps(ctx, lane, order, order.Token, amount); err != nil {
-		return err
 	}
 	// Mark the intent BEFORE broadcasting: a crash mid-refund must read as
 	// "a refund was under way", never as an order still waiting to convert.
@@ -430,6 +571,7 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 		ChainKey: lane.ChainKey, Token: strings.ToUpper(order.Token),
 		FromAddr: o.treasury.Address(), ToAddr: order.WalletAddress,
 		Amount: amount.String(), Status: models.RampLegStatusPending,
+		CreatedAt: o.now().UTC(),
 	}
 	existing, err := o.legs.Reserve(ctx, leg)
 	if err != nil {
@@ -466,6 +608,22 @@ func (o *ConversionOrchestrator) finishRefund(ctx context.Context, order *models
 	})
 }
 
+// toRecovery parks an order for a human with the reason recorded and the
+// balance still owed computed from the legs. It is the endpoint for everything
+// no retry can fix.
+func (o *ConversionOrchestrator) toRecovery(ctx context.Context, order *models.PaycrestOrderRecord, reason string, extra map[string]any) error {
+	log.Printf("[ramp-conversion] ALERT ramp_conversion_recovery_total=1 order=%s reason=%q", order.ID, reason)
+	updates := map[string]any{
+		"status":         models.PaycrestStatusRecoveryPending,
+		"fault":          models.FaultPlatform,
+		"failure_reason": reason,
+	}
+	for k, v := range extra {
+		updates[k] = v
+	}
+	return o.setOrder(detached(ctx), order, updates)
+}
+
 // setOrder writes a narrow set of columns and ALWAYS recomputes owed_to_user
 // from the leg ledger — a caller-supplied value is dropped, because what we
 // owe is a fact about what moved on-chain, not something anyone gets to state.
@@ -492,12 +650,14 @@ func (o *ConversionOrchestrator) setOrder(ctx context.Context, order *models.Pay
 	return o.db.WithContext(ctx).Model(order).Updates(updates).Error
 }
 
-// owedFromLegs is what we still owe the user, in the requested token's base
-// units: the promise less everything that actually reached their wallet. A
-// settled or refunded order owes nothing by definition.
+// owedFromLegs is what we still owe the user, in the destination token's base
+// units: the promise less everything that actually reached their wallet.
+//
+// A refunding order still owes: the refund has not landed yet, and reporting
+// zero would hide a live liability for exactly as long as it matters.
 func owedFromLegs(order *models.PaycrestOrderRecord, legs []models.RampLeg) string {
 	switch order.Status {
-	case models.PaycrestStatusSettled, models.PaycrestStatusRefunded, models.PaycrestStatusRefunding:
+	case models.PaycrestStatusSettled, models.PaycrestStatusRefunded:
 		return "0"
 	}
 	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
@@ -515,6 +675,11 @@ func owedFromLegs(order *models.PaycrestOrderRecord, legs []models.RampLeg) stri
 // own wallet: confirmed bridge and deliver legs only. It is the single answer
 // to "have we paid them yet", so a lost status write cannot turn one payment
 // into two.
+//
+// A confirmed leg with no recorded AmountReceived is SKIPPED rather than
+// falling back to leg.Amount: Amount is what we sent in SOURCE units, and
+// counting it as if it had arrived in destination units would credit the user
+// with money that may never have landed.
 func creditedToUser(order *models.PaycrestOrderRecord, legs []models.RampLeg) *big.Int {
 	credited := new(big.Int)
 	for _, leg := range legs {
@@ -527,11 +692,12 @@ func creditedToUser(order *models.PaycrestOrderRecord, legs []models.RampLeg) *b
 		if !strings.EqualFold(leg.ToAddr, order.WalletAddress) {
 			continue
 		}
-		raw := leg.AmountReceived
-		if raw == "" {
-			raw = leg.Amount
+		if leg.AmountReceived == "" {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_without_amount_total=1 order=%s leg=%s kind=%s",
+				order.ID, leg.ID, leg.Kind)
+			continue
 		}
-		if v, ok := new(big.Int).SetString(raw, 10); ok {
+		if v, ok := new(big.Int).SetString(leg.AmountReceived, 10); ok {
 			credited.Add(credited, v)
 		}
 	}
@@ -547,9 +713,43 @@ func (o *ConversionOrchestrator) failLeg(ctx context.Context, id uuid.UUID, reas
 	return nil
 }
 
-// checkCaps is the gate before anything irreversible. Phase 2 moves only
-// stablecoins, so a token's base-unit amount converts to USD by its decimals
-// alone — no price feed, and no floats in the money itself.
+// conversionDestination is where the user is actually paid: the treasury lane
+// on the requested chain, the requested token's address there, and its
+// precision — the units every promise and landing is denominated in.
+type conversionDestination struct {
+	lane     *TreasuryLane
+	token    string
+	symbol   string
+	decimals int
+}
+
+func (o *ConversionOrchestrator) destination(order *models.PaycrestOrderRecord) (*conversionDestination, error) {
+	lane := o.treasury.Lane(order.RequestedChain)
+	if lane == nil {
+		return nil, fmt.Errorf("conversion: no treasury lane on %s", order.RequestedChain)
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(order.RequestedToken))
+	token := lane.tokenAddress(symbol)
+	if token == "" {
+		token = o.tokenAddress(order.RequestedChain, symbol)
+	}
+	if token == "" {
+		return nil, fmt.Errorf("conversion: token %s is not configured on %s", symbol, order.RequestedChain)
+	}
+	decimals, err := lane.Native.GetTokenDecimals(token)
+	if err != nil {
+		return nil, fmt.Errorf("conversion: read decimals of %s on %s: %w", symbol, lane.ChainKey, err)
+	}
+	return &conversionDestination{lane: lane, token: token, symbol: symbol, decimals: decimals}, nil
+}
+
+func (o *ConversionOrchestrator) verifierFor(chainKey string) ERC20TransferVerifier {
+	return o.transfers[strings.ToLower(strings.TrimSpace(chainKey))]
+}
+
+// checkCaps is the gate before new exposure. Phase 2 moves only stablecoins, so
+// a token's base-unit amount converts to USD by its decimals alone — no price
+// feed, and no floats in the money itself.
 func (o *ConversionOrchestrator) checkCaps(ctx context.Context, lane *TreasuryLane, order *models.PaycrestOrderRecord, token string, amount *big.Int) error {
 	orderUSD, err := o.usdValue(lane, token, amount)
 	if err != nil {
@@ -565,9 +765,7 @@ func (o *ConversionOrchestrator) checkCaps(ctx context.Context, lane *TreasuryLa
 // inFlightUSD is this chain's current exposure: every OTHER converted buy whose
 // funds are in the treasury's hands on this chain. It is deliberately measured
 // on the delivery chain (chain_key), which is where the treasury actually holds
-// the float; a top-up on the destination chain is checked against the same
-// figure rather than a second, per-destination one, because a top-up is a
-// fraction of a percent of an order and the cap exists to bound the float.
+// the float.
 //
 // A failure to read it fails CLOSED: an unknown exposure is not a zero one.
 func (o *ConversionOrchestrator) inFlightUSD(ctx context.Context, lane *TreasuryLane, exclude uuid.UUID) (float64, error) {
@@ -597,8 +795,8 @@ func (o *ConversionOrchestrator) inFlightUSD(ctx context.Context, lane *Treasury
 	return total, nil
 }
 
-// usdValue converts base units to a USD figure for the caps only — never for
-// anything that is actually paid out.
+// usdValue converts base units to a USD figure for the caps and the top-up
+// ceiling only — never for anything that is actually paid out.
 func (o *ConversionOrchestrator) usdValue(lane *TreasuryLane, token string, amount *big.Int) (float64, error) {
 	addr := lane.tokenAddress(token)
 	if addr == "" {
@@ -608,9 +806,42 @@ func (o *ConversionOrchestrator) usdValue(lane *TreasuryLane, token string, amou
 	if err != nil {
 		return 0, fmt.Errorf("conversion: read decimals of %s on %s: %w", token, lane.ChainKey, err)
 	}
-	scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
+	return unitsToUSD(amount, decimals), nil
+}
+
+// unitsToUSD is a stablecoin-only shortcut: 1 token = 1 USD, so precision is
+// the whole conversion. Never used for an amount that is paid out.
+func unitsToUSD(amount *big.Int, decimals int) float64 {
+	if amount == nil {
+		return 0
+	}
+	scale := new(big.Float).SetInt(pow10(decimals))
 	usd, _ := new(big.Float).Quo(new(big.Float).SetInt(amount), scale).Float64()
-	return usd, nil
+	return usd
+}
+
+// rescaleUnits restates a base-unit amount from one token's precision to
+// another's. Scaling DOWN truncates, which is deliberate: the result is used to
+// size a promise, and a promise rounded down is one we can always honour.
+func rescaleUnits(amount *big.Int, from, to int) *big.Int {
+	if amount == nil {
+		return nil
+	}
+	switch {
+	case to == from:
+		return new(big.Int).Set(amount)
+	case to > from:
+		return new(big.Int).Mul(amount, pow10(to-from))
+	default:
+		return new(big.Int).Quo(amount, pow10(from-to))
+	}
+}
+
+func pow10(n int) *big.Int {
+	if n < 0 {
+		n = 0
+	}
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
 }
 
 func (o *ConversionOrchestrator) chainID(chainKey string) int64 {
@@ -649,8 +880,10 @@ func latestLeg(legs []models.RampLeg, kind, status string) *models.RampLeg {
 	return out
 }
 
-// latestPendingLeg is the most recent leg of ANY kind still in flight — the
-// "one leg at a time per order" invariant in one place.
+// latestPendingLeg is the leg of ANY kind still in flight — the "one leg at a
+// time per order" invariant in one place. Ordered by attempt, not by
+// CreatedAt: two rows written in the same clock tick are indistinguishable by
+// time, and the attempt number is the field that actually sequences them.
 func latestPendingLeg(legs []models.RampLeg) *models.RampLeg {
 	var out *models.RampLeg
 	for i := range legs {
@@ -658,18 +891,47 @@ func latestPendingLeg(legs []models.RampLeg) *models.RampLeg {
 		if leg.Status != models.RampLegStatusPending {
 			continue
 		}
-		if out == nil || leg.CreatedAt.After(out.CreatedAt) {
+		if out == nil || leg.Attempt > out.Attempt {
 			out = leg
 		}
 	}
 	return out
 }
 
+// bridgeLegByAttempt finds one specific bridge attempt, whatever its status.
+func bridgeLegByAttempt(legs []models.RampLeg, attempt int) *models.RampLeg {
+	for i := range legs {
+		if legs[i].Kind == models.RampLegKindBridge && legs[i].Attempt == attempt {
+			return &legs[i]
+		}
+	}
+	return nil
+}
+
+// broadcastBridgeLeg is any bridge attempt that put a transaction on the chain
+// without reaching a confirmed outcome. Its funds are unaccounted for, so
+// nothing else may spend against the same money.
+func broadcastBridgeLeg(legs []models.RampLeg) *models.RampLeg {
+	for i := range legs {
+		leg := &legs[i]
+		if leg.Kind == models.RampLegKindBridge && leg.TxHash != "" &&
+			leg.Status != models.RampLegStatusConfirmed {
+			return leg
+		}
+	}
+	return nil
+}
+
 // detached returns a short-lived context that survives the caller's own
 // cancellation, for writes that MUST land because the broadcast already
 // happened — the same pattern as recordSponsorshipTx in sponsor_lane.go.
+//
+// The cancel func cannot be deferred here (the context has to outlive this
+// call), so it is registered with AfterFunc instead: the timer is released as
+// soon as the context is done, whether that is the write finishing or the
+// timeout firing.
 func detached(ctx context.Context) context.Context {
 	out, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	context.AfterFunc(out, cancel) // release the timer once the write finishes
+	context.AfterFunc(out, cancel)
 	return out
 }

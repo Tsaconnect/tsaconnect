@@ -219,16 +219,19 @@ func (f *fakeSponsorBuilder) lastCall() (to string, data []byte, value *big.Int,
 }
 
 type fakeSponsorNative struct {
-	mu            sync.Mutex
-	decimals      int
-	estimate      uint64
-	estimateErr   error
-	gasPrice      *big.Int
-	sentTo        string
-	sentWei       *big.Int
-	receiptStatus uint64
-	receiptErr    error
-	prepareErr    error
+	mu       sync.Mutex
+	decimals int
+	// decimalsByToken overrides `decimals` for specific token addresses, so one
+	// lane can hold a 6dp and an 18dp stable at once.
+	decimalsByToken map[string]int
+	estimate        uint64
+	estimateErr     error
+	gasPrice        *big.Int
+	sentTo          string
+	sentWei         *big.Int
+	receiptStatus   uint64
+	receiptErr      error
+	prepareErr      error
 
 	// ERC-20 fields, for the treasury lane (Task 6). allowance is what
 	// GetTokenAllowance answers with; nil means zero, so an approve is always
@@ -269,8 +272,19 @@ func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.I
 func (f *fakeSponsorNative) EstimateGas(ethereum.CallMsg) (uint64, error) {
 	return f.estimate, f.estimateErr
 }
-func (f *fakeSponsorNative) SuggestGasPrice() (*big.Int, error)   { return f.gasPrice, nil }
-func (f *fakeSponsorNative) GetTokenDecimals(string) (int, error) { return f.decimals, nil }
+func (f *fakeSponsorNative) SuggestGasPrice() (*big.Int, error) { return f.gasPrice, nil }
+
+// GetTokenDecimals answers per token address when a test needs a lane to hold
+// tokens of differing precision (BSC stables are 18dp against 6dp elsewhere),
+// falling back to the rig's single `decimals` otherwise.
+func (f *fakeSponsorNative) GetTokenDecimals(token string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.decimalsByToken[strings.ToLower(token)]; ok {
+		return d, nil
+	}
+	return f.decimals, nil
+}
 
 func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string, _ time.Duration) (*types.Receipt, error) {
 	if err := ctx.Err(); err != nil {

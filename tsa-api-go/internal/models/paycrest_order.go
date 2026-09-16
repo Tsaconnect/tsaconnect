@@ -204,8 +204,11 @@ func PaycrestOrderTerminal(status string) bool {
 
 // NeedsOperator reports whether a row is stuck in a way no retry can fix, so
 // the admin queue and alerting can select on one predicate.
+// A converted buy in recovery_pending is the same shape of problem as an
+// unmatched deposit: the money's position is known but only a human can settle
+// what is still owed, so both must surface through one predicate.
 func (o *PaycrestOrderRecord) NeedsOperator() bool {
-	return o != nil && o.Status == PaycrestStatusUnmatched
+	return o != nil && (o.Status == PaycrestStatusUnmatched || o.Status == PaycrestStatusRecoveryPending)
 }
 
 // Converted reports whether this order routes through the treasury. Rows

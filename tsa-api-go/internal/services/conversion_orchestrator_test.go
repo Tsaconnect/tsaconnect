@@ -80,6 +80,7 @@ func (f *fakeTransferVerifier) VerifyTransfer(_ context.Context, _, _, _ string)
 type fakeLiFiStatus struct {
 	mu        sync.Mutex
 	status    string
+	substatus string
 	amount    string
 	toAddress string
 	srv       *httptest.Server
@@ -87,11 +88,12 @@ type fakeLiFiStatus struct {
 
 func newFakeLiFiStatus(t *testing.T, toAddress string) *fakeLiFiStatus {
 	t.Helper()
-	f := &fakeLiFiStatus{status: LiFiStatusPending, toAddress: toAddress}
+	f := &fakeLiFiStatus{status: LiFiStatusPending, substatus: LiFiSubstatusCompleted, toAddress: toAddress}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
 		body := map[string]any{
-			"status": f.status,
+			"status":    f.status,
+			"substatus": f.substatus,
 			"receiving": map[string]any{
 				"txHash":    "0xdest",
 				"chainId":   137,
@@ -113,17 +115,54 @@ func (f *fakeLiFiStatus) set(status, amount string) {
 	f.status, f.amount = status, amount
 }
 
+func (f *fakeLiFiStatus) setSubstatus(sub string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.substatus = sub
+}
+
 func (f *fakeLiFiStatus) setRecipient(addr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.toAddress = addr
 }
 
+// stubLegStore wraps the real store so a test can force the two outcomes a
+// concurrent tick produces — Reserve losing the row, and Confirm/Fail finding
+// the row already terminal — without needing two goroutines to collide.
+type stubLegStore struct {
+	rampLegStore
+	reserveExisting *models.RampLeg
+	confirmErr      error
+	failErr         error
+}
+
+func (s *stubLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*models.RampLeg, error) {
+	if s.reserveExisting != nil {
+		return s.reserveExisting, nil
+	}
+	return s.rampLegStore.Reserve(ctx, leg)
+}
+
+func (s *stubLegStore) Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error {
+	if s.confirmErr != nil {
+		return s.confirmErr
+	}
+	return s.rampLegStore.Confirm(ctx, id, amountReceived, at)
+}
+
+func (s *stubLegStore) Fail(ctx context.Context, id uuid.UUID, reason string) error {
+	if s.failErr != nil {
+		return s.failErr
+	}
+	return s.rampLegStore.Fail(ctx, id, reason)
+}
+
 // ── rig ────────────────────────────────────────────────────────────────────
 
 // conversionRig is one converted buy mid-flight: Paycrest has already paid the
 // treasury 100 USDC on base (holder=treasury), the user asked for USDT on
-// polygon, and the promise is 99.5 USDC-equivalent (100 USDC less 50 bps).
+// polygon, and the promise is 99.5 (100 less 50 bps).
 type conversionRig struct {
 	t         *testing.T
 	db        *gorm.DB
@@ -133,6 +172,7 @@ type conversionRig struct {
 	transfers *fakeTransferVerifier
 	status    *fakeLiFiStatus
 	treasury  *Treasury
+	chains    *BlockchainService
 	src       *sponsorRig // base: where Paycrest delivered
 	dst       *sponsorRig // polygon: where the user is paid
 	order     *models.PaycrestOrderRecord
@@ -163,7 +203,7 @@ func newConversionRig(t *testing.T) *conversionRig {
 	r.status = newFakeLiFiStatus(t, sponsorTestUser)
 	r.legStore = &GormRampLegStore{DB: db}
 
-	chains := &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{
+	r.chains = &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{
 		"mainnet": {
 			Chains:         map[string]config.ChainConfig{"base": {ChainID: 8453}, "polygon": {ChainID: 137}},
 			TokenAddresses: map[string]string{"base:USDC": sponsorTestUSDC, "polygon:USDT": sponsorTestBscUSDT},
@@ -185,10 +225,17 @@ func newConversionRig(t *testing.T) *conversionRig {
 		t.Fatalf("seed order: %v", err)
 	}
 
-	r.svc = NewConversionOrchestrator(db, r.treasury, r.legStore, r.lifi,
-		NewLiFiStatusClient(r.status.srv.URL, ""), r.transfers, chains,
-		30*time.Minute, func() time.Time { return r.clock })
+	r.svc = r.newOrchestrator(r.legStore)
 	return r
+}
+
+// newOrchestrator builds a service over a (possibly wrapped) leg store. Both
+// chains get a verifier: the treasury can take custody on either.
+func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrator {
+	return NewConversionOrchestrator(r.db, r.treasury, legs, r.lifi,
+		NewLiFiStatusClient(r.status.srv.URL, ""),
+		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.transfers},
+		r.chains, 30*time.Minute, func() time.Time { return r.clock })
 }
 
 func (r *conversionRig) reload(t *testing.T) *models.PaycrestOrderRecord {
@@ -221,10 +268,11 @@ func (r *conversionRig) broadcasts() int {
 	return r.src.signer.calls() + r.dst.signer.calls()
 }
 
-// completeBridge makes LiFi report the bridge as DONE with what landed.
+// completeBridge makes LiFi report the bridge as DONE/COMPLETED with what landed.
 func (r *conversionRig) completeBridge(t *testing.T, amount string) {
 	t.Helper()
 	r.status.set(LiFiStatusDone, amount)
+	r.status.setSubstatus(LiFiSubstatusCompleted)
 }
 
 // mustAdvance runs one step against the CURRENT row and fails the test on
@@ -275,7 +323,7 @@ func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 
 func TestOrchestrator_TopsUpAShortfallInsideTwentyBps(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_400000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 10 bps under the 99_500000 promise
 	mustAdvance(t, r)
@@ -340,6 +388,68 @@ func TestOrchestrator_NeverSendsTwiceForOneAttempt(t *testing.T) {
 	}
 }
 
+// The leg row is the lock, and it is taken BEFORE the quote — otherwise two
+// ticks can both sit in a slow LiFi round-trip and both broadcast. Proof: a
+// quote that fails still leaves a leg row behind.
+func TestOrchestrator_ReservesTheLegBeforeQuoting(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 {
+		t.Fatalf("bridge legs = %+v; the attempt must be reserved before the quote is asked for", legs)
+	}
+	if legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("bridge leg = %+v; a quote failure never broadcast, so the attempt must be freed", legs[0])
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a failed quote must send nothing", r.broadcasts())
+	}
+}
+
+// A tick that loses the Reserve race does nothing at all: no quote, no send.
+func TestOrchestrator_DoesNothingWhenAnotherTickOwnsTheAttempt(t *testing.T) {
+	r := newConversionRig(t)
+	stub := &stubLegStore{
+		rampLegStore:    r.legStore,
+		reserveExisting: &models.RampLeg{ID: uuid.New(), OrderID: r.order.ID, Kind: models.RampLegKindBridge, Attempt: 1},
+	}
+	svc := r.newOrchestrator(stub)
+
+	if err := svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
+		t.Fatalf("quotes=%d broadcasts=%d; the tick that lost the row must do nothing",
+			r.lifi.quoteCalls(), r.broadcasts())
+	}
+}
+
+// A pending deliver/refund leg has no oracle to ask, so the order stops for a
+// human rather than guessing whether the transfer landed.
+func TestOrchestrator_StopsWhenADeliverLegIsStalled(t *testing.T) {
+	r := newConversionRig(t)
+	stalled := &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
+		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
+		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
+	}
+	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
+		t.Fatal(err)
+	}
+
+	mustAdvance(t, r)
+
+	if r.broadcasts() != 0 || r.lifi.quoteCalls() != 0 {
+		t.Fatalf("broadcasts=%d quotes=%d; a stalled leg must freeze the order", r.broadcasts(), r.lifi.quoteCalls())
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; want the order left where it was", got.Status)
+	}
+}
+
 func TestOrchestrator_RefusesWhenTheTreasuryIsKilled(t *testing.T) {
 	r := newConversionRig(t)
 	r.treasury.SetKillSwitch(true)
@@ -359,6 +469,8 @@ func TestOrchestrator_RefusesWhenTheTreasuryIsKilled(t *testing.T) {
 	}
 }
 
+// ── taking custody ─────────────────────────────────────────────────────────
+
 func TestOrchestrator_WaitsForTheDeliveryToConfirm(t *testing.T) {
 	r := newConversionRig(t)
 	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
@@ -371,6 +483,22 @@ func TestOrchestrator_WaitsForTheDeliveryToConfirm(t *testing.T) {
 	}
 	if got := r.reload(t); got.Holder != models.HolderPaycrest || got.Status != models.PaycrestStatusConverting {
 		t.Fatalf("order = %s/%s; want it still waiting on Paycrest", got.Status, got.Holder)
+	}
+}
+
+// No delivery hash yet means Paycrest has not paid at all: nothing is even
+// looked up, let alone converted.
+func TestOrchestrator_WaitsWhenThereIsNoDeliveryHashYet(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Updates(map[string]any{"holder": models.HolderPaycrest, "tx_hash": ""})
+
+	mustAdvance(t, r)
+
+	if r.transfers.calls != 0 {
+		t.Fatalf("verifier calls = %d; there is no transaction to verify yet", r.transfers.calls)
+	}
+	if got := r.reload(t); got.Holder != models.HolderPaycrest {
+		t.Fatalf("holder = %s; want it still with Paycrest", got.Holder)
 	}
 }
 
@@ -390,6 +518,26 @@ func TestOrchestrator_TakesCustodyOnceTheDeliveryIsProven(t *testing.T) {
 	}
 }
 
+// One verifier wraps one RPC client, so an order on a chain with no verifier
+// could never be proven. Failing closed beats an order that silently never
+// confirms.
+func TestOrchestrator_RefusesWhenNoVerifierCoversTheChain(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	svc := NewConversionOrchestrator(r.db, r.treasury, r.legStore, r.lifi,
+		NewLiFiStatusClient(r.status.srv.URL, ""),
+		map[string]ERC20TransferVerifier{"polygon": r.transfers}, // nothing for base
+		r.chains, 30*time.Minute, func() time.Time { return r.clock })
+
+	err := svc.Advance(context.Background(), r.reload(t))
+	if !errors.Is(err, ErrSponsorNotAvailable) {
+		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable", err)
+	}
+	if got := r.reload(t); got.Holder != models.HolderPaycrest {
+		t.Fatalf("holder = %s; an unprovable delivery must not be taken into custody", got.Holder)
+	}
+}
+
 // A short Paycrest delivery rewrites BOTH the amount and the promise: a
 // promise computed from money that never arrived would owe more than we hold.
 func TestOrchestrator_ShortDeliveryRepricesThePromise(t *testing.T) {
@@ -403,7 +551,8 @@ func TestOrchestrator_ShortDeliveryRepricesThePromise(t *testing.T) {
 	if got.TokenAmount != "99000000" {
 		t.Fatalf("tokenAmount = %q, want what actually landed", got.TokenAmount)
 	}
-	// 99_000000 less the order's own 50 bps markup.
+	// 99_000000 less the order's own 50 bps markup (source and destination are
+	// both 6dp here, so the rescale is the identity).
 	if want := PromisedAmount(big.NewInt(99_000000), 50).String(); got.PromisedAmount != want {
 		t.Fatalf("promisedAmount = %q, want %q recomputed from the delivery", got.PromisedAmount, want)
 	}
@@ -412,21 +561,75 @@ func TestOrchestrator_ShortDeliveryRepricesThePromise(t *testing.T) {
 	}
 }
 
-// ── failure paths ──────────────────────────────────────────────────────────
+// ── the promise is denominated in what the USER receives ───────────────────
 
-func TestOrchestrator_RetriesWithAFreshQuoteAfterAFailedBridge(t *testing.T) {
+// 6dp in, 18dp out. Comparing a 6dp promise against an 18dp landing would make
+// every such route look catastrophically short.
+func TestOrchestrator_RestatesThePromiseIntoAnEighteenDecimalDestination(t *testing.T) {
 	r := newConversionRig(t)
+	r.dst.native.decimalsByToken = map[string]int{strings.ToLower(sponsorTestBscUSDT): 18}
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+
 	mustAdvance(t, r)
-	r.status.set(LiFiStatusFailed, "")
-	mustAdvance(t, r) // observe the failure
+
+	// 100 USDC at 6dp becomes 100 * 10^18 at the destination, less 50 bps.
+	want := PromisedAmount(mustBig(t, "100000000000000000000"), 50).String()
+	if got := r.reload(t).PromisedAmount; got != want {
+		t.Fatalf("promisedAmount = %q, want %q in the DESTINATION token's units", got, want)
+	}
+}
+
+// 18dp in, 6dp out. Scaling down truncates, which keeps the promise one we can
+// always honour.
+func TestOrchestrator_RestatesThePromiseIntoASixDecimalDestination(t *testing.T) {
+	r := newConversionRig(t)
+	r.src.native.decimalsByToken = map[string]int{strings.ToLower(sponsorTestUSDC): 18}
+	r.transfers.amount = mustBig(t, "100000000000000000000") // 100 tokens at 18dp
+	r.db.Model(r.order).Updates(map[string]any{
+		"holder": models.HolderPaycrest, "token_amount": "100000000000000000000",
+	})
+
+	mustAdvance(t, r)
+
+	want := PromisedAmount(big.NewInt(100_000000), 50).String()
+	if got := r.reload(t).PromisedAmount; got != want {
+		t.Fatalf("promisedAmount = %q, want %q in the DESTINATION token's units", got, want)
+	}
+}
+
+// ── the retry window ───────────────────────────────────────────────────────
+
+// The window measures how long we have been TRYING, not how long ago the order
+// was created. A bank payment that took an hour to clear must still get its
+// conversion attempted.
+func TestOrchestrator_AttemptsABridgeEvenWhenTheOrderIsOlderThanTheWindow(t *testing.T) {
+	r := newConversionRig(t)
+	r.clock = r.clock.Add(90 * time.Minute) // custody taken long after creation
+
+	mustAdvance(t, r)
 
 	legs := r.legsOfKind(t, models.RampLegKindBridge)
-	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
-		t.Fatalf("bridge legs = %+v; want attempt 1 recorded as failed", legs)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge legs = %+v; attempt 1 is always allowed however old the order is", legs)
+	}
+	if got := r.legsOfKind(t, models.RampLegKindRefund); len(got) != 0 {
+		t.Fatalf("refund legs = %+v; an order that was never tried must not be refunded", got)
+	}
+}
+
+// Only an attempt that never broadcast may be retried.
+func TestOrchestrator_RetriesWithAFreshQuoteWhenTheAttemptNeverBroadcast(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r) // attempt 1: quote failed, nothing sent
+
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed || legs[0].TxHash != "" {
+		t.Fatalf("bridge legs = %+v; want attempt 1 failed with no broadcast", legs)
 	}
 
-	r.status.set(LiFiStatusPending, "")
-	r.clock = r.clock.Add(5 * time.Minute) // still inside the 30-minute window
+	r.lifi.err = nil
+	r.clock = r.clock.Add(5 * time.Minute) // still inside the window
 	mustAdvance(t, r)
 
 	legs = r.legsOfKind(t, models.RampLegKindBridge)
@@ -438,28 +641,136 @@ func TestOrchestrator_RetriesWithAFreshQuoteAfterAFailedBridge(t *testing.T) {
 	}
 }
 
-// Landing further below the promise than margin covers is not something a
-// retry can fix — the money already reached the user. The order stops for an
-// operator with the shortfall recorded, rather than looping forever.
-func TestOrchestrator_FlagsAMissBeyondTheToleranceForRecovery(t *testing.T) {
+// LiFi reporting FAILED on a transaction that DID broadcast is not permission
+// to send again: it reports FAILED for stalls where the funds can still land.
+func TestOrchestrator_NeverRetriesABridgeThatAlreadyBroadcast(t *testing.T) {
 	r := newConversionRig(t)
-	mustAdvance(t, r)
-	r.completeBridge(t, "98000000") // 150 bps under the promise
-	mustAdvance(t, r)
+	mustAdvance(t, r) // attempt 1 broadcasts
+	sent := r.broadcasts()
+	r.status.set(LiFiStatusFailed, "")
+
+	mustAdvance(t, r) // observe the FAILED verdict
 
 	got := r.reload(t)
 	if got.Status != models.PaycrestStatusRecoveryPending || got.Fault != models.FaultPlatform {
-		t.Fatalf("order = %s fault=%s; want recovery_pending, our fault", got.Status, got.Fault)
+		t.Fatalf("order = %s fault=%s; a broadcast bridge that LiFi calls failed needs a human",
+			got.Status, got.Fault)
 	}
-	if got.OwedToUser != "1500000" {
-		t.Fatalf("owedToUser = %q, want the 1.5 USDC still owed", got.OwedToUser)
+	if !got.NeedsOperator() {
+		t.Fatal("order must surface to the operator queue")
 	}
-	if legs := r.legsOfKind(t, models.RampLegKindDeliver); len(legs) != 0 {
-		t.Fatalf("deliver legs = %+v; a miss this size is not topped up from margin", legs)
+
+	// And no later tick may quietly start attempt 2.
+	r.clock = r.clock.Add(5 * time.Minute)
+	mustAdvance(t, r)
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); len(legs) != 1 {
+		t.Fatalf("bridge legs = %+v; want no second attempt, ever", legs)
 	}
-	// The bridge did land, so the ledger must keep saying so.
-	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusConfirmed {
-		t.Fatalf("bridge leg = %+v; a leg that landed is never rewritten as failed", legs[0])
+	if r.broadcasts() != sent {
+		t.Fatalf("broadcasts = %d, want %d", r.broadcasts(), sent)
+	}
+}
+
+// ── what may be settled on ─────────────────────────────────────────────────
+
+// A route whose guaranteed minimum is under the promise cannot honour it, so
+// it is not a route we may take. The attempt is freed and retried.
+func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01",
+		ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_000000), Tool: "across"}
+
+	mustAdvance(t, r)
+
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a route that cannot meet the promise must not be executed", r.broadcasts())
+	}
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("bridge legs = %+v; want the attempt freed for a retry", legs)
+	}
+
+	// A later quote that does meet it goes through.
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01",
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+	r.clock = r.clock.Add(2 * time.Minute)
+	mustAdvance(t, r)
+	if r.broadcasts() == 0 {
+		t.Fatal("a route that meets the promise must be executed")
+	}
+}
+
+// DONE is not a statement that the recipient was paid. Only DONE + COMPLETED is.
+func TestOrchestrator_NeverSettlesAPartialDelivery(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "99800000")
+	r.status.setSubstatus(LiFiSubstatusPartial)
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a PARTIAL delivery must never settle", got.Status)
+	}
+}
+
+func TestOrchestrator_NeverSettlesABridgeTheToolRefunded(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "99800000")
+	r.status.setSubstatus(LiFiSubstatusRefunded)
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a REFUNDED bridge must never settle", got.Status)
+	}
+}
+
+func TestOrchestrator_NeverSettlesAnUnqualifiedDone(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "99800000")
+	r.status.setSubstatus("") // LiFi said DONE and nothing else
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; a DONE we cannot qualify must leave the order open", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge leg = %+v; want it left pending", legs[0])
+	}
+}
+
+func TestOrchestrator_NeverSettlesADoneWithoutAnAmount(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "0")
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; a DONE with nothing received must not settle", got.Status)
+	}
+}
+
+// An unstated recipient is an unknown recipient.
+func TestOrchestrator_NeverSettlesWhenTheRecipientIsUnstated(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.status.setRecipient("")
+	r.completeBridge(t, "99800000")
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; want it left open", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge leg = %+v; want it left pending", legs[0])
 	}
 }
 
@@ -482,94 +793,51 @@ func TestOrchestrator_RefusesADoneReportToAnotherRecipient(t *testing.T) {
 	}
 }
 
-// ── caps and configuration ────────────────────────────────────────────────
+// ── shortfalls: the user is always made whole ──────────────────────────────
 
-func TestOrchestrator_CountsChainExposureAgainstTheCap(t *testing.T) {
+// Beyond 20 bps is a margin loss finance must SEE — but the user is still paid
+// what they were promised, because that is what a promise is.
+func TestOrchestrator_TopsUpAShortfallBeyondTheToleranceAndFlagsIt(t *testing.T) {
 	r := newConversionRig(t)
-	// Another converted buy already in flight on base, just under the cap.
-	other := *r.order
-	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950000000" // 9,950 USDC
-	if err := r.db.Create(&other).Error; err != nil {
-		t.Fatalf("seed second order: %v", err)
-	}
-
-	err := r.svc.Advance(context.Background(), r.order)
-	if !errors.Is(err, ErrTreasuryCapExceeded) {
-		t.Fatalf("Advance = %v, want ErrTreasuryCapExceeded", err)
-	}
-	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
-		t.Fatal("an order over the chain cap must reserve nothing and send nothing")
-	}
-}
-
-// Lanes that disagree about their signer mean we do not know which address
-// Paycrest paid. Refuse rather than guess.
-func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
-	r := newConversionRig(t)
-	other, _ := newSponsorRig("polygon", "USDT")
-	other.signer.addr = "0x1111111111111111111111111111111111111111"
-	broken := NewTreasury(map[string]*TreasuryLane{
-		"base":    {SponsorLane: r.src.lane, ChainID: 8453},
-		"polygon": {SponsorLane: other.lane, ChainID: 137},
-	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
-	r.svc.treasury = broken
-
-	if err := r.svc.Advance(context.Background(), r.order); !errors.Is(err, ErrSponsorNotAvailable) {
-		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable", err)
-	}
-	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
-		t.Fatal("a misconfigured treasury must not quote or send")
-	}
-}
-
-func TestOrchestrator_TickOnlyPicksUpConvertedBuysInFlight(t *testing.T) {
-	r := newConversionRig(t)
-
-	// A direct buy and a settled converted buy must both be left alone.
-	direct := *r.order
-	direct.ID, direct.Reference, direct.RouteKind = uuid.New(), "direct-1", models.RouteKindDirect
-	done := *r.order
-	done.ID, done.Reference, done.Status = uuid.New(), "settled-1", models.PaycrestStatusSettled
-	for _, row := range []*models.PaycrestOrderRecord{&direct, &done} {
-		if err := r.db.Create(row).Error; err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	if err := r.svc.Tick(context.Background(), 10); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
-	if r.lifi.quoteCalls() != 1 {
-		t.Fatalf("quotes = %d, want exactly one — only the live converted buy is due", r.lifi.quoteCalls())
-	}
-	for _, id := range []uuid.UUID{direct.ID, done.ID} {
-		var legs []models.RampLeg
-		if err := r.db.Where("order_id = ?", id).Find(&legs).Error; err != nil {
-			t.Fatal(err)
-		}
-		if len(legs) != 0 {
-			t.Fatalf("order %s got legs %+v; it was never due", id, legs)
-		}
-	}
-}
-
-// An uncertain broadcast (the RPC failed after the transaction may already
-// have been accepted) leaves the leg PENDING: the alternative is a second
-// conversion for the same money.
-func TestOrchestrator_KeepsTheLegPendingWhenABroadcastIsUncertain(t *testing.T) {
-	r := newConversionRig(t)
-	r.src.signer.err = fmt.Errorf("rpc timeout")
-
+	mustAdvance(t, r)
+	r.completeBridge(t, "98000000") // 150 bps under the promise
 	mustAdvance(t, r)
 
-	legs := r.legsOfKind(t, models.RampLegKindBridge)
-	if len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
-		t.Fatalf("bridge legs = %+v; an uncertain broadcast must stay pending", legs)
+	legs := r.legsOfKind(t, models.RampLegKindDeliver)
+	if len(legs) != 1 || legs[0].Amount != "1500000" {
+		t.Fatalf("deliver legs = %+v; want the full 1.5 shortfall paid", legs)
 	}
-	// And nothing else may move while it is unresolved.
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; the user is made whole, so the order settles", got.Status)
+	}
+	if got.OwedToUser != "0" {
+		t.Fatalf("owedToUser = %q; nothing is owed once the top-up lands", got.OwedToUser)
+	}
+}
+
+// Above the automatic ceiling, something is wrong in a way a top-up should not
+// paper over: stop for a human with the balance recorded.
+func TestOrchestrator_StopsForAHumanWhenTheShortfallExceedsTheCeiling(t *testing.T) {
+	r := newConversionRig(t)
+	r.svc.maxShortfallUSD = 1 // a dollar
 	mustAdvance(t, r)
-	if legs := r.legsOfKind(t, models.RampLegKindBridge); len(legs) != 1 {
-		t.Fatalf("bridge legs = %+v; want no second attempt", legs)
+	r.completeBridge(t, "90000000") // 9.5 short, well over the ceiling
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || got.Fault != models.FaultPlatform {
+		t.Fatalf("order = %s fault=%s; want recovery_pending, our fault", got.Status, got.Fault)
+	}
+	if got.OwedToUser != "9500000" {
+		t.Fatalf("owedToUser = %q, want the 9.5 still owed", got.OwedToUser)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindDeliver); len(legs) != 0 {
+		t.Fatalf("deliver legs = %+v; a gap this size is not paid automatically", legs)
+	}
+	// The bridge did land, so the ledger must keep saying so.
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); legs[0].Status != models.RampLegStatusConfirmed {
+		t.Fatalf("bridge leg = %+v; a leg that landed is never rewritten as failed", legs[0])
 	}
 }
 
@@ -583,7 +851,7 @@ func TestOrchestrator_KeepsTheLegPendingWhenABroadcastIsUncertain(t *testing.T) 
 
 func TestOrchestrator_NeverTopsUpTwiceIfTheSettlementWriteIsLost(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_400000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000")
 	mustAdvance(t, r) // tops up the 0.1 shortfall and settles
@@ -629,5 +897,207 @@ func TestOrchestrator_NeverRefundsTwiceIfTheFinalWriteIsLost(t *testing.T) {
 	}
 	if got := r.reload(t); got.Status != models.PaycrestStatusRefunded {
 		t.Fatalf("status = %s; a confirmed refund leg finishes the order", got.Status)
+	}
+}
+
+// ── losing a race with another tick ────────────────────────────────────────
+
+// Confirm finding the row already terminal means another tick got there first.
+// That is not this tick's failure, and it must not be reported as one.
+func TestOrchestrator_CarriesOnWhenAnotherTickAlreadyConfirmedTheLeg(t *testing.T) {
+	r := newConversionRig(t)
+	mustAdvance(t, r)
+	r.completeBridge(t, "99800000")
+
+	stub := &stubLegStore{rampLegStore: r.legStore, confirmErr: ErrLegNotPending}
+	if err := r.newOrchestrator(stub).Advance(context.Background(), r.reload(t)); err != nil {
+		t.Fatalf("Advance = %v; losing the confirm race is not an error", err)
+	}
+	// The winning tick owns the settle, so this one must not have written it.
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; the tick that lost must leave the settle to the winner", got.Status)
+	}
+}
+
+// Fail finding the row already terminal is likewise another tick's work, not
+// an error to propagate over the real cause.
+func TestOrchestrator_CarriesOnWhenAnotherTickAlreadyFailedTheLeg(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	stub := &stubLegStore{rampLegStore: r.legStore, failErr: ErrLegNotPending}
+
+	err := r.newOrchestrator(stub).Advance(context.Background(), r.reload(t))
+	if !errors.Is(err, ErrLiFiNoRoute) {
+		t.Fatalf("Advance = %v; want the quote failure, not the leg-store race", err)
+	}
+}
+
+// ── caps and configuration ────────────────────────────────────────────────
+
+func TestOrchestrator_CountsChainExposureAgainstTheCap(t *testing.T) {
+	r := newConversionRig(t)
+	// Another converted buy already in flight on base, just under the cap.
+	other := *r.order
+	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950000000" // 9,950 USDC
+	if err := r.db.Create(&other).Error; err != nil {
+		t.Fatalf("seed second order: %v", err)
+	}
+
+	err := r.svc.Advance(context.Background(), r.order)
+	if !errors.Is(err, ErrTreasuryCapExceeded) {
+		t.Fatalf("Advance = %v, want ErrTreasuryCapExceeded", err)
+	}
+	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
+		t.Fatal("an order over the chain cap must reserve nothing and send nothing")
+	}
+}
+
+// A refund returns money the treasury already holds: it creates no new
+// exposure, so the cap must not be able to trap a user's funds.
+func TestOrchestrator_RefundsEvenWhenTheChainCapIsExhausted(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r)
+
+	other := *r.order
+	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950000000"
+	if err := r.db.Create(&other).Error; err != nil {
+		t.Fatalf("seed second order: %v", err)
+	}
+	r.clock = r.clock.Add(31 * time.Minute)
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Status != models.PaycrestStatusRefunded {
+		t.Fatalf("status = %s; a refund must not be blocked by the exposure cap", got.Status)
+	}
+}
+
+// Lanes that disagree about their signer mean we do not know which address
+// Paycrest paid. Refuse rather than guess.
+func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
+	r := newConversionRig(t)
+	other, _ := newSponsorRig("polygon", "USDT")
+	other.signer.addr = "0x1111111111111111111111111111111111111111"
+	broken := NewTreasury(map[string]*TreasuryLane{
+		"base":    {SponsorLane: r.src.lane, ChainID: 8453},
+		"polygon": {SponsorLane: other.lane, ChainID: 137},
+	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
+	r.svc.treasury = broken
+
+	if err := r.svc.Advance(context.Background(), r.order); !errors.Is(err, ErrSponsorNotAvailable) {
+		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable", err)
+	}
+	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
+		t.Fatal("a misconfigured treasury must not quote or send")
+	}
+}
+
+// An unroutable destination will never fix itself, so it stops immediately
+// rather than burning the whole retry window rediscovering that.
+func TestOrchestrator_StopsFastWhenTheDestinationTokenIsUnknown(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("requested_token", "NOPE")
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; an unroutable destination needs a human now, not in 30 minutes", got.Status)
+	}
+	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
+		t.Fatalf("quotes=%d broadcasts=%d; want nothing attempted", r.lifi.quoteCalls(), r.broadcasts())
+	}
+}
+
+func TestOrchestrator_TickOnlyPicksUpConvertedBuysInFlight(t *testing.T) {
+	r := newConversionRig(t)
+
+	// A direct buy and a settled converted buy must both be left alone.
+	direct := *r.order
+	direct.ID, direct.Reference, direct.RouteKind = uuid.New(), "direct-1", models.RouteKindDirect
+	done := *r.order
+	done.ID, done.Reference, done.Status = uuid.New(), "settled-1", models.PaycrestStatusSettled
+	for _, row := range []*models.PaycrestOrderRecord{&direct, &done} {
+		if err := r.db.Create(row).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if r.lifi.quoteCalls() != 1 {
+		t.Fatalf("quotes = %d, want exactly one — only the live converted buy is due", r.lifi.quoteCalls())
+	}
+	for _, id := range []uuid.UUID{direct.ID, done.ID} {
+		var legs []models.RampLeg
+		if err := r.db.Where("order_id = ?", id).Find(&legs).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(legs) != 0 {
+			t.Fatalf("order %s got legs %+v; it was never due", id, legs)
+		}
+	}
+}
+
+// An order that cannot move must not hold the head of the queue: it is rotated
+// to the back so the orders behind it still get their turn.
+func TestOrchestrator_TickRotatesAnIdleOrderToTheBackOfTheQueue(t *testing.T) {
+	r := newConversionRig(t)
+	stalled := &models.RampLeg{
+		OrderID: r.order.ID, Kind: models.RampLegKindDeliver, Attempt: 1,
+		ChainKey: "polygon", Token: "USDT", ToAddr: r.order.WalletAddress,
+		Amount: "100000", Status: models.RampLegStatusPending, TxHash: "0xstalled",
+	}
+	if _, err := r.legStore.Reserve(context.Background(), stalled); err != nil {
+		t.Fatal(err)
+	}
+	// Put the row's clock on the orchestrator's clock: GORM stamps UpdatedAt
+	// from the wall clock on create, and comparing that against an injected
+	// clock would measure the gap between the two, not whether we rotated.
+	if err := r.db.Model(r.order).UpdateColumn("updated_at", r.clock.UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+	before := r.reload(t).UpdatedAt
+	r.clock = r.clock.Add(time.Hour)
+
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if after := r.reload(t).UpdatedAt; !after.After(before) {
+		t.Fatalf("updatedAt = %v, was %v; a stalled order must rotate to the back of the queue", after, before)
+	}
+}
+
+// An uncertain broadcast (the RPC failed after the transaction may already
+// have been accepted) leaves the leg PENDING: the alternative is a second
+// conversion for the same money.
+func TestOrchestrator_KeepsTheLegPendingWhenABroadcastIsUncertain(t *testing.T) {
+	r := newConversionRig(t)
+	r.src.signer.err = fmt.Errorf("rpc timeout")
+
+	mustAdvance(t, r)
+
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("bridge legs = %+v; an uncertain broadcast must stay pending", legs)
+	}
+	// And nothing else may move while it is unresolved.
+	mustAdvance(t, r)
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); len(legs) != 1 {
+		t.Fatalf("bridge legs = %+v; want no second attempt", legs)
+	}
+}
+
+// A refund that has not landed yet is a live liability, and reporting zero
+// would hide it for exactly as long as it matters.
+func TestOrchestrator_ReportsWhatIsOwedWhileARefundIsInFlight(t *testing.T) {
+	r := newConversionRig(t)
+	order := r.reload(t)
+	order.Status = models.PaycrestStatusRefunding
+	if got := owedFromLegs(order, nil); got != "99500000" {
+		t.Fatalf("owed while refunding = %q, want the full promise still outstanding", got)
 	}
 }
