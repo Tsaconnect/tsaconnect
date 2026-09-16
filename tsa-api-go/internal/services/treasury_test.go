@@ -387,12 +387,12 @@ func TestTreasury_ExecuteRouteRouteBuildFailureAfterApproveStaysAttempted(t *tes
 	}
 }
 
-// ── I8: TreasuryLane.convertMu serialises per-lane conversions ──────────
+// ── I8: TreasuryLane.convertCh serialises per-lane conversions ──────────
 
 func TestTreasury_ExecuteRouteSerializesConcurrentConversionsPerLane(t *testing.T) {
 	tr, lane, native, signer := newTestTreasuryWithFakes(t)
 	// Widen the allowance-read-then-decide window so two goroutines racing
-	// through it without convertMu would overlap almost certainly.
+	// through it without convertCh would overlap almost certainly.
 	native.allowanceDelay = 20 * time.Millisecond
 
 	const n = 5
@@ -414,13 +414,51 @@ func TestTreasury_ExecuteRouteSerializesConcurrentConversionsPerLane(t *testing.
 		}
 	}
 	if max := native.maxAllowanceConcurrency(); max > 1 {
-		t.Fatalf("TreasuryLane.convertMu did not serialise: observed %d concurrent allowance reads", max)
+		t.Fatalf("TreasuryLane.convertCh did not serialise: observed %d concurrent allowance reads", max)
 	}
 	// Every conversion needed a fresh approve (the fake never remembers a
 	// prior approve as raising its allowance), so each of the n legs should
 	// have broadcast exactly twice (approve + route) if properly serialised.
 	if got, want := signer.calls(), 2*n; got != want {
 		t.Fatalf("broadcasts = %d, want %d (approve+route per leg)", got, want)
+	}
+}
+
+// A caller waiting for the lane's lock must be able to abandon that wait the
+// moment its OWN context is cancelled, instead of blocking until the lane
+// frees up (sync.Mutex.Lock cannot be cancelled; the channel-based lock can).
+func TestTreasury_ExecuteRouteAbandonsLockWaitOnContextCancellation(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	// Long enough that the second call would clearly be waiting on the lock
+	// (not coincidentally finishing first), short enough to keep the test fast.
+	native.allowanceDelay = 150 * time.Millisecond
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _, _ = tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), validRoute())
+	}()
+	// Give the first call time to acquire the lane's lock and enter the delay.
+	time.Sleep(30 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled: the second call must not wait for the lock at all
+
+	start := time.Now()
+	_, attempted, err := tr.ExecuteRoute(ctx, lane, "USDC", big.NewInt(50_000000), validRoute())
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) || attempted {
+		t.Fatalf("attempted=%v err=%v, want context.Canceled and attempted=false", attempted, err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("second call took %v; should have returned promptly on ctx cancellation instead of waiting ~%v for the lock",
+			elapsed, native.allowanceDelay)
+	}
+
+	<-firstDone // let the first leg finish before asserting on shared fake state
+	if signer.calls() != 2 {
+		t.Fatalf("only the first leg (approve+route) should have broadcast, got %d calls", signer.calls())
 	}
 }
 

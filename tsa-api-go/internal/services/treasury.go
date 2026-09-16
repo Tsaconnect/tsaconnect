@@ -42,19 +42,34 @@ type TreasuryLane struct {
 	*SponsorLane // ChainKey, Chain, Builder, Native, Signer, Guard, Tokens, send()
 	ChainID      int64
 
-	// convertMu serialises the whole allowance-read -> approve -> route
-	// sequence for THIS lane. It is deliberately separate from
-	// SponsorLane.sendMu, which only serialises one nonce read and its
-	// broadcast: an approve here is sized to the EXACT amount of one
-	// specific route, so "read the current allowance, then decide whether to
-	// top it up" is racy by construction. Without this lock, two concurrent
-	// conversions on the same lane could both read the same stale allowance,
-	// both decide to approve, and leave the second route call spending
-	// against an allowance the first route call already consumed (or vice
-	// versa) — a revert at best, a stuck approve at worst. Do NOT remove
-	// this thinking it duplicates sendMu; it protects a different critical
-	// section (read-then-decide, not nonce-then-broadcast).
-	convertMu sync.Mutex
+	// convertCh is a capacity-1 channel used as a context-aware lock that
+	// serialises the whole allowance-read -> approve -> route sequence for
+	// THIS lane. It is deliberately separate from SponsorLane.sendMu, which
+	// only serialises one nonce read and its broadcast: an approve here is
+	// sized to the EXACT amount of one specific route, so "read the current
+	// allowance, then decide whether to top it up" is racy by construction.
+	// Without this lock, two concurrent conversions on the same lane could
+	// both read the same stale allowance, both decide to approve, and leave
+	// the second route call spending against an allowance the first route
+	// call already consumed (or vice versa) — a revert at best, a stuck
+	// approve at worst. Do NOT remove this thinking it duplicates sendMu; it
+	// protects a different critical section (read-then-decide, not
+	// nonce-then-broadcast).
+	//
+	// It is a channel rather than a sync.Mutex because sync.Mutex.Lock is not
+	// context-aware: a caller queued behind a slow approve (the wait for its
+	// receipt can run up to 60s) must be able to abandon the wait the moment
+	// ITS OWN context is cancelled, not just block until the lane is free.
+	convertOnce sync.Once
+	convertCh   chan struct{}
+}
+
+// convertLock lazily creates the lane's lock channel the first time it is
+// used, so a TreasuryLane's zero value is safe to use directly (e.g. in
+// tests that construct one without going through NewTreasury).
+func (l *TreasuryLane) convertLock() chan struct{} {
+	l.convertOnce.Do(func() { l.convertCh = make(chan struct{}, 1) })
+	return l.convertCh
 }
 
 // TreasuryCaps bound the treasury's value exposure. A treasury caps VALUE,
@@ -233,6 +248,14 @@ func (t *Treasury) routeExpired(route *LiFiRoute) bool {
 // attempted=false after the approve already landed on-chain, free/retry the
 // leg, and leave a stray allowance (and possibly a double-spent gas fee)
 // behind it.
+//
+// ExecuteRoute is meant to be called from a background worker, not directly
+// off a request path: a lane serialises conversions (see TreasuryLane's
+// convertCh), so a call here can genuinely wait — up to the ~60s approve
+// receipt timeout — behind another conversion already in flight on the same
+// lane. A caller that must not block that long should pass a ctx it is
+// willing to cancel; ExecuteRoute abandons the wait for the lane's lock (not
+// a wait already broadcast) the moment ctx is done.
 func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
@@ -283,8 +306,17 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		return "", false, fmt.Errorf("%w: route quote has expired", ErrTreasuryInvalidRoute)
 	}
 
-	lane.convertMu.Lock()
-	defer lane.convertMu.Unlock()
+	// Context-aware acquisition: sync.Mutex.Lock cannot be cancelled, so a
+	// caller queued behind another conversion on this lane would otherwise
+	// block until the lane frees up even after its own ctx is done. Nothing
+	// has been broadcast yet at this point, so a cancellation here is a
+	// clean, attempted=false refusal.
+	select {
+	case lane.convertLock() <- struct{}{}:
+		defer func() { <-lane.convertCh }()
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	}
 
 	var approveAttempted bool
 	if route.ApprovalAddress != "" {
