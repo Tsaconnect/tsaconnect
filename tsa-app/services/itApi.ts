@@ -137,6 +137,10 @@ export interface ITPayTo {
   accountNumber: string;
   bank: string;
   accountName: string;
+  /** Central mode only: the whole-naira figure the matcher compares against. */
+  amountNgn?: string;
+  /** Central mode only: own-name / recipient-name notice. See utils/payInto. */
+  payerInstruction?: string;
   /** @deprecated Spec 1 standing VA — no user-typed reference */
   reference?: string;
 }
@@ -408,7 +412,12 @@ export interface ITStableBuyPayInto {
   accountNumber: string;
   bankName: string;
   accountName: string;
-  reference: string;
+  /** VA mode only — nothing minted survives a transfer into the central account. */
+  reference?: string;
+  /** Central mode only: the naira to send, as a decimal string. */
+  amountNgn?: string;
+  /** Central mode only: own-name / recipient-name notice. See utils/payInto. */
+  payerInstruction?: string;
 }
 
 export interface ITStableBuyResult {

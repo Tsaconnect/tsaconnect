@@ -298,7 +298,7 @@ func TestCentralPayTo_HalfNaira_ShowsTheFigureTheMatcherWillAskFor(t *testing.T)
 		t.Fatalf("seed intent: %v", err)
 	}
 
-	shown, _ := centralPayTo(testCentralAccount(), intent.NgnKobo)["amountNgn"].(string)
+	shown, _ := centralPayTo(testCentralAccount(), intent.NgnKobo, "")["amountNgn"].(string)
 
 	claims, err := services.NewITMCGPClaimSource(db, it).OpenClaims(context.Background(), "NGN")
 	if err != nil {

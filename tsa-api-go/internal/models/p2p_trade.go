@@ -114,6 +114,11 @@ type PmPayTo struct {
 	AccountNumber string `json:"accountNumber"`
 	Bank          string `json:"bank"`
 	AccountName   string `json:"accountName"`
+	// PayerInstruction is what the buyer must be told before they transfer.
+	// Filled only when this card points at the shared company account, where
+	// the buyer's own name is what attributes the credit; empty when it points
+	// at a merchant's account, which a merchant confirms by hand instead.
+	PayerInstruction string `json:"payerInstruction,omitempty"`
 }
 
 func (P2PTrade) TableName() string {
