@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -119,11 +118,9 @@ type BillService struct {
 	// than writing somewhere nothing reads.
 	disputes *DisputeService
 
-	// scan pages the reconciler's scans; deepScanMu/lastDeepScan run the
-	// unwindowed late-debit audit once a day.
-	scan         reconcileCursor
-	deepScanMu   sync.Mutex
-	lastDeepScan time.Time
+	// scan pages the reconciler's scans; the daily late-debit audit claims its
+	// run in the database (claimDailyRun).
+	scan reconcileCursor
 }
 
 // SetDisputes wires the shared dispute queue in. Called at boot.
@@ -470,7 +467,7 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("id = ? AND status = ? AND quote_expires_at > ?",
 			order.ID, models.BillStatusQuoted, time.Now()).
-		Update("status", models.BillStatusPaying)
+		Updates(map[string]any{"status": models.BillStatusPaying, "claim_seq": gorm.Expr("claim_seq + 1")})
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -824,7 +821,7 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 	// Expire dead quotes (cheap bulk update; no money involved).
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("status = ? AND quote_expires_at < ?", models.BillStatusQuoted, cutoff).
-		Updates(map[string]any{"status": models.BillStatusExpired})
+		Updates(map[string]any{"status": models.BillStatusExpired, "claim_seq": gorm.Expr("claim_seq + 1")})
 	changed += int(res.RowsAffected)
 
 	// Scans are cursor-paged: orders the reconciler can only alert on never
@@ -916,7 +913,12 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 		}
 	}
 
-	if s.deepScanDue(now) {
+	// One claim a day, persisted (models.JobRunMarker) exactly as the sell-side
+	// audit claims its own: a restart or a second instance must not repeat it.
+	// A run that then fails leaves the day claimed — acceptable for an
+	// alert-only audit, where the cost is a day's delay on a warning rather
+	// than anything that moves money.
+	if claimDailyRun(ctx, s.db, "bill-late-debit-audit", billDeepScanEvery) {
 		if _, err := s.payer.AlertLateDebitsBeyondWindow(ctx); err != nil {
 			log.Printf("[bills] late-debit audit failed: %v", err)
 		}
@@ -930,16 +932,6 @@ func (s *BillService) advanceOrders(key string, rows []models.BillOrder, limit i
 		return
 	}
 	s.scan.advance(key, 0, limit, time.Time{}, uuid.Nil)
-}
-
-func (s *BillService) deepScanDue(now time.Time) bool {
-	s.deepScanMu.Lock()
-	defer s.deepScanMu.Unlock()
-	if now.Sub(s.lastDeepScan) < billDeepScanEvery {
-		return false
-	}
-	s.lastDeepScan = now
-	return true
 }
 
 // reconcileOrder resolves one stale non-terminal order. Returns true if the

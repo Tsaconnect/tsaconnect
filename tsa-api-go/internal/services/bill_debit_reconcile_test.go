@@ -534,3 +534,46 @@ func TestI6Bills_ReconcileRunsTheDailyAudit(t *testing.T) {
 		t.Fatalf("audits = %d, want exactly one per day", r.payer.deepAudits)
 	}
 }
+
+// B3: the bill audit claims its daily run the same way the sell audit does —
+// persisted, so a restart (a fresh service over the same database) does not
+// run it again.
+func TestB3_BillDailyAuditSurvivesARestart(t *testing.T) {
+	r := newBillServiceRig(t)
+	if _, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewBillService(r.db, r.vendor, r.payer, &fakeBillPrice{usdcPerMcgp: big.NewInt(18_000)}, &fakeBillFx{rate: 1500}, 300, 5*time.Minute)
+	if _, err := restarted.Reconcile(context.Background(), 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if r.payer.deepAudits != 1 {
+		t.Fatalf("audits = %d, want the day still claimed after a restart", r.payer.deepAudits)
+	}
+}
+
+// The consistency note: every bill-order write bumps claim_seq, including the
+// two bulk/CAS writes that do not go through moveOrder.
+func TestB3_QuoteTransitionsBumpTheClaimVersion(t *testing.T) {
+	r := newBillServiceRig(t)
+	q := r.airtimeQuote(t)
+	before := r.order(t, q.Order.ID).ClaimSeq
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+	// quoted→paying (the CAS), paying→paid and paid→delivered: three guarded
+	// writes, so three bumps. Two would mean the CAS skipped its own.
+	if got := r.order(t, q.Order.ID).ClaimSeq; got != before+3 {
+		t.Fatalf("claim_seq = %d, want %d — every write on the pay path bumps it", got, before+3)
+	}
+
+	q2 := r.airtimeQuote(t)
+	r.db.Exec(`UPDATE bill_orders SET quote_expires_at = ? WHERE id = ?`, time.Now().Add(-time.Hour), q2.Order.ID)
+	expiredBefore := r.order(t, q2.Order.ID).ClaimSeq
+	if _, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.order(t, q2.Order.ID).ClaimSeq; got <= expiredBefore {
+		t.Fatalf("claim_seq = %d, want the bulk expire to bump it past %d", got, expiredBefore)
+	}
+}

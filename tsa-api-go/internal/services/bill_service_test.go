@@ -291,6 +291,10 @@ func newBillServiceRig(t *testing.T) *billRig {
 	if err := db.AutoMigrate(&models.Dispute{}); err != nil {
 		t.Fatalf("migrate disputes: %v", err)
 	}
+	// The daily late-debit audit claims its run in this table (claimDailyRun).
+	if err := db.AutoMigrate(&models.JobRunMarker{}); err != nil {
+		t.Fatalf("migrate job run markers: %v", err)
+	}
 	disputes := NewDisputeService(db, nil)
 	disputes.RegisterSubject(models.DisputeSubjectBillOrder, BillDisputeSubject(db))
 	svc.SetDisputes(disputes)
