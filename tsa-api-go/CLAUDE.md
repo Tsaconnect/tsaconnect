@@ -149,6 +149,12 @@ IT sell recovery (`internal/services/it_sell_recovery.go`, `it-sell-reconciler` 
   (`payout_rejected`), so exactly one can win; a payout is only sent while the on-chain
   debit is Pending; a settle/reverse that did not verify but whose debit is already
   resolved on-chain parks the sell as `needs_review`.
+- **A sell is parked only on facts that cannot un-happen** — a debit already RESOLVED, or
+  one for another wallet/amount. "No debit at this ref" is a lagging RPC node as often as
+  it is a missing debit, so it (and an unreadable chain) holds the payout for a later tick
+  and alerts past the 30-minute abandon window. `POST /api/it/admin/sell/:id/reevaluate`
+  (super_admin) is the exit from `needs_review`: it re-reads the chain and the payout
+  transfer and closes the row the way the evidence points, refusing when they disagree.
 
 Central-account inbound attribution (default `va` — a deploy that omits all of these changes nothing):
 - `INBOUND_MODE` - `va`: per-user Flutterwave virtual account, attributed by the charge

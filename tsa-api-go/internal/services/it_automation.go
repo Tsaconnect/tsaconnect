@@ -320,8 +320,10 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		var rej *ProviderRejectedError
 		switch {
 		case errors.As(err, &rej) && isMCGP && firstAttempt:
-			s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error())
-			return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
+			if s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error()) {
+				return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
+			}
+			return err
 		case errors.As(err, &rej) && isMCGP:
 			reason := truncateReason(itPayoutReasonPrefix + " refused on retry: " + err.Error())
 			intent.PayoutRefusedOnRetry, intent.FailureReason = true, reason
@@ -349,19 +351,43 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 }
 
 // requireDebitPending refuses a payout unless the sell's debit is Pending
-// on-chain for this wallet and amount. A debit that is already resolved moves
-// the row to needs_review: nothing may pay or reverse it automatically.
+// on-chain for this wallet and amount.
+//
+// Only a debit that is already RESOLVED, or one that belongs to a different
+// wallet or amount, parks the row: those are facts that cannot un-happen. "No
+// debit at this ref" is NOT one of them — a load-balanced RPC node a block or
+// two behind answers exactly that for a debit that just mined, and parking on
+// it stranded healthy sells. An unreadable chain is the same: unknown, not
+// false. Both leave the row where it is for a later tick, and only alert once
+// the debit has been invisible past the abandon window.
 func (s *ITService) requireDebitPending(ctx context.Context, intent *models.ITIntent) error {
 	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", intent.ID))
 	if err != nil {
 		return fmt.Errorf("it payout: cannot confirm the debit is pending: %w", err)
 	}
-	if rec.State == DebitStatePending && debitMatchesIntent(rec, intent) {
+	switch {
+	case rec.State == DebitStatePending && debitMatchesIntent(rec, intent):
 		return nil
+	case rec.State == DebitStateNone:
+		if time.Since(intent.UpdatedAt) > itDebitAbandonAfter {
+			alertf("sell-debit-invisible:"+intent.ID.String(),
+				"[it] ALERT it_sell_debit_not_visible intent=%s — no debit at this ref for over %s; payout held", intent.ID, itDebitAbandonAfter)
+		}
+		return fmt.Errorf("%w: debit for intent %s is not visible on-chain yet", ErrITSellDebitPending, intent.ID)
+	default:
+		s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+			fmt.Sprintf("payout blocked: on-chain debit state %d does not match a pending debit for this sell", rec.State))
+		return fmt.Errorf("%w: debit for intent %s is not pending on-chain", ErrITBadState, intent.ID)
 	}
-	s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
-		fmt.Sprintf("payout blocked: on-chain debit state %d does not match a pending debit for this sell", rec.State))
-	return fmt.Errorf("%w: debit for intent %s is not pending on-chain", ErrITBadState, intent.ID)
+}
+
+// fwTerminalTransferStatus reports whether a provider transfer status is final.
+func fwTerminalTransferStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "SUCCESSFUL", "SUCCESS", "SUCCEEDED", "FAILED", "CANCELLED", "CANCELED":
+		return true
+	}
+	return false
 }
 
 // itPayoutReasonPrefix starts every failure_reason AutoPayout writes. Rows
@@ -378,26 +404,41 @@ func payoutNeverSubmitted(intent *models.ITIntent) bool {
 }
 
 // payoutNotSent handles a payout that failed before any request was made. On
-// the first attempt that is a definite rejection for an MCGP sell. A brokered
-// stablecoin sell is left to its watcher to retry, as before: nothing was sent,
-// and the user's fiat is still sitting in the provider balance.
+// the first attempt that is a definite rejection for an MCGP sell — but only if
+// the row still looks the way this caller read it, because "first attempt" is
+// read from a copy that may already be stale. A brokered stablecoin sell is
+// left to its watcher to retry: nothing was sent, and the user's fiat is still
+// sitting in the provider balance.
 func (s *ITService) payoutNotSent(ctx context.Context, intent *models.ITIntent, firstAttempt bool, cause error) error {
 	if firstAttempt && models.ITIntentAsset(intent) == models.ITAssetMCGP {
-		s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected (not sent): "+cause.Error())
-		return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, cause)
+		if s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected (not sent): "+cause.Error()) {
+			return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, cause)
+		}
+		log.Printf("[it] intent=%s payout not sent (%v) but the row moved on; not marking it rejected", intent.ID, cause)
 	}
 	return cause
 }
 
-func (s *ITService) markPayoutRejected(ctx context.Context, intent *models.ITIntent, reason string) {
+// markPayoutRejected records a rejection, guarded on the payout state the
+// caller read. It is also the reverse claim: a send cannot win the row
+// afterwards. Reports whether it moved the row — a caller whose read was stale
+// must not go on to reverse a payout someone else is sending.
+func (s *ITService) markPayoutRejected(ctx context.Context, intent *models.ITIntent, reason string) bool {
 	reason = truncateReason(reason)
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND payout_attempts = ? AND COALESCE(payout_id, '') = '' AND payout_rejected = ? AND payout_ref_gen = ?",
+			intent.ID, intent.PayoutAttempts, false, intent.PayoutRefGen).
+		Updates(map[string]any{"payout_rejected": true, "failure_reason": reason})
+	if res.Error != nil {
+		log.Printf("[it] ALERT it_sell_payout_rejection_unrecorded intent=%s: %v", intent.ID, res.Error)
+		return false
+	}
+	if res.RowsAffected != 1 {
+		return false
+	}
 	intent.PayoutRejected = true
 	intent.FailureReason = reason
-	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ?", intent.ID).
-		Updates(map[string]any{"payout_rejected": true, "failure_reason": reason}).Error; err != nil {
-		log.Printf("[it] ALERT it_sell_payout_rejection_unrecorded intent=%s: %v", intent.ID, err)
-	}
+	return true
 }
 
 // buildSellPayoutRequest prices the payout (the NET, converted to the
@@ -510,9 +551,24 @@ func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef,
 		_, err = s.resolveSell(ctx, intentID, "", settle) // no-op; alerts on a contradiction
 		return err
 	}
+	if intent.Status == models.ITStatusNeedsReview {
+		// Nothing automated may move a parked sell, and re-driving the webhook
+		// would only fail forever: acknowledge it and say so.
+		alertf("webhook-review:"+intentID.String()+":"+status,
+			"[it] ALERT it_payout_webhook_on_parked_sell intent=%s status=%s webhook=%s transfer=%s — acknowledged, operator must reevaluate",
+			intentID, intent.Status, status, payoutID)
+		return fmt.Errorf("%w: sell is parked for review", ErrNonSettlingEvent)
+	}
 	if gen != intent.PayoutRefGen {
 		alertf("webhook-gen:"+intentID.String()+":"+merchantTxRef,
 			"[it] ALERT it_payout_webhook_superseded intent=%s ref=%s current_gen=%d — ignored", intentID, merchantTxRef, intent.PayoutRefGen)
+		if settle {
+			// A superseded reference that PAID is a double payout: this sell was
+			// repaid on a fresh reference because the old one was confirmed
+			// failed. Park it — no automated settle or reverse may follow.
+			s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
+				fmt.Sprintf("superseded payout reference %s reported SUCCESS after a repay — possible double payout", merchantTxRef))
+		}
 		return fmt.Errorf("%w: superseded payout reference", ErrNonSettlingEvent)
 	}
 	payoutID = strings.TrimSpace(payoutID)
@@ -540,8 +596,17 @@ func (s *ITService) ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef,
 		confirmed = fwSucceeded(tr.Status)
 	}
 	if !confirmed {
+		// A provider that is merely not final yet (NEW/PENDING/INITIATED) is
+		// read-after-write lag, not a contradiction: the webhook must come back,
+		// or a settled payout is lost — stablecoin sells have no reconciler to
+		// catch it. Only a genuine contradiction is acknowledged as terminal.
+		if !fwTerminalTransferStatus(tr.Status) {
+			log.Printf("[it] intent=%s transfer=%s webhook=%s but provider still reports %s — retrying later",
+				intentID, transferID, status, tr.Status)
+			return fmt.Errorf("it payout webhook: provider has not finalised transfer %s (%s); retry", transferID, tr.Status)
+		}
 		alertf("webhook-status:"+transferID+":"+status,
-			"[it] ALERT it_payout_webhook_unconfirmed intent=%s transfer=%s webhook=%s provider=%s — no action", intentID, transferID, status, tr.Status)
+			"[it] ALERT it_payout_webhook_contradiction intent=%s transfer=%s webhook=%s provider=%s — no action", intentID, transferID, status, tr.Status)
 		return fmt.Errorf("%w: provider reports transfer %s as %s", ErrNonSettlingEvent, transferID, tr.Status)
 	}
 	if intent.PayoutID == "" {

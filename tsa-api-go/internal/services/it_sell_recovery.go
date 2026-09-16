@@ -194,7 +194,7 @@ func (s *ITService) ReconcileStuckSells(ctx context.Context, grace time.Duration
 		}
 	}
 
-	if s.deepScanDue(now) {
+	if claimDailyRun(ctx, s.db, "it-sell-late-debit-audit", itDeepScanEvery) {
 		if _, err := s.AlertLateDebitsBeyondWindow(ctx); err != nil {
 			log.Printf("[it-sell-reconciler] late-debit audit failed: %v", err)
 		}
@@ -213,16 +213,6 @@ func (s *ITService) scanSells(ctx context.Context, key string, q *gorm.DB) ([]mo
 		s.sellScan.advance(key, 0, itSellScanLimit, time.Time{}, uuid.Nil)
 	}
 	return rows, nil
-}
-
-func (s *ITService) deepScanDue(now time.Time) bool {
-	s.deepScanMu.Lock()
-	defer s.deepScanMu.Unlock()
-	if now.Sub(s.lastDeepScan) < itDeepScanEvery {
-		return false
-	}
-	s.lastDeepScan = now
-	return true
 }
 
 // debitMatchesIntent checks that an on-chain debit record is this intent's:
@@ -369,7 +359,7 @@ func (s *ITService) reconcileDebitedSell(ctx context.Context, in *models.ITInten
 	}
 	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(in), payoutAttemptTime(in))
 	if err != nil {
-		log.Printf("[it-sell-reconciler] intent=%s payout lookup failed: %v", in.ID, err)
+		s.alertLookupFailure(in, err)
 		return false
 	}
 	if found {
@@ -398,7 +388,7 @@ func (s *ITService) resolveRefusedRetry(ctx context.Context, in *models.ITIntent
 	}
 	tr, found, err := s.payoutTransfers.FindTransferByReference(ctx, itPayoutRefFor(in), payoutAttemptTime(in))
 	if err != nil {
-		log.Printf("[it-sell-reconciler] intent=%s refused-retry lookup failed: %v", in.ID, err)
+		s.alertLookupFailure(in, err)
 		return false
 	}
 	if found {
@@ -417,6 +407,22 @@ func (s *ITService) resolveRefusedRetry(ctx context.Context, in *models.ITIntent
 		return false
 	}
 	return true
+}
+
+// alertLookupFailure alerts on a provider lookup that did not complete. A
+// payout whose outcome cannot be established is money in limbo, so it is never
+// just a log line — and a response shape this code does not recognise is
+// called out by name, because that is exactly what IT_SELL_FW_ABSENCE_TRUSTED
+// is waiting to be confirmed.
+func (s *ITService) alertLookupFailure(in *models.ITIntent, err error) {
+	if errors.Is(err, ErrFWTransferShape) {
+		alertf("fw-shape:"+in.ID.String(),
+			"[it-sell-reconciler] ALERT it_fw_transfer_shape_unrecognised intent=%s: %v — the /transfers listing does not match what this code parses; absence can never be trusted until it does",
+			in.ID, err)
+		return
+	}
+	alertf("sell-lookup:"+in.ID.String(),
+		"[it-sell-reconciler] ALERT it_sell_payout_lookup_failed intent=%s: %v", in.ID, err)
 }
 
 func (s *ITService) submitSellPayout(ctx context.Context, in *models.ITIntent) bool {
@@ -712,8 +718,14 @@ func (s *ITService) RepayStableSell(ctx context.Context, intentID uuid.UUID) (*m
 	if in.Direction != models.ITDirectionSell || (asset != models.ITAssetUSDC && asset != models.ITAssetUSDT) {
 		return nil, fmt.Errorf("%w: not a stablecoin sell", ErrITBadState)
 	}
-	if in.Status != models.ITStatusDebited || !in.PayoutRejected {
-		return nil, fmt.Errorf("%w: only a parked (payout failed) stablecoin sell can be repaid", ErrITBadState)
+	// Two ways in: a sell PARKED by a provider-confirmed FAILED transfer, and
+	// one whose current reference the provider keeps refusing outright (the
+	// watcher can only replay that refusal forever). Both need the same
+	// evidence below: whatever the provider holds for this reference must not
+	// be a payout that could still land.
+	refused := strings.HasPrefix(in.FailureReason, itPayoutReasonPrefix+" refused") && in.PayoutAttempts > 0
+	if in.Status != models.ITStatusDebited || (!in.PayoutRejected && !refused) {
+		return nil, fmt.Errorf("%w: only a parked or repeatedly refused stablecoin sell can be repaid", ErrITBadState)
 	}
 	if s.payout == nil {
 		return nil, errors.New("it: no payout gateway configured")
@@ -721,26 +733,36 @@ func (s *ITService) RepayStableSell(ctx context.Context, intentID uuid.UUID) (*m
 	if in.PayoutRefGen >= itPayoutRefMaxGen {
 		return nil, fmt.Errorf("%w: payout reference generations exhausted", ErrITBadState)
 	}
-	var tr FWTransfer
 	if in.PayoutID != "" {
-		if tr, err = s.readTransfer(ctx, in.PayoutID); err != nil {
-			return nil, err
+		tr, terr := s.readTransfer(ctx, in.PayoutID)
+		if terr != nil {
+			return nil, terr
+		}
+		if !strings.EqualFold(tr.Status, "FAILED") {
+			return nil, fmt.Errorf("%w: previous transfer %s is %s, not FAILED", ErrITSellPayoutConflict, tr.ID, tr.Status)
 		}
 	} else {
-		var found bool
-		if tr, found, err = s.findPayout(ctx, in); err != nil {
-			return nil, err
+		tr, found, ferr := s.findPayout(ctx, in)
+		if ferr != nil {
+			return nil, ferr
 		}
-		if !found {
-			return nil, fmt.Errorf("%w: no previous transfer found to confirm as failed", ErrITSellPayoutUnverified)
+		switch {
+		case found && strings.EqualFold(tr.Status, "FAILED"):
+			// Confirmed failed: safe to pay again on a fresh reference.
+		case found:
+			// A transfer exists that is not failed — adopt it and let the normal
+			// settle/reverse path handle it rather than paying twice.
+			s.adoptPayoutID(ctx, in, tr.ID)
+			return nil, fmt.Errorf("%w: transfer %s for this reference is %s", ErrITSellPayoutConflict, tr.ID, tr.Status)
+		case !s.fwAbsenceTrusted:
+			return nil, fmt.Errorf("%w: no transfer found at Flutterwave, but absence is not trusted (IT_SELL_FW_ABSENCE_TRUSTED)", ErrITSellPayoutUnverified)
 		}
-	}
-	if !strings.EqualFold(tr.Status, "FAILED") {
-		return nil, fmt.Errorf("%w: previous transfer %s is %s, not FAILED", ErrITSellPayoutConflict, tr.ID, tr.Status)
+		// Absent and absence trusted: the refused reference never created a
+		// transfer, so a fresh one cannot double-pay.
 	}
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ? AND payout_rejected = ? AND payout_ref_gen = ? AND COALESCE(payout_id, '') = ?",
-			in.ID, models.ITStatusDebited, true, in.PayoutRefGen, in.PayoutID).
+		Where("id = ? AND status = ? AND payout_attempts = ? AND payout_ref_gen = ? AND COALESCE(payout_id, '') = ?",
+			in.ID, models.ITStatusDebited, in.PayoutAttempts, in.PayoutRefGen, in.PayoutID).
 		Updates(map[string]any{
 			"payout_ref_gen":          in.PayoutRefGen + 1,
 			"payout_id":               "",
@@ -760,11 +782,122 @@ func (s *ITService) RepayStableSell(ctx context.Context, intentID uuid.UUID) (*m
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[it] stable sell intent=%s repaid on reference generation %d after transfer %s FAILED", in.ID, fresh.PayoutRefGen, tr.ID)
+	log.Printf("[it] stable sell intent=%s repaid on reference generation %d", in.ID, fresh.PayoutRefGen)
 	if err := s.AutoPayout(ctx, fresh); err != nil {
 		return nil, err
 	}
 	return s.getIntent(ctx, in.ID)
+}
+
+// ReevaluateSell is the exit door for a sell parked in `needs_review`: it
+// re-reads the chain and, where a payout reference exists, the provider, then
+// moves the row to whatever the evidence supports.
+//
+//	debit Pending (matching)  → debited; the sell carries on normally
+//	debit Resolved            → settled or reversed, decided by which operation
+//	                            did not verify (recorded when it was parked) and
+//	                            cross-checked against the transfer; with no
+//	                            recorded operation the transfer decides
+//	debit None / unreadable   → refused: a lagging node cannot close a sell
+//	contradiction             → left parked, ALERT
+//
+// It never broadcasts anything: the debit is already resolved on-chain, so
+// this only records which way it went.
+func (s *ITService) ReevaluateSell(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
+	in, err := s.adminMCGPSell(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	switch in.Status {
+	case models.ITStatusNeedsReview, models.ITStatusDebited, models.ITStatusDebiting, models.ITStatusProcessing:
+	default:
+		return nil, fmt.Errorf("%w: sell is %s; nothing to reevaluate", ErrITBadState, in.Status)
+	}
+	rec, err := s.chain().DebitRecord(ctx, itRef("IT:debit:", in.ID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrITSellPayoutUnverified, err)
+	}
+	from := []string{models.ITStatusNeedsReview, models.ITStatusDebited, models.ITStatusDebiting, models.ITStatusProcessing}
+	switch rec.State {
+	case DebitStatePending:
+		if !debitMatchesIntent(rec, in) {
+			alertf("reevaluate-mismatch:"+in.ID.String(),
+				"[it] ALERT it_sell_reevaluate_mismatch intent=%s on-chain user=%s amount=%s — left parked", in.ID, rec.User.Hex(), rec.Amount)
+			return nil, fmt.Errorf("%w: the on-chain debit is for a different wallet or amount", ErrITSellPayoutConflict)
+		}
+		if !s.moveSellStatus(ctx, in, from, models.ITStatusDebited, "") {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		return s.getIntent(ctx, in.ID)
+	case DebitStateNone:
+		return nil, fmt.Errorf("%w: no debit at this ref — the node may be behind; try again shortly", ErrITSellPayoutUnverified)
+	}
+
+	// Resolved: settled or reversed on-chain, and the row never recorded which.
+	settled, reversed := strings.HasPrefix(in.FailureReason, reviewReasonSettle), strings.HasPrefix(in.FailureReason, reviewReasonReverse)
+	transfer, haveTransfer, err := s.reevaluateTransfer(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	paid := haveTransfer && fwSucceeded(transfer.Status)
+	notPaid := haveTransfer && strings.EqualFold(transfer.Status, "FAILED")
+
+	switch {
+	case settled && notPaid, reversed && paid:
+		alertf("reevaluate-conflict:"+in.ID.String(),
+			"[it] ALERT it_sell_reevaluate_conflict intent=%s attempted=%q transfer=%s status=%s — left parked",
+			in.ID, in.FailureReason, transfer.ID, transfer.Status)
+		return nil, fmt.Errorf("%w: the on-chain outcome and transfer %s (%s) contradict each other", ErrITSellPayoutConflict, transfer.ID, transfer.Status)
+	case settled, paid:
+		if !s.moveSellStatus(ctx, in, from, models.ITStatusSettled, "closed by operator reevaluation") {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		s.settleITFee(ctx, in)
+		return s.getIntent(ctx, in.ID)
+	case reversed, notPaid, !haveTransfer && payoutNeverSubmitted(in):
+		if !s.moveSellStatus(ctx, in, from, models.ITStatusReversed, "closed by operator reevaluation") {
+			return nil, fmt.Errorf("%w: sell %s changed while it was being reevaluated", ErrITSellPayoutConflict, in.ID)
+		}
+		return s.getIntent(ctx, in.ID)
+	default:
+		alertf("reevaluate-unknown:"+in.ID.String(),
+			"[it] ALERT it_sell_reevaluate_inconclusive intent=%s — debit resolved on-chain but neither the row nor the provider says which way; left parked", in.ID)
+		return nil, fmt.Errorf("%w: cannot tell whether this sell settled or reversed", ErrITSellPayoutUnverified)
+	}
+}
+
+// reevaluateTransfer reads whatever the provider holds for the sell's payout
+// reference. found=false means there is nothing to read (no reference sent, or
+// absence the deployment does not trust).
+func (s *ITService) reevaluateTransfer(ctx context.Context, in *models.ITIntent) (FWTransfer, bool, error) {
+	if in.PayoutID != "" {
+		tr, err := s.readTransfer(ctx, in.PayoutID)
+		return tr, err == nil, err
+	}
+	if payoutNeverSubmitted(in) || s.payoutTransfers == nil {
+		return FWTransfer{}, false, nil
+	}
+	tr, found, err := s.findPayout(ctx, in)
+	if err != nil {
+		return FWTransfer{}, false, err
+	}
+	if !found && !s.fwAbsenceTrusted {
+		return FWTransfer{}, false, nil
+	}
+	return tr, found, nil
+}
+
+// moveSellStatus applies a status change guarded on the statuses it was read in.
+func (s *ITService) moveSellStatus(ctx context.Context, in *models.ITIntent, from []string, to, reason string) bool {
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status IN ?", in.ID, from).
+		Updates(map[string]any{"status": to, "failure_reason": truncateReason(reason)})
+	if res.Error != nil || res.RowsAffected != 1 {
+		return false
+	}
+	in.Status, in.FailureReason = to, reason
+	log.Printf("[it] intent=%s reevaluated → %s", in.ID, to)
+	return true
 }
 
 // StuckMCGPSell is an MCGP sell that has not reached a terminal state, with

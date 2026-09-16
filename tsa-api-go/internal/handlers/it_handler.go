@@ -876,6 +876,15 @@ func (h *ITHandler) AdminRetrySellPayout(c *gin.Context) {
 	})
 }
 
+// POST /api/it/admin/sell/:id/reevaluate — re-read the chain (and the payout
+// transfer) for a sell parked in `needs_review` and close it whichever way the
+// evidence points. The exit door for a parked sell.
+func (h *ITHandler) AdminReevaluateSell(c *gin.Context) {
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.ReevaluateSell(c.Request.Context(), intentID)
+	})
+}
+
 // POST /api/it/admin/stable/:id/repay — pay a parked stablecoin sell again on
 // a fresh payout reference. Refused unless Flutterwave confirms the previous
 // transfer FAILED.

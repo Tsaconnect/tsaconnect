@@ -775,6 +775,12 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 	return parsed, nil
 }
 
+// ErrFWTransferShape marks a /transfers response this code does not
+// positively recognise. It is the signal that the live listing differs from
+// the schema FindTransferByReference was built against — the thing
+// IT_SELL_FW_ABSENCE_TRUSTED is waiting on — so callers alert on it by name.
+var ErrFWTransferShape = errors.New("flutterwave list-transfers: unrecognised response shape")
+
 // fwTransferListMaxPages bounds a reference scan: 20 pages of 50 is a thousand
 // transfers, far more than two days of payouts. Hitting it is an error, not
 // "not found".
@@ -882,22 +888,22 @@ func decodeFWTransferPage(body []byte) ([]fwListedTransfer, bool, string, error)
 		} `json:"transfers"`
 	}
 	if err := json.Unmarshal(env.Data, &data); err != nil {
-		return nil, false, "", fmt.Errorf("flutterwave list-transfers: unrecognised data shape: %w", err)
+		return nil, false, "", fmt.Errorf("%w: data: %v", ErrFWTransferShape, err)
 	}
 	if data.Cursor == nil || data.Cursor.HasMoreItems == nil {
-		return nil, false, "", errors.New("flutterwave list-transfers: response has no cursor.has_more_items; cannot tell whether the scan is complete")
+		return nil, false, "", fmt.Errorf("%w: no cursor.has_more_items; cannot tell whether the scan is complete", ErrFWTransferShape)
 	}
 	if data.Transfers == nil {
-		return nil, false, "", errors.New("flutterwave list-transfers: response has no transfers list")
+		return nil, false, "", fmt.Errorf("%w: no transfers list", ErrFWTransferShape)
 	}
 	out := make([]fwListedTransfer, 0, len(*data.Transfers))
 	for _, t := range *data.Transfers {
 		if t.Reference == nil || t.CreatedDatetime == nil {
-			return nil, false, "", fmt.Errorf("flutterwave list-transfers: transfer %q lacks reference or created_datetime", t.ID)
+			return nil, false, "", fmt.Errorf("%w: transfer %q lacks reference or created_datetime", ErrFWTransferShape, t.ID)
 		}
 		at, err := time.Parse(time.RFC3339, *t.CreatedDatetime)
 		if err != nil {
-			return nil, false, "", fmt.Errorf("flutterwave list-transfers: transfer %q created_datetime %q: %w", t.ID, *t.CreatedDatetime, err)
+			return nil, false, "", fmt.Errorf("%w: transfer %q created_datetime %q: %v", ErrFWTransferShape, t.ID, *t.CreatedDatetime, err)
 		}
 		out = append(out, fwListedTransfer{
 			FWTransfer: FWTransfer{ID: t.ID, Reference: *t.Reference, Status: t.Status},

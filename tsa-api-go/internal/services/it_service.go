@@ -894,14 +894,22 @@ func (s *ITService) resolveStableSellPayout(ctx context.Context, intent *models.
 // payout was sent with no transfer id recorded — on the last attempt being old
 // enough that it is not still in flight.
 func (s *ITService) claimReverse(ctx context.Context, intent *models.ITIntent) error {
-	if intent.PayoutRejected {
-		return nil
-	}
 	q := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = ? AND payout_attempts = ? AND payout_rejected = ? AND payout_ref_gen = ?",
-			intent.ID, models.ITStatusDebited, intent.PayoutID, intent.PayoutAttempts, false, intent.PayoutRefGen)
-	if intent.PayoutID == "" && intent.PayoutAttempts > 0 {
-		q = q.Where("(last_payout_attempt_at IS NULL OR last_payout_attempt_at < ?)", time.Now().Add(-itPayoutAbsentSettle))
+		Where("id = ? AND status = ? AND COALESCE(payout_id, '') = ? AND payout_attempts = ? AND payout_ref_gen = ?",
+			intent.ID, models.ITStatusDebited, intent.PayoutID, intent.PayoutAttempts, intent.PayoutRefGen)
+	if intent.PayoutRejected {
+		// Already claimed — but the claim is only good if the row still looks
+		// the way it was read. Re-asserting it here is what stops a stale
+		// "rejected" copy reversing a payout that has since gone out.
+		q = q.Where("payout_rejected = ?", true)
+	} else {
+		q = q.Where("payout_rejected = ?", false)
+		if intent.PayoutID == "" && intent.PayoutAttempts > 0 {
+			// Evaluate the age in the DATABASE: comparing one process's clock to
+			// another's stored timestamp would let clock skew weaken a money guard.
+			expr, args := olderThanExpr(s.db, "last_payout_attempt_at", itPayoutAbsentSettle)
+			q = q.Where("(last_payout_attempt_at IS NULL OR "+expr+")", args...)
+		}
 	}
 	res := q.Update("payout_rejected", true)
 	if res.Error != nil {
@@ -914,6 +922,14 @@ func (s *ITService) claimReverse(ctx context.Context, intent *models.ITIntent) e
 	return nil
 }
 
+// reviewReasonSettle / reviewReasonReverse prefix the failure_reason written
+// when a settle or reverse did not verify. ReevaluateSell reads them to know
+// which operation the resolved on-chain debit most likely came from.
+const (
+	reviewReasonSettle  = "settle did not verify"
+	reviewReasonReverse = "reverse did not verify"
+)
+
 // afterResolveFailure runs when a settle or reverse did not verify. If the
 // debit is nonetheless already resolved on-chain, the operation (or another)
 // took effect and the row can no longer say which: it moves to needs_review so
@@ -924,12 +940,12 @@ func (s *ITService) afterResolveFailure(ctx context.Context, intent *models.ITIn
 	if err != nil || rec.State != DebitStateResolved {
 		return
 	}
-	op := "reverse"
+	marker := reviewReasonReverse
 	if settle {
-		op = "settle"
+		marker = reviewReasonSettle
 	}
 	s.moveToReview(ctx, intent, []string{models.ITStatusDebited},
-		fmt.Sprintf("%s did not verify but the debit is already resolved on-chain: %v", op, cause))
+		fmt.Sprintf("%s (the debit is already resolved on-chain): %v", marker, cause))
 }
 
 // moveToReview parks a sell whose on-chain debit contradicts its row.
