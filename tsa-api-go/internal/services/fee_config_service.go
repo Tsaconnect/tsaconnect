@@ -230,6 +230,18 @@ func (s *FeeConfigService) Load() error {
 		if productFeeWildcardOnly(r.Feature, r.TokenSymbol) {
 			return errProductPerTokenOverride(r.Feature, r.TokenSymbol)
 		}
+		// A non-NULL direction that is not in the known set is a corrupt row, and
+		// the empty string is the dangerous one: it is not NULL, so every
+		// `direction IS NULL` filter (the reconciler, the replica writer) skips
+		// it, yet its in-memory key is the same "" the direction-agnostic row
+		// uses — so it would shadow the real rate in the cache while being
+		// invisible to everything that keeps the replica honest. Skip it and
+		// alert; the agnostic row then answers exactly as it did before.
+		if r.Direction != nil && !models.IsValidFeeDirection(rowDirection(r)) {
+			log.Printf("[FeeConfig] ALERT fee_rate_bad_direction feature=%s token=%s chain=%s direction=%q -> row IGNORED (not a known direction)",
+				r.Feature, r.TokenSymbol, chainLabel(r.ChainID), *r.Direction)
+			continue
+		}
 		cache[cacheKey(r.Feature, r.TokenSymbol, r.ChainID, rowDirection(r))] = r
 	}
 	s.mu.Lock()
@@ -265,7 +277,15 @@ func cacheKey(feature, token string, chainID *int64, direction string) string {
 	if chainID != nil {
 		chain = strconv.FormatInt(*chainID, 10)
 	}
-	return feature + "|" + strings.ToUpper(token) + "|" + chain + "|" + direction
+	return feature + "|" + strings.ToUpper(token) + "|" + chain + "|" + normalizeDirection(direction)
+}
+
+// normalizeDirection is the canonical spelling of a direction: trimmed and
+// lower-cased. Both sides of the cache key go through it, so a caller asking
+// for "SELL" cannot miss its own "sell" row and fall through to the untaxed
+// direction-agnostic rate.
+func normalizeDirection(direction string) string {
+	return strings.ToLower(strings.TrimSpace(direction))
 }
 
 // rowDirection is the in-memory spelling of a row's direction: "" for the NULL
@@ -274,7 +294,7 @@ func rowDirection(c models.FeeConfig) string {
 	if c.Direction == nil {
 		return ""
 	}
-	return *c.Direction
+	return normalizeDirection(*c.Direction)
 }
 
 // RateFor returns the fee rate for (feature, tokenSymbol, chainID) from the
@@ -308,6 +328,13 @@ func (s *FeeConfigService) RateFor(feature, tokenSymbol string, chainID *int64) 
 // resolution is identical to RateFor.
 //
 // Pass "" to mean "no particular direction", which is exactly what RateFor does.
+//
+// SECURITY: direction MUST be derived from the flow the server is executing,
+// never from a request field. It selects which rate row is charged, so a
+// caller-supplied direction is a caller-supplied price — an attacker would name
+// whichever leg is cheapest. Unknown directions resolve to the
+// direction-agnostic row rather than erroring, which makes a threaded-through
+// request value fail SILENTLY cheap.
 func (s *FeeConfigService) RateForDirection(feature, tokenSymbol string, chainID *int64, direction string) (bps int, flatUSD float64, exempt bool, found bool) {
 	upperToken := strings.ToUpper(strings.TrimSpace(tokenSymbol))
 
@@ -380,8 +407,8 @@ func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *
 	row, ok := s.lookupLocked(s.lastKnownGood, feature, upperToken, chainID, direction)
 	s.lkgMu.RUnlock()
 	if ok {
-		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> last-known-good (cache empty)",
-			feature, upperToken, chainLabel(chainID))
+		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> last-known-good (cache empty)",
+			feature, upperToken, chainLabel(chainID), direction)
 		if row.MCGPExempt && upperToken == "MCGP" {
 			return 0, 0, true, true
 		}
@@ -392,8 +419,8 @@ func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *
 	// without the chain dimension — the seed has no chain rows.
 	dbps, dflat, dexempt, dfound := defaultRateFor(feature, upperToken)
 	if dfound {
-		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> SEED DEFAULT (no replica, no last-known-good)",
-			feature, upperToken, chainLabel(chainID))
+		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> SEED DEFAULT (no replica, no last-known-good; the seed has no direction dimension)",
+			feature, upperToken, chainLabel(chainID), direction)
 		if dexempt {
 			return 0, 0, true, true
 		}
@@ -403,8 +430,8 @@ func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *
 	// No seed either: the feature is genuinely unknown. This is a real
 	// found=false (not a configured-but-empty row); the caller decides. Still
 	// not a silent $0 charge — found=false signals "no such fee".
-	log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> NO ROW (unknown feature)",
-		feature, upperToken, chainLabel(chainID))
+	log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> NO ROW (unknown feature)",
+		feature, upperToken, chainLabel(chainID), direction)
 	return 0, 0, false, false
 }
 
@@ -506,9 +533,17 @@ func (s *FeeConfigService) WriteReplicaRowTx(tx *gorm.DB, feature, token string,
 		return errProductPerTokenOverride(feature, upperToken)
 	}
 
-	// Upsert the (feature, token, chain) replica row.
+	// Upsert the (feature, token, chain) DIRECTION-AGNOSTIC replica row.
+	//
+	// `direction IS NULL` is load-bearing, the write-side twin of the filter in
+	// replicaRowFor. The on-chain FeeManager keys by (feature, token) alone, so
+	// a per-leg tax row has no on-chain counterpart and must never be the row a
+	// confirmed chain rate lands on. Without the filter First() picks by UUID
+	// order: a directional row winning that coin flip has its rate overwritten
+	// from chain (silently wiping the tax) AND leaves the agnostic row stale, so
+	// the hourly reconciler sees the same drift and does it again every pass.
 	var existing models.FeeConfig
-	q := tx.Where("feature = ? AND token_symbol = ?", feature, upperToken)
+	q := tx.Where("feature = ? AND token_symbol = ? AND direction IS NULL", feature, upperToken)
 	if chainID == nil {
 		q = q.Where("chain_id IS NULL")
 	} else {

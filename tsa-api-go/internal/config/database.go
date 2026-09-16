@@ -179,6 +179,22 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// The 4-column UNIQUE GORM builds from the struct tags does NOT make a
+	// fee rate unique in Postgres: NULLs compare as DISTINCT in a unique index,
+	// so two identical (feature, token, NULL chain, NULL direction) rows both
+	// insert cleanly. Every row written to date carries both NULLs, so nothing
+	// in this table is actually deduplicated — and a duplicate is a money bug:
+	// the cache keeps whichever row Load() saw last, and the replica writer /
+	// drift reconciler pick one by UUID order.
+	//
+	// This expression index restores the invariant the column list only implies.
+	// It is additive: on a table that already holds duplicates it simply fails
+	// to build, logged below, and the operator de-duplicates before it takes.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_fee_config_feature_token_chain_direction
+		ON fee_configs (feature, token_symbol, COALESCE(chain_id, -1), lower(COALESCE(direction, '')))`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_fee_config_feature_token_chain_direction: %v — fee_configs most likely holds DUPLICATE (feature, token, chain, direction) rows, which resolve non-deterministically. De-duplicate it.", err)
+	}
+
 	// The admin fee tracker filters and aggregates fee_distributions by date
 	// (list ORDER BY created_at DESC, summary WHERE created_at >= ?); without
 	// this index both are sequential scans that grow with every settled fee.

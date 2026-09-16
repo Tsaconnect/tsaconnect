@@ -222,3 +222,112 @@ func TestFeeDirection_ValidatesAgainstTheKnownSet(t *testing.T) {
 		t.Error(`"swap" is not in the PM's direction set and must not validate`)
 	}
 }
+
+// WriteReplicaRowTx is the other half of the hazard replicaRowFor closed. The
+// reconciler detects drift with a direction-filtered read, but it RESOLVES that
+// drift through RefreshFromConfirmedRate → WriteReplicaRowTx, and the admin
+// confirm endpoint (ConfirmAndApply) writes through the same function. An
+// unfiltered First() there picks a row by UUID order, so a directional tax row
+// can be the one the confirmed on-chain rate overwrites — the exact silent wipe
+// the read-side filter was added to prevent, one call down.
+//
+// It also leaves the agnostic row stale, so the next reconciler pass sees the
+// same drift and clobbers the tax row again, every hour, forever.
+func TestWriteReplicaRowTx_NeverTouchesADirectionalRow(t *testing.T) {
+	sonic := int64(146)
+	for _, tc := range []struct {
+		name             string
+		directionalFirst bool
+	}{
+		{"agnostic row inserted first", false},
+		{"directional row inserted first", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupFeeConfigDirectionTestDB(t)
+			svc := NewFeeConfigService(db)
+			if tc.directionalFirst {
+				insertDirRow(t, db, models.FeatureOTC, "USDC", &sonic, models.FeeDirectionSell, 900)
+				insertDirRow(t, db, models.FeatureOTC, "USDC", &sonic, "", 100)
+			} else {
+				insertDirRow(t, db, models.FeatureOTC, "USDC", &sonic, "", 100)
+				insertDirRow(t, db, models.FeatureOTC, "USDC", &sonic, models.FeeDirectionSell, 900)
+			}
+
+			// Chain truth for (otc, USDC) is 250 bps. Only the direction-agnostic
+			// row has an on-chain counterpart, so only it may move.
+			if err := svc.RefreshFromConfirmedRate(models.FeatureOTC, "USDC", &sonic, 250, 0, false, true); err != nil {
+				t.Fatalf("RefreshFromConfirmedRate: %v", err)
+			}
+
+			var rows []models.FeeConfig
+			if err := db.Where("feature = ? AND token_symbol = ?", models.FeatureOTC, "USDC").Find(&rows).Error; err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if len(rows) != 2 {
+				t.Fatalf("got %d rows, want 2 — the write must update in place, not insert a third", len(rows))
+			}
+			for _, r := range rows {
+				if r.Direction == nil {
+					if r.BPS != 250 {
+						t.Errorf("agnostic row bps=%d, want 250 — chain truth must land on it", r.BPS)
+					}
+					continue
+				}
+				if r.BPS != 900 {
+					t.Errorf("directional row bps=%d, want 900 — it has no on-chain counterpart and must never be overwritten", r.BPS)
+				}
+			}
+		})
+	}
+}
+
+// Direction is compared as a string key, so an unnormalised caller ("SELL", or
+// a row hand-written as " Sell ") would miss its own row and fall through to the
+// untaxed agnostic rate — a silent undercharge that looks like working config.
+func TestRateForDirection_IsCaseAndSpaceInsensitive(t *testing.T) {
+	db := setupFeeConfigDirectionTestDB(t)
+	svc := NewFeeConfigService(db)
+	insertDirRow(t, db, models.FeatureOTC, "MCGP", nil, "", 100)
+	insertDirRow(t, db, models.FeatureOTC, "MCGP", nil, " SELL ", 250)
+	if err := svc.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	for _, d := range []string{"sell", "SELL", " Sell "} {
+		bps, _, _, found := svc.RateForDirection(models.FeatureOTC, "MCGP", nil, d)
+		if !found || bps != 250 {
+			t.Errorf("direction %q: got (%d, %v), want (250, true)", d, bps, found)
+		}
+	}
+}
+
+// A non-NULL but EMPTY direction is the poisoning case: it is not NULL, so every
+// `direction IS NULL` filter skips it, yet its in-memory key is the same "" the
+// agnostic row uses — so it can shadow the real agnostic rate in the cache while
+// being invisible to the reconciler. Load must refuse to cache any row whose
+// direction is non-NULL and not a known direction.
+func TestLoad_IgnoresRowsWithAnInvalidDirection(t *testing.T) {
+	for _, bad := range []string{"", "swap", "BUYY"} {
+		t.Run("direction="+bad, func(t *testing.T) {
+			db := setupFeeConfigDirectionTestDB(t)
+			svc := NewFeeConfigService(db)
+			insertDirRow(t, db, models.FeatureOTC, "MCGP", nil, "", 100)
+			// Insert the malformed row directly — insertDirRow maps "" to NULL.
+			badRow := models.FeeConfig{
+				ID: uuid.New(), Feature: models.FeatureOTC, TokenSymbol: "MCGP",
+				Direction: &bad, BPS: 900, Active: true,
+			}
+			if err := db.Create(&badRow).Error; err != nil {
+				t.Fatalf("insert bad row: %v", err)
+			}
+			if err := svc.Load(); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+
+			bps, _, _, found := svc.RateFor(models.FeatureOTC, "MCGP", nil)
+			if !found || bps != 100 {
+				t.Fatalf("agnostic lookup: got (%d, %v), want (100, true) — a malformed direction row must not shadow it", bps, found)
+			}
+		})
+	}
+}
