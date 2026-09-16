@@ -49,12 +49,10 @@ func ConversionCostBps(routeAmount, toAmountMin *big.Int) int {
 // PromisedAmount is what the user is guaranteed to receive: the Paycrest
 // amount less the markup. Integer maths only — this is money.
 func PromisedAmount(routeAmount *big.Int, markupBps int) *big.Int {
-	if routeAmount == nil {
+	if routeAmount == nil || routeAmount.Sign() <= 0 {
 		return big.NewInt(0)
 	}
-	keep := big.NewInt(int64(10_000 - markupBps))
-	out := new(big.Int).Mul(routeAmount, keep)
-	return out.Div(out, big.NewInt(10_000))
+	return bpsShare(routeAmount, int64(10_000-markupBps))
 }
 
 // MeetsMinimumOrder applies the per-chain floor (Decision 6). Stablecoins are
