@@ -12,14 +12,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import { getMcgpBalance } from '@/services/mcgpSwapApi';
+import { boughtBase } from '@/services/mcgpValuation';
 import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { getNetwork } from '@/hooks/useNetwork';
 import { getSignableWallet } from '@/services/wallet';
 
 export interface McgpBalancesState {
   usdc: number; // human USDC (Sonic)
-  mcgpPremium: number; // human spendable MCGP
-  mcgpPremiumStr: string; // exact string (18dp) for Max
+  mcgpPremium: number; // human spendable MCGP (bought + naira-bought/credited)
+  mcgpPremiumStr: string; // exact string (18dp) for Max on spend flows
+  /** USDC-bought bucket only — the amount actually sellable for USDC. */
+  mcgpSellableForUsdc: number;
+  /** Exact string (18dp) form of mcgpSellableForUsdc, for the sell screen's Max. */
+  mcgpSellableForUsdcStr: string;
   loading: boolean;
   /** No signing key on this device — prompt to import, do not render a balance. */
   walletMissing: boolean;
@@ -30,6 +35,8 @@ export function useMcgpBalances(): McgpBalancesState {
   const [usdc, setUsdc] = useState(0);
   const [mcgpPremium, setMcgpPremium] = useState(0);
   const [mcgpPremiumStr, setMcgpPremiumStr] = useState('0');
+  const [mcgpSellableForUsdc, setMcgpSellableForUsdc] = useState(0);
+  const [mcgpSellableForUsdcStr, setMcgpSellableForUsdcStr] = useState('0');
   const [loading, setLoading] = useState(true);
   const [walletMissing, setWalletMissing] = useState(false);
 
@@ -42,6 +49,8 @@ export function useMcgpBalances(): McgpBalancesState {
       setUsdc(0);
       setMcgpPremium(0);
       setMcgpPremiumStr('0');
+      setMcgpSellableForUsdc(0);
+      setMcgpSellableForUsdcStr('0');
       setLoading(false);
       return;
     }
@@ -63,6 +72,15 @@ export function useMcgpBalances(): McgpBalancesState {
         setMcgpPremiumStr('0');
         setMcgpPremium(0);
       }
+      try {
+        const boughtRaw = boughtBase({ totalBase: raw, premiumBought: mcgpRes.data.premiumBought });
+        const str = ethers.formatUnits(boughtRaw, 18);
+        setMcgpSellableForUsdcStr(str);
+        setMcgpSellableForUsdc(Number(str));
+      } catch {
+        setMcgpSellableForUsdcStr('0');
+        setMcgpSellableForUsdc(0);
+      }
     }
     if (balRes.success && balRes.data) {
       // /wallet/balances returns { balances: { <chain>: { <symbol>: {...} } } },
@@ -80,5 +98,14 @@ export function useMcgpBalances(): McgpBalancesState {
     refresh();
   }, [refresh]);
 
-  return { usdc, mcgpPremium, mcgpPremiumStr, loading, walletMissing, refresh };
+  return {
+    usdc,
+    mcgpPremium,
+    mcgpPremiumStr,
+    mcgpSellableForUsdc,
+    mcgpSellableForUsdcStr,
+    loading,
+    walletMissing,
+    refresh,
+  };
 }

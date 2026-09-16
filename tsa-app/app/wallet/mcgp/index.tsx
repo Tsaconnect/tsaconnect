@@ -66,7 +66,13 @@ export default function McgpHub() {
             {loading ? '—' : fmtMcgp(bal?.premiumBalance)} MCGP
           </Text>
           <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-            Bought MCGP — spend it in the marketplace and pay other users.
+            Spend it in the marketplace and pay other users.
+          </Text>
+          <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.sm }}>
+            Sellable for USDC: {loading ? '—' : fmtMcgp(bal?.premiumBought)} MCGP
+          </Text>
+          <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+            Bought with naira (in-app only): {loading ? '—' : fmtMcgp(bal?.premiumCredited)} MCGP
           </Text>
         </AccentCard>
 
