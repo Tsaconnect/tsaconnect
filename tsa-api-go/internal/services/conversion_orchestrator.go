@@ -412,6 +412,32 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		return nil
 	}
 
+	// Custody is PROVEN the instant VerifyTransfer returns — record it before
+	// resolving the destination, not after. o.destination() below can fail
+	// (no treasury lane on the requested chain, or the token unconfigured
+	// there) for reasons that have nothing to do with whether the money
+	// landed, and a failure there used to leave Holder at its pre-custody
+	// value while parking the order in recovery_pending. That produced a
+	// park with a materially wrong record: the treasury verifiably held the
+	// funds, but every reader of Holder — including the admin refund tool's
+	// own custody gate in OwedToUser — saw an order that looked as though
+	// custody was never taken, and refused to refund money that was
+	// provably sitting in the treasury.
+	custodyUpdates := map[string]any{"holder": models.HolderTreasury}
+	if expected, ok := new(big.Int).SetString(order.TokenAmount, 10); ok && received.Cmp(expected) < 0 {
+		// Short delivery: never convert more than actually landed.
+		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s — repricing the promise",
+			order.ID, expected, received)
+		custodyUpdates["token_amount"] = received.String()
+	}
+	order.Holder = models.HolderTreasury
+	if v, ok := custodyUpdates["token_amount"].(string); ok {
+		order.TokenAmount = v
+	}
+	if err := o.setOrder(ctx, order, custodyUpdates); err != nil {
+		return err
+	}
+
 	// The promise is what the user RECEIVES, so it is denominated in the
 	// destination token's base units. Source and destination precision differ
 	// (BSC stables are 18dp against 6dp on base/polygon), and comparing a
@@ -420,6 +446,10 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	dst, err := o.destination(order)
 	if err != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
+		// Holder is already Treasury as of the write above — toRecovery only
+		// touches status/fault/failure_reason, so the park below correctly
+		// records money the treasury verifiably holds, not money that looks
+		// unclaimed.
 		return o.toRecovery(ctx, order, err.Error(), nil)
 	}
 	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
@@ -427,21 +457,9 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		return fmt.Errorf("conversion: read decimals of %s on %s: %w", order.Token, lane.ChainKey, err)
 	}
 	promise := PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
-
-	updates := map[string]any{
-		"holder":          models.HolderTreasury,
-		"promised_amount": promise.String(),
-	}
-	if expected, ok := new(big.Int).SetString(order.TokenAmount, 10); ok && received.Cmp(expected) < 0 {
-		// Short delivery: never convert more than actually landed, and never
-		// promise more than what landed can cover.
-		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s — repricing the promise",
-			order.ID, expected, received)
-		updates["token_amount"] = received.String()
-	}
 	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
 		order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
-	return o.setOrder(ctx, order, updates)
+	return o.setOrder(ctx, order, map[string]any{"promised_amount": promise.String()})
 }
 
 // startBridge reserves the attempt FIRST, then quotes, then broadcasts. The
@@ -1254,13 +1272,18 @@ func latestPendingLeg(legs []models.RampLeg) *models.RampLeg {
 	return out
 }
 
-// pendingLegOfKinds is latestPendingLeg scoped to a specific set of kinds.
-// latestPendingLeg orders by attempt ACROSS every kind, but attempt numbers
-// are sequenced independently PER KIND (see RampLeg.Attempt) — so "the
-// highest-attempt pending leg happens to be a refund" must never hide a
-// lower-attempt-numbered bridge or deliver leg that is just as pending. Any
-// caller that cares about a specific kind (or set of kinds) being pending
-// must use this, not latestPendingLeg filtered after the fact.
+// pendingLegOfKinds reports whether ANY leg of the given kinds is pending,
+// returning the first one found in slice order (whatever is pending among a
+// given kind at any moment is normally a single row — this makes no attempt
+// to find "the latest" one, unlike latestPendingLeg's name).
+//
+// This exists because latestPendingLeg is the wrong tool for "is a bridge or
+// a deliver leg pending": it picks the highest-ATTEMPT pending leg ACROSS
+// EVERY KIND, but attempt numbers are sequenced independently PER KIND (see
+// RampLeg.Attempt) — so a pending refund at attempt 5 would outrank, and
+// hide, a pending bridge at attempt 1 that is just as live. Any caller that
+// cares about a specific kind (or set of kinds) being pending must use this
+// instead, not latestPendingLeg filtered after the fact.
 func pendingLegOfKinds(legs []models.RampLeg, kinds ...string) *models.RampLeg {
 	want := make(map[string]bool, len(kinds))
 	for _, k := range kinds {
@@ -1604,7 +1627,20 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 	// Mark the intent BEFORE broadcasting, exactly as the automatic refund()
 	// above does: a crash between here and the broadcast must read as "a
 	// refund was under way", never as an order still waiting to convert.
-	if order.Status != models.PaycrestStatusRefunding {
+	//
+	// EXCEPT when the order is recovery_pending: that status is the ONLY
+	// thing NeedsOperator() keys on, and Tick's own query selects
+	// "refunding" for the automatic state machine to keep advancing. A
+	// crash right after this write — before anything broadcast — would drop
+	// a human-parked order out of the operator queue and hand it back to
+	// Advance, which could resume converting an order an operator
+	// deliberately stopped. The leg row Reserve is about to create is
+	// already a crash-visible record that a refund is under way; the
+	// order's own status does not also need to say so when a human already
+	// parked it on purpose. The unconditional status=refunded write on
+	// success, below, still applies regardless of the starting status: a
+	// refund that actually lands must close the order out.
+	if order.Status != models.PaycrestStatusRefunding && order.Status != models.PaycrestStatusRecoveryPending {
 		if err := o.setOrder(ctx, &order, map[string]any{
 			"status": models.PaycrestStatusRefunding, "fault": models.FaultPlatform,
 		}); err != nil {

@@ -305,6 +305,10 @@ func TestRefundFromTreasury_KilledTreasuryFailsClosed(t *testing.T) {
 	if r.broadcasts() != 0 {
 		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
 	}
+	refundLegs := r.legsOfKind(t, models.RampLegKindRefund)
+	if len(refundLegs) != 1 || refundLegs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("refund legs = %+v, want exactly one, FAILED (freed, not stuck pending)", refundLegs)
+	}
 }
 
 // ── RefundPreview (I4) ───────────────────────────────────────────────────────
@@ -350,5 +354,122 @@ func TestLegsAndOwed_NoRefundPreviewForANonCustodiedOrder(t *testing.T) {
 	}
 	if info.RefundPreview != nil {
 		t.Fatalf("refund preview = %+v, want nil for a direct order", info.RefundPreview)
+	}
+}
+
+// ── Fix round 2 ──────────────────────────────────────────────────────────────
+
+// Custody is proven the instant VerifyTransfer succeeds — takeCustody must
+// record holder=treasury BEFORE resolving the destination, not after. An
+// order whose requested token/chain cannot be routed (o.destination fails)
+// still ends up parked in recovery_pending, but it must be parked as MONEY
+// THE TREASURY HOLDS, not as a shape the refund tool refuses outright. This
+// is exactly the stranded-funds case the admin refund tool exists for.
+func TestOrchestrator_RecordsCustodyEvenWhenTheDestinationCannotBeResolved(t *testing.T) {
+	r := newConversionRig(t)
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"holder": models.HolderPaycrest, "requested_token": "NOPE",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %s, want treasury — VerifyTransfer already proved the money landed", got.Holder)
+	}
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending", got.Status)
+	}
+
+	// The whole point of the fix: this order must now be refundable, not
+	// refused as a shape the treasury never custodied.
+	token, chain, amount, err := r.svc.OwedToUser(context.Background(), got)
+	if err != nil {
+		t.Fatalf("OwedToUser = %v; a verifiably-custodied order must not be ErrRefundNotApplicable", err)
+	}
+	if amount != "100000000" || token != "USDC" || chain != "base" {
+		t.Fatalf("owed = %s %s %s, want the origin deposit the treasury actually holds", amount, token, chain)
+	}
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err != nil {
+		t.Fatalf("RefundFromTreasury = %v, want the stranded custody to be refundable", err)
+	}
+}
+
+// A refund attempt must never un-park an order a human deliberately parked.
+// The pre-broadcast "refunding" status write would otherwise clear the only
+// status NeedsOperator() keys on and hand the order back to Tick's automatic
+// state machine — which could resume converting an order an operator
+// stopped on purpose. An attempt that does not actually land must leave the
+// order exactly where the operator put it.
+func TestRefundFromTreasury_LeavesAParkedOrderParkedWhenTheAttemptFails(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	if err := r.db.Model(r.order).Update("status", models.PaycrestStatusRecoveryPending).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.src.native.transferErr = errors.New("rpc rejected the transfer")
+
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err == nil {
+		t.Fatal("expected the transfer build to fail")
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want the order to stay parked (recovery_pending) after an attempt that did not land", got.Status)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
+	}
+}
+
+// A refund actually landing on a parked order still closes it out: the order
+// is now resolved, so it correctly leaves the operator queue.
+func TestRefundFromTreasury_ClosesOutAParkedOrderOnSuccess(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	if err := r.db.Model(r.order).Update("status", models.PaycrestStatusRecoveryPending).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRefunded {
+		t.Fatalf("status = %s, want refunded once the transfer actually lands", got.Status)
+	}
+}
+
+// pendingLegOfKinds regression: attempts are numbered independently PER
+// KIND, so a pending refund at a HIGHER attempt number must never hide a
+// pending bridge at a lower one. Reverting to a kind-filtered-after-the-fact
+// "latest pending leg across every kind" would make this fall through to the
+// origin branch and return a real number — the exact bug this helper exists
+// to prevent.
+//
+// The bridge leg deliberately carries NO tx hash: with one, broadcastBridgeLeg
+// (a separate, later check) would independently also read this as
+// undetermined and mask whether pendingLegOfKinds is actually doing its job.
+// A pending, hashless bridge is caught ONLY by the pending-leg check.
+func TestOwedToUser_APendingRefundAtAHigherAttemptDoesNotHideAPendingBridge(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t,
+		&models.RampLeg{
+			Kind: models.RampLegKindBridge, Attempt: 1, Status: models.RampLegStatusPending,
+			ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: sponsorTestUser,
+			Amount: "100000000", TxHash: "",
+		},
+		&models.RampLeg{
+			Kind: models.RampLegKindRefund, Attempt: 5, Status: models.RampLegStatusPending,
+			ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: sponsorTestUser,
+			Amount: "100000000", TxHash: "0xsomeearlierattempt",
+		},
+	)
+	_, _, amount, err := r.svc.OwedToUser(context.Background(), r.order)
+	if err != nil || amount != "" {
+		t.Fatalf("owed = %q, err = %v; a live bridge must be undetermined even behind a higher-attempt-numbered pending refund", amount, err)
 	}
 }

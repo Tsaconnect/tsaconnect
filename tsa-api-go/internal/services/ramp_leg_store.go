@@ -36,6 +36,17 @@ type GormRampLegStore struct{ DB *gorm.DB }
 // Reserve inserts the leg, or returns the row already holding
 // (order_id, kind, attempt). The unique index settles concurrent ticks; a
 // pre-check could not. Same shape as GormSponsorshipStore.Reserve.
+//
+// A refund leg has a SECOND arbiter it can conflict against:
+// uq_ramp_legs_one_pending_refund (Postgres-only, added in
+// config.AutoMigrate) rejects a second PENDING refund leg for the same
+// order at ANY attempt number, not just this one — which is what actually
+// closes the race NextAttempt alone cannot: two callers computing different,
+// non-colliding attempt numbers for the same order's refund. When the
+// conflict is against THAT index rather than (order_id, kind, attempt), the
+// exact-match read-back below finds nothing (this row was never inserted),
+// so a broader fallback looks up whichever row actually won instead of
+// surfacing a bare "not found".
 func (s *GormRampLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*models.RampLeg, error) {
 	if leg.Status == "" {
 		leg.Status = models.RampLegStatusPending
@@ -51,9 +62,22 @@ func (s *GormRampLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*m
 		return nil, nil
 	}
 	var existing models.RampLeg
-	if err := s.DB.WithContext(ctx).
+	err := s.DB.WithContext(ctx).
 		Where("order_id = ? AND kind = ? AND attempt = ?", leg.OrderID, leg.Kind, leg.Attempt).
-		First(&existing).Error; err != nil {
+		First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	// Fallback: the row that actually blocked this insert is not the one at
+	// OUR attempt number. Return the pending or confirmed row for this
+	// (order_id, kind) instead, so the caller still gets a real leg back.
+	if err := s.DB.WithContext(ctx).
+		Where("order_id = ? AND kind = ? AND status IN ?", leg.OrderID, leg.Kind,
+			[]string{models.RampLegStatusPending, models.RampLegStatusConfirmed}).
+		Order("attempt DESC").First(&existing).Error; err != nil {
 		return nil, err
 	}
 	return &existing, nil
