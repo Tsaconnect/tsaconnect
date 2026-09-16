@@ -40,6 +40,9 @@ func newPaycrestOrderTestService(t *testing.T) (*PaycrestOrderService, *Currency
 	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
 		t.Fatalf("migrate paycrest_order_records: %v", err)
 	}
+	// A buy is money in, so CreateBuy reads the buyer's verification. A test
+	// that means to get past that gate seeds a verified buyer (seedVerifiedUser).
+	createTestUsersTable(t, db)
 
 	quotes := NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil)
 	svc := NewPaycrestOrderService(db, stubPaycrestOrderer{}, quotes, nil, "", "")
@@ -88,6 +91,7 @@ func (stubPaycrestQuoter) MarketRate(context.Context, string, string) (float64, 
 func TestPaycrestOrderService_NilRegistryIsNoGate(t *testing.T) {
 	svc, _ := newPaycrestOrderTestService(t)
 	// Deliberately do not call SetCurrencyRegistry.
+	buyer := seedVerifiedUser(t, svc.db)
 
 	// With no gate, the request proceeds past the currency check and reaches
 	// the stub client (panic) instead of stopping on ErrPaycrestDisabled.
@@ -98,7 +102,7 @@ func TestPaycrestOrderService_NilRegistryIsNoGate(t *testing.T) {
 		}
 	}()
 	_, _ = svc.CreateBuy(context.Background(), PaycrestBuyRequest{
-		UserID:        uuid.New(),
+		UserID:        buyer,
 		WalletAddress: "0xabc",
 		FiatCode:      "KES",
 		FiatAmount:    "1000",
@@ -172,6 +176,7 @@ func TestPaycrestOrderService_CreateBuy_AllowsWhenPaycrest(t *testing.T) {
 	if got := registry.RampProvider("NGN"); got != RampProviderPaycrest {
 		t.Fatalf("test fixture invalid: NGN resolves to %q, want paycrest", got)
 	}
+	buyer := seedVerifiedUser(t, svc.db)
 
 	defer func() {
 		r := recover()
@@ -180,7 +185,7 @@ func TestPaycrestOrderService_CreateBuy_AllowsWhenPaycrest(t *testing.T) {
 		}
 	}()
 	_, _ = svc.CreateBuy(context.Background(), PaycrestBuyRequest{
-		UserID:            uuid.New(),
+		UserID:            buyer,
 		WalletAddress:     "0xabc",
 		FiatCode:          "NGN",
 		FiatAmount:        "1000",

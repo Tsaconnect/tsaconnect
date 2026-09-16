@@ -61,6 +61,7 @@ import {
   type PaycrestQuote,
   type PaycrestVenue,
 } from '@/services/paycrestApi';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 
 /** Debounce on the amount field: every keystroke would otherwise fan a live
  *  quote out across every network we support. */
@@ -261,6 +262,9 @@ export default function PaycrestBuyScreen() {
       ).catch(() => {});
       setOrder(created);
     } catch (e) {
+      // Not verified (or verified with no legal name): offer the next step
+      // instead of a dead-end "could not start" alert.
+      if (e instanceof PaycrestError && promptKycRefusal(e.code, e.message)) return;
       Alert.alert(
         'Could not start your purchase',
         e instanceof PaycrestError ? e.message : 'Please try again.',

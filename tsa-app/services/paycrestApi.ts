@@ -102,10 +102,14 @@ export interface PaycrestOrder {
  *  shown to users, so screens can surface `message` directly. */
 export class PaycrestError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  /** Machine error code, when the server sends one (e.g.
+   *  "kyc_verification_required" on a buy). Branch on this, not on message. */
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'PaycrestError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -132,7 +136,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       res.status === 404 || res.status === 503
         ? 'Naira transfers are not available right now. Please try again later.'
         : 'Could not reach the transfer provider. Check your connection and try again.';
-    throw new PaycrestError(body?.message ?? fallback, res.status);
+    throw new PaycrestError(body?.message ?? fallback, res.status, body?.code);
   }
   return body?.data as T;
 }

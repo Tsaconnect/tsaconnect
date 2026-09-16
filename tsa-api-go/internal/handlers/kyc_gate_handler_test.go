@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -227,5 +229,188 @@ func TestActivateVA_UnverifiedUserIsRefusedWithTheKYCCode(t *testing.T) {
 	}
 	if code := decodeITResponse(t, w)["code"]; code != "kyc_verification_required" {
 		t.Fatalf("code = %v, want kyc_verification_required (body=%s)", code, w.Body.String())
+	}
+}
+
+// ─── Paycrest onramp ────────────────────────────────────────────────────────
+
+var errPaycrestProviderReached = errors.New("paycrest provider reached")
+
+// paycrestGateProvider stands in for both Paycrest client surfaces and counts
+// every call, so a test can tell "refused before the provider" apart from
+// "refused by the provider".
+type paycrestGateProvider struct{ calls int }
+
+func (p *paycrestGateProvider) Markets(context.Context) (*services.PaycrestMarkets, error) {
+	p.calls++
+	return nil, errPaycrestProviderReached
+}
+
+func (p *paycrestGateProvider) Rates(context.Context, string, string, float64, string) (*services.PaycrestRates, error) {
+	p.calls++
+	return nil, errPaycrestProviderReached
+}
+
+func (p *paycrestGateProvider) MarketRate(context.Context, string, string) (float64, error) {
+	p.calls++
+	return 0, errPaycrestProviderReached
+}
+
+func (p *paycrestGateProvider) CreateOnrampOrder(context.Context, services.PaycrestOnrampRequest) (*services.PaycrestOrder, error) {
+	p.calls++
+	return nil, errPaycrestProviderReached
+}
+
+func (p *paycrestGateProvider) CreateOfframpOrder(context.Context, services.PaycrestOfframpRequest) (*services.PaycrestOrder, error) {
+	p.calls++
+	return nil, errPaycrestProviderReached
+}
+
+func (p *paycrestGateProvider) GetOrder(context.Context, string) (*services.PaycrestOrder, error) {
+	p.calls++
+	return nil, errPaycrestProviderReached
+}
+
+func newPaycrestGateHandler(t *testing.T) (*PaycrestHandler, *gorm.DB, *paycrestGateProvider) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	createHandlerUsersTable(t, db)
+
+	provider := &paycrestGateProvider{}
+	quotes := services.NewPaycrestQuoteService(provider, nil, nil)
+	dir := services.NewPaycrestDirectory(
+		&stubPaycrestInstitutions{rows: []services.PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA", Type: "bank"}}},
+		&stubPaycrestBankDir{rows: []services.NombaBank{{Name: "Access Bank", Code: "044"}}},
+	)
+	orders := services.NewPaycrestOrderService(db, provider, quotes, dir, "", "")
+	if orders == nil {
+		t.Fatal("NewPaycrestOrderService returned nil")
+	}
+	return NewPaycrestHandler(orders, quotes, dir), db, provider
+}
+
+func doPaycrest(t *testing.T, handle gin.HandlerFunc, path string, user *models.User, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", user)
+	handle(c)
+	return w
+}
+
+func doPaycrestBuy(t *testing.T, h *PaycrestHandler, user *models.User) *httptest.ResponseRecorder {
+	t.Helper()
+	return doPaycrest(t, h.Buy, "/api/paycrest/buy", user, map[string]any{
+		"amount": "800", "currency": "NGN", "chain": "base", "token": "USDC",
+		"refundBankCode": "044", "refundAccount": "0123456789",
+	})
+}
+
+// An unverified buyer gets the routable 403 and nothing reaches Paycrest —
+// no provider order means no bank account the user could pay into.
+func TestPaycrestBuy_UnverifiedUserIsRefusedWithTheKYCCode(t *testing.T) {
+	for _, status := range []string{
+		models.VerificationStatusPending,
+		models.VerificationStatusInReview,
+		models.VerificationStatusRejected,
+	} {
+		h, db, provider := newPaycrestGateHandler(t)
+		user := seedHandlerUserAt(t, db, status)
+
+		w := doPaycrestBuy(t, h, user)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status %q: HTTP %d, want 403 (body=%s)", status, w.Code, w.Body.String())
+		}
+		resp := decodeITResponse(t, w)
+		if resp["success"] != false || resp["code"] != "kyc_verification_required" {
+			t.Fatalf("status %q: body = %s, want success=false code=kyc_verification_required", status, w.Body.String())
+		}
+		if provider.calls != 0 {
+			t.Fatalf("status %q: %d provider call(s) made before the refusal", status, provider.calls)
+		}
+		var n int64
+		db.Model(&models.PaycrestOrderRecord{}).Count(&n)
+		if n != 0 {
+			t.Fatalf("status %q: %d order(s) written despite the refusal", status, n)
+		}
+	}
+}
+
+func TestPaycrestBuy_NamelessVerifiedUserGetsTheSupportCode(t *testing.T) {
+	h, db, provider := newPaycrestGateHandler(t)
+	user := seedHandlerNamelessVerified(t, db)
+
+	w := doPaycrestBuy(t, h, user)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("HTTP %d, want 403 (body=%s)", w.Code, w.Body.String())
+	}
+	if code := decodeITResponse(t, w)["code"]; code != "kyc_legal_name_missing" {
+		t.Fatalf("code = %v, want kyc_legal_name_missing (body=%s)", code, w.Body.String())
+	}
+	if provider.calls != 0 {
+		t.Fatalf("%d provider call(s) made before the refusal", provider.calls)
+	}
+}
+
+func TestPaycrestBuy_VerifiedUserReachesTheProvider(t *testing.T) {
+	h, db, provider := newPaycrestGateHandler(t)
+	user := seedHandlerUserAt(t, db, models.VerificationStatusVerified)
+
+	w := doPaycrestBuy(t, h, user)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("verified buyer refused: HTTP 403 (body=%s)", w.Body.String())
+	}
+	if provider.calls == 0 {
+		t.Fatalf("verified buyer never reached the provider (HTTP %d, body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// The sell is money out. An unverified holder must reach the provider, not a
+// KYC refusal that would trap their stablecoin.
+func TestPaycrestSell_UnverifiedUserIsNotGated(t *testing.T) {
+	h, db, provider := newPaycrestGateHandler(t)
+	user := seedHandlerUserAt(t, db, models.VerificationStatusPending)
+
+	w := doPaycrest(t, h.Sell, "/api/paycrest/sell", user, map[string]any{
+		"amount": "800", "currency": "NGN", "chain": "base", "token": "USDC",
+		"bankCode": "044", "accountNumber": "0123456789",
+	})
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("unverified seller refused: HTTP 403 (body=%s) — money-out must not be gated", w.Body.String())
+	}
+	if provider.calls == 0 {
+		t.Fatalf("sell never reached the provider (HTTP %d, body=%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestPaycrestError_KYCRefusalIs403WithTheCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for err, want := range map[error]string{
+		services.ErrKYCVerificationRequired: "kyc_verification_required",
+		services.ErrKYCLegalNameMissing:     "kyc_legal_name_missing",
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		paycrestError(c, err)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%v: status = %d, want 403", err, w.Code)
+		}
+		if code := decodeITResponse(t, w)["code"]; code != want {
+			t.Fatalf("%v: code = %v, want %s (body=%s)", err, code, want, w.Body.String())
+		}
 	}
 }
