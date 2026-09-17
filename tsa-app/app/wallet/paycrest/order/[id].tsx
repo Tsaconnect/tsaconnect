@@ -27,6 +27,8 @@ import {
   Text,
 } from '@/components/ui';
 import { useCountdown } from '@/hooks/useCountdown';
+import { DepositProgress } from '@/components/paycrest/DepositProgress';
+import { depositCardState } from '@/utils/paycrestDepositView';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
 import {
   cancelOrder,
@@ -54,9 +56,13 @@ const CHAIN_LABELS: Record<string, string> = {
 
 export default function PaycrestOrderScreen() {
   const { colors, spacing } = useTheme();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  // sentTx is set when this app just broadcast the deposit itself (sell.tsx →
+  // goToOrder). Without it this screen cannot tell "the user still has to
+  // send" from "we already sent, on their behalf, seconds ago".
+  const { id, sentTx } = useLocalSearchParams<{ id: string; sentTx?: string }>();
 
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
+  const [addressShown, setAddressShown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
@@ -173,6 +179,16 @@ export default function PaycrestOrderScreen() {
   const unmatched = order.status === 'unmatched';
   const settled = order.status === 'settled';
 
+  const deposit = depositCardState({
+    direction: order.direction,
+    status: order.status,
+    expired,
+    sentTxHash: typeof sentTx === 'string' ? sentTx : undefined,
+    paymentClaimedAt: order.paymentClaimedAt,
+  });
+  /** The deposit is on its way, so stop asking for it in the status line too. */
+  const depositUnderway = deposit.kind === 'progress' || deposit.kind === 'claimed';
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
@@ -214,7 +230,11 @@ export default function PaycrestOrderScreen() {
             <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               {order.direction === 'buy'
                 ? `Transfer ₦${order.payAmount} to the account below. ${countdown} left.`
-                : `Send ${order.tokenAmount} ${order.token} from your wallet. ${countdown} left.`}
+                : depositUnderway
+                  ? // Instructing a user to send money they have already sent is
+                    // how a sale becomes two. Once it is moving, report, do not ask.
+                    `Confirming ${order.tokenAmount} ${order.token} from your wallet.`
+                  : `Send ${order.tokenAmount} ${order.token} from your wallet. ${countdown} left.`}
             </Text>
           )}
           {order.failureReason && !unmatched && (
@@ -243,7 +263,47 @@ export default function PaycrestOrderScreen() {
           </Card>
         )}
 
-        {awaiting && order.direction === 'sell' && !expired && (
+        {deposit.kind === 'progress' && (
+          <DepositProgress
+            amountLabel={`${order.tokenAmount} ${order.token}`}
+            chainLabel={CHAIN_LABELS[order.chain] ?? order.chain}
+            txHash={deposit.txHash}
+          />
+        )}
+
+        {/* The user says it is sent but this screen has no hash to show for it
+            — a restart lost it, or they sent from a wallet we do not hold. Say
+            we are waiting, and keep the address one tap away rather than gone:
+            "I've sent it" is a button someone can press before they have. */}
+        {deposit.kind === 'claimed' && (
+          <Card>
+            <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+              Waiting for your deposit to arrive
+            </Text>
+            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+              {order.tokenAmount} {order.token} on {CHAIN_LABELS[order.chain] ?? order.chain}. This
+              confirms on its own once the provider sees it.
+            </Text>
+            {addressShown ? (
+              <>
+                <CopyableField value={order.depositAddress ?? ''} />
+                <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+                  Only send again if nothing left your wallet — a second transfer will not be
+                  matched to this order.
+                </Text>
+              </>
+            ) : (
+              <Button
+                title="Show deposit address"
+                variant="ghost"
+                onPress={() => setAddressShown(true)}
+                fullWidth
+              />
+            )}
+          </Card>
+        )}
+
+        {deposit.kind === 'address' && (
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
               Send from your wallet to
