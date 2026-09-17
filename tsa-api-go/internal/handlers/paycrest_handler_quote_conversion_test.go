@@ -84,10 +84,26 @@ func testConversionChainRegistry() *services.BlockchainService {
 	}})
 }
 
+// fakeTreasuryLaneChecker stands in for *services.Treasury in
+// ConvertedVenues' own gate (services.PaycrestQuoteService.SetTreasuryLanes)
+// — needed here to exercise the handler's conversion wiring from outside the
+// services package, where services.treasuryLaneChecker is unexported but its
+// method set is still satisfiable structurally.
+type fakeTreasuryLaneChecker struct {
+	laned map[string]bool
+}
+
+func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *services.TreasuryLane {
+	if f.laned[chainKey] {
+		return &services.TreasuryLane{}
+	}
+	return nil
+}
+
 // newConvertibleQuoteService wires a service that quotes 100 USDC on base for
 // NGN 150,000 (rate 1,500), with conversion fully configured (LiFi quoter,
-// treasury address, chain registry) — everything buildRampConversion wires at
-// boot when RAMP_CONVERSION_BUY is on.
+// treasury address, chain registry, treasury lanes) — everything
+// buildRampConversion wires at boot when RAMP_CONVERSION_BUY is on.
 func newConvertibleQuoteService(t *testing.T) (*services.PaycrestQuoteService, *fakeLiFiQuoterForQuote) {
 	t.Helper()
 	pc := &stubPaycrestQuoter{
@@ -102,6 +118,7 @@ func newConvertibleQuoteService(t *testing.T) (*services.PaycrestQuoteService, *
 	svc.SetLiFiQuoter(lifi)
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testConversionChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "optimism": true}})
 	return svc, lifi
 }
 

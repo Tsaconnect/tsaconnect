@@ -54,9 +54,22 @@ type RampLeg struct {
 	// AmountReceived exists — see that function's own comment for why.
 	Amount string `gorm:"size:64" json:"amount"`
 	// AmountReceived is what actually landed, read back on confirmation —
-	// also base units, in the SAME token/chain Amount is denominated in for
-	// that leg's Kind (see above). A bridge's output is never exactly its
-	// quote.
+	// also base units, but NOT always in the same token/chain Amount is
+	// denominated in on THIS SAME ROW. For a deliver or refund leg the two
+	// agree (both denominated in this row's own Token/ChainKey, since that
+	// is the only chain either kind ever moves on). For a BRIDGE leg they
+	// deliberately DISAGREE: Amount is what left the treasury on the ORIGIN
+	// chain (this row's own Token/ChainKey), but AmountReceived is what the
+	// DESTINATION-chain verifier proved landed in the user's wallet —
+	// order.RequestedToken on order.RequestedChain, which this row does not
+	// itself record. Resolving AmountReceived's decimals for a bridge leg
+	// therefore means looking up the ORDER's requested token/chain, never
+	// this row's own. No consumer in this codebase does that resolution
+	// today — creditedToUser (conversion_orchestrator.go) only sums the raw
+	// base-unit integer, never re-derives it from decimals — which is why
+	// this asymmetry is currently harmless. It will not stay harmless if a
+	// future reader assumes this row's own Token/ChainKey describe both
+	// columns.
 	AmountReceived string `gorm:"size:64" json:"amountReceived,omitempty"`
 
 	TxHash string `gorm:"size:128;index" json:"txHash,omitempty"`

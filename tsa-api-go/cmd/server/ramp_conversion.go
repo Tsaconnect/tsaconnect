@@ -138,13 +138,17 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		quotes.SetLiFiQuoter(lifiQuoteClient)
 		quotes.SetChainRegistry(chains)
 		quotes.SetTreasuryAddress(addr)
-		// Quotable chains and treasury lanes are independent sets —
-		// RampConversionMinUSDByChain covers every chain in
-		// RAMP_TREASURY_CHAINS, but `lanes` can be a strict subset (missing
-		// floor, no chain client, no chain id). Filtering here means the
-		// quote service never offers a converted venue on a chain this
-		// treasury cannot actually execute on.
-		quotes.SetConversionMinimums(rampQuotableConversionMinimums(cfg.RampConversionMinUSDByChain, lanes), cfg.RampConversionMinUSD)
+		// The REAL gate on which requested chains a converted buy may be
+		// offered on: quotable chains and treasury lanes are independent
+		// sets (RAMP_TREASURY_CHAINS can be a strict subset of what
+		// config.Networks knows — missing floor, no chain client, no chain
+		// id), and ConvertedVenues asks `treasury` directly per request
+		// rather than trusting a filtered minimums map (a minimums map with
+		// no entry for a chain is NOT a refusal — MeetsMinimumOrder falls
+		// back to the default floor, which makes an unlaned chain MORE
+		// quotable, not less).
+		quotes.SetTreasuryLanes(treasury)
+		quotes.SetConversionMinimums(cfg.RampConversionMinUSDByChain, cfg.RampConversionMinUSD)
 	}
 	if orders != nil {
 		orders.SetTreasury(addr)
@@ -168,24 +172,6 @@ func rampTreasuryLaneFloor(cfg *config.Config, chain string) (floor *big.Int, sk
 		return nil, "invalid or missing RAMP_TREASURY_NATIVE_FLOOR_WEI_" + strings.ToUpper(chain)
 	}
 	return floor, ""
-}
-
-// rampQuotableConversionMinimums restricts mins (populated for every chain in
-// RAMP_TREASURY_CHAINS by config.Load) to the chains that actually got a
-// treasury lane. Quotable chains and treasury lanes are independent sets — a
-// missing floor, no chain client, or no chain id can drop a configured chain
-// from lanes — so passing the unfiltered map to
-// PaycrestQuoteService.SetConversionMinimums would let it offer a converted
-// venue on a chain this treasury can never execute on: the user would see a
-// quote and then an error at order time.
-func rampQuotableConversionMinimums(mins map[string]float64, lanes map[string]*services.TreasuryLane) map[string]float64 {
-	out := make(map[string]float64, len(lanes))
-	for chain := range lanes {
-		if v, ok := mins[chain]; ok {
-			out[chain] = v
-		}
-	}
-	return out
 }
 
 // rampTreasuryCaps validates the two exposure caps before they ever reach

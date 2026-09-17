@@ -307,14 +307,23 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 	}
 	// An empty treasury address means the lanes disagree about their signer
 	// (or none are configured), so we do not know which address Paycrest was
-	// told to pay. Refuse the order rather than act on a guess.
+	// told to pay. A bare error here used to be a SILENT PERMANENT STALL for
+	// any order that had already taken custody: Holder is Treasury, zero
+	// legs exist yet, and afterStep's own stall detector returns early on
+	// zero legs — so nothing ever parks, nothing alerts, and the retry
+	// window (anchored on bridge attempt 1) never starts either, so the
+	// automatic refund never fires. Reachable in production by hitting the
+	// per-chain exposure cap after custody or by removing a chain from
+	// RAMP_TREASURY_CHAINS while orders are in flight — park instead, so an
+	// order that may already be holding user money is never invisible.
 	if o.treasury == nil || o.treasury.Address() == "" {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_treasury_total=1 order=%s", order.ID)
-		return ErrSponsorNotAvailable
+		return o.toRecovery(ctx, order, "treasury lanes disagree on their signer, or none are configured", nil)
 	}
 	lane := o.treasury.Lane(order.ChainKey)
 	if lane == nil {
-		return ErrSponsorNotAvailable
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_lane_total=1 order=%s chain=%s", order.ID, order.ChainKey)
+		return o.toRecovery(ctx, order, fmt.Sprintf("no treasury lane configured for %s", order.ChainKey), nil)
 	}
 
 	// 1. Paycrest's own delivery must be PROVEN before we treat the funds as
@@ -350,10 +359,13 @@ func (o *ConversionOrchestrator) Advance(ctx context.Context, order *models.Payc
 			return o.observeBridge(ctx, order, pending)
 		case models.RampLegKindDeliver:
 			return o.observeDeliver(ctx, order, pending)
+		case models.RampLegKindRefund:
+			return o.observeRefund(ctx, order, pending)
 		}
-		// A refund we broadcast ourselves but could not record an outcome for.
-		// Its fate is unknown, so this order stops here rather than risking a
-		// second payment; the stall deadline surfaces it to an operator.
+		// An unrecognised leg kind we broadcast ourselves but could not
+		// record an outcome for. Its fate is unknown, so this order stops
+		// here rather than risking a second payment; the stall deadline
+		// surfaces it to an operator.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d tx=%s",
 			order.ID, pending.ID, pending.Kind, pending.Attempt, pending.TxHash)
 		return nil
@@ -471,6 +483,21 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s (base units, %ddp) — repricing to %s",
 			order.ID, expected, received, srcDecimals, correctedDecimal)
 		custodyUpdates["token_amount"] = correctedDecimal
+	case received.Cmp(expected) > 0:
+		// Over-delivery: VerifyTransfer sums EVERY matching Transfer log in
+		// the transaction, so a provider settling another one of our orders
+		// in the SAME tx (both rows can carry the same hash), or any
+		// unrelated transfer riding along, makes `received` exceed what
+		// THIS order's own TokenAmount ever promised. startBridge only ever
+		// sends order.TokenAmount (never `received`) — promising off the
+		// inflated figure would guarantee a shortfall paid from margin or
+		// parked, for money that was never this order's to begin with.
+		// Clamp what the PROMISE is computed from to what this order
+		// actually asked for; token_amount itself is left untouched; it
+		// already equals `expected`.
+		log.Printf("[ramp-conversion] order=%s delivery over-counted: expected=%s received=%s (base units, %ddp) — clamping to what this order promised",
+			order.ID, expected, received, srcDecimals)
+		received = expected
 	}
 	order.Holder = models.HolderTreasury
 	if v, ok := custodyUpdates["token_amount"].(string); ok {
@@ -547,9 +574,17 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
 		return o.toRecovery(ctx, order, err.Error(), nil)
 	}
-	// Caps gate NEW exposure, and this is the only path that creates any.
+	// Caps gate NEW exposure, and this is the only path that creates any. A
+	// bare error here (the kill switch, or the per-order/per-chain cap) is
+	// the same silent-permanent-stall shape as an unresolvable treasury/lane
+	// in Advance: Holder is already Treasury, zero legs exist yet, so
+	// afterStep's stall detector never fires and nothing ever surfaces this
+	// order again. Park it — an operator can always retry once the cap
+	// frees up or the kill switch lifts; invisible is worse than requiring
+	// a nudge.
 	if err := o.checkCaps(ctx, lane, order, order.Token, amount); err != nil {
-		return err
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_caps_check_total=1 order=%s err=%v", order.ID, err)
+		return o.toRecovery(ctx, order, fmt.Sprintf("cannot start the bridge: %v", err), nil)
 	}
 
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindBridge)
@@ -718,19 +753,37 @@ func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.
 // It is the single gate for "never settle on a number nobody checked", shared
 // by the bridge landing and the top-up, so neither can drift from the other.
 func (o *ConversionOrchestrator) verifyOnDestination(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, txHash, stage string) (*big.Int, error) {
+	return o.verifyTransferOnChain(ctx, order, order.RequestedChain, dst.token, txHash, stage)
+}
+
+// verifyTransferOnChain reads ONE transaction on the given chain and returns
+// what the order's own wallet was actually credited by it.
+//
+//	(amount, nil) — proven; this is the only shape that may settle anything
+//	(nil, nil)    — cannot be established YET; wait and look again (alerted)
+//	(nil, err)    — parked for a human, or a real error
+//
+// This is the single gate for "never settle on a number nobody checked",
+// shared by the bridge landing, the top-up (both via verifyOnDestination,
+// which always asks about order.RequestedChain), AND the refund (via
+// observeRefund, which asks about the ORIGIN chain instead) — so none of the
+// three can drift from one another in how "proven" is decided. A refund
+// pays the user's own wallet exactly like the other two; it earns exactly
+// the same proof.
+func (o *ConversionOrchestrator) verifyTransferOnChain(ctx context.Context, order *models.PaycrestOrderRecord, chainKey, tokenAddr, txHash, stage string) (*big.Int, error) {
 	if txHash == "" {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_dest_tx_total=1 order=%s stage=%s", order.ID, stage)
 		return nil, nil
 	}
-	verifier := o.verifierFor(order.RequestedChain)
+	verifier := o.verifierFor(chainKey)
 	if verifier == nil {
 		// Same reasoning as taking custody: with no verifier the alternative is
 		// settling on a number nobody checked.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=%s",
-			order.ID, order.RequestedChain, stage)
+			order.ID, chainKey, stage)
 		return nil, nil
 	}
-	credited, err := verifier.VerifyTransfer(ctx, txHash, dst.token, order.WalletAddress)
+	credited, err := verifier.VerifyTransfer(ctx, txHash, tokenAddr, order.WalletAddress)
 	if err != nil {
 		// A REVERTED transfer, or one that paid someone else, is a settled
 		// question with a bad answer — it will never become true by waiting, so
@@ -951,6 +1004,54 @@ func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.
 	})
 }
 
+// observeRefund resolves a refund leg that has already been broadcast — by
+// the automatic refund() below, or by RefundFromTreasury's admin action.
+//
+// A refund is, in every way that matters, just another payment to the
+// user's own wallet: it earns exactly the same on-chain proof the bridge
+// landing and the top-up already require, never less because it happens to
+// be the recovery path. Confirming (and closing the order) on broadcast
+// alone was the one remaining asymmetry Task 7's own on-chain-verification
+// ruling forbade — a reverted or dropped refund transfer would otherwise
+// leave a "confirmed" leg and a terminal "refunded" order recording a debt
+// that was never actually paid, with owedFromLegs reporting "0" and
+// NeedsOperator() false: every recovery tool would believe the debt was
+// settled while the user got nothing.
+func (o *ConversionOrchestrator) observeRefund(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if leg.TxHash == "" {
+		// Reserved, but no broadcast outcome was ever recorded. Nothing to
+		// verify yet; the stall deadline is what eventually surfaces this.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d",
+			order.ID, leg.ID, leg.Kind, leg.Attempt)
+		return nil
+	}
+	lane := o.treasury.Lane(leg.ChainKey)
+	if lane == nil {
+		return ErrSponsorNotAvailable
+	}
+	tokenAddr := lane.tokenAddress(leg.Token)
+	if tokenAddr == "" {
+		return fmt.Errorf("conversion: token %s is not configured on %s", leg.Token, leg.ChainKey)
+	}
+	// A refund leg is denominated in its OWN Token/ChainKey (the origin the
+	// treasury actually paid from) — unlike a bridge leg, there is no
+	// origin/destination split to resolve here; see RampLeg.AmountReceived's
+	// own doc comment for that distinction.
+	credited, err := o.verifyTransferOnChain(ctx, order, leg.ChainKey, tokenAddr, leg.TxHash, "refund")
+	if err != nil || credited == nil {
+		return err // alerted inside; the leg stays pending, or the order was parked
+	}
+	if err := o.legs.Confirm(detached(ctx), leg.ID, credited.String(), o.now()); err != nil {
+		if errors.Is(err, ErrLegNotPending) {
+			return nil // another tick (or admin call) already confirmed it
+		}
+		return err
+	}
+	log.Printf("[ramp-conversion] order=%s refund#%d confirmed tx=%s credited=%s (verified on-chain)",
+		order.ID, leg.Attempt, leg.TxHash, credited)
+	return o.finishRefund(detached(ctx), order, order.Fault)
+}
+
 // refund returns the FULL Paycrest amount — markup included — in the token the
 // treasury actually holds, on the chain Paycrest delivered to, to the wallet
 // the order itself names.
@@ -1023,12 +1124,15 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, ""); err != nil {
 		return err
 	}
-	if err := o.legs.Confirm(detached(ctx), leg.ID, amount.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
-		return err
-	}
-	log.Printf("[ramp-conversion] order=%s refund#%d chain=%s token=%s amount=%s tx=%s fault=%s",
+	log.Printf("[ramp-conversion] order=%s refund#%d chain=%s token=%s amount=%s tx=%s fault=%s — awaiting on-chain confirmation",
 		order.ID, attempt, lane.ChainKey, leg.Token, amount, txHash, fault)
-	return o.finishRefund(detached(ctx), order, fault)
+	// Leave the leg PENDING: a broadcast is not proof. observeRefund verifies
+	// it on the ORIGIN chain on a LATER tick (Advance's step 2 dispatches a
+	// pending refund leg to it) — confirming here on broadcast alone was the
+	// one refund-specific asymmetry Task 7's on-chain-verification ruling
+	// forbade; see observeRefund's own doc comment for the exact failure it
+	// closes.
+	return nil
 }
 
 // finishRefund closes an order whose refund has provably landed. It is split
@@ -1419,11 +1523,21 @@ func bridgeLegByAttempt(legs []models.RampLeg, attempt int) *models.RampLeg {
 // without reaching a confirmed outcome. Its funds are unaccounted for, so
 // nothing else may spend against the same money.
 //
-// NOTE: as the state machine currently stands this is unreachable — a leg with
-// a hash is either pending (caught by step 2) or has already been sent to
-// recovery by observeBridge. It is kept as defence in depth against a future
-// path that fails a broadcast leg, which is the one mistake that would cost a
-// user a second payment. Do not read it as a live guard.
+// Within Advance's own step 4 this is genuinely unreachable — a leg with a
+// hash is either still pending (caught by step 2, which returns before step 4
+// ever runs) or has already been sent to recovery by observeBridge — and is
+// kept there only as defence in depth against a future path that fails a
+// broadcast leg without going through observeBridge first.
+//
+// It is NOT merely defensive everywhere, though — read it as a live guard
+// wherever else it is called. observeBridge's own LiFi-FAILED case is exactly
+// how this shape gets created and left behind: toRecovery parks the ORDER but
+// never touches the LEG, so a bridge attempt LiFi reported failed after
+// broadcasting sits forever as Kind=bridge, TxHash!="", Status=pending.
+// OwedToUser calls this function directly to refuse to name a refund figure
+// while that money might still land — reached the moment an admin looks at
+// (or tries to refund) a recovery_pending order with a stranded bridge, which
+// is a real, common path into a parked order.
 func broadcastBridgeLeg(legs []models.RampLeg) *models.RampLeg {
 	for i := range legs {
 		leg := &legs[i]
@@ -1714,6 +1828,15 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 	if existing := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusConfirmed); existing != nil {
 		return existing, nil
 	}
+	// A refund already broadcast (by an earlier call to this same action, or
+	// by the automatic refund() path) but not yet resolved: attempt to
+	// VERIFY it now rather than refusing outright. This is what actually
+	// unsticks an order sitting in recovery_pending — Advance's own tick
+	// never touches a parked order again, so if the admin does not
+	// re-attempt verification here, nothing else ever will.
+	if pending := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusPending); pending != nil {
+		return o.resolveAdminRefund(ctx, adminID, &order, pending)
+	}
 
 	// OwedToUser is the single gate on custody (refuses ErrRefundNotApplicable
 	// for a direct order, a sell, or a converted buy never taken into
@@ -1769,6 +1892,11 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		}); err != nil {
 			return nil, err
 		}
+		// setOrder writes through GORM's map-based Updates, which this file
+		// never trusts to also refresh the struct in hand (see takeCustody's
+		// own explicit order.Holder mirror) — order.Fault is read again
+		// below, by observeRefund's finishRefund call, so it must be current.
+		order.Fault = models.FaultPlatform
 	}
 
 	// A FRESH, LAST-MOMENT read, immediately before reserving. The `legs`
@@ -1789,7 +1917,7 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return again, nil
 	}
 	if pending := latestLeg(freshLegs, models.RampLegKindRefund, models.RampLegStatusPending); pending != nil {
-		return nil, ErrRefundInFlight
+		return o.resolveAdminRefund(ctx, adminID, &order, pending)
 	}
 
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindRefund)
@@ -1808,12 +1936,10 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return nil, err
 	}
 	if reserved != nil {
-		// Another call already claimed this attempt: hand back its outcome if
-		// it landed, otherwise refuse rather than race it.
-		if reserved.Status == models.RampLegStatusConfirmed {
-			return reserved, nil
-		}
-		return nil, ErrRefundInFlight
+		// Another call already claimed this attempt: try to resolve ITS
+		// outcome rather than refusing outright — same reasoning as the two
+		// pending-leg checks above.
+		return o.resolveAdminRefund(ctx, adminID, &order, reserved)
 	}
 
 	txHash, attempted, err := o.treasury.TransferToken(ctx, lane, token, order.WalletAddress, amount)
@@ -1836,32 +1962,51 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		}
 		return nil, err
 	}
-	// Detached from here on: the transfer already broadcast, so every
-	// remaining write must survive the caller's own context ending —
-	// exactly refund()'s own pattern.
+	// Detached: the transfer already broadcast, so this write must survive
+	// the caller's own context ending — exactly refund()'s own pattern.
 	if err := o.legs.SetTxHash(detached(ctx), newLeg.ID, txHash, ""); err != nil {
 		return nil, err
 	}
-	if err := o.legs.Confirm(detached(ctx), newLeg.ID, amount.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
-		return nil, err
-	}
-	log.Printf("[ramp-conversion] ALERT ramp_treasury_refund_total=1 order=%s admin=%s amount=%s tx=%s",
-		order.ID, adminID, amount, txHash)
-
-	confirmedAt := o.now().UTC()
 	newLeg.TxHash = txHash
-	newLeg.Status = models.RampLegStatusConfirmed
-	newLeg.AmountReceived = amount.String()
-	newLeg.ConfirmedAt = &confirmedAt
+	log.Printf("[ramp-conversion] order=%s refund#%d chain=%s token=%s amount=%s tx=%s admin=%s — verifying on-chain before closing the order",
+		order.ID, attempt, lane.ChainKey, token, amount, txHash, adminID)
 
-	// Close the order out: the ledger now shows a confirmed refund, and
-	// nothing else may act on this order once it has been paid back.
-	if err := o.setOrder(detached(ctx), &order, map[string]any{
-		"status": models.PaycrestStatusRefunded, "holder": models.HolderUser, "fault": models.FaultPlatform,
-	}); err != nil {
+	// A broadcast is not proof: Task 7's on-chain-verification ruling
+	// applies to a refund exactly as much as a bridge landing or a top-up —
+	// confirming (and closing the order) here on broadcast alone is the one
+	// asymmetry that let a reverted or dropped refund transfer record a
+	// "confirmed" leg and a terminal "refunded" order for a debt that was
+	// never actually paid. This is a synchronous admin action and a refund
+	// is a single same-chain transfer, so attempting the proof in the SAME
+	// call — rather than waiting for a later tick, which this order may
+	// never receive again once it is recovery_pending — is both correct and
+	// the only way an admin ever gets a definitive answer from this action.
+	return o.resolveAdminRefund(ctx, adminID, &order, newLeg)
+}
+
+// resolveAdminRefund asks observeRefund to verify a refund leg on-chain and,
+// if that lands it, logs the admin audit trail (Decision 6) and returns the
+// now-confirmed leg. If the leg is still genuinely pending — not yet mined,
+// or the RPC has not caught up — it is returned AS-IS with no error: a
+// broadcast is a real, useful answer for an admin to see, just not yet a
+// confirmed one, and refusing outright here would leave a recovery_pending
+// order with no way to ever be re-checked (Advance's own tick does not
+// touch a parked order again, so a repeat call to this same action is what
+// has to stand in for that tick).
+func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID uuid.UUID, order *models.PaycrestOrderRecord, pending *models.RampLeg) (*models.RampLeg, error) {
+	if err := o.observeRefund(ctx, order, pending); err != nil {
 		return nil, err
 	}
-	return newLeg, nil
+	legs, err := o.legs.ForOrder(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+	if confirmed := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusConfirmed); confirmed != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_refund_total=1 order=%s admin=%s amount=%s tx=%s",
+			order.ID, adminID, confirmed.AmountReceived, confirmed.TxHash)
+		return confirmed, nil
+	}
+	return pending, nil
 }
 
 // detached returns a short-lived context that survives the caller's own

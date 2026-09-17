@@ -114,6 +114,29 @@ func TestRefundFromTreasury_AlwaysPaysTheOrdersOwnWallet(t *testing.T) {
 	}
 }
 
+// C1, via the admin action specifically: RefundFromTreasury broadcasts a
+// FRESH attempt (no pre-existing pending leg) whose transfer then REVERTS
+// on-chain. The leg must stay pending and the order must park — never
+// confirm/close on the strength of the broadcast alone, the exact defect
+// this whole fix wave's Critical finding was about.
+func TestRefundFromTreasury_FreshAttemptThatRevertsOnChainDoesNotCloseTheOrder(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t, leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""))
+	r.src.signer.txHash = "0xthisonereverts"
+	r.transfers.errByTx = map[string]error{"0xthisonereverts": ErrTransferReverted}
+
+	got, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != models.RampLegStatusPending {
+		t.Fatalf("leg = %+v, want it left PENDING — a reverted transfer is never confirmed", got)
+	}
+	if reloaded := r.reload(t); reloaded.Status != models.PaycrestStatusRecoveryPending || !reloaded.NeedsOperator() {
+		t.Fatalf("order status = %s, want recovery_pending — a reverted refund must park for a human", reloaded.Status)
+	}
+}
+
 // A second admin refund on an order already paid out must not send again —
 // it returns the same confirmed leg.
 func TestRefundFromTreasury_IsIdempotent(t *testing.T) {
@@ -253,6 +276,13 @@ func TestRefundFromTreasury_RefusesAStrandedBridge(t *testing.T) {
 // NextAttempt and broadcasting alongside it. The unique (order_id, kind,
 // attempt) index only rejects two callers landing on the SAME attempt
 // number; it does nothing to stop two DIFFERENT numbers both going out.
+// C1: RefundFromTreasury now attempts to VERIFY an already-pending refund
+// leg (resolveAdminRefund) rather than refusing it outright — that is what
+// actually unsticks a recovery_pending order, since Advance's own tick never
+// touches a parked order again. This still must never broadcast a SECOND
+// attempt alongside the pending one: with the existing tx genuinely
+// unverifiable (not yet mined), the call must hand back the SAME still-
+// pending leg, not an error and not a new one.
 func TestRefundFromTreasury_RefusesWhenARefundIsAlreadyPending(t *testing.T) {
 	r := newConversionRig(t)
 	r.seedLegs(t,
@@ -263,14 +293,56 @@ func TestRefundFromTreasury_RefusesWhenARefundIsAlreadyPending(t *testing.T) {
 			Amount: "100000000", TxHash: "0xalreadysentbysomeoneelse",
 		},
 	)
-	if _, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID); !errors.Is(err, ErrRefundInFlight) {
-		t.Fatalf("want ErrRefundInFlight, got %v", err)
+	r.transfers.errByTx = map[string]error{"0xalreadysentbysomeoneelse": ErrTransferNotFound}
+
+	got, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID)
+	if err != nil {
+		t.Fatalf("want no error while the existing attempt is still unverified, got %v", err)
+	}
+	if got == nil || got.Status != models.RampLegStatusPending || got.TxHash != "0xalreadysentbysomeoneelse" {
+		t.Fatalf("leg = %+v; want the SAME still-pending leg handed back, not a new one", got)
 	}
 	if r.broadcasts() != 0 {
 		t.Fatalf("broadcasts = %d; a second refund attempt must never be created alongside a pending one", r.broadcasts())
 	}
 	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 1 {
 		t.Fatalf("refund legs = %d, want exactly the 1 already pending", len(legs))
+	}
+}
+
+// The genuinely-successful counterpart: an admin re-invoking this same
+// action on a recovery_pending order with a pending refund leg that HAS
+// since landed must confirm it and close the order out — this is the exact
+// mechanism that un-sticks an order Advance's own tick will never touch
+// again.
+func TestRefundFromTreasury_ResolvesAPreviouslyPendingRefundOnRetry(t *testing.T) {
+	r := newConversionRig(t)
+	r.seedLegs(t,
+		leg(models.RampLegKindBridge, 1, models.RampLegStatusFailed, "100000000", ""),
+		&models.RampLeg{
+			Kind: models.RampLegKindRefund, Attempt: 1, Status: models.RampLegStatusPending,
+			ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: sponsorTestUser,
+			Amount: "100000000", TxHash: "0xnowmined",
+		},
+	)
+	if err := r.db.Model(r.order).Update("status", models.PaycrestStatusRecoveryPending).Error; err != nil {
+		t.Fatal(err)
+	}
+	// r.transfers' default (100000000) verifies "0xnowmined" successfully —
+	// no override needed.
+
+	got, err := r.svc.RefundFromTreasury(context.Background(), uuid.New(), r.order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != models.RampLegStatusConfirmed {
+		t.Fatalf("leg = %+v, want confirmed", got)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0 — nothing new was ever sent, only verified", r.broadcasts())
+	}
+	if reloaded := r.reload(t); reloaded.Status != models.PaycrestStatusRefunded {
+		t.Fatalf("order status = %s, want refunded", reloaded.Status)
 	}
 }
 
@@ -605,6 +677,77 @@ func TestOrchestrator_StartBridgeParksWhenTheSourceDecimalsReadFails(t *testing.
 	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
 		t.Fatalf("quotes=%d broadcasts=%d, want 0 — nothing may be attempted before the amount is even readable",
 			r.lifi.quoteCalls(), r.broadcasts())
+	}
+}
+
+// ── Final review fix wave: C1 ────────────────────────────────────────────────
+//
+// A refund leg was the only leg kind ever confirmed on broadcast alone.
+// SendRawTransaction succeeding proves the network accepted the
+// transaction, never that it didn't revert (a short treasury balance —
+// top-ups and other conversions draw the same pool — or a dropped/replaced
+// tx are both real ways this happens). Confirming here closed the order as
+// "refunded" (terminal), made owedFromLegs report "0", dropped it out of
+// Tick's own selection, and made a manual retry fail with ErrNothingOwed —
+// every recovery tool believing the debt was paid while the user held
+// nothing. These pin the fix for BOTH refund() (the automatic path) and,
+// separately, RefundFromTreasury (see the resolveAdminRefund tests further
+// down this file).
+
+// A refund that broadcasts and then REVERTS on-chain must park the order
+// for a human, never settle it.
+func TestOrchestrator_RefundThatRevertsOnChainDoesNotCloseTheOrder(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r) // attempt 1 fails before ever broadcasting
+	r.clock = r.clock.Add(31 * time.Minute)
+	mustAdvance(t, r) // broadcasts the refund; a broadcast alone is not proof
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRefunding {
+		t.Fatalf("status = %s, want refunding — a broadcast alone must never close the order", got.Status)
+	}
+	legs := r.legsOfKind(t, models.RampLegKindRefund)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("refund legs = %+v, want exactly one still PENDING", legs)
+	}
+
+	r.transfers.errByTx = map[string]error{legs[0].TxHash: ErrTransferReverted}
+	mustAdvance(t, r) // observeRefund proves it reverted
+
+	got = r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a reverted refund must park for a human, not settle", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("refund legs = %+v; the leg stays PENDING as a permanent record, never silently overwritten", legs)
+	}
+}
+
+// The "never-mined" half of the same rule: while the refund transfer is
+// simply not yet provable (RPC lag, not yet mined), the order must stay
+// open — never closed as refunded on the strength of the broadcast alone.
+func TestOrchestrator_RefundThatIsNotYetMinedDoesNotCloseTheOrder(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r)
+	r.clock = r.clock.Add(31 * time.Minute)
+	mustAdvance(t, r) // broadcasts
+
+	legs := r.legsOfKind(t, models.RampLegKindRefund)
+	if len(legs) != 1 {
+		t.Fatalf("refund legs = %+v, want exactly one", legs)
+	}
+	r.transfers.errByTx = map[string]error{legs[0].TxHash: ErrTransferNotFound}
+
+	mustAdvance(t, r) // observeRefund looks again; still nothing to see
+
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRefunding {
+		t.Fatalf("status = %s, want refunding — an unmined transfer must not close the order", got.Status)
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 1 || legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("refund legs = %+v, want exactly one still pending", legs)
 	}
 }
 

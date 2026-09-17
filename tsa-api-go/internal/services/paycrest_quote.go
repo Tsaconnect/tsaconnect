@@ -170,6 +170,18 @@ type PaycrestQuoteService struct {
 	lifi            lifiQuoter
 	chains          *BlockchainService
 	treasuryAddress string
+	// treasuryLanes answers the one question chainID()/tokenAddress() below
+	// CANNOT: not "does the chain registry know this chain" but "does the
+	// treasury actually have an executable lane on it". Those are
+	// deliberately different sets — RAMP_TREASURY_CHAINS can (and does) name
+	// a strict subset of every chain config.Networks knows about (a missing
+	// native-floor override, no chain client, or no chain id at boot all
+	// drop a chain from `lanes` in buildRampConversion without removing it
+	// from the registry) — so this must be asked separately, inside
+	// ConvertedVenues itself, before a venue on an unlaned chain is ever
+	// offered. *Treasury satisfies this; kept as an interface so tests can
+	// fake it without building a whole Treasury.
+	treasuryLanes treasuryLaneChecker
 	// conversionMins/conversionMinDefault are Decision 6's per-chain floor,
 	// measured on the settlement leg's stablecoin amount. conversionMinDefault
 	// starts at the product default ($1) so a service that never calls
@@ -339,6 +351,24 @@ func (s *PaycrestQuoteService) SetChainRegistry(chains *BlockchainService) {
 // would cost if the treasury ran it.
 func (s *PaycrestQuoteService) SetTreasuryAddress(addr string) {
 	s.treasuryAddress = strings.TrimSpace(addr)
+}
+
+// treasuryLaneChecker is the one question ConvertedVenues needs about the
+// treasury itself: does it have an executable lane on a given chain.
+// *Treasury satisfies it via its own Lane method.
+type treasuryLaneChecker interface {
+	Lane(chainKey string) *TreasuryLane
+}
+
+// SetTreasuryLanes wires the REAL gate on which requested chains a converted
+// buy may ever be offered on. Without it, ConvertedVenues offers nothing —
+// same dormant-until-wired convention as a nil lifi/chains or an empty
+// treasuryAddress — because offering a venue this treasury cannot execute on
+// is exactly the live defect this exists to close: the user pays naira,
+// custody lands, and only THEN does o.destination() discover there is
+// nowhere to send it.
+func (s *PaycrestQuoteService) SetTreasuryLanes(t treasuryLaneChecker) {
+	s.treasuryLanes = t
 }
 
 // SetConversionMinimums installs the per-chain floor a converted buy must
@@ -720,6 +750,18 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// Decision 3: a direct route always wins; never convert what Paycrest
 		// can already deliver.
 		if directVenueFor(base.Venues, req) != nil {
+			continue
+		}
+		// The requested chain must have an ACTUAL treasury lane, not merely a
+		// chain-registry entry — chainID()/tokenAddress() below only prove
+		// config.Networks knows the chain, which is a WIDER set than
+		// RAMP_TREASURY_CHAINS (a missing native-floor override, no chain
+		// client, or no chain id at boot can drop a chain from the treasury's
+		// own lanes without removing it from the registry). Refused here,
+		// before anything else is spent on this request, not discovered
+		// later at o.destination() after the user has already paid and
+		// custody has already landed.
+		if s.treasuryLanes == nil || s.treasuryLanes.Lane(req.Chain) == nil {
 			continue
 		}
 		src := s.bestSourceVenue(base.Venues) // most liquid direct route we can settle from

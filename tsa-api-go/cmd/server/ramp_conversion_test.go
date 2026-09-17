@@ -160,30 +160,12 @@ func TestRampTreasuryCaps_AcceptsBothValidCaps(t *testing.T) {
 	}
 }
 
-// Quotable chains and treasury lanes are independent sets:
-// RampConversionMinUSDByChain is populated for every configured chain, but
-// `lanes` (missing floor, no chain client, ...) can be a strict subset. The
-// quote service must only ever be told about chains that actually got a
-// lane.
-func TestRampQuotableConversionMinimums_FiltersToChainsWithALane(t *testing.T) {
-	mins := map[string]float64{"base": 1, "ethereum": 5, "linea": 25}
-	// Zero-value TreasuryLane literals: this is a pure map-filtering
-	// function, so the lane's own contents are irrelevant — only its
-	// presence as a key is.
-	lanes := map[string]*services.TreasuryLane{"base": {}}
-
-	got := rampQuotableConversionMinimums(mins, lanes)
-
-	if len(got) != 1 {
-		t.Fatalf("expected exactly the chains with a lane, got %v", got)
-	}
-	if got["base"] != 1 {
-		t.Fatalf("base minimum = %v, want 1", got["base"])
-	}
-	if _, ok := got["ethereum"]; ok {
-		t.Fatal("ethereum has no lane and must not be quotable")
-	}
-	if _, ok := got["linea"]; ok {
-		t.Fatal("linea has no lane and must not be quotable")
-	}
-}
+// The former rampQuotableConversionMinimums map-filter is gone: it never
+// actually gated anything (MeetsMinimumOrder falls back to the DEFAULT
+// minimum for a chain absent from the map, making an unlaned chain MORE
+// quotable, not less). The real gate now lives inside
+// PaycrestQuoteService.ConvertedVenues itself, wired via SetTreasuryLanes —
+// see TestQuote_RefusesAVenueOnAChainWithNoTreasuryLane in
+// internal/services/paycrest_quote_conversion_test.go, which asserts the
+// actual observable behavior (the venue is not offered, and LiFi is never
+// called), not an internal map's keys.

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -66,6 +67,24 @@ type quoteServiceRig struct {
 	lifi *fakeLiFiQuoter
 }
 
+// fakeTreasuryLaneChecker stands in for *Treasury in ConvertedVenues' own
+// gate: "does the treasury have an EXECUTABLE lane on this chain" — a
+// narrower, deliberately different question from "does the chain registry
+// know about it" (testChainRegistry answers that one). Every chain
+// testChainRegistry configures is marked laned by default so the existing
+// fixtures below are unaffected; TestQuote_RefusesAVenueOnAChainWithNoTreasuryLane
+// builds its own checker that excludes one on purpose.
+type fakeTreasuryLaneChecker struct {
+	laned map[string]bool
+}
+
+func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *TreasuryLane {
+	if f.laned[strings.ToLower(chainKey)] {
+		return &TreasuryLane{}
+	}
+	return nil
+}
+
 // newQuoteServiceWithFakes wires a service that quotes 100 USDC on base for
 // NGN 150,000 (rate 1,500) — the fixture every test below starts from unless
 // it needs a different settlement leg.
@@ -79,6 +98,9 @@ func newQuoteServiceWithFakes(t *testing.T) *quoteServiceRig {
 	svc.SetLiFiQuoter(lifi)
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{
+		"base": true, "bsc": true, "optimism": true, "linea": true,
+	}})
 	return &quoteServiceRig{svc: svc, pc: pc, lifi: lifi}
 }
 
@@ -184,6 +206,7 @@ func TestQuote_ConvertedVenue_EighteenToSixDecimals(t *testing.T) {
 	svc.SetLiFiQuoter(lifi)
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"bsc": true, "optimism": true}})
 
 	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
 	if err != nil || len(venues) != 1 {
@@ -245,5 +268,56 @@ func TestQuote_ConvertedVenuesRefusesASellSide(t *testing.T) {
 	}
 	if s.lifi.quoteCalls() != 0 {
 		t.Fatalf("spent a LiFi call on a sell-side request")
+	}
+}
+
+// ── Final review fix wave: I2 ────────────────────────────────────────────────
+//
+// A chain the chain registry knows about (chainID()/tokenAddress() succeed)
+// is NOT the same set as a chain the treasury actually has an executable
+// lane on (RAMP_TREASURY_CHAINS). Before this fix, nothing checked the
+// narrower set inside ConvertedVenues itself — a venue on an unlaned chain
+// was offered, quoted, and only failed later at o.destination() AFTER the
+// user had already paid naira and custody had already landed. This asserts
+// the actual observable behavior (no venue offered, no LiFi call spent) —
+// not an internal map's keys, which is what the superseded
+// rampQuotableConversionMinimums unit test asserted and which passed for
+// the wrong reason (MeetsMinimumOrder falls back to a default minimum for
+// an absent map key, so filtering the minimums map alone never refused
+// anything).
+func TestQuote_RefusesAVenueOnAChainWithNoTreasuryLane(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	// optimism is a real chain-registry entry (testChainRegistry configures
+	// it) but NOT laned for this test.
+	s.svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true}})
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000)}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{Chain: "optimism", Token: "USDT"}})
+
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v, err = %v; an unlaned requested chain must never be offered", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent a LiFi call on a chain the treasury cannot actually execute on")
+	}
+}
+
+// A treasury-lane checker that was simply never wired must also refuse
+// everything, not fall open — same dormant-until-wired convention as a nil
+// lifi/chains or an empty treasuryAddress.
+func TestQuote_RefusesEveryVenueWhenTreasuryLanesWasNeverWired(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	s.svc.SetTreasuryLanes(nil)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000)}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{Chain: "optimism", Token: "USDT"}})
+
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v, err = %v; an unwired lane checker must refuse, not fall open", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent a LiFi call with no treasury-lane checker wired at all")
 	}
 }

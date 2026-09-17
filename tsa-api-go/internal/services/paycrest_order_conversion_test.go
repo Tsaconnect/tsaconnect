@@ -118,6 +118,7 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	quotes.SetLiFiQuoter(lifi)
 	quotes.SetTreasuryAddress("0xTreasury")
 	quotes.SetChainRegistry(testChainRegistry())
+	quotes.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "optimism": true}})
 
 	client := &fakePaycrestConversionClient{}
 	svc := NewPaycrestOrderService(db, client, quotes, nil, "", "")

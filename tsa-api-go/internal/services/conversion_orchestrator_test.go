@@ -393,7 +393,8 @@ func TestOrchestrator_RefundsInTheRouteTokenAfterTheRetryWindow(t *testing.T) {
 	r.lifi.err = ErrLiFiNoRoute
 	mustAdvance(t, r) // attempt 1 fails
 	r.clock = r.clock.Add(31 * time.Minute)
-	mustAdvance(t, r)
+	mustAdvance(t, r) // broadcasts the refund; a broadcast is not proof, so it stays pending
+	mustAdvance(t, r) // observeRefund verifies it on-chain and closes the order
 	got := r.reload(t)
 	if got.Status != models.PaycrestStatusRefunded || got.Fault != models.FaultPlatform {
 		t.Fatalf("order = %s fault=%s; want refunded, our fault", got.Status, got.Fault)
@@ -495,13 +496,16 @@ func TestOrchestrator_StopsWhenADeliverLegIsStalled(t *testing.T) {
 	}
 }
 
+// I6: the kill switch is exactly the checkCaps failure the final review wave
+// asked to be parked rather than bare-errored — Holder is already Treasury
+// and zero legs exist yet, so a bare error here used to be a silent
+// permanent stall (afterStep's own stall detector never trips on zero legs).
 func TestOrchestrator_RefusesWhenTheTreasuryIsKilled(t *testing.T) {
 	r := newConversionRig(t)
 	r.treasury.SetKillSwitch(true)
 
-	err := r.svc.Advance(context.Background(), r.order)
-	if !errors.Is(err, ErrTreasuryKilled) {
-		t.Fatalf("Advance = %v, want ErrTreasuryKilled", err)
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
 	}
 	if got := r.legsOfKind(t, models.RampLegKindBridge); len(got) != 0 {
 		t.Fatalf("legs = %+v; a paused treasury must reserve nothing", got)
@@ -509,8 +513,12 @@ func TestOrchestrator_RefusesWhenTheTreasuryIsKilled(t *testing.T) {
 	if r.broadcasts() != 0 || r.lifi.quoteCalls() != 0 {
 		t.Fatalf("broadcasts=%d quotes=%d; want none while paused", r.broadcasts(), r.lifi.quoteCalls())
 	}
-	if got := r.reload(t); got.Status != models.PaycrestStatusConverting || got.Holder != models.HolderTreasury {
-		t.Fatalf("order = %s/%s; want it untouched", got.Status, got.Holder)
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a paused treasury must park the order, not silently stall it", got.Status)
+	}
+	if got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %s, want treasury (custody was never in question)", got.Holder)
 	}
 }
 
@@ -603,6 +611,37 @@ func TestOrchestrator_ShortDeliveryRepricesThePromise(t *testing.T) {
 	// both 6dp here, so the rescale is the identity).
 	if want := PromisedAmount(big.NewInt(99_000000), 50).String(); got.PromisedAmount != want {
 		t.Fatalf("promisedAmount = %q, want %q recomputed from the delivery", got.PromisedAmount, want)
+	}
+	if got.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %s, want treasury", got.Holder)
+	}
+}
+
+// Final review fix wave, I1: VerifyTransfer sums EVERY matching Transfer log
+// in the transaction, so a provider settling another one of our orders in
+// the SAME tx (both rows would carry the same hash), or any unrelated
+// transfer riding along, can make `received` exceed what THIS order's own
+// TokenAmount ever promised. The bridge only ever sends order.TokenAmount
+// (see startBridge) — promising off the inflated figure would guarantee a
+// shortfall the treasury pays from margin or parks, for money that was
+// never this order's to begin with.
+func TestOrchestrator_OverDeliveryClampsThePromiseToWhatWasAsked(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.transfers.amount = big.NewInt(150_000000) // 150 USDC landed in the tx — 50 more than this order's 100
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	// token_amount is UNCHANGED: the extra 50 USDC was never this order's to
+	// claim, so it must not be folded into what gets converted.
+	if got.TokenAmount != "100" {
+		t.Fatalf("tokenAmount = %q, want it left at \"100\" — the extra 50 was never this order's", got.TokenAmount)
+	}
+	// The promise is computed off the CLAMPED 100000000, never the raw
+	// 150000000 that actually showed up in the transaction.
+	if want := PromisedAmount(big.NewInt(100_000000), 50).String(); got.PromisedAmount != want {
+		t.Fatalf("promisedAmount = %q, want %q clamped to this order's own amount, not the over-delivered figure", got.PromisedAmount, want)
 	}
 	if got.Holder != models.HolderTreasury {
 		t.Fatalf("holder = %s, want treasury", got.Holder)
@@ -1017,9 +1056,15 @@ func TestOrchestrator_CountsChainExposureAgainstTheCap(t *testing.T) {
 		t.Fatalf("seed second order: %v", err)
 	}
 
-	err := r.svc.Advance(context.Background(), r.order)
-	if !errors.Is(err, ErrTreasuryCapExceeded) {
-		t.Fatalf("Advance = %v, want ErrTreasuryCapExceeded", err)
+	// I6: a cap breach must PARK, not bare-error — a bare error here, with
+	// Holder already Treasury and zero legs, is invisible to the stall
+	// detector forever (afterStep returns early on zero legs).
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a cap breach must park the order, not silently stall it", got.Status)
 	}
 	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
 		t.Fatal("an order over the chain cap must reserve nothing and send nothing")
@@ -1039,9 +1084,14 @@ func TestOrchestrator_FailsClosedWhenAnInFlightOrdersTokenIsUnconfigured(t *test
 		t.Fatalf("seed second order: %v", err)
 	}
 
-	err := r.svc.Advance(context.Background(), r.order)
-	if !errors.Is(err, ErrSponsorNotAvailable) {
-		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable (fail closed on an unpriceable in-flight order)", err)
+	// I6: the fail-closed refusal must PARK the order rather than bare-error
+	// it, same reasoning as the cap-breach case above.
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a fail-closed caps check must park the order, not silently stall it", got.Status)
 	}
 	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
 		t.Fatal("an unpriceable in-flight order must refuse the whole cap check, not silently skip it")
@@ -1062,7 +1112,8 @@ func TestOrchestrator_RefundsEvenWhenTheChainCapIsExhausted(t *testing.T) {
 	}
 	r.clock = r.clock.Add(31 * time.Minute)
 
-	mustAdvance(t, r)
+	mustAdvance(t, r) // broadcasts the refund (no cap check on a refund)
+	mustAdvance(t, r) // observeRefund verifies it on-chain and closes the order
 
 	if got := r.reload(t); got.Status != models.PaycrestStatusRefunded {
 		t.Fatalf("status = %s; a refund must not be blocked by the exposure cap", got.Status)
@@ -1081,11 +1132,42 @@ func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
 	r.svc.treasury = broken
 
-	if err := r.svc.Advance(context.Background(), r.order); !errors.Is(err, ErrSponsorNotAvailable) {
-		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable", err)
+	// I6: an unknown treasury address must PARK the order rather than
+	// bare-error it — see the cap-breach tests above for why a bare error
+	// here is a silent permanent stall.
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; an unresolvable treasury address must park the order", got.Status)
 	}
 	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
 		t.Fatal("a misconfigured treasury must not quote or send")
+	}
+}
+
+// I6: no lane for the order's OWN chain (e.g. removed from
+// RAMP_TREASURY_CHAINS while orders are in flight) must also PARK, not
+// bare-error — the treasury address itself resolves fine here (there is
+// still a lane, just not on "base"), isolating this from the
+// unknown-address case above.
+func TestOrchestrator_ParksWhenNoLaneCoversTheOrdersChain(t *testing.T) {
+	r := newConversionRig(t)
+	dstOnly := NewTreasury(map[string]*TreasuryLane{
+		"polygon": {SponsorLane: r.dst.lane, ChainID: 137},
+	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
+	r.svc.treasury = dstOnly
+
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending || !got.NeedsOperator() {
+		t.Fatalf("status = %s; a missing lane for the order's own chain must park it", got.Status)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
 	}
 }
 
@@ -1339,6 +1421,10 @@ func TestOrchestrator_ParksAStalledRefund(t *testing.T) {
 		ChainKey: "base", Token: "USDC", ToAddr: r.order.WalletAddress,
 		Amount: "100000000", Status: models.RampLegStatusPending, TxHash: "0xstuckrefund",
 	})
+	// Genuinely unverifiable — observeRefund now asks the chain on every
+	// tick (C1), so without this the rig's default verifier would happily
+	// confirm the "stuck" refund instead of ever letting it stall.
+	r.transfers.errByTx = map[string]error{"0xstuckrefund": ErrTransferNotFound}
 
 	r.clock = r.clock.Add(7 * time.Hour)
 	if err := r.svc.Tick(context.Background(), 10); err != nil {
