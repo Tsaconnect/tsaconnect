@@ -109,6 +109,18 @@ type PaycrestOrderRecord struct {
 	// Rate is what we quoted: the provider's rate with our sender fee priced
 	// in (orders before 2026-09-14 hold the raw provider rate). TokenAmount is
 	// what the user receives (buy) or sends (sell).
+	//
+	// TokenAmount is a PLAIN HUMAN-READABLE DECIMAL STRING ("100", "36.4218")
+	// — Paycrest's own order.Amount on a buy, exactly as CreateBuy writes it
+	// verbatim, NEVER base units. Every other converted-buy site that reads
+	// this field (authorization_relayer.go, gas_topup.go, ramp_sponsorship.go,
+	// ConversionOrchestrator) already converts it with DecimalToBaseUnits and
+	// the SOURCE token's own decimals before treating it as an integer — do
+	// not add a new site that parses it with big.Int.SetString directly, that
+	// silently misreads it as base units (fixed after a fork rehearsal found
+	// the short-delivery check and every automatic bridge/refund tick doing
+	// exactly that). PromisedAmount below, and every RampLeg.Amount /
+	// AmountReceived, ARE base units — this field alone is not.
 	Rate        string `gorm:"size:32" json:"rate"`
 	TokenAmount string `gorm:"size:40" json:"tokenAmount"`
 	// ProviderID is which liquidity provider took it. Stored because provider

@@ -236,7 +236,13 @@ func newConversionRig(t *testing.T) *conversionRig {
 		FiatCode:  "NGN", FiatAmount: "138000",
 		Token: "USDC", ChainKey: "base", Network: "base",
 		RouteKind: models.RouteKindConverted, RequestedToken: "USDT", RequestedChain: "polygon",
-		MarkupBps: 50, TokenAmount: "100000000", PromisedAmount: "99500000",
+		// TokenAmount is a plain human-readable decimal string — exactly
+		// what CreateBuy writes (Paycrest's own order.Amount) and what a
+		// direct order has always stored, NEVER base units. "100" at the
+		// rig's 6dp USDC is 100000000 base units, which is why every other
+		// fixture/assertion in this file that already used that number
+		// keeps working unchanged.
+		MarkupBps: 50, TokenAmount: "100", PromisedAmount: "99500000",
 		Holder: models.HolderTreasury, WalletAddress: sponsorTestUser,
 		TxHash: "0xpaycrestdelivery", CreatedAt: r.clock,
 	}
@@ -587,8 +593,11 @@ func TestOrchestrator_ShortDeliveryRepricesThePromise(t *testing.T) {
 	mustAdvance(t, r)
 
 	got := r.reload(t)
-	if got.TokenAmount != "99000000" {
-		t.Fatalf("tokenAmount = %q, want what actually landed", got.TokenAmount)
+	// TokenAmount is a plain human-readable decimal string (Paycrest's own
+	// order.Amount, exactly as CreateBuy writes it) — the correction must be
+	// recorded in that SAME convention, not as a base-units integer string.
+	if got.TokenAmount != "99" {
+		t.Fatalf("tokenAmount = %q, want what actually landed (\"99\", the same decimal convention it started in)", got.TokenAmount)
 	}
 	// 99_000000 less the order's own 50 bps markup (source and destination are
 	// both 6dp here, so the rescale is the identity).
@@ -977,7 +986,7 @@ func TestOrchestrator_CountsChainExposureAgainstTheCap(t *testing.T) {
 	r := newConversionRig(t)
 	// Another converted buy already in flight on base, just under the cap.
 	other := *r.order
-	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950000000" // 9,950 USDC
+	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950" // 9,950 USDC (plain decimal, matching CreateBuy's convention)
 	if err := r.db.Create(&other).Error; err != nil {
 		t.Fatalf("seed second order: %v", err)
 	}
@@ -999,7 +1008,7 @@ func TestOrchestrator_RefundsEvenWhenTheChainCapIsExhausted(t *testing.T) {
 	mustAdvance(t, r)
 
 	other := *r.order
-	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950000000"
+	other.ID, other.Reference, other.TokenAmount = uuid.New(), "conv-other", "9950"
 	if err := r.db.Create(&other).Error; err != nil {
 		t.Fatalf("seed second order: %v", err)
 	}

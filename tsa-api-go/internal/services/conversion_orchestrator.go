@@ -412,6 +412,32 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		return nil
 	}
 
+	// srcDecimals is read FIRST, before anything else: it is needed to even
+	// INTERPRET order.TokenAmount, which is a plain human-readable decimal
+	// string (Paycrest's own order.Amount, exactly as a direct order has
+	// always stored it and the app renders it — see the field's doc comment)
+	// — never base units. A short delivery must be detected by comparing
+	// like with like: `received` (from VerifyTransfer, always base units) is
+	// only comparable to order.TokenAmount once THAT is converted with the
+	// SOURCE token's own decimals.
+	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
+	if err != nil {
+		// Custody is proven (VerifyTransfer already succeeded) but nothing
+		// downstream can be computed without decimals — not even in what
+		// currency to record the delivery. Park with holder=treasury in the
+		// SAME write: nothing has recorded custody yet at this point, and a
+		// transient RPC failure here must not read as "still needs custody"
+		// forever (no later tick re-enters takeCustody once Holder is
+		// Treasury — step 1's own gate — so a bare error would otherwise
+		// repeat silently, invisible to the stall detector since a leg-less
+		// order never trips afterStep).
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_decimals_total=1 order=%s token=%s chain=%s err=%v",
+			order.ID, order.Token, lane.ChainKey, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err),
+			map[string]any{"holder": models.HolderTreasury})
+	}
+
 	// Custody is PROVEN the instant VerifyTransfer returns — record it before
 	// resolving the destination, not after. o.destination() below can fail
 	// (no treasury lane on the requested chain, or the token unconfigured
@@ -424,11 +450,27 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	// custody was never taken, and refused to refund money that was
 	// provably sitting in the treasury.
 	custodyUpdates := map[string]any{"holder": models.HolderTreasury}
-	if expected, ok := new(big.Int).SetString(order.TokenAmount, 10); ok && received.Cmp(expected) < 0 {
-		// Short delivery: never convert more than actually landed.
-		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s — repricing the promise",
-			order.ID, expected, received)
-		custodyUpdates["token_amount"] = received.String()
+	expected, expErr := DecimalToBaseUnits(order.TokenAmount, srcDecimals)
+	switch {
+	case expErr != nil:
+		// Cannot even tell whether delivery was short. Silently assuming it
+		// was not is exactly the bug this whole fix exists to close — park
+		// instead, so a human resolves what the row actually says.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_amount_total=1 order=%s token_amount=%q err=%v",
+			order.ID, order.TokenAmount, expErr)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("unreadable order amount %q: %v", order.TokenAmount, expErr),
+			map[string]any{"holder": models.HolderTreasury})
+	case received.Cmp(expected) < 0:
+		// Short delivery: never convert more than actually landed. Recorded
+		// back in the SAME human-decimal convention TokenAmount already
+		// carries — BaseUnitsToDecimal is DecimalToBaseUnits's exact
+		// inverse, so nothing downstream that re-parses this field (every
+		// site in this file does) can misread it.
+		correctedDecimal := BaseUnitsToDecimal(received, srcDecimals)
+		log.Printf("[ramp-conversion] order=%s delivery short: expected=%s received=%s (base units, %ddp) — repricing to %s",
+			order.ID, expected, received, srcDecimals, correctedDecimal)
+		custodyUpdates["token_amount"] = correctedDecimal
 	}
 	order.Holder = models.HolderTreasury
 	if v, ok := custodyUpdates["token_amount"].(string); ok {
@@ -452,23 +494,6 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		// unclaimed.
 		return o.toRecovery(ctx, order, err.Error(), nil)
 	}
-	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
-	if err != nil {
-		// Holder is ALREADY Treasury as of the write above, which is exactly
-		// what makes a bare error here fatal rather than merely annoying: no
-		// LATER tick ever re-enters takeCustody once Holder is Treasury (step
-		// 1's own gate), so a transient RPC failure at this exact point would
-		// otherwise leave promised_amount permanently unreadable and repeat
-		// this same error, silently, on every tick forever — invisible to the
-		// stall detector too, since afterStep never looks at an order with no
-		// legs. Park it instead, exactly like the destination failure above,
-		// so a human sees money the treasury already holds instead of a log
-		// line nobody is paged on.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_decimals_total=1 order=%s token=%s chain=%s err=%v",
-			order.ID, order.Token, lane.ChainKey, err)
-		return o.toRecovery(ctx, order,
-			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err), nil)
-	}
 	promise := PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
 	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
 		order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
@@ -480,9 +505,26 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 // function, so reserving after it would let both ticks broadcast; reserving
 // before it means the loser never even asks for a route.
 func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane) error {
-	amount, ok := new(big.Int).SetString(order.TokenAmount, 10)
-	if !ok {
-		return fmt.Errorf("conversion: unreadable order amount %q", order.TokenAmount)
+	// order.TokenAmount is a plain human-readable decimal string (Paycrest's
+	// own order.Amount, exactly as CreateBuy writes it and the app renders
+	// it) — never base units. It must be read with the SOURCE token's own
+	// decimals, exactly like takeCustody's own short-delivery check.
+	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_decimals_total=1 order=%s token=%s chain=%s err=%v",
+			order.ID, order.Token, lane.ChainKey, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err), nil)
+	}
+	amount, err := DecimalToBaseUnits(order.TokenAmount, srcDecimals)
+	if err != nil {
+		// Same reasoning as the unreadable-promise branch just below: a bare
+		// error here would repeat on every tick forever with no leg for the
+		// stall detector to ever notice. Park it instead.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_amount_total=1 order=%s token_amount=%q err=%v",
+			order.ID, order.TokenAmount, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("unreadable order amount %q: %v", order.TokenAmount, err), nil)
 	}
 	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
 	if !ok {
@@ -915,9 +957,23 @@ func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.
 //
 // No cap check: a refund returns money the treasury already holds.
 func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane, fault string) error {
-	amount, ok := new(big.Int).SetString(order.TokenAmount, 10)
-	if !ok {
-		return fmt.Errorf("conversion: unreadable order amount %q", order.TokenAmount)
+	// order.TokenAmount is a plain human-readable decimal string (see
+	// startBridge's own doc comment) — never base units.
+	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_decimals_total=1 order=%s token=%s chain=%s err=%v",
+			order.ID, order.Token, lane.ChainKey, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err), nil)
+	}
+	amount, err := DecimalToBaseUnits(order.TokenAmount, srcDecimals)
+	if err != nil {
+		// Same reasoning as startBridge: a bare error here would repeat on
+		// every tick forever, invisible to the stall detector. Park it.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_amount_total=1 order=%s token_amount=%q err=%v",
+			order.ID, order.TokenAmount, err)
+		return o.toRecovery(ctx, order,
+			fmt.Sprintf("unreadable order amount %q: %v", order.TokenAmount, err), nil)
 	}
 	// A refund that already landed finishes the order. The LEDGER is the record
 	// of what moved, not the order's status column: if the "refunded" write was
@@ -1177,9 +1233,27 @@ func (o *ConversionOrchestrator) inFlightUSD(ctx context.Context, lane *Treasury
 	}
 	var total float64
 	for _, row := range rows {
-		amount, ok := new(big.Int).SetString(row.TokenAmount, 10)
-		if !ok {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_unreadable_amount_total=1 order=%s amount=%q", row.ID, row.TokenAmount)
+		// row.TokenAmount is a plain human-readable decimal string (see
+		// startBridge's own doc comment) — never base units. It has to be
+		// converted with THIS row's own token's decimals before usdValue
+		// (which expects base units) can price it.
+		addr := lane.tokenAddress(row.Token)
+		if addr == "" {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_unreadable_amount_total=1 order=%s token=%s not configured on %s",
+				row.ID, row.Token, lane.ChainKey)
+			continue
+		}
+		decimals, derr := lane.Native.GetTokenDecimals(addr)
+		if derr != nil {
+			// Unlike a single order's own tick, this loop prices EVERY other
+			// in-flight order on the chain — a real RPC failure here is
+			// exactly the "unknown exposure is not a zero one" case the
+			// function's own doc comment already fails closed on.
+			return 0, fmt.Errorf("conversion: read decimals of %s on %s: %w", row.Token, lane.ChainKey, derr)
+		}
+		amount, aerr := DecimalToBaseUnits(row.TokenAmount, decimals)
+		if aerr != nil {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_unreadable_amount_total=1 order=%s amount=%q err=%v", row.ID, row.TokenAmount, aerr)
 			continue
 		}
 		usd, err := o.usdValue(lane, row.Token, amount)
@@ -1579,9 +1653,25 @@ func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.P
 	}
 	// Nothing ever bridged out: the treasury still holds the ORIGIN deposit
 	// untouched, in the token and on the chain it actually landed in.
-	orderAmt, ok := new(big.Int).SetString(order.TokenAmount, 10)
-	if !ok {
-		return "", "", "", fmt.Errorf("conversion: unreadable order amount %q for order %s", order.TokenAmount, order.ID)
+	// order.TokenAmount is a plain human-readable decimal string (see
+	// startBridge's own doc comment) — never base units — so it needs the
+	// ORIGIN token's own decimals, resolved off the origin lane, before it
+	// can be compared or paid as base units.
+	originLane := o.treasury.Lane(order.ChainKey)
+	if originLane == nil {
+		return "", "", "", ErrSponsorNotAvailable
+	}
+	originAddr := originLane.tokenAddress(order.Token)
+	if originAddr == "" {
+		return "", "", "", fmt.Errorf("conversion: token %s is not configured on %s", order.Token, order.ChainKey)
+	}
+	originDecimals, err := originLane.Native.GetTokenDecimals(originAddr)
+	if err != nil {
+		return "", "", "", fmt.Errorf("conversion: read decimals of %s on %s: %w", order.Token, order.ChainKey, err)
+	}
+	orderAmt, err := DecimalToBaseUnits(order.TokenAmount, originDecimals)
+	if err != nil {
+		return "", "", "", fmt.Errorf("conversion: unreadable order amount %q for order %s: %w", order.TokenAmount, order.ID, err)
 	}
 	if orderAmt.Sign() <= 0 {
 		return "", "", "0", nil

@@ -1,0 +1,153 @@
+package services
+
+import (
+	"context"
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+)
+
+// conversion_creates_buy_test.go — Fix round 4.
+//
+// Every orchestrator test elsewhere in this package (conversion_orchestrator_test.go,
+// conversion_refund_test.go) hand-seeds a *models.PaycrestOrderRecord directly into
+// the database with `TokenAmount` written the way the orchestrator's PARSER
+// expected — a plain base-units integer string ("100000000"). That is not what
+// CreateBuy, the only real writer of a converted order, has ever written there:
+// TokenAmount is Paycrest's own order.Amount, a human-readable decimal string
+// ("100"), exactly as a direct order has always stored it and the app renders
+// it. The rig and production disagreed about the format of a field, and only a
+// test that spans BOTH the real writer and the real reader can catch that.
+//
+// This file drives a converted buy through CreateBuy (the real writer), then
+// hands the resulting row — untouched — to a real ConversionOrchestrator, and
+// proves every site that reads TokenAmount interprets it correctly: the
+// short-delivery check actually fires, and startBridge does not error out on
+// every tick forever the way it did in production before this fix.
+// TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote is THE
+// regression test for this bug class. It never hand-seeds order.TokenAmount:
+// the row comes entirely from a real PaycrestOrderService.CreateBuy call, the
+// same path a live buy request runs. A verifier reporting a SHORT delivery
+// (99 of the 100 USDC actually promised) exercises the exact scenario the
+// fork rehearsal proved broken: takeCustody's short-delivery comparison
+// against a human-decimal TokenAmount, and startBridge's own parse of the
+// same field one tick later.
+func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T) {
+	ordersRig := newOrderServiceWithFakes(t) // base/USDC -> optimism/USDT, via CreateBuy's real path
+	ordersRig.svc.SetConversionEnabled(true)
+	ordersRig.svc.SetTreasury("0xTreasury")
+	buyer := seedVerifiedUser(t, ordersRig.db)
+
+	row, err := ordersRig.svc.CreateBuy(context.Background(),
+		ordersRig.buyRequest(buyer, "base", "USDC", "optimism", "USDT"))
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	// Pin the defect itself: CreateBuy writes the plain decimal string
+	// Paycrest returned, never base units. If this assertion ever starts
+	// failing because CreateBuy changed, every assertion below is checking
+	// the wrong thing.
+	if row.TokenAmount != "100" {
+		t.Fatalf("TokenAmount = %q, want the plain decimal CreateBuy actually writes (\"100\"), not base units", row.TokenAmount)
+	}
+	if row.ChainKey != "base" || row.Token != "USDC" || row.RequestedChain != "optimism" || row.RequestedToken != "USDT" {
+		t.Fatalf("row legs = %+v", row)
+	}
+
+	// Same database CreateBuy just wrote into, additionally migrated for the
+	// orchestrator's own ledger — this stays the row CreateBuy inserted, not
+	// a re-seeded copy of it.
+	if err := ordersRig.db.AutoMigrate(&models.RampLeg{}); err != nil {
+		t.Fatalf("migrate ramp_legs: %v", err)
+	}
+
+	// Simulate what a real webhook/poller does once Paycrest has delivered:
+	// only TxHash and Status change. TokenAmount's own representation is
+	// untouched — it is still exactly what CreateBuy wrote.
+	if err := ordersRig.db.Model(row).Updates(map[string]any{
+		"tx_hash": "0xpaycrestdelivery", "status": models.PaycrestStatusConverting,
+	}).Error; err != nil {
+		t.Fatalf("mark delivered: %v", err)
+	}
+
+	src, _ := newSponsorRig("base", "USDC")     // 6dp, matches CreateBuy's settlement leg
+	dst, _ := newSponsorRig("optimism", "USDT") // 6dp, matches CreateBuy's requested leg
+	clock := sponsorTestNow
+	treasury := NewTreasury(map[string]*TreasuryLane{
+		"base":     {SponsorLane: src.lane, ChainID: 8453},
+		"optimism": {SponsorLane: dst.lane, ChainID: 10},
+	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return clock })
+
+	// The verifier reports a SHORT delivery — 99 of the 100 USDC promised —
+	// on the same transaction hash the poller just recorded.
+	transfers := &fakeTransferVerifier{amount: big.NewInt(99_000000)}
+	lifiQuoter := &fakeLiFiQuoter{route: &LiFiRoute{
+		To: "0xR", Data: "0x01",
+		ToAmount: big.NewInt(98_800000), ToAmountMin: big.NewInt(98_700000), Tool: "across",
+	}}
+	chains := &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: map[string]config.ChainConfig{"base": {ChainID: 8453}, "optimism": {ChainID: 10}}},
+	}}}
+	legStore := &GormRampLegStore{DB: ordersRig.db}
+	orch := NewConversionOrchestrator(ordersRig.db, treasury, legStore,
+		lifiQuoter, NewLiFiStatusClient("http://unused.invalid", ""),
+		map[string]ERC20TransferVerifier{"base": transfers}, chains,
+		30*time.Minute, 0, 0, 0, func() time.Time { return clock })
+
+	// ── Step 1: takeCustody ──────────────────────────────────────────────
+	//
+	// Before this fix, order.TokenAmount ("100") failed new(big.Int).SetString
+	// entirely, so the short-delivery branch silently never ran and the
+	// order proceeded as though the full 100 USDC had landed.
+	if err := orch.Advance(context.Background(), row); err != nil {
+		t.Fatalf("Advance (custody): %v", err)
+	}
+	var afterCustody models.PaycrestOrderRecord
+	if err := ordersRig.db.First(&afterCustody, "id = ?", row.ID).Error; err != nil {
+		t.Fatalf("reload after custody: %v", err)
+	}
+	if afterCustody.Holder != models.HolderTreasury {
+		t.Fatalf("holder = %s, want treasury", afterCustody.Holder)
+	}
+	if afterCustody.TokenAmount != "99" {
+		t.Fatalf("tokenAmount = %q, want the short delivery detected and recorded as \"99\" "+
+			"(the SAME human-decimal convention it started in — not \"99000000\", and not left at \"100\")",
+			afterCustody.TokenAmount)
+	}
+	if afterCustody.PromisedAmount == "" {
+		t.Fatal("promisedAmount was never set")
+	}
+
+	// ── Step 2: startBridge ──────────────────────────────────────────────
+	//
+	// Before this fix, EVERY converted buy died here on every tick, forever:
+	// "conversion: unreadable order amount \"100\"" (or whatever the row's
+	// real decimal happened to be) — no leg, no park, no operator queue,
+	// just a repeating log line. This is the core of the production defect.
+	if err := orch.Advance(context.Background(), &afterCustody); err != nil {
+		t.Fatalf("Advance (bridge): %v", err)
+	}
+	legs, err := legStore.ForOrder(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("ForOrder: %v", err)
+	}
+	if len(legs) != 1 {
+		t.Fatalf("legs = %+v, want exactly one bridge leg reserved", legs)
+	}
+	if legs[0].Kind != models.RampLegKindBridge {
+		t.Fatalf("leg kind = %s, want bridge", legs[0].Kind)
+	}
+	if legs[0].Amount != "99000000" {
+		t.Fatalf("leg amount = %q, want 99000000 base units (99 USDC at 6dp) — "+
+			"the short-delivered amount, correctly converted from the human-decimal TokenAmount", legs[0].Amount)
+	}
+	if lifiQuoter.quoteCalls() != 1 {
+		t.Fatalf("lifi quotes = %d, want 1 — startBridge must actually reach the quote step, not error out first", lifiQuoter.quoteCalls())
+	}
+	if legs[0].TxHash == "" {
+		t.Fatal("leg never broadcast — startBridge must complete, not just reserve")
+	}
+}
