@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
@@ -57,5 +58,20 @@ func TestGasFloatMonitor_DormantWhenDisabled(t *testing.T) {
 	m := NewGasFloatMonitor(fakeFloats{enabled: false}, 0)
 	if out := captureLog(t, func() { _ = m.Run(context.Background()) }); out != "" {
 		t.Fatalf("disabled monitor logged:\n%s", out)
+	}
+}
+
+// The SAME monitor, pointed at the treasury: one job type, two registrations.
+func TestGasFloatMonitor_CarriesItsMetricPrefix(t *testing.T) {
+	m := NewGasFloatMonitorNamed("ramp_treasury", fakeFloats{enabled: true, floats: []services.SponsorFloat{
+		{Chain: "base", BalanceWei: big.NewInt(1), FloorWei: big.NewInt(1000)},
+	}}, time.Minute)
+	out := captureLog(t, func() {
+		if err := m.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "ramp_treasury_float_empty_total=1 chain=base") {
+		t.Fatalf("no treasury alert logged: %s", out)
 	}
 }

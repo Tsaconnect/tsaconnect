@@ -116,3 +116,37 @@ func TestDecimalToBaseUnits(t *testing.T) {
 		}
 	}
 }
+
+// TestBaseUnitsToDecimal_RoundTripsThroughDecimalToBaseUnits pins the exact
+// property the conversion path relies on: BaseUnitsToDecimal is the inverse
+// of DecimalToBaseUnits, so a short-delivery correction written with one and
+// read back with the other never drifts by a single base unit.
+func TestBaseUnitsToDecimal_RoundTripsThroughDecimalToBaseUnits(t *testing.T) {
+	cases := []struct {
+		amount   string
+		decimals int
+		want     string
+	}{
+		{"36421800", 6, "36.4218"},
+		{"1000000000000000000", 18, "1"},
+		{"1", 6, "0.000001"},
+		{"14708586000000000000", 18, "14.708586"},
+		{"100000000", 6, "100"},
+		{"0", 6, "0"},
+	}
+	for _, c := range cases {
+		amount, ok := new(big.Int).SetString(c.amount, 10)
+		if !ok {
+			t.Fatalf("bad fixture %q", c.amount)
+		}
+		got := BaseUnitsToDecimal(amount, c.decimals)
+		if got != c.want {
+			t.Errorf("BaseUnitsToDecimal(%s, %d) = %q, want %q", c.amount, c.decimals, got, c.want)
+		}
+		back, err := DecimalToBaseUnits(got, c.decimals)
+		if err != nil || back.Cmp(amount) != 0 {
+			t.Errorf("round trip failed: BaseUnitsToDecimal(%s,%d)=%q -> DecimalToBaseUnits = %v, %v; want %s",
+				c.amount, c.decimals, got, back, err, c.amount)
+		}
+	}
+}

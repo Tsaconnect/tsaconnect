@@ -234,6 +234,60 @@ func TestLoad_InboundAlertEmailsUnset(t *testing.T) {
 	}
 }
 
+// LIFI_BASE_URL exists so a local rehearsal of the ramp-conversion feature can
+// point every LiFi client at a stand-in server instead of the real API — the
+// real API can never satisfy a status check for a transaction that only
+// exists on a local chain fork. Left unset, behaviour must be byte-identical
+// to the previously-hardcoded "https://li.quest/v1" everywhere that literal
+// used to live (cmd/server/ramp_conversion.go, cmd/server/main.go,
+// internal/handlers/swap_lifi_handler.go).
+func TestResolveLiFiBaseURL_DefaultsWhenUnset(t *testing.T) {
+	if got := ResolveLiFiBaseURL(""); got != "https://li.quest/v1" {
+		t.Errorf("ResolveLiFiBaseURL(\"\") = %q, want %q", got, "https://li.quest/v1")
+	}
+}
+
+// A configured value wins over the default.
+func TestResolveLiFiBaseURL_ConfiguredValueWins(t *testing.T) {
+	if got := ResolveLiFiBaseURL("http://localhost:9191/v1"); got != "http://localhost:9191/v1" {
+		t.Errorf("ResolveLiFiBaseURL = %q, want %q", got, "http://localhost:9191/v1")
+	}
+}
+
+// Defensive normalisation: surrounding whitespace and a trailing slash must
+// not leak into the value every LiFi client builds request paths from, and a
+// whitespace-only value is the same as unset — it must not silently produce
+// requests to a nonsense host (e.g. "https://li.quest/v1/" + "/quote" would
+// double-slash the path if the trailing slash weren't stripped).
+func TestResolveLiFiBaseURL_NormalisesAndFallsBack(t *testing.T) {
+	cases := map[string]string{
+		"  https://stand-in.local/v1  ": "https://stand-in.local/v1",
+		"https://stand-in.local/v1/":    "https://stand-in.local/v1",
+		"   ":                           "https://li.quest/v1",
+	}
+	for in, want := range cases {
+		if got := ResolveLiFiBaseURL(in); got != want {
+			t.Errorf("ResolveLiFiBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Load() wires LIFI_BASE_URL through the same resolver, so the field on
+// Config is never a raw, unnormalised env value.
+func TestLoad_LiFiBaseURLDefaultsWhenUnset(t *testing.T) {
+	t.Setenv("LIFI_BASE_URL", "")
+	if got := Load().LiFiBaseURL; got != "https://li.quest/v1" {
+		t.Errorf("LiFiBaseURL = %q, want default %q", got, "https://li.quest/v1")
+	}
+}
+
+func TestLoad_LiFiBaseURLOverride(t *testing.T) {
+	t.Setenv("LIFI_BASE_URL", " http://localhost:9191/v1/ ")
+	if got := Load().LiFiBaseURL; got != "http://localhost:9191/v1" {
+		t.Errorf("LiFiBaseURL = %q, want %q", got, "http://localhost:9191/v1")
+	}
+}
+
 // ADMIN_URL is a comma-separated CORS list ordered dev-first. The hold alert
 // needs ONE origin an on-call operator can click, so the https entry has to
 // win over the localhost one that happens to be listed first.

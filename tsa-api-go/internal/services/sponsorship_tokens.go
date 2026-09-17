@@ -160,3 +160,36 @@ func DecimalToBaseUnits(amount string, decimals int) (*big.Int, error) {
 	}
 	return out, nil
 }
+
+// BaseUnitsToDecimal is the inverse of DecimalToBaseUnits: it renders an
+// exact integer base-units amount back into the plain-decimal-string
+// convention fields like PaycrestOrderRecord.TokenAmount use everywhere else
+// — no floats, so round-tripping the result back through DecimalToBaseUnits
+// (with the same decimals) recovers the identical integer. Used when a
+// short delivery needs to correct a field that started life as a human
+// decimal string (e.g. Paycrest's own order.Amount), not as base units.
+func BaseUnitsToDecimal(amount *big.Int, decimals int) string {
+	if amount == nil {
+		return "0"
+	}
+	neg := amount.Sign() < 0
+	s := new(big.Int).Abs(amount).String()
+	if decimals <= 0 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	for len(s) <= decimals {
+		s = "0" + s
+	}
+	whole, frac := s[:len(s)-decimals], strings.TrimRight(s[len(s)-decimals:], "0")
+	out := whole
+	if frac != "" {
+		out += "." + frac
+	}
+	if neg {
+		out = "-" + out
+	}
+	return out
+}

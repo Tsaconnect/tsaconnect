@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"fmt"
 	"log"
 	"math/big"
 	"strings"
@@ -10,6 +12,80 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
+
+// fatalf terminates boot. It is a package-level indirection — rather than a
+// direct log.Fatalf call — purely so a test can intercept a boot-time
+// refusal (assertDistinctKey's callers) without exec'ing a subprocess.
+// Production always runs the real log.Fatalf, which never returns.
+//
+// WARNING: tests that swap this var (see refusesToStart) are NOT safe under
+// t.Parallel() — two parallel tests would race on the same package-level
+// variable and could each restore the other's swap mid-test.
+var fatalf = log.Fatalf
+
+// assertDistinctKey refuses to start when key's address matches any entry in
+// others (a name -> hex-private-key map). It is the ONE collision check every
+// privileged signer goes through — the relayer, the IT operator, the PM
+// release key, the ramp sponsor and the ramp treasury are all hot keys that
+// broadcast from this server, so sharing any two of them turns a single
+// compromise into a compromise of both. An unparsable entry in others is
+// skipped rather than failing the boot on a malformed but irrelevant key —
+// that key's own builder is responsible for validating it.
+func assertDistinctKey(name string, key *ecdsa.PrivateKey, others map[string]string) error {
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	for otherName, other := range others {
+		if other == "" {
+			continue
+		}
+		k, err := crypto.HexToECDSA(strings.TrimPrefix(other, "0x"))
+		if err != nil {
+			continue
+		}
+		if crypto.PubkeyToAddress(k.PublicKey) == addr {
+			return fmt.Errorf("%s is the same key as %s", name, otherName)
+		}
+	}
+	return nil
+}
+
+// rampLaneTokens resolves the stablecoin addresses configured for chain —
+// the only tokens either a sponsor lane or a treasury lane ever moves.
+func rampLaneTokens(chains *services.BlockchainService, chain string) map[string]string {
+	tokens := map[string]string{}
+	for _, symbol := range []string{"USDC", "USDT"} {
+		if addr := chains.TokenAddress(chain, symbol); addr != "" {
+			tokens[symbol] = addr
+		}
+	}
+	return tokens
+}
+
+// buildSponsorLane builds one SponsorLane for chain — the shape both the gas
+// sponsor and the ramp treasury need (chain client, EVMRelayChain,
+// EVMRelayTxBuilder, NewLocalKeyReleaseSigner, NewSponsorGuard). Returns nil
+// when chain has no configured RPC client. guardName namespaces the guard's
+// own kill switch/daily counter (e.g. "ramp_sponsor_base" vs
+// "ramp_treasury_base") so the two lane types never share one.
+func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+	client := chains.ClientForChain(chain)
+	if client == nil {
+		return nil
+	}
+	// Ramp lanes do not rate-limit per user, so no PerUserPerWindow and
+	// ReserveUser is never called on them: each sponsored tx needs a real
+	// order (one per order), a user holds one open sell order at a time,
+	// and top-ups are capped by how many went unused.
+	return &services.SponsorLane{
+		ChainKey:    chain,
+		Chain:       services.EVMRelayChain{Client: client},
+		Builder:     services.EVMRelayTxBuilder{Client: client},
+		Native:      client,
+		Signer:      services.NewLocalKeyReleaseSigner(key, client),
+		Guard:       services.NewSponsorGuard(guardName, limits, nil),
+		Tokens:      rampLaneTokens(chains, chain),
+		TopUpMaxWei: topUpMaxWei,
+	}
+}
 
 // rampSponsorLaneLimits validates a chain's eligibility for a sponsor lane and
 // returns its parsed limits. A lane MUST NOT be built with a nil BalanceFloor,
@@ -65,54 +141,32 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 	}
 	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
 	sponsorAddr := crypto.PubkeyToAddress(key.PublicKey)
-	for name, other := range map[string]string{
-		"RELAYER_PRIVATE_KEY":     cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY": cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":  cfg.PMReleasePrivateKey,
-	} {
-		if other == "" {
-			continue
-		}
-		if k, kerr := crypto.HexToECDSA(strings.TrimPrefix(other, "0x")); kerr == nil && crypto.PubkeyToAddress(k.PublicKey) == sponsorAddr {
-			log.Fatalf("[config] REFUSING TO START: RAMP_SPONSOR_PRIVATE_KEY is the same key as %s", name)
-		}
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
+		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
+		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
+	}); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+		return nil
 	}
 
 	lanes := map[string]*services.SponsorLane{}
 	for _, chain := range cfg.RampSponsorChains {
-		client := chains.ClientForChain(chain)
-		if client == nil {
-			log.Printf("[ramp-sponsor] skipping %s: no chain client", chain)
-			continue
-		}
 		floor, topUpMax, dailyBudget, skipReason := rampSponsorLaneLimits(cfg, chain)
 		if skipReason != "" {
 			log.Printf("[ramp-sponsor] ALERT ramp_sponsor_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
 			continue
 		}
-		tokens := map[string]string{}
-		for _, symbol := range []string{"USDC", "USDT"} {
-			if addr := chains.TokenAddress(chain, symbol); addr != "" {
-				tokens[symbol] = addr
-			}
+		lane := buildSponsorLane(chains, chain, key, "ramp_sponsor_"+chain, services.SponsorLimits{
+			DailyGasBudget: dailyBudget,
+			BalanceFloor:   floor,
+		}, topUpMax)
+		if lane == nil {
+			log.Printf("[ramp-sponsor] skipping %s: no chain client", chain)
+			continue
 		}
-		// Ramp lanes do not rate-limit per user, so no PerUserPerWindow and
-		// ReserveUser is never called on them: each sponsored tx needs a real
-		// order (one per order), a user holds one open sell order at a time,
-		// and top-ups are capped by how many went unused.
-		lanes[chain] = &services.SponsorLane{
-			ChainKey: chain,
-			Chain:    services.EVMRelayChain{Client: client},
-			Builder:  services.EVMRelayTxBuilder{Client: client},
-			Native:   client,
-			Signer:   services.NewLocalKeyReleaseSigner(key, client),
-			Guard: services.NewSponsorGuard("ramp_sponsor_"+chain, services.SponsorLimits{
-				DailyGasBudget: dailyBudget,
-				BalanceFloor:   floor,
-			}, nil),
-			Tokens:      tokens,
-			TopUpMaxWei: topUpMax,
-		}
+		lanes[chain] = lane
 	}
 	if len(lanes) == 0 {
 		log.Printf("[ramp-sponsor] dormant: no usable chains in RAMP_SPONSOR_CHAINS")

@@ -281,6 +281,49 @@ type Config struct {
 	RampSponsorBalanceFloorWei     map[string]string // chain -> wei; sponsoring stops below this
 	RampSponsorTopUpMaxWei         map[string]string // chain -> wei; largest single top-up
 
+	// Ramp treasury / converted buys — Paycrest delivers into our own
+	// treasury instead of the user's wallet, and the treasury bridges it to
+	// the requested chain/token via LiFi. Dormant unless RAMP_CONVERSION_BUY
+	// is true AND RAMP_TREASURY_PRIVATE_KEY is set.
+	//
+	// RampTreasuryPrivateKey MUST differ from the relayer, IT operator, PM
+	// release AND ramp sponsor keys: unlike the sponsor (which only ever
+	// pays gas), the treasury holds USER FUNDS in transit, so sharing its
+	// key with any other hot signer turns a single compromise into one that
+	// drains customer money. Asserted at boot (assertDistinctKey).
+	RampConversionBuyEnabled bool
+	RampTreasuryPrivateKey   string
+	RampTreasuryChains       []string
+	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
+	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
+	// across every converted buy the treasury has not yet settled.
+	RampTreasuryMaxInflightUSDPerOrder float64
+	RampTreasuryMaxInflightUSDPerChain float64
+	// RampTreasuryNativeFloorWei is the native balance below which a lane
+	// refuses to execute a conversion — same shape as
+	// RampSponsorBalanceFloorWei but a separate map: a treasury lane signs a
+	// bridge tx, not a simple relay, so the floor that matters is different.
+	RampTreasuryNativeFloorWei map[string]string
+	// RampConversionRetryWindow (Decision 10) is how long a converted buy may
+	// sit with no broadcast bridge attempt before it is refunded instead of
+	// retried again.
+	RampConversionRetryWindow time.Duration
+	// RampConversionMinUSD/RampConversionMinUSDByChain are Decision 6's floor
+	// on a converted buy, measured on the settlement leg's stablecoin amount.
+	// ByChain always holds an entry for every chain in RampTreasuryChains
+	// (defaulting to RampConversionMinUSD unless overridden), so
+	// PaycrestQuoteService.SetConversionMinimums never has to guess a chain
+	// it wasn't told about.
+	RampConversionMinUSD        float64
+	RampConversionMinUSDByChain map[string]float64
+	// RampConversionStallWindow/RampConversionLegCeiling/
+	// RampConversionMaxShortfallUSD retune ConversionOrchestrator's own code
+	// defaults (defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD)
+	// via env instead of a code change.
+	RampConversionStallWindow     time.Duration
+	RampConversionLegCeiling      time.Duration
+	RampConversionMaxShortfallUSD float64
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -378,6 +421,9 @@ type Config struct {
 	LiFiAPIKey        string
 	LiFiIntegratorID  string
 	LiFiIntegratorFee string
+	// LiFiBaseURL is always resolved (never raw/empty) via ResolveLiFiBaseURL —
+	// see that function's doc for why this exists and what it defaults to.
+	LiFiBaseURL string
 
 	// AllSwap server-verified settle (design §8, I8). The backend re-queries LiFi
 	// to recompute the integrator fee, then rejects a client-supplied fee that
@@ -688,6 +734,60 @@ func Load() *Config {
 		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
 	}
 
+	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
+	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
+	cfg.RampTreasuryChains = nil
+	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {
+		if chain = strings.ToLower(strings.TrimSpace(chain)); chain != "" {
+			cfg.RampTreasuryChains = append(cfg.RampTreasuryChains, chain)
+		}
+	}
+	cfg.RampTreasuryMaxInflightUSDPerOrder = getEnvFloat64("RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER", 2000)
+	cfg.RampTreasuryMaxInflightUSDPerChain = getEnvFloat64("RAMP_TREASURY_MAX_INFLIGHT_USD_PER_CHAIN", 10000)
+	// Order-of-magnitude placeholders (~0.005-0.01 of the chain's native gas
+	// token, ~$5-10 at typical prices) covering a bridge transaction, which
+	// costs more gas than the simple relay RampSponsorBalanceFloorWei bounds.
+	// Retune per chain once real bridge gas costs are observed in production.
+	rampTreasuryFloorDefaults := map[string]string{
+		"base": "5000000000000000", "arbitrum": "5000000000000000", // 0.005 ETH
+		"optimism": "5000000000000000", "linea": "5000000000000000", // 0.005 ETH
+		"polygon":   "5000000000000000000", // 5 POL
+		"bsc":       "10000000000000000",   // 0.01 BNB
+		"avalanche": "100000000000000000",  // 0.1 AVAX
+		"sonic":     "5000000000000000000", // 5 S
+		"ethereum":  "10000000000000000",   // 0.01 ETH — mainnet gas is pricier
+	}
+	cfg.RampTreasuryNativeFloorWei = map[string]string{}
+	for _, chain := range cfg.RampTreasuryChains {
+		up := strings.ToUpper(chain)
+		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
+	}
+	cfg.RampConversionRetryWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_RETRY_MINUTES", 30)) * time.Minute
+	cfg.RampConversionMinUSD = getEnvFloat64("RAMP_CONVERSION_MIN_USD", 1)
+	// Decision 6: Ethereum and Linea cost enough in gas that a $1 minimum
+	// order would not be worth converting; every other chain uses the
+	// RampConversionMinUSD default unless explicitly overridden below.
+	rampConversionMinDefaults := map[string]float64{
+		"ethereum": 5,
+		"linea":    25,
+	}
+	cfg.RampConversionMinUSDByChain = map[string]float64{}
+	for _, chain := range cfg.RampTreasuryChains {
+		up := strings.ToUpper(chain)
+		def := cfg.RampConversionMinUSD
+		if d, ok := rampConversionMinDefaults[chain]; ok {
+			def = d
+		}
+		cfg.RampConversionMinUSDByChain[chain] = getEnvFloat64("RAMP_CONVERSION_MIN_USD_"+up, def)
+	}
+	// ConversionOrchestrator's own code defaults are 6h/24h/$50 — see
+	// defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD in
+	// internal/services/conversion_orchestrator.go. Reading them from env
+	// here means retuning never needs a code change.
+	cfg.RampConversionStallWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_STALL_MINUTES", 360)) * time.Minute
+	cfg.RampConversionLegCeiling = time.Duration(getEnvInt64("RAMP_CONVERSION_LEG_CEILING_HOURS", 24)) * time.Hour
+	cfg.RampConversionMaxShortfallUSD = getEnvFloat64("RAMP_CONVERSION_MAX_SHORTFALL_USD", 50)
+
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
 	// TrimPrefix "0x": crypto.HexToECDSA rejects a 0x-prefixed string outright,
@@ -811,6 +911,11 @@ func Load() *Config {
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
+	// LIFI_BASE_URL exists so a local rehearsal can point every LiFi client at
+	// a stand-in server — production must leave it unset. Resolved through
+	// ResolveLiFiBaseURL so this is the one place the default/normalisation
+	// logic lives; every call site downstream uses cfg.LiFiBaseURL directly.
+	cfg.LiFiBaseURL = ResolveLiFiBaseURL(os.Getenv("LIFI_BASE_URL"))
 
 	// AllSwap server-verified settle thresholds (design §8, I8).
 	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
@@ -1236,6 +1341,29 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// DefaultLiFiBaseURL is LiFi's public API base. It is the single source of
+// truth for every LiFi client the backend builds (AllSwap, ramp-conversion
+// treasury, IT stable verifier) — none of them hardcode the literal
+// themselves, they all resolve through ResolveLiFiBaseURL.
+const DefaultLiFiBaseURL = "https://li.quest/v1"
+
+// ResolveLiFiBaseURL normalises a raw LIFI_BASE_URL value: trims surrounding
+// whitespace, strips a trailing slash, and falls back to DefaultLiFiBaseURL
+// when the result is empty. LIFI_BASE_URL exists purely to let a local
+// rehearsal point every LiFi client at a stand-in server — the real API
+// cannot satisfy a status check for a transaction that only exists on a
+// local chain fork — and must be left unset in production. A malformed value
+// (blank, whitespace-only) falling through to the default rather than being
+// used verbatim keeps a typo from silently sending real requests to a
+// nonsense host.
+func ResolveLiFiBaseURL(raw string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return DefaultLiFiBaseURL
+	}
+	return trimmed
 }
 
 // normalizeEnv trims whitespace, lower-cases, and canonicalises "prod" to

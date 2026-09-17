@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,13 +130,14 @@ func (f *fakeSponsorStore) onlyRow() *models.GasSponsorship {
 // fakeSponsorChain answers by selector so each test controls the
 // authorizationState read and the simulation independently.
 type fakeSponsorChain struct {
-	mu       sync.Mutex
-	used     bool
-	simErr   error
-	balances map[string]*big.Int // lowercase address -> wei; default 1 ether
-	extra    map[string][]byte   // selector hex -> canned return, checked first
-	code     map[string][]byte   // lowercase address -> code; default none (an EOA)
-	codeErr  error
+	mu         sync.Mutex
+	used       bool
+	simErr     error
+	balances   map[string]*big.Int // lowercase address -> wei; default 1 ether
+	extra      map[string][]byte   // selector hex -> canned return, checked first
+	code       map[string][]byte   // lowercase address -> code; default none (an EOA)
+	codeErr    error
+	balanceErr error // BalanceAt failure, for FloatBalances "carry on past a bad RPC" tests
 }
 
 func (f *fakeSponsorChain) CodeAt(_ context.Context, account common.Address, _ *big.Int) ([]byte, error) {
@@ -173,6 +175,9 @@ func (f *fakeSponsorChain) CallContract(_ context.Context, msg ethereum.CallMsg,
 func (f *fakeSponsorChain) BalanceAt(_ context.Context, account common.Address, _ *big.Int) (*big.Int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.balanceErr != nil {
+		return nil, f.balanceErr
+	}
 	if b, ok := f.balances[strings.ToLower(account.Hex())]; ok {
 		return b, nil
 	}
@@ -182,25 +187,47 @@ func (f *fakeSponsorChain) BalanceAt(_ context.Context, account common.Address, 
 func (f *fakeSponsorChain) ChainID() *big.Int { return big.NewInt(8453) }
 
 type fakeSponsorBuilder struct {
-	mu   sync.Mutex
-	to   string
-	data []byte
-	err  error
+	mu       sync.Mutex
+	to       string
+	data     []byte
+	value    *big.Int
+	gasLimit uint64
+	err      error
 }
 
-func (f *fakeSponsorBuilder) BuildUnsignedTx(_, to string, callData []byte) ([]byte, error) {
+func (f *fakeSponsorBuilder) BuildUnsignedTx(from, to string, callData []byte) ([]byte, error) {
+	return f.BuildUnsignedCall(from, to, callData, nil, 0)
+}
+
+func (f *fakeSponsorBuilder) BuildUnsignedCall(_, to string, callData []byte, value *big.Int, gasLimit uint64) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.to, f.data = to, callData
+	f.to, f.data, f.value, f.gasLimit = to, callData, value, gasLimit
 	if f.err != nil {
 		return nil, f.err
 	}
 	return []byte(`{"unsigned":true}`), nil
 }
 
+// lastCall is the mutex-guarded accessor for what BuildUnsignedCall was last
+// invoked with — reads the same fields under the same lock BuildUnsignedCall
+// writes them under, instead of a data race waiting to happen under -race.
+func (f *fakeSponsorBuilder) lastCall() (to string, data []byte, value *big.Int, gasLimit uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.to, f.data, f.value, f.gasLimit
+}
+
 type fakeSponsorNative struct {
-	mu            sync.Mutex
-	decimals      int
+	mu       sync.Mutex
+	decimals int
+	// decimalsByToken overrides `decimals` for specific token addresses, so one
+	// lane can hold a 6dp and an 18dp stable at once.
+	decimalsByToken map[string]int
+	// decimalsErr simulates a transient RPC failure reading a token's
+	// decimals (e.g. custody's own source-side read) — separate from
+	// prepareErr, which is the send-side failure.
+	decimalsErr   error
 	estimate      uint64
 	estimateErr   error
 	gasPrice      *big.Int
@@ -209,6 +236,31 @@ type fakeSponsorNative struct {
 	receiptStatus uint64
 	receiptErr    error
 	prepareErr    error
+
+	// ERC-20 fields, for the treasury lane (Task 6). allowance is what
+	// GetTokenAllowance answers with; nil means zero, so an approve is always
+	// exercised unless a test sets one high enough to skip it.
+	allowance    *big.Int
+	allowanceErr error
+	// allowanceDelay artificially widens the read-then-decide window inside
+	// GetTokenAllowance, for the TreasuryLane.convertMu regression test: two
+	// concurrent ExecuteRoute calls on one lane must not both observe the
+	// same stale allowance.
+	allowanceDelay time.Duration
+	inFlight       int32 // atomic: calls currently inside GetTokenAllowance
+	maxInFlight    int32 // atomic: high-water mark of the above
+
+	approveToken   string
+	approveOwner   string
+	approveSpender string
+	approveAmount  *big.Int
+	approveErr     error
+
+	transferToken string
+	transferFrom  string
+	transferTo    string
+	transferAmt   *big.Int
+	transferErr   error
 }
 
 func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.Int) ([]byte, error) {
@@ -224,8 +276,22 @@ func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.I
 func (f *fakeSponsorNative) EstimateGas(ethereum.CallMsg) (uint64, error) {
 	return f.estimate, f.estimateErr
 }
-func (f *fakeSponsorNative) SuggestGasPrice() (*big.Int, error)   { return f.gasPrice, nil }
-func (f *fakeSponsorNative) GetTokenDecimals(string) (int, error) { return f.decimals, nil }
+func (f *fakeSponsorNative) SuggestGasPrice() (*big.Int, error) { return f.gasPrice, nil }
+
+// GetTokenDecimals answers per token address when a test needs a lane to hold
+// tokens of differing precision (BSC stables are 18dp against 6dp elsewhere),
+// falling back to the rig's single `decimals` otherwise.
+func (f *fakeSponsorNative) GetTokenDecimals(token string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decimalsErr != nil {
+		return 0, f.decimalsErr
+	}
+	if d, ok := f.decimalsByToken[strings.ToLower(token)]; ok {
+		return d, nil
+	}
+	return f.decimals, nil
+}
 
 func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string, _ time.Duration) (*types.Receipt, error) {
 	if err := ctx.Err(); err != nil {
@@ -235,6 +301,74 @@ func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string,
 		return nil, f.receiptErr
 	}
 	return &types.Receipt{Status: f.receiptStatus}, nil
+}
+
+func (f *fakeSponsorNative) GetTokenAllowance(_, _, _ string) (*big.Int, error) {
+	n := atomic.AddInt32(&f.inFlight, 1)
+	defer atomic.AddInt32(&f.inFlight, -1)
+	for {
+		old := atomic.LoadInt32(&f.maxInFlight)
+		if n <= old || atomic.CompareAndSwapInt32(&f.maxInFlight, old, n) {
+			break
+		}
+	}
+	if f.allowanceDelay > 0 {
+		time.Sleep(f.allowanceDelay)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.allowanceErr != nil {
+		return nil, f.allowanceErr
+	}
+	if f.allowance != nil {
+		return new(big.Int).Set(f.allowance), nil
+	}
+	return big.NewInt(0), nil
+}
+
+// maxAllowanceConcurrency is the high-water mark of concurrent
+// GetTokenAllowance calls observed — 1 proves a caller-side lock (e.g.
+// TreasuryLane.convertMu) serialised the allowance-read-then-decide section.
+func (f *fakeSponsorNative) maxAllowanceConcurrency() int32 {
+	return atomic.LoadInt32(&f.maxInFlight)
+}
+
+func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approveToken, f.approveOwner, f.approveSpender = tokenAddress, owner, spender
+	f.approveAmount = new(big.Int).Set(amount)
+	if f.approveErr != nil {
+		return nil, f.approveErr
+	}
+	return []byte(`{"approve":true}`), nil
+}
+
+// approveCall is the mutex-guarded accessor for the last PrepareERC20Approve
+// call, mirroring PrepareERC20Approve's own lock.
+func (f *fakeSponsorNative) approveCall() (token, owner, spender string, amount *big.Int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approveToken, f.approveOwner, f.approveSpender, f.approveAmount
+}
+
+func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.transferToken, f.transferFrom, f.transferTo = tokenAddress, from, to
+	f.transferAmt = new(big.Int).Set(amount)
+	if f.transferErr != nil {
+		return nil, f.transferErr
+	}
+	return []byte(`{"transfer":true}`), nil
+}
+
+// transferCall is the mutex-guarded accessor for the last
+// PrepareERC20Transfer call, mirroring PrepareERC20Transfer's own lock.
+func (f *fakeSponsorNative) transferCall() (token, from, to string, amount *big.Int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.transferToken, f.transferFrom, f.transferTo, f.transferAmt
 }
 
 type sponsorRig struct {

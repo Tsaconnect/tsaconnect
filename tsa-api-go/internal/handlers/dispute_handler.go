@@ -11,6 +11,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
 // dispute_handler.go — one complaint queue for every kind of order.
@@ -34,8 +35,18 @@ type disputeService interface {
 	Resolve(ctx context.Context, adminID, id uuid.UUID, status, resolution string) (*models.Dispute, error)
 }
 
+// rampAdminService is the slice of the converted-buy treasury this handler
+// needs for the two ramp admin routes. *services.ConversionOrchestrator
+// satisfies it. An interface, like disputeService above, so the routes can be
+// exercised without a live treasury.
+type rampAdminService interface {
+	LegsAndOwedByOrderID(ctx context.Context, orderID uuid.UUID) (*models.PaycrestOrderRecord, *services.RampLegsInfo, error)
+	RefundFromTreasury(ctx context.Context, adminID, orderID uuid.UUID) (*models.RampLeg, error)
+}
+
 type DisputeHandler struct {
 	disputes disputeService
+	ramp     rampAdminService
 }
 
 func NewDisputeHandler(disputes *services.DisputeService) *DisputeHandler {
@@ -46,6 +57,97 @@ func NewDisputeHandler(disputes *services.DisputeService) *DisputeHandler {
 }
 
 func (h *DisputeHandler) Enabled() bool { return h != nil && h.disputes != nil }
+
+// WithRampAdmin wires the treasury refund tooling in. Nil-safe, and dormant
+// (routes answer 503) when never called — same pattern as
+// PaycrestHandler.WithSponsorship.
+func (h *DisputeHandler) WithRampAdmin(orch *services.ConversionOrchestrator) *DisputeHandler {
+	if h == nil || orch == nil {
+		return h
+	}
+	h.ramp = orch
+	return h
+}
+
+func (h *DisputeHandler) RampAdminEnabled() bool { return h != nil && h.ramp != nil }
+
+// rampAdminError maps the refund tooling's sentinels onto status codes. The
+// business-rule refusals — nothing owed, undetermined, in flight, not
+// applicable, an invalid recipient — are all 409s (nothing about any of them
+// is a malformed request) but each keeps its OWN distinct, explicit message:
+// collapsing "nothing owed" and "undetermined" into one string is exactly the
+// confusion Decision 2 exists to prevent, and the same reasoning extends to
+// every other sentinel here.
+func rampAdminError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+	case errors.Is(err, services.ErrNothingOwed):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrOwedUndetermined):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrRefundInFlight):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrRefundNotApplicable):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrTreasuryInvalidRecipient):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrSponsorNotAvailable),
+		errors.Is(err, services.ErrTreasuryKilled),
+		errors.Is(err, services.ErrRelayerUnderfunded):
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Treasury is not available for this chain right now")
+	default:
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong. Please try again.")
+	}
+}
+
+// GET /api/admin/ramp/orders/:id/legs
+func (h *DisputeHandler) RampLegs(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	if h.ramp == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Ramp treasury is not configured")
+		return
+	}
+	_, info, err := h.ramp.LegsAndOwedByOrderID(c.Request.Context(), id)
+	if err != nil {
+		rampAdminError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Ramp legs", info)
+}
+
+// POST /api/admin/ramp/orders/:id/refund
+//
+// The order id in the path is the ONLY input this endpoint reads. The
+// destination (the order's own wallet), the token and the amount all come
+// from RefundFromTreasury's own read of the order record and its leg
+// ledger — never from anything an admin could type in a request body.
+func (h *DisputeHandler) RampRefund(c *gin.Context) {
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	if h.ramp == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Ramp treasury is not configured")
+		return
+	}
+	leg, err := h.ramp.RefundFromTreasury(c.Request.Context(), admin.ID, id)
+	if err != nil {
+		rampAdminError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Refund sent", leg)
+}
 
 // disputeError maps service sentinels onto status codes, surfacing the
 // sentinel's own wording — these strings are written to be shown to users.

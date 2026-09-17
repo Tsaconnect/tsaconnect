@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,8 +22,6 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
-
-const defaultLiFiBaseURL = "https://li.quest/v1"
 
 const (
 	lifiDefaultSlippage = "0.005"
@@ -100,12 +99,26 @@ type SwapLiFiHandler struct {
 	// endpoint reports "not configured" rather than pretending a swap landed.
 	StatusClient *services.LiFiStatusClient
 
+	// quoteClient is the shared typed LiFi /quote client (internal/services).
+	// Not used by this handler's own raw pass-through endpoints (GetQuote,
+	// quoteWithoutFee, liveRequeryQuoteUSD all need untyped/param-level control
+	// LiFiQuoteClient.Quote does not expose — see its callers for why) — held
+	// here so a converted-buy treasury flow can share the same client rather
+	// than building a second one.
+	quoteClient *services.LiFiQuoteClient
+
 	// requeryQuoteUSD re-queries LiFi for the supplied route. Split out as a
 	// field so tests can inject a deterministic / unreachable LiFi without HTTP.
 	requeryQuoteUSD func(p settleQuoteParams) requeryResult
 }
 
 // NewSwapLiFiHandler creates a production SwapLiFiHandler.
+//
+// `baseURL` is resolved through config.ResolveLiFiBaseURL — an empty string
+// (the common case: callers pass cfg.LiFiBaseURL, which is already resolved,
+// but tests often pass "") defaults to LiFi's public API. This is the one
+// place the handler's base URL is decided; lifiGet and quoteClient both
+// share it.
 //
 // `apiKey` is forwarded as the `x-lifi-api-key` header on every upstream
 // call (empty = anonymous tier, rate-limited).
@@ -114,28 +127,30 @@ type SwapLiFiHandler struct {
 // are non-empty. Collecting an integrator fee requires the matching name
 // to be registered on portal.li.fi with a fee wallet configured; quoting
 // with an unregistered integrator + fee returns a 400 from LiFi.
-func NewSwapLiFiHandler(apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
+func NewSwapLiFiHandler(baseURL, apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
+	resolvedBaseURL := config.ResolveLiFiBaseURL(baseURL)
 	h := &SwapLiFiHandler{
 		tokenCache:    make(map[string]tokenCacheEntry),
-		lifiBaseURL:   defaultLiFiBaseURL,
+		lifiBaseURL:   resolvedBaseURL,
 		apiKey:        apiKey,
 		integratorID:  integratorID,
 		integratorFee: integratorFee,
 	}
+	h.quoteClient = services.NewLiFiQuoteClient(resolvedBaseURL, apiKey, integratorID)
 	h.requeryQuoteUSD = h.liveRequeryQuoteUSD
 	return h
 }
 
 // lifiGet performs a GET against the LiFi base URL and forwards the
 // configured API key when one is set. Keeps the per-endpoint code free of
-// header-plumbing noise.
+// header-plumbing noise. The request itself is built by
+// services.NewLiFiGetRequest — the same helper the shared LiFiQuoteClient
+// uses — so the base-URL/api-key plumbing lives in exactly one place rather
+// than being duplicated between the handler and the services client.
 func (h *SwapLiFiHandler) lifiGet(client *http.Client, path string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, h.lifiBaseURL+path, nil)
+	req, err := services.NewLiFiGetRequest(context.Background(), h.lifiBaseURL, h.apiKey, path)
 	if err != nil {
 		return nil, err
-	}
-	if h.apiKey != "" {
-		req.Header.Set("x-lifi-api-key", h.apiKey)
 	}
 	return client.Do(req)
 }
@@ -924,6 +939,14 @@ func deterministicUUID(key string) uuid.UUID {
 // liveRequeryQuoteUSD re-queries LiFi /quote for the supplied route and returns
 // the from-amount USD (estimate.fromAmountUSD). reachable=false on any transport
 // or decode failure so the caller falls back to the conservative default.
+//
+// This keeps its own request + parse rather than calling h.quoteClient.Quote:
+// the shared client cannot serve it. It needs (a) the conditional fee/integrator
+// params so a non-200 can be classified via isIntegratorFeeUnconfigured — a
+// distinction Quote's plain error does not preserve — and (b) the handler's own
+// default slippage (0.005, matching GetQuote) rather than Quote's fixed 0.001.
+// Both are load-bearing for the FeeCollectable branch below; unifying onto
+// Quote would silently disable it.
 func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) requeryResult {
 	// fromAddress is REQUIRED by LiFi ("querystring must have required property
 	// 'fromAddress'"), and a UTXO route additionally needs it to hold coins,

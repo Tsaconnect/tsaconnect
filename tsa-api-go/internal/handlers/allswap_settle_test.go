@@ -27,7 +27,7 @@ func newAllSwapHandler(t *testing.T, db *gorm.DB, fromAmountUSD float64, reachab
 		AllSwapFeeDeviationMax: 0.10,
 		AllSwapNominalFeeBps:   300, // 3%
 	}
-	h := NewSwapLiFiHandler("", "", "")
+	h := NewSwapLiFiHandler("", "", "", "")
 	h.Config = cfg
 	h.FeeService = services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
 	h.requeryQuoteUSD = func(p settleQuoteParams) requeryResult {

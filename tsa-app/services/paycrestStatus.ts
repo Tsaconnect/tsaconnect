@@ -22,7 +22,16 @@ export type PaycrestStatus =
   | 'failed'
   /** Ours: the user abandoned the order before sending anything. Paycrest's
    *  own copy keeps running to its expiry — see the cancel endpoint. */
-  | 'cancelled';
+  | 'cancelled'
+  // ── Converted-order states (Phase 2). None of these are terminal. ──
+  /** Paycrest delivered to our treasury; the cross-chain conversion has not
+   *  finished. Holder is 'treasury' throughout. */
+  | 'converting'
+  /** A refund leg back to the user's own wallet is in flight. */
+  | 'refunding'
+  /** Funds are stranded at Paycrest in a way no retry can fix; an operator
+   *  is working it through a dispute — same shape of problem as `unmatched`. */
+  | 'recovery_pending';
 
 /** Statuses that will never change on their own. */
 export function isTerminal(status: PaycrestStatus): boolean {

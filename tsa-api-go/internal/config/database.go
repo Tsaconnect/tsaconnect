@@ -153,6 +153,10 @@ func AutoMigrate() error {
 		// One row per transaction we paid gas for on a user's behalf; the
 		// (order_id, kind) unique index is the once-per-order rule.
 		&models.GasSponsorship{},
+		// Ramp conversion (Phase 2) — one row per on-chain leg of a converted
+		// Paycrest order. (order_id, kind, attempt) unique index is the
+		// once-per-attempt rule.
+		&models.RampLeg{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
@@ -427,6 +431,21 @@ func AutoMigrate() error {
 	    ON it_intents (user_id)
 	    WHERE direction = 'buy' AND status = 'pending_payment'
 	      AND asset IN ('USDC','USDT')`)
+
+	// Ramp treasury refund — "at most one refund IN FLIGHT per order": the
+	// existing (order_id, kind, attempt) unique index only rejects two callers
+	// landing on the SAME attempt number, and Reserve's read-then-decide
+	// NextAttempt call is not atomic with the insert — two independent callers
+	// (the automatic Advance/refund() path and an admin's RefundFromTreasury)
+	// can each compute a DIFFERENT, non-colliding attempt number and both go on
+	// to broadcast a refund for the same order. This is the one remaining path
+	// to paying a user's refund twice, and closing it needs a constraint the
+	// application cannot enforce by reading first. Partial over PENDING refund
+	// legs only: once a refund confirms, the row's status leaves this index,
+	// same as every other partial index here. Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_pending_refund
+	    ON ramp_legs (order_id)
+	    WHERE kind = 'refund' AND status = 'pending'`)
 
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot

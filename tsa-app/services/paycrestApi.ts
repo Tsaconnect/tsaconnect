@@ -17,6 +17,14 @@
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
 import { makeIdempotencyKey } from '@/services/itApi';
+import { getChain, type ChainKey } from '@/constants/chains';
+import { p2pTokenDecimals, formatTokenAmount } from '@/services/p2p';
+// The multi-hop ramp progress UI's own types — reused verbatim, not
+// redeclared. The status→hop MAPPING below is new (Paycrest's converted-order
+// statuses have no overlap with the stablecoin sell/buy ones that file maps),
+// but the shape it renders through is the same one already wired into
+// app/wallet/it/intent/[id].tsx.
+import type { Hop } from '@/utils/stableSellQuote';
 import type { PaycrestStatus } from './paycrestStatus';
 
 /** One fillable (token, network) with its live price. */
@@ -31,6 +39,32 @@ export interface PaycrestVenue {
   spreadPercent: number;
   /** What the user receives (buy) or must send (sell). */
   tokenAmount: number;
+
+  // ── Conversion (Phase 2). Absent/'direct' on every ordinary venue. ──
+
+  /** 'converted' means Paycrest settles on chain/token (below) and a
+   *  cross-chain route then delivers requestedChain/requestedToken instead.
+   *  This is the ONLY signal that distinguishes a converted route from a
+   *  direct one — the app must label it, never fold it into an ordinary
+   *  venue silently. */
+  kind?: 'direct' | 'converted';
+  /** The Paycrest settlement leg a converted venue actually creates the
+   *  order against — restates chain/token under their own name so a
+   *  converted venue can say what it settles as without being confused with
+   *  what the user gets. */
+  viaChain?: string;
+  viaToken?: string;
+  /** What the user actually asked for and will receive on a converted venue. */
+  requestedChain?: string;
+  requestedToken?: string;
+  /** Priced markup for the conversion, in basis points. */
+  markupBps?: number;
+  /** Guaranteed delivery, in the REQUESTED token's own base units — render
+   *  with that token's decimals (see formatPromisedAmount), never as a raw
+   *  integer. */
+  promisedAmount?: string;
+  /** The cross-chain route's estimated execution time, in seconds. */
+  etaSeconds?: number;
 }
 
 export interface PaycrestQuote {
@@ -64,6 +98,30 @@ export interface PaycrestOrder {
   tokenAmount?: string;
   senderFee?: string;
   walletAddress: string;
+
+  // ── Conversion (Phase 2). Empty/'direct' on every pre-Phase-2 order. ──
+
+  /** 'converted' means chain/token above is the SETTLEMENT leg (what
+   *  Paycrest actually delivers, to our treasury) — requestedChain/
+   *  requestedToken below is what the user gets. Reading chain/token alone
+   *  on a converted order is the exact silent substitution this phase exists
+   *  to remove; always check this first. */
+  routeKind?: 'direct' | 'converted';
+  requestedToken?: string;
+  requestedChain?: string;
+  markupBps?: number;
+  /** What we guaranteed the user receives, in the REQUESTED token's base
+   *  units. Format with formatPromisedAmount, never render raw. */
+  promisedAmount?: string;
+  /** Who currently holds the funds. 'paycrest' until the settlement leg
+   *  lands, then 'treasury' while converting, then 'user' once delivered or
+   *  refunded. */
+  holder?: 'user' | 'treasury' | 'paycrest';
+  /** What we still owe the user, in destination base units. "0" means
+   *  nothing owed; "" means UNDETERMINED (a transfer is in flight) — never
+   *  treat "" as zero. */
+  owedToUser?: string;
+  fault?: 'platform' | 'user';
 
   /** Buy leg — the provider account the user must pay. */
   payInstitution?: string;
@@ -141,8 +199,18 @@ export async function getQuote(
   side: 'buy' | 'sell',
   amount: string,
   currency = 'NGN',
+  // The (chain, token) the user has explicitly chosen to receive. Passed
+  // through so a server that cannot fill it directly can price a converted
+  // route for THIS pair — ConvertedVenues needs to know what to price against,
+  // it cannot guess. An older/not-yet-wired server just ignores the extra
+  // query params and returns direct venues exactly as before.
+  requested?: { chain: string; token: string },
 ): Promise<PaycrestQuote> {
   const q = new URLSearchParams({ side, amount, currency });
+  if (requested?.chain && requested.token) {
+    q.set('requestedChain', requested.chain);
+    q.set('requestedToken', requested.token);
+  }
   return request<PaycrestQuote>(`/quote?${q.toString()}`);
 }
 
@@ -178,6 +246,11 @@ export interface CreateBuyInput {
   refundAccount: string;
   refundAccountName?: string;
   currency?: string;
+  /** What the user actually wants delivered. Omitted (or equal to
+   *  chain/token) means a direct buy — the server defaults both to
+   *  chain/token, so leaving these unset behaves exactly as before. */
+  requestedChain?: string;
+  requestedToken?: string;
 }
 
 /** Opens an onramp. The returned order carries the provider account to pay. */
@@ -280,7 +353,183 @@ export function statusLabel(order: PaycrestOrder): string {
       return 'Could not be completed';
     case 'cancelled':
       return 'Cancelled';
+    case 'converting':
+      return 'Converting to what you asked for';
+    case 'refunding':
+      return 'Returning to your wallet';
+    case 'recovery_pending':
+      return 'We are recovering your funds';
   }
+}
+
+// ─── Conversion (Phase 2) ──────────────────────────────────────────────────
+
+export function isConvertedVenue(v: Pick<PaycrestVenue, 'kind'>): boolean {
+  return v.kind === 'converted';
+}
+
+export function isConvertedOrder(o: Pick<PaycrestOrder, 'routeKind'>): boolean {
+  return o.routeKind === 'converted';
+}
+
+/**
+ * The single rule this whole phase exists to enforce: pick the venue that
+ * fills the user's exact requested (chainKey, symbol) — or nothing.
+ *
+ * An exact DIRECT match always wins over a converted one for the same pair
+ * (mirrors the backend's own Decision 3: never convert what Paycrest can
+ * already deliver). A converted match is used only when no direct match
+ * exists. When NEITHER exists this returns `null` — never `venues[0]`,
+ * never "best", never anything the user did not explicitly ask for. A
+ * caller with nothing to show must render "no route" and offer an
+ * alternative as a choice, not silently substitute one here.
+ */
+export function selectVenue(
+  venues: PaycrestVenue[],
+  wantChainKey: string,
+  wantSymbol: string,
+): PaycrestVenue | null {
+  const matchesWanted = (v: PaycrestVenue) =>
+    v.chain.toLowerCase() === wantChainKey.toLowerCase() &&
+    v.token.toUpperCase() === wantSymbol.toUpperCase();
+  const direct = venues.find((v) => matchesWanted(v) && !isConvertedVenue(v));
+  if (direct) return direct;
+  const converted = venues.find(
+    (v) =>
+      isConvertedVenue(v) &&
+      v.requestedChain?.toLowerCase() === wantChainKey.toLowerCase() &&
+      v.requestedToken?.toUpperCase() === wantSymbol.toUpperCase(),
+  );
+  return converted ?? null;
+}
+
+/**
+ * On-chain decimals for a (chainKey, symbol) pair, resolved through the
+ * app's own chain registry — the same source `p2pTokenDecimals` already
+ * gets right for BSC's 18-decimal stables vs everywhere else's 6. Falls back
+ * to whatever `p2pTokenDecimals` does for an unresolved chain (its own
+ * symbol-only default), rather than inventing a second guess here.
+ */
+export function requestedAssetDecimals(chainKey: string, token: string): number {
+  const chain = getChain(chainKey as ChainKey);
+  return p2pTokenDecimals(chain?.chainId, token);
+}
+
+/**
+ * promisedAmount is a raw base-units integer string in the REQUESTED token's
+ * OWN decimals (never the settlement leg's — see the field's doc comment).
+ * Rendering it without rescaling is off by 10^decimals and would show a user
+ * "9950000" instead of "9.95". Null when any of the three fields required to
+ * price it are missing, which is every direct venue/order — callers gate
+ * display on `kind`/`routeKind` first.
+ */
+export function formatPromisedAmount(
+  v: Pick<PaycrestVenue, 'promisedAmount' | 'requestedChain' | 'requestedToken'>,
+): string | null {
+  if (!v.promisedAmount || !v.requestedChain || !v.requestedToken) return null;
+  const decimals = requestedAssetDecimals(v.requestedChain, v.requestedToken);
+  return formatTokenAmount(v.promisedAmount, decimals, decimals);
+}
+
+/** "~30s" under 90 seconds (matches how a user actually reads a short wait),
+ *  "~2 min" above it. A missing/zero estimate reads as a vague-but-honest
+ *  "a few minutes" rather than "~0s", which would be a promise we cannot
+ *  keep. */
+export function formatEta(seconds?: number): string {
+  if (!seconds || seconds <= 0) return 'a few minutes';
+  if (seconds < 90) return `~${Math.round(seconds)}s`;
+  return `~${Math.round(seconds / 60)} min`;
+}
+
+/**
+ * The one sentence a converted route must say, per the no-silent-substitution
+ * rule this phase exists to enforce: what the user receives, that it is a
+ * conversion (not the thing Paycrest itself fills), and roughly how long it
+ * takes. `chainLabel` is caller-supplied so this stays free of any one
+ * screen's display-name table.
+ */
+export function describeConvertedVenue(
+  v: Pick<PaycrestVenue, 'requestedToken' | 'requestedChain' | 'viaToken' | 'viaChain' | 'etaSeconds'>,
+  chainLabel: (chainKey: string) => string,
+): string {
+  const to = `${v.requestedToken ?? '?'} on ${chainLabel(v.requestedChain ?? '')}`;
+  const via = `${v.viaToken ?? '?'} on ${chainLabel(v.viaChain ?? '')}`;
+  return `${to} — includes a conversion from ${via}, arrives in ${formatEta(v.etaSeconds)}`;
+}
+
+/**
+ * The order-screen timeline for a CONVERTED order: Received → Converting →
+ * Delivering. Callers gate this on `isConvertedOrder` — a direct order never
+ * reaches `converting`/`refunding`/`recovery_pending`, so it needs no hops.
+ *
+ * `holder` backstops `status` rather than being read alone: the model only
+ * ever moves it to 'treasury' in the same write that moves status to
+ * 'converting' (see conversion_orchestrator.go), so the two should always
+ * agree — but a stale/racy read that still shows holder 'paycrest' under a
+ * 'converting' status must not claim the funds were received when our own
+ * ledger hasn't caught up to say so.
+ *
+ * A refund replaces "Delivering" outright rather than failing it: the money
+ * is going BACK to the user's wallet, not forward to what they originally
+ * asked for, and reporting it as a failed delivery would understate that it
+ * is still landing in their own hands.
+ */
+export function paycrestConversionHops(status: PaycrestStatus, holder?: string): Hop[] {
+  if (status === 'refunding' || status === 'refunded') {
+    const done = status === 'refunded';
+    return [
+      { key: 'received', label: 'Received', state: 'done' },
+      { key: 'converting', label: 'Converting', state: 'done' },
+      {
+        key: 'delivering',
+        label: done ? 'Returned to your wallet' : 'Returning to your wallet',
+        state: done ? 'done' : 'active',
+      },
+    ];
+  }
+  if (status === 'recovery_pending') {
+    return [
+      { key: 'received', label: 'Received', state: 'done' },
+      { key: 'converting', label: 'Converting', state: 'failed' },
+      { key: 'delivering', label: 'Delivering', state: 'pending' },
+    ];
+  }
+  if (status === 'settled') {
+    return [
+      { key: 'received', label: 'Received', state: 'done' },
+      { key: 'converting', label: 'Converting', state: 'done' },
+      { key: 'delivering', label: 'Delivering', state: 'done' },
+    ];
+  }
+  if (status === 'converting') {
+    const receivedDone = holder !== 'paycrest';
+    return [
+      { key: 'received', label: 'Received', state: receivedDone ? 'done' : 'active' },
+      { key: 'converting', label: 'Converting', state: 'active' },
+      { key: 'delivering', label: 'Delivering', state: 'pending' },
+    ];
+  }
+  if (status === 'pending' || status === 'settling') {
+    return [
+      { key: 'received', label: 'Received', state: 'active' },
+      { key: 'converting', label: 'Converting', state: 'pending' },
+      { key: 'delivering', label: 'Delivering', state: 'pending' },
+    ];
+  }
+  if (status === 'awaiting_payment' || status === 'awaiting_deposit') {
+    return [
+      { key: 'received', label: 'Received', state: 'pending' },
+      { key: 'converting', label: 'Converting', state: 'pending' },
+      { key: 'delivering', label: 'Delivering', state: 'pending' },
+    ];
+  }
+  // expired/unmatched/failed/cancelled: never claim progress the order never
+  // made.
+  return [
+    { key: 'received', label: 'Received', state: 'failed' },
+    { key: 'converting', label: 'Converting', state: 'pending' },
+    { key: 'delivering', label: 'Delivering', state: 'pending' },
+  ];
 }
 
 /** Shared with gasSponsorship.ts, which lives under the same /paycrest routes. */

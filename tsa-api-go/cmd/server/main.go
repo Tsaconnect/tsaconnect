@@ -597,7 +597,7 @@ func main() {
 	feeSplitConfigService := services.NewFeeSplitConfigService(config.DB)
 	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
 	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
-	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
+	slh := handlers.NewSwapLiFiHandler(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
 	slh.Config = cfg
@@ -606,7 +606,7 @@ func main() {
 	slh.PriceService = priceService
 	// Rates come from fee_config (what admins edit), not the env constant.
 	slh.FeeConfigService = feeConfigService
-	slh.StatusClient = services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey)
+	slh.StatusClient = services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey)
 	if cfg.FeeModelV2Enabled {
 		slh.FeeService = feeDistributionService
 	}
@@ -963,9 +963,11 @@ func main() {
 		default:
 			itService.SetStableDepositAddress("POLYGON", cfg.FWStableDepositAddressPolygon)
 			itService.SetStableVerifier(
-				// li.quest/v1 is LiFi's public API base — same default the
-				// AllSwap handler uses (handlers/swap_lifi_handler.go).
-				services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey),
+				// cfg.LiFiBaseURL is the same resolved base the AllSwap
+				// handler uses (handlers/swap_lifi_handler.go) — defaults to
+				// LiFi's public API, overridable via LIFI_BASE_URL for a
+				// local rehearsal against a stand-in server.
+				services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
 				services.NewLogTransferVerifier(polygonClient.Client),
 				map[string]string{
 					models.ITAssetUSDC: cfg.Networks["mainnet"].TokenAddresses["polygon:USDC"],
@@ -1448,6 +1450,10 @@ func main() {
 		os.Getenv("PAYCREST_BASE_URL"), os.Getenv("PAYCREST_API_KEY"))
 	var paycrestHandler *handlers.PaycrestHandler
 	var paycrestWebhookHandler *handlers.PaycrestWebhookHandler
+	// Hoisted out of the `if paycrestClient.IsEnabled()` block below (where
+	// buildRampConversion actually runs) so the dispute service and handler,
+	// wired further down, can pick it up whether or not it ended up nil.
+	var conversionOrch *services.ConversionOrchestrator
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1474,6 +1480,14 @@ func main() {
 			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
 			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
 		}
+		// Converted buys: Paycrest delivers into our own treasury instead of
+		// the user's wallet, then the treasury bridges it via LiFi. Dormant
+		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
+		// nil-orchestrator gate itself lives in registerRampConversionWorkers
+		// (and is unit-tested there), not inlined here.
+		var treasury *services.Treasury
+		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
+		registerRampConversionWorkers(scheduler, treasury, conversionOrch)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
@@ -1509,7 +1523,12 @@ func main() {
 		// the unified queue.
 		billService.SetDisputes(disputeService)
 	}
-	disputeHandler := handlers.NewDisputeHandler(disputeService)
+	if conversionOrch != nil {
+		// A converted-buy dispute's detail carries its own leg ledger and
+		// what it owes, straight from the ledger a refund would use.
+		disputeService.SetRampLegsReader(conversionOrch)
+	}
+	disputeHandler := handlers.NewDisputeHandler(disputeService).WithRampAdmin(conversionOrch)
 
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 

@@ -19,6 +19,15 @@ const (
 	LiFiStatusFailed  = "FAILED"
 )
 
+// LiFi substatuses. DONE is not on its own a statement that the recipient was
+// paid in full: LiFi also reports DONE for a partial fill and for a transfer
+// it bounced back to the sender. Only COMPLETED means "delivered as quoted".
+const (
+	LiFiSubstatusCompleted = "COMPLETED"
+	LiFiSubstatusPartial   = "PARTIAL"
+	LiFiSubstatusRefunded  = "REFUNDED"
+)
+
 // LiFiTransferStatus is the outcome of one bridged transfer.
 //
 // ReceivedBaseUnits is what actually landed at the destination — a bridge
@@ -26,7 +35,10 @@ const (
 // from the quoted amount. Treat it as a lead, not as proof: the destination tx
 // is verified independently on-chain before any money moves.
 type LiFiTransferStatus struct {
-	Status            string
+	Status string
+	// Substatus qualifies Status. A DONE carries COMPLETED, PARTIAL or
+	// REFUNDED, and only COMPLETED means the recipient got what was quoted.
+	Substatus         string
 	DestTxHash        string
 	DestChainID       int64
 	ReceivedBaseUnits *big.Int
@@ -54,6 +66,7 @@ func NewLiFiStatusClient(baseURL, apiKey string) *LiFiStatusClient {
 
 type lifiStatusResponse struct {
 	Status    string `json:"status"`
+	Substatus string `json:"substatus"`
 	Receiving struct {
 		TxHash    string `json:"txHash"`
 		ChainID   int64  `json:"chainId"`
@@ -91,6 +104,7 @@ func (c *LiFiStatusClient) Status(ctx context.Context, srcTxHash string) (*LiFiT
 
 	out := &LiFiTransferStatus{
 		Status:      parsed.Status,
+		Substatus:   parsed.Substatus,
 		DestTxHash:  parsed.Receiving.TxHash,
 		DestChainID: parsed.Receiving.ChainID,
 		ToAddress:   parsed.Receiving.ToAddress,
