@@ -25,7 +25,8 @@ var (
 	// floor reuses the guard's own ErrRelayerUnderfunded — no third sentinel.
 	ErrTreasuryCapExceeded = errors.New("this order is above the conversion limit right now")
 	// ErrTreasuryInvalidRoute is returned when a LiFi route fails a safety
-	// check before anything is signed: an unexpected approval token, a
+	// check before anything is signed: a `to` or `approvalAddress` outside
+	// the lane's router allowlist, an unexpected approval token, a
 	// non-zero/malformed value, unparsable calldata, or an expired quote.
 	// LiFi's response is untrusted input, so every one of these fails closed.
 	ErrTreasuryInvalidRoute = errors.New("this conversion route cannot be executed safely")
@@ -41,6 +42,11 @@ var (
 type TreasuryLane struct {
 	*SponsorLane // ChainKey, Chain, Builder, Native, Signer, Guard, Tokens, send()
 	ChainID      int64
+
+	// Routers is the allowlist of contract addresses a route on this lane may
+	// call or be approved to spend. Empty means no route may execute: a lane
+	// without an allowlist is a lane that would sign anything.
+	Routers []string
 
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
@@ -275,6 +281,23 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	// LiFi's response is untrusted input; a treasury that signs whatever it
 	// says is a wallet drainer with extra steps.
 
+	// route.To is the single most dangerous field in the response: it is the
+	// contract the treasury's own EOA is about to call with attacker-chosen
+	// calldata. Validating ApprovalToken/Value/Data without validating WHERE
+	// the call goes leaves the drain wide open — `to` = the USDC contract
+	// with transfer(them, balance) spends the whole float, not one order.
+	// Both `to` and the approval spender must be on the lane's allowlist.
+	if !routerAllowed(lane.Routers, route.To) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_to_refused_total=1 chain=%s to=%s tool=%s",
+			lane.ChainKey, route.To, route.Tool)
+		return "", false, fmt.Errorf("%w: route targets an address outside the allowlist", ErrTreasuryInvalidRoute)
+	}
+	if route.ApprovalAddress != "" && !routerAllowed(lane.Routers, route.ApprovalAddress) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_spender_refused_total=1 chain=%s spender=%s tool=%s",
+			lane.ChainKey, route.ApprovalAddress, route.Tool)
+		return "", false, fmt.Errorf("%w: route names a spender outside the allowlist", ErrTreasuryInvalidRoute)
+	}
+
 	// route.ApprovalToken is asserted by the quote alone. Accept it only
 	// when it case-insensitively matches the token this order is actually
 	// converting — never approve an address a third party's response merely
@@ -428,4 +451,26 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 		out = append(out, SponsorFloat{Chain: chain, Address: addr, BalanceWei: bal, FloorWei: lane.Guard.Floor()})
 	}
 	return out, errors.Join(errs...)
+}
+
+// routerAllowed reports whether addr is one of the lane's allowlisted router
+// contracts. An empty allowlist allows NOTHING: a misconfigured lane must
+// refuse every route rather than accept every route.
+func routerAllowed(allowlist []string, addr string) bool {
+	if len(allowlist) == 0 || strings.TrimSpace(addr) == "" {
+		return false
+	}
+	// Compared as parsed addresses, not strings: EIP-55 checksum casing and
+	// zero-padding differences are cosmetic, and a string compare would let
+	// the same contract read as two different values.
+	if !common.IsHexAddress(addr) {
+		return false
+	}
+	want := common.HexToAddress(addr)
+	for _, a := range allowlist {
+		if common.IsHexAddress(a) && common.HexToAddress(a) == want {
+			return true
+		}
+	}
+	return false
 }

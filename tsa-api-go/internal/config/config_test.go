@@ -415,3 +415,31 @@ func TestLoad_ITSellFWAbsenceTrustedDefaultsOff(t *testing.T) {
 		t.Fatal("IT_SELL_FW_ABSENCE_TRUSTED=true must enable it")
 	}
 }
+
+// Every default treasury chain must ship with a pinned router: a chain that
+// loads with an empty allowlist boots with no conversion lane at all.
+func TestLoad_RampTreasuryRoutersDefaultToLiFiDiamond(t *testing.T) {
+	t.Setenv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum")
+	cfg := Load()
+	if len(cfg.RampTreasuryChains) != 9 {
+		t.Fatalf("RampTreasuryChains = %v, want all nine", cfg.RampTreasuryChains)
+	}
+	for _, chain := range cfg.RampTreasuryChains {
+		routers := cfg.RampTreasuryRouters[chain]
+		if len(routers) != 1 {
+			t.Errorf("%s: routers = %v, want exactly one pinned diamond", chain, routers)
+		}
+	}
+	if got := cfg.RampTreasuryRouters["linea"]; len(got) != 1 || got[0] != "0xde1e598b81620773454588b85d6b5d4eec32573e" {
+		t.Errorf("linea routers = %v, want its own diamond", got)
+	}
+}
+
+func TestLoad_RampTreasuryRoutersOverride(t *testing.T) {
+	t.Setenv("RAMP_TREASURY_CHAINS", "bsc")
+	t.Setenv("RAMP_TREASURY_ROUTERS_BSC", " 0x1111111111111111111111111111111111111111 , ,0x2222222222222222222222222222222222222222")
+	got := Load().RampTreasuryRouters["bsc"]
+	if len(got) != 2 || got[0] != "0x1111111111111111111111111111111111111111" || got[1] != "0x2222222222222222222222222222222222222222" {
+		t.Errorf("bsc routers = %v, want the two overrides, trimmed, blanks dropped", got)
+	}
+}

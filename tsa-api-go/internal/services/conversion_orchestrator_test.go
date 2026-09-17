@@ -209,13 +209,13 @@ func newConversionRig(t *testing.T) *conversionRig {
 	r := &conversionRig{t: t, db: db, clock: sponsorTestNow, src: src, dst: dst}
 
 	r.treasury = NewTreasury(map[string]*TreasuryLane{
-		"base":    {SponsorLane: src.lane, ChainID: 8453},
-		"polygon": {SponsorLane: dst.lane, ChainID: 137},
+		"base":    {SponsorLane: src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
+		"polygon": {SponsorLane: dst.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000},
 		func() time.Time { return r.clock })
 
 	r.lifi = &fakeLiFiQuoter{route: &LiFiRoute{
-		To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
+		To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
 	}}
 	r.transfers = &fakeTransferVerifier{amount: big.NewInt(100_000000)}
 	r.dstTransfers = &fakeTransferVerifier{amount: new(big.Int)}
@@ -336,7 +336,7 @@ func mustAdvance(t *testing.T, r *conversionRig) {
 
 func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
 	if err := r.svc.Advance(context.Background(), r.order); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 
 func TestOrchestrator_TopsUpAShortfallInsideTwentyBps(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 10 bps under the 99_500000 promise
 	mustAdvance(t, r)
@@ -790,7 +790,7 @@ func TestOrchestrator_NeverRetriesABridgeThatAlreadyBroadcast(t *testing.T) {
 // it is not a route we may take. The attempt is freed and retried.
 func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01",
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01",
 		ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_000000), Tool: "across"}
 
 	mustAdvance(t, r)
@@ -804,7 +804,7 @@ func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T
 	}
 
 	// A later quote that does meet it goes through.
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01",
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01",
 		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
 	r.clock = r.clock.Add(2 * time.Minute)
 	mustAdvance(t, r)
@@ -964,7 +964,7 @@ func TestOrchestrator_StopsForAHumanWhenTheShortfallExceedsTheCeiling(t *testing
 
 func TestOrchestrator_NeverTopsUpTwiceIfTheSettlementWriteIsLost(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000")
 	mustAdvance(t, r) // tops up the 0.1 shortfall and settles
@@ -1127,8 +1127,8 @@ func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
 	other, _ := newSponsorRig("polygon", "USDT")
 	other.signer.addr = "0x1111111111111111111111111111111111111111"
 	broken := NewTreasury(map[string]*TreasuryLane{
-		"base":    {SponsorLane: r.src.lane, ChainID: 8453},
-		"polygon": {SponsorLane: other.lane, ChainID: 137},
+		"base":    {SponsorLane: r.src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
+		"polygon": {SponsorLane: other.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
 	r.svc.treasury = broken
 
@@ -1155,7 +1155,7 @@ func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
 func TestOrchestrator_ParksWhenNoLaneCoversTheOrdersChain(t *testing.T) {
 	r := newConversionRig(t)
 	dstOnly := NewTreasury(map[string]*TreasuryLane{
-		"polygon": {SponsorLane: r.dst.lane, ChainID: 137},
+		"polygon": {SponsorLane: r.dst.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
 	r.svc.treasury = dstOnly
 
@@ -1580,7 +1580,7 @@ func TestCreditedToUser_NeverCountsABridgeLegBySourceAmount(t *testing.T) {
 // as the bridge: a broadcast is not a delivery.
 func TestOrchestrator_VerifiesTheTopUpOnChainBeforeSettling(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short
 
@@ -1820,7 +1820,7 @@ func TestOrchestrator_NeverStartsASecondTopUpWhileOneIsPending(t *testing.T) {
 // one, and settling on it closes an order the user is still short on.
 func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: "0xR", Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short; the top-up is for 100000
 	// The top-up transaction credits only part of what it was sent for.

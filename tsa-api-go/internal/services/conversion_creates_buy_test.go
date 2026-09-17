@@ -77,15 +77,15 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	dst, _ := newSponsorRig("optimism", "USDT") // 6dp, matches CreateBuy's requested leg
 	clock := sponsorTestNow
 	treasury := NewTreasury(map[string]*TreasuryLane{
-		"base":     {SponsorLane: src.lane, ChainID: 8453},
-		"optimism": {SponsorLane: dst.lane, ChainID: 10},
+		"base":     {SponsorLane: src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
+		"optimism": {SponsorLane: dst.lane, ChainID: 10, Routers: []string{treasuryTestRouter}},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return clock })
 
 	// The verifier reports a SHORT delivery — 99 of the 100 USDC promised —
 	// on the same transaction hash the poller just recorded.
 	transfers := &fakeTransferVerifier{amount: big.NewInt(99_000000)}
 	lifiQuoter := &fakeLiFiQuoter{route: &LiFiRoute{
-		To: "0xR", Data: "0x01",
+		To: treasuryTestRouter, Data: "0x01",
 		ToAmount: big.NewInt(98_800000), ToAmountMin: big.NewInt(98_700000), Tool: "across",
 	}}
 	chains := &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{

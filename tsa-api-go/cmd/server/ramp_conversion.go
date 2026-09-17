@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -92,7 +93,13 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 			missing = append(missing, chain)
 			continue
 		}
-		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID}
+		routers, skipReason := rampTreasuryLaneRouters(cfg, chain)
+		if skipReason != "" {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
+			missing = append(missing, chain)
+			continue
+		}
+		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID, Routers: routers}
 	}
 	if len(missing) > 0 {
 		// Named once, in one line, rather than only inferred from the
@@ -178,6 +185,25 @@ func rampTreasuryLaneFloor(cfg *config.Config, chain string) (floor *big.Int, sk
 		return nil, "invalid or missing RAMP_TREASURY_NATIVE_FLOOR_WEI_" + strings.ToUpper(chain)
 	}
 	return floor, ""
+}
+
+// rampTreasuryLaneRouters validates a chain's router allowlist, with the same
+// fail-closed shape as a missing native floor. ExecuteRoute refuses a route
+// whose `to` or spender is off the list, so a lane whose list is empty — or
+// holds a mistyped address that can never match — would be quotable but
+// unexecutable; skipping it at boot keeps the chain off the menu instead.
+func rampTreasuryLaneRouters(cfg *config.Config, chain string) (routers []string, skipReason string) {
+	envVar := "RAMP_TREASURY_ROUTERS_" + strings.ToUpper(chain)
+	routers = cfg.RampTreasuryRouters[chain]
+	if len(routers) == 0 {
+		return nil, "no router allowlist (set " + envVar + ")"
+	}
+	for _, addr := range routers {
+		if !common.IsHexAddress(addr) {
+			return nil, "invalid address " + addr + " in " + envVar
+		}
+	}
+	return routers, ""
 }
 
 // rampTreasuryCaps validates the two exposure caps before they ever reach
