@@ -169,8 +169,22 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   the poll is the only thing that ever notices a credit and the interval is the payer's wait.
 - `INBOUND_ALERT_EMAILS` - who is paged when the matcher holds a credit. Nothing releases a
   held credit automatically; unset is legitimate but means the admin queue is the only place
-  it is ever seen.
+  it is ever seen. The same list also receives background-job failure alerts (below).
 - Per-variable rationale is in `.env.example`; read it before changing any of them.
+
+Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
+- A worker registered with `jobs.AlertOnFailureStreak()` alerts when it has failed every tick
+  for ~5 minutes (`ceil(5m / interval)` consecutive failures, never fewer than 3; override with
+  `jobs.AlertAfterFailures(n)`). Register every worker whose silent death leaves money
+  unattributed, unpaid or unreconciled with it — the inbound poller and reconciler failed every
+  tick for six days (2026-09-11..17) with only a `tick error` log line to show for it.
+- Log lines: `[jobs] ALERT worker_failing_total=1 worker=… consecutive_failures=… failing_for=…
+  since=… last_error="…"`, repeated at most hourly while the streak lasts, then
+  `[jobs] RECOVERED worker_recovered_total=1 …` on the first success. Boot logs which workers are
+  watched and at what threshold.
+- Email goes to `INBOUND_ALERT_EMAILS` through `InboundHoldNotifier` (no new variable; blank = log
+  only). Error text passes through `services.RedactAlertText` (URL paths/queries, userinfo,
+  bearer/JWT, key=value credentials, 64-hex, DB constraint values, emails; 500-byte cap) first.
 
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me

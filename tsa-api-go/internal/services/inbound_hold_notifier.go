@@ -46,10 +46,12 @@ const alertQueueDepth = 256
 // and hand it over. It is safe to construct unconditionally — an unconfigured
 // notifier is a no-op, never a nil to guard against.
 //
-// It also carries the reconciler's gap alert (NotifyGap). Two findings, one
-// channel on purpose: both mean money is unaccounted for, both go to the same
-// INBOUND_ALERT_EMAILS mailboxes, and a second copy of the recipient parsing
-// and the send loop is a second thing to keep in step.
+// It also carries the reconciler's gap alert (NotifyGap) and the scheduler's
+// money-path worker failure alerts (NotifyWorkerFailing/Recovered, in
+// worker_failure_alert.go). One channel on purpose: all of them mean money is
+// unaccounted for, all go to the same INBOUND_ALERT_EMAILS mailboxes, and a
+// second copy of the recipient parsing and the send loop is a second thing to
+// keep in step.
 type InboundHoldNotifier struct {
 	mailer InboundAlertMailer
 	// to is the operator mailboxes from INBOUND_ALERT_EMAILS. Empty is a valid

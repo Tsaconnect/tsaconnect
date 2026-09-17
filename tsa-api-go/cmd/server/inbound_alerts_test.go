@@ -59,3 +59,41 @@ func TestInboundGapAlertsSatisfiesTheReconcilerNotifier(t *testing.T) {
 		}
 	}
 }
+
+// The scheduler's failure-streak alert reaches the same inbox as a held credit.
+// Every field must survive the jobs → services copy: an alert without the
+// worker, the count, the duration or the error is one nobody can act on.
+func TestWorkerFailureAlertsSatisfiesTheSchedulerNotifier(t *testing.T) {
+	var _ jobs.WorkerFailureNotifier = workerFailureAlerts{}
+
+	mailer := &recordingMailer{}
+	notifier := services.NewInboundHoldNotifier(mailer, []string{"ops@tsa.test"}, "")
+	f := jobs.WorkerFailure{
+		Worker:              "inbound-reconciler",
+		ConsecutiveFailures: 1728,
+		FailingSince:        time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC),
+		FailingFor:          144 * time.Hour,
+		LastError:           "flutterwave wallet-statement: HTTP 400: page size must not exceed 50",
+	}
+	a := workerFailureAlerts{to: notifier}
+	if err := a.NotifyWorkerFailing(context.Background(), f); err != nil {
+		t.Fatalf("NotifyWorkerFailing: %v", err)
+	}
+	if err := a.NotifyWorkerRecovered(context.Background(), f); err != nil {
+		t.Fatalf("NotifyWorkerRecovered: %v", err)
+	}
+	notifier.Flush()
+
+	if len(mailer.subjects) != 2 {
+		t.Fatalf("sent %d emails, want failing + recovered", len(mailer.subjects))
+	}
+	failing := mailer.subjects[0] + mailer.bodies[0]
+	for _, want := range []string{"inbound-reconciler", "1728", "2026-09-11 08:00:00", "144h0m0s", "page size must not exceed 50"} {
+		if !strings.Contains(failing, want) {
+			t.Errorf("failing alert lost %q in the copy\n---\n%s", want, failing)
+		}
+	}
+	if !strings.Contains(mailer.subjects[1], "recovered") {
+		t.Errorf("second email should be the recovery: %q", mailer.subjects[1])
+	}
+}
