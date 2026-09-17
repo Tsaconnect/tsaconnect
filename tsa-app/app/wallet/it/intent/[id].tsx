@@ -15,12 +15,14 @@ import {
   getITIntent,
   reportStableDeposit,
   cancelITBuy,
+  checkITBuyPayment,
   cancelStableBuy,
   IT_STABLE_DEPOSIT_CLAIMED,
   type ITIntent,
   type ITPayTo,
 } from '@/services/itApi';
 import { PayIntoCard } from '@/components/it/PayIntoCard';
+import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { cancelBuyErrorMessage, confirmCancelITBuy } from '@/utils/itBuyOrder';
 import { formatTokenAmount } from '@/services/p2p';
 import { formatKobo, isLikelyTxHash, isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
@@ -133,6 +135,9 @@ export default function ITIntentDetail() {
   // ever exists for the intent.
   const [cancellingBuy, setCancellingBuy] = useState(false);
   const [cancelBuyError, setCancelBuyError] = useState('');
+  // "I've sent the transfer": a one-off lookup ahead of the scheduled poll.
+  const [checkingPayment, setCheckingPayment] = useState(false);
+  const [paymentCheckNote, setPaymentCheckNote] = useState('');
   // Manual recovery: a hash the user pastes in themselves. A bridged sell has
   // no other route back — sell-stable.tsx's history lookup only sees Polygon,
   // and the app told the user to report the transfer against this order.
@@ -331,6 +336,27 @@ export default function ITIntentDetail() {
     load();
   }, [intent, isStableAsset, load]);
 
+  const checkPayment = useCallback(async () => {
+    if (!intent) return;
+    setCheckingPayment(true);
+    setPaymentCheckNote('');
+    const r = await checkITBuyPayment(intent.id);
+    if (r.success && r.data?.intent) {
+      setIntent(r.data.intent);
+      setPayTo(r.data.payTo ?? null);
+      if (r.data.intent.status === 'pending_payment') {
+        setPaymentCheckNote(
+          "We haven't seen your transfer yet. Bank transfers can take a few minutes to arrive — this page updates on its own as soon as it does."
+        );
+      }
+    } else {
+      // An API without this endpoint, or a network blip: the regular refresh
+      // still tells the user where the order stands.
+      await load();
+    }
+    setCheckingPayment(false);
+  }, [intent, load]);
+
   // Cancelling after the transfer has been sent is the one unrecoverable
   // mistake on this screen. For a stablecoin buy, with no open buy intent left
   // the settlement path no longer matches the incoming charge and the naira is
@@ -437,6 +463,8 @@ export default function ITIntentDetail() {
   // the provider floor alike, parking the intent in buy_awaiting_rate — an
   // operator-only state with no user-facing recovery (spec §10). Telling a
   // stablecoin buyer to send any amount instructs them into it.
+  // Same breakdown the buy screen showed when the order opened, so the fee doesn't vanish on return.
+  const mcgpBuyFees = isBuy && !isStableAsset ? buyFeeBreakdown(intent) : null;
   const exactNaira = formatKobo(intent.ngnKobo);
   const stableBuyPayCopy =
     exactNaira === '—'
@@ -450,11 +478,8 @@ export default function ITIntentDetail() {
         refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
       >
         <Card>
-          <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
+          <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.sm }}>
             {title}
-          </Text>
-          <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-            {displayStatus(intent.status)}
           </Text>
           <SummaryCard>
             <SummaryRow label="Status" value={displayStatus(intent.status)} />
@@ -500,7 +525,20 @@ export default function ITIntentDetail() {
               <>
                 <SummaryRow label="You pay" value={`₦${fmtNaira(intent.ngnKobo)}`} />
                 <Divider spacing="xs" />
-                <SummaryRow label="You get" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
+                {mcgpBuyFees?.hasFees ? (
+                  <>
+                    <SummaryRow label="You pay for" value={`${mcgpBuyFees.grossMcgp} MCGP`} />
+                    <SummaryRow
+                      label="Fees"
+                      value={`−${mcgpBuyFees.feeMcgp} MCGP`}
+                      hint={`≈ ₦${mcgpBuyFees.feeNgn}`}
+                    />
+                    <Divider spacing="xs" />
+                    <SummaryRow label="You receive" value={`${mcgpBuyFees.netMcgp} MCGP`} />
+                  </>
+                ) : (
+                  <SummaryRow label="You get" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
+                )}
               </>
             ) : (
               <>
@@ -611,6 +649,22 @@ export default function ITIntentDetail() {
                 This order updates on its own once your payment is confirmed.
               </Text>
             )
+          ) : null}
+          {isBuy && intent.status === 'pending_payment' ? (
+            <View style={{ marginTop: spacing.lg }}>
+              <Button
+                title="I've sent the transfer"
+                loading={checkingPayment}
+                onPress={() => {
+                  void checkPayment();
+                }}
+              />
+              {paymentCheckNote ? (
+                <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+                  {paymentCheckNote}
+                </Text>
+              ) : null}
+            </View>
           ) : null}
         </Card>
 

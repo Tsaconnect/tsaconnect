@@ -183,6 +183,15 @@ export const itBuy = (ngnKobo: string) =>
 export const cancelITBuy = (intentId: string) =>
   req<{ cancelled: boolean; intent?: ITIntent }>('POST', `/it/buy/${intentId}/cancel`);
 
+/** "I've paid": asks the API to look for this buy's transfer now rather than on
+ *  its next scheduled poll. `checked` is false when a lookup had just run or
+ *  was still running — the returned intent is current either way. */
+export const checkITBuyPayment = (intentId: string) =>
+  req<{ intent: ITIntent; payTo?: ITPayTo; checked: boolean }>(
+    'POST',
+    `/it/buy/${intentId}/check-payment`
+  );
+
 export interface ITVA {
   id: string;
   currency: string;
