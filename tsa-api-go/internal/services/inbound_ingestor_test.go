@@ -797,7 +797,13 @@ func (p *statementPager) handler(t *testing.T) http.HandlerFunc {
 		// a page size above 50 fails the whole request, so every poll tick
 		// errored and nothing was ever ingested. The fake refuses the same
 		// way so a regression fails these tests instead of the live poller.
-		if size, err := strconv.Atoi(q.Get("size")); err != nil || size < 1 || size > fwStatementProviderMaxPageSize {
+		//
+		// The 50 is Flutterwave's, measured in production — deliberately a
+		// literal here, not fwStatementProviderMaxPageSize. A fake that reads
+		// its limit from the code under test moves with it: raising that
+		// constant back to 100 would pass every test and fail every poll.
+		const flutterwaveStatementMaxPageSize = 50
+		if size, err := strconv.Atoi(q.Get("size")); err != nil || size < 1 || size > flutterwaveStatementMaxPageSize {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"status":"failed","error":{"type":"REQUEST_NOT_VALID","code":"10400","message":"Request is not valid; must be less than or equal to 50"}}`))
 			return
