@@ -490,7 +490,7 @@ func main() {
 	// MCGP swap (Contract B) read-only backing/stale-pending reconciler. Gated on
 	// the swap being configured; never moves money (alerts only).
 	if mcgpSwapService.IsConfigured() {
-		scheduler.Register(jobs.NewMCGPSwapReconciler(mcgpSwapService, config.DB, time.Minute))
+		scheduler.Register(jobs.NewMCGPSwapReconciler(mcgpSwapService, config.DB, time.Minute), jobs.AlertOnFailureStreak())
 	}
 
 	// Instant Transfer: close unpaid MCGP buy orders the settle path has
@@ -498,10 +498,10 @@ func main() {
 	// nothing will fulfil. Registered wherever IT is live — it needs no
 	// provider, only the database.
 	if itService != nil {
-		scheduler.Register(jobs.NewBuyOrderExpiry(itService, time.Hour))
+		scheduler.Register(jobs.NewBuyOrderExpiry(itService, time.Hour), jobs.AlertOnFailureStreak())
 		// MCGP sells stopped between the on-chain debit and the naira payout:
 		// resolved from the debit record and Flutterwave's transfer record only.
-		scheduler.Register(jobs.NewITSellReconciler(itService, 2*time.Minute))
+		scheduler.Register(jobs.NewITSellReconciler(itService, 2*time.Minute), jobs.AlertOnFailureStreak())
 	}
 
 	// Booking requests: close the ones nobody answered, and — the reason this
@@ -513,7 +513,7 @@ func main() {
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
 	if billService != nil {
-		scheduler.Register(jobs.NewBillReconciler(billService, time.Minute))
+		scheduler.Register(jobs.NewBillReconciler(billService, time.Minute), jobs.AlertOnFailureStreak())
 		scheduler.Register(jobs.NewBillFloatMonitor(clubkonnect, cfg.BillsFloatAlertNgn, 10*time.Minute))
 		// Dual-write drift watch. The legacy NGN columns and pm_balances are
 		// written together; this is the only thing that would notice if they
@@ -787,6 +787,13 @@ func main() {
 	// no-op, never a nil the callers have to guard.
 	inboundAlerts := services.NewInboundHoldNotifier(emailService, cfg.InboundAlertEmails, cfg.AdminConsoleBaseURL())
 
+	// Workers registered with jobs.AlertOnFailureStreak page the same people
+	// when they fail every tick for ~5 minutes (2026-09-11..17: the inbound
+	// poller and reconciler failed for six days and only a log line knew).
+	// Every such worker is a money path, so this is the same audience as a
+	// held credit rather than a new list to configure.
+	scheduler.SetFailureNotifier(workerFailureAlerts{to: inboundAlerts})
+
 	// Central-account inbound attribution (design 2026-09-10). Polls the
 	// Flutterwave wallet statement and writes every customer credit to
 	// inbound_credits. There is NO webhook for wallet funding, so this poll is
@@ -805,7 +812,7 @@ func main() {
 			cfg.InboundPollIntervalOrDefault(),
 		)
 		inboundPoller.SetCheckCooldown(cfg.InboundCheckCooldown)
-		scheduler.Register(inboundPoller)
+		scheduler.Register(inboundPoller, jobs.AlertOnFailureStreak())
 		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s)",
 			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
 
@@ -830,7 +837,7 @@ func main() {
 			5*time.Minute,
 		)
 		inboundReconciler.SetNotifier(inboundGapAlerts{to: inboundAlerts})
-		scheduler.Register(inboundReconciler)
+		scheduler.Register(inboundReconciler, jobs.AlertOnFailureStreak())
 		log.Printf("[inbound] reconciler registered (Σ inbound_credits vs statement credits, 5m, both directions)")
 	} else {
 		log.Printf("[inbound] credit poller dormant: no Flutterwave client")
@@ -951,7 +958,7 @@ func main() {
 		// the request path believes cannot drift apart.
 		itService.SetStableDeliverer(fwClient)
 		if itService.HasStableBuy() {
-			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second))
+			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second), jobs.AlertOnFailureStreak())
 			stableBuyEnabled = true
 			log.Printf("[it stable] brokered stablecoin BUY ready (spread=%dbps min=%s)",
 				cfg.StableSpreadBps, cfg.StableMinSell)
@@ -982,7 +989,7 @@ func main() {
 					models.ITAssetUSDT: cfg.Networks["mainnet"].TokenAddresses["polygon:USDT"],
 				},
 			)
-			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
+			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second), jobs.AlertOnFailureStreak())
 			stableSellEnabled = true
 			log.Printf("[it stable] brokered stablecoin SELL ready (spread=%dbps min=%s)",
 				cfg.StableSpreadBps, cfg.StableMinSell)
@@ -1116,7 +1123,7 @@ func main() {
 		// Register the chain reconciler — every 30s, walks non-terminal
 		// trades and corrects DB drift against on-chain truth. Safety net
 		// for dropped-response failures in the prepare/confirm flow.
-		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc))
+		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc), jobs.AlertOnFailureStreak())
 		// Register the merchant-reputation reconciler — recomputes windowed
 		// stats nightly as a correctness backstop for the incremental path.
 		merchantStats = services.NewMerchantStatsService(config.DB, eventBus, services.TrustedThresholds{
@@ -1317,7 +1324,7 @@ func main() {
 		// re-dispatch failed/stale Nomba webhook events. Complements the chain
 		// reconciler + timeout watchdog, which don't cover paid-orphans or dropped
 		// dispatches.
-		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
+		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto), jobs.AlertOnFailureStreak())
 		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
 
 		// Instant per-trade settlement forward (central-account design decision
@@ -1344,7 +1351,7 @@ func main() {
 		settlementForwarder := services.NewP2PSettlementForwarder(
 			config.DB, pmSvc, gateway, balanceReader, cfg.NombaSenderName)
 		pmAuto.SetSettlementForwarder(settlementForwarder)
-		scheduler.Register(jobs.NewP2PForwardSweepJob(settlementForwarder))
+		scheduler.Register(jobs.NewP2PForwardSweepJob(settlementForwarder), jobs.AlertOnFailureStreak())
 		log.Printf("[pm] settlement forward wired (balance pre-check=%t); unanswered-transfer sweep registered",
 			balanceReader != nil)
 
@@ -1508,7 +1515,7 @@ func main() {
 		if paycrestOrders != nil {
 			// No public webhook endpoint yet, so orders only advance because
 			// something polls them.
-			scheduler.Register(jobs.NewPaycrestOrderPoller(paycrestOrders, 20*time.Second))
+			scheduler.Register(jobs.NewPaycrestOrderPoller(paycrestOrders, 20*time.Second), jobs.AlertOnFailureStreak())
 			log.Printf("[paycrest] ramp ready (poller 20s)")
 		} else {
 			log.Printf("[paycrest] client configured but order service could not be built — routes dormant")
@@ -1631,6 +1638,31 @@ func (a inboundGapAlerts) NotifyInboundGap(ctx context.Context, gap jobs.Inbound
 		ProviderRows: gap.ProviderRows,
 		Streak:       gap.Streak,
 	})
+}
+
+// workerFailureAlerts adapts the inbound alert channel onto the scheduler's
+// jobs.WorkerFailureNotifier; the field copy exists for the same one-way
+// dependency reason as inboundGapAlerts.
+type workerFailureAlerts struct {
+	to *services.InboundHoldNotifier
+}
+
+func (a workerFailureAlerts) NotifyWorkerFailing(ctx context.Context, f jobs.WorkerFailure) error {
+	return a.to.NotifyWorkerFailing(ctx, workerFailureAlert(f))
+}
+
+func (a workerFailureAlerts) NotifyWorkerRecovered(ctx context.Context, f jobs.WorkerFailure) error {
+	return a.to.NotifyWorkerRecovered(ctx, workerFailureAlert(f))
+}
+
+func workerFailureAlert(f jobs.WorkerFailure) services.WorkerFailureAlert {
+	return services.WorkerFailureAlert{
+		Worker:              f.Worker,
+		ConsecutiveFailures: f.ConsecutiveFailures,
+		FailingSince:        f.FailingSince,
+		FailingFor:          f.FailingFor,
+		LastError:           f.LastError,
+	}
 }
 
 // to validate statically here.

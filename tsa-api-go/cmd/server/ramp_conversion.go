@@ -213,7 +213,7 @@ func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services
 	if orch == nil {
 		return
 	}
-	scheduler.Register(jobs.NewConversionOrchestratorWorker(orch, 30*time.Second))
+	scheduler.Register(jobs.NewConversionOrchestratorWorker(orch, 30*time.Second), jobs.AlertOnFailureStreak())
 	// Registered a second time under its own metric prefix, alongside the
 	// gas sponsor's own float-monitor registration: same job type, two
 	// independent floats to watch.

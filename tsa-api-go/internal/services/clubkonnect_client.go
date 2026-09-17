@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,11 +44,6 @@ var (
 	// every other vendor error as internal.
 	ErrBillCustomerNotFound = errors.New("customer not found")
 )
-
-// ckQueryRE matches a URL query string so redact() can strip it wholesale —
-// transport errors (*url.Error) embed the ENTIRE request URL, credentials
-// included, and allowlisting individual secrets is a losing game.
-var ckQueryRE = regexp.MustCompile(`\?[^\s"]*`)
 
 // vendTimeout covers ClubKonnect's up-to-60s network wait before it parks an
 // order as 201; catalogTimeout is for the cheap public reads.
@@ -139,7 +133,7 @@ func (c *ClubkonnectClient) IsEnabled() bool {
 // the full request URL), then the API key and UserID (both halves of the
 // credential pair) raw and URL-encoded.
 func (c *ClubkonnectClient) redact(s string) string {
-	s = ckQueryRE.ReplaceAllString(s, "?[params-redacted]")
+	s = RedactURLQueries(s)
 	for _, secret := range []string{c.apiKey, c.userID} {
 		if secret == "" {
 			continue
