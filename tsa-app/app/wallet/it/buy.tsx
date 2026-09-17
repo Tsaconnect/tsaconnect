@@ -361,11 +361,6 @@ export default function ITBuy() {
                 value={intent?.status === 'pending_payment' ? 'Awaiting transfer' : (intent?.status || 'Awaiting transfer')}
               />
             </SummaryCard>
-            {fees?.hasFees ? (
-              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-                Fees are taken in MCGP — that portion is never issued to your wallet.
-              </Text>
-            ) : null}
 
             {payTo ? (
               <View style={{ marginTop: spacing.md }}>
