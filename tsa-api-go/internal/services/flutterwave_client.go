@@ -1250,14 +1250,21 @@ func (c *FlutterwaveClient) ConvertBalance(ctx context.Context, merchantID, sour
 const fwStatementDateLayout = "2006-01-02"
 
 const (
+	// fwStatementProviderMaxPageSize is the most rows Flutterwave will serve
+	// per /wallets/statement page. Asking for more is not clamped — the whole
+	// request fails with HTTP 400 REQUEST_NOT_VALID "must be less than or
+	// equal to 50", so every poll tick errors and no credit is ever ingested.
+	fwStatementProviderMaxPageSize = 50
 	// fwStatementPageSize is how many rows one request asks for. Also the
-	// signal that a page is the last one: a short page ends the walk.
-	fwStatementPageSize = 100
+	// signal that a page is the last one: a short page ends the walk. Pinned
+	// to the provider's maximum — see above.
+	fwStatementPageSize = fwStatementProviderMaxPageSize
 	// fwStatementMaxPages bounds the walk so a provider that keeps handing
 	// back full pages cannot spin the poll forever. Reaching it means the
 	// window was NOT fully read, which is why it is logged rather than
-	// absorbed.
-	fwStatementMaxPages = 50
+	// absorbed. 100 pages of 50 keeps the 5,000-row ceiling the walk had
+	// when it asked for (unservable) pages of 100.
+	fwStatementMaxPages = 100
 )
 
 // FWStatementTime is a statement timestamp.
