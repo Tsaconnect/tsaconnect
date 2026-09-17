@@ -91,6 +91,52 @@ func TestOpenBuyOrder_RefusesWhileAnOrderIsOpenAndNamesIt(t *testing.T) {
 	}
 }
 
+// Asking again for the SAME amount is the user coming back to the order they
+// already have, not a second order. Answer with that order. This is also the
+// only way a build that predates the open-order screen can get back to the
+// pay-into details for it: that build shows the 409 message and nothing else.
+func TestOpenBuyOrder_SameAmountReturnsTheOpenOrder(t *testing.T) {
+	s, user, _ := newVATestService(t)
+	ctx := context.Background()
+
+	first, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "100000")
+	if err != nil {
+		t.Fatalf("open first: %v", err)
+	}
+	// 99,960 kobo snaps to the same whole naira the first order was minted at.
+	again, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "99960")
+	if err != nil {
+		t.Fatalf("same-amount re-open = %v, want the open order back", err)
+	}
+	if again == nil || again.ID != first.ID {
+		t.Fatalf("re-open returned %v, want the open order %s", again, first.ID)
+	}
+	if rows := buyIntents(t, s, user.ID); len(rows) != 1 {
+		t.Errorf("%d buy intents exist, want 1", len(rows))
+	}
+}
+
+// An order minted before whole-naira snapping carries kobo. It is offered to
+// the matcher, and shown on the pay-into card, at its rounded naira — so that
+// is the amount that counts as "the same order" too.
+func TestOpenBuyOrder_SameAmountMatchesAPreSnapOrderByWholeNaira(t *testing.T) {
+	s, user, _ := newVATestService(t)
+	ctx := context.Background()
+
+	first, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "100000")
+	if err != nil {
+		t.Fatalf("open first: %v", err)
+	}
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", first.ID).
+		Update("ngn_kobo", "99960").Error; err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "100000")
+	if err != nil || again == nil || again.ID != first.ID {
+		t.Fatalf("re-open = %v, %v; want the pre-snap order %s back", again, err, first.ID)
+	}
+}
+
 // Another user's open order is not this user's business.
 func TestOpenBuyOrder_OtherUsersOpenOrderDoesNotBlock(t *testing.T) {
 	s, user, _ := newVATestService(t)
@@ -160,7 +206,9 @@ func TestOpenBuyOrder_UniqueIndexRaceReadsAsOrderOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "100000")
+	// A different amount from the winner's ₦1,000: the same amount would be
+	// answered with the winner's order (reopenOrRefuse), not refused.
+	_, err := s.OpenBuyOrder(ctx, user.ID, user.WalletAddress, "200000")
 	if !fired {
 		t.Fatal("race hook never ran")
 	}

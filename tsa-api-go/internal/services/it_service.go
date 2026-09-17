@@ -418,7 +418,8 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 // attribution a transfer for its amount then matched no open claim and held
 // for an operator. So a second order is refused with ITBuyOrderOpenError, which
 // names the open order for the app to route to; the user cancels it (CancelBuy)
-// if they really meant to start over. The partial unique index
+// if they really meant to start over. Asking again for the open order's own
+// amount returns that order instead (see reopenOrRefuse). The partial unique index
 // uq_it_intents_open_mcgp_buy backs the check against a double tap.
 //
 // The ask is snapped to WHOLE NAIRA before the intent is minted (design §5.4).
@@ -446,19 +447,32 @@ func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAd
 		return nil, err
 	}
 	if open != nil {
-		return nil, &ITBuyOrderOpenError{Intent: open}
+		return reopenOrRefuse(open, ngnKobo)
 	}
 
 	intent, err := s.CreateBuyIntent(ctx, userID, walletAddr, ngnKobo, nil)
 	if err != nil && isUniqueViolation(err) {
 		// A concurrent request (a double tap) won between the check above and
-		// this insert, and the partial unique index refused the loser. Report
-		// the winner's order, exactly as if this request had arrived second.
+		// this insert, and the partial unique index refused the loser. Answer
+		// exactly as if this request had arrived second.
 		if winner, lookupErr := s.openMCGPBuyOrder(ctx, userID); lookupErr == nil && winner != nil {
-			return nil, &ITBuyOrderOpenError{Intent: winner}
+			return reopenOrRefuse(winner, ngnKobo)
 		}
 	}
 	return intent, err
+}
+
+// reopenOrRefuse answers a buy request that found the user's order already
+// open. The same whole-naira amount is the user coming back to that order, so
+// it is returned as the order opened. It is also the only route back to the
+// pay-into details for an app build that predates the open-order screen and
+// shows the refusal's message on a dead end. Any other amount is refused and
+// names the open order.
+func reopenOrRefuse(open *models.ITIntent, wantKobo string) (*models.ITIntent, error) {
+	if wholeNairaKobo(open.NgnKobo) == wantKobo {
+		return open, nil
+	}
+	return nil, &ITBuyOrderOpenError{Intent: open}
 }
 
 // ExpireStaleBuyOrders cancels unpaid MCGP buy orders past buyOrderClaimWindow,

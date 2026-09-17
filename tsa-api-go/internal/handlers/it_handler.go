@@ -566,7 +566,7 @@ func (h *ITHandler) Buy(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{
 				"success": false,
 				"code":    itBuyOrderOpenCode,
-				"message": "You already have an open buy order. Pay into it, or cancel it to start a new one.",
+				"message": itBuyOrderOpenMessage(open.Intent.NgnKobo),
 				"data": gin.H{
 					"intentId": open.Intent.ID,
 					"ngnKobo":  open.Intent.NgnKobo,
@@ -1251,6 +1251,22 @@ func (h *ITHandler) PostCancelStableBuy(c *gin.Context) {
 const itBuyPaymentArrivedMessage = "A payment for this order has already arrived, so it can't be cancelled. " +
 	"It's being processed — if it doesn't complete, contact support."
 
+// itBuyOrderOpenMessage is the whole of what an app build older than the
+// open-order screen shows for this refusal: that build has no route to the
+// order and no MCGP cancel, only an error screen with this text. So it names the
+// order by its amount and says how to get back to it — asking for that same
+// amount returns the open order and its pay-into details (reopenOrRefuse).
+func itBuyOrderOpenMessage(openNgnKobo string) string {
+	naira := wholeNairaFromKobo(openNgnKobo)
+	if naira == "" {
+		return "You already have an open buy order waiting for your transfer. Pay into it, or cancel it from its order details to start a new one."
+	}
+	return fmt.Sprintf("You already have an open buy order for ₦%s waiting for your transfer. "+
+		"To see where to pay, go back and continue with ₦%s. "+
+		"To buy a different amount, cancel that order from its order details first (update the app if you don't see Cancel).",
+		naira, naira)
+}
+
 const (
 	itBuyOrderOpenCode      = "it_buy_order_open"
 	itBuyPaymentArrivedCode = "it_buy_payment_arrived"
@@ -1274,7 +1290,11 @@ func (h *ITHandler) cancelBuy(c *gin.Context, cancel func(ctx context.Context, u
 			return
 		}
 		if stableStatusFor(err) == http.StatusInternalServerError {
+			// Logged, not returned: the text is a database error.
 			log.Printf("[it] cancel buy user=%s intent=%s: %v", user.ID, id, err)
+			utils.ErrorResponseWithCode(c, http.StatusInternalServerError,
+				"Could not cancel the order right now. Try again.", stableCodeFor(err))
+			return
 		}
 		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return

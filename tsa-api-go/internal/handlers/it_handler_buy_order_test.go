@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,44 @@ func TestBuy_SecondOpenOrderIs409NamingTheFirst(t *testing.T) {
 	}
 }
 
+// The API ships before the app update, and the app in users' hands shows a
+// refusal's message on a dead-end error screen: no open-order screen, no
+// cancel. The message is therefore all that user gets, and must say which order
+// is open and how to reach it.
+func TestBuy_OrderOpenMessageStandsAloneForOlderApps(t *testing.T) {
+	h, _, it := newITBuyHandler(t)
+	it.SetInboundCentral(true, testCentralAccount())
+	user := &models.User{ID: uuid.New(), Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+	openedIntentID(t, doITBuy(t, h, user, "500000"))
+
+	rec := doITBuy(t, h, user, "700000")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	msg, _ := decodeBody(t, rec)["message"].(string)
+	if !strings.Contains(msg, "₦5000") {
+		t.Errorf("message = %q, want it to name the open order's amount (₦5000)", msg)
+	}
+}
+
+// Re-entering the open order's amount answers with that order and its pay-into
+// card — the older app's route back to where to pay.
+func TestBuy_SameAmountReturnsTheOpenOrderWithItsCard(t *testing.T) {
+	h, _, it := newITBuyHandler(t)
+	it.SetInboundCentral(true, testCentralAccount())
+	user := &models.User{ID: uuid.New(), Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+	firstID := openedIntentID(t, doITBuy(t, h, user, "500000"))
+
+	rec := doITBuy(t, h, user, "500000")
+	if got := openedIntentID(t, rec); got != firstID {
+		t.Fatalf("re-open returned intent %s, want the open order %s", got, firstID)
+	}
+	payTo, _ := itBuyData(t, rec)["payTo"].(map[string]any)
+	if payTo == nil || payTo["amountNgn"] != "5000" {
+		t.Errorf("payTo = %v, want the open order's card asking ₦5000", payTo)
+	}
+}
+
 func TestPostCancelBuy_CancelsTheCallersOpenOrder(t *testing.T) {
 	h, _, it := newITBuyHandler(t)
 	it.SetInboundCentral(true, testCentralAccount())
@@ -160,6 +199,29 @@ func TestPostCancelBuy_PaymentArrivedIs409WithAReadableMessage(t *testing.T) {
 	}
 	if msg, _ := body["message"].(string); msg != itBuyPaymentArrivedMessage {
 		t.Errorf("message = %q, want the user-readable explanation", msg)
+	}
+}
+
+// The late-payment guard fails closed when it cannot read the inbound queue.
+// The user is told to retry; the database's own error text stays in the log.
+func TestPostCancelBuy_GuardFailureIs500WithoutInternalDetail(t *testing.T) {
+	h, _, it := newITBuyHandler(t)
+	it.SetInboundCentral(true, testCentralAccount())
+	// No inbound_credits table: the guard's read fails.
+	user := &models.User{ID: uuid.New(), Name: "JOHN DOE", WalletAddress: "0xWALLET"}
+	id := openedIntentID(t, doITBuy(t, h, user, "500000"))
+
+	rec := doITIntentAction(t, h, user, id, h.PostCancelBuy)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (fail closed); body=%s", rec.Code, rec.Body.String())
+	}
+	msg, _ := decodeBody(t, rec)["message"].(string)
+	if strings.Contains(msg, "inbound") || strings.Contains(msg, "table") {
+		t.Errorf("message = %q leaks the internal error", msg)
+	}
+	got := doITGetIntent(t, h, user, id)
+	if intent, _ := got["intent"].(map[string]any); intent["status"] != models.ITStatusPendingPayment {
+		t.Errorf("order status = %v, want still pending_payment", intent["status"])
 	}
 }
 
