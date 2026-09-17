@@ -173,7 +173,7 @@ func (s *ServiceContactService) VerifyContactFeePaid(txHash, expectedCaller, exp
 // buildUnsignedTx creates an UnsignedTx JSON for the ServiceContact contract.
 func (s *ServiceContactService) buildUnsignedTx(from string, callData []byte) ([]byte, error) {
 	if s.client == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		// Return a minimal tx in non-production (e.g. tests) with valid ABI-encoded data

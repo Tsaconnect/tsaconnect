@@ -33,10 +33,16 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		log.Printf("[ramp-conversion] dormant: RAMP_TREASURY_PRIVATE_KEY not set")
 		return nil, nil
 	}
-	if cfg.Env == "production" {
-		log.Printf("[ramp-conversion] dormant: raw RAMP_TREASURY_PRIVATE_KEY refused in production (use KMS)")
+	// Routed through the one guard every raw-env-key signer uses, rather
+	// than comparing cfg.Env here: an inline check ignores
+	// ALLOW_RAW_SIGNER_KEYS, so the documented production rollout
+	// (ENV=production + ALLOW_RAW_SIGNER_KEYS=true, see tsa-api-go/CLAUDE.md)
+	// would keep every other signer alive and silently take THIS one dormant.
+	if !rawSignerKeyAllowed(cfg) {
+		log.Printf("[ramp-conversion] dormant: raw RAMP_TREASURY_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true, or use KMS)")
 		return nil, nil
 	}
+	alertRawSignerKeyInProduction(cfg, "RAMP_TREASURY_PRIVATE_KEY")
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampTreasuryPrivateKey, "0x"))
 	if err != nil {
 		log.Printf("[ramp-conversion] dormant: invalid RAMP_TREASURY_PRIVATE_KEY: %v", err)

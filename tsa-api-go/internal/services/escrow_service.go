@@ -237,7 +237,7 @@ func (s *EscrowService) buildUnsignedTx(from, contractAddr string, callData []by
 	}
 
 	if s.client == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{

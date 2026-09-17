@@ -12,6 +12,7 @@ import { ethers } from 'ethers';
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
 import { getSignableWallet } from '@/services/wallet';
+import { boughtBase } from '@/services/mcgpValuation';
 
 /**
  * Returned instead of calling the API when this device holds no signing key.
@@ -32,7 +33,11 @@ export type McgpUnsignedTx = {
 
 export interface McgpBalance {
   walletAddress: string;
-  premiumBalance: string; // MCGP base units (18dp)
+  premiumBalance: string; // MCGP base units (18dp) — bought + credited
+  /** USDC-bought, self-exitable bucket. Additive field; absent on an older API. */
+  premiumBought?: string;
+  /** Naira-bought (IT/bills), spend-only-in-app bucket. Additive field; absent on an older API. */
+  premiumCredited?: string;
 }
 
 export interface McgpQuote {
@@ -156,19 +161,29 @@ export const getMcgpQuote = (kind: QuoteKind, amount: string) =>
  * Premium MCGP is a Contract-B entitlement, not an ERC-20 in the wallet, so the
  * standard balance read misses it — this is how the asset lists surface it.
  * Returns a zero balance when unavailable so callers can simply skip it.
+ *
+ * `usdValue` prices ONLY the USDC-bought bucket (`premiumBought`) at the
+ * premiumSell quote. The naira-bought bucket (`premiumCredited`) has no USDC
+ * exit — sellPremium reverts "Insufficient bought premium" for it — so
+ * pricing it the same way overstated the wallet's USD total. Its quantity is
+ * still counted in `balance`; it just contributes no USD value here (no
+ * USD-denominated naira rate is wired up to price it against instead).
  */
 export async function getPremiumMcgpAsset(): Promise<{ balance: number; usdValue: number }> {
   const res = await getMcgpBalance();
   if (!res.success || !res.data) return { balance: 0, usdValue: 0 };
-  const rawBase = res.data.premiumBalance || '0'; // 18dp base units
+  const rawBase = res.data.premiumBalance || '0'; // 18dp base units, bought + credited
   const balance = Number(ethers.formatUnits(rawBase, 18)) || 0;
   if (balance <= 0) return { balance: 0, usdValue: 0 };
+  const boughtRaw = boughtBase({ totalBase: rawBase, premiumBought: res.data.premiumBought });
   let usdValue = 0;
-  try {
-    const q = await getMcgpQuote('premiumSell', rawBase);
-    if (q.success && q.data) usdValue = Number(ethers.formatUnits(q.data.usdcAmount || '0', 6)) || 0;
-  } catch {
-    /* price unavailable — show the quantity with no USD rather than failing */
+  if (BigInt(boughtRaw || '0') > 0n) {
+    try {
+      const q = await getMcgpQuote('premiumSell', boughtRaw);
+      if (q.success && q.data) usdValue = Number(ethers.formatUnits(q.data.usdcAmount || '0', 6)) || 0;
+    } catch {
+      /* price unavailable — show the quantity with no USD rather than failing */
+    }
   }
   return { balance, usdValue };
 }

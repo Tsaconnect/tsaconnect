@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -38,6 +40,9 @@ type billService interface {
 	GetOrderReport(ctx context.Context, userID, orderID uuid.UUID) (*models.BillReport, error)
 	ListReportsAdmin(ctx context.Context, status string, limit, offset int) ([]services.BillReportAdminRow, int64, error)
 	ResolveReport(ctx context.Context, adminID, reportID uuid.UUID, status, resolution string) (*models.BillReport, error)
+	AdminReversePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error)
+	AdminSettlePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error)
+	ListStuckPayments(ctx context.Context, olderThan time.Duration, limit int) ([]services.BillStuckPayment, error)
 }
 
 // BillHandler serves /api/bills/* — utility bills (airtime/data/electricity/
@@ -285,6 +290,67 @@ func (h *BillHandler) ResolveReportAdmin(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Report updated", report)
+}
+
+// GET /api/admin/bills/payments/stuck?minutes=&limit= — bill payments still
+// debiting or debited past the threshold (default 30m), with their orders.
+func (h *BillHandler) ListStuckPaymentsAdmin(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	limit := clamp(atoiDefault(c.Query("limit"), 50), 1, 200)
+	rows, err := h.bills.ListStuckPayments(c.Request.Context(), time.Duration(minutes)*time.Minute, limit)
+	if err != nil {
+		billFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck payments", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+// POST /api/admin/bills/orders/:id/reverse-payment — return a bill's MCGP.
+// Refused unless the vend failed or never happened.
+func (h *BillHandler) ReversePaymentAdmin(c *gin.Context) {
+	h.adminPaymentAction(c, h.bills.AdminReversePayment)
+}
+
+// POST /api/admin/bills/orders/:id/settle-payment — free a bill's backing.
+// Refused unless the vend is confirmed delivered.
+func (h *BillHandler) SettlePaymentAdmin(c *gin.Context) {
+	h.adminPaymentAction(c, h.bills.AdminSettlePayment)
+}
+
+func (h *BillHandler) adminPaymentAction(c *gin.Context, fn func(context.Context, uuid.UUID) (*models.BillOrder, error)) {
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	order, err := fn(c.Request.Context(), orderID)
+	if err != nil {
+		log.Printf("[bills] %s %s order=%s refused: %v", c.Request.Method, c.FullPath(), orderID, err)
+		if status, ok := billAdminPaymentStatus(err); ok {
+			// Operators need the actual reason to decide what to do next.
+			utils.ErrorResponse(c, status, err.Error())
+			return
+		}
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"order": order})
+}
+
+// billAdminPaymentStatus maps the refusals of an admin settle/reverse.
+func billAdminPaymentStatus(err error) (int, bool) {
+	switch {
+	case errors.Is(err, services.ErrBillPaymentConflict), errors.Is(err, services.ErrBillPayBadState):
+		return http.StatusConflict, true
+	case errors.Is(err, services.ErrBillVendUnverified), errors.Is(err, services.ErrBillDebitUnverified):
+		return http.StatusServiceUnavailable, true
+	}
+	return 0, false
 }
 
 // billStatus maps service errors to HTTP status codes, and billMessage decides

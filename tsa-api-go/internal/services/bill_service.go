@@ -32,7 +32,33 @@ var (
 	ErrBillBadState     = errors.New("bill order is not awaiting payment")
 	ErrBillBadCategory  = errors.New("unknown bill category")
 	ErrBillBadRequest   = errors.New("invalid bill request")
+	// ErrBillPaymentConflict: the vend's known outcome contradicts the admin
+	// action (e.g. reversing a delivered bill).
+	ErrBillPaymentConflict = errors.New("the bill's vend state does not allow this payment action")
+	// ErrBillVendUnverified: the vendor could not be asked what happened.
+	ErrBillVendUnverified = errors.New("could not confirm the vend outcome with the provider")
+	// ErrBillDebitUnverified: the swap contract could not be read to confirm
+	// the payment's debit.
+	ErrBillDebitUnverified = errors.New("could not confirm the payment's debit on-chain")
+	// errBillOrderChanged: a guarded order transition found the order already
+	// moved by someone else; the caller must not act on its stale copy.
+	errBillOrderChanged = errors.New("bill order changed concurrently")
 )
+
+// billAdminInFlightGrace is how long after its last update a paid/vending
+// order is assumed to possibly still have a vend in flight.
+const billAdminInFlightGrace = 5 * time.Minute
+
+// billScanLimit / billLateScanLimit are the reconciler page sizes.
+const (
+	billScanLimit     = 100
+	billLateScanLimit = 50
+	billDeepScanEvery = 24 * time.Hour
+)
+
+// billLateDebitScanWindow bounds how far back failed payments are re-checked
+// for a debit that mined after they were given up on.
+const billLateDebitScanWindow = 48 * time.Hour
 
 // billEscalateAfter is how long an order may sit non-terminal before the
 // reconciler starts shouting for a human. ClubKonnect's own retry window is
@@ -67,6 +93,10 @@ type billPayer interface {
 	Debit(ctx context.Context, in DebitInput) (*models.BillPayment, error)
 	Settle(ctx context.Context, orderID uuid.UUID) (*models.BillPayment, error)
 	Reverse(ctx context.Context, orderID uuid.UUID) (*models.BillPayment, error)
+	ResolveDebiting(ctx context.Context, orderID uuid.UUID) (string, bool, error)
+	AdoptLateDebit(ctx context.Context, orderID uuid.UUID) (bool, error)
+	StuckPayments(ctx context.Context, olderThan time.Duration, limit int) ([]models.BillPayment, error)
+	AlertLateDebitsBeyondWindow(ctx context.Context) (int, error)
 }
 
 // billPriceSource quotes USDC (6dp) for an MCGP amount at a PriceKind.
@@ -87,6 +117,10 @@ type BillService struct {
 	// call sites compile unchanged; without it reporting is dormant rather
 	// than writing somewhere nothing reads.
 	disputes *DisputeService
+
+	// scan pages the reconciler's scans; the daily late-debit audit claims its
+	// run in the database (claimDailyRun).
+	scan reconcileCursor
 }
 
 // SetDisputes wires the shared dispute queue in. Called at boot.
@@ -413,8 +447,7 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 		return nil, ErrBillBadState
 	}
 	if order.IsExpired(time.Now()) {
-		order.Status = models.BillStatusExpired
-		s.db.WithContext(ctx).Save(&order)
+		s.moveOrder(ctx, &order, []string{models.BillStatusQuoted}, map[string]any{"status": models.BillStatusExpired})
 		return nil, ErrBillQuoteExpired
 	}
 
@@ -434,7 +467,7 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("id = ? AND status = ? AND quote_expires_at > ?",
 			order.ID, models.BillStatusQuoted, time.Now()).
-		Update("status", models.BillStatusPaying)
+		Updates(map[string]any{"status": models.BillStatusPaying, "claim_seq": gorm.Expr("claim_seq + 1")})
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -444,8 +477,7 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 			return nil, err
 		}
 		if order.IsExpired(time.Now()) {
-			order.Status = models.BillStatusExpired
-			s.db.WithContext(ctx).Save(&order)
+			s.moveOrder(ctx, &order, []string{models.BillStatusQuoted}, map[string]any{"status": models.BillStatusExpired})
 			return nil, ErrBillQuoteExpired
 		}
 		return &order, nil
@@ -474,24 +506,22 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 		//                      replaying this order could only ever surface the
 		//                      failed row again — a retry needs a fresh order.
 		//   anything else    → a concurrent Pay moved money; don't touch it.
+		// Every order write is guarded on `paying`, so none of them can
+		// overwrite an order the reconciler has already moved on.
 		var pay models.BillPayment
 		perr := s.db.WithContext(ctx).Where("order_id = ?", order.ID).First(&pay).Error
+		paying := []string{models.BillStatusPaying}
 		switch {
 		case errors.Is(perr, gorm.ErrRecordNotFound):
-			order.Status = models.BillStatusQuoted
-			order.FailureReason = truncateReason(err.Error())
-			s.db.WithContext(ctx).Save(&order)
+			s.moveOrder(ctx, &order, paying, map[string]any{"status": models.BillStatusQuoted, "failure_reason": truncateReason(err.Error())})
 			return nil, err
 		case perr != nil:
 			return nil, err
 		case pay.Status == models.BillPayStatusDebiting:
-			order.FailureReason = truncateReason("debit unconfirmed: " + err.Error())
-			s.db.WithContext(ctx).Save(&order)
+			s.moveOrder(ctx, &order, paying, map[string]any{"failure_reason": truncateReason("debit unconfirmed: " + err.Error())})
 			return nil, fmt.Errorf("payment pending confirmation; it will resolve shortly")
 		case pay.Status == models.BillPayStatusFailed:
-			order.Status = models.BillStatusFailed
-			order.FailureReason = truncateReason(err.Error())
-			s.db.WithContext(ctx).Save(&order)
+			s.moveOrder(ctx, &order, paying, map[string]any{"status": models.BillStatusFailed, "failure_reason": truncateReason(err.Error())})
 			return nil, err
 		default:
 			// Debited (or beyond) by a concurrent caller — leave the flow to it
@@ -500,27 +530,72 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 		}
 	}
 
-	order.Status = models.BillStatusPaid
-	if err := s.db.WithContext(ctx).Save(&order).Error; err != nil {
-		return nil, err
+	if !s.moveOrder(ctx, &order, []string{models.BillStatusPaying}, map[string]any{"status": models.BillStatusPaid}) {
+		// Something else moved the order while the debit ran; it owns the vend.
+		if err := s.db.WithContext(ctx).First(&order, "id = ?", order.ID).Error; err != nil {
+			return nil, err
+		}
+		return &order, nil
 	}
 	s.vend(ctx, &order)
 	return &order, nil
 }
 
+// moveOrder applies updates only while the order is still in one of from,
+// then refreshes o. Reports whether this call moved it. Every order write on
+// the pay/vend/reconcile paths goes through here: a full-row Save from a stale
+// copy could overwrite a concurrent delivery (and its token/PIN).
+func (s *BillService) moveOrder(ctx context.Context, o *models.BillOrder, from []string, updates map[string]any) bool {
+	if _, taken := updates["claim_seq"]; !taken {
+		updates["claim_seq"] = gorm.Expr("claim_seq + 1")
+	}
+	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Where("id = ? AND status IN ?", o.ID, from).
+		Updates(updates)
+	if res.Error != nil {
+		log.Printf("[bills] order=%s transition %v→%v failed: %v", o.ID, from, updates["status"], res.Error)
+		return false
+	}
+	if res.RowsAffected != 1 {
+		return false
+	}
+	if err := s.db.WithContext(ctx).First(o, "id = ?", o.ID).Error; err != nil {
+		log.Printf("[bills] order=%s reload after transition failed: %v", o.ID, err)
+	}
+	return true
+}
+
+// claimOrder takes an order for work that must happen once (a re-vend), by
+// writing the exact version the caller read. Exactly one concurrent caller
+// wins; the rest see the bumped version and stand down.
+func (s *BillService) claimOrder(ctx context.Context, o *models.BillOrder, status string) bool {
+	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Where("id = ? AND status = ? AND claim_seq = ?", o.ID, status, o.ClaimSeq).
+		Update("claim_seq", gorm.Expr("claim_seq + 1"))
+	if res.Error != nil || res.RowsAffected != 1 {
+		return false
+	}
+	o.ClaimSeq++
+	return true
+}
+
 // vend calls ClubKonnect and resolves the order as far as the response allows.
-// It never returns an error: the order status carries the outcome, and an
-// unknown outcome parks the order in `vending` for the reconciler (a transport
-// error does NOT mean the vend didn't happen).
+// The caller must own the order (have moved it to `paid` itself). The order
+// status carries the outcome, and an unknown outcome parks the order in
+// `vending` for the reconciler (a transport error does NOT mean the vend
+// didn't happen).
 func (s *BillService) vend(ctx context.Context, o *models.BillOrder) {
 	res, err := s.callVendor(ctx, o)
 	if err != nil {
-		o.Status = models.BillStatusVending
-		o.FailureReason = truncateReason("vend outcome unknown: " + err.Error())
-		s.db.WithContext(ctx).Save(o)
+		s.moveOrder(ctx, o, []string{models.BillStatusPaid, models.BillStatusVending}, map[string]any{
+			"status":         models.BillStatusVending,
+			"failure_reason": truncateReason("vend outcome unknown: " + err.Error()),
+		})
 		return
 	}
-	s.adoptVendResult(ctx, o, res)
+	if aerr := s.adoptVendResult(ctx, o, res); aerr != nil {
+		log.Printf("[bills] order=%s vend result not fully applied: %v", o.ID, aerr)
+	}
 }
 
 func (s *BillService) callVendor(ctx context.Context, o *models.BillOrder) (BillVendResult, error) {
@@ -556,16 +631,22 @@ func (s *BillService) callVendor(ctx context.Context, o *models.BillOrder) (Bill
 }
 
 // adoptVendResult moves an order (and its payment) to wherever a vend/query
-// response says it is. Shared by the inline vend and the reconciler.
-func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, res BillVendResult) {
+// response says it is. Shared by the inline vend, the reconciler and the admin
+// actions. Every order write is guarded on the order still being paid/vending,
+// so a stale caller can neither overwrite a delivered bill nor reverse it;
+// that case returns errBillOrderChanged. A settle or reverse that fails is
+// returned (the MCGP stays in pendingSettle and the reconciler retries).
+func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, res BillVendResult) error {
+	open := []string{models.BillStatusPaid, models.BillStatusVending}
+	updates := map[string]any{}
 	if res.OrderID != "" {
-		o.VendorOrderID = res.OrderID
+		updates["vendor_order_id"] = res.OrderID
 	}
 	if res.StatusCode != 0 {
-		o.VendorStatusCode = res.StatusCode
+		updates["vendor_status_code"] = res.StatusCode
 	}
 	if res.Delivery != "" {
-		o.DeliveryPayload = truncate512(res.Delivery)
+		updates["delivery_payload"] = truncate512(res.Delivery)
 	}
 	decision, floatLow := decideVend(res.StatusCode)
 	if floatLow {
@@ -575,14 +656,13 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 	}
 	switch decision {
 	case VendSuccess:
-		o.Status = models.BillStatusDelivered
-		o.FailureReason = ""
+		updates["status"] = models.BillStatusDelivered
+		updates["failure_reason"] = ""
 		// The delivery (meter token / PIN) must be on disk BEFORE the debit is
 		// settled: settling is irreversible, and settling a delivery we failed
 		// to record charges the user for a product they cannot retrieve.
-		if err := s.db.WithContext(ctx).Save(o).Error; err != nil {
-			log.Printf("[bills] ALERT bill_delivery_persist_failed_total=1 order=%s: %v", o.ID, err)
-			return // stays non-terminal; the reconciler re-queries and retries
+		if !s.moveOrder(ctx, o, open, updates) {
+			return errBillOrderChanged
 		}
 		if _, err := s.payer.Settle(ctx, o.ID); err != nil {
 			if errors.Is(err, ErrBillPayBadState) || errors.Is(err, ErrBillPayNotFound) {
@@ -595,9 +675,10 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 				// sweep retries the settle.
 				log.Printf("[bills] settle deferred order=%s: %v", o.ID, err)
 			}
+			return fmt.Errorf("bill delivered but settle failed: %w", err)
 		}
+		return nil
 	case VendFailed:
-		o.Status = models.BillStatusVendFail
 		reason := res.Remark
 		if reason == "" {
 			reason = fmt.Sprintf("vend failed (code %d %s)", res.StatusCode, res.Status)
@@ -605,20 +686,23 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 		if floatLow {
 			reason = "service temporarily unavailable" // never blame the user for our float
 		}
-		o.FailureReason = truncateReason(reason)
-		if err := s.db.WithContext(ctx).Save(o).Error; err != nil {
-			log.Printf("[bills] vend-fail persist failed order=%s: %v", o.ID, err)
-			return // reconciler re-queries and re-adopts
+		updates["status"] = models.BillStatusVendFail
+		updates["failure_reason"] = truncateReason(reason)
+		if !s.moveOrder(ctx, o, open, updates) {
+			return errBillOrderChanged
 		}
 		if _, err := s.payer.Reverse(ctx, o.ID); err != nil {
 			log.Printf("[bills] reverse deferred order=%s: %v", o.ID, err)
-			return
+			return fmt.Errorf("vend failed but reverse failed: %w", err)
 		}
-		o.Status = models.BillStatusRefunded
-		s.db.WithContext(ctx).Save(o)
+		s.moveOrder(ctx, o, []string{models.BillStatusVendFail}, map[string]any{"status": models.BillStatusRefunded})
+		return nil
 	default: // pending
-		o.Status = models.BillStatusVending
-		s.db.WithContext(ctx).Save(o)
+		updates["status"] = models.BillStatusVending
+		if !s.moveOrder(ctx, o, open, updates) {
+			return errBillOrderChanged
+		}
+		return nil
 	}
 }
 
@@ -731,21 +815,25 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 		return 0, ErrBillsDisabled
 	}
 	changed := 0
-	cutoff := time.Now().Add(-grace)
+	now := time.Now()
+	cutoff := now.Add(-grace)
 
 	// Expire dead quotes (cheap bulk update; no money involved).
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("status = ? AND quote_expires_at < ?", models.BillStatusQuoted, cutoff).
-		Updates(map[string]any{"status": models.BillStatusExpired})
+		Updates(map[string]any{"status": models.BillStatusExpired, "claim_seq": gorm.Expr("claim_seq + 1")})
 	changed += int(res.RowsAffected)
 
+	// Scans are cursor-paged: orders the reconciler can only alert on never
+	// change, and an ordered LIMIT would otherwise refill every page with them.
 	var orders []models.BillOrder
-	if err := s.db.WithContext(ctx).
+	if err := s.scan.page("orders", "", s.db.WithContext(ctx).Model(&models.BillOrder{}).
 		Where("status IN ? AND updated_at < ?",
-			[]string{models.BillStatusPaying, models.BillStatusPaid, models.BillStatusVending}, cutoff).
-		Order("updated_at asc").Limit(100).Find(&orders).Error; err != nil {
+			[]string{models.BillStatusPaying, models.BillStatusPaid, models.BillStatusVending}, cutoff),
+		billScanLimit).Find(&orders).Error; err != nil {
 		return changed, err
 	}
+	s.advanceOrders("orders", orders, billScanLimit)
 	for i := range orders {
 		if s.reconcileOrder(ctx, &orders[i]) {
 			changed++
@@ -762,80 +850,353 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 			models.BillStatusDelivered,
 			[]string{models.BillPayStatusFailed, models.BillPayStatusDebiting}).
 		Count(&freeVends).Error; err == nil && freeVends > 0 {
-		log.Printf("[bills] ALERT bill_delivered_without_payment_total=%d — vend without a confirmed debit", freeVends)
+		alertf("bills-free-vend",
+			"[bills] ALERT bill_delivered_without_payment_total=%d — vend without a confirmed debit", freeVends)
+	}
+
+	// Payments given up on whose debit mined anyway. The order decides what
+	// the MCGP was for: a delivered bill settles and one that never vended
+	// (failed) is reversed, both by the sweep below. Anything else is left for
+	// a human.
+	var late []models.BillPayment
+	if err := s.scan.page("late", "", s.db.WithContext(ctx).Model(&models.BillPayment{}).
+		Where("status = ? AND updated_at > ?", models.BillPayStatusFailed, now.Add(-billLateDebitScanWindow)),
+		billLateScanLimit).Find(&late).Error; err == nil {
+		if n := len(late); n > 0 {
+			s.scan.advance("late", n, billLateScanLimit, late[n-1].UpdatedAt, late[n-1].ID)
+		} else {
+			s.scan.advance("late", 0, billLateScanLimit, time.Time{}, uuid.Nil)
+		}
+		for i := range late {
+			adopted, err := s.payer.AdoptLateDebit(ctx, late[i].OrderID)
+			if err != nil || !adopted {
+				continue
+			}
+			changed++
+			var o models.BillOrder
+			if err := s.db.WithContext(ctx).First(&o, "id = ?", late[i].OrderID).Error; err == nil &&
+				o.Status != models.BillStatusDelivered && o.Status != models.BillStatusFailed {
+				log.Printf("[bills] ALERT bill_late_debit_needs_review order=%s status=%s", o.ID, o.Status)
+			}
+		}
 	}
 
 	// Orders terminal but whose payment leg didn't resolve (settle/reverse
-	// deferred earlier). Retry quietly.
+	// deferred earlier, or a late debit just adopted). Retry quietly. A
+	// `failed` order never reached the vend (Pay only vends once paid), so its
+	// debit can only be returned.
 	var unresolved []models.BillOrder
-	if err := s.db.WithContext(ctx).
+	if err := s.scan.page("unresolved", "bill_orders", s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Select("bill_orders.*").
 		Joins("JOIN bill_payments ON bill_payments.order_id = bill_orders.id").
 		Where("bill_orders.status IN ? AND bill_payments.status = ?",
-			[]string{models.BillStatusDelivered, models.BillStatusVendFail}, models.BillPayStatusDebited).
-		Limit(50).Find(&unresolved).Error; err == nil {
+			[]string{models.BillStatusDelivered, models.BillStatusVendFail, models.BillStatusFailed}, models.BillPayStatusDebited),
+		billLateScanLimit).Find(&unresolved).Error; err == nil {
+		s.advanceOrders("unresolved", unresolved, billLateScanLimit)
 		for i := range unresolved {
 			o := &unresolved[i]
-			if o.Status == models.BillStatusDelivered {
+			switch o.Status {
+			case models.BillStatusDelivered:
 				if _, err := s.payer.Settle(ctx, o.ID); err == nil {
 					changed++
 				}
-			} else {
+			case models.BillStatusFailed:
 				if _, err := s.payer.Reverse(ctx, o.ID); err == nil {
-					o.Status = models.BillStatusRefunded
-					s.db.WithContext(ctx).Save(o)
+					changed++
+				}
+			default:
+				if _, err := s.payer.Reverse(ctx, o.ID); err == nil {
+					s.moveOrder(ctx, o, []string{models.BillStatusVendFail}, map[string]any{"status": models.BillStatusRefunded})
 					changed++
 				}
 			}
+		}
+	}
+
+	// One claim a day, persisted (models.JobRunMarker) exactly as the sell-side
+	// audit claims its own: a restart or a second instance must not repeat it.
+	// A run that then fails leaves the day claimed — acceptable for an
+	// alert-only audit, where the cost is a day's delay on a warning rather
+	// than anything that moves money.
+	if claimDailyRun(ctx, s.db, "bill-late-debit-audit", billDeepScanEvery) {
+		if _, err := s.payer.AlertLateDebitsBeyondWindow(ctx); err != nil {
+			log.Printf("[bills] late-debit audit failed: %v", err)
 		}
 	}
 	return changed, nil
 }
 
+func (s *BillService) advanceOrders(key string, rows []models.BillOrder, limit int) {
+	if n := len(rows); n > 0 {
+		s.scan.advance(key, n, limit, rows[n-1].UpdatedAt, rows[n-1].ID)
+		return
+	}
+	s.scan.advance(key, 0, limit, time.Time{}, uuid.Nil)
+}
+
 // reconcileOrder resolves one stale non-terminal order. Returns true if the
-// order moved.
+// order moved. o may be stale: every write is guarded on the status it read,
+// and a vend only happens after this call itself moved the order to `paid`.
 func (s *BillService) reconcileOrder(ctx context.Context, o *models.BillOrder) bool {
 	before := o.Status
 	switch o.Status {
 	case models.BillStatusPaying:
+		paying := []string{models.BillStatusPaying}
 		// The debit's fate is in the payment row.
 		var pay models.BillPayment
 		err := s.db.WithContext(ctx).Where("order_id = ?", o.ID).First(&pay).Error
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && pay.Status == models.BillPayStatusFailed):
-			// No debit ever confirmed — reopen the quote path.
-			o.Status = models.BillStatusFailed
-			o.FailureReason = truncateReason("payment did not complete")
-			s.db.WithContext(ctx).Save(o)
+			// No debit ever confirmed — the order is over.
+			s.moveOrder(ctx, o, paying, map[string]any{"status": models.BillStatusFailed, "failure_reason": truncateReason("payment did not complete")})
 		case err == nil && pay.Status == models.BillPayStatusDebited:
-			o.Status = models.BillStatusPaid
-			s.db.WithContext(ctx).Save(o)
-			s.vend(ctx, o)
+			if s.moveOrder(ctx, o, paying, map[string]any{"status": models.BillStatusPaid}) {
+				s.vend(ctx, o)
+			}
 		case err == nil && pay.Status == models.BillPayStatusDebiting:
-			// Broadcast but never verified: needs a human (or the operator's
-			// pendingSettle view) — money may be on-chain.
-			if time.Since(o.CreatedAt) > billEscalateAfter {
-				log.Printf("[bills] ALERT bill_payment_unresolved_total=1 order=%s payment=%s", o.ID, pay.ID)
+			// Broadcast (or attempted) but never verified. The contract's debit
+			// record for the order's ref is the evidence: a landed debit carries
+			// on to the vend, a debit that never landed fails the order. Only the
+			// caller that won the payment transition acts; a loser leaves the
+			// order to the winner (or to the `debited` branch next tick).
+			status, won, rerr := s.payer.ResolveDebiting(ctx, o.ID)
+			switch {
+			case rerr == nil && won && status == models.BillPayStatusDebited:
+				if s.moveOrder(ctx, o, paying, map[string]any{"status": models.BillStatusPaid}) {
+					s.vend(ctx, o)
+				}
+			case rerr == nil && won && status == models.BillPayStatusFailed:
+				s.moveOrder(ctx, o, paying, map[string]any{"status": models.BillStatusFailed, "failure_reason": truncateReason("payment did not complete")})
+			default:
+				if rerr != nil {
+					log.Printf("[bills] order=%s debit check failed: %v", o.ID, rerr)
+				}
+				if time.Since(o.CreatedAt) > billEscalateAfter {
+					alertf("bill-payment-unresolved:"+o.ID.String(),
+						"[bills] ALERT bill_payment_unresolved_total=1 order=%s payment=%s", o.ID, pay.ID)
+				}
 			}
 		}
 	case models.BillStatusPaid:
-		// Debit confirmed but the vend outcome was lost. Ask ClubKonnect; if it
-		// has never seen the RequestID, the vend was never sent — send it.
+		// Debit confirmed but the vend outcome was lost. Claim the order first
+		// (a CAS on the exact row version read) so two passes cannot both
+		// re-vend, then ask ClubKonnect; if it has never seen the RequestID, the
+		// vend was never sent — send it.
+		if !s.claimOrder(ctx, o, models.BillStatusPaid) {
+			return false
+		}
 		res, err := s.vendor.QueryOrder(ctx, o.ID.String())
 		if err != nil {
 			s.vend(ctx, o)
-		} else {
-			s.adoptVendResult(ctx, o, res)
+		} else if aerr := s.adoptVendResult(ctx, o, res); aerr != nil {
+			log.Printf("[bills] order=%s adopt query result: %v", o.ID, aerr)
 		}
 	case models.BillStatusVending:
 		res, err := s.vendor.QueryOrder(ctx, o.ID.String())
 		if err == nil {
-			s.adoptVendResult(ctx, o, res)
+			if aerr := s.adoptVendResult(ctx, o, res); aerr != nil {
+				log.Printf("[bills] order=%s adopt query result: %v", o.ID, aerr)
+			}
 		}
 		if o.Status == models.BillStatusVending && time.Since(o.CreatedAt) > billEscalateAfter {
-			log.Printf("[bills] ALERT bill_vend_unresolved_total=1 order=%s vendor_order=%s", o.ID, o.VendorOrderID)
+			alertf("bill-vend-unresolved:"+o.ID.String(),
+				"[bills] ALERT bill_vend_unresolved_total=1 order=%s vendor_order=%s", o.ID, o.VendorOrderID)
 		}
 	}
 	return o.Status != before
+}
+
+// ─── admin payment resolution ────────────────────────────────────────────────
+
+// queryConfirmsVendFailed reports whether a QueryOrder answer is positive
+// evidence the vend failed: it must identify the order (the vendor order id,
+// matching the one recorded if any) and carry a code from the ORDER_CANCELLED
+// group. A 4xx on a query is about the query, not the vend, and proves nothing.
+func queryConfirmsVendFailed(o *models.BillOrder, res BillVendResult) bool {
+	if res.OrderID == "" || (o.VendorOrderID != "" && res.OrderID != o.VendorOrderID) {
+		return false
+	}
+	return res.StatusCode >= 500 && res.StatusCode < 600
+}
+
+// queryConfirmsVendDelivered is the success counterpart: code 200 for this order.
+func queryConfirmsVendDelivered(o *models.BillOrder, res BillVendResult) bool {
+	if res.OrderID == "" || (o.VendorOrderID != "" && res.OrderID != o.VendorOrderID) {
+		return false
+	}
+	return res.StatusCode == 200
+}
+
+// AdminReversePayment returns a bill's MCGP, but only on evidence the bill was
+// not delivered: the vend failed (recorded, or reported terminal for this
+// order by the vendor now), or the order never reached the vend. A delivered,
+// successful or still-pending vend is refused — reversing it gives the user
+// the bill for free — and so is an order touched too recently to rule out a
+// vend in flight.
+func (s *BillService) AdminReversePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error) {
+	o, err := s.adminPaymentOrder(ctx, orderID, models.BillPayStatusReversed)
+	if err != nil {
+		return nil, err
+	}
+	switch o.Status {
+	case models.BillStatusVendFail:
+		if _, err := s.payer.Reverse(ctx, o.ID); err != nil {
+			return nil, err
+		}
+		s.moveOrder(ctx, o, []string{models.BillStatusVendFail}, map[string]any{"status": models.BillStatusRefunded})
+		return o, nil
+	case models.BillStatusFailed, models.BillStatusQuoted, models.BillStatusExpired:
+		// Pay only vends once the order is paid, so these never reached it.
+		if _, err := s.payer.Reverse(ctx, o.ID); err != nil {
+			return nil, err
+		}
+		return o, nil
+	case models.BillStatusPaid, models.BillStatusVending:
+		if time.Since(o.UpdatedAt) < billAdminInFlightGrace {
+			return nil, fmt.Errorf("%w: the order changed %s ago; a vend may still be in flight", ErrBillVendUnverified, time.Since(o.UpdatedAt).Round(time.Second))
+		}
+		res, err := s.vendor.QueryOrder(ctx, o.ID.String())
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBillVendUnverified, err)
+		}
+		switch decision, _ := decideVend(res.StatusCode); decision {
+		case VendSuccess:
+			return nil, fmt.Errorf("%w: the vendor reports this bill delivered", ErrBillPaymentConflict)
+		case VendPending:
+			return nil, fmt.Errorf("%w: the vend is still pending at the vendor (code %d)", ErrBillPaymentConflict, res.StatusCode)
+		}
+		if !queryConfirmsVendFailed(o, res) {
+			return nil, fmt.Errorf("%w: the vendor's answer (order %q, code %d %s) does not confirm the vend failed", ErrBillVendUnverified, res.OrderID, res.StatusCode, res.Status)
+		}
+		switch aerr := s.adoptVendResult(ctx, o, res); {
+		case errors.Is(aerr, errBillOrderChanged):
+			return nil, fmt.Errorf("%w: the order changed while it was being checked; reload and retry", ErrBillPaymentConflict)
+		case aerr != nil:
+			return nil, aerr
+		}
+		return o, nil
+	default:
+		return nil, fmt.Errorf("%w: order is %s", ErrBillPaymentConflict, o.Status)
+	}
+}
+
+// AdminSettlePayment frees a bill's backing, but only on evidence the bill was
+// delivered: recorded as delivered, or reported successful for this order by
+// the vendor now. A settle that fails is returned.
+func (s *BillService) AdminSettlePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error) {
+	o, err := s.adminPaymentOrder(ctx, orderID, models.BillPayStatusSettled)
+	if err != nil {
+		return nil, err
+	}
+	switch o.Status {
+	case models.BillStatusDelivered:
+		if _, err := s.payer.Settle(ctx, o.ID); err != nil {
+			return nil, err
+		}
+		return o, nil
+	case models.BillStatusPaid, models.BillStatusVending:
+		res, err := s.vendor.QueryOrder(ctx, o.ID.String())
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBillVendUnverified, err)
+		}
+		if !queryConfirmsVendDelivered(o, res) {
+			return nil, fmt.Errorf("%w: the vendor does not report this bill delivered (order %q, code %d)", ErrBillPaymentConflict, res.OrderID, res.StatusCode)
+		}
+		switch aerr := s.adoptVendResult(ctx, o, res); {
+		case errors.Is(aerr, errBillOrderChanged):
+			return nil, fmt.Errorf("%w: the order changed while it was being checked; reload and retry", ErrBillPaymentConflict)
+		case aerr != nil:
+			return nil, aerr
+		}
+		return o, nil
+	default:
+		return nil, fmt.Errorf("%w: order is %s", ErrBillPaymentConflict, o.Status)
+	}
+}
+
+// adminPaymentOrder loads an order whose payment is `debited` and so can be
+// settled or reversed. A `debiting` payment is first resolved from chain
+// state; an unreadable chain is ErrBillDebitUnverified, and an unconfirmed
+// debit, or a payment already `done` or otherwise terminal, is refused with
+// ErrBillPayBadState.
+func (s *BillService) adminPaymentOrder(ctx context.Context, orderID uuid.UUID, done string) (*models.BillOrder, error) {
+	if !s.IsEnabled() {
+		return nil, ErrBillsDisabled
+	}
+	var o models.BillOrder
+	if err := s.db.WithContext(ctx).First(&o, "id = ?", orderID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrBillNotFound
+		}
+		return nil, err
+	}
+	status, _, err := s.payer.ResolveDebiting(ctx, o.ID)
+	if err != nil {
+		if errors.Is(err, ErrBillPayNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", ErrBillDebitUnverified, err)
+	}
+	switch status {
+	case done:
+		return nil, fmt.Errorf("%w: payment is already %s", ErrBillPayBadState, status)
+	case models.BillPayStatusDebited:
+		return &o, nil
+	case models.BillPayStatusDebiting:
+		return nil, fmt.Errorf("%w: the debit is not confirmed on-chain yet", ErrBillPayBadState)
+	default:
+		return nil, fmt.Errorf("%w: payment is %s", ErrBillPayBadState, status)
+	}
+}
+
+// BillStuckPayment is a non-terminal bill payment with the order evidence an
+// operator needs to decide between settle and reverse.
+type BillStuckPayment struct {
+	models.BillPayment
+	OrderStatus      string `json:"orderStatus"`
+	Category         string `json:"category"`
+	Provider         string `json:"provider"`
+	NgnAmount        int64  `json:"ngnAmount"`
+	VendorOrderID    string `json:"vendorOrderId,omitempty"`
+	VendorStatusCode int    `json:"vendorStatusCode,omitempty"`
+	OrderFailure     string `json:"orderFailureReason,omitempty"`
+}
+
+// ListStuckPayments lists debiting/debited bill payments older than olderThan,
+// joined to their orders.
+func (s *BillService) ListStuckPayments(ctx context.Context, olderThan time.Duration, limit int) ([]BillStuckPayment, error) {
+	if !s.IsEnabled() {
+		return nil, ErrBillsDisabled
+	}
+	pays, err := s.payer.StuckPayments(ctx, olderThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, 0, len(pays))
+	for _, p := range pays {
+		ids = append(ids, p.OrderID)
+	}
+	orders := map[uuid.UUID]models.BillOrder{}
+	if len(ids) > 0 {
+		var rows []models.BillOrder
+		if err := s.db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, o := range rows {
+			orders[o.ID] = o
+		}
+	}
+	out := make([]BillStuckPayment, 0, len(pays))
+	for _, p := range pays {
+		row := BillStuckPayment{BillPayment: p}
+		if o, ok := orders[p.OrderID]; ok {
+			row.OrderStatus, row.Category, row.Provider = o.Status, o.Category, o.Provider
+			row.NgnAmount, row.VendorOrderID, row.VendorStatusCode = o.NgnAmount, o.VendorOrderID, o.VendorStatusCode
+			row.OrderFailure = o.FailureReason
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 // ─── queries ─────────────────────────────────────────────────────────────────

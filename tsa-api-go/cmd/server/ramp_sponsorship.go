@@ -130,8 +130,8 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		log.Printf("[ramp-sponsor] dormant: RAMP_SPONSOR_PRIVATE_KEY not set or Paycrest orders unavailable")
 		return nil
 	}
-	if cfg.Env == "production" {
-		log.Printf("[ramp-sponsor] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (use KMS)")
+	if !rawSignerKeyAllowed(cfg) {
+		log.Printf("[ramp-sponsor] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
 		return nil
 	}
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
@@ -139,6 +139,7 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		log.Printf("[ramp-sponsor] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
 		return nil
 	}
+	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
 	sponsorAddr := crypto.PubkeyToAddress(key.PublicKey)
 	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
 		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,

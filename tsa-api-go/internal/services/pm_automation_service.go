@@ -517,11 +517,23 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 			!r.ReceivedAt.IsZero() &&
 			time.Since(r.ReceivedAt) > fwChargeNotFoundGrace
 
-		if err != nil && (errors.Is(err, ErrChargeRejected) || agedOutNotFound) {
+		// Same shape for a payout webhook the provider never finalises: past the
+		// grace it stops being read-after-write lag, and re-driving it every tick
+		// would hold a slot in this oldest-first pool forever.
+		agedOutNotFinal := err != nil &&
+			errors.Is(err, ErrITPayoutNotFinal) &&
+			!r.ReceivedAt.IsZero() &&
+			time.Since(r.ReceivedAt) > itPayoutWebhookGrace
+
+		if err != nil && (errors.Is(err, ErrChargeRejected) || agedOutNotFound || agedOutNotFinal) {
 			// Terminal — a retry can never settle it. Mark 'rejected' so it drops
 			// out of the failed pool instead of being re-driven every tick.
 			if agedOutNotFound {
 				log.Printf("[pm recovery] ALARM event=%s charge still not found %s after arrival — marking rejected, NOT settled: %v",
+					r.EventID, time.Since(r.ReceivedAt).Round(time.Minute), err)
+			}
+			if agedOutNotFinal {
+				log.Printf("[pm recovery] ALERT it_payout_webhook_never_final event=%s still not final %s after arrival — marking rejected, NOT settled: %v",
 					r.EventID, time.Since(r.ReceivedAt).Round(time.Minute), err)
 			}
 			if uerr := s.db.WithContext(ctx).

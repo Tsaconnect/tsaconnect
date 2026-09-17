@@ -1046,6 +1046,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.GET("/intents", ith.AdminListIntents)
 			adminIT.GET("/stable/stuck", ith.GetStuckStableSells)
 			adminIT.GET("/stable/buy/stuck", ith.GetStuckStableBuys)
+			adminIT.GET("/sell/stuck", ith.GetStuckMCGPSells)
 			// Money-movement actions are super_admin only — a plain admin may
 			// view the orders console but not credit/reprice/settle/reverse.
 			// The admin UI hides these buttons for non-super_admins; this is the
@@ -1055,6 +1056,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superIT.POST("/reprice/:id", ith.AdminRepriceCredit)
 			superIT.POST("/settle/:id", ith.AdminSettle)
 			superIT.POST("/reverse/:id", ith.AdminReverse)
+			superIT.POST("/sell/:id/retry-payout", ith.AdminRetrySellPayout)
+			superIT.POST("/sell/:id/reevaluate", ith.AdminReevaluateSell)
+			superIT.POST("/stable/:id/repay", ith.AdminRepayStableSell)
 			// RepriceParkedStableBuy resumes a purchase still holding the
 			// user's naira, same class of action as AdminRepriceCredit above —
 			// it belongs behind the same super_admin gate, not plain admin.
@@ -1103,6 +1107,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminBills.GET("/reports", bh.ListReportsAdmin)
 			adminBills.POST("/reports/:id/resolve", bh.ResolveReportAdmin)
+			adminBills.GET("/payments/stuck", bh.ListStuckPaymentsAdmin)
+			// Moving a bill's MCGP is super_admin only, like the IT
+			// settle/reverse actions.
+			superBills := adminBills.Group("", middleware.RequireSuperAdmin())
+			superBills.POST("/orders/:id/reverse-payment", bh.ReversePaymentAdmin)
+			superBills.POST("/orders/:id/settle-payment", bh.SettlePaymentAdmin)
 		}
 	} else {
 		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")

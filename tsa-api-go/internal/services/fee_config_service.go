@@ -230,7 +230,19 @@ func (s *FeeConfigService) Load() error {
 		if productFeeWildcardOnly(r.Feature, r.TokenSymbol) {
 			return errProductPerTokenOverride(r.Feature, r.TokenSymbol)
 		}
-		cache[cacheKey(r.Feature, r.TokenSymbol, r.ChainID)] = r
+		// A non-NULL direction that is not in the known set is a corrupt row, and
+		// the empty string is the dangerous one: it is not NULL, so every
+		// `direction IS NULL` filter (the reconciler, the replica writer) skips
+		// it, yet its in-memory key is the same "" the direction-agnostic row
+		// uses — so it would shadow the real rate in the cache while being
+		// invisible to everything that keeps the replica honest. Skip it and
+		// alert; the agnostic row then answers exactly as it did before.
+		if r.Direction != nil && !models.IsValidFeeDirection(rowDirection(r)) {
+			log.Printf("[FeeConfig] ALERT fee_rate_bad_direction feature=%s token=%s chain=%s direction=%q -> row IGNORED (not a known direction)",
+				r.Feature, r.TokenSymbol, chainLabel(r.ChainID), *r.Direction)
+			continue
+		}
+		cache[cacheKey(r.Feature, r.TokenSymbol, r.ChainID, rowDirection(r))] = r
 	}
 	s.mu.Lock()
 	s.cache = cache
@@ -260,12 +272,29 @@ func (s *FeeConfigService) Invalidate() error {
 // cacheKey builds the per-(feature, token, chain) cache key. A nil chainID
 // (the legacy global / backend-charged row) uses an empty chain segment so it
 // is distinct from any numeric chain.
-func cacheKey(feature, token string, chainID *int64) string {
+func cacheKey(feature, token string, chainID *int64, direction string) string {
 	chain := ""
 	if chainID != nil {
 		chain = strconv.FormatInt(*chainID, 10)
 	}
-	return feature + "|" + strings.ToUpper(token) + "|" + chain
+	return feature + "|" + strings.ToUpper(token) + "|" + chain + "|" + normalizeDirection(direction)
+}
+
+// normalizeDirection is the canonical spelling of a direction: trimmed and
+// lower-cased. Both sides of the cache key go through it, so a caller asking
+// for "SELL" cannot miss its own "sell" row and fall through to the untaxed
+// direction-agnostic rate.
+func normalizeDirection(direction string) string {
+	return strings.ToLower(strings.TrimSpace(direction))
+}
+
+// rowDirection is the in-memory spelling of a row's direction: "" for the NULL
+// "applies to any direction" row.
+func rowDirection(c models.FeeConfig) string {
+	if c.Direction == nil {
+		return ""
+	}
+	return normalizeDirection(*c.Direction)
 }
 
 // RateFor returns the fee rate for (feature, tokenSymbol, chainID) from the
@@ -290,15 +319,32 @@ func cacheKey(feature, token string, chainID *int64) string {
 //   - The resolved bps is always clamped to [0, MaxFeeBPS].
 //   - found is true whenever a usable rate was produced (cache OR fallback).
 func (s *FeeConfigService) RateFor(feature, tokenSymbol string, chainID *int64) (bps int, flatUSD float64, exempt bool, found bool) {
+	return s.RateForDirection(feature, tokenSymbol, chainID, "")
+}
+
+// RateForDirection is RateFor scoped to one leg of a flow (buy/sell/send/pay/
+// withdraw) — see models.FeeDirection*. A directional row for (feature, token,
+// chain) overrides the direction-agnostic one; absent any directional row the
+// resolution is identical to RateFor.
+//
+// Pass "" to mean "no particular direction", which is exactly what RateFor does.
+//
+// SECURITY: direction MUST be derived from the flow the server is executing,
+// never from a request field. It selects which rate row is charged, so a
+// caller-supplied direction is a caller-supplied price — an attacker would name
+// whichever leg is cheapest. Unknown directions resolve to the
+// direction-agnostic row rather than erroring, which makes a threaded-through
+// request value fail SILENTLY cheap.
+func (s *FeeConfigService) RateForDirection(feature, tokenSymbol string, chainID *int64, direction string) (bps int, flatUSD float64, exempt bool, found bool) {
 	upperToken := strings.ToUpper(strings.TrimSpace(tokenSymbol))
 
 	s.mu.RLock()
-	row, ok := s.lookupLocked(s.cache, feature, upperToken, chainID)
+	row, ok := s.lookupLocked(s.cache, feature, upperToken, chainID, direction)
 	s.mu.RUnlock()
 
 	if !ok {
 		// §11 ladder: cache miss → last-known-good → seed default + loud alert.
-		return s.resolveFallback(feature, upperToken, chainID)
+		return s.resolveFallback(feature, upperToken, chainID, direction)
 	}
 
 	if row.MCGPExempt && upperToken == "MCGP" {
@@ -308,23 +354,42 @@ func (s *FeeConfigService) RateFor(feature, tokenSymbol string, chainID *int64) 
 	return clampBPS(row.BPS), row.FlatAmountUSD, false, true
 }
 
-// lookupLocked walks the 4-tier per-chain resolution over a given cache map.
-// Caller holds the appropriate lock for the map being read.
-func (s *FeeConfigService) lookupLocked(cache map[string]models.FeeConfig, feature, upperToken string, chainID *int64) (models.FeeConfig, bool) {
-	if chainID != nil {
-		if row, ok := cache[cacheKey(feature, upperToken, chainID)]; ok { // (1)
+// lookupLocked walks the resolution ladder over a given cache map. Caller holds
+// the appropriate lock for the map being read.
+//
+// Direction is the OUTERMOST dimension: the whole 4-tier (token, chain) ladder
+// runs first for the requested direction, then again for the direction-agnostic
+// rows. A direction of "" runs only the agnostic pass, so a caller that does not
+// ask for a direction can never be handed a directional rate.
+//
+// With no direction rows in the table the first pass finds nothing and the
+// second pass is byte-for-byte the pre-direction ladder.
+func (s *FeeConfigService) lookupLocked(cache map[string]models.FeeConfig, feature, upperToken string, chainID *int64, direction string) (models.FeeConfig, bool) {
+	if direction != "" {
+		if row, ok := s.lookupDirectionLocked(cache, feature, upperToken, chainID, direction); ok {
 			return row, true
 		}
 	}
-	if row, ok := cache[cacheKey(feature, upperToken, nil)]; ok { // (2)
+	return s.lookupDirectionLocked(cache, feature, upperToken, chainID, "")
+}
+
+// lookupDirectionLocked walks the 4-tier (token, chain) resolution within a
+// single direction bucket.
+func (s *FeeConfigService) lookupDirectionLocked(cache map[string]models.FeeConfig, feature, upperToken string, chainID *int64, direction string) (models.FeeConfig, bool) {
+	if chainID != nil {
+		if row, ok := cache[cacheKey(feature, upperToken, chainID, direction)]; ok { // (1)
+			return row, true
+		}
+	}
+	if row, ok := cache[cacheKey(feature, upperToken, nil, direction)]; ok { // (2)
 		return row, true
 	}
 	if chainID != nil {
-		if row, ok := cache[cacheKey(feature, models.FeeTokenAny, chainID)]; ok { // (3)
+		if row, ok := cache[cacheKey(feature, models.FeeTokenAny, chainID, direction)]; ok { // (3)
 			return row, true
 		}
 	}
-	if row, ok := cache[cacheKey(feature, models.FeeTokenAny, nil)]; ok { // (4)
+	if row, ok := cache[cacheKey(feature, models.FeeTokenAny, nil, direction)]; ok { // (4)
 		return row, true
 	}
 	return models.FeeConfig{}, false
@@ -334,16 +399,16 @@ func (s *FeeConfigService) lookupLocked(cache map[string]models.FeeConfig, featu
 // no row for (feature, token, chain). It tries last-known-good, then the
 // per-feature seed default, and fires the loud cache-miss alert. It NEVER
 // returns a $0 silent miss and ALWAYS clamps to [0, MaxFeeBPS].
-func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *int64) (bps int, flatUSD float64, exempt bool, found bool) {
+func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *int64, direction string) (bps int, flatUSD float64, exempt bool, found bool) {
 	feeCacheMissTotal.Add(1)
 
 	// (3a) last-known-good — a previously successful replica load.
 	s.lkgMu.RLock()
-	row, ok := s.lookupLocked(s.lastKnownGood, feature, upperToken, chainID)
+	row, ok := s.lookupLocked(s.lastKnownGood, feature, upperToken, chainID, direction)
 	s.lkgMu.RUnlock()
 	if ok {
-		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> last-known-good (cache empty)",
-			feature, upperToken, chainLabel(chainID))
+		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> last-known-good (cache empty)",
+			feature, upperToken, chainLabel(chainID), direction)
 		if row.MCGPExempt && upperToken == "MCGP" {
 			return 0, 0, true, true
 		}
@@ -354,8 +419,8 @@ func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *
 	// without the chain dimension — the seed has no chain rows.
 	dbps, dflat, dexempt, dfound := defaultRateFor(feature, upperToken)
 	if dfound {
-		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> SEED DEFAULT (no replica, no last-known-good)",
-			feature, upperToken, chainLabel(chainID))
+		log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> SEED DEFAULT (no replica, no last-known-good; the seed has no direction dimension)",
+			feature, upperToken, chainLabel(chainID), direction)
 		if dexempt {
 			return 0, 0, true, true
 		}
@@ -365,8 +430,8 @@ func (s *FeeConfigService) resolveFallback(feature, upperToken string, chainID *
 	// No seed either: the feature is genuinely unknown. This is a real
 	// found=false (not a configured-but-empty row); the caller decides. Still
 	// not a silent $0 charge — found=false signals "no such fee".
-	log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s -> NO ROW (unknown feature)",
-		feature, upperToken, chainLabel(chainID))
+	log.Printf("[FeeConfig] ALERT fee_rate_cache_miss feature=%s token=%s chain=%s direction=%q -> NO ROW (unknown feature)",
+		feature, upperToken, chainLabel(chainID), direction)
 	return 0, 0, false, false
 }
 
@@ -468,9 +533,17 @@ func (s *FeeConfigService) WriteReplicaRowTx(tx *gorm.DB, feature, token string,
 		return errProductPerTokenOverride(feature, upperToken)
 	}
 
-	// Upsert the (feature, token, chain) replica row.
+	// Upsert the (feature, token, chain) DIRECTION-AGNOSTIC replica row.
+	//
+	// `direction IS NULL` is load-bearing, the write-side twin of the filter in
+	// replicaRowFor. The on-chain FeeManager keys by (feature, token) alone, so
+	// a per-leg tax row has no on-chain counterpart and must never be the row a
+	// confirmed chain rate lands on. Without the filter First() picks by UUID
+	// order: a directional row winning that coin flip has its rate overwritten
+	// from chain (silently wiping the tax) AND leaves the agnostic row stale, so
+	// the hourly reconciler sees the same drift and does it again every pass.
 	var existing models.FeeConfig
-	q := tx.Where("feature = ? AND token_symbol = ?", feature, upperToken)
+	q := tx.Where("feature = ? AND token_symbol = ? AND direction IS NULL", feature, upperToken)
 	if chainID == nil {
 		q = q.Where("chain_id IS NULL")
 	} else {

@@ -308,3 +308,110 @@ func TestAdminConsoleBaseURL(t *testing.T) {
 		t.Errorf("nil config = %q, want empty", got)
 	}
 }
+
+// IsProduction is the single comparison every raw-signer-key guard and the gin
+// release-mode switch must use instead of a direct string compare against
+// Env — it has to tolerate the values an operator actually types.
+func TestIsProduction(t *testing.T) {
+	cases := map[string]bool{
+		"production":  true,
+		"Production":  true,
+		" production": true,
+		"production ": true,
+		"PRODUCTION":  true,
+		"prod":        true,
+		"Prod":        true,
+		" prod ":      true,
+		"development": false,
+		"staging":     false,
+		"":            false,
+		"productions": false,
+	}
+	for env, want := range cases {
+		cfg := &Config{Env: env}
+		if got := cfg.IsProduction(); got != want {
+			t.Errorf("IsProduction() with Env=%q = %v, want %v", env, got, want)
+		}
+	}
+
+	var nilCfg *Config
+	if nilCfg.IsProduction() {
+		t.Errorf("nil config IsProduction() = true, want false")
+	}
+}
+
+// Load() must normalise ENV the same way IsProduction() does, so a stray
+// space or "Prod"/"PROD" typed into the deploy env is detected identically to
+// the exact string "production".
+func TestLoad_NormalisesEnv(t *testing.T) {
+	// Note: t.Setenv always SETS the var (even to ""), which getEnv treats as
+	// present via os.LookupEnv — so an explicit "" here is "ENV is set to
+	// empty", a different case from ENV being unset, and normalises to "" not
+	// the "development" default (same LookupEnv gotcha .env.example documents
+	// for FLUTTERWAVE_BASE_URL). Only non-empty values are exercised here.
+	cases := map[string]struct {
+		wantEnv    string
+		wantIsProd bool
+	}{
+		" Production ": {"production", true},
+		"PROD":         {"production", true},
+		"development":  {"development", false},
+	}
+	for raw, want := range cases {
+		t.Setenv("ENV", raw)
+		cfg := Load()
+		if cfg.Env != want.wantEnv {
+			t.Errorf("ENV=%q: cfg.Env = %q, want %q", raw, cfg.Env, want.wantEnv)
+		}
+		if cfg.IsProduction() != want.wantIsProd {
+			t.Errorf("ENV=%q: cfg.IsProduction() = %v, want %v", raw, cfg.IsProduction(), want.wantIsProd)
+		}
+	}
+}
+
+// ALLOW_RAW_SIGNER_KEYS must default to false — the raw-key guard's fail-safe
+// direction is refusing in production, not permitting it.
+func TestLoad_AllowRawSignerKeysDefaultsFalse(t *testing.T) {
+	t.Setenv("ALLOW_RAW_SIGNER_KEYS", "")
+	if Load().AllowRawSignerKeys {
+		t.Errorf("AllowRawSignerKeys = true with unset env, want false")
+	}
+}
+
+func TestLoad_AllowRawSignerKeysTrue(t *testing.T) {
+	t.Setenv("ALLOW_RAW_SIGNER_KEYS", "true")
+	if !Load().AllowRawSignerKeys {
+		t.Errorf("AllowRawSignerKeys = false with ALLOW_RAW_SIGNER_KEYS=true, want true")
+	}
+}
+
+// A 0x-prefixed IT_OPERATOR_PRIVATE_KEY must not silently leave IT (and
+// utility bills, which share the operator signer) dormant: crypto.HexToECDSA
+// rejects the 0x prefix outright, and RELAYER/PM/RAMP keys already tolerate
+// it at their point of use.
+func TestLoad_StripsITOperatorKeyPrefix(t *testing.T) {
+	const raw = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	t.Setenv("IT_OPERATOR_PRIVATE_KEY", "0x"+raw)
+	if got := Load().ITOperatorPrivateKey; got != raw {
+		t.Errorf("ITOperatorPrivateKey = %q, want %q (0x stripped)", got, raw)
+	}
+
+	t.Setenv("IT_OPERATOR_PRIVATE_KEY", raw)
+	if got := Load().ITOperatorPrivateKey; got != raw {
+		t.Errorf("ITOperatorPrivateKey without 0x = %q, want unchanged %q", got, raw)
+	}
+}
+
+// Acting on "Flutterwave has no transfer for this reference" can pay a user
+// twice if the listing is misread, so it must stay off unless asked for.
+func TestLoad_ITSellFWAbsenceTrustedDefaultsOff(t *testing.T) {
+	t.Setenv("SONIC_NETWORK", "testnet")
+	t.Setenv("IT_SELL_FW_ABSENCE_TRUSTED", "")
+	if Load().ITSellFWAbsenceTrusted {
+		t.Fatal("IT_SELL_FW_ABSENCE_TRUSTED must default to false")
+	}
+	t.Setenv("IT_SELL_FW_ABSENCE_TRUSTED", "true")
+	if !Load().ITSellFWAbsenceTrusted {
+		t.Fatal("IT_SELL_FW_ABSENCE_TRUSTED=true must enable it")
+	}
+}

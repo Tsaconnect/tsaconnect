@@ -60,7 +60,11 @@ func (h *TPAdminHandler) ListFeeSplits(c *gin.Context) {
 	// the admin sees the resulting section rate rather than two numbers to
 	// multiply in their head.
 	var feeCfgs []models.FeeConfig
-	h.DB.Where("active = ? AND chain_id IS NULL", true).Find(&feeCfgs)
+	// direction IS NULL: only the direction-agnostic row is the feature's
+	// headline rate. A per-leg row has no single "the fee rate" meaning, and
+	// picking one by row order would make the displayed effective TP rate
+	// depend on insertion order.
+	h.DB.Where("active = ? AND chain_id IS NULL AND direction IS NULL", true).Find(&feeCfgs)
 	bpsByFeature := map[string]int{}
 	for _, fc := range feeCfgs {
 		if _, seen := bpsByFeature[fc.Feature]; !seen {

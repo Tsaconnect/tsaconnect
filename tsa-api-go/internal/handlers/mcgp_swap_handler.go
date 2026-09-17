@@ -35,6 +35,8 @@ type mcgpSwapPort interface {
 	LegacyEntitlement(user string) (*big.Int, error)
 	LegacyRemaining(user string) (*big.Int, error)
 	PremiumBalance(user string) (*big.Int, error)
+	PremiumBought(user string) (*big.Int, error)
+	PremiumCredited(user string) (*big.Int, error)
 	PrepareApprove(from, token string, amount *big.Int) ([]byte, error)
 	PrepareBuyPremium(from string, mcgpAmount, maxUsdc *big.Int) ([]byte, error)
 	PrepareSellLegacy(from string, mcgpAmount, minUsdc *big.Int) ([]byte, error)
@@ -118,9 +120,18 @@ func (h *MCGPSwapHandler) GetBalance(c *gin.Context) {
 		return
 	}
 	legacyEntitlement, _ := h.swap.LegacyEntitlement(wallet)
+	// premiumBought/premiumCredited split the merged premiumBalance into its two
+	// on-chain buckets so the app can tell a user which MCGP is sellable for USDC
+	// (bought) vs. spend-only, naira-bought (credited) — see sellPremium's
+	// "Insufficient bought premium" revert. Additive fields: read best-effort so
+	// an older contract/RPC hiccup still returns the pre-existing shape.
+	bought, _ := h.swap.PremiumBought(wallet)
+	credited, _ := h.swap.PremiumCredited(wallet)
 	utils.SuccessResponse(c, http.StatusOK, "Balance", gin.H{
 		"walletAddress":     wallet,
 		"premiumBalance":    premium.String(),
+		"premiumBought":     bigOrZero(bought),   // sellable for USDC
+		"premiumCredited":   bigOrZero(credited), // naira-bought, spend-only (in-app + IT)
 		"legacyEntitlement": bigOrZero(legacyEntitlement),
 		"legacyRemaining":   legacyRemaining.String(),
 	})

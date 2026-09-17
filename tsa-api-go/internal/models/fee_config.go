@@ -39,6 +39,32 @@ const (
 // unless a more specific (feature, token) row exists.
 const FeeTokenAny = "*"
 
+// Fee directions. The gasless/transaction-tax schedule prices a flow by the
+// direction money moves as well as by (feature, token, chain): an MCGP buy is
+// untaxed where an MCGP sell is not, and OTC/spot carry separate buy and sell
+// rates. A row with a NULL direction applies to every direction — that is the
+// legacy shape, and every row predating this dimension has it.
+const (
+	FeeDirectionBuy      = "buy"
+	FeeDirectionSell     = "sell"
+	FeeDirectionSend     = "send"
+	FeeDirectionPay      = "pay"
+	FeeDirectionWithdraw = "withdraw"
+)
+
+// IsValidFeeDirection reports whether d is one of the known directions. The
+// empty string is NOT valid: it is the in-memory spelling of the NULL "applies
+// to any direction" row, so accepting it here would let an admin write a row
+// that looks direction-scoped but silently matches everything.
+func IsValidFeeDirection(d string) bool {
+	switch d {
+	case FeeDirectionBuy, FeeDirectionSell, FeeDirectionSend, FeeDirectionPay, FeeDirectionWithdraw:
+		return true
+	default:
+		return false
+	}
+}
+
 // FeeConfig is an admin-tunable per-(feature, token) fee rate. It replaces the
 // scattered hardcoded fee constants with a single source of truth that can be
 // edited at runtime via the admin API without a redeploy.
@@ -61,7 +87,14 @@ type FeeConfig struct {
 	// read. A non-NULL ChainID is that chain's override of the global default.
 	// (Configurable-FeeManager design §4: fee_config is the READ REPLICA of the
 	// confirmed on-chain rates; the chain dimension mirrors the FeeManager keys.)
-	ChainID       *int64    `gorm:"uniqueIndex:idx_fee_config_feature_token_chain" json:"chainId,omitempty"`
+	ChainID *int64 `gorm:"uniqueIndex:idx_fee_config_feature_token_chain" json:"chainId,omitempty"`
+	// Direction scopes the row to one leg of a flow (buy/sell/send/pay/withdraw).
+	// NULL = applies to every direction, which is what every row written before
+	// the transaction-tax work carries. A non-NULL Direction is that leg's
+	// override, and it is the OUTERMOST resolution dimension — a directional
+	// wildcard-token row outranks a direction-agnostic exact-token row, because
+	// the tax schedule is authored per leg first and per asset second.
+	Direction     *string   `gorm:"size:16;uniqueIndex:idx_fee_config_feature_token_chain" json:"direction,omitempty"`
 	BPS           int       `gorm:"not null;default:0" json:"bps"`
 	FlatAmountUSD float64   `gorm:"not null;default:0" json:"flatAmountUsd"`
 	MCGPExempt    bool      `gorm:"not null;default:false" json:"mcgpExempt"`

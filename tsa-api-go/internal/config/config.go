@@ -202,13 +202,21 @@ type FeeQuoteConfig struct {
 }
 
 type Config struct {
-	DatabaseURL         string
-	JWTSecret           string
-	FrontendURL         string
-	AdminURL            string
-	LandingURL          string
-	Port                string
-	Env                 string
+	DatabaseURL string
+	JWTSecret   string
+	FrontendURL string
+	AdminURL    string
+	LandingURL  string
+	Port        string
+	// Env is normalised at Load() time (trim, lower-case, "prod" -> "production")
+	// so a stray space or differing case can never desync the checks below —
+	// call IsProduction() rather than comparing this field directly.
+	Env string
+	// AllowRawSignerKeys opts a production process back into raw-env-var private
+	// keys (IT operator, relayer, ramp sponsor, PM release local signer) until a
+	// KMS-backed signer exists. Ignored outside production. See
+	// rawSignerKeyAllowed in cmd/server for the single place this is consumed.
+	AllowRawSignerKeys  bool
 	CloudinaryCloudName string
 	CloudinaryAPIKey    string
 	CloudinaryAPISecret string
@@ -331,6 +339,13 @@ type Config struct {
 	// (default ₦100 = 10000, Flutterwave's TRANSFER_AMOUNT_LIMIT floor). Raise to
 	// tighten the dust-sell guard without a code change.
 	ITMinSellNgnKobo int64
+	// ITSellFWAbsenceTrusted lets IT sell recovery act on "Flutterwave has no
+	// transfer for this reference": the reconciler re-sends a previously
+	// attempted payout (and reverses a sell whose retry was refused), and an
+	// admin may reverse or retry a sell on that evidence. Off by default until
+	// the /transfers listing shape is confirmed against the live API — a wrong
+	// "absent" pays the user twice. IT_SELL_FW_ABSENCE_TRUSTED.
+	ITSellFWAbsenceTrusted bool
 
 	// ClubKonnect (Nellobyte) — prepaid utility-bill vendor. Bills are dormant
 	// unless BOTH ClubkonnectUserID and ClubkonnectAPIKey are set AND the MCGP
@@ -655,7 +670,8 @@ func Load() *Config {
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
 		Port:                getEnv("PORT", "5000"),
-		Env:                 getEnv("ENV", "development"),
+		Env:                 normalizeEnv(getEnv("ENV", "development")),
+		AllowRawSignerKeys:  getEnvBool("ALLOW_RAW_SIGNER_KEYS", false),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),
@@ -774,9 +790,14 @@ func Load() *Config {
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
-	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
+	// TrimPrefix "0x": crypto.HexToECDSA rejects a 0x-prefixed string outright,
+	// so an operator who pastes a key with the prefix (as ramp/PM keys already
+	// tolerate) would otherwise leave IT — and utility bills, which need the
+	// same operator signer — silently dormant.
+	cfg.ITOperatorPrivateKey = strings.TrimPrefix(strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", "")), "0x")
 	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
 	cfg.ITMinSellNgnKobo = getEnvInt64("IT_MIN_SELL_NGN_KOBO", 10000) // ₦100
+	cfg.ITSellFWAbsenceTrusted = getEnvBool("IT_SELL_FW_ABSENCE_TRUSTED", false)
 
 	cfg.ClubkonnectUserID = strings.TrimSpace(getEnv("CLUBKONNECT_USER_ID", ""))
 	cfg.ClubkonnectAPIKey = strings.TrimSpace(getEnv("CLUBKONNECT_API_KEY", ""))
@@ -1343,6 +1364,31 @@ func ResolveLiFiBaseURL(raw string) string {
 		return DefaultLiFiBaseURL
 	}
 	return trimmed
+}
+
+// normalizeEnv trims whitespace, lower-cases, and canonicalises "prod" to
+// "production" so ENV="Production", " production ", or "prod" are all
+// detected identically to the exact string "production". Every other value
+// (including "development", "staging", "") passes through unchanged.
+func normalizeEnv(raw string) string {
+	e := strings.ToLower(strings.TrimSpace(raw))
+	if e == "prod" {
+		return "production"
+	}
+	return e
+}
+
+// IsProduction reports whether this process is running in production. It
+// re-normalises c.Env so it is correct even for a Config built by hand (e.g.
+// in a test) rather than via Load(). Every raw-signer-key guard and the gin
+// release-mode switch must call this rather than comparing c.Env directly —
+// see rawSignerKeyAllowed in cmd/server for the raw-key-specific guard built
+// on top of it.
+func (c *Config) IsProduction() bool {
+	if c == nil {
+		return false
+	}
+	return normalizeEnv(c.Env) == "production"
 }
 
 // getEnvDuration parses a Go duration env var (e.g. "24h", "15m", "1h30m"). An

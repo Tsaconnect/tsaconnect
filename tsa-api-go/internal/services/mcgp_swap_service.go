@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -114,7 +115,7 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 		return nil, fmt.Errorf("MCGP swap contract address is empty")
 	}
 	if s.chain == nil {
-		if s.cfg != nil && s.cfg.Env == "production" {
+		if s.cfg.IsProduction() {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{To: s.address, Value: "0", Data: common.Bytes2Hex(callData)}
@@ -408,7 +409,7 @@ func (s *MCGPSwapService) Backing() (held, owed *big.Int, err error) {
 
 func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte) (string, error) {
 	if s.operator == nil {
-		return "", fmt.Errorf("IT operator signer not configured")
+		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
 	}
 
 	// The nonce read inside buildUnsignedTx and the broadcast must not interleave
@@ -418,9 +419,65 @@ func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte
 
 	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 	if err != nil {
-		return "", err
+		// Nonce, gas price and gas estimate are all reads: nothing was sent.
+		return "", notBroadcast(err)
 	}
 	return s.operator.SignAndBroadcast(ctx, unsigned)
+}
+
+// ErrTxNotBroadcast marks an operator-transaction error raised BEFORE the
+// transaction could have reached the network (build, estimate, sign). Only
+// these may be read as "the on-chain op definitely did not happen". Any other
+// error from a broadcast — a send that timed out, a node that answered with an
+// error after accepting the bytes — leaves the outcome unknown, and the caller
+// must resolve it from chain state rather than assume failure.
+var ErrTxNotBroadcast = errors.New("transaction was not broadcast")
+
+type notBroadcastError struct{ err error }
+
+func (e notBroadcastError) Error() string   { return e.err.Error() }
+func (e notBroadcastError) Unwrap() []error { return []error{e.err, ErrTxNotBroadcast} }
+
+func notBroadcast(err error) error { return notBroadcastError{err: err} }
+
+// DebitState mirrors the contract's DebitState enum for a debitRef.
+type DebitState uint8
+
+const (
+	DebitStateNone     DebitState = 0 // no debit was ever recorded for the ref
+	DebitStatePending  DebitState = 1 // debited, awaiting settle or reverse
+	DebitStateResolved DebitState = 2 // settled or reversed
+)
+
+// DebitRecord is the contract's per-ref debit entry (`debits(bytes32)`).
+type DebitRecord struct {
+	User   common.Address
+	Amount *big.Int
+	State  DebitState
+}
+
+// DebitRecord reads the on-chain debit keyed by debitRef. It is the positive
+// evidence the reconcilers use to decide whether a debit whose broadcast or
+// verification was lost actually landed: Pending means it did, None means it
+// has not (yet). Both V1 and V2 of the swap expose this public mapping.
+func (s *MCGPSwapService) DebitRecord(ctx context.Context, debitRef [32]byte) (DebitRecord, error) {
+	vals, err := s.callRaw(ctx, "debits", debitRef)
+	if err != nil {
+		return DebitRecord{}, err
+	}
+	if len(vals) != 3 {
+		return DebitRecord{}, fmt.Errorf("debits returned %d values, want 3", len(vals))
+	}
+	user, ok1 := vals[0].(common.Address)
+	amount, ok2 := vals[1].(*big.Int)
+	state, ok3 := vals[2].(uint8)
+	if !ok1 || !ok2 || !ok3 {
+		return DebitRecord{}, fmt.Errorf("debits returned unexpected types %T/%T/%T", vals[0], vals[1], vals[2])
+	}
+	if state > uint8(DebitStateResolved) {
+		return DebitRecord{}, fmt.Errorf("debits returned unknown state %d", state)
+	}
+	return DebitRecord{User: user, Amount: amount, State: DebitState(state)}, nil
 }
 
 // OperatorCreditPremium credits spend-only premium after an NGN payment settles.

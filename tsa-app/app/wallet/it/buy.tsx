@@ -395,6 +395,9 @@ export default function ITBuy() {
           symbolPosition="prefix"
           error={error || undefined}
         />
+        <Text variant="caption" style={{ color: colors.textMuted }}>
+          MCGP bought with naira can be spent in the app or sold back for naira.
+        </Text>
         <Button title="Continue" onPress={submit} />
 
         <View

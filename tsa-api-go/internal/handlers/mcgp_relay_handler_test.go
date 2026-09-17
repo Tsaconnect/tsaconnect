@@ -33,12 +33,29 @@ import (
 type fakeSwapPort struct {
 	prepareSpendCalls int
 	lastRef           [32]byte
+
+	// premiumBought/premiumCredited let GetBalance tests pin the bucket split
+	// without a live chain; zero-value (unset) behaves like a fresh wallet.
+	premiumBought   *big.Int
+	premiumCredited *big.Int
 }
 
 func (f *fakeSwapPort) Allowance(string, string) (*big.Int, error) { return big.NewInt(0), nil }
 func (f *fakeSwapPort) LegacyEntitlement(string) (*big.Int, error) { return big.NewInt(0), nil }
 func (f *fakeSwapPort) LegacyRemaining(string) (*big.Int, error)   { return big.NewInt(0), nil }
 func (f *fakeSwapPort) PremiumBalance(string) (*big.Int, error)    { return big.NewInt(0), nil }
+func (f *fakeSwapPort) PremiumBought(string) (*big.Int, error) {
+	if f.premiumBought == nil {
+		return big.NewInt(0), nil
+	}
+	return f.premiumBought, nil
+}
+func (f *fakeSwapPort) PremiumCredited(string) (*big.Int, error) {
+	if f.premiumCredited == nil {
+		return big.NewInt(0), nil
+	}
+	return f.premiumCredited, nil
+}
 func (f *fakeSwapPort) PrepareApprove(string, string, *big.Int) ([]byte, error) {
 	return preparedTx(), nil
 }

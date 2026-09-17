@@ -655,12 +655,74 @@ func (h *ITHandler) Sell(c *gin.Context) {
 		bank.DestinationCurrency = req.DestinationCurrency
 		bank.RailType = req.RailType
 	}
+	// The service detaches the sell from this request's cancellation: once the
+	// debit is broadcast, a client hanging up must not stop it half way.
 	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		r := sellFailureResponse(err, intent)
+		if r.accepted && intent != nil {
+			intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
+			c.JSON(r.status, gin.H{"success": true, "message": r.message, "code": r.code, "data": gin.H{"intent": intent}})
+			return
+		}
+		if r.code != "" {
+			utils.ErrorResponseWithCode(c, r.status, r.message, r.code)
+			return
+		}
+		utils.ErrorResponse(c, r.status, r.message)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Sell submitted", gin.H{"intent": intent})
+}
+
+type sellOutcome struct {
+	status   int
+	code     string
+	message  string
+	accepted bool // the sell exists and is still progressing
+}
+
+// sellFailureResponse maps a CreateSellIntent error to what the user is told.
+// The two sell-outcome errors carry chain/provider detail that stays in logs.
+func sellFailureResponse(err error, intent *models.ITIntent) sellOutcome {
+	switch {
+	case errors.Is(err, services.ErrITSellPayoutRejected):
+		message := "We couldn't send your payout, so this sale was cancelled. Your MCGP is being returned to your balance — this can take a few minutes."
+		if intent != nil && intent.Status == models.ITStatusReversed {
+			message = "We couldn't send your payout, so this sale was cancelled. Your MCGP has been returned to your balance (it can take a few minutes to show)."
+		}
+		return sellOutcome{
+			status:  http.StatusUnprocessableEntity,
+			code:    "it_sell_payout_rejected",
+			message: message,
+		}
+	case errors.Is(err, services.ErrITSellDebitPending):
+		return sellOutcome{
+			status:   http.StatusAccepted,
+			code:     "it_sell_processing",
+			message:  "Your sale is processing. We're confirming it on-chain and will pay out as soon as it's confirmed.",
+			accepted: true,
+		}
+	default:
+		return sellOutcome{status: http.StatusBadRequest, message: err.Error()}
+	}
+}
+
+// adminSellActionStatus maps an admin sell settle/reverse/retry refusal to an
+// HTTP status an operator can act on.
+func adminSellActionStatus(err error) int {
+	switch {
+	case errors.Is(err, services.ErrITSellPayoutConflict):
+		return http.StatusConflict
+	case errors.Is(err, services.ErrITSellPayoutUnverified),
+		// The chain has not shown the debit yet: transient, try again shortly.
+		errors.Is(err, services.ErrITSellDebitPending):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrITSellPayoutRejected):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // GET /api/it/intents — caller's IT history.
@@ -788,18 +850,94 @@ func (h *ITHandler) PostRepriceParkedStableBuy(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": intent})
 }
 
-// POST /api/it/admin/settle/:id — finalize a sell after a confirmed NGN payout.
+// POST /api/it/admin/settle/:id — finalize an MCGP sell. With automated
+// payouts, refused unless Flutterwave reports the transfer SUCCESSFUL: settling
+// a payout that failed takes the user's MCGP.
 func (h *ITHandler) AdminSettle(c *gin.Context) {
-	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
-		return h.it.SettleSell(c.Request.Context(), intentID, wallet)
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.AdminSettleSell(c.Request.Context(), intentID)
 	})
 }
 
-// POST /api/it/admin/reverse/:id — reverse a sell whose NGN payout failed.
+// POST /api/it/admin/reverse/:id — reverse an MCGP sell whose payout did not
+// happen. Refused unless Flutterwave reports the transfer FAILED, the payout
+// was rejected, or the provider has no transfer for it: reversing a payout
+// that went out pays the user twice.
 func (h *ITHandler) AdminReverse(c *gin.Context) {
-	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
-		return h.it.ReverseSell(c.Request.Context(), intentID, wallet)
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.AdminReverseSell(c.Request.Context(), intentID)
 	})
+}
+
+// POST /api/it/admin/sell/:id/retry-payout — re-drive the payout of a debited
+// MCGP sell. An existing transfer for the sell's reference is adopted rather
+// than sent again.
+func (h *ITHandler) AdminRetrySellPayout(c *gin.Context) {
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.RetrySellPayout(c.Request.Context(), intentID)
+	})
+}
+
+// POST /api/it/admin/sell/:id/reevaluate — re-read the chain (and the payout
+// transfer) for a sell parked in `needs_review` and close it whichever way the
+// evidence points. The exit door for a parked sell.
+func (h *ITHandler) AdminReevaluateSell(c *gin.Context) {
+	h.adminSellAction(c, func(intentID uuid.UUID) (*models.ITIntent, error) {
+		return h.it.ReevaluateSell(c.Request.Context(), intentID)
+	})
+}
+
+// POST /api/it/admin/stable/:id/repay — pay a parked stablecoin sell again on
+// a fresh payout reference. Refused unless Flutterwave confirms the previous
+// transfer FAILED.
+func (h *ITHandler) AdminRepayStableSell(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	out, err := h.it.RepayStableSell(c.Request.Context(), id)
+	if err != nil {
+		utils.ErrorResponse(c, adminSellActionStatus(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
+}
+
+// GET /api/it/admin/sell/stuck?minutes= — MCGP sells still processing,
+// debiting or debited past the threshold (default 30m), with the evidence an
+// operator needs: debit ref and tx, payout id, attempts, rejection, reason.
+func (h *ITHandler) GetStuckMCGPSells(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckMCGPSells(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+func (h *ITHandler) adminSellAction(c *gin.Context, fn func(uuid.UUID) (*models.ITIntent, error)) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	if _, err := h.it.GetIntent(c.Request.Context(), id); err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
+		return
+	}
+	out, err := fn(id)
+	if err != nil {
+		utils.ErrorResponse(c, adminSellActionStatus(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
 }
 
 // GET /api/it/admin/intents?direction=&status=&limit=&offset= — the operator
