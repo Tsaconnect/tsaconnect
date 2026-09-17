@@ -9,12 +9,13 @@ import { base58 } from '@scure/base';
 import {
   getSolanaAddress,
   getSolanaSigner,
-  getSolanaSigningKey,
   loadSolanaWallet,
   forgetSolanaDerivation,
+  switchSolanaDerivation,
   clearSolanaCache,
 } from '../solanaWallet';
 import { getNonEVMBalances, registerNonEVMAddress } from '../nonevmApi';
+import { deriveSolanaAddresses } from '../derivation';
 import { getNetwork } from '../../../hooks/useNetwork';
 
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -38,6 +39,12 @@ jest.mock('../../wallet', () => ({
   ),
 }));
 
+// Spy on the one-seed derivation without changing what it returns.
+jest.mock('../derivation', () => {
+  const actual = jest.requireActual('../derivation');
+  return { ...actual, deriveSolanaAddresses: jest.fn(actual.deriveSolanaAddresses) };
+});
+
 jest.mock('../nonevmApi', () => ({
   getNonEVMBalances: jest.fn(),
   registerNonEVMAddress: jest.fn().mockResolvedValue(undefined),
@@ -53,7 +60,12 @@ const mockedGetItem = AsyncStorage.getItem as jest.Mock;
 const mockedSetItem = AsyncStorage.setItem as jest.Mock;
 const mockedGetNetwork = getNetwork as jest.Mock;
 
+const mockedDeriveBoth = deriveSolanaAddresses as jest.Mock;
+
 const row = (raw: string) => ({ symbol: 'SOL', raw, decimals: 9, isNative: true });
+const spl = (symbol: string, raw: string, usdPrice?: number) => ({
+  symbol, raw, decimals: 6, isNative: false, tokenAddress: `mint-${symbol}`, usdPrice,
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -147,9 +159,10 @@ describe('loadSolanaWallet path self-healing', () => {
     mockedGetItem.mockResolvedValue('phantom');
     mockedBalances
       .mockResolvedValueOnce([row('0')]) // phantom balances: empty
-      .mockResolvedValueOnce([row('42')]) // other-path probe: funded
-      .mockResolvedValueOnce([row('42')]); // re-fetch for display rows
+      .mockResolvedValueOnce([row('42')]); // other-path probe: funded, rows reused
     const result = await loadSolanaWallet(WALLET);
+    expect(mockedBalances).toHaveBeenCalledTimes(2);
+    expect(result?.otherPath).toBeNull();
     expect(result?.address).toBe(TRUST_ADDR);
     expect(result?.balances[0]?.balance).toBe('0.000000042');
     expect(mockedSetItem).toHaveBeenCalledWith(PREF_KEY, 'trustwallet');
@@ -172,18 +185,21 @@ describe('loadSolanaWallet path self-healing', () => {
   });
 });
 
-describe('getSolanaSigningKey', () => {
+describe('getSolanaSigner', () => {
+  const pubOf = (key: string) => base58.encode(ed25519.getPublicKey(key));
+
   it('returns the key pairing with the resolved Trust Wallet address', async () => {
     mockedGetItem.mockResolvedValue('trustwallet');
-    const key = await getSolanaSigningKey(WALLET);
-    expect(key).toMatch(/^[0-9a-f]{64}$/);
-    expect(base58.encode(ed25519.getPublicKey(key!))).toBe(TRUST_ADDR);
+    const signer = await getSolanaSigner(WALLET);
+    expect(signer?.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(signer?.address).toBe(TRUST_ADDR);
+    expect(pubOf(signer!.key)).toBe(TRUST_ADDR);
   });
 
   it('returns the Phantom-path key for a stored phantom preference', async () => {
     mockedGetItem.mockResolvedValue('phantom');
-    const key = await getSolanaSigningKey(WALLET);
-    expect(base58.encode(ed25519.getPublicKey(key!))).toBe(PHANTOM_ADDR);
+    const signer = await getSolanaSigner(WALLET);
+    expect(pubOf(signer!.key)).toBe(PHANTOM_ADDR);
   });
 
   it('pairs with the address a live scan resolved — no rescan, no divergence', async () => {
@@ -192,15 +208,124 @@ describe('getSolanaSigningKey', () => {
     mockedBalances.mockResolvedValueOnce([]).mockResolvedValueOnce([row('9')]);
     await expect(getSolanaAddress(WALLET)).resolves.toBe(TRUST_ADDR);
     const scanCalls = mockedBalances.mock.calls.length;
-    const key = await getSolanaSigningKey(WALLET);
-    expect(base58.encode(ed25519.getPublicKey(key!))).toBe(TRUST_ADDR);
+    const signer = await getSolanaSigner(WALLET);
+    expect(pubOf(signer!.key)).toBe(TRUST_ADDR);
     expect(mockedBalances.mock.calls.length).toBe(scanCalls);
   });
 
-  it('getSolanaSigner returns a matching address/key pair from one resolution', async () => {
-    mockedGetItem.mockResolvedValue('trustwallet');
+  it('refuses to sign with a stand-in address when the scan failed', async () => {
+    mockedBalances.mockRejectedValue(new Error('rpc down'));
+    await expect(getSolanaSigner(WALLET)).rejects.toThrow("Couldn't confirm your Solana address");
+  });
+
+  it('refuses to sign when the network changed mid-scan', async () => {
+    mockedBalances.mockImplementation(async () => {
+      mockedGetNetwork.mockReturnValue('testnet');
+      return [row('5')];
+    });
+    await expect(getSolanaSigner(WALLET)).rejects.toThrow("Couldn't confirm your Solana address");
+    expect(mockedSetItem).not.toHaveBeenCalled();
+  });
+
+  it('signs on testnet with the standard path, without a scan', async () => {
+    mockedGetNetwork.mockReturnValue('testnet');
     const signer = await getSolanaSigner(WALLET);
-    expect(signer?.address).toBe(TRUST_ADDR);
-    expect(base58.encode(ed25519.getPublicKey(signer!.key))).toBe(TRUST_ADDR);
+    expect(signer?.address).toBe(PHANTOM_ADDR);
+    expect(mockedBalances).not.toHaveBeenCalled();
+  });
+});
+
+describe('seed derivation cost', () => {
+  it('derives the seed once for both paths across scan, load and probe', async () => {
+    // Scan (both paths), display, other-path probe, then a second load's display.
+    mockedBalances.mockResolvedValue([]);
+    await loadSolanaWallet(WALLET);
+    await loadSolanaWallet(WALLET);
+    expect(mockedDeriveBoth).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('funds detection', () => {
+  it('ignores an unpriced spam token when choosing the path', async () => {
+    mockedBalances
+      .mockResolvedValueOnce([spl('Spam…Drop', '1000000')]) // phantom: airdrop only
+      .mockResolvedValueOnce([row('77')]); // trust wallet: real SOL
+    await expect(getSolanaAddress(WALLET)).resolves.toBe(TRUST_ADDR);
+  });
+
+  it('counts a stablecoin even when the price feed attached no price', async () => {
+    mockedBalances.mockResolvedValueOnce([spl('USDC', '5000000')]);
+    await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
+    expect(mockedBalances).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a priced token', async () => {
+    mockedBalances.mockResolvedValueOnce([spl('JUP', '5000000', 0.8)]);
+    await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
+    expect(mockedBalances).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('backend registration', () => {
+  it('does not register a stand-in address when the scan fails', async () => {
+    mockedBalances.mockRejectedValue(new Error('rpc down'));
+    const result = await loadSolanaWallet(WALLET);
+    expect(result?.address).toBe(PHANTOM_ADDR);
+    expect(mockedRegister).not.toHaveBeenCalled();
+  });
+
+  it('registers a settled decision', async () => {
+    mockedGetItem.mockResolvedValue('trustwallet');
+    mockedBalances.mockResolvedValue([row('1')]);
+    await loadSolanaWallet(WALLET);
+    expect(mockedRegister).toHaveBeenCalledWith(WALLET, 'solana', TRUST_ADDR);
+  });
+
+  it('does not persist a decision for a wallet removed mid-scan', async () => {
+    let release!: (v: unknown) => void;
+    mockedBalances.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const pending = getSolanaAddress(WALLET);
+    while (mockedBalances.mock.calls.length === 0) await new Promise((r) => setImmediate(r));
+    await forgetSolanaDerivation(WALLET);
+    release([row('5')]);
+    await pending;
+    expect(mockedSetItem).not.toHaveBeenCalled();
+  });
+});
+
+describe('both paths funded', () => {
+  it('keeps the current path and reports the other one instead of hiding it', async () => {
+    mockedGetItem.mockResolvedValue('phantom');
+    mockedBalances
+      .mockResolvedValueOnce([row('10')]) // phantom: funded
+      .mockResolvedValueOnce([row('20')]); // trust wallet: funded too
+    const result = await loadSolanaWallet(WALLET);
+    expect(result?.address).toBe(PHANTOM_ADDR);
+    expect(result?.otherPath).toMatchObject({ wallet: WALLET, derivation: 'trustwallet', address: TRUST_ADDR });
+    expect(result?.otherPath?.balances[0]?.balance).toBe('0.00000002');
+    expect(mockedSetItem).not.toHaveBeenCalled();
+
+    // A reload in the same session keeps reporting it without probing again.
+    mockedBalances.mockResolvedValueOnce([row('10')]);
+    const again = await loadSolanaWallet(WALLET);
+    expect(again?.otherPath?.address).toBe(TRUST_ADDR);
+    expect(mockedBalances).toHaveBeenCalledTimes(3);
+  });
+
+  it('switchSolanaDerivation persists, registers, and re-probes the path it left', async () => {
+    mockedGetItem.mockResolvedValue('phantom');
+    mockedBalances.mockResolvedValueOnce([row('10')]).mockResolvedValueOnce([row('20')]);
+    await loadSolanaWallet(WALLET);
+
+    await expect(switchSolanaDerivation(WALLET, 'trustwallet')).resolves.toBe(TRUST_ADDR);
+    expect(mockedSetItem).toHaveBeenCalledWith(PREF_KEY, 'trustwallet');
+    expect(mockedRegister).toHaveBeenCalledWith(WALLET, 'solana', TRUST_ADDR);
+
+    mockedBalances
+      .mockResolvedValueOnce([row('20')]) // trust wallet: now current
+      .mockResolvedValueOnce([row('10')]); // phantom: the path it left, still funded
+    const after = await loadSolanaWallet(WALLET);
+    expect(after?.address).toBe(TRUST_ADDR);
+    expect(after?.otherPath).toMatchObject({ derivation: 'phantom', address: PHANTOM_ADDR });
   });
 });

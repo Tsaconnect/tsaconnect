@@ -2,7 +2,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getNetwork } from '../../hooks/useNetwork';
 import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../submitErrors';
-import { getSolanaSigningKey } from './solanaWallet';
+import { getSolanaSigner } from './solanaWallet';
 import { signEd25519Message } from './sign';
 
 async function authHeaders() {
@@ -89,8 +89,14 @@ export async function broadcastSolana(
   if (!Array.isArray(payloads) || payloads.length === 0) {
     throw new Error('prepare-tx returned no payloads');
   }
-  const solKey = await getSolanaSigningKey(params.walletAddress);
-  if (!solKey) throw new Error('no key for wallet');
+  const signer = await getSolanaSigner(params.walletAddress);
+  if (!signer) throw new Error('no key for wallet');
+  // The tx was prepared for `from`; if the wallet's path changed since (a
+  // switch, or a first scan finishing), this key can't sign it.
+  if (signer.address !== params.from) {
+    throw new Error('Your Solana address changed. Go back and start the send again.');
+  }
+  const solKey = signer.key;
   // ed25519 signs the whole serialized message carried in hashHex. Guard the
   // declared curve so a mismatched backend payload fails loudly, not silently
   // with a wrong-scheme signature.
