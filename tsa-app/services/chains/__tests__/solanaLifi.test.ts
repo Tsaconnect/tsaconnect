@@ -26,9 +26,13 @@ jest.mock('../../wallet', () => ({
   getMnemonic: jest.fn().mockResolvedValue(M),
 }));
 
-const mockGetSolanaAddress = jest.fn();
+// Real derivation for the mocked signer, so signing still runs for real
+// end-to-end (address/key pairs are genuine, only the resolution is stubbed).
+const realDerivation = jest.requireActual('../derivation');
+const PHANTOM_KEY: string = realDerivation.deriveSolanaPrivateKey(M);
+const mockGetSolanaSigner = jest.fn();
 jest.mock('../solanaWallet', () => ({
-  getSolanaAddress: (...a: any[]) => mockGetSolanaAddress(...a),
+  getSolanaSigner: (...a: any[]) => mockGetSolanaSigner(...a),
 }));
 
 const mockRegister = jest.fn().mockResolvedValue(undefined);
@@ -65,7 +69,7 @@ function legacyFixture(signerKeys: Uint8Array[]): string {
 beforeEach(() => {
   jest.clearAllMocks();
   mockGetNetwork.mockReturnValue('mainnet');
-  mockGetSolanaAddress.mockResolvedValue(FIXTURE_SIGNER);
+  mockGetSolanaSigner.mockResolvedValue({ address: FIXTURE_SIGNER, key: PHANTOM_KEY });
   mockRegister.mockResolvedValue(undefined);
 });
 
@@ -178,7 +182,7 @@ describe('executeLiFiSolanaSwap', () => {
     const keyOffset = msgStart + 1 + 3 + 1; // version + header + compact count (0x0b)
     raw.set(base58.decode(derived), keyOffset);
     const patched = base64.encode(raw);
-    mockGetSolanaAddress.mockResolvedValue(derived);
+    mockGetSolanaSigner.mockResolvedValue({ address: derived, key: PHANTOM_KEY });
 
     const fetchFn = mockFetch({ data: { txHash: 'x' } });
     await executeLiFiSolanaSwap({ ...params(), txDataB64: patched });
@@ -192,6 +196,31 @@ describe('executeLiFiSolanaSwap', () => {
     expect(ok).toBe(true);
   });
 
+  it('signs with the Trust Wallet path key when that is the resolved derivation', async () => {
+    // A seed imported from Trust Wallet resolves to m/44'/501'/0' — the swap
+    // must sign with THAT key, and the signature must verify against the
+    // Trust Wallet-path pubkey embedded as fee payer.
+    const twAddress: string = realDerivation.deriveSolanaAddress(M, 'trustwallet');
+    const twKey: string = realDerivation.deriveSolanaPrivateKey(M, 'trustwallet');
+    const raw = base64.decode(FIXTURE_B64);
+    const msgStart = 65;
+    const keyOffset = msgStart + 1 + 3 + 1;
+    raw.set(base58.decode(twAddress), keyOffset);
+    mockGetSolanaSigner.mockResolvedValue({ address: twAddress, key: twKey });
+
+    const fetchFn = mockFetch({ data: { txHash: 'x' } });
+    await executeLiFiSolanaSwap({ ...params(), txDataB64: base64.encode(raw) });
+
+    const body = JSON.parse(fetchFn.mock.calls[0][1].body);
+    expect(body.from).toBe(twAddress);
+    const ok = ed25519.verify(
+      hexToBytes(body.sigs[0].sigHex),
+      hexToBytes(body.prepared.raw),
+      base58.decode(twAddress),
+    );
+    expect(ok).toBe(true);
+  });
+
   it('refuses to execute in testnet mode (broadcast is pinned to mainnet)', async () => {
     mockGetNetwork.mockReturnValue('testnet');
     const fetchFn = mockFetch({ data: { txHash: 'x' } });
@@ -200,7 +229,10 @@ describe('executeLiFiSolanaSwap', () => {
   });
 
   it('refuses to sign when the wallet is not the required signer', async () => {
-    mockGetSolanaAddress.mockResolvedValue('SomeOtherAddress1111111111111111111111111111');
+    mockGetSolanaSigner.mockResolvedValue({
+      address: 'SomeOtherAddress1111111111111111111111111111',
+      key: PHANTOM_KEY,
+    });
     const fetchFn = mockFetch({ data: { txHash: 'x' } });
     await expect(executeLiFiSolanaSwap(params())).rejects.toThrow(/does not support/i);
     expect(fetchFn).not.toHaveBeenCalled();

@@ -16,8 +16,21 @@ export const DERIVATION_PATHS = {
   btc: "m/84'/0'/0'/0/0",
   btcTestnet: "m/84'/1'/0'/0/0", // BIP-84 testnet coin type
   solana: "m/44'/501'/0'/0'",
+  solanaTrustWallet: "m/44'/501'/0'", // Trust Wallet's wallet-core default — one hop shorter
   sui: "m/44'/784'/0'/0'/0'", // SLIP-0044 coin type 784, all-hardened (matches @mysten/sui)
 } as const;
+
+// Which path a wallet's Solana account lives at. 'phantom' is the ecosystem
+// standard (Phantom/Solflare/Backpack, m/44'/501'/0'/0'); 'trustwallet' is
+// Trust Wallet's m/44'/501'/0'. Same seed, different address — resolved per
+// wallet by the balance scan in solanaWallet.ts, so imported Trust Wallet
+// seeds keep showing the address their funds are on.
+export type SolanaDerivation = 'phantom' | 'trustwallet';
+
+const SOLANA_PATHS: Record<SolanaDerivation, string> = {
+  phantom: DERIVATION_PATHS.solana,
+  trustwallet: DERIVATION_PATHS.solanaTrustWallet,
+};
 
 export type BtcNetwork = 'mainnet' | 'testnet';
 
@@ -138,9 +151,9 @@ function decodeSegwit(addr: string, hrp: string): { version: number; program: Ui
 }
 
 // Solana: ed25519 via SLIP-0010 hardened path → base58 of the 32-byte pubkey.
-export function deriveSolanaAddress(mnemonic: string): string {
+export function deriveSolanaAddress(mnemonic: string, derivation: SolanaDerivation = 'phantom'): string {
   const seed = mnemonicToSeedSync(mnemonic.trim());
-  const priv = ed25519Slip10(seed, DERIVATION_PATHS.solana);
+  const priv = ed25519Slip10(seed, SOLANA_PATHS[derivation]);
   const pub = ed25519.getPublicKey(priv);
   return b58EncodeNoCheck(pub);
 }
@@ -152,9 +165,9 @@ export function deriveSolanaAddress(mnemonic: string): string {
 // ed25519 signature against the fee-payer pubkey it embedded in the message, so
 // signing with any other seed fails verification before broadcast. Returns a
 // 0x-less 32-byte hex key.
-export function deriveSolanaPrivateKey(mnemonic: string): string {
+export function deriveSolanaPrivateKey(mnemonic: string, derivation: SolanaDerivation = 'phantom'): string {
   const seed = mnemonicToSeedSync(mnemonic.trim());
-  return bytesToHex(ed25519Slip10(seed, DERIVATION_PATHS.solana));
+  return bytesToHex(ed25519Slip10(seed, SOLANA_PATHS[derivation]));
 }
 
 // Validate a Solana address: base58 that decodes to exactly 32 bytes. Solana

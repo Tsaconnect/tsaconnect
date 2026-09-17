@@ -13,11 +13,9 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { txHashOrThrow, SWAP_COPY } from '../submitErrors';
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAuthHeaders } from '../walletApi';
-import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
-import { deriveSolanaPrivateKey } from './derivation';
 import { signEd25519Message } from './sign';
-import { getSolanaAddress } from './solanaWallet';
+import { getSolanaSigner } from './solanaWallet';
 import { registerNonEVMAddress } from './nonevmApi';
 
 // Swaps are mainnet-only (LiFi has no testnets), so the broadcast pins mainnet
@@ -126,8 +124,11 @@ export async function executeLiFiSolanaSwap({
   if (getNetwork() === 'testnet') {
     throw new Error('Swaps are mainnet-only. Switch the app back to mainnet to swap.');
   }
-  const solAddress = await getSolanaAddress(walletAddress);
-  if (!solAddress) throw new Error('No Solana key for this wallet.');
+  // One resolution for both the address check and the signing key, so the two
+  // can never disagree (path preference races are structurally impossible here).
+  const signer = await getSolanaSigner(walletAddress);
+  if (!signer) throw new Error('No Solana key for this wallet.');
+  const solAddress = signer.address;
 
   // The submit endpoint only broadcasts for addresses registered to this user;
   // registration is an idempotent upsert, so make sure it happened even if the
@@ -146,9 +147,7 @@ export async function executeLiFiSolanaSwap({
   }
 
   onStage?.('Signing swap…');
-  const mnemonic = await getMnemonic(walletAddress);
-  if (!mnemonic) throw new Error('No key for this wallet.');
-  const sigHex = signEd25519Message(parsed.messageHex, deriveSolanaPrivateKey(mnemonic));
+  const sigHex = signEd25519Message(parsed.messageHex, signer.key);
 
   onStage?.('Broadcasting swap…');
   const headers = await getAuthHeaders();

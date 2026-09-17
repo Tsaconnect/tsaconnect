@@ -1,9 +1,8 @@
 import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
 import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../submitErrors';
-import { deriveSolanaPrivateKey } from './derivation';
+import { getSolanaSigningKey } from './solanaWallet';
 import { signEd25519Message } from './sign';
 
 async function authHeaders() {
@@ -77,9 +76,10 @@ export async function prepareSolana(params: SendSolanaParams): Promise<SolanaPre
 
 /**
  * Sign the prepared tx's serialized message with the wallet's Solana key and
- * broadcast. Signing uses the Solana-path ed25519 key (m/44'/501'), not the EVM
- * key — the 64-byte signature must verify against the fee-payer pubkey the
- * backend embedded in the message.
+ * broadcast. Signing uses the wallet's resolved Solana-path ed25519 key
+ * (m/44'/501' Phantom or Trust Wallet variant), not the EVM key — the 64-byte
+ * signature must verify against the fee-payer pubkey the backend embedded in
+ * the message.
  */
 export async function broadcastSolana(
   prepared: SolanaPrepared['prepared'],
@@ -89,9 +89,8 @@ export async function broadcastSolana(
   if (!Array.isArray(payloads) || payloads.length === 0) {
     throw new Error('prepare-tx returned no payloads');
   }
-  const mnemonic = await getMnemonic(params.walletAddress);
-  if (!mnemonic) throw new Error('no key for wallet');
-  const solKey = deriveSolanaPrivateKey(mnemonic);
+  const solKey = await getSolanaSigningKey(params.walletAddress);
+  if (!solKey) throw new Error('no key for wallet');
   // ed25519 signs the whole serialized message carried in hashHex. Guard the
   // declared curve so a mismatched backend payload fails loudly, not silently
   // with a wrong-scheme signature.

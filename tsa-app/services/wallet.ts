@@ -7,6 +7,9 @@ import { toFiniteNumber } from './txFields';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CHAINS, type ChainKey, type ChainConfig } from '../constants/chains';
+// Circular with solanaWallet (it reads getMnemonic) — safe because both sides
+// only call the other inside function bodies, never during module evaluation.
+import { forgetSolanaDerivation } from './chains/solanaWallet';
 
 const WALLET_LIST_KEY = 'tsa-wallet-list';
 const ACTIVE_WALLET_KEY = 'tsa-active-wallet';
@@ -101,6 +104,7 @@ export async function addWallet(info: WalletInfo, label: string): Promise<void> 
 export async function removeWallet(address: string): Promise<void> {
   await SecureStore.deleteItemAsync(`tsa-wallet-pk-${address}`);
   await SecureStore.deleteItemAsync(`tsa-wallet-mn-${address}`);
+  await forgetSolanaDerivation(address);
   let list = await getWalletList();
   list = list.filter(w => w.address !== address);
   await AsyncStorage.setItem(WALLET_LIST_KEY, JSON.stringify(list));

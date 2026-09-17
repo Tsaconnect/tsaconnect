@@ -1,8 +1,12 @@
 import { sendSolana, prepareSolana } from '../solanaSend';
 
-// minimal mocks so the flow can run without real network / native modules
+// minimal mocks so the flow can run without real network / native modules.
+// The derivation preference is pinned to 'phantom' so getSolanaSigningKey
+// resolves without a balance scan (which would consume the fetch mocks).
 jest.mock('@react-native-async-storage/async-storage', () => ({
-  getItem: jest.fn().mockResolvedValue('test-token'),
+  getItem: jest.fn((key: string) =>
+    Promise.resolve(key.startsWith('tsa-solana-derivation') ? 'phantom' : 'test-token')
+  ),
 }));
 
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
