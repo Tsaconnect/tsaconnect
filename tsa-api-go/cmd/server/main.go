@@ -482,6 +482,10 @@ func main() {
 	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
 	// path to River.
 	scheduler := jobs.NewScheduler()
+	// Cancelled at shutdown. Background work started outside the scheduler (an
+	// on-demand inbound check) derives from it so it stops with everything else.
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
 
 	// MCGP swap (Contract B) read-only backing/stale-pending reconciler. Gated on
 	// the swap being configured; never moves money (alerts only).
@@ -800,6 +804,7 @@ func main() {
 			services.NewInboundIngestor(config.DB, fwClient, "NGN", cfg.InboundStatementLookback),
 			cfg.InboundPollIntervalOrDefault(),
 		)
+		inboundPoller.SetCheckCooldown(cfg.InboundCheckCooldown)
 		scheduler.Register(inboundPoller)
 		log.Printf("[inbound] credit poller registered (mode=%s interval=%s lookback=%s)",
 			cfg.InboundMode, cfg.InboundPollIntervalOrDefault(), cfg.InboundStatementLookback)
@@ -894,6 +899,9 @@ func main() {
 		registerInboundClaim(services.InboundClaimTypeITStable,
 			services.NewITStableClaimSource(itService))
 		inboundPoller.SetMatcher(inboundMatcher)
+		if itHandler != nil {
+			itHandler.SetPaymentChecker(inboundPoller, workerCtx)
+		}
 		log.Printf("[inbound] matcher wired (claim sources: %s, %s)",
 			services.InboundClaimTypeITMCGP, services.InboundClaimTypeITStable)
 	} else if inboundPoller != nil {
@@ -1547,9 +1555,7 @@ func main() {
 	}
 
 	// Start scheduler (no-op if no workers registered yet — future steps add them).
-	schedulerCtx, schedulerCancel := context.WithCancel(context.Background())
-	defer schedulerCancel()
-	scheduler.Start(schedulerCtx)
+	scheduler.Start(workerCtx)
 
 	// Start server in a goroutine
 	go func() {
@@ -1567,6 +1573,7 @@ func main() {
 	log.Println("Shutting down server...")
 
 	// Stop scheduler first so workers don't accept new work mid-shutdown.
+	workerCancel()
 	scheduler.Stop()
 
 	// Stop event bus

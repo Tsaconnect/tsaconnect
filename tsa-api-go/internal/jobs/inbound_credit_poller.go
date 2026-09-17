@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -48,6 +49,16 @@ type InboundCreditPoller struct {
 	// the interval — the scheduler skips rather than queues, so a slow tick
 	// silently halves the effective poll rate.
 	batch int
+
+	// mu serialises scheduled ticks with user-triggered checks so the two never
+	// fetch the statement or match concurrently.
+	mu      sync.Mutex
+	lastRun time.Time
+	// checkCooldown is how soon after any tick a user-triggered check may fetch
+	// again. Every tap across every user shares it, so a crowd pressing the
+	// button cannot outrun Flutterwave's statement rate limit.
+	checkCooldown time.Duration
+	now           func() time.Time
 }
 
 // NewInboundCreditPoller builds the worker. A non-positive interval falls back
@@ -57,7 +68,13 @@ func NewInboundCreditPoller(ingestor InboundStatementIngestor, interval time.Dur
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &InboundCreditPoller{ingestor: ingestor, interval: interval, batch: 100}
+	return &InboundCreditPoller{
+		ingestor:      ingestor,
+		interval:      interval,
+		batch:         100,
+		checkCooldown: 10 * time.Second,
+		now:           time.Now,
+	}
 }
 
 // SetMatcher wires the attribution step. Until it is called the poller ingests
@@ -65,10 +82,39 @@ func NewInboundCreditPoller(ingestor InboundStatementIngestor, interval time.Dur
 // attributed the moment a matcher exists, because nothing about them expired.
 func (w *InboundCreditPoller) SetMatcher(m InboundCreditMatcher) { w.matcher = m }
 
+// SetCheckCooldown sets the minimum gap between ticks that CheckNow enforces.
+// Non-positive keeps the default rather than letting every tap hit the provider.
+func (w *InboundCreditPoller) SetCheckCooldown(d time.Duration) {
+	if d > 0 {
+		w.checkCooldown = d
+	}
+}
+
 func (w *InboundCreditPoller) Name() string            { return "inbound-credit-poller" }
 func (w *InboundCreditPoller) Interval() time.Duration { return w.interval }
 
 func (w *InboundCreditPoller) Run(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.tick(ctx)
+}
+
+// CheckNow runs a tick ahead of schedule, for a user who says they have just
+// paid. A tick already in flight is waited for rather than skipped — that tick
+// is the likeliest one to find the payment. It reports whether it ran a tick
+// itself: false means one finished within the cooldown, and that result is as
+// fresh as this one would be.
+func (w *InboundCreditPoller) CheckNow(ctx context.Context) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.lastRun.IsZero() && w.now().Sub(w.lastRun) < w.checkCooldown {
+		return false, nil
+	}
+	return true, w.tick(ctx)
+}
+
+func (w *InboundCreditPoller) tick(ctx context.Context) error {
+	defer func() { w.lastRun = w.now() }()
 	var errs []error
 
 	res, err := w.ingestor.RunOnce(ctx)

@@ -124,3 +124,107 @@ func TestInboundCreditPoller_StopsOnCancelledContext(t *testing.T) {
 		t.Errorf("matcher calls = %d, want 0 on a cancelled context", m.calls)
 	}
 }
+
+// "I've paid" runs a tick at once, but taps inside the cooldown share the last
+// result instead of each fetching the statement again.
+func TestInboundCreditPoller_CheckNowRespectsCooldown(t *testing.T) {
+	ing := &fakeInboundIngestor{}
+	w := NewInboundCreditPoller(ing, time.Minute)
+	clock := time.Unix(1_700_000_000, 0)
+	w.now = func() time.Time { return clock }
+
+	if ran, err := w.CheckNow(context.Background()); !ran || err != nil {
+		t.Fatalf("first CheckNow = (%v, %v), want a tick", ran, err)
+	}
+	if ran, _ := w.CheckNow(context.Background()); ran {
+		t.Error("second CheckNow inside the cooldown ran a tick")
+	}
+	clock = clock.Add(w.checkCooldown)
+	if ran, _ := w.CheckNow(context.Background()); !ran {
+		t.Error("CheckNow after the cooldown did not run a tick")
+	}
+	if ing.calls != 2 {
+		t.Errorf("ingest calls = %d, want 2", ing.calls)
+	}
+}
+
+// A scheduled tick also counts: a check right after it has nothing newer to find.
+func TestInboundCreditPoller_CheckNowSkipsRightAfterScheduledTick(t *testing.T) {
+	ing := &fakeInboundIngestor{}
+	w := NewInboundCreditPoller(ing, time.Minute)
+	if err := w.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ran, _ := w.CheckNow(context.Background()); ran {
+		t.Error("CheckNow ran straight after a scheduled tick")
+	}
+}
+
+type blockingInboundIngestor struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (b *blockingInboundIngestor) RunOnce(context.Context) (services.IngestResult, error) {
+	b.calls++
+	if b.calls == 1 {
+		close(b.started)
+		<-b.release
+	}
+	return services.IngestResult{}, nil
+}
+
+// A check never overlaps a tick in flight: it waits for that tick, then relies
+// on its result instead of fetching the statement a second time.
+func TestInboundCreditPoller_CheckNowWaitsForTickInFlight(t *testing.T) {
+	ing := &blockingInboundIngestor{started: make(chan struct{}), release: make(chan struct{})}
+	w := NewInboundCreditPoller(ing, time.Minute)
+
+	runDone := make(chan struct{})
+	go func() {
+		_ = w.Run(context.Background())
+		close(runDone)
+	}()
+	<-ing.started
+
+	checkDone := make(chan bool)
+	go func() {
+		ran, _ := w.CheckNow(context.Background())
+		checkDone <- ran
+	}()
+	select {
+	case <-checkDone:
+		t.Fatal("CheckNow returned while a tick was still running")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(ing.release)
+	<-runDone
+	if ran := <-checkDone; ran {
+		t.Error("CheckNow ran a second tick straight after the one it waited for")
+	}
+	if ing.calls != 1 {
+		t.Errorf("ingest calls = %d, want 1", ing.calls)
+	}
+}
+
+// The tick's error reaches the caller so the handler can log it.
+func TestInboundCreditPoller_CheckNowReturnsTickError(t *testing.T) {
+	w := NewInboundCreditPoller(&fakeInboundIngestor{err: errors.New("fw down")}, time.Minute)
+	if ran, err := w.CheckNow(context.Background()); !ran || err == nil {
+		t.Errorf("CheckNow = (%v, %v), want ran with an error", ran, err)
+	}
+}
+
+func TestInboundCreditPoller_SetCheckCooldownIgnoresNonPositive(t *testing.T) {
+	w := NewInboundCreditPoller(&fakeInboundIngestor{}, time.Minute)
+	w.SetCheckCooldown(0)
+	if w.checkCooldown != 10*time.Second {
+		t.Errorf("cooldown = %s, want the 10s default kept", w.checkCooldown)
+	}
+	w.SetCheckCooldown(time.Minute)
+	if w.checkCooldown != time.Minute {
+		t.Errorf("cooldown = %s, want 1m", w.checkCooldown)
+	}
+}
