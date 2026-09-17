@@ -151,8 +151,9 @@ func TestOpenBuyOrder_RefusesUnverifiedBuyer(t *testing.T) {
 }
 
 // A refused buyer must not lose the order they already have. The gate sits
-// ahead of the supersede UPDATE, so a user who was verified when they opened
-// an order and is refused a new one still has the first order to pay.
+// ahead of everything that writes (the stale-order sweep included), so a user
+// who was verified when they opened an order and is refused a new one still
+// has the first order to pay.
 func TestOpenBuyOrder_RefusalLeavesThePriorOrderPayable(t *testing.T) {
 	s := newITTestService(t)
 	ctx := context.Background()

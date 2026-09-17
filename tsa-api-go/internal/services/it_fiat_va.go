@@ -723,16 +723,30 @@ func (s *ITService) CreditBuyOrderFromInbound(ctx context.Context, intentID uuid
 	// Repriced at the LIVE rate on the amount actually sent, not at the quote
 	// the order was minted with — identical to VA settlement, and the reason
 	// the order's own figure is never trusted here.
-	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"payment_ref":        providerRef,
-		"ngn_kobo":           paidKobo.String(),
-		"rate_kobo":          buyRate.String(),
-		"mcgp_amount":        mcgp.String(),
-		"fee_ngn_kobo":       fees.Fee.String(),
-		"net_ngn_kobo":       fees.Net.String(),
-		"platform_kept_kobo": fees.PlatformKept.String(),
-		"wallet_address":     wallet,
-	}).Error; err != nil {
+	//
+	// Guarded on the state read above, not written by id alone. Everything
+	// between that read and this write — the wallet lookup, the rate, the fee
+	// quote — is time in which the user can cancel the order or the sweep can
+	// expire it. An unguarded write then left a CANCELLED row carrying this
+	// session id and amounts nobody agreed to, with approveBuyCreditWithRef
+	// refusing it one line later. The status transition itself stays in
+	// approveBuyCreditWithRef's claim: folding it in here would move the row
+	// to `processing` before that claim runs, and the claim only accepts
+	// pending_payment|failed — the broadcast would never happen.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ? AND payment_ref = ?",
+			intent.ID, models.ITStatusPendingPayment, intent.PaymentRef).
+		Updates(map[string]any{
+			"payment_ref":        providerRef,
+			"ngn_kobo":           paidKobo.String(),
+			"rate_kobo":          buyRate.String(),
+			"mcgp_amount":        mcgp.String(),
+			"fee_ngn_kobo":       fees.Fee.String(),
+			"net_ngn_kobo":       fees.Net.String(),
+			"platform_kept_kobo": fees.PlatformKept.String(),
+			"wallet_address":     wallet,
+		})
+	if err := res.Error; err != nil {
 		if isUniqueViolation(err) {
 			// Another route claimed this session id between our lookup and our
 			// write. Retryable: the re-drive takes the idempotency branch above
@@ -740,6 +754,14 @@ func (s *ITService) CreditBuyOrderFromInbound(ctx context.Context, intentID uuid
 			return fmt.Errorf("it inbound credit: concurrent settlement of ref %s", providerRef)
 		}
 		return err
+	}
+	if res.RowsAffected == 0 {
+		// Cancelled, expired or claimed by other money since the read. The same
+		// outcome as finding it closed in the first place, and just as
+		// retryable: the matcher leaves the credit unmatched, and on the next
+		// tick the order is no longer offered, so the credit holds for an
+		// operator rather than settling into a closed order.
+		return fmt.Errorf("it inbound credit: intent %s is no longer an open MCGP buy", intent.ID)
 	}
 
 	_, err = s.approveBuyCreditWithRef(ctx, intent.ID, wallet, &onChainRef)

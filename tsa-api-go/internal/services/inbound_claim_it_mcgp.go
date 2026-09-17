@@ -67,11 +67,8 @@ func (s *ITMCGPClaimSource) OpenClaims(ctx context.Context, currency string) ([]
 	}
 
 	var rows []models.ITIntent
-	if err := s.db.WithContext(ctx).
-		Where("direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?) "+
-			"AND payment_ref LIKE ? AND currency = ? AND created_at >= ?",
-			models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP,
-			mintedRefPrefix+"%", currency, time.Now().Add(-buyOrderClaimWindow)).
+	if err := scopeOpenMCGPBuys(s.db.WithContext(ctx)).
+		Where("currency = ? AND created_at >= ?", currency, time.Now().Add(-buyOrderClaimWindow)).
 		Order("created_at ASC").
 		Find(&rows).Error; err != nil {
 		return nil, err
