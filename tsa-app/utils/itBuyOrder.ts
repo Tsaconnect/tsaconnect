@@ -13,6 +13,9 @@ import { Alert } from 'react-native';
 
 export const IT_BUY_ORDER_OPEN = 'it_buy_order_open';
 export const IT_BUY_PAYMENT_ARRIVED = 'it_buy_payment_arrived';
+/** The order is no longer awaiting payment (settling, settled or already
+ *  cancelled). Shared by every ramp endpoint, hence the stable_ prefix. */
+export const IT_BAD_STATE = 'stable_bad_state';
 
 export interface OpenBuyOrder {
   intentId: string;
@@ -38,6 +41,9 @@ export function itIntentRoute(id: string): string {
 /** What to tell the user when a cancel is refused. */
 export function cancelBuyErrorMessage(r: { code?: string; message?: string }): string {
   if (r.code === IT_BUY_PAYMENT_ARRIVED && r.message) return r.message;
+  // The server's text here is an internal one, and "try again" would be wrong:
+  // the order has moved on and retrying can never succeed.
+  if (r.code === IT_BAD_STATE) return 'This order can no longer be cancelled — its status has changed.';
   return 'Could not cancel. Try again.';
 }
 

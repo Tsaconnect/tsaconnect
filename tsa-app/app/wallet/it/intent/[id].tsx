@@ -323,6 +323,9 @@ export default function ITIntentDetail() {
     if (!r.success) {
       // it_buy_payment_arrived carries a message written for the user.
       setCancelBuyError(cancelBuyErrorMessage(r));
+      // A refusal usually means the order moved on (a payment claimed it), so
+      // show its real state instead of leaving the cancel card up.
+      load();
       return;
     }
     load();

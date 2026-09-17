@@ -72,6 +72,12 @@ describe('cancelBuyErrorMessage', () => {
     );
   });
 
+  it('says the order has moved on when the server reports a bad state, rather than inviting a retry', () => {
+    expect(cancelBuyErrorMessage({ code: 'stable_bad_state', message: 'invalid IT intent state' })).toBe(
+      'This order can no longer be cancelled — its status has changed.',
+    );
+  });
+
   it('falls back to a retry prompt otherwise', () => {
     expect(cancelBuyErrorMessage({ code: undefined, message: undefined })).toBe('Could not cancel. Try again.');
   });
