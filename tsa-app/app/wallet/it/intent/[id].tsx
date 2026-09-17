@@ -14,10 +14,14 @@ import { Button, Card, Divider, Icon, Input, Spinner, SummaryCard, SummaryRow, T
 import {
   getITIntent,
   reportStableDeposit,
+  cancelITBuy,
   cancelStableBuy,
   IT_STABLE_DEPOSIT_CLAIMED,
   type ITIntent,
+  type ITPayTo,
 } from '@/services/itApi';
+import { PayIntoCard } from '@/components/it/PayIntoCard';
+import { cancelBuyErrorMessage, confirmCancelITBuy } from '@/utils/itBuyOrder';
 import { formatTokenAmount } from '@/services/p2p';
 import { formatKobo, isLikelyTxHash, isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
@@ -113,6 +117,9 @@ export default function ITIntentDetail() {
   const { colors, spacing, radius } = useTheme();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [intent, setIntent] = useState<ITIntent | null>(null);
+  // Where to pay, for a buy still waiting for the transfer. The API sends it
+  // only in that state, so its absence is not an error.
+  const [payTo, setPayTo] = useState<ITPayTo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   // Whether an unreported deposit hash is sitting in AsyncStorage for this
@@ -146,16 +153,19 @@ export default function ITIntentDetail() {
     }
     setError('');
     const r = await getITIntent(id);
-    if (r.success && r.data?.intent) setIntent(r.data.intent);
-    else setError(r.message || 'Order not found');
+    if (r.success && r.data?.intent) {
+      setIntent(r.data.intent);
+      setPayTo(r.data.payTo ?? null);
+    } else setError(r.message || 'Order not found');
     setLoading(false);
   }, [id]);
 
   const isStableAsset = intent ? STABLE_ASSETS.has(intent.asset ?? '') : false;
 
-  // MCGP path: unchanged behavior — fetch once per focus, no continuous poll.
-  // This also covers the very first load for a stablecoin intent too, since
-  // isStableAsset is false until `intent` has loaded at least once.
+  // MCGP path: fetch once per focus. This also covers the very first load for a
+  // stablecoin intent too, since isStableAsset is false until `intent` has
+  // loaded at least once. An MCGP buy still awaiting the transfer additionally
+  // polls (below).
   useFocusEffect(
     useCallback(() => {
       if (!isStableAsset) load();
@@ -181,12 +191,20 @@ export default function ITIntentDetail() {
   // too (it isn't in that set either) by coincidence, but would also be
   // wrong on any future status the two mappings diverge on, so route on
   // direction explicitly rather than relying on that coincidence.
+  //
+  // An MCGP buy polls only while it is pending_payment: the user is on this
+  // screen to pay, and it should flip to processing/credited on its own once
+  // the transfer is matched. Every later MCGP status is either terminal or an
+  // operator's to move, so the poll stops there — never on 'credited'.
   const isFocused = useIsFocused();
   const isStableBuy = isStableAsset && intent?.direction === 'buy';
+  const isMcgpBuyAwaitingTransfer =
+    !!intent && !isStableAsset && intent.direction === 'buy' && intent.status === 'pending_payment';
   const pollingActive =
-    isStableAsset &&
     isFocused &&
-    !(isStableBuy ? isTerminalBuyStatus(intent?.status ?? '') : isTerminalStableStatus(intent?.status ?? ''));
+    (isStableAsset
+      ? !(isStableBuy ? isTerminalBuyStatus(intent?.status ?? '') : isTerminalStableStatus(intent?.status ?? ''))
+      : isMcgpBuyAwaitingTransfer);
 
   useEffect(() => {
     if (!pollingActive) return;
@@ -294,25 +312,35 @@ export default function ITIntentDetail() {
     setTimeout(() => setAddressCopied(false), 2000);
   }, [intent?.depositAddress]);
 
+  // One cancel for both buy legs. The stablecoin leg keeps its original route
+  // so this build still works against an API that predates /it/buy/:id/cancel.
   const cancelBuy = useCallback(async () => {
     if (!intent) return;
     setCancelBuyError('');
     setCancellingBuy(true);
-    const r = await cancelStableBuy(intent.id);
+    const r = isStableAsset ? await cancelStableBuy(intent.id) : await cancelITBuy(intent.id);
     setCancellingBuy(false);
     if (!r.success) {
-      setCancelBuyError(r.message || 'Could not cancel. Try again.');
+      // it_buy_payment_arrived carries a message written for the user.
+      setCancelBuyError(cancelBuyErrorMessage(r));
       return;
     }
     load();
-  }, [intent, load]);
+  }, [intent, isStableAsset, load]);
 
   // Cancelling after the transfer has been sent is the one unrecoverable
-  // mistake on this screen: with no open buy intent left, the settlement path
-  // no longer matches the incoming charge and the naira is auto-credited as a
-  // DIFFERENT asset. A one-tap destructive action with that consequence gets a
-  // confirmation, not just body copy above it.
+  // mistake on this screen. For a stablecoin buy, with no open buy intent left
+  // the settlement path no longer matches the incoming charge and the naira is
+  // auto-credited as a DIFFERENT asset; for an MCGP buy the money matches
+  // nothing and is held and refunded. A one-tap destructive action with either
+  // consequence gets a confirmation, not just body copy above it.
   const handleCancelBuy = useCallback(() => {
+    if (!isStableAsset) {
+      confirmCancelITBuy(() => {
+        void cancelBuy();
+      });
+      return;
+    }
     Alert.alert(
       'Cancel this purchase?',
       'If you have already sent the transfer, cancelling can route your money to a different asset. Only cancel if you have not paid.',
@@ -321,7 +349,7 @@ export default function ITIntentDetail() {
         { text: 'Cancel purchase', style: 'destructive', onPress: () => { void cancelBuy(); } },
       ]
     );
-  }, [cancelBuy]);
+  }, [cancelBuy, isStableAsset]);
 
   if (loading && !intent) {
     return (
@@ -565,23 +593,32 @@ export default function ITIntentDetail() {
               </Text>
             </View>
           ) : null}
-          {intent.status === 'pending_payment' ? (
+          {isStableBuy && intent.status === 'pending_payment' ? (
             <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-              {isStableBuy
-                ? stableBuyPayCopy
-                : 'Transfer any Naira amount into your Instant Transfer account. This order updates when payment is confirmed at the live rate.'}
+              {stableBuyPayCopy}
             </Text>
+          ) : null}
+          {isMcgpBuyAwaitingTransfer ? (
+            payTo ? (
+              <View style={{ marginTop: spacing.md }}>
+                <PayIntoCard payTo={payTo} />
+              </View>
+            ) : (
+              <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
+                This order updates on its own once your payment is confirmed.
+              </Text>
+            )
           ) : null}
         </Card>
 
-        {isBuy && isStableAsset && intent.status === 'pending_payment' ? (
+        {isBuy && intent.status === 'pending_payment' ? (
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
               Haven&apos;t paid yet?
             </Text>
             <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-              You can cancel this purchase before paying. If you have already sent the transfer, do
-              not cancel — wait for it to be matched instead.
+              You can cancel this {isStableAsset ? 'purchase' : 'order'} before paying. If you have
+              already sent the transfer, do not cancel — wait for it to be matched instead.
             </Text>
             {cancelBuyError ? (
               <Text variant="bodySm" style={{ color: colors.danger, marginBottom: spacing.md }}>
@@ -589,7 +626,7 @@ export default function ITIntentDetail() {
               </Text>
             ) : null}
             <Button
-              title="Cancel purchase"
+              title={isStableAsset ? 'Cancel purchase' : 'Cancel order'}
               variant="secondary"
               loading={cancellingBuy}
               onPress={handleCancelBuy}
