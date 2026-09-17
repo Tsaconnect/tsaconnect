@@ -6,7 +6,7 @@
 // one-time BVN/NIN gate to mint the VA. Settlement happens when funds land —
 // no payment reference to type, no per-intent expiry.
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { ethers } from 'ethers';
@@ -16,7 +16,6 @@ import {
   Button,
   Card,
   Chip,
-  CopyableField,
   Divider,
   Icon,
   PickerSheet,
@@ -28,6 +27,7 @@ import {
 import type { PickerItem } from '@/components/ui';
 import {
   activateITVA,
+  cancelITBuy,
   itBuy,
   IT_AGREEMENT_REQUIRED,
   type ITBuyQuote,
@@ -39,10 +39,17 @@ import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { RAILS } from '@/constants/rails';
 import { promptKycRefusal } from '@/utils/kycRefusal';
-import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
-import { exactNairaOf, payerInstructionOf } from '@/utils/payInto';
+import { PayIntoCard } from '@/components/it/PayIntoCard';
+import { exactNairaOf } from '@/utils/payInto';
+import {
+  cancelBuyErrorMessage,
+  confirmCancelITBuy,
+  itIntentRoute,
+  openBuyOrderOf,
+  type OpenBuyOrder,
+} from '@/utils/itBuyOrder';
 
-type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
+type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'open-order' | 'error';
 type IdType = 'BVN' | 'NIN';
 
 // Stablecoins navigate away to the dedicated buy-stable screen rather than
@@ -75,6 +82,9 @@ export default function ITBuy() {
   const [payTo, setPayTo] = useState<ITPayTo | null>(null);
   const [intent, setIntent] = useState<ITIntent | null>(null);
   const [estMcgp, setEstMcgp] = useState('');
+  // The order the server says is already open, when it refuses a second one.
+  const [openOrder, setOpenOrder] = useState<OpenBuyOrder | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   const [paymentCurrency, setPaymentCurrency] = useState('NGN');
   const [paymentMethod, setPaymentMethod] = useState('bank');
@@ -140,6 +150,14 @@ export default function ITBuy() {
       setScreen('form');
       return;
     }
+    // One open order per user. Not an error: the user may be paying that order
+    // right now, so send them to it rather than to a dead end.
+    const existing = openBuyOrderOf(r);
+    if (existing) {
+      setOpenOrder(existing);
+      setScreen('open-order');
+      return;
+    }
     if (!r.success || !r.data) {
       setError(r.message || 'Could not open the buy order');
       setScreen('error');
@@ -174,6 +192,12 @@ export default function ITBuy() {
     // Re-quote so payTo is attached; quote may already be set from Continue.
     const kobo = String(Math.round(Number(naira) * 100));
     const r = await itBuy(kobo);
+    const existing = openBuyOrderOf(r);
+    if (existing) {
+      setOpenOrder(existing);
+      setScreen('open-order');
+      return;
+    }
     if (!r.success || !r.data || r.data.needsActivation) {
       applyQuote(quote ?? { ngnKobo: kobo, mcgpAmount: '0', rateKobo: '0' }, act.data.payTo, null);
       setScreen('instructions');
@@ -192,10 +216,23 @@ export default function ITBuy() {
   const fees = useMemo(() => (quote ? buyFeeBreakdown(quote) : null), [quote]);
 
   // Central mode (one company account, credited by payer name + exact amount)
-  // is signalled by the card itself. The VA-era "any amount, permanent account"
-  // copy is false there, and would contradict the instruction beside it.
-  const payerInstruction = payerInstructionOf(payTo);
+  // is signalled by the card itself — see PayIntoCard.
   const exactNaira = exactNairaOf(payTo);
+
+  const cancelOrder = () => {
+    const id = intent?.id;
+    if (!id) return;
+    confirmCancelITBuy(async () => {
+      setCancelling(true);
+      const r = await cancelITBuy(id);
+      setCancelling(false);
+      if (!r.success) {
+        Alert.alert('Could not cancel', cancelBuyErrorMessage(r));
+        return;
+      }
+      router.replace('/wallet/it');
+    });
+  };
 
   if (screen === 'submitting') {
     return (
@@ -263,6 +300,29 @@ export default function ITBuy() {
     );
   }
 
+  if (screen === 'open-order' && openOrder) {
+    const openNaira = Number(openOrder.ngnKobo) / 100;
+    return (
+      <SafeAreaView style={{ flex: 1, justifyContent: 'center', padding: spacing.xl, backgroundColor: colors.background }}>
+        <Card>
+          <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
+            You already have an open order
+          </Text>
+          <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+            {openNaira > 0
+              ? `Your ₦${openNaira.toLocaleString()} order is still waiting for your transfer.`
+              : 'An earlier order is still waiting for your transfer.'}{' '}
+            Pay into it, or open it and cancel it to start a new one.
+          </Text>
+        </Card>
+        <View style={{ height: spacing.lg }} />
+        <Button title="View open order" onPress={() => router.push(itIntentRoute(openOrder.intentId) as never)} />
+        <View style={{ height: spacing.sm }} />
+        <Button title="Back" variant="secondary" onPress={() => setScreen('form')} />
+      </SafeAreaView>
+    );
+  }
+
   if (screen === 'instructions' && quote) {
     return (
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
@@ -308,33 +368,9 @@ export default function ITBuy() {
             ) : null}
 
             {payTo ? (
-              <>
-                <View style={{ marginTop: spacing.md }}>
-                  <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
-                    Pay into this account
-                  </Text>
-                  {payerInstruction ? (
-                    <View style={{ marginBottom: spacing.sm }}>
-                      <PayerInstructionNotice instruction={payerInstruction} />
-                    </View>
-                  ) : null}
-                  <SummaryCard>
-                    <SummaryRow label="Bank" value={payTo.bank || '—'} />
-                    <SummaryRow label="Account name" value={payTo.accountName || '—'} />
-                  </SummaryCard>
-                  <View style={{ marginTop: spacing.xs }}>
-                    <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
-                      Account number
-                    </Text>
-                    <CopyableField value={payTo.accountNumber || ''} />
-                  </View>
-                </View>
-                <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-                  {payerInstruction
-                    ? 'Your spendable MCGP appears once your transfer is matched to this order, priced at the live rate and net of transfer fees. Sending a different amount holds your purchase for review.'
-                    : 'This is your permanent Instant Transfer account — no reference to type, no expiry. Transfer any Naira amount; your spendable MCGP appears when the payment is confirmed, priced at the live rate and net of transfer fees.'}
-                </Text>
-              </>
+              <View style={{ marginTop: spacing.md }}>
+                <PayIntoCard payTo={payTo} />
+              </View>
             ) : (
               <Text variant="bodySm" style={{ color: colors.danger, marginTop: spacing.md }}>
                 Account details unavailable. Please try again.
@@ -342,6 +378,9 @@ export default function ITBuy() {
             )}
           </Card>
           <Button title="Done" onPress={() => router.replace('/wallet/it')} />
+          {intent?.id && intent.status === 'pending_payment' ? (
+            <Button title="Cancel order" variant="ghost" loading={cancelling} onPress={cancelOrder} />
+          ) : null}
         </ScrollView>
       </SafeAreaView>
     );

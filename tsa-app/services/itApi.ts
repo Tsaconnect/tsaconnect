@@ -64,6 +64,10 @@ export type ApiResult<T> = {
   /** HTTP status, so callers can distinguish a user-fixable 400 from a
    *  retryable 503. Absent when the request never reached the server. */
   status?: number;
+  /** The `data` a refusal carries, when it carries any — e.g. which order is
+   *  already open (see utils/itBuyOrder). Unknown shape: read it through the
+   *  helper for its code, never directly. */
+  errorData?: unknown;
 };
 
 /** RFC 4122 v4 where available; same approach as services/p2p.ts.
@@ -105,6 +109,7 @@ async function req<T>(
       message: json?.message || `Request failed (${res.status})`,
       code: json?.code,
       status: res.status,
+      errorData: json?.data,
     };
   } catch (e: any) {
     return { success: false, message: e?.message || 'Network error' };
@@ -131,7 +136,10 @@ export const acceptITAgreement = () =>
 export const getITRate = () => req<ITRate>('GET', '/it/rate');
 export const getITBalance = () => req<ITBalance>('GET', '/it/balance');
 export const listITIntents = () => req<{ intents: ITIntent[] }>('GET', '/it/intents');
-export const getITIntent = (id: string) => req<{ intent: ITIntent }>('GET', `/it/intents/${id}`);
+/** payTo is present only on a buy still waiting for the user's transfer — the
+ *  same card POST /it/buy returned. */
+export const getITIntent = (id: string) =>
+  req<{ intent: ITIntent; payTo?: ITPayTo | null }>('GET', `/it/intents/${id}`);
 
 export interface ITPayTo {
   accountNumber: string;
@@ -165,8 +173,15 @@ export interface ITBuyResult {
 
 // ngnKobo = naira * 100 (string). Opens a pending buy order + standing VA
 // details. needsActivation=true when the user has no VA yet.
+// A second open order is refused with code it_buy_order_open (409) naming the
+// open one — see utils/itBuyOrder.openBuyOrderOf.
 export const itBuy = (ngnKobo: string) =>
   req<ITBuyResult>('POST', '/it/buy', { ngnKobo });
+
+/** Abandon an unpaid buy order (MCGP or stablecoin). Refused with
+ *  it_buy_payment_arrived when the payment already appears to be in. */
+export const cancelITBuy = (intentId: string) =>
+  req<{ cancelled: boolean; intent?: ITIntent }>('POST', `/it/buy/${intentId}/cancel`);
 
 export interface ITVA {
   id: string;

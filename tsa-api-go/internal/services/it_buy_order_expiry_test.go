@@ -10,9 +10,8 @@ import (
 )
 
 // Past buyOrderClaimWindow an MCGP order can no longer claim a payment, but
-// nothing used to close it: OpenBuyOrder only supersedes when the user opens
-// ANOTHER MCGP buy, there is no user-facing cancel for this leg, and no job
-// swept it. The order therefore sat in the hub reading "awaiting transfer"
+// nothing used to close it unless the user acted (opened another order, or —
+// since CancelBuy — cancelled it), and no job swept it. The order therefore sat in the hub reading "awaiting transfer"
 // forever — a row the system had already decided to ignore.
 func TestExpireStaleBuyOrders_CancelsAnUnpaidOrderPastTheWindow(t *testing.T) {
 	s, user, _ := newVATestService(t)

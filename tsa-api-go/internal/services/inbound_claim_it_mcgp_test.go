@@ -432,6 +432,10 @@ func TestOpenBuyOrder_MintsWholeNairaOnly(t *testing.T) {
 				t.Errorf("OpenBuyOrder(%s) minted %s kobo — not a whole naira", tc.ask, order.NgnKobo)
 			}
 		}
+		// One open order per user: close this one before minting the next.
+		if _, err := s.CancelBuy(ctx, user.ID, order.ID); err != nil {
+			t.Fatalf("cancel %s: %v", tc.ask, err)
+		}
 	}
 
 	// Unparseable input still gets CreateBuyIntent's own rejection rather than
