@@ -19,11 +19,24 @@ export const SummaryRow: React.FC<SummaryRowProps> = ({ label, value, total, val
   return (
     <View style={{ paddingVertical: spacing.sm }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md }}>
-        <Text variant={total ? 'bodyMed' : 'bodySm'} color={total ? 'textPrimary' : 'textSecondary'} weight={total ? '700' : '400'}>
+        <Text
+          variant={total ? 'bodyMed' : 'bodySm'}
+          color={total ? 'textPrimary' : 'textSecondary'}
+          weight={total ? '700' : '400'}
+          // Labels wrap before they crowd the value out; the value keeps at least half the row.
+          style={{ flexShrink: 1, maxWidth: '50%' }}
+        >
           {label}
         </Text>
         {typeof value === 'string' ? (
-          <Text variant={total ? 'title3' : 'bodyMed'} weight={total ? '700' : '600'} numeric color={valueColor ?? 'textPrimary'}>
+          <Text
+            variant={total ? 'title3' : 'bodyMed'}
+            weight={total ? '700' : '600'}
+            numeric
+            color={valueColor ?? 'textPrimary'}
+            // Long values (company account names) wrap inside the card instead of pushing past its edge.
+            style={{ flexShrink: 1, textAlign: 'right' }}
+          >
             {value}
           </Text>
         ) : (

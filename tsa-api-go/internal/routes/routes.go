@@ -1028,6 +1028,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			it.POST("/va/activate", itIdem, ith.ActivateVA)
 			it.POST("/buy", itIdem, ith.Buy)
 			it.POST("/buy/:id/cancel", itIdem, ith.PostCancelBuy)
+			it.POST("/buy/:id/check-payment", ith.PostCheckBuyPayment)
 			it.POST("/sell", itIdem, ith.Sell)
 			it.GET("/intents", ith.ListIntents)
 			it.GET("/intents/:id", ith.GetIntent)

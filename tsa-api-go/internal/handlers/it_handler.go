@@ -34,6 +34,18 @@ type ITHandler struct {
 	// separately because the Paycrest stack is built later in boot (and is
 	// dormant without a key) — see SetRampLegs.
 	legs RampLegSource
+	// payments runs the inbound payment lookup on demand. Nil when Flutterwave
+	// is dormant; check-payment then just returns the order as it stands.
+	payments PaymentChecker
+	// paymentsCtx bounds an on-demand lookup by the server's lifetime instead
+	// of the request's (see checkPaymentsNow).
+	paymentsCtx context.Context
+}
+
+// PaymentChecker is the narrow seam over jobs.InboundCreditPoller that
+// check-payment needs.
+type PaymentChecker interface {
+	CheckNow(ctx context.Context) (bool, error)
 }
 
 // RampLegSource is the narrow seam over PaycrestQuoteService this handler
@@ -50,6 +62,13 @@ func NewITHandler(db *gorm.DB, it *services.ITService, currencies *services.Curr
 // cannot answer, Currencies falls back to advertising both directions for any
 // currency that has a provider — see the reasoning there.
 func (h *ITHandler) SetRampLegs(src RampLegSource) { h.legs = src }
+
+// SetPaymentChecker wires the on-demand inbound lookup behind check-payment.
+// lifetime is cancelled at shutdown, the same signal the scheduled poll obeys.
+func (h *ITHandler) SetPaymentChecker(p PaymentChecker, lifetime context.Context) {
+	h.payments = p
+	h.paymentsCtx = lifetime
+}
 
 func (h *ITHandler) userWallet(userID uuid.UUID) string {
 	var u models.User
@@ -785,6 +804,78 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
 		return
 	}
+	utils.SuccessResponse(c, http.StatusOK, "Intent", h.intentData(c.Request.Context(), user, intent))
+}
+
+// POST /api/it/buy/:id/check-payment — "I've paid": look for the transfer now
+// instead of waiting for the next scheduled poll, then answer with the order as
+// GetIntent would. The check is best-effort; a failed or skipped lookup still
+// returns the order, and the scheduled poll keeps running regardless.
+func (h *ITHandler) PostCheckBuyPayment(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	ctx := c.Request.Context()
+	intent, err := h.it.GetIntent(ctx, id)
+	if err != nil || intent.UserID != user.ID {
+		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
+		return
+	}
+	checked := false
+	if services.IsBuyAwaitingTransfer(intent) && h.payments != nil {
+		checked = h.checkPaymentsNow(ctx, intent.ID)
+		// Re-read even when this call ran no tick itself: it may have waited
+		// for one that matched the payment in the meantime.
+		if fresh, ferr := h.it.GetIntent(ctx, id); ferr == nil {
+			intent = fresh
+		}
+	}
+	data := h.intentData(ctx, user, intent)
+	data["checked"] = checked
+	utils.SuccessResponse(c, http.StatusOK, "Intent", data)
+}
+
+// checkPaymentWait bounds how long check-payment holds the request open.
+var checkPaymentWait = 15 * time.Second
+
+// checkPaymentsNow runs the lookup and reports whether it ran a tick of its own
+// within checkPaymentWait.
+//
+// The lookup runs on the server's lifetime context, not the request's: a match
+// credits MCGP on-chain inside the tick, and a user closing the screen must not
+// be able to cancel that halfway. Past checkPaymentWait the tick carries on in
+// the background and the app's own polling picks up the result.
+func (h *ITHandler) checkPaymentsNow(ctx context.Context, intentID uuid.UUID) bool {
+	lifetime := h.paymentsCtx
+	if lifetime == nil {
+		lifetime = context.WithoutCancel(ctx)
+	}
+	done := make(chan bool, 1)
+	go func() {
+		ran, err := h.payments.CheckNow(lifetime)
+		if err != nil {
+			log.Printf("[it] check-payment intent=%s: %v", intentID, err)
+		}
+		done <- ran
+	}()
+	select {
+	case ran := <-done:
+		return ran
+	case <-time.After(checkPaymentWait):
+		return false
+	}
+}
+
+// intentData is the order-detail payload: the intent, plus the pay-into card
+// while a buy is still waiting for money.
+func (h *ITHandler) intentData(ctx context.Context, user *models.User, intent *models.ITIntent) gin.H {
 	intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
 	data := gin.H{"intent": intent}
 	if services.IsBuyAwaitingTransfer(intent) {
@@ -794,17 +885,17 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 		central, centralMode := h.it.ActiveCentralAccount()
 		var va *models.FiatVirtualAccount
 		if !centralMode {
-			if found, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN"); err == nil {
+			if found, err := h.it.GetFiatVA(ctx, user.ID, "NGN"); err == nil {
 				va = found
 			} else if !errors.Is(err, services.ErrITVANotFound) {
 				log.Printf("[it] GetIntent GetFiatVA user=%s: %v", user.ID, err)
 			}
 		}
-		if payTo := h.buyPayTo(c.Request.Context(), user, intent.NgnKobo, central, centralMode, va); payTo != nil {
+		if payTo := h.buyPayTo(ctx, user, intent.NgnKobo, central, centralMode, va); payTo != nil {
 			data["payTo"] = payTo
 		}
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Intent", data)
+	return data
 }
 
 // ──────────────────────────────── admin ───────────────────────────────────

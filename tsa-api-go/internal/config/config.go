@@ -545,6 +545,11 @@ type Config struct {
 	// than an outage silently loses every credit that arrived during it — so
 	// this is deliberately far wider than the poll interval.
 	InboundStatementLookback time.Duration
+	// InboundCheckCooldown is the shortest gap between a completed statement
+	// poll and a user-triggered one ("I've sent the transfer"). It is global,
+	// not per user, and is the knob that keeps taps inside Flutterwave's
+	// statement rate limit.
+	InboundCheckCooldown time.Duration
 	// InboundAlertEmails are the operator mailboxes told, one email per credit,
 	// whenever the matcher declines to attribute money and holds it.
 	//
@@ -996,6 +1001,7 @@ func Load() *Config {
 	cfg.InboundMode = normalizeInboundMode(getEnv("INBOUND_MODE", InboundModeVA))
 	cfg.InboundPollInterval = getEnvDuration("INBOUND_POLL_INTERVAL", 30*time.Second)
 	cfg.InboundStatementLookback = getEnvDuration("INBOUND_STATEMENT_LOOKBACK", 24*time.Hour)
+	cfg.InboundCheckCooldown = getEnvDuration("INBOUND_CHECK_COOLDOWN", 10*time.Second)
 	cfg.InboundCentralAccountNumber = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NUMBER")
 	cfg.InboundCentralBankName = os.Getenv("INBOUND_CENTRAL_BANK_NAME")
 	cfg.InboundCentralAccountName = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NAME")
