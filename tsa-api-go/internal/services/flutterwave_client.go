@@ -822,7 +822,9 @@ func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, referen
 	for page := 0; page < fwTransferListMaxPages; page++ {
 		q := url.Values{}
 		q.Set("from", lo.Format("2006-01-02"))
-		q.Set("to", hi.AddDate(0, 0, 1).Format("2006-01-02"))
+		if upper := fwUpperBoundDate(hi, time.Now()); upper != "" {
+			q.Set("to", upper)
+		}
 		q.Set("size", "50")
 		if cursor != "" {
 			q.Set("next", cursor)
@@ -1249,6 +1251,27 @@ func (c *FlutterwaveClient) ConvertBalance(ctx context.Context, merchantID, sour
 // but date-only from/to is its convention on every other listing endpoint.
 const fwStatementDateLayout = "2006-01-02"
 
+// fwUpperBoundDate renders the `to` of a date-range query, or "" when it must
+// be left off.
+//
+// Flutterwave's date bounds look inclusive-of-day, so the day AFTER the window
+// ends is what includes the end's own day — but it also refuses any `to` it
+// reads as later than today, with HTTP 400 REQUEST_NOT_VALID "'to' cannot be
+// in the future". For a window ending today those two rules cannot both be
+// satisfied: the day after today is tomorrow. So a window that reaches the
+// present sends no `to` at all and lets the provider read up to now, and only
+// a window that has already closed carries the +1 day.
+//
+// Sending today's date instead would be the worse trade: if the bound really
+// is exclusive, every credit that arrived today is invisible until tomorrow.
+func fwUpperBoundDate(end, now time.Time) string {
+	next := end.UTC().AddDate(0, 0, 1)
+	if next.UTC().Truncate(24 * time.Hour).After(now.UTC().Truncate(24 * time.Hour)) {
+		return ""
+	}
+	return next.Format(fwStatementDateLayout)
+}
+
 const (
 	// fwStatementProviderMaxPageSize is the most rows Flutterwave will serve
 	// per /wallets/statement page. Asking for more is not clamped — the whole
@@ -1396,7 +1419,9 @@ func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency s
 			q.Set("from", from.UTC().Format(fwStatementDateLayout))
 		}
 		if !to.IsZero() {
-			q.Set("to", to.UTC().AddDate(0, 0, 1).Format(fwStatementDateLayout))
+			if upper := fwUpperBoundDate(to, time.Now()); upper != "" {
+				q.Set("to", upper)
+			}
 		}
 		q.Set("page", strconv.Itoa(page))
 		q.Set("size", strconv.Itoa(fwStatementPageSize))
