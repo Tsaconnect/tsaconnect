@@ -252,6 +252,10 @@ async function probeOtherPath(
   } catch {
     return null;
   }
+  // A toggle to testnet mid-probe means this may be devnet's answer: acting on
+  // it could move the wallet off its funded path, and remembering an empty one
+  // would silence the probe for the rest of the session.
+  if (getNetwork() !== 'mainnet') return null;
   if (!hasFunds(raw)) {
     otherPathFindings.set(wallet, null);
     return null;
@@ -260,17 +264,19 @@ async function probeOtherPath(
 }
 
 /**
- * Move the wallet onto the other derivation path: persist it, re-register the
- * address with the backend, and forget the session's probe so the path it
- * leaves is checked again on the next load.
+ * Move the wallet onto the other derivation path: re-register the address with
+ * the backend, then persist it and forget the session's probe so the path it
+ * leaves is checked again on the next load. Registration goes first so a
+ * failure leaves the app and the backend both on the old path — otherwise the
+ * app would show the new address while buys still deliver to the old one.
  */
 export async function switchSolanaDerivation(wallet: string, derivation: SolanaDerivation): Promise<string | null> {
   const mnemonic = await getMnemonic(wallet);
   if (!mnemonic) return null;
   const address = addressesFor(wallet, mnemonic)[derivation];
+  await registerNonEVMAddress(wallet, SOLANA_KEY, address);
   persist(wallet, { derivation, address, settled: true });
   otherPathFindings.delete(wallet);
-  await registerNonEVMAddress(wallet, SOLANA_KEY, address);
   return address;
 }
 

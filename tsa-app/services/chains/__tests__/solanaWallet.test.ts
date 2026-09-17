@@ -18,7 +18,6 @@ import { getNonEVMBalances, registerNonEVMAddress } from '../nonevmApi';
 import { deriveSolanaAddresses } from '../derivation';
 import { getNetwork } from '../../../hooks/useNetwork';
 
-const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 // Phantom path m/44'/501'/0'/0' and Trust Wallet path m/44'/501'/0' addresses
 // for the canonical mnemonic (see derivation.test.ts for vector provenance).
 const PHANTOM_ADDR = 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk';
@@ -183,6 +182,45 @@ describe('loadSolanaWallet path self-healing', () => {
     expect(mockedBalances.mock.calls.length).toBe(callsAfterFirst + 1); // no second probe
     expect(mockedSetItem).not.toHaveBeenCalled();
   });
+
+  it('does not follow, or remember, a probe answered after a switch to testnet', async () => {
+    mockedGetItem.mockResolvedValue('phantom');
+    mockedBalances
+      .mockResolvedValueOnce([row('0')]) // phantom (mainnet): empty
+      .mockImplementationOnce(async () => {
+        // The user toggles to testnet while the probe is in flight, so this
+        // answer is devnet's and says nothing about real funds.
+        mockedGetNetwork.mockReturnValue('testnet');
+        return [row('42')];
+      });
+    const result = await loadSolanaWallet(WALLET);
+    expect(result?.address).toBe(PHANTOM_ADDR);
+    expect(result?.otherPath).toBeNull();
+    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(mockedRegister).not.toHaveBeenCalledWith(WALLET, 'solana', TRUST_ADDR);
+
+    // Back on mainnet the probe runs again instead of trusting the devnet read.
+    mockedGetNetwork.mockReturnValue('mainnet');
+    mockedBalances.mockResolvedValueOnce([row('0')]).mockResolvedValueOnce([row('42')]);
+    const healed = await loadSolanaWallet(WALLET);
+    expect(healed?.address).toBe(TRUST_ADDR);
+  });
+
+  it('does not memoize an empty probe answered from devnet', async () => {
+    mockedGetItem.mockResolvedValue('phantom');
+    mockedBalances
+      .mockResolvedValueOnce([row('10')]) // phantom (mainnet): funded
+      .mockImplementationOnce(async () => {
+        mockedGetNetwork.mockReturnValue('testnet');
+        return []; // devnet: the other path looks empty
+      });
+    await loadSolanaWallet(WALLET);
+
+    mockedGetNetwork.mockReturnValue('mainnet');
+    mockedBalances.mockResolvedValueOnce([row('10')]).mockResolvedValueOnce([row('20')]);
+    const again = await loadSolanaWallet(WALLET);
+    expect(again?.otherPath).toMatchObject({ derivation: 'trustwallet', address: TRUST_ADDR });
+  });
 });
 
 describe('getSolanaSigner', () => {
@@ -327,5 +365,21 @@ describe('both paths funded', () => {
     const after = await loadSolanaWallet(WALLET);
     expect(after?.address).toBe(TRUST_ADDR);
     expect(after?.otherPath).toMatchObject({ derivation: 'phantom', address: PHANTOM_ADDR });
+  });
+
+  it('switchSolanaDerivation changes nothing locally when the backend registration fails', async () => {
+    mockedGetItem.mockResolvedValue('phantom');
+    mockedBalances.mockResolvedValueOnce([row('10')]).mockResolvedValueOnce([row('20')]);
+    await loadSolanaWallet(WALLET);
+
+    mockedRegister.mockRejectedValueOnce(new Error('network down'));
+    await expect(switchSolanaDerivation(WALLET, 'trustwallet')).rejects.toThrow('network down');
+    // The app keeps showing, signing for, and reporting the other path exactly as
+    // before, so the "Switch failed" alert is true and the backend still agrees.
+    expect(mockedSetItem).not.toHaveBeenCalled();
+    await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
+    mockedBalances.mockResolvedValueOnce([row('10')]);
+    const after = await loadSolanaWallet(WALLET);
+    expect(after?.otherPath).toMatchObject({ derivation: 'trustwallet', address: TRUST_ADDR });
   });
 });
