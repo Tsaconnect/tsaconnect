@@ -1429,12 +1429,17 @@ func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency s
 	}
 
 	var all, prev []FWStatementEntry
+	cursor := ""
 	for page := 1; page <= fwStatementMaxPages; page++ {
 		// A failed page is not returned as a short window: partial results
 		// would read downstream as "the rest of the window is empty", and the
 		// row order the provider uses is unverified, so there is no telling
 		// which part is missing. The poll retries in seconds.
-		rows, err := c.fetchStatementPage(ctx, pageQuery(page))
+		q := pageQuery(page)
+		if cursor != "" {
+			q.Set("next", cursor)
+		}
+		rows, hasMore, sawCursor, next, err := c.fetchStatementPage(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -1445,9 +1450,17 @@ func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency s
 			return all, nil
 		}
 		all = append(all, rows...)
-		if len(rows) < fwStatementPageSize {
+		// The provider's own cursor is the authoritative end of the window
+		// when it sends one; the short-page rule is the fallback for the
+		// payload shape that carries no cursor.
+		if sawCursor {
+			if !hasMore {
+				return all, nil
+			}
+		} else if len(rows) < fwStatementPageSize {
 			return all, nil
 		}
+		cursor = next
 		prev = rows
 	}
 	log.Printf("[flutterwave] WARNING statement page bound reached: %d pages of %d rows read and the provider still has more; the window is truncated and older credits may be unseen",
@@ -1455,23 +1468,121 @@ func (c *FlutterwaveClient) FetchWalletStatement(ctx context.Context, currency s
 	return all, nil
 }
 
-func (c *FlutterwaveClient) fetchStatementPage(ctx context.Context, q url.Values) ([]FWStatementEntry, error) {
-	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/statement?"+q.Encode(), nil, "")
-	if err != nil {
-		return nil, fmt.Errorf("flutterwave statement: %w", err)
+// fwMoney reads a money field that the provider sends either as a bare number
+// or as {value, currency}. The statement's `amount` is the object form; older
+// measured payloads and other endpoints use the number.
+type fwMoney struct {
+	Value    FWQuoteAmount
+	Currency string
+}
+
+func (m *fwMoney) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) > 0 && b[0] == '{' {
+		var o struct {
+			Value    FWQuoteAmount `json:"value"`
+			Currency string        `json:"currency"`
+		}
+		if err := json.Unmarshal(b, &o); err != nil {
+			return err
+		}
+		m.Value, m.Currency = o.Value, o.Currency
+		return nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fwError("statement", resp.StatusCode, body)
+	return m.Value.UnmarshalJSON(b)
+}
+
+// fwStatementWireRow is the statement row as sent, which is not the shape this
+// client was written against. Measured in production 2026-09-17:
+//
+//	transaction_direction / transaction_type, not direction / type
+//	amount as {value, currency}, not a bare number
+//
+// The legacy names stay as fallbacks so either payload reads. This matters
+// more than a decode error would suggest: an unknown field name leaves
+// Direction and Type empty, and a row with no type is silently not funding —
+// ingestion would report success and credit nobody.
+type fwStatementWireRow struct {
+	TransactionDirection string `json:"transaction_direction"`
+	Direction            string `json:"direction"`
+	TransactionType      string `json:"transaction_type"`
+	Type                 string `json:"type"`
+	Amount               fwMoney
+	Balance              FWStatementBalance `json:"balance"`
+	Reference            string             `json:"reference"`
+	Remarks              string             `json:"remarks"`
+	Currency             string             `json:"currency"`
+	TransactionDate      FWStatementTime    `json:"transaction_date"`
+}
+
+func (r fwStatementWireRow) entry() FWStatementEntry {
+	e := FWStatementEntry{
+		Direction:       firstNonEmpty(r.TransactionDirection, r.Direction),
+		Type:            firstNonEmpty(r.TransactionType, r.Type),
+		Amount:          r.Amount.Value,
+		Balance:         r.Balance,
+		Reference:       r.Reference,
+		Remarks:         r.Remarks,
+		Currency:        firstNonEmpty(r.Currency, r.Amount.Currency),
+		TransactionDate: r.TransactionDate,
 	}
+	return e
+}
+
+// decodeStatementPage reads one page in either shape the provider has served:
+// `data` as {cursor, transactions} — the live shape — or as a bare array.
+// hasMore comes from the provider's own cursor when it sends one; without a
+// cursor the caller falls back to its short-page rule.
+func decodeStatementPage(body []byte) (rows []FWStatementEntry, hasMore, sawCursor bool, next string, err error) {
 	var env fwEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, fmt.Errorf("flutterwave statement decode: %w", err)
+		return nil, false, false, "", fmt.Errorf("flutterwave statement decode: %w", err)
 	}
-	var parsed []FWStatementEntry
-	if err := json.Unmarshal(env.Data, &parsed); err != nil {
-		return nil, fmt.Errorf("flutterwave statement decode data: %w", err)
+	data := bytes.TrimSpace(env.Data)
+	var wire []fwStatementWireRow
+
+	switch {
+	case len(data) == 0 || string(data) == "null":
+		return nil, false, false, "", nil
+	case data[0] == '[':
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return nil, false, false, "", fmt.Errorf("flutterwave statement decode data: %w", err)
+		}
+	default:
+		var page struct {
+			Transactions []fwStatementWireRow `json:"transactions"`
+			Cursor       *struct {
+				HasMoreItems *bool  `json:"has_more_items"`
+				Next         string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return nil, false, false, "", fmt.Errorf("flutterwave statement decode data: %w", err)
+		}
+		wire = page.Transactions
+		if page.Cursor != nil {
+			sawCursor = true
+			next = strings.TrimSpace(page.Cursor.Next)
+			hasMore = page.Cursor.HasMoreItems != nil && *page.Cursor.HasMoreItems
+		}
 	}
-	return parsed, nil
+
+	rows = make([]FWStatementEntry, 0, len(wire))
+	for _, w := range wire {
+		rows = append(rows, w.entry())
+	}
+	return rows, hasMore, sawCursor, next, nil
+}
+
+func (c *FlutterwaveClient) fetchStatementPage(ctx context.Context, q url.Values) ([]FWStatementEntry, bool, bool, string, error) {
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/statement?"+q.Encode(), nil, "")
+	if err != nil {
+		return nil, false, false, "", fmt.Errorf("flutterwave statement: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, false, "", fwError("statement", resp.StatusCode, body)
+	}
+	return decodeStatementPage(body)
 }
 
 // sameStatementPage reports whether two consecutive pages are the same rows —
