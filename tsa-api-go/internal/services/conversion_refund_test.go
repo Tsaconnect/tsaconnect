@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -568,6 +569,60 @@ func TestRefundFromTreasury_SetsRefundingStatusBeforeTheBroadcast(t *testing.T) 
 	}
 	if got.Fault != models.FaultPlatform {
 		t.Fatalf("fault = %s, want platform", got.Fault)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())
+	}
+}
+
+// ── Fix round 5 ──────────────────────────────────────────────────────────────
+//
+// "Park, don't loop forever" (round 3, and round 4's startBridge/refund
+// extensions of it) is only real if reverting any ONE of the three park
+// branches to a bare error is caught by SOME test. takeCustody's own branch
+// was already pinned by TestOrchestrator_ParksWhenTheSourceDecimalsReadFails
+// (round 3); these two cover the other two functions the same reasoning
+// applies to.
+
+// startBridge's own decimals-read failure must park too, for the identical
+// reason takeCustody's does: Holder is already Treasury by the time
+// Advance ever reaches startBridge, so a bare error here would repeat
+// silently on every tick forever with no leg yet reserved for the stall
+// detector to notice.
+func TestOrchestrator_StartBridgeParksWhenTheSourceDecimalsReadFails(t *testing.T) {
+	r := newConversionRig(t)
+	// Holder is already Treasury (the rig's default) — Advance must reach
+	// startBridge directly, not takeCustody.
+	r.src.native.decimalsErr = errors.New("rpc timeout")
+
+	if err := r.svc.Advance(context.Background(), r.order); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending — a decimals RPC failure inside startBridge must park, not loop", got.Status)
+	}
+	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
+		t.Fatalf("quotes=%d broadcasts=%d, want 0 — nothing may be attempted before the amount is even readable",
+			r.lifi.quoteCalls(), r.broadcasts())
+	}
+}
+
+// refund()'s own decimals-read failure must park too — same reasoning, one
+// function further down the automatic state machine.
+func TestOrchestrator_RefundParksWhenTheSourceDecimalsReadFails(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r) // attempt 1 fails before ever broadcasting
+	r.clock = r.clock.Add(31 * time.Minute)
+	r.src.native.decimalsErr = errors.New("rpc timeout")
+
+	if err := r.svc.Advance(context.Background(), r.reload(t)); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t)
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending — a decimals RPC failure inside refund() must park, not loop", got.Status)
 	}
 	if r.broadcasts() != 0 {
 		t.Fatalf("broadcasts = %d, want 0", r.broadcasts())

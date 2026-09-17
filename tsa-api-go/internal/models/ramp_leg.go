@@ -42,10 +42,21 @@ type RampLeg struct {
 	Token    string `gorm:"size:16;not null" json:"token"`
 	FromAddr string `gorm:"size:128;not null" json:"from"`
 	ToAddr   string `gorm:"size:128;not null" json:"to"`
-	// Amount is in token base units, as a decimal string.
+	// Amount is in TOKEN BASE UNITS, as a decimal string — never a
+	// human-readable decimal like PaycrestOrderRecord.TokenAmount. WHICH
+	// side's base units depends on Kind: for a bridge or refund leg it is
+	// the ORIGIN token's base units (what left the treasury, in Token/
+	// ChainKey as recorded on this same row); for a deliver leg it is
+	// already the DESTINATION token's base units, because that is the one
+	// token/chain a deliver leg ever moves on. This distinction is
+	// load-bearing for creditedToUser (conversion_orchestrator.go), which
+	// only trusts a bridge leg's OWN Amount as destination-denominated once
+	// AmountReceived exists — see that function's own comment for why.
 	Amount string `gorm:"size:64" json:"amount"`
-	// AmountReceived is what actually landed, read back on confirmation. A
-	// bridge's output is never exactly its quote.
+	// AmountReceived is what actually landed, read back on confirmation —
+	// also base units, in the SAME token/chain Amount is denominated in for
+	// that leg's Kind (see above). A bridge's output is never exactly its
+	// quote.
 	AmountReceived string `gorm:"size:64" json:"amountReceived,omitempty"`
 
 	TxHash string `gorm:"size:128;index" json:"txHash,omitempty"`

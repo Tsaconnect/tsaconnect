@@ -1239,9 +1239,20 @@ func (o *ConversionOrchestrator) inFlightUSD(ctx context.Context, lane *Treasury
 		// (which expects base units) can price it.
 		addr := lane.tokenAddress(row.Token)
 		if addr == "" {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_unreadable_amount_total=1 order=%s token=%s not configured on %s",
+			// FAIL CLOSED, not skip: this row counts toward the chain's
+			// in-flight exposure, so silently dropping it out of the total
+			// would let CheckCaps wave a NEW bridge through underneath an
+			// exposure that is not actually zero, only unmeasurable. Before
+			// the per-row decimals conversion above existed, this exact
+			// shape reached usdValue directly and usdValue's own "addr==''"
+			// branch returned ErrSponsorNotAvailable, failing the whole
+			// call closed — this restores that. A distinct metric name from
+			// the unparseable-amount branch below: the amount here is fine,
+			// only the token is unconfigured, and a dashboard must not read
+			// the two as the same kind of problem.
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_exposure_token_unconfigured_total=1 order=%s token=%s chain=%s",
 				row.ID, row.Token, lane.ChainKey)
-			continue
+			return 0, ErrSponsorNotAvailable
 		}
 		decimals, derr := lane.Native.GetTokenDecimals(addr)
 		if derr != nil {

@@ -629,19 +629,45 @@ func TestOrchestrator_RestatesThePromiseIntoAnEighteenDecimalDestination(t *test
 
 // 18dp in, 6dp out. Scaling down truncates, which keeps the promise one we can
 // always honour.
+//
+// token_amount is seeded as "100" — the plain human-decimal convention (see
+// TokenAmount's own doc comment on the model) — NOT "100000000000000000000".
+// That base-units-looking string was a stale fixture from before the
+// TokenAmount fix: under the corrected (decimal-string) reading it means 10^20
+// TOKENS, which at 18dp is 10^38 base units — far more than the 10^20 base
+// units actually verified as received, so the test was silently taking the
+// SHORT-DELIVERY branch instead of exercising the full-delivery 18dp->6dp
+// rescale its own name promises. It only ever passed because the promise
+// assertion is computed from `received` either way.
 func TestOrchestrator_RestatesThePromiseIntoASixDecimalDestination(t *testing.T) {
 	r := newConversionRig(t)
 	r.src.native.decimalsByToken = map[string]int{strings.ToLower(sponsorTestUSDC): 18}
-	r.transfers.amount = mustBig(t, "100000000000000000000") // 100 tokens at 18dp
+	r.transfers.amount = mustBig(t, "100000000000000000000") // 100 tokens at 18dp, in base units
 	r.db.Model(r.order).Updates(map[string]any{
-		"holder": models.HolderPaycrest, "token_amount": "100000000000000000000",
+		"holder": models.HolderPaycrest, "token_amount": "100", // 100 tokens, human-decimal
 	})
+	logs := captureLog(t)
 
 	mustAdvance(t, r)
 
+	// Proves the FULL-delivery path actually ran, not the short-delivery
+	// correction: the stale ("100000000000000000000") fixture this replaced
+	// happened to produce the identical FINAL TokenAmount ("100") through
+	// EITHER branch — expected(10^38) > received(10^20) fired the
+	// short-delivery correction, which then rewrote TokenAmount back down to
+	// "100" anyway — so the final-value check alone cannot tell the two
+	// branches apart. The log line can: it is only ever emitted on the
+	// short-delivery branch.
+	if strings.Contains(logs.String(), "delivery short") {
+		t.Fatalf("a short-delivery correction fired; want the full-delivery path. logs:\n%s", logs.String())
+	}
+	got := r.reload(t)
+	if got.TokenAmount != "100" {
+		t.Fatalf("tokenAmount = %q, want it UNCHANGED at \"100\"", got.TokenAmount)
+	}
 	want := PromisedAmount(big.NewInt(100_000000), 50).String()
-	if got := r.reload(t).PromisedAmount; got != want {
-		t.Fatalf("promisedAmount = %q, want %q in the DESTINATION token's units", got, want)
+	if got.PromisedAmount != want {
+		t.Fatalf("promisedAmount = %q, want %q in the DESTINATION token's units", got.PromisedAmount, want)
 	}
 }
 
@@ -997,6 +1023,28 @@ func TestOrchestrator_CountsChainExposureAgainstTheCap(t *testing.T) {
 	}
 	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
 		t.Fatal("an order over the chain cap must reserve nothing and send nothing")
+	}
+}
+
+// inFlightUSD's own doc comment: "a failure to read it fails CLOSED: an
+// unknown exposure is not a zero one." An in-flight order whose token has no
+// configured address on this lane must make the WHOLE caps check fail, not
+// silently drop out of the exposure total and let a new bridge sail through
+// underneath an exposure that is real but unmeasurable.
+func TestOrchestrator_FailsClosedWhenAnInFlightOrdersTokenIsUnconfigured(t *testing.T) {
+	r := newConversionRig(t)
+	other := *r.order
+	other.ID, other.Reference, other.Token, other.TokenAmount = uuid.New(), "conv-other", "GHOST", "100"
+	if err := r.db.Create(&other).Error; err != nil {
+		t.Fatalf("seed second order: %v", err)
+	}
+
+	err := r.svc.Advance(context.Background(), r.order)
+	if !errors.Is(err, ErrSponsorNotAvailable) {
+		t.Fatalf("Advance = %v, want ErrSponsorNotAvailable (fail closed on an unpriceable in-flight order)", err)
+	}
+	if r.broadcasts() != 0 || len(r.legsOfKind(t, models.RampLegKindBridge)) != 0 {
+		t.Fatal("an unpriceable in-flight order must refuse the whole cap check, not silently skip it")
 	}
 }
 
