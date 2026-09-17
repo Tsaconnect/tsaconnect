@@ -43,6 +43,8 @@ func newStableBuyDBService(t *testing.T) (*ITService, uuid.UUID) {
 	// so the fixture user must exist and be verified or every test here would
 	// fail at the gate rather than at the behaviour it is pinning.
 	createTestUsersTable(t, db)
+	// CancelStableBuy's late-payment guard reads inbound_credits.
+	createInboundCreditsTable(t, db)
 	userID := seedVerifiedUser(t, db)
 	va := &models.FiatVirtualAccount{
 		ID: uuid.New(), UserID: userID, Currency: "NGN",

@@ -464,6 +464,26 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 	})
 }
 
+// buyPayTo is the pay-into card for a buy order: the company account and the
+// exact figure in central mode, the user's own virtual account otherwise. One
+// place for the choice, so the card on Buy and the card on the order detail
+// cannot disagree about where the money goes.
+//
+// va may be nil in VA mode when the caller has none; the card is then nil
+// rather than an account the user cannot pay into.
+func (h *ITHandler) buyPayTo(ctx context.Context, user *models.User, ngnKobo string,
+	central services.CentralAccount, centralMode bool, va *models.FiatVirtualAccount) gin.H {
+	if centralMode {
+		// Read from the row, not the context user: the matcher compares against
+		// the stored column, so the name shown must be that same value.
+		return centralPayTo(central, ngnKobo, h.it.VerifiedLegalName(ctx, user.ID))
+	}
+	if va == nil {
+		return nil
+	}
+	return fiatVAPayTo(va, user.Name)
+}
+
 // POST /api/it/buy — open a pending buy order + standing VA details.
 // Settlement still happens when funds land (live rate, actual amount); the
 // pending intent gives the user progress on the hub until then.
@@ -538,17 +558,26 @@ func (h *ITHandler) Buy(c *gin.Context) {
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), code)
 			return
 		}
+		// One open order per user. 409 naming the order, not a 400 dead end:
+		// the app routes the user to the order they already have, which may be
+		// the one they are paying into right now.
+		var open *services.ITBuyOrderOpenError
+		if errors.As(err, &open) && open.Intent != nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"code":    itBuyOrderOpenCode,
+				"message": "You already have an open buy order. Pay into it, or cancel it to start a new one.",
+				"data": gin.H{
+					"intentId": open.Intent.ID,
+					"ngnKobo":  open.Intent.NgnKobo,
+				},
+			})
+			return
+		}
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	var payTo gin.H
-	if centralMode {
-		// Read from the row, not the context user: the matcher compares against
-		// the stored column, so the name shown must be that same value.
-		payTo = centralPayTo(central, intent.NgnKobo, h.it.VerifiedLegalName(c.Request.Context(), user.ID))
-	} else {
-		payTo = fiatVAPayTo(va, user.Name)
-	}
+	payTo := h.buyPayTo(c.Request.Context(), user, intent.NgnKobo, central, centralMode, va)
 	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
 		"needsActivation": false,
 		"quote": gin.H{
@@ -757,7 +786,25 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 		return
 	}
 	intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
-	utils.SuccessResponse(c, http.StatusOK, "Intent", gin.H{"intent": intent})
+	data := gin.H{"intent": intent}
+	if services.IsBuyAwaitingTransfer(intent) {
+		// The order detail is where a user comes back to pay, so it carries the
+		// same card Buy returned. Only while the order is still waiting for
+		// money: on anything else a pay-into card invites a second transfer.
+		central, centralMode := h.it.ActiveCentralAccount()
+		var va *models.FiatVirtualAccount
+		if !centralMode {
+			if found, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN"); err == nil {
+				va = found
+			} else if !errors.Is(err, services.ErrITVANotFound) {
+				log.Printf("[it] GetIntent GetFiatVA user=%s: %v", user.ID, err)
+			}
+		}
+		if payTo := h.buyPayTo(c.Request.Context(), user, intent.NgnKobo, central, centralMode, va); payTo != nil {
+			data["payTo"] = payTo
+		}
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Intent", data)
 }
 
 // ──────────────────────────────── admin ───────────────────────────────────
@@ -1183,11 +1230,33 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
 }
 
-// POST /api/it/stable/buy/:id/cancel — the user's own self-service exit from
-// a stablecoin buy still awaiting payment. Without this, an abandoned intent
-// has no way out of pending_payment short of the 24h claim window lapsing
-// (stableBuyClaimWindow) — see CancelStableBuy for why one is needed.
+// POST /api/it/buy/:id/cancel — the user's own exit from a buy still awaiting
+// payment, MCGP or stablecoin. Answers with the cancelled intent.
+func (h *ITHandler) PostCancelBuy(c *gin.Context) {
+	h.cancelBuy(c, func(ctx context.Context, userID, id uuid.UUID) (*models.ITIntent, error) {
+		return h.it.CancelBuy(ctx, userID, id)
+	})
+}
+
+// POST /api/it/stable/buy/:id/cancel — the stablecoin-only form, kept for app
+// builds that predate /it/buy/:id/cancel. Same service path, same refusals;
+// it still refuses an MCGP order.
 func (h *ITHandler) PostCancelStableBuy(c *gin.Context) {
+	h.cancelBuy(c, func(ctx context.Context, userID, id uuid.UUID) (*models.ITIntent, error) {
+		return nil, h.it.CancelStableBuy(ctx, userID, id)
+	})
+}
+
+// itBuyPaymentArrivedMessage is shown to the user verbatim.
+const itBuyPaymentArrivedMessage = "A payment for this order has already arrived, so it can't be cancelled. " +
+	"It's being processed — if it doesn't complete, contact support."
+
+const (
+	itBuyOrderOpenCode      = "it_buy_order_open"
+	itBuyPaymentArrivedCode = "it_buy_payment_arrived"
+)
+
+func (h *ITHandler) cancelBuy(c *gin.Context, cancel func(ctx context.Context, userID, id uuid.UUID) (*models.ITIntent, error)) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
@@ -1198,11 +1267,24 @@ func (h *ITHandler) PostCancelStableBuy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
 		return
 	}
-	if err := h.it.CancelStableBuy(c.Request.Context(), user.ID, id); err != nil {
+	intent, err := cancel(c.Request.Context(), user.ID, id)
+	if err != nil {
+		if errors.Is(err, services.ErrITBuyPaymentArrived) {
+			utils.ErrorResponseWithCode(c, http.StatusConflict, itBuyPaymentArrivedMessage, itBuyPaymentArrivedCode)
+			return
+		}
+		if stableStatusFor(err) == http.StatusInternalServerError {
+			log.Printf("[it] cancel buy user=%s intent=%s: %v", user.ID, id, err)
+		}
 		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Cancelled", gin.H{"cancelled": true})
+	data := gin.H{"cancelled": true}
+	if intent != nil {
+		intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
+		data["intent"] = intent
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Cancelled", data)
 }
 
 // GetStuckStableSells lists brokered sells that have not advanced.

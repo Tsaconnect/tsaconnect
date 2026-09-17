@@ -408,14 +408,18 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	return intent, nil
 }
 
-// OpenBuyOrder creates a pending buy the user can track while transferring into
-// their standing VA. Supersedes any prior pending buy for the same user so the
-// hub shows one clear awaiting-transfer order. Actual settlement still prices
-// at the live rate when funds land (amount may differ from the quote).
-// Only orders still carrying their MINTED reference are superseded. VA
-// settlement overwrites payment_ref with the provider charge id the moment
-// money is attributed to an order — superseding one of those would cancel an
-// order a payment is already landing against.
+// OpenBuyOrder creates a pending buy the user can track while transferring.
+// Actual settlement still prices at the live rate when funds land (amount may
+// differ from the quote).
+//
+// ONE open MCGP buy per user, and an existing one is never superseded. It used
+// to be: the prior order was cancelled so the hub showed one clear order. But
+// the user may already be paying the first one, and under central-account
+// attribution a transfer for its amount then matched no open claim and held
+// for an operator. So a second order is refused with ITBuyOrderOpenError, which
+// names the open order for the app to route to; the user cancels it (CancelBuy)
+// if they really meant to start over. The partial unique index
+// uq_it_intents_open_mcgp_buy backs the check against a double tap.
 //
 // The ask is snapped to WHOLE NAIRA before the intent is minted (design §5.4).
 // Under central-account attribution the amount is half the evidence of who
@@ -425,55 +429,74 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 // every single time. Rounding here rather than at the comparison also means the
 // user is only ever shown a figure they can actually transfer.
 func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string) (*models.ITIntent, error) {
-	// Ahead of the supersede UPDATE below, not after it: a refused user must
-	// keep whatever order they already have. Cancelling it on the way to a
-	// refusal would close an order they may already have transferred into.
+	// First, so a refused user writes nothing — not even the stale-order sweep.
 	if err := requireVerifiedForMoneyIn(ctx, s.db, userID); err != nil {
 		return nil, err
 	}
 	ngnKobo = wholeNairaKobo(ngnKobo)
-	_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("user_id = ? AND direction = ? AND status = ? AND payment_ref LIKE ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment, mintedRefPrefix+"%").
-		Updates(map[string]any{
-			"status":         models.ITStatusCancelled,
-			"failure_reason": "superseded by new buy order",
-		}).Error
-	return s.CreateBuyIntent(ctx, userID, walletAddr, ngnKobo, nil)
+
+	// Retire this user's own abandoned order before counting: past the claim
+	// window it can no longer be paid into, so it must not wedge them out of
+	// buying until the hourly sweep reaches it.
+	if _, err := s.expireStaleBuyOrders(ctx, &userID); err != nil {
+		return nil, err
+	}
+	open, err := s.openMCGPBuyOrder(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if open != nil {
+		return nil, &ITBuyOrderOpenError{Intent: open}
+	}
+
+	intent, err := s.CreateBuyIntent(ctx, userID, walletAddr, ngnKobo, nil)
+	if err != nil && isUniqueViolation(err) {
+		// A concurrent request (a double tap) won between the check above and
+		// this insert, and the partial unique index refused the loser. Report
+		// the winner's order, exactly as if this request had arrived second.
+		if winner, lookupErr := s.openMCGPBuyOrder(ctx, userID); lookupErr == nil && winner != nil {
+			return nil, &ITBuyOrderOpenError{Intent: winner}
+		}
+	}
+	return intent, err
 }
 
 // ExpireStaleBuyOrders cancels unpaid MCGP buy orders past buyOrderClaimWindow,
 // and reports how many it closed.
 //
 // The window already stops such an order from claiming a payment (see
-// AutoCreditFromVA). Without this sweep it merely stops mattering: nothing else
-// closes one — OpenBuyOrder supersedes only when the user opens another MCGP
-// buy, and this leg has no user-facing cancel — so the row sits in the hub
-// reading "awaiting transfer" indefinitely while the settle path ignores it.
-// Telling the user it is closed is the honest end state.
+// AutoCreditFromVA). Without this sweep it merely stops mattering: an order
+// the user walks away from without cancelling sits in the hub reading
+// "awaiting transfer" indefinitely while the settle path ignores it. Telling
+// the user it is closed is the honest end state.
 //
-// Two guards, both load-bearing:
+// Scoped by scopeOpenMCGPBuys, and both of its guards are load-bearing here:
 //
-//	The MINTED-ref filter is the same one OpenBuyOrder uses, for the same
-//	reason. Settlement overwrites payment_ref with the provider charge id the
-//	moment money is attributed, so a row without its minted ref has real money
-//	against it and must never be cancelled on age.
+//	The MINTED-ref filter. Settlement overwrites payment_ref with the provider
+//	charge id the moment money is attributed, so a row without its minted ref
+//	has real money against it and must never be cancelled on age.
 //
-//	MCGP only. Stablecoin purchases have a user-facing cancel, a resume view
-//	and the one-open-purchase rule, so a stale one is both visible and
-//	clearable; sweeping them here would close orders out from under that flow.
+//	MCGP only. Stablecoin purchases have their own expiry
+//	(expireStaleStableBuys); sweeping them here would close orders out from
+//	under that flow.
 //
 // Idempotent: a converged state cancels nothing and returns 0.
 func (s *ITService) ExpireStaleBuyOrders(ctx context.Context) (int64, error) {
-	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?) "+
-			"AND payment_ref LIKE ? AND created_at < ?",
-			models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP,
-			mintedRefPrefix+"%", time.Now().Add(-buyOrderClaimWindow)).
-		Updates(map[string]any{
-			"status":         models.ITStatusCancelled,
-			"failure_reason": "expired unpaid — start a new order to buy",
-		})
+	return s.expireStaleBuyOrders(ctx, nil)
+}
+
+// expireStaleBuyOrders is ExpireStaleBuyOrders, optionally for one user only —
+// OpenBuyOrder runs it for the caller before applying the one-open-order rule.
+func (s *ITService) expireStaleBuyOrders(ctx context.Context, userID *uuid.UUID) (int64, error) {
+	q := scopeOpenMCGPBuys(s.db.WithContext(ctx).Model(&models.ITIntent{})).
+		Where("created_at < ?", time.Now().Add(-buyOrderClaimWindow))
+	if userID != nil {
+		q = q.Where("user_id = ?", *userID)
+	}
+	res := q.Updates(map[string]any{
+		"status":         models.ITStatusCancelled,
+		"failure_reason": "expired unpaid — start a new order to buy",
+	})
 	if res.Error != nil {
 		return 0, res.Error
 	}

@@ -63,6 +63,9 @@ func newITTestService(t *testing.T) *ITService {
 	// of the baseline fixture now — without it the gate fails on a missing
 	// table and reads as an implementation bug rather than a fixture gap.
 	createTestUsersTable(t, db)
+	// Cancelling a buy reads inbound_credits (the late-payment guard) and fails
+	// closed without it.
+	createInboundCreditsTable(t, db)
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
 	swap.SetOperatorSigner(&fakeReleaseSigner{addr: "0x000000000000000000000000000000000000A11CE", hash: "0xdead"})
 	svc := NewITService(db, swap, stubFx{ngn: 1500}) // FX = ₦1500/$
@@ -404,7 +407,7 @@ func TestCreateSellIntent_NilBankLeavesDestinationEmpty(t *testing.T) {
 	}
 }
 
-func TestOpenBuyOrder_WorksWithoutPMAndSupersedesPrior(t *testing.T) {
+func TestOpenBuyOrder_WorksWithoutPMAndKeepsPrior(t *testing.T) {
 	s := newITTestService(t)
 	ctx := context.Background()
 	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil {
@@ -416,18 +419,16 @@ func TestOpenBuyOrder_WorksWithoutPMAndSupersedesPrior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open buy without PM: %v", err)
 	}
-	second, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "2000")
-	if err != nil {
-		t.Fatalf("open second buy: %v", err)
+	// A second order is refused rather than superseding the first, which the
+	// user may already be paying into.
+	if _, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "2000"); !errors.Is(err, ErrITBuyOrderOpen) {
+		t.Fatalf("open second buy = %v, want ErrITBuyOrderOpen", err)
 	}
 	var prior models.ITIntent
 	if err := s.db.First(&prior, "id = ?", first.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if prior.Status != models.ITStatusCancelled {
-		t.Fatalf("prior status = %s, want cancelled", prior.Status)
-	}
-	if second.Status != models.ITStatusPendingPayment || second.NgnKobo != "2000" {
-		t.Fatalf("second = %+v", second)
+	if prior.Status != models.ITStatusPendingPayment {
+		t.Fatalf("prior status = %s, want pending_payment", prior.Status)
 	}
 }

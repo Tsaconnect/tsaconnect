@@ -90,8 +90,21 @@ func (c CentralAccount) PayerInstruction(verifiedLegalName string) string {
 // generic "in your own name" wording rather than failing the pay-into screen.
 // Only the user id and the error are logged, never the name.
 func VerifiedLegalNameOf(ctx context.Context, db *gorm.DB, userID uuid.UUID) string {
-	if db == nil || userID == uuid.Nil {
+	name, err := verifiedLegalName(ctx, db, userID)
+	if err != nil {
+		log.Printf("[payer instruction] legal name lookup failed for user=%s: %v", userID, err)
 		return ""
+	}
+	return name
+}
+
+// verifiedLegalName is the strict read under VerifiedLegalNameOf: a lookup that
+// failed is an error, not an empty name. Callers that REFUSE on a name match
+// (the buy-cancel late-payment guard) must not read "could not look" as "no
+// name on file".
+func verifiedLegalName(ctx context.Context, db *gorm.DB, userID uuid.UUID) (string, error) {
+	if db == nil || userID == uuid.Nil {
+		return "", nil
 	}
 	var row struct{ VerifiedLegalName sql.NullString }
 	// Table("users") rather than the model, as requireVerifiedForMoneyIn does:
@@ -101,10 +114,9 @@ func VerifiedLegalNameOf(ctx context.Context, db *gorm.DB, userID uuid.UUID) str
 		Where("id = ?", userID).
 		Limit(1).
 		Scan(&row).Error; err != nil {
-		log.Printf("[payer instruction] legal name lookup failed for user=%s: %v", userID, err)
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(row.VerifiedLegalName.String)
+	return strings.TrimSpace(row.VerifiedLegalName.String), nil
 }
 
 // VerifiedLegalName is VerifiedLegalNameOf against the IT service's database.

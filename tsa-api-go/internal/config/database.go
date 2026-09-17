@@ -432,6 +432,27 @@ func AutoMigrate() error {
 	    WHERE direction = 'buy' AND status = 'pending_payment'
 	      AND asset IN ('USDC','USDT')`)
 
+	// IT MCGP-buy "one open order per user": OpenBuyOrder no longer supersedes
+	// a prior order (that made the order the user was paying vanish, and in
+	// central mode held their transfer), it refuses. Its check-then-create is
+	// not atomic, so a double tap must fail here and is reported as the same
+	// refusal. The predicate is services.scopeOpenMCGPBuys in SQL — change them
+	// together.
+	//
+	// Additive, and NON-FATAL on existing data: the previous release
+	// superseded before inserting, but a race there could still leave one user
+	// with two open orders, and then the build fails. That must not stop the
+	// migration — the application-level check still refuses a second order,
+	// only the double-tap backstop is missing. Cancel the older duplicate(s)
+	// and the next migrate builds it.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_mcgp_buy
+	    ON it_intents (user_id)
+	    WHERE direction = 'buy' AND status = 'pending_payment'
+	      AND (asset IS NULL OR asset = '' OR asset = 'MCGP')
+	      AND payment_ref LIKE 'IT-%'`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_it_intents_open_mcgp_buy: %v — it_intents most likely holds a user with MORE THAN ONE open MCGP buy order (direction=buy, status=pending_payment, MCGP/empty asset, payment_ref LIKE 'IT-%%'). The one-open-order check still runs, but a double tap can mint a second order until the older duplicate(s) are cancelled and migrate is re-run.", err)
+	}
+
 	// Ramp treasury refund — "at most one refund IN FLIGHT per order": the
 	// existing (order_id, kind, attempt) unique index only rejects two callers
 	// landing on the SAME attempt number, and Reserve's read-then-decide

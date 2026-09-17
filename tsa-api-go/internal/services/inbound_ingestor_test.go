@@ -36,6 +36,15 @@ func setupInboundDB(t *testing.T) *gorm.DB {
 		t.Fatalf("sql db: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
+	createInboundCreditsTable(t, db)
+	return db
+}
+
+// createInboundCreditsTable is the inbound_credits DDL on its own, so a rig
+// built for something else (the IT service's buy-cancel guard reads this
+// table) gets exactly the same shape as the ingestor's.
+func createInboundCreditsTable(t *testing.T, db *gorm.DB) {
+	t.Helper()
 	if err := db.Exec(`CREATE TABLE inbound_credits (
 		id TEXT PRIMARY KEY,
 		provider TEXT NOT NULL,
@@ -67,7 +76,6 @@ func setupInboundDB(t *testing.T) *gorm.DB {
 		ON inbound_credits (provider_ref)`).Error; err != nil {
 		t.Fatalf("index ddl: %v", err)
 	}
-	return db
 }
 
 // fakeStatementSource replays a fixed statement page, counting fetches.

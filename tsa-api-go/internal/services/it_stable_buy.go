@@ -438,47 +438,14 @@ func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID)
 		}).Error
 }
 
-// CancelStableBuy lets a user abandon their own stablecoin buy before money
-// lands. This is the self-service exit ErrStableBuyAlreadyOpen otherwise
-// wedges a user behind, and — together with stableBuyClaimWindow in
-// it_stable_buy_settle.go — closes the hazard of an abandoned intent sitting
-// in pending_payment indefinitely and later hijacking an unrelated payment
-// from the same user (including a plain MCGP purchase).
-//
-// Refuses anything not owned by userID (ErrStableIntentNotFound, never
-// leaking that a differently-owned intent exists) and anything not still
-// pending_payment (ErrITBadState) — once money may have landed, cancelling
-// would either strand a payment mid-flight or silently un-claim one that
-// already settled.
+// CancelStableBuy is the stablecoin-only form of CancelBuy, kept for the
+// POST /api/it/stable/buy/:id/cancel route older app builds call. It refuses an
+// MCGP order (ErrITBadState) so that route keeps meaning what its path says;
+// everything else — ownership, the status CAS, the late-payment guard — is
+// CancelBuy's.
 func (s *ITService) CancelStableBuy(ctx context.Context, userID, intentID uuid.UUID) error {
-	intent, err := s.getIntentForUser(ctx, userID, intentID)
-	if err != nil {
-		return err
-	}
-	// Scoped to stablecoin, matching the endpoint's name: an MCGP buy has its
-	// own lifecycle (OpenBuyOrder supersedes the prior one on a new order) and
-	// no reason to gain a second cancel path here.
-	if !IsStableAsset(intent.Asset) || intent.Status != models.ITStatusPendingPayment {
-		return ErrITBadState
-	}
-	// Status-guarded, same pattern as the settle claim: a charge landing in
-	// the same instant must win, not this cancel.
-	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ?", intent.ID, models.ITStatusPendingPayment).
-		Updates(map[string]any{
-			"status":         models.ITStatusCancelled,
-			"failure_reason": "cancelled by user",
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		// Lost the race to a charge claiming it — no longer cancellable is not
-		// an error from the caller's point of view worth surfacing as one, but
-		// it is also not a lie: the intent genuinely isn't pending anymore.
-		return ErrITBadState
-	}
-	return nil
+	_, err := s.cancelBuy(ctx, userID, intentID, true)
+	return err
 }
 
 // itBuyConversionRef mints the reference for a buy's NGN→asset conversion.
