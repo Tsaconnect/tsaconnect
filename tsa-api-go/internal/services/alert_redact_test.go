@@ -50,6 +50,26 @@ func TestRedactAlertText(t *testing.T) {
 			secrets: []string{"shh123", "k-999", "=pw"},
 		},
 		{
+			// fwError falls back to the raw provider body, which is JSON: the
+			// quote between name and colon kept every JSON credential out of
+			// reach of the key=value rule.
+			name:    "credentials in a JSON provider body",
+			in:      `flutterwave token: HTTP 401: {"status":"error","secret_key":"FLWSECK-abc123def456","access_token": "tok-777","client_secret":"cs-888","private_key":"pk-999"}`,
+			secrets: []string{"FLWSECK-abc123def456", "tok-777", "cs-888", "pk-999"},
+			// "token: HTTP" reads as a credential named token, so "HTTP" goes.
+			// Deliberate: `api_key: k-999` has the same shape and must redact,
+			// and a lost word costs less than a leaked key.
+			keep: []string{"401", "status"},
+		},
+		{
+			// A Flutterwave secret key has a recognisable prefix; redact it
+			// wherever it appears, not only beside a name we thought of.
+			name:    "Flutterwave secret key with no field name",
+			in:      `rejected credential FLWSECK_TEST-1a2b3c4d5e6f-X for merchant`,
+			secrets: []string{"1a2b3c4d5e6f"},
+			keep:    []string{"rejected credential", "for merchant"},
+		},
+		{
 			name:    "raw 32-byte hex, the shape of a private key",
 			in:      `signer 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 rejected`,
 			secrets: []string{"4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"},

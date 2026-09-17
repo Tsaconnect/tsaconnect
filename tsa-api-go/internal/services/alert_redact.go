@@ -31,7 +31,16 @@ var (
 	absoluteURLRE = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
 	bearerRE      = regexp.MustCompile(`(?i)\bbearer\s+[^\s"',;]+`)
 	jwtRE         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*`)
-	credentialRE  = regexp.MustCompile(`(?i)\b(client_secret|access_token|refresh_token|api[_-]?key|secret|token|password|passwd|pwd)\s*[=:]\s*[^\s,;&"']+`)
+	// credentialRE matches a credential-named field in both `name=value` and
+	// JSON `"name": "value"` form. Provider errors fall back to the raw JSON
+	// body, where a quote sits between the name and the colon — without the
+	// optional quotes here every JSON credential passed through untouched.
+	// The name may carry a prefix or suffix (secret_key, private_key,
+	// x-api-key) so compound field names are caught too.
+	credentialRE = regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key)[a-z0-9_-]*)"?\s*[=:]\s*"?[^\s,;&"'}]+`)
+	// flwSecretKeyRE catches a Flutterwave secret key by its own prefix,
+	// wherever it appears and whatever field (if any) carries it.
+	flwSecretKeyRE = regexp.MustCompile(`\bFLWSECK(?:_TEST)?-[A-Za-z0-9-]+`)
 	// hex64RE is the shape of a raw private key. Tx hashes share it and are
 	// lost too; an alert that might carry a key is not worth the hash.
 	hex64RE = regexp.MustCompile(`\b(0x)?[0-9a-fA-F]{64}\b`)
@@ -65,6 +74,7 @@ func RedactAlertText(s string) string {
 	s = RedactURLQueries(s)
 	s = bearerRE.ReplaceAllString(s, "Bearer [redacted]")
 	s = jwtRE.ReplaceAllString(s, "[jwt-redacted]")
+	s = flwSecretKeyRE.ReplaceAllString(s, "[flw-key-redacted]")
 	s = credentialRE.ReplaceAllString(s, "$1=[redacted]")
 	s = hex64RE.ReplaceAllString(s, "[hex-redacted]")
 	s = pgDetailRE.ReplaceAllString(s, ")=([redacted])")

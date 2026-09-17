@@ -184,7 +184,8 @@ Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
   watched and at what threshold.
 - Email goes to `INBOUND_ALERT_EMAILS` through `InboundHoldNotifier` (no new variable; blank = log
   only). Error text passes through `services.RedactAlertText` (URL paths/queries, userinfo,
-  bearer/JWT, key=value credentials, 64-hex, DB constraint values, emails; 500-byte cap) first.
+  bearer/JWT, credentials as `key=value` AND JSON `"key": "value"`, Flutterwave `FLWSECK-` keys,
+  64-hex, DB constraint values, emails; 500-byte cap) first.
 
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
