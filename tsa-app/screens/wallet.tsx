@@ -22,6 +22,7 @@ import {
   Image,
   TextInput,
   FlatList,
+  Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -48,7 +49,7 @@ import {
 } from '../constants/chains';
 import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
-import { loadSolanaWallet } from '../services/chains/solanaWallet';
+import { loadSolanaWallet, switchSolanaDerivation, type SolanaOtherPath } from '../services/chains/solanaWallet';
 import { loadSuiWallet } from '../services/chains/suiWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { type SpotCategory } from '../services/spotApi';
@@ -804,6 +805,7 @@ const WalletScreen: React.FC = () => {
   const [walletList, setWalletList] = useState<WalletMeta[]>([]);
   const [activeLabel, setActiveLabel] = useState('Wallet');
   const [activeAddress, setActiveAddress] = useState('');
+  const [solanaOtherPath, setSolanaOtherPath] = useState<SolanaOtherPath | null>(null);
   const [showWalletSelector, setShowWalletSelector] = useState(false);
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
@@ -1001,12 +1003,14 @@ const WalletScreen: React.FC = () => {
 
   const loadSolanaAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
     const out: WalletAsset[] = [];
-    // Non-EVM (Solana): the Phantom-path address derives from the same seed,
-    // self-registers, and SOL shows as a native token (visible at 0 in the
-    // zero-balance section) so Solana always appears; held SPL tokens (auto-
-    // discovered) ride alongside.
+    // Non-EVM (Solana): the address derives from the same seed (Phantom or
+    // Trust Wallet path, whichever holds the funds), self-registers, and SOL
+    // shows as a native token (visible at 0 in the zero-balance section) so
+    // Solana always appears; held SPL tokens (auto-discovered) ride alongside.
+    setSolanaOtherPath(null);
     try {
       const sol = await loadSolanaWallet(addr || undefined);
+      setSolanaOtherPath(sol?.otherPath ?? null);
       if (sol) {
         const solChain = getChainDisplay('solana');
         let sId = 1;
@@ -1230,6 +1234,35 @@ const WalletScreen: React.FC = () => {
 
   const onRefresh = useCallback(() => fetchBalances(true), [fetchBalances]);
 
+  // Both Solana paths hold funds: the wallet can only show one, so let the user
+  // pick rather than leave the other set invisible.
+  const confirmSolanaSwitch = useCallback(() => {
+    const other = solanaOtherPath;
+    if (!other || other.wallet !== activeAddress) return;
+    const usd = other.balances.reduce((sum, b) => sum + (parseFloat(b.usdValue) || 0), 0);
+    const format = other.derivation === 'trustwallet' ? 'Trust Wallet' : 'standard (Phantom)';
+    Alert.alert(
+      'Switch Solana address?',
+      `Your recovery phrase also holds about $${usd.toFixed(2)} on its ${format} Solana address ` +
+        `(${other.address.slice(0, 4)}…${other.address.slice(-4)}). The app shows one Solana address ` +
+        'at a time. Funds on the address you switch away from stay safe, and you can switch back later.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Switch',
+          onPress: async () => {
+            try {
+              await switchSolanaDerivation(other.wallet, other.derivation);
+            } catch {
+              Alert.alert('Switch failed', 'Check your connection and try again.');
+            }
+            fetchBalances(true);
+          },
+        },
+      ],
+    );
+  }, [solanaOtherPath, activeAddress, fetchBalances]);
+
   const handleSwitchWallet = useCallback(async (address: string) => {
     setShowWalletSelector(false);
     if (address === activeAddress) return;
@@ -1431,6 +1464,18 @@ const WalletScreen: React.FC = () => {
           onQuickAction={handleQuickAction}
           onWalletPress={() => setShowWalletSelector(true)}
         />
+
+        {solanaOtherPath?.wallet === activeAddress && (
+          <AccentCard padding="lg" railColor={colors.warning} style={{ marginTop: spacing.lg }}>
+            <Text variant="bodyMed" weight="600">
+              Funds found on another Solana address
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.md }}>
+              Your recovery phrase holds Solana funds on an address this wallet is not showing.
+            </Text>
+            <Button title="Review" variant="secondary" size="sm" onPress={confirmSolanaSwitch} />
+          </AccentCard>
+        )}
 
         {/* Assets */}
         <AccentCard padding="lg" railColor="transparent" style={{ marginTop: spacing.lg }}>

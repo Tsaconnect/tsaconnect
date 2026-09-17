@@ -63,6 +63,10 @@ export async function registerNonEVMAddress(
   }
 }
 
+// Solana's path resolver waits on balance reads before a send or swap can
+// sign, so a hung request must fail instead of stalling the flow forever.
+const BALANCES_TIMEOUT_MS = 15_000;
+
 /** Fetch native + token balances for a non-EVM address. */
 export async function getNonEVMBalances(
   chainKey: string,
@@ -70,7 +74,17 @@ export async function getNonEVMBalances(
 ): Promise<NonEVMBalance[]> {
   const headers = await getAuthHeaders();
   const qp = new URLSearchParams({ chain: chainKey, address, network: getNetwork() });
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/balances?${qp.toString()}`, { headers });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BALANCES_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}/wallet/nonevm/balances?${qp.toString()}`, {
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const body = await readJson<{ balances?: NonEVMBalance[] }>(res);
   if (!res.ok || !body.data?.balances) {
     throw new Error(body.message || `balances failed (${res.status})`);

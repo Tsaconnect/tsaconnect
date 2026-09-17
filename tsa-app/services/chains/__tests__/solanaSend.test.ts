@@ -1,7 +1,10 @@
 import { sendSolana, prepareSolana } from '../solanaSend';
 
+// Phantom-path address of M (see derivation.test.ts for vector provenance).
+const PHANTOM_ADDR = 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk';
+
 // minimal mocks so the flow can run without real network / native modules.
-// The derivation preference is pinned to 'phantom' so getSolanaSigningKey
+// The derivation preference is pinned to 'phantom' so getSolanaSigner
 // resolves without a balance scan (which would consume the fetch mocks).
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn((key: string) =>
@@ -47,13 +50,22 @@ describe('sendSolana', () => {
     ]);
 
     const res = await sendSolana({
-      from: 'SoLsender', to: 'SoLrecipient', amount: '1000000000', symbol: 'SOL', walletAddress: '0xw',
+      from: PHANTOM_ADDR, to: 'SoLrecipient', amount: '1000000000', symbol: 'SOL', walletAddress: '0xw',
     });
 
     expect(res.txHash).toBe('SoLtxHash123');
     // second call is submit-tx and carries a 64-byte ed25519 signature (128 hex)
     const submitBody = JSON.parse((fetchFn.mock.calls[1][1] as any).body);
     expect(submitBody.sigs[0].sigHex).toMatch(/^[0-9a-f]{128}$/);
+  });
+
+  it('refuses to sign a tx prepared for a different Solana address', async () => {
+    const prepared = { family: 'solana', raw: 'deadbeef', payloads: [{ index: 0, hashHex: 'deadbeef', curve: 'ed25519' }] };
+    const fetchFn = mockFetchOnce([{ ok: true, body: { data: { prepared, fee: { hasEnoughGas: true } } } }]);
+    await expect(
+      sendSolana({ from: 'SoLotherPath', to: 'SoLrecipient', amount: '1', symbol: 'SOL', walletAddress: '0xw' })
+    ).rejects.toThrow('Your Solana address changed');
+    expect(fetchFn).toHaveBeenCalledTimes(1); // never reached submit-tx
   });
 });
 

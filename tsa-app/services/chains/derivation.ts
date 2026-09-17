@@ -152,10 +152,23 @@ function decodeSegwit(addr: string, hrp: string): { version: number; program: Ui
 
 // Solana: ed25519 via SLIP-0010 hardened path → base58 of the 32-byte pubkey.
 export function deriveSolanaAddress(mnemonic: string, derivation: SolanaDerivation = 'phantom'): string {
+  return solanaAddressFromSeed(mnemonicToSeedSync(mnemonic.trim()), derivation);
+}
+
+// Both paths' addresses from ONE seed. mnemonicToSeedSync is 2048 PBKDF2
+// rounds and blocks the JS thread, so the path resolver pays for it once
+// instead of once per path.
+export function deriveSolanaAddresses(mnemonic: string): Record<SolanaDerivation, string> {
   const seed = mnemonicToSeedSync(mnemonic.trim());
+  return {
+    phantom: solanaAddressFromSeed(seed, 'phantom'),
+    trustwallet: solanaAddressFromSeed(seed, 'trustwallet'),
+  };
+}
+
+function solanaAddressFromSeed(seed: Uint8Array, derivation: SolanaDerivation): string {
   const priv = ed25519Slip10(seed, SOLANA_PATHS[derivation]);
-  const pub = ed25519.getPublicKey(priv);
-  return b58EncodeNoCheck(pub);
+  return b58EncodeNoCheck(ed25519.getPublicKey(priv));
 }
 
 // The Solana signing key — the 32-byte ed25519 seed at the Phantom path

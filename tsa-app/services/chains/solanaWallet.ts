@@ -9,7 +9,7 @@
 import { formatUnits } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getActiveWallet, getMnemonic } from '../wallet';
-import { deriveSolanaAddress, deriveSolanaPrivateKey, type SolanaDerivation } from './derivation';
+import { deriveSolanaAddresses, deriveSolanaPrivateKey, type SolanaDerivation } from './derivation';
 import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
 import { NONEVM_CHAINS } from '../../constants/chains';
 import { getNetwork } from '../../hooks/useNetwork';
@@ -18,50 +18,82 @@ import type { WalletBalanceWithChain } from '../walletApi';
 const SOLANA_KEY = 'solana';
 const derivationPrefKey = (wallet: string) => `tsa-solana-derivation-${wallet}`;
 
-type Resolved = { derivation: SolanaDerivation; address: string };
+/**
+ * `settled` is false for a stand-in answer (pref unreadable, scan failed, or
+ * the network changed mid-scan). A stand-in must never be registered with the
+ * backend or signed with: the backend keeps ONE Solana address per wallet and
+ * delivers stablecoin buys to it, so registering a guess would route a user's
+ * funds to the path the app is about to stop showing.
+ */
+type Resolved = { derivation: SolanaDerivation; address: string; settled: boolean };
 
-// resolvedCache memoizes only durable decisions (stored or freshly persisted)
-// so a backend-down fallback keeps retrying the scan on later calls.
-// phantomDefaults memoizes the pure standard-path derivation for those
-// fallbacks (mnemonicToSeedSync is ~2048 PBKDF2 rounds per call).
+const otherPathOf = (d: SolanaDerivation): SolanaDerivation => (d === 'phantom' ? 'trustwallet' : 'phantom');
+
+// Public addresses only, one seed derivation per wallet per session.
+const addressCache = new Map<string, Record<SolanaDerivation, string>>();
+// Only persisted decisions, so a stand-in answer keeps retrying the scan.
 const resolvedCache = new Map<string, Resolved>();
-const phantomDefaults = new Map<string, Resolved>();
 const inFlight = new Map<string, Promise<Resolved>>();
-// Wallets whose OTHER path was already probed this session (see loadSolanaWallet).
-const otherPathProbed = new Set<string>();
+// The other-path probe runs once per session; its finding is kept so every
+// reload in that session reports the same notice.
+const otherPathFindings = new Map<string, SolanaOtherPath | null>();
+// Bumped by forgetSolanaDerivation so a scan that outlives its wallet can't
+// persist a decision for it afterwards.
+const epochs = new Map<string, number>();
+const epochOf = (wallet: string) => epochs.get(wallet) ?? 0;
 
-/** Test hook: forget all resolved derivations and probe throttles. */
+/** Test hook: forget all resolved derivations and probe findings. */
 export function clearSolanaCache(): void {
+  addressCache.clear();
   resolvedCache.clear();
-  phantomDefaults.clear();
   inFlight.clear();
-  otherPathProbed.clear();
+  otherPathFindings.clear();
+  epochs.clear();
 }
 
 /** Drop a wallet's persisted path decision and caches (call on wallet removal). */
 export async function forgetSolanaDerivation(wallet: string): Promise<void> {
+  epochs.set(wallet, epochOf(wallet) + 1);
+  addressCache.delete(wallet);
   resolvedCache.delete(wallet);
-  phantomDefaults.delete(wallet);
-  otherPathProbed.delete(wallet);
+  inFlight.delete(wallet);
+  otherPathFindings.delete(wallet);
   await AsyncStorage.removeItem(derivationPrefKey(wallet)).catch(() => {});
 }
 
+// Stablecoins stay counted when the price feed is down. Their symbol is safe to
+// trust: the backend names only mints in its registry and abbreviates the rest.
+const TRUSTED_UNPRICED = new Set(['USDC', 'USDT']);
+
+/**
+ * Whether a path holds anything worth following. Spam SPL airdrops are common
+ * on Solana and carry no price, so counting them would let an airdrop on one
+ * path outrank real funds on the other.
+ */
 function hasFunds(balances: NonEVMBalance[]): boolean {
   return balances.some((b) => {
+    let raw: bigint;
     try {
-      return BigInt(b.raw || '0') > 0n;
+      raw = BigInt(b.raw || '0');
     } catch {
       return false;
     }
+    if (raw <= 0n) return false;
+    return b.isNative || (b.usdPrice ?? 0) > 0 || TRUSTED_UNPRICED.has(b.symbol);
   });
 }
 
-function phantomDefault(wallet: string, mnemonic: string): Resolved {
-  const hit = phantomDefaults.get(wallet);
+function addressesFor(wallet: string, mnemonic: string): Record<SolanaDerivation, string> {
+  const hit = addressCache.get(wallet);
   if (hit) return hit;
-  const out: Resolved = { derivation: 'phantom', address: deriveSolanaAddress(mnemonic) };
-  phantomDefaults.set(wallet, out);
-  return out;
+  const both = deriveSolanaAddresses(mnemonic);
+  addressCache.set(wallet, both);
+  return both;
+}
+
+function persist(wallet: string, out: Resolved): void {
+  resolvedCache.set(wallet, out);
+  AsyncStorage.setItem(derivationPrefKey(wallet), out.derivation).catch(() => {});
 }
 
 /**
@@ -77,51 +109,51 @@ function resolveDerivation(wallet: string, mnemonic: string): Promise<Resolved> 
   if (hit) return Promise.resolve(hit);
   const pending = inFlight.get(wallet);
   if (pending) return pending;
-  const p = doResolve(wallet, mnemonic).finally(() => inFlight.delete(wallet));
+  const p = doResolve(wallet, mnemonic).finally(() => {
+    if (inFlight.get(wallet) === p) inFlight.delete(wallet);
+  });
   inFlight.set(wallet, p);
   return p;
 }
 
 async function doResolve(wallet: string, mnemonic: string): Promise<Resolved> {
+  const epoch = epochOf(wallet);
+  const addresses = addressesFor(wallet, mnemonic);
+  const standIn: Resolved = { derivation: 'phantom', address: addresses.phantom, settled: false };
+
   let stored: string | null;
   try {
     stored = await AsyncStorage.getItem(derivationPrefKey(wallet));
   } catch {
     // Can't tell whether a decision already exists — don't run a scan that
-    // could overwrite it. Fall back for this call; the next call retries.
-    return phantomDefault(wallet, mnemonic);
+    // could overwrite it. The next call retries.
+    return standIn;
   }
   if (stored === 'phantom' || stored === 'trustwallet') {
-    const out: Resolved = { derivation: stored, address: deriveSolanaAddress(mnemonic, stored) };
-    resolvedCache.set(wallet, out);
+    const out: Resolved = { derivation: stored, address: addresses[stored], settled: true };
+    if (epoch === epochOf(wallet)) resolvedCache.set(wallet, out);
     return out;
   }
 
-  // Only mainnet balances say where the user's real funds are — off mainnet
-  // there is nothing to scan, so default to the standard path (unpersisted).
-  if (getNetwork() !== 'mainnet') return phantomDefault(wallet, mnemonic);
+  // Only mainnet balances say where the user's real funds are. Off mainnet the
+  // standard path is the answer (settled, so devnet sends can register), but it
+  // isn't persisted: the first mainnet load still gets to scan.
+  if (getNetwork() !== 'mainnet') return { ...standIn, settled: true };
 
-  const standard = phantomDefault(wallet, mnemonic);
-  let out = standard;
+  let out: Resolved = { ...standIn, settled: true };
   try {
-    if (!hasFunds(await getNonEVMBalances(SOLANA_KEY, standard.address))) {
-      const legacy = deriveSolanaAddress(mnemonic, 'trustwallet');
-      if (hasFunds(await getNonEVMBalances(SOLANA_KEY, legacy))) {
-        out = { derivation: 'trustwallet', address: legacy };
+    if (!hasFunds(await getNonEVMBalances(SOLANA_KEY, addresses.phantom))) {
+      if (hasFunds(await getNonEVMBalances(SOLANA_KEY, addresses.trustwallet))) {
+        out = { derivation: 'trustwallet', address: addresses.trustwallet, settled: true };
       }
     }
-    // This scan just checked both paths — no point probing again this session.
-    otherPathProbed.add(wallet);
   } catch {
-    // Backend unreachable/dormant — show the standard address for now, but
-    // don't persist or cache so the next call retries the scan.
-    return standard;
+    return standIn;
   }
-  // Re-check the network: a mid-scan toggle means the balances above may mix
-  // mainnet and devnet answers — treat the result as a throwaway fallback.
-  if (getNetwork() !== 'mainnet') return out;
-  resolvedCache.set(wallet, out);
-  AsyncStorage.setItem(derivationPrefKey(wallet), out.derivation).catch(() => {});
+  // A mid-scan network toggle may have mixed mainnet and devnet answers, and a
+  // removed wallet must not get its decision written back.
+  if (getNetwork() !== 'mainnet' || epoch !== epochOf(wallet)) return { ...out, settled: false };
+  persist(wallet, out);
   return out;
 }
 
@@ -150,18 +182,17 @@ export interface SolanaSigner {
  * ONE resolution, so a flow that verifies the address and then signs cannot
  * see the two disagree. Signing with the other path's key would fail
  * verification against the fee-payer pubkey the backend embedded in the
- * message. Returns null when the wallet has no mnemonic.
+ * message. Returns null when the wallet has no mnemonic; throws when the path
+ * isn't settled yet, rather than signing (and registering) a guess.
  */
 export async function getSolanaSigner(walletAddress: string): Promise<SolanaSigner | null> {
   const mnemonic = await getMnemonic(walletAddress);
   if (!mnemonic) return null;
-  const { derivation, address } = await resolveDerivation(walletAddress, mnemonic);
+  const { derivation, address, settled } = await resolveDerivation(walletAddress, mnemonic);
+  if (!settled) {
+    throw new Error("Couldn't confirm your Solana address. Check your connection and try again.");
+  }
   return { address, key: deriveSolanaPrivateKey(mnemonic, derivation) };
-}
-
-/** The signing key alone — see getSolanaSigner for the pairing guarantee. */
-export async function getSolanaSigningKey(walletAddress: string): Promise<string | null> {
-  return (await getSolanaSigner(walletAddress))?.key ?? null;
 }
 
 // Fallback pricing when the backend didn't attach a price: stablecoins pin to
@@ -193,65 +224,105 @@ export async function getSolanaBalances(solAddress: string): Promise<WalletBalan
   return balances.map(toBalanceRow);
 }
 
+/** Funds found on the path the wallet is NOT using, for the UI to offer a switch. */
+export interface SolanaOtherPath {
+  /** The EVM wallet id this finding belongs to. */
+  wallet: string;
+  derivation: SolanaDerivation;
+  address: string;
+  balances: WalletBalanceWithChain[];
+}
+
 /**
- * Self-heal a stale path decision: when the resolved path holds nothing, probe
- * the OTHER path once per session and follow the funds if they're there (e.g.
- * a wallet locked to phantom while empty, funded on the Trust Wallet path
- * later). Only flips when the current path is empty, so nothing visible ever
- * disappears. Returns the new Resolved on a flip, null otherwise.
+ * Check the path the wallet isn't using, once per session on mainnet. Returns
+ * its address and balances when it holds funds, null otherwise. A transient
+ * failure isn't remembered, so a later load retries.
  */
-async function followFundsToOtherPath(wallet: string): Promise<Resolved | null> {
-  if (getNetwork() !== 'mainnet' || otherPathProbed.has(wallet)) return null;
-  otherPathProbed.add(wallet);
-  const mnemonic = await getMnemonic(wallet);
-  if (!mnemonic) return null;
-  const current = await resolveDerivation(wallet, mnemonic);
-  const other: SolanaDerivation = current.derivation === 'phantom' ? 'trustwallet' : 'phantom';
-  const address = deriveSolanaAddress(mnemonic, other);
+async function probeOtherPath(
+  wallet: string,
+  mnemonic: string,
+  current: Resolved,
+): Promise<{ derivation: SolanaDerivation; address: string; raw: NonEVMBalance[] } | null> {
+  if (getNetwork() !== 'mainnet' || otherPathFindings.has(wallet)) return null;
+  const derivation = otherPathOf(current.derivation);
+  const address = addressesFor(wallet, mnemonic)[derivation];
+  let raw: NonEVMBalance[];
   try {
-    if (!hasFunds(await getNonEVMBalances(SOLANA_KEY, address))) return null;
+    raw = await getNonEVMBalances(SOLANA_KEY, address);
   } catch {
-    otherPathProbed.delete(wallet); // transient failure — allow a later retry
     return null;
   }
-  const out: Resolved = { derivation: other, address };
-  resolvedCache.set(wallet, out);
-  AsyncStorage.setItem(derivationPrefKey(wallet), other).catch(() => {});
-  return out;
+  if (!hasFunds(raw)) {
+    otherPathFindings.set(wallet, null);
+    return null;
+  }
+  return { derivation, address, raw };
+}
+
+/**
+ * Move the wallet onto the other derivation path: persist it, re-register the
+ * address with the backend, and forget the session's probe so the path it
+ * leaves is checked again on the next load.
+ */
+export async function switchSolanaDerivation(wallet: string, derivation: SolanaDerivation): Promise<string | null> {
+  const mnemonic = await getMnemonic(wallet);
+  if (!mnemonic) return null;
+  const address = addressesFor(wallet, mnemonic)[derivation];
+  persist(wallet, { derivation, address, settled: true });
+  otherPathFindings.delete(wallet);
+  await registerNonEVMAddress(wallet, SOLANA_KEY, address);
+  return address;
 }
 
 /**
  * Derive the wallet's Solana address, register it with the backend in the
- * background (best-effort), and return the address + balance rows. Returns null
- * when the chain is dormant server-side or no mnemonic is available, so callers
- * can simply skip Solana.
+ * background (best-effort), and return the address + balance rows. When the
+ * resolved path is empty but the other path holds funds, the wallet follows
+ * the funds. When BOTH hold funds, the other path comes back as `otherPath`
+ * so the UI can offer a switch instead of silently hiding it. Returns null
+ * when no mnemonic is available, so callers can simply skip Solana.
  */
 export async function loadSolanaWallet(
   walletAddress?: string
-): Promise<{ address: string; balances: WalletBalanceWithChain[] } | null> {
+): Promise<{ address: string; balances: WalletBalanceWithChain[]; otherPath: SolanaOtherPath | null } | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
-  let address = await getSolanaAddress(wallet);
-  if (!address) return null;
+  const mnemonic = await getMnemonic(wallet);
+  if (!mnemonic) return null;
+  const resolved = await resolveDerivation(wallet, mnemonic);
+  const address = resolved.address;
 
-  registerNonEVMAddress(wallet, SOLANA_KEY, address).catch(() => {
-    /* dormant chain or transient error — reconcile tracking is best-effort */
-  });
+  if (resolved.settled) {
+    registerNonEVMAddress(wallet, SOLANA_KEY, address).catch(() => {
+      /* dormant chain or transient error — reconcile tracking is best-effort */
+    });
+  }
 
+  let raw: NonEVMBalance[];
   try {
-    let raw = await getNonEVMBalances(SOLANA_KEY, address);
-    if (!hasFunds(raw)) {
-      const healed = await followFundsToOtherPath(wallet);
-      if (healed) {
-        address = healed.address;
-        raw = await getNonEVMBalances(SOLANA_KEY, address);
-        registerNonEVMAddress(wallet, SOLANA_KEY, address).catch(() => {});
-      }
-    }
-    return { address, balances: raw.map(toBalanceRow) };
+    raw = await getNonEVMBalances(SOLANA_KEY, address);
   } catch {
     // Chain unavailable (dormant backend) or upstream RPC error — surface the
     // address (receive still works) with no balance rows.
-    return { address, balances: [] };
+    return { address, balances: [], otherPath: null };
   }
+
+  // Probing on top of a stand-in answer would compare against a guess.
+  const probe = resolved.settled ? await probeOtherPath(wallet, mnemonic, resolved) : null;
+  if (probe && !hasFunds(raw)) {
+    // Nothing visible disappears: the current path is empty, the other isn't.
+    persist(wallet, { derivation: probe.derivation, address: probe.address, settled: true });
+    otherPathFindings.set(wallet, null);
+    registerNonEVMAddress(wallet, SOLANA_KEY, probe.address).catch(() => {});
+    return { address: probe.address, balances: probe.raw.map(toBalanceRow), otherPath: null };
+  }
+  if (probe) {
+    otherPathFindings.set(wallet, {
+      wallet,
+      derivation: probe.derivation,
+      address: probe.address,
+      balances: probe.raw.map(toBalanceRow),
+    });
+  }
+  return { address, balances: raw.map(toBalanceRow), otherPath: otherPathFindings.get(wallet) ?? null };
 }
