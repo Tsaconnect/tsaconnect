@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,62 @@ func TestOpenBuyOrder_RefusesWhileAnOrderIsOpenAndNamesIt(t *testing.T) {
 // already have, not a second order. Answer with that order. This is also the
 // only way a build that predates the open-order screen can get back to the
 // pay-into details for it: that build shows the 409 message and nothing else.
+// TestOpenBuyOrder_NeverReachesAnotherUsersOrder pins the user scope on the
+// open-order lookup. Without it, a same-amount request returns someone else's
+// order — its id, its pay-into card, and a claim the matcher credits to them —
+// and a different-amount request is refused over an order the caller cannot
+// see, let alone cancel.
+func TestOpenBuyOrder_NeverReachesAnotherUsersOrder(t *testing.T) {
+	s, ada, _ := newVATestService(t)
+	ctx := context.Background()
+
+	seed := func(name, wallet string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		if err := s.db.Exec(
+			`INSERT INTO users (id, name, email, phone_number, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, name, strings.ToLower(strings.Fields(name)[0])+"@example.com", "0803"+id.String()[:7], wallet,
+			models.VerificationStatusVerified, name,
+		).Error; err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+		return id
+	}
+	bob := seed("Bob Okafor", "0x000000000000000000000000000000000000bEEF")
+	carol := seed("Carol Adeyemi", "0x000000000000000000000000000000000000cAFE")
+
+	adaOrder, err := s.OpenBuyOrder(ctx, ada.ID, ada.WalletAddress, "100000")
+	if err != nil {
+		t.Fatalf("ada opens: %v", err)
+	}
+
+	// Same amount as Ada's open order: Bob must get an order of his own.
+	bobOrder, err := s.OpenBuyOrder(ctx, bob, "0x000000000000000000000000000000000000bEEF", "100000")
+	if err != nil {
+		t.Fatalf("bob opens at ada's amount = %v, want a new order of his own", err)
+	}
+	if bobOrder.ID == adaOrder.ID || bobOrder.UserID != bob {
+		t.Fatalf("bob was handed order %s owned by %s — another user's open order", bobOrder.ID, bobOrder.UserID)
+	}
+
+	// A different amount with no order of her own: Carol must not be refused
+	// over an order that belongs to someone else.
+	carolOrder, err := s.OpenBuyOrder(ctx, carol, "0x000000000000000000000000000000000000cAFE", "200000")
+	if err != nil {
+		t.Fatalf("carol opens = %v, want a new order — she has none open", err)
+	}
+	if carolOrder.UserID != carol {
+		t.Fatalf("carol's order is owned by %s", carolOrder.UserID)
+	}
+
+	// And a refusal only ever names the caller's own order.
+	_, err = s.OpenBuyOrder(ctx, bob, "0x000000000000000000000000000000000000bEEF", "300000")
+	var open *ITBuyOrderOpenError
+	if !errors.As(err, &open) || open.Intent == nil || open.Intent.ID != bobOrder.ID {
+		t.Fatalf("bob's refusal = %v, want it to name his own order %s", err, bobOrder.ID)
+	}
+}
+
 func TestOpenBuyOrder_SameAmountReturnsTheOpenOrder(t *testing.T) {
 	s, user, _ := newVATestService(t)
 	ctx := context.Background()
