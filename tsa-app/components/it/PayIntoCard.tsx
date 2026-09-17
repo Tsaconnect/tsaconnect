@@ -29,7 +29,11 @@ export const PayIntoCard: React.FC<PayIntoCardProps> = ({ payTo }) => {
 
   return (
     <View testID="it-pay-into-card">
-      <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+      <Text
+        variant="bodySm"
+        weight="600"
+        style={{ color: colors.textSecondary, marginBottom: spacing.xs }}
+      >
         Pay into this account
       </Text>
       {payerInstruction ? (
@@ -40,19 +44,27 @@ export const PayIntoCard: React.FC<PayIntoCardProps> = ({ payTo }) => {
       <SummaryCard>
         <SummaryRow label="Bank" value={payTo.bank || '—'} />
         <SummaryRow label="Account name" value={payTo.accountName || '—'} />
-        {exactNaira ? <SummaryRow label="Amount (exactly)" value={`₦${exactNaira}`} /> : null}
+        {exactNaira ? (
+          <SummaryRow label="Amount (exactly)" value={`₦${exactNaira}`} />
+        ) : null}
       </SummaryCard>
       <View style={{ marginTop: spacing.xs }}>
-        <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+        <Text
+          variant="bodySm"
+          weight="600"
+          style={{ color: colors.textSecondary, marginBottom: spacing.xs }}
+        >
           Account number
         </Text>
         <CopyableField value={payTo.accountNumber || ''} />
       </View>
-      <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-        {payerInstruction
-          ? 'Your spendable MCGP appears once your transfer is matched to this order, priced at the live rate and net of transfer fees. Sending a different amount holds your purchase for review.'
-          : 'This is your permanent Instant Transfer account — no reference to type, no expiry. Transfer any Naira amount; your spendable MCGP appears when the payment is confirmed, priced at the live rate and net of transfer fees.'}
-      </Text>
+      {payerInstruction ? null : (
+        <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
+          This is your permanent Instant Transfer account — no reference to type, no expiry. Transfer
+          any Naira amount; your spendable MCGP appears when the payment is confirmed, priced at the
+          live rate and net of transfer fees.
+        </Text>
+      )}
     </View>
   );
 };

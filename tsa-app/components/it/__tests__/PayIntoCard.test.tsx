@@ -65,8 +65,9 @@ describe('PayIntoCard', () => {
     expect(out).toContain('Amount (exactly): ₦12,500');
     expect(out).toContain('copy:0123456789');
     expect(out).toContain('notice:Pay from a bank account named JOHN DOE.');
-    expect(out.join('\n')).toMatch(/Sending a different amount holds your purchase/);
-    expect(out.join('\n')).not.toMatch(/Transfer any Naira amount/);
+    expect(out.join('\n')).not.toMatch(/Transfer any Naira amount|permanent/);
+    // No caption at all — not even an empty one holding space under the card.
+    expect(out).not.toContain('');
   });
 
   it('VA mode: the user’s own account, no amount, no notice', () => {
