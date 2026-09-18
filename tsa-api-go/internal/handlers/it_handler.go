@@ -251,6 +251,123 @@ func (h *ITHandler) QuoteWithdrawal(c *gin.Context) {
 	})
 }
 
+// itPricingUnavailableCode is the machine code for "the live price cannot be
+// computed right now" — a stale or missing NGN rate, or an unpriceable fee. It
+// is transient and nothing has moved, so the app offers a retry that keeps the
+// user's inputs instead of a dead-end failure screen.
+const itPricingUnavailableCode = "it_pricing_unavailable"
+
+// itPricingUnavailableMessage is what the user is told for that state.
+const itPricingUnavailableMessage = "Rates are refreshing — try again in a moment."
+
+// isITPricingUnavailable reports whether err is the transient pricing state
+// (as opposed to something the user must change, like the amount).
+func isITPricingUnavailable(err error) bool {
+	return errors.Is(err, services.ErrITFxUnavailable) ||
+		errors.Is(err, services.ErrITNoRate) ||
+		errors.Is(err, services.ErrITFeeQuoteUnavailable)
+}
+
+// Upper bounds on what GET /api/it/sell/quote will price. Far beyond any real
+// sale (the sell itself is capped by the user's balance), they exist because
+// the amount is caller-controlled: an unbounded integer turns every inverse
+// evaluation into arbitrarily large big-int work and ships absurd amounts to
+// the provider's fee endpoint.
+var (
+	// 1,000,000,000 MCGP.
+	maxSellQuoteMcgpWei = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	// ₦10,000,000,000.
+	maxSellQuoteReceiveKobo = new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
+)
+
+// parseSellQuoteAmount reads a positive integer no larger than max. Length is
+// checked first so a megabyte of digits is never parsed.
+func parseSellQuoteAmount(raw string, max *big.Int) (*big.Int, bool) {
+	if len(raw) > len(max.String()) {
+		return nil, false
+	}
+	v, ok := new(big.Int).SetString(raw, 10)
+	if !ok || v.Sign() <= 0 || v.Cmp(max) > 0 {
+		return nil, false
+	}
+	return v, true
+}
+
+// GET /api/it/sell/quote — prices an MCGP sell before any bank details exist.
+//
+// Exactly one of:
+//
+//	mcgpAmount=<wei>     forward: what selling this much MCGP pays out.
+//	receiveKobo=<kobo>   inverse: the smallest MCGP whose NET payout (after
+//	                     every fee) is at least this much naira.
+//
+// currency is the payout destination's currency (default NGN), which selects
+// the platform fee tier exactly as the sell does.
+//
+// Both directions run the sell's own pricing path (ITService.priceSellAt), so
+// the figures are the ones POST /it/sell would compute at the same rate. They
+// are not locked — the sell re-prices at submit.
+func (h *ITHandler) SellQuote(c *gin.Context) {
+	mcgpRaw := strings.TrimSpace(c.Query("mcgpAmount"))
+	receiveRaw := strings.TrimSpace(c.Query("receiveKobo"))
+	if (mcgpRaw == "") == (receiveRaw == "") {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Provide exactly one of mcgpAmount or receiveKobo")
+		return
+	}
+	currency := strings.ToUpper(strings.TrimSpace(c.DefaultQuery("currency", "NGN")))
+	// The sell screen offers bank payouts only (step 2 filters the catalog to
+	// the bank rail), so that is the set a quote may be asked for. Checked here
+	// because an unknown currency otherwise surfaces from the fee engine as the
+	// retryable "rates are refreshing" 503.
+	if !services.IsSupportedWithdrawalDestination(currency, "bank", "") {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported payout currency")
+		return
+	}
+
+	var (
+		price *services.SellPrice
+		err   error
+		mode  string
+	)
+	if mcgpRaw != "" {
+		mode = "mcgp"
+		wei, ok := parseSellQuoteAmount(mcgpRaw, maxSellQuoteMcgpWei)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei) within the sell limit")
+			return
+		}
+		price, err = h.it.QuoteSell(c.Request.Context(), wei, currency)
+	} else {
+		mode = "receive"
+		kobo, ok := parseSellQuoteAmount(receiveRaw, maxSellQuoteReceiveKobo)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "receiveKobo must be a positive integer (kobo) within the sell limit")
+			return
+		}
+		price, err = h.it.QuoteSellForNet(c.Request.Context(), kobo, currency)
+	}
+	if err != nil {
+		if isITPricingUnavailable(err) {
+			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, itPricingUnavailableMessage, itPricingUnavailableCode)
+			return
+		}
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Sell quote", gin.H{
+		"mode":       mode,
+		"currency":   currency,
+		"mcgpAmount": price.McgpWei.String(),
+		"rateKobo":   price.RateKobo.String(),
+		"grossKobo":  price.Fees.Gross.String(),
+		"feeKobo":    price.Fees.Fee.String(),
+		"netKobo":    price.Fees.Net.String(),
+		// Same shape as GET /api/it/quote's `quote`, so the app renders the
+		// itemized lines with the code it already has.
+		"feeQuote": price.Fees.Lines,
+	})
+}
+
 // GET /api/it/withdraw/destinations — the product catalog of currency/rail
 // (and, for mobile_money, network) combinations IT withdrawal supports.
 // Currently NGN/bank only. The app's destination picker renders only these
@@ -750,6 +867,13 @@ func sellFailureResponse(err error, intent *models.ITIntent) sellOutcome {
 			code:     "it_sell_processing",
 			message:  "Your sale is processing. We're confirming it on-chain and will pay out as soon as it's confirmed.",
 			accepted: true,
+		}
+	case isITPricingUnavailable(err):
+		// Refused before any debit: nothing moved, and it clears on its own.
+		return sellOutcome{
+			status:  http.StatusServiceUnavailable,
+			code:    itPricingUnavailableCode,
+			message: itPricingUnavailableMessage,
 		}
 	default:
 		return sellOutcome{status: http.StatusBadRequest, message: err.Error()}

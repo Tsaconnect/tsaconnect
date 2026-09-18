@@ -287,6 +287,33 @@ export const getITFeeQuote = (params: {
   return req<{ quote: ITFeeQuote }>('GET', `/it/quote?${q.toString()}`);
 };
 
+// Machine code: the live price cannot be computed right now (stale/missing NGN
+// rate or unpriceable fees). Transient and nothing moved — show a retry that
+// keeps the user's inputs, never a dead-end failure.
+export const IT_PRICING_UNAVAILABLE = 'it_pricing_unavailable';
+
+// GET /api/it/sell/quote — the MCGP sell priced by the sell's own server path.
+export interface ITSellQuote {
+  mode: 'mcgp' | 'receive';
+  currency: string;
+  mcgpAmount: string; // wei
+  rateKobo: string;
+  grossKobo: string;
+  feeKobo: string;
+  netKobo: string; // what lands in the bank — exact, not an estimate
+  feeQuote: ITFeeQuote;
+}
+
+// Exactly one of mcgpAmount (wei: "what does selling this pay?") or
+// receiveKobo ("the smallest MCGP that pays this much after fees").
+export const getITSellQuote = (
+  amount: { mcgpAmount: string } | { receiveKobo: string },
+  currency = 'NGN',
+) => {
+  const q = new URLSearchParams({ ...amount, currency });
+  return req<ITSellQuote>('GET', `/it/sell/quote?${q.toString()}`);
+};
+
 // Optional payout destination for /it/sell. Omit entirely (or leave every
 // field empty) for the legacy NGN manual-payout-queue path — unchanged
 // behavior. When destinationCurrency/railType are set they're validated

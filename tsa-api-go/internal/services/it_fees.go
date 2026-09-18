@@ -69,6 +69,9 @@ type ITFeeBreakdown struct {
 	// fee), i.e. the base that funds cashback and TP. Provider fee and tax are
 	// excluded — they are pass-through and remittance respectively.
 	PlatformKept *big.Int
+	// Lines is the itemized engine quote the totals came from, so a preview can
+	// show the same platform / provider / tax / swap lines the deduction used.
+	Lines *FeeQuote
 }
 
 // quoteITFees prices one IT leg. flow is FeeFlowWithdraw for a sell (naira
@@ -117,6 +120,7 @@ func (s *ITService) quoteITFees(ctx context.Context, flow FeeFlow, grossKobo *bi
 		Fee:          new(big.Int).Set(q.TotalFees.Minor),
 		Net:          new(big.Int).Set(q.NetAmount.Minor),
 		PlatformKept: kept,
+		Lines:        q,
 	}, nil
 }
 
