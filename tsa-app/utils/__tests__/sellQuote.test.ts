@@ -15,6 +15,11 @@ import {
   isMobileMoneyDestinationComplete,
   isDestinationReadyToSubmit,
   mcgpAmountToNgn,
+  sellQuoteRequest,
+  exceedsSpendable,
+  formatKobo,
+  formatMcgp,
+  sellQuoteMoved,
   WithdrawDestination,
   WithdrawQuote,
 } from '@/utils/sellQuote';
@@ -194,5 +199,83 @@ describe('isDestinationReadyToSubmit', () => {
     expect(
       isDestinationReadyToSubmit(CATALOG[2], { mobileCountry: 'SN', mobileMsisdn: '221771234567' }),
     ).toBe(true);
+  });
+});
+
+// ─── Two-step MCGP sell (amount → payout) ─────────────────────────────────
+
+describe('sellQuoteRequest', () => {
+  it('turns an MCGP amount into exact wei', () => {
+    expect(sellQuoteRequest('mcgp', '1.5')).toEqual({ ok: true, mcgpAmount: '1500000000000000000' });
+  });
+  it('turns a naira amount into kobo without float drift', () => {
+    expect(sellQuoteRequest('ngn', '50000')).toEqual({ ok: true, receiveKobo: '5000000' });
+    // 0.1 + 0.2 style drift would give 1000.2999… → 100029
+    expect(sellQuoteRequest('ngn', '1000.30')).toEqual({ ok: true, receiveKobo: '100030' });
+  });
+  it('is silent for an empty or zero entry', () => {
+    expect(sellQuoteRequest('mcgp', '')).toEqual({ ok: false, error: null });
+    expect(sellQuoteRequest('ngn', '0')).toEqual({ ok: false, error: null });
+    expect(sellQuoteRequest('ngn', '.')).toEqual({ ok: false, error: null });
+  });
+  it('refuses sub-kobo naira instead of rounding it', () => {
+    const r = sellQuoteRequest('ngn', '100.555');
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toMatch(/2 decimal/);
+  });
+});
+
+describe('exceedsSpendable', () => {
+  const spendable = '5000000000000000000'; // 5 MCGP
+  it('allows exactly the spendable balance', () => {
+    expect(exceedsSpendable('5000000000000000000', spendable)).toBe(false);
+  });
+  it('refuses one wei over', () => {
+    expect(exceedsSpendable('5000000000000000001', spendable)).toBe(true);
+  });
+  it('fails closed on an unreadable figure', () => {
+    expect(exceedsSpendable('abc', spendable)).toBe(true);
+    expect(exceedsSpendable('1', '')).toBe(true);
+  });
+});
+
+describe('formatKobo', () => {
+  it('renders kobo as grouped naira with two decimals', () => {
+    expect(formatKobo('5000000')).toBe('₦50,000.00');
+    expect(formatKobo('12345678905')).toBe('₦123,456,789.05');
+    expect(formatKobo('7')).toBe('₦0.07');
+  });
+  it('shows a dash for nothing usable', () => {
+    expect(formatKobo('')).toBe('—');
+  });
+});
+
+describe('formatMcgp', () => {
+  it('rounds UP so the amount leaving the wallet is never understated', () => {
+    expect(formatMcgp('1754385964912280702')).toBe('1.754386');
+    expect(formatMcgp('1000000000000000001')).toBe('1.000001');
+  });
+  it('trims trailing zeros and groups thousands', () => {
+    expect(formatMcgp('1754000000000000000000')).toBe('1,754');
+    expect(formatMcgp('1500000000000000000')).toBe('1.5');
+  });
+});
+
+describe('sellQuoteMoved', () => {
+  const quoted = { mcgpAmount: '100', netKobo: '5000000' };
+  it('is null when nothing moved', () => {
+    expect(sellQuoteMoved(quoted, { ...quoted })).toBeNull();
+  });
+  it('names the new payout when the receive figure moved', () => {
+    expect(sellQuoteMoved(quoted, { mcgpAmount: '100', netKobo: '4990000' })).toBe(
+      'The rate moved: you now receive ₦49,900.00 (was ₦50,000.00).',
+    );
+  });
+  it('names the new MCGP when only the amount sold moved', () => {
+    const msg = sellQuoteMoved(
+      { mcgpAmount: '1000000000000000000', netKobo: '5000000' },
+      { mcgpAmount: '1100000000000000000', netKobo: '5000000' },
+    );
+    expect(msg).toBe('The rate moved: you now sell 1.1 MCGP (was 1 MCGP) to receive ₦50,000.00.');
   });
 });
