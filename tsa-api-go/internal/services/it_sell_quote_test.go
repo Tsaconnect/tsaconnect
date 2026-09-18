@@ -271,3 +271,18 @@ func TestQuoteSellForNet_FewFeeCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestQuoteSellForNet_BelowFloorCostsNoFeeCalls: a request under the payout
+// floor can never be paid, so it is refused before any (possibly live) fee
+// lookup rather than after a full search.
+func TestQuoteSellForNet_BelowFloorCostsNoFeeCalls(t *testing.T) {
+	s := newSellQuoteService(t)
+	counter := &countingFees{inner: feeQuoterForTest()}
+	s.SetFeeQuoter(counter)
+	if _, err := s.QuoteSellForNet(context.Background(), big.NewInt(defaultMinSellNgnKobo/2), ""); err == nil {
+		t.Fatal("below-floor request quoted")
+	}
+	if counter.calls != 0 {
+		t.Fatalf("%d fee lookups for a request that can never be paid", counter.calls)
+	}
+}

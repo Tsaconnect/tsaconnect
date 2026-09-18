@@ -203,6 +203,10 @@ export default function ITSell() {
   const [spendable, setSpendable] = useState<string | null>(null); // wei, bought + credited
   const [balanceError, setBalanceError] = useState(false);
   const [quote, setQuote] = useState<ITSellQuote | null>(null);
+  // Which request (amount + unit + payout currency) `quote` answers. Continue
+  // requires it to match what is on screen right now, so a quote can never be
+  // carried forward for an amount the user has since edited.
+  const [quotedKey, setQuotedKey] = useState('');
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteRetry, setQuoteRetry] = useState<string | null>(null);
@@ -296,6 +300,7 @@ export default function ITSell() {
   }, []);
 
   const request = useMemo(() => sellQuoteRequest(mode, amount), [mode, amount]);
+  const requestKey = `${JSON.stringify(quoteParams(request))}|${payoutCurrency}`;
 
   // Live quote while the user types. Only the latest request may land.
   useEffect(() => {
@@ -316,6 +321,7 @@ export default function ITSell() {
       setQuoting(false);
       if (r.success && r.data) {
         setQuote(r.data);
+        setQuotedKey(`${JSON.stringify(params)}|${payoutCurrency}`);
         setQuoteError(null);
         setQuoteRetry(null);
         return;
@@ -334,7 +340,8 @@ export default function ITSell() {
 
   const overBalance = !!quote && (spendable == null || exceedsSpendable(quote.mcgpAmount, spendable));
   const quoteMatchesMode = !!quote && (quote.mode === 'receive') === (mode === 'ngn');
-  const canContinue = !!quote && quoteMatchesMode && !quoting && !overBalance && request.ok;
+  const canContinue =
+    !!quote && quoteMatchesMode && quotedKey === requestKey && !quoting && !overBalance && request.ok;
 
   const currencyLabel =
     currencyOptions.find((o) => o.id === payoutCurrency)?.label ?? currencyLabelFor(payoutCurrency);
