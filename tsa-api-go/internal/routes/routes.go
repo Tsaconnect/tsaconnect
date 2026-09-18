@@ -453,16 +453,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// app's usage (a wallet load fires a handful) but caps abuse well under
 		// the gateway budget. Registration/prepare/submit are naturally bounded
 		// by user action and keep the global IP limiter only.
-		nonEVMReadLimit := middleware.RateLimiterBy(60, time.Minute, func(c *gin.Context) string {
-			v, _ := c.Get("user")
-			switch u := v.(type) {
-			case models.User:
-				return "nonevm:" + u.ID.String()
-			case *models.User:
-				return "nonevm:" + u.ID.String()
-			}
-			return "" // falls back to client IP inside RateLimiterBy
-		})
+		nonEVMReadLimit := middleware.RateLimiterBy(60, time.Minute, perUserRateKey)
 		walletGroup.POST("/nonevm/register", h.RegisterNonEVMAddress)
 		walletGroup.GET("/nonevm/balances", nonEVMReadLimit, h.GetNonEVMBalances)
 		walletGroup.POST("/nonevm/prepare-tx", h.PrepareNonEVMTx)
@@ -926,16 +917,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// single account can otherwise loop failing creates and burn
 				// provider quota for everyone. Ten a minute is far above any
 				// real user's pace. Mirrors the dispute and bill write limits.
-				paycrestWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
-					v, _ := c.Get("user")
-					switch u := v.(type) {
-					case models.User:
-						return "paycrest:" + u.ID.String()
-					case *models.User:
-						return "paycrest:" + u.ID.String()
-					}
-					return "" // falls back to client IP inside RateLimiterBy
-				})
+				paycrestWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
 				pc.POST("/buy", itIdem, paycrestWriteLimit, pch.Buy)
 				pc.POST("/sell", itIdem, paycrestWriteLimit, pch.Sell)
 				pc.GET("/orders", pch.ListOrders)
@@ -966,16 +948,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// nothing bounds the RATE of attempts, and each carries up to four
 			// URLs and a kilobyte of text. The bills report route this
 			// supersedes was rate limited; keep that.
-			disputeWriteLimit := middleware.RateLimiterBy(10, time.Minute, func(c *gin.Context) string {
-				v, _ := c.Get("user")
-				switch u := v.(type) {
-				case models.User:
-					return "dispute:" + u.ID.String()
-				case *models.User:
-					return "dispute:" + u.ID.String()
-				}
-				return "dispute:" + c.ClientIP()
-			})
+			disputeWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
 			d := api.Group("/disputes")
 			d.Use(auth)
 			{
@@ -1014,6 +987,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			}
 		}
 
+		// The sell quote is priced live as the user types, and one naira-mode
+		// quote runs a dozen fee evaluations — each a possible Flutterwave /fees
+		// call — so it is limited per user, not only by the global IP limiter.
+		// 30/min is several times a typing user's debounced pace.
+		sellQuoteLimit := middleware.RateLimiterBy(30, time.Minute, perUserRateKey)
 		it := api.Group("/it")
 		it.Use(auth)
 		{
@@ -1029,7 +1007,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			it.POST("/buy", itIdem, ith.Buy)
 			it.POST("/buy/:id/cancel", itIdem, ith.PostCancelBuy)
 			it.POST("/buy/:id/check-payment", ith.PostCheckBuyPayment)
-			it.GET("/sell/quote", ith.SellQuote)
+			it.GET("/sell/quote", sellQuoteLimit, ith.SellQuote)
 			it.POST("/sell", itIdem, ith.Sell)
 			it.GET("/intents", ith.ListIntents)
 			it.GET("/intents/:id", ith.GetIntent)
@@ -1081,16 +1059,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// write rows. The global IP limiter is weak cover here: mobile users
 		// share carrier NAT IPs, and /validate is a name-lookup oracle for
 		// meter/smartcard numbers if left open to enumeration.
-		billWriteLimit := middleware.RateLimiterBy(20, time.Minute, func(c *gin.Context) string {
-			v, _ := c.Get("user")
-			switch u := v.(type) {
-			case models.User:
-				return "bills:" + u.ID.String()
-			case *models.User:
-				return "bills:" + u.ID.String()
-			}
-			return "" // falls back to client IP inside RateLimiterBy
-		})
+		billWriteLimit := middleware.RateLimiterBy(20, time.Minute, perUserRateKey)
 		{
 			bills.GET("/catalog/:category", bh.GetProviders)
 			bills.GET("/catalog/:category/:provider/plans", bh.GetPlans)
@@ -1156,4 +1125,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superInbound.POST("/credits/:id/ignore", iah.MarkIgnored)
 		}
 	}
+}
+
+// perUserRateKey keys a per-route limiter on the authenticated user, so users
+// behind one carrier NAT do not share a budget. Each RateLimiterBy owns its own
+// store, so the key needs no route prefix. "" (no user on the context) makes
+// RateLimiterBy fall back to the client IP.
+func perUserRateKey(c *gin.Context) string {
+	v, _ := c.Get("user")
+	switch u := v.(type) {
+	case models.User:
+		return u.ID.String()
+	case *models.User:
+		return u.ID.String()
+	}
+	return ""
 }

@@ -268,6 +268,31 @@ func isITPricingUnavailable(err error) bool {
 		errors.Is(err, services.ErrITFeeQuoteUnavailable)
 }
 
+// Upper bounds on what GET /api/it/sell/quote will price. Far beyond any real
+// sale (the sell itself is capped by the user's balance), they exist because
+// the amount is caller-controlled: an unbounded integer turns every inverse
+// evaluation into arbitrarily large big-int work and ships absurd amounts to
+// the provider's fee endpoint.
+var (
+	// 1,000,000,000 MCGP.
+	maxSellQuoteMcgpWei = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	// ₦10,000,000,000.
+	maxSellQuoteReceiveKobo = new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
+)
+
+// parseSellQuoteAmount reads a positive integer no larger than max. Length is
+// checked first so a megabyte of digits is never parsed.
+func parseSellQuoteAmount(raw string, max *big.Int) (*big.Int, bool) {
+	if len(raw) > len(max.String()) {
+		return nil, false
+	}
+	v, ok := new(big.Int).SetString(raw, 10)
+	if !ok || v.Sign() <= 0 || v.Cmp(max) > 0 {
+		return nil, false
+	}
+	return v, true
+}
+
 // GET /api/it/sell/quote — prices an MCGP sell before any bank details exist.
 //
 // Exactly one of:
@@ -290,6 +315,14 @@ func (h *ITHandler) SellQuote(c *gin.Context) {
 		return
 	}
 	currency := strings.ToUpper(strings.TrimSpace(c.DefaultQuery("currency", "NGN")))
+	// The sell screen offers bank payouts only (step 2 filters the catalog to
+	// the bank rail), so that is the set a quote may be asked for. Checked here
+	// because an unknown currency otherwise surfaces from the fee engine as the
+	// retryable "rates are refreshing" 503.
+	if !services.IsSupportedWithdrawalDestination(currency, "bank", "") {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported payout currency")
+		return
+	}
 
 	var (
 		price *services.SellPrice
@@ -298,17 +331,17 @@ func (h *ITHandler) SellQuote(c *gin.Context) {
 	)
 	if mcgpRaw != "" {
 		mode = "mcgp"
-		wei, ok := new(big.Int).SetString(mcgpRaw, 10)
-		if !ok || wei.Sign() <= 0 {
-			utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei)")
+		wei, ok := parseSellQuoteAmount(mcgpRaw, maxSellQuoteMcgpWei)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei) within the sell limit")
 			return
 		}
 		price, err = h.it.QuoteSell(c.Request.Context(), wei, currency)
 	} else {
 		mode = "receive"
-		kobo, ok := new(big.Int).SetString(receiveRaw, 10)
-		if !ok || kobo.Sign() <= 0 {
-			utils.ErrorResponse(c, http.StatusBadRequest, "receiveKobo must be a positive integer (kobo)")
+		kobo, ok := parseSellQuoteAmount(receiveRaw, maxSellQuoteReceiveKobo)
+		if !ok {
+			utils.ErrorResponse(c, http.StatusBadRequest, "receiveKobo must be a positive integer (kobo) within the sell limit")
 			return
 		}
 		price, err = h.it.QuoteSellForNet(c.Request.Context(), kobo, currency)

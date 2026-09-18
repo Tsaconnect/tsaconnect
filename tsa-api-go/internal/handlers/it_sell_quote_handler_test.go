@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -106,5 +107,47 @@ func TestSellFailureResponse_PricingUnavailable(t *testing.T) {
 		if r.status != http.StatusServiceUnavailable || r.code != itPricingUnavailableCode || r.accepted {
 			t.Errorf("%v → %+v, want 503 %s", err, r, itPricingUnavailableCode)
 		}
+	}
+}
+
+// TestSellQuote_RejectsAbsurdAmounts: the amount is attacker-controlled and
+// every inverse evaluation is big-int arithmetic plus a provider fee lookup,
+// so an amount no sale could ever reach is refused before any pricing.
+func TestSellQuote_RejectsAbsurdAmounts(t *testing.T) {
+	h := newSellQuoteHandler(t, stubITFx{})
+	over := func(limit *big.Int) string { return new(big.Int).Add(limit, big.NewInt(1)).String() }
+	for _, q := range []string{
+		"receiveKobo=" + over(maxSellQuoteReceiveKobo),
+		"mcgpAmount=" + over(maxSellQuoteMcgpWei),
+		"receiveKobo=1" + strings.Repeat("0", 5000),
+	} {
+		if w, _ := serveSellQuote(t, h, q); w.Code != http.StatusBadRequest {
+			t.Errorf("%.40s… → %d, want 400", q, w.Code)
+		}
+	}
+	// The limits themselves still price.
+	for _, q := range []string{
+		"receiveKobo=" + maxSellQuoteReceiveKobo.String(),
+		"mcgpAmount=" + maxSellQuoteMcgpWei.String(),
+	} {
+		if w, _ := serveSellQuote(t, h, q); w.Code != http.StatusOK {
+			t.Errorf("%s → %d, want 200 (body %s)", q, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestSellQuote_UnknownCurrencyIsTheCallersError: a currency the payout
+// catalog does not offer is a 400 — not the retryable "rates are refreshing"
+// 503, which would have the app offer a Retry that can never succeed.
+func TestSellQuote_UnknownCurrencyIsTheCallersError(t *testing.T) {
+	h := newSellQuoteHandler(t, stubITFx{})
+	for _, q := range []string{"receiveKobo=5000000&currency=XYZ", "mcgpAmount=1000000000000000000000&currency=XYZ"} {
+		w, resp := serveSellQuote(t, h, q)
+		if w.Code != http.StatusBadRequest || resp["code"] != nil {
+			t.Errorf("%s → %d code=%v, want plain 400", q, w.Code, resp["code"])
+		}
+	}
+	if w, _ := serveSellQuote(t, h, "receiveKobo=5000000&currency=ngn"); w.Code != http.StatusOK {
+		t.Errorf("lower-case NGN → %d, want 200", w.Code)
 	}
 }
