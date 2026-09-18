@@ -70,12 +70,6 @@ const SignupScreen1: React.FC<SignupScreen1Props> = ({
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
       newErrors.email = 'Enter a valid email address';
     }
-    if (!data.phoneNumber.trim()) {
-      newErrors.phoneNumber = 'Phone number is required';
-    }
-    if (!data.address.trim()) {
-      newErrors.address = 'Address is required';
-    }
     if (!data.password) {
       newErrors.password = 'Password is required';
     } else if (data.password.length < 8) {
@@ -173,8 +167,8 @@ const SignupScreen1: React.FC<SignupScreen1Props> = ({
       {renderInput('user', 'Full Name', 'name', { autoCapitalize: 'words' })}
       {renderInput('at', 'Username', 'username')}
       {renderInput('mail', 'Email Address', 'email', { keyboardType: 'email-address' })}
-      {renderInput('mobile', 'Phone Number', 'phoneNumber', { keyboardType: 'phone-pad' })}
-      {renderInput('home', 'Address', 'address')}
+      {renderInput('mobile', 'Phone Number (Optional)', 'phoneNumber', { keyboardType: 'phone-pad' })}
+      {renderInput('home', 'Address (Optional)', 'address')}
       {renderInput('lock', 'Password (min. 8 characters)', 'password', {
         secureTextEntry: !showPassword,
         toggleVisibility: () => setShowPassword(!showPassword),

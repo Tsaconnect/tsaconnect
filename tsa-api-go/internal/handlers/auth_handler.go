@@ -79,10 +79,6 @@ func (h *Handlers) Signup(c *gin.Context) {
 	if req.ConfirmPassword != "" && req.ConfirmPassword != req.Password {
 		validationErrors = append(validationErrors, gin.H{"field": "confirmPassword", "message": "Passwords do not match"})
 	}
-	if req.PhoneNumber == "" {
-		validationErrors = append(validationErrors, gin.H{"field": "phoneNumber", "message": "Phone number is required"})
-	}
-
 	if len(validationErrors) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -91,12 +87,19 @@ func (h *Handlers) Signup(c *gin.Context) {
 		return
 	}
 
-	// Check for existing user (email, username, phoneNumber)
+	// Check for existing user. Email and username are always compared; the phone
+	// number is optional at signup, so it only joins the lookup (and the conflict
+	// message below) when the user supplied one — an empty phone number must not
+	// match every other account that also skipped it.
 	emailLower := strings.ToLower(req.Email)
 	usernameLower := strings.ToLower(req.Username)
 
 	var existingUser models.User
-	err := config.DB.Where("email = ? OR username = ? OR phone_number = ?", emailLower, usernameLower, req.PhoneNumber).First(&existingUser).Error
+	query := config.DB.Where("email = ? OR username = ?", emailLower, usernameLower)
+	if req.PhoneNumber != "" {
+		query = query.Or("phone_number = ?", req.PhoneNumber)
+	}
+	err := query.First(&existingUser).Error
 	if err == nil {
 		var conflictErrors []gin.H
 		if existingUser.Email == emailLower {
@@ -105,7 +108,7 @@ func (h *Handlers) Signup(c *gin.Context) {
 		if existingUser.Username == usernameLower {
 			conflictErrors = append(conflictErrors, gin.H{"field": "username", "message": "Username already taken"})
 		}
-		if existingUser.PhoneNumber == req.PhoneNumber {
+		if req.PhoneNumber != "" && existingUser.PhoneNumber == req.PhoneNumber {
 			conflictErrors = append(conflictErrors, gin.H{"field": "phoneNumber", "message": "Phone number already registered"})
 		}
 		c.JSON(http.StatusBadRequest, gin.H{

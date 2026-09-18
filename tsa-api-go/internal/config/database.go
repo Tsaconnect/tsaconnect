@@ -295,6 +295,14 @@ func AutoMigrate() error {
 	DB.Exec("DROP INDEX IF EXISTS idx_users_wallet_address")
 	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wallet_address ON users (wallet_address) WHERE wallet_address != ''")
 
+	// Same move for phone_number: signup no longer requires it, so multiple users
+	// can legitimately have an empty phone number. The plain UNIQUE GORM built
+	// from the old `uniqueIndex` tag treats '' as a value, so the second empty
+	// phone number would collide. Replace it with a partial index that only
+	// deduplicates non-empty numbers (and still rejects two users sharing one).
+	DB.Exec("DROP INDEX IF EXISTS idx_users_phone_number")
+	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_number ON users (phone_number) WHERE phone_number != ''")
+
 	// Backfill P2P payment-method providers for rows created before the
 	// `provider` column existed. AutoMigrate defaults new/legacy rows to
 	// 'bank_transfer'; refine known mobile-money providers by bank name.

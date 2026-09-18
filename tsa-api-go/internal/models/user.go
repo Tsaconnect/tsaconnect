@@ -23,7 +23,7 @@ type User struct {
 	Email              string         `gorm:"uniqueIndex;not null" json:"email"`
 	Password           string         `gorm:"not null" json:"-"`
 	Role               string         `gorm:"default:'user'" json:"role"`
-	PhoneNumber        string         `gorm:"uniqueIndex" json:"phoneNumber"`
+	PhoneNumber        string         `json:"phoneNumber"`
 	Country            string         `json:"country"`
 	State              string         `json:"state,omitempty"`
 	City               string         `json:"city,omitempty"`
