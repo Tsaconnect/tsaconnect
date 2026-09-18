@@ -142,6 +142,10 @@ func (s *ITService) QuoteSellForNet(ctx context.Context, netKobo *big.Int, destC
 	if err := s.checkMinSellPayout(netKobo); err != nil {
 		return nil, err
 	}
+	// One provider-fee memo for the whole search: each evaluation below can be
+	// a live Flutterwave /fees call with a 5s timeout, so without it a dead
+	// provider costs a timeout per evaluation. See providerFeeMemo.
+	ctx = WithProviderFeeMemo(ctx)
 	rate, err := s.sellRate(ctx)
 	if err != nil {
 		return nil, err

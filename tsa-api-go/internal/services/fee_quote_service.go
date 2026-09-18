@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -313,12 +314,10 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 	// else the config fallback percentage of the gross amount.
 	provider := FeeProviderQuote{Source: "fallback", FallbackBps: s.cfg.ProviderFallbackBps}
 	providerMinor := bpsShare(amount, s.cfg.ProviderFallbackBps)
-	if s.provider != nil {
-		if live, ok := s.provider.QuoteProviderFee(ctx, flow, amount, currency); ok && live != nil && live.Sign() >= 0 {
-			providerMinor = live
-			provider.Source = "live"
-			provider.FallbackBps = 0
-		}
+	if live, ok := s.liveProviderFee(ctx, flow, amount, currency); ok {
+		providerMinor = live
+		provider.Source = "live"
+		provider.FallbackBps = 0
 	}
 	provider.Fee = feeLine(providerMinor)
 
@@ -451,6 +450,83 @@ func MinorPerUSDFromRate(rate float64) (*big.Int, error) {
 		return nil, fmt.Errorf("fee quote: fx rate %v rounds to zero", rate)
 	}
 	return minor, nil
+}
+
+// liveProviderFee asks the provider for its fee on this exact amount. ok=false
+// means "use the fallback percentage". When ctx carries a provider-fee memo
+// (WithProviderFeeMemo) the answer is shared across the quotes made with it.
+func (s *FeeQuoteService) liveProviderFee(ctx context.Context, flow FeeFlow, amount *big.Int, currency string) (*big.Int, bool) {
+	if s.provider == nil {
+		return nil, false
+	}
+	memo, _ := ctx.Value(providerFeeMemoKey{}).(*providerFeeMemo)
+	key := string(flow) + "|" + currency + "|" + amount.String()
+	if memo != nil {
+		if fee, ok, hit := memo.get(key); hit {
+			return fee, ok
+		}
+	}
+	fee, ok := s.provider.QuoteProviderFee(ctx, flow, amount, currency)
+	ok = ok && fee != nil && fee.Sign() >= 0
+	if !ok {
+		fee = nil
+	}
+	if memo != nil {
+		memo.put(key, fee, ok)
+	}
+	return fee, ok
+}
+
+type providerFeeMemoKey struct{}
+
+// providerFeeMemo scopes provider-fee lookups to ONE logical quote that prices
+// many amounts (the inverse sell search runs a dozen). Two rules:
+//
+//   - A live answer is remembered per (flow, currency, amount): the provider fee
+//     depends on the amount (banded tariffs), so it is never reused for a
+//     different amount — only re-served for the same one.
+//   - Once the provider has failed, every later lookup in the same scope takes
+//     the fallback without calling. A failed call yields the fallback anyway,
+//     so this changes no figure unless the provider recovers within the few
+//     seconds one quote lasts; it stops a dead provider (5s timeout per call)
+//     from turning one quote into a dozen sequential timeouts.
+//
+// Deliberately request-scoped, never global: the sell itself prices without a
+// memo, so a failure seen by a quote can never make a real sell skip the
+// provider.
+type providerFeeMemo struct {
+	mu   sync.Mutex
+	down bool
+	fees map[string]*big.Int
+}
+
+func (m *providerFeeMemo) get(key string) (fee *big.Int, ok, hit bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return nil, false, true
+	}
+	if f, found := m.fees[key]; found {
+		return new(big.Int).Set(f), true, true
+	}
+	return nil, false, false
+}
+
+func (m *providerFeeMemo) put(key string, fee *big.Int, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !ok {
+		m.down = true
+		return
+	}
+	m.fees[key] = new(big.Int).Set(fee)
+}
+
+// WithProviderFeeMemo returns a ctx whose fee quotes share one provider-fee
+// memo (see providerFeeMemo). Use it for a single request that prices many
+// amounts; never for a context that outlives that request.
+func WithProviderFeeMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, providerFeeMemoKey{}, &providerFeeMemo{fees: map[string]*big.Int{}})
 }
 
 // ─── Flutterwave live provider-fee quoter ──────────────────────────────────
