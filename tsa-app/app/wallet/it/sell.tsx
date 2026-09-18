@@ -240,6 +240,10 @@ export default function ITSell() {
   const [payoutRetry, setPayoutRetry] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
+  // Bumped whenever step 2 is left or re-entered, so a pre-PIN re-quote that
+  // lands afterwards is dropped instead of opening the PIN prompt later or
+  // replacing the sale the user has since agreed to.
+  const sellCheckSeq = useRef(0);
 
   // ── outcome ──
   const [error, setError] = useState('');
@@ -255,10 +259,13 @@ export default function ITSell() {
 
   // Back from step 2 (header chevron, Android back button, swipe) is a step
   // back, not a screen pop — the amount the user worked out stays put.
-  usePreventRemove(step === 'payout', () => {
+  const backToAmount = useCallback(() => {
+    sellCheckSeq.current++;
+    setChecking(false);
     setShowAuth(false);
     setStep('amount');
-  });
+  }, []);
+  usePreventRemove(step === 'payout', backToAmount);
 
   const loadBalance = useCallback(async () => {
     setBalanceError(false);
@@ -375,6 +382,8 @@ export default function ITSell() {
 
   const onContinue = () => {
     if (!canContinue || !quote) return;
+    sellCheckSeq.current++;
+    setShowAuth(false);
     setAgreed(quote);
     setAgreedRequest(request);
     setMovedNote(null);
@@ -395,7 +404,9 @@ export default function ITSell() {
     setPayoutError('');
     setPayoutRetry(null);
     setChecking(true);
+    const seq = ++sellCheckSeq.current;
     const r = await getITSellQuote(params, payoutCurrency);
+    if (seq !== sellCheckSeq.current) return;
     setChecking(false);
     if (!r.success || !r.data) {
       if (isRetryable(r)) setPayoutRetry(retryMessage(r));
@@ -575,7 +586,7 @@ export default function ITSell() {
             loading={checking}
             disabled={!dest.ready || checking}
           />
-          <Button title="Back" variant="ghost" leftIcon="chevronLeft" onPress={() => setStep('amount')} />
+          <Button title="Back" variant="ghost" leftIcon="chevronLeft" onPress={backToAmount} />
         </ScrollView>
 
         <PickerSheet
