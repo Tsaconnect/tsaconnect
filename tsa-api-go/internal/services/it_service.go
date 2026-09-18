@@ -61,6 +61,12 @@ type ITService struct {
 	fx          FxProvider // NGN/USD source for USD→Naira conversion
 	companyPMID string     // PaymentMerchant UUID for the IT pay-into account (optional)
 
+	// fxLoggedAt rate-limits the "pricing unavailable" cause log. The rate
+	// endpoint is polled by the app, so an outage would otherwise log on every
+	// poll; see logFxUnavailable.
+	fxLogMu    sync.Mutex
+	fxLoggedAt time.Time
+
 	// minSellNgnKobo is the smallest NGN payout a sell may produce, in kobo.
 	// Flutterwave rejects transfers below ₦100 (TRANSFER_AMOUNT_LIMIT), and a
 	// sell that clears the on-chain debit before that payout fails strands the
@@ -308,16 +314,46 @@ func (s *ITService) EffectiveKoboRates(ctx context.Context) (buyKobo, sellKobo *
 		return nil, nil, FxMeta{}, err
 	}
 	if s.fx == nil {
+		s.logFxUnavailable("no FX provider wired")
 		return nil, nil, FxMeta{}, ErrITFxUnavailable
 	}
 	ngnPerUsd, stale, ferr := s.fx.NgnPerUsd(ctx)
-	if ferr != nil || ngnPerUsd <= 0 {
+	if ferr != nil {
+		s.logFxUnavailable(ferr.Error())
+		return nil, nil, FxMeta{}, ErrITFxUnavailable
+	}
+	if ngnPerUsd <= 0 {
+		s.logFxUnavailable(fmt.Sprintf("non-positive NGN/USD rate %v", ngnPerUsd))
 		return nil, nil, FxMeta{}, ErrITFxUnavailable
 	}
 	sellPriceUsdMicros := rate.BuyPriceUsdMicros * int64(bpsDenom-rate.SellDiscountBps) / int64(bpsDenom)
 	buyKobo = usdMicrosToKobo(rate.BuyPriceUsdMicros, ngnPerUsd, true)
 	sellKobo = usdMicrosToKobo(sellPriceUsdMicros, ngnPerUsd, false)
 	return buyKobo, sellKobo, FxMeta{NgnPerUsd: ngnPerUsd, Stale: stale}, nil
+}
+
+// itFxCauseLogInterval bounds how often the pricing-unavailable cause is
+// logged. Long enough that a polled rate endpoint cannot flood the journal
+// during an outage, short enough that a recovery-then-relapse is still seen.
+const itFxCauseLogInterval = time.Minute
+
+// logFxUnavailable records WHY Instant Transfer pricing is refused.
+//
+// Every rate-lookup failure reaches the user as ErrITFxUnavailable — a
+// deliberately generic message, because the sell handler shows err.Error() to
+// the user and the underlying cause is internal. Before this, the cause was
+// then dropped entirely: a refused sale left nothing in the logs, so a dead
+// feed, a currency with no market anchor and a one-off blip all looked the
+// same. It is an ALERT because every IT buy and sell is refused while it holds.
+func (s *ITService) logFxUnavailable(cause string) {
+	s.fxLogMu.Lock()
+	defer s.fxLogMu.Unlock()
+	now := time.Now()
+	if !s.fxLoggedAt.IsZero() && now.Sub(s.fxLoggedAt) < itFxCauseLogInterval {
+		return
+	}
+	s.fxLoggedAt = now
+	log.Printf("[it] ALERT it_fx_unavailable_total=1 cause=%q — Instant Transfer buys and sells are refused until the NGN/USD rate recovers", cause)
 }
 
 // usdMicrosToKobo converts a USD price (micro-dollars per MCGP) to kobo per MCGP
@@ -368,6 +404,7 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	// preview may show stale data, but the transactional paths must not (mirrors
 	// the P2P trade service's requireFreshRate).
 	if fx.Stale {
+		s.logFxUnavailable("NGN/USD rate is stale (buy refused)")
 		return nil, ErrITFxUnavailable
 	}
 	// Fees come off the naira before it buys anything, so the intent quotes the
@@ -629,6 +666,7 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 		return nil, err
 	}
 	if fx.Stale {
+		s.logFxUnavailable("NGN/USD rate is stale (reprice refused)")
 		// Repricing at a stale rate is the exact thing the park exists to prevent.
 		return nil, ErrITFxUnavailable
 	}

@@ -38,7 +38,12 @@ func (s *ITService) sellRate(ctx context.Context) (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fx.Stale || rate == nil || rate.Sign() <= 0 {
+	if fx.Stale {
+		s.logFxUnavailable("NGN/USD rate is stale (sell refused)")
+		return nil, ErrITFxUnavailable
+	}
+	if rate == nil || rate.Sign() <= 0 {
+		s.logFxUnavailable(fmt.Sprintf("non-positive MCGP sell rate %v (sell refused)", rate))
 		return nil, ErrITFxUnavailable
 	}
 	return rate, nil
