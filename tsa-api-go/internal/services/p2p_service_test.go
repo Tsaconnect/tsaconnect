@@ -1020,3 +1020,71 @@ func TestFetchBybitRate_ThinBookDegradesToStale(t *testing.T) {
 		t.Errorf("source = %v, want the OER fallback — a sub-floor book must not be served as a market rate", ngn.Source)
 	}
 }
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestGetSnapshot_SingleCurrencyDegradedDoesNotMakeSnapshotStale pins the root-cause
+// fix: when one currency's Bybit fetch fails, that individual currency is marked
+// Stale, but the global snapshot must NOT be marked Stale (StaleSeconds must stay 0).
+// Crucially, subsequent cache hits (via loadFreshCache -> toSnapshot) must also
+// NOT report StaleSeconds > 0.
+func TestGetSnapshot_SingleCurrencyDegradedDoesNotMakeSnapshotStale(t *testing.T) {
+	svc := newTestP2PServiceWithBybit(nil, "NGN", "GHS")
+
+	// Custom round-tripper to let NGN succeed and GHS fail.
+	svc.HTTPClient.Transport = testRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Host, "openexchangerates.org") {
+			return mockResponse(200, oerSuccessBody()), nil
+		}
+		if strings.Contains(req.URL.Path, "item/online") {
+			body, _ := io.ReadAll(req.Body)
+			if strings.Contains(string(body), `"currencyId":"GHS"`) {
+				return mockResponse(500, `{"error":"bybit GHS down"}`), nil
+			}
+			return mockResponse(200, bybitSuccessBody("1600", "1605", "1610", "1615", "1620")), nil
+		}
+		return mockResponse(404, "not found"), nil
+	})
+
+	// 1. First call triggers fetchAndCache.
+	snap, err := svc.GetSnapshot()
+	if err != nil {
+		t.Fatalf("first GetSnapshot: %v", err)
+	}
+	if snap.StaleSeconds != 0 {
+		t.Errorf("first call: StaleSeconds = %d, want 0 (single currency degradation must not make snapshot stale)", snap.StaleSeconds)
+	}
+	if snap.IsStale() {
+		t.Errorf("first call: IsStale = true, want false")
+	}
+	if snap.Rates["NGN"].Stale {
+		t.Errorf("first call: NGN should NOT be stale")
+	}
+	if !snap.Rates["GHS"].Stale {
+		t.Errorf("first call: GHS MUST be stale")
+	}
+
+	// 2. Second call hits loadFreshCache -> toSnapshot.
+	snap2, err := svc.GetSnapshot()
+	if err != nil {
+		t.Fatalf("cached GetSnapshot: %v", err)
+	}
+	if snap2.StaleSeconds != 0 {
+		t.Errorf("cached call: StaleSeconds = %d, want 0 (toSnapshot must not conflate single-currency degradation with global fallback)", snap2.StaleSeconds)
+	}
+	if snap2.IsStale() {
+		t.Errorf("cached call: IsStale = true, want false")
+	}
+	if snap2.Rates["NGN"].Stale {
+		t.Errorf("cached call: NGN should NOT be stale")
+	}
+	if !snap2.Rates["GHS"].Stale {
+		t.Errorf("cached call: GHS MUST be stale")
+	}
+}
+
+

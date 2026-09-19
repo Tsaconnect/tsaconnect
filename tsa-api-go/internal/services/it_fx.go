@@ -77,5 +77,10 @@ func (a p2pFxProvider) RatePerUsd(ctx context.Context, currency string) (float64
 		return 0, false, fmt.Errorf("%w: %s is priced from the official feed, not a market", ErrNoMarketAnchor, code)
 	}
 
-	return row.MidRate, snap.IsStale() || row.Stale, nil
+	// Per-row Stale is the correct signal: it is true when THIS currency's own
+	// Bybit feed failed (OER fallback) OR when the entire cache was served
+	// from the stale rescue path (markAllStale). snap.IsStale() is an
+	// aggregate — true when ANY row is stale — so it would refuse a fresh NGN
+	// rate just because an unrelated currency (e.g. GHS) had a Bybit failure.
+	return row.MidRate, row.Stale, nil
 }

@@ -87,3 +87,37 @@ func TestRatePerUsd_NgnPerUsdDelegates(t *testing.T) {
 		t.Errorf("NgnPerUsd=%v but RatePerUsd(NGN)=%v — they must be the same resolution", legacy, multi)
 	}
 }
+
+// TestRatePerUsd_StalenessIsolation is the regression test for the "Rates are
+// refreshing" bug: a Bybit failure for one currency (GHS) marked that row
+// Stale, and toSnapshot propagated it as snapshot-level staleness, which
+// RatePerUsd then ORed into every currency's stale flag — including NGN, whose
+// own data was perfectly fresh. The fix is to use only the per-row Stale flag.
+func TestRatePerUsd_StalenessIsolation(t *testing.T) {
+	fx := fxSnapshot(t, map[string]P2PRate{
+		"NGN": {Currency: "NGN", MidRate: 1_388.72, FloatAnchor: true, Stale: false},
+		"GHS": {Currency: "GHS", MidRate: 11.79, FloatAnchor: true, Stale: true}, // Bybit failure
+	})
+
+	// NGN must NOT be reported stale — its own row is fresh.
+	rate, stale, err := fx.RatePerUsd(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("RatePerUsd(NGN): %v", err)
+	}
+	if stale {
+		t.Errorf("RatePerUsd(NGN) stale=%v — a fresh NGN row must not be poisoned "+
+			"by an unrelated currency's staleness", stale)
+	}
+	if rate != 1_388.72 {
+		t.Errorf("RatePerUsd(NGN) = %v, want 1388.72", rate)
+	}
+
+	// GHS itself MUST be stale — its own row says so.
+	_, ghsStale, err := fx.RatePerUsd(context.Background(), "GHS")
+	if err != nil {
+		t.Fatalf("RatePerUsd(GHS): %v", err)
+	}
+	if !ghsStale {
+		t.Errorf("RatePerUsd(GHS) stale=%v — a Stale=true row must report stale", ghsStale)
+	}
+}

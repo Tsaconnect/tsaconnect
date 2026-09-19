@@ -253,9 +253,10 @@ func (ps *P2PService) fetchAndCache() (*RatesSnapshot, error) {
 				// don't each retry OER. cachedAt preserves original freshness so
 				// the maxStaleAge ceiling continues to track real data age.
 				ps.cache.Store("all", &p2pCacheEntry{
-					rates:     staleRates,
-					cachedAt:  priorEntry.cachedAt,
-					expiresAt: now.Add(ps.degradedTTL),
+					rates:      staleRates,
+					cachedAt:   priorEntry.cachedAt,
+					expiresAt:  now.Add(ps.degradedTTL),
+					isFallback: true,
 				})
 				ageSec := int64(age.Seconds())
 				if ageSec < 1 {
@@ -298,9 +299,10 @@ func (ps *P2PService) fetchAndCache() (*RatesSnapshot, error) {
 	}
 	now := time.Now()
 	ps.cache.Store("all", &p2pCacheEntry{
-		rates:     rates,
-		cachedAt:  now,
-		expiresAt: now.Add(ttl),
+		rates:      rates,
+		cachedAt:   now,
+		expiresAt:  now.Add(ttl),
+		isFallback: false,
 	})
 
 	return &RatesSnapshot{
@@ -752,24 +754,19 @@ func (ps *P2PService) trackRequest() {
 // ──────────────────────────────────────────────
 
 type p2pCacheEntry struct {
-	rates     map[string]P2PRate
-	cachedAt  time.Time
-	expiresAt time.Time
+	rates      map[string]P2PRate
+	cachedAt   time.Time
+	expiresAt  time.Time
+	isFallback bool // true when served from the expired-cache rescue path (markAllStale)
 }
 
 // toSnapshot converts the cache entry into a RatesSnapshot, computing
-// StaleSeconds when forceStale is true OR any individual row is marked Stale
-// (e.g. because we wrote back a stale-fallback map and a later caller hits it).
+// StaleSeconds when forceStale is true OR when the entry represents an
+// expired-cache rescue fallback (isFallback). A single currency's Bybit
+// degradation does NOT mark the global snapshot as stale; callers needing
+// currency-level freshness check the per-row Stale flag.
 func (ce *p2pCacheEntry) toSnapshot(now time.Time, forceStale bool) *RatesSnapshot {
-	stale := forceStale
-	if !stale {
-		for _, r := range ce.rates {
-			if r.Stale {
-				stale = true
-				break
-			}
-		}
-	}
+	stale := forceStale || ce.isFallback
 	snap := &RatesSnapshot{Rates: ce.rates, CachedAt: ce.cachedAt}
 	if stale {
 		ageSec := int64(now.Sub(ce.cachedAt).Seconds())

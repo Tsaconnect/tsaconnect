@@ -2237,3 +2237,76 @@ func TestCreateAd_RejectsCuratedAssetMismatch(t *testing.T) {
 		t.Error("USDT must be allowed on BSC")
 	}
 }
+
+type staticSnapshotRates struct {
+	snap *RatesSnapshot
+}
+
+func (s *staticSnapshotRates) GetSnapshot() (*RatesSnapshot, error) {
+	return s.snap, nil
+}
+
+func TestRequireFreshRate_StalenessIsolation(t *testing.T) {
+	// GHS is stale, NGN is fresh.
+	svc := &P2PTradeService{
+		rates: &staticSnapshotRates{
+			snap: &RatesSnapshot{
+				Rates: map[string]P2PRate{
+					"NGN": {Currency: "NGN", MidRate: 1400, Stale: false},
+					"GHS": {Currency: "GHS", MidRate: 15, Stale: true},
+				},
+			},
+		},
+	}
+
+	// NGN must pass fresh check.
+	if err := svc.requireFreshRate("NGN"); err != nil {
+		t.Errorf("requireFreshRate(NGN) error = %v, want nil", err)
+	}
+
+	// GHS must fail fresh check.
+	if err := svc.requireFreshRate("GHS"); !errors.Is(err, ErrRateStale) {
+		t.Errorf("requireFreshRate(GHS) error = %v, want ErrRateStale", err)
+	}
+}
+
+func TestComputeEffectiveRate_StalenessIsolation(t *testing.T) {
+	svc := &P2PTradeService{
+		rates: &staticSnapshotRates{
+			snap: &RatesSnapshot{
+				Rates: map[string]P2PRate{
+					"NGN": {Currency: "NGN", BinanceSell: 1400, MidRate: 1400, Stale: false},
+					"GHS": {Currency: "GHS", BinanceSell: 15, MidRate: 15, Stale: true},
+				},
+			},
+		},
+	}
+
+	offset := 100 // +1%
+	ngnAd := &models.P2PAd{
+		RateType:       models.P2PAdRateTypeFloat,
+		FiatCurrency:   "NGN",
+		FloatOffsetBps: &offset,
+	}
+	ghsAd := &models.P2PAd{
+		RateType:       models.P2PAdRateTypeFloat,
+		FiatCurrency:   "GHS",
+		FloatOffsetBps: &offset,
+	}
+
+	// NGN ad must successfully compute rate.
+	rate, err := svc.ComputeEffectiveRate(ngnAd)
+	if err != nil {
+		t.Errorf("ComputeEffectiveRate(ngnAd) error = %v, want nil", err)
+	}
+	if rate == "" {
+		t.Error("ComputeEffectiveRate(ngnAd) returned empty rate")
+	}
+
+	// GHS ad must fail with ErrRateStale because GHS is stale.
+	_, err = svc.ComputeEffectiveRate(ghsAd)
+	if !errors.Is(err, ErrRateStale) {
+		t.Errorf("ComputeEffectiveRate(ghsAd) error = %v, want ErrRateStale", err)
+	}
+}
+

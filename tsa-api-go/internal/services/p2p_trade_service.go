@@ -3629,7 +3629,7 @@ func (s *P2PTradeService) requireFreshRate(currency string) error {
 	if !ok {
 		return fmt.Errorf("%w: currency %s not in rate snapshot", ErrInvalidParams, currency)
 	}
-	if row.Stale || snap.IsStale() {
+	if row.Stale {
 		return ErrRateStale
 	}
 	return nil
@@ -3665,7 +3665,7 @@ func (s *P2PTradeService) ComputeEffectiveRate(ad *models.P2PAd) (string, error)
 		return "", ErrRateStale
 	}
 	row, ok := snap.Rates[strings.ToUpper(ad.FiatCurrency)]
-	if !ok || row.Stale || snap.IsStale() {
+	if !ok || row.Stale {
 		return "", ErrRateStale
 	}
 
