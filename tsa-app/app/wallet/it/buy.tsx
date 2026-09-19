@@ -34,6 +34,8 @@ import {
   type ITIntent,
   type ITPayTo,
 } from '@/services/itApi';
+import { getActiveWallet } from '@/services/wallet';
+import { registerWalletAddress } from '@/services/walletApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
@@ -137,7 +139,21 @@ export default function ITBuy() {
     }
     setScreen('submitting');
     const kobo = String(Math.round(amt * 100));
-    const r = await itBuy(kobo);
+    let r = await itBuy(kobo);
+    // If backend rejected because no wallet address is registered, check if an active wallet exists on device
+    if (!r.success && (r.message?.toLowerCase().includes('wallet') || r.code === 'WALLET_REQUIRED')) {
+      try {
+        const localAddr = await getActiveWallet();
+        if (localAddr) {
+          const regRes = await registerWalletAddress(localAddr);
+          if (regRes?.success) {
+            r = await itBuy(kobo);
+          }
+        }
+      } catch {
+        // Continue to error handling below
+      }
+    }
     if (r.code === IT_AGREEMENT_REQUIRED) {
       // Reached here without accepting (deep link / stale state) — the hub owns
       // the agreement gate; send them there.
@@ -382,13 +398,19 @@ export default function ITBuy() {
   }
 
   if (screen === 'error') {
+    const isWalletError = error.toLowerCase().includes('wallet');
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: colors.background }}>
         <Icon name="closeCircle" size={64} color={colors.danger} />
         <Text variant="title3" weight="700" style={{ marginTop: spacing.lg, color: colors.textPrimary }}>Couldn’t continue</Text>
         <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.danger, textAlign: 'center' }}>{error}</Text>
         <View style={{ height: spacing.xl }} />
-        <Button title="Back" variant="secondary" onPress={() => setScreen('form')} />
+        <View style={{ width: '100%', gap: spacing.sm }}>
+          {isWalletError && (
+            <Button title="Set up wallet" onPress={() => router.push('/wallet' as never)} />
+          )}
+          <Button title="Back" variant="secondary" onPress={() => setScreen('form')} />
+        </View>
       </SafeAreaView>
     );
   }

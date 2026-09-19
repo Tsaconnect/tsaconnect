@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
@@ -27,43 +28,50 @@ func getUserFromContext(c *gin.Context) *models.User {
 
 // callerWallet resolves the wallet address an entitlement endpoint acts on.
 //
-// The account's registered address is the only one these endpoints ever use.
-// `claimed` is the address the DEVICE says it holds a signing key for, and this
-// is where the two are reconciled — it is never substituted for the registered
-// one, only checked against it.
+// In an active-wallet / decentralized model, `claimed` is the wallet address the
+// calling device currently holds active keys for. If provided and valid:
+//  - It must not be in use by another active account (account_status != 'deleted').
+//  - If it differs from the account's registered wallet_address (or if the account
+//    has no registered wallet yet), it is dynamically synced to users.wallet_address.
+//  - It is returned as the active wallet for this request.
 //
-// Reconciling matters because the two can disagree, and both failure modes were
-// silent before. A device with no wallet imported sent nothing and got the
-// registered address's balance back: a number the user cannot spend, rendered
-// as if the platform were holding their MCGP. A device holding a DIFFERENT
-// wallet got a prepared tx built for an address it has no key for, which then
-// fails at broadcast with a nonce/sender error that names neither address.
-//
-// A mismatch is 409, not 400: the request is well-formed, it is the client's
-// wallet state that conflicts with the account's. The app keys on that status
-// to prompt for the right seed phrase.
+// If `claimed` is omitted, the user's previously registered wallet_address is used
+// as a fallback. If both are empty, the request is refused with "Set up a wallet first".
 func callerWallet(c *gin.Context, user *models.User, claimed string) (string, bool) {
+	claimed = strings.TrimSpace(claimed)
+	if claimed != "" {
+		if !isValidEthAddress(claimed) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address")
+			return "", false
+		}
+
+		if config.DB != nil && config.DB.Migrator().HasTable(&models.User{}) {
+			var otherUser models.User
+			if err := config.DB.Where("wallet_address = ? AND account_status != ? AND id != ?",
+				claimed, models.AccountStatusDeleted, user.ID).First(&otherUser).Error; err == nil {
+				utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
+				return "", false
+			}
+
+			// Clean up any stale record on deleted accounts
+			_ = config.DB.Model(&models.User{}).
+				Where("wallet_address = ? AND account_status = ?", claimed, models.AccountStatusDeleted).
+				Update("wallet_address", "").Error
+
+			// Auto-sync user's registered wallet to match this active wallet
+			if !strings.EqualFold(claimed, user.WalletAddress) {
+				_ = config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", claimed).Error
+				user.WalletAddress = claimed
+			}
+		} else {
+			user.WalletAddress = claimed
+		}
+		return claimed, true
+	}
+
+	// Fallback to previously registered address if device did not send an active wallet
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
-		return "", false
-	}
-
-	claimed = strings.TrimSpace(claimed)
-	if claimed == "" {
-		// Older app builds send no address. They keep the pre-existing
-		// behaviour rather than breaking mid-rollout; the current app always
-		// sends one, so it never reaches this branch.
-		return user.WalletAddress, true
-	}
-
-	if !isValidEthAddress(claimed) {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address")
-		return "", false
-	}
-	if !strings.EqualFold(claimed, user.WalletAddress) {
-		utils.ErrorResponse(c, http.StatusConflict,
-			"This device is using a different wallet than the one registered to your account. "+
-				"Switch to the registered wallet, or import its recovery phrase, to continue.")
 		return "", false
 	}
 	return user.WalletAddress, true

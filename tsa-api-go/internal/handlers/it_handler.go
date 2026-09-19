@@ -406,7 +406,8 @@ func (h *ITHandler) GetBalance(c *gin.Context) {
 }
 
 type itBuyReq struct {
-	NgnKobo string `json:"ngnKobo"`
+	NgnKobo       string `json:"ngnKobo"`
+	WalletAddress string `json:"walletAddress,omitempty"`
 }
 
 type itActivateVAReq struct {
@@ -629,16 +630,16 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
-		return
-	}
-	if !h.requireITAgreement(c, user.ID) {
-		return
-	}
 	var req itBuyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	wallet, ok := callerWallet(c, user, req.WalletAddress)
+	if !ok {
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
 		return
 	}
 	// Ahead of the VA branch below, which answers a user with no virtual
@@ -683,7 +684,7 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		}
 	}
 
-	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
+	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, wallet, req.NgnKobo)
 	if err != nil {
 		// The pre-check above already refused an unverified user, so reaching
 		// here means the status changed underneath the request. Still map it
@@ -731,7 +732,8 @@ func (h *ITHandler) Buy(c *gin.Context) {
 }
 
 type itSellReq struct {
-	McgpAmount string `json:"mcgpAmount"`
+	McgpAmount    string `json:"mcgpAmount"`
+	WalletAddress string `json:"walletAddress,omitempty"`
 	// Payout destination — required when auto-payout is active so the fiat
 	// leg can fire without an operator; optional on the legacy manual flow.
 	BankCode      string `json:"bankCode"`
@@ -757,16 +759,16 @@ func (h *ITHandler) Sell(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
-		return
-	}
-	if !h.requireITAgreement(c, user.ID) {
-		return
-	}
 	var req itSellReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	wallet, ok := callerWallet(c, user, req.WalletAddress)
+	if !ok {
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
 		return
 	}
 	// A rail/currency selection must resolve to a catalog entry BEFORE we ever
@@ -822,7 +824,7 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	}
 	// The service detaches the sell from this request's cancellation: once the
 	// debit is broadcast, a client hanging up must not stop it half way.
-	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
+	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, wallet, req.McgpAmount, bank)
 	if err != nil {
 		r := sellFailureResponse(err, intent)
 		if r.accepted && intent != nil {

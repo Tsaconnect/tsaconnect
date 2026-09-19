@@ -273,12 +273,18 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, walletAddress)
 	}
 
-	// Check if the address is already taken by another user.
+	// Check if the address is already taken by another active user.
 	var existingUser models.User
-	if err := config.DB.Where("wallet_address = ?", walletAddress).First(&existingUser).Error; err == nil {
+	if err := config.DB.Where("wallet_address = ? AND account_status != ? AND id != ?",
+		walletAddress, models.AccountStatusDeleted, user.ID).First(&existingUser).Error; err == nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
 		return
 	}
+
+	// Release any stale reference to this address on previously deleted accounts.
+	_ = config.DB.Model(&models.User{}).
+		Where("wallet_address = ? AND account_status = ?", walletAddress, models.AccountStatusDeleted).
+		Update("wallet_address", "").Error
 
 	// Update user's wallet address.
 	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", walletAddress).Error; err != nil {

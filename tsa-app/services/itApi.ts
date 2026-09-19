@@ -6,6 +6,7 @@
 
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
+import { getActiveWallet } from './wallet';
 
 export interface ITRate {
   buyRateKobo: string; // kobo per 1 MCGP
@@ -175,8 +176,10 @@ export interface ITBuyResult {
 // details. needsActivation=true when the user has no VA yet.
 // A second open order is refused with code it_buy_order_open (409) naming the
 // open one — see utils/itBuyOrder.openBuyOrderOf.
-export const itBuy = (ngnKobo: string) =>
-  req<ITBuyResult>('POST', '/it/buy', { ngnKobo });
+export const itBuy = async (ngnKobo: string, walletAddress?: string) => {
+  const resolvedWallet = walletAddress || (await getActiveWallet()) || undefined;
+  return req<ITBuyResult>('POST', '/it/buy', { ngnKobo, walletAddress: resolvedWallet });
+};
 
 /** Abandon an unpaid buy order (MCGP or stablecoin). Refused with
  *  it_buy_payment_arrived when the payment already appears to be in. */
@@ -320,6 +323,7 @@ export const getITSellQuote = (
 // against the withdraw-destinations catalog server-side before the intent is
 // created.
 export interface ITSellOptions {
+  walletAddress?: string;
   bankCode?: string;
   accountNumber?: string;
   accountName?: string;
@@ -333,8 +337,10 @@ export interface ITSellOptions {
 // mcgpAmount is base-unit wei (string) — semantics unchanged. `opts` carries
 // the optional payout destination; omitted, this is exactly the legacy
 // NGN-bank call.
-export const itSell = (mcgpAmount: string, opts: ITSellOptions = {}) =>
-  req<{ intent: ITIntent }>('POST', '/it/sell', { mcgpAmount, ...opts });
+export const itSell = async (mcgpAmount: string, opts: ITSellOptions = {}) => {
+  const walletAddress = opts.walletAddress || (await getActiveWallet()) || undefined;
+  return req<{ intent: ITIntent }>('POST', '/it/sell', { mcgpAmount, ...opts, walletAddress });
+};
 
 // ──────────────────────────── stablecoin sell (brokered) ──────────────────
 //

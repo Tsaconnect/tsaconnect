@@ -145,6 +145,7 @@ func (h *Handlers) RequestAccountDeletion(c *gin.Context) {
 			"account_status": models.AccountStatusDeleted,
 			"deleted_at":     now,
 			"updated_at":     now,
+			"wallet_address": "",
 		}).Error
 	})
 	if txErr != nil {

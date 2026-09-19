@@ -1,184 +1,239 @@
-// Tests for reconciling the DEVICE's wallet against the account's registered
-// one on the MCGP entitlement endpoints.
-//
-// The bug these pin down is not a crash — it is a screen that lies. Before
-// this, a device holding no wallet (or a different one) still got the
-// registered address's premium balance back, so the app rendered MCGP the user
-// had no key to spend. That reads as the platform custodying their MCGP, which
-// is exactly what it is not. The prepare endpoints had the matching failure:
-// they would build a tx for an address the device cannot sign for, which dies
-// later at broadcast naming neither address.
-
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-const (
-	registeredWallet = "0x87c2422be9A11b71A5c530ecd156134D3b04E3cE"
-	otherWallet      = "0x09124a9E3c1B5AcF4207E33828195D00846E5EA8"
-)
-
-type walletRig struct {
-	router *gin.Engine
-	user   *models.User
-}
-
-func newWalletRig(t *testing.T, registered string) *walletRig {
+func newCallerWalletTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-
-	user := &models.User{
-		ID:            uuid.New(),
-		Username:      "holder",
-		Name:          "Holder",
-		WalletAddress: registered,
-	}
-	h := &MCGPSwapHandler{swap: &fakeSwapPort{}}
-
-	r := gin.New()
-	r.Use(func(c *gin.Context) { c.Set("user", user); c.Next() })
-	r.GET("/balance", h.GetBalance)
-	r.POST("/buy/prepare", h.PrepareBuy)
-	r.POST("/sell/prepare", h.PrepareSell)
-
-	return &walletRig{router: r, user: user}
-}
-
-func (wr *walletRig) get(t *testing.T, path string) (int, map[string]any) {
-	t.Helper()
-	w := httptest.NewRecorder()
-	wr.router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	return w.Code, out
-}
-
-func (wr *walletRig) postJSON(t *testing.T, path string, body any) int {
-	t.Helper()
-	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(raw)))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	wr.router.ServeHTTP(w, req)
-	return w.Code
-}
-
-// The whole point: a device that says which wallet it holds gets that wallet's
-// balance, and the response names the address it read so the app can never
-// display a number against the wrong wallet.
-func TestGetBalance_MatchingDeviceWalletIsServed(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	code, resp := wr.get(t, "/balance?address="+registeredWallet)
-
-	if code != http.StatusOK {
-		t.Fatalf("expected 200 for the registered wallet, got %d (%v)", code, resp)
-	}
-	data, _ := resp["data"].(map[string]any)
-	if data["walletAddress"] != registeredWallet {
-		t.Fatalf("response must name the address it read, got %v", data["walletAddress"])
-	}
-}
-
-// The custody-looking bug. A device holding a different wallet must be told so,
-// not silently handed the registered wallet's entitlement.
-func TestGetBalance_DifferentDeviceWalletIsRejected(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	code, resp := wr.get(t, "/balance?address="+otherWallet)
-
-	if code != http.StatusConflict {
-		t.Fatalf("a device on another wallet must get 409, got %d (%v)", code, resp)
-	}
-	if msg, _ := resp["message"].(string); !strings.Contains(msg, "different wallet") {
-		t.Fatalf("message must explain the wallet conflict, got %q", msg)
-	}
-}
-
-// Addresses arrive checksummed from some call sites and lowercased from others;
-// that must never be mistaken for a different wallet.
-func TestGetBalance_AddressComparisonIgnoresCasing(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	code, _ := wr.get(t, "/balance?address="+strings.ToLower(registeredWallet))
-
-	if code != http.StatusOK {
-		t.Fatalf("same wallet in different casing must be accepted, got %d", code)
-	}
-}
-
-func TestGetBalance_GarbageAddressIsRejected(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	if code, _ := wr.get(t, "/balance?address=not-an-address"); code != http.StatusBadRequest {
-		t.Fatalf("malformed address must be 400, got %d", code)
-	}
-}
-
-// Older app builds send no address at all. They must keep working through the
-// rollout rather than losing their balance screen mid-update.
-func TestGetBalance_OmittedAddressFallsBackToTheRegisteredWallet(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	code, resp := wr.get(t, "/balance")
-
-	if code != http.StatusOK {
-		t.Fatalf("a client that sends no address must still be served, got %d", code)
-	}
-	data, _ := resp["data"].(map[string]any)
-	if data["walletAddress"] != registeredWallet {
-		t.Fatalf("expected the registered wallet, got %v", data["walletAddress"])
-	}
-}
-
-func TestGetBalance_AccountWithNoWalletIsRejected(t *testing.T) {
-	wr := newWalletRig(t, "")
-
-	if code, _ := wr.get(t, "/balance"); code != http.StatusBadRequest {
-		t.Fatalf("an account with no registered wallet must be 400, got %d", code)
-	}
-}
-
-// A prepare must never build a tx for an address the device has no key for —
-// that tx can only fail at broadcast, long after the user has committed.
-func TestPrepare_RefusesToBuildForAWalletTheDeviceDoesNotHold(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		path string
-		body map[string]any
-	}{
-		{"buy", "/buy/prepare", map[string]any{"mcgpAmount": "1000", "maxUsdc": "20000"}},
-		{"sell", "/sell/prepare", map[string]any{"mcgpAmount": "1000", "minUsdc": "0"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			wr := newWalletRig(t, registeredWallet)
-			tc.body["fromAddress"] = otherWallet
-
-			if code := wr.postJSON(t, tc.path, tc.body); code != http.StatusConflict {
-				t.Fatalf("expected 409 before any tx is built, got %d", code)
-			}
-		})
-	}
-}
-
-func TestPrepare_BuildsForTheRegisteredWallet(t *testing.T) {
-	wr := newWalletRig(t, registeredWallet)
-
-	code := wr.postJSON(t, "/buy/prepare", map[string]any{
-		"mcgpAmount": "1000", "maxUsdc": "20000", "fromAddress": registeredWallet,
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT,
+		account_status TEXT DEFAULT 'active',
+		created_at DATETIME, updated_at DATETIME
+	)`).Error; err != nil {
+		t.Fatalf("create users table: %v", err)
+	}
+	prev := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = prev })
+	return db
+}
 
-	if code != http.StatusOK {
-		t.Fatalf("the registered wallet must be able to prepare, got %d", code)
+func insertTestUser(t *testing.T, db *gorm.DB, user *models.User) {
+	t.Helper()
+	if err := db.Exec(`INSERT INTO users (id, username, name, wallet_address, account_status) VALUES (?,?,?,?,?)`,
+		user.ID.String(), user.Username, user.Name, user.WalletAddress, user.AccountStatus).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+}
+
+func storedUserWallet(t *testing.T, db *gorm.DB, id uuid.UUID) string {
+	t.Helper()
+	var got string
+	if err := db.Raw(`SELECT wallet_address FROM users WHERE id = ?`, id.String()).Scan(&got).Error; err != nil {
+		t.Fatalf("read wallet_address: %v", err)
+	}
+	return got
+}
+
+func testGinContext() (*gin.Context, *httptest.ResponseRecorder) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/", nil)
+	return c, w
+}
+
+func TestCallerWallet_ActiveWalletUsedWhenUserWalletEmpty(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	user := models.User{
+		ID:            uuid.New(),
+		Username:      "new_user",
+		WalletAddress: "",
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertTestUser(t, db, &user)
+
+	c, w := testGinContext()
+	activeWallet := "0x1111111111111111111111111111111111111111"
+
+	wallet, ok := callerWallet(c, &user, activeWallet)
+	if !ok {
+		t.Fatalf("expected callerWallet to succeed, got error code %d body %s", w.Code, w.Body.String())
+	}
+	if wallet != activeWallet {
+		t.Fatalf("expected resolved wallet %q, got %q", activeWallet, wallet)
+	}
+	if user.WalletAddress != activeWallet {
+		t.Fatalf("expected in-memory user.WalletAddress to be updated, got %q", user.WalletAddress)
+	}
+
+	// Verify database was synced
+	if stored := storedUserWallet(t, db, user.ID); stored != activeWallet {
+		t.Fatalf("expected db wallet_address to be %q, got %q", activeWallet, stored)
+	}
+}
+
+func TestCallerWallet_ActiveWalletSwitched(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	oldWallet := "0x1111111111111111111111111111111111111111"
+	newWallet := "0x2222222222222222222222222222222222222222"
+	user := models.User{
+		ID:            uuid.New(),
+		Username:      "switching_user",
+		WalletAddress: oldWallet,
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertTestUser(t, db, &user)
+
+	c, w := testGinContext()
+	wallet, ok := callerWallet(c, &user, newWallet)
+	if !ok {
+		t.Fatalf("expected switch to succeed, got %d %s", w.Code, w.Body.String())
+	}
+	if wallet != newWallet {
+		t.Fatalf("expected resolved wallet %q, got %q", newWallet, wallet)
+	}
+
+	if stored := storedUserWallet(t, db, user.ID); stored != newWallet {
+		t.Fatalf("expected db wallet updated to %q, got %q", newWallet, stored)
+	}
+}
+
+func TestCallerWallet_FallbackToRegisteredWhenClaimedEmpty(t *testing.T) {
+	_ = newCallerWalletTestDB(t)
+	registered := "0x1111111111111111111111111111111111111111"
+	user := models.User{
+		ID:            uuid.New(),
+		Username:      "existing_user",
+		WalletAddress: registered,
+		AccountStatus: models.AccountStatusActive,
+	}
+
+	c, _ := testGinContext()
+	wallet, ok := callerWallet(c, &user, "")
+	if !ok {
+		t.Fatalf("expected fallback to succeed")
+	}
+	if wallet != registered {
+		t.Fatalf("expected %q, got %q", registered, wallet)
+	}
+}
+
+func TestCallerWallet_BothEmptyFails(t *testing.T) {
+	_ = newCallerWalletTestDB(t)
+	user := models.User{
+		ID:            uuid.New(),
+		Username:      "no_wallet_user",
+		WalletAddress: "",
+		AccountStatus: models.AccountStatusActive,
+	}
+
+	c, w := testGinContext()
+	_, ok := callerWallet(c, &user, "")
+	if ok {
+		t.Fatalf("expected failure when both empty")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", w.Code)
+	}
+}
+
+func TestCallerWallet_MalformedClaimedFails(t *testing.T) {
+	_ = newCallerWalletTestDB(t)
+	user := models.User{
+		ID:            uuid.New(),
+		Username:      "user",
+		WalletAddress: "0x1111111111111111111111111111111111111111",
+		AccountStatus: models.AccountStatusActive,
+	}
+
+	c, w := testGinContext()
+	_, ok := callerWallet(c, &user, "not-a-valid-eth-address")
+	if ok {
+		t.Fatalf("expected failure on malformed address")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", w.Code)
+	}
+}
+
+func TestCallerWallet_ClaimedConflictWithOtherActiveUserFails(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	claimedAddr := "0x3333333333333333333333333333333333333333"
+
+	otherUser := models.User{
+		ID:            uuid.New(),
+		Username:      "other_active",
+		WalletAddress: claimedAddr,
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertTestUser(t, db, &otherUser)
+
+	currentUser := models.User{
+		ID:            uuid.New(),
+		Username:      "current_user",
+		WalletAddress: "",
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertTestUser(t, db, &currentUser)
+
+	c, w := testGinContext()
+	_, ok := callerWallet(c, &currentUser, claimedAddr)
+	if ok {
+		t.Fatalf("expected conflict failure")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict, got %d", w.Code)
+	}
+}
+
+func TestCallerWallet_ClaimedPreviouslyHeldByDeletedAccountSucceeds(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	claimedAddr := "0x4444444444444444444444444444444444444444"
+
+	deletedUser := models.User{
+		ID:            uuid.New(),
+		Username:      "deleted_user",
+		WalletAddress: claimedAddr,
+		AccountStatus: models.AccountStatusDeleted,
+	}
+	insertTestUser(t, db, &deletedUser)
+
+	currentUser := models.User{
+		ID:            uuid.New(),
+		Username:      "active_user",
+		WalletAddress: "",
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertTestUser(t, db, &currentUser)
+
+	c, w := testGinContext()
+	wallet, ok := callerWallet(c, &currentUser, claimedAddr)
+	if !ok {
+		t.Fatalf("expected success claiming address from deleted user, got %d %s", w.Code, w.Body.String())
+	}
+	if wallet != claimedAddr {
+		t.Fatalf("expected %q, got %q", claimedAddr, wallet)
+	}
+
+	// Verify deleted user had wallet address cleared
+	if stored := storedUserWallet(t, db, deletedUser.ID); stored != "" {
+		t.Fatalf("expected deleted user wallet_address cleared, got %q", stored)
 	}
 }

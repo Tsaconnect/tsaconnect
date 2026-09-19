@@ -24,6 +24,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const registeredWallet = "0x87c2422be9A11b71A5c530ecd156134D3b04E3cE"
+
 func newRegisterRig(t *testing.T, registered string) (*gin.Engine, *models.User, *gorm.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -38,6 +40,7 @@ func newRegisterRig(t *testing.T, registered string) (*gin.Engine, *models.User,
 	// Update, so omitting the column fails the write with "no such column".
 	if err := db.Exec(`CREATE TABLE users (
 		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT,
+		account_status TEXT DEFAULT 'active',
 		created_at DATETIME, updated_at DATETIME
 	)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
@@ -147,3 +150,30 @@ func TestRegisterWallet_ValidAddressIsStored(t *testing.T) {
 		t.Fatalf("expected the address to be stored, got %q", got)
 	}
 }
+
+// A wallet address previously linked to an account that was deleted must NOT
+// block a new account (or re-created account) from registering that same
+// non-custodial address.
+func TestRegisterWallet_AddressFromDeletedAccountCanBeClaimedByNewUser(t *testing.T) {
+	r, user, db := newRegisterRig(t, "")
+
+	// Insert an old deleted user who still had registeredWallet
+	deletedUserID := uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, username, name, wallet_address, account_status) VALUES (?,?,?,?,?)`,
+		deletedUserID.String(), "old_user", "Old User", registeredWallet, models.AccountStatusDeleted).Error; err != nil {
+		t.Fatalf("seed deleted user: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"walletAddress": registeredWallet})
+	if code := postRegister(t, r, string(body)); code != http.StatusOK {
+		t.Fatalf("registering address from a deleted account must succeed (200), got %d", code)
+	}
+	if got := storedWallet(t, db, user.ID); got != registeredWallet {
+		t.Fatalf("expected active user to now hold the address, got %q", got)
+	}
+	// The deleted user's reference should be released
+	if got := storedWallet(t, db, deletedUserID); got != "" {
+		t.Fatalf("expected deleted user's wallet_address to be cleared, got %q", got)
+	}
+}
+
