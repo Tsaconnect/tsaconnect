@@ -1,5 +1,5 @@
 import React from 'react';
-import { ViewStyle } from 'react-native';
+import { ViewStyle, Insets } from 'react-native';
 import { useTheme } from '@/theme';
 import { PressableScale } from './PressableScale';
 import { Icon, IconName } from './Icon';
@@ -12,6 +12,7 @@ export interface IconButtonProps {
   color?: string;
   disabled?: boolean;
   accessibilityLabel: string;
+  hitSlop?: Insets | number;
   style?: ViewStyle;
 }
 
@@ -23,6 +24,7 @@ export const IconButton: React.FC<IconButtonProps> = ({
   color,
   disabled,
   accessibilityLabel,
+  hitSlop,
   style,
 }) => {
   const { colors, radius } = useTheme();
@@ -31,6 +33,7 @@ export const IconButton: React.FC<IconButtonProps> = ({
     <PressableScale
       onPress={onPress}
       disabled={disabled}
+      hitSlop={hitSlop}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       accessibilityState={{ disabled: !!disabled }}

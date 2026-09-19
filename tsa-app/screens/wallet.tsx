@@ -1237,15 +1237,16 @@ const WalletScreen: React.FC = () => {
 
   useEffect(() => {
     if (!activeAddress) return;
+    let ignore = false;
     AsyncStorage.getItem(`tsa-dismissed-solana-other-${activeAddress}`)
       .then((val) => {
-        if (val === 'true') {
-          setDismissedOtherSolana(activeAddress);
-        } else {
-          setDismissedOtherSolana(null);
-        }
+        if (ignore) return;
+        setDismissedOtherSolana(val === 'true' ? activeAddress : null);
       })
       .catch(() => {});
+    return () => {
+      ignore = true;
+    };
   }, [activeAddress]);
 
   const handleDismissOtherSolana = useCallback(() => {
@@ -1271,11 +1272,21 @@ const WalletScreen: React.FC = () => {
 
     if (!hasMeaningfulFunds) return null;
 
+    // Sort balances so highest-value or native token leads display
+    const sortedBalances = [...balances].sort((a, b) => {
+      const aUsd = parseFloat(a.usdValue) || 0;
+      const bUsd = parseFloat(b.usdValue) || 0;
+      if (bUsd !== aUsd) return bUsd - aUsd;
+      if (a.symbol === 'SOL') return -1;
+      if (b.symbol === 'SOL') return 1;
+      return (parseFloat(b.balance) || 0) - (parseFloat(a.balance) || 0);
+    });
+
     let displayValue = '';
     if (usd >= 0.01) {
       displayValue = `≈ $${usd.toFixed(2)}`;
-    } else if (balances.length > 0) {
-      const primary = balances[0];
+    } else if (sortedBalances.length > 0) {
+      const primary = sortedBalances[0];
       displayValue = `${primary.balance} ${primary.symbol}`;
     } else {
       displayValue = '< $0.01';
@@ -1289,7 +1300,7 @@ const WalletScreen: React.FC = () => {
       displayValue,
       format,
       shortAddr,
-      balances,
+      balances: sortedBalances,
     };
   }, [solanaOtherPath, activeAddress]);
 
@@ -1306,7 +1317,6 @@ const WalletScreen: React.FC = () => {
       [
         {
           text: "Don't ask again",
-          style: 'destructive',
           onPress: handleDismissOtherSolana,
         },
         { text: 'Cancel', style: 'cancel' },
@@ -1550,6 +1560,7 @@ const WalletScreen: React.FC = () => {
                 size={16}
                 color={colors.textMuted}
                 accessibilityLabel="Dismiss notice"
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 onPress={handleDismissOtherSolana}
                 style={{ width: 32, height: 32, marginTop: -spacing.xs, marginRight: -spacing.xs }}
               />
