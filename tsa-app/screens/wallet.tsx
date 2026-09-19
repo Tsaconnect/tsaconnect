@@ -806,6 +806,7 @@ const WalletScreen: React.FC = () => {
   const [activeLabel, setActiveLabel] = useState('Wallet');
   const [activeAddress, setActiveAddress] = useState('');
   const [solanaOtherPath, setSolanaOtherPath] = useState<SolanaOtherPath | null>(null);
+  const [dismissedOtherSolana, setDismissedOtherSolana] = useState<string | null>(null);
   const [showWalletSelector, setShowWalletSelector] = useState(false);
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
@@ -1234,22 +1235,83 @@ const WalletScreen: React.FC = () => {
 
   const onRefresh = useCallback(() => fetchBalances(true), [fetchBalances]);
 
+  useEffect(() => {
+    if (!activeAddress) return;
+    AsyncStorage.getItem(`tsa-dismissed-solana-other-${activeAddress}`)
+      .then((val) => {
+        if (val === 'true') {
+          setDismissedOtherSolana(activeAddress);
+        } else {
+          setDismissedOtherSolana(null);
+        }
+      })
+      .catch(() => {});
+  }, [activeAddress]);
+
+  const handleDismissOtherSolana = useCallback(() => {
+    if (!activeAddress) return;
+    setDismissedOtherSolana(activeAddress);
+    AsyncStorage.setItem(`tsa-dismissed-solana-other-${activeAddress}`, 'true').catch(() => {});
+  }, [activeAddress]);
+
+  const otherSolanaDetails = useMemo(() => {
+    if (!solanaOtherPath || solanaOtherPath.wallet !== activeAddress) return null;
+    const balances = solanaOtherPath.balances.filter((b) => (parseFloat(b.balance) || 0) > 0);
+    const usd = balances.reduce((sum, b) => sum + (parseFloat(b.usdValue) || 0), 0);
+
+    // Filter out dust: only show if USD >= $0.50, or SOL >= 0.005, or token >= 0.5
+    const hasMeaningfulFunds =
+      usd >= 0.5 ||
+      balances.some((b) => {
+        const bal = parseFloat(b.balance) || 0;
+        if (b.symbol === 'SOL') return bal >= 0.005;
+        if (b.symbol === 'USDC' || b.symbol === 'USDT') return bal >= 0.5;
+        return (parseFloat(b.usdValue) || 0) >= 0.5;
+      });
+
+    if (!hasMeaningfulFunds) return null;
+
+    let displayValue = '';
+    if (usd >= 0.01) {
+      displayValue = `≈ $${usd.toFixed(2)}`;
+    } else if (balances.length > 0) {
+      const primary = balances[0];
+      displayValue = `${primary.balance} ${primary.symbol}`;
+    } else {
+      displayValue = '< $0.01';
+    }
+
+    const format = solanaOtherPath.derivation === 'trustwallet' ? 'Trust Wallet' : 'standard (Phantom)';
+    const shortAddr = `${solanaOtherPath.address.slice(0, 4)}…${solanaOtherPath.address.slice(-4)}`;
+
+    return {
+      usd,
+      displayValue,
+      format,
+      shortAddr,
+      balances,
+    };
+  }, [solanaOtherPath, activeAddress]);
+
   // Both Solana paths hold funds: the wallet can only show one, so let the user
   // pick rather than leave the other set invisible.
   const confirmSolanaSwitch = useCallback(() => {
     const other = solanaOtherPath;
-    if (!other || other.wallet !== activeAddress) return;
-    const usd = other.balances.reduce((sum, b) => sum + (parseFloat(b.usdValue) || 0), 0);
-    const format = other.derivation === 'trustwallet' ? 'Trust Wallet' : 'standard (Phantom)';
+    const details = otherSolanaDetails;
+    if (!other || !details || other.wallet !== activeAddress) return;
+
     Alert.alert(
       'Switch Solana address?',
-      `Your recovery phrase also holds about $${usd.toFixed(2)} on its ${format} Solana address ` +
-        `(${other.address.slice(0, 4)}…${other.address.slice(-4)}). The app shows one Solana address ` +
-        'at a time. Funds on the address you switch away from stay safe, and you can switch back later.',
+      `Your recovery phrase also holds ${details.displayValue} on its ${details.format} Solana address (${details.shortAddr}).\n\nThe app displays one Solana address at a time. Funds on the address you switch away from stay safe, and you can switch back anytime.`,
       [
+        {
+          text: "Don't ask again",
+          style: 'destructive',
+          onPress: handleDismissOtherSolana,
+        },
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Switch',
+          text: 'Switch address',
           onPress: async () => {
             try {
               await switchSolanaDerivation(other.wallet, other.derivation);
@@ -1261,7 +1323,7 @@ const WalletScreen: React.FC = () => {
         },
       ],
     );
-  }, [solanaOtherPath, activeAddress, fetchBalances]);
+  }, [solanaOtherPath, otherSolanaDetails, activeAddress, handleDismissOtherSolana, fetchBalances]);
 
   const handleSwitchWallet = useCallback(async (address: string) => {
     setShowWalletSelector(false);
@@ -1465,15 +1527,37 @@ const WalletScreen: React.FC = () => {
           onWalletPress={() => setShowWalletSelector(true)}
         />
 
-        {solanaOtherPath?.wallet === activeAddress && (
-          <AccentCard padding="lg" railColor={colors.warning} style={{ marginTop: spacing.lg }}>
-            <Text variant="bodyMed" weight="600">
-              Funds found on another Solana address
-            </Text>
-            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.md }}>
-              Your recovery phrase holds Solana funds on an address this wallet is not showing.
-            </Text>
-            <Button title="Review" variant="secondary" size="sm" onPress={confirmSolanaSwitch} />
+        {otherSolanaDetails && dismissedOtherSolana !== activeAddress && (
+          <AccentCard
+            padding="md"
+            railColor={colors.accentRail}
+            style={{ marginTop: spacing.lg }}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <View style={{ flex: 1, paddingRight: spacing.sm }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.xs }}>
+                  <Icon name="wallet" size={16} color={colors.accent} />
+                  <Text variant="bodyMed" weight="600">
+                    Alternative Solana address found
+                  </Text>
+                </View>
+                <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.md }}>
+                  Your recovery phrase holds {otherSolanaDetails.displayValue} on {otherSolanaDetails.format} ({otherSolanaDetails.shortAddr}).
+                </Text>
+              </View>
+              <IconButton
+                icon="close"
+                size={16}
+                color={colors.textMuted}
+                accessibilityLabel="Dismiss notice"
+                onPress={handleDismissOtherSolana}
+                style={{ width: 32, height: 32, marginTop: -spacing.xs, marginRight: -spacing.xs }}
+              />
+            </View>
+            <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'center' }}>
+              <Button title="Review & switch" variant="secondary" size="sm" onPress={confirmSolanaSwitch} />
+              <Button title="Dismiss" variant="ghost" size="sm" onPress={handleDismissOtherSolana} />
+            </View>
           </AccentCard>
         )}
 
