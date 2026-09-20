@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -410,6 +411,24 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
+	// Check account status — deleted or suspended accounts must not receive session tokens
+	if user.AccountStatus == models.AccountStatusDeleted {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "This account has been deleted. Please contact support if you wish to restore it.",
+			"code":    "ACCOUNT_DELETED",
+		})
+		return
+	}
+	if user.AccountStatus != models.AccountStatusActive {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("Account is %s. Please contact support.", user.AccountStatus),
+			"code":    "ACCOUNT_NOT_ACTIVE",
+		})
+		return
+	}
+
 	// Reset login attempts on success
 	now := time.Now()
 	config.DB.Model(&user).Updates(map[string]interface{}{
@@ -430,15 +449,17 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
-	h.EventBus.Publish(events.Event{
-		Type:    events.SecurityLoginNewDevice,
-		UserID:  user.ID,
-		Title:   "New Login",
-		Message: "A new login was detected on your account",
-		Data: map[string]interface{}{
-			"ip": c.ClientIP(),
-		},
-	})
+	if h.EventBus != nil {
+		h.EventBus.Publish(events.Event{
+			Type:    events.SecurityLoginNewDevice,
+			UserID:  user.ID,
+			Title:   "New Login",
+			Message: "A new login was detected on your account",
+			Data: map[string]interface{}{
+				"ip": c.ClientIP(),
+			},
+		})
+	}
 
 	rawRefresh, hashedRefresh, err := generateRefreshToken()
 	if err != nil {
