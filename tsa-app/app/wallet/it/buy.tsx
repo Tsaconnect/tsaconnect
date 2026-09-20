@@ -140,8 +140,13 @@ export default function ITBuy() {
     setScreen('submitting');
     const kobo = String(Math.round(amt * 100));
     let r = await itBuy(kobo);
-    // If backend rejected because no wallet address is registered, check if an active wallet exists on device
-    if (!r.success && (r.message?.toLowerCase().includes('wallet') || r.code === 'WALLET_REQUIRED')) {
+    // If the backend returned WALLET_REQUIRED (no wallet linked), check if an
+    // active wallet exists on device and register it, then retry once.
+    // Key on the stable machine code first; fall back to message substring only
+    // for backward compatibility with older server deployments.
+    const isWalletRequired =
+      r.code === 'WALLET_REQUIRED' || r.message?.toLowerCase().includes('set up a wallet');
+    if (!r.success && isWalletRequired) {
       try {
         const localAddr = await getActiveWallet();
         if (localAddr) {
@@ -398,7 +403,9 @@ export default function ITBuy() {
   }
 
   if (screen === 'error') {
-    const isWalletError = error.toLowerCase().includes('wallet');
+    // Show the "Set up wallet" CTA only when the error is specifically about a
+    // missing wallet — not on any error that happens to contain the word "wallet".
+    const isWalletError = error.toLowerCase().includes('set up a wallet');
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: colors.background }}>
         <Icon name="closeCircle" size={64} color={colors.danger} />

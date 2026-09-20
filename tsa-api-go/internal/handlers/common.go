@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -8,7 +10,17 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
+
+// WalletRequiredCode is the stable machine code returned when a request cannot
+// be processed because no wallet address is known for the caller. Clients
+// should key on this rather than matching the human-readable message string.
+const WalletRequiredCode = "WALLET_REQUIRED"
+
+// errWalletConflict is a sentinel returned by claimWalletTx when the address
+// is already held by another active account.
+var errWalletConflict = errors.New("wallet_conflict")
 
 // getUserFromContext extracts the authenticated user from the Gin context.
 func getUserFromContext(c *gin.Context) *models.User {
@@ -28,15 +40,17 @@ func getUserFromContext(c *gin.Context) *models.User {
 
 // callerWallet resolves the wallet address an entitlement endpoint acts on.
 //
-// In an active-wallet / decentralized model, `claimed` is the wallet address the
+// In an active-wallet / decentralised model, `claimed` is the wallet address the
 // calling device currently holds active keys for. If provided and valid:
-//  - It must not be in use by another active account (account_status != 'deleted').
-//  - If it differs from the account's registered wallet_address (or if the account
-//    has no registered wallet yet), it is dynamically synced to users.wallet_address.
-//  - It is returned as the active wallet for this request.
+//   - The conflict check and wallet-address update run inside a single DB
+//     transaction, so two concurrent requests claiming the same address cannot
+//     both pass the SELECT and both proceed to UPDATE (check-then-act race).
+//   - Stale references on deleted accounts are cleared inside the same TX.
+//   - It is returned as the active wallet for this request.
 //
-// If `claimed` is omitted, the user's previously registered wallet_address is used
-// as a fallback. If both are empty, the request is refused with "Set up a wallet first".
+// If `claimed` is omitted, the user's previously registered wallet_address is
+// used as a fallback. If both are empty, the request is refused with HTTP 400
+// and machine code WALLET_REQUIRED.
 func callerWallet(c *gin.Context, user *models.User, claimed string) (string, bool) {
 	claimed = strings.TrimSpace(claimed)
 	if claimed != "" {
@@ -45,34 +59,75 @@ func callerWallet(c *gin.Context, user *models.User, claimed string) (string, bo
 			return "", false
 		}
 
-		if config.DB != nil && config.DB.Migrator().HasTable(&models.User{}) {
-			var otherUser models.User
-			if err := config.DB.Where("wallet_address = ? AND account_status != ? AND id != ?",
-				claimed, models.AccountStatusDeleted, user.ID).First(&otherUser).Error; err == nil {
+		if config.DB != nil {
+			// claimWalletTx performs the conflict check, stale-cleanup, and
+			// wallet-address sync in one ACID transaction, eliminating the
+			// check-then-act race that would exist if these were separate queries.
+			err := claimWalletTx(config.DB, user, claimed)
+			if err == errWalletConflict {
 				utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
 				return "", false
 			}
-
-			// Clean up any stale record on deleted accounts
-			_ = config.DB.Model(&models.User{}).
-				Where("wallet_address = ? AND account_status = ?", claimed, models.AccountStatusDeleted).
-				Update("wallet_address", "").Error
-
-			// Auto-sync user's registered wallet to match this active wallet
-			if !strings.EqualFold(claimed, user.WalletAddress) {
-				_ = config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", claimed).Error
-				user.WalletAddress = claimed
+			if err != nil {
+				log.Printf("[callerWallet] unexpected DB error for user %s: %v", user.ID, err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Could not validate wallet address")
+				return "", false
 			}
 		} else {
+			// No DB wired (lightweight test stubs): accept address as-is.
 			user.WalletAddress = claimed
 		}
 		return claimed, true
 	}
 
-	// Fallback to previously registered address if device did not send an active wallet
+	// Fallback: use the address the user previously registered.
 	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Set up a wallet first", WalletRequiredCode)
 		return "", false
 	}
 	return user.WalletAddress, true
+}
+
+// claimWalletTx runs the wallet-claim logic inside a single DB transaction:
+//  1. Check that no OTHER active account already holds `claimed`.
+//  2. Clear the address from any deleted accounts that still hold it.
+//  3. Sync the address onto the caller's users row (if different).
+//
+// Returns errWalletConflict when another active user owns the address, or a
+// plain error on unexpected DB failure.
+func claimWalletTx(db *gorm.DB, user *models.User, claimed string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		// 1. Conflict check — reject if another ACTIVE account owns this address.
+		var otherUser models.User
+		if err := tx.Where(
+			"wallet_address = ? AND account_status != ? AND id != ?",
+			claimed, models.AccountStatusDeleted, user.ID,
+		).First(&otherUser).Error; err == nil {
+			// Found a conflicting active user.
+			return errWalletConflict
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			// Unexpected query error — surface it.
+			return err
+		}
+
+		// 2. Release stale references on deleted accounts.
+		if err := tx.Model(&models.User{}).
+			Where("wallet_address = ? AND account_status = ?", claimed, models.AccountStatusDeleted).
+			Update("wallet_address", "").Error; err != nil {
+			log.Printf("[claimWalletTx] stale-cleanup failed for %s: %v", claimed, err)
+			// Non-fatal: proceed anyway; the conflict check above already
+			// confirmed no active conflict.
+		}
+
+		// 3. Sync the caller's registered wallet if it differs.
+		if !strings.EqualFold(claimed, user.WalletAddress) {
+			if err := tx.Model(&models.User{}).
+				Where("id = ?", user.ID).
+				Update("wallet_address", claimed).Error; err != nil {
+				return err
+			}
+			user.WalletAddress = claimed
+		}
+		return nil
+	})
 }

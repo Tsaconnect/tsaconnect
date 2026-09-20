@@ -1134,8 +1134,11 @@ const WalletScreen: React.FC = () => {
       setActiveAddress(addr);
       const meta = list.find(w => w.address === addr);
       setActiveLabel(meta?.label || 'Wallet');
-      // Ensure backend knows the user's active wallet address (auto-heals unlinked accounts)
-      registerWalletAddress(addr).catch(() => {});
+      // Ensure backend knows the user's active wallet address (auto-heals unlinked accounts).
+      // Failures are non-blocking but logged so they are visible in observability tools.
+      registerWalletAddress(addr).catch((err) => {
+        console.warn('[wallet] opportunistic wallet registration failed:', err);
+      });
     } else {
       // Must reset: without this, deleting the last wallet leaves a stale
       // address and the no-wallet onboarding branch becomes unreachable.

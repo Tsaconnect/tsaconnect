@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +15,8 @@ import (
 	"gorm.io/gorm"
 )
 
+// ── Test helpers ─────────────────────────────────────────────────────────────
+
 func newCallerWalletTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -22,6 +26,9 @@ func newCallerWalletTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	// Use a minimal DDL instead of AutoMigrate because the full models.User
+	// schema contains PostgreSQL-specific syntax (uuid DEFAULT gen_random_uuid())
+	// that SQLite does not understand.
 	if err := db.Exec(`CREATE TABLE users (
 		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT,
 		account_status TEXT DEFAULT 'active',
@@ -59,6 +66,20 @@ func testGinContext() (*gin.Context, *httptest.ResponseRecorder) {
 	return c, w
 }
 
+// responseCode extracts the "code" field from a JSON response body.
+func responseCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	return body.Code
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 func TestCallerWallet_ActiveWalletUsedWhenUserWalletEmpty(t *testing.T) {
 	db := newCallerWalletTestDB(t)
 	user := models.User{
@@ -83,7 +104,7 @@ func TestCallerWallet_ActiveWalletUsedWhenUserWalletEmpty(t *testing.T) {
 		t.Fatalf("expected in-memory user.WalletAddress to be updated, got %q", user.WalletAddress)
 	}
 
-	// Verify database was synced
+	// Verify database was synced.
 	if stored := storedUserWallet(t, db, user.ID); stored != activeWallet {
 		t.Fatalf("expected db wallet_address to be %q, got %q", activeWallet, stored)
 	}
@@ -135,6 +156,7 @@ func TestCallerWallet_FallbackToRegisteredWhenClaimedEmpty(t *testing.T) {
 	}
 }
 
+// TestCallerWallet_BothEmptyFails asserts a 400 with code WALLET_REQUIRED.
 func TestCallerWallet_BothEmptyFails(t *testing.T) {
 	_ = newCallerWalletTestDB(t)
 	user := models.User{
@@ -151,6 +173,10 @@ func TestCallerWallet_BothEmptyFails(t *testing.T) {
 	}
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", w.Code)
+	}
+	// Must return the stable machine code so the frontend can branch on it.
+	if got := responseCode(t, w); got != WalletRequiredCode {
+		t.Fatalf("expected code %q, got %q", WalletRequiredCode, got)
 	}
 }
 
@@ -232,8 +258,92 @@ func TestCallerWallet_ClaimedPreviouslyHeldByDeletedAccountSucceeds(t *testing.T
 		t.Fatalf("expected %q, got %q", claimedAddr, wallet)
 	}
 
-	// Verify deleted user had wallet address cleared
+	// Verify deleted user had wallet address cleared.
 	if stored := storedUserWallet(t, db, deletedUser.ID); stored != "" {
 		t.Fatalf("expected deleted user wallet_address cleared, got %q", stored)
 	}
 }
+
+// TestCallerWallet_ConcurrentClaimOnlyOneWins asserts that when two goroutines
+// concurrently try to claim the same unused wallet address for different users,
+// exactly one succeeds and the other gets a 409 Conflict — confirming that the
+// transaction wrapper prevents the check-then-act race.
+//
+// NOTE: SQLite `:memory:` creates a per-connection database, so each goroutine
+// would see a different empty DB. We work around this by using a shared named
+// in-memory SQLite DSN (`file::memory:?cache=shared`) with a single pooled
+// connection so both goroutines operate on the same tables.
+func TestCallerWallet_ConcurrentClaimOnlyOneWins(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// Use a named shared-memory SQLite so goroutines share the same connection pool.
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		t.Fatalf("open shared sqlite: %v", err)
+	}
+	// Force a single connection so SQLite serialises transactions.
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+	defer sqlDB.Close()
+
+	if err := db.Exec(`DROP TABLE IF EXISTS users`).Error; err != nil {
+		t.Fatalf("drop users: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT,
+		account_status TEXT DEFAULT 'active',
+		created_at DATETIME, updated_at DATETIME
+	)`).Error; err != nil {
+		t.Fatalf("create users table: %v", err)
+	}
+
+	sharedAddr := "0x5555555555555555555555555555555555555555"
+
+	userA := models.User{ID: uuid.New(), Username: "user_a", WalletAddress: "", AccountStatus: models.AccountStatusActive}
+	userB := models.User{ID: uuid.New(), Username: "user_b", WalletAddress: "", AccountStatus: models.AccountStatusActive}
+
+	for _, u := range []*models.User{&userA, &userB} {
+		if err := db.Exec(`INSERT INTO users (id, username, name, wallet_address, account_status) VALUES (?,?,?,?,?)`,
+			u.ID.String(), u.Username, u.Name, u.WalletAddress, u.AccountStatus).Error; err != nil {
+			t.Fatalf("insert user: %v", err)
+		}
+	}
+
+	prev := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = prev })
+
+	type result struct {
+		ok   bool
+		code int
+	}
+	results := make([]result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	for i, u := range []*models.User{&userA, &userB} {
+		go func(idx int, user *models.User) {
+			defer wg.Done()
+			c, w := testGinContext()
+			_, ok := callerWallet(c, user, sharedAddr)
+			results[idx] = result{ok: ok, code: w.Code}
+		}(i, u)
+	}
+	wg.Wait()
+
+	successes := 0
+	conflicts := 0
+	for _, r := range results {
+		if r.ok {
+			successes++
+		} else if r.code == http.StatusConflict {
+			conflicts++
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("expected 1 success + 1 conflict, got successes=%d conflicts=%d results=%+v",
+			successes, conflicts, results)
+	}
+}
+
