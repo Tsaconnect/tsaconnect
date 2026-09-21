@@ -5,7 +5,7 @@
 // (login API call, biometric/refresh-token session restore, credential state,
 // validation, error handling, and post-login navigation) is preserved verbatim.
 import React, { useState, useEffect } from "react";
-import { ScrollView, View } from "react-native";
+import { Alert, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, Link } from "expo-router";
 import api from "../services/api";
@@ -129,6 +129,40 @@ export default function Login() {
         setEmail("");
         setPassword("");
         router.replace("/home");
+      } else if (response.code === "ACCOUNT_DELETED_GRACE_PERIOD") {
+        const daysLeft = response.data?.graceDaysLeft;
+        const daysText = daysLeft ? ` (${daysLeft} day${daysLeft === 1 ? "" : "s"} left)` : "";
+        Alert.alert(
+          "Account Scheduled for Deletion",
+          `This account was deactivated and is scheduled for permanent deletion${daysText}. Would you like to restore your account and sign in?`,
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Restore Account",
+              onPress: async () => {
+                setLoading(true);
+                try {
+                  const restoreRes = await api.reactivateAccount(email.trim(), password.trim());
+                  if (restoreRes.success && restoreRes.data) {
+                    setAuthenticated(true);
+                    setAuthToken(restoreRes.data.token);
+                    setEmailVerified(restoreRes.data.emailVerified ?? false);
+                    setCurrentUser(restoreRes.data);
+                    setEmail("");
+                    setPassword("");
+                    router.replace("/home");
+                  } else {
+                    setGeneralError(restoreRes.message || "Failed to restore account. Please try again.");
+                  }
+                } catch (err: any) {
+                  setGeneralError(err.message || "Failed to restore account.");
+                } finally {
+                  setLoading(false);
+                }
+              },
+            },
+          ]
+        );
       } else {
         setGeneralError(
           response.message || "Invalid credentials. Please try again."

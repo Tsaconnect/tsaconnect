@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -413,6 +414,31 @@ func (h *Handlers) Login(c *gin.Context) {
 
 	// Check account status — deleted or suspended accounts must not receive session tokens
 	if user.AccountStatus == models.AccountStatusDeleted {
+		// Check if there is a pending deletion request within the grace window
+		var delReq models.AccountDeletionRequest
+		if config.DB != nil {
+			if err := config.DB.Where("user_id = ? AND status = ? AND purge_after > ?",
+				user.ID, models.AccountDeletionStatusPending, time.Now()).
+				Order("created_at DESC").First(&delReq).Error; err == nil {
+				daysLeft := int(math.Ceil(time.Until(delReq.PurgeAfter).Hours() / 24))
+				if daysLeft < 1 {
+					daysLeft = 1
+				}
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": fmt.Sprintf("Your account is scheduled for deletion on %s (%d days left). You can restore your account to continue.",
+						delReq.PurgeAfter.Format("2 January 2006"), daysLeft),
+					"code": "ACCOUNT_DELETED_GRACE_PERIOD",
+					"data": gin.H{
+						"canRestore":    true,
+						"purgeAfter":    delReq.PurgeAfter,
+						"graceDaysLeft": daysLeft,
+					},
+				})
+				return
+			}
+		}
+
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "This account has been deleted. Please contact support if you wish to restore it.",
@@ -562,3 +588,154 @@ func hashToken(raw string) string {
 }
 
 // getUserFromContext is defined in common.go
+
+// ReactivateAccount handles POST /api/auth/reactivate
+// Allows a user whose account was soft-deleted to restore it within the 30-day grace period.
+func (h *Handlers) ReactivateAccount(c *gin.Context) {
+	var req loginRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Identifier == "" || req.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Identifier and password are required",
+		})
+		return
+	}
+
+	lowered := strings.ToLower(strings.TrimSpace(req.Identifier))
+	var user models.User
+	var err error
+	if strings.Contains(lowered, "@") {
+		err = config.DB.Where("email = ?", lowered).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
+		}
+	} else {
+		err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = config.DB.Where("email = ?", lowered).First(&user).Error
+		}
+	}
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "Invalid credentials",
+		})
+		return
+	}
+
+	if err := user.ComparePassword(req.Password); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "Invalid credentials",
+		})
+		return
+	}
+
+	if user.AccountStatus != models.AccountStatusDeleted {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Account is not deleted",
+		})
+		return
+	}
+
+	// Verify there is an active pending deletion request within the grace window
+	now := time.Now()
+	var delReq models.AccountDeletionRequest
+	if err := config.DB.Where("user_id = ? AND status = ? AND purge_after > ?",
+		user.ID, models.AccountDeletionStatusPending, now).
+		Order("created_at DESC").First(&delReq).Error; err != nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "The grace period for restoring this account has expired",
+			"code":    "ACCOUNT_DELETED",
+		})
+		return
+	}
+
+	// Restore account inside transaction
+	txErr := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.AccountDeletionRequest{}).Where("id = ?", delReq.ID).Updates(map[string]interface{}{
+			"status":      models.AccountDeletionStatusRestored,
+			"admin_note":  "Self-service restored by user on login",
+			"reviewed_at": now,
+			"updated_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+			"account_status": models.AccountStatusActive,
+			"deleted_at":     nil,
+			"updated_at":     now,
+			"login_attempts": 0,
+			"last_login":     now,
+			"lock_until":     nil,
+		}).Error
+	})
+	if txErr != nil {
+		log.Printf("ReactivateAccount tx error for %s: %v", user.ID, txErr)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to restore account",
+		})
+		return
+	}
+
+	user.AccountStatus = models.AccountStatusActive
+	user.DeletedAt = nil
+
+	if h.EventBus != nil {
+		h.EventBus.Publish(events.Event{
+			Type:    events.AccountDeletionRestored,
+			UserID:  user.ID,
+			Title:   "Account Restored",
+			Message: "Your TSA Connect account has been restored.",
+			Data: map[string]interface{}{
+				"requestId": delReq.ID.String(),
+				"userId":    user.ID.String(),
+			},
+		})
+	}
+
+	// Generate JWT tokens and return standard login response
+	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to generate token",
+		})
+		return
+	}
+
+	rawRefresh, hashedRefresh, err := generateRefreshToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate refresh token"})
+		return
+	}
+	rt := models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: hashedRefresh,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+	}
+	if err := config.DB.Create(&rt).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Account restored successfully",
+		"data": gin.H{
+			"userId":             user.ID.String(),
+			"role":               user.Role,
+			"token":              token,
+			"accessToken":        token,
+			"refreshToken":       rawRefresh,
+			"name":               user.Name,
+			"email":              user.Email,
+			"verificationStatus": user.VerificationStatus,
+			"accountStatus":      user.AccountStatus,
+			"emailVerified":      user.EmailVerified,
+		},
+	})
+}

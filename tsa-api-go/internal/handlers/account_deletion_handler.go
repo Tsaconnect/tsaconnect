@@ -307,14 +307,37 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 	}
 
 	now := time.Now()
-	if err := config.DB.Model(&models.AccountDeletionRequest{}).Where("id = ?", req.ID).Updates(map[string]interface{}{
-		"status":      models.AccountDeletionStatusCompleted,
-		"admin_note":  input.Note,
-		"reviewed_by": admin.ID,
-		"reviewed_at": now,
-		"updated_at":  now,
-	}).Error; err != nil {
-		log.Printf("CompleteAccountDeletionRequest %s: %v", req.ID, err)
+	txErr := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.AccountDeletionRequest{}).Where("id = ?", req.ID).Updates(map[string]interface{}{
+			"status":      models.AccountDeletionStatusCompleted,
+			"admin_note":  input.Note,
+			"reviewed_by": admin.ID,
+			"reviewed_at": now,
+			"updated_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		// Permanent erasure: anonymize personal identifiers so PII is removed
+		// and the user's original email, username, and phone are freed up for new registration.
+		anonEmail := fmt.Sprintf("deleted_%s@deleted.local", req.UserID.String())
+		anonUsername := fmt.Sprintf("deleted_%s", req.UserID.String()[:12])
+		return tx.Model(&models.User{}).Where("id = ?", req.UserID).Updates(map[string]interface{}{
+			"email":          anonEmail,
+			"username":       anonUsername,
+			"phone_number":   "",
+			"name":           "Deleted User",
+			"profile_photo":  "",
+			"address":        "",
+			"city":           "",
+			"state":          "",
+			"country":        "",
+			"wallet_address": "",
+			"updated_at":     now,
+		}).Error
+	})
+	if txErr != nil {
+		log.Printf("CompleteAccountDeletionRequest %s: %v", req.ID, txErr)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update deletion request")
 		return
 	}

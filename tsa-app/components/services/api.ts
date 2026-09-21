@@ -6,6 +6,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 export interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
+  code?: string;
   data?: T;
   errors?: Array<{ field: string; message: string }>;
 }
@@ -364,6 +365,8 @@ class APIService {
       return {
         success: false,
         message: data.message || `Request failed with status ${response.status}`,
+        code: data.code,
+        data: data.data,
         errors: data.errors,
       };
     }
@@ -460,6 +463,38 @@ class APIService {
       return result;
     } catch (error: any) {
       console.error('Login error:', error);
+      return {
+        success: false,
+        message: error.message || 'Network error. Please check your connection.',
+      };
+    }
+  }
+
+  // Reactivate account during the grace period
+  async reactivateAccount(emailOrUsername: string, password: string): Promise<ApiResponse<SignupResponse>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/reactivate`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ identifier: emailOrUsername.trim(), password }),
+      });
+
+      const result = await this.handleResponse<SignupResponse>(response);
+      if (result.success && result.data) {
+        const accessToken = result.data.accessToken || result.data.token;
+        this.setToken(accessToken);
+        await AsyncStorage.setItem('authToken', accessToken);
+        await AsyncStorage.setItem('userId', result.data.userId);
+        await AsyncStorage.setItem('role', result.data.role);
+        if (result.data.refreshToken) {
+          const { storeRefreshToken } = await import('../../services/localAuth');
+          await storeRefreshToken(result.data.refreshToken);
+        }
+      }
+
+      return result;
+    } catch (error: any) {
+      console.error('Reactivate account error:', error);
       return {
         success: false,
         message: error.message || 'Network error. Please check your connection.',

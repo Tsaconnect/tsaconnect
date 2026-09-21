@@ -58,6 +58,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		authGroup.POST("/reset-password", h.ResetPassword)
 		authGroup.POST("/refresh", h.RefreshToken)
 		authGroup.POST("/revoke", auth, h.RevokeToken)
+		authGroup.POST("/reactivate", h.ReactivateAccount)
 	}
 
 	// User routes

@@ -42,6 +42,12 @@ func setupAuthTestDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
 			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
 		)`,
+		`CREATE TABLE account_deletion_requests (
+			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, reason TEXT,
+			status TEXT NOT NULL DEFAULT 'pending', purge_after DATETIME,
+			admin_note TEXT, reviewed_by TEXT, reviewed_at DATETIME,
+			created_at DATETIME, updated_at DATETIME
+		)`,
 	}
 	for _, sql := range stmts {
 		if err := db.Exec(sql).Error; err != nil {
