@@ -33,6 +33,7 @@ import {
   Button,
   Icon,
   Input,
+  PickerSheet,
   PressableScale,
   SelectRow,
   Sheet,
@@ -40,6 +41,7 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
+import { useMerchantPricing } from '@/hooks/useMerchantPricing';
 
 const CategoryAvatar = ({ category }: { category: any }) => {
   const { radius } = useTheme();
@@ -62,6 +64,36 @@ const AddProduct = () => {
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
 
+  const {
+    selectedCurrencyCode,
+    setSelectedCurrencyCode,
+    selectedCurrency,
+    rate,
+    isUsd,
+    currencyOptions,
+    toUsd,
+    toLocal,
+    formatUsd,
+    convertValue,
+  } = useMerchantPricing();
+
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+
+  const onSelectCurrency = (newCode: string) => {
+    if (newCode === selectedCurrencyCode) {
+      setCurrencyPickerOpen(false);
+      return;
+    }
+    setPrice((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setBaseShippingFee((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setShippingSameCity((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setShippingSameState((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setShippingSameCountry((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setShippingInternational((prev) => convertValue(prev, selectedCurrencyCode, newCode));
+    setSelectedCurrencyCode(newCode);
+    setCurrencyPickerOpen(false);
+  };
+
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
   const [price, setPrice] = useState('');
@@ -80,17 +112,18 @@ const AddProduct = () => {
 
   const applyBaseShippingFee = (baseStr: string) => {
     setBaseShippingFee(baseStr);
-    const base = parseFloat(baseStr);
+    const base = parseFloat(baseStr.replace(/,/g, ''));
     if (isNaN(base) || base < 0) return;
     const rates = calculateZoneRates(base);
-    setShippingSameCity(rates.sameCity.toFixed(2));
-    setShippingSameState(rates.sameState.toFixed(2));
-    setShippingSameCountry(rates.sameCountry.toFixed(2));
-    setShippingInternational(rates.international.toFixed(2));
+    setShippingSameCity(Number.isInteger(rates.sameCity) ? rates.sameCity.toString() : rates.sameCity.toFixed(2));
+    setShippingSameState(Number.isInteger(rates.sameState) ? rates.sameState.toString() : rates.sameState.toFixed(2));
+    setShippingSameCountry(Number.isInteger(rates.sameCountry) ? rates.sameCountry.toString() : rates.sameCountry.toFixed(2));
+    setShippingInternational(Number.isInteger(rates.international) ? rates.international.toString() : rates.international.toFixed(2));
   };
 
-  const applyPackagePreset = (baseFee: number) => {
-    applyBaseShippingFee(String(baseFee));
+  const applyPackagePreset = (usdBaseFee: number) => {
+    const localBase = toLocal(usdBaseFee);
+    applyBaseShippingFee(localBase);
   };
   const [productImages, setProductImages] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
@@ -253,19 +286,20 @@ const AddProduct = () => {
         });
       });
 
+      const usdPrice = toUsd(price);
       formData.append('name', productName);
       formData.append('description', description);
-      formData.append('price', parseFloat(price).toString());
+      formData.append('price', usdPrice.toString());
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
       formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
-      if (shippingSameCity) formData.append('shippingSameCity', shippingSameCity);
-      if (shippingSameState) formData.append('shippingSameState', shippingSameState);
-      if (shippingSameCountry) formData.append('shippingSameCountry', shippingSameCountry);
-      if (shippingInternational) formData.append('shippingInternational', shippingInternational);
+      if (shippingSameCity) formData.append('shippingSameCity', toUsd(shippingSameCity).toString());
+      if (shippingSameState) formData.append('shippingSameState', toUsd(shippingSameState).toString());
+      if (shippingSameCountry) formData.append('shippingSameCountry', toUsd(shippingSameCountry).toString());
+      if (shippingInternational) formData.append('shippingInternational', toUsd(shippingInternational).toString());
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
@@ -534,16 +568,32 @@ const AddProduct = () => {
             </View>
           </View>
 
+          <SelectRow
+            label="Pricing Currency"
+            value={`${selectedCurrency.flag ? selectedCurrency.flag + ' ' : ''}${selectedCurrency.code} (${selectedCurrency.symbol})`}
+            onPress={() => setCurrencyPickerOpen(true)}
+            containerStyle={{ marginBottom: spacing.md }}
+          />
+
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Input
-                label="Price ($) *"
-                placeholder="0.00"
+                label={`Price (${selectedCurrency.symbol}) *`}
+                placeholder={isUsd ? "0.00" : "0"}
                 keyboardType="decimal-pad"
                 value={price}
                 onChangeText={setPrice}
                 error={errors.price}
-                helper={!errors.price ? '2% platform fee applies per sale' : undefined}
+                helper={
+                  !errors.price
+                    ? [
+                        formatUsd(price),
+                        '2% platform fee applies per sale',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : undefined
+                }
               />
             </View>
             <View style={{ flex: 1 }}>
@@ -560,47 +610,57 @@ const AddProduct = () => {
 
           {/* Shipping Rates */}
           <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
-            Shipping Rates ($)
+            Shipping Rates ({selectedCurrency.symbol})
           </Text>
 
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
             Package size (optional quick-select)
           </Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
-            {PACKAGE_SIZE_PRESETS.map((preset) => (
-              <PressableScale
-                key={preset.key}
-                onPress={() => applyPackagePreset(preset.baseFee)}
-                style={{
-                  flex: 1,
-                  minWidth: 90,
-                  paddingVertical: spacing.sm,
-                  paddingHorizontal: spacing.sm,
-                  borderRadius: radius.md,
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                  backgroundColor: colors.surface,
-                  alignItems: 'center',
-                  gap: 2,
-                }}
-              >
-                <Text variant="caption" weight="700" align="center">
-                  {preset.label}
-                </Text>
-                <Text variant="caption" weight="600" color="accent">
-                  ${preset.baseFee}
-                </Text>
-              </PressableScale>
-            ))}
+            {PACKAGE_SIZE_PRESETS.map((preset) => {
+              const localPreset = toLocal(preset.baseFee);
+              return (
+                <PressableScale
+                  key={preset.key}
+                  onPress={() => applyPackagePreset(preset.baseFee)}
+                  style={{
+                    flex: 1,
+                    minWidth: 90,
+                    paddingVertical: spacing.sm,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.md,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    backgroundColor: colors.surface,
+                    alignItems: 'center',
+                    gap: 2,
+                  }}
+                >
+                  <Text variant="caption" weight="700" align="center">
+                    {preset.label}
+                  </Text>
+                  <Text variant="caption" weight="600" color="accent">
+                    ${preset.baseFee}{!isUsd && localPreset ? ` · ${selectedCurrency.symbol}${localPreset}` : ''}
+                  </Text>
+                </PressableScale>
+              );
+            })}
           </View>
 
           <Input
-            label="Base shipping fee ($)"
-            placeholder="e.g. 2.00"
+            label={`Base shipping fee (${selectedCurrency.symbol})`}
+            placeholder={isUsd ? "e.g. 2.00" : "e.g. 1000"}
             keyboardType="decimal-pad"
             value={baseShippingFee}
             onChangeText={applyBaseShippingFee}
-            helper="Auto-fills the zone rates below. Edit any zone to override."
+            helper={
+              [
+                formatUsd(baseShippingFee),
+                'Auto-fills the zone rates below. Edit any zone to override.',
+              ]
+                .filter(Boolean)
+                .join(' · ')
+            }
             containerStyle={{ marginBottom: spacing.lg }}
           />
 
@@ -615,8 +675,8 @@ const AddProduct = () => {
             </View>
             <View style={{ flex: 1 }}>
               <Input
-                label="Same City"
-                placeholder="0.00"
+                label={`Same City (${selectedCurrency.symbol})`}
+                placeholder={isUsd ? "0.00" : "0"}
                 keyboardType="decimal-pad"
                 value={shippingSameCity}
                 onChangeText={setShippingSameCity}
@@ -626,8 +686,8 @@ const AddProduct = () => {
           <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
             <View style={{ flex: 1 }}>
               <Input
-                label="Same State"
-                placeholder="0.00"
+                label={`Same State (${selectedCurrency.symbol})`}
+                placeholder={isUsd ? "0.00" : "0"}
                 keyboardType="decimal-pad"
                 value={shippingSameState}
                 onChangeText={setShippingSameState}
@@ -635,8 +695,8 @@ const AddProduct = () => {
             </View>
             <View style={{ flex: 1 }}>
               <Input
-                label="Same Country"
-                placeholder="0.00"
+                label={`Same Country (${selectedCurrency.symbol})`}
+                placeholder={isUsd ? "0.00" : "0"}
                 keyboardType="decimal-pad"
                 value={shippingSameCountry}
                 onChangeText={setShippingSameCountry}
@@ -646,8 +706,8 @@ const AddProduct = () => {
           <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
             <View style={{ flex: 1 }}>
               <Input
-                label="International"
-                placeholder="0.00"
+                label={`International (${selectedCurrency.symbol})`}
+                placeholder={isUsd ? "0.00" : "0"}
                 keyboardType="decimal-pad"
                 value={shippingInternational}
                 onChangeText={setShippingInternational}
@@ -858,6 +918,15 @@ const AddProduct = () => {
           )}
         </ScrollView>
       </Sheet>
+
+      <PickerSheet
+        title="Select Pricing Currency"
+        items={currencyOptions}
+        value={selectedCurrencyCode}
+        onSelect={(val) => onSelectCurrency(val)}
+        open={currencyPickerOpen}
+        onClose={() => setCurrencyPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 };
