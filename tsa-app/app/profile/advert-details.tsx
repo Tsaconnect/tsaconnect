@@ -6,6 +6,7 @@ import { useLocalSearchParams } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { useTheme } from "@/theme";
+import { useCurrency } from "@/contexts/CurrencyContext";
 import { Card, Spinner, Text } from "@/components/ui";
 
 // Normalize auth header to always include Bearer prefix
@@ -31,6 +32,7 @@ function firstImageUrl(images: any): string | undefined {
 
 const AdvertDetailScreen = () => {
   const { colors, spacing, radius } = useTheme();
+  const { formatPrice } = useCurrency();
   const { token } = useAuth();
   const [advert, setAdvert] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,7 +114,7 @@ const AdvertDetailScreen = () => {
         <Text variant="title2" weight="700">{advert.name ?? 'Untitled'}</Text>
         {advert.price != null && (
           <Text variant="title3" weight="700" color="accent" style={{ marginVertical: spacing.xs }}>
-            ${Number(advert.price).toFixed(2)} USD
+            {formatPrice(Number(advert.price))}
           </Text>
         )}
         {advert.status && (

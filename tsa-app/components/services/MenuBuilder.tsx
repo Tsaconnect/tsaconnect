@@ -3,6 +3,8 @@
 // Order-type menu builder. Merchants add/remove menu items (name, description,
 // price, optional image). Purely a controlled list — the parent owns the state
 // and persists each item via createServiceMenuItem after the product exists.
+// Prices are typed in the merchant's currency and held in `pricing` under
+// menuPriceKey(item), not on the draft.
 //
 // TSA Signature design system only (@/theme + @/components/ui).
 import React from 'react';
@@ -10,30 +12,38 @@ import { Image, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useTheme } from '@/theme';
 import { Button, Card, Icon, IconButton, Input, PressableScale, Text } from '@/components/ui';
+import { LocalAmountInput } from '@/components/products/MerchantPricingFields';
+import type { MerchantPricing } from '@/hooks/useMerchantPricing';
 
 // A menu item as edited in the form. `imageUri` is a local file URI (from the
 // picker) until upload; `imageUrl` is a persisted remote URL (edit prefetch).
 export interface MenuDraft {
+  key: string; // stable per draft; the server id once saved
   id?: string; // server id for an already-saved item; absent for a new draft
   name: string;
   description: string;
-  priceUsd: string; // kept as string for the text input
   imageUri?: string;
   imageUrl?: string;
 }
 
+let draftSeq = 0;
+
 export const emptyMenuDraft = (): MenuDraft => ({
+  key: `draft-${++draftSeq}`,
   name: '',
   description: '',
-  priceUsd: '',
 });
+
+/** The pricing key an item's price is stored under. */
+export const menuPriceKey = (item: Pick<MenuDraft, 'key'>) => `menu:${item.key}`;
 
 interface MenuBuilderProps {
   items: MenuDraft[];
   onChange: (items: MenuDraft[]) => void;
+  pricing: MerchantPricing;
 }
 
-const MenuBuilder: React.FC<MenuBuilderProps> = ({ items, onChange }) => {
+const MenuBuilder: React.FC<MenuBuilderProps> = ({ items, onChange, pricing }) => {
   const { colors, spacing, radius } = useTheme();
 
   const update = (index: number, patch: Partial<MenuDraft>) => {
@@ -62,7 +72,7 @@ const MenuBuilder: React.FC<MenuBuilderProps> = ({ items, onChange }) => {
       {items.map((item, index) => {
         const preview = item.imageUri || item.imageUrl;
         return (
-          <Card key={index} padding="lg" style={{ gap: spacing.md }}>
+          <Card key={item.key} padding="lg" style={{ gap: spacing.md }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
               <Text variant="bodyMed" weight="700">
                 Item {index + 1}
@@ -113,13 +123,7 @@ const MenuBuilder: React.FC<MenuBuilderProps> = ({ items, onChange }) => {
                   onChangeText={(t) => update(index, { name: t })}
                   placeholder="e.g. Jollof Rice"
                 />
-                <Input
-                  label="Price ($)"
-                  value={item.priceUsd}
-                  onChangeText={(t) => update(index, { priceUsd: t })}
-                  keyboardType="decimal-pad"
-                  placeholder="0.00"
-                />
+                <LocalAmountInput pricing={pricing} amountKey={menuPriceKey(item)} label="Price" />
               </View>
             </View>
 

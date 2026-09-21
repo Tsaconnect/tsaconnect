@@ -32,7 +32,7 @@ jest.mock('@/AuthContext/AuthContext', () => ({
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
-import { useMerchantPricing, type MerchantPricing } from '../useMerchantPricing';
+import { BASE_FEE_KEY, useMerchantPricing, type MerchantPricing } from '../useMerchantPricing';
 
 let pricing: MerchantPricing;
 const Harness = () => {
@@ -86,11 +86,11 @@ describe('useMerchantPricing', () => {
     mount();
     act(() => pricing.loadSavedAmounts({ price: 35, shippingSameCity: 2 }));
     // No rate yet: showing "35" in a naira field is how $35 became $0.02.
-    expect(pricing.amounts.price).toBe('');
+    expect(pricing.amount('price')).toBe('');
 
     loadRates({ NGN: 1500 });
-    expect(pricing.amounts.price).toBe('52500');
-    expect(pricing.amounts.shippingSameCity).toBe('3000');
+    expect(pricing.amount('price')).toBe('52500');
+    expect(pricing.amount('shippingSameCity')).toBe('3000');
   });
 
   it('submits untouched stored amounts verbatim, even after a currency switch', () => {
@@ -118,13 +118,9 @@ describe('useMerchantPricing', () => {
     loadRates({ NGN: 1500 });
 
     act(() => pricing.applyPackagePreset(3));
-    expect(pricing.baseShippingFee).toBe('4500');
-    expect(pricing.amounts).toMatchObject({
-      shippingSameCity: '4500',
-      shippingSameState: '6750',
-      shippingSameCountry: '11250',
-      shippingInternational: '22500',
-    });
+    expect(pricing.amount(BASE_FEE_KEY)).toBe('4500');
+    expect(['shippingSameCity', 'shippingSameState', 'shippingSameCountry', 'shippingInternational'].map(pricing.amount))
+      .toEqual(['4500', '6750', '11250', '22500']);
     expect(pricing.usdPayload()).toEqual({
       price: 35,
       shippingSameCity: 3,
@@ -140,5 +136,23 @@ describe('useMerchantPricing', () => {
     rerender();
     expect(pricing.selectedCurrencyCode).toBe('USD');
     expect(pricing.ready).toBe(true);
+  });
+
+  it('keys beyond the product fields: merged loads, per-key USD, switch converts them all', () => {
+    mount();
+    act(() => pricing.loadSavedAmounts({ accessFeeUsd: 5 }));
+    act(() => pricing.loadSavedAmounts({ 'menu:a': 2, 'menu:b': 0 }));
+    loadRates({ NGN: 1500, UGX: 3700 });
+
+    expect(pricing.amount('accessFeeUsd')).toBe('7500');
+    expect(pricing.amount('menu:a')).toBe('3000');
+    expect(pricing.amount('menu:b')).toBe('');
+
+    act(() => pricing.setAmount('menu:new', '4500'));
+    act(() => pricing.switchCurrency('UGX'));
+    expect(pricing.amount('menu:new')).toBe('11100');
+    expect(pricing.usdFor('menu:new')).toBe(3);
+    expect(pricing.usdFor('menu:a')).toBe(2);
+    expect(pricing.usdFor('menu:b')).toBeUndefined();
   });
 });

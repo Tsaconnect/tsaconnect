@@ -5,6 +5,11 @@
  * `visible`) leaves the sheet permanently closed with nothing else failing.
  * This reads the props PickerSheet actually receives.
  */
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: { getItem: jest.fn(async () => null), setItem: jest.fn(async () => null) },
+}));
+
 jest.mock('@/theme', () => ({
   __esModule: true,
   useTheme: () => ({

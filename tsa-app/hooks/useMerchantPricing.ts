@@ -25,13 +25,8 @@ export const AMOUNT_FIELDS = [
 export type AmountField = (typeof AMOUNT_FIELDS)[number];
 export type UsdAmounts = Partial<Record<AmountField, number>>;
 
-const EMPTY_AMOUNTS: Record<AmountField, string> = {
-  price: '',
-  shippingSameCity: '',
-  shippingSameState: '',
-  shippingSameCountry: '',
-  shippingInternational: '',
-};
+/** Key of the base fee that auto-fills the distance zones; never submitted. */
+export const BASE_FEE_KEY = 'baseShippingFee';
 
 /** Parses a typed amount, tolerating thousands separators. NaN when not a number. */
 export function parseAmount(value: string): number {
@@ -157,30 +152,34 @@ export function useMerchantPricing() {
     [pricedCurrencies]
   );
 
-  const [amounts, setAmounts] = useState<Record<AmountField, string>>(EMPTY_AMOUNTS);
-  const [baseShippingFee, setBaseShippingFeeValue] = useState('');
-  // USD values of an existing product. A field the merchant never touches is
-  // submitted from here verbatim, so saving an unrelated edit (stock, photos)
-  // cannot re-round the price through today's rate.
-  const [savedUsd, setSavedUsd] = useState<UsdAmounts>({});
-  const [pendingLoad, setPendingLoad] = useState<UsdAmounts | null>(null);
-  const [edited, setEdited] = useState<ReadonlySet<AmountField>>(new Set());
+  // Amounts are keyed so one store serves every merchant money input: product
+  // price and shipping, service fee tiers, menu items, request quotes.
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  // Stored USD values of an existing listing. A key the merchant never touches
+  // is submitted from here verbatim, so saving an unrelated edit (stock,
+  // photos) cannot re-round the price through today's rate.
+  const [savedUsd, setSavedUsd] = useState<Record<string, number>>({});
+  const [pendingLoad, setPendingLoad] = useState<Record<string, number | null> | null>(null);
+  const [edited, setEdited] = useState<ReadonlySet<string>>(new Set());
 
-  const markEdited = useCallback((fields: AmountField[]) => {
-    setEdited((prev) => new Set([...prev, ...fields]));
+  const amount = useCallback((key: string) => amounts[key] ?? '', [amounts]);
+
+  const markEdited = useCallback((keys: string[]) => {
+    setEdited((prev) => new Set([...prev, ...keys]));
   }, []);
 
   const setAmount = useCallback(
-    (field: AmountField, value: string) => {
-      setAmounts((prev) => ({ ...prev, [field]: value }));
-      markEdited([field]);
+    (key: string, value: string) => {
+      setAmounts((prev) => ({ ...prev, [key]: value }));
+      markEdited([key]);
     },
     [markEdited]
   );
 
+  /** Sets the base fee and auto-fills the four distance zones from it. */
   const setBaseShippingFee = useCallback(
     (value: string) => {
-      setBaseShippingFeeValue(value);
+      setAmounts((prev) => ({ ...prev, [BASE_FEE_KEY]: value }));
       const base = parseAmount(value);
       if (isNaN(base) || base < 0) return;
       const zones = calculateZoneRates(base);
@@ -201,61 +200,78 @@ export function useMerchantPricing() {
     [setBaseShippingFee, rate]
   );
 
-  /** Prefills from an existing product's stored USD values; shown once a rate is known. */
-  const loadSavedAmounts = useCallback((usd: Partial<Record<AmountField, number | null | undefined>>) => {
-    const positive: UsdAmounts = {};
-    for (const field of AMOUNT_FIELDS) {
-      const value = usd[field];
-      if (value != null && value > 0) positive[field] = value;
+  /**
+   * Prefills keys from stored USD values; shown once a rate is known. Merges,
+   * so a form that loads its listing in several requests can call it per part.
+   * Zero or missing values load as blank.
+   */
+  const loadSavedAmounts = useCallback((usd: Record<string, number | null | undefined>) => {
+    const keys = Object.keys(usd);
+    const loaded: Record<string, number | null> = {};
+    for (const key of keys) {
+      const value = usd[key];
+      loaded[key] = value != null && value > 0 ? value : null;
     }
-    setSavedUsd(positive);
-    setEdited(new Set());
-    setPendingLoad(positive);
+    setSavedUsd((prev) => {
+      const next = { ...prev };
+      for (const key of keys) {
+        if (loaded[key] != null) next[key] = loaded[key]!;
+        else delete next[key];
+      }
+      return next;
+    });
+    setEdited((prev) => new Set([...prev].filter((k) => !keys.includes(k))));
+    setPendingLoad((prev) => ({ ...prev, ...loaded }));
   }, []);
 
   useEffect(() => {
     if (!pendingLoad || !ready) return;
-    const filled = { ...EMPTY_AMOUNTS };
-    for (const field of AMOUNT_FIELDS) {
-      const usd = pendingLoad[field];
-      if (usd != null) filled[field] = usdToLocal(usd, rate);
+    const filled: Record<string, string> = {};
+    for (const [key, usd] of Object.entries(pendingLoad)) {
+      filled[key] = usd != null ? usdToLocal(usd, rate) : '';
     }
-    setAmounts(filled);
+    setAmounts((prev) => ({ ...prev, ...filled }));
     setPendingLoad(null);
   }, [pendingLoad, ready, rate]);
 
   const switchCurrency = useCallback(
     (newCode: string) => {
       if (newCode === selectedCurrencyCode) return;
-      const convert = (value: string) => convertCurrencyValue(value, selectedCurrencyCode, newCode, allRates);
       setAmounts((prev) => {
-        const next = { ...prev };
-        for (const field of AMOUNT_FIELDS) next[field] = convert(prev[field]);
+        const next: Record<string, string> = {};
+        for (const [key, value] of Object.entries(prev)) {
+          next[key] = convertCurrencyValue(value, selectedCurrencyCode, newCode, allRates);
+        }
         return next;
       });
-      setBaseShippingFeeValue(convert);
       setPickedCode(newCode);
     },
     [selectedCurrencyCode, allRates]
   );
 
-  /** USD values to submit; a field is absent when it is blank. */
+  /** USD value to submit for a key; undefined when it is blank. */
+  const usdFor = useCallback(
+    (key: string): number | undefined => {
+      const saved = savedUsd[key];
+      if (!edited.has(key) && saved != null) return saved;
+      const typed = amounts[key] ?? '';
+      return typed.trim() ? localToUsd(typed, rate) : undefined;
+    },
+    [amounts, edited, savedUsd, rate]
+  );
+
+  /** USD values for the product amount fields; a field is absent when blank. */
   const usdPayload = useCallback((): UsdAmounts => {
     const out: UsdAmounts = {};
     for (const field of AMOUNT_FIELDS) {
-      const saved = savedUsd[field];
-      if (!edited.has(field) && saved != null) {
-        out[field] = saved;
-      } else if (amounts[field].trim()) {
-        out[field] = localToUsd(amounts[field], rate);
-      }
+      const usd = usdFor(field);
+      if (usd != null) out[field] = usd;
     }
     return out;
-  }, [amounts, edited, savedUsd, rate]);
+  }, [usdFor]);
 
   const reset = useCallback(() => {
-    setAmounts(EMPTY_AMOUNTS);
-    setBaseShippingFeeValue('');
+    setAmounts({});
     setSavedUsd({});
     setPendingLoad(null);
     setEdited(new Set());
@@ -275,9 +291,9 @@ export function useMerchantPricing() {
     isUsd,
     currencyOptions,
     switchCurrency,
-    amounts,
+    amount,
     setAmount,
-    baseShippingFee,
+    usdFor,
     setBaseShippingFee,
     applyPackagePreset,
     loadSavedAmounts,

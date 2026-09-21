@@ -196,7 +196,7 @@ const AddProduct = () => {
     if (!productName.trim()) newErrors.productName = 'Product name is required';
     if (!description.trim()) newErrors.description = 'Description is required';
     if (description.length > maxDescriptionLength) newErrors.description = `Description must be less than ${maxDescriptionLength} characters`;
-    const price = pricing.amounts.price;
+    const price = pricing.amount('price');
     if (!pricing.ready) newErrors.price = 'Exchange rates are still loading. Try again in a moment.';
     else if (!price.trim()) newErrors.price = 'Price is required';
     else if (isNaN(parseAmount(price)) || parseAmount(price) <= 0) newErrors.price = 'Price must be a positive number';

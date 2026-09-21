@@ -1,11 +1,13 @@
-// Pricing-currency picker, price input and shipping-rate block shared by the
-// merchant inventory add and edit screens. State lives in useMerchantPricing.
+// Merchant money inputs in the merchant's chosen currency: the currency
+// picker, a generic amount input, the product price and the distance-fee block.
+// Shared by the product and service listing forms; state lives in
+// useMerchantPricing, which converts to USD on submit.
 import React, { useState } from 'react';
 import { View, ViewStyle } from 'react-native';
 import { useTheme } from '@/theme';
 import { Input, PickerSheet, PressableScale, SelectRow, Text } from '@/components/ui';
 import { PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
-import type { AmountField, MerchantPricing } from '@/hooks/useMerchantPricing';
+import { BASE_FEE_KEY, type MerchantPricing } from '@/hooks/useMerchantPricing';
 
 const joinHelper = (...parts: string[]) => parts.filter(Boolean).join(' · ');
 
@@ -36,6 +38,42 @@ export const PricingCurrencySelect = ({ pricing, style }: { pricing: MerchantPri
   );
 };
 
+/** A money input typed in the merchant's currency, stored under `amountKey`. */
+export const LocalAmountInput = ({
+  pricing,
+  amountKey,
+  label,
+  required,
+  helper,
+  error,
+  placeholder,
+  containerStyle,
+}: {
+  pricing: MerchantPricing;
+  amountKey: string;
+  label: string;
+  required?: boolean;
+  helper?: string;
+  error?: string;
+  placeholder?: string;
+  containerStyle?: ViewStyle;
+}) => {
+  const value = pricing.amount(amountKey);
+  return (
+    <Input
+      containerStyle={containerStyle}
+      label={`${label} (${pricing.selectedCurrency.symbol})${required ? ' *' : ''}`}
+      placeholder={pricing.ready ? placeholder ?? (pricing.isUsd ? '0.00' : '0') : 'Loading rates…'}
+      keyboardType="decimal-pad"
+      editable={pricing.ready}
+      value={value}
+      onChangeText={(v) => pricing.setAmount(amountKey, v)}
+      error={error}
+      helper={error ? undefined : joinHelper(pricing.formatUsd(value), helper ?? '') || undefined}
+    />
+  );
+};
+
 export const PriceInput = ({
   pricing,
   error,
@@ -45,40 +83,45 @@ export const PriceInput = ({
   error?: string;
   containerStyle?: ViewStyle;
 }) => (
-  <Input
-    containerStyle={containerStyle}
-    label={`Price (${pricing.selectedCurrency.symbol}) *`}
-    placeholder={pricing.ready ? (pricing.isUsd ? '0.00' : '0') : 'Loading rates…'}
-    keyboardType="decimal-pad"
-    editable={pricing.ready}
-    value={pricing.amounts.price}
-    onChangeText={(v) => pricing.setAmount('price', v)}
+  <LocalAmountInput
+    pricing={pricing}
+    amountKey="price"
+    label="Price"
+    required
     error={error}
-    helper={error ? undefined : joinHelper(pricing.formatUsd(pricing.amounts.price), '2% platform fee applies per sale')}
+    helper="2% platform fee applies per sale"
+    containerStyle={containerStyle}
   />
 );
 
-const ZoneInput = ({ pricing, field, label }: { pricing: MerchantPricing; field: AmountField; label: string }) => (
-  <Input
-    containerStyle={{ flex: 1 }}
-    label={`${label} (${pricing.selectedCurrency.symbol})`}
-    placeholder={pricing.isUsd ? '0.00' : '0'}
-    keyboardType="decimal-pad"
-    editable={pricing.ready}
-    value={pricing.amounts[field]}
-    onChangeText={(v) => pricing.setAmount(field, v)}
-  />
+const ZoneInput = ({ pricing, amountKey, label }: { pricing: MerchantPricing; amountKey: string; label: string }) => (
+  <LocalAmountInput pricing={pricing} amountKey={amountKey} label={label} containerStyle={{ flex: 1 }} />
 );
 
-/** Package presets, base fee and per-zone rates. `onCard` picks the chip fill for card backgrounds. */
-export const ShippingRatesFields = ({ pricing, onCard }: { pricing: MerchantPricing; onCard?: boolean }) => {
+/**
+ * Package presets, base fee and per-zone rates. `onCard` picks the chip fill
+ * for card backgrounds; `residentialPriceable` makes the residential tier a
+ * priced field instead of a fixed "Free".
+ */
+export const ShippingRatesFields = ({
+  pricing,
+  onCard,
+  residentialPriceable,
+  presetLabel = 'Package size (optional quick-select)',
+}: {
+  pricing: MerchantPricing;
+  onCard?: boolean;
+  residentialPriceable?: boolean;
+  presetLabel?: string;
+}) => {
   const { colors, spacing, radius } = useTheme();
   const { selectedCurrency, isUsd } = pricing;
+  const baseFee = pricing.amount(BASE_FEE_KEY);
 
   return (
     <View style={{ gap: spacing.md }}>
       <Text variant="bodySm" weight="600" color="textSecondary">
-        Package size (optional quick-select)
+        {presetLabel}
       </Text>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
         {PACKAGE_SIZE_PRESETS.map((preset) => {
@@ -114,46 +157,50 @@ export const ShippingRatesFields = ({ pricing, onCard }: { pricing: MerchantPric
       </View>
 
       <Input
-        label={`Base shipping fee (${selectedCurrency.symbol})`}
+        label={`Base fee (${selectedCurrency.symbol})`}
         placeholder={isUsd ? 'e.g. 2.00' : 'e.g. 1000'}
         keyboardType="decimal-pad"
         editable={pricing.ready}
-        value={pricing.baseShippingFee}
+        value={baseFee}
         onChangeText={pricing.setBaseShippingFee}
-        helper={joinHelper(
-          pricing.formatUsd(pricing.baseShippingFee),
-          'Auto-fills the zone rates below. Edit any zone to override.'
-        )}
+        helper={joinHelper(pricing.formatUsd(baseFee), 'Auto-fills the zone rates below. Edit any zone to override.')}
       />
 
       <View style={{ flexDirection: 'row', gap: spacing.md }}>
-        <Input
-          containerStyle={{ flex: 1 }}
-          label="Same Residential Area"
-          value="Free"
-          editable={false}
-          inputStyle={{ color: colors.textMuted } as any}
-        />
-        <ZoneInput pricing={pricing} field="shippingSameCity" label="Same City" />
+        {residentialPriceable ? (
+          <ZoneInput pricing={pricing} amountKey="shippingResidential" label="Same Residential Area" />
+        ) : (
+          <Input
+            containerStyle={{ flex: 1 }}
+            label="Same Residential Area"
+            value="Free"
+            editable={false}
+            inputStyle={{ color: colors.textMuted } as any}
+          />
+        )}
+        <ZoneInput pricing={pricing} amountKey="shippingSameCity" label="Same City" />
       </View>
       <View style={{ flexDirection: 'row', gap: spacing.md }}>
-        <ZoneInput pricing={pricing} field="shippingSameState" label="Same State" />
-        <ZoneInput pricing={pricing} field="shippingSameCountry" label="Same Country" />
+        <ZoneInput pricing={pricing} amountKey="shippingSameState" label="Same State" />
+        <ZoneInput pricing={pricing} amountKey="shippingSameCountry" label="Same Country" />
       </View>
       <View style={{ flexDirection: 'row', gap: spacing.md }}>
-        <ZoneInput pricing={pricing} field="shippingInternational" label="International" />
+        <ZoneInput pricing={pricing} amountKey="shippingInternational" label="International" />
         <View style={{ flex: 1 }} />
       </View>
 
-      {!isUsd && (
-        <Text variant="caption" color="textMuted">
-          Prices are saved in USD. Buyers paying in {selectedCurrency.code} see today&apos;s rate, so their local
-          price moves with the exchange rate.
-        </Text>
-      )}
+      {!isUsd && <UsdStorageNote />}
     </View>
   );
 };
+
+/** Tells the merchant why a local price will not stay fixed for buyers. */
+export const UsdStorageNote = () => (
+  <Text variant="caption" color="textMuted">
+    Prices are saved in USD. Buyers see them in their own currency at today&apos;s rate, so the local price moves
+    with the exchange rate.
+  </Text>
+);
 
 /** Appends the USD amounts from `pricing` to a product FormData. */
 export function appendUsdAmounts(formData: FormData, pricing: MerchantPricing) {
