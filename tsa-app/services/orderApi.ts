@@ -70,6 +70,8 @@ export interface Order {
 export interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
+  /** Stable machine code on some errors (e.g. "price_changed"). */
+  code?: string;
   data?: T;
 }
 
@@ -96,7 +98,11 @@ async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
     return { success: false, message: `HTTP ${response.status}: ${response.statusText}` };
   }
   if (!response.ok) {
-    return { success: false, message: data.message || `Request failed with status ${response.status}` };
+    return {
+      success: false,
+      message: data.message || `Request failed with status ${response.status}`,
+      code: typeof data.code === 'string' ? data.code : undefined,
+    };
   }
   return { success: true, ...data };
 }
@@ -183,7 +189,10 @@ export async function createOrders(
   // The server recomputes prices from the DB (never trusts client totals).
   menuSelections?: Record<string, { itemId: string; quantity: number }[]>,
   // bookingSlots maps a Booking-type service product ID → the reserved slot.
-  bookingSlots?: Record<string, { slotStart: string; partySize: number }>
+  bookingSlots?: Record<string, { slotStart: string; partySize: number }>,
+  // expectedTotal is the quote total (base units, gas included) the buyer
+  // confirmed. The backend refuses a different total with code "price_changed".
+  expectedTotal?: string,
 ): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
@@ -198,6 +207,7 @@ export async function createOrders(
         serviceTiers,
         menuSelections,
         bookingSlots,
+        expectedTotal,
       }),
     });
     return await handleResponse(response);

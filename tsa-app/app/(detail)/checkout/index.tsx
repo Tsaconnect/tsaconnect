@@ -97,6 +97,9 @@ const CheckoutScreen = () => {
   // The quote the buyer confirmed; progress and the receipt read from it so
   // they show what was agreed even if the live quote re-prices meanwhile.
   const [paidQuote, setPaidQuote] = useState<CartQuote | null>(null);
+  // Set when order creation reported a different total than the one confirmed:
+  // the confirm sheet reopens on the fresh quote.
+  const [repriced, setRepriced] = useState(false);
   const [hasWallet, setHasWallet] = useState<boolean | null>(null);
   const [editingAddress, setEditingAddress] = useState(false);
   const [shippingLocation, setShippingLocation] = useState({ country: '', state: '', city: '' });
@@ -217,6 +220,15 @@ const CheckoutScreen = () => {
     return map;
   }, [quote]);
 
+  // After a price_changed refusal, reopen the confirm sheet once the re-priced
+  // quote has arrived.
+  useEffect(() => {
+    if (repriced && quote && !quoteLoading) {
+      setRepriced(false);
+      setConfirmOpen(true);
+    }
+  }, [repriced, quote, quoteLoading]);
+
   const tokenBalance = balances[selectedToken as 'USDC' | 'USDT' | 'MCGP'];
   const totalUnits = quote ? quoteUnits(quote.totals.total, quote.decimals) : null;
   const shortOnToken = tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
@@ -269,7 +281,20 @@ const CheckoutScreen = () => {
         shippingLocation.state,
         shippingLocation.country,
         serviceTiers,
+        undefined,
+        undefined,
+        quote.totals.total,
       );
+      if (createResult.code === 'price_changed') {
+        // Nothing was created. Back to review, re-price, and show the buyer
+        // the new amount before anything is signed.
+        setStep('review');
+        setSigningPhase('idle');
+        setPaidQuote(null);
+        setRepriced(true);
+        Alert.alert('Price updated', 'The total changed since you confirmed it. Review the new amount before paying.');
+        return;
+      }
       if (!createResult.success || !createResult.data?.orders) {
         throw new Error(createResult.message || 'Failed to create orders');
       }

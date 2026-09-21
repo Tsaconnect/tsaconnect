@@ -34,8 +34,10 @@ export function useCheckoutBalances() {
     const next = { ...UNKNOWN };
     for (const symbol of SYMBOLS) {
       const row = flat.find((b) => b.symbol?.toUpperCase() === symbol);
-      // Absent from a successful response means the wallet holds none.
-      next[symbol] = row ? parseFloat(row.balance || '0') || 0 : 0;
+      // Only a returned row is a known balance. A token missing from the
+      // response (one RPC failing server-side) stays unknown, so it can never
+      // block a payment the wallet could cover.
+      if (row) next[symbol] = parseFloat(row.balance || '0') || 0;
     }
     setBalances(next);
   }, []);
