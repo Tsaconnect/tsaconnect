@@ -65,9 +65,9 @@ const (
 // The models package cannot import services (services imports models — that
 // would be an import cycle), so the cart handler threads these wrappers in (they
 // are services.FeeRate / services.FeeFlatUSD bound to FeatureProductMerchant /
-// FeatureProduct). This is the same injection pattern CalculatePlatformFee uses
-// from the handlers package, lifted into a struct so the cart QUOTE reads the
-// EXACT rate the on-chain CHARGE reads — quote == charge (design §6, B5/I8).
+// FeatureProduct). The checkout charge itself is priced from the escrow's
+// on-chain rates (handlers.resolvePricingRates), which the replica these read
+// mirrors; the checkout quote endpoint, not this summary, is quote == charge.
 //
 // A nil CartFeeLookups (or nil funcs) means "no fee" — never a hardcoded
 // fallback that could disagree with the service.

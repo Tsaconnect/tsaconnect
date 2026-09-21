@@ -60,7 +60,7 @@ type FeeConfigService struct {
 
 // Fees is the process-wide FeeConfigService singleton. It is initialized at
 // boot via InitFeeConfigService. Call sites that are not struct methods (e.g.
-// CalculatePlatformFee, GetFeeAmount, withdrawal/swap helpers) read rates
+// the checkout fallback rates, GetFeeAmount, withdrawal/swap helpers) read rates
 // through the FeeRate / FeeFlatUSD package helpers, which fall back to the
 // built-in defaults when the singleton has not been initialized (tests).
 var Fees *FeeConfigService
@@ -78,9 +78,9 @@ type feeDefault struct {
 // DefaultFeeConfigs returns the canonical seed set. Each value is pinned to the
 // current production behavior so seeding an empty table changes no fee math:
 //
-//   - product_merchant: 200 bps (2%), MCGP-exempt (CalculatePlatformFee returns
-//     0 for MCGP today). This is the merchant rate the cart quote AND the
-//     on-chain charge both resolve through this service (design §6).
+//   - product_merchant: 200 bps (2%), MCGP-exempt. The escrow applies the
+//     on-chain FeeManager row (or its own 200) — this replica mirrors it and is
+//     the checkout's fallback when the chain cannot be read.
 //   - product: buyer pays 0% platform fee today (CartSummary.PlatformFee = 0);
 //     a flat per-order gas fee of $0.10 applies for non-MCGP orders, MCGP-exempt.
 //   - service_contact: $0.10 flat (on-chain feeAmount = 100000 @ 6dp); MCGP
@@ -94,9 +94,9 @@ type feeDefault struct {
 func DefaultFeeConfigs() []models.FeeConfig {
 	defs := []feeDefault{
 		// Product merchant fee — 2% (200 bps) baked into listing price, MCGP exempt.
-		// This is the single source of truth for the merchant rate; the cart quote
-		// (CalculateCartSummary) and the on-chain charge (CalculatePlatformFee) both
-		// resolve it here, so quote == charge (design §6).
+		// A replica of the escrow's on-chain rate (the charge reads the chain via
+		// EscrowService.PlatformFeeBPS); used by the cart summary and as the
+		// checkout fallback.
 		{Feature: models.FeatureProductMerchant, TokenSymbol: models.FeeTokenAny, BPS: 200, MCGPExempt: true},
 		// Buyer product platform fee — 0% today, plus a flat $0.10 gas fee per
 		// order for non-MCGP. The flat component is MCGP-exempt. The cart quote and

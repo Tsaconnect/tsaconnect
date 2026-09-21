@@ -64,7 +64,7 @@ func TestCartQuoteEqualsCharge(t *testing.T) {
 
 			// Merchant component: cart MerchantFee == subtotal * FeeRate(
 			// FeatureProductMerchant, token)/10000 when not exempt, else 0. SAME
-			// read CalculatePlatformFee makes.
+			// read the checkout fallback makes.
 			mBps, mExempt := FeeRate(models.FeatureProductMerchant, token, nil)
 			wantMerchant := summary.Subtotal * (float64(mBps) / 10000.0)
 			if mExempt {

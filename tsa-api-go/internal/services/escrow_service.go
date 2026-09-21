@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -49,8 +50,8 @@ type EscrowService struct {
 	client        *blockchain.EVMClient
 	escrowAddress string
 	cfg           *config.Config
-	// feeBPS caches PlatformFeeBPS per token address (lower-case) → feeBPSEntry.
-	feeBPS sync.Map
+	// rates caches escrow fee reads per feature + token address → rateEntry.
+	rates sync.Map
 	// caller serves the read-only fee lookups; nil without an RPC client.
 	caller contractCaller
 }
@@ -60,16 +61,43 @@ type contractCaller interface {
 	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 }
 
-// DefaultEscrowPlatformFeeBPS is ProductEscrowV2.PLATFORM_FEE_BPS: what the
-// contract charges when it has no FeeManager or no active row for the token.
-const DefaultEscrowPlatformFeeBPS = 200
+// Constants of ProductEscrowV2 that the backend must mirror exactly.
+const (
+	// DefaultEscrowPlatformFeeBPS is PLATFORM_FEE_BPS: the fee when the escrow
+	// has no FeeManager or no active product_merchant row for the token.
+	DefaultEscrowPlatformFeeBPS = 200
+	// MaxEscrowPlatformFeeBPS is MAX_PLATFORM_FEE_BPS: above it createOrder
+	// reverts ("Platform fee too high").
+	MaxEscrowPlatformFeeBPS = 300
+	// DefaultEscrowGasFee is GAS_FEE ($0.10 in 6-decimal base units): the flat
+	// gas fee when there is no FeeManager or no active product row.
+	DefaultEscrowGasFee = 100000
+)
 
-// escrowFeeBPSTTL bounds how long a read rate is trusted. An admin fee change
-// confirmed on-chain reaches checkout within this window.
-const escrowFeeBPSTTL = time.Minute
+// ErrEscrowFeeAboveMax means FeeManager holds a rate the escrow refuses, so
+// every createOrder would revert. Pricing must stop rather than quote it.
+var ErrEscrowFeeAboveMax = fmt.Errorf("escrow platform fee is above the contract maximum of %d bps", MaxEscrowPlatformFeeBPS)
 
-type feeBPSEntry struct {
-	bps    int
+const (
+	// escrowRateTTL bounds how long a read rate is trusted. An admin fee change
+	// confirmed on-chain reaches checkout within this window.
+	escrowRateTTL = time.Minute
+	// escrowRateMaxStale bounds how long a previous read may stand in for a
+	// failed one. Past it the caller falls back to the fee_config replica.
+	escrowRateMaxStale = 10 * time.Minute
+)
+
+// escrowRate is one FeeManager row as ProductEscrow resolves it.
+type escrowRate struct {
+	noFeeManager bool
+	bps          int
+	flatUSD      uint64 // 1e6 units, which the escrow uses as token base units
+	exempt       bool
+	active       bool
+}
+
+type rateEntry struct {
+	rate   escrowRate
 	readAt time.Time
 }
 
@@ -214,49 +242,67 @@ func (s *EscrowService) PrepareAdminResolve(orderId [32]byte, refundBuyer bool, 
 	return s.buildUnsignedTx(admin, escrowAddr, data)
 }
 
-// VerifyEscrowCreated fetches the receipt and parses the OrderCreated event.
-func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
-	var empty [32]byte
+// EscrowCreated is the OrderCreated event for one order, as the escrow
+// recorded it — the amounts it actually holds.
+type EscrowCreated struct {
+	OrderID        [32]byte
+	Buyer          common.Address
+	ProductAmount  *big.Int
+	ShippingAmount *big.Int
+	PlatformFee    *big.Int
+}
 
+// VerifyEscrowCreated checks that txHash succeeded and emitted OrderCreated on
+// the configured escrow FOR expectedOrderID, and returns what the escrow
+// recorded. Matching the id matters: without it, any successful escrow tx —
+// another, cheaper order's — would mark this order as paid.
+func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]byte) (*EscrowCreated, error) {
 	if s.client == nil {
-		return empty, fmt.Errorf("blockchain client not available")
+		return nil, fmt.Errorf("blockchain client not available")
 	}
-
 	receipt, err := s.client.GetTransactionReceipt(txHash)
 	if err != nil {
-		return empty, fmt.Errorf("failed to get receipt: %w", err)
+		return nil, fmt.Errorf("failed to get receipt: %w", err)
 	}
-
 	if receipt.Status != 1 {
-		return empty, fmt.Errorf("transaction failed")
+		return nil, fmt.Errorf("transaction failed")
 	}
+	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
+}
 
-	escrowAddr := common.HexToAddress(s.escrowAddress)
-	orderCreatedSig := parsedEscrowABI.Events["OrderCreated"].ID
+func findOrderCreated(logs []*types.Log, escrowAddr common.Address, expectedOrderID [32]byte) (*EscrowCreated, error) {
+	event := parsedEscrowABI.Events["OrderCreated"]
 	foundEscrowLog := false
-
-	for _, log := range receipt.Logs {
-		if log.Address != escrowAddr {
+	for _, l := range logs {
+		if l.Address != escrowAddr {
 			continue
 		}
 		foundEscrowLog = true
-		if len(log.Topics) < 1 || log.Topics[0] != orderCreatedSig {
+		if len(l.Topics) < 4 || l.Topics[0] != event.ID || l.Topics[1] != common.Hash(expectedOrderID) {
 			continue
 		}
-		if len(log.Topics) < 2 {
-			continue
+		vals, err := event.Inputs.NonIndexed().Unpack(l.Data)
+		if err != nil || len(vals) < 4 {
+			return nil, fmt.Errorf("decode OrderCreated: %v", err)
 		}
-		// Topics[1] is the indexed orderId
-		var orderId [32]byte
-		copy(orderId[:], log.Topics[1].Bytes())
-		return orderId, nil
+		product, _ := vals[1].(*big.Int)
+		shipping, _ := vals[2].(*big.Int)
+		fee, _ := vals[3].(*big.Int)
+		if product == nil || shipping == nil || fee == nil {
+			return nil, fmt.Errorf("decode OrderCreated: unexpected amount types")
+		}
+		return &EscrowCreated{
+			OrderID:        expectedOrderID,
+			Buyer:          common.BytesToAddress(l.Topics[2].Bytes()),
+			ProductAmount:  product,
+			ShippingAmount: shipping,
+			PlatformFee:    fee,
+		}, nil
 	}
-
 	if !foundEscrowLog {
-		return empty, fmt.Errorf("no logs found for configured escrow contract %s in receipt", s.escrowAddress)
+		return nil, fmt.Errorf("no logs found for configured escrow contract %s in receipt", escrowAddr.Hex())
 	}
-
-	return empty, fmt.Errorf("OrderCreated event not found in receipt")
+	return nil, fmt.Errorf("OrderCreated for this order not found in receipt")
 }
 
 // buildUnsignedTx creates an UnsignedTx JSON targeting the supplied escrow contract,
@@ -317,36 +363,77 @@ func (s *EscrowService) buildUnsignedTx(from, contractAddr string, callData []by
 // tokenAddr, resolved the way its _calculatePlatformFee does: no FeeManager →
 // the built-in 200; the FeeManager's product_merchant row for the escrow's OWN
 // symbol for the token (exact key, no wildcard) inactive → 200; exempt → 0;
-// otherwise its bps. The caller handles MCGP, which the contract zeroes first.
+// otherwise its bps, which above MaxEscrowPlatformFeeBPS makes the escrow
+// revert (ErrEscrowFeeAboveMax). The caller handles MCGP, which the contract
+// zeroes first.
 //
-// Reading the contract rather than fee_config is what keeps the recorded fee
-// and the approve amount equal to what createOrder pulls, whichever admin tool
-// last changed a rate. On an RPC failure the last read value is returned with
-// no error (and logged), so a blip does not change prices mid-checkout.
+// Reading the contract rather than fee_config keeps the recorded fee and the
+// approve amount equal to what createOrder pulls, whichever admin tool last
+// changed a rate.
 func (s *EscrowService) PlatformFeeBPS(ctx context.Context, tokenAddr string) (int, error) {
-	key := strings.ToLower(tokenAddr)
-	cached, hasCached := s.feeBPS.Load(key)
-	if hasCached && time.Since(cached.(feeBPSEntry).readAt) < escrowFeeBPSTTL {
-		return cached.(feeBPSEntry).bps, nil
-	}
-	bps, err := s.readPlatformFeeBPS(ctx, tokenAddr)
+	r, err := s.escrowRateFor(ctx, "product_merchant", tokenAddr)
 	if err != nil {
-		if hasCached {
-			log.Printf("[escrow] platform fee read for %s failed (%v); using last read %d bps", tokenAddr, err, cached.(feeBPSEntry).bps)
-			return cached.(feeBPSEntry).bps, nil
-		}
 		return 0, err
 	}
-	s.feeBPS.Store(key, feeBPSEntry{bps: bps, readAt: time.Now()})
-	return bps, nil
+	switch {
+	case r.noFeeManager || !r.active:
+		return DefaultEscrowPlatformFeeBPS, nil
+	case r.exempt:
+		return 0, nil
+	case r.bps > MaxEscrowPlatformFeeBPS:
+		return 0, ErrEscrowFeeAboveMax
+	default:
+		return r.bps, nil
+	}
 }
 
-func (s *EscrowService) readPlatformFeeBPS(ctx context.Context, tokenAddr string) (int, error) {
+// GasFeeWei is the flat gas fee ProductEscrow adds at createOrder for tokenAddr,
+// in the token's base units, resolved the way its _gasFee does: no FeeManager
+// or an inactive product row → GAS_FEE; exempt → 0; otherwise the row's
+// flatUSD. The caller handles MCGP, which the contract zeroes first.
+func (s *EscrowService) GasFeeWei(ctx context.Context, tokenAddr string) (*big.Int, error) {
+	r, err := s.escrowRateFor(ctx, "product", tokenAddr)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case r.noFeeManager || !r.active:
+		return big.NewInt(DefaultEscrowGasFee), nil
+	case r.exempt:
+		return big.NewInt(0), nil
+	default:
+		return new(big.Int).SetUint64(r.flatUSD), nil
+	}
+}
+
+// escrowRateFor returns the cached FeeManager row for feature/token, re-reading
+// it past escrowRateTTL. When a re-read fails, a previous read younger than
+// escrowRateMaxStale is returned without error (logged), so an RPC blip does
+// not change prices mid-checkout.
+func (s *EscrowService) escrowRateFor(ctx context.Context, feature, tokenAddr string) (escrowRate, error) {
+	key := feature + "|" + strings.ToLower(tokenAddr)
+	cached, hasCached := s.rates.Load(key)
+	if hasCached && time.Since(cached.(rateEntry).readAt) < escrowRateTTL {
+		return cached.(rateEntry).rate, nil
+	}
+	r, err := s.readEscrowRate(ctx, feature, tokenAddr)
+	if err != nil {
+		if hasCached && time.Since(cached.(rateEntry).readAt) < escrowRateMaxStale {
+			log.Printf("[escrow] %s rate read for %s failed (%v); using the read from %s", feature, tokenAddr, err, cached.(rateEntry).readAt.Format(time.RFC3339))
+			return cached.(rateEntry).rate, nil
+		}
+		return escrowRate{}, err
+	}
+	s.rates.Store(key, rateEntry{rate: r, readAt: time.Now()})
+	return r, nil
+}
+
+func (s *EscrowService) readEscrowRate(ctx context.Context, feature, tokenAddr string) (escrowRate, error) {
 	if s.caller == nil {
-		return 0, fmt.Errorf("blockchain client not available")
+		return escrowRate{}, fmt.Errorf("blockchain client not available")
 	}
 	if !common.IsHexAddress(tokenAddr) {
-		return 0, fmt.Errorf("token address %q not configured", tokenAddr)
+		return escrowRate{}, fmt.Errorf("token address %q not configured", tokenAddr)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -370,33 +457,27 @@ func (s *EscrowService) readPlatformFeeBPS(ctx context.Context, tokenAddr string
 
 	vals, err := call(escrow, parsedEscrowABI, "feeManager")
 	if err != nil {
-		return 0, err
+		return escrowRate{}, err
 	}
 	feeManager, _ := vals[0].(common.Address)
 	if feeManager == (common.Address{}) {
-		return DefaultEscrowPlatformFeeBPS, nil
+		return escrowRate{noFeeManager: true}, nil
 	}
 	vals, err = call(escrow, parsedEscrowABI, "tokenSymbol", common.HexToAddress(tokenAddr))
 	if err != nil {
-		return 0, err
+		return escrowRate{}, err
 	}
 	symbol, _ := vals[0].(string)
-	vals, err = call(feeManager, parsedFeeManagerABI, "rateFor", "product_merchant", symbol)
+	vals, err = call(feeManager, parsedFeeManagerABI, "rateFor", feature, symbol)
 	if err != nil {
-		return 0, err
+		return escrowRate{}, err
 	}
 	if len(vals) < 4 {
-		return 0, fmt.Errorf("decode rateFor: %d values", len(vals))
+		return escrowRate{}, fmt.Errorf("decode rateFor: %d values", len(vals))
 	}
 	bps, _ := vals[0].(uint16)
+	flat, _ := vals[1].(uint64)
 	exempt, _ := vals[2].(bool)
 	active, _ := vals[3].(bool)
-	switch {
-	case !active:
-		return DefaultEscrowPlatformFeeBPS, nil
-	case exempt:
-		return 0, nil
-	default:
-		return int(bps), nil
-	}
+	return escrowRate{bps: int(bps), flatUSD: flat, exempt: exempt, active: active}, nil
 }

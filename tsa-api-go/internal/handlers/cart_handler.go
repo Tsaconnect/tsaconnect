@@ -32,15 +32,15 @@ import (
 // per-token override that could diverge the quote from the charge can never
 // exist. MCGP exemption is the wildcard row's mcgpExempt flag (MCGP order → gas
 // $0); MCGP is never the cart-quote token. The checkout CHARGE path
-// (CalculatePlatformFee, FeeFlatUSD) already uses the order's real token.
+// (resolvePricingRates) already uses the order's real token.
 const cartQuoteToken = "USDC"
 
-// cartFeeLookups binds the fee-config service reads into the models package so
-// the cart QUOTE reads the EXACT rate the on-chain CHARGE reads (design §6,
-// B5/I8). The merchant component uses services.FeeRate(FeatureProductMerchant,
-// …) — the same call CalculatePlatformFee makes; the gas component uses
-// services.FeeFlatUSD(FeatureProduct, …) — the same call PrepareApprove makes.
-// Both pass nil chainID (documented-global, Sonic-only product flow, design §6).
+// cartFeeLookups binds the fee-config service reads into the models package for
+// the cart summary's informational fee lines. The CHARGE is priced from the
+// escrow's own rates (resolvePricingRates); the fee_config replica these read
+// is kept in step with it by the confirmed on-chain flow, and is the fallback
+// the charge uses when the chain cannot be read. Both pass nil chainID
+// (documented-global, Sonic-only product flow, design §6).
 func cartFeeLookups() *models.CartFeeLookups {
 	return &models.CartFeeLookups{
 		MerchantBPS: func(token string) (int, bool) {

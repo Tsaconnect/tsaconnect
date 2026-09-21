@@ -211,7 +211,7 @@ func FeeRateViaService(s *FeeConfigService, feature, token string) (int, bool) {
 // constant for representative inputs. These reproduce the exact arithmetic of
 // each site against the seeded service.
 
-// productMerchantFee reproduces CalculatePlatformFee's big.Int math.
+// productMerchantFee reproduces the escrow fee's big.Int math (amount*bps/10000).
 func productMerchantFee(svc *FeeConfigService, productAmount *big.Int, token string) *big.Int {
 	bps, _, _, _ := svc.RateFor(models.FeatureProductMerchant, token, nil)
 	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(bps)))
@@ -324,7 +324,7 @@ func TestSeedMatchesCartConstants(t *testing.T) {
 		t.Errorf("product flat=%v, want 0.10", flat)
 	}
 
-	// Merchant fee — the cart MerchantFee + CalculatePlatformFee both read this.
+	// Merchant fee — the cart MerchantFee and the checkout fallback both read this.
 	if bps, _ := FeeRate(models.FeatureProductMerchant, "USDC", nil); bps != 200 {
 		t.Errorf("product_merchant bps=%d, want 200", bps)
 	}

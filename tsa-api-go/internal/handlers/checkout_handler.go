@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -29,7 +30,10 @@ type CheckoutHandler struct {
 	BlockchainService *services.BlockchainService
 	EscrowService     *services.EscrowService
 	EventBus          *events.Bus
-	otcService        *services.OTCService
+	// otcService prices MCGP; feeRates reads the escrow's fee and gas. Both are
+	// interfaces so tests can stand in for the chain; nil means unavailable.
+	otcService mcgpPricer
+	feeRates   escrowRateReader
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -37,13 +41,32 @@ type CheckoutHandler struct {
 
 // NewCheckoutHandler creates a new CheckoutHandler.
 func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *services.EscrowService, bus *events.Bus, otc *services.OTCService) *CheckoutHandler {
-	return &CheckoutHandler{
+	ch := &CheckoutHandler{
 		Config:            cfg,
 		BlockchainService: bs,
 		EscrowService:     es,
 		EventBus:          bus,
-		otcService:        otc,
 	}
+	// Assign only non-nil pointers: a nil *T in an interface is not nil.
+	if otc != nil {
+		ch.otcService = otc
+	}
+	if es != nil {
+		ch.feeRates = es
+	}
+	return ch
+}
+
+// mcgpPricer is the OTC read that prices MCGP in USD.
+type mcgpPricer interface {
+	GetBuyPricePerToken() (*big.Int, error)
+}
+
+// escrowRateReader is what pricing needs from the escrow: the fee rate and the
+// flat gas fee createOrder will apply. *services.EscrowService implements it.
+type escrowRateReader interface {
+	PlatformFeeBPS(ctx context.Context, tokenAddr string) (int, error)
+	GasFeeWei(ctx context.Context, tokenAddr string) (*big.Int, error)
 }
 
 // orderEscrowContract returns the contract address that the order's escrow lives on.
@@ -494,19 +517,6 @@ func (ch *CheckoutHandler) resolveServicePricing(
 
 // --- Fee calculation (big.Int) ---
 
-// CalculatePlatformFee returns the merchant fee (2% for non-MCGP tokens, 0 for
-// MCGP) on an escrowed productAmount, read from the unified fee-config service.
-// Orders size productAmount with splitSellerFee so this fee comes out of the
-// listing price — the merchant pays it, not the buyer.
-//
-// The rate comes from the product_merchant fee_config row (seeded to 200 bps,
-// MCGP-exempt). MCGP resolves to bps=0/exempt, which produces the same zero fee
-// as the previous explicit MCGP branch. This is the SAME read the cart quote
-// (CalculateCartSummary's MerchantFee) makes, so quote == charge (design §6).
-func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
-	return calculateFeeForFeature(productAmount, token, models.FeatureProductMerchant)
-}
-
 // splitSellerFee turns a listing price into the escrowed productAmount and the
 // platform fee, sized so the two add up to the price. ProductEscrow pulls
 // productAmount + productAmount*bps/10000 from the buyer and releases only
@@ -515,10 +525,7 @@ func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
 // When bps does not divide evenly the buyer pays up to one base unit less than
 // the price, never more.
 func splitSellerFee(priceWei *big.Int, bps int) (productAmount, fee *big.Int) {
-	feeOn := func(amount *big.Int) *big.Int {
-		f := new(big.Int).Mul(amount, big.NewInt(int64(bps)))
-		return f.Div(f, big.NewInt(10000))
-	}
+	feeOn := func(amount *big.Int) *big.Int { return escrowFeeOn(amount, bps) }
 	if bps <= 0 {
 		return new(big.Int).Set(priceWei), big.NewInt(0)
 	}
@@ -535,42 +542,118 @@ func splitSellerFee(priceWei *big.Int, bps int) (productAmount, fee *big.Int) {
 	return p, feeOn(p)
 }
 
-// escrowFeeBPS is the platform fee rate ProductEscrow will apply to an order
-// in token. The contract has one rate for every order it escrows — the
-// product_merchant rate, products and services alike — and zeroes MCGP. It is
-// read from the escrow itself so an admin rate change on either tool can never
-// make the recorded fee or the approve amount disagree with what createOrder
-// pulls. Without a chain read (no RPC, or a first read failing) it falls back
-// to the fee_config replica, which the confirmed-rate flow keeps in step.
-func (ch *CheckoutHandler) escrowFeeBPS(ctx context.Context, token string) int {
-	if strings.ToUpper(token) == "MCGP" {
-		return 0
-	}
-	if ch.EscrowService != nil && ch.BlockchainService != nil {
-		addr := ch.BlockchainService.TokenAddress("sonic", token)
-		bps, err := ch.EscrowService.PlatformFeeBPS(ctx, addr)
-		if err == nil {
-			return bps
-		}
-		log.Printf("[checkout] escrow fee read for %s failed (%v); using fee_config", token, err)
-	}
-	bps, exempt := services.FeeRate(models.FeatureProductMerchant, token, nil)
-	if exempt {
-		return 0
-	}
-	return bps
+// escrowFeeOn is the platform fee ProductEscrow computes on an escrowed
+// productAmount: amount * bps / 10000, rounded down.
+func escrowFeeOn(amount *big.Int, bps int) *big.Int {
+	f := new(big.Int).Mul(amount, big.NewInt(int64(bps)))
+	return f.Div(f, big.NewInt(10000))
 }
 
-// calculateFeeForFeature reads the documented-GLOBAL (chainID nil) fee_config
-// row for the given feature and applies it to amount. Product/service settlement
-// is Sonic-only with no per-call chain context here (design §6). This is the
-// SAME read the cart quote makes, so quote == charge.
-func calculateFeeForFeature(amount *big.Int, token, feature string) *big.Int {
-	bps, _ := services.FeeRate(feature, token, nil)
-	// fee = amount * bps / 10000
-	fee := new(big.Int).Mul(amount, big.NewInt(int64(bps)))
-	fee.Div(fee, big.NewInt(10000))
-	return fee
+// pricingRates are the chain-side rates one checkout prices with. They are
+// read once, before any DB transaction opens, so a slow RPC never holds a
+// pooled connection and every line in a cart prices at the same rates.
+type pricingRates struct {
+	token    string
+	decimals int
+	// feeBPS is the platform fee rate the escrow applies (0 for MCGP).
+	feeBPS int
+	// gasFee is the flat per-order fee the escrow adds, in token base units.
+	gasFee *big.Int
+	// pricePerMCGP is the OTC buy price of 1 MCGP in USD (6dp); nil for stables.
+	pricePerMCGP *big.Int
+}
+
+// usdToWei converts a USD amount to the token's base units: 1:1 for the
+// stables, through the OTC buy price for MCGP.
+func (r pricingRates) usdToWei(usd float64) (*big.Int, error) {
+	if r.pricePerMCGP != nil {
+		// (usd * 1e6 * 1e18) / pricePerMCGP
+		usd6, err := toWei(floatToDecimalStr(usd, 6), 6)
+		if err != nil {
+			return nil, err
+		}
+		w := new(big.Int).Mul(usd6, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+		return w.Div(w, r.pricePerMCGP), nil
+	}
+	return toWei(floatToDecimalStr(usd, r.decimals), r.decimals)
+}
+
+// usdPerToken is the USD value of one token, for display only.
+func (r pricingRates) usdPerToken() float64 {
+	if r.pricePerMCGP == nil {
+		return 1
+	}
+	v, _ := new(big.Float).Quo(new(big.Float).SetInt(r.pricePerMCGP), big.NewFloat(1e6)).Float64()
+	return v
+}
+
+// resolvePricingRates reads the rates an order in token is priced and charged
+// with. The fee and gas come from the escrow itself — one rate for every order
+// it holds, products and services alike, MCGP zeroed — so the recorded fee and
+// the approve amount always equal what createOrder pulls. If the chain cannot
+// be read they fall back to the fee_config replica, which the confirmed
+// on-chain flow keeps in step. A rate the escrow would refuse stops pricing.
+func (ch *CheckoutHandler) resolvePricingRates(ctx context.Context, token string) (pricingRates, *cartPricingError) {
+	token = strings.ToUpper(token)
+	r := pricingRates{token: token, decimals: tokenDecimals(token), gasFee: big.NewInt(0)}
+	if token == "MCGP" {
+		if ch.otcService == nil {
+			return r, &cartPricingError{http.StatusInternalServerError, "Failed to get MCGP exchange rate"}
+		}
+		p, err := ch.otcService.GetBuyPricePerToken()
+		if err != nil || p == nil || p.Sign() == 0 {
+			return r, &cartPricingError{http.StatusInternalServerError, "Failed to get MCGP exchange rate"}
+		}
+		r.pricePerMCGP = p
+		return r, nil
+	}
+
+	addr := ""
+	if ch.BlockchainService != nil {
+		addr = ch.BlockchainService.TokenAddress("sonic", token)
+	}
+	feeRead, gasRead := false, false
+	if ch.feeRates != nil {
+		bps, err := ch.feeRates.PlatformFeeBPS(ctx, addr)
+		switch {
+		case errors.Is(err, services.ErrEscrowFeeAboveMax):
+			log.Printf("[checkout] ALERT escrow_fee_above_max=1 token=%s", token)
+			return r, &cartPricingError{http.StatusServiceUnavailable, "Checkout is temporarily unavailable: the platform fee is misconfigured."}
+		case err != nil:
+			log.Printf("[checkout] escrow fee read for %s failed (%v); using fee_config", token, err)
+		default:
+			r.feeBPS, feeRead = bps, true
+		}
+		gas, err := ch.feeRates.GasFeeWei(ctx, addr)
+		if err != nil {
+			log.Printf("[checkout] escrow gas read for %s failed (%v); using fee_config", token, err)
+		} else {
+			r.gasFee, gasRead = gas, true
+		}
+	}
+	if !feeRead {
+		if bps, exempt := services.FeeRate(models.FeatureProductMerchant, token, nil); !exempt {
+			r.feeBPS = bps
+		}
+	}
+	if !gasRead {
+		r.gasFee = configGasFeeWei(token)
+	}
+	return r, nil
+}
+
+// configGasFeeWei is the fee_config replica's flat product gas fee in token
+// base units — the fallback when the escrow cannot be read.
+func configGasFeeWei(token string) *big.Int {
+	gasFeeUSD, exempt := services.FeeFlatUSD(models.FeatureProduct, token, nil)
+	if exempt {
+		return big.NewInt(0)
+	}
+	gasFeeWei, ok := new(big.Int).SetString(fmt.Sprintf("%.0f", gasFeeUSD*math.Pow10(tokenDecimals(token))), 10)
+	if !ok {
+		return big.NewInt(0)
+	}
+	return gasFeeWei
 }
 
 // tokenDecimals returns the number of decimals for a given token symbol.
@@ -666,6 +749,10 @@ type createOrderRequest struct {
 	MenuSelections map[string][]menuLineRequest `json:"menuSelections"`
 	// BookingSlots maps a Booking-type service product ID → the reserved slot.
 	BookingSlots map[string]bookingSlotRequest `json:"bookingSlots"`
+	// ExpectedTotal is the quote total (token base units, gas included) the
+	// buyer confirmed. When set, order creation refuses a different total with
+	// 409 code "price_changed". Optional for older clients.
+	ExpectedTotal string `json:"expectedTotal"`
 }
 
 type menuLineRequest struct {
@@ -748,35 +835,9 @@ func buyerLocation(req createOrderRequest, user *models.User) (city, state, coun
 
 // priceCartItems validates and prices every cart item for token inside tx. It
 // writes nothing: stock is checked here and decremented by the caller.
-func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items []models.CartItem, req createOrderRequest, token string) ([]pricedCartLine, *cartPricingError) {
+func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items []models.CartItem, req createOrderRequest, rates pricingRates) ([]pricedCartLine, *cartPricingError) {
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
-	decimals := tokenDecimals(token)
-
-	// One fee-rate read per request, so every line prices at the same rate.
-	feeBPS := ch.escrowFeeBPS(context.Background(), token)
-
-	// One OTC read per request, so every line in a mixed cart uses the same rate.
-	var pricePerMCGP *big.Int
-	if token == "MCGP" {
-		p, err := ch.otcService.GetBuyPricePerToken()
-		if err != nil || p == nil || p.Sign() == 0 {
-			return nil, &cartPricingError{http.StatusInternalServerError, "Failed to get MCGP exchange rate"}
-		}
-		pricePerMCGP = p
-	}
-	usdToWei := func(usd float64) (*big.Int, error) {
-		if pricePerMCGP != nil {
-			// (usd * 1e6 * 1e18) / pricePerMCGP
-			usd6, err := toWei(floatToDecimalStr(usd, 6), 6)
-			if err != nil {
-				return nil, err
-			}
-			w := new(big.Int).Mul(usd6, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-			return w.Div(w, pricePerMCGP), nil
-		}
-		// USDC/USDT: 1:1 with USD
-		return toWei(floatToDecimalStr(usd, decimals), decimals)
-	}
+	token := rates.token
 
 	// Group items by seller
 	type sellerGroup struct {
@@ -873,12 +934,12 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 				calloutUSD = GetShippingRate(&product, line.zone) * float64(item.Quantity)
 			}
 
-			priceWei, err := usdToWei(priceUSD)
+			priceWei, err := rates.usdToWei(priceUSD)
 			if err != nil {
 				return nil, &cartPricingError{http.StatusInternalServerError, "Failed to convert product amount"}
 			}
-			line.productAmount, line.platformFee = splitSellerFee(priceWei, feeBPS)
-			if line.shippingAmount, err = usdToWei(calloutUSD); err != nil {
+			line.productAmount, line.platformFee = splitSellerFee(priceWei, rates.feeBPS)
+			if line.shippingAmount, err = rates.usdToWei(calloutUSD); err != nil {
 				return nil, &cartPricingError{http.StatusInternalServerError, "Failed to convert shipping amount"}
 			}
 
@@ -896,56 +957,71 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 	return lines, nil
 }
 
-// orderGasFeeWei is the flat per-order gas fee the escrow collects on top of
-// TotalAmount, in the token's base units. It comes from the product fee_config
-// row (seeded to $0.10, MCGP-exempt) — the SAME read the cart quote makes, so
-// quote == charge (design §6).
-func orderGasFeeWei(token string) *big.Int {
-	if strings.ToUpper(token) == "MCGP" {
-		return big.NewInt(0)
-	}
-	// Documented-GLOBAL (chainID nil), Sonic-only product flow (§6).
-	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, token, nil)
-	gasFeeWei, ok := new(big.Int).SetString(fmt.Sprintf("%.0f", gasFeeUSD*math.Pow10(tokenDecimals(token))), 10)
-	if !ok {
-		return big.NewInt(0)
-	}
-	return gasFeeWei
+// cartCheckout is the validated input shared by QuoteCart and CreateOrderFromCart.
+type cartCheckout struct {
+	user  *models.User
+	req   createOrderRequest
+	token string
+	cart  models.Cart
+	items []models.CartItem
 }
 
-func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
+// loadCartCheckout authenticates, binds and validates a cart checkout request
+// and loads the caller's non-empty active cart, writing the error response and
+// returning false when any step fails.
+func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
-		return
+		return nil, false
 	}
-
 	var req createOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "token is required")
-		return
+		return nil, false
 	}
-
 	token := strings.ToUpper(req.Token)
 	if token != "USDC" && token != "USDT" && token != "MCGP" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
-		return
+		return nil, false
 	}
-
-	// Get active cart
 	var cart models.Cart
 	if err := config.DB.Where("user_id = ? AND status = ?", user.ID, "active").First(&cart).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "No active cart found")
-		return
+		return nil, false
 	}
-
 	items := cart.GetItems()
 	if len(items) == 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cart is empty")
+		return nil, false
+	}
+	return &cartCheckout{user: user, req: req, token: token, cart: cart, items: items}, true
+}
+
+// cartTotal is everything the buyer's wallet pays for lines: each order's
+// TotalAmount plus the escrow's gas fee per order.
+func cartTotal(lines []pricedCartLine, gasFee *big.Int) *big.Int {
+	total := new(big.Int)
+	for _, l := range lines {
+		total.Add(total, l.orderTotal())
+		total.Add(total, gasFee)
+	}
+	return total
+}
+
+func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
+	in, ok := loadCartCheckout(c)
+	if !ok {
 		return
 	}
-
+	user, req, token, cart, items := in.user, in.req, in.token, in.cart, in.items
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
+
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return
+	}
 
 	// Wrap everything in a DB transaction
 	tx := config.DB.Begin()
@@ -959,11 +1035,23 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		}
 	}()
 
-	lines, perr := ch.priceCartItems(tx, user, items, req, token)
+	lines, perr := ch.priceCartItems(tx, user, items, req, rates)
 	if perr != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
+	}
+
+	// The buyer confirmed a quoted total; if anything re-priced since (MCGP
+	// rate, fee rate, stock, shipping), stop before any order exists rather
+	// than have the wallet sign an amount they never saw.
+	if req.ExpectedTotal != "" {
+		if total := cartTotal(lines, rates.gasFee); total.String() != req.ExpectedTotal {
+			tx.Rollback()
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"The total changed since you confirmed it. Review the new amount before paying.", "price_changed")
+			return
+		}
 	}
 
 	// Determine buyer upline
@@ -1136,31 +1224,15 @@ type cartQuoteTotals struct {
 // amount a buyer confirms is the amount the escrow pulls. Same body as
 // CreateOrderFromCart.
 func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
-	user := getUserFromContext(c)
-	if user == nil {
-		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+	in, ok := loadCartCheckout(c)
+	if !ok {
 		return
 	}
+	user, req, token, items := in.user, in.req, in.token, in.items
 
-	var req createOrderRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "token is required")
-		return
-	}
-	token := strings.ToUpper(req.Token)
-	if token != "USDC" && token != "USDT" && token != "MCGP" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
-		return
-	}
-
-	var cart models.Cart
-	if err := config.DB.Where("user_id = ? AND status = ?", user.ID, "active").First(&cart).Error; err != nil {
-		utils.ErrorResponse(c, http.StatusNotFound, "No active cart found")
-		return
-	}
-	items := cart.GetItems()
-	if len(items) == 0 {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Cart is empty")
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
 	}
 
@@ -1173,13 +1245,13 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	lines, perr := ch.priceCartItems(tx, user, items, req, token)
+	lines, perr := ch.priceCartItems(tx, user, items, req, rates)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
 	}
 
-	gasFee := orderGasFeeWei(token)
+	gasFee := rates.gasFee
 	sum := struct{ product, shipping, fee, gas, total *big.Int }{
 		new(big.Int), new(big.Int), new(big.Int), new(big.Int), new(big.Int),
 	}
@@ -1211,19 +1283,12 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 		sum.total.Add(sum.total, lineTotal)
 	}
 
-	// usdPerToken lets the app show "≈ local currency" without a second rate
-	// source: 1 for the stables, the OTC buy price for MCGP.
-	usdPerToken := 1.0
-	if token == "MCGP" {
-		if p, err := ch.otcService.GetBuyPricePerToken(); err == nil && p != nil {
-			usdPerToken, _ = new(big.Float).Quo(new(big.Float).SetInt(p), big.NewFloat(1e6)).Float64()
-		}
-	}
-
 	utils.SuccessResponse(c, http.StatusOK, "Quote ready", gin.H{
-		"token":       token,
-		"decimals":    tokenDecimals(token),
-		"usdPerToken": usdPerToken,
+		"token":    token,
+		"decimals": tokenDecimals(token),
+		// USD value of one token, from the same read the amounts were sized
+		// with, so the app's "≈ local currency" matches the charge.
+		"usdPerToken": rates.usdPerToken(),
 		"lines":       out,
 		"totals": cartQuoteTotals{
 			ProductAmount:  sum.product.String(),
@@ -1287,6 +1352,12 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		buyerCountry = user.Country
 	}
 
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return
+	}
+
 	tx := config.DB.Begin()
 	if tx.Error != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
@@ -1337,7 +1408,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	}
 
 	order, errMsg, status := ch.placeServiceOrder(
-		tx, user, &seller, &product, serviceType, &profile,
+		tx, rates, user, &seller, &product, serviceType, &profile,
 		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
 		req.MenuSelections, req.BookingSlot, req.Answers, nil,
 	)
@@ -1374,7 +1445,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 // path lives in one place. On failure it returns a non-empty errMsg + HTTP
 // status and leaves the tx open for the caller to roll back.
 func (ch *CheckoutHandler) placeServiceOrder(
-	tx *gorm.DB, buyer, seller *models.User, product *models.Product,
+	tx *gorm.DB, rates pricingRates, buyer, seller *models.User, product *models.Product,
 	serviceType string, profile *models.ServiceProfile,
 	token, serviceTier, buyerCity, buyerState, buyerCountry string,
 	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
@@ -1408,12 +1479,15 @@ func (ch *CheckoutHandler) placeServiceOrder(
 		}
 	}
 
-	decimals := tokenDecimals(token)
-	priceWei, shippingAmountWei, err := ch.serviceAmountsToWei(priceUSD, calloutUSD, token, decimals)
+	priceWei, err := rates.usdToWei(priceUSD)
 	if err != nil {
-		return nil, err.Error(), http.StatusInternalServerError
+		return nil, "Failed to convert product amount", http.StatusInternalServerError
 	}
-	productAmountWei, platformFeeWei := splitSellerFee(priceWei, ch.escrowFeeBPS(context.Background(), token))
+	shippingAmountWei, err := rates.usdToWei(calloutUSD)
+	if err != nil {
+		return nil, "Failed to convert shipping amount", http.StatusInternalServerError
+	}
+	productAmountWei, platformFeeWei := splitSellerFee(priceWei, rates.feeBPS)
 	if productAmountWei == nil || productAmountWei.Sign() <= 0 {
 		return nil, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token), http.StatusBadRequest
 	}
@@ -1465,35 +1539,6 @@ func (ch *CheckoutHandler) placeServiceOrder(
 		}
 	}
 	return &order, "", 0
-}
-
-// serviceAmountsToWei converts the USD price/call-out to on-chain wei for the
-// given token (USDC/USDT 1:1; MCGP via the OTC buy rate), matching the cart
-// checkout's conversion so quote == charge.
-func (ch *CheckoutHandler) serviceAmountsToWei(priceUSD, calloutUSD float64, token string, decimals int) (*big.Int, *big.Int, error) {
-	if token == "MCGP" {
-		pricePerMCGP, rateErr := ch.otcService.GetBuyPricePerToken()
-		if rateErr != nil || pricePerMCGP.Sign() == 0 {
-			return nil, nil, fmt.Errorf("Failed to get MCGP exchange rate")
-		}
-		e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		usdP, _ := toWei(floatToDecimalStr(priceUSD, 6), 6)
-		pWei := new(big.Int).Mul(usdP, e18)
-		pWei.Div(pWei, pricePerMCGP)
-		usdS, _ := toWei(floatToDecimalStr(calloutUSD, 6), 6)
-		sWei := new(big.Int).Mul(usdS, e18)
-		sWei.Div(sWei, pricePerMCGP)
-		return pWei, sWei, nil
-	}
-	pWei, err := toWei(floatToDecimalStr(priceUSD, decimals), decimals)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to convert product amount")
-	}
-	sWei, err := toWei(floatToDecimalStr(calloutUSD, decimals), decimals)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to convert shipping amount")
-	}
-	return pWei, sWei, nil
 }
 
 // orderSystemFeeUSD computes the USD-denominated system fee for TP distribution.
@@ -1567,6 +1612,48 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 	return &order, user, &seller, tokenAddr, true
 }
 
+// repriceToEscrowFee keeps a pending order payable when the escrow's fee rate
+// changed after the order was created. createOrder computes the fee from the
+// CURRENT rate, so a stored fee at an older rate makes the approve short (the
+// escrow reverts, on every retry) or long (the stored fee no longer matches
+// what the escrow holds). The listing price the buyer agreed to —
+// productAmount + stored fee — is re-split at the current rate, so the buyer
+// pays the same and only the seller/fee split moves. Orders already escrowed
+// are left alone.
+func repriceToEscrowFee(db *gorm.DB, order *models.Order, bps int) error {
+	if order.Status != models.OrderStatusPendingPayment {
+		return nil
+	}
+	product, ok1 := new(big.Int).SetString(order.ProductAmount, 10)
+	storedFee, ok2 := new(big.Int).SetString(order.PlatformFee, 10)
+	shipping, ok3 := new(big.Int).SetString(order.ShippingAmount, 10)
+	if !ok1 || !ok2 || !ok3 {
+		return fmt.Errorf("order %s has non-numeric amounts", order.ID)
+	}
+	if escrowFeeOn(product, bps).Cmp(storedFee) == 0 {
+		return nil
+	}
+	listing := new(big.Int).Add(product, storedFee)
+	newProduct, newFee := splitSellerFee(listing, bps)
+	if newProduct.Sign() <= 0 {
+		return fmt.Errorf("order %s re-prices to a zero product amount", order.ID)
+	}
+	total := new(big.Int).Add(newProduct, shipping)
+	total.Add(total, newFee)
+	log.Printf("[checkout] re-priced order %s to %d bps: product %s→%s fee %s→%s",
+		order.ID, bps, order.ProductAmount, newProduct, order.PlatformFee, newFee)
+	updates := map[string]interface{}{
+		"product_amount": newProduct.String(),
+		"platform_fee":   newFee.String(),
+		"total_amount":   total.String(),
+	}
+	if err := db.Model(order).Updates(updates).Error; err != nil {
+		return err
+	}
+	order.ProductAmount, order.PlatformFee, order.TotalAmount = newProduct.String(), newFee.String(), total.String()
+	return nil
+}
+
 // PrepareApprove handles POST /api/orders/:id/prepare-approve — returns the ERC20 approve tx.
 func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 	order, user, _, tokenAddr, ok := ch.getOrderForEscrow(c)
@@ -1574,14 +1661,21 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 		return
 	}
 
-	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), order.Token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return
+	}
+	if err := repriceToEscrowFee(config.DB, order, rates.feeBPS); err != nil {
+		log.Printf("Failed to re-price order %s to the escrow fee: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
+		return
+	}
 
-	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee.
-	// The flat gas fee comes from the product fee_config row (seeded to $0.10,
-	// MCGP-exempt). MCGP resolves to flat=0, preserving the previous behavior
-	// where MCGP orders added no gas fee. This is the SAME read the cart quote
-	// (CalculateCartSummary's GasFee) makes, so quote == charge (design §6).
-	approveAmount := new(big.Int).Add(totalAmount, orderGasFeeWei(order.Token))
+	// The escrow pulls product + shipping + platformFee + its gas fee, so the
+	// approve covers exactly that, with the gas read from the escrow itself.
+	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
+	approveAmount := new(big.Int).Add(totalAmount, rates.gasFee)
 
 	client := ch.BlockchainService.ClientForChain("sonic")
 	if client == nil {
@@ -1704,7 +1798,7 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 	}
 
 	// Verify escrow tx and extract OrderCreated event
-	contractOrderID, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash)
+	created, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID))
 	if err != nil {
 		log.Printf("Failed to verify escrow tx: %v", err)
 		utils.ErrorResponse(c, http.StatusBadRequest, "Escrow transaction verification failed: "+err.Error())
@@ -1713,10 +1807,18 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	escrowExpires := time.Now().Add(30 * 24 * time.Hour)
 	updates := map[string]interface{}{
-		"status":                  models.OrderStatusEscrowed,
-		"approve_tx_hash":         req.ApproveTxHash,
-		"escrow_tx_hash":          req.EscrowTxHash,
-		"contract_order_id":       fmt.Sprintf("0x%x", contractOrderID),
+		"status":            models.OrderStatusEscrowed,
+		"approve_tx_hash":   req.ApproveTxHash,
+		"escrow_tx_hash":    req.EscrowTxHash,
+		"contract_order_id": fmt.Sprintf("0x%x", created.OrderID),
+		// Store what the escrow actually recorded, so fee settlement and every
+		// later screen read the amounts it holds, not the ones we asked for.
+		"product_amount":  created.ProductAmount.String(),
+		"shipping_amount": created.ShippingAmount.String(),
+		"platform_fee":    created.PlatformFee.String(),
+		"total_amount": new(big.Int).Add(
+			new(big.Int).Add(created.ProductAmount, created.ShippingAmount), created.PlatformFee,
+		).String(),
 		"escrow_contract_address": ch.EscrowService.CurrentEscrowAddress(),
 		"escrow_expires_at":       escrowExpires,
 	}
@@ -1759,7 +1861,7 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Escrow submitted successfully", gin.H{
 		"orderId":         order.ID,
 		"status":          models.OrderStatusEscrowed,
-		"contractOrderId": fmt.Sprintf("0x%x", contractOrderID),
+		"contractOrderId": fmt.Sprintf("0x%x", created.OrderID),
 		"escrowExpiresAt": escrowExpires,
 	})
 }

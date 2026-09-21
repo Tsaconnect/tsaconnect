@@ -440,6 +440,12 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 		return
 	}
 
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), r.Token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return
+	}
+
 	tx := config.DB.Begin()
 	if tx.Error != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
@@ -466,7 +472,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	serviceType, profile := resolveServiceTypeAndProfile(tx, &product)
 
 	order, errMsg, status := ch.placeServiceOrder(
-		tx, user, &seller, &product, serviceType, &profile,
+		tx, rates, user, &seller, &product, serviceType, &profile,
 		r.Token, r.ServiceTier, r.BuyerCity, r.BuyerState, r.BuyerCountry,
 		nil, nil, r.GetAnswers(), r.QuotedAmountUSD,
 	)
