@@ -14,8 +14,8 @@ import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { useTheme } from '@/theme';
+import { useCurrency } from '@/contexts/CurrencyContext';
 import {
-  AmountText,
   Badge,
   Chip,
   EmptyState,
@@ -35,6 +35,7 @@ type SectionTab = 'products' | 'services';
 
 export default function MerchantInventoryScreen() {
     const { colors, spacing, radius } = useTheme();
+    const { formatPrice } = useCurrency();
     const { token } = useAuth();
     const [searchQuery, setSearchQuery] = useState('');
     const [activeTab, setActiveTab] = useState<ActiveTab>('all');
@@ -187,7 +188,7 @@ export default function MerchantInventoryScreen() {
                         </View>
 
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: spacing.sm }}>
-                            <AmountText value={item.price} currency="USD" variant="bodySm" minimumFractionDigits={2} maximumFractionDigits={2} />
+                            <Text variant="bodySm" weight="700" numeric>{formatPrice(item.price)}</Text>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                                 <Text variant="caption" weight="600" color={isActive ? 'accent' : 'textMuted'}>
                                     {isActive ? 'Active' : 'Inactive'}

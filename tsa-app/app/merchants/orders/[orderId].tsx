@@ -43,6 +43,7 @@ import { signAndBroadcast } from '@/services/transaction';
 import api from '@/components/services/api';
 import { formatStatus, formatDate } from '@/constants/orderStatus';
 import { useTheme } from '@/theme';
+import { useCurrency } from '@/contexts/CurrencyContext';
 import {
   Avatar,
   Badge,
@@ -170,6 +171,7 @@ const CARD_LABEL = (text: string) => (
 
 const MerchantOrderDetail = () => {
   const { colors, spacing, radius } = useTheme();
+  const { formatPrice } = useCurrency();
   const { orderId } = useLocalSearchParams<{ orderId: string }>();
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -617,7 +619,7 @@ const MerchantOrderDetail = () => {
                     Qty: {order.quantity}
                   </Text>
                   <Text variant="caption" color="textMuted">
-                    ${order.product.price.toFixed(2)} each
+                    {formatPrice(order.product.price)} each
                   </Text>
                 </View>
               </View>

@@ -8,7 +8,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Badge, Button, Card, EmptyState, Input, Spinner, Text, useToast } from '@/components/ui';
+import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
 import {
   listBookingRequests,
   approveBookingRequest,
@@ -17,6 +17,9 @@ import {
   type BookingRequestStatus,
 } from '@/services/bookingRequestApi';
 import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
+import { LocalAmountInput, PricingCurrencySelect } from '@/components/products/MerchantPricingFields';
 
 type Tab = 'buyer' | 'seller';
 
@@ -40,7 +43,10 @@ export default function BookingRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
+  // Sellers quote in their own currency; the quote is sent in USD.
+  const pricing = useMerchantPricing();
+  const { formatPrice } = useCurrency();
+  const quoteKey = (id: string) => `quote:${id}`;
 
   const load = useCallback(async () => {
     const res = await listBookingRequests(tab);
@@ -70,11 +76,13 @@ export default function BookingRequestsScreen() {
 
   const handleApprove = (id: string) =>
     withBusy(id, async () => {
-      const raw = priceDrafts[id];
-      const amount = raw && raw.trim() !== '' ? Number(raw) : undefined;
-      if (amount != null && (isNaN(amount) || amount <= 0)) {
-        return toast.show('Enter a valid price', 'error');
+      const raw = pricing.amount(quoteKey(id));
+      if (raw.trim() !== '') {
+        const typed = parseAmount(raw);
+        if (isNaN(typed) || typed <= 0) return toast.show('Enter a valid price', 'error');
+        if (!pricing.ready) return toast.show('Exchange rates are still loading. Try again in a moment.', 'error');
       }
+      const amount = pricing.usdFor(quoteKey(id));
       const res = await approveBookingRequest(id, amount);
       if (!res.success) return toast.show(res.message || 'Failed to approve', 'error');
       toast.show('Request approved', 'success');
@@ -129,6 +137,9 @@ export default function BookingRequestsScreen() {
           contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingBottom: spacing['2xl'], gap: spacing.md }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         >
+          {tab === 'seller' && rows.some(({ request }) => request.status === 'requested') ? (
+            <PricingCurrencySelect pricing={pricing} />
+          ) : null}
           {rows.length === 0 ? (
             <EmptyState
               icon="list"
@@ -175,7 +186,7 @@ export default function BookingRequestsScreen() {
                     <>
                       {request.quotedAmountUsd != null ? (
                         <Text variant="bodyMed" weight="700">
-                          Quoted price: ${request.quotedAmountUsd.toFixed(2)}
+                          Quoted price: {formatPrice(request.quotedAmountUsd)}
                         </Text>
                       ) : null}
                       <Button
@@ -189,12 +200,11 @@ export default function BookingRequestsScreen() {
                   ) : null}
                   {tab === 'seller' && request.status === 'requested' ? (
                     <View style={{ gap: spacing.sm }}>
-                      <Input
-                        label="Price (USD) — leave blank for a fixed-price listing"
-                        keyboardType="decimal-pad"
-                        value={priceDrafts[request.id] ?? ''}
-                        onChangeText={(t) => setPriceDrafts((p) => ({ ...p, [request.id]: t }))}
-                        placeholder="e.g. 40.00"
+                      <LocalAmountInput
+                        pricing={pricing}
+                        amountKey={quoteKey(request.id)}
+                        label="Price"
+                        helper="Leave blank for a fixed-price listing"
                       />
                       <View style={{ flexDirection: 'row', gap: spacing.sm }}>
                         <Button

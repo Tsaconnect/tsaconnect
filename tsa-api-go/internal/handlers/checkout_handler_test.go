@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -485,36 +486,33 @@ func TestDetectShippingZone_StateSuffixNormalization(t *testing.T) {
 
 // ---------- Fee calculation tests ----------
 
-// The platform fee is no longer a hardcoded 10%: calculateFeeForFeature reads
-// the global fee_config row for models.FeatureProductMerchant, documented as the
-// 2% product_merchant rate. These expectations are pinned to that rate on
-// purpose — if the configured rate changes, these tests SHOULD fail, because
-// that is a deliberate product decision and not an incidental refactor.
-func TestCalculatePlatformFee_USDC(t *testing.T) {
-	productAmount := big.NewInt(10000000) // 10 USDC (6 decimals)
-	fee := CalculatePlatformFee(productAmount, "USDC")
-	expected := big.NewInt(200000) // 2% = 0.2 USDC
-	if fee.Cmp(expected) != 0 {
-		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
+// Without a chain read (no escrow client in tests), checkout falls back to the
+// fee_config replica, pinned to the 2% product_merchant rate and $0.10 gas.
+// If the configured rates change, these SHOULD fail: that is a product
+// decision, not an incidental refactor.
+func TestResolvePricingRates_FallsBackToFeeConfig(t *testing.T) {
+	setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	ch.feeRates = nil
+
+	for _, token := range []string{"USDC", "usdt"} {
+		r, perr := ch.resolvePricingRates(context.Background(), token)
+		if perr != nil {
+			t.Fatalf("%s: %v", token, perr.msg)
+		}
+		if r.feeBPS != 200 || r.gasFee.String() != "100000" || r.decimals != 6 || r.pricePerMCGP != nil {
+			t.Errorf("%s: fee %d gas %s decimals %d, want 200 / 100000 / 6", token, r.feeBPS, r.gasFee, r.decimals)
+		}
 	}
 }
 
-func TestCalculatePlatformFee_MCGP_Zero(t *testing.T) {
-	productAmount := big.NewInt(10000000000000000) // 0.01 MCGP (18 decimals)
-	fee := CalculatePlatformFee(productAmount, "MCGP")
-	if fee.Sign() != 0 {
-		t.Errorf("expected 0 fee for MCGP, got %s", fee.String())
+func TestEscrowFeeOn_WeiMath(t *testing.T) {
+	// 2% of 15.5 USDC (15500000 at 6dp) = 310000, rounded down like the contract.
+	if got := escrowFeeOn(big.NewInt(15500000), 200); got.String() != "310000" {
+		t.Errorf("fee = %s, want 310000", got)
 	}
-}
-
-func TestCalculatePlatformFee_WeiMath(t *testing.T) {
-	// 15.5 USDC = 15500000 (6 decimals)
-	productAmount := big.NewInt(15500000)
-	fee := CalculatePlatformFee(productAmount, "USDT")
-	// 2% of 15500000 = 310000 (product_merchant rate; see note above)
-	expected := big.NewInt(310000)
-	if fee.Cmp(expected) != 0 {
-		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
+	if got := escrowFeeOn(big.NewInt(49), 200); got.Sign() != 0 {
+		t.Errorf("fee on 49 base units = %s, want 0 (rounded down)", got)
 	}
 }
 

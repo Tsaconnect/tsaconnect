@@ -27,7 +27,6 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import LocationPicker, { LocationValue } from "../common/LocationPicker";
-import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from "@/constants/shipping";
 import { useTheme } from "@/theme";
 import {
   Button,
@@ -55,7 +54,14 @@ import {
   type BookingType,
   type PricingMethod,
 } from "@/services/serviceListingApi";
-import MenuBuilder, { MenuDraft, emptyMenuDraft } from "./MenuBuilder";
+import MenuBuilder, { MenuDraft, emptyMenuDraft, menuPriceKey } from "./MenuBuilder";
+import { useMerchantPricing } from "@/hooks/useMerchantPricing";
+import {
+  LocalAmountInput,
+  PricingCurrencySelect,
+  ShippingRatesFields,
+  UsdStorageNote,
+} from "@/components/products/MerchantPricingFields";
 import AvailabilityEditor from "./AvailabilityEditor";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
@@ -71,6 +77,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const { token } = useAuth();
   const { colors, spacing, radius } = useTheme();
   const isEdit = !!editProductId;
+  // Every fee below is typed in the merchant's currency and submitted in USD.
+  const pricing = useMerchantPricing();
+  const { loadSavedAmounts } = pricing;
 
   const [loading, setLoading] = useState(false);
   const [prefetching, setPrefetching] = useState(false);
@@ -90,19 +99,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // Standard fixed price (order/contact optional).
   const [price, setPrice] = useState("");
 
-  // Per-zone distance fee (reuses the product shipping* columns). Used as the
-  // call-out fee (contact) or delivery/booking fee tiers (order/booking).
-  // "shippingResidential" is now a priceable tier for order/booking.
-  const [baseCalloutFee, setBaseCalloutFee] = useState("");
-  const [calloutResidential, setCalloutResidential] = useState("");
-  const [calloutSameCity, setCalloutSameCity] = useState("");
-  const [calloutSameState, setCalloutSameState] = useState("");
-  const [calloutSameCountry, setCalloutSameCountry] = useState("");
-  const [calloutInternational, setCalloutInternational] = useState("");
-
-  // Service-profile fields (serviceListingApi).
-  const [accessFeeUsd, setAccessFeeUsd] = useState("");
-  const [calloutFeeUsd, setCalloutFeeUsd] = useState("");
+  // Per-zone distance fees reuse the product shipping* columns and live in
+  // `pricing` under those names: the call-out fee (contact) or delivery/booking
+  // fee tiers (order/booking). "shippingResidential" is priceable for
+  // order/booking. The access and call-out flat fees live there too.
   const [slotDurationMinutes, setSlotDurationMinutes] = useState("");
   const [maxCapacityPerSlot, setMaxCapacityPerSlot] = useState("");
   const [serviceAddress, setServiceAddress] = useState("");
@@ -139,18 +139,6 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // the residential tier is priceable (order/booking) vs free (contact).
   const showDistanceTiers = isContact || isOrder || isBooking;
   const residentialPriceable = isOrder || isBooking;
-
-  // Typing a base fee auto-fills the zone rates below, each still editable.
-  const applyBaseCalloutFee = (baseStr: string) => {
-    setBaseCalloutFee(baseStr);
-    const base = parseFloat(baseStr);
-    if (isNaN(base) || base < 0) return;
-    const rates = calculateZoneRates(base);
-    setCalloutSameCity(rates.sameCity.toFixed(2));
-    setCalloutSameState(rates.sameState.toFixed(2));
-    setCalloutSameCountry(rates.sameCountry.toFixed(2));
-    setCalloutInternational(rates.international.toFixed(2));
-  };
 
   // Price-on-request listings can't be bought instantly — the merchant must
   // name a price first, so force the engagement to "request" in that case.
@@ -203,11 +191,13 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           setCompanyName(p.companyName ?? "");
           setCategory(typeof p.category === "string" ? p.category : p.category?.id ?? "");
           if (p.price) setPrice(String(p.price));
-          if (p.shippingResidential != null) setCalloutResidential(String(p.shippingResidential));
-          if (p.shippingSameCity != null) setCalloutSameCity(String(p.shippingSameCity));
-          if (p.shippingSameState != null) setCalloutSameState(String(p.shippingSameState));
-          if (p.shippingSameCountry != null) setCalloutSameCountry(String(p.shippingSameCountry));
-          if (p.shippingInternational != null) setCalloutInternational(String(p.shippingInternational));
+          loadSavedAmounts({
+            shippingResidential: p.shippingResidential,
+            shippingSameCity: p.shippingSameCity,
+            shippingSameState: p.shippingSameState,
+            shippingSameCountry: p.shippingSameCountry,
+            shippingInternational: p.shippingInternational,
+          });
           if (Array.isArray(p.images)) {
             setProductImages(p.images.map((im: any) => im.url).filter(Boolean));
           }
@@ -217,8 +207,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         const profRes = await getServiceProfile(editProductId);
         const prof = profRes.data;
         if (prof) {
-          if (prof.accessFeeUsd) setAccessFeeUsd(String(prof.accessFeeUsd));
-          if (prof.calloutFeeUsd) setCalloutFeeUsd(String(prof.calloutFeeUsd));
+          loadSavedAmounts({
+            accessFeeUsd: prof.accessFeeUsd,
+            calloutFeeUsd: prof.calloutFeeUsd,
+          });
           if (prof.slotDurationMinutes) setSlotDurationMinutes(String(prof.slotDurationMinutes));
           if (prof.maxCapacityPerSlot) setMaxCapacityPerSlot(String(prof.maxCapacityPerSlot));
           setServiceAddress(prof.serviceAddress ?? "");
@@ -240,14 +232,16 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         const items = menuRes.data?.items;
         if (Array.isArray(items) && items.length) {
           originalMenuIds.current = items.map((it) => it.id).filter(Boolean);
-          setMenuItems(
-            items.map((it) => ({
-              id: it.id,
-              name: it.name,
-              description: it.description ?? "",
-              priceUsd: it.priceUsd != null ? String(it.priceUsd) : "",
-              imageUrl: it.imageUrl,
-            }))
+          const drafts: MenuDraft[] = items.map((it) => ({
+            key: it.id,
+            id: it.id,
+            name: it.name,
+            description: it.description ?? "",
+            imageUrl: it.imageUrl,
+          }));
+          setMenuItems(drafts);
+          loadSavedAmounts(
+            Object.fromEntries(items.map((it, i) => [menuPriceKey(drafts[i]), it.priceUsd]))
           );
         }
 
@@ -263,7 +257,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       }
     };
     if (token) prefetch();
-  }, [editProductId, token]);
+  }, [editProductId, token, loadSavedAmounts]);
 
   const pickProductImages = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -297,8 +291,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     // Profile — send the fields relevant to the current type.
     const profile: Record<string, any> = {};
     if (isContact || isBooking) {
-      profile.accessFeeUsd = num(accessFeeUsd);
-      profile.calloutFeeUsd = num(calloutFeeUsd);
+      profile.accessFeeUsd = pricing.usdFor("accessFeeUsd") ?? 0;
+      profile.calloutFeeUsd = pricing.usdFor("calloutFeeUsd") ?? 0;
     }
     if (isBooking) {
       profile.slotDurationMinutes = num(slotDurationMinutes);
@@ -330,7 +324,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         const payload = {
           name: m.name.trim(),
           description: m.description,
-          priceUsd: num(m.priceUsd),
+          priceUsd: pricing.usdFor(menuPriceKey(m)) ?? 0,
           imageUrl: m.imageUrl,
           sortOrder: i,
           isAvailable: true,
@@ -369,6 +363,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       Alert.alert("Missing Fields", "Please fill all required fields and upload at least one image.");
       return;
     }
+    if (!pricing.ready) {
+      Alert.alert("One moment", "Exchange rates are still loading. Try again in a moment.");
+      return;
+    }
     setLoading(true);
     const formData = new FormData();
     // On create we always send local URIs. On edit, only newly-picked local
@@ -403,13 +401,17 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     // Distance-fee tiers reuse the product shipping* columns. Residential is a
     // real priceable tier for order/booking; for contact it stays free (unsent).
     if (showDistanceTiers) {
-      if (residentialPriceable && calloutResidential) {
-        formData.append("shippingResidential", calloutResidential);
+      const tiers = [
+        ...(residentialPriceable ? ["shippingResidential"] : []),
+        "shippingSameCity",
+        "shippingSameState",
+        "shippingSameCountry",
+        "shippingInternational",
+      ];
+      for (const tier of tiers) {
+        const usd = pricing.usdFor(tier);
+        if (usd != null) formData.append(tier, usd.toString());
       }
-      if (calloutSameCity) formData.append("shippingSameCity", calloutSameCity);
-      if (calloutSameState) formData.append("shippingSameState", calloutSameState);
-      if (calloutSameCountry) formData.append("shippingSameCountry", calloutSameCountry);
-      if (calloutInternational) formData.append("shippingInternational", calloutInternational);
     }
 
     formData.append("phoneNumber", phoneNumber);
@@ -465,14 +467,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     setProductName("");
     setCompanyName("");
     setPrice("");
-    setBaseCalloutFee("");
-    setCalloutResidential("");
-    setCalloutSameCity("");
-    setCalloutSameState("");
-    setCalloutSameCountry("");
-    setCalloutInternational("");
-    setAccessFeeUsd("");
-    setCalloutFeeUsd("");
+    pricing.reset();
     setSlotDurationMinutes("");
     setMaxCapacityPerSlot("");
     setServiceAddress("");
@@ -501,110 +496,13 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         {sub}
       </Text>
 
-      <Card padding="lg" style={{ gap: spacing.lg }}>
-        <View>
-          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
-            Quick-select base fee
-          </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-            {PACKAGE_SIZE_PRESETS.map((preset) => (
-              <PressableScale
-                key={preset.key}
-                onPress={() => applyBaseCalloutFee(String(preset.baseFee))}
-                style={{
-                  flex: 1,
-                  minWidth: 90,
-                  paddingVertical: spacing.sm,
-                  paddingHorizontal: spacing.sm,
-                  borderRadius: radius.md,
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                  backgroundColor: colors.surface,
-                  alignItems: 'center',
-                  gap: 2,
-                }}
-              >
-                <Text variant="caption" weight="700" align="center">
-                  {preset.label}
-                </Text>
-                <Text variant="caption" weight="600" color="accent">
-                  ${preset.baseFee}
-                </Text>
-              </PressableScale>
-            ))}
-          </View>
-        </View>
-
-        <Input
-          label="Base fee ($)"
-          placeholder="e.g. 2.00"
-          keyboardType="decimal-pad"
-          value={baseCalloutFee}
-          onChangeText={applyBaseCalloutFee}
-          helper="Auto-fills the zone rates below. Edit any zone to override."
+      <Card padding="lg">
+        <ShippingRatesFields
+          pricing={pricing}
+          onCard
+          residentialPriceable={residentialPriceable}
+          presetLabel="Quick-select base fee"
         />
-
-        <View style={{ flexDirection: 'row', gap: spacing.md }}>
-          <View style={{ flex: 1 }}>
-            {residentialPriceable ? (
-              <Input
-                label="Same Residential Area"
-                placeholder="0.00"
-                keyboardType="decimal-pad"
-                value={calloutResidential}
-                onChangeText={setCalloutResidential}
-              />
-            ) : (
-              <Input
-                label="Same Residential Area"
-                value="Free"
-                editable={false}
-                inputStyle={{ color: colors.textMuted } as any}
-              />
-            )}
-          </View>
-          <View style={{ flex: 1 }}>
-            <Input
-              label="Same City"
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              value={calloutSameCity}
-              onChangeText={setCalloutSameCity}
-            />
-          </View>
-        </View>
-        <View style={{ flexDirection: 'row', gap: spacing.md }}>
-          <View style={{ flex: 1 }}>
-            <Input
-              label="Same State"
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              value={calloutSameState}
-              onChangeText={setCalloutSameState}
-            />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Input
-              label="Same Country"
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              value={calloutSameCountry}
-              onChangeText={setCalloutSameCountry}
-            />
-          </View>
-        </View>
-        <View style={{ flexDirection: 'row', gap: spacing.md }}>
-          <View style={{ flex: 1 }}>
-            <Input
-              label="International"
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              value={calloutInternational}
-              onChangeText={setCalloutInternational}
-            />
-          </View>
-          <View style={{ flex: 1 }} />
-        </View>
       </Card>
     </>
   );
@@ -614,21 +512,20 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     <>
       {sectionTitle(isContact ? "Pricing" : "Access & call-out fees")}
       <Card padding="lg" style={{ gap: spacing.lg }}>
-        <Input
-          label={isContact ? "Access Fee ($) *" : "Access Fee ($)"}
-          placeholder="e.g. 5.00"
-          keyboardType="decimal-pad"
-          value={accessFeeUsd}
-          onChangeText={setAccessFeeUsd}
+        <LocalAmountInput
+          pricing={pricing}
+          amountKey="accessFeeUsd"
+          label="Access Fee"
+          required={isContact}
           helper="Charged to unlock/contact or start a booking."
         />
-        <Input
-          label="Call-Out Fee ($) — optional"
+        <LocalAmountInput
+          pricing={pricing}
+          amountKey="calloutFeeUsd"
+          label="Call-Out Fee — optional"
           placeholder="Leave blank if none"
-          keyboardType="decimal-pad"
-          value={calloutFeeUsd}
-          onChangeText={setCalloutFeeUsd}
         />
+        {!pricing.isUsd && <UsdStorageNote />}
       </Card>
     </>
   );
@@ -788,12 +685,14 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           {/* Type-specific sections. Only shown once a category is chosen. */}
           {category ? (
             <>
+              <PricingCurrencySelect pricing={pricing} style={{ marginTop: spacing['2xl'] }} />
+
               {/* CONTACT: access/call-out fee + free-residential call-out tiers */}
               {isContact && (
                 <>
                   {renderAccessFees()}
                   {renderDistanceTiers(
-                    "Call-out fee ($)",
+                    `Call-out fee (${pricing.selectedCurrency.symbol})`,
                     "Mobilisation/transport by buyer area. All optional — blank = free."
                   )}
 
@@ -808,10 +707,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
               {isOrder && (
                 <>
                   {sectionTitle("Menu")}
-                  <MenuBuilder items={menuItems} onChange={setMenuItems} />
+                  <MenuBuilder items={menuItems} onChange={setMenuItems} pricing={pricing} />
 
                   {renderDistanceTiers(
-                    "Delivery fee ($)",
+                    `Delivery fee (${pricing.selectedCurrency.symbol})`,
                     "Per-area delivery cost, including same residential area."
                   )}
 
@@ -826,7 +725,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
               {isBooking && (
                 <>
                   {renderDistanceTiers(
-                    "Booking fee ($)",
+                    `Booking fee (${pricing.selectedCurrency.symbol})`,
                     "Per-area fee, including same residential area."
                   )}
 

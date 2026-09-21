@@ -125,8 +125,8 @@ func TestOrderService_MenuTotalRecomputedFromDB(t *testing.T) {
 	}
 	order := firstOrder(t, w)
 	// 22.5 USDC in ProductAmount, 4 USDC delivery in ShippingAmount (6 decimals).
-	if order["productAmount"] != "22500000" {
-		t.Errorf("expected productAmount 22500000, got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "22500000" {
+		t.Errorf("expected productAmount 22500000, got %s (productAmount + platformFee)", got)
 	}
 	if order["shippingAmount"] != "4000000" {
 		t.Errorf("expected shippingAmount 4000000, got %v", order["shippingAmount"])
@@ -271,8 +271,8 @@ func TestBookingService_ReservesSlotAndCharges(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 	order := firstOrder(t, w)
-	if order["productAmount"] != "15000000" {
-		t.Errorf("expected booking fee 15000000, got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "15000000" {
+		t.Errorf("expected booking fee 15000000, got %s (productAmount + platformFee)", got)
 	}
 	// Exactly one booking row created (F9).
 	var count int64
@@ -375,8 +375,8 @@ func TestContactService_AccessFeeCharged(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 	order := firstOrder(t, w)
-	if order["productAmount"] != "12000000" {
-		t.Errorf("expected access fee 12000000 in productAmount, got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "12000000" {
+		t.Errorf("expected access fee 12000000 in productAmount, got %s (productAmount + platformFee)", got)
 	}
 	if order["shippingAmount"] != "3000000" {
 		t.Errorf("expected call-out 3000000 in shippingAmount, got %v", order["shippingAmount"])
@@ -489,8 +489,8 @@ func TestCreateServiceOrder_Order_NoCartNeeded(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 	order := firstOrder(t, w)
-	if order["productAmount"] != "30000000" { // 15*2
-		t.Errorf("expected productAmount 30000000, got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "30000000" { // 15*2
+		t.Errorf("expected productAmount 30000000, got %s (productAmount + platformFee)", got)
 	}
 	if order["shippingAmount"] != "4000000" {
 		t.Errorf("expected delivery 4000000, got %v", order["shippingAmount"])

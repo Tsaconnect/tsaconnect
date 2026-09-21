@@ -70,6 +70,8 @@ export interface Order {
 export interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
+  /** Stable machine code on some errors (e.g. "price_changed"). */
+  code?: string;
   data?: T;
 }
 
@@ -96,7 +98,11 @@ async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
     return { success: false, message: `HTTP ${response.status}: ${response.statusText}` };
   }
   if (!response.ok) {
-    return { success: false, message: data.message || `Request failed with status ${response.status}` };
+    return {
+      success: false,
+      message: data.message || `Request failed with status ${response.status}`,
+      code: typeof data.code === 'string' ? data.code : undefined,
+    };
   }
   return { success: true, ...data };
 }
@@ -119,6 +125,57 @@ export function formatTokenAmount(weiStr: string, token: string): string {
 
 // --- API functions ---
 
+/** One order-to-be in a cart quote. Amounts are the token's base units. */
+export interface CartQuoteLine {
+  productId: string;
+  name: string;
+  sellerId: string;
+  sellerName: string;
+  quantity: number;
+  kind: string;
+  shippingZone: string;
+  productAmount: string;
+  shippingAmount: string;
+  platformFee: string;
+  gasFee: string;
+  /** Everything the approve/escrow pair pulls for this order. */
+  total: string;
+}
+
+/**
+ * The active cart priced for a pay token by the same backend code that creates
+ * the orders, so what the buyer confirms is what the wallet is asked for.
+ */
+export interface CartQuote {
+  token: string;
+  decimals: number;
+  /** USD value of one token: 1 for USDC/USDT, the OTC buy price for MCGP. */
+  usdPerToken: number;
+  lines: CartQuoteLine[];
+  totals: Pick<CartQuoteLine, 'productAmount' | 'shippingAmount' | 'platformFee' | 'gasFee' | 'total'>;
+}
+
+/** Prices the active cart without creating orders. Same inputs as createOrders. */
+export async function quoteCart(
+  token: string,
+  buyerCity?: string,
+  buyerState?: string,
+  buyerCountry?: string,
+  serviceTiers?: Record<string, string>,
+): Promise<ApiResponse<CartQuote>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/quote`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ token, buyerCity, buyerState, buyerCountry, serviceTiers }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to price your cart' };
+  }
+}
+
 export async function createOrders(
   token: string,
   buyerCity?: string,
@@ -132,7 +189,10 @@ export async function createOrders(
   // The server recomputes prices from the DB (never trusts client totals).
   menuSelections?: Record<string, { itemId: string; quantity: number }[]>,
   // bookingSlots maps a Booking-type service product ID → the reserved slot.
-  bookingSlots?: Record<string, { slotStart: string; partySize: number }>
+  bookingSlots?: Record<string, { slotStart: string; partySize: number }>,
+  // expectedTotal is the quote total (base units, gas included) the buyer
+  // confirmed. The backend refuses a different total with code "price_changed".
+  expectedTotal?: string,
 ): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
@@ -147,6 +207,7 @@ export async function createOrders(
         serviceTiers,
         menuSelections,
         bookingSlots,
+        expectedTotal,
       }),
     });
     return await handleResponse(response);

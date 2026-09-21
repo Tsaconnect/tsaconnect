@@ -24,6 +24,7 @@ import api, { Product } from '@/components/services/api';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
 import { useTheme } from '@/theme';
+import { useCurrency } from '@/contexts/CurrencyContext';
 import {
   AccentCard,
   AmountText,
@@ -82,6 +83,7 @@ function sumByToken(orders: Order[]): Record<string, number> {
 
 const MerchantProductDetail = () => {
   const { colors, spacing, radius } = useTheme();
+  const { currency, formatPrice } = useCurrency();
   const { productId } = useLocalSearchParams<{ productId: string }>();
   const [product, setProduct] = useState<Product | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -284,7 +286,14 @@ const MerchantProductDetail = () => {
             {product.name}
           </Text>
           <View style={{ marginTop: spacing.xs, marginBottom: spacing.sm }}>
-            <AmountText value={product.price} currency="USD" variant="title1" color="accent" minimumFractionDigits={2} maximumFractionDigits={2} />
+            <Text variant="title1" weight="700" color="accent" numeric>
+              {formatPrice(product.price)}
+            </Text>
+            {currency.code !== 'USD' && (
+              <Text variant="caption" color="textMuted">
+                Saved as ${product.price.toFixed(2)}; buyers see it at today&apos;s rate
+              </Text>
+            )}
           </View>
           <Badge
             label={formatStatus(product.status || 'active')}
@@ -453,25 +462,25 @@ const MerchantProductDetail = () => {
             <Text variant="bodySm" color="textSecondary">
               Same City
             </Text>
-            <AmountText value={product.shippingSameCity ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
+            <Text variant="bodySm" numeric>{formatPrice(product.shippingSameCity ?? 0)}</Text>
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
             <Text variant="bodySm" color="textSecondary">
               Same State
             </Text>
-            <AmountText value={product.shippingSameState ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
+            <Text variant="bodySm" numeric>{formatPrice(product.shippingSameState ?? 0)}</Text>
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
             <Text variant="bodySm" color="textSecondary">
               Same Country
             </Text>
-            <AmountText value={product.shippingSameCountry ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
+            <Text variant="bodySm" numeric>{formatPrice(product.shippingSameCountry ?? 0)}</Text>
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
             <Text variant="bodySm" color="textSecondary">
               International
             </Text>
-            <AmountText value={product.shippingInternational ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
+            <Text variant="bodySm" numeric>{formatPrice(product.shippingInternational ?? 0)}</Text>
           </View>
         </Card>
 
