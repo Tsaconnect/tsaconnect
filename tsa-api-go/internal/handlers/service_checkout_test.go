@@ -245,8 +245,8 @@ func TestCreateOrderFromCart_Service_StandardPriced(t *testing.T) {
 		t.Errorf("expected zone same_city, got %v", order["shippingZone"])
 	}
 	// price 20 USDC in ProductAmount, call-out 3 USDC in ShippingAmount (6 decimals).
-	if order["productAmount"] != "20000000" {
-		t.Errorf("expected productAmount 20000000, got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "20000000" {
+		t.Errorf("expected productAmount 20000000, got %s (productAmount + platformFee)", got)
 	}
 	if order["shippingAmount"] != "3000000" {
 		t.Errorf("expected shippingAmount 3000000, got %v", order["shippingAmount"])
@@ -298,8 +298,8 @@ func TestCreateOrderFromCart_Service_Booking(t *testing.T) {
 	}
 	order := firstOrder(t, w)
 	// Admin fare (5 USDC) lands in ProductAmount; no separate call-out.
-	if order["productAmount"] != "5000000" {
-		t.Errorf("expected productAmount 5000000 (booking fare), got %v", order["productAmount"])
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "5000000" {
+		t.Errorf("expected productAmount 5000000 (booking fare), got %s (productAmount + platformFee)", got)
 	}
 	if order["shippingAmount"] != "0" {
 		t.Errorf("expected shippingAmount 0 for booking, got %v", order["shippingAmount"])

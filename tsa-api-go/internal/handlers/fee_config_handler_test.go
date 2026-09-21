@@ -50,9 +50,14 @@ func setupFeeConfigHandlerDB(t *testing.T) *gorm.DB {
 
 func seedFeeConfigRow(t *testing.T, db *gorm.DB) models.FeeConfig {
 	t.Helper()
+	return seedFeeConfigRowFor(t, db, models.FeatureServiceOther)
+}
+
+func seedFeeConfigRowFor(t *testing.T, db *gorm.DB, feature string) models.FeeConfig {
+	t.Helper()
 	row := models.FeeConfig{
 		ID:          uuid.New(),
-		Feature:     models.FeatureProduct,
+		Feature:     feature,
 		TokenSymbol: models.FeeTokenAny,
 		BPS:         50,
 		Active:      true,
@@ -101,5 +106,27 @@ func TestUpdateFeeConfig_PersistsEdit(t *testing.T) {
 	}
 	if got.BPS != 999 {
 		t.Fatalf("should persist the edit: bps = %d, want 999", got.BPS)
+	}
+}
+
+// A rate a contract reads from FeeManager must not be edited in the replica
+// alone: the backend would quote and approve one amount while the contract
+// pulls another (a short approve reverts the escrow).
+func TestUpdateFeeConfig_RefusesOnChainFeatures(t *testing.T) {
+	for feature := range models.OnChainFeeFeatures {
+		t.Run(feature, func(t *testing.T) {
+			db := setupFeeConfigHandlerDB(t)
+			row := seedFeeConfigRowFor(t, db, feature)
+
+			w := doUpdate(t, db, &config.Config{}, row.ID, map[string]any{"bps": 150})
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409\nbody=%s", w.Code, w.Body.String())
+			}
+			var got models.FeeConfig
+			db.First(&got, "id = ?", row.ID)
+			if got.BPS != row.BPS {
+				t.Fatalf("refused edit still changed bps: %d → %d", row.BPS, got.BPS)
+			}
+		})
 	}
 }

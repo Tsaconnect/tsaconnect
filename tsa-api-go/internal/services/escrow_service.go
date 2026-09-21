@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -27,6 +29,8 @@ const productEscrowABI = `[
 	{"inputs":[{"name":"orderId","type":"bytes32"},{"name":"refundBuyer","type":"bool"}],"name":"adminResolve","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
 ]`
 
@@ -45,15 +49,41 @@ type EscrowService struct {
 	client        *blockchain.EVMClient
 	escrowAddress string
 	cfg           *config.Config
+	// feeBPS caches PlatformFeeBPS per token address (lower-case) → feeBPSEntry.
+	feeBPS sync.Map
+	// caller serves the read-only fee lookups; nil without an RPC client.
+	caller contractCaller
+}
+
+// contractCaller is the eth_call surface the fee lookups need.
+type contractCaller interface {
+	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+}
+
+// DefaultEscrowPlatformFeeBPS is ProductEscrowV2.PLATFORM_FEE_BPS: what the
+// contract charges when it has no FeeManager or no active row for the token.
+const DefaultEscrowPlatformFeeBPS = 200
+
+// escrowFeeBPSTTL bounds how long a read rate is trusted. An admin fee change
+// confirmed on-chain reaches checkout within this window.
+const escrowFeeBPSTTL = time.Minute
+
+type feeBPSEntry struct {
+	bps    int
+	readAt time.Time
 }
 
 // NewEscrowService creates a new EscrowService.
 func NewEscrowService(client *blockchain.EVMClient, cfg *config.Config) *EscrowService {
-	return &EscrowService{
+	es := &EscrowService{
 		client:        client,
 		escrowAddress: cfg.ProductEscrowAddress,
 		cfg:           cfg,
 	}
+	if client != nil {
+		es.caller = client.Client
+	}
+	return es
 }
 
 // GenerateOrderID creates a deterministic bytes32 from a UUID using keccak256.
@@ -281,4 +311,92 @@ func (s *EscrowService) buildUnsignedTx(from, contractAddr string, callData []by
 	}
 
 	return json.Marshal(tx)
+}
+
+// PlatformFeeBPS is the fee rate ProductEscrow will apply at createOrder for
+// tokenAddr, resolved the way its _calculatePlatformFee does: no FeeManager →
+// the built-in 200; the FeeManager's product_merchant row for the escrow's OWN
+// symbol for the token (exact key, no wildcard) inactive → 200; exempt → 0;
+// otherwise its bps. The caller handles MCGP, which the contract zeroes first.
+//
+// Reading the contract rather than fee_config is what keeps the recorded fee
+// and the approve amount equal to what createOrder pulls, whichever admin tool
+// last changed a rate. On an RPC failure the last read value is returned with
+// no error (and logged), so a blip does not change prices mid-checkout.
+func (s *EscrowService) PlatformFeeBPS(ctx context.Context, tokenAddr string) (int, error) {
+	key := strings.ToLower(tokenAddr)
+	cached, hasCached := s.feeBPS.Load(key)
+	if hasCached && time.Since(cached.(feeBPSEntry).readAt) < escrowFeeBPSTTL {
+		return cached.(feeBPSEntry).bps, nil
+	}
+	bps, err := s.readPlatformFeeBPS(ctx, tokenAddr)
+	if err != nil {
+		if hasCached {
+			log.Printf("[escrow] platform fee read for %s failed (%v); using last read %d bps", tokenAddr, err, cached.(feeBPSEntry).bps)
+			return cached.(feeBPSEntry).bps, nil
+		}
+		return 0, err
+	}
+	s.feeBPS.Store(key, feeBPSEntry{bps: bps, readAt: time.Now()})
+	return bps, nil
+}
+
+func (s *EscrowService) readPlatformFeeBPS(ctx context.Context, tokenAddr string) (int, error) {
+	if s.caller == nil {
+		return 0, fmt.Errorf("blockchain client not available")
+	}
+	if !common.IsHexAddress(tokenAddr) {
+		return 0, fmt.Errorf("token address %q not configured", tokenAddr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	escrow := common.HexToAddress(s.escrowAddress)
+	call := func(to common.Address, abiDef abi.ABI, method string, args ...interface{}) ([]interface{}, error) {
+		data, err := abiDef.Pack(method, args...)
+		if err != nil {
+			return nil, fmt.Errorf("pack %s: %w", method, err)
+		}
+		out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s call: %w", method, err)
+		}
+		vals, err := abiDef.Unpack(method, out)
+		if err != nil || len(vals) == 0 {
+			return nil, fmt.Errorf("decode %s: %v", method, err)
+		}
+		return vals, nil
+	}
+
+	vals, err := call(escrow, parsedEscrowABI, "feeManager")
+	if err != nil {
+		return 0, err
+	}
+	feeManager, _ := vals[0].(common.Address)
+	if feeManager == (common.Address{}) {
+		return DefaultEscrowPlatformFeeBPS, nil
+	}
+	vals, err = call(escrow, parsedEscrowABI, "tokenSymbol", common.HexToAddress(tokenAddr))
+	if err != nil {
+		return 0, err
+	}
+	symbol, _ := vals[0].(string)
+	vals, err = call(feeManager, parsedFeeManagerABI, "rateFor", "product_merchant", symbol)
+	if err != nil {
+		return 0, err
+	}
+	if len(vals) < 4 {
+		return 0, fmt.Errorf("decode rateFor: %d values", len(vals))
+	}
+	bps, _ := vals[0].(uint16)
+	exempt, _ := vals[2].(bool)
+	active, _ := vals[3].(bool)
+	switch {
+	case !active:
+		return DefaultEscrowPlatformFeeBPS, nil
+	case exempt:
+		return 0, nil
+	default:
+		return int(bps), nil
+	}
 }

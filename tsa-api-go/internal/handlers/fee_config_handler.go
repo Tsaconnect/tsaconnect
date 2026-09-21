@@ -92,6 +92,11 @@ func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "Fee config not found")
 		return
 	}
+	if models.OnChainFeeFeatures[row.Feature] {
+		utils.ErrorResponse(c, http.StatusConflict,
+			"This fee is charged by a smart contract, so it can only change on-chain. Use Author on this row instead of editing it directly.")
+		return
+	}
 
 	updates := map[string]interface{}{}
 	if req.BPS != nil {

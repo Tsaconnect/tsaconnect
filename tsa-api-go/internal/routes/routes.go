@@ -382,6 +382,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	orderGroup.Use(auth)
 	if ch != nil {
 		orderGroup.POST("", ch.CreateOrderFromCart)
+		// Read-only price of the active cart for a pay token — what the confirm
+		// screen shows, computed by the same code that creates the orders.
+		orderGroup.POST("/quote", ch.QuoteCart)
 		// Single-service "Pay now" (no cart) for order/booking/contact flows that
 		// carry menu selections / booking slots the cart route can't thread.
 		orderGroup.POST("/service", ch.CreateServiceOrder)

@@ -35,6 +35,19 @@ const (
 	FeatureGas = "gas"
 )
 
+// OnChainFeeFeatures are the features a deployed contract reads from
+// FeeManager at transaction time (ProductEscrowV2: product_merchant, product;
+// P2PEscrowV3: p2p_platform, p2p). Their fee_config rows are a replica of chain
+// truth, written only by the confirmed on-chain flow — editing one directly
+// makes the backend quote and approve one amount while the contract pulls
+// another.
+var OnChainFeeFeatures = map[string]bool{
+	FeatureProductMerchant: true,
+	FeatureProduct:         true,
+	FeatureP2PPlatform:     true,
+	FeatureP2P:             true,
+}
+
 // FeeTokenAny is the wildcard token symbol meaning "applies to any token"
 // unless a more specific (feature, token) row exists.
 const FeeTokenAny = "*"
