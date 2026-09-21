@@ -5,7 +5,7 @@
 // getCategories / createProduct API calls, the expo-image-picker gallery/camera
 // flow that appends LOCAL asset URIs and builds the multipart FormData (images
 // are NOT pre-uploaded — they ride along on api.createProduct), the zone-rate
-// auto-fill math (calculateZoneRates / PACKAGE_SIZE_PRESETS), attribute
+// auto-fill math (now in useMerchantPricing), attribute
 // add/remove, the full validateForm() rule set, LocationPicker wiring, and the
 // reset + router.back() success flow. Only the chrome changed: legacy GOLD/
 // StyleSheet → tokens + primitives; the result Modal → useToast; the category
@@ -25,7 +25,6 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
-import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -33,7 +32,6 @@ import {
   Button,
   Icon,
   Input,
-  PickerSheet,
   PressableScale,
   SelectRow,
   Sheet,
@@ -41,7 +39,13 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
-import { useMerchantPricing } from '@/hooks/useMerchantPricing';
+import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
+import {
+  appendUsdAmounts,
+  PriceInput,
+  PricingCurrencySelect,
+  ShippingRatesFields,
+} from '@/components/products/MerchantPricingFields';
 
 const CategoryAvatar = ({ category }: { category: any }) => {
   const { radius } = useTheme();
@@ -64,39 +68,10 @@ const AddProduct = () => {
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
 
-  const {
-    selectedCurrencyCode,
-    setSelectedCurrencyCode,
-    selectedCurrency,
-    rate,
-    isUsd,
-    currencyOptions,
-    toUsd,
-    toLocal,
-    formatUsd,
-    convertValue,
-  } = useMerchantPricing();
-
-  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
-
-  const onSelectCurrency = (newCode: string) => {
-    if (newCode === selectedCurrencyCode) {
-      setCurrencyPickerOpen(false);
-      return;
-    }
-    setPrice((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setBaseShippingFee((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setShippingSameCity((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setShippingSameState((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setShippingSameCountry((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setShippingInternational((prev) => convertValue(prev, selectedCurrencyCode, newCode));
-    setSelectedCurrencyCode(newCode);
-    setCurrencyPickerOpen(false);
-  };
+  const pricing = useMerchantPricing();
 
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
-  const [price, setPrice] = useState('');
   const [stock, setStock] = useState('0');
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
@@ -104,27 +79,6 @@ const AddProduct = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
-  const [baseShippingFee, setBaseShippingFee] = useState('');
-  const [shippingSameCity, setShippingSameCity] = useState('');
-  const [shippingSameState, setShippingSameState] = useState('');
-  const [shippingSameCountry, setShippingSameCountry] = useState('');
-  const [shippingInternational, setShippingInternational] = useState('');
-
-  const applyBaseShippingFee = (baseStr: string) => {
-    setBaseShippingFee(baseStr);
-    const base = parseFloat(baseStr.replace(/,/g, ''));
-    if (isNaN(base) || base < 0) return;
-    const rates = calculateZoneRates(base);
-    setShippingSameCity(Number.isInteger(rates.sameCity) ? rates.sameCity.toString() : rates.sameCity.toFixed(2));
-    setShippingSameState(Number.isInteger(rates.sameState) ? rates.sameState.toString() : rates.sameState.toFixed(2));
-    setShippingSameCountry(Number.isInteger(rates.sameCountry) ? rates.sameCountry.toString() : rates.sameCountry.toFixed(2));
-    setShippingInternational(Number.isInteger(rates.international) ? rates.international.toString() : rates.international.toFixed(2));
-  };
-
-  const applyPackagePreset = (usdBaseFee: number) => {
-    const localBase = toLocal(usdBaseFee);
-    applyBaseShippingFee(localBase);
-  };
   const [productImages, setProductImages] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
@@ -242,8 +196,10 @@ const AddProduct = () => {
     if (!productName.trim()) newErrors.productName = 'Product name is required';
     if (!description.trim()) newErrors.description = 'Description is required';
     if (description.length > maxDescriptionLength) newErrors.description = `Description must be less than ${maxDescriptionLength} characters`;
-    if (!price.trim()) newErrors.price = 'Price is required';
-    if (isNaN(parseFloat(price)) || parseFloat(price) <= 0) newErrors.price = 'Price must be a positive number';
+    const price = pricing.amounts.price;
+    if (!pricing.ready) newErrors.price = 'Exchange rates are still loading. Try again in a moment.';
+    else if (!price.trim()) newErrors.price = 'Price is required';
+    else if (isNaN(parseAmount(price)) || parseAmount(price) <= 0) newErrors.price = 'Price must be a positive number';
     if (!stock.trim()) newErrors.stock = 'Stock is required';
     if (isNaN(parseInt(stock)) || parseInt(stock) < 0) newErrors.stock = 'Stock must be a non-negative number';
     if (!categoryId) newErrors.category = 'Category is required';
@@ -286,20 +242,15 @@ const AddProduct = () => {
         });
       });
 
-      const usdPrice = toUsd(price);
       formData.append('name', productName);
       formData.append('description', description);
-      formData.append('price', usdPrice.toString());
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
       formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
-      if (shippingSameCity) formData.append('shippingSameCity', toUsd(shippingSameCity).toString());
-      if (shippingSameState) formData.append('shippingSameState', toUsd(shippingSameState).toString());
-      if (shippingSameCountry) formData.append('shippingSameCountry', toUsd(shippingSameCountry).toString());
-      if (shippingInternational) formData.append('shippingInternational', toUsd(shippingInternational).toString());
+      appendUsdAmounts(formData, pricing);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
@@ -328,7 +279,7 @@ const AddProduct = () => {
   const resetForm = () => {
     setProductName('');
     setDescription('');
-    setPrice('');
+    pricing.reset();
     setStock('0');
     setCategoryId('');
     setCategoryName('');
@@ -568,33 +519,11 @@ const AddProduct = () => {
             </View>
           </View>
 
-          <SelectRow
-            label="Pricing Currency"
-            value={`${selectedCurrency.flag ? selectedCurrency.flag + ' ' : ''}${selectedCurrency.code} (${selectedCurrency.symbol})`}
-            onPress={() => setCurrencyPickerOpen(true)}
-            containerStyle={{ marginBottom: spacing.md }}
-          />
+          <PricingCurrencySelect pricing={pricing} style={{ marginBottom: spacing.md }} />
 
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
-              <Input
-                label={`Price (${selectedCurrency.symbol}) *`}
-                placeholder={isUsd ? "0.00" : "0"}
-                keyboardType="decimal-pad"
-                value={price}
-                onChangeText={setPrice}
-                error={errors.price}
-                helper={
-                  !errors.price
-                    ? [
-                        formatUsd(price),
-                        '2% platform fee applies per sale',
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')
-                    : undefined
-                }
-              />
+              <PriceInput pricing={pricing} error={errors.price} />
             </View>
             <View style={{ flex: 1 }}>
               <Input
@@ -610,110 +539,11 @@ const AddProduct = () => {
 
           {/* Shipping Rates */}
           <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
-            Shipping Rates ({selectedCurrency.symbol})
+            Shipping Rates ({pricing.selectedCurrency.symbol})
           </Text>
 
-          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
-            Package size (optional quick-select)
-          </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
-            {PACKAGE_SIZE_PRESETS.map((preset) => {
-              const localPreset = toLocal(preset.baseFee);
-              return (
-                <PressableScale
-                  key={preset.key}
-                  onPress={() => applyPackagePreset(preset.baseFee)}
-                  style={{
-                    flex: 1,
-                    minWidth: 90,
-                    paddingVertical: spacing.sm,
-                    paddingHorizontal: spacing.sm,
-                    borderRadius: radius.md,
-                    borderWidth: 1,
-                    borderColor: colors.border,
-                    backgroundColor: colors.surface,
-                    alignItems: 'center',
-                    gap: 2,
-                  }}
-                >
-                  <Text variant="caption" weight="700" align="center">
-                    {preset.label}
-                  </Text>
-                  <Text variant="caption" weight="600" color="accent">
-                    ${preset.baseFee}{!isUsd && localPreset ? ` · ${selectedCurrency.symbol}${localPreset}` : ''}
-                  </Text>
-                </PressableScale>
-              );
-            })}
-          </View>
-
-          <Input
-            label={`Base shipping fee (${selectedCurrency.symbol})`}
-            placeholder={isUsd ? "e.g. 2.00" : "e.g. 1000"}
-            keyboardType="decimal-pad"
-            value={baseShippingFee}
-            onChangeText={applyBaseShippingFee}
-            helper={
-              [
-                formatUsd(baseShippingFee),
-                'Auto-fills the zone rates below. Edit any zone to override.',
-              ]
-                .filter(Boolean)
-                .join(' · ')
-            }
-            containerStyle={{ marginBottom: spacing.lg }}
-          />
-
-          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
-            <View style={{ flex: 1 }}>
-              <Input
-                label="Same Residential Area"
-                value="Free"
-                editable={false}
-                inputStyle={{ color: colors.textMuted } as any}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Input
-                label={`Same City (${selectedCurrency.symbol})`}
-                placeholder={isUsd ? "0.00" : "0"}
-                keyboardType="decimal-pad"
-                value={shippingSameCity}
-                onChangeText={setShippingSameCity}
-              />
-            </View>
-          </View>
-          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
-            <View style={{ flex: 1 }}>
-              <Input
-                label={`Same State (${selectedCurrency.symbol})`}
-                placeholder={isUsd ? "0.00" : "0"}
-                keyboardType="decimal-pad"
-                value={shippingSameState}
-                onChangeText={setShippingSameState}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Input
-                label={`Same Country (${selectedCurrency.symbol})`}
-                placeholder={isUsd ? "0.00" : "0"}
-                keyboardType="decimal-pad"
-                value={shippingSameCountry}
-                onChangeText={setShippingSameCountry}
-              />
-            </View>
-          </View>
-          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
-            <View style={{ flex: 1 }}>
-              <Input
-                label={`International (${selectedCurrency.symbol})`}
-                placeholder={isUsd ? "0.00" : "0"}
-                keyboardType="decimal-pad"
-                value={shippingInternational}
-                onChangeText={setShippingInternational}
-              />
-            </View>
-            <View style={{ flex: 1 }} />
+          <View style={{ marginBottom: spacing.lg }}>
+            <ShippingRatesFields pricing={pricing} />
           </View>
 
           {/* Contact & Location */}
@@ -918,15 +748,6 @@ const AddProduct = () => {
           )}
         </ScrollView>
       </Sheet>
-
-      <PickerSheet
-        title="Select Pricing Currency"
-        items={currencyOptions}
-        value={selectedCurrencyCode}
-        onSelect={(val) => onSelectCurrency(val)}
-        open={currencyPickerOpen}
-        onClose={() => setCurrencyPickerOpen(false)}
-      />
     </SafeAreaView>
   );
 };

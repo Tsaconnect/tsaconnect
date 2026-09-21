@@ -9,6 +9,7 @@ import {
   formatUsdBadge,
   resolveMerchantDefaultCurrency,
   convertCurrencyValue,
+  rateFor,
 } from '../useMerchantPricing';
 
 describe('Merchant pricing conversion functions', () => {
@@ -37,6 +38,7 @@ describe('Merchant pricing conversion functions', () => {
       expect(localToUsd('-500', 1500)).toBe(0);
       expect(localToUsd('abc', 1500)).toBe(0);
       expect(localToUsd('100', 0)).toBe(0);
+      expect(localToUsd('100', null)).toBe(0);
     });
 
     it('clamps tiny positive fractions to 0.01 minimum USD rather than 0', () => {
@@ -61,6 +63,7 @@ describe('Merchant pricing conversion functions', () => {
       expect(usdToLocal('', 1500)).toBe('');
       expect(usdToLocal(-10, 1500)).toBe('');
       expect(usdToLocal(10, 0)).toBe('');
+      expect(usdToLocal(10, null)).toBe('');
     });
   });
 
@@ -98,6 +101,11 @@ describe('Merchant pricing conversion functions', () => {
     it('falls back to NGN when both KYC country and app currency are unavailable', () => {
       expect(resolveMerchantDefaultCurrency(null, null, supported)).toBe('NGN');
     });
+
+    it('never defaults to a currency it cannot price', () => {
+      // Rates not loaded yet: only USD is priceable, so NG must not get NGN.
+      expect(resolveMerchantDefaultCurrency('NG', 'NGN', ['USD'])).toBe('USD');
+    });
   });
 
   describe('convertCurrencyValue', () => {
@@ -118,9 +126,23 @@ describe('Merchant pricing conversion functions', () => {
       expect(convertCurrencyValue('15000', 'NGN', 'UGX', rates)).toBe('37000');
     });
 
+    it('clears the value instead of converting at 1:1 when a rate is missing', () => {
+      expect(convertCurrencyValue('45000', 'NGN', 'KES', rates)).toBe('');
+      expect(convertCurrencyValue('45000', 'KES', 'USD', rates)).toBe('');
+    });
+
     it('preserves empty or invalid inputs', () => {
       expect(convertCurrencyValue('', 'NGN', 'USD', rates)).toBe('');
       expect(convertCurrencyValue('abc', 'NGN', 'USD', rates)).toBe('abc');
+    });
+  });
+
+  describe('rateFor', () => {
+    it('is 1 for USD and null for an unknown or non-positive rate', () => {
+      expect(rateFor('USD', {})).toBe(1);
+      expect(rateFor('NGN', {})).toBeNull();
+      expect(rateFor('NGN', { NGN: { midRate: 0 } })).toBeNull();
+      expect(rateFor('NGN', { NGN: { midRate: 1500 } })).toBe(1500);
     });
   });
 });
