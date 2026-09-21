@@ -1,8 +1,9 @@
 // app/wallet/paycrest/buy.tsx
 //
-// Buy stablecoins with Naira through Paycrest's provider network.
+// Buy stablecoins with local fiat (the selected ramp currency) through
+// Paycrest's provider network.
 //
-// Non-custodial end to end: the user transfers Naira straight to a liquidity
+// Non-custodial end to end: the user transfers fiat straight to a liquidity
 // provider's bank account, and the stablecoin lands in their own connected
 // wallet. TSA brokers and records; it never holds either side.
 //
@@ -49,7 +50,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
-import { useRampCurrency } from '@/hooks/useRampCurrency';
+import { rampCurrencyLabel, useRampCurrency } from '@/hooks/useRampCurrency';
 import {
   accountFieldLabel,
   accountFieldPlaceholder,
@@ -152,7 +153,7 @@ export default function PaycrestBuyScreen() {
     options: currencyOptions,
   } = useRampCurrency('paycrest', 'buy');
   const symbol = currencyConfig.symbol;
-  const currencyLabel = !currencyCode || currencyCode === 'NGN' ? 'Naira' : currencyCode;
+  const currencyLabel = rampCurrencyLabel(currencyCode);
   const headerTitle = `Buy with ${currencyLabel}`;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);

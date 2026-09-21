@@ -1,14 +1,15 @@
 // app/wallet/paycrest/sell.tsx
 //
-// Sell stablecoins for Naira through Paycrest's provider network.
+// Sell stablecoins for local fiat (the selected ramp currency) through
+// Paycrest's provider network.
 //
 // Non-custodial: the user sends the stablecoin FROM their own connected wallet
 // to the provider's address, and the provider pays their bank directly. TSA
-// never holds the asset or the Naira — which also means we cannot reverse a
+// never holds the asset or the fiat — which also means we cannot reverse a
 // send, so the deposit address and amount are shown copyably and never
 // truncated.
 //
-// The user types the Naira they want to receive; the token amount is derived
+// The user types the fiat they want to receive; the token amount is derived
 // from the live quote. That is the right way round for this market — people
 // think in "I need ₦50,000", not "I'll sell 36.4 USDC".
 //
@@ -40,7 +41,7 @@ import {
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
-import { useRampCurrency } from '@/hooks/useRampCurrency';
+import { rampCurrencyLabel, useRampCurrency } from '@/hooks/useRampCurrency';
 import { resolveAccountName } from '@/services/ngBanks';
 import {
   accountFieldLabel,
@@ -151,7 +152,7 @@ export default function PaycrestSellScreen() {
     options: currencyOptions,
   } = useRampCurrency('paycrest', 'sell');
   const symbol = currencyConfig.symbol;
-  const currencyLabel = !currencyCode || currencyCode === 'NGN' ? 'Naira' : currencyCode;
+  const currencyLabel = rampCurrencyLabel(currencyCode);
   const headerTitle = `Sell for ${currencyLabel}`;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);

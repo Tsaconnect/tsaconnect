@@ -3,7 +3,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
   setItem: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { resolveRampCurrencyCode } from './useRampCurrency';
+import { rampCurrencyLabel, resolveRampCurrencyCode } from './useRampCurrency';
 import type { RampCurrency } from '@/services/itApi';
 
 const list: RampCurrency[] = [
@@ -105,5 +105,16 @@ describe('resolveRampCurrencyCode with a direction', () => {
   it('treats missing direction fields as tradable either way', () => {
     expect(resolveRampCurrencyCode(null, list, { leg: 'buy' })).toBe('NGN');
     expect(resolveRampCurrencyCode('GHS', list, { leg: 'sell' })).toBe('GHS');
+  });
+});
+
+describe('rampCurrencyLabel', () => {
+  it('names Naira by word', () => {
+    expect(rampCurrencyLabel('NGN')).toBe('Naira');
+  });
+
+  it('uses the code for every other currency', () => {
+    expect(rampCurrencyLabel('UGX')).toBe('UGX');
+    expect(rampCurrencyLabel('KES')).toBe('KES');
   });
 });

@@ -1,20 +1,14 @@
 /* eslint-disable import/first -- jest hoists mocks above imports */
 import React from 'react';
-import TestRenderer, { act } from 'react-test-renderer';
+import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 
-const mockScreenOptionsState = {
-  sellTitles: [] as string[],
-  buyTitles: [] as string[],
-};
+// Every title a screen sets, in order — the last one is what the header shows.
+let mockTitles: string[] = [];
 
-let mockCurrentParams: Record<string, string> = {};
-let mockCurrentRampCurrency = {
+const mockCurrentRampCurrency = {
   code: 'NGN',
   currency: { code: 'NGN', symbol: '₦', name: 'Nigerian Naira' },
-  setCode: jest.fn((next: string) => {
-    mockCurrentRampCurrency.code = next;
-    mockCurrentRampCurrency.currency = { code: next, symbol: next, name: next };
-  }),
+  setCode: jest.fn(),
   options: [
     { id: 'NGN', label: 'NGN' },
     { id: 'UGX', label: 'UGX' },
@@ -24,16 +18,10 @@ let mockCurrentRampCurrency = {
 jest.mock('expo-router', () => ({
   __esModule: true,
   router: { push: jest.fn(), replace: jest.fn(), back: jest.fn() },
-  useLocalSearchParams: () => mockCurrentParams,
+  useLocalSearchParams: () => ({}),
   Stack: {
     Screen: (props: { options?: { title?: string } }) => {
-      if (props.options?.title) {
-        if (props.options.title.startsWith('Sell for')) {
-          mockScreenOptionsState.sellTitles.push(props.options.title);
-        } else if (props.options.title.startsWith('Buy with')) {
-          mockScreenOptionsState.buyTitles.push(props.options.title);
-        }
-      }
+      if (props.options?.title) mockTitles.push(props.options.title);
       return null;
     },
   },
@@ -77,6 +65,7 @@ jest.mock('@/hooks/useCountdown', () => ({
 
 jest.mock('@/hooks/useRampCurrency', () => ({
   __esModule: true,
+  ...jest.requireActual('@/hooks/useRampCurrency'),
   useRampCurrency: () => mockCurrentRampCurrency,
 }));
 
@@ -138,78 +127,43 @@ jest.mock('@/components/swap/TokenPickerModal', () => ({
 import PaycrestSellScreen from '../sell';
 import PaycrestBuyScreen from '../buy';
 
-describe('Paycrest header title dynamic currency display', () => {
+const selectRampCurrency = (code: string) => {
+  mockCurrentRampCurrency.code = code;
+  mockCurrentRampCurrency.currency = { code, symbol: code, name: code };
+};
+
+async function lastTitle(Screen: React.ComponentType): Promise<string | undefined> {
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = TestRenderer.create(<Screen />);
+  });
+  await act(async () => {
+    renderer?.unmount();
+  });
+  return mockTitles[mockTitles.length - 1];
+}
+
+describe('Paycrest header title follows the ramp currency', () => {
   beforeEach(() => {
-    mockScreenOptionsState.sellTitles = [];
-    mockScreenOptionsState.buyTitles = [];
-    mockCurrentParams = {};
-    mockCurrentRampCurrency = {
-      code: 'NGN',
-      currency: { code: 'NGN', symbol: '₦', name: 'Nigerian Naira' },
-      setCode: jest.fn((next: string) => {
-        mockCurrentRampCurrency.code = next;
-        mockCurrentRampCurrency.currency = { code: next, symbol: next, name: next };
-      }),
-      options: [
-        { id: 'NGN', label: 'NGN' },
-        { id: 'UGX', label: 'UGX' },
-      ],
-    };
+    mockTitles = [];
+    selectRampCurrency('NGN');
   });
 
-  it('renders "Sell for Naira" when currency is NGN', async () => {
-    let renderer: any;
-    await act(async () => {
-      renderer = TestRenderer.create(<PaycrestSellScreen />);
-    });
-    expect(mockScreenOptionsState.sellTitles).toContain('Sell for Naira');
-    await act(async () => {
-      renderer.unmount();
-    });
+  it('sell screen says "Sell for Naira" for NGN', async () => {
+    expect(await lastTitle(PaycrestSellScreen)).toBe('Sell for Naira');
   });
 
-  it('renders "Sell for UGX" when currency is UGX', async () => {
-    mockCurrentRampCurrency.code = 'UGX';
-    mockCurrentRampCurrency.currency = { code: 'UGX', symbol: 'USh', name: 'Ugandan Shilling' };
-    currentParamsMock();
-
-    let renderer: any;
-    await act(async () => {
-      renderer = TestRenderer.create(<PaycrestSellScreen />);
-    });
-    expect(mockScreenOptionsState.sellTitles).toContain('Sell for UGX');
-    await act(async () => {
-      renderer.unmount();
-    });
+  it('sell screen says "Sell for UGX" for UGX', async () => {
+    selectRampCurrency('UGX');
+    expect(await lastTitle(PaycrestSellScreen)).toBe('Sell for UGX');
   });
 
-  it('renders "Buy with Naira" when currency is NGN', async () => {
-    let renderer: any;
-    await act(async () => {
-      renderer = TestRenderer.create(<PaycrestBuyScreen />);
-    });
-    expect(mockScreenOptionsState.buyTitles).toContain('Buy with Naira');
-    await act(async () => {
-      renderer.unmount();
-    });
+  it('buy screen says "Buy with Naira" for NGN', async () => {
+    expect(await lastTitle(PaycrestBuyScreen)).toBe('Buy with Naira');
   });
 
-  it('renders "Buy with UGX" when currency is UGX', async () => {
-    mockCurrentRampCurrency.code = 'UGX';
-    mockCurrentRampCurrency.currency = { code: 'UGX', symbol: 'USh', name: 'Ugandan Shilling' };
-    currentParamsMock();
-
-    let renderer: any;
-    await act(async () => {
-      renderer = TestRenderer.create(<PaycrestBuyScreen />);
-    });
-    expect(mockScreenOptionsState.buyTitles).toContain('Buy with UGX');
-    await act(async () => {
-      renderer.unmount();
-    });
+  it('buy screen says "Buy with KES" for KES', async () => {
+    selectRampCurrency('KES');
+    expect(await lastTitle(PaycrestBuyScreen)).toBe('Buy with KES');
   });
 });
-
-function currentParamsMock() {
-  mockCurrentParams = { currency: 'UGX' };
-}

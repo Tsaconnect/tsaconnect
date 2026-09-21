@@ -82,6 +82,17 @@ export function resolveRampCurrencyCode(
   );
 }
 
+/**
+ * Short currency label for ramp screen copy ("Sell for Naira", "Sell for UGX").
+ *
+ * Naira keeps its word because it is the home market and the copy predates
+ * other currencies. Everything else uses its code: the full names are too long
+ * for a header, and "Shilling" alone would be ambiguous across KES/UGX/TZS.
+ */
+export function rampCurrencyLabel(code: string): string {
+  return code === 'NGN' ? 'Naira' : code;
+}
+
 /** One direction of trade, for screens that only do one. */
 export type RampLeg = 'buy' | 'sell';
 
