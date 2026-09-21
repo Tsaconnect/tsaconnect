@@ -26,6 +26,10 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
+// dummyBcryptHash is a pre-hashed cost-10 bcrypt string used to normalize
+// response times when user lookup fails, mitigating timing-based user enumeration.
+const dummyBcryptHash = "$2a$10$w8TfU0lXh2K5F2nK1i8L7.xPZ1N4rC1J5k9Q2o7X8z6W5y4V3u2T1"
+
 // signupRequest defines the expected JSON body for signup.
 type signupRequest struct {
 	Name            string `json:"name"`
@@ -360,6 +364,7 @@ func (h *Handlers) Login(c *gin.Context) {
 	}
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(req.Password))
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Invalid credentials",
@@ -616,6 +621,9 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		}
 	}
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(req.Password))
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "Invalid credentials",
@@ -623,7 +631,38 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
+	// 1. Check if account is locked
+	if user.IsLocked() {
+		c.JSON(http.StatusLocked, gin.H{
+			"success": false,
+			"message": "Account is temporarily locked. Try again later.",
+		})
+		return
+	}
+
+	// 2. Compare password and increment login attempts on failure (protects against brute-force)
 	if err := user.ComparePassword(req.Password); err != nil {
+		attempts, lockUntil := user.IncrementLoginAttempts()
+		updates := map[string]interface{}{
+			"login_attempts": attempts,
+			"updated_at":     time.Now(),
+		}
+		if lockUntil != nil {
+			updates["lock_until"] = lockUntil
+			if h.EventBus != nil {
+				h.EventBus.Publish(events.Event{
+					Type:    events.SecurityAccountLocked,
+					UserID:  user.ID,
+					Title:   "Account Locked",
+					Message: "Your account has been temporarily locked due to multiple failed login attempts",
+					Data: map[string]interface{}{
+						"attempts": attempts,
+					},
+				})
+			}
+		}
+		config.DB.Model(&user).Updates(updates)
+
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "Invalid credentials",
@@ -631,6 +670,7 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
+	// 3. Password verified: check if account is actually deleted
 	if user.AccountStatus != models.AccountStatusDeleted {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -639,7 +679,7 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
-	// Verify there is an active pending deletion request within the grace window
+	// 4. Verify there is an active pending deletion request within the grace window
 	now := time.Now()
 	var delReq models.AccountDeletionRequest
 	if err := config.DB.Where("user_id = ? AND status = ? AND purge_after > ?",
@@ -653,26 +693,51 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
-	// Restore account inside transaction
+	// 5. Restore account inside transaction with optimistic concurrency check
+	var errStateConflict = errors.New("state_conflict")
 	txErr := config.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.AccountDeletionRequest{}).Where("id = ?", delReq.ID).Updates(map[string]interface{}{
-			"status":      models.AccountDeletionStatusRestored,
-			"admin_note":  "Self-service restored by user on login",
-			"reviewed_at": now,
-			"updated_at":  now,
-		}).Error; err != nil {
-			return err
+		reqRes := tx.Model(&models.AccountDeletionRequest{}).
+			Where("id = ? AND status = ?", delReq.ID, models.AccountDeletionStatusPending).
+			Updates(map[string]interface{}{
+				"status":      models.AccountDeletionStatusRestored,
+				"admin_note":  "Self-service restored by user on login",
+				"reviewed_at": now,
+				"updated_at":  now,
+			})
+		if reqRes.Error != nil {
+			return reqRes.Error
 		}
-		return tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
-			"account_status": models.AccountStatusActive,
-			"deleted_at":     nil,
-			"updated_at":     now,
-			"login_attempts": 0,
-			"last_login":     now,
-			"lock_until":     nil,
-		}).Error
+		if reqRes.RowsAffected == 0 {
+			return errStateConflict
+		}
+
+		userRes := tx.Model(&models.User{}).
+			Where("id = ? AND account_status = ?", user.ID, models.AccountStatusDeleted).
+			Updates(map[string]interface{}{
+				"account_status": models.AccountStatusActive,
+				"deleted_at":     nil,
+				"updated_at":     now,
+				"login_attempts": 0,
+				"last_login":     now,
+				"lock_until":     nil,
+			})
+		if userRes.Error != nil {
+			return userRes.Error
+		}
+		if userRes.RowsAffected == 0 {
+			return errStateConflict
+		}
+		return nil
 	})
 	if txErr != nil {
+		if errors.Is(txErr, errStateConflict) {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"message": "Account deletion has already been processed or restored",
+				"code":    "ACCOUNT_STATE_CONFLICT",
+			})
+			return
+		}
 		log.Printf("ReactivateAccount tx error for %s: %v", user.ID, txErr)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,

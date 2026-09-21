@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -48,6 +49,16 @@ func setupReactivationTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE refresh_tokens (
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
 			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+		)`,
+		`CREATE TABLE p2p_trades (
+			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT
+		)`,
+		`CREATE TABLE orders (
+			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT
+		)`,
+		`CREATE TABLE device_tokens (
+			id TEXT PRIMARY KEY, user_id TEXT, token TEXT, platform TEXT,
+			created_at DATETIME, updated_at DATETIME
 		)`,
 	}
 	for _, sql := range stmts {
@@ -347,7 +358,207 @@ func TestCompleteAccountDeletion_AnonymizesUserPII(t *testing.T) {
 	if purgedUser.Username == "johndoe" {
 		t.Errorf("expected original username to be wiped, still %q", purgedUser.Username)
 	}
+	usernameRegex := regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`)
+	if !usernameRegex.MatchString(purgedUser.Username) {
+		t.Errorf("anonymized username %q violates username regex ^[a-zA-Z0-9_]{3,20}$", purgedUser.Username)
+	}
 	if purgedUser.Name != "Deleted User" {
 		t.Errorf("expected name 'Deleted User', got %q", purgedUser.Name)
 	}
 }
+
+func TestReactivateAccount_LocksOutAfterFailedAttempts(t *testing.T) {
+	db := setupReactivationTestDB(t)
+	now := time.Now()
+	purgeAfter := now.AddDate(0, 0, 10)
+
+	user := models.User{
+		ID:            uuid.New(),
+		Name:          "Brute Target",
+		Username:      "brute_target",
+		Email:         "brute@example.com",
+		AccountStatus: models.AccountStatusDeleted,
+		DeletedAt:     &now,
+	}
+	insertReactivationUser(t, db, &user)
+
+	delReq := models.AccountDeletionRequest{
+		ID:         uuid.New(),
+		UserID:     user.ID,
+		Status:     models.AccountDeletionStatusPending,
+		PurgeAfter: purgeAfter,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	insertDeletionRequest(t, db, &delReq)
+
+	h := &Handlers{
+		Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"},
+	}
+
+	body := []byte(`{"identifier":"brute@example.com","password":"WrongPassword!"}`)
+
+	// Attempt 5 bad passwords (max is 5)
+	for i := 0; i < 5; i++ {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/reactivate", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.ReactivateAccount(c)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401 Unauthorized, got %d", i+1, w.Code)
+		}
+	}
+
+	// 6th attempt must be 423 Locked
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/reactivate", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ReactivateAccount(c)
+
+	if w.Code != http.StatusLocked {
+		t.Fatalf("expected 423 Locked on 6th attempt, got %d", w.Code)
+	}
+}
+
+func TestReactivateAccount_NonDeletedAccount_DoesNotLeakStatusOnBadPassword(t *testing.T) {
+	db := setupReactivationTestDB(t)
+
+	activeUser := models.User{
+		ID:            uuid.New(),
+		Name:          "Active Target",
+		Username:      "active_target",
+		Email:         "active_target@example.com",
+		AccountStatus: models.AccountStatusActive,
+	}
+	insertReactivationUser(t, db, &activeUser)
+
+	h := &Handlers{
+		Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"},
+	}
+
+	// Bad password on active account must return 401 Unauthorized, NOT 400 Account is not deleted
+	body := []byte(`{"identifier":"active_target@example.com","password":"WrongPassword!"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/reactivate", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.ReactivateAccount(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized (not leaking account state on bad password), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReactivateAccount_ConcurrentAdminCompletion_FailsWithConflict(t *testing.T) {
+	db := setupReactivationTestDB(t)
+	now := time.Now()
+	purgeAfter := now.AddDate(0, 0, 10)
+
+	user := models.User{
+		ID:            uuid.New(),
+		Name:          "Conflict User",
+		Username:      "conflict_user",
+		Email:         "conflict@example.com",
+		AccountStatus: models.AccountStatusDeleted,
+		DeletedAt:     &now,
+	}
+	insertReactivationUser(t, db, &user)
+
+	// Status is already completed by admin
+	delReq := models.AccountDeletionRequest{
+		ID:         uuid.New(),
+		UserID:     user.ID,
+		Status:     models.AccountDeletionStatusCompleted,
+		PurgeAfter: purgeAfter,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	insertDeletionRequest(t, db, &delReq)
+
+	h := &Handlers{
+		Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"},
+	}
+
+	body := []byte(`{"identifier":"conflict@example.com","password":"StrongPass1!"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/reactivate", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.ReactivateAccount(c)
+
+	// Since status is already completed, it cannot be restored and must be rejected
+	if w.Code != http.StatusForbidden && w.Code != http.StatusConflict {
+		t.Fatalf("expected 403 Forbidden or 409 Conflict, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRequestAccountDeletion_RevokesRefreshTokensAndPreservesWallet(t *testing.T) {
+	db := setupReactivationTestDB(t)
+	now := time.Now()
+	testWallet := "0x1234567890abcdef1234567890abcdef12345678"
+
+	user := models.User{
+		ID:            uuid.New(),
+		Name:          "Token User",
+		Username:      "token_user",
+		Email:         "token@example.com",
+		AccountStatus: models.AccountStatusActive,
+		WalletAddress: testWallet,
+	}
+	insertReactivationUser(t, db, &user)
+	if err := db.Exec(`UPDATE users SET wallet_address = ? WHERE id = ?`, testWallet, user.ID.String()).Error; err != nil {
+		t.Fatalf("set wallet: %v", err)
+	}
+
+	// Insert an active refresh token
+	rt := models.RefreshToken{
+		ID:        uuid.New(),
+		UserID:    user.ID,
+		TokenHash: "hash123",
+		ExpiresAt: now.Add(24 * time.Hour),
+		Revoked:   false,
+	}
+	if err := db.Exec(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, revoked, created_at) VALUES (?,?,?,?,?,?)`,
+		rt.ID.String(), rt.UserID.String(), rt.TokenHash, rt.ExpiresAt, 0, now).Error; err != nil {
+		t.Fatalf("insert rt: %v", err)
+	}
+
+	h := &Handlers{
+		Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/api/users/account/deletion-request", bytes.NewReader([]byte(`{"password":"StrongPass1!","reason":"test"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &user)
+
+	h.RequestAccountDeletion(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 1. Refresh token must be revoked
+	var storedRT models.RefreshToken
+	if err := db.First(&storedRT, "id = ?", rt.ID).Error; err != nil {
+		t.Fatalf("read rt: %v", err)
+	}
+	if !storedRT.Revoked {
+		t.Errorf("expected refresh token to be revoked upon account deletion")
+	}
+
+	// 2. Wallet address must be preserved on soft delete
+	var freshUser models.User
+	if err := db.First(&freshUser, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if freshUser.WalletAddress != testWallet {
+		t.Errorf("expected wallet_address to be preserved on soft delete, got %q", freshUser.WalletAddress)
+	}
+}
+

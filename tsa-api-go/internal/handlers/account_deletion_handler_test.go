@@ -66,6 +66,10 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, user_id TEXT, token TEXT, platform TEXT,
 			created_at DATETIME, updated_at DATETIME
 		)`,
+		`CREATE TABLE refresh_tokens (
+			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
+			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+		)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {

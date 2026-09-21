@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -141,12 +142,16 @@ func (h *Handlers) RequestAccountDeletion(c *gin.Context) {
 		if err := tx.Create(&req).Error; err != nil {
 			return err
 		}
-		return tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+		if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
 			"account_status": models.AccountStatusDeleted,
 			"deleted_at":     now,
 			"updated_at":     now,
-			"wallet_address": "",
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		// Revoke all active refresh tokens so stale sessions cannot be reused upon reactivation
+		return tx.Model(&models.RefreshToken{}).Where("user_id = ? AND revoked = false", user.ID).
+			Update("revoked", true).Error
 	})
 	if txErr != nil {
 		log.Printf("RequestAccountDeletion: %s: %v", user.ID, txErr)
@@ -320,8 +325,12 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 
 		// Permanent erasure: anonymize personal identifiers so PII is removed
 		// and the user's original email, username, and phone are freed up for new registration.
+		anonCleanID := strings.ReplaceAll(req.UserID.String(), "-", "")
+		if len(anonCleanID) > 12 {
+			anonCleanID = anonCleanID[:12]
+		}
 		anonEmail := fmt.Sprintf("deleted_%s@deleted.local", req.UserID.String())
-		anonUsername := fmt.Sprintf("deleted_%s", req.UserID.String()[:12])
+		anonUsername := fmt.Sprintf("deleted_%s", anonCleanID)
 		return tx.Model(&models.User{}).Where("id = ?", req.UserID).Updates(map[string]interface{}{
 			"email":          anonEmail,
 			"username":       anonUsername,
