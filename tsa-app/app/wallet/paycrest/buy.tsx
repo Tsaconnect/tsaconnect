@@ -31,7 +31,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AmountInput,
@@ -152,6 +152,8 @@ export default function PaycrestBuyScreen() {
     options: currencyOptions,
   } = useRampCurrency('paycrest', 'buy');
   const symbol = currencyConfig.symbol;
+  const currencyLabel = !currencyCode || currencyCode === 'NGN' ? 'Naira' : currencyCode;
+  const headerTitle = `Buy with ${currencyLabel}`;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);
     // Applying the hub's choice is a one-time sync on arrival, not a binding —
@@ -438,6 +440,7 @@ export default function PaycrestBuyScreen() {
   if (order) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+        <Stack.Screen options={{ title: headerTitle }} />
         <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
           <Card>
             <Text variant="bodySm" style={{ color: colors.textSecondary }}>
@@ -572,6 +575,7 @@ export default function PaycrestBuyScreen() {
   // ── Amount + route ──────────────────────────────────────────────────────
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+      <Stack.Screen options={{ title: headerTitle }} />
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -618,7 +622,7 @@ export default function PaycrestBuyScreen() {
           {!wantChainKey && amount.trim() ? (
             <Card>
               <Text variant="bodySm" style={{ color: colors.textSecondary }}>
-                This network isn&apos;t supported for a Naira purchase yet — choose a different one.
+                {`This network isn't supported for a ${currencyLabel} purchase yet — choose a different one.`}
               </Text>
             </Card>
           ) : null}

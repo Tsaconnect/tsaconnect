@@ -22,7 +22,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AmountInput,
@@ -151,6 +151,8 @@ export default function PaycrestSellScreen() {
     options: currencyOptions,
   } = useRampCurrency('paycrest', 'sell');
   const symbol = currencyConfig.symbol;
+  const currencyLabel = !currencyCode || currencyCode === 'NGN' ? 'Naira' : currencyCode;
+  const headerTitle = `Sell for ${currencyLabel}`;
   useEffect(() => {
     if (currencyParam) setCurrencyCode(currencyParam);
     // One-time sync of the hub's choice on arrival — see the identical note
@@ -504,6 +506,7 @@ export default function PaycrestSellScreen() {
       !!address && !!CHAINS[order.chain as ChainKey] && !!order.depositAddress && !!order.tokenAmount;
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+        <Stack.Screen options={{ title: headerTitle }} />
         <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
           <Card>
             <Text variant="bodySm" style={{ color: colors.textSecondary }}>
@@ -653,6 +656,7 @@ export default function PaycrestSellScreen() {
   // ── Amount, route, payout ───────────────────────────────────────────────
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+      <Stack.Screen options={{ title: headerTitle }} />
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}

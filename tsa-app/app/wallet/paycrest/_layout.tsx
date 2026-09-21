@@ -9,8 +9,8 @@ export default function PaycrestLayout() {
   const screenOptions = useDefaultScreenOptions();
   return (
     <Stack screenOptions={screenOptions}>
-      <Stack.Screen name="buy" options={{ title: 'Buy with Naira' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell for Naira' }} />
+      <Stack.Screen name="buy" options={{ title: 'Buy' }} />
+      <Stack.Screen name="sell" options={{ title: 'Sell' }} />
       <Stack.Screen name="order/[id]" options={{ title: 'Order' }} />
     </Stack>
   );
