@@ -1,32 +1,19 @@
-// app/(dashboard)/(tabs)/(home)/checkout/index.tsx
+// app/(detail)/checkout/index.tsx
 //
-// Checkout (home tab) — review cart, pick shipping address + payment token, then
-// run the escrow checkout flow (createOrders → approve → escrow → submit) signing
-// + broadcasting client-side. Restyled onto the TSA Signature design system
-// (@/theme tokens + @/components/ui primitives).
+// Checkout — review the cart, pick a delivery address and pay token, confirm
+// the exact amount in a sheet, then run the escrow flow (createOrders → approve
+// → escrow → submit), signing and broadcasting client-side.
 //
-// FINANCIAL screen: every order total, shipping/address handling, fee/gas math,
-// and the place-order escrow sign/broadcast/confirm flow is preserved verbatim —
-// this is a visual/structural restyle only. The reused LocationPicker (already on
-// the design system) is unchanged.
-import React, { useEffect, useState, useCallback } from 'react';
-import {
-  View,
-  ScrollView,
-  Alert,
-  Image,
-  Platform,
-  KeyboardAvoidingView,
-} from 'react-native';
+// FINANCIAL screen. Every amount shown comes from the backend cart quote
+// (POST /orders/quote), which is priced by the same code that creates the
+// orders — so the total a buyer confirms is the total the wallet is asked to
+// approve. The escrow sign/broadcast/submit sequence itself is unchanged.
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import { View, ScrollView, Alert, Image, Platform, KeyboardAvoidingView } from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/AuthContext/AuthContext';
-import {
-  cartService,
-  CartSummaryResponse,
-  CartItem,
-  Product,
-} from '@/components/services/cart';
+import { cartService, CartSummaryResponse, CartItem, Product } from '@/components/services/cart';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
@@ -34,20 +21,22 @@ import {
   prepareApprove,
   prepareEscrow,
   submitEscrow,
-  formatTokenAmount,
-  getShippingEstimate,
   Order,
+  type CartQuote,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import LocationPicker from '@/components/common/LocationPicker';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
+import { listingAmount, quoteUnits, useCheckoutQuote, useQuoteFormat } from '@/hooks/useCheckoutQuote';
+import { useCheckoutBalances } from '@/hooks/useCheckoutBalances';
+import { ConfirmPaymentSheet } from '@/components/checkout/ConfirmPaymentSheet';
+import { PaymentProgress, type PaymentPhase } from '@/components/checkout/PaymentProgress';
+import { QuoteBreakdown } from '@/components/checkout/QuoteBreakdown';
 import { useTheme } from '@/theme';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import {
-  AccentCard,
-  AmountText,
   Button,
   Card,
   Divider,
@@ -57,21 +46,10 @@ import {
   IconButton,
   PressableScale,
   Spinner,
-  SummaryRow,
   Text,
 } from '@/components/ui';
 
 type CheckoutStep = 'review' | 'signing' | 'success';
-type SigningPhase =
-  | 'idle'
-  | 'creating_orders'
-  | 'preparing_escrow'
-  | 'approving_token'
-  | 'broadcasting_approve'
-  | 'creating_escrow'
-  | 'broadcasting_escrow'
-  | 'submitting'
-  | 'done';
 
 const SUPPORTED_TOKENS = ['USDC', 'USDT', 'MCGP'] as const;
 
@@ -92,14 +70,13 @@ function friendlyTxError(err: any): string {
 // Brand-identity colors for each stablecoin/token (used only to tint the token
 // icon chip so the selector reads as the real coin). These are token identity,
 // not UI theme — all surface/text chrome comes from useTheme tokens below.
-const TOKEN_META: Record<
-  string,
-  { icon: string; color: string; label: string }
-> = {
-  USDC: { icon: 'card', color: '#2775CA', label: 'USD Coin' },
-  USDT: { icon: 'card', color: '#26A17B', label: 'Tether' },
-  MCGP: { icon: 'pricetag', color: '#D4AF37', label: 'MCGP (0% fee)' },
+const TOKEN_META: Record<string, { icon: string; color: string }> = {
+  USDC: { icon: 'card', color: '#2775CA' },
+  USDT: { icon: 'card', color: '#26A17B' },
+  MCGP: { icon: 'pricetag', color: '#D4AF37' },
 };
+
+const formatBalance = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 2 });
 
 const CheckoutScreen = () => {
   const { colors, spacing, radius } = useTheme();
@@ -111,20 +88,18 @@ const CheckoutScreen = () => {
 
   const [step, setStep] = useState<CheckoutStep>('review');
   const [selectedToken, setSelectedToken] = useState<string>('USDC');
-  const [signingPhase, setSigningPhase] = useState<SigningPhase>('idle');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [signingPhase, setSigningPhase] = useState<PaymentPhase>('idle');
   const [currentOrderIndex, setCurrentOrderIndex] = useState(0);
   const [orders, setOrders] = useState<Order[]>([]);
   const [completedOrders, setCompletedOrders] = useState<string[]>([]);
   const [signingError, setSigningError] = useState<string | null>(null);
+  // The quote the buyer confirmed; progress and the receipt read from it so
+  // they show what was agreed even if the live quote re-prices meanwhile.
+  const [paidQuote, setPaidQuote] = useState<CartQuote | null>(null);
   const [hasWallet, setHasWallet] = useState<boolean | null>(null);
   const [editingAddress, setEditingAddress] = useState(false);
-  const [shippingLocation, setShippingLocation] = useState({
-    country: '',
-    state: '',
-    city: '',
-  });
-  const [shippingEstimateTotal, setShippingEstimateTotal] = useState<number | null>(null);
-  const [shippingEstimateLoading, setShippingEstimateLoading] = useState(false);
+  const [shippingLocation, setShippingLocation] = useState({ country: '', state: '', city: '' });
   const { currency, rate } = useCurrency();
 
   const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
@@ -183,77 +158,117 @@ const CheckoutScreen = () => {
 
   const getProductId = (item: CartItem) => {
     if (typeof item.product === 'object') {
-      return (item.product as Product)._id;
+      // The Go API returns `id`; `_id` is the legacy field name.
+      const product = item.product as Product & { id?: string };
+      return product.id || product._id;
     }
-
     return typeof item.product === 'string' ? item.product : '';
   };
 
-  const shippingName = currentUser?.name || currentUser?.username || '';
-  const shippingAddress = {
+  // --- Derived data ---
+  const items = useMemo(
+    () => cartData?.itemsBySeller?.flatMap((group) => group.items) || cartData?.cart.items || [],
+    [cartData],
+  );
+  const totalQuantity = cartData?.summary?.totalQuantity ?? items.reduce((n, it) => n + it.quantity, 0);
+  const feeConfig = cartData?.feeConfig;
+  const isMCGP = selectedToken === 'MCGP';
+  const hasAddress = !!shippingLocation.country && !!shippingLocation.state;
+
+  // Per-service declared-tier map (productId → tier) from the service line items.
+  // Plain product items carry no service note and are skipped. This threads the
+  // buyer's residential/booking declaration to the backend (spec §6.5,
+  // "quote == charge") for both the quote and the order.
+  const serviceTiers = useMemo(() => {
+    const tiers: Record<string, string> = {};
+    for (const item of items) {
+      const meta = decodeServiceNotes(item.notes);
+      if (meta) tiers[getProductId(item)] = meta.tier;
+    }
+    return Object.keys(tiers).length > 0 ? tiers : undefined;
+  }, [items]);
+
+  const cartKey = useMemo(
+    () => items.map((it) => `${getProductId(it)}:${it.quantity}`).join(','),
+    [items],
+  );
+
+  const {
+    quote,
+    loading: quoteLoading,
+    error: quoteError,
+    refresh: refreshQuote,
+  } = useCheckoutQuote({
+    token: selectedToken,
     city: shippingLocation.city,
     state: shippingLocation.state,
     country: shippingLocation.country,
-  };
+    serviceTiers,
+    enabled: hasAddress && items.length > 0 && step === 'review',
+    cartKey,
+  });
+  const fmt = useQuoteFormat(quote);
+  const paidFmt = useQuoteFormat(paidQuote);
+  const { balances, address: walletAddress, refresh: refreshBalances } = useCheckoutBalances();
 
-  // --- Escrow checkout flow ---
-  const handleCreateOrders = async () => {
+  const quoteByProduct = useMemo(() => {
+    const map = new Map<string, NonNullable<typeof quote>['lines'][number]>();
+    for (const line of quote?.lines ?? []) map.set(line.productId, line);
+    return map;
+  }, [quote]);
+
+  const tokenBalance = balances[selectedToken as 'USDC' | 'USDT' | 'MCGP'];
+  const totalUnits = quote ? quoteUnits(quote.totals.total, quote.decimals) : null;
+  const shortOnToken = tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
+
+  // Service line items charge a "Call-out fee", not "Shipping". Relabel the
+  // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
+  const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
+  const hasProductItem = items.some((it) => decodeServiceNotes(it.notes) == null);
+  const feeRowLabel = hasServiceItem ? (hasProductItem ? 'Shipping & call-out' : 'Call-out fee') : 'Shipping';
+
+  // --- Step 1 → 2: validate, then show the confirm sheet ---
+  const openConfirm = async () => {
     if (!requireKycVerified()) return;
     // Re-check wallet in case user came back without completing setup
     const addr = await getActiveWallet();
     if (!addr) {
-      Alert.alert(
-        'Wallet Required',
-        'Please set up your wallet first.',
-        [{ text: 'Set Up Wallet', onPress: () => router.push('/tokenization') }],
-      );
+      Alert.alert('Wallet Required', 'Please set up your wallet first.', [
+        { text: 'Set Up Wallet', onPress: () => router.push('/tokenization') },
+      ]);
       return;
     }
-
-    if (!shippingLocation.country || !shippingLocation.state) {
-      Alert.alert(
-        'Shipping Required',
-        'Please set your shipping address before checking out.',
-      );
+    if (!hasAddress) {
+      Alert.alert('Shipping Required', 'Please set your shipping address before checking out.');
       setEditingAddress(true);
-      return;
-    }
-    if (shippingEstimateLoading) {
-      Alert.alert(
-        'Updating Shipping',
-        'Please wait for shipping fees to finish updating.',
-      );
       return;
     }
     if (!cartData || items.length === 0) {
       Alert.alert('Empty Cart', 'Add items to your cart before checking out.');
       return;
     }
+    if (!quote) return;
+    refreshBalances();
+    setConfirmOpen(true);
+  };
 
+  // --- Step 2 → 3: the escrow checkout flow ---
+  const payNow = async () => {
+    if (!quote) return;
+    setConfirmOpen(false);
+    setPaidQuote(quote);
     setStep('signing');
     setSigningPhase('creating_orders');
     setSigningError(null);
     setCompletedOrders([]);
 
     try {
-      // Build the per-service declared-tier map (productId → tier) from the
-      // service line items in the cart. Plain product items carry no service
-      // note and are skipped. This threads the buyer's residential/booking
-      // declaration through to the backend (spec §6.5, "quote == charge").
-      const serviceTiers: Record<string, string> = {};
-      for (const item of items) {
-        const meta = decodeServiceNotes(item.notes);
-        if (meta) {
-          serviceTiers[getProductId(item)] = meta.tier;
-        }
-      }
-
       const createResult = await createOrders(
         selectedToken,
         shippingLocation.city,
         shippingLocation.state,
         shippingLocation.country,
-        Object.keys(serviceTiers).length > 0 ? serviceTiers : undefined,
+        serviceTiers,
       );
       if (!createResult.success || !createResult.data?.orders) {
         throw new Error(createResult.message || 'Failed to create orders');
@@ -296,11 +311,7 @@ const CheckoutScreen = () => {
         }
 
         setSigningPhase('submitting');
-        const submitResult = await submitEscrow(
-          order.id,
-          approveTxHash,
-          escrowTxHash,
-        );
+        const submitResult = await submitEscrow(order.id, approveTxHash, escrowTxHash);
         if (!submitResult.success) {
           throw new Error(submitResult.message || 'Failed to submit escrow');
         }
@@ -316,161 +327,11 @@ const CheckoutScreen = () => {
     } catch (err: any) {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');
-      setSigningPhase('idle');
     }
   };
-
-  const getSigningStatusText = (): string => {
-    const n =
-      orders.length > 1 ? ` (${currentOrderIndex + 1}/${orders.length})` : '';
-    switch (signingPhase) {
-      case 'creating_orders':
-        return 'Creating orders...';
-      case 'preparing_escrow':
-        return `Preparing escrow${n}...`;
-      case 'approving_token':
-        return `Approving ${selectedToken}${n}...`;
-      case 'creating_escrow':
-        return `Creating escrow${n}...`;
-      case 'submitting':
-        return `Confirming on-chain${n}...`;
-      case 'done':
-        return 'All orders escrowed!';
-      default:
-        return '';
-    }
-  };
-
-  // --- Derived data ---
-  const items = cartData?.itemsBySeller?.flatMap((group) => group.items) || cartData?.cart.items || [];
-  const summary = cartData?.summary || {
-    subtotal: 0,
-    shipping: 0,
-    gasFee: 0,
-    platformFee: 0,
-    discount: 0,
-    total: 0,
-    totalItems: 0,
-    totalQuantity: 0,
-  };
-  const feeConfig = cartData?.feeConfig;
-  const isMCGP = selectedToken === 'MCGP';
-  // Never fabricate a gas fee: fall back to 0 (not a hardcoded estimate) so the
-  // total stays honest if the backend omits the fee. The Gas Fee row only shows
-  // when there's a real positive value.
-  const gasFee = isMCGP ? 0 : (summary.gasFee || feeConfig?.gasFeeUSD || 0);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadShippingEstimate = async () => {
-      const checkoutItems =
-        cartData?.itemsBySeller?.flatMap((group) => group.items) ||
-        cartData?.cart.items ||
-        [];
-
-      if (checkoutItems.length === 0) {
-        setShippingEstimateTotal(0);
-        setShippingEstimateLoading(false);
-        return;
-      }
-
-      if (!shippingLocation.country || !shippingLocation.state) {
-        setShippingEstimateTotal(null);
-        setShippingEstimateLoading(false);
-        return;
-      }
-
-      setShippingEstimateLoading(true);
-
-      try {
-        const estimates = await Promise.all(
-          checkoutItems.map(async (item) => {
-            const productId = getProductId(item);
-            if (!productId) {
-              return null;
-            }
-
-            const result = await getShippingEstimate(
-              productId,
-              shippingLocation.city,
-              shippingLocation.state,
-              shippingLocation.country,
-            );
-
-            if (!result.success || result.data?.shippingCost == null) {
-              return null;
-            }
-
-            return result.data.shippingCost * item.quantity;
-          }),
-        );
-
-        if (cancelled) {
-          return;
-        }
-
-        const resolvedEstimates = estimates.filter(
-          (value): value is number => value != null,
-        );
-
-        if (resolvedEstimates.length !== estimates.length) {
-          setShippingEstimateTotal(null);
-          return;
-        }
-
-        setShippingEstimateTotal(
-          resolvedEstimates.reduce((total, value) => total + value, 0),
-        );
-      } catch (err) {
-        if (!cancelled) {
-          console.error('Failed to load shipping estimates:', err);
-          setShippingEstimateTotal(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setShippingEstimateLoading(false);
-        }
-      }
-    };
-
-    loadShippingEstimate();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    cartData,
-    shippingLocation.city,
-    shippingLocation.state,
-    shippingLocation.country,
-  ]);
-
-  // Service line items charge a "Call-out fee", not "Shipping". Relabel the
-  // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
-  const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
-  const hasProductItem = items.some((it) => decodeServiceNotes(it.notes) == null);
-  const feeRowLabel = hasServiceItem
-    ? hasProductItem
-      ? 'Shipping & call-out'
-      : 'Call-out fee'
-    : 'Shipping';
-
-  const shippingTotal = shippingEstimateTotal ?? summary.shipping;
-  const estimatedTotal =
-    summary.subtotal + shippingTotal + gasFee - summary.discount;
-  const totalDisplay = shippingEstimateLoading
-    ? 'Updating...'
-    : fmtPrice(estimatedTotal);
 
   // ===== HEADER =====
-  const Header = ({
-    title = 'Checkout',
-    showBack = true,
-  }: {
-    title?: string;
-    showBack?: boolean;
-  }) => (
+  const Header = ({ title = 'Checkout', showBack = true }: { title?: string; showBack?: boolean }) => (
     <View
       style={{
         flexDirection: 'row',
@@ -484,12 +345,7 @@ const CheckoutScreen = () => {
       }}
     >
       {showBack ? (
-        <IconButton
-          icon="chevronLeft"
-          accessibilityLabel="Go back"
-          variant="surface"
-          onPress={() => router.back()}
-        />
+        <IconButton icon="chevronLeft" accessibilityLabel="Go back" variant="surface" onPress={() => router.back()} />
       ) : (
         <View style={{ width: 44 }} />
       )}
@@ -543,196 +399,66 @@ const CheckoutScreen = () => {
 
   // ===== NO WALLET — redirect to wallet setup =====
   if (hasWallet === false && step === 'review') {
-    Alert.alert(
-      'Wallet Required',
-      'You need a wallet to complete your purchase. Set up your wallet to continue.',
-      [
-        { text: 'Cancel', style: 'cancel', onPress: () => router.back() },
-        { text: 'Set Up Wallet', onPress: () => router.push('/tokenization') },
-      ],
-    );
+    Alert.alert('Wallet Required', 'You need a wallet to complete your purchase. Set up your wallet to continue.', [
+      { text: 'Cancel', style: 'cancel', onPress: () => router.back() },
+      { text: 'Set Up Wallet', onPress: () => router.push('/tokenization') },
+    ]);
     // Reset so the alert doesn't re-trigger
     setHasWallet(null);
   }
 
-  // ===== SUCCESS =====
-  if (step === 'success') {
+  // ===== SUCCESS (RECEIPT) =====
+  if (step === 'success' && paidQuote) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <ScrollView
-          contentContainerStyle={{
-            flexGrow: 1,
-            justifyContent: 'center',
-            padding: spacing.lg,
-            paddingBottom: spacing['4xl'],
-          }}
-        >
-          <View style={{ alignItems: 'center', gap: spacing.sm }}>
-            <View
-              style={{
-                width: 72,
-                height: 72,
-                borderRadius: radius.pill,
-                backgroundColor: colors.success,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginBottom: spacing.sm,
-              }}
-            >
-              <Icon name="check" size={40} color={colors.textInverse} />
-            </View>
-            <Text variant="title1" weight="700" align="center">
-              Payment Successful!
-            </Text>
-            <Text variant="bodySm" color="textSecondary" align="center">
-              {orders.length} order{orders.length !== 1 ? 's' : ''} created &
-              funded via escrow
-            </Text>
-          </View>
-
-          <View style={{ width: '100%', marginTop: spacing.lg, gap: spacing.sm }}>
-            {orders.map((order) => (
-              <Card key={order.id} padding="md">
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                  }}
-                >
-                  <View>
-                    <Text variant="bodySm" weight="600">
-                      #{order.id.slice(0, 8)}
-                    </Text>
-                    <Text variant="caption" color="textMuted">
-                      {order.token}
-                    </Text>
-                  </View>
-                  <AmountText
-                    value={formatTokenAmount(order.totalAmount, order.token)}
-                    variant="title3"
-                    color="accent"
-                  />
-                </View>
-              </Card>
-            ))}
-          </View>
-
-          <View style={{ marginTop: spacing.xl, gap: spacing.sm }}>
-            <Button
-              title="View Orders"
-              leftIcon="list"
-              onPress={() => router.push('/(dashboard)/orderlist')}
-            />
-            <Button
-              title="Continue Shopping"
-              variant="secondary"
-              onPress={() => router.replace('/home')}
-            />
-          </View>
-        </ScrollView>
+        <Receipt
+          quote={paidQuote}
+          orderCount={orders.length}
+          shippingLabel={feeRowLabel}
+          cashbackPercent={isMCGP ? undefined : feeConfig?.buyerCashbackPercent}
+        />
       </SafeAreaView>
     );
   }
 
   // ===== SIGNING (PROCESSING) =====
-  if (step === 'signing') {
-    const progress =
-      orders.length > 0 ? completedOrders.length / orders.length : 0;
+  if (step === 'signing' && paidQuote) {
+    // Before the orders exist, show the confirmed quote's lines; after, match
+    // each created order back to its quote line for a name and amount.
+    const lines =
+      orders.length > 0
+        ? orders.map((o, i) => paidQuote.lines.find((l) => l.productId === o.productId) ?? paidQuote.lines[i])
+        : paidQuote.lines;
+    const progressOrders = lines.map((line, i) => ({
+      name: line?.name ?? `Order ${i + 1}`,
+      amount: line ? paidFmt.token(line.total) : '',
+    }));
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Header title="Processing" showBack={false} />
-        <View
-          style={{
-            flex: 1,
-            justifyContent: 'center',
-            alignItems: 'center',
-            paddingHorizontal: spacing['2xl'],
-            gap: spacing.md,
+        <Header title="Paying" showBack={false} />
+        <PaymentProgress
+          token={paidQuote.token}
+          orders={progressOrders}
+          phase={signingPhase}
+          currentOrderIndex={currentOrderIndex}
+          error={signingError}
+          completedCount={completedOrders.length}
+          onViewOrders={() => router.replace('/(dashboard)/orderlist')}
+          onBackToCheckout={() => {
+            setStep('review');
+            setSigningError(null);
+            setSigningPhase('idle');
+            setOrders([]);
+            setCompletedOrders([]);
+            loadCart();
           }}
-        >
-          {signingError ? (
-            <>
-              <View
-                style={{
-                  width: 64,
-                  height: 64,
-                  borderRadius: radius.pill,
-                  backgroundColor: colors.danger,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <Icon name="close" size={32} color={colors.textInverse} />
-              </View>
-              <Text variant="title3" weight="700" align="center">
-                Transaction Failed
-              </Text>
-              <Text variant="bodySm" color="textSecondary" align="center">
-                {signingError}
-              </Text>
-              {completedOrders.length > 0 && (
-                <Text variant="bodySm" color="textMuted" align="center">
-                  {completedOrders.length}/{orders.length} orders completed
-                </Text>
-              )}
-              <Button
-                title={
-                  completedOrders.length > 0 ? 'View Orders' : 'Back to Checkout'
-                }
-                fullWidth={false}
-                style={{ marginTop: spacing.sm }}
-                onPress={() => {
-                  if (completedOrders.length > 0) {
-                    router.replace('/(dashboard)/orderlist');
-                  } else {
-                    setStep('review');
-                    setSigningError(null);
-                    setSigningPhase('idle');
-                    setOrders([]);
-                    setCompletedOrders([]);
-                  }
-                }}
-              />
-            </>
-          ) : (
-            <>
-              <Spinner size="large" />
-              <Text variant="title3" weight="600" align="center">
-                {getSigningStatusText()}
-              </Text>
-              {orders.length > 1 && (
-                <View
-                  style={{
-                    width: '70%',
-                    height: 4,
-                    backgroundColor: colors.surfaceAlt,
-                    borderRadius: radius.pill,
-                    marginTop: spacing.lg,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <View
-                    style={{
-                      height: '100%',
-                      width: `${progress * 100}%`,
-                      backgroundColor: colors.accent,
-                      borderRadius: radius.pill,
-                    }}
-                  />
-                </View>
-              )}
-              <Text variant="bodySm" color="textSecondary" align="center">
-                Please wait. Do not close the app.
-              </Text>
-            </>
-          )}
-        </View>
+        />
       </SafeAreaView>
     );
   }
 
   // ===== REVIEW (MAIN CHECKOUT) =====
+  const payDisabled = !quote || quoteLoading || shortOnToken;
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <Header />
@@ -744,101 +470,39 @@ const CheckoutScreen = () => {
       >
         <ScrollView
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'], gap: spacing.md }}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Step Indicators */}
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'center',
-              gap: spacing['3xl'],
-              marginBottom: spacing.lg,
-            }}
-          >
-            {['Review', 'Pay', 'Done'].map((label, i) => {
-              const active = i === 0;
-              return (
-                <View key={label} style={{ alignItems: 'center', gap: spacing.xs }}>
-                  <View
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: radius.pill,
-                      backgroundColor: active ? colors.accent : colors.surfaceAlt,
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text
-                      variant="caption"
-                      weight="700"
-                      style={{ color: active ? colors.onAccent : colors.textMuted }}
-                    >
-                      {i + 1}
-                    </Text>
-                  </View>
-                  <Text
-                    variant="caption"
-                    weight={active ? '600' : '500'}
-                    color={active ? 'accent' : 'textMuted'}
-                  >
-                    {label}
-                  </Text>
-                </View>
-              );
-            })}
-          </View>
+          <StepBar active={0} />
 
           {/* Shipping Address */}
-          <Card style={{ marginBottom: spacing.md }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.sm,
-                marginBottom: spacing.md,
-              }}
-            >
+          <Card>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
               <Icon name="nearMe" size={16} color={colors.accent} />
               <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
-                Shipping Address
+                Deliver to
               </Text>
               <PressableScale onPress={() => setEditingAddress(!editingAddress)} hitSlop={8}>
                 <Text variant="bodySm" weight="600" color="accent">
-                  {editingAddress ? 'Done' : 'Edit'}
+                  {editingAddress ? 'Done' : hasAddress ? 'Change' : 'Add'}
                 </Text>
               </PressableScale>
             </View>
             {editingAddress ? (
-              <LocationPicker
-                value={shippingLocation}
-                onChange={setShippingLocation}
-              />
-            ) : shippingAddress.country ? (
+              <LocationPicker value={shippingLocation} onChange={setShippingLocation} />
+            ) : shippingLocation.country ? (
               <View>
                 <Text variant="bodyMed" weight="600">
-                  {shippingName}
+                  {currentUser?.name || currentUser?.username || ''}
                 </Text>
                 <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
-                  {[
-                    shippingAddress.city,
-                    shippingAddress.state,
-                    shippingAddress.country,
-                  ]
-                    .filter(Boolean)
-                    .join(', ')}
+                  {[shippingLocation.city, shippingLocation.state, shippingLocation.country].filter(Boolean).join(', ')}
                 </Text>
               </View>
             ) : (
               <PressableScale
                 onPress={() => setEditingAddress(true)}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: spacing.sm,
-                  paddingVertical: spacing.sm,
-                }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.sm }}
               >
                 <Icon name="plus" size={18} color={colors.accent} />
                 <Text variant="bodySm" weight="600" color="accent">
@@ -848,29 +512,82 @@ const CheckoutScreen = () => {
             )}
           </Card>
 
+          {/* Order Items */}
+          <Card>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="cart" size={16} color={colors.accent} />
+              <Text variant="bodyMed" weight="600">
+                Items ({totalQuantity})
+              </Text>
+            </View>
+            {items.map((item, index) => {
+              const { name, imageUrl } = getProductData(item);
+              const line = quoteByProduct.get(getProductId(item));
+              return (
+                <View key={item._id || index}>
+                  {index > 0 && <Divider spacing="sm" />}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.xs }}>
+                    <View
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: radius.md,
+                        backgroundColor: colors.surfaceAlt,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {imageUrl ? (
+                        <Image source={{ uri: imageUrl }} style={{ width: 48, height: 48, borderRadius: radius.md }} />
+                      ) : (
+                        <Icon name="cart" size={22} color={colors.textMuted} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: spacing.md }}>
+                      <Text variant="bodySm" weight="500" numberOfLines={2}>
+                        {name}
+                      </Text>
+                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                        Qty: {item.quantity}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text variant="bodyMed" weight="700" numeric>
+                        {fmtPrice(item.price * item.quantity)}
+                      </Text>
+                      {line ? (
+                        <Text variant="caption" color="textMuted" numeric>
+                          {fmt.token(listingAmount(line))}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
+              );
+            })}
+          </Card>
+
           {/* Payment Token */}
-          <Card style={{ marginBottom: spacing.md }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.sm,
-                marginBottom: spacing.md,
-              }}
-            >
+          <Card>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
               <Icon name="wallet" size={16} color={colors.accent} />
               <Text variant="bodyMed" weight="600">
-                Payment Method
+                Pay with
               </Text>
             </View>
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>
               {SUPPORTED_TOKENS.map((tk) => {
                 const meta = TOKEN_META[tk];
                 const active = selectedToken === tk;
+                const bal = balances[tk];
                 return (
                   <PressableScale
                     key={tk}
                     onPress={() => setSelectedToken(tk)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`Pay with ${tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
                     style={{
                       flex: 1,
                       alignItems: 'center',
@@ -885,231 +602,77 @@ const CheckoutScreen = () => {
                   >
                     <View
                       style={{
-                        width: 36,
-                        height: 36,
+                        width: 32,
+                        height: 32,
                         borderRadius: radius.pill,
                         justifyContent: 'center',
                         alignItems: 'center',
                         backgroundColor: active ? meta.color + '22' : colors.surfaceAlt,
                       }}
                     >
-                      <Icon
-                        name={meta.icon as any}
-                        size={20}
-                        color={active ? meta.color : colors.textMuted}
-                      />
+                      <Icon name={meta.icon as any} size={18} color={active ? meta.color : colors.textMuted} />
                     </View>
-                    <Text
-                      variant="bodySm"
-                      weight="700"
-                      style={active ? { color: meta.color } : undefined}
-                    >
+                    <Text variant="bodySm" weight="700" style={active ? { color: meta.color } : undefined}>
                       {tk}
                     </Text>
-                    <Text variant="caption" color="textMuted" align="center">
-                      {meta.label}
+                    <Text variant="caption" color="textMuted" numeric>
+                      {bal != null ? `Bal ${formatBalance(bal)}` : '—'}
                     </Text>
-                    {active && (
-                      <View
-                        style={{
-                          position: 'absolute',
-                          top: spacing.xs,
-                          right: spacing.xs,
-                          width: 18,
-                          height: 18,
-                          borderRadius: radius.pill,
-                          justifyContent: 'center',
-                          alignItems: 'center',
-                          backgroundColor: meta.color,
-                        }}
-                      >
-                        <Icon name="check" size={12} color="#FFFFFF" />
-                      </View>
-                    )}
                   </PressableScale>
                 );
               })}
             </View>
-            {isMCGP ? (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: spacing.xs,
-                  marginTop: spacing.md,
-                  paddingVertical: spacing.sm,
-                  paddingHorizontal: spacing.md,
-                  backgroundColor: colors.successBg,
-                  borderRadius: radius.sm,
-                }}
-              >
-                <Icon name="star" size={14} color={colors.success} />
-                <Text variant="caption" weight="500" color="success">
-                  MCGP: No gas fee applied
-                </Text>
-              </View>
+            {shortOnToken ? (
+              <Notice tone="danger" icon="info">
+                {`Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
+              </Notice>
+            ) : isMCGP ? (
+              <Notice tone="success" icon="star">
+                MCGP: no network or platform fee
+              </Notice>
             ) : feeConfig?.buyerCashbackPercent ? (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: spacing.xs,
-                  marginTop: spacing.md,
-                  paddingVertical: spacing.sm,
-                  paddingHorizontal: spacing.md,
-                  backgroundColor: colors.successBg,
-                  borderRadius: radius.sm,
-                }}
-              >
-                <Icon name="star" size={14} color={colors.success} />
-                <Text variant="caption" weight="500" color="success">
-                  {feeConfig.buyerCashbackPercent}% cashback on order confirmation
-                </Text>
-              </View>
+              <Notice tone="success" icon="star">
+                {`${feeConfig.buyerCashbackPercent}% cashback when you confirm delivery`}
+              </Notice>
             ) : null}
           </Card>
 
-          {/* Order Items */}
-          <Card style={{ marginBottom: spacing.md }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.sm,
-                marginBottom: spacing.md,
-              }}
-            >
-              <Icon name="cart" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="600">
-                Items ({summary.totalQuantity})
+          {/* Summary */}
+          <Card>
+            {!hasAddress ? (
+              <Text variant="bodySm" color="textSecondary">
+                Add a delivery address to see shipping and your total.
               </Text>
-            </View>
-            {items.map((item, index) => {
-              const { name, imageUrl } = getProductData(item);
-              return (
-                <View key={item._id || index}>
-                  {index > 0 && <Divider spacing="sm" />}
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      paddingVertical: spacing.xs,
-                    }}
-                  >
-                    <View
-                      style={{
-                        width: 48,
-                        height: 48,
-                        borderRadius: radius.md,
-                        backgroundColor: colors.surfaceAlt,
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      {imageUrl ? (
-                        <Image
-                          source={{ uri: imageUrl }}
-                          style={{ width: 48, height: 48, borderRadius: radius.md }}
-                        />
-                      ) : (
-                        <Icon name="cart" size={22} color={colors.textMuted} />
-                      )}
-                    </View>
-                    <View style={{ flex: 1, marginLeft: spacing.md }}>
-                      <Text variant="bodySm" weight="500" numberOfLines={2}>
-                        {name}
-                      </Text>
-                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-                        Qty: {item.quantity}
-                      </Text>
-                    </View>
-                    <Text variant="bodyMed" weight="700" numeric>
-                      {fmtPrice(item.price * item.quantity)}
+            ) : quoteError ? (
+              <View style={{ gap: spacing.sm }}>
+                <Text variant="bodySm" color="danger">
+                  {quoteError}
+                </Text>
+                <Button title="Try again" variant="secondary" size="sm" fullWidth={false} onPress={refreshQuote} />
+              </View>
+            ) : !quote ? (
+              <Spinner label="Pricing your order…" />
+            ) : (
+              <>
+                <QuoteBreakdown quote={quote} shippingLabel={feeRowLabel} />
+                <Divider spacing="sm" />
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+                  <Text variant="bodyMed" weight="700">
+                    You pay
+                  </Text>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text variant="title1" weight="700" numeric>
+                      {fmt.token(quote.totals.total)}
                     </Text>
+                    {fmt.approx(quote.totals.total) ? (
+                      <Text variant="bodySm" weight="600" color="accent" numeric>
+                        {fmt.approx(quote.totals.total)}
+                      </Text>
+                    ) : null}
                   </View>
                 </View>
-              );
-            })}
-          </Card>
-
-          {/* Order Summary */}
-          <Card>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.sm,
-                marginBottom: spacing.sm,
-              }}
-            >
-              <Icon name="list" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="600">
-                Summary
-              </Text>
-            </View>
-
-            <SummaryRow label="Subtotal" value={fmtPrice(summary.subtotal)} />
-            <SummaryRow
-              label={feeRowLabel}
-              value={
-                shippingEstimateLoading
-                  ? 'Calculating...'
-                  : shippingTotal > 0
-                  ? fmtPrice(shippingTotal)
-                  : 'Free'
-              }
-            />
-            {!isMCGP && gasFee > 0 && (
-              <SummaryRow label="Gas Fee" value={fmtPrice(gasFee)} />
+              </>
             )}
-            {summary.discount > 0 && (
-              <SummaryRow
-                label="Discount"
-                value={`-${fmtPrice(summary.discount)}`}
-                valueColor="success"
-              />
-            )}
-
-            {feeConfig?.merchantFeePercent != null && feeConfig.merchantFeePercent > 0 && (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  paddingVertical: spacing.sm,
-                }}
-              >
-                <Text variant="bodySm" color="textMuted">
-                  Platform Fee ({feeConfig.merchantFeePercent}%)
-                </Text>
-                <Text variant="bodySm" color="textMuted">
-                  Charged to seller
-                </Text>
-              </View>
-            )}
-
-            <Divider spacing="sm" />
-
-            <View
-              style={{
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <Text variant="title3" weight="700">
-                Total
-              </Text>
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text variant="title1" weight="800" color="accent" numeric>
-                  {totalDisplay}
-                </Text>
-                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-                  Paid in {selectedToken}
-                </Text>
-              </View>
-            </View>
           </Card>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -1117,35 +680,168 @@ const CheckoutScreen = () => {
       {/* Fixed Footer */}
       <View
         style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: spacing.md,
           paddingHorizontal: spacing.lg,
           paddingTop: spacing.md,
           paddingBottom: Platform.OS === 'ios' ? spacing['3xl'] : spacing.lg,
           backgroundColor: colors.surface,
           borderTopWidth: 1,
           borderTopColor: colors.hairline,
+          gap: spacing.xs,
         }}
       >
-        <View>
-          <Text variant="caption" color="textMuted">
-            Total
+        {quote ? (
+          <Text variant="caption" color="textMuted" align="center" numeric>
+            {[fmt.token(quote.totals.total), fmt.approx(quote.totals.total)].filter(Boolean).join(' · ')}
           </Text>
-          <Text variant="title1" weight="800" numeric>
-            {totalDisplay}
-          </Text>
-        </View>
-        <Button
-          title={`Pay with ${selectedToken}`}
-          leftIcon="shield"
-          fullWidth={false}
-          disabled={shippingEstimateLoading}
-          onPress={handleCreateOrders}
-        />
+        ) : null}
+        <Button title="Review payment" leftIcon="shield" disabled={payDisabled} onPress={openConfirm} />
       </View>
+
+      {quote ? (
+        <ConfirmPaymentSheet
+          visible={confirmOpen}
+          onClose={() => setConfirmOpen(false)}
+          onConfirm={payNow}
+          quote={quote}
+          shippingLabel={feeRowLabel}
+          walletAddress={walletAddress}
+          tokenBalance={tokenBalance}
+          gasBalance={balances.S}
+        />
+      ) : null}
     </SafeAreaView>
+  );
+};
+
+/** Review → Confirm → Pay, drawn as a thin segmented bar. */
+const StepBar = ({ active }: { active: number }) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <View style={{ gap: spacing.xs }}>
+      <View style={{ flexDirection: 'row', gap: spacing.xs }}>
+        {[0, 1, 2].map((i) => (
+          <View
+            key={i}
+            style={{
+              flex: 1,
+              height: 3,
+              borderRadius: radius.pill,
+              backgroundColor: i <= active ? colors.accent : colors.border,
+            }}
+          />
+        ))}
+      </View>
+      <View style={{ flexDirection: 'row' }}>
+        {['Review', 'Confirm', 'Pay'].map((label, i) => (
+          <Text
+            key={label}
+            variant="caption"
+            weight={i === active ? '600' : '500'}
+            color={i === active ? 'accent' : 'textMuted'}
+            style={{ flex: 1, textAlign: i === 0 ? 'left' : i === 1 ? 'center' : 'right' }}
+          >
+            {label}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+};
+
+const Notice = ({
+  tone,
+  icon,
+  children,
+}: {
+  tone: 'success' | 'danger';
+  icon: 'star' | 'info';
+  children: string;
+}) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.xs,
+        marginTop: spacing.md,
+        paddingVertical: spacing.sm,
+        paddingHorizontal: spacing.md,
+        backgroundColor: tone === 'success' ? colors.successBg : colors.surfaceAlt,
+        borderRadius: radius.sm,
+      }}
+    >
+      <Icon name={icon} size={14} color={tone === 'success' ? colors.success : colors.danger} />
+      <Text variant="caption" weight="500" color={tone} style={{ flex: 1 }}>
+        {children}
+      </Text>
+    </View>
+  );
+};
+
+/** Post-payment receipt: what was paid, where it sits, what happens next. */
+const Receipt = ({
+  quote,
+  orderCount,
+  shippingLabel,
+  cashbackPercent,
+}: {
+  quote: CartQuote;
+  orderCount: number;
+  shippingLabel: string;
+  cashbackPercent?: number;
+}) => {
+  const { colors, spacing, radius } = useTheme();
+  const fmt = useQuoteFormat(quote);
+  const approx = fmt.approx(quote.totals.total);
+  return (
+    <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'], gap: spacing.md }}>
+      <View style={{ alignItems: 'center', gap: spacing.xs, paddingVertical: spacing.lg }}>
+        <View
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: radius.pill,
+            backgroundColor: colors.successBg,
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: spacing.sm,
+          }}
+        >
+          <Icon name="check" size={34} color={colors.success} />
+        </View>
+        <Text variant="title2" weight="700" align="center" numeric>
+          Paid {fmt.token(quote.totals.total)}
+        </Text>
+        <Text variant="bodySm" color="textSecondary" align="center">
+          {[approx, `${orderCount} order${orderCount !== 1 ? 's' : ''} held in escrow`].filter(Boolean).join(' · ')}
+        </Text>
+      </View>
+
+      <Card>
+        <QuoteBreakdown quote={quote} shippingLabel={shippingLabel} withTotal />
+      </Card>
+
+      {cashbackPercent ? (
+        <Text variant="caption" color="success" align="center">
+          {`${cashbackPercent}% cashback lands when you confirm delivery`}
+        </Text>
+      ) : null}
+
+      <Card style={{ gap: spacing.sm }}>
+        <Text variant="overline" color="textMuted">
+          What happens next
+        </Text>
+        <Text variant="bodySm">1. The seller ships, and you get a notification.</Text>
+        <Text variant="bodySm">2. You confirm delivery, and the seller is paid from escrow.</Text>
+        <Text variant="bodySm">3. If something is wrong, open a dispute from the order.</Text>
+      </Card>
+
+      <View style={{ gap: spacing.sm, marginTop: spacing.sm }}>
+        <Button title="View Orders" leftIcon="list" onPress={() => router.push('/(dashboard)/orderlist')} />
+        <Button title="Continue Shopping" variant="secondary" onPress={() => router.replace('/home')} />
+      </View>
+    </ScrollView>
   );
 };
 
