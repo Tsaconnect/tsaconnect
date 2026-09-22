@@ -1,6 +1,7 @@
 package services
 
 import (
+	"math"
 	"math/big"
 	"strings"
 )
@@ -63,4 +64,88 @@ func MeetsMinimumOrder(chainKey string, usd float64, mins map[string]float64, de
 		min = m
 	}
 	return usd >= min
+}
+
+// stableHeadroomBps is the room a stablecoin promise leaves under what she's
+// owed: LiFi's 0.1% stable slippage plus 20 bps for USDC/USDT price drift, so
+// an honest route clears it.
+const stableHeadroomBps = 30
+
+// ceilBps rounds a bps figure up — never under-price a route — after shaving
+// float noise, and floors it at zero.
+func ceilBps(x float64) int {
+	v := int(math.Ceil(x - 1e-6))
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// LiFiCostBps is LiFi's own cost of a route: USD in less USD out. Gas is paid
+// separately (TreasuryGasBps / USDGasBps) and slippage tolerance is not a cost.
+func LiFiCostBps(route *LiFiRoute) (int, bool) {
+	if route == nil || route.FromAmountUSD <= 0 || route.ToAmountUSD <= 0 {
+		return 0, false
+	}
+	return ceilBps((route.FromAmountUSD - route.ToAmountUSD) / route.FromAmountUSD * 10_000), true
+}
+
+// TreasuryGasBps is the gas the treasury pays for a route plus extraGasUnits
+// (the approve), priced from the route's own gas cost, as bps of the input.
+func TreasuryGasBps(route *LiFiRoute, extraGasUnits uint64) int {
+	if route == nil || route.FromAmountUSD <= 0 {
+		return 0
+	}
+	routeGas := route.GasLimit
+	if routeGas == 0 {
+		routeGas = maxRouteGasLimit
+	}
+	return USDGasBps(route.GasCostUSD*float64(routeGas+extraGasUnits)/float64(routeGas), route.FromAmountUSD)
+}
+
+// USDGasBps is a USD gas cost as bps of an order's USD value.
+func USDGasBps(usd, fromUSD float64) int {
+	if fromUSD <= 0 {
+		return 0
+	}
+	return ceilBps(usd / fromUSD * 10_000)
+}
+
+// BridgeAmount is what the treasury sends so LiFi delivers about `entitled`
+// in value: entitled / (1 − l). Refused when that exceeds what was received.
+func BridgeAmount(entitled, received *big.Int, costBps int) (*big.Int, bool) {
+	if entitled == nil || received == nil || entitled.Sign() <= 0 || costBps < 0 || costBps >= 10_000 {
+		return nil, false
+	}
+	a := new(big.Int).Mul(entitled, big.NewInt(10_000))
+	a.Quo(a, big.NewInt(int64(10_000-costBps)))
+	if a.Cmp(received) > 0 {
+		return nil, false
+	}
+	return a, true
+}
+
+// StablePromise is the floor a stablecoin destination must reach: what she's
+// owed in destination units, less slippage and price-drift headroom.
+func StablePromise(entitled *big.Int, srcDecimals, dstDecimals int) *big.Int {
+	return rescaleUnits(bpsShare(entitled, 10_000-stableHeadroomBps), srcDecimals, dstDecimals)
+}
+
+// QuotedFromOrder is T from Paycrest's own order amount: what a direct order
+// at F would have delivered, given this order was sent at F − B. Using the
+// order's amount (not the venue's quote) keeps T consistent with what the
+// treasury actually receives even if the provider's rate moved.
+func QuotedFromOrder(orderAmount *big.Int, feeBps, budgetBps int) *big.Int {
+	out := new(big.Int).Mul(orderAmount, big.NewInt(int64(10_000+feeBps-budgetBps)))
+	return out.Quo(out, big.NewInt(int64(10_000+feeBps)))
+}
+
+// EntitledAmount is what she is owed from a delivery: the quoted amount, cut
+// in proportion when Paycrest delivered less than the order expected.
+func EntitledAmount(quoted, expected, received *big.Int) *big.Int {
+	if expected == nil || expected.Sign() <= 0 || received.Cmp(expected) >= 0 {
+		return new(big.Int).Set(quoted)
+	}
+	out := new(big.Int).Mul(quoted, received)
+	return out.Quo(out, expected)
 }
