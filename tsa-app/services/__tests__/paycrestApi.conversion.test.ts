@@ -98,6 +98,25 @@ describe('createBuy — passing through what the user actually wants', () => {
     expect(body.token).toBe('USDC');
   });
 
+  it('sends requestedChainId/requestedTokenAddress — the mechanism the server actually keys the requested asset by — and never sends decimals', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ id: 'o1', status: 'awaiting_payment' }));
+
+    await createBuy({
+      ...baseInput,
+      requestedChain: 'optimism',
+      requestedToken: 'USDT',
+      requestedChainId: 10,
+      requestedTokenAddress: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58',
+    });
+
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.requestedChainId).toBe(10);
+    expect(body.requestedTokenAddress).toBe('0x94b008aa00579c1307b0ef2c499ad98a8ce58e58');
+    // The server derives decimals itself — never trust a client-side guess.
+    expect(body.requestedTokenDecimals).toBeUndefined();
+  });
+
   it('omits requestedChain/requestedToken on a direct buy, matching old behaviour exactly', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ id: 'o1', status: 'awaiting_payment' }));
 

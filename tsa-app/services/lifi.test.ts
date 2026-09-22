@@ -2,6 +2,7 @@ import {
   getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
   SUI_LIFI_CHAIN_ID, isSignableSourceChain, isNativeTokenAddress, chainsForLeg, sumGasCostsWei,
+  findTokenBySymbolForChain, type LiFiToken,
 } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -187,6 +188,39 @@ describe('isNativeTokenAddress', () => {
   it('is false for tokens and empty input', () => {
     expect(isNativeTokenAddress('0x55d398326f99059fF775485246999027B3197955')).toBe(false);
     expect(isNativeTokenAddress('')).toBe(false);
+  });
+});
+
+describe('findTokenBySymbolForChain — refusing a stale (wrong-chain) token list', () => {
+  const optimismUsdt: LiFiToken = {
+    address: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58',
+    symbol: 'USDT',
+    name: 'Tether USD',
+    decimals: 6,
+    logoURI: '',
+  };
+  const baseUsdt: LiFiToken = {
+    address: '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2',
+    symbol: 'USDT',
+    name: 'Tether USD',
+    decimals: 6,
+    logoURI: '',
+  };
+
+  it('matches by symbol when the list was fetched for the wanted chain', () => {
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 10, 'USDT')).toBe(optimismUsdt);
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 10, 'usdt')).toBe(optimismUsdt);
+  });
+
+  it('refuses the match when the list is still the PREVIOUS chain\'s — this is the bug: a stale Optimism list must never resolve a Base USDT request just because the symbol matches', () => {
+    // otherwise "use X instead" (switch to Base while Optimism's token list
+    // is still in state) would silently pin baseUsdt's chainId to
+    // optimismUsdt's address.
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 8453, 'USDT')).toBeNull();
+  });
+
+  it('returns null when the symbol just is not in the (correctly-chained) list', () => {
+    expect(findTokenBySymbolForChain([baseUsdt], 8453, 8453, 'USDC')).toBeNull();
   });
 });
 

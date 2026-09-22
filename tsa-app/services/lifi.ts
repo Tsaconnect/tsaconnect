@@ -99,6 +99,33 @@ export interface LiFiToken {
   verificationStatus?: 'verified' | 'unverified' | string;
 }
 
+/**
+ * Find `symbol` in `tokens`, refusing the match unless `tokens` was actually
+ * fetched FOR `wantChainId`.
+ *
+ * `getLiFiTokens(chainId)` resolves asynchronously, so a caller holding the
+ * result in state can still be showing the PREVIOUS chain's list on the very
+ * render where it switches to a new chain — React doesn't apply one effect's
+ * setState until the next render, so a sibling effect in the same commit
+ * still sees the old list. A symbol like USDT/USDC/DAI recurs on almost
+ * every EVM chain, so a naive symbol-only match against that stale list can
+ * silently return a token from the WRONG chain. Per-token `chainId` can't
+ * catch this either — it isn't reliably populated by a single-chain
+ * `getLiFiTokens` response (see getLiFiAllTokens, which has to stamp it on
+ * manually). Callers must instead track which chain id the list itself was
+ * fetched for and pass it as `tokensChainId`; this refuses rather than
+ * guesses when the two disagree.
+ */
+export function findTokenBySymbolForChain(
+  tokens: LiFiToken[],
+  tokensChainId: number,
+  wantChainId: number,
+  symbol: string,
+): LiFiToken | null {
+  if (tokensChainId !== wantChainId) return null;
+  return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase()) ?? null;
+}
+
 export interface LiFiQuoteParams {
   fromChain: number;
   toChain: number;

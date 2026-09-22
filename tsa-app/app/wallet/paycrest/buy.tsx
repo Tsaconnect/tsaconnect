@@ -87,7 +87,7 @@ import { promptKycRefusal } from '@/utils/kycRefusal';
 // want to receive" picker needs.
 import AssetPicker from '@/components/assets/AssetPicker';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
-import { getLiFiTokens, type LiFiToken } from '@/services/lifi';
+import { getLiFiTokens, findTokenBySymbolForChain, type LiFiToken } from '@/services/lifi';
 import { getChainByChainId, getChainDisplay, getChain, type ChainKey } from '@/constants/chains';
 
 /** Debounce on the amount field: every keystroke would otherwise fan a live
@@ -203,7 +203,17 @@ export default function PaycrestBuyScreen() {
   // LiFiToken object at all).
   const [wantTokenMeta, setWantTokenMeta] = useState<LiFiToken | null>(null);
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
-  const [pickerTokens, setPickerTokens] = useState<LiFiToken[]>([]);
+  // Tagged with the chain id it was actually fetched FOR — not just "the
+  // current list" — because getLiFiTokens resolves asynchronously: on the
+  // very render `want.chainId` changes, this can still hold the PREVIOUS
+  // chain's tokens, and a symbol like USDT/USDC/DAI recurs on almost every
+  // EVM chain. Every consumer below goes through findTokenBySymbolForChain,
+  // which refuses a match when this tag disagrees with what's wanted, rather
+  // than risk pinning a wrong-chain address to the new chain id.
+  const [pickerTokens, setPickerTokens] = useState<{ chainId: number; tokens: LiFiToken[] }>({
+    chainId: DEFAULT_CHAIN_ID,
+    tokens: [],
+  });
 
   // Refund destination. Paycrest requires one on every onramp, because it
   // cannot know who will pay until the transfer arrives — so this is the only
@@ -275,9 +285,13 @@ export default function PaycrestBuyScreen() {
   // this never re-resolves it there.
   useEffect(() => {
     let active = true;
-    getLiFiTokens(want.chainId)
+    const chainId = want.chainId;
+    getLiFiTokens(chainId)
       .then((tokens) => {
-        if (active) setPickerTokens(tokens);
+        // Tag the list with the chain id it was fetched FOR — see
+        // pickerTokens's own doc comment for why this matters more than it
+        // looks like it should.
+        if (active) setPickerTokens({ chainId, tokens });
       })
       .catch(() => {});
     return () => {
@@ -289,18 +303,31 @@ export default function PaycrestBuyScreen() {
   // loads — best-effort only; `want` already carries everything the quote
   // and the order actually need.
   useEffect(() => {
-    const match = pickerTokens.find((t) => t.symbol.toUpperCase() === want.token.toUpperCase());
+    const match = findTokenBySymbolForChain(
+      pickerTokens.tokens,
+      pickerTokens.chainId,
+      want.chainId,
+      want.token,
+    );
     if (match) setWantTokenMeta(match);
-  }, [pickerTokens, want.token]);
+  }, [pickerTokens, want.chainId, want.token]);
 
   // Fill in the address once it's known — the quote effect below waits for
   // this rather than guessing at getLiFiToken(chainId, addressOrSymbol),
   // which takes an address, not a symbol.
   useEffect(() => {
     if (want.address) return;
-    const match = pickerTokens.find((t) => t.symbol.toUpperCase() === want.token.toUpperCase());
-    if (match) setWant((w) => (w.address ? w : { ...w, address: match.address }));
-  }, [pickerTokens, want.address, want.token]);
+    const wantedChainId = want.chainId;
+    const match = findTokenBySymbolForChain(
+      pickerTokens.tokens,
+      pickerTokens.chainId,
+      wantedChainId,
+      want.token,
+    );
+    if (match) {
+      setWant((w) => (w.address || w.chainId !== wantedChainId ? w : { ...w, address: match.address }));
+    }
+  }, [pickerTokens, want.address, want.chainId, want.token]);
 
   // Re-quote on amount, currency, or a change of what the user wants to
   // receive. The requested (chain, token) is sent on every call — see
