@@ -20,7 +20,8 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { getChainByChainId, CHAINS, NONEVM_CHAINS, txExplorerUrl } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
-import { getActiveWallet, readErc20BalanceOf, getProvider } from '@/services/wallet';
+import { getActiveWallet, readErc20BalanceOf, getProvider, ensureGas, nativeGasReserve } from '@/services/wallet';
+import { spendableNative } from '@/services/gasReserve';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
@@ -28,7 +29,7 @@ import { ethers } from 'ethers';
 import {
   getLiFiToken, getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
   type SwapDeliveryStatus,
-  isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
+  isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, isNativeTokenAddress, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
@@ -426,7 +427,9 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       }
       const res = await getWalletBalances(fromChainId);
       if (res.success && res.data) {
-        setBalances(normalizeWalletBalances(res.data, 'bsc'));
+        // Label rows the backend leaves unstamped with the chain actually
+        // read, not a hardcoded BSC.
+        setBalances(normalizeWalletBalances(res.data, getChainByChainId(fromChainId)?.key));
       }
     } catch {}
   };
@@ -478,11 +481,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
         }
         const chain = getChainByChainId(fromChainId);
         if (!chain) return;
-        const addr = fromToken.address.toLowerCase();
-        const isNative =
-          addr === '0x0000000000000000000000000000000000000000' ||
-          addr === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
-        const raw = isNative
+        const raw = isNativeTokenAddress(fromToken.address)
           ? await getProvider(chain.key).getBalance(walletAddress)
           : await readErc20BalanceOf(fromToken.address, walletAddress, chain.key);
         if (cancelled) return;
@@ -495,6 +494,42 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       cancelled = true;
     };
   }, [fromToken, fromChainId, walletAddress, solanaAddress, btcAddress, suiAddress, refreshKey]);
+
+  // Native units to hold back when the token being sold IS the EVM gas token,
+  // so MAX can't pick an amount that leaves nothing to pay for the swap. Uses
+  // the current quote's gasLimit and gas cost once there is one. null =
+  // unknown (RPC blip, non-EVM source): MAX then stays at the full balance.
+  const [gasReserve, setGasReserve] = useState<bigint | null>(null);
+  // Whether the amount is "whatever MAX is" (tapped, and not typed over since).
+  // MAX follows the reserve as quotes refine it, and while it does the reserve
+  // only grows, so quote → reserve → amount → quote can only settle, never
+  // oscillate.
+  const [maxMode, setMaxMode] = useState(false);
+  const maxModeRef = useRef(false);
+  maxModeRef.current = maxMode;
+  const quoteGasLimit = quote?.transactionRequest?.gasLimit;
+  const quoteGasCostWei = quote?.gasCostWei;
+  useEffect(() => {
+    const chain = isNonEVMLiFiChain(fromChainId) ? undefined : getChainByChainId(fromChainId);
+    if (!chain || !fromToken || !isNativeTokenAddress(fromToken.address)) {
+      setGasReserve(null);
+      return;
+    }
+    const toBig = (v?: string) => {
+      try { return v ? BigInt(v) : undefined; } catch { return undefined; }
+    };
+    let cancelled = false;
+    nativeGasReserve(chain.key, { gasUnits: toBig(quoteGasLimit), gasCostWei: toBig(quoteGasCostWei) })
+      .then(r => {
+        if (cancelled) return;
+        setGasReserve(prev => (maxModeRef.current && prev != null && r != null && prev > r ? prev : r));
+      })
+      .catch(() => { if (!cancelled) setGasReserve(null); });
+    return () => { cancelled = true; };
+  }, [fromChainId, fromToken, quoteGasLimit, quoteGasCostWei, refreshKey]);
+
+  // A new token or chain starts from a clean slate.
+  useEffect(() => { setMaxMode(false); }, [fromToken, fromChainId]);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -578,6 +613,25 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       ? '0'
       : balances.find(b => b.symbol === fromToken?.symbol)?.balance ?? '0');
 
+  // The most MAX may fill in: the full balance, less the gas reserve when the
+  // token being sold pays for its own swap.
+  const maxAmount = (() => {
+    if (!fromToken || gasReserve == null) return fromBalance;
+    try {
+      const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
+      return ethers.formatUnits(spendableNative(balanceUnits, gasReserve), fromToken.decimals);
+    } catch {
+      return fromBalance;
+    }
+  })();
+
+  useEffect(() => {
+    if (maxMode && Number(maxAmount) > 0 && maxAmount !== fromAmount) setFromAmount(maxAmount);
+    // fromAmount is deliberately not a dependency: this follows maxAmount, and
+    // re-running on the amount it just set would be a no-op anyway.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maxMode, maxAmount]);
+
   const validate = () => {
     if (!fromToken) return 'Select a token to send';
     if (!toToken) return 'Select a token to receive';
@@ -593,6 +647,9 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
       const amountUnits = ethers.parseUnits(fromAmount, fromToken.decimals);
       const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
       if (amountUnits > balanceUnits) return `Insufficient ${fromToken.symbol} balance`;
+      if (gasReserve != null && amountUnits + gasReserve > balanceUnits) {
+        return `Leave some ${fromToken.symbol} to pay the network fee`;
+      }
     } catch {
       return 'Enter a valid amount';
     }
@@ -601,10 +658,61 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     return null;
   };
 
+  // Why the confirm screen can't execute right now, or null when it can. The
+  // expiry countdown keeps running on that screen, and a refresh can come back
+  // with no route, so this drives both its banner and its button.
+  const confirmBlocker = ((): string | null => {
+    if (quoteStatus === 'quoted' && quote) return null;
+    switch (quoteStatus) {
+      case 'quoting': return null;
+      case 'expired': return 'This price expired — get a fresh one before swapping';
+      case 'no_route': return 'No route for this pair right now — try a fresh price';
+      case 'error': return quoteError || 'Could not price this route — try a fresh price';
+      default: return 'No live price for this route — tap to get one';
+    }
+  })();
+
   // Approve→wait→swap execution lives in services/lifiFlow (shared with the
   // Spot Trade desk); this handler only owns the screen-state wiring.
+  // One swap at a time. The gas pre-flight awaits an RPC read while the
+  // Confirm button is still on screen, so without this a second tap would run
+  // a second swap.
+  const swapInFlight = useRef(false);
+  const [preparingSwap, setPreparingSwap] = useState(false);
+
   const handleSwap = async () => {
     if (!quote || !fromToken || !toToken || !walletAddress) return;
+    // An expired quote still exists, so the check above passes it. Signing it
+    // would send a stale minAmountOut — a revert with gas burned, or a fill
+    // at a price the user never saw. The button is disabled then too; this is
+    // the guard that matters.
+    if (quoteStatus !== 'quoted') return;
+    if (swapInFlight.current) return;
+    swapInFlight.current = true;
+    try {
+      await runSwap(quote, fromToken, toToken);
+    } finally {
+      swapInFlight.current = false;
+      setPreparingSwap(false);
+    }
+  };
+
+  const runSwap = async (quote: LiFiQuote, fromToken: LiFiToken, toToken: LiFiToken) => {
+    // Same pre-flight the Spot Trade desk runs: a wallet with no gas should
+    // stop here, not after the user has sat through signing.
+    const sourceChain = isNonEVMLiFiChain(fromChainId) ? undefined : getChainByChainId(fromChainId);
+    if (sourceChain) {
+      setPreparingSwap(true);
+      let gasMessage = '';
+      const hasGas = await ensureGas(sourceChain.key, walletAddress, (title, message) => {
+        gasMessage = `${title}: ${message}`;
+      });
+      if (!hasGas) {
+        setError(gasMessage || `You need ${sourceChain.nativeCurrency.symbol} on ${sourceChain.name} to pay the network fee.`);
+        return;
+      }
+    }
+
     setScreen('signing'); setError('');
 
     // Built BEFORE the swap runs, so that nothing about reporting the fee can
@@ -796,10 +904,32 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
           </View>
         )}
 
+        {confirmBlocker ? (
+          <View
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+              backgroundColor: colors.warningBg, borderWidth: 1, borderColor: colors.warning,
+              borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+            }}
+          >
+            <Icon name="clock" size={13} color={colors.warning} />
+            <Text variant="caption" style={{ flex: 1, color: colors.warning }}>{confirmBlocker}</Text>
+          </View>
+        ) : null}
+        {error ? (
+          <Text variant="caption" color="danger" style={{ marginTop: spacing.md }}>{error}</Text>
+        ) : null}
+
         <Button
-          title="Confirm Swap"
-          leftIcon="swapVertical"
-          onPress={handleSwap}
+          title={
+            quoteStatus === 'quoting' ? 'Getting a fresh price…'
+              : confirmBlocker ? 'Refresh price'
+              : 'Confirm Swap'
+          }
+          leftIcon={confirmBlocker ? 'refresh' : 'swapVertical'}
+          onPress={confirmBlocker ? refreshQuote : handleSwap}
+          loading={preparingSwap}
+          disabled={quoteStatus === 'quoting'}
           size="lg"
           style={{ marginTop: spacing.xl }}
         />
@@ -887,7 +1017,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
                 placeholder="0.00"
                 placeholderTextColor={colors.textDisabled}
                 value={fromAmount}
-                onChangeText={t => { setFromAmount(t); setError(''); }}
+                onChangeText={t => { setMaxMode(false); setFromAmount(t); setError(''); }}
                 keyboardType="decimal-pad"
               />
             </View>
@@ -895,7 +1025,15 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
               {fromAmountUSD != null && (
                 <Text variant="caption" color="textMuted">≈ ${fromAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
               )}
-              <PressableScale onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
+              <PressableScale
+                accessibilityRole="button"
+                accessibilityLabel={`Use maximum: ${maxAmount} ${fromToken?.symbol ?? ''}`}
+                onPress={() => {
+                  if (Number(maxAmount) <= 0) return;
+                  setMaxMode(true);
+                  setFromAmount(maxAmount);
+                }}
+              >
                 <Text variant="caption" weight="500" color="accent">Balance: {formattedBalance} {fromToken?.symbol}</Text>
               </PressableScale>
             </View>
@@ -1047,7 +1185,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
 
           <Button
             title="Review Swap"
-            onPress={() => { const e = validate(); if (e) { setError(e); return; } setScreen('confirm'); }}
+            onPress={() => { const e = validate(); if (e) { setError(e); return; } setError(''); setScreen('confirm'); }}
             disabled={!!validationError}
             size="lg"
             style={{ marginTop: spacing.xl }}

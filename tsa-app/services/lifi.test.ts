@@ -1,6 +1,7 @@
 import {
   getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
+  SUI_LIFI_CHAIN_ID, isSignableSourceChain, isNativeTokenAddress, chainsForLeg, sumGasCostsWei,
 } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -129,6 +130,63 @@ describe('chain family helpers', () => {
     expect(isNonEVMLiFiChain(SOLANA_LIFI_CHAIN_ID)).toBe(true);
     expect(isNonEVMLiFiChain(BTC_LIFI_CHAIN_ID)).toBe(true);
     expect(isNonEVMLiFiChain(1)).toBe(false);
+  });
+});
+
+describe('isSignableSourceChain', () => {
+  it('allows the wallet\'s own EVM chains', () => {
+    expect(isSignableSourceChain(56)).toBe(true); // BSC
+    expect(isSignableSourceChain(146)).toBe(true); // Sonic
+  });
+
+  it('allows every non-EVM family the swap flow signs (Solana, Bitcoin, Sui)', () => {
+    expect(isSignableSourceChain(SOLANA_LIFI_CHAIN_ID)).toBe(true);
+    expect(isSignableSourceChain(BTC_LIFI_CHAIN_ID)).toBe(true);
+    expect(isSignableSourceChain(SUI_LIFI_CHAIN_ID)).toBe(true);
+  });
+
+  it('refuses a LiFi EVM chain the wallet holds no signer config for', () => {
+    expect(isSignableSourceChain(324)).toBe(false); // zkSync Era
+    expect(isSignableSourceChain(1284)).toBe(false); // Moonbeam
+  });
+});
+
+describe('chainsForLeg', () => {
+  const all = [56, 146, 324, 1284, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID]
+    .map(id => ({ id, name: String(id), key: String(id), coin: 'X' }));
+
+  it('offers only signable chains as a source, Bitcoin/Solana/Sui included', () => {
+    expect(chainsForLeg(all, 'from').map(c => c.id)).toEqual(
+      [56, 146, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID],
+    );
+  });
+
+  it('offers every chain as a destination', () => {
+    expect(chainsForLeg(all, 'to')).toHaveLength(all.length);
+  });
+});
+
+describe('sumGasCostsWei', () => {
+  it('sums every gas cost exactly', () => {
+    expect(sumGasCostsWei([{ amount: '40000000000000' }, { amount: '5' }])).toBe('40000000000005');
+  });
+
+  it('is undefined for a missing or unparseable estimate', () => {
+    expect(sumGasCostsWei(undefined)).toBeUndefined();
+    expect(sumGasCostsWei([])).toBeUndefined();
+    expect(sumGasCostsWei([{ amount: 'n/a' }])).toBeUndefined();
+  });
+});
+
+describe('isNativeTokenAddress', () => {
+  it('recognises both LiFi native markers, case-insensitively', () => {
+    expect(isNativeTokenAddress('0x0000000000000000000000000000000000000000')).toBe(true);
+    expect(isNativeTokenAddress('0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE')).toBe(true);
+  });
+
+  it('is false for tokens and empty input', () => {
+    expect(isNativeTokenAddress('0x55d398326f99059fF775485246999027B3197955')).toBe(false);
+    expect(isNativeTokenAddress('')).toBe(false);
   });
 });
 

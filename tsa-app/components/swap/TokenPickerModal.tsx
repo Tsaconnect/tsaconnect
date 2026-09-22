@@ -6,7 +6,7 @@
 // section, BE-paginated "All chains" list, and the onSelect(token, chainId)
 // contract are all preserved verbatim — this is a visual/structural restyle
 // only. Props interface and the default export are unchanged.
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Modal, View, TextInput, TouchableOpacity,
   StyleSheet, Pressable, SectionList, FlatList, Image,
@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { LiFiToken, LiFiChain } from '../../services/lifi';
-import { getLiFiChains, getLiFiToken } from '../../services/lifi';
+import { chainsForLeg, getLiFiChains, getLiFiToken, isSignableSourceChain } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import type { Theme } from '@/theme';
@@ -348,7 +348,10 @@ export default function TokenPickerModal({
   const { colors, spacing, radius } = theme;
   const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
-  const [chains, setChains] = useState<LiFiChain[]>([]);
+  // Fetched once; each leg sees its own view of it (chainsForLeg), so switching
+  // legs never shows the other leg's list or re-fetches.
+  const [allChains, setAllChains] = useState<LiFiChain[]>([]);
+  const chains = useMemo(() => chainsForLeg(allChains, mode), [allChains, mode]);
   const [chainsLoading, setChainsLoading] = useState(true);
   const [chainPickerVisible, setChainPickerVisible] = useState(false);
   const [selectedChainId, setSelectedChainId] = useState<number | 'all'>('all');
@@ -368,7 +371,7 @@ export default function TokenPickerModal({
 
   useEffect(() => {
     getLiFiChains()
-      .then(setChains)
+      .then(setAllChains)
       .catch(() => {})
       .finally(() => setChainsLoading(false));
   }, []);
@@ -473,22 +476,39 @@ export default function TokenPickerModal({
 
   // Source list: "All" uses combined cross-chain tokens, specific chain uses that chain's list
   const isAllChains = selectedChainId === 'all';
-  const sourceTokens = isAllChains
-    ? (allChainsTokens ?? allTokens)
-    : allTokens.filter(t => !t.chainId || t.chainId === selectedChainId);
+
+  // The all-chains list spans every LiFi chain, so gate it like the chain
+  // chips. A token with no chainId came from the per-chain fetch for the
+  // `chainId` prop, which is already a signable source.
+  const signableOnly = useCallback(
+    (tokens: LiFiToken[]) =>
+      mode === 'from' ? tokens.filter(t => t.chainId === undefined || isSignableSourceChain(t.chainId)) : tokens,
+    [mode],
+  );
+
+  const sourceTokens = useMemo(
+    () =>
+      signableOnly(
+        isAllChains
+          ? (allChainsTokens ?? allTokens)
+          : allTokens.filter(t => !t.chainId || t.chainId === selectedChainId),
+      ),
+    [signableOnly, isAllChains, allChainsTokens, allTokens, selectedChainId],
+  );
 
   const heldTokens = useMemo(() => {
     if (mode === 'to') return [];
+    const candidates = signableOnly(allChainsTokens ?? allTokens);
     return userBalances
       .filter(b => Number(b.balance) > 0)
       .map(b => {
-        const match = (allChainsTokens ?? allTokens).find(
+        const match = candidates.find(
           t => t.symbol.toLowerCase() === b.symbol.toLowerCase()
         );
         return match ? { token: match, balance: b.balance, usdValue: b.usdValue } : null;
       })
       .filter(Boolean) as { token: LiFiToken; balance: string; usdValue: string }[];
-  }, [userBalances, allTokens, allChainsTokens, mode]);
+  }, [userBalances, allTokens, allChainsTokens, mode, signableOnly]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();

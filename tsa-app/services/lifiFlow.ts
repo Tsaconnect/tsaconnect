@@ -115,7 +115,9 @@ export async function executeLiFiSwap({
   }
 
   const fromAmountWei = ethers.parseUnits(fromAmount, fromDecimals).toString();
-  const humanAmount = String(Number(fromAmountWei) / Math.pow(10, fromDecimals));
+  // formatUnits, not Number division: an 18-decimal amount passes 2^53 base
+  // units, so dividing through a JS number rounds the figure we record.
+  const humanAmount = ethers.formatUnits(fromAmountWei, fromDecimals);
 
   if (quote.approvalAddress && quote.approvalToken) {
     onStage?.('Step 1 of 2: Approving token…');
