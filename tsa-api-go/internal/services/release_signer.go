@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -85,7 +86,21 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	if err != nil {
 		return "", notBroadcast(fmt.Errorf("rlp encode: %w", err))
 	}
-	return s.bc.SendRawTransaction(raw)
+	hash, err := s.bc.SendRawTransaction(raw)
+	if err != nil && rejectedForFunds(err) {
+		return "", notBroadcast(err)
+	}
+	return hash, err
+}
+
+// rejectedForFunds reports a node refusing a transaction because the sender
+// cannot pay for it. That refusal is definite — the transaction never entered
+// a mempool — unlike a timeout, which can hide one that did. Matched on text
+// because the RPC error carries no code for it; geth, erigon and the
+// L2 forks all say "insufficient funds", nethermind "InsufficientFunds".
+func rejectedForFunds(err error) bool {
+	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	return strings.Contains(msg, "insufficientfunds")
 }
 
 // fakeReleaseSigner records calls for tests and returns a canned hash.

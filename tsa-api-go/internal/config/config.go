@@ -300,9 +300,10 @@ type Config struct {
 	RampTreasuryMaxInflightUSDPerOrder float64
 	RampTreasuryMaxInflightUSDPerChain float64
 	// RampTreasuryNativeFloorWei is the native balance below which a lane
-	// refuses to execute a conversion — same shape as
-	// RampSponsorBalanceFloorWei but a separate map: a treasury lane signs a
-	// bridge tx, not a simple relay, so the floor that matters is different.
+	// raises a refill ALERT. It is a warning, not a stop: a lane keeps
+	// sending as long as it can pay for the transaction in hand (see
+	// Treasury.requireGas). Same shape as RampSponsorBalanceFloorWei but a
+	// separate map: a treasury lane signs a bridge tx, not a simple relay.
 	RampTreasuryNativeFloorWei map[string]string
 	// RampTreasuryRouters is the per-chain allowlist of contract addresses a
 	// LiFi route may ask the treasury to call or approve. A quote names its

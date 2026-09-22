@@ -186,13 +186,65 @@ func TestTreasury_ExecuteRouteRefusedWhenKilled(t *testing.T) {
 	}
 }
 
-func TestTreasury_ExecuteRouteRefusedBelowFloor(t *testing.T) {
-	tr, lane, _, _ := newTestTreasuryWithFakes(t)
-	lane.Chain.(*fakeSponsorChain).balances[lane.Signer.Address()] = big.NewInt(1) // below the 1_000 wei floor
+// withTreasuryBalance sets the lane's native balance and gives it a real
+// 1-native floor, so "below the floor" and "cannot pay for this tx" can be
+// told apart (the rig's own 1_000 wei floor is below any gas cost).
+func withTreasuryBalance(lane *TreasuryLane, wei *big.Int) {
+	lane.Chain.(*fakeSponsorChain).balances[strings.ToLower(lane.Signer.Address())] = wei
+	lane.Guard = NewSponsorGuard("ramp_treasury_test", SponsorLimits{
+		BalanceFloor: new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
+	}, func() time.Time { return sponsorTestNow })
+}
+
+// The rig prices gas at 1 gwei. validRoute asks for 250k gas and needs an
+// approve (treasuryERC20Gas), so it costs (250k + approve) gwei.
+func routeCostWei(route *LiFiRoute, withApprove bool) *big.Int {
+	units := route.GasLimit
+	if withApprove {
+		units += treasuryERC20Gas
+	}
+	return new(big.Int).Mul(new(big.Int).SetUint64(units), big.NewInt(1_000_000_000))
+}
+
+// The floor is a warning, not a stop: a lane below it that can still pay
+// for THIS transaction sends it.
+func TestTreasury_ExecuteRouteRunsBelowTheFloorWhenItCanPayForTheTx(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
 	route := validRoute()
+	withTreasuryBalance(lane, routeCostWei(route, true))
+	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100), route); err != nil {
+		t.Fatalf("a lane that can pay for the tx was refused: %v", err)
+	}
+	if signer.calls() != 2 {
+		t.Fatalf("broadcasts = %d, want approve then route", signer.calls())
+	}
+}
+
+// Nothing is sent — not even the approve — when the lane cannot pay for the
+// approve AND the route together: an approve with no route after it spends
+// gas for nothing.
+func TestTreasury_ExecuteRouteRefusedWhenItCannotPayForApproveAndRoute(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	short := new(big.Int).Sub(routeCostWei(route, true), big.NewInt(1))
+	withTreasuryBalance(lane, short)
 	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100), route)
 	if !errors.Is(err, ErrRelayerUnderfunded) || attempted {
 		t.Fatalf("attempted=%v err=%v, want ErrRelayerUnderfunded and attempted=false", attempted, err)
+	}
+	if signer.calls() != 0 {
+		t.Fatalf("broadcasts = %d; nothing may be sent that the lane cannot finish", signer.calls())
+	}
+}
+
+// With the allowance already in place only the route itself has to be paid.
+func TestTreasury_ExecuteRouteOnlyNeedsRouteGasWhenNoApproveIsDue(t *testing.T) {
+	tr, lane, native, _ := newTestTreasuryWithFakes(t)
+	native.allowance = big.NewInt(1_000_000000)
+	route := validRoute()
+	withTreasuryBalance(lane, routeCostWei(route, false))
+	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100), route); err != nil {
+		t.Fatalf("route gas alone was enough: %v", err)
 	}
 }
 
@@ -524,12 +576,23 @@ func TestTreasury_TransferTokenRefusedWhenKilled(t *testing.T) {
 	}
 }
 
-func TestTreasury_TransferTokenRefusedBelowFloor(t *testing.T) {
+func TestTreasury_TransferTokenRunsBelowTheFloorWhenItCanPayForTheTx(t *testing.T) {
 	tr, lane, _, _ := newTestTreasuryWithFakes(t)
-	lane.Chain.(*fakeSponsorChain).balances[lane.Signer.Address()] = big.NewInt(1) // below the 1_000 wei floor
+	withTreasuryBalance(lane, new(big.Int).Mul(big.NewInt(treasuryERC20Gas), big.NewInt(1_000_000_000)))
+	if _, _, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1)); err != nil {
+		t.Fatalf("a lane that can pay for the transfer was refused: %v", err)
+	}
+}
+
+func TestTreasury_TransferTokenRefusedWhenItCannotPayForTheTx(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
+	withTreasuryBalance(lane, big.NewInt(1))
 	_, attempted, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1))
 	if !errors.Is(err, ErrRelayerUnderfunded) || attempted {
 		t.Fatalf("attempted=%v err=%v, want ErrRelayerUnderfunded and attempted=false", attempted, err)
+	}
+	if signer.calls() != 0 {
+		t.Fatalf("broadcasts = %d, want none", signer.calls())
 	}
 }
 
@@ -750,5 +813,45 @@ func TestTreasury_ExecuteRouteBoundsAMissingGasLimitByTheCeiling(t *testing.T) {
 func TestTreasury_RouteGasCeilingClearsLiveQuotes(t *testing.T) {
 	if maxRouteGasLimit < 2*2_275_122 {
 		t.Fatalf("ceiling %d leaves no headroom over live LiFi limits", maxRouteGasLimit)
+	}
+}
+
+// A broadcast the node refused outright never happened, so the caller may
+// free the slot and retry instead of stranding the order as "may have landed".
+func TestTreasury_TransferRefusedForFundsWasNeverBroadcast(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
+	signer.err = notBroadcast(errors.New("insufficient funds for gas * price + value"))
+	_, attempted, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1_000000))
+	if err == nil || attempted {
+		t.Fatalf("attempted=%v err=%v; want a clean, not-broadcast refusal", attempted, err)
+	}
+}
+
+// Quoting asks whether a lane can pay for a route's gas on every public quote
+// request, so the answer is cached briefly rather than costing two RPC reads
+// per request; execution always reads fresh (requireGas).
+func TestTreasury_CanPayForGas(t *testing.T) {
+	tr, lane, _, _ := newTestTreasuryWithFakes(t)
+	clock := sponsorTestNow
+	tr.now = func() time.Time { return clock }
+	withTreasuryBalance(lane, big.NewInt(1_000_000_000*1_000_000)) // 1M gas at the rig's 1 gwei
+
+	if !tr.CanPayForGas(context.Background(), "base", 1_000_000) {
+		t.Fatal("a lane holding exactly the cost can pay")
+	}
+	if tr.CanPayForGas(context.Background(), "base", 1_000_001) {
+		t.Fatal("one gas unit more than the balance covers must be refused")
+	}
+	if tr.CanPayForGas(context.Background(), "nowhere", 1) {
+		t.Fatal("a chain with no lane cannot pay for anything")
+	}
+
+	withTreasuryBalance(lane, big.NewInt(1))
+	if !tr.CanPayForGas(context.Background(), "base", 1_000_000) {
+		t.Fatal("inside the cache window the earlier reading stands")
+	}
+	clock = clock.Add(treasuryGasCacheTTL + time.Second)
+	if tr.CanPayForGas(context.Background(), "base", 1_000_000) {
+		t.Fatal("after the cache window the drained balance must be seen")
 	}
 }

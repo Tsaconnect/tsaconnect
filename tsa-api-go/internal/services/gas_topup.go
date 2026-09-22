@@ -231,11 +231,10 @@ func (g *GasTopUp) gasNeeded(lane *SponsorLane, order *models.PaycrestOrderRecor
 	if err != nil || limit == 0 {
 		limit = topUpFallbackTransferGas
 	}
-	price, err := lane.Native.SuggestGasPrice()
+	need, err := lane.gasCost(limit)
 	if err != nil {
-		return nil, fmt.Errorf("sponsor: gas price: %w", err)
+		return nil, fmt.Errorf("sponsor: %w", err)
 	}
-	need := new(big.Int).Mul(new(big.Int).SetUint64(limit), price)
 	return need.Mul(need, big.NewInt(topUpGasBuffer)), nil
 }
 

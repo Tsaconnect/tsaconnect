@@ -75,7 +75,19 @@ type quoteServiceRig struct {
 // fixtures below are unaffected; TestQuote_RefusesAVenueOnAChainWithNoTreasuryLane
 // builds its own checker that excludes one on purpose.
 type fakeTreasuryLaneChecker struct {
-	laned map[string]bool
+	laned    map[string]bool
+	unfunded map[string]bool // lanes that cannot pay for gas
+	asked    []gasAsk
+}
+
+type gasAsk struct {
+	chain string
+	units uint64
+}
+
+func (f *fakeTreasuryLaneChecker) CanPayForGas(_ context.Context, chainKey string, units uint64) bool {
+	f.asked = append(f.asked, gasAsk{chainKey, units})
+	return f.laned[strings.ToLower(chainKey)] && !f.unfunded[strings.ToLower(chainKey)]
 }
 
 func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *TreasuryLane {
@@ -102,6 +114,32 @@ func newQuoteServiceWithFakes(t *testing.T) *quoteServiceRig {
 		"base": true, "bsc": true, "optimism": true, "linea": true,
 	}})
 	return &quoteServiceRig{svc: svc, pc: pc, lifi: lifi}
+}
+
+// A route the treasury cannot pay gas for is not offered: the user would pay
+// naira into an order the treasury can only strand.
+func TestQuote_NoConvertedVenueWhenTheSettlementLaneCannotPayForGas(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	s.svc.treasuryLanes.(*fakeTreasuryLaneChecker).unfunded = map[string]bool{"base": true}
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), GasLimit: 1_200_000, Tool: "across"}
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v err = %v; want none while base cannot pay for gas", venues, err)
+	}
+}
+
+// The gas asked for is THIS route's own limit plus an approve, on the chain
+// the bridge actually runs from (the settlement leg), not the destination.
+func TestQuote_ConvertedVenueAsksForTheRoutesOwnGas(t *testing.T) {
+	s := newQuoteServiceWithFakes(t)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), GasLimit: 1_200_000, Tool: "across"}
+	if _, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}}); err != nil {
+		t.Fatal(err)
+	}
+	asked := s.svc.treasuryLanes.(*fakeTreasuryLaneChecker).asked
+	if len(asked) != 1 || asked[0].chain != "base" || asked[0].units != 1_200_000+treasuryERC20Gas {
+		t.Fatalf("gas asks = %+v; want one for base covering the route plus an approve", asked)
+	}
 }
 
 func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testing.T) {

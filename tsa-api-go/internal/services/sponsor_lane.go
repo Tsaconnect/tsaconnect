@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"strings"
@@ -85,7 +86,10 @@ type SponsorLane struct {
 // send builds and broadcasts one tx. broadcastAttempted separates a build
 // failure (nothing left this process, safe to free the order's slot) from a
 // broadcast failure, which is not proof of rejection: an RPC timeout can hide
-// a tx the node accepted, so callers must keep the slot on that path.
+// a tx the node accepted, so callers must keep the slot on that path. The one
+// exception is a refusal the signer marks ErrTxNotBroadcast (the node said
+// the sender cannot pay): that tx provably never left, so it is reported as
+// not attempted.
 func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
@@ -94,11 +98,24 @@ func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (t
 		return "", false, err
 	}
 	txHash, err = l.Signer.SignAndBroadcast(ctx, unsigned)
+	if errors.Is(err, ErrTxNotBroadcast) {
+		return "", false, err
+	}
 	return txHash, true, err
 }
 
 func (l *SponsorLane) tokenAddress(symbol string) string {
 	return l.Tokens[strings.ToUpper(strings.TrimSpace(symbol))]
+}
+
+// gasCost is what `units` of gas cost on this lane at the current price —
+// the one "limit × SuggestGasPrice" every lane-side affordability check uses.
+func (l *SponsorLane) gasCost(units uint64) (*big.Int, error) {
+	price, err := l.Native.SuggestGasPrice()
+	if err != nil {
+		return nil, fmt.Errorf("gas price on %s: %w", l.ChainKey, err)
+	}
+	return new(big.Int).Mul(new(big.Int).SetUint64(units), price), nil
 }
 
 // releaseSponsorshipRow releases a sponsorship reservation on a context that
