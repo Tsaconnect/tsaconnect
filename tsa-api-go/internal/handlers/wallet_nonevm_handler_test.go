@@ -37,6 +37,24 @@ func TestEnrichBalancesWithUSD(t *testing.T) {
 	}
 }
 
+// A discovered Sui coin names itself from metadata its creator wrote; one called
+// "USDC" must not be shown as worth real USDC.
+func TestEnrichBalancesPricesOnlyNativeAndListedRows(t *testing.T) {
+	ps := services.NewPriceService()
+	ps.SeedPriceForTest("USDC", services.PriceData{USD: 1})
+
+	out := enrichBalancesWithUSD(ps, []chains.Balance{
+		{Symbol: "USDC", Raw: "5000000", Decimals: 6, TokenAddress: "0xreal::usdc::USDC", Listed: true},
+		{Symbol: "USDC", Raw: "500000000", Decimals: 6, TokenAddress: "0xfake::usdc::USDC"},
+	})
+	if out[0].UsdValue != 5 {
+		t.Fatalf("listed USDC: want $5, got %+v", out[0])
+	}
+	if out[1].UsdPrice != 0 || out[1].UsdValue != 0 {
+		t.Fatalf("discovered USDC must be unpriced, got %+v", out[1])
+	}
+}
+
 func TestEnrichBalancesBestEffortWhenNoPriceService(t *testing.T) {
 	out := enrichBalancesWithUSD(nil, []chains.Balance{
 		{Symbol: "TRX", Raw: "1000000", Decimals: 6, IsNative: true},

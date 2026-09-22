@@ -134,21 +134,21 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 	// resolve — emitting Decimals:0 for real holdings renders a ~10^n-inflated
 	// balance/USD on a financial screen. A zero-balance token with unknown
 	// decimals is harmless (0 scales to 0), so configured tokens still show at 0.
-	emit := func(mint string) {
+	emit := func(mint string, listed bool) {
 		dec, ok := decs[mint]
 		if !ok && amountByMint[mint] > 0 {
 			return
 		}
 		out = append(out, chains.Balance{
 			Symbol: c.symbolFor(mint), Raw: strconv.FormatUint(amountByMint[mint], 10),
-			Decimals: int(dec), TokenAddress: mint,
+			Decimals: int(dec), TokenAddress: mint, Listed: listed,
 		})
 	}
 
 	// Configured tokens are always shown (even at zero), like Tron's TRC-20s.
 	emitted := map[string]struct{}{}
 	for _, mint := range c.cfg.Tokens {
-		emit(mint)
+		emit(mint, true)
 		emitted[mint] = struct{}{}
 	}
 	// Auto-discovered tokens (not in the registry) are shown only when held.
@@ -161,7 +161,7 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 	}
 	sort.Strings(discovered) // stable ordering across refreshes
 	for _, mint := range discovered {
-		emit(mint)
+		emit(mint, false)
 	}
 	return out, nil
 }

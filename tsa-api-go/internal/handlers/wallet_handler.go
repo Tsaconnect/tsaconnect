@@ -1296,12 +1296,18 @@ func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
 // balances using the shared CoinGecko price service (same source as EVM). It's
 // best-effort: when the price service is unset or a symbol has no price, the
 // balance is returned with usdPrice/usdValue = 0 rather than failing the read.
+//
+// Prices are keyed by symbol, so only native and listed rows are priced: a
+// discovered Sui coin can name itself "USDC" and would otherwise be shown as
+// worth real USDC.
 func enrichBalancesWithUSD(ps *services.PriceService, bals []chains.Balance) []balanceWithUSD {
 	prices := map[string]services.PriceData{}
 	if ps != nil && len(bals) > 0 {
 		symbols := make([]string, 0, len(bals))
 		for _, b := range bals {
-			symbols = append(symbols, b.Symbol)
+			if b.IsNative || b.Listed {
+				symbols = append(symbols, b.Symbol)
+			}
 		}
 		if pd, err := ps.GetPrices(symbols); err == nil {
 			prices = pd
@@ -1309,7 +1315,10 @@ func enrichBalancesWithUSD(ps *services.PriceService, bals []chains.Balance) []b
 	}
 	out := make([]balanceWithUSD, 0, len(bals))
 	for _, b := range bals {
-		price := prices[strings.ToUpper(b.Symbol)].USD
+		price := 0.0
+		if b.IsNative || b.Listed {
+			price = prices[strings.ToUpper(b.Symbol)].USD
+		}
 		out = append(out, balanceWithUSD{
 			Balance:  b,
 			UsdPrice: price,

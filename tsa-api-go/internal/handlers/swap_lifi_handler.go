@@ -259,7 +259,9 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.lifiGet(liFiHTTPClient, fmt.Sprintf("/token?chain=%s&token=%s", chain, token))
+	// Encoded, not spliced: a raw "&…" in either value would add parameters to
+	// our request to LiFi.
+	resp, err := h.lifiGet(liFiHTTPClient, "/token?"+url.Values{"chain": {chain}, "token": {token}}.Encode())
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -1016,19 +1018,25 @@ func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) requeryResult
 	// 'fromAddress'"), and a UTXO route additionally needs it to hold coins,
 	// since the quote is built from that address's UTXOs. Omitting it made every
 	// re-query a 400 — i.e. every settle silently took the unreachable path.
-	q := fmt.Sprintf("/quote?fromChain=%s&toChain=%s&fromToken=%s&toToken=%s&fromAmount=%s&slippage=%s",
-		p.FromChain, p.ToChain, p.FromToken, p.ToToken, p.FromAmount, lifiDefaultSlippage)
+	// Every value is encoded: these come from the settle request, and a token
+	// field carrying "&fromAmount=1" would otherwise price a different amount.
+	params := url.Values{
+		"fromChain": {p.FromChain}, "toChain": {p.ToChain},
+		"fromToken": {p.FromToken}, "toToken": {p.ToToken},
+		"fromAmount": {p.FromAmount}, "slippage": {lifiDefaultSlippage},
+	}
 	if p.FromAddress != "" {
-		q += "&fromAddress=" + url.QueryEscape(p.FromAddress)
+		params.Set("fromAddress", p.FromAddress)
 	}
 	if p.ToAddress != "" {
-		q += "&toAddress=" + url.QueryEscape(p.ToAddress)
+		params.Set("toAddress", p.ToAddress)
 	}
 	if h.integratorID != "" && h.integratorFee != "" {
-		q += "&fee=" + h.integratorFee + "&integrator=" + h.integratorID
+		params.Set("fee", h.integratorFee)
+		params.Set("integrator", h.integratorID)
 	}
 
-	resp, err := h.lifiGet(liFiHTTPClient, q)
+	resp, err := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
 	if err != nil {
 		return requeryResult{}
 	}

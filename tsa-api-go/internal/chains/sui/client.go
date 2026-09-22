@@ -140,6 +140,7 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 	// Build the display set: configured tokens (always shown) + auto-discovered
 	// coin types with a non-zero balance (bounded).
 	seen := map[string]struct{}{nativeCoinType: {}}
+	listed := map[string]bool{}
 	display := make([]string, 0)
 	for _, coinType := range c.cfg.Tokens {
 		nt := normalizeCoinType(coinType)
@@ -147,6 +148,7 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 			continue
 		}
 		seen[nt] = struct{}{}
+		listed[nt] = true
 		display = append(display, nt)
 	}
 	discovered := make([]string, 0)
@@ -180,6 +182,7 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 			Raw:          amt,
 			Decimals:     meta.decimals,
 			TokenAddress: coinType,
+			Listed:       listed[coinType],
 		})
 	}
 	return out, nil

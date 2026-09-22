@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -749,5 +750,38 @@ func TestLiFiChainTypes_CoverSignableNonEVMFamilies(t *testing.T) {
 		if !strings.Contains(lifiChainTypes, want) {
 			t.Errorf("lifiChainTypes %q is missing %s", lifiChainTypes, want)
 		}
+	}
+}
+
+// Values from the client are encoded into our LiFi requests, never spliced: a
+// token field carrying "&fromAmount=1" must arrive as one literal value, not
+// as a second fromAmount that re-prices the settle.
+func TestLiFiRequests_EncodeClientValues(t *testing.T) {
+	var seen []url.Values
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"address":"0xabc","estimate":{"fromAmountUSD":"1"}}`))
+	}))
+	defer mockLiFi.Close()
+	h := newTestLiFiHandler(mockLiFi.URL)
+
+	h.liveRequeryQuoteUSD(settleQuoteParams{
+		FromChain: "56", ToChain: "56", FromToken: "0xabc&fromAmount=1", ToToken: "0xdef", FromAmount: "1000000",
+	})
+	req := httptest.NewRequest("GET", "/swap/lifi/token?chain=56&token="+url.QueryEscape("0xabc&chain=1"), nil)
+	setupTestRouter(h).ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(seen) != 2 {
+		t.Fatalf("want 2 LiFi calls, got %d", len(seen))
+	}
+	if got := seen[0]["fromAmount"]; len(got) != 1 || got[0] != "1000000" {
+		t.Errorf("quote fromAmount = %v, want only 1000000", got)
+	}
+	if got := seen[0].Get("fromToken"); got != "0xabc&fromAmount=1" {
+		t.Errorf("quote fromToken = %q", got)
+	}
+	if got := seen[1]["chain"]; len(got) != 1 || got[0] != "56" {
+		t.Errorf("token chain = %v, want only 56", got)
 	}
 }
