@@ -12,11 +12,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 // ErrLiFiNoRoute is returned when LiFi has no executable route for a quote
 // request (a 404/422 upstream, or a 200 that omits the fields a route needs).
 var ErrLiFiNoRoute = errors.New("no conversion route available")
+
+// ErrLiFiFeeUnconfigured is returned when LiFi rejects the request because our
+// integrator has no fee wallet set up for the chain — distinct from
+// ErrLiFiNoRoute, which is a routing failure rather than a portal-config gap.
+var ErrLiFiFeeUnconfigured = errors.New("lifi: integrator fee not configured on this chain")
 
 // LiFiRoute is one executable quote. The treasury signs transactionRequest as
 // given: a route is never reconstructed from its parts.
@@ -41,6 +48,22 @@ type LiFiRoute struct {
 	// beyond the brief's list, for the same reason: a treasury that signs a
 	// stale route risks executing at a rate it never agreed to.
 	ValidUntil int64
+	// FromAmountUSD, ToAmountUSD and GasCostUSD price the route in dollars, so
+	// its cost can be compared without knowing either token's own price.
+	FromAmountUSD float64
+	ToAmountUSD   float64
+	GasCostUSD    float64
+	// ToTokenDecimals and ToTokenSymbol come from LiFi's own action.toToken,
+	// never the caller: the server must not trust the client for either.
+	ToTokenDecimals int
+	ToTokenSymbol   string
+	// TransactionID is the calldata's bytes32 transactionId (0x-hex), when
+	// decodable. LiFi's status API reports the same id, which is how a user's
+	// swap is bound back to the quote that produced it.
+	TransactionID string
+	// Raw is the whole quote response body, kept for fields a later task needs
+	// without growing this struct field-by-field again.
+	Raw json.RawMessage
 }
 
 // LiFiQuoteRequest is one /quote ask: convert FromAmount of FromToken (on
@@ -54,6 +77,18 @@ type LiFiQuoteRequest struct {
 	FromAddress string
 	ToAddress   string
 	FromAmount  string // base units
+	// FeeBps is the integrator fee in basis points, sent to LiFi as a fraction
+	// (e.g. 25 -> "0.0025"). 0 omits the fee param entirely.
+	FeeBps int
+	// Slippage is the max acceptable slippage as a fraction (e.g. 0.005 for
+	// 0.5%). 0 defaults to 0.001, the stable-to-stable-safe value Quote used
+	// to hardcode.
+	Slippage float64
+	// AllowDestinationCall opts into routes that hand funds to a contract call
+	// on arrival. False (the default) is sent explicitly as
+	// allowDestinationCall=false, since a destination call can forward funds
+	// anywhere the checked receiver does not name.
+	AllowDestinationCall bool
 }
 
 // LiFiQuoteClient is the one shared client for LiFi's /quote endpoint. Both
@@ -118,11 +153,21 @@ type lifiQuoteResponse struct {
 		ApprovalAddress   string `json:"approvalAddress"`
 		ExecutionDuration int    `json:"executionDuration"`
 		ValidUntil        int64  `json:"validUntil"`
+		FromAmountUSD     string `json:"fromAmountUSD"`
+		ToAmountUSD       string `json:"toAmountUSD"`
+		GasCosts          []struct {
+			AmountUSD string `json:"amountUSD"`
+		} `json:"gasCosts"`
 	} `json:"estimate"`
 	Action struct {
 		FromToken struct {
 			Address string `json:"address"`
 		} `json:"fromToken"`
+		ToToken struct {
+			Address  string `json:"address"`
+			Decimals int    `json:"decimals"`
+			Symbol   string `json:"symbol"`
+		} `json:"toToken"`
 	} `json:"action"`
 	TransactionRequest struct {
 		To       string `json:"to"`
@@ -145,7 +190,17 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	q.Set("toAddress", req.ToAddress)
 	q.Set("fromAmount", req.FromAmount)
 	q.Set("order", "FASTEST")
-	q.Set("slippage", "0.001")
+	slippage := req.Slippage
+	if slippage <= 0 {
+		slippage = 0.001
+	}
+	q.Set("slippage", strconv.FormatFloat(slippage, 'f', -1, 64))
+	if !req.AllowDestinationCall {
+		q.Set("allowDestinationCall", "false")
+	}
+	if req.FeeBps > 0 {
+		q.Set("fee", strconv.FormatFloat(float64(req.FeeBps)/10_000, 'f', -1, 64))
+	}
 	q.Set("integrator", c.integrator)
 
 	httpReq, err := NewLiFiGetRequest(ctx, c.baseURL, c.apiKey, "/quote?"+q.Encode())
@@ -161,10 +216,13 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	if err != nil {
 		return nil, fmt.Errorf("lifi quote: %w", err)
 	}
-	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusUnprocessableEntity {
-		return nil, ErrLiFiNoRoute
-	}
 	if res.StatusCode != http.StatusOK {
+		if IsIntegratorFeeUnconfigured(body) {
+			return nil, ErrLiFiFeeUnconfigured
+		}
+		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusUnprocessableEntity {
+			return nil, ErrLiFiNoRoute
+		}
 		return nil, fmt.Errorf("lifi quote: status %d", res.StatusCode)
 	}
 	var parsed lifiQuoteResponse
@@ -186,7 +244,7 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		tool = "LiFi"
 	}
 
-	return &LiFiRoute{
+	route := &LiFiRoute{
 		Tool:            tool,
 		ToAmount:        toAmount,
 		ToAmountMin:     toMin,
@@ -198,5 +256,35 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		GasLimit:        gasLimit,
 		ETASeconds:      parsed.Estimate.ExecutionDuration,
 		ValidUntil:      parsed.Estimate.ValidUntil,
-	}, nil
+	}
+	route.Raw = json.RawMessage(body)
+	route.ToTokenDecimals = parsed.Action.ToToken.Decimals
+	route.ToTokenSymbol = parsed.Action.ToToken.Symbol
+	route.FromAmountUSD, _ = strconv.ParseFloat(parsed.Estimate.FromAmountUSD, 64)
+	route.ToAmountUSD, _ = strconv.ParseFloat(parsed.Estimate.ToAmountUSD, 64)
+	for _, g := range parsed.Estimate.GasCosts {
+		v, _ := strconv.ParseFloat(g.AmountUSD, 64)
+		route.GasCostUSD += v
+	}
+	if data, derr := hexutil.Decode(route.Data); derr == nil {
+		if id, ok := lifiTransactionID(data); ok {
+			route.TransactionID = id
+		}
+	}
+	return route, nil
+}
+
+// IsIntegratorFeeUnconfigured spots LiFi's "not configured for collecting fees
+// on chain X" rejection, which is about our portal setup rather than the
+// route. Exported so both this client and SwapLiFiHandler's raw /quote proxy
+// — which must keep behaving exactly as before — share one detection.
+func IsIntegratorFeeUnconfigured(body []byte) bool {
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false
+	}
+	msg := strings.ToLower(parsed.Message)
+	return strings.Contains(msg, "not configured for collecting fees")
 }

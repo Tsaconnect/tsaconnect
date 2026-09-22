@@ -148,6 +148,15 @@ func TestCheckLiFiDelivery_GenericSwapIsSameChainOnly(t *testing.T) {
 	}
 }
 
+func TestLiFiTransactionID_FromLiveFixtures(t *testing.T) {
+	for name, f := range loadLiFiFixtures(t) {
+		id, ok := lifiTransactionID(hexutil.MustDecode(f.Data))
+		if !ok || len(id) != 66 {
+			t.Errorf("%s: id = %q ok = %v", name, id, ok)
+		}
+	}
+}
+
 func TestCheckLiFiDelivery_RefusesUndecodableCalldata(t *testing.T) {
 	transfer := "0xa9059cbb" + strings.Repeat("0", 24) + sponsorTestUser[2:] + strings.Repeat("f", 64)
 	for name, data := range map[string]string{

@@ -150,6 +150,30 @@ func decodeLiFiDelivery(data []byte, sourceChainID int64) (lifiDelivery, error) 
 	}, nil
 }
 
+// lifiTransactionID returns the bytes32 transactionId LiFi stamps on every
+// diamond call — the first argument of the generic-swap functions and the
+// first field of BridgeData — as 0x-hex. LiFi's status API reports the same
+// id, which is how a swap is tied back to the quote that produced it.
+func lifiTransactionID(data []byte) (string, bool) {
+	if len(data) < 4+32 {
+		return "", false
+	}
+	var sel [4]byte
+	copy(sel[:], data[:4])
+	if _, ok := lifiGenericSwapSelectors[sel]; ok {
+		return hexutil.Encode(data[4 : 4+32]), true
+	}
+	vals, err := abi.Arguments{{Type: lifiBridgeDataType}}.Unpack(data[4:])
+	if err != nil {
+		return "", false
+	}
+	bd, ok := abi.ConvertType(vals[0], new(lifiBridgeData)).(*lifiBridgeData)
+	if !ok {
+		return "", false
+	}
+	return hexutil.Encode(bd.TransactionId[:]), true
+}
+
 // checkLiFiDelivery refuses a route whose calldata would deliver anywhere but
 // receiver on destChainID — or hand the funds to a destination call. Every
 // refusal is ErrTreasuryInvalidRoute: the route is untrusted input that
