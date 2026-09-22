@@ -47,6 +47,10 @@ export interface Order {
   shippingCity?: string;
   shippingState?: string;
   shippingCountry?: string;
+  // Snapshot of the buyer's saved delivery address (product orders only).
+  shippingRecipientName?: string;
+  shippingPhone?: string;
+  shippingStreet?: string;
   status: string;
   buyerConfirmedAt?: string;
   sellerShippedAt?: string;
@@ -77,7 +81,7 @@ export interface ApiResponse<T = any> {
 
 // --- Auth helper ---
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+export async function getAuthHeaders(): Promise<Record<string, string>> {
   const token = await AsyncStorage.getItem('authToken');
   if (!token) {
     throw new Error('Not authenticated. Please log in again.');
@@ -90,7 +94,7 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
 
 // --- Response helper ---
 
-async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
+export async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
   let data;
   try {
     data = await response.json();
@@ -193,6 +197,9 @@ export async function createOrders(
   // expectedTotal is the quote total (base units, gas included) the buyer
   // confirmed. The backend refuses a different total with code "price_changed".
   expectedTotal?: string,
+  // deliveryAddressId picks a saved address; the server prices from its
+  // location and snapshots the recipient, phone and street onto each order.
+  deliveryAddressId?: string,
 ): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
@@ -208,6 +215,7 @@ export async function createOrders(
         menuSelections,
         bookingSlots,
         expectedTotal,
+        deliveryAddressId,
       }),
     });
     return await handleResponse(response);

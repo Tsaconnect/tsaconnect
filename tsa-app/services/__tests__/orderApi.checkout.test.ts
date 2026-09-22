@@ -44,3 +44,11 @@ it('omits the total for callers that do not confirm one', async () => {
   const body = JSON.parse(fetchMock.mock.calls[0][1].body);
   expect(body.expectedTotal).toBeUndefined();
 });
+
+it('sends the picked saved address with the order request', async () => {
+  respond(201, { success: true, data: { orders: [] } });
+  await createOrders('USDC', 'Ikeja', 'Lagos', 'Nigeria', undefined, undefined, undefined, '1', 'addr-1');
+
+  const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+  expect(body.deliveryAddressId).toBe('addr-1');
+});
