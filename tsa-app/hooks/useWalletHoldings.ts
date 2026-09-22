@@ -35,7 +35,8 @@ function nativeSymbolFor(chainKey: string): string | undefined {
 /**
  * A balance row as a Holding, or null when its chain has no LiFi id here.
  * `fromSupportedList` rows come from our own curated token list (trusted);
- * other families' rows are trusted only for their native coin.
+ * other families' rows are trusted only for their native coin or a token the
+ * API marks as listed — a discovered coin's symbol is whatever its creator chose.
  */
 export function holdingFromRow(row: WalletBalanceWithChain, fromSupportedList: boolean): Holding | null {
   const chainId = NON_EVM_CHAIN_IDS[row.chainKey] ?? CHAINS[row.chainKey as ChainKey]?.chainId;
@@ -51,7 +52,7 @@ export function holdingFromRow(row: WalletBalanceWithChain, fromSupportedList: b
     chainId,
     address: native ? '' : row.contractAddress || '',
     native,
-    trusted: fromSupportedList || native,
+    trusted: fromSupportedList || native || row.listed === true,
     symbol: row.symbol,
     name: row.name || row.symbol,
     decimals: row.decimals,

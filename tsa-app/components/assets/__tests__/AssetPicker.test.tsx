@@ -64,6 +64,8 @@ jest.mock('@/hooks/useWalletHoldings', () => {
       { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
       // Native S on Sonic: not a major.
       { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+      // Airdropped on Sui: its metadata says "USDC", nobody vouches for it.
+      { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
     ],
   };
   return { __esModule: true, useWalletHoldings: () => value };
@@ -108,7 +110,7 @@ jest.mock('@/services/lifi', () => {
 });
 
 import React from 'react';
-import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+import TestRenderer, { act, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import AssetPicker from '../AssetPicker';
 import { resetAssetCatalogCache } from '@/hooks/useAssetCatalog';
 import * as Lifi from '@/services/lifi';
@@ -123,6 +125,9 @@ function textNodes(node: any, out: string[] = []): string[] {
   return out;
 }
 const text = (tree: ReactTestRenderer) => textNodes(tree.toJSON()).join(' ');
+/** The text inside one row. */
+const rowText = (row: ReactTestInstance) =>
+  row.findAll(n => typeof n.props.children === 'string').map(n => n.props.children as string).join(' ');
 const flush = async () => { for (let i = 0; i < 8; i += 1) await act(async () => { await Promise.resolve(); }); };
 const pressLabel = (tree: ReactTestRenderer, start: string) => {
   const hit = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
@@ -239,4 +244,16 @@ it('hands a held native coin back with its real native address', async () => {
   expect(onSelect).toHaveBeenCalledWith(
     expect.objectContaining({ symbol: 'S', address: '0x0000000000000000000000000000000000000000' }), 146,
   );
+});
+
+it('labels a coin in the wallet that nobody vouches for, even outside search', async () => {
+  const { tree } = await open({ side: 'to' });
+  const fake = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('USDC, Sui') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(fake)).toContain('Unverified');
+  expect(text(tree)).toContain('Anyone can create a token');
+  // The real, verified USDC row carries no such label.
+  const real = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('USDC, 3 networks') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(real)).not.toContain('Unverified');
 });

@@ -11,6 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveSolanaAddresses, deriveSolanaPrivateKey, type SolanaDerivation } from './derivation';
 import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
+import { nonEvmUsdPrice } from './nonevmPrice';
 import { NONEVM_CHAINS } from '../../constants/chains';
 import { getNetwork } from '../../hooks/useNetwork';
 import type { WalletBalanceWithChain } from '../walletApi';
@@ -195,15 +196,10 @@ export async function getSolanaSigner(walletAddress: string): Promise<SolanaSign
   return { address, key: deriveSolanaPrivateKey(mnemonic, derivation) };
 }
 
-// Fallback pricing when the backend didn't attach a price: stablecoins pin to
-// $1; everything else shows no USD rather than a wrong value.
-function fallbackUsdPrice(symbol: string): number {
-  return symbol === 'USDT' || symbol === 'USDC' ? 1 : 0;
-}
 
 function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
   const human = formatUnits(b.raw || '0', b.decimals);
-  const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : fallbackUsdPrice(b.symbol);
+  const usdPrice = nonEvmUsdPrice(b);
   const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
   return {
     symbol: b.symbol,
@@ -213,6 +209,7 @@ function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
     usdValue: usdValue.toFixed(2),
     contractAddress: b.tokenAddress || '',
     decimals: b.decimals,
+    listed: b.listed === true ? true : undefined,
     chainKey: SOLANA_KEY,
     chainName: NONEVM_CHAINS.solana.shortName,
   };

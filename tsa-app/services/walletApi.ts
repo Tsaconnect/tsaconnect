@@ -17,6 +17,8 @@ export interface WalletBalance {
   decimals: number;
   /** Set by the API on the chain's native-coin row; absent from older APIs. */
   native?: boolean;
+  /** A non-EVM token from our own configuration (not discovered on chain). */
+  listed?: boolean;
 }
 
 export interface WalletBalanceWithChain extends WalletBalance {

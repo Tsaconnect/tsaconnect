@@ -27,10 +27,10 @@ beforeEach(() => {
 });
 
 describe('getTronBalances', () => {
-  it('maps base-unit balances to human amounts and pins stablecoins to $1', async () => {
+  it('maps base-unit balances to human amounts and pins our listed stablecoins to $1', async () => {
     mockedApi.getNonEVMBalances.mockResolvedValue([
       { symbol: 'TRX', raw: '12500000', decimals: 6, isNative: true },
-      { symbol: 'USDT', raw: '2500000', decimals: 6, tokenAddress: 'TR7...', isNative: false },
+      { symbol: 'USDT', raw: '2500000', decimals: 6, tokenAddress: 'TR7...', isNative: false, listed: true },
     ]);
 
     const rows = await getTronBalances('TXaddr');

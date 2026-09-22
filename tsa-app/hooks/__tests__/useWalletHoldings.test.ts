@@ -46,6 +46,13 @@ it('does not trust a non-native token from outside our supported list', () => {
   expect(holdingFromRow(row({ chainKey: 'solana', symbol: 'SOL' }), false)!.trusted).toBe(true);
 });
 
+it('trusts a non-EVM token only when the API lists it', () => {
+  const listed = holdingFromRow(row({ chainKey: 'sui', contractAddress: '0xdba1::usdc::USDC', listed: true }), false)!;
+  expect(listed.trusted).toBe(true);
+  const airdrop = holdingFromRow(row({ chainKey: 'sui', contractAddress: '0xbad1::usdc::USDC' }), false)!;
+  expect(airdrop.trusted).toBe(false);
+});
+
 it('skips empty balances', () => {
   expect(holdingFromRow(row({ balance: '0' }), true)).toBeNull();
 });
