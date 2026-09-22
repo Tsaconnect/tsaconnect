@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -90,16 +89,23 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	transfers := &fakeTransferVerifier{amount: big.NewInt(99_000000)}
 	lifiQuoter := &fakeLiFiQuoter{route: &LiFiRoute{
 		To: treasuryTestRouter, Data: testBridgeCalldata(t, row.WalletAddress, 10, false),
-		ToAmount: big.NewInt(98_800000), ToAmountMin: big.NewInt(98_700000), Tool: "across",
+		ToAmount: big.NewInt(98_800000), ToAmountMin: big.NewInt(98_700000),
+		// Priced in USD, exactly as the quote side's own fixture is: the
+		// bridge amount is sized from LiFi's cost, so an unpriced route is
+		// one the orchestrator refuses rather than one it sends blind.
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across",
 	}}
-	chains := &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{
-		"mainnet": {Chains: map[string]config.ChainConfig{"base": {ChainID: 8453}, "optimism": {ChainID: 10}}},
-	}}}
+	// The SAME registry CreateBuy resolved the destination against, so the
+	// orchestrator recognises optimism USDT as the configured stablecoin the
+	// order was written for — a registry with no token addresses would make
+	// the identical row read as a volatile destination here and nowhere else.
+	chains := testChainRegistry()
 	legStore := &GormRampLegStore{DB: ordersRig.db}
 	orch := NewConversionOrchestrator(ordersRig.db, treasury, legStore,
 		lifiQuoter, NewLiFiStatusClient("http://unused.invalid", ""),
 		map[string]ERC20TransferVerifier{"base": transfers}, chains,
 		30*time.Minute, 0, 0, 0, func() time.Time { return clock })
+	orch.SetRoundTripBudgetBps(50)
 
 	// ── Step 1: takeCustody ──────────────────────────────────────────────
 	//
@@ -144,12 +150,19 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	if legs[0].Kind != models.RampLegKindBridge {
 		t.Fatalf("leg kind = %s, want bridge", legs[0].Kind)
 	}
-	if legs[0].Amount != "99000000" {
-		t.Fatalf("leg amount = %q, want 99000000 base units (99 USDC at 6dp) — "+
-			"the short-delivered amount, correctly converted from the human-decimal TokenAmount", legs[0].Amount)
+	// 99 USDC landed (99000000 base units at 6dp, read from the human-decimal
+	// TokenAmount). What she is owed was scaled to that same 99/100 at custody,
+	// and the bridge sends T/(1 − l) of it — 98707314 at LiFi's 20 bps — so the
+	// rest stays behind as USDC. The figure that matters to this regression is
+	// that it is derived from 99, not 100: a leg sized off the full order
+	// amount would be over 99700000 and could not be funded.
+	if legs[0].Amount != "98707314" {
+		t.Fatalf("leg amount = %q, want 98707314 — T/(1 − l) of the SHORT-delivered 99 USDC, "+
+			"correctly converted from the human-decimal TokenAmount", legs[0].Amount)
 	}
-	if lifiQuoter.quoteCalls() != 1 {
-		t.Fatalf("lifi quotes = %d, want 1 — startBridge must actually reach the quote step, not error out first", lifiQuoter.quoteCalls())
+	// Two: the probe that prices l, then the route actually executed.
+	if lifiQuoter.quoteCalls() != 2 {
+		t.Fatalf("lifi quotes = %d, want 2 — startBridge must actually reach the quote step, not error out first", lifiQuoter.quoteCalls())
 	}
 	if legs[0].TxHash == "" {
 		t.Fatal("leg never broadcast — startBridge must complete, not just reserve")

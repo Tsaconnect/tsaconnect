@@ -159,3 +159,33 @@ func TestGormRampLegStore_ReserveDefaultsAttemptAndStatus(t *testing.T) {
 		t.Fatalf("leg = %+v; want attempt=1 status=pending", legs[0])
 	}
 }
+
+// reserveTestLeg is one pending, not-yet-broadcast bridge leg — the only
+// state whose amount may still be rewritten.
+func reserveTestLeg(t *testing.T) (*GormRampLegStore, *models.RampLeg) {
+	t.Helper()
+	store := newRampLegStore(t)
+	leg := &models.RampLeg{OrderID: uuid.New(), Kind: models.RampLegKindBridge, Attempt: 1,
+		ChainKey: "base", Token: "USDC", Amount: "1", Status: models.RampLegStatusPending, CreatedAt: time.Now().UTC()}
+	if existing, err := store.Reserve(context.Background(), leg); err != nil || existing != nil {
+		t.Fatalf("reserve: existing=%v err=%v", existing, err)
+	}
+	return store, leg
+}
+
+func TestGormRampLegStore_SetAmountOnlyBeforeBroadcast(t *testing.T) {
+	store, leg := reserveTestLeg(t) // pending, no tx hash
+	if err := store.SetAmount(context.Background(), leg.ID, "123"); err != nil {
+		t.Fatal(err)
+	}
+	legs, _ := store.ForOrder(context.Background(), leg.OrderID)
+	if legs[0].Amount != "123" {
+		t.Fatalf("amount = %q", legs[0].Amount)
+	}
+	_ = store.SetTxHash(context.Background(), leg.ID, "0xsent", "across")
+	_ = store.SetAmount(context.Background(), leg.ID, "999")
+	legs, _ = store.ForOrder(context.Background(), leg.OrderID)
+	if legs[0].Amount != "123" {
+		t.Fatal("a broadcast leg's amount must never change")
+	}
+}

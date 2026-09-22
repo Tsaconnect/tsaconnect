@@ -104,3 +104,71 @@ func TestLiFiStatus_SendsTheAPIKeyWhenConfigured(t *testing.T) {
 		t.Fatalf("x-lifi-api-key = %q, want secret", seen)
 	}
 }
+
+// Every field the orchestrator and the sell-side reconciler read off one
+// status, parsed from one body: a token or a sending amount that silently
+// drops to its zero value reads as "no evidence", which on the delivery path
+// is indistinguishable from evidence of the wrong thing.
+func TestLiFiStatus_ParsesBothSidesOfTheTransfer(t *testing.T) {
+	srv := lifiServer(t, 200, `{
+		"status": "DONE",
+		"substatus": "COMPLETED",
+		"transactionId": "0xtxid",
+		"fromAddress": "0x1111111111111111111111111111111111111111",
+		"sending": {
+			"chainId": 8453,
+			"amount": "100000000",
+			"token": {"address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}
+		},
+		"receiving": {
+			"txHash": "0xabc123",
+			"chainId": 56,
+			"amount": "990",
+			"token": {"address": "0x0000000000000000000000000000000000000000"},
+			"toAddress": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+		}
+	}`)
+	defer srv.Close()
+
+	got, err := NewLiFiStatusClient(srv.URL, "").Status(context.Background(), "0xsrc")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.TransactionID != "0xtxid" {
+		t.Errorf("transactionID = %q", got.TransactionID)
+	}
+	if got.FromAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("fromAddress = %q", got.FromAddress)
+	}
+	if got.SendingChainID != 8453 {
+		t.Errorf("sendingChainID = %d", got.SendingChainID)
+	}
+	if got.SendingToken != "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" {
+		t.Errorf("sendingToken = %q", got.SendingToken)
+	}
+	if got.SendingAmount == nil || got.SendingAmount.String() != "100000000" {
+		t.Errorf("sendingAmount = %v", got.SendingAmount)
+	}
+	if got.ReceivingToken != "0x0000000000000000000000000000000000000000" {
+		t.Errorf("receivingToken = %q", got.ReceivingToken)
+	}
+	if got.DestChainID != 56 {
+		t.Errorf("destChainID = %d", got.DestChainID)
+	}
+}
+
+// A sending amount LiFi omits (or writes unparseably) must stay nil, not
+// become zero: "nothing was sent" is a claim, and this parser has no evidence
+// for it.
+func TestLiFiStatus_LeavesAnUnparseableSendingAmountNil(t *testing.T) {
+	srv := lifiServer(t, 200, `{"status":"PENDING","sending":{"amount":"not-a-number"}}`)
+	defer srv.Close()
+
+	got, err := NewLiFiStatusClient(srv.URL, "").Status(context.Background(), "0xsrc")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.SendingAmount != nil {
+		t.Fatalf("sendingAmount = %v, want nil", got.SendingAmount)
+	}
+}

@@ -153,6 +153,10 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		cfg.RampConversionRetryWindow, cfg.RampConversionStallWindow, cfg.RampConversionLegCeiling,
 		cfg.RampConversionMaxShortfallUSD, nil,
 	)
+	// The same B the quote and order services are priced on (pushed there by
+	// SetRoundTripBudgetBps in main.go): a route is executed against exactly
+	// the budget the order was quoted on, never a second copy of the number.
+	orchestrator.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
 
 	if quotes != nil {
 		quotes.SetLiFiQuoter(lifiQuoteClient)

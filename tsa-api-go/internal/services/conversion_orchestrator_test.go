@@ -98,12 +98,19 @@ type fakeLiFiStatus struct {
 	substatus string
 	amount    string
 	toAddress string
-	srv       *httptest.Server
+	// receivingToken is the token LiFi says it delivered. A native coin
+	// leaves no Transfer log to read, so on that path this is the only thing
+	// that says the user got the asset they actually asked for.
+	receivingToken string
+	// chainID is receiving.chainId. Settable so a BSC-destination test can
+	// report 56 rather than the polygon default every other test wants.
+	chainID int64
+	srv     *httptest.Server
 }
 
 func newFakeLiFiStatus(t *testing.T, toAddress string) *fakeLiFiStatus {
 	t.Helper()
-	f := &fakeLiFiStatus{status: LiFiStatusPending, substatus: LiFiSubstatusCompleted, toAddress: toAddress}
+	f := &fakeLiFiStatus{status: LiFiStatusPending, substatus: LiFiSubstatusCompleted, toAddress: toAddress, chainID: 137}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
 		body := map[string]any{
@@ -111,9 +118,10 @@ func newFakeLiFiStatus(t *testing.T, toAddress string) *fakeLiFiStatus {
 			"substatus": f.substatus,
 			"receiving": map[string]any{
 				"txHash":    "0xdest",
-				"chainId":   137,
+				"chainId":   f.chainID,
 				"amount":    f.amount,
 				"toAddress": f.toAddress,
+				"token":     map[string]any{"address": f.receivingToken},
 			},
 		}
 		f.mu.Unlock()
@@ -134,6 +142,12 @@ func (f *fakeLiFiStatus) setSubstatus(sub string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.substatus = sub
+}
+
+func (f *fakeLiFiStatus) setToken(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.receivingToken = addr
 }
 
 func (f *fakeLiFiStatus) setRecipient(addr string) {
@@ -214,8 +228,11 @@ func newConversionRig(t *testing.T) *conversionRig {
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000},
 		func() time.Time { return r.clock })
 
+	// The USD fields price the round trip: 100 in, 99.8 out is a 20 bps LiFi
+	// cost, comfortably inside the 50 bps budget set below.
 	r.lifi = &fakeLiFiQuoter{route: &LiFiRoute{
-		To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
+		To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across",
 	}}
 	r.transfers = &fakeTransferVerifier{amount: big.NewInt(100_000000)}
 	r.dstTransfers = &fakeTransferVerifier{amount: new(big.Int)}
@@ -257,10 +274,15 @@ func newConversionRig(t *testing.T) *conversionRig {
 // newOrchestrator builds a service over a (possibly wrapped) leg store. Both
 // chains get a verifier: the treasury can take custody on either.
 func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrator {
-	return NewConversionOrchestrator(r.db, r.treasury, legs, r.lifi,
+	svc := NewConversionOrchestrator(r.db, r.treasury, legs, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.dstTransfers},
 		r.chains, 30*time.Minute, 0, 0, 0, func() time.Time { return r.clock })
+	// B, the round-trip budget the wiring pushes in from config. Set on every
+	// orchestrator the rig builds, not only r.svc, so a test that swaps the
+	// leg store still prices routes the way production does.
+	svc.SetRoundTripBudgetBps(50)
+	return svc
 }
 
 // seedLeg inserts a leg stamped on the INJECTED clock. GORM would otherwise
@@ -336,7 +358,7 @@ func mustAdvance(t *testing.T, r *conversionRig) {
 
 func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	if err := r.svc.Advance(context.Background(), r.order); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +392,7 @@ func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 
 func TestOrchestrator_TopsUpAShortfallInsideTwentyBps(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 10 bps under the 99_500000 promise
 	mustAdvance(t, r)
@@ -982,7 +1004,7 @@ func TestOrchestrator_NeverRetriesABridgeThatAlreadyBroadcast(t *testing.T) {
 func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T) {
 	r := newConversionRig(t)
 	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
-		ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_000000), Tool: "across"}
+		ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_000000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 
 	mustAdvance(t, r)
 
@@ -996,7 +1018,7 @@ func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T
 
 	// A later quote that does meet it goes through.
 	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
-		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	r.clock = r.clock.Add(2 * time.Minute)
 	mustAdvance(t, r)
 	if r.broadcasts() == 0 {
@@ -1010,7 +1032,7 @@ func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T
 func TestOrchestrator_RefusesARoutePayingSomeoneElse(t *testing.T) {
 	r := newConversionRig(t)
 	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: testBridgeCalldata(t, sponsorTestDeposit, 137, false),
-		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 
 	mustAdvance(t, r)
 
@@ -1024,7 +1046,7 @@ func TestOrchestrator_RefusesARoutePayingSomeoneElse(t *testing.T) {
 
 	// An honest quote on the next tick goes through.
 	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
-		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	r.clock = r.clock.Add(2 * time.Minute)
 	mustAdvance(t, r)
 	if r.broadcasts() == 0 {
@@ -1183,7 +1205,7 @@ func TestOrchestrator_StopsForAHumanWhenTheShortfallExceedsTheCeiling(t *testing
 
 func TestOrchestrator_NeverTopsUpTwiceIfTheSettlementWriteIsLost(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000")
 	mustAdvance(t, r) // tops up the 0.1 shortfall and settles
@@ -1799,7 +1821,7 @@ func TestCreditedToUser_NeverCountsABridgeLegBySourceAmount(t *testing.T) {
 // as the bridge: a broadcast is not a delivery.
 func TestOrchestrator_VerifiesTheTopUpOnChainBeforeSettling(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short
 
@@ -2039,7 +2061,7 @@ func TestOrchestrator_NeverStartsASecondTopUpWhileOneIsPending(t *testing.T) {
 // one, and settling on it closes an order the user is still short on.
 func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short; the top-up is for 100000
 	// The top-up transaction credits only part of what it was sent for.
@@ -2077,4 +2099,149 @@ func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
 func rigRouteData(t *testing.T) string {
 	t.Helper()
 	return testBridgeCalldata(t, sponsorTestUser, 137, false)
+}
+
+// ── any-token destinations ─────────────────────────────────────────────────
+
+// asNewVolatileBuy makes the rig order a post-change BNB-on-BSC buy: owed T,
+// a native non-stable destination with no lane there, no promise yet.
+func asNewVolatileBuy(t *testing.T, r *conversionRig) {
+	t.Helper()
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"requested_chain": "bsc", "requested_token": "BNB", "requested_chain_id": 56,
+		"requested_token_address": evmNativeAddress, "requested_token_decimals": 18,
+		"destination_address": sponsorTestUser, "promised_amount": "", "quoted_amount": "99500000",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: testBridgeCalldata(t, sponsorTestUser, 56, false),
+		ToAmount: big.NewInt(1_000), ToAmountMin: big.NewInt(990), FromAmountUSD: 100, ToAmountUSD: 99.8,
+		GasLimit: 1_000_000, Tool: "across"}
+	r.status.setToken(evmNativeAddress)
+	r.status.chainID = 56
+}
+
+func TestOrchestrator_BridgesWhatSheIsOwedAndKeepsTheRest(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	// T = 99.5 USDC, l = 20 bps: a = 99500000 × 10000/9980 = 99699398.
+	if len(legs) != 1 || legs[0].Amount != "99699398" || legs[0].TxHash == "" {
+		t.Fatalf("bridge leg = %+v", legs)
+	}
+	req := r.lifi.lastRequest()
+	if req.ToToken != evmNativeAddress || req.ToChainID != 56 || req.FromAmount != "99699398" || req.ToAddress != sponsorTestUser {
+		t.Fatalf("LiFi request = %+v", req)
+	}
+}
+
+func TestOrchestrator_LegacyOrderStillBridgesTheFullAmount(t *testing.T) {
+	r := newConversionRig(t) // QuotedAmount "" — written before this change
+	mustAdvance(t, r)
+	if legs := r.legsOfKind(t, models.RampLegKindBridge); len(legs) != 1 || legs[0].Amount != "100000000" {
+		t.Fatalf("legacy bridge leg = %+v", legs)
+	}
+}
+
+func TestOrchestrator_VolatileDestinationSettlesAtLiFisMinimum(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	if got := r.reload(t).PromisedAmount; got != "990" {
+		t.Fatalf("promise = %q, want LiFi's toAmountMin 990", got)
+	}
+	r.status.set(LiFiStatusDone, "995")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s, want settled", got.Status)
+	}
+	if n := len(r.legsOfKind(t, models.RampLegKindDeliver)); n != 0 {
+		t.Fatalf("deliver legs = %d; a volatile destination is never topped up", n)
+	}
+}
+
+func TestOrchestrator_VolatileLandingBelowTheMinimumStopsForAHuman(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "900")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending", got.Status)
+	}
+}
+
+func TestOrchestrator_WrongReceivingTokenStopsForAHuman(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	r.status.setToken("0x55d398326f99059fF775485246999027B3197955") // USDT, not BNB
+	r.status.set(LiFiStatusDone, "995")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a delivery in the wrong token must park", got.Status)
+	}
+}
+
+func TestOrchestrator_AFreshRouteOverTheBudgetFailsTheAttempt(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	r.lifi.route.ToAmountUSD = 99.2 // 80 bps
+	mustAdvance(t, r)
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want none", r.broadcasts())
+	}
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("legs = %+v, want one failed attempt (the retry window starts)", legs)
+	}
+}
+
+// A short Paycrest delivery scales what she's owed, and the bridge sizes
+// from that — not from the original quote, which no longer fits R.
+func TestOrchestrator_ShortDeliveryScalesWhatSheIsOwed(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.transfers.amount = big.NewInt(50_000000) // half of the expected 100 USDC
+	mustAdvance(t, r)                          // custody
+	if got := r.reload(t).QuotedAmount; got != "49750000" {
+		t.Fatalf("quoted = %q, want 49750000 (99.5 × 50/100)", got)
+	}
+	mustAdvance(t, r) // bridge
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	// 49750000 × 10000/9980 = 49849699.
+	if len(legs) != 1 || legs[0].Amount != "49849699" || legs[0].TxHash == "" {
+		t.Fatalf("bridge leg = %+v", legs)
+	}
+}
+
+// USDT priced a few bps above USDC must still clear a stablecoin promise.
+func TestOrchestrator_StableDestinationPricedAboveUSDCStillBridges(t *testing.T) {
+	r := newConversionRig(t) // polygon USDT, already in custody
+	promise := StablePromise(big.NewInt(99_500000), 6, 6)
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"quoted_amount": "99500000", "promised_amount": promise.String(),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
+		ToAmount: big.NewInt(99_470000), ToAmountMin: big.NewInt(99_370000), // ≈ T × 0.9997 × 0.999
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: "across"}
+	mustAdvance(t, r)
+	if r.broadcasts() == 0 {
+		t.Fatal("an honest stable route 3 bps off USDC was refused")
+	}
+}
+
+func TestOrchestrator_OwedToUserOnANonStableDeliveryIsUndetermined(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "900")
+	mustAdvance(t, r) // parks with a confirmed bridge leg
+	if _, _, _, err := r.svc.OwedToUser(context.Background(), r.reload(t)); !errors.Is(err, ErrOwedUndetermined) {
+		t.Fatalf("OwedToUser err = %v, want ErrOwedUndetermined (and no panic)", err)
+	}
 }

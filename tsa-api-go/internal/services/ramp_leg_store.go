@@ -25,6 +25,7 @@ var ErrLegNotPending = errors.New("ramp leg is no longer pending")
 type rampLegStore interface {
 	Reserve(ctx context.Context, leg *models.RampLeg) (*models.RampLeg, error)
 	SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error
+	SetAmount(ctx context.Context, id uuid.UUID, amount string) error
 	Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error
 	Fail(ctx context.Context, id uuid.UUID, reason string) error
 	ForOrder(ctx context.Context, orderID uuid.UUID) ([]models.RampLeg, error)
@@ -87,6 +88,16 @@ func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, 
 	return s.DB.WithContext(ctx).Model(&models.RampLeg{}).
 		Where("id = ?", id).
 		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool}).Error
+}
+
+// SetAmount rewrites a reserved leg's amount before it is broadcast (the
+// bridge amount is only known once the route is priced, and the row is
+// reserved before the quote so a second tick cannot join in). A leg with a
+// hash is history and never changes.
+func (s *GormRampLegStore) SetAmount(ctx context.Context, id uuid.UUID, amount string) error {
+	return s.DB.WithContext(ctx).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", id, models.RampLegStatusPending).
+		Update("amount", amount).Error
 }
 
 // Confirm records what landed, but only on a still-pending leg: scoping the
