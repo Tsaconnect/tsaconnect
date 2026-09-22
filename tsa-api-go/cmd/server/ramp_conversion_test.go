@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -175,7 +178,7 @@ func TestRampTreasuryCaps_AcceptsBothValidCaps(t *testing.T) {
 // but unexecutable.
 func TestRampTreasuryLaneRouters_SkipsAnEmptyAllowlist(t *testing.T) {
 	cfg := testConfig(t)
-	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc"); reason == "" {
+	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil); reason == "" {
 		t.Fatalf("a missing allowlist must skip the lane, got routers=%v", routers)
 	}
 }
@@ -187,7 +190,7 @@ func TestRampTreasuryLaneRouters_SkipsAMalformedEntry(t *testing.T) {
 	cfg.RampTreasuryRouters = map[string][]string{
 		"bsc": {"0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE", "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4Ea"},
 	}
-	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc"); reason == "" {
+	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil); reason == "" {
 		t.Fatalf("a malformed router address must skip the lane, got routers=%v", routers)
 	}
 }
@@ -195,8 +198,31 @@ func TestRampTreasuryLaneRouters_SkipsAMalformedEntry(t *testing.T) {
 func TestRampTreasuryLaneRouters_AcceptsValidAddresses(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RampTreasuryRouters = map[string][]string{"bsc": {"0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"}}
-	routers, reason := rampTreasuryLaneRouters(cfg, "bsc")
-	if reason != "" || len(routers) != 1 {
+	routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil)
+	if reason != "" || len(routers) != 1 || routers[0] != common.HexToAddress("0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE") {
 		t.Fatalf("routers=%v reason=%q, want the one valid router and no skip", routers, reason)
+	}
+}
+
+// Allowlisting a token the lane holds would reopen the exact drain the list
+// exists to close: `to` = that token, calldata = transfer(attacker, balance).
+// Casing must not hide the match.
+func TestRampTreasuryLaneRouters_SkipsALaneTokenInTheAllowlist(t *testing.T) {
+	const bscUSDT = "0x55d398326f99059fF775485246999027B3197955"
+	cfg := testConfig(t)
+	cfg.RampTreasuryRouters = map[string][]string{
+		"bsc": {"0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE", strings.ToLower(bscUSDT)},
+	}
+	tokens := map[string]string{"USDT": bscUSDT}
+	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", tokens); reason == "" {
+		t.Fatalf("a lane token in the allowlist must skip the lane, got routers=%v", routers)
+	}
+}
+
+func TestRampTreasuryLaneRouters_SkipsTheZeroAddress(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.RampTreasuryRouters = map[string][]string{"bsc": {"0x0000000000000000000000000000000000000000"}}
+	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil); reason == "" {
+		t.Fatalf("the zero address must skip the lane, got routers=%v", routers)
 	}
 }

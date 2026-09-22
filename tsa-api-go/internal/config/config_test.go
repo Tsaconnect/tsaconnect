@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -419,10 +420,14 @@ func TestLoad_ITSellFWAbsenceTrustedDefaultsOff(t *testing.T) {
 // Every default treasury chain must ship with a pinned router: a chain that
 // loads with an empty allowlist boots with no conversion lane at all.
 func TestLoad_RampTreasuryRoutersDefaultToLiFiDiamond(t *testing.T) {
-	t.Setenv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum")
+	// Unset, not set-to-empty: an empty value loads no chains at all, which
+	// would make this loop vacuous. The real default list is what a new
+	// chain gets added to, so it is the list that must be checked.
+	t.Setenv("RAMP_TREASURY_CHAINS", "")
+	os.Unsetenv("RAMP_TREASURY_CHAINS")
 	cfg := Load()
-	if len(cfg.RampTreasuryChains) != 9 {
-		t.Fatalf("RampTreasuryChains = %v, want all nine", cfg.RampTreasuryChains)
+	if len(cfg.RampTreasuryChains) == 0 {
+		t.Fatal("RampTreasuryChains is empty; the default list did not load")
 	}
 	for _, chain := range cfg.RampTreasuryChains {
 		routers := cfg.RampTreasuryRouters[chain]

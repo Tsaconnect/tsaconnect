@@ -41,8 +41,12 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	ordersRig.svc.SetTreasury("0xTreasury")
 	buyer := seedVerifiedUser(t, ordersRig.db)
 
-	row, err := ordersRig.svc.CreateBuy(context.Background(),
-		ordersRig.buyRequest(buyer, "base", "USDC", "optimism", "USDT"))
+	req := ordersRig.buyRequest(buyer, "base", "USDC", "optimism", "USDT")
+	// A real address: the orchestrator decodes the route's receiver and
+	// compares it to this wallet before signing, so a placeholder can never
+	// be paid.
+	req.WalletAddress = sponsorTestUser
+	row, err := ordersRig.svc.CreateBuy(context.Background(), req)
 	if err != nil {
 		t.Fatalf("CreateBuy: %v", err)
 	}
@@ -77,15 +81,15 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	dst, _ := newSponsorRig("optimism", "USDT") // 6dp, matches CreateBuy's requested leg
 	clock := sponsorTestNow
 	treasury := NewTreasury(map[string]*TreasuryLane{
-		"base":     {SponsorLane: src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
-		"optimism": {SponsorLane: dst.lane, ChainID: 10, Routers: []string{treasuryTestRouter}},
+		"base":     {SponsorLane: src.lane, ChainID: 8453, Routers: treasuryTestRouters},
+		"optimism": {SponsorLane: dst.lane, ChainID: 10, Routers: treasuryTestRouters},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return clock })
 
 	// The verifier reports a SHORT delivery — 99 of the 100 USDC promised —
 	// on the same transaction hash the poller just recorded.
 	transfers := &fakeTransferVerifier{amount: big.NewInt(99_000000)}
 	lifiQuoter := &fakeLiFiQuoter{route: &LiFiRoute{
-		To: treasuryTestRouter, Data: "0x01",
+		To: treasuryTestRouter, Data: testBridgeCalldata(t, row.WalletAddress, 10, false),
 		ToAmount: big.NewInt(98_800000), ToAmountMin: big.NewInt(98_700000), Tool: "across",
 	}}
 	chains := &BlockchainService{cfg: &config.Config{Networks: map[string]config.NetworkConfig{

@@ -633,6 +633,15 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 			order.ID, attempt, route.ToAmountMin, promised)
 		return o.failLeg(detached(ctx), leg.ID, "route guarantees less than the promised amount")
 	}
+	// The route's `to` is allowlisted inside ExecuteRoute, but the calldata
+	// alone decides who the diamond pays. Checked here, where the order's
+	// wallet and destination are known — LiFi's status would only report a
+	// wrong landing after the treasury's funds had already left.
+	if err := checkLiFiDelivery(route.Data, lane.ChainID, o.chainID(order.RequestedChain), order.WalletAddress); err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_delivery_refused_total=1 order=%s bridge#%d tool=%s err=%v",
+			order.ID, attempt, route.Tool, err)
+		return o.failLeg(detached(ctx), leg.ID, err.Error())
+	}
 
 	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, amount, route)
 	if err != nil {

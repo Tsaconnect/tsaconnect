@@ -775,10 +775,10 @@ func Load() *Config {
 		up := strings.ToUpper(chain)
 		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
 	}
-	// LiFi's own diamond per chain, read from li.quest/v1/chains on
-	// 2026-09-17 and PINNED here deliberately: resolving the allowlist at
-	// runtime from the same API whose responses it exists to validate would
-	// defeat the check entirely. Linea's diamond differs from the shared one.
+	// LiFi's own diamond per chain, read from li.quest/v1/chains (last
+	// checked 2026-09-22) and PINNED here deliberately: resolving the
+	// allowlist at runtime from the same API whose responses it exists to
+	// validate would defeat the check entirely. Linea's diamond differs from the shared one.
 	// Override per chain with RAMP_TREASURY_ROUTERS_<CHAIN> (comma-separated)
 	// when LiFi migrates a diamond.
 	const lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"

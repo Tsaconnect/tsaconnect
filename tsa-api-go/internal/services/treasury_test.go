@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // treasuryTestRecipient is a well-formed (but unrelated) hex address reused
@@ -26,6 +28,8 @@ const (
 	treasuryTestToken  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 )
 
+var treasuryTestRouters = []common.Address{common.HexToAddress(treasuryTestRouter)}
+
 // newTestTreasury wires one "base" lane on top of the existing sponsor test
 // rig (newSponsorRig, sponsor_fakes_test.go) with caps: 2000 USD per order,
 // 10000 USD per chain. Reused rather than a parallel fixture: a treasury lane
@@ -41,7 +45,7 @@ func newTestTreasury(t *testing.T) *Treasury {
 func newTestTreasuryWithFakes(t *testing.T) (*Treasury, *TreasuryLane, *fakeSponsorNative, *fakeRelaySigner) {
 	t.Helper()
 	rig, _ := newSponsorRig("base", "USDC")
-	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}}
+	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: treasuryTestRouters}
 	tr := NewTreasury(map[string]*TreasuryLane{"base": lane}, TreasuryCaps{
 		MaxInFlightUSDPerOrder: 2000,
 		MaxInFlightUSDPerChain: 10000,
@@ -625,7 +629,7 @@ func TestTreasury_AddressEmptyOnSignerMismatch(t *testing.T) {
 // its lookup.
 func TestTreasury_NewTreasuryNormalizesLaneKeyCase(t *testing.T) {
 	rig, _ := newSponsorRig("base", "USDC")
-	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}}
+	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: treasuryTestRouters}
 	tr := NewTreasury(map[string]*TreasuryLane{"BASE": lane}, TreasuryCaps{}, nil)
 	if tr.Lane("base") == nil {
 		t.Fatalf("want NewTreasury to normalise lane keys to lower case")

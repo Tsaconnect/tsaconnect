@@ -209,13 +209,13 @@ func newConversionRig(t *testing.T) *conversionRig {
 	r := &conversionRig{t: t, db: db, clock: sponsorTestNow, src: src, dst: dst}
 
 	r.treasury = NewTreasury(map[string]*TreasuryLane{
-		"base":    {SponsorLane: src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
-		"polygon": {SponsorLane: dst.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
+		"base":    {SponsorLane: src.lane, ChainID: 8453, Routers: treasuryTestRouters},
+		"polygon": {SponsorLane: dst.lane, ChainID: 137, Routers: treasuryTestRouters},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000},
 		func() time.Time { return r.clock })
 
 	r.lifi = &fakeLiFiQuoter{route: &LiFiRoute{
-		To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
+		To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across",
 	}}
 	r.transfers = &fakeTransferVerifier{amount: big.NewInt(100_000000)}
 	r.dstTransfers = &fakeTransferVerifier{amount: new(big.Int)}
@@ -336,7 +336,7 @@ func mustAdvance(t *testing.T, r *conversionRig) {
 
 func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
 	if err := r.svc.Advance(context.Background(), r.order); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestOrchestrator_SettlesWhenTheConversionMeetsThePromise(t *testing.T) {
 
 func TestOrchestrator_TopsUpAShortfallInsideTwentyBps(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 10 bps under the 99_500000 promise
 	mustAdvance(t, r)
@@ -790,7 +790,7 @@ func TestOrchestrator_NeverRetriesABridgeThatAlreadyBroadcast(t *testing.T) {
 // it is not a route we may take. The attempt is freed and retried.
 func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01",
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
 		ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_000000), Tool: "across"}
 
 	mustAdvance(t, r)
@@ -804,12 +804,40 @@ func TestOrchestrator_RefusesARouteThatGuaranteesLessThanThePromise(t *testing.T
 	}
 
 	// A later quote that does meet it goes through.
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01",
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
 		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
 	r.clock = r.clock.Add(2 * time.Minute)
 	mustAdvance(t, r)
 	if r.broadcasts() == 0 {
 		t.Fatal("a route that meets the promise must be executed")
+	}
+}
+
+// A route to an allowlisted router can still name someone else as receiver.
+// That must be caught from the calldata before signing — LiFi's status only
+// reports the real landing once the treasury's funds are gone.
+func TestOrchestrator_RefusesARoutePayingSomeoneElse(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: testBridgeCalldata(t, sponsorTestDeposit, 137, false),
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+
+	mustAdvance(t, r)
+
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a route paying another wallet must not be signed", r.broadcasts())
+	}
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("bridge legs = %+v; want the attempt freed for a retry", legs)
+	}
+
+	// An honest quote on the next tick goes through.
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t),
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), Tool: "across"}
+	r.clock = r.clock.Add(2 * time.Minute)
+	mustAdvance(t, r)
+	if r.broadcasts() == 0 {
+		t.Fatal("a route paying the order's wallet must be executed")
 	}
 }
 
@@ -964,7 +992,7 @@ func TestOrchestrator_StopsForAHumanWhenTheShortfallExceedsTheCeiling(t *testing
 
 func TestOrchestrator_NeverTopsUpTwiceIfTheSettlementWriteIsLost(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000")
 	mustAdvance(t, r) // tops up the 0.1 shortfall and settles
@@ -1127,8 +1155,8 @@ func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
 	other, _ := newSponsorRig("polygon", "USDT")
 	other.signer.addr = "0x1111111111111111111111111111111111111111"
 	broken := NewTreasury(map[string]*TreasuryLane{
-		"base":    {SponsorLane: r.src.lane, ChainID: 8453, Routers: []string{treasuryTestRouter}},
-		"polygon": {SponsorLane: other.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
+		"base":    {SponsorLane: r.src.lane, ChainID: 8453, Routers: treasuryTestRouters},
+		"polygon": {SponsorLane: other.lane, ChainID: 137, Routers: treasuryTestRouters},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
 	r.svc.treasury = broken
 
@@ -1155,7 +1183,7 @@ func TestOrchestrator_RefusesWhenTheTreasuryAddressIsUnknown(t *testing.T) {
 func TestOrchestrator_ParksWhenNoLaneCoversTheOrdersChain(t *testing.T) {
 	r := newConversionRig(t)
 	dstOnly := NewTreasury(map[string]*TreasuryLane{
-		"polygon": {SponsorLane: r.dst.lane, ChainID: 137, Routers: []string{treasuryTestRouter}},
+		"polygon": {SponsorLane: r.dst.lane, ChainID: 137, Routers: treasuryTestRouters},
 	}, TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000}, func() time.Time { return r.clock })
 	r.svc.treasury = dstOnly
 
@@ -1580,7 +1608,7 @@ func TestCreditedToUser_NeverCountsABridgeLegBySourceAmount(t *testing.T) {
 // as the bridge: a broadcast is not a delivery.
 func TestOrchestrator_VerifiesTheTopUpOnChainBeforeSettling(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short
 
@@ -1820,7 +1848,7 @@ func TestOrchestrator_NeverStartsASecondTopUpWhileOneIsPending(t *testing.T) {
 // one, and settling on it closes an order the user is still short on.
 func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
 	r := newConversionRig(t)
-	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: "0x01", ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: rigRouteData(t), ToAmount: big.NewInt(99_600000), ToAmountMin: big.NewInt(99_500000), Tool: "across"}
 	mustAdvance(t, r)
 	r.completeBridge(t, "99400000") // 0.1 short; the top-up is for 100000
 	// The top-up transaction credits only part of what it was sent for.
@@ -1851,4 +1879,11 @@ func TestOrchestrator_NeverSettlesOnAPartialTopUp(t *testing.T) {
 	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
 		t.Fatalf("status = %s; want settled once the user actually holds the promise", got.Status)
 	}
+}
+
+// rigRouteData is calldata for the rig's own conversion: a bridge to
+// sponsorTestUser (the order's wallet) on polygon (137).
+func rigRouteData(t *testing.T) string {
+	t.Helper()
+	return testBridgeCalldata(t, sponsorTestUser, 137, false)
 }

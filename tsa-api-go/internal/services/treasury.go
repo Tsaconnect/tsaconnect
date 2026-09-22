@@ -44,9 +44,10 @@ type TreasuryLane struct {
 	ChainID      int64
 
 	// Routers is the allowlist of contract addresses a route on this lane may
-	// call or be approved to spend. Empty means no route may execute: a lane
-	// without an allowlist is a lane that would sign anything.
-	Routers []string
+	// call or be approved to spend, parsed and validated once at boot. Empty
+	// means no route may execute: a lane without an allowlist is a lane that
+	// would sign anything.
+	Routers []common.Address
 
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
@@ -455,20 +456,17 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 
 // routerAllowed reports whether addr is one of the lane's allowlisted router
 // contracts. An empty allowlist allows NOTHING: a misconfigured lane must
-// refuse every route rather than accept every route.
-func routerAllowed(allowlist []string, addr string) bool {
-	if len(allowlist) == 0 || strings.TrimSpace(addr) == "" {
-		return false
-	}
-	// Compared as parsed addresses, not strings: EIP-55 checksum casing and
-	// zero-padding differences are cosmetic, and a string compare would let
-	// the same contract read as two different values.
+// refuse every route rather than accept every route. addr comes from LiFi,
+// so it is parsed strictly — common.HexToAddress alone would coerce garbage
+// into some address — and then compared as an address, so EIP-55 casing
+// cannot make one contract read as two.
+func routerAllowed(allowlist []common.Address, addr string) bool {
 	if !common.IsHexAddress(addr) {
 		return false
 	}
 	want := common.HexToAddress(addr)
 	for _, a := range allowlist {
-		if common.IsHexAddress(a) && common.HexToAddress(a) == want {
+		if a == want {
 			return true
 		}
 	}
