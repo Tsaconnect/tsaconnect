@@ -67,7 +67,14 @@ jest.mock('@/components/ui', () => {
   return {
     __esModule: true,
     Text: (props: any) => label(props.children),
-    Button: (props: any) => label(props.title),
+    // Pressable by title (accessibilityLabel) so a test can tap it; renders
+    // its title as text like before.
+    Button: (props: any) =>
+      react.createElement(
+        View,
+        { accessibilityLabel: props.title, onPress: props.onPress, disabled: props.disabled },
+        label(props.title),
+      ),
     Card: box,
     Icon: () => null,
     // Rendered as nothing so that the form's first pressable is the "you pay"
@@ -94,6 +101,8 @@ jest.mock('@/services/wallet', () => ({
   getActiveWallet: jest.fn(async () => '0xwallet'),
   readErc20BalanceOf: jest.fn(async () => 0n),
   getProvider: jest.fn(() => ({ getBalance: async () => 0n })),
+  ensureGas: jest.fn(async () => true),
+  nativeGasReserve: jest.fn(async () => null),
 }));
 jest.mock('@/services/walletApi', () => ({
   __esModule: true,
@@ -134,6 +143,8 @@ jest.mock('@/services/lifi', () => {
     isBtcLiFiChain: (id: number) => id === BTC_LIFI_CHAIN_ID,
     isNonEVMLiFiChain: (id: number) =>
       id === SOLANA_LIFI_CHAIN_ID || id === SUI_LIFI_CHAIN_ID || id === BTC_LIFI_CHAIN_ID,
+    isNativeTokenAddress: (a: string) =>
+      ['0x0000000000000000000000000000000000000000', '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'].includes((a || '').toLowerCase()),
     getLiFiToken: jest.fn((chainId: number, symbol: string) => state.token(chainId, symbol)),
     getLiFiTokens: jest.fn((chainId: number) => state.tokens(chainId)),
     getLiFiAllChainTokens: jest.fn(async () => ({ tokens: [], total: 0, offset: 0, limit: 0 })),
@@ -148,6 +159,8 @@ import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import * as Lifi from '@/services/lifi';
 import * as Picker from '@/components/swap/TokenPickerModal';
 import * as WalletApi from '@/services/walletApi';
+import * as Wallet from '@/services/wallet';
+import * as LifiFlow from '@/services/lifiFlow';
 import AllSwapScreen from '../all-swap';
 
 const BTC_CHAIN_ID = 20000000000001;
@@ -532,5 +545,165 @@ describe('All Swap preselection against a live quote', () => {
     // The amount priced against the old pair must not survive into the new one.
     expect(amountValue()).toBe('');
     expect(rendered(tree)).toContain('BTC');
+  });
+});
+
+describe('All Swap confirm and MAX', () => {
+  const wallet = Wallet as unknown as {
+    readErc20BalanceOf: jest.Mock; getProvider: jest.Mock; ensureGas: jest.Mock; nativeGasReserve: jest.Mock;
+  };
+  const flow = LifiFlow as unknown as { executeLiFiSwap: jest.Mock };
+  const getQuote = (Lifi as unknown as { getLiFiQuote: jest.Mock }).getLiFiQuote;
+  const BNB = token('BNB', '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+  const USDT_DAI = { fromSymbol: 'USDT', fromChain: 'bsc', toSymbol: 'DAI', toChain: 'bsc' };
+
+  const quoteValidFor = (seconds: number) => ({
+    toAmount: '1000000000000000000', toAmountUSD: '1', tool: 'pancake', estimatedDuration: 30,
+    gasCostUSD: '0.01', transactionRequest: { chainId: 56, gasLimit: '200000' },
+    validUntil: Math.floor(Date.now() / 1000) + seconds,
+  });
+
+  const pressable = (tree: ReactTestRenderer, label: string) =>
+    tree.root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
+
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    lifi.__state.token = async (_chainId, symbol) => ({ USDT, DAI, BNB } as Record<string, any>)[symbol] ?? null;
+    wallet.readErc20BalanceOf.mockImplementation(async () => 100n * 10n ** 18n);
+    wallet.ensureGas.mockReset();
+    wallet.ensureGas.mockImplementation(async () => true);
+    wallet.nativeGasReserve.mockImplementation(async () => null);
+    flow.executeLiFiSwap.mockReset();
+    getQuote.mockReset();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    wallet.readErc20BalanceOf.mockImplementation(async () => 0n);
+    wallet.getProvider.mockImplementation(() => ({ getBalance: async () => 0n }));
+  });
+
+  /** Types an amount, lets the debounced quote land, and opens the confirm screen. */
+  async function openConfirm(quoteSeconds: number) {
+    getQuote.mockResolvedValue(quoteValidFor(quoteSeconds));
+    const tree = await mount({ preselect: USDT_DAI });
+    await act(async () => { tree.root.findAllByProps({ placeholder: '0.00' })[0].props.onChangeText('1'); });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    await flush();
+    const review = pressable(tree, 'Review Swap');
+    expect(review).toBeDefined();
+    await act(async () => { review.props.onPress(); });
+    await flush();
+    expect(pressable(tree, 'Confirm Swap')).toBeDefined();
+    return tree;
+  }
+
+  it('turns Confirm into Refresh once the quote expires on the confirm screen, and never signs it', async () => {
+    const tree = await openConfirm(5);
+
+    await act(async () => { jest.advanceTimersByTime(6000); });
+    await flush();
+
+    expect(pressable(tree, 'Confirm Swap')).toBeUndefined();
+    expect(rendered(tree)).toContain('This price expired — get a fresh one before swapping');
+    const refresh = pressable(tree, 'Refresh price');
+    expect(refresh).toBeDefined();
+
+    const quotesBefore = getQuote.mock.calls.length;
+    await act(async () => { refresh.props.onPress(); });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    await flush();
+
+    expect(flow.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(getQuote.mock.calls.length).toBeGreaterThan(quotesBefore);
+  });
+
+  it('stops before signing when the wallet has no gas', async () => {
+    wallet.ensureGas.mockImplementation(async (_chain: string, _addr: string, onAlert: (t: string, m: string) => void) => {
+      onAlert('Not enough gas', 'You need BNB on BNB Chain to cover the transaction fee.');
+      return false;
+    });
+    const tree = await openConfirm(60);
+
+    await act(async () => { await pressable(tree, 'Confirm Swap').props.onPress(); });
+    await flush();
+
+    expect(flow.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(rendered(tree)).toContain('Not enough gas: You need BNB on BNB Chain to cover the transaction fee.');
+  });
+
+  it('holds back the gas reserve when MAX is tapped on the native token', async () => {
+    wallet.getProvider.mockImplementation(() => ({ getBalance: async () => 10n ** 18n })); // 1 BNB
+    wallet.nativeGasReserve.mockImplementation(async () => 4_375_000_000_000_000n); // 0.004375 BNB
+    const tree = await mount({ preselect: { fromSymbol: 'BNB', fromChain: 'bsc', toSymbol: 'USDT', toChain: 'bsc' } });
+
+    const max = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+      && n.props.accessibilityLabel.startsWith('Use maximum') && typeof n.props.onPress === 'function')[0];
+    expect(max).toBeDefined();
+    await act(async () => { max.props.onPress(); });
+    await flush();
+
+    expect(tree.root.findAllByProps({ placeholder: '0.00' })[0].props.value).toBe('0.995625');
+  });
+
+  it('runs one swap however many times Confirm is tapped while the gas check is in flight', async () => {
+    const gasCheck = deferred<boolean>();
+    wallet.ensureGas.mockImplementation(() => gasCheck.promise);
+    flow.executeLiFiSwap.mockResolvedValue('0xswap');
+    const tree = await openConfirm(60);
+
+    const confirm = pressable(tree, 'Confirm Swap');
+    await act(async () => { confirm.props.onPress(); confirm.props.onPress(); confirm.props.onPress(); });
+    await act(async () => { gasCheck.resolve(true); });
+    await flush();
+
+    expect(wallet.ensureGas).toHaveBeenCalledTimes(1);
+    expect(flow.executeLiFiSwap).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps MAX in step when a quote raises the reserve, until the user types', async () => {
+    wallet.getProvider.mockImplementation(() => ({ getBalance: async () => 10n ** 18n })); // 1 BNB
+    wallet.nativeGasReserve.mockImplementation(async () => 4_375_000_000_000_000n); // before a quote
+    getQuote.mockResolvedValue({ ...quoteValidFor(60), transactionRequest: { chainId: 56, gasLimit: '900000' } });
+    const tree = await mount({ preselect: { fromSymbol: 'BNB', fromChain: 'bsc', toSymbol: 'USDT', toChain: 'bsc' } });
+    const amount = () => tree.root.findAllByProps({ placeholder: '0.00' })[0];
+
+    // The quote for the MAX amount reports a heavier route: 0.01 BNB reserve.
+    wallet.nativeGasReserve.mockImplementation(async (_k: string, q?: { gasUnits?: bigint }) =>
+      (q?.gasUnits === 900_000n ? 10n ** 16n : 4_375_000_000_000_000n));
+    const max = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+      && n.props.accessibilityLabel.startsWith('Use maximum') && typeof n.props.onPress === 'function')[0];
+    await act(async () => { max.props.onPress(); });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    await flush();
+
+    expect(amount().props.value).toBe('0.99');
+    expect(rendered(tree)).not.toContain('Leave some BNB to pay the network fee');
+
+    // Typing takes the amount back from MAX.
+    await act(async () => { amount().props.onChangeText('0.5'); });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    await flush();
+    expect(amount().props.value).toBe('0.5');
+  });
+
+  it('does not carry an old error back onto the confirm screen', async () => {
+    // First attempt: the gas check fails and says so on the confirm screen.
+    wallet.ensureGas.mockImplementationOnce(async (_c: string, _a: string, onAlert: (t: string, m: string) => void) => {
+      onAlert('Not enough gas', 'Top up BNB.');
+      return false;
+    });
+    const tree = await openConfirm(60);
+    await act(async () => { await pressable(tree, 'Confirm Swap').props.onPress(); });
+    await flush();
+    expect(rendered(tree)).toContain('Not enough gas: Top up BNB.');
+
+    // Back to the form and in again: the old message must not come with it.
+    await act(async () => { pressable(tree, 'Cancel').props.onPress(); });
+    await flush();
+    await act(async () => { pressable(tree, 'Review Swap').props.onPress(); });
+    await flush();
+
+    expect(pressable(tree, 'Confirm Swap')).toBeDefined();
+    expect(rendered(tree)).not.toContain('Not enough gas: Top up BNB.');
   });
 });

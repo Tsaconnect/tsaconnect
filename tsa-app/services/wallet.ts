@@ -7,6 +7,7 @@ import { toFiniteNumber } from './txFields';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CHAINS, type ChainKey, type ChainConfig } from '../constants/chains';
+import { MIN_SWAP_RESERVE_WEI, swapGasReserve } from './gasReserve';
 // Circular with solanaWallet (it reads getMnemonic) — safe because both sides
 // only call the other inside function bodies, never during module evaluation.
 import { forgetSolanaDerivation } from './chains/solanaWallet';
@@ -430,6 +431,33 @@ export async function nativeBalance(chainKey: ChainKey, address: string): Promis
     console.warn('[wallet] nativeBalance read failed, degrading gracefully:', err);
     return null;
   }
+}
+
+/**
+ * Native base units to hold back so a swap selling the gas token can still pay
+ * for itself — what MAX subtracts (see swapGasReserve). `quote` carries the
+ * route's gasLimit and gas cost once there is one. Priced at the current gas
+ * price (base + tip), not maxFeePerGas, which already carries a 2x base-fee
+ * cushion and would overstate the reserve.
+ *
+ * Returns null only when nothing at all is known (price unreadable, no quote,
+ * no floor) — callers then leave MAX at the full balance rather than invent a
+ * reserve (same degrade-gracefully contract as `nativeBalance`).
+ */
+export async function nativeGasReserve(
+  chainKey: ChainKey,
+  quote?: { gasUnits?: bigint; gasCostWei?: bigint },
+): Promise<bigint | null> {
+  let gasPriceWei: bigint | null = null;
+  try {
+    const fee = await withRpcFallback(chainKey, (provider) => provider.getFeeData());
+    gasPriceWei = fee.gasPrice ?? fee.maxFeePerGas ?? null;
+  } catch (err) {
+    console.warn('[wallet] gas price read failed, degrading gracefully:', err);
+  }
+  const floorWei = MIN_SWAP_RESERVE_WEI[chainKey];
+  if (gasPriceWei == null && !quote?.gasCostWei && !floorWei) return null;
+  return swapGasReserve({ gasPriceWei, gasUnits: quote?.gasUnits, quoteGasCostWei: quote?.gasCostWei, floorWei });
 }
 
 /**

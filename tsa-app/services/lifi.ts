@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
 import { getNetwork } from '../hooks/useNetwork';
+import { getChainByChainId } from '../constants/chains';
 
 // LiFi's non-numeric chain id for Solana (SVM family). Safe as a JS number
 // (~2^50 < 2^53) but has no entry in the EVM CHAINS map — branch on it before
@@ -53,6 +54,26 @@ export function isSuiLiFiChain(chainId: number): boolean {
  */
 export function isNonEVMLiFiChain(chainId: number): boolean {
   return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId);
+}
+
+/**
+ * True when this device can SIGN a swap that starts on `chainId`: an EVM chain
+ * in the wallet's own registry (the signer needs it for nonce and RPC), or one
+ * of the non-EVM families with its own signing path (Solana, Bitcoin, Sui).
+ *
+ * LiFi routes across ~60 EVM chains; the wallet signs on a handful. The rest
+ * are fine DESTINATIONS — LiFi delivers the far leg — but as a SOURCE they give
+ * a quote that dies at signing ("Unsupported chain in route"), so the "from"
+ * picker offers only these.
+ */
+export function isSignableSourceChain(chainId: number): boolean {
+  return isNonEVMLiFiChain(chainId) || getChainByChainId(chainId) !== undefined;
+}
+
+/** True for the two addresses LiFi uses for an EVM chain's native coin. */
+export function isNativeTokenAddress(address: string): boolean {
+  const a = (address || '').toLowerCase();
+  return a === '0x0000000000000000000000000000000000000000' || a === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 }
 
 export interface LiFiChain {
@@ -109,6 +130,12 @@ export interface LiFiQuote {
   toAmountUSD: string;
   estimatedDuration: number;
   gasCostUSD: string;
+  /**
+   * The route's gas cost in the source chain's native base units (sum of
+   * estimate.gasCosts), including any L1 data fee. Absent when LiFi reports
+   * none or reports it unparseably.
+   */
+  gasCostWei?: string;
   /**
    * Total platform + protocol fees LiFi reports for this route, in USD
    * (estimate.feeCosts).
@@ -220,6 +247,25 @@ export async function getLiFiToken(chainId: number, address: string): Promise<Li
   return data?.address ? (data as LiFiToken) : null;
 }
 
+/** Sums LiFi's estimate.gasCosts amounts (native base units) exactly. */
+export function sumGasCostsWei(gasCosts: unknown): string | undefined {
+  if (!Array.isArray(gasCosts) || gasCosts.length === 0) return undefined;
+  try {
+    return gasCosts.reduce((acc: bigint, c: any) => acc + BigInt(c?.amount ?? 0), 0n).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The chains a picker leg may offer: every chain as a destination, only the
+ * ones this device can sign on as a source. Pure, so a picker can derive it
+ * from one fetched list without ever showing the unfiltered one.
+ */
+export function chainsForLeg(chains: LiFiChain[], mode: 'from' | 'to'): LiFiChain[] {
+  return mode === 'from' ? chains.filter(c => isSignableSourceChain(c.id)) : chains;
+}
+
 export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> {
   const headers = await getAuthHeaders();
   const qs = new URLSearchParams({
@@ -243,6 +289,7 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,
     gasCostUSD: data.estimate?.gasCosts?.[0]?.amountUSD ?? '0',
+    gasCostWei: sumGasCostsWei(data.estimate?.gasCosts),
     feeCostUSD: sumFeeCostsUSD(data.estimate?.feeCosts),
     tool: data.toolDetails?.name ?? data.tool ?? 'LiFi',
     transactionRequest: data.transactionRequest,
