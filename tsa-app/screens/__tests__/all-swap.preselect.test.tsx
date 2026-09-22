@@ -87,7 +87,7 @@ jest.mock('@/components/ui', () => {
 });
 
 // Captures its props so a test can drive the picker the way a user does.
-jest.mock('@/components/swap/TokenPickerModal', () => {
+jest.mock('@/components/assets/AssetPicker', () => {
   const state: { props: any } = { props: null };
   return {
     __esModule: true,
@@ -157,7 +157,7 @@ jest.mock('@/services/lifi', () => {
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import * as Lifi from '@/services/lifi';
-import * as Picker from '@/components/swap/TokenPickerModal';
+import * as Picker from '@/components/assets/AssetPicker';
 import * as WalletApi from '@/services/walletApi';
 import * as Wallet from '@/services/wallet';
 import * as LifiFlow from '@/services/lifiFlow';
@@ -300,11 +300,11 @@ describe('All Swap preselection', () => {
     const payPill = tree.root.findAll(n =>
       n.props?.accessibilityLabel === 'Select token to pay' && typeof n.props?.onPress === 'function');
     await act(async () => { payPill[0].props.onPress(); });
-    // `visible` is what proves the picker actually opened: `mode` alone falls
+    // `visible` is what proves the picker actually opened: `side` alone falls
     // back to 'from' when nothing is open, so asserting it would pass on a
     // press that did nothing.
     expect(picker.__state.props.visible).toBe(true);
-    expect(picker.__state.props.mode).toBe('from');
+    expect(picker.__state.props.side).toBe('from');
     await act(async () => { picker.__state.props.onSelect(DAI, ETH_CHAIN_ID); });
 
     await act(async () => { bscList.resolve([USDT]); });
@@ -429,8 +429,9 @@ describe('All Swap preselection', () => {
     const tree = await mount({});
 
     expect(lifi.getLiFiToken).not.toHaveBeenCalled();
-    // The two default chains, and nothing else, got a token list.
-    expect(lifi.getLiFiTokens.mock.calls.map(c => c[0]).sort()).toEqual([ETH_CHAIN_ID, BSC_CHAIN_ID]);
+    // No per-chain token list either: the coin picker loads its own list when
+    // it opens, so an untouched screen fetches none of those multi-MB lists.
+    expect(lifi.getLiFiTokens).not.toHaveBeenCalled();
     expect(rendered(tree).filter(t => t === 'Select')).toHaveLength(2);
     expect(rendered(tree)).not.toContain('Selecting this pair…');
     expect(rendered(tree).some(t => t.startsWith('Couldn’t preselect'))).toBe(false);
@@ -483,25 +484,6 @@ describe('All Swap picker with no leg open', () => {
     expect(amountInput().props.value).toBe('1.5');
     // The leg that did resolve is not collateral damage either.
     expect(rendered(tree)).toContain('USDT');
-  });
-
-  it('ignores a chain change made while the picker is closed', async () => {
-    lifi.__state.token = async () => null;
-    lifi.__state.tokens = () => Promise.resolve([]);
-
-    const tree = await mount({});
-    expect(rendered(tree).filter(t => t === 'Select')).toHaveLength(2);
-
-    lifi.getLiFiTokens.mockClear();
-    expect(picker.__state.props.visible).toBe(false);
-    await act(async () => { picker.__state.props.onChainChange(POLYGON_CHAIN_ID); });
-    await flush();
-
-    // A moved chain is observable through the list it makes the screen fetch,
-    // which is the same fetch that would have offered the user the wrong
-    // chain's tokens on a leg they never opened.
-    expect(lifi.getLiFiTokens.mock.calls.map(c => c[0])).not.toContain(POLYGON_CHAIN_ID);
-    expect(lifi.getLiFiTokens).not.toHaveBeenCalled();
   });
 });
 

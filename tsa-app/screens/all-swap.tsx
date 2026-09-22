@@ -4,8 +4,8 @@
 // then sign approval + swap. Restyled onto the TSA Signature design system (theme
 // tokens + @/components/ui primitives). All quote/fee/decimal math, the LiFi quote
 // lifecycle (debounce + expiry countdown + refresh), the two-step approve→swap
-// signing flow, live on-chain balance reads, navigation, and the TokenPickerModal
-// wiring are unchanged — this is a visual/structural restyle only.
+// signing flow, live on-chain balance reads and navigation are unchanged; coins are
+// chosen with the shared AssetPicker — this is a visual/structural restyle only.
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
@@ -27,7 +27,7 @@ import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiToken, getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
+  getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
   type SwapDeliveryStatus,
   isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, isNativeTokenAddress, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
@@ -36,7 +36,8 @@ import { executeLiFiSwap } from '@/services/lifiFlow';
 import { fundedQuoteChain } from '@/services/quoteChain';
 import { missingAddressNotice } from '@/utils/swapAddresses';
 import { resolveLiFiChainId } from '@/utils/spotChains';
-import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import AssetPicker from '@/components/assets/AssetPicker';
+import { invalidateWalletHoldings } from '@/hooks/useWalletHoldings';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
 // LiFi tokens are identified by contract; only one we vouch for borrows a
 // registry logo when LiFi sends none.
@@ -146,16 +147,6 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
   const [quoteError, setQuoteError] = useState('');
   const [screen, setScreen] = useState<Screen>('form');
   const [pickerMode, setPickerMode] = useState<'from' | 'to' | null>(null);
-  const [allTokens, setAllTokens] = useState<LiFiToken[]>([]);
-  const [toAllTokens, setToAllTokens] = useState<LiFiToken[]>([]);
-  const [tokensLoading, setTokensLoading] = useState(false);
-  const [toTokensLoading, setToTokensLoading] = useState(false);
-  const [allChainsTokens, setAllChainsTokens] = useState<LiFiToken[]>([]);
-  const [allChainsLoading, setAllChainsLoading] = useState(false);
-  const [allChainsTotal, setAllChainsTotal] = useState(0);
-  const [allChainsQuery, setAllChainsQuery] = useState('');
-  const allChainsLoadedQueryRef = useRef<string | null>(null);
-  const ALL_CHAINS_PAGE_SIZE = 100;
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [signingStatus, setSigningStatus] = useState('');
   const [txHash, setTxHash] = useState('');
@@ -331,78 +322,10 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     return walletAddress || null;
   }, [walletAddress, solanaAddress, btcAddress, suiAddress]);
 
-  // Lazy-load all-chain tokens paginated. Initial page is fetched the first
-  // time the picker is opened in "All" mode (see `loadAllChainsPage`); we don't
-  // pre-fetch at mount because the LiFi cross-chain blob is several MB and
-  // blocks the home screen if shipped eagerly.
-  const loadAllChainsPage = useCallback(async (opts: { reset?: boolean; q?: string } = {}) => {
-    const q = (opts.q ?? allChainsQuery).trim();
-    const reset = !!opts.reset;
-    if (allChainsLoading) return;
-    // When the query changes we always reset the cursor.
-    if (allChainsLoadedQueryRef.current !== q) {
-      allChainsLoadedQueryRef.current = q;
-    }
-    setAllChainsLoading(true);
-    try {
-      const offset = reset ? 0 : allChainsTokens.length;
-      const page = await getLiFiAllChainTokens({ offset, limit: ALL_CHAINS_PAGE_SIZE, q: q || undefined });
-      setAllChainsTotal(page.total);
-      setAllChainsTokens(prev => (reset ? page.tokens : [...prev, ...page.tokens]));
-    } catch {
-      // Swallow: picker will fall back to per-chain `allTokens`.
-    } finally {
-      setAllChainsLoading(false);
-    }
-  }, [allChainsLoading, allChainsTokens.length, allChainsQuery]);
-
-  // First-page load triggered when the picker opens for the first time.
-  useEffect(() => {
-    if (pickerMode === null) return;
-    if (allChainsLoadedQueryRef.current !== null) return;
-    void loadAllChainsPage({ reset: true, q: '' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickerMode]);
-
-  // Reset+refetch when the user types into the picker's search (debounced
-  // inside the picker — see the `onSearchChange` prop).
-  const handleAllChainsSearchChange = useCallback((q: string) => {
-    setAllChainsQuery(q);
-    setAllChainsTokens([]);
-    allChainsLoadedQueryRef.current = null;
-    void loadAllChainsPage({ reset: true, q });
-  }, [loadAllChainsPage]);
-
-  const handleAllChainsLoadMore = useCallback(() => {
-    if (allChainsLoading) return;
-    if (allChainsTokens.length >= allChainsTotal) return;
-    void loadAllChainsPage();
-  }, [allChainsLoading, allChainsTokens.length, allChainsTotal, loadAllChainsPage]);
-
   useFocusEffect(useCallback(() => {
     loadBalances();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fromChainId, solanaAddress, btcAddress, suiAddress]));
-
-  useEffect(() => {
-    let active = true;
-    setTokensLoading(true);
-    getLiFiTokens(fromChainId)
-      .then(tokens => { if (active) setAllTokens(tokens); })
-      .catch(() => {})
-      .finally(() => { if (active) setTokensLoading(false); });
-    return () => { active = false; };
-  }, [fromChainId]);
-
-  useEffect(() => {
-    let active = true;
-    setToTokensLoading(true);
-    getLiFiTokens(toChainId)
-      .then(tokens => { if (active) setToAllTokens(tokens); })
-      .catch(() => {})
-      .finally(() => { if (active) setToTokensLoading(false); });
-    return () => { active = false; };
-  }, [toChainId]);
 
   const loadBalances = async () => {
     try {
@@ -754,6 +677,8 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
     }
 
     setTxHash(swapHash); setScreen('success');
+    // Balances just changed; the coin picker must not show the old ones.
+    invalidateWalletHoldings();
     settleSwapFee({ ...feeReport, quoteId: swapHash })
       .catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
   };
@@ -1192,34 +1117,9 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
           />
         </ScrollView>
 
-        <TokenPickerModal
+        <AssetPicker
           visible={pickerMode !== null}
-          // Stays mounted while closed on purpose: the picker fetches the LiFi
-          // chain list once per mount and clears its own search/chain/paging
-          // state off `visible`, so unmounting it on close would refetch that
-          // whole list on every open. The fallback exists only to satisfy the
-          // non-nullable prop on that closed render, and says nothing about a
-          // leg being live — `visible` is the only signal that does.
-          mode={pickerMode ?? 'from'}
-          chainId={pickerMode === 'from' ? fromChainId : toChainId}
-          userBalances={balances}
-          allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
-          allChainsTokens={allChainsTokens}
-          allChainsLoading={allChainsLoading}
-          allChainsHasMore={allChainsTokens.length < allChainsTotal}
-          onAllChainsLoadMore={handleAllChainsLoadMore}
-          onAllChainsSearchChange={handleAllChainsSearchChange}
-          tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
-          onChainChange={(newChainId) => {
-            // No mode means no leg was ever opened, and an untaken `from`
-            // branch here re-chains `to` — the leg the user was not touching.
-            if (pickerMode === null) return;
-            // Changing a chain is choosing a leg: whatever the preselection is
-            // still fetching for this side is now the wrong chain's token.
-            userChoseLeg.current[pickerMode] = true;
-            if (pickerMode === 'from') setFromChainId(newChainId);
-            else setToChainId(newChainId);
-          }}
+          side={pickerMode ?? 'from'}
           onSelect={(token, chainId) => {
             // Same absent-leg guard, and it protects more here: a fall-through
             // would not just write `to`, it would also drop the preselect

@@ -22,7 +22,7 @@
 // the user pays in their bank app -> the order screen takes over.
 //
 // Phase 2 (converted buys): the user now names the token AND chain they want
-// up front (TokenPickerModal), rather than the screen inferring a chain from
+// up front (AssetPicker), rather than the screen inferring a chain from
 // whatever Paycrest could fill. The quote for that exact pair comes back as
 // either a direct venue, a labelled CONVERSION (Paycrest fills something
 // else into our treasury, then a cross-chain route delivers what was asked
@@ -82,9 +82,9 @@ import { promptKycRefusal } from '@/utils/kycRefusal';
 // flow rather than built again here. Its callback is already
 // `(token: LiFiToken, chainId: number)`, exactly the shape a "what do you
 // want to receive" picker needs.
-import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import AssetPicker from '@/components/assets/AssetPicker';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
-import { getLiFiTokens, getLiFiAllChainTokens, type LiFiToken } from '@/services/lifi';
+import { getLiFiTokens, type LiFiToken } from '@/services/lifi';
 import { getChainByChainId, getChainDisplay, getChain, type ChainKey } from '@/constants/chains';
 
 /** Debounce on the amount field: every keystroke would otherwise fan a live
@@ -126,6 +126,9 @@ const DEFAULT_CHAIN_ID = getChain(DEFAULT_CHAIN_KEY)?.chainId ?? 8453;
  *  Scoped per currency: a NGN account number is meaningless as a GHS refund
  *  destination. */
 const REFUND_STORE_KEY = (currency: string) => `paycrest.refundAccount.v1.${currency}`;
+
+/** Chains a Naira buy can be quoted on: the wallet's EVM registry. */
+const isBuyableChain = (chainId: number) => getChainByChainId(chainId) !== undefined;
 
 export default function PaycrestBuyScreen() {
   const { colors, spacing } = useTheme();
@@ -187,13 +190,6 @@ export default function PaycrestBuyScreen() {
   const [wantTokenMeta, setWantTokenMeta] = useState<LiFiToken | null>(null);
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
   const [pickerTokens, setPickerTokens] = useState<LiFiToken[]>([]);
-  const [pickerTokensLoading, setPickerTokensLoading] = useState(false);
-  const [allChainsTokens, setAllChainsTokens] = useState<LiFiToken[]>([]);
-  const [allChainsLoading, setAllChainsLoading] = useState(false);
-  const [allChainsTotal, setAllChainsTotal] = useState(0);
-  const [allChainsQuery, setAllChainsQuery] = useState('');
-  const allChainsLoadedQueryRef = useRef<string | null>(null);
-  const ALL_CHAINS_PAGE_SIZE = 100;
 
   // Our chain key for wantChainId, or undefined for a chain outside the EVM
   // registry (e.g. a non-EVM pick from the "all chains" list) — quoting has
@@ -263,19 +259,15 @@ export default function PaycrestBuyScreen() {
     };
   }, [currencyCode]);
 
-  // Token list for whichever chain is currently wanted — feeds the picker's
-  // per-chain section, same as a swap screen's "from"/"to" token list.
+  // Token list for whichever chain is currently wanted, only to resolve the
+  // wanted token's icon and decimals below (the picker loads its own coins).
   useEffect(() => {
     let active = true;
-    setPickerTokensLoading(true);
     getLiFiTokens(wantChainId)
       .then((tokens) => {
         if (active) setPickerTokens(tokens);
       })
-      .catch(() => {})
-      .finally(() => {
-        if (active) setPickerTokensLoading(false);
-      });
+      .catch(() => {});
     return () => {
       active = false;
     };
@@ -288,51 +280,6 @@ export default function PaycrestBuyScreen() {
     const match = pickerTokens.find((t) => t.symbol.toUpperCase() === wantSymbol.toUpperCase());
     if (match) setWantTokenMeta(match);
   }, [pickerTokens, wantSymbol]);
-
-  // Lazy-loaded, paginated "all chains" token search inside the picker —
-  // fetched only once the picker is actually opened, since the cross-chain
-  // blob is multi-MB and must not block this screen's first render.
-  const loadAllChainsPage = useCallback(
-    async (opts: { reset?: boolean; q?: string } = {}) => {
-      const q = (opts.q ?? allChainsQuery).trim();
-      if (allChainsLoading) return;
-      setAllChainsLoading(true);
-      try {
-        const offset = opts.reset ? 0 : allChainsTokens.length;
-        const page = await getLiFiAllChainTokens({ offset, limit: ALL_CHAINS_PAGE_SIZE, q: q || undefined });
-        setAllChainsTotal(page.total);
-        setAllChainsTokens((prev) => (opts.reset ? page.tokens : [...prev, ...page.tokens]));
-      } catch {
-        // Swallow: the picker falls back to the per-chain list above.
-      } finally {
-        setAllChainsLoading(false);
-      }
-    },
-    [allChainsLoading, allChainsTokens.length, allChainsQuery],
-  );
-
-  useEffect(() => {
-    if (!tokenPickerOpen) return;
-    if (allChainsLoadedQueryRef.current !== null) return;
-    allChainsLoadedQueryRef.current = '';
-    void loadAllChainsPage({ reset: true, q: '' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokenPickerOpen]);
-
-  const handleAllChainsSearchChange = useCallback(
-    (q: string) => {
-      setAllChainsQuery(q);
-      setAllChainsTokens([]);
-      allChainsLoadedQueryRef.current = null;
-      void loadAllChainsPage({ reset: true, q });
-    },
-    [loadAllChainsPage],
-  );
-
-  const handleAllChainsLoadMore = useCallback(() => {
-    if (allChainsLoading || allChainsTokens.length >= allChainsTotal) return;
-    void loadAllChainsPage();
-  }, [allChainsLoading, allChainsTokens.length, allChainsTotal, loadAllChainsPage]);
 
   // Re-quote on amount, currency, or a change of what the user wants to
   // receive. The requested (chain, token) is sent on every call — see
@@ -791,27 +738,13 @@ export default function PaycrestBuyScreen() {
         }}
         emptyText="No currencies available."
       />
-      <TokenPickerModal
+      <AssetPicker
         visible={tokenPickerOpen}
-        mode="to"
-        // This picker chooses a DESTINATION, not a balance to spend from — a
-        // buy has nothing in the user's wallet to weight by, unlike a swap's
-        // "from" side, so the held-token section is simply empty rather than
-        // gated on a multi-chain balance read this screen has no other use
-        // for.
-        userBalances={[]}
-        chainId={wantChainId}
-        onChainChange={(chainId) => {
-          setWantChainId(chainId);
-          setWantTokenMeta(null);
-        }}
-        allTokens={pickerTokens}
-        tokensLoading={pickerTokensLoading}
-        allChainsTokens={allChainsTokens}
-        allChainsLoading={allChainsLoading}
-        allChainsHasMore={allChainsTokens.length < allChainsTotal}
-        onAllChainsLoadMore={handleAllChainsLoadMore}
-        onAllChainsSearchChange={handleAllChainsSearchChange}
+        side="to"
+        title="Choose what to buy"
+        // A buy is quoted per EVM chain (wantChainKey); a chain outside the
+        // registry could never be priced, so it is not offered.
+        allow={isBuyableChain}
         onSelect={(token, chainId) => {
           setWantChainId(chainId);
           setWantSymbol(token.symbol.toUpperCase());
