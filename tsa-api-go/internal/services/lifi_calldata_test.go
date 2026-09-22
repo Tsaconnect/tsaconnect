@@ -51,6 +51,11 @@ func loadLiFiFixtures(t *testing.T) map[string]lifiCalldataFixture {
 // was asked to deliver on.
 func TestDecodeLiFiDelivery_LiveFixtures(t *testing.T) {
 	for name, f := range loadLiFiFixtures(t) {
+		if f.ToChainID == solanaLiFiChainID {
+			// A non-EVM destination puts a placeholder in BridgeData.receiver;
+			// TestCheckLiFiDeliveryTo_SolanaFixtures covers those.
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			got, err := decodeLiFiDelivery(hexutil.MustDecode(f.Data), f.FromChainID)
 			if err != nil {
@@ -145,6 +150,59 @@ func TestCheckLiFiDelivery_GenericSwapIsSameChainOnly(t *testing.T) {
 	err := checkLiFiDelivery(f.Data, f.FromChainID, 137, f.Receiver)
 	if !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("want ErrTreasuryInvalidRoute for a swap asked to cross chains, got %v", err)
+	}
+}
+
+// A Solana destination is the case BridgeData alone cannot answer: LiFi fills
+// its receiver with the non-EVM placeholder and puts the real 32-byte address
+// in the tool's own facet data. Every captured tool must decode back to the
+// address the quote was asked to deliver to — and to nothing else.
+func TestCheckLiFiDeliveryTo_SolanaFixtures(t *testing.T) {
+	seen := 0
+	for name, f := range loadLiFiFixtures(t) {
+		if f.ToChainID != solanaLiFiChainID {
+			continue
+		}
+		seen++
+		t.Run(name, func(t *testing.T) {
+			if err := checkLiFiDeliveryTo(f.Data, f.FromChainID, f.ToChainID, f.Receiver, "solana"); err != nil {
+				t.Fatalf("%s: %v", f.Tool, err)
+			}
+			other := "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+			if err := checkLiFiDeliveryTo(f.Data, f.FromChainID, f.ToChainID, other, "solana"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+				t.Fatalf("a route paying someone else was accepted: %v", err)
+			}
+		})
+	}
+	if seen == 0 {
+		t.Fatal("no Solana fixtures captured")
+	}
+}
+
+// The receiver's position differs per facet, so a tool whose layout was never
+// captured cannot be vouched for — it is refused, never guessed at.
+func TestCheckLiFiDeliveryTo_UnknownSolanaToolIsRefused(t *testing.T) {
+	data := testBridgeCalldata(t, lifiNonEVMAddress, solanaLiFiChainID, false) // unknown selector 0x1794958f layout
+	if err := checkLiFiDeliveryTo(data, 8453, solanaLiFiChainID, "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", "solana"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// An address family with no decoder is refused rather than silently checked
+// with the EVM one, which would read a placeholder as the recipient.
+func TestCheckLiFiDeliveryTo_UnknownFamilyIsRefused(t *testing.T) {
+	f := loadLiFiFixtures(t)["polymer_base_solana_usdc"]
+	if err := checkLiFiDeliveryTo(f.Data, f.FromChainID, f.ToChainID, f.Receiver, "tron"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A captured Solana tool must still be refused when it is asked to deliver
+// somewhere other than Solana, or hand the funds to a destination call.
+func TestCheckLiFiDeliveryTo_SolanaRefusesAnotherDestination(t *testing.T) {
+	f := loadLiFiFixtures(t)["near_base_solana_sol"]
+	if err := checkLiFiDeliveryTo(f.Data, f.FromChainID, 42161, f.Receiver, "solana"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("want ErrTreasuryInvalidRoute for a route to another chain, got %v", err)
 	}
 }
 

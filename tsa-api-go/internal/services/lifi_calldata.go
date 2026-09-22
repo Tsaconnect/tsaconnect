@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/mr-tron/base58"
 )
 
 // A LiFi route's calldata decides who receives the funds the diamond pulls
@@ -17,13 +18,16 @@ import (
 // and its receiver checked before anything is signed. LiFi's status API says
 // the same thing only after the funds have left.
 //
-// Two layouts cover every route LiFi returns for a treasury conversion
+// Three layouts cover every route LiFi returns for a treasury conversion
 // (verified against live calldata in testdata/lifi_calldata):
 //
 //   - cross-chain: every bridge facet takes ILiFi.BridgeData as its first
 //     argument, and that struct names the receiver and destination chain.
 //   - same-chain: the GenericSwapFacet(V3) functions take the receiver as
 //     their fourth argument and have no BridgeData at all.
+//   - non-EVM destination: BridgeData.receiver holds only a placeholder and
+//     the real receiver is 32 bytes inside the tool's own facet struct, at a
+//     position that differs per facet (nonEVMReceiverLayouts).
 //
 // The selector picks the layout, never a guess from the bytes: a generic swap
 // can put an attacker-chosen offset in its first word (transactionId) that
@@ -104,6 +108,58 @@ var lifiGenericSwapSelectors = func() map[[4]byte]string {
 	return out
 }()
 
+// solanaLiFiChainID is the pseudo chain id LiFi gives Solana — far outside
+// the EVM range, which is how a non-EVM destination is recognised at all.
+const solanaLiFiChainID int64 = 1151111081099710
+
+// lifiNonEVMAddress is what LiFi writes into BridgeData.receiver when the real
+// recipient is not an EVM address. Seeing it means the receiver has to come
+// out of the facet's own data instead; seeing anything else on a non-EVM
+// destination means the calldata is not the shape this decoder was written
+// against.
+const lifiNonEVMAddress = "0x11f111f111f111F111f111f111F111f111f111F1"
+
+// nonEVMReceiverLayout locates a facet's real 32-byte receiver: argIndex is
+// the top-level argument holding the facet's own struct, wordOffset the word
+// within that struct's encoding. Both are read off live calldata, never
+// inferred — see scripts/lifi-nonevm-calldata-probe.sh.
+type nonEVMReceiverLayout struct{ argIndex, wordOffset int }
+
+// nonEVMReceiverLayouts is the allowlist of tools whose Solana calldata has
+// actually been captured and decoded (testdata/lifi_calldata). A route on any
+// other selector is refused rather than guessed at: reading the wrong word
+// would compare the order's wallet against an unrelated 32 bytes, and the two
+// facets here already disagree about where the receiver sits.
+//
+// Selectors are derived from the signatures in lifinance/contracts
+// (src/Facets/<Facet>.sol) the same way lifiGenericSwapSelectors are, so a
+// mistyped hex constant cannot quietly admit the wrong function.
+//
+// Only the swapAndStartBridgeTokensVia* entry points are listed: those are
+// what LiFi quoted (hasSourceSwaps = true). The plain startBridgeTokensVia*
+// variants take the facet struct as their second argument, but no live
+// capture of one exists, so they stay refused until the probe returns one.
+var nonEVMReceiverLayouts = func() map[[4]byte]nonEVMReceiverLayout {
+	const bridgeData = "(bytes32,string,string,address,address,address,uint256,uint256,bool,bool)"
+	const swapData = "(address,address,address,address,uint256,bytes,bool)[]"
+	out := map[[4]byte]nonEVMReceiverLayout{}
+	for sig, layout := range map[string]nonEVMReceiverLayout{
+		// NEARIntentsData.nonEVMReceiver is the struct's first word.
+		"swapAndStartBridgeTokensViaNEARIntents(" + bridgeData + "," + swapData +
+			",(bytes32,address,bytes32,uint256,uint256,address,bytes))": {argIndex: 2, wordOffset: 0},
+		// PolymerCCTPData.nonEVMReceiver sits after polymerTokenFee and
+		// maxCCTPFee. The word after it is solanaReceiverATA — the token
+		// account derived from this owner, not a second recipient.
+		"swapAndStartBridgeTokensViaPolymerCCTP(" + bridgeData + "," + swapData +
+			",(uint256,uint256,bytes32,bytes32,uint32,address,bytes))": {argIndex: 2, wordOffset: 2},
+	} {
+		var sel [4]byte
+		copy(sel[:], crypto.Keccak256([]byte(sig))[:4])
+		out[sel] = layout
+	}
+	return out
+}()
+
 // lifiDelivery is where a LiFi diamond call sends what it pulls.
 type lifiDelivery struct {
 	Receiver           common.Address
@@ -179,9 +235,15 @@ func lifiTransactionID(data []byte) (string, bool) {
 // refusal is ErrTreasuryInvalidRoute: the route is untrusted input that
 // failed a safety check, the same class as an off-allowlist `to`.
 func checkLiFiDelivery(data string, sourceChainID, destChainID int64, receiver string) error {
-	if !common.IsHexAddress(receiver) {
-		return fmt.Errorf("%w: order wallet %q is not an address", ErrTreasuryInvalidRoute, receiver)
-	}
+	return checkLiFiDeliveryTo(data, sourceChainID, destChainID, receiver, "evm")
+}
+
+// checkLiFiDeliveryTo is checkLiFiDelivery for a receiver of any address
+// family ("evm", "solana"). The family decides how the receiver is read out of
+// the calldata, and a family with no decoder is refused rather than checked
+// with the EVM one — on a non-EVM route that would compare the order's wallet
+// against LiFi's placeholder and pass anything.
+func checkLiFiDeliveryTo(data string, sourceChainID, destChainID int64, receiver, family string) error {
 	raw, err := hexutil.Decode(data)
 	if err != nil {
 		return fmt.Errorf("%w: route data is not valid hex: %v", ErrTreasuryInvalidRoute, err)
@@ -193,11 +255,69 @@ func checkLiFiDelivery(data string, sourceChainID, destChainID int64, receiver s
 	if got.HasDestinationCall {
 		return fmt.Errorf("%w: route hands the funds to a destination call", ErrTreasuryInvalidRoute)
 	}
-	if got.Receiver != common.HexToAddress(receiver) {
-		return fmt.Errorf("%w: route pays %s, not the order's wallet", ErrTreasuryInvalidRoute, got.Receiver.Hex())
-	}
 	if got.DestinationChainID != destChainID {
 		return fmt.Errorf("%w: route delivers on chain %d, not %d", ErrTreasuryInvalidRoute, got.DestinationChainID, destChainID)
 	}
+	switch family {
+	case "evm":
+		if !common.IsHexAddress(receiver) {
+			return fmt.Errorf("%w: order wallet %q is not an address", ErrTreasuryInvalidRoute, receiver)
+		}
+		if got.Receiver != common.HexToAddress(receiver) {
+			return fmt.Errorf("%w: route pays %s, not the order's wallet", ErrTreasuryInvalidRoute, got.Receiver.Hex())
+		}
+		return nil
+	case "solana":
+		return checkLiFiSolanaReceiver(raw, destChainID, got.Receiver, receiver)
+	default:
+		return fmt.Errorf("%w: no receiver decoder for the %q address family", ErrTreasuryInvalidRoute, family)
+	}
+}
+
+// checkLiFiSolanaReceiver checks the 32-byte Solana address the facet carries,
+// which is the only place a Solana route names its recipient.
+func checkLiFiSolanaReceiver(raw []byte, destChainID int64, bridgeReceiver common.Address, receiver string) error {
+	if destChainID != solanaLiFiChainID {
+		return fmt.Errorf("%w: chain %d is not Solana", ErrTreasuryInvalidRoute, destChainID)
+	}
+	// Without the placeholder the route is not one of the non-EVM shapes this
+	// decoder was written against — a generic swap, say, whose receiver is a
+	// real EVM address that no Solana wallet could ever match.
+	if bridgeReceiver != common.HexToAddress(lifiNonEVMAddress) {
+		return fmt.Errorf("%w: route names %s, not LiFi's non-EVM receiver", ErrTreasuryInvalidRoute, bridgeReceiver.Hex())
+	}
+	var sel [4]byte
+	copy(sel[:], raw[:4])
+	layout, ok := nonEVMReceiverLayouts[sel]
+	if !ok {
+		return fmt.Errorf("%w: no captured Solana receiver layout for selector %x", ErrTreasuryInvalidRoute, sel)
+	}
+	word, err := lifiArgumentWord(raw[4:], layout)
+	if err != nil {
+		return fmt.Errorf("%w: selector %x: %v", ErrTreasuryInvalidRoute, sel, err)
+	}
+	if got := base58.Encode(word); got != receiver {
+		return fmt.Errorf("%w: route pays %s, not the order's wallet", ErrTreasuryInvalidRoute, got)
+	}
 	return nil
+}
+
+// lifiArgumentWord reads one 32-byte word out of a dynamic top-level argument:
+// the argument's head word is an offset into args, and wordOffset counts words
+// from there. Every facet struct holding a non-EVM receiver is dynamic (each
+// ends in a `bytes` field), so the head is always an offset, never a value.
+func lifiArgumentWord(args []byte, layout nonEVMReceiverLayout) ([]byte, error) {
+	head := layout.argIndex * 32
+	if len(args) < head+32 {
+		return nil, fmt.Errorf("calldata ends before argument %d", layout.argIndex)
+	}
+	offset := new(big.Int).SetBytes(args[head : head+32])
+	if !offset.IsInt64() {
+		return nil, fmt.Errorf("argument %d has an unreadable offset", layout.argIndex)
+	}
+	start := offset.Int64() + int64(layout.wordOffset)*32
+	if start < 0 || start+32 > int64(len(args)) {
+		return nil, fmt.Errorf("argument %d word %d is out of bounds", layout.argIndex, layout.wordOffset)
+	}
+	return args[start : start+32], nil
 }
