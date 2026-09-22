@@ -2000,3 +2000,29 @@ func TestCreateOrderFromCart_AddressLookupFailureIsNotA404(t *testing.T) {
 		t.Fatalf("want 500 on a database error, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestClearCart_EmptiesTheActiveCart(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	cart := createTestCart(t, db, buyer.ID, []models.CartItem{
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 2, Price: 10.0, AddedAt: time.Now()},
+	})
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Request, _ = http.NewRequest("DELETE", "/", nil)
+	(&Handlers{}).ClearCart(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var saved models.Cart
+	db.First(&saved, "id = ?", cart.ID)
+	if n := len(saved.GetItems()); n != 0 {
+		t.Errorf("want an empty cart, got %d items", n)
+	}
+}
