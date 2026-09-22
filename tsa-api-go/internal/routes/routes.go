@@ -924,6 +924,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// currency it reaches Paycrest, so leaving it open let anyone
 				// drive one upstream request per HTTP request.
 				pc.GET("/banks", pch.Banks)
+				// The converted price is behind auth AND a per-user limit:
+				// each call quotes a LiFi route for a token the caller
+				// chooses, which is a live request to a paid API. Thirty a
+				// minute is well above a user re-quoting as they type, and
+				// far below anything worth pointing at LiFi.
+				pc.GET("/converted-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), pch.ConvertedQuote)
 				// Per user, not per IP. Order creation is the most sensitive
 				// write here and the only one that spends a /v2/rates call —
 				// slow and concurrency-throttled at the provider. One order at

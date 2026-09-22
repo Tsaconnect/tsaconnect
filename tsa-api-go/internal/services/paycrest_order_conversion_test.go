@@ -121,6 +121,11 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	quotes := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base"})
 	lifi := &fakeLiFiQuoter{route: &LiFiRoute{
 		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), ETASeconds: 30, Tool: "across",
+		// Priced in USD and executable: without a cost the venue pricer
+		// cannot size the bridge, and without decodable calldata delivering
+		// on the requested chain no venue is offered at all.
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000,
+		Data: testBridgeCalldata(t, orderTestUserWallet, 10, false),
 	}}
 	quotes.SetLiFiQuoter(lifi)
 	quotes.SetTreasuryAddress("0xTreasury")
@@ -146,11 +151,15 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi}
 }
 
+// orderTestUserWallet is the buyer's own wallet: a real hex address, because
+// a converted route is now priced to the address it will deliver to.
+const orderTestUserWallet = "0x00000000000000000000000000000000000a11ce"
+
 // buyRequest fills in a valid refund destination on top of the caller's
 // fields, so each test only has to state what it is actually varying.
 func (r *orderConversionRig) buyRequest(userID uuid.UUID, chainKey, token, requestedChain, requestedToken string) PaycrestBuyRequest {
 	return PaycrestBuyRequest{
-		UserID: userID, WalletAddress: "0xUser", FiatCode: "NGN", FiatAmount: "150000",
+		UserID: userID, WalletAddress: orderTestUserWallet, FiatCode: "NGN", FiatAmount: "150000",
 		ChainKey: chainKey, Token: token,
 		RequestedChain: requestedChain, RequestedToken: requestedToken,
 		RefundBankCode: "044", RefundAccount: "0123456789", RefundAccountName: "Test User",
@@ -208,7 +217,7 @@ func TestCreateBuy_ConvertedOrderDeliversToTheTreasuryAndRecordsThePromise(t *te
 	}
 	// The user's own wallet is still recorded — it is where the money ends
 	// up, even though Paycrest itself never sees that address.
-	if row.WalletAddress != "0xUser" {
+	if row.WalletAddress != orderTestUserWallet {
 		t.Fatalf("row.WalletAddress = %s, want the user's own wallet recorded regardless of custody", row.WalletAddress)
 	}
 }
@@ -221,7 +230,7 @@ func TestCreateBuy_DirectOrderIsUnchangedWhenConversionIsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.client.lastCreate.WalletAddress != "0xUser" || row.RouteKind == models.RouteKindConverted {
+	if s.client.lastCreate.WalletAddress != orderTestUserWallet || row.RouteKind == models.RouteKindConverted {
 		t.Fatalf("a direct order must still deliver to the user: %+v", row)
 	}
 	if row.Holder != "" {
@@ -328,5 +337,69 @@ func TestSync_ConvertedBuyOnceTreasuryHoldsFundsDoesNotOverwriteStatus(t *testin
 	}
 	if out.Status != models.PaycrestStatusRefunding {
 		t.Fatalf("status = %s, want refunding untouched; Sync must not overwrite a converted order once holder != paycrest", out.Status)
+	}
+}
+
+// ── Part 2: buying an arbitrary token, and recording what she is owed ───────
+
+func TestCreateBuy_StoresTheRequestedAssetAndWhatSheIsOwed(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if row.RequestedChain != "bsc" || row.RequestedChainID != 56 || row.RequestedTokenAddress != evmNativeAddress ||
+		row.RequestedTokenDecimals != 18 || row.DestinationAddress != req.WalletAddress {
+		t.Fatalf("row = %+v", row)
+	}
+	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
+	if want := QuotedFromOrder(orderAmount, 100, 50).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount at F−B, restated at F)", row.QuotedAmount, want)
+	}
+	if row.EstimatedAmount == "" || row.PromisedAmount != "" {
+		t.Fatalf("estimate/promise = %q/%q", row.EstimatedAmount, row.PromisedAmount)
+	}
+}
+
+func TestCreateBuy_RefusesAnUnknownChainID(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "X")
+	req.RequestedChainID, req.RequestedTokenAddress = 424242, evmNativeAddress
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrBadRequestedAsset) {
+		t.Fatalf("err = %v, want ErrBadRequestedAsset", err)
+	}
+}
+
+// recovery_pending is operator-owned. It is non-terminal, so DueForSync keeps
+// selecting the row — without an explicit guard the very next poll would
+// write Paycrest's own view over a status only a human may resolve.
+func TestSync_RecoveryPendingIsNotOverwrittenByThePoller(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	row := r.seedConvertedBuy(t)
+	if err := r.db.Model(row).Update("status", models.PaycrestStatusRecoveryPending).Error; err != nil {
+		t.Fatalf("seed recovery_pending: %v", err)
+	}
+	row.Status = models.PaycrestStatusRecoveryPending
+
+	r.client.remoteStatus = "settled"
+	out, err := r.svc.Sync(context.Background(), row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending untouched", out.Status)
+	}
+	if !out.NeedsOperator() {
+		t.Fatal("a recovery_pending order must surface to an operator")
 	}
 }

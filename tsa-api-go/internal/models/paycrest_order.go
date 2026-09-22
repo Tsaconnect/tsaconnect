@@ -137,7 +137,30 @@ type PaycrestOrderRecord struct {
 	RouteKind      string `gorm:"size:12;index" json:"routeKind,omitempty"`
 	RequestedToken string `gorm:"size:16" json:"requestedToken,omitempty"`
 	RequestedChain string `gorm:"size:24" json:"requestedChain,omitempty"`
-	MarkupBps      int    `gorm:"default:0" json:"markupBps,omitempty"`
+	// RequestedChainID/RequestedTokenAddress/RequestedTokenDecimals identify
+	// the destination asset exactly, which the symbol pair above cannot: two
+	// chains can serve a token of the same name, a symbol is not unique on one
+	// chain, and a token the config map has never heard of has no symbol here
+	// at all. Every one of them is DERIVED server-side (chain key from the
+	// chain id, decimals and symbol from LiFi or our own config) — the client
+	// sends only the chain id and the address.
+	RequestedChainID       int64  `gorm:"default:0" json:"requestedChainId,omitempty"`
+	RequestedTokenAddress  string `gorm:"size:128" json:"requestedTokenAddress,omitempty"`
+	RequestedTokenDecimals int    `json:"requestedTokenDecimals,omitempty"`
+	// DestinationAddress is where the converted asset must land. Today it is
+	// always the user's own wallet (the same value as WalletAddress), stored
+	// separately because the delivery target and the account's wallet are not
+	// the same question — a non-EVM destination will not be an EVM address.
+	DestinationAddress string `gorm:"size:128" json:"destinationAddress,omitempty"`
+	MarkupBps          int    `gorm:"default:0" json:"markupBps,omitempty"`
+	// QuotedAmount is T: what she is owed, in the SOURCE (settlement leg's)
+	// base units. Computed from Paycrest's own delivered amount, never from
+	// the venue's quote — see QuotedFromOrder.
+	QuotedAmount string `gorm:"size:80" json:"quotedAmount,omitempty"`
+	// EstimatedAmount is what the route was expected to deliver, in the
+	// DESTINATION token's base units. An estimate shown to the user, never a
+	// promise: only PromisedAmount (stablecoin destinations) binds.
+	EstimatedAmount string `gorm:"size:80" json:"estimatedAmount,omitempty"`
 	// PromisedAmount is what we guaranteed the user receives: token base units
 	// on a buy. The conversion must land at least this much.
 	PromisedAmount string `gorm:"size:64" json:"promisedAmount,omitempty"`
