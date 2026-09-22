@@ -261,6 +261,12 @@ type fakeSponsorNative struct {
 	transferTo    string
 	transferAmt   *big.Int
 	transferErr   error
+
+	// tokenBalances answers GetTokenBalance per token address (lowercase),
+	// for the treasury's kept-USDC float check. Unset addresses read as
+	// zero rather than erroring, matching GetTokenAllowance's default.
+	tokenBalances   map[string]*big.Int
+	tokenBalanceErr error
 }
 
 func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.Int) ([]byte, error) {
@@ -291,6 +297,20 @@ func (f *fakeSponsorNative) GetTokenDecimals(token string) (int, error) {
 		return d, nil
 	}
 	return f.decimals, nil
+}
+
+// GetTokenBalance answers per token address, for tests that give a lane
+// several stables at once (mirrors GetTokenDecimals's decimalsByToken).
+func (f *fakeSponsorNative) GetTokenBalance(token, _ string) (*big.Int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.tokenBalanceErr != nil {
+		return nil, f.tokenBalanceErr
+	}
+	if b, ok := f.tokenBalances[strings.ToLower(token)]; ok {
+		return new(big.Int).Set(b), nil
+	}
+	return big.NewInt(0), nil
 }
 
 func (f *fakeSponsorNative) WaitForReceiptContext(ctx context.Context, _ string, _ time.Duration) (*types.Receipt, error) {

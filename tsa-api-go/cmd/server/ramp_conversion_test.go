@@ -104,7 +104,7 @@ func TestBuildRampConversion_DormantWithoutTheFlagRegistersNoWorkers(t *testing.
 	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
 
 	scheduler := jobs.NewScheduler()
-	registerRampConversionWorkers(scheduler, treasury, orch)
+	registerRampConversionWorkers(scheduler, treasury, orch, 500)
 	if got := scheduler.Count(); got != 0 {
 		t.Fatalf("flag off must register zero workers, got %d", got)
 	}
@@ -112,7 +112,7 @@ func TestBuildRampConversion_DormantWithoutTheFlagRegistersNoWorkers(t *testing.
 
 func TestRegisterRampConversionWorkers_NilOrchestratorRegistersNothing(t *testing.T) {
 	scheduler := jobs.NewScheduler()
-	registerRampConversionWorkers(scheduler, nil, nil)
+	registerRampConversionWorkers(scheduler, nil, nil, 500)
 	if got := scheduler.Count(); got != 0 {
 		t.Fatalf("a nil orchestrator must register zero workers, got %d", got)
 	}

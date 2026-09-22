@@ -41,6 +41,11 @@ type SponsorFloat struct {
 	Address    string
 	BalanceWei *big.Int
 	FloorWei   *big.Int
+	// TokenUSD is the lane's USDC+USDT balance, priced at $1 each. Only the
+	// treasury populates this (RampSponsorship.FloatBalances leaves it zero):
+	// a converted buy leaves the round trip's unspent budget sitting here as
+	// USDC, which nothing sweeps automatically.
+	TokenUSD float64
 }
 
 // RampSponsorship is the one surface the HTTP layer and the float monitor

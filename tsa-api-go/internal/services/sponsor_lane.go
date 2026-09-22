@@ -56,6 +56,10 @@ type sponsorNativeSender interface {
 	SuggestGasPrice() (*big.Int, error)
 	WaitForReceiptContext(ctx context.Context, txHash string, timeout time.Duration) (*types.Receipt, error)
 	GetTokenDecimals(tokenAddress string) (int, error)
+	// GetTokenBalance exists for the treasury's kept-USDC float check
+	// (Treasury.FloatBalances): the same widen-not-duplicate reasoning as the
+	// ERC-20 methods above.
+	GetTokenBalance(tokenAddress, walletAddress string) (*big.Int, error)
 	GetTokenAllowance(tokenAddress, owner, spender string) (*big.Int, error)
 	PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error)
 	PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error)

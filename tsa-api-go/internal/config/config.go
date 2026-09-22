@@ -337,6 +337,11 @@ type Config struct {
 	RampConversionStallWindow     time.Duration
 	RampConversionLegCeiling      time.Duration
 	RampConversionMaxShortfallUSD float64
+	// RampTreasuryKeptUSDCAlert is the USD threshold above which the treasury
+	// float monitor alerts on a lane's kept USDC (SponsorFloat.TokenUSD): a
+	// converted buy leaves the round trip's unspent budget sitting there, and
+	// nothing sweeps it automatically. Zero disables the check.
+	RampTreasuryKeptUSDCAlert float64
 
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
@@ -832,6 +837,7 @@ func Load() *Config {
 	cfg.RampConversionStallWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_STALL_MINUTES", 360)) * time.Minute
 	cfg.RampConversionLegCeiling = time.Duration(getEnvInt64("RAMP_CONVERSION_LEG_CEILING_HOURS", 24)) * time.Hour
 	cfg.RampConversionMaxShortfallUSD = getEnvFloat64("RAMP_CONVERSION_MAX_SHORTFALL_USD", 50)
+	cfg.RampTreasuryKeptUSDCAlert = getEnvFloat64("RAMP_TREASURY_KEPT_USDC_ALERT", 500)
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.

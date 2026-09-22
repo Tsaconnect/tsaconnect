@@ -278,7 +278,11 @@ func rampTreasuryCaps(cfg *config.Config) (caps services.TreasuryCaps, ok bool) 
 // out of main() so the exact gate that keeps the flag-off path from
 // registering anything is itself unit-testable, independent of the full
 // server boot.
-func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services.Treasury, orch *services.ConversionOrchestrator) {
+//
+// keptUSDCAlert is cfg.RampTreasuryKeptUSDCAlert: only this (treasury)
+// registration of the monitor carries it — the gas sponsor lane has no
+// kept-token float to sweep.
+func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services.Treasury, orch *services.ConversionOrchestrator, keptUSDCAlert float64) {
 	if orch == nil {
 		return
 	}
@@ -286,5 +290,5 @@ func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services
 	// Registered a second time under its own metric prefix, alongside the
 	// gas sponsor's own float-monitor registration: same job type, two
 	// independent floats to watch.
-	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute))
+	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute).WithKeptUSDCAlert(keptUSDCAlert))
 }

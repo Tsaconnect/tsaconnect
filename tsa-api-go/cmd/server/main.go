@@ -1507,7 +1507,7 @@ func main() {
 		// (and is unit-tested there), not inlined here.
 		var treasury *services.Treasury
 		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
-		registerRampConversionWorkers(scheduler, treasury, conversionOrch)
+		registerRampConversionWorkers(scheduler, treasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
