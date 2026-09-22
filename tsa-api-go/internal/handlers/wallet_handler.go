@@ -324,9 +324,6 @@ func resolveNetwork(c *gin.Context) string {
 	return "mainnet"
 }
 
-// GetWalletBalances handles GET /api/wallet/balances.
-// Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional),
-// ?address=<hex> (optional — overrides the user's registered wallet for multi-wallet clients).
 // tokenBalance is one row of GET /wallet/balances.
 type tokenBalance struct {
 	Balance  string  `json:"balance"`
@@ -362,6 +359,9 @@ func pricedRow(balance string, price float64) tokenBalance {
 	return tokenBalance{Balance: balance, UsdPrice: price, UsdValue: amount * price}
 }
 
+// GetWalletBalances handles GET /api/wallet/balances.
+// Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional),
+// ?address=<hex> (optional — overrides the user's registered wallet for multi-wallet clients).
 func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {

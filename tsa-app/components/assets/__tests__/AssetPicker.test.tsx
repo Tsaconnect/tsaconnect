@@ -64,6 +64,8 @@ jest.mock('@/hooks/useWalletHoldings', () => {
       { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
       // Native S on Sonic: not a major.
       { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+      // Binance-Peg ETH: from our own list, but not ETH itself, so not grouped with it.
+      { chainId: 56, address: '0xpegeth', native: false, trusted: true, symbol: 'ETH', name: 'Binance-Peg ETH', decimals: 18, balance: 0.1, usdValue: 300 },
       // Airdropped on Sui: its metadata says "USDC", nobody vouches for it.
       { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
     ],
@@ -256,4 +258,11 @@ it('labels a coin in the wallet that nobody vouches for, even outside search', a
   const real = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
     && n.props.accessibilityLabel.startsWith('USDC, 3 networks') && typeof n.props.onPress === 'function')[0];
   expect(rowText(real)).not.toContain('Unverified');
+});
+
+it('does not call a coin from our own list Unverified just because it may not wear the ETH icon', async () => {
+  const { tree } = await open({ side: 'to' });
+  const peg = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('ETH, BNB Smart Chain') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(peg)).not.toContain('Unverified');
 });

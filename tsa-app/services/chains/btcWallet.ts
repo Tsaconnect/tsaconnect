@@ -5,11 +5,10 @@
 // then registered with the backend so the reconciler tracks it. Balances come
 // from the dormant-safe /wallet/nonevm/* endpoints. Unlike Tron, the address
 // is network-specific (bc1… mainnet vs tb1… testnet), so caches key on both.
-import { formatUnits } from 'ethers';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveBtcAddress } from './derivation';
+import { toNonEvmBalanceRow } from './nonevmRows';
 import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
-import { NONEVM_CHAINS } from '../../constants/chains';
 import { getNetwork } from '../../hooks/useNetwork';
 import type { WalletBalanceWithChain } from '../walletApi';
 
@@ -42,22 +41,7 @@ export async function getBtcAddress(walletAddress?: string): Promise<string | nu
 /** Fetch the BTC balance as a display row. */
 export async function getBtcBalances(btcAddress: string): Promise<WalletBalanceWithChain[]> {
   const balances = await getNonEVMBalances(BTC_KEY, btcAddress);
-  return balances.map((b) => {
-    const human = formatUnits(b.raw || '0', b.decimals);
-    const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : 0;
-    const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
-    return {
-      symbol: b.symbol,
-      name: b.symbol === 'BTC' ? 'Bitcoin' : b.symbol,
-      balance: human,
-      usdPrice,
-      usdValue: usdValue.toFixed(2),
-      contractAddress: '',
-      decimals: b.decimals,
-      chainKey: BTC_KEY,
-      chainName: NONEVM_CHAINS.btc.shortName,
-    };
-  });
+  return balances.map((b) => toNonEvmBalanceRow(b, BTC_KEY, b.symbol === 'BTC' ? 'Bitcoin' : b.symbol));
 }
 
 /**

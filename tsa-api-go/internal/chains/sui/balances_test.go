@@ -21,7 +21,9 @@ func TestGetBalances_OnlyConfiguredCoinsAreListed(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req struct{ Method string `json:"method"` }
+		var req struct {
+			Method string `json:"method"`
+		}
 		_ = json.Unmarshal(body, &req)
 		var result interface{}
 		switch req.Method {

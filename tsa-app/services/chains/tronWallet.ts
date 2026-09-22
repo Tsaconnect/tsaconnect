@@ -4,12 +4,10 @@
 // so an exported seed reproduces the same address in TronLink), then registered
 // with the backend so the reconciler tracks it. Balances come from the
 // dormant-safe /wallet/nonevm/* endpoints.
-import { formatUnits } from 'ethers';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveTronAddress } from './derivation';
-import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
-import { nonEvmUsdPrice } from './nonevmPrice';
-import { NONEVM_CHAINS } from '../../constants/chains';
+import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
+import { toNonEvmBalanceRow } from './nonevmRows';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const TRON_KEY = 'tron';
@@ -36,29 +34,10 @@ export async function getTronAddress(walletAddress?: string): Promise<string | n
   return tronAddress;
 }
 
-
-function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
-  const human = formatUnits(b.raw || '0', b.decimals);
-  const usdPrice = nonEvmUsdPrice(b);
-  const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
-  return {
-    symbol: b.symbol,
-    name: b.symbol,
-    balance: human,
-    usdPrice,
-    usdValue: usdValue.toFixed(2),
-    contractAddress: b.tokenAddress || '',
-    decimals: b.decimals,
-    listed: b.listed === true ? true : undefined,
-    chainKey: TRON_KEY,
-    chainName: NONEVM_CHAINS.tron.shortName,
-  };
-}
-
 /** Fetch Tron balances (TRX + configured TRC-20s) as display rows. */
 export async function getTronBalances(tronAddress: string): Promise<WalletBalanceWithChain[]> {
   const balances = await getNonEVMBalances(TRON_KEY, tronAddress);
-  return balances.map(toBalanceRow);
+  return balances.map((b) => toNonEvmBalanceRow(b, TRON_KEY));
 }
 
 /**

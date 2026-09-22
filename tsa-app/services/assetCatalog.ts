@@ -80,7 +80,15 @@ export interface Asset {
   name: string;
   logoURI?: string;
   verified: boolean;
-  /** May borrow the registry logo for its symbol (verified, or a trusted holding). */
+  /**
+   * Someone we trust stands behind it: LiFi verified it, or it came from our own
+   * token list or configuration. Decides the Unverified label.
+   */
+  vouched: boolean;
+  /**
+   * May borrow the registry logo for its symbol. Narrower than `vouched`: a
+   * bridged copy of ETH is vouched for but must not wear the ETH icon.
+   */
   logoTrusted: boolean;
   networks: AssetNetwork[];
   /** Total held across networks. */
@@ -104,8 +112,7 @@ export function isNativeLiFiToken(token: Pick<LiFiToken, 'address' | 'chainId'>)
  */
 export function isSuiNativeCoinType(coinType: string): boolean {
   const [pkg, mod, name, ...rest] = coinType.split('::');
-  if (rest.length || mod !== 'sui' || name !== 'SUI' || !/^0x0*2$/i.test(pkg ?? '')) return false;
-  return true;
+  return rest.length === 0 && mod === 'sui' && name === 'SUI' && /^0x0*2$/i.test(pkg ?? '');
 }
 
 const isVerified = (t: LiFiToken) => t.verificationStatus === 'verified';
@@ -146,6 +153,7 @@ export function groupAssets(tokens: LiFiToken[]): Asset[] {
         name: MAJOR_NAMES[key] ?? t.name,
         logoURI: t.logoURI || undefined,
         verified: isVerified(t),
+        vouched: isVerified(t),
         // A bridged copy keeps its own logo: our "SOL" icon would pass it off as SOL.
         logoTrusted: isVerified(t) && (joinsByCoinKey(t) || !isBridgedNativeMajor(t.symbol, t)),
         networks: [],
@@ -247,6 +255,7 @@ export function assetFromHolding(h: Holding): Asset {
     symbol: h.symbol,
     name: h.name,
     verified: false,
+    vouched: h.trusted,
     // Binance-Peg ETH on BSC is from our own list, but it is not ETH: no ETH icon.
     logoTrusted: h.trusted && !isBridgedNativeMajor(h.symbol, h.native ? null : h),
     networks: [{ chainId: h.chainId, token, balance: h.balance, usdValue: h.usdValue }],

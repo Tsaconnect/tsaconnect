@@ -70,10 +70,11 @@ const iconFor = (asset: Asset) =>
 /**
  * Whether a coin is labelled Unverified. In search that is anything LiFi has not
  * verified; anywhere else it is a coin nobody vouches for — one airdropped to
- * the wallet can call itself "USDC", so its balance alone must not make it look real.
+ * the wallet can call itself "USDC", so its balance alone must not make it look
+ * real. Not the same question as which icon it may wear (`logoTrusted`).
  */
 const isUnverified = (asset: Asset, sectionId: string) =>
-  !asset.verified && (sectionId === 'search' || !asset.logoTrusted);
+  sectionId === 'search' ? !asset.verified : !asset.vouched;
 
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
