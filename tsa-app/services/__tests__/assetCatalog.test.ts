@@ -5,7 +5,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 import {
   groupAssets, attachHoldings, assetFromHolding, networksForSide, buildSections, isNativeLiFiToken,
-  onlyMajorTokens, nativeAddressFor, type Holding,
+  onlyMajorTokens, nativeAddressFor, isSuiNativeCoinType, type Holding,
 } from '../assetCatalog';
 import { BTC_LIFI_CHAIN_ID, SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, type LiFiToken } from '../lifi';
 
@@ -28,7 +28,7 @@ const ETH_NATIVE = tok({ chainId: ETH, symbol: 'ETH', coinKey: 'ETH', address: '
 const ETH_BASE = tok({ chainId: BASE, symbol: 'ETH', coinKey: 'ETH', address: '0x0000000000000000000000000000000000000000', decimals: 18 });
 
 const holding = (over: Partial<Holding> & { chainId: number; symbol: string }): Holding => ({
-  address: '', name: over.symbol, decimals: 6, balance: 1, usdValue: 1, ...over,
+  address: '', native: false, trusted: true, name: over.symbol, decimals: 6, balance: 1, usdValue: 1, ...over,
 });
 
 describe('groupAssets', () => {
@@ -84,7 +84,7 @@ describe('attachHoldings', () => {
     const imported = holding({ chainId: BSC, symbol: 'CREPE', address: '0xcrepe', balance: 5, usdValue: 2 });
     const { assets, unmatched } = attachHoldings(groupAssets([USDC_BASE, USDC_BSC, ETH_NATIVE]), [
       holding({ chainId: BSC, symbol: 'USDC', address: USDC_BSC.address.toUpperCase(), balance: 2.33, usdValue: 2.33 }),
-      holding({ chainId: ETH, symbol: 'ETH', balance: 0.01, usdValue: 35 }),
+      holding({ chainId: ETH, symbol: 'ETH', native: true, balance: 0.01, usdValue: 35 }),
       imported,
     ]);
     const usdc = assets.find(a => a.key === 'USDC')!;
@@ -97,7 +97,7 @@ describe('attachHoldings', () => {
 
   it("gives a held native coin the chain's real native address, never ''", () => {
     // S on Sonic is native and not a major: it arrives as a holding only.
-    const s = assetFromHolding(holding({ chainId: 146, symbol: 'S', address: '', balance: 12, usdValue: 5 }));
+    const s = assetFromHolding(holding({ chainId: 146, symbol: 'S', native: true, balance: 12, usdValue: 5 }));
     expect(s.networks[0].token.address).toBe('0x0000000000000000000000000000000000000000');
     expect(nativeAddressFor(SOLANA_LIFI_CHAIN_ID)).toBe(SOLANA_NATIVE_ADDRESS);
     expect(nativeAddressFor(BTC_LIFI_CHAIN_ID)).toBe('bitcoin');
@@ -167,5 +167,71 @@ describe('onlyMajorTokens', () => {
       tok({ chainId: BASE, symbol: 'USDC', coinKey: 'USDC', address: '0xfake', verificationStatus: 'unverified' }),
     ];
     expect(onlyMajorTokens([...junk, USDC_BASE, ETH_NATIVE])).toEqual([USDC_BASE, ETH_NATIVE]);
+  });
+
+  it('keeps a native major only in its native form (no Wormhole SOL on EVM chains)', () => {
+    const solNative = tok({ chainId: SOLANA_LIFI_CHAIN_ID, symbol: 'SOL', coinKey: 'SOL', address: SOLANA_NATIVE_ADDRESS });
+    const wormholeSol = tok({ chainId: BSC, symbol: 'SOL', coinKey: 'SOL', name: 'Wrapped SOL (Wormhole)' });
+    const bridgedEth = tok({ chainId: BSC, symbol: 'ETH', coinKey: 'ETH' });
+    expect(onlyMajorTokens([wormholeSol, solNative, bridgedEth, ETH_BASE])).toEqual([solNative, ETH_BASE]);
+  });
+});
+
+describe('asset identity', () => {
+  it('names a major plainly and takes its logo from its home network', () => {
+    const superUsdt = tok({ chainId: 137, symbol: 'USDT', coinKey: 'USDT', name: 'Super USDT', logoURI: 'https://x/poly.png' });
+    const baseUsdt = tok({ chainId: BASE, symbol: 'USDT', coinKey: 'USDT', name: 'Tether USD', logoURI: 'https://x/base.png' });
+    const [usdt] = groupAssets([superUsdt, baseUsdt]);
+    expect(usdt.name).toBe('Tether');
+    expect(usdt.logoURI).toBe('https://x/base.png');
+  });
+
+  it('never reads a held token with no address as the native coin', () => {
+    // An older API sends no contractAddress: this USDC must not become ETH.
+    const usdcNoAddr = holding({ chainId: BASE, symbol: 'USDC', address: '', balance: 7, usdValue: 7 });
+    const { assets, unmatched } = attachHoldings(groupAssets([USDC_BASE, ETH_BASE]), [usdcNoAddr]);
+    expect(assets.find(a => a.key === 'ETH')!.balance).toBe(0);
+    // Matched by symbol to the verified USDC on the same chain instead.
+    expect(assets.find(a => a.key === 'USDC')!.balance).toBe(7);
+    expect(unmatched).toEqual([]);
+  });
+
+  it('keeps a bridged copy of a native coin out of that coin, under its own name', () => {
+    // What search returns for "sol": native SOL plus Wormhole copies with coinKey SOL.
+    const solNative = tok({ chainId: SOLANA_LIFI_CHAIN_ID, symbol: 'SOL', coinKey: 'SOL', address: SOLANA_NATIVE_ADDRESS });
+    const wormholeSol = tok({ chainId: BSC, symbol: 'SOL', coinKey: 'SOL', name: 'Wrapped SOL (Wormhole)', logoURI: 'https://x/w.png' });
+    const assets = groupAssets([wormholeSol, solNative]);
+    const sol = assets.find(a => a.key === 'SOL')!;
+    expect(sol.networks.map(n => n.chainId)).toEqual([SOLANA_LIFI_CHAIN_ID]);
+    expect(sol.name).toBe('Solana');
+    const wrapped = assets.find(a => a.key !== 'SOL')!;
+    expect(wrapped.name).toBe('Wrapped SOL (Wormhole)');
+    // Its own logo, never our SOL icon.
+    expect(wrapped.logoTrusted).toBe(false);
+  });
+
+  it('does not give a held bridged ETH the ETH icon', () => {
+    const pegEth = assetFromHolding(holding({ chainId: BSC, symbol: 'ETH', address: '0x2170ed0880ac9a755fd29b2688956bd959f933f8' }));
+    expect(pegEth.logoTrusted).toBe(false);
+    expect(assetFromHolding(holding({ chainId: BASE, symbol: 'ETH', native: true })).logoTrusted).toBe(true);
+  });
+
+  it('drops an unidentifiable holding rather than guess its contract', () => {
+    const mystery = holding({ chainId: BASE, symbol: 'XYZ', address: '', balance: 3 });
+    const untrustedUsdc = holding({ chainId: BASE, symbol: 'USDC', address: '', trusted: false, balance: 3 });
+    const { assets, unmatched } = attachHoldings(groupAssets([USDC_BASE]), [mystery, untrustedUsdc]);
+    expect(assets[0].balance).toBe(0);
+    expect(unmatched).toEqual([]);
+  });
+});
+
+describe('isSuiNativeCoinType', () => {
+  it('accepts SUI in short and padded form only', () => {
+    expect(isSuiNativeCoinType('0x2::sui::SUI')).toBe(true);
+    expect(isSuiNativeCoinType(`0x${'0'.repeat(63)}2::sui::SUI`)).toBe(true);
+    // Any package can publish a module named sui with a coin named SUI.
+    expect(isSuiNativeCoinType('0xabc::sui::SUI')).toBe(false);
+    expect(isSuiNativeCoinType('0x2::sui::SUI::x')).toBe(false);
+    expect(isNativeLiFiToken({ chainId: SUI_LIFI_CHAIN_ID, address: '0xdead::sui::SUI' })).toBe(false);
   });
 });

@@ -256,7 +256,7 @@ export async function getLiFiAllChainTokens(params: {
 /** Look up a single token by contract address. Returns null if not found. */
 export async function getLiFiToken(chainId: number, address: string): Promise<LiFiToken | null> {
   const headers = await getAuthHeaders();
-  const res = await fetch(`${API_BASE_URL}/swap/lifi/token?chain=${chainId}&token=${address}`, { headers });
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/token?chain=${chainId}&token=${encodeURIComponent(address)}`, { headers });
   if (!res.ok) return null;
   const data = await res.json();
   return data?.address ? (data as LiFiToken) : null;

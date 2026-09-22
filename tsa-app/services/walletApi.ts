@@ -15,6 +15,10 @@ export interface WalletBalance {
   usdValue: string;
   contractAddress: string;
   decimals: number;
+  /** Set by the API on the chain's native-coin row; absent from older APIs. */
+  native?: boolean;
+  /** A non-EVM token from our own configuration (not discovered on chain). */
+  listed?: boolean;
 }
 
 export interface WalletBalanceWithChain extends WalletBalance {
@@ -150,6 +154,7 @@ function normalizeWalletBalanceEntry(
     usdValue: String(rawValue.usdValue ?? '0'),
     contractAddress: typeof rawValue.contractAddress === 'string' ? rawValue.contractAddress : '',
     decimals: inferDecimals(symbol, rawValue),
+    native: rawValue.native === true ? true : undefined,
     chainKey,
     chainName: chain.shortName,
   };

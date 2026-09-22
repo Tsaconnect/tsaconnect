@@ -59,6 +59,23 @@ function chainName(chainId: number, lifi: LiFiChain[]): string {
   return getChainByChainId(chainId)?.name ?? lifi.find(c => c.id === chainId)?.name ?? `Chain ${chainId}`;
 }
 
+/**
+ * What TokenAvatar should draw for a coin: a trusted coin we know (USDC, ETH,
+ * S, SOL…) gets our own icon, the same as in the wallet, over whichever chain's
+ * LiFi logo came back. An untrusted coin never borrows one.
+ */
+const iconFor = (asset: Asset) =>
+  ({ iconUrl: asset.logoURI, curated: asset.logoTrusted, preferRegistry: asset.logoTrusted });
+
+/**
+ * Whether a coin is labelled Unverified. In search that is anything LiFi has not
+ * verified; anywhere else it is a coin nobody vouches for — one airdropped to
+ * the wallet can call itself "USDC", so its balance alone must not make it look
+ * real. Not the same question as which icon it may wear (`logoTrusted`).
+ */
+const isUnverified = (asset: Asset, sectionId: string) =>
+  sectionId === 'search' ? !asset.verified : !asset.vouched;
+
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
 export default function AssetPicker({ visible, side, title, allow, onSelect, onClose }: AssetPickerProps) {
@@ -116,7 +133,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
                   backgroundColor: colors.surface,
                 }}
               >
-                <TokenAvatar symbol={networkFor.symbol} iconUrl={networkFor.logoURI} chainKey={key} size={36} />
+                <TokenAvatar symbol={networkFor.symbol} {...iconFor(networkFor)} chainKey={key} size={36} />
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
                     <Text variant="bodyMed" weight="700">{chainName(n.chainId, lifi)}</Text>
@@ -161,7 +178,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
         {sections.map(section => (
           <View key={section.id} style={{ marginTop: spacing.md }}>
             <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.xs }}>{section.title}</Text>
-            {section.id === 'search' && section.assets.some(a => !a.verified) ? (
+            {section.assets.some(a => isUnverified(a, section.id)) ? (
               <View style={{ backgroundColor: colors.warningBg, borderRadius: radius.md, padding: spacing.sm, marginBottom: spacing.xs }}>
                 <Text variant="caption" style={{ color: colors.warning }}>
                   Anyone can create a token. Check the contract address before you trade an unverified one.
@@ -184,16 +201,15 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
                 >
                   <TokenAvatar
                     symbol={asset.symbol}
-                    iconUrl={asset.logoURI}
+                    {...iconFor(asset)}
                     chainKey={nets.length === 1 ? chainKeyFor(nets[0].chainId) : undefined}
-                    curated={asset.verified}
                     size={40}
                   />
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
                       <Text variant="bodyMed" weight="700" numberOfLines={1}>{asset.symbol}</Text>
                       {section.id === 'tsa' ? <Pill label="TSA" fg={colors.accent} bg={colors.accentMuted} /> : null}
-                      {section.id === 'search' && !asset.verified ? <Pill label="Unverified" fg={colors.warning} bg={colors.warningBg} /> : null}
+                      {isUnverified(asset, section.id) ? <Pill label="Unverified" fg={colors.warning} bg={colors.warningBg} /> : null}
                     </View>
                     <Text variant="caption" color="textSecondary" numberOfLines={1}>{asset.name} · {sub}</Text>
                   </View>

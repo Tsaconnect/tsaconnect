@@ -8,14 +8,14 @@
 // "You pay" and then "You receive" does not reload the same balances.
 
 import { useEffect, useState } from 'react';
-import { CHAINS, type ChainKey } from '@/constants/chains';
+import { CHAINS, NONEVM_CHAINS, type ChainKey } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { BTC_LIFI_CHAIN_ID, SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID } from '@/services/lifi';
-import type { Holding } from '@/services/assetCatalog';
+import { isNativeLiFiToken, type Holding } from '@/services/assetCatalog';
 
 const CACHE_MS = 60_000;
 let cache: { wallet: string; at: number; holdings: Holding[] } | null = null;
@@ -26,14 +26,33 @@ const NON_EVM_CHAIN_IDS: Record<string, number> = {
   sui: SUI_LIFI_CHAIN_ID,
 };
 
-/** A balance row as a Holding, or null when its chain has no LiFi id here. */
-export function holdingFromRow(row: WalletBalanceWithChain): Holding | null {
+/** The chain's own coin symbol (ETH, BNB, S, SOL…). */
+function nativeSymbolFor(chainKey: string): string | undefined {
+  const nonEvm = NONEVM_CHAINS[chainKey as keyof typeof NONEVM_CHAINS];
+  return (nonEvm ?? CHAINS[chainKey as ChainKey])?.nativeCurrency?.symbol;
+}
+
+/**
+ * A balance row as a Holding, or null when its chain has no LiFi id here.
+ * `fromSupportedList` rows come from our own curated token list (trusted);
+ * other families' rows are trusted only for their native coin or a token the
+ * API marks as listed — a discovered coin's symbol is whatever its creator chose.
+ */
+export function holdingFromRow(row: WalletBalanceWithChain, fromSupportedList: boolean): Holding | null {
   const chainId = NON_EVM_CHAIN_IDS[row.chainKey] ?? CHAINS[row.chainKey as ChainKey]?.chainId;
   const balance = Number(row.balance);
   if (!chainId || !Number.isFinite(balance) || balance <= 0) return null;
+  // Native when the API says so, when the address is the chain's native form
+  // (Sui reports SUI as 0x00…02::sui::SUI), or — for a row with no address —
+  // when the symbol IS the chain's coin. A missing address alone never is.
+  const native = row.native === true || (row.contractAddress
+    ? isNativeLiFiToken({ chainId, address: row.contractAddress })
+    : row.symbol.toUpperCase() === nativeSymbolFor(row.chainKey)?.toUpperCase());
   return {
     chainId,
-    address: row.contractAddress || '',
+    address: native ? '' : row.contractAddress || '',
+    native,
+    trusted: fromSupportedList || native || row.listed === true,
     symbol: row.symbol,
     name: row.name || row.symbol,
     decimals: row.decimals,
@@ -58,8 +77,11 @@ async function loadHoldings(wallet: string): Promise<Holding[] | null> {
   const results = [evm, sol, btc, sui];
   if (results.every(r => r.status === 'rejected')) return null;
   // A family that fails to load just contributes nothing; the picker still works.
-  const rows = results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
-  return rows.map(holdingFromRow).filter((h): h is Holding => h !== null);
+  const rowsOf = (r: PromiseSettledResult<WalletBalanceWithChain[]>) => (r.status === 'fulfilled' ? r.value : []);
+  return [
+    ...rowsOf(evm).map(row => holdingFromRow(row, true)),
+    ...[sol, btc, sui].flatMap(rowsOf).map(row => holdingFromRow(row, false)),
+  ].filter((h): h is Holding => h !== null);
 }
 
 export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; loading: boolean } {

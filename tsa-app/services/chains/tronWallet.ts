@@ -4,11 +4,10 @@
 // so an exported seed reproduces the same address in TronLink), then registered
 // with the backend so the reconciler tracks it. Balances come from the
 // dormant-safe /wallet/nonevm/* endpoints.
-import { formatUnits } from 'ethers';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveTronAddress } from './derivation';
-import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
-import { NONEVM_CHAINS } from '../../constants/chains';
+import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
+import { toNonEvmBalanceRow } from './nonevmRows';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const TRON_KEY = 'tron';
@@ -35,34 +34,10 @@ export async function getTronAddress(walletAddress?: string): Promise<string | n
   return tronAddress;
 }
 
-// Fallback pricing when the backend didn't attach a price (e.g. pre-redeploy):
-// stablecoins pin to $1; everything else shows no USD rather than a wrong value.
-function fallbackUsdPrice(symbol: string): number {
-  return symbol === 'USDT' || symbol === 'USDC' ? 1 : 0;
-}
-
-function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
-  const human = formatUnits(b.raw || '0', b.decimals);
-  // Prefer the backend's CoinGecko price; fall back to the stablecoin pin.
-  const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : fallbackUsdPrice(b.symbol);
-  const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
-  return {
-    symbol: b.symbol,
-    name: b.symbol,
-    balance: human,
-    usdPrice,
-    usdValue: usdValue.toFixed(2),
-    contractAddress: b.tokenAddress || '',
-    decimals: b.decimals,
-    chainKey: TRON_KEY,
-    chainName: NONEVM_CHAINS.tron.shortName,
-  };
-}
-
 /** Fetch Tron balances (TRX + configured TRC-20s) as display rows. */
 export async function getTronBalances(tronAddress: string): Promise<WalletBalanceWithChain[]> {
   const balances = await getNonEVMBalances(TRON_KEY, tronAddress);
-  return balances.map(toBalanceRow);
+  return balances.map((b) => toNonEvmBalanceRow(b, TRON_KEY));
 }
 
 /**

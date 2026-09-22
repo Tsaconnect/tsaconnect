@@ -13,6 +13,8 @@ export interface NonEVMBalance {
   decimals: number;
   tokenAddress?: string;
   isNative: boolean;
+  /** One of our configured tokens. A discovered token's symbol may be whatever its creator wrote. */
+  listed?: boolean;
   usdPrice?: number; // attached by the backend price service
   usdValue?: number;
 }

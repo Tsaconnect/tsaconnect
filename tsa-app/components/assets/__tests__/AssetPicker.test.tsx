@@ -60,10 +60,14 @@ jest.mock('@/hooks/useWalletHoldings', () => {
   // 2.33 USDT on BSC, and an imported token LiFi's lists don't carry.
   const value = {
     holdings: [
-      { chainId: 56, address: '0xusdt56', symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
-      { chainId: 56, address: '0xcrepe', symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
-      // Native S on Sonic: not a major, arrives with an empty address.
-      { chainId: 146, address: '', symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+      { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
+      { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
+      // Native S on Sonic: not a major.
+      { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+      // Binance-Peg ETH: from our own list, but not ETH itself, so not grouped with it.
+      { chainId: 56, address: '0xpegeth', native: false, trusted: true, symbol: 'ETH', name: 'Binance-Peg ETH', decimals: 18, balance: 0.1, usdValue: 300 },
+      // Airdropped on Sui: its metadata says "USDC", nobody vouches for it.
+      { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
     ],
   };
   return { __esModule: true, useWalletHoldings: () => value };
@@ -108,7 +112,7 @@ jest.mock('@/services/lifi', () => {
 });
 
 import React from 'react';
-import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+import TestRenderer, { act, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import AssetPicker from '../AssetPicker';
 import { resetAssetCatalogCache } from '@/hooks/useAssetCatalog';
 import * as Lifi from '@/services/lifi';
@@ -123,6 +127,9 @@ function textNodes(node: any, out: string[] = []): string[] {
   return out;
 }
 const text = (tree: ReactTestRenderer) => textNodes(tree.toJSON()).join(' ');
+/** The text inside one row. */
+const rowText = (row: ReactTestInstance) =>
+  row.findAll(n => typeof n.props.children === 'string').map(n => n.props.children as string).join(' ');
 const flush = async () => { for (let i = 0; i < 8; i += 1) await act(async () => { await Promise.resolve(); }); };
 const pressLabel = (tree: ReactTestRenderer, start: string) => {
   const hit = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
@@ -230,7 +237,7 @@ it('keeps every network of a coin the admin lists on one chain', async () => {
   const t = text(tree);
   // USDT is listed on BSC, so it sits under On TSA — with both of its networks.
   expect(t.indexOf('USDT')).toBeLessThan(t.indexOf('Stablecoins & major coins'));
-  expect(t).toMatch(/USDT\s+·\s+2 networks/);
+  expect(t).toMatch(/Tether\s+·\s+2 networks/);
 });
 
 it('hands a held native coin back with its real native address', async () => {
@@ -239,4 +246,23 @@ it('hands a held native coin back with its real native address', async () => {
   expect(onSelect).toHaveBeenCalledWith(
     expect.objectContaining({ symbol: 'S', address: '0x0000000000000000000000000000000000000000' }), 146,
   );
+});
+
+it('labels a coin in the wallet that nobody vouches for, even outside search', async () => {
+  const { tree } = await open({ side: 'to' });
+  const fake = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('USDC, Sui') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(fake)).toContain('Unverified');
+  expect(text(tree)).toContain('Anyone can create a token');
+  // The real, verified USDC row carries no such label.
+  const real = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('USDC, 3 networks') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(real)).not.toContain('Unverified');
+});
+
+it('does not call a coin from our own list Unverified just because it may not wear the ETH icon', async () => {
+  const { tree } = await open({ side: 'to' });
+  const peg = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+    && n.props.accessibilityLabel.startsWith('ETH, BNB Smart Chain') && typeof n.props.onPress === 'function')[0];
+  expect(rowText(peg)).not.toContain('Unverified');
 });

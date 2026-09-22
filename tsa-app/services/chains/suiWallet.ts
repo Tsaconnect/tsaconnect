@@ -5,11 +5,10 @@
 // wallet), then registered with the backend so the reconciler tracks it.
 // Balances (SUI + all held coin types) come from the dormant-safe
 // /wallet/nonevm/* endpoints.
-import { formatUnits } from 'ethers';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveSuiAddress } from './derivation';
-import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
-import { NONEVM_CHAINS } from '../../constants/chains';
+import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
+import { toNonEvmBalanceRow } from './nonevmRows';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const SUI_KEY = 'sui';
@@ -34,33 +33,10 @@ export async function getSuiAddress(walletAddress?: string): Promise<string | nu
   return suiAddress;
 }
 
-// Fallback pricing when the backend didn't attach a price: stablecoins pin to
-// $1; everything else shows no USD rather than a wrong value.
-function fallbackUsdPrice(symbol: string): number {
-  return symbol === 'USDT' || symbol === 'USDC' ? 1 : 0;
-}
-
-function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
-  const human = formatUnits(b.raw || '0', b.decimals);
-  const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : fallbackUsdPrice(b.symbol);
-  const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
-  return {
-    symbol: b.symbol,
-    name: b.symbol,
-    balance: human,
-    usdPrice,
-    usdValue: usdValue.toFixed(2),
-    contractAddress: b.tokenAddress || '',
-    decimals: b.decimals,
-    chainKey: SUI_KEY,
-    chainName: NONEVM_CHAINS.sui.shortName,
-  };
-}
-
 /** Fetch Sui balances (SUI + held coin types) as display rows. */
 export async function getSuiBalances(suiAddress: string): Promise<WalletBalanceWithChain[]> {
   const balances = await getNonEVMBalances(SUI_KEY, suiAddress);
-  return balances.map(toBalanceRow);
+  return balances.map((b) => toNonEvmBalanceRow(b, SUI_KEY));
 }
 
 /**

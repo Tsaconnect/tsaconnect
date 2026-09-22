@@ -6,12 +6,11 @@
 // paths' balances and sticks with the one that's funded. The resolved address
 // is registered with the backend so the reconciler tracks it. Balances (SOL +
 // all held SPL tokens) come from the dormant-safe /wallet/nonevm/* endpoints.
-import { formatUnits } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveSolanaAddresses, deriveSolanaPrivateKey, type SolanaDerivation } from './derivation';
 import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
-import { NONEVM_CHAINS } from '../../constants/chains';
+import { toNonEvmBalanceRow } from './nonevmRows';
 import { getNetwork } from '../../hooks/useNetwork';
 import type { WalletBalanceWithChain } from '../walletApi';
 
@@ -195,33 +194,10 @@ export async function getSolanaSigner(walletAddress: string): Promise<SolanaSign
   return { address, key: deriveSolanaPrivateKey(mnemonic, derivation) };
 }
 
-// Fallback pricing when the backend didn't attach a price: stablecoins pin to
-// $1; everything else shows no USD rather than a wrong value.
-function fallbackUsdPrice(symbol: string): number {
-  return symbol === 'USDT' || symbol === 'USDC' ? 1 : 0;
-}
-
-function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
-  const human = formatUnits(b.raw || '0', b.decimals);
-  const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : fallbackUsdPrice(b.symbol);
-  const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
-  return {
-    symbol: b.symbol,
-    name: b.symbol,
-    balance: human,
-    usdPrice,
-    usdValue: usdValue.toFixed(2),
-    contractAddress: b.tokenAddress || '',
-    decimals: b.decimals,
-    chainKey: SOLANA_KEY,
-    chainName: NONEVM_CHAINS.solana.shortName,
-  };
-}
-
 /** Fetch Solana balances (SOL + held SPL tokens) as display rows. */
 export async function getSolanaBalances(solAddress: string): Promise<WalletBalanceWithChain[]> {
   const balances = await getNonEVMBalances(SOLANA_KEY, solAddress);
-  return balances.map(toBalanceRow);
+  return balances.map((b) => toNonEvmBalanceRow(b, SOLANA_KEY));
 }
 
 /** Funds found on the path the wallet is NOT using, for the UI to offer a switch. */
@@ -320,15 +296,15 @@ export async function loadSolanaWallet(
     persist(wallet, { derivation: probe.derivation, address: probe.address, settled: true });
     otherPathFindings.set(wallet, null);
     registerNonEVMAddress(wallet, SOLANA_KEY, probe.address).catch(() => {});
-    return { address: probe.address, balances: probe.raw.map(toBalanceRow), otherPath: null };
+    return { address: probe.address, balances: probe.raw.map((b) => toNonEvmBalanceRow(b, SOLANA_KEY)), otherPath: null };
   }
   if (probe) {
     otherPathFindings.set(wallet, {
       wallet,
       derivation: probe.derivation,
       address: probe.address,
-      balances: probe.raw.map(toBalanceRow),
+      balances: probe.raw.map((b) => toNonEvmBalanceRow(b, SOLANA_KEY)),
     });
   }
-  return { address, balances: raw.map(toBalanceRow), otherPath: otherPathFindings.get(wallet) ?? null };
+  return { address, balances: raw.map((b) => toNonEvmBalanceRow(b, SOLANA_KEY)), otherPath: otherPathFindings.get(wallet) ?? null };
 }

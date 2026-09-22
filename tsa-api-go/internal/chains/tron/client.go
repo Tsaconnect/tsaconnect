@@ -48,7 +48,7 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 	for sym, tokenAddr := range c.cfg.Tokens {
 		out = append(out, chains.Balance{
 			Symbol: sym, Raw: firstNonEmpty(acc.TRC20[tokenAddr], "0"),
-			Decimals: 6, TokenAddress: tokenAddr,
+			Decimals: 6, TokenAddress: tokenAddr, Listed: true,
 		})
 	}
 	return out, nil

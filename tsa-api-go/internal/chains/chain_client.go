@@ -29,10 +29,14 @@ const (
 // Balance is one native or token balance for an address.
 type Balance struct {
 	Symbol       string `json:"symbol"`
-	Raw          string `json:"raw"`          // integer string in base units
+	Raw          string `json:"raw"` // integer string in base units
 	Decimals     int    `json:"decimals"`
 	TokenAddress string `json:"tokenAddress,omitempty"`
 	IsNative     bool   `json:"isNative"`
+	// Listed marks a token from our own configuration. A discovered token's
+	// symbol can come from metadata its creator wrote (Sui), so only native and
+	// listed rows may be priced or shown as the coin their symbol names.
+	Listed bool `json:"listed,omitempty"`
 }
 
 // TransferRequest describes a send the user wants to make.
@@ -71,8 +75,8 @@ type TransferRequest struct {
 
 // FeeQuote is the result of the mandatory pre-send gas check.
 type FeeQuote struct {
-	GasSymbol       string `json:"gasSymbol"`       // e.g. "TRX"
-	EstFeeRaw       string `json:"estFeeRaw"`       // integer string in gas base units
+	GasSymbol       string `json:"gasSymbol"` // e.g. "TRX"
+	EstFeeRaw       string `json:"estFeeRaw"` // integer string in gas base units
 	GasDecimals     int    `json:"gasDecimals"`
 	NeedsActivation bool   `json:"needsActivation"` // recipient not yet on-chain (Tron ~1 TRX)
 	HasEnoughGas    bool   `json:"hasEnoughGas"`    // sender's native balance covers EstFeeRaw
@@ -89,7 +93,7 @@ type SigningPayload struct {
 // PreparedTx is the opaque unsigned tx plus the payloads to sign.
 type PreparedTx struct {
 	Family   string           `json:"family"`
-	Raw      string           `json:"raw"`      // family-specific serialized unsigned tx (JSON/hex)
+	Raw      string           `json:"raw"` // family-specific serialized unsigned tx (JSON/hex)
 	Payloads []SigningPayload `json:"payloads"`
 }
 

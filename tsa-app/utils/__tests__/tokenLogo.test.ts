@@ -4,6 +4,15 @@ import { isKnownContract, tokenLogoSource } from '../tokenLogo';
 import { DEFAULT_TOKENS, NONEVM_CHAINS } from '../../constants/chains';
 
 describe('tokenLogoSource', () => {
+  it('prefers our own icon for a curated coin only when asked', () => {
+    const lifi = { explicitUri: 'https://lifi.example/usdt-polygon.png' };
+    expect(tokenLogoSource('USDT', { ...lifi, preferRegistry: true })).not.toEqual({ uri: lifi.explicitUri });
+    // Unknown symbol: falls back to the explicit logo.
+    expect(tokenLogoSource('CREPE', { ...lifi, preferRegistry: true })).toEqual({ uri: lifi.explicitUri });
+    // Never for an uncurated token.
+    expect(tokenLogoSource('USDT', { ...lifi, curated: false, preferRegistry: true })).toEqual({ uri: lifi.explicitUri });
+  });
+
   it('prefers a logo that describes the exact token', () => {
     expect(tokenLogoSource('USDT', { explicitUri: 'https://lifi.example/usdt0.png' }))
       .toEqual({ uri: 'https://lifi.example/usdt0.png' });
