@@ -93,6 +93,10 @@ export interface LiFiToken {
   logoURI: string;
   priceUSD?: string;
   chainId?: number;
+  /** LiFi's id for the same asset across chains (USDC on Base and on BSC). */
+  coinKey?: string;
+  /** LiFi's check: "verified" or "unverified" (flagged tokens never arrive). */
+  verificationStatus?: 'verified' | 'unverified' | string;
 }
 
 export interface LiFiQuoteParams {
@@ -174,6 +178,14 @@ export async function getLiFiChains(): Promise<LiFiChain[]> {
   return getNetwork() === 'testnet' ? chains.filter(c => !isNonEVMLiFiChain(c.id)) : chains;
 }
 
+// LiFi's chain list changes rarely; one read per session serves every picker.
+let chainsCache: Promise<LiFiChain[]> | null = null;
+/** getLiFiChains, read once and shared. A failed read is not kept. */
+export function getLiFiChainsCached(): Promise<LiFiChain[]> {
+  if (!chainsCache) chainsCache = getLiFiChains().catch(err => { chainsCache = null; throw err; });
+  return chainsCache;
+}
+
 export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
   const headers = await getAuthHeaders();
   const res = await fetch(`${API_BASE_URL}/swap/lifi/tokens?chainId=${chainId}`, { headers });
@@ -219,6 +231,8 @@ export async function getLiFiAllChainTokens(params: {
   limit?: number;
   q?: string;
   chains?: number[];
+  /** Only VERIFIED tokens with these coinKeys (the picker's major coins). */
+  coinKeys?: string[];
 }): Promise<AllChainTokensPage> {
   const headers = await getAuthHeaders();
   const qs = new URLSearchParams();
@@ -226,6 +240,7 @@ export async function getLiFiAllChainTokens(params: {
   if (params.limit != null) qs.append('limit', String(params.limit));
   if (params.q && params.q.trim()) qs.append('q', params.q.trim());
   if (params.chains && params.chains.length > 0) qs.append('chains', params.chains.join(','));
+  if (params.coinKeys && params.coinKeys.length > 0) qs.append('coinKeys', params.coinKeys.join(','));
   const url = `${API_BASE_URL}/swap/lifi/tokens/all${qs.toString() ? `?${qs.toString()}` : ''}`;
   const res = await fetch(url, { headers });
   if (!res.ok) throw new Error('Failed to fetch all-chain token list');

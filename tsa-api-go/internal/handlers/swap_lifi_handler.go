@@ -64,6 +64,12 @@ type tokenWithChain struct {
 	LogoURI  string `json:"logoURI,omitempty"`
 	PriceUSD string `json:"priceUSD,omitempty"`
 	ChainID  int    `json:"chainId"`
+	// CoinKey is LiFi's id for the same asset across chains ("USDC" on Base
+	// and on BSC), so the app can show one coin with several networks.
+	CoinKey string `json:"coinKey,omitempty"`
+	// VerificationStatus is LiFi's "verified" | "unverified". "flagged" tokens
+	// (security-flagged) are dropped before they get here.
+	VerificationStatus string `json:"verificationStatus,omitempty"`
 }
 
 type allTokensCacheEntry struct {
@@ -266,6 +272,16 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 		return
 	}
 
+	// A pasted address is how a scam token gets in: never hand back one LiFi
+	// has security-flagged, same rule as the all-chains list.
+	var status struct {
+		VerificationStatus string `json:"verificationStatus"`
+	}
+	if json.Unmarshal(body, &status) == nil && strings.EqualFold(status.VerificationStatus, "flagged") {
+		utils.ErrorResponse(c, http.StatusNotFound, "This token is flagged as unsafe")
+		return
+	}
+
 	c.Data(resp.StatusCode, "application/json", body)
 }
 
@@ -281,6 +297,9 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 //   - offset (default 0)
 //   - q      (optional, case-insensitive substring match on symbol/name/address)
 //   - chains (optional, comma-separated chainId allowlist)
+//   - coinKeys (optional, comma-separated LiFi coinKeys, e.g. USDC,USDT,ETH):
+//     only VERIFIED tokens with one of these keys — the picker's default list
+//     of major coins in a single request
 //
 // Response: {"tokens": [...], "total": N, "offset": O, "limit": L}
 func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
@@ -304,6 +323,16 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 		}
 	}
 
+	var coinKeys map[string]struct{}
+	if raw := strings.TrimSpace(c.Query("coinKeys")); raw != "" {
+		coinKeys = make(map[string]struct{})
+		for _, k := range strings.Split(raw, ",") {
+			if k = strings.ToUpper(strings.TrimSpace(k)); k != "" {
+				coinKeys[k] = struct{}{}
+			}
+		}
+	}
+
 	flat, err := h.getOrFetchAllTokens()
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
@@ -312,12 +341,17 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 
 	// Filter
 	filtered := flat
-	if chainsFilter != nil || q != "" {
+	if chainsFilter != nil || q != "" || coinKeys != nil {
 		filtered = make([]tokenWithChain, 0, 1024)
 		for i := range flat {
 			t := &flat[i]
 			if chainsFilter != nil {
 				if _, ok := chainsFilter[t.ChainID]; !ok {
+					continue
+				}
+			}
+			if coinKeys != nil {
+				if _, ok := coinKeys[strings.ToUpper(t.CoinKey)]; !ok || t.VerificationStatus != "verified" {
 					continue
 				}
 			}
@@ -330,6 +364,27 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 			}
 			filtered = append(filtered, *t)
 		}
+	}
+
+	// A text search ranks the real thing first, BEFORE the page is cut: an
+	// exact symbol match, then verified, then tokens LiFi groups under a coin.
+	// Otherwise a broad query ("usd") fills the page alphabetically with
+	// lookalikes and the real coins never make it in.
+	if q != "" {
+		score := func(t tokenWithChain) int {
+			s := 0
+			if strings.EqualFold(t.Symbol, q) {
+				s += 4
+			}
+			if t.VerificationStatus == "verified" {
+				s += 2
+			}
+			if t.CoinKey != "" {
+				s++
+			}
+			return s
+		}
+		sort.SliceStable(filtered, func(i, j int) bool { return score(filtered[i]) > score(filtered[j]) })
 	}
 
 	total := len(filtered)
@@ -444,6 +499,8 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 			LogoURI  string          `json:"logoURI"`
 			PriceUSD json.RawMessage `json:"priceUSD"`
 			ChainID  int             `json:"chainId"`
+			CoinKey  string          `json:"coinKey"`
+			Status   string          `json:"verificationStatus"`
 		} `json:"tokens"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -457,6 +514,10 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 			continue
 		}
 		for _, t := range list {
+			// Security-flagged tokens never reach a picker, search included.
+			if strings.EqualFold(t.Status, "flagged") {
+				continue
+			}
 			id := t.ChainID
 			if id == 0 {
 				id = chainID
@@ -480,6 +541,9 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 				LogoURI:  t.LogoURI,
 				PriceUSD: priceUSD,
 				ChainID:  id,
+				CoinKey:  t.CoinKey,
+				// Absent on older payloads: treat as unverified, never verified.
+				VerificationStatus: strings.ToLower(t.Status),
 			})
 		}
 	}

@@ -360,6 +360,132 @@ func TestGetAllChainTokens_RequestsNonEVMTypesAndFlattensSolana(t *testing.T) {
 	}
 }
 
+// The picker's default list asks for major coins by coinKey. It must get only
+// verified tokens with those keys, carry coinKey/verificationStatus through,
+// and never see a security-flagged token — not even in free-text search.
+func TestGetAllChainTokens_CoinKeysVerifiedOnlyAndDropsFlagged(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"tokens":{
+			"8453":[
+				{"address":"0x833589fc","symbol":"USDC","decimals":6,"name":"USD Coin","chainId":8453,"coinKey":"USDC","verificationStatus":"verified"},
+				{"address":"0xfake","symbol":"USDC","decimals":6,"name":"USDC Rewards","chainId":8453,"coinKey":"USDC","verificationStatus":"unverified"},
+				{"address":"0xbad","symbol":"USDT","decimals":6,"name":"Tether Drainer","chainId":8453,"coinKey":"USDT","verificationStatus":"flagged"},
+				{"address":"0xnest","symbol":"NEST","decimals":18,"name":"Nest","chainId":8453,"verificationStatus":"unverified"}
+			],
+			"56":[{"address":"0x55d3","symbol":"USDT","decimals":18,"name":"Tether","chainId":56,"coinKey":"USDT","verificationStatus":"verified"}]
+		}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+	r.GET("/swap/lifi/tokens/all", h.GetAllChainTokens)
+
+	get := func(query string) []tokenWithChain {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/swap/lifi/tokens/all?"+query, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", query, w.Code, w.Body.String())
+		}
+		var body struct {
+			Tokens []tokenWithChain `json:"tokens"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("response not valid JSON: %v", err)
+		}
+		return body.Tokens
+	}
+
+	majors := get("coinKeys=usdc,USDT")
+	if len(majors) != 2 {
+		t.Fatalf("coinKeys: got %d tokens, want the 2 verified ones: %+v", len(majors), majors)
+	}
+	for _, tok := range majors {
+		if tok.VerificationStatus != "verified" || tok.CoinKey == "" {
+			t.Errorf("coinKeys returned %+v", tok)
+		}
+	}
+
+	for _, tok := range get("q=usdt") {
+		if tok.Address == "0xbad" {
+			t.Fatal("a security-flagged token reached search results")
+		}
+	}
+	// Unverified tokens stay searchable, labelled.
+	found := false
+	for _, tok := range get("q=nest") {
+		if tok.Address == "0xnest" && tok.VerificationStatus == "unverified" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("unverified token missing from search, or its status was not carried through")
+	}
+}
+
+// A broad search must put the real coin first even when many lookalikes sort
+// ahead of it alphabetically, because the app only takes the first page.
+func TestGetAllChainTokens_SearchRanksExactAndVerifiedFirst(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"tokens":{"8453":[
+			{"address":"0xa","symbol":"AUSDC","decimals":6,"name":"a usdc","chainId":8453,"verificationStatus":"unverified"},
+			{"address":"0xb","symbol":"BUSDC","decimals":6,"name":"b usdc","chainId":8453,"verificationStatus":"unverified"},
+			{"address":"0xc","symbol":"USDC","decimals":6,"name":"USDC fake","chainId":8453,"verificationStatus":"unverified"},
+			{"address":"0x833589fc","symbol":"USDC","decimals":6,"name":"USD Coin","chainId":8453,"coinKey":"USDC","verificationStatus":"verified"}
+		]}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+	r.GET("/swap/lifi/tokens/all", h.GetAllChainTokens)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/tokens/all?q=usdc&limit=1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var body struct {
+		Tokens []tokenWithChain `json:"tokens"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Tokens) != 1 {
+		t.Fatalf("bad response: %v %s", err, w.Body.String())
+	}
+	if body.Tokens[0].Address != "0x833589fc" {
+		t.Fatalf("first result = %+v, want the verified USDC", body.Tokens[0])
+	}
+}
+
+// A pasted contract address must not return a security-flagged token.
+func TestGetToken_RefusesFlagged(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Query().Get("token") == "0xbad" {
+			w.Write([]byte(`{"address":"0xbad","symbol":"USDT","verificationStatus":"flagged"}`))
+			return
+		}
+		w.Write([]byte(`{"address":"0xok","symbol":"USDT","verificationStatus":"verified"}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	for token, want := range map[string]int{"0xbad": http.StatusNotFound, "0xok": http.StatusOK} {
+		req := httptest.NewRequest("GET", "/swap/lifi/token?chain=8453&token="+token, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Errorf("%s: status %d, want %d (%s)", token, w.Code, want, w.Body.String())
+		}
+	}
+}
+
 func TestGetQuote_PreservesCallerSlippage(t *testing.T) {
 	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("slippage") != "0.01" {
