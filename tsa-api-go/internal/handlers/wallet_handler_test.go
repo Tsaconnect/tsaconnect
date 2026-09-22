@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -946,5 +947,22 @@ func TestSubmitTx_FromAddressSignerMismatch(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("signed by wallet")) {
 		t.Errorf("expected signer-mismatch 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The app reads `native` as "this is the chain's own coin" and swaps it by the
+// native address; a contract row that claimed it would swap ETH for USDC.
+func TestWalletBalanceRows_OnlyTheNativeRowIsNative(t *testing.T) {
+	native := nativeBalanceRow("1.5", 2000)
+	if !native.Native || native.ContractAddress != "" || native.Decimals != 18 || native.UsdValue != 3000 {
+		t.Fatalf("native row = %+v", native)
+	}
+	usdt := contractBalanceRow("2.33", 1, "0x55d398326f99059fF775485246999027B3197955", 18)
+	if usdt.Native || usdt.ContractAddress == "" || usdt.Decimals != 18 || usdt.UsdValue != 2.33 {
+		t.Fatalf("contract row = %+v", usdt)
+	}
+	body, _ := json.Marshal(usdt)
+	if strings.Contains(string(body), `"native"`) {
+		t.Fatalf("contract row must not carry a native field: %s", body)
 	}
 }

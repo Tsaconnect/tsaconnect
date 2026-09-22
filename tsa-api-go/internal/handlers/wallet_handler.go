@@ -327,6 +327,41 @@ func resolveNetwork(c *gin.Context) string {
 // GetWalletBalances handles GET /api/wallet/balances.
 // Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional),
 // ?address=<hex> (optional — overrides the user's registered wallet for multi-wallet clients).
+// tokenBalance is one row of GET /wallet/balances.
+type tokenBalance struct {
+	Balance  string  `json:"balance"`
+	UsdPrice float64 `json:"usdPrice"`
+	UsdValue float64 `json:"usdValue"`
+	// Which token this is. Without these a client can only guess from the
+	// symbol, and a guess that reads "no address" as "native coin" would turn
+	// USDC into ETH. Native is set only by nativeBalanceRow; every contract row
+	// carries its address.
+	ContractAddress string `json:"contractAddress,omitempty"`
+	Decimals        int    `json:"decimals,omitempty"`
+	Native          bool   `json:"native,omitempty"`
+}
+
+// nativeBalanceRow is the chain's own coin (18 decimals on every EVM chain).
+func nativeBalanceRow(balance string, price float64) tokenBalance {
+	row := pricedRow(balance, price)
+	row.Decimals = 18
+	row.Native = true
+	return row
+}
+
+// contractBalanceRow is an ERC-20 at tokenAddr; never native.
+func contractBalanceRow(balance string, price float64, tokenAddr string, decimals int) tokenBalance {
+	row := pricedRow(balance, price)
+	row.ContractAddress = tokenAddr
+	row.Decimals = decimals
+	return row
+}
+
+func pricedRow(balance string, price float64) tokenBalance {
+	amount, _ := strconv.ParseFloat(balance, 64)
+	return tokenBalance{Balance: balance, UsdPrice: price, UsdValue: amount * price}
+}
+
 func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -387,11 +422,6 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	var supportedTokens []models.SupportedToken
 	config.DB.Where("is_active = ?", true).Find(&supportedTokens)
 
-	type tokenBalance struct {
-		Balance  string  `json:"balance"`
-		UsdPrice float64 `json:"usdPrice"`
-		UsdValue float64 `json:"usdValue"`
-	}
 	result := make(map[string]map[string]tokenBalance)
 
 	// Collect all token symbols to fetch prices
@@ -443,14 +473,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 
 			if client != nil {
 				if nativeBal, err := client.GetBalance(address); err == nil {
-					balStr := formatTokenBalance(nativeBal, 18)
-					balFloat, _ := strconv.ParseFloat(balStr, 64)
-					price := prices[cq.cfg.NativeCurrency]
-					chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
-						Balance:  balStr,
-						UsdPrice: price,
-						UsdValue: balFloat * price,
-					}
+					chainBalances[cq.cfg.NativeCurrency] = nativeBalanceRow(formatTokenBalance(nativeBal, 18), prices[cq.cfg.NativeCurrency])
 				}
 			}
 
@@ -473,16 +496,9 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 									log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
 										tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
 								}
-								balStr := formatTokenBalance(bal, decimals)
-								balFloat, _ := strconv.ParseFloat(balStr, 64)
-								price := prices[tok.Symbol]
-								chainBalances[tok.Symbol] = tokenBalance{
-									Balance:  balStr,
-									UsdPrice: price,
-									UsdValue: balFloat * price,
-								}
+								chainBalances[tok.Symbol] = contractBalanceRow(formatTokenBalance(bal, decimals), prices[tok.Symbol], tokenAddr, decimals)
 							} else {
-								chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
+								chainBalances[tok.Symbol] = contractBalanceRow("0", 0, tokenAddr, 0)
 							}
 						} else {
 							chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
