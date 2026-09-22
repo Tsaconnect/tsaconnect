@@ -55,3 +55,16 @@ func TestTokenAddressForChainID(t *testing.T) {
 		t.Errorf("nil cfg: want empty string, got %s", addr)
 	}
 }
+
+// TestChainNameForID pins the mirror of ChainIDForName: the server must
+// never trust a client-supplied chain name, so it derives one from a chain
+// ID (e.g. a LiFi route's own chainId) instead.
+func TestChainNameForID(t *testing.T) {
+	b := testChainRegistry() // base 8453, bsc 56, optimism 10, linea 59144
+	if name, ok := b.ChainNameForID(56); !ok || name != "bsc" {
+		t.Fatalf("56 -> %q,%v want bsc", name, ok)
+	}
+	if _, ok := b.ChainNameForID(999999); ok {
+		t.Fatal("an unknown chain id must not resolve")
+	}
+}

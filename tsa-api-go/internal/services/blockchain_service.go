@@ -80,21 +80,41 @@ func (bs *BlockchainService) ClientForChain(chain string) *blockchain.EVMClient 
 	return bs.ClientForNetwork("mainnet", chain)
 }
 
-// ClientForChainID returns the EVMClient matching the given numeric chain ID,
-// searching across all networks.
-func (bs *BlockchainService) ClientForChainID(chainID int64) (*blockchain.EVMClient, string) {
+// chainLocation searches every configured network for the chain with the
+// given numeric chain ID, returning which network it lives on alongside its
+// configured name. The one loop both ClientForChainID and ChainNameForID
+// need, so a chain ID is only ever searched for once per call.
+func (bs *BlockchainService) chainLocation(id int64) (network, name string, ok bool) {
 	if bs.cfg == nil {
-		return nil, ""
+		return "", "", false
 	}
 	for network, netCfg := range bs.cfg.Networks {
 		for name, chain := range netCfg.Chains {
-			if chain.ChainID == chainID {
-				key := network + ":" + name
-				return bs.clients[key], name
+			if chain.ChainID == id {
+				return network, name, true
 			}
 		}
 	}
-	return nil, ""
+	return "", "", false
+}
+
+// ClientForChainID returns the EVMClient matching the given numeric chain ID,
+// searching across all networks.
+func (bs *BlockchainService) ClientForChainID(chainID int64) (*blockchain.EVMClient, string) {
+	network, name, ok := bs.chainLocation(chainID)
+	if !ok {
+		return nil, ""
+	}
+	return bs.clients[network+":"+name], name
+}
+
+// ChainNameForID resolves a numeric chain ID (e.g. a LiFi route's own
+// chainId, or one a client sent) to the configured EVM chain key for it on
+// the active network — the mirror of ChainIDForName. The server must never
+// trust a client-supplied chain name; this is how it derives one instead.
+func (bs *BlockchainService) ChainNameForID(id int64) (string, bool) {
+	_, name, ok := bs.chainLocation(id)
+	return name, ok
 }
 
 // Client returns the mainnet Sonic client for backward compatibility.

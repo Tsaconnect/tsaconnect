@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -224,5 +226,50 @@ func TestRampTreasuryLaneRouters_SkipsTheZeroAddress(t *testing.T) {
 	cfg.RampTreasuryRouters = map[string][]string{"bsc": {"0x0000000000000000000000000000000000000000"}}
 	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil); reason == "" {
 		t.Fatalf("the zero address must skip the lane, got routers=%v", routers)
+	}
+}
+
+// testChainIDs gives testBlockchainService a stable numeric chain ID per
+// chain key, distinct enough that a client mixing them up would misroute.
+var testChainIDs = map[string]int64{"base": 8453, "bsc": 56}
+
+// testBlockchainService builds a *services.BlockchainService whose clients
+// point at a throwaway httptest JSON-RPC server, one per requested chain
+// key, on the mainnet network. Dialing an httptest server does no I/O by
+// itself (ethclient.DialContext only wires the transport), so this is safe
+// to use in any test that never actually calls the RPC.
+func testBlockchainService(t *testing.T, keys ...string) *services.BlockchainService {
+	t.Helper()
+	chains := map[string]config.ChainConfig{}
+	for _, key := range keys {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		id, ok := testChainIDs[key]
+		if !ok {
+			t.Fatalf("testBlockchainService: no chain id fixture for %q", key)
+		}
+		chains[key] = config.ChainConfig{RPCURL: srv.URL, ChainID: id}
+	}
+	cfg := &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: chains},
+	}}
+	return services.NewBlockchainService(cfg)
+}
+
+// TestRampTransferVerifiers_CoverChainsWithoutALane pins the Task 4 fix: a
+// converted buy's on-chain delivery proof must be available for every
+// configured EVM chain, not only chains with a treasury lane — a lane-less
+// chain can still be a converted-buy DESTINATION even though the treasury
+// never sources funds from it directly.
+func TestRampTransferVerifiers_CoverChainsWithoutALane(t *testing.T) {
+	chains := testBlockchainService(t, "base", "bsc") // clients for both; see below
+	got := rampTransferVerifiers(chains, []string{"base", "bsc", "nowhere"})
+	if got["bsc"] == nil || got["base"] == nil {
+		t.Fatalf("verifiers = %v; every chain with a client needs one", got)
+	}
+	if _, ok := got["nowhere"]; ok {
+		t.Fatal("a chain with no client gets no verifier")
 	}
 }

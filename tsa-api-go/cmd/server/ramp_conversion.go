@@ -137,12 +137,15 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	lifiQuoteClient := services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
 	statusClient := services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey)
 
-	transfers := map[string]services.ERC20TransferVerifier{}
-	for chain := range lanes {
-		if client := chains.ClientForChain(chain); client != nil {
-			transfers[chain] = services.NewLogTransferVerifier(client.Client)
-		}
+	// Every configured EVM chain gets a verifier, not only treasury lanes: a
+	// converted buy's DESTINATION can be a chain the treasury never sources
+	// funds from directly, and that destination still needs an on-chain
+	// delivery proof.
+	evmChains := make([]string, 0, len(cfg.Networks["mainnet"].Chains))
+	for chain := range cfg.Networks["mainnet"].Chains {
+		evmChains = append(evmChains, chain)
 	}
+	transfers := rampTransferVerifiers(chains, evmChains)
 
 	orchestrator := services.NewConversionOrchestrator(
 		config.DB, treasury, &services.GormRampLegStore{DB: config.DB},
@@ -176,6 +179,22 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	log.Printf("[ramp-conversion] enabled treasury=%s chains=%v caps=order:$%.0f/chain:$%.0f",
 		addr, cfg.RampTreasuryChains, cfg.RampTreasuryMaxInflightUSDPerOrder, cfg.RampTreasuryMaxInflightUSDPerChain)
 	return treasury, orchestrator
+}
+
+// rampTransferVerifiers builds an ERC20TransferVerifier for every chain key
+// that has a client, skipping any that don't (e.g. a non-EVM chain, or a
+// chain whose RPC client failed to connect at boot). Called with every
+// configured EVM chain key — not only treasury lanes — so any ERC-20
+// destination a converted buy can be sent to still gets an on-chain delivery
+// proof, even one the treasury never sources funds from directly.
+func rampTransferVerifiers(chains *services.BlockchainService, keys []string) map[string]services.ERC20TransferVerifier {
+	transfers := map[string]services.ERC20TransferVerifier{}
+	for _, chain := range keys {
+		if client := chains.ClientForChain(chain); client != nil {
+			transfers[chain] = services.NewLogTransferVerifier(client.Client)
+		}
+	}
+	return transfers
 }
 
 // rampTreasuryLaneFloor validates and parses a chain's native-balance floor.
