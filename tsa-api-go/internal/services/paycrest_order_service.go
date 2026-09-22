@@ -80,6 +80,10 @@ type PaycrestOrderService struct {
 	// default, which is what produced the 0.5% observed on live orders.
 	senderFeePercent string
 	senderFeeAddress string
+	// roundTripBudgetBps is B: the slice of senderFeePercent (F) that pays a
+	// converted order's round trip. Set via SetRoundTripBudgetBps, which also
+	// pushes it onto quotes so the two never disagree.
+	roundTripBudgetBps int
 
 	// ── Conversion (Phase 2, Task 9). Both dormant by default: conversionEnabled
 	// false and treasuryAddr "" together mean every buy is created exactly as
@@ -117,6 +121,53 @@ func (s *PaycrestOrderService) SetTreasury(addr string) { s.treasuryAddr = strin
 // SetTreasuryCaps wires the optional early caps gate — see treasuryCaps'
 // doc comment.
 func (s *PaycrestOrderService) SetTreasuryCaps(c treasuryCapsChecker) { s.treasuryCaps = c }
+
+// feePercentToBps reads a sender-fee percent ("1", "0.5") as integer bps, so
+// F − B is exact arithmetic rather than float.
+func feePercentToBps(pct string) (int, bool) {
+	v, ok := parseSenderFeePercent(pct)
+	if !ok {
+		return 0, false
+	}
+	return int(math.Round(v * 100)), true
+}
+
+// bpsToFeePercent writes integer bps back in the percent form Paycrest takes.
+func bpsToFeePercent(bps int) string {
+	return strconv.FormatFloat(float64(bps)/100, 'f', -1, 64)
+}
+
+// SetRoundTripBudgetBps sets B here and on the quote service, the same way
+// the constructor pushes F: one source for both, so they cannot drift.
+func (s *PaycrestOrderService) SetRoundTripBudgetBps(bps int) {
+	s.roundTripBudgetBps = bps
+	if s.quotes != nil {
+		s.quotes.SetRoundTripBudgetBps(bps)
+	}
+}
+
+// ConversionPriced reports whether 0 < B < F: a round-trip budget exists and
+// something is still left for Paycrest's sender fee.
+func (s *PaycrestOrderService) ConversionPriced() bool {
+	f, ok := feePercentToBps(s.senderFeePercent)
+	return ok && s.roundTripBudgetBps > 0 && s.roundTripBudgetBps < f
+}
+
+// senderFeeFor is the Paycrest sender fee for one order: F on a direct
+// order, F − B on a converted one. "" when conversion is not priced.
+func (s *PaycrestOrderService) senderFeeFor(converted bool) string {
+	if !converted {
+		return s.senderFeePercent
+	}
+	if !s.ConversionPriced() {
+		return ""
+	}
+	f, _ := feePercentToBps(s.senderFeePercent)
+	return bpsToFeePercent(f - s.roundTripBudgetBps)
+}
+
+// ConvertedFeePercent is the sender fee a converted buy or swapped sell sends.
+func (s *PaycrestOrderService) ConvertedFeePercent() string { return s.senderFeeFor(true) }
 
 // ErrConversionUnavailable refuses a converted buy: the feature is off, no
 // treasury is configured (or its lanes disagree on an address), or the
@@ -309,28 +360,29 @@ func userRate(side, providerRate, feePercent string) string {
 }
 
 // chargedFeePercent is the fee Paycrest reports on the order, falling back to
-// ours when it reports none.
+// want (the fee this order was actually sent with — F direct, F − B
+// converted) when it reports none.
 //
 // A mismatch is an operator alarm, not a rounding note: the quote priced in
-// our percent, so a different charge means the user was shown one amount and
-// paid or received another. It happens when PAYCREST_SENDER_FEE_PERCENT is
-// unset or refused — the request then omits the fee and the dashboard default
-// applies — or when the dashboard changes under a set env var.
-func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref string) string {
+// want, so a different charge means the user was shown one amount and paid or
+// received another. It happens when PAYCREST_SENDER_FEE_PERCENT is unset or
+// refused — the request then omits the fee and the dashboard default applies
+// — or when the dashboard changes under a set env var.
+func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref, want string) string {
 	reported := strings.TrimSpace(order.SenderFeePercent)
 	if reported == "" {
-		return s.senderFeePercent
+		return want
 	}
-	want, _ := parseSenderFeePercent(s.senderFeePercent)
+	wantV, _ := parseSenderFeePercent(want)
 	got, ok := parseSenderFeePercent(reported)
-	if !ok || math.Abs(got-want) > 1e-9 {
-		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s configured=%q paycrest_charged=%q — quoted amounts are off for this order",
-			ref, s.senderFeePercent, reported)
+	if !ok || math.Abs(got-wantV) > 1e-9 {
+		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s sent=%q paycrest_charged=%q — quoted amounts are off for this order",
+			ref, want, reported)
 	}
 	if !ok {
 		// Never store what we could not read: the column is varchar(16), and a
 		// failed insert here strands an order that already exists upstream.
-		return s.senderFeePercent
+		return want
 	}
 	return strconv.FormatFloat(got, 'f', -1, 64)
 }
@@ -400,6 +452,11 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		(requestedChain != strings.ToLower(strings.TrimSpace(req.ChainKey)) ||
 			requestedToken != strings.ToUpper(strings.TrimSpace(req.Token)))
 
+	feeForOrder := s.senderFeeFor(converting)
+	if converting && feeForOrder == "" {
+		return nil, fmt.Errorf("%w: the round-trip budget leaves no Paycrest fee", ErrConversionUnavailable)
+	}
+
 	var venue *PaycrestVenue
 	recipient := req.WalletAddress // direct: Paycrest pays the user directly
 	if converting {
@@ -449,7 +506,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 
 	// Submit the grossed-down figure so the provider asks the user for exactly
 	// the amount they entered. FiatAmount on the row stays the user's number.
-	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, s.senderFeePercent)
+	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, feeForOrder)
 
 	ref := paycrestReference("PCB", req.UserID)
 	order, err := s.pc.CreateOnrampOrder(ctx, PaycrestOnrampRequest{
@@ -464,14 +521,14 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			AccountName:       req.RefundAccountName,
 		},
 		Reference:        ref,
-		SenderFeePercent: s.senderFeePercent,
+		SenderFeePercent: feeForOrder,
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	feePercent := s.chargedFeePercent(order, ref)
+	feePercent := s.chargedFeePercent(order, ref, feeForOrder)
 	row := &models.PaycrestOrderRecord{
 		UserID:           req.UserID,
 		Direction:        models.PaycrestDirectionBuy,
@@ -641,7 +698,7 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		return nil, err
 	}
 
-	feePercent := s.chargedFeePercent(order, ref)
+	feePercent := s.chargedFeePercent(order, ref, s.senderFeePercent)
 	row := &models.PaycrestOrderRecord{
 		UserID:            req.UserID,
 		Direction:         models.PaycrestDirectionSell,

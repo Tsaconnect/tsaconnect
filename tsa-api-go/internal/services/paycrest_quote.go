@@ -153,6 +153,10 @@ type PaycrestQuoteService struct {
 	// senderFeePercent is our margin, priced into every rate we quote. Zero
 	// quotes provider rates verbatim.
 	senderFeePercent float64
+	// roundTripBudgetBps is B, pushed here by
+	// PaycrestOrderService.SetRoundTripBudgetBps the same way SetSenderFeePercent
+	// pushes F, so the two services can never disagree on it.
+	roundTripBudgetBps int
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
@@ -197,6 +201,10 @@ type PaycrestQuoteService struct {
 func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
 	s.senderFeePercent, _ = parseSenderFeePercent(pct)
 }
+
+// SetRoundTripBudgetBps sets B, pushed here by
+// PaycrestOrderService.SetRoundTripBudgetBps.
+func (s *PaycrestQuoteService) SetRoundTripBudgetBps(bps int) { s.roundTripBudgetBps = bps }
 
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
 // would charge, low enough that a typo ("5" for "0.5") is refused rather than

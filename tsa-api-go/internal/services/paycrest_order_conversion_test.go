@@ -47,13 +47,19 @@ type fakePaycrestConversionClient struct {
 // for what the assertion cares about (WalletAddress), not the wire field
 // (RecipientAddress) — the two are the same delivery target either way.
 type capturedOnramp struct {
-	WalletAddress string
-	Token         string
-	Network       string
+	WalletAddress    string
+	Token            string
+	Network          string
+	SenderFeePercent string
 }
 
 func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req PaycrestOnrampRequest) (*PaycrestOrder, error) {
-	f.lastCreate = capturedOnramp{WalletAddress: req.RecipientAddress, Token: req.Token, Network: req.Network}
+	f.lastCreate = capturedOnramp{
+		WalletAddress:    req.RecipientAddress,
+		Token:            req.Token,
+		Network:          req.Network,
+		SenderFeePercent: req.SenderFeePercent,
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -62,6 +68,7 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 	}
 	return &PaycrestOrder{
 		ID: "pc-conv-" + req.Reference, Status: PaycrestStatusPending, Rate: "1500", Amount: "100",
+		SenderFeePercent: req.SenderFeePercent,
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution: "Fake Bank", AccountIdentifier: "0000000000", AccountName: "Fake",
 			AmountToTransfer: req.AmountNGN,
@@ -125,6 +132,12 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	if svc == nil {
 		t.Fatal("NewPaycrestOrderService returned nil")
 	}
+	// A converted order needs an explicit F to split into F − B — default it
+	// here (config's own default B=50bps against a plausible F=1%) so tests
+	// that only care about conversion routing don't each have to set it; a
+	// test that cares about the split itself overrides these directly.
+	svc.senderFeePercent = "1"
+	svc.SetRoundTripBudgetBps(50)
 	svc.dir = NewPaycrestDirectory(
 		&stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}},
 		&stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}},

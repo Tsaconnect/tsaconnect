@@ -1477,6 +1477,11 @@ func main() {
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
 		if paycrestOrders != nil {
+			paycrestOrders.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
+			if !paycrestOrders.ConversionPriced() {
+				log.Printf("[paycrest] conversion unpriced: RAMP_ROUND_TRIP_BUDGET_BPS=%d must be > 0 and below PAYCREST_SENDER_FEE_PERCENT (in bps); converted buys and swapped sells stay off",
+					cfg.RampRoundTripBudgetBps)
+			}
 			// Server-side kill switch: an operator can now stop the rail for a
 			// currency by flipping its ramp_provider column, not just change
 			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.

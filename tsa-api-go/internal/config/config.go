@@ -292,8 +292,13 @@ type Config struct {
 	// key with any other hot signer turns a single compromise into one that
 	// drains customer money. Asserted at boot (assertDistinctKey).
 	RampConversionBuyEnabled bool
-	RampTreasuryPrivateKey   string
-	RampTreasuryChains       []string
+	// RampRoundTripBudgetBps is B: the part of the user-facing markup F
+	// (PAYCREST_SENDER_FEE_PERCENT) that pays a conversion's round trip —
+	// LiFi's cost plus the gas we pay. Converted orders send Paycrest F − B;
+	// a route costing more than B is not offered; the unspent rest is ours.
+	RampRoundTripBudgetBps int
+	RampTreasuryPrivateKey string
+	RampTreasuryChains     []string
 	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
 	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
 	// across every converted buy the treasury has not yet settled.
@@ -749,6 +754,7 @@ func Load() *Config {
 	}
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
+	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))
 	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
 	cfg.RampTreasuryChains = nil
 	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {

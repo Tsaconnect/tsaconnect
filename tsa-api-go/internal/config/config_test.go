@@ -448,3 +448,14 @@ func TestLoad_RampTreasuryRoutersOverride(t *testing.T) {
 		t.Errorf("bsc routers = %v, want the two overrides, trimmed, blanks dropped", got)
 	}
 }
+
+func TestLoad_RampRoundTripBudgetBps(t *testing.T) {
+	t.Setenv("RAMP_ROUND_TRIP_BUDGET_BPS", "")
+	if got := Load().RampRoundTripBudgetBps; got != 50 {
+		t.Fatalf("default budget = %d, want 50", got)
+	}
+	t.Setenv("RAMP_ROUND_TRIP_BUDGET_BPS", "35")
+	if got := Load().RampRoundTripBudgetBps; got != 35 {
+		t.Fatalf("budget = %d, want 35", got)
+	}
+}

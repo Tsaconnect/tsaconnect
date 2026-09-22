@@ -30,6 +30,10 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		log.Printf("[ramp-conversion] dormant: RAMP_CONVERSION_BUY is off")
 		return nil, nil
 	}
+	if orders != nil && !orders.ConversionPriced() {
+		log.Printf("[ramp-conversion] dormant: conversion is not priced (need 0 < B < F)")
+		return nil, nil
+	}
 	if cfg.RampTreasuryPrivateKey == "" {
 		log.Printf("[ramp-conversion] dormant: RAMP_TREASURY_PRIVATE_KEY not set")
 		return nil, nil
