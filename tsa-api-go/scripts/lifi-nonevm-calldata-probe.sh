@@ -18,7 +18,7 @@ RECV="$1"; OUT="$2"; mkdir -p "$OUT"
 FROM=0x4B0897b0513fdC7C541B6d9D7E929C4e5364D2dB
 for TO_TOKEN in 11111111111111111111111111111111 EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v; do
   curl -s "https://li.quest/v1/quote?fromChain=8453&toChain=1151111081099710&fromToken=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&toToken=$TO_TOKEN&fromAmount=15000000&fromAddress=$FROM&toAddress=$RECV&allowDestinationCall=false" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({'capturedAt':'$(date +%F)','tool':d.get('tool'),'fromChainId':8453,'toChainId':1151111081099710,'receiver':'$RECV','to':d['transactionRequest']['to'],'data':d['transactionRequest']['data']}, indent=1))" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({'capturedAt':'$(date +%F)','tool':d.get('tool'),'fromChainId':8453,'toChainId':1151111081099710,'toToken':'$TO_TOKEN','receiver':'$RECV','to':d['transactionRequest']['to'],'data':d['transactionRequest']['data']}, indent=1))" \
     > "$OUT/probe_$TO_TOKEN.json"
   sleep 1
 done

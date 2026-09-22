@@ -9,7 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/mr-tron/base58"
+	solanago "github.com/gagliardetto/solana-go"
 )
 
 // A LiFi route's calldata decides who receives the funds the diamond pulls
@@ -119,11 +119,23 @@ const solanaLiFiChainID int64 = 1151111081099710
 // against.
 const lifiNonEVMAddress = "0x11f111f111f111F111f111f111F111f111f111F1"
 
+// solanaNativeToken is what LiFi calls native SOL — the System Program id,
+// i.e. 32 zero bytes. Any other destination token is an SPL mint, which is
+// delivered into a token account rather than to the owner directly.
+const solanaNativeToken = "11111111111111111111111111111111"
+
 // nonEVMReceiverLayout locates a facet's real 32-byte receiver: argIndex is
 // the top-level argument holding the facet's own struct, wordOffset the word
-// within that struct's encoding. Both are read off live calldata, never
-// inferred — see scripts/lifi-nonevm-calldata-probe.sh.
-type nonEVMReceiverLayout struct{ argIndex, wordOffset int }
+// within that struct's encoding. ataWordOffset is the word holding the SPL
+// token account the funds actually land in, or noATAWord when the facet
+// carries none. All are read off live calldata, never inferred — see
+// scripts/lifi-nonevm-calldata-probe.sh.
+type nonEVMReceiverLayout struct{ argIndex, wordOffset, ataWordOffset int }
+
+// noATAWord marks a layout with no token-account word, which is only safe for
+// a native-SOL destination: an SPL route on such a facet is refused, because
+// nothing in the captured calldata says where its tokens land.
+const noATAWord = -1
 
 // nonEVMReceiverLayouts is the allowlist of tools whose Solana calldata has
 // actually been captured and decoded (testdata/lifi_calldata). A route on any
@@ -144,14 +156,16 @@ var nonEVMReceiverLayouts = func() map[[4]byte]nonEVMReceiverLayout {
 	const swapData = "(address,address,address,address,uint256,bytes,bool)[]"
 	out := map[[4]byte]nonEVMReceiverLayout{}
 	for sig, layout := range map[string]nonEVMReceiverLayout{
-		// NEARIntentsData.nonEVMReceiver is the struct's first word.
+		// NEARIntentsData.nonEVMReceiver is the struct's first word. Only a
+		// native-SOL route was captured, and nothing in NEARIntentsData names
+		// a token account, so an SPL destination on this facet is refused.
 		"swapAndStartBridgeTokensViaNEARIntents(" + bridgeData + "," + swapData +
-			",(bytes32,address,bytes32,uint256,uint256,address,bytes))": {argIndex: 2, wordOffset: 0},
+			",(bytes32,address,bytes32,uint256,uint256,address,bytes))": {argIndex: 2, wordOffset: 0, ataWordOffset: noATAWord},
 		// PolymerCCTPData.nonEVMReceiver sits after polymerTokenFee and
-		// maxCCTPFee. The word after it is solanaReceiverATA — the token
-		// account derived from this owner, not a second recipient.
+		// maxCCTPFee, and solanaReceiverATA follows it — the CCTP mint
+		// recipient, which is where an SPL delivery actually lands.
 		"swapAndStartBridgeTokensViaPolymerCCTP(" + bridgeData + "," + swapData +
-			",(uint256,uint256,bytes32,bytes32,uint32,address,bytes))": {argIndex: 2, wordOffset: 2},
+			",(uint256,uint256,bytes32,bytes32,uint32,address,bytes))": {argIndex: 2, wordOffset: 2, ataWordOffset: 3},
 	} {
 		var sel [4]byte
 		copy(sel[:], crypto.Keccak256([]byte(sig))[:4])
@@ -235,7 +249,7 @@ func lifiTransactionID(data []byte) (string, bool) {
 // refusal is ErrTreasuryInvalidRoute: the route is untrusted input that
 // failed a safety check, the same class as an off-allowlist `to`.
 func checkLiFiDelivery(data string, sourceChainID, destChainID int64, receiver string) error {
-	return checkLiFiDeliveryTo(data, sourceChainID, destChainID, receiver, "evm")
+	return checkLiFiDeliveryTo(data, sourceChainID, destChainID, receiver, "evm", "")
 }
 
 // checkLiFiDeliveryTo is checkLiFiDelivery for a receiver of any address
@@ -243,7 +257,12 @@ func checkLiFiDelivery(data string, sourceChainID, destChainID int64, receiver s
 // the calldata, and a family with no decoder is refused rather than checked
 // with the EVM one — on a non-EVM route that would compare the order's wallet
 // against LiFi's placeholder and pass anything.
-func checkLiFiDeliveryTo(data string, sourceChainID, destChainID int64, receiver, family string) error {
+//
+// destToken is the destination token the route was quoted for, which only the
+// caller knows. It matters on Solana: an SPL delivery lands in a token account
+// rather than at the owner's own address, so the owner alone does not say who
+// ends up with the money. It is ignored for "evm".
+func checkLiFiDeliveryTo(data string, sourceChainID, destChainID int64, receiver, family, destToken string) error {
 	raw, err := hexutil.Decode(data)
 	if err != nil {
 		return fmt.Errorf("%w: route data is not valid hex: %v", ErrTreasuryInvalidRoute, err)
@@ -268,17 +287,21 @@ func checkLiFiDeliveryTo(data string, sourceChainID, destChainID int64, receiver
 		}
 		return nil
 	case "solana":
-		return checkLiFiSolanaReceiver(raw, destChainID, got.Receiver, receiver)
+		return checkLiFiSolanaReceiver(raw, destChainID, got.Receiver, receiver, destToken)
 	default:
 		return fmt.Errorf("%w: no receiver decoder for the %q address family", ErrTreasuryInvalidRoute, family)
 	}
 }
 
 // checkLiFiSolanaReceiver checks the 32-byte Solana address the facet carries,
-// which is the only place a Solana route names its recipient.
-func checkLiFiSolanaReceiver(raw []byte, destChainID int64, bridgeReceiver common.Address, receiver string) error {
+// which is the only place a Solana route names its recipient — plus, for an
+// SPL destination, the token account those tokens are actually minted into.
+func checkLiFiSolanaReceiver(raw []byte, destChainID int64, bridgeReceiver common.Address, receiver, destToken string) error {
 	if destChainID != solanaLiFiChainID {
 		return fmt.Errorf("%w: chain %d is not Solana", ErrTreasuryInvalidRoute, destChainID)
+	}
+	if destToken == "" {
+		return fmt.Errorf("%w: a Solana route cannot be checked without its destination token", ErrTreasuryInvalidRoute)
 	}
 	// Without the placeholder the route is not one of the non-EVM shapes this
 	// decoder was written against — a generic swap, say, whose receiver is a
@@ -292,12 +315,40 @@ func checkLiFiSolanaReceiver(raw []byte, destChainID int64, bridgeReceiver commo
 	if !ok {
 		return fmt.Errorf("%w: no captured Solana receiver layout for selector %x", ErrTreasuryInvalidRoute, sel)
 	}
-	word, err := lifiArgumentWord(raw[4:], layout)
+	word, err := lifiArgumentWord(raw[4:], layout.argIndex, layout.wordOffset)
 	if err != nil {
 		return fmt.Errorf("%w: selector %x: %v", ErrTreasuryInvalidRoute, sel, err)
 	}
-	if got := base58.Encode(word); got != receiver {
-		return fmt.Errorf("%w: route pays %s, not the order's wallet", ErrTreasuryInvalidRoute, got)
+	owner := solanago.PublicKeyFromBytes(word)
+	if owner.String() != receiver {
+		return fmt.Errorf("%w: route pays %s, not the order's wallet", ErrTreasuryInvalidRoute, owner)
+	}
+	if destToken == solanaNativeToken {
+		// Native SOL is credited to the owner account itself; there is no
+		// token account to check.
+		return nil
+	}
+	// An SPL token is minted into a token account, and only the canonical
+	// associated account of (owner, mint) is reachable by the owner's wallet.
+	// Any other account here pays the right owner on paper and an attacker in
+	// practice.
+	if layout.ataWordOffset == noATAWord {
+		return fmt.Errorf("%w: selector %x has no captured token-account word for an SPL destination", ErrTreasuryInvalidRoute, sel)
+	}
+	mint, err := solanago.PublicKeyFromBase58(destToken)
+	if err != nil {
+		return fmt.Errorf("%w: destination token %q is not a Solana mint", ErrTreasuryInvalidRoute, destToken)
+	}
+	want, _, err := solanago.FindAssociatedTokenAddress(owner, mint)
+	if err != nil {
+		return fmt.Errorf("%w: no associated token account for %s/%s: %v", ErrTreasuryInvalidRoute, owner, mint, err)
+	}
+	ataWord, err := lifiArgumentWord(raw[4:], layout.argIndex, layout.ataWordOffset)
+	if err != nil {
+		return fmt.Errorf("%w: selector %x: %v", ErrTreasuryInvalidRoute, sel, err)
+	}
+	if got := solanago.PublicKeyFromBytes(ataWord); got != want {
+		return fmt.Errorf("%w: route mints into token account %s, not the order wallet's %s", ErrTreasuryInvalidRoute, got, want)
 	}
 	return nil
 }
@@ -306,18 +357,31 @@ func checkLiFiSolanaReceiver(raw []byte, destChainID int64, bridgeReceiver commo
 // the argument's head word is an offset into args, and wordOffset counts words
 // from there. Every facet struct holding a non-EVM receiver is dynamic (each
 // ends in a `bytes` field), so the head is always an offset, never a value.
-func lifiArgumentWord(args []byte, layout nonEVMReceiverLayout) ([]byte, error) {
-	head := layout.argIndex * 32
-	if len(args) < head+32 {
-		return nil, fmt.Errorf("calldata ends before argument %d", layout.argIndex)
+//
+// The head word is attacker-controlled — nothing upstream validates any
+// argument but the first — so every bound is checked in uint64 and each
+// comparison is arranged so neither side can wrap: a hostile 2^63-1 offset
+// used to make `start+32` overflow past both guards and panic the decoder.
+func lifiArgumentWord(args []byte, argIndex, wordOffset int) ([]byte, error) {
+	if argIndex < 0 || wordOffset < 0 {
+		return nil, fmt.Errorf("argument %d word %d is not a position", argIndex, wordOffset)
 	}
+	limit := uint64(len(args))
+	if limit < 32 || uint64(argIndex) > limit/32-1 {
+		return nil, fmt.Errorf("calldata ends before argument %d", argIndex)
+	}
+	head := uint64(argIndex) * 32
 	offset := new(big.Int).SetBytes(args[head : head+32])
-	if !offset.IsInt64() {
-		return nil, fmt.Errorf("argument %d has an unreadable offset", layout.argIndex)
+	// limit-32 is the last position a whole word can start at; every check
+	// below subtracts from it rather than adding to a candidate start.
+	last := limit - 32
+	if !offset.IsUint64() || offset.Uint64() > last {
+		return nil, fmt.Errorf("argument %d points outside the calldata", argIndex)
 	}
-	start := offset.Int64() + int64(layout.wordOffset)*32
-	if start < 0 || start+32 > int64(len(args)) {
-		return nil, fmt.Errorf("argument %d word %d is out of bounds", layout.argIndex, layout.wordOffset)
+	start := offset.Uint64()
+	if uint64(wordOffset) > (last-start)/32 {
+		return nil, fmt.Errorf("argument %d word %d is out of bounds", argIndex, wordOffset)
 	}
+	start += uint64(wordOffset) * 32
 	return args[start : start+32], nil
 }
