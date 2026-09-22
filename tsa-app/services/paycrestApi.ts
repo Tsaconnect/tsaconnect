@@ -14,6 +14,7 @@
 //      hardcoded list: ask for a quote at the amount the user actually typed
 //      and show only what comes back.
 
+import { ethers } from 'ethers';
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
 import { makeIdempotencyKey } from '@/services/itApi';
@@ -65,6 +66,28 @@ export interface PaycrestVenue {
   promisedAmount?: string;
   /** The cross-chain route's estimated execution time, in seconds. */
   etaSeconds?: number;
+
+  // ── Buy any token by address (Task 9). The server now identifies the
+  // requested asset by (chain id, address) rather than (chain key, symbol) —
+  // it works for anything LiFi routes to, not just the handful in our own
+  // registry, and it derives decimals itself instead of trusting the client.
+
+  /** LiFi chain id of what the user asked for. Paired with
+   *  requestedTokenAddress for matching — see selectVenue. */
+  requestedChainId?: number;
+  /** Checksum or lowercase address of what the user asked for — native coins
+   *  included, using their own placeholder address. Compare case-insensitively. */
+  requestedTokenAddress?: string;
+  /** Decimals of the requested token, as the server resolved them. Never
+   *  trust a client-side guess — see formatEstimate. */
+  requestedTokenDecimals?: number;
+  /** What this route is expected to deliver, in the requested token's own
+   *  base units. An ESTIMATE, not a guarantee — render with a leading `~`
+   *  (see formatEstimate), never as a promise. */
+  estimatedAmount?: string;
+  /** All-in cost of the conversion against the round-trip budget, in basis
+   *  points. */
+  costBps?: number;
 }
 
 export interface PaycrestQuote {
@@ -144,6 +167,22 @@ export interface PaycrestOrder {
   paymentClaimedAt?: string;
   settledAt?: string;
   createdAt: string;
+
+  // ── Buy any token by address (Task 9) — mirrors PaycrestVenue's own fields;
+  // see there for why each exists.
+  requestedChainId?: number;
+  requestedTokenAddress?: string;
+  requestedTokenDecimals?: number;
+  /** What this order is expected to deliver, in the requested token's own
+   *  base units. An estimate — render with formatEstimate, never as a
+   *  promise. */
+  estimatedAmount?: string;
+  /** What Paycrest itself quoted at order-creation time, in the settlement
+   *  leg's base units. */
+  quotedAmount?: string;
+  /** Where a converted order's delivery leg actually sends the requested
+   *  token — the user's own wallet on the requested chain. */
+  destinationAddress?: string;
 }
 
 /** Thrown with the server's own wording — these messages are written to be
@@ -190,26 +229,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /**
+ * What the user actually asked to receive — identified by (LiFi) chain id
+ * and on-chain address, which works for any token LiFi can route to, not
+ * just the handful in our own chain registry. `chain` (our ChainKey) is
+ * carried alongside only for a DIRECT match (see selectVenue) and for
+ * display; it is never sent as the matching key on its own.
+ */
+export type RequestedAsset = { token: string; chainId: number; address: string; chain?: string };
+
+/**
  * Ask what is actually fillable at this amount, right now.
  *
  * Call this on every amount change (debounced) rather than once — a quote is
  * only true for the size it was asked about, and only for a moment.
+ *
+ * Naming a `requested` asset routes to the authenticated, per-user
+ * rate-limited converted-quote endpoint — the only one that can price a
+ * conversion for it. Without one this stays on the public direct-only quote,
+ * exactly as before.
  */
 export async function getQuote(
   side: 'buy' | 'sell',
   amount: string,
   currency = 'NGN',
-  // The (chain, token) the user has explicitly chosen to receive. Passed
-  // through so a server that cannot fill it directly can price a converted
-  // route for THIS pair — ConvertedVenues needs to know what to price against,
-  // it cannot guess. An older/not-yet-wired server just ignores the extra
-  // query params and returns direct venues exactly as before.
-  requested?: { chain: string; token: string },
+  requested?: RequestedAsset,
 ): Promise<PaycrestQuote> {
   const q = new URLSearchParams({ side, amount, currency });
-  if (requested?.chain && requested.token) {
-    q.set('requestedChain', requested.chain);
+  if (requested) {
+    q.set('requestedChainId', String(requested.chainId));
+    q.set('requestedTokenAddress', requested.address);
     q.set('requestedToken', requested.token);
+    if (requested.chain) q.set('requestedChain', requested.chain);
+    return request<PaycrestQuote>(`/converted-quote?${q.toString()}`);
   }
   return request<PaycrestQuote>(`/quote?${q.toString()}`);
 }
@@ -251,6 +302,11 @@ export interface CreateBuyInput {
    *  chain/token, so leaving these unset behaves exactly as before. */
   requestedChain?: string;
   requestedToken?: string;
+  /** The (chain id, address) form of the same thing — what the server
+   *  actually keys the requested asset by (see RequestedAsset). Decimals are
+   *  never sent; the server derives them itself. */
+  requestedChainId?: number;
+  requestedTokenAddress?: string;
 }
 
 /** Opens an onramp. The returned order carries the provider account to pay. */
@@ -384,21 +440,23 @@ export function isConvertedOrder(o: Pick<PaycrestOrder, 'routeKind'>): boolean {
  * caller with nothing to show must render "no route" and offer an
  * alternative as a choice, not silently substitute one here.
  */
-export function selectVenue(
-  venues: PaycrestVenue[],
-  wantChainKey: string,
-  wantSymbol: string,
-): PaycrestVenue | null {
-  const matchesWanted = (v: PaycrestVenue) =>
-    v.chain.toLowerCase() === wantChainKey.toLowerCase() &&
-    v.token.toUpperCase() === wantSymbol.toUpperCase();
-  const direct = venues.find((v) => matchesWanted(v) && !isConvertedVenue(v));
+export function selectVenue(venues: PaycrestVenue[], want: RequestedAsset): PaycrestVenue | null {
+  const direct = venues.find(
+    (v) =>
+      !isConvertedVenue(v) &&
+      !!want.chain &&
+      v.chain.toLowerCase() === want.chain.toLowerCase() &&
+      v.token.toUpperCase() === want.token.toUpperCase(),
+  );
   if (direct) return direct;
+  // A converted venue is matched by (chain id, address) — the server's own
+  // key for "what was actually requested" — never by chain/token strings,
+  // which cannot name a token outside our registry.
   const converted = venues.find(
     (v) =>
       isConvertedVenue(v) &&
-      v.requestedChain?.toLowerCase() === wantChainKey.toLowerCase() &&
-      v.requestedToken?.toUpperCase() === wantSymbol.toUpperCase(),
+      v.requestedChainId === want.chainId &&
+      v.requestedTokenAddress?.toLowerCase() === want.address.toLowerCase(),
   );
   return converted ?? null;
 }
@@ -429,6 +487,22 @@ export function formatPromisedAmount(
   if (!v.promisedAmount || !v.requestedChain || !v.requestedToken) return null;
   const decimals = requestedAssetDecimals(v.requestedChain, v.requestedToken);
   return formatTokenAmount(v.promisedAmount, decimals, decimals);
+}
+
+/**
+ * "~0.0022 BNB": what a converted buy should deliver, per the server's own
+ * decimals for the requested token (never a client-side guess — see
+ * requestedTokenDecimals). Leads with `~` on purpose: this is an estimate
+ * priced against a round-trip budget, not the old guaranteed-minimum figure
+ * — never render it as a promise. Null when the estimate isn't known.
+ */
+export function formatEstimate(
+  v: Pick<PaycrestVenue, 'estimatedAmount' | 'requestedTokenDecimals' | 'requestedToken'>,
+): string | null {
+  if (!v.estimatedAmount || !v.requestedTokenDecimals) return null;
+  const n = Number(ethers.formatUnits(v.estimatedAmount, v.requestedTokenDecimals));
+  if (!Number.isFinite(n)) return null;
+  return `~${n.toLocaleString(undefined, { maximumSignificantDigits: 4 })} ${v.requestedToken ?? ''}`.trim();
 }
 
 /** "~30s" under 90 seconds (matches how a user actually reads a short wait),

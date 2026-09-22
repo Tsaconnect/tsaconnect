@@ -18,6 +18,7 @@ import {
   selectVenue,
   requestedAssetDecimals,
   formatPromisedAmount,
+  formatEstimate,
   formatEta,
   describeConvertedVenue,
   paycrestConversionHops,
@@ -32,29 +33,38 @@ const okJson = (data: unknown) => ({
   text: async () => JSON.stringify({ success: true, data }),
 });
 
-describe('getQuote — asking for a specific (chain, token)', () => {
+describe('getQuote — asking for a specific (chain id, address)', () => {
   beforeEach(() => {
     (global as any).fetch = jest.fn();
   });
 
-  it('sends requestedChain/requestedToken when the caller names a destination', async () => {
+  it('routes to the converted-quote endpoint with chain id/address/token when the caller names a destination', async () => {
     (global.fetch as jest.Mock).mockResolvedValue(okJson({ venues: [], best: null }));
 
-    await getQuote('buy', '150000', 'NGN', { chain: 'optimism', token: 'USDT' });
+    await getQuote('buy', '150000', 'NGN', {
+      token: 'USDT',
+      chainId: 10,
+      address: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58',
+      chain: 'optimism',
+    });
 
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toContain('requestedChain=optimism');
+    expect(url).toContain('/paycrest/converted-quote?');
+    expect(url).toContain('requestedChainId=10');
+    expect(url).toContain('requestedTokenAddress=0x94b008aa00579c1307b0ef2c499ad98a8ce58e58');
     expect(url).toContain('requestedToken=USDT');
+    expect(url).toContain('requestedChain=optimism');
   });
 
-  it('omits them entirely when no destination is given, so an unwired server sees the old request', async () => {
+  it('stays on the public direct-only quote when no destination is given', async () => {
     (global.fetch as jest.Mock).mockResolvedValue(okJson({ venues: [], best: null }));
 
     await getQuote('buy', '150000', 'NGN');
 
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).not.toContain('requestedChain');
-    expect(url).not.toContain('requestedToken');
+    expect(url).toContain('/paycrest/quote?');
+    expect(url).not.toContain('requestedChainId');
+    expect(url).not.toContain('requestedTokenAddress');
   });
 });
 
@@ -100,6 +110,11 @@ describe('createBuy — passing through what the user actually wants', () => {
   });
 });
 
+const OPTIMISM_USDT_ADDRESS = '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58';
+const BASE_USDC_ADDRESS = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+const BASE_USDT_ADDRESS = '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2';
+const ARBITRUM_DAI_ADDRESS = '0xda10009cbd5d07dd0cecc66161fc93d7c9000da4';
+
 const convertedVenue: PaycrestVenue = {
   kind: 'converted',
   chain: 'base',
@@ -108,6 +123,8 @@ const convertedVenue: PaycrestVenue = {
   viaToken: 'USDC',
   requestedChain: 'optimism',
   requestedToken: 'USDT',
+  requestedChainId: 10,
+  requestedTokenAddress: OPTIMISM_USDT_ADDRESS,
   rate: '1650.00',
   spreadPercent: 0.5,
   tokenAmount: 99.5,
@@ -153,16 +170,21 @@ const otherDirectVenue: PaycrestVenue = {
 };
 
 describe('selectVenue — the one rule this phase exists to enforce', () => {
+  const wantBaseUsdc = { chain: 'base', token: 'USDC', chainId: 8453, address: BASE_USDC_ADDRESS };
+  const wantOptimismUsdt = { chain: 'optimism', token: 'USDT', chainId: 10, address: OPTIMISM_USDT_ADDRESS };
+
   it('picks the exact direct match for what was asked', () => {
-    expect(selectVenue([directVenue, otherDirectVenue], 'base', 'USDC')).toBe(directVenue);
+    expect(selectVenue([directVenue, otherDirectVenue], wantBaseUsdc)).toBe(directVenue);
   });
 
   it('is case-insensitive on chain and token', () => {
-    expect(selectVenue([directVenue], 'BASE', 'usdc')).toBe(directVenue);
+    expect(
+      selectVenue([directVenue], { ...wantBaseUsdc, chain: 'BASE', token: 'usdc' }),
+    ).toBe(directVenue);
   });
 
   it('uses the converted match only when no direct match exists for that pair', () => {
-    expect(selectVenue([otherDirectVenue, convertedVenue], 'optimism', 'USDT')).toBe(convertedVenue);
+    expect(selectVenue([otherDirectVenue, convertedVenue], wantOptimismUsdt)).toBe(convertedVenue);
   });
 
   it('a direct match for the SAME pair always wins over a converted one', () => {
@@ -177,23 +199,32 @@ describe('selectVenue — the one rule this phase exists to enforce', () => {
       tokenAmount: 91.2,
     };
     const conflictingConverted: PaycrestVenue = { ...convertedVenue, chain: 'optimism', token: 'USDT' };
-    expect(selectVenue([conflictingConverted, directOptimismUsdt], 'optimism', 'USDT')).toBe(
+    expect(selectVenue([conflictingConverted, directOptimismUsdt], wantOptimismUsdt)).toBe(
       directOptimismUsdt,
     );
   });
 
   it('returns null — never venues[0], never "best" — when nothing matches at all', () => {
-    expect(selectVenue([otherDirectVenue, convertedVenue], 'arbitrum', 'DAI')).toBeNull();
+    expect(
+      selectVenue([otherDirectVenue, convertedVenue], {
+        chain: 'arbitrum',
+        token: 'DAI',
+        chainId: 42161,
+        address: ARBITRUM_DAI_ADDRESS,
+      }),
+    ).toBeNull();
   });
 
   it('returns null on an empty venue list', () => {
-    expect(selectVenue([], 'base', 'USDC')).toBeNull();
+    expect(selectVenue([], wantBaseUsdc)).toBeNull();
   });
 
-  it('never matches a converted venue whose requestedChain/requestedToken is a different pair', () => {
+  it('never matches a converted venue whose requestedChainId/requestedTokenAddress is a different pair', () => {
     // convertedVenue converts TO optimism/USDT — asking for base/USDT (its
     // OWN settlement chain, different token) must not match it.
-    expect(selectVenue([convertedVenue], 'base', 'USDT')).toBeNull();
+    expect(
+      selectVenue([convertedVenue], { chain: 'base', token: 'USDT', chainId: 8453, address: BASE_USDT_ADDRESS }),
+    ).toBeNull();
   });
 });
 
@@ -304,5 +335,43 @@ describe('paycrestConversionHops — Received → Converting → Delivering', ()
     expect(stateOf('expired')).toEqual(['failed', 'pending', 'pending']);
     expect(stateOf('failed')).toEqual(['failed', 'pending', 'pending']);
     expect(stateOf('cancelled')).toEqual(['failed', 'pending', 'pending']);
+  });
+});
+
+describe('buying by address', () => {
+  beforeEach(() => {
+    (global as any).fetch = jest.fn();
+  });
+
+  const bnb = { token: 'BNB', chainId: 56, address: '0x0000000000000000000000000000000000000000' };
+
+  it('asks the authenticated converted quote by chain id and address', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ venues: [], best: null }));
+    await getQuote('buy', '20000', 'NGN', bnb);
+    const url = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    expect(url).toContain('/paycrest/converted-quote?');
+    expect(url).toContain('requestedChainId=56');
+    expect(url).toContain('requestedTokenAddress=0x0000000000000000000000000000000000000000');
+    expect(url).not.toContain('requestedTokenDecimals');
+  });
+
+  it('keeps the public quote for direct-only lookups', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ venues: [], best: null }));
+    await getQuote('buy', '20000', 'NGN');
+    expect((global.fetch as jest.Mock).mock.calls[0][0]).toContain('/paycrest/quote?');
+  });
+
+  it('selects the converted venue by address', () => {
+    const v = { chain: 'base', token: 'USDC', rate: '1500', spreadPercent: 1, tokenAmount: 1, kind: 'converted',
+      requestedChainId: 56, requestedTokenAddress: bnb.address, requestedTokenDecimals: 18,
+      estimatedAmount: '2200000000000000' } as PaycrestVenue;
+    expect(selectVenue([v], bnb)).toBe(v);
+    expect(selectVenue([v], { ...bnb, chainId: 1 })).toBeNull();
+  });
+
+  it('formats the estimate with ~', () => {
+    expect(formatEstimate({ requestedTokenDecimals: 18, estimatedAmount: '2200000000000000', requestedToken: 'BNB' }))
+      .toBe('~0.0022 BNB');
+    expect(formatEstimate({ requestedToken: 'BNB' })).toBeNull();
   });
 });
