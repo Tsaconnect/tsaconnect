@@ -42,15 +42,24 @@ export function isKnownContract(
  * Registry logos are keyed by SYMBOL, so they are only borrowed for tokens we
  * curate. A discovered or imported contract can call itself "USDT"; giving it
  * Tether's logo would vouch for it. Pass `curated: false` for those.
+ *
+ * `preferRegistry` — for a curated coin shown across chains (the asset picker),
+ * our own icon beats whichever chain's third-party logo came back, so USDC looks
+ * the same there as in the wallet.
  */
 export function tokenLogoSource(
   symbol: string,
-  { explicitUri, curated = true }: { explicitUri?: string | null; curated?: boolean } = {},
+  { explicitUri, curated = true, preferRegistry = false }:
+    { explicitUri?: string | null; curated?: boolean; preferRegistry?: boolean } = {},
 ): TokenLogoSource | null {
   const uri = explicitUri?.trim();
-  if (uri && /^https:\/\//i.test(uri)) return { uri };
-  if (!curated) return null;
+  const explicit = uri && /^https:\/\//i.test(uri) ? { uri } : null;
+  if (!curated) return explicit;
+  if (preferRegistry) return registryLogo(symbol) ?? explicit;
+  return explicit ?? registryLogo(symbol);
+}
 
+function registryLogo(symbol: string): TokenLogoSource | null {
   const key = symbol.trim().toUpperCase();
   if (key === 'MCGP') return MCGP_LOGO;
   const registry = DEFAULT_TOKENS[key]?.iconUrl;

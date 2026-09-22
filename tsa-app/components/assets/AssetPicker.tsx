@@ -59,6 +59,14 @@ function chainName(chainId: number, lifi: LiFiChain[]): string {
   return getChainByChainId(chainId)?.name ?? lifi.find(c => c.id === chainId)?.name ?? `Chain ${chainId}`;
 }
 
+/**
+ * What TokenAvatar should draw for a coin: a trusted coin we know (USDC, ETH,
+ * S, SOL…) gets our own icon, the same as in the wallet, over whichever chain's
+ * LiFi logo came back. An untrusted coin never borrows one.
+ */
+const iconFor = (asset: Asset) =>
+  ({ iconUrl: asset.logoURI, curated: asset.logoTrusted, preferRegistry: asset.logoTrusted });
+
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
 export default function AssetPicker({ visible, side, title, allow, onSelect, onClose }: AssetPickerProps) {
@@ -116,7 +124,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
                   backgroundColor: colors.surface,
                 }}
               >
-                <TokenAvatar symbol={networkFor.symbol} iconUrl={networkFor.logoURI} chainKey={key} size={36} />
+                <TokenAvatar symbol={networkFor.symbol} {...iconFor(networkFor)} chainKey={key} size={36} />
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
                     <Text variant="bodyMed" weight="700">{chainName(n.chainId, lifi)}</Text>
@@ -184,9 +192,8 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
                 >
                   <TokenAvatar
                     symbol={asset.symbol}
-                    iconUrl={asset.logoURI}
+                    {...iconFor(asset)}
                     chainKey={nets.length === 1 ? chainKeyFor(nets[0].chainId) : undefined}
-                    curated={asset.verified}
                     size={40}
                   />
                   <View style={{ flex: 1, minWidth: 0 }}>

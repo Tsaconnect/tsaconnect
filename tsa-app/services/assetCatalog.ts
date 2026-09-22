@@ -27,6 +27,18 @@ const EVM_NATIVE_ADDRESS = '0x0000000000000000000000000000000000000000';
 /** Coins in the default "Stablecoins & major coins" section, in this order. */
 export const MAJOR_COIN_KEYS = ['USDC', 'USDT', 'ETH', 'BNB', 'SOL', 'BTC', 'SUI'] as const;
 
+/**
+ * Majors that are a chain's own coin. Only their native form counts: LiFi also
+ * files bridged copies under the same key (Wormhole "Wrapped SOL" on EVM
+ * chains), which are not what someone choosing "SOL" means.
+ */
+const NATIVE_MAJOR_KEYS = new Set(['ETH', 'BNB', 'SOL', 'BTC', 'SUI']);
+
+/** Plain names for the majors, instead of whichever chain's token name came first. */
+const MAJOR_NAMES: Record<string, string> = {
+  USDC: 'USD Coin', USDT: 'Tether', ETH: 'Ethereum', BNB: 'BNB', SOL: 'Solana', BTC: 'Bitcoin', SUI: 'Sui',
+};
+
 /** Coins never offered, even from search (product decision: TRX is hidden). */
 export const HIDDEN_COIN_KEYS = new Set(['TRX']);
 
@@ -38,8 +50,12 @@ export type PickerSide = 'from' | 'to';
 /** A wallet balance for one token on one chain. */
 export interface Holding {
   chainId: number;
-  /** '' for the chain's native coin. */
+  /** The token's contract; '' when unknown (an older API) or for the native coin. */
   address: string;
+  /** The chain's own coin (ETH on Base, S on Sonic). Never inferred from a missing address. */
+  native: boolean;
+  /** From a curated source (our supported-token list, or a native coin), so its registry logo may be used. */
+  trusted: boolean;
   symbol: string;
   name: string;
   decimals: number;
@@ -64,6 +80,8 @@ export interface Asset {
   name: string;
   logoURI?: string;
   verified: boolean;
+  /** May borrow the registry logo for its symbol (verified, or a trusted holding). */
+  logoTrusted: boolean;
   networks: AssetNetwork[];
   /** Total held across networks. */
   balance: number;
@@ -75,19 +93,43 @@ export function isNativeLiFiToken(token: Pick<LiFiToken, 'address' | 'chainId'>)
   const chainId = token.chainId ?? 0;
   if (isBtcLiFiChain(chainId)) return true; // Bitcoin carries exactly one asset
   if (isSolanaLiFiChain(chainId)) return token.address === SOLANA_NATIVE_ADDRESS;
-  if (isSuiLiFiChain(chainId)) return token.address.toLowerCase().endsWith('::sui::sui');
+  if (isSuiLiFiChain(chainId)) return isSuiNativeCoinType(token.address);
   return isNativeTokenAddress(token.address);
+}
+
+/**
+ * Whether a Sui coin type is native SUI, written short (0x2::sui::SUI) or padded
+ * (0x00…02::sui::SUI) as the RPC reports it. Checking only the "::sui::SUI"
+ * tail would let any package publish a coin that passes for SUI.
+ */
+export function isSuiNativeCoinType(coinType: string): boolean {
+  const [pkg, mod, name, ...rest] = coinType.split('::');
+  if (rest.length || mod !== 'sui' || name !== 'SUI' || !/^0x0*2$/i.test(pkg ?? '')) return false;
+  return true;
 }
 
 const isVerified = (t: LiFiToken) => t.verificationStatus === 'verified';
 
+/** A token named like a chain's own coin (SOL, ETH…) that is not that coin; `null` = it is native. */
+const isBridgedNativeMajor = (symbol: string, token: Pick<LiFiToken, 'chainId' | 'address'> | null) =>
+  NATIVE_MAJOR_KEYS.has(symbol.toUpperCase()) && token !== null && !isNativeLiFiToken(token);
+
 /**
- * Only a VERIFIED token may join a coin by its coinKey. LiFi gives unverified
- * lookalikes the real coin's key too (seen live: 74 of them carry USDC, USDT,
- * SOL or BNB), so trusting the key alone would file a fake under real USDC.
+ * Whether a token joins its coin by coinKey. Only a VERIFIED token may: LiFi
+ * gives unverified lookalikes the real coin's key too (seen live: 74 of them
+ * carry USDC, USDT, SOL or BNB). And a chain's own coin (SOL, ETH…) joins only
+ * in its native form: LiFi files bridged copies (Wormhole "Wrapped SOL" on EVM
+ * chains) under the same key, and those are not what someone choosing SOL means.
+ * A token that does not join stands alone, under its own name.
  */
+function joinsByCoinKey(t: LiFiToken): boolean {
+  const key = t.coinKey?.toUpperCase();
+  if (!key || !isVerified(t)) return false;
+  return !NATIVE_MAJOR_KEYS.has(key) || isNativeLiFiToken(t);
+}
+
 const assetKey = (t: LiFiToken) =>
-  (t.coinKey && isVerified(t) ? t.coinKey.toUpperCase() : `${t.chainId ?? 0}:${t.address.toLowerCase()}`);
+  (joinsByCoinKey(t) ? t.coinKey!.toUpperCase() : `${t.chainId ?? 0}:${t.address.toLowerCase()}`);
 
 /** One Asset per coinKey, each network listed once. Hidden coins are dropped. */
 export function groupAssets(tokens: LiFiToken[]): Asset[] {
@@ -100,10 +142,12 @@ export function groupAssets(tokens: LiFiToken[]): Asset[] {
     if (!asset) {
       asset = {
         key,
-        symbol: t.coinKey ?? t.symbol,
-        name: t.name,
+        symbol: joinsByCoinKey(t) ? t.coinKey! : t.symbol,
+        name: MAJOR_NAMES[key] ?? t.name,
         logoURI: t.logoURI || undefined,
-        verified: t.verificationStatus === 'verified',
+        verified: isVerified(t),
+        // A bridged copy keeps its own logo: our "SOL" icon would pass it off as SOL.
+        logoTrusted: isVerified(t) && (joinsByCoinKey(t) || !isBridgedNativeMajor(t.symbol, t)),
         networks: [],
         balance: 0,
         usdValue: 0,
@@ -118,14 +162,31 @@ export function groupAssets(tokens: LiFiToken[]): Asset[] {
       existing.alternates = [...(existing.alternates ?? []), t];
     }
   }
+  // The logo comes from the coin's home network (its native form, else the
+  // preferred chain), not whichever chain's token happened to sort first.
+  for (const asset of byKey.values()) {
+    const home = [...asset.networks].sort((a, b) =>
+      Number(isNativeLiFiToken(b.token)) - Number(isNativeLiFiToken(a.token)) ||
+      preferenceRank(a.chainId) - preferenceRank(b.chainId))[0];
+    asset.logoURI = home?.token.logoURI || asset.logoURI;
+  }
   return [...byKey.values()];
 }
 
-const holdingMatches = (h: Holding, token: LiFiToken) =>
-  h.chainId === token.chainId &&
-  (h.address === ''
-    ? isNativeLiFiToken(token)
-    : h.address.toLowerCase() === token.address.toLowerCase());
+/**
+ * Whether holding `h` is `token`. A missing address is never read as "native":
+ * that is how a USDC balance would turn into ETH. With no address (an older
+ * API), a trusted holding may match a VERIFIED token of the same symbol on the
+ * same chain, and nothing else.
+ */
+const holdingMatches = (h: Holding, token: LiFiToken) => {
+  if (h.chainId !== token.chainId) return false;
+  if (h.native) return isNativeLiFiToken(token);
+  if (h.address) return h.address.toLowerCase() === token.address.toLowerCase();
+  // Only until the API that sends contractAddress is deployed everywhere. If two
+  // verified tokens on one chain share a symbol, the first one wins.
+  return h.trusted && isVerified(token) && token.symbol.toUpperCase() === h.symbol.toUpperCase();
+};
 
 /**
  * Copies `assets` with balances attached from `holdings`. Returns the holdings
@@ -151,7 +212,10 @@ export function attachHoldings(assets: Asset[], holdings: Holding[]): { assets: 
     });
     return { ...a, networks, balance, usdValue };
   });
-  return { assets: out, unmatched: holdings.filter(h => h.balance > 0 && !used.has(h)) };
+  // A holding we cannot pin to a contract is not offered on its own: guessing
+  // its address is how the wrong token would get swapped.
+  const identifiable = (h: Holding) => h.native || !!h.address;
+  return { assets: out, unmatched: holdings.filter(h => h.balance > 0 && !used.has(h) && identifiable(h)) };
 }
 
 /** LiFi's address for a chain's native coin, given the chain id. */
@@ -169,7 +233,7 @@ export function nativeAddressFor(chainId: number): string {
  * quote for token '' can never be priced.
  */
 export function assetFromHolding(h: Holding): Asset {
-  const address = h.address || nativeAddressFor(h.chainId);
+  const address = h.native ? nativeAddressFor(h.chainId) : h.address;
   const token: LiFiToken = {
     address,
     symbol: h.symbol,
@@ -183,6 +247,8 @@ export function assetFromHolding(h: Holding): Asset {
     symbol: h.symbol,
     name: h.name,
     verified: false,
+    // Binance-Peg ETH on BSC is from our own list, but it is not ETH: no ETH icon.
+    logoTrusted: h.trusted && !isBridgedNativeMajor(h.symbol, h.native ? null : h),
     networks: [{ chainId: h.chainId, token, balance: h.balance, usdValue: h.usdValue }],
     balance: h.balance,
     usdValue: h.usdValue,
@@ -222,7 +288,7 @@ export function networksForSide(
  */
 export function onlyMajorTokens(tokens: LiFiToken[]): LiFiToken[] {
   const majors = new Set<string>(MAJOR_COIN_KEYS);
-  return tokens.filter(t => isVerified(t) && !!t.coinKey && majors.has(t.coinKey.toUpperCase()));
+  return tokens.filter(t => joinsByCoinKey(t) && majors.has(t.coinKey!.toUpperCase()));
 }
 
 export interface AssetSection {

@@ -16,6 +16,7 @@ export default function TokenAvatar({
   iconColor,
   chainKey,
   curated = true,
+  preferRegistry = false,
   size = 36,
 }: {
   symbol: string;
@@ -26,10 +27,12 @@ export default function TokenAvatar({
   chainKey?: AnyChainKey;
   /** False for discovered/imported contracts: never borrow a registry logo by symbol. */
   curated?: boolean;
+  /** Our own icon for a known symbol beats iconUrl (a coin shown across chains). */
+  preferRegistry?: boolean;
   size?: number;
 }) {
   const { colors } = useTheme();
-  const source = tokenLogoSource(symbol, { explicitUri: iconUrl, curated });
+  const source = tokenLogoSource(symbol, { explicitUri: iconUrl, curated, preferRegistry });
   const sourceKey = source === null ? '' : typeof source === 'number' ? String(source) : source.uri;
   const chain = chainKey ? getChainDisplay(chainKey) : undefined;
   const chainLogo = chain?.iconUrl ?? '';

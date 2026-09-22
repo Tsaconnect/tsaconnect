@@ -60,10 +60,10 @@ jest.mock('@/hooks/useWalletHoldings', () => {
   // 2.33 USDT on BSC, and an imported token LiFi's lists don't carry.
   const value = {
     holdings: [
-      { chainId: 56, address: '0xusdt56', symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
-      { chainId: 56, address: '0xcrepe', symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
-      // Native S on Sonic: not a major, arrives with an empty address.
-      { chainId: 146, address: '', symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+      { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
+      { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
+      // Native S on Sonic: not a major.
+      { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
     ],
   };
   return { __esModule: true, useWalletHoldings: () => value };
@@ -230,7 +230,7 @@ it('keeps every network of a coin the admin lists on one chain', async () => {
   const t = text(tree);
   // USDT is listed on BSC, so it sits under On TSA — with both of its networks.
   expect(t.indexOf('USDT')).toBeLessThan(t.indexOf('Stablecoins & major coins'));
-  expect(t).toMatch(/USDT\s+·\s+2 networks/);
+  expect(t).toMatch(/Tether\s+·\s+2 networks/);
 });
 
 it('hands a held native coin back with its real native address', async () => {
