@@ -9,7 +9,7 @@
 // orders — so the total a buyer confirms is the total the wallet is asked to
 // approve. The escrow sign/broadcast/submit sequence itself is unchanged.
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { View, ScrollView, Alert, Image, Platform, KeyboardAvoidingView } from 'react-native';
+import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/AuthContext/AuthContext';
@@ -26,17 +26,20 @@ import {
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
-import LocationPicker from '@/components/common/LocationPicker';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
 import { listingAmount, quoteUnits, useCheckoutQuote, useQuoteFormat } from '@/hooks/useCheckoutQuote';
 import { useCheckoutBalances } from '@/hooks/useCheckoutBalances';
 import { ConfirmPaymentSheet } from '@/components/checkout/ConfirmPaymentSheet';
+import { DeliveryAddressSheet } from '@/components/checkout/DeliveryAddressSheet';
+import { useDeliveryAddresses } from '@/hooks/useDeliveryAddresses';
+import { formatDeliveryAddress } from '@/services/deliveryAddressApi';
 import { PaymentProgress, type PaymentPhase } from '@/components/checkout/PaymentProgress';
 import { QuoteBreakdown } from '@/components/checkout/QuoteBreakdown';
 import { useTheme } from '@/theme';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import {
+  BottomActionBar,
   Button,
   Card,
   Divider,
@@ -101,8 +104,15 @@ const CheckoutScreen = () => {
   // the confirm sheet reopens on the fresh quote.
   const [repriced, setRepriced] = useState(false);
   const [hasWallet, setHasWallet] = useState<boolean | null>(null);
-  const [editingAddress, setEditingAddress] = useState(false);
-  const [shippingLocation, setShippingLocation] = useState({ country: '', state: '', city: '' });
+  const [addressSheetOpen, setAddressSheetOpen] = useState(false);
+  const {
+    addresses,
+    selected: deliveryAddress,
+    select: selectAddress,
+    loading: addressesLoading,
+    error: addressesError,
+    reload: reloadAddresses,
+  } = useDeliveryAddresses();
   const { currency, rate } = useCurrency();
 
   const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
@@ -138,14 +148,6 @@ const CheckoutScreen = () => {
     })();
   }, [loadCart]);
 
-  useEffect(() => {
-    setShippingLocation({
-      country: currentUser?.country || '',
-      state: currentUser?.state || '',
-      city: currentUser?.city || '',
-    });
-  }, [currentUser]);
-
   const getProductData = (item: CartItem) => {
     if (typeof item.product === 'object') {
       const product = item.product as Product;
@@ -176,7 +178,21 @@ const CheckoutScreen = () => {
   const totalQuantity = cartData?.summary?.totalQuantity ?? items.reduce((n, it) => n + it.quantity, 0);
   const feeConfig = cartData?.feeConfig;
   const isMCGP = selectedToken === 'MCGP';
-  const hasAddress = !!shippingLocation.country && !!shippingLocation.state;
+  // Service line items charge a "Call-out fee", not "Shipping". Relabel the
+  // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
+  const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
+  const hasProductItem = items.some((it) => decodeServiceNotes(it.notes) == null);
+  const feeRowLabel = hasServiceItem ? (hasProductItem ? 'Shipping & call-out' : 'Call-out fee') : 'Shipping';
+
+  // Physical products ship to a saved address (the seller needs the street and
+  // phone). A services-only cart only needs a location to price the call-out,
+  // so it can still fall back to the profile location.
+  const profileLocation =
+    currentUser?.country && currentUser?.state
+      ? { city: currentUser.city || '', state: currentUser.state, country: currentUser.country }
+      : null;
+  const location = deliveryAddress ?? (hasProductItem ? null : profileLocation);
+  const hasAddress = !!location;
 
   // Per-service declared-tier map (productId → tier) from the service line items.
   // Plain product items carry no service note and are skipped. This threads the
@@ -203,9 +219,9 @@ const CheckoutScreen = () => {
     refresh: refreshQuote,
   } = useCheckoutQuote({
     token: selectedToken,
-    city: shippingLocation.city,
-    state: shippingLocation.state,
-    country: shippingLocation.country,
+    city: location?.city ?? '',
+    state: location?.state ?? '',
+    country: location?.country ?? '',
     serviceTiers,
     enabled: hasAddress && items.length > 0 && step === 'review',
     cartKey,
@@ -233,12 +249,6 @@ const CheckoutScreen = () => {
   const totalUnits = quote ? quoteUnits(quote.totals.total, quote.decimals) : null;
   const shortOnToken = tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
 
-  // Service line items charge a "Call-out fee", not "Shipping". Relabel the
-  // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
-  const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
-  const hasProductItem = items.some((it) => decodeServiceNotes(it.notes) == null);
-  const feeRowLabel = hasServiceItem ? (hasProductItem ? 'Shipping & call-out' : 'Call-out fee') : 'Shipping';
-
   // --- Step 1 → 2: validate, then show the confirm sheet ---
   const openConfirm = async () => {
     if (!requireKycVerified()) return;
@@ -250,9 +260,8 @@ const CheckoutScreen = () => {
       ]);
       return;
     }
-    if (!hasAddress) {
-      Alert.alert('Shipping Required', 'Please set your shipping address before checking out.');
-      setEditingAddress(true);
+    if (!location) {
+      setAddressSheetOpen(true);
       return;
     }
     if (!cartData || items.length === 0) {
@@ -266,7 +275,7 @@ const CheckoutScreen = () => {
 
   // --- Step 2 → 3: the escrow checkout flow ---
   const payNow = async () => {
-    if (!quote) return;
+    if (!quote || !location) return;
     setConfirmOpen(false);
     setPaidQuote(quote);
     setStep('signing');
@@ -277,13 +286,14 @@ const CheckoutScreen = () => {
     try {
       const createResult = await createOrders(
         selectedToken,
-        shippingLocation.city,
-        shippingLocation.state,
-        shippingLocation.country,
+        location.city,
+        location.state,
+        location.country,
         serviceTiers,
         undefined,
         undefined,
         quote.totals.total,
+        deliveryAddress?.id,
       );
       if (createResult.code === 'price_changed') {
         // Nothing was created. Back to review, re-price, and show the buyer
@@ -488,239 +498,268 @@ const CheckoutScreen = () => {
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <Header />
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'], gap: spacing.md }}
+        keyboardShouldPersistTaps="handled"
       >
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'], gap: spacing.md }}
-          keyboardShouldPersistTaps="handled"
-        >
-          <StepBar active={0} />
+        <StepBar active={0} />
 
-          {/* Shipping Address */}
-          <Card>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
-              <Icon name="nearMe" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
-                Deliver to
-              </Text>
-              <PressableScale onPress={() => setEditingAddress(!editingAddress)} hitSlop={8}>
+        {/* Delivery Address */}
+        <Card>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+            <Icon name="nearMe" size={16} color={colors.accent} />
+            <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
+              {hasProductItem ? 'Deliver to' : 'Your location'}
+            </Text>
+            {deliveryAddress ? (
+              <PressableScale onPress={() => setAddressSheetOpen(true)} hitSlop={8}>
                 <Text variant="bodySm" weight="600" color="accent">
-                  {editingAddress ? 'Done' : hasAddress ? 'Change' : 'Add'}
+                  Change
                 </Text>
               </PressableScale>
+            ) : null}
+          </View>
+          {addressesError && !deliveryAddress ? (
+            <View style={{ gap: spacing.sm }}>
+              <Text variant="bodySm" color="danger">
+                {addressesError}
+              </Text>
+              <Button
+                title="Try again"
+                variant="secondary"
+                size="sm"
+                fullWidth={false}
+                loading={addressesLoading}
+                onPress={() => reloadAddresses()}
+              />
             </View>
-            {editingAddress ? (
-              <LocationPicker value={shippingLocation} onChange={setShippingLocation} />
-            ) : shippingLocation.country ? (
-              <View>
-                <Text variant="bodyMed" weight="600">
-                  {currentUser?.name || currentUser?.username || ''}
+          ) : addressesLoading && !deliveryAddress ? (
+            <Spinner label="Loading your addresses…" />
+          ) : deliveryAddress ? (
+            <View style={{ gap: 2 }}>
+              <Text variant="bodyMed" weight="600">
+                {deliveryAddress.recipientName}
+                {deliveryAddress.label ? (
+                  <Text variant="bodySm" color="textMuted">{`  ·  ${deliveryAddress.label}`}</Text>
+                ) : null}
+              </Text>
+              <Text variant="bodySm" color="textSecondary">
+                {formatDeliveryAddress(deliveryAddress)}
+              </Text>
+              <Text variant="caption" color="textMuted">
+                {deliveryAddress.phone}
+              </Text>
+            </View>
+          ) : (
+            <View>
+              {location ? (
+                <Text variant="bodySm" color="textSecondary">
+                  {[location.city, location.state, location.country].filter(Boolean).join(', ')}
                 </Text>
-                <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
-                  {[shippingLocation.city, shippingLocation.state, shippingLocation.country].filter(Boolean).join(', ')}
-                </Text>
-              </View>
-            ) : (
+              ) : null}
               <PressableScale
-                onPress={() => setEditingAddress(true)}
+                onPress={() => setAddressSheetOpen(true)}
                 style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.sm }}
               >
                 <Icon name="plus" size={18} color={colors.accent} />
                 <Text variant="bodySm" weight="600" color="accent">
-                  Add shipping address
+                  {location ? 'Use a saved address instead' : 'Add delivery address'}
                 </Text>
               </PressableScale>
-            )}
-          </Card>
-
-          {/* Order Items */}
-          <Card>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
-              <Icon name="cart" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="600">
-                Items ({totalQuantity})
-              </Text>
             </View>
-            {items.map((item, index) => {
-              const { name, imageUrl } = getProductData(item);
-              const line = quoteByProduct.get(getProductId(item));
-              return (
-                <View key={item._id || index}>
-                  {index > 0 && <Divider spacing="sm" />}
-                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.xs }}>
-                    <View
-                      style={{
-                        width: 48,
-                        height: 48,
-                        borderRadius: radius.md,
-                        backgroundColor: colors.surfaceAlt,
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      {imageUrl ? (
-                        <Image source={{ uri: imageUrl }} style={{ width: 48, height: 48, borderRadius: radius.md }} />
-                      ) : (
-                        <Icon name="cart" size={22} color={colors.textMuted} />
-                      )}
-                    </View>
-                    <View style={{ flex: 1, marginLeft: spacing.md }}>
-                      <Text variant="bodySm" weight="500" numberOfLines={2}>
-                        {name}
-                      </Text>
-                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-                        Qty: {item.quantity}
-                      </Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      <Text variant="bodyMed" weight="700" numeric>
-                        {fmtPrice(item.price * item.quantity)}
-                      </Text>
-                      {line ? (
-                        <Text variant="caption" color="textMuted" numeric>
-                          {fmt.token(listingAmount(line))}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </View>
-                </View>
-              );
-            })}
-          </Card>
+          )}
+        </Card>
 
-          {/* Payment Token */}
-          <Card>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
-              <Icon name="wallet" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="600">
-                Pay with
-              </Text>
-            </View>
-            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-              {SUPPORTED_TOKENS.map((tk) => {
-                const meta = TOKEN_META[tk];
-                const active = selectedToken === tk;
-                const bal = balances[tk];
-                return (
-                  <PressableScale
-                    key={tk}
-                    onPress={() => setSelectedToken(tk)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: active }}
-                    accessibilityLabel={`Pay with ${tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
+        {/* Order Items */}
+        <Card>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+            <Icon name="cart" size={16} color={colors.accent} />
+            <Text variant="bodyMed" weight="600">
+              Items ({totalQuantity})
+            </Text>
+          </View>
+          {items.map((item, index) => {
+            const { name, imageUrl } = getProductData(item);
+            const line = quoteByProduct.get(getProductId(item));
+            return (
+              <View key={item._id || index}>
+                {index > 0 && <Divider spacing="sm" />}
+                <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.xs }}>
+                  <View
                     style={{
-                      flex: 1,
-                      alignItems: 'center',
-                      paddingVertical: spacing.md,
-                      paddingHorizontal: spacing.sm,
+                      width: 48,
+                      height: 48,
                       borderRadius: radius.md,
-                      borderWidth: 1.5,
-                      borderColor: active ? colors.accent : colors.border,
-                      backgroundColor: active ? colors.accentMuted : colors.surfaceAlt,
-                      gap: spacing.xs,
+                      backgroundColor: colors.surfaceAlt,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      overflow: 'hidden',
                     }}
                   >
-                    <View
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: radius.pill,
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        backgroundColor: active ? meta.color + '22' : colors.surfaceAlt,
-                      }}
-                    >
-                      <Icon name={meta.icon as any} size={18} color={active ? meta.color : colors.textMuted} />
-                    </View>
-                    <Text variant="bodySm" weight="700" style={active ? { color: meta.color } : undefined}>
-                      {tk}
+                    {imageUrl ? (
+                      <Image source={{ uri: imageUrl }} style={{ width: 48, height: 48, borderRadius: radius.md }} />
+                    ) : (
+                      <Icon name="cart" size={22} color={colors.textMuted} />
+                    )}
+                  </View>
+                  <View style={{ flex: 1, marginLeft: spacing.md }}>
+                    <Text variant="bodySm" weight="500" numberOfLines={2}>
+                      {name}
                     </Text>
-                    <Text variant="caption" color="textMuted" numeric>
-                      {bal != null ? `Bal ${formatBalance(bal)}` : '—'}
+                    <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                      Qty: {item.quantity}
                     </Text>
-                  </PressableScale>
-                );
-              })}
-            </View>
-            {shortOnToken ? (
-              <Notice tone="danger" icon="info">
-                {`Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
-              </Notice>
-            ) : isMCGP ? (
-              <Notice tone="success" icon="star">
-                MCGP: no network or platform fee
-              </Notice>
-            ) : feeConfig?.buyerCashbackPercent ? (
-              <Notice tone="success" icon="star">
-                {`${feeConfig.buyerCashbackPercent}% cashback when you confirm delivery`}
-              </Notice>
-            ) : null}
-          </Card>
-
-          {/* Summary */}
-          <Card>
-            {!hasAddress ? (
-              <Text variant="bodySm" color="textSecondary">
-                Add a delivery address to see shipping and your total.
-              </Text>
-            ) : quoteError ? (
-              <View style={{ gap: spacing.sm }}>
-                <Text variant="bodySm" color="danger">
-                  {quoteError}
-                </Text>
-                <Button title="Try again" variant="secondary" size="sm" fullWidth={false} onPress={refreshQuote} />
-              </View>
-            ) : !quote ? (
-              <Spinner label="Pricing your order…" />
-            ) : (
-              <>
-                <QuoteBreakdown quote={quote} shippingLabel={feeRowLabel} />
-                <Divider spacing="sm" />
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-                  <Text variant="bodyMed" weight="700">
-                    You pay
-                  </Text>
+                  </View>
                   <View style={{ alignItems: 'flex-end' }}>
-                    <Text variant="title1" weight="700" numeric>
-                      {fmt.token(quote.totals.total)}
+                    <Text variant="bodyMed" weight="700" numeric>
+                      {fmtPrice(item.price * item.quantity)}
                     </Text>
-                    {fmt.approx(quote.totals.total) ? (
-                      <Text variant="bodySm" weight="600" color="accent" numeric>
-                        {fmt.approx(quote.totals.total)}
+                    {line ? (
+                      <Text variant="caption" color="textMuted" numeric>
+                        {fmt.token(listingAmount(line))}
                       </Text>
                     ) : null}
                   </View>
                 </View>
-              </>
-            )}
-          </Card>
-        </ScrollView>
-      </KeyboardAvoidingView>
+              </View>
+            );
+          })}
+        </Card>
 
-      {/* Fixed Footer */}
-      <View
-        style={{
-          paddingHorizontal: spacing.lg,
-          paddingTop: spacing.md,
-          paddingBottom: Platform.OS === 'ios' ? spacing['3xl'] : spacing.lg,
-          backgroundColor: colors.surface,
-          borderTopWidth: 1,
-          borderTopColor: colors.hairline,
-          gap: spacing.xs,
-        }}
-      >
+        {/* Payment Token */}
+        <Card>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+            <Icon name="wallet" size={16} color={colors.accent} />
+            <Text variant="bodyMed" weight="600">
+              Pay with
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            {SUPPORTED_TOKENS.map((tk) => {
+              const meta = TOKEN_META[tk];
+              const active = selectedToken === tk;
+              const bal = balances[tk];
+              return (
+                <PressableScale
+                  key={tk}
+                  onPress={() => setSelectedToken(tk)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`Pay with ${tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
+                  style={{
+                    flex: 1,
+                    alignItems: 'center',
+                    paddingVertical: spacing.md,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.md,
+                    borderWidth: 1.5,
+                    borderColor: active ? colors.accent : colors.border,
+                    backgroundColor: active ? colors.accentMuted : colors.surfaceAlt,
+                    gap: spacing.xs,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: radius.pill,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      backgroundColor: active ? meta.color + '22' : colors.surfaceAlt,
+                    }}
+                  >
+                    <Icon name={meta.icon as any} size={18} color={active ? meta.color : colors.textMuted} />
+                  </View>
+                  <Text variant="bodySm" weight="700" style={active ? { color: meta.color } : undefined}>
+                    {tk}
+                  </Text>
+                  <Text variant="caption" color="textMuted" numeric>
+                    {bal != null ? `Bal ${formatBalance(bal)}` : '—'}
+                  </Text>
+                </PressableScale>
+              );
+            })}
+          </View>
+          {shortOnToken ? (
+            <Notice tone="danger" icon="info">
+              {`Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
+            </Notice>
+          ) : isMCGP ? (
+            <Notice tone="success" icon="star">
+              MCGP: no network or platform fee
+            </Notice>
+          ) : feeConfig?.buyerCashbackPercent ? (
+            <Notice tone="success" icon="star">
+              {`${feeConfig.buyerCashbackPercent}% cashback when you confirm delivery`}
+            </Notice>
+          ) : null}
+        </Card>
+
+        {/* Summary */}
+        <Card>
+          {!hasAddress ? (
+            <Text variant="bodySm" color="textSecondary">
+              Add a delivery address to see shipping and your total.
+            </Text>
+          ) : quoteError ? (
+            <View style={{ gap: spacing.sm }}>
+              <Text variant="bodySm" color="danger">
+                {quoteError}
+              </Text>
+              <Button title="Try again" variant="secondary" size="sm" fullWidth={false} onPress={refreshQuote} />
+            </View>
+          ) : !quote ? (
+            <Spinner label="Pricing your order…" />
+          ) : (
+            <>
+              <QuoteBreakdown quote={quote} shippingLabel={feeRowLabel} />
+              <Divider spacing="sm" />
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+                <Text variant="bodyMed" weight="700">
+                  You pay
+                </Text>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text variant="title1" weight="700" numeric>
+                    {fmt.token(quote.totals.total)}
+                  </Text>
+                  {fmt.approx(quote.totals.total) ? (
+                    <Text variant="bodySm" weight="600" color="accent" numeric>
+                      {fmt.approx(quote.totals.total)}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            </>
+          )}
+        </Card>
+      </ScrollView>
+
+      {/* Fixed footer — BottomActionBar keeps the CTA above the system nav bar. */}
+      <BottomActionBar style={{ gap: spacing.xs }}>
         {quote ? (
           <Text variant="caption" color="textMuted" align="center" numeric>
             {[fmt.token(quote.totals.total), fmt.approx(quote.totals.total)].filter(Boolean).join(' · ')}
           </Text>
         ) : null}
         <Button title="Review payment" leftIcon="shield" disabled={payDisabled} onPress={openConfirm} />
-      </View>
+      </BottomActionBar>
+
+      <DeliveryAddressSheet
+        visible={addressSheetOpen}
+        onClose={() => setAddressSheetOpen(false)}
+        addresses={addresses}
+        selectedId={deliveryAddress?.id ?? null}
+        onSelect={selectAddress}
+        onChanged={reloadAddresses}
+        prefill={{
+          recipientName: currentUser?.name || '',
+          phone: currentUser?.phoneNumber || '',
+          country: currentUser?.country || '',
+          state: currentUser?.state || '',
+          city: currentUser?.city || '',
+        }}
+      />
 
       {quote ? (
         <ConfirmPaymentSheet

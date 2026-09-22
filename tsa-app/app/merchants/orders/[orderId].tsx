@@ -492,7 +492,7 @@ const MerchantOrderDetail = () => {
     (order.buyer?.username ? `@${order.buyer.username}` : '') ||
     order.buyer?.email ||
     'Unknown buyer';
-  const shippingAddressParts = [order.shippingCity, order.shippingState, order.shippingCountry].filter(Boolean);
+  const shippingAddressParts = [order.shippingStreet, order.shippingCity, order.shippingState, order.shippingCountry].filter(Boolean);
 
   const hasActionBar =
     !isDisputed && (canShip || canDeliver || canResolveRefund || canHandleCancel || canRaiseDispute);
@@ -577,11 +577,21 @@ const MerchantOrderDetail = () => {
         {shippingAddressParts.length > 0 && (
           <Card style={{ marginBottom: spacing.md }}>
             {CARD_LABEL('SHIP TO')}
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm }}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginTop: spacing.sm }}>
               <Icon name="nearMe" size={18} color={colors.accent} />
-              <Text variant="bodySm" style={{ marginLeft: spacing.md, flex: 1 }}>
-                {shippingAddressParts.join(', ')}
-              </Text>
+              <View style={{ marginLeft: spacing.md, flex: 1, gap: 2 }}>
+                {order.shippingRecipientName ? (
+                  <Text variant="bodyMed" weight="600">
+                    {order.shippingRecipientName}
+                  </Text>
+                ) : null}
+                <Text variant="bodySm">{shippingAddressParts.join(', ')}</Text>
+                {order.shippingPhone ? (
+                  <Text variant="bodySm" color="textSecondary" selectable>
+                    {order.shippingPhone}
+                  </Text>
+                ) : null}
+              </View>
             </View>
           </Card>
         )}

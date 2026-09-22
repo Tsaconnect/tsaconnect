@@ -134,6 +134,9 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_city TEXT,
 			shipping_state TEXT,
 			shipping_country TEXT,
+			shipping_recipient_name TEXT,
+			shipping_phone TEXT,
+			shipping_street TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
 			escrow_tx_hash TEXT,
@@ -163,6 +166,23 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS delivery_addresses (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			label TEXT,
+			recipient_name TEXT NOT NULL,
+			phone TEXT NOT NULL,
+			street TEXT NOT NULL,
+			city TEXT NOT NULL,
+			state TEXT NOT NULL,
+			country TEXT NOT NULL,
+			is_default INTEGER DEFAULT 0,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		// Mirrors the Postgres partial index: at most one default per user.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_addresses_one_default
+			ON delivery_addresses (user_id) WHERE is_default = 1`,
 		`CREATE TABLE IF NOT EXISTS categories (
 			id TEXT PRIMARY KEY,
 			title TEXT,
@@ -1815,5 +1835,168 @@ func TestCreateOrderFromCart_RejectsSuspendedSeller(t *testing.T) {
 	db.Model(&models.Order{}).Count(&orders)
 	if orders != 0 {
 		t.Fatal("an order was escrowed against a suspended seller")
+	}
+}
+
+// ---------- Saved delivery address ----------
+
+func postCartOrder(t *testing.T, ch *CheckoutHandler, buyer *models.User, body map[string]interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	raw, _ := json.Marshal(body)
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+	ch.CreateOrderFromCart(c)
+	return w
+}
+
+func TestCreateOrderFromCart_SnapshotsSavedDeliveryAddress(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	// Profile says Abuja; the saved address says Ikeja — the address wins, so
+	// the zone is priced from where the parcel actually goes.
+	buyer := createTestUserWithLocation(t, db, "Abuja", "FCT", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	createTestCart(t, db, buyer.ID, []models.CartItem{
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 1, Price: 10.0, AddedAt: time.Now()},
+	})
+	addr := models.DeliveryAddress{
+		ID: uuid.New(), UserID: buyer.ID, RecipientName: "Ada Obi", Phone: "+2348012345678",
+		Street: "12 Allen Avenue", City: "Ikeja", State: "Lagos", Country: "Nigeria",
+	}
+	if err := db.Create(&addr).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	w := postCartOrder(t, ch, buyer, map[string]interface{}{
+		"token":             "USDC",
+		"deliveryAddressId": addr.ID.String(),
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var order models.Order
+	if err := db.Where("buyer_id = ?", buyer.ID).First(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.ShippingRecipientName != "Ada Obi" || order.ShippingPhone != "+2348012345678" ||
+		order.ShippingStreet != "12 Allen Avenue" || order.ShippingCity != "Ikeja" || order.ShippingState != "Lagos" {
+		t.Errorf("address not snapshotted: %+v", order)
+	}
+	if order.ShippingZone != ShippingZoneSameCity {
+		t.Errorf("want zone priced from the saved address (%s), got %s", ShippingZoneSameCity, order.ShippingZone)
+	}
+}
+
+func TestCreateOrderFromCart_RejectsSomeoneElsesAddress(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	stranger := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	createTestCart(t, db, buyer.ID, []models.CartItem{
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 1, Price: 10.0, AddedAt: time.Now()},
+	})
+	addr := models.DeliveryAddress{
+		ID: uuid.New(), UserID: stranger.ID, RecipientName: "X", Phone: "1",
+		Street: "s", City: "Lagos", State: "Lagos", Country: "Nigeria",
+	}
+	db.Create(&addr)
+
+	w := postCartOrder(t, ch, buyer, map[string]interface{}{
+		"token":             "USDC",
+		"deliveryAddressId": addr.ID.String(),
+	})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
+	}
+	var n int64
+	db.Model(&models.Order{}).Where("buyer_id = ?", buyer.ID).Count(&n)
+	if n != 0 {
+		t.Errorf("want no orders created, got %d", n)
+	}
+}
+
+func TestCreateOrderFromCart_ServiceLinesSkipTheAddressSnapshot(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	cat := createTestCategory(t, db, models.CategoryTypeService, models.ServiceFeeModeStandard)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
+	payContactFee(t, db, buyer.ID, svc.ID)
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	createTestCart(t, db, buyer.ID, []models.CartItem{
+		{ID: uuid.New(), Product: svc.ID, Seller: seller.ID, Quantity: 1, Price: 20.0, AddedAt: time.Now()},
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 1, Price: 10.0, AddedAt: time.Now()},
+	})
+	addr := models.DeliveryAddress{
+		ID: uuid.New(), UserID: buyer.ID, RecipientName: "Ada Obi", Phone: "+2348012345678",
+		Street: "12 Allen Avenue", City: "Lagos", State: "Lagos", Country: "Nigeria",
+	}
+	db.Create(&addr)
+
+	w := postCartOrder(t, ch, buyer, map[string]interface{}{"token": "USDC", "deliveryAddressId": addr.ID.String()})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var orders []models.Order
+	db.Where("buyer_id = ?", buyer.ID).Find(&orders)
+	if len(orders) != 2 {
+		t.Fatalf("want 2 orders, got %d", len(orders))
+	}
+	for _, o := range orders {
+		copied := o.ShippingStreet != "" || o.ShippingPhone != "" || o.ShippingRecipientName != ""
+		if o.Kind == models.OrderKindService && copied {
+			t.Errorf("service order carries the delivery address: %+v", o)
+		}
+		if o.Kind == models.OrderKindProduct && !copied {
+			t.Errorf("product order is missing the delivery address: %+v", o)
+		}
+	}
+}
+
+func TestCreateOrderFromCart_MalformedAddressIDIsABadRequest(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+
+	w := postCartOrder(t, ch, buyer, map[string]interface{}{"token": "USDC", "deliveryAddressId": "not-a-uuid"})
+	if w.Code != http.StatusBadRequest || bytes.Contains(w.Body.Bytes(), []byte("token is required")) {
+		t.Fatalf("want 400 without a token complaint, got %d: %s", w.Code, w.Body.String())
+	}
+
+	w = postCartOrder(t, ch, buyer, map[string]interface{}{})
+	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("token is required")) {
+		t.Fatalf("missing token: want 400 token is required, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateOrderFromCart_AddressLookupFailureIsNotA404(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	createTestCart(t, db, buyer.ID, []models.CartItem{
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 1, Price: 10.0, AddedAt: time.Now()},
+	})
+	db.Exec("DROP TABLE delivery_addresses")
+
+	w := postCartOrder(t, ch, buyer, map[string]interface{}{"token": "USDC", "deliveryAddressId": uuid.New().String()})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 on a database error, got %d: %s", w.Code, w.Body.String())
 	}
 }

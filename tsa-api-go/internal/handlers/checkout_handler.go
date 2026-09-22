@@ -734,7 +734,7 @@ func isValidTransitionForKind(currentStatus, newStatus, kind string) bool {
 // --- Request/Response types ---
 
 type createOrderRequest struct {
-	Token        string `json:"token" binding:"required"`
+	Token        string `json:"token"`
 	BuyerCity    string `json:"buyerCity"`
 	BuyerState   string `json:"buyerState"`
 	BuyerCountry string `json:"buyerCountry"`
@@ -753,6 +753,10 @@ type createOrderRequest struct {
 	// buyer confirmed. When set, order creation refuses a different total with
 	// 409 code "price_changed". Optional for older clients.
 	ExpectedTotal string `json:"expectedTotal"`
+	// DeliveryAddressID picks one of the buyer's saved addresses. When set, its
+	// location replaces BuyerCity/State/Country for pricing, and its recipient,
+	// phone and street are snapshotted onto each order for the seller.
+	DeliveryAddressID *uuid.UUID `json:"deliveryAddressId"`
 }
 
 type menuLineRequest struct {
@@ -964,6 +968,8 @@ type cartCheckout struct {
 	token string
 	cart  models.Cart
 	items []models.CartItem
+	// delivery is the saved address the buyer picked; nil when none was sent.
+	delivery *models.DeliveryAddress
 }
 
 // loadCartCheckout authenticates, binds and validates a cart checkout request
@@ -977,6 +983,10 @@ func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 	}
 	var req createOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return nil, false
+	}
+	if strings.TrimSpace(req.Token) == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "token is required")
 		return nil, false
 	}
@@ -995,7 +1005,21 @@ func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cart is empty")
 		return nil, false
 	}
-	return &cartCheckout{user: user, req: req, token: token, cart: cart, items: items}, true
+	var delivery *models.DeliveryAddress
+	if req.DeliveryAddressID != nil {
+		addr, err := findUserDeliveryAddress(config.DB, user.ID, *req.DeliveryAddressID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, "Delivery address not found")
+			return nil, false
+		}
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load delivery address")
+			return nil, false
+		}
+		delivery = addr
+		req.BuyerCity, req.BuyerState, req.BuyerCountry = addr.City, addr.State, addr.Country
+	}
+	return &cartCheckout{user: user, req: req, token: token, cart: cart, items: items, delivery: delivery}, true
 }
 
 // cartTotal is everything the buyer's wallet pays for lines: each order's
@@ -1104,6 +1128,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			Status:          models.OrderStatusPendingPayment,
 			CreatedAt:       time.Now(),
 			UpdatedAt:       time.Now(),
+		}
+		if in.delivery != nil && !line.isService {
+			order.ShippingRecipientName = in.delivery.RecipientName
+			order.ShippingPhone = in.delivery.Phone
+			order.ShippingStreet = in.delivery.Street
 		}
 
 		// Persist Order-type menu selections in the dedicated column (not Notes,
