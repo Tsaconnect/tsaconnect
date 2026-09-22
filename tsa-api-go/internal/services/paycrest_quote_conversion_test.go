@@ -186,13 +186,23 @@ func TestQuote_CostlyRouteIsNotOffered(t *testing.T) {
 	}
 }
 
+// The route here is deliberately one that WOULD be offered — priced inside
+// the budget, executable, clearing its promise — so the only thing refusing
+// it is the per-chain minimum. And because that gate runs before any LiFi
+// call, the refusal is free: no paid quote is spent on an amount that could
+// never be offered anyway.
 func TestQuote_BelowMinimumOrderIsNotOffered(t *testing.T) {
-	s := newQuoteServiceWithFakes(t)
+	s := priceRig(t)
 	s.svc.SetConversionMinimums(map[string]float64{"linea": 25}, 1)
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(20_000000), ToAmountMin: big.NewInt(19_950000)}
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(19_990000), ToAmountMin: big.NewInt(19_950000),
+		FromAmountUSD: 20, ToAmountUSD: 19.96, GasCostUSD: 0.002, GasLimit: 1_000_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 59144, false)}
 	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "30000", []RequestedAsset{{Chain: "linea", Token: "USDC"}})
 	if len(venues) != 0 {
 		t.Fatalf("$20 on linea is under its $25 minimum: %+v", venues)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent %d LiFi calls on an amount under the chain's minimum", s.lifi.quoteCalls())
 	}
 }
 
