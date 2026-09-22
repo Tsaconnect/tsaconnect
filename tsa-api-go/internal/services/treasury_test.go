@@ -5,15 +5,30 @@ import (
 	"encoding/hex"
 	"errors"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // treasuryTestRecipient is a well-formed (but unrelated) hex address reused
 // wherever a test needs a VALID recipient for TransferToken — sponsorTestUser
 // and sponsorTestDeposit already exist for that shape in sponsor_fakes_test.go.
 const treasuryTestRecipient = sponsorTestDeposit
+
+// treasuryTestRouter is LiFi's real diamond — the one address a route on the
+// test lane is allowed to call or be approved to spend. treasuryTestToken is
+// a well-formed address that is NOT on the allowlist: the drain shape the
+// allowlist exists to stop is `to` = a token contract with transfer() as the
+// calldata, which spends the whole float rather than one order's amount.
+const (
+	treasuryTestRouter = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
+	treasuryTestToken  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+)
+
+var treasuryTestRouters = []common.Address{common.HexToAddress(treasuryTestRouter)}
 
 // newTestTreasury wires one "base" lane on top of the existing sponsor test
 // rig (newSponsorRig, sponsor_fakes_test.go) with caps: 2000 USD per order,
@@ -30,7 +45,7 @@ func newTestTreasury(t *testing.T) *Treasury {
 func newTestTreasuryWithFakes(t *testing.T) (*Treasury, *TreasuryLane, *fakeSponsorNative, *fakeRelaySigner) {
 	t.Helper()
 	rig, _ := newSponsorRig("base", "USDC")
-	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453}
+	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: treasuryTestRouters}
 	tr := NewTreasury(map[string]*TreasuryLane{"base": lane}, TreasuryCaps{
 		MaxInFlightUSDPerOrder: 2000,
 		MaxInFlightUSDPerChain: 10000,
@@ -42,7 +57,7 @@ func newTestTreasuryWithFakes(t *testing.T) (*Treasury, *TreasuryLane, *fakeSpon
 // zero value, valid hex data, no expiry, an approval address that needs a
 // fresh approve (default fake allowance is zero).
 func validRoute() *LiFiRoute {
-	return &LiFiRoute{To: "0xRouter", Data: "0xdeadbeef", Value: "0x0", GasLimit: 250_000, ApprovalAddress: "0xAppr"}
+	return &LiFiRoute{To: treasuryTestRouter, Data: "0xdeadbeef", Value: "0x0", GasLimit: 250_000, ApprovalAddress: treasuryTestRouter}
 }
 
 // ── caps / kill switch ──────────────────────────────────────────────────
@@ -95,14 +110,14 @@ func TestTreasury_ExecuteRouteSignsTheRouteAsGiven(t *testing.T) {
 
 	builder := lane.Builder.(*fakeSponsorBuilder)
 	to, data, _, gasLimit := builder.lastCall()
-	if to != "0xRouter" || hex.EncodeToString(data) != "deadbeef" {
+	if to != treasuryTestRouter || hex.EncodeToString(data) != "deadbeef" {
 		t.Fatalf("route rebuilt instead of signed as given: to=%s data=%x", to, data)
 	}
 	if gasLimit != 250_000 {
 		t.Fatalf("route's own gas limit not honoured: got %d", gasLimit)
 	}
 	_, _, approveSpender, approveAmount := native.approveCall()
-	if approveSpender != "0xAppr" {
+	if approveSpender != treasuryTestRouter {
 		t.Fatalf("approval went to %q, want the route's approvalAddress", approveSpender)
 	}
 	if approveAmount == nil || approveAmount.Cmp(big.NewInt(100_000000)) != 0 {
@@ -324,7 +339,7 @@ func TestTreasury_ExecuteRouteSurfacesUncertainBroadcastAtRoute(t *testing.T) {
 		t.Fatalf("attempted=%v err=%v, want an error with attempted=true (the route broadcast is what timed out)", attempted, err)
 	}
 	builder := lane.Builder.(*fakeSponsorBuilder)
-	if to, _, _, _ := builder.lastCall(); to != "0xRouter" {
+	if to, _, _, _ := builder.lastCall(); to != treasuryTestRouter {
 		t.Fatalf("route build should have been reached, builder.to=%q", to)
 	}
 	if signer.calls() != 1 {
@@ -614,9 +629,126 @@ func TestTreasury_AddressEmptyOnSignerMismatch(t *testing.T) {
 // its lookup.
 func TestTreasury_NewTreasuryNormalizesLaneKeyCase(t *testing.T) {
 	rig, _ := newSponsorRig("base", "USDC")
-	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453}
+	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453, Routers: treasuryTestRouters}
 	tr := NewTreasury(map[string]*TreasuryLane{"BASE": lane}, TreasuryCaps{}, nil)
 	if tr.Lane("base") == nil {
 		t.Fatalf("want NewTreasury to normalise lane keys to lower case")
+	}
+}
+
+// ── router allowlist ────────────────────────────────────────────────────
+//
+// route.To is the contract the treasury's own EOA is about to call with
+// calldata the same untrusted response chose. These four tests are the only
+// thing standing between a bad /quote answer and the chain float.
+
+func TestTreasury_ExecuteRouteRefusesToOutsideTheAllowlist(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	// The drain: call the token contract directly. Everything else about
+	// this route is well-formed — zero value, valid hex, unexpired.
+	route.To = treasuryTestToken
+	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route)
+	if !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("want ErrTreasuryInvalidRoute, got %v", err)
+	}
+	if attempted {
+		t.Fatal("nothing may be broadcast for a refused route")
+	}
+	if signer.calls() != 0 {
+		t.Fatalf("signer was used %d times for a refused route", signer.calls())
+	}
+	if _, _, spender, _ := native.approveCall(); spender != "" {
+		t.Fatalf("an allowance was granted to %q before the route was validated", spender)
+	}
+}
+
+func TestTreasury_ExecuteRouteRefusesSpenderOutsideTheAllowlist(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	// To is fine; the approval spender is not. Approving an attacker for the
+	// leg amount is a smaller loss than a full drain, but it is still a loss.
+	route.ApprovalAddress = treasuryTestToken
+	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route)
+	if !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("want ErrTreasuryInvalidRoute, got %v", err)
+	}
+	if attempted || signer.calls() != 0 {
+		t.Fatalf("attempted=%v calls=%d, want nothing signed", attempted, signer.calls())
+	}
+	if _, _, spender, _ := native.approveCall(); spender != "" {
+		t.Fatalf("allowance granted to %q despite the refusal", spender)
+	}
+}
+
+// A lane whose allowlist was never configured must refuse EVERY route, not
+// accept every route: the fail-closed direction is the whole point.
+func TestTreasury_ExecuteRouteRefusesWhenAllowlistIsEmpty(t *testing.T) {
+	rig, _ := newSponsorRig("base", "USDC")
+	lane := &TreasuryLane{SponsorLane: rig.lane, ChainID: 8453} // no Routers
+	tr := NewTreasury(map[string]*TreasuryLane{"base": lane},
+		TreasuryCaps{MaxInFlightUSDPerOrder: 2000, MaxInFlightUSDPerChain: 10000},
+		func() time.Time { return sponsorTestNow })
+	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), validRoute())
+	if !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("want ErrTreasuryInvalidRoute for an unconfigured allowlist, got %v", err)
+	}
+	if attempted {
+		t.Fatal("nothing may be broadcast on a lane with no allowlist")
+	}
+}
+
+// EIP-55 checksum casing is cosmetic. Comparing as strings would refuse the
+// very address we allowlisted, turning every conversion into a false alarm.
+func TestTreasury_ExecuteRouteAcceptsDifferentlyCasedAllowlistedRouter(t *testing.T) {
+	tr, lane, _, _ := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	route.To = strings.ToLower(treasuryTestRouter)
+	route.ApprovalAddress = strings.ToUpper(strings.TrimPrefix(treasuryTestRouter, "0x"))
+	route.ApprovalAddress = "0x" + route.ApprovalAddress
+	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route); err != nil {
+		t.Fatalf("case-different form of an allowlisted router refused: %v", err)
+	}
+}
+
+// LiFi's gasLimit is untrusted: a route asking for far more gas than any real
+// bridge needs, on a call that burns it, drains the lane's native balance.
+// The balance floor cannot stop one transaction — the node only checks that
+// the balance covers limit × price.
+func TestTreasury_ExecuteRouteRefusesAGasLimitAboveTheCeiling(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	route.GasLimit = maxRouteGasLimit + 1
+	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route)
+	if !errors.Is(err, ErrTreasuryInvalidRoute) || attempted {
+		t.Fatalf("attempted=%v err=%v, want ErrTreasuryInvalidRoute and nothing broadcast", attempted, err)
+	}
+	if signer.calls() != 0 {
+		t.Fatalf("signer was used %d times for a refused route", signer.calls())
+	}
+	if _, _, spender, _ := native.approveCall(); spender != "" {
+		t.Fatalf("an allowance was granted to %q before the gas limit was checked", spender)
+	}
+}
+
+// A route with no gasLimit gets the ceiling, never an unbounded estimate: an
+// estimate of a gas-burning call is the block gas limit.
+func TestTreasury_ExecuteRouteBoundsAMissingGasLimitByTheCeiling(t *testing.T) {
+	tr, lane, _, _ := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	route.GasLimit = 0
+	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route); err != nil {
+		t.Fatalf("ExecuteRoute: %v", err)
+	}
+	if _, _, _, gasLimit := lane.Builder.(*fakeSponsorBuilder).lastCall(); gasLimit != maxRouteGasLimit {
+		t.Fatalf("gasLimit = %d, want the ceiling %d", gasLimit, maxRouteGasLimit)
+	}
+}
+
+// The largest limit LiFi returned in live quotes (gasZip, 2026-09-22) must
+// fit with room to spare.
+func TestTreasury_RouteGasCeilingClearsLiveQuotes(t *testing.T) {
+	if maxRouteGasLimit < 2*2_275_122 {
+		t.Fatalf("ceiling %d leaves no headroom over live LiFi limits", maxRouteGasLimit)
 	}
 }

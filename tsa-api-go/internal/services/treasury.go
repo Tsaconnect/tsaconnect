@@ -25,7 +25,8 @@ var (
 	// floor reuses the guard's own ErrRelayerUnderfunded — no third sentinel.
 	ErrTreasuryCapExceeded = errors.New("this order is above the conversion limit right now")
 	// ErrTreasuryInvalidRoute is returned when a LiFi route fails a safety
-	// check before anything is signed: an unexpected approval token, a
+	// check before anything is signed: a `to` or `approvalAddress` outside
+	// the lane's router allowlist, an unexpected approval token, a
 	// non-zero/malformed value, unparsable calldata, or an expired quote.
 	// LiFi's response is untrusted input, so every one of these fails closed.
 	ErrTreasuryInvalidRoute = errors.New("this conversion route cannot be executed safely")
@@ -41,6 +42,12 @@ var (
 type TreasuryLane struct {
 	*SponsorLane // ChainKey, Chain, Builder, Native, Signer, Guard, Tokens, send()
 	ChainID      int64
+
+	// Routers is the allowlist of contract addresses a route on this lane may
+	// call or be approved to spend, parsed and validated once at boot. Empty
+	// means no route may execute: a lane without an allowlist is a lane that
+	// would sign anything.
+	Routers []common.Address
 
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
@@ -229,6 +236,15 @@ func (t *Treasury) routeExpired(route *LiFiRoute) bool {
 	return !t.now().Before(time.Unix(route.ValidUntil, 0))
 }
 
+// maxRouteGasLimit bounds the gas a LiFi route may ask the treasury to pay
+// for. The route's gasLimit is untrusted: a large one on a call that burns it
+// drains the lane's native balance in one transaction, which the balance floor
+// cannot stop (the node only checks that the balance covers limit × price).
+// Live LiFi limits topped out at ~2.3M (gasZip, 2026-09-22); the ceiling is
+// about twice that. A route with no limit gets the ceiling rather than an
+// estimate, since estimating a gas-burning call returns the block gas limit.
+const maxRouteGasLimit uint64 = 5_000_000
+
 // ExecuteRoute approves the route's spender if needed, then signs LiFi's
 // transactionRequest AS GIVEN — never rebuilt from parts, the same invariant
 // the BTC/PSBT path holds.
@@ -275,6 +291,23 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	// LiFi's response is untrusted input; a treasury that signs whatever it
 	// says is a wallet drainer with extra steps.
 
+	// route.To is the single most dangerous field in the response: it is the
+	// contract the treasury's own EOA is about to call with attacker-chosen
+	// calldata. Validating ApprovalToken/Value/Data without validating WHERE
+	// the call goes leaves the drain wide open — `to` = the USDC contract
+	// with transfer(them, balance) spends the whole float, not one order.
+	// Both `to` and the approval spender must be on the lane's allowlist.
+	if !routerAllowed(lane.Routers, route.To) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_to_refused_total=1 chain=%s to=%s tool=%s",
+			lane.ChainKey, route.To, route.Tool)
+		return "", false, fmt.Errorf("%w: route targets an address outside the allowlist", ErrTreasuryInvalidRoute)
+	}
+	if route.ApprovalAddress != "" && !routerAllowed(lane.Routers, route.ApprovalAddress) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_spender_refused_total=1 chain=%s spender=%s tool=%s",
+			lane.ChainKey, route.ApprovalAddress, route.Tool)
+		return "", false, fmt.Errorf("%w: route names a spender outside the allowlist", ErrTreasuryInvalidRoute)
+	}
+
 	// route.ApprovalToken is asserted by the quote alone. Accept it only
 	// when it case-insensitively matches the token this order is actually
 	// converting — never approve an address a third party's response merely
@@ -299,6 +332,15 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	if derr != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_data_refused_total=1 chain=%s err=%v", lane.ChainKey, derr)
 		return "", false, fmt.Errorf("%w: route data is not valid hex: %v", ErrTreasuryInvalidRoute, derr)
+	}
+	if route.GasLimit > maxRouteGasLimit {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_gas_refused_total=1 chain=%s gas_limit=%d ceiling=%d tool=%s",
+			lane.ChainKey, route.GasLimit, maxRouteGasLimit, route.Tool)
+		return "", false, fmt.Errorf("%w: route asks for %d gas, above the %d ceiling", ErrTreasuryInvalidRoute, route.GasLimit, maxRouteGasLimit)
+	}
+	gasLimit := route.GasLimit
+	if gasLimit == 0 {
+		gasLimit = maxRouteGasLimit
 	}
 	if t.routeExpired(route) {
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_expired_total=1 chain=%s valid_until=%d now=%d",
@@ -350,13 +392,12 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	}
 
 	// Task 4's generalized builder, reached through the lane's existing
-	// Builder — the same interface the sponsor already holds. A zero
-	// route.GasLimit means "estimate", and the builder itself fails closed if
-	// estimation fails (e.g. a malformed gasLimit from LiFi parsed to 0).
-	// value is always zero here: routeValueIsZero already refused anything
-	// else above.
+	// Builder — the same interface the sponsor already holds. gasLimit is
+	// never zero here (a missing or malformed limit became the ceiling
+	// above), so the builder never estimates an unbounded one. value is
+	// always zero: routeValueIsZero already refused anything else above.
 	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
-		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), route.GasLimit)
+		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), gasLimit)
 	})
 	attempted = attempted || approveAttempted // sticky, see doc comment
 	if err != nil {
@@ -428,4 +469,23 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 		out = append(out, SponsorFloat{Chain: chain, Address: addr, BalanceWei: bal, FloorWei: lane.Guard.Floor()})
 	}
 	return out, errors.Join(errs...)
+}
+
+// routerAllowed reports whether addr is one of the lane's allowlisted router
+// contracts. An empty allowlist allows NOTHING: a misconfigured lane must
+// refuse every route rather than accept every route. addr comes from LiFi,
+// so it is parsed strictly — common.HexToAddress alone would coerce garbage
+// into some address — and then compared as an address, so EIP-55 casing
+// cannot make one contract read as two.
+func routerAllowed(allowlist []common.Address, addr string) bool {
+	if !common.IsHexAddress(addr) {
+		return false
+	}
+	want := common.HexToAddress(addr)
+	for _, a := range allowlist {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }

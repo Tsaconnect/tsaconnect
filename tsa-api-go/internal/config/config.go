@@ -304,6 +304,14 @@ type Config struct {
 	// RampSponsorBalanceFloorWei but a separate map: a treasury lane signs a
 	// bridge tx, not a simple relay, so the floor that matters is different.
 	RampTreasuryNativeFloorWei map[string]string
+	// RampTreasuryRouters is the per-chain allowlist of contract addresses a
+	// LiFi route may ask the treasury to call or approve. A quote names its
+	// own `to` and `approvalAddress`; without this the treasury would sign
+	// whatever a compromised or misdirected LiFi answer returned, including
+	// a token contract with transfer(attacker, balance) as its calldata,
+	// which drains the whole chain float rather than one order's amount.
+	// A chain with an empty allowlist gets no lane at all — fail closed.
+	RampTreasuryRouters map[string][]string
 	// RampConversionRetryWindow (Decision 10) is how long a converted buy may
 	// sit with no broadcast bridge attempt before it is refunded instead of
 	// retried again.
@@ -766,6 +774,31 @@ func Load() *Config {
 	for _, chain := range cfg.RampTreasuryChains {
 		up := strings.ToUpper(chain)
 		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
+	}
+	// LiFi's own diamond per chain, read from li.quest/v1/chains (last
+	// checked 2026-09-22) and PINNED here deliberately: resolving the
+	// allowlist at runtime from the same API whose responses it exists to
+	// validate would defeat the check entirely. Linea's diamond differs from the shared one.
+	// Override per chain with RAMP_TREASURY_ROUTERS_<CHAIN> (comma-separated)
+	// when LiFi migrates a diamond.
+	const lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
+	rampTreasuryRouterDefaults := map[string]string{
+		"ethereum": lifiDiamond, "arbitrum": lifiDiamond, "base": lifiDiamond,
+		"bsc": lifiDiamond, "optimism": lifiDiamond, "polygon": lifiDiamond,
+		"avalanche": lifiDiamond, "sonic": lifiDiamond,
+		"linea": "0xde1e598b81620773454588b85d6b5d4eec32573e",
+	}
+	cfg.RampTreasuryRouters = map[string][]string{}
+	for _, chain := range cfg.RampTreasuryChains {
+		up := strings.ToUpper(chain)
+		raw := strings.TrimSpace(getEnv("RAMP_TREASURY_ROUTERS_"+up, rampTreasuryRouterDefaults[chain]))
+		var routers []string
+		for _, addr := range strings.Split(raw, ",") {
+			if addr = strings.TrimSpace(addr); addr != "" {
+				routers = append(routers, addr)
+			}
+		}
+		cfg.RampTreasuryRouters[chain] = routers
 	}
 	cfg.RampConversionRetryWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_RETRY_MINUTES", 30)) * time.Minute
 	cfg.RampConversionMinUSD = getEnvFloat64("RAMP_CONVERSION_MIN_USD", 1)

@@ -423,7 +423,6 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	if received == nil || received.Sign() <= 0 {
 		return nil
 	}
-
 	// srcDecimals is read FIRST, before anything else: it is needed to even
 	// INTERPRET order.TokenAmount, which is a plain human-readable decimal
 	// string (Paycrest's own order.Amount, exactly as a direct order has
@@ -448,6 +447,29 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		return o.toRecovery(ctx, order,
 			fmt.Sprintf("could not read decimals of %s on %s: %v", order.Token, lane.ChainKey, err),
 			map[string]any{"holder": models.HolderTreasury})
+	}
+
+	// The transaction proves money reached the treasury, not that it was
+	// THIS order's money: Paycrest reporting one hash against two orders
+	// would otherwise let the second bridge out of the treasury's own float.
+	// Only what other orders have not already claimed is this order's.
+	claimed, err := o.claimedFromDelivery(ctx, order, srcDecimals)
+	if errors.Is(err, errUnreadableClaim) {
+		// A corrupt row will not fix itself on the next tick; park it.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_claim_unreadable_total=1 order=%s tx=%s err=%v", order.ID, order.TxHash, err)
+		return o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	if err != nil {
+		return err
+	}
+	if claimed.Sign() > 0 {
+		received = new(big.Int).Sub(received, claimed)
+		if received.Sign() <= 0 {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_reused_total=1 order=%s tx=%s already_claimed=%s",
+				order.ID, order.TxHash, claimed)
+			return o.toRecovery(ctx, order,
+				fmt.Sprintf("delivery %s is already fully claimed by another order", order.TxHash), nil)
+		}
 	}
 
 	// Custody is PROVEN the instant VerifyTransfer returns — record it before
@@ -525,6 +547,44 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
 		order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
 	return o.setOrder(ctx, order, map[string]any{"promised_amount": promise.String()})
+}
+
+// claimedFromDelivery totals what other converted buys have already taken
+// custody of from this order's delivery transaction, in the source token's
+// base units. A claim is custody actually recorded — holder moved off
+// Paycrest, to the treasury or on to the user — for the same token on the
+// same chain; an order still waiting on Paycrest has claimed nothing, and a
+// direct order was paid to the user's wallet, never into the treasury's
+// receipt. A claim survives settlement, so a delivered order's transaction
+// can never be reused.
+//
+// A read-then-write with no lock: the orchestrator runs as one scheduler
+// worker that never overlaps itself, in one process. A second process
+// advancing orders would need a lock here.
+var errUnreadableClaim = errors.New("conversion: unreadable claim on a delivery")
+
+func (o *ConversionOrchestrator) claimedFromDelivery(ctx context.Context, order *models.PaycrestOrderRecord, decimals int) (*big.Int, error) {
+	var others []models.PaycrestOrderRecord
+	err := o.db.WithContext(ctx).
+		Where("tx_hash = ? AND chain_key = ? AND token = ? AND route_kind = ? AND direction = ? AND id <> ? AND holder IN ?",
+			order.TxHash, order.ChainKey, order.Token, models.RouteKindConverted, models.PaycrestDirectionBuy, order.ID,
+			[]string{models.HolderTreasury, models.HolderUser}).
+		Find(&others).Error
+	if err != nil {
+		return nil, fmt.Errorf("conversion: read claims on delivery %s: %w", order.TxHash, err)
+	}
+	claimed := new(big.Int)
+	for _, other := range others {
+		amount, err := DecimalToBaseUnits(other.TokenAmount, decimals)
+		if err != nil {
+			// An unreadable claim is still a claim. Treating it as zero would
+			// hand its share of the delivery to this order.
+			return nil, fmt.Errorf("%w: order %s claims delivery %s with amount %q: %v",
+				errUnreadableClaim, other.ID, order.TxHash, other.TokenAmount, err)
+		}
+		claimed.Add(claimed, amount)
+	}
+	return claimed, nil
 }
 
 // startBridge reserves the attempt FIRST, then quotes, then broadcasts. The
@@ -632,6 +692,15 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		log.Printf("[ramp-conversion] order=%s bridge#%d rejected route: toAmountMin=%v < promise=%s",
 			order.ID, attempt, route.ToAmountMin, promised)
 		return o.failLeg(detached(ctx), leg.ID, "route guarantees less than the promised amount")
+	}
+	// The route's `to` is allowlisted inside ExecuteRoute, but the calldata
+	// alone decides who the diamond pays. Checked here, where the order's
+	// wallet and destination are known — LiFi's status would only report a
+	// wrong landing after the treasury's funds had already left.
+	if err := checkLiFiDelivery(route.Data, lane.ChainID, o.chainID(order.RequestedChain), order.WalletAddress); err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_delivery_refused_total=1 order=%s bridge#%d tool=%s err=%v",
+			order.ID, attempt, route.Tool, err)
+		return o.failLeg(detached(ctx), leg.ID, err.Error())
 	}
 
 	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, amount, route)

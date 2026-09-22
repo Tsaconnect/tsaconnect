@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -92,7 +93,13 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 			missing = append(missing, chain)
 			continue
 		}
-		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID}
+		routers, skipReason := rampTreasuryLaneRouters(cfg, chain, lane.Tokens)
+		if skipReason != "" {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
+			missing = append(missing, chain)
+			continue
+		}
+		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID, Routers: routers}
 	}
 	if len(missing) > 0 {
 		// Named once, in one line, rather than only inferred from the
@@ -178,6 +185,41 @@ func rampTreasuryLaneFloor(cfg *config.Config, chain string) (floor *big.Int, sk
 		return nil, "invalid or missing RAMP_TREASURY_NATIVE_FLOOR_WEI_" + strings.ToUpper(chain)
 	}
 	return floor, ""
+}
+
+// rampTreasuryLaneRouters validates a chain's router allowlist and parses it
+// once, with the same fail-closed shape as a missing native floor. ExecuteRoute
+// refuses a route whose `to` or spender is off the list, so a lane whose list
+// is empty — or holds a mistyped address that can never match — would be
+// quotable but unexecutable; skipping it at boot keeps the chain off the menu.
+//
+// tokens are the lane's own token contracts. One of them on the list would
+// reopen the exact drain the list exists to close (`to` = the token,
+// calldata = transfer(attacker, balance)), so an override naming one is
+// refused rather than trusted. The zero address is refused for the same
+// reason a typo is: it can only be a mistake.
+func rampTreasuryLaneRouters(cfg *config.Config, chain string, tokens map[string]string) (routers []common.Address, skipReason string) {
+	envVar := "RAMP_TREASURY_ROUTERS_" + strings.ToUpper(chain)
+	raw := cfg.RampTreasuryRouters[chain]
+	if len(raw) == 0 {
+		return nil, "no router allowlist (set " + envVar + ")"
+	}
+	for _, addr := range raw {
+		if !common.IsHexAddress(addr) {
+			return nil, "invalid address " + addr + " in " + envVar
+		}
+		router := common.HexToAddress(addr)
+		if router == (common.Address{}) {
+			return nil, "zero address in " + envVar
+		}
+		for symbol, token := range tokens {
+			if common.IsHexAddress(token) && common.HexToAddress(token) == router {
+				return nil, "token contract " + symbol + " (" + addr + ") in " + envVar
+			}
+		}
+		routers = append(routers, router)
+	}
+	return routers, ""
 }
 
 // rampTreasuryCaps validates the two exposure caps before they ever reach
