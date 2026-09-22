@@ -236,6 +236,15 @@ func (t *Treasury) routeExpired(route *LiFiRoute) bool {
 	return !t.now().Before(time.Unix(route.ValidUntil, 0))
 }
 
+// maxRouteGasLimit bounds the gas a LiFi route may ask the treasury to pay
+// for. The route's gasLimit is untrusted: a large one on a call that burns it
+// drains the lane's native balance in one transaction, which the balance floor
+// cannot stop (the node only checks that the balance covers limit × price).
+// Live LiFi limits topped out at ~2.3M (gasZip, 2026-09-22); the ceiling is
+// about twice that. A route with no limit gets the ceiling rather than an
+// estimate, since estimating a gas-burning call returns the block gas limit.
+const maxRouteGasLimit uint64 = 5_000_000
+
 // ExecuteRoute approves the route's spender if needed, then signs LiFi's
 // transactionRequest AS GIVEN — never rebuilt from parts, the same invariant
 // the BTC/PSBT path holds.
@@ -324,6 +333,15 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_data_refused_total=1 chain=%s err=%v", lane.ChainKey, derr)
 		return "", false, fmt.Errorf("%w: route data is not valid hex: %v", ErrTreasuryInvalidRoute, derr)
 	}
+	if route.GasLimit > maxRouteGasLimit {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_gas_refused_total=1 chain=%s gas_limit=%d ceiling=%d tool=%s",
+			lane.ChainKey, route.GasLimit, maxRouteGasLimit, route.Tool)
+		return "", false, fmt.Errorf("%w: route asks for %d gas, above the %d ceiling", ErrTreasuryInvalidRoute, route.GasLimit, maxRouteGasLimit)
+	}
+	gasLimit := route.GasLimit
+	if gasLimit == 0 {
+		gasLimit = maxRouteGasLimit
+	}
 	if t.routeExpired(route) {
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_route_expired_total=1 chain=%s valid_until=%d now=%d",
 			lane.ChainKey, route.ValidUntil, t.now().Unix())
@@ -374,13 +392,12 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	}
 
 	// Task 4's generalized builder, reached through the lane's existing
-	// Builder — the same interface the sponsor already holds. A zero
-	// route.GasLimit means "estimate", and the builder itself fails closed if
-	// estimation fails (e.g. a malformed gasLimit from LiFi parsed to 0).
-	// value is always zero here: routeValueIsZero already refused anything
-	// else above.
+	// Builder — the same interface the sponsor already holds. gasLimit is
+	// never zero here (a missing or malformed limit became the ceiling
+	// above), so the builder never estimates an unbounded one. value is
+	// always zero: routeValueIsZero already refused anything else above.
 	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
-		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), route.GasLimit)
+		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), gasLimit)
 	})
 	attempted = attempted || approveAttempted // sticky, see doc comment
 	if err != nil {

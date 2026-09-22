@@ -710,3 +710,45 @@ func TestTreasury_ExecuteRouteAcceptsDifferentlyCasedAllowlistedRouter(t *testin
 		t.Fatalf("case-different form of an allowlisted router refused: %v", err)
 	}
 }
+
+// LiFi's gasLimit is untrusted: a route asking for far more gas than any real
+// bridge needs, on a call that burns it, drains the lane's native balance.
+// The balance floor cannot stop one transaction — the node only checks that
+// the balance covers limit × price.
+func TestTreasury_ExecuteRouteRefusesAGasLimitAboveTheCeiling(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	route.GasLimit = maxRouteGasLimit + 1
+	_, attempted, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route)
+	if !errors.Is(err, ErrTreasuryInvalidRoute) || attempted {
+		t.Fatalf("attempted=%v err=%v, want ErrTreasuryInvalidRoute and nothing broadcast", attempted, err)
+	}
+	if signer.calls() != 0 {
+		t.Fatalf("signer was used %d times for a refused route", signer.calls())
+	}
+	if _, _, spender, _ := native.approveCall(); spender != "" {
+		t.Fatalf("an allowance was granted to %q before the gas limit was checked", spender)
+	}
+}
+
+// A route with no gasLimit gets the ceiling, never an unbounded estimate: an
+// estimate of a gas-burning call is the block gas limit.
+func TestTreasury_ExecuteRouteBoundsAMissingGasLimitByTheCeiling(t *testing.T) {
+	tr, lane, _, _ := newTestTreasuryWithFakes(t)
+	route := validRoute()
+	route.GasLimit = 0
+	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(100_000000), route); err != nil {
+		t.Fatalf("ExecuteRoute: %v", err)
+	}
+	if _, _, _, gasLimit := lane.Builder.(*fakeSponsorBuilder).lastCall(); gasLimit != maxRouteGasLimit {
+		t.Fatalf("gasLimit = %d, want the ceiling %d", gasLimit, maxRouteGasLimit)
+	}
+}
+
+// The largest limit LiFi returned in live quotes (gasZip, 2026-09-22) must
+// fit with room to spare.
+func TestTreasury_RouteGasCeilingClearsLiveQuotes(t *testing.T) {
+	if maxRouteGasLimit < 2*2_275_122 {
+		t.Fatalf("ceiling %d leaves no headroom over live LiFi limits", maxRouteGasLimit)
+	}
+}

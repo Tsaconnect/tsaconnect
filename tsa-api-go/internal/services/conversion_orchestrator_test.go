@@ -648,6 +648,144 @@ func TestOrchestrator_OverDeliveryClampsThePromiseToWhatWasAsked(t *testing.T) {
 	}
 }
 
+// ── one delivery, one claim ────────────────────────────────────────────────
+
+// seedClaimant stores another converted buy carrying the rig order's delivery
+// hash, already in custody for 100 USDC unless mutate says otherwise.
+func seedClaimant(t *testing.T, r *conversionRig, mutate func(*models.PaycrestOrderRecord)) {
+	t.Helper()
+	other := &models.PaycrestOrderRecord{
+		ID: uuid.New(), UserID: uuid.New(),
+		Direction: models.PaycrestDirectionBuy, Status: models.PaycrestStatusConverting,
+		Reference: "conv-" + uuid.NewString(), FiatCode: "NGN", FiatAmount: "138000",
+		Token: "USDC", ChainKey: "base", Network: "base",
+		RouteKind: models.RouteKindConverted, RequestedToken: "USDT", RequestedChain: "polygon",
+		TokenAmount: "100", Holder: models.HolderTreasury, WalletAddress: sponsorTestDeposit,
+		TxHash: r.order.TxHash, CreatedAt: r.clock,
+	}
+	if mutate != nil {
+		mutate(other)
+	}
+	if err := r.db.Create(other).Error; err != nil {
+		t.Fatalf("seed claimant: %v", err)
+	}
+}
+
+// A delivery another order already took custody of cannot fund this one too.
+// Paycrest reporting one hash against two orders — a bug or a compromised
+// account — would otherwise have the treasury bridge the second order out of
+// its own float.
+func TestOrchestrator_RefusesADeliveryAnotherOrderAlreadyClaimed(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	seedClaimant(t, r, nil) // the tx's whole 100 USDC is already spoken for
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderPaycrest {
+		t.Fatalf("holder = %s; custody of an already-claimed delivery must not be recorded", got.Holder)
+	}
+	if got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a reused delivery must stop for a human", got.Status)
+	}
+	mustAdvance(t, r)
+	if r.lifi.quoteCalls() != 0 || r.broadcasts() != 0 {
+		t.Fatalf("quotes=%d broadcasts=%d; nothing may move on a reused delivery", r.lifi.quoteCalls(), r.broadcasts())
+	}
+}
+
+// One Paycrest transaction genuinely settling two of our orders must still
+// fund both: each takes its own amount out of what the transaction delivered.
+func TestOrchestrator_ASharedSettlementFundsEachOrderOnce(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.transfers.amount = big.NewInt(200_000000)
+	seedClaimant(t, r, nil)
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderTreasury || got.TokenAmount != "100" {
+		t.Fatalf("holder=%s tokenAmount=%q; want custody of this order's full 100", got.Holder, got.TokenAmount)
+	}
+}
+
+// What is left after other orders' claims is all this order can have.
+func TestOrchestrator_OnlyTheUnclaimedRemainderIsThisOrders(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.transfers.amount = big.NewInt(150_000000)
+	seedClaimant(t, r, nil)
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderTreasury || got.TokenAmount != "50" {
+		t.Fatalf("holder=%s tokenAmount=%q; want custody of only the unclaimed 50", got.Holder, got.TokenAmount)
+	}
+	if want := PromisedAmount(big.NewInt(50_000000), 50).String(); got.PromisedAmount != want {
+		t.Fatalf("promisedAmount = %q, want %q from the remainder", got.PromisedAmount, want)
+	}
+}
+
+// Only a converted buy on the same chain that has actually TAKEN custody has
+// claimed anything: an order still waiting on Paycrest, a direct order (paid
+// to the user's own wallet, never counted in the treasury's receipt), or the
+// same hash on another chain claim nothing.
+func TestOrchestrator_OnlyCustodyTakenOnTheSameChainCountsAsAClaim(t *testing.T) {
+	for name, mutate := range map[string]func(*models.PaycrestOrderRecord){
+		"still with paycrest": func(o *models.PaycrestOrderRecord) { o.Holder = models.HolderPaycrest },
+		"direct order":        func(o *models.PaycrestOrderRecord) { o.RouteKind = models.RouteKindDirect; o.Holder = "" },
+		"another chain":       func(o *models.PaycrestOrderRecord) { o.ChainKey = "polygon" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newConversionRig(t)
+			r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+			seedClaimant(t, r, mutate)
+
+			mustAdvance(t, r)
+
+			if got := r.reload(t); got.Holder != models.HolderTreasury || got.TokenAmount != "100" {
+				t.Fatalf("holder=%s tokenAmount=%q; that order claimed nothing", got.Holder, got.TokenAmount)
+			}
+		})
+	}
+}
+
+// A delivered order hands custody on to the user; its claim on the
+// transaction must survive that, or the delivery frees up for reuse.
+func TestOrchestrator_ADeliveredOrdersClaimStillCounts(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	seedClaimant(t, r, func(o *models.PaycrestOrderRecord) {
+		o.Holder = models.HolderUser
+		o.Status = models.PaycrestStatusSettled
+	})
+
+	mustAdvance(t, r)
+
+	if got := r.reload(t); got.Holder != models.HolderPaycrest {
+		t.Fatalf("holder = %s; a settled order's delivery was reused", got.Holder)
+	}
+}
+
+// A claim whose amount cannot be read still holds its share; guessing zero
+// would hand that share to this order.
+func TestOrchestrator_AnUnreadableClaimStopsForAHuman(t *testing.T) {
+	r := newConversionRig(t)
+	r.db.Model(r.order).Update("holder", models.HolderPaycrest)
+	r.transfers.amount = big.NewInt(200_000000)
+	seedClaimant(t, r, func(o *models.PaycrestOrderRecord) { o.TokenAmount = "not-a-number" })
+
+	mustAdvance(t, r)
+
+	got := r.reload(t)
+	if got.Holder != models.HolderPaycrest || got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("holder=%s status=%s; want no custody, parked for a human", got.Holder, got.Status)
+	}
+}
+
 // ── the promise is denominated in what the USER receives ───────────────────
 
 // 6dp in, 18dp out. Comparing a 6dp promise against an 18dp landing would make
