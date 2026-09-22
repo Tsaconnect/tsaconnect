@@ -587,6 +587,17 @@ func (o *ConversionOrchestrator) claimedFromDelivery(ctx context.Context, order 
 	return claimed, nil
 }
 
+// errIfOutOfGas passes on only the one failure an operator must act on: a
+// treasury lane that cannot pay for gas. Returned from a step, it fails the
+// tick and trips the worker's failure-streak alert; every other refused
+// route just frees the attempt for the next tick.
+func errIfOutOfGas(err error) error {
+	if errors.Is(err, ErrRelayerUnderfunded) {
+		return err
+	}
+	return nil
+}
+
 // startBridge reserves the attempt FIRST, then quotes, then broadcasts. The
 // quote is a network round-trip long enough for a second tick to enter this
 // function, so reserving after it would let both ticks broadcast; reserving
@@ -711,7 +722,10 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 				order.ID, leg.ID, err)
 			return nil
 		}
-		return o.failLeg(detached(ctx), leg.ID, err.Error())
+		if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+			return ferr
+		}
+		return errIfOutOfGas(err)
 	}
 	// Detached: the broadcast already happened, so losing this write to a
 	// cancelled request would strand the leg with no hash.
@@ -974,6 +988,9 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 // No cap check: a top-up completes an order the treasury is already exposed to.
 // It creates no new exposure, and refusing it would leave the user short.
 func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, shortfall *big.Int) error {
+	if err := o.treasury.requireGas(ctx, dst.lane, treasuryERC20Gas); err != nil {
+		return err
+	}
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindDeliver)
 	if err != nil {
 		return err
@@ -1163,6 +1180,12 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 		}); err != nil {
 			return err
 		}
+	}
+	if err := o.treasury.requireGas(ctx, lane, treasuryERC20Gas); err != nil {
+		// No leg: one written per tick while the lane is empty would read as
+		// fresh activity and hide the order from the stall detector. The
+		// error fails the tick, which is what pages someone.
+		return err
 	}
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindRefund)
 	if err != nil {
@@ -1989,6 +2012,9 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return o.resolveAdminRefund(ctx, adminID, &order, pending)
 	}
 
+	if err := o.treasury.requireGas(ctx, lane, treasuryERC20Gas); err != nil {
+		return nil, err
+	}
 	attempt, err := o.legs.NextAttempt(ctx, order.ID, models.RampLegKindRefund)
 	if err != nil {
 		return nil, err

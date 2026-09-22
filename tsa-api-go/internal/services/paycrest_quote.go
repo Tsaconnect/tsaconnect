@@ -358,6 +358,10 @@ func (s *PaycrestQuoteService) SetTreasuryAddress(addr string) {
 // *Treasury satisfies it via its own Lane method.
 type treasuryLaneChecker interface {
 	Lane(chainKey string) *TreasuryLane
+	// CanPayForGas is whether chainKey's lane can pay for `units` of gas
+	// right now (briefly cached), so a route is never offered that the
+	// treasury could not send.
+	CanPayForGas(ctx context.Context, chainKey string, units uint64) bool
 }
 
 // SetTreasuryLanes wires the REAL gate on which requested chains a converted
@@ -797,6 +801,18 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		})
 		if rerr != nil {
 			continue // no route today is not an error: the venue just isn't offered
+		}
+		// The bridge runs from the settlement leg's chain, so that lane must
+		// be able to pay THIS route's gas plus an approve. Selling a route
+		// the treasury cannot send takes the user's money into an order
+		// that can only wait for a refill. Same gas rules as ExecuteRoute: a
+		// missing limit costs the ceiling, one above it is never executed.
+		routeGas := route.GasLimit
+		if routeGas == 0 {
+			routeGas = maxRouteGasLimit
+		}
+		if routeGas > maxRouteGasLimit || !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
+			continue
 		}
 		// Anchor everything in DESTINATION units before pricing: routeAmount
 		// is in the settlement leg's own decimals, route.ToAmountMin is

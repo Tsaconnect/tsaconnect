@@ -92,9 +92,11 @@ func rampAdminError(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrTreasuryInvalidRecipient):
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrRelayerUnderfunded):
+		utils.ErrorResponse(c, http.StatusServiceUnavailable,
+			"The treasury cannot pay for gas on this chain. Top up its native balance, then retry the refund.")
 	case errors.Is(err, services.ErrSponsorNotAvailable),
-		errors.Is(err, services.ErrTreasuryKilled),
-		errors.Is(err, services.ErrRelayerUnderfunded):
+		errors.Is(err, services.ErrTreasuryKilled):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Treasury is not available for this chain right now")
 	default:
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong. Please try again.")

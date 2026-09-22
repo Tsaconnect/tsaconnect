@@ -415,6 +415,59 @@ func TestOrchestrator_RefundsInTheRouteTokenAfterTheRetryWindow(t *testing.T) {
 	}
 }
 
+// ── a lane that cannot pay for gas ─────────────────────────────────────────
+
+func setSourceGas(r *conversionRig, wei *big.Int) {
+	r.src.chain.balances[strings.ToLower(sponsorTestSigner)] = wei
+}
+
+// A treasury lane that cannot pay for the bridge sends nothing and fails the
+// tick, so the worker's failure-streak alert pages someone. A tick that
+// "succeeds" while every conversion is stuck is how an empty lane goes
+// unnoticed.
+func TestOrchestrator_ALaneThatCannotPayFailsTheTickAndSendsNothing(t *testing.T) {
+	r := newConversionRig(t)
+	setSourceGas(r, big.NewInt(1))
+
+	err := r.svc.Advance(context.Background(), r.reload(t))
+
+	if !errors.Is(err, ErrRelayerUnderfunded) {
+		t.Fatalf("Advance = %v, want ErrRelayerUnderfunded so the tick reports it", err)
+	}
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d, want none", r.broadcasts())
+	}
+}
+
+// A refund blocked on gas waits without writing a leg per tick — each one
+// would read as fresh activity and hide the order from the stall detector —
+// and goes out on its own once the lane is topped up.
+func TestOrchestrator_ARefundWaitsForGasWithoutPilingUpLegs(t *testing.T) {
+	r := newConversionRig(t)
+	r.lifi.err = ErrLiFiNoRoute
+	mustAdvance(t, r) // attempt 1 fails
+	r.clock = r.clock.Add(31 * time.Minute)
+	setSourceGas(r, big.NewInt(1))
+
+	for i := 0; i < 3; i++ {
+		if err := r.svc.Advance(context.Background(), r.reload(t)); !errors.Is(err, ErrRelayerUnderfunded) {
+			t.Fatalf("tick %d: Advance = %v, want ErrRelayerUnderfunded", i, err)
+		}
+	}
+	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 0 {
+		t.Fatalf("refund legs = %d; a refund that cannot pay for gas must not write one per tick", len(legs))
+	}
+	if got := r.reload(t); got.Status != models.PaycrestStatusRefunding {
+		t.Fatalf("status = %s, want refunding while it waits", got.Status)
+	}
+
+	setSourceGas(r, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	mustAdvance(t, r)
+	if legs := r.legsOfKind(t, models.RampLegKindRefund); len(legs) != 1 || legs[0].TxHash == "" {
+		t.Fatalf("refund legs = %+v; want the refund broadcast once gas is back", legs)
+	}
+}
+
 // ── one leg at a time ──────────────────────────────────────────────────────
 
 func TestOrchestrator_NeverSendsTwiceForOneAttempt(t *testing.T) {

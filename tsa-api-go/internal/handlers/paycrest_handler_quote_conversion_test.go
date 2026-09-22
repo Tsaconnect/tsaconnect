@@ -93,6 +93,10 @@ type fakeTreasuryLaneChecker struct {
 	laned map[string]bool
 }
 
+func (f *fakeTreasuryLaneChecker) CanPayForGas(_ context.Context, chainKey string, _ uint64) bool {
+	return f.laned[chainKey]
+}
+
 func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *services.TreasuryLane {
 	if f.laned[chainKey] {
 		return &services.TreasuryLane{}

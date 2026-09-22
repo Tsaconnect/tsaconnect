@@ -21,8 +21,9 @@ var (
 	// switch; this is only how that state is reported.
 	ErrTreasuryKilled = errors.New("conversions are paused")
 	// ErrTreasuryCapExceeded is returned when an order or a chain's in-flight
-	// exposure would cross the value caps configured in TreasuryCaps. The
-	// floor reuses the guard's own ErrRelayerUnderfunded — no third sentinel.
+	// exposure would cross the value caps configured in TreasuryCaps. A lane
+	// that cannot pay for a transaction's gas reuses the guard's own
+	// ErrRelayerUnderfunded — no third sentinel.
 	ErrTreasuryCapExceeded = errors.New("this order is above the conversion limit right now")
 	// ErrTreasuryInvalidRoute is returned when a LiFi route fails a safety
 	// check before anything is signed: a `to` or `approvalAddress` outside
@@ -89,14 +90,30 @@ type TreasuryCaps struct {
 
 // Treasury holds and moves user funds in transit for a converted buy: one
 // lane per chain, each a SponsorLane with the treasury's own SponsorGuard
-// (kill switch + native floor) and this treasury's value caps.
+// (kill switch + low-balance warning floor) and this treasury's value caps.
 type Treasury struct {
 	lanes map[string]*TreasuryLane
 	caps  TreasuryCaps
 	now   func() time.Time
 	// address is computed once in NewTreasury: see Address's doc comment.
 	address string
+
+	gasMu    sync.Mutex
+	gasCache map[string]gasReading // chain -> last quote-time reading
 }
+
+// gasReading is one lane's native balance and gas price, as read for
+// quoting. Execution never uses it: requireGas always reads fresh.
+type gasReading struct {
+	balance, price *big.Int
+	at             time.Time
+}
+
+// treasuryGasCacheTTL bounds how stale a quote-time gas reading may be. The
+// quote endpoint is public, so a fresh read per request would be two RPC calls
+// anyone can trigger; a lane drained inside the window is still caught at
+// execution, before anything is sent.
+const treasuryGasCacheTTL = 30 * time.Second
 
 // NewTreasury normalises lane keys to lower case (Lane looks up by lower
 // case) and computes the treasury's address once, deterministically, from
@@ -110,7 +127,7 @@ func NewTreasury(lanes map[string]*TreasuryLane, caps TreasuryCaps, now func() t
 		normalized[strings.ToLower(strings.TrimSpace(k))] = lane
 	}
 
-	t := &Treasury{lanes: normalized, caps: caps, now: now}
+	t := &Treasury{lanes: normalized, caps: caps, now: now, gasCache: map[string]gasReading{}}
 	t.address = computeTreasuryAddress(normalized)
 	return t
 }
@@ -201,15 +218,33 @@ func (t *Treasury) CheckCaps(chainKey string, orderUSD, inFlightUSD float64) err
 	return nil
 }
 
-// checkFloor reuses the guard's own floor check — the same one the sponsor
-// lanes use — rather than a second copy of "read balance, compare, alert". A
-// half-sent conversion is worse than one that never started.
-func (t *Treasury) checkFloor(ctx context.Context, lane *TreasuryLane) error {
+// treasuryERC20Gas budgets one ERC-20 approve or transfer from the treasury:
+// the same allowance the gas top-up makes for a transfer it cannot estimate.
+const treasuryERC20Gas = topUpFallbackTransferGas
+
+// requireGas refuses unless the lane's native balance pays for `units` of gas
+// at the current price — the question that decides whether a transaction can
+// go out, rather than whether the balance is above an arbitrary floor. A lane
+// below its floor that can still pay keeps working; the floor only raises the
+// refill ALERT (the guard logs it). Checked before anything is sent, because a
+// half-sent conversion — an approve with no route after it — is worse than
+// one that never started.
+func (t *Treasury) requireGas(ctx context.Context, lane *TreasuryLane, units uint64) error {
 	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
 	if err != nil {
 		return fmt.Errorf("treasury: read native balance: %w", err)
 	}
-	return lane.Guard.CheckFloor(bal) // logs its own ALERT, returns ErrRelayerUnderfunded
+	_ = lane.Guard.CheckFloor(bal) // a refill warning, not a stop
+	cost, err := lane.gasCost(units)
+	if err != nil {
+		return fmt.Errorf("treasury: %w", err)
+	}
+	if bal.Cmp(cost) < 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_gas_short_total=1 chain=%s balance=%s needed=%s gas=%d",
+			lane.ChainKey, bal, cost, units)
+		return fmt.Errorf("%w: %s holds %s wei, needs %s for %d gas", ErrRelayerUnderfunded, lane.ChainKey, bal, cost, units)
+	}
+	return nil
 }
 
 // routeValueIsZero reports whether route.Value encodes exactly zero, after
@@ -236,6 +271,45 @@ func (t *Treasury) routeExpired(route *LiFiRoute) bool {
 	return !t.now().Before(time.Unix(route.ValidUntil, 0))
 }
 
+// CanPayForGas reports whether chainKey's lane can pay for `units` of gas,
+// for deciding whether to OFFER a converted route at all — so a user is never
+// sold a conversion the treasury cannot send. Readings are cached for
+// treasuryGasCacheTTL; an unreadable balance or price reads as "cannot pay",
+// since offering the route anyway is the failure this exists to prevent.
+func (t *Treasury) CanPayForGas(ctx context.Context, chainKey string, units uint64) bool {
+	lane := t.Lane(chainKey)
+	if lane == nil || lane.SponsorLane == nil {
+		return false
+	}
+	reading, ok := t.gasReadingFor(ctx, lane)
+	if !ok {
+		return false
+	}
+	cost := new(big.Int).Mul(new(big.Int).SetUint64(units), reading.price)
+	return reading.balance.Cmp(cost) >= 0
+}
+
+func (t *Treasury) gasReadingFor(ctx context.Context, lane *TreasuryLane) (gasReading, bool) {
+	t.gasMu.Lock()
+	defer t.gasMu.Unlock()
+	if r, ok := t.gasCache[lane.ChainKey]; ok && t.now().Sub(r.at) < treasuryGasCacheTTL {
+		return r, true
+	}
+	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
+	if err != nil {
+		log.Printf("[ramp-conversion] treasury gas reading on %s: balance: %v", lane.ChainKey, err)
+		return gasReading{}, false
+	}
+	price, err := lane.Native.SuggestGasPrice()
+	if err != nil {
+		log.Printf("[ramp-conversion] treasury gas reading on %s: gas price: %v", lane.ChainKey, err)
+		return gasReading{}, false
+	}
+	r := gasReading{balance: bal, price: price, at: t.now()}
+	t.gasCache[lane.ChainKey] = r
+	return r, true
+}
+
 // maxRouteGasLimit bounds the gas a LiFi route may ask the treasury to pay
 // for. The route's gasLimit is untrusted: a large one on a call that burns it
 // drains the lane's native balance in one transaction, which the balance floor
@@ -250,8 +324,8 @@ const maxRouteGasLimit uint64 = 5_000_000
 // the BTC/PSBT path holds.
 //
 // Callers MUST run CheckCaps for this leg's order/chain BEFORE calling
-// ExecuteRoute: this method only re-checks the kill switch and the native
-// floor, not the value caps, which are a per-order/per-chain decision this
+// ExecuteRoute: this method only re-checks the kill switch and that the lane
+// can pay for the gas, not the value caps, which are a per-order/per-chain decision this
 // lane-scoped method cannot make on its own.
 //
 // broadcastAttempted separates a build failure (nothing left this process,
@@ -278,9 +352,6 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	}
 	if lane.Guard.Killed() {
 		return "", false, ErrTreasuryKilled
-	}
-	if err := t.checkFloor(ctx, lane); err != nil {
-		return "", false, err
 	}
 	tokenAddr := lane.tokenAddress(token) // SponsorLane's own lookup
 	if tokenAddr == "" || route == nil || route.To == "" || route.Data == "" {
@@ -360,34 +431,44 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		return "", false, ctx.Err()
 	}
 
-	var approveAttempted bool
+	needApprove := false
 	if route.ApprovalAddress != "" {
 		allowance, err := lane.Native.GetTokenAllowance(tokenAddr, lane.Signer.Address(), route.ApprovalAddress)
 		if err != nil {
 			return "", false, fmt.Errorf("treasury: read allowance: %w", err)
 		}
-		if allowance.Cmp(amount) < 0 {
-			// Exact-amount approval, never MaxUint256: the spender is a
-			// third-party router that changes weekly. lane.send carries the
-			// nonce lock and the broadcastAttempted contract.
-			approveHash, attempted, aerr := lane.send(ctx, func() ([]byte, error) {
-				return lane.Native.PrepareERC20Approve(tokenAddr, lane.Signer.Address(), route.ApprovalAddress, amount)
-			})
-			approveAttempted = attempted // sticky from here on, see doc comment
-			if aerr != nil {
-				return "", approveAttempted, fmt.Errorf("treasury: approve: %w", aerr)
-			}
-			receipt, rerr := lane.Native.WaitForReceiptContext(ctx, approveHash, 60*time.Second)
-			if rerr != nil {
-				return "", true, fmt.Errorf("treasury: approve unconfirmed: %w", rerr)
-			}
-			// An approve that reverted granted no allowance. Broadcasting
-			// the route anyway would spend against an allowance that was
-			// never actually set. Same pattern as gas_topup.go's confirm().
-			if receipt.Status != 1 {
-				log.Printf("[ramp-conversion] ALERT ramp_treasury_approve_reverted_total=1 chain=%s tx=%s", lane.ChainKey, approveHash)
-				return "", true, fmt.Errorf("treasury: approve reverted on-chain (tx %s)", approveHash)
-			}
+		needApprove = allowance.Cmp(amount) < 0
+	}
+	gasUnits := gasLimit
+	if needApprove {
+		gasUnits += treasuryERC20Gas
+	}
+	if err := t.requireGas(ctx, lane, gasUnits); err != nil {
+		return "", false, err
+	}
+
+	var approveAttempted bool
+	if needApprove {
+		// Exact-amount approval, never MaxUint256: the spender is a
+		// third-party router that changes weekly. lane.send carries the
+		// nonce lock and the broadcastAttempted contract.
+		approveHash, attempted, aerr := lane.send(ctx, func() ([]byte, error) {
+			return lane.Native.PrepareERC20Approve(tokenAddr, lane.Signer.Address(), route.ApprovalAddress, amount)
+		})
+		approveAttempted = attempted // sticky from here on, see doc comment
+		if aerr != nil {
+			return "", approveAttempted, fmt.Errorf("treasury: approve: %w", aerr)
+		}
+		receipt, rerr := lane.Native.WaitForReceiptContext(ctx, approveHash, 60*time.Second)
+		if rerr != nil {
+			return "", true, fmt.Errorf("treasury: approve unconfirmed: %w", rerr)
+		}
+		// An approve that reverted granted no allowance. Broadcasting
+		// the route anyway would spend against an allowance that was
+		// never actually set. Same pattern as gas_topup.go's confirm().
+		if receipt.Status != 1 {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_approve_reverted_total=1 chain=%s tx=%s", lane.ChainKey, approveHash)
+			return "", true, fmt.Errorf("treasury: approve reverted on-chain (tx %s)", approveHash)
 		}
 	}
 
@@ -412,8 +493,8 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 
 // TransferToken moves a token out of the treasury — a shortfall top-up or a
 // refund. Same uncertain-broadcast contract as ExecuteRoute, and the same
-// CheckCaps-first obligation: this method only checks the kill switch, the
-// floor, and the recipient's shape, not the value caps.
+// CheckCaps-first obligation: this method only checks the kill switch, that
+// the lane can pay for the gas, and the recipient's shape, not the value caps.
 func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
@@ -428,12 +509,12 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_invalid_recipient_total=1 chain=%s to=%q", lane.ChainKey, to)
 		return "", false, ErrTreasuryInvalidRecipient
 	}
-	if err := t.checkFloor(ctx, lane); err != nil {
-		return "", false, err
-	}
 	tokenAddr := lane.tokenAddress(token)
 	if tokenAddr == "" {
 		return "", false, ErrSponsorNotAvailable
+	}
+	if err := t.requireGas(ctx, lane, treasuryERC20Gas); err != nil {
+		return "", false, err
 	}
 	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
 		return lane.Native.PrepareERC20Transfer(tokenAddr, lane.Signer.Address(), to, amount)
