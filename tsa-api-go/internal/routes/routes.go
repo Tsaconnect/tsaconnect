@@ -377,6 +377,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		depositGroup.PATCH("/:id/status", h.UpdateDepositStatus)
 	}
 
+	// Saved delivery addresses the buyer picks from at checkout
+	addressGroup := api.Group("/delivery-addresses")
+	addressGroup.Use(auth)
+	{
+		addressGroup.GET("", h.ListDeliveryAddresses)
+		addressGroup.POST("", h.CreateDeliveryAddress)
+		addressGroup.PUT("/:id", h.UpdateDeliveryAddress)
+		addressGroup.DELETE("/:id", h.DeleteDeliveryAddress)
+	}
+
 	// Order/checkout routes (authenticated)
 	orderGroup := api.Group("/orders")
 	orderGroup.Use(auth)

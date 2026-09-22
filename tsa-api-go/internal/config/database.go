@@ -53,6 +53,7 @@ func AutoMigrate() error {
 		&models.User{},
 		&models.Product{},
 		&models.Cart{},
+		&models.DeliveryAddress{},
 		&models.Category{},
 		&models.CategoryBookingFee{},
 		// Three service types (booking/order/contact) — per-service config, menus,

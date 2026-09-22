@@ -18,17 +18,22 @@ type Order struct {
 	// pending_payment → escrowed → completed (buyer confirms or timeout
 	// auto-releases). Escrow/UI/reconciler/watchdog branch on this instead of
 	// re-joining the product to read its type.
-	Kind                   string     `gorm:"default:'product';index" json:"kind"`
-	Quantity               int        `gorm:"not null;default:1" json:"quantity"`
-	Token                  string     `gorm:"not null" json:"token"`
-	ProductAmount          string     `gorm:"not null" json:"productAmount"`
-	ShippingAmount         string     `gorm:"not null;default:'0'" json:"shippingAmount"`
-	PlatformFee            string     `gorm:"not null;default:'0'" json:"platformFee"`
-	TotalAmount            string     `gorm:"not null" json:"totalAmount"`
-	ShippingZone           string     `json:"shippingZone"`
-	ShippingCity           string     `json:"shippingCity,omitempty"`
-	ShippingState          string     `json:"shippingState,omitempty"`
-	ShippingCountry        string     `json:"shippingCountry,omitempty"`
+	Kind            string `gorm:"default:'product';index" json:"kind"`
+	Quantity        int    `gorm:"not null;default:1" json:"quantity"`
+	Token           string `gorm:"not null" json:"token"`
+	ProductAmount   string `gorm:"not null" json:"productAmount"`
+	ShippingAmount  string `gorm:"not null;default:'0'" json:"shippingAmount"`
+	PlatformFee     string `gorm:"not null;default:'0'" json:"platformFee"`
+	TotalAmount     string `gorm:"not null" json:"totalAmount"`
+	ShippingZone    string `json:"shippingZone"`
+	ShippingCity    string `json:"shippingCity,omitempty"`
+	ShippingState   string `json:"shippingState,omitempty"`
+	ShippingCountry string `json:"shippingCountry,omitempty"`
+	// Snapshot of the buyer's saved delivery address at checkout. Empty on
+	// service orders and on orders placed before saved addresses existed.
+	ShippingRecipientName  string     `json:"shippingRecipientName,omitempty"`
+	ShippingPhone          string     `json:"shippingPhone,omitempty"`
+	ShippingStreet         string     `json:"shippingStreet,omitempty"`
 	ContractOrderID        string     `json:"contractOrderId,omitempty"`
 	EscrowContractAddress  string     `json:"escrowContractAddress,omitempty"`
 	EscrowTxHash           string     `json:"escrowTxHash,omitempty"`
