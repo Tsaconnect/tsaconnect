@@ -2172,6 +2172,22 @@ func TestOrchestrator_VolatileLandingBelowTheMinimumStopsForAHuman(t *testing.T)
 	}
 }
 
+// LiFi names a native coin either as the zero address or as the 0xEeee…EEeE
+// alias, and which one comes back varies by chain and by tool. Both mean the
+// same asset, so both must settle — insisting on the spelling we happened to
+// store would park every native buy on the chains that answer with the other.
+func TestOrchestrator_NativeLandingReportedByItsAliasStillSettles(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	r.status.setToken("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
+	r.status.set(LiFiStatusDone, "995")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s; the native alias names the same coin we asked for", got.Status)
+	}
+}
+
 func TestOrchestrator_WrongReceivingTokenStopsForAHuman(t *testing.T) {
 	r := newConversionRig(t)
 	asNewVolatileBuy(t, r)
@@ -2184,7 +2200,10 @@ func TestOrchestrator_WrongReceivingTokenStopsForAHuman(t *testing.T) {
 	}
 }
 
-func TestOrchestrator_AFreshRouteOverTheBudgetFailsTheAttempt(t *testing.T) {
+// At 80 bps, T/(1 − l) is 100302419 — more than the 100000000 that actually
+// landed. The attempt is refused before the budget is ever consulted: the
+// treasury can only send what it holds.
+func TestOrchestrator_ARouteThatNoLongerFitsWhatLandedFailsTheAttempt(t *testing.T) {
 	r := newConversionRig(t)
 	asNewVolatileBuy(t, r)
 	r.lifi.route.ToAmountUSD = 99.2 // 80 bps
@@ -2195,6 +2214,33 @@ func TestOrchestrator_AFreshRouteOverTheBudgetFailsTheAttempt(t *testing.T) {
 	legs := r.legsOfKind(t, models.RampLegKindBridge)
 	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
 		t.Fatalf("legs = %+v, want one failed attempt (the retry window starts)", legs)
+	}
+	if !strings.Contains(legs[0].Error, "no longer fits") {
+		t.Fatalf("leg error = %q; this test pins the FIT refusal, not the budget one", legs[0].Error)
+	}
+}
+
+// The admission rule is l + g ≤ B, and g is half of it. 40 bps of LiFi cost
+// alone clears the 50 bps budget; it is the treasury's own gas — $0.15 on a
+// 1M-gas route plus the 80k approve, 17 bps of a $100 order — that takes the
+// round trip over. Sized so the route still FITS what landed (T/(1 − l) at 40
+// bps is 99899598, inside the 100000000 delivered), so the refusal can only
+// come from the budget line.
+func TestOrchestrator_ARouteWhoseGasTakesItOverTheBudgetFailsTheAttempt(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	r.lifi.route.ToAmountUSD = 99.6 // l = 40 bps, on its own inside the 50 bps budget
+	r.lifi.route.GasCostUSD = 0.15  // + 80k approve on a 1M-gas route = 17 bps
+	mustAdvance(t, r)
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; 40 + 17 bps is over the 50 bps budget", r.broadcasts())
+	}
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("legs = %+v, want one failed attempt (the retry window starts)", legs)
+	}
+	if !strings.Contains(legs[0].Error, "over the 50 bps budget") {
+		t.Fatalf("leg error = %q; the gas half of l + g ≤ B must be what refused this route", legs[0].Error)
 	}
 }
 

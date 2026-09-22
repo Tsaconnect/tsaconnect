@@ -1034,11 +1034,16 @@ func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *model
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
 		return nil, o.toRecovery(ctx, order, err.Error(), nil)
 	}
-	if !dst.stable && strings.EqualFold(dst.token, evmNativeAddress) {
+	if !dst.stable && isNativeTokenAddress(dst.token) {
 		// A native coin leaves no Transfer log: LiFi's status is the signal,
 		// held to the right token here and to LiFi's own minimum in settle.
 		// Every ERC-20 — stable or not — still earns the on-chain proof below.
-		if !strings.EqualFold(st.ReceivingToken, dst.token) {
+		//
+		// Either spelling of "native" counts (see isNativeTokenAddress): an
+		// alias mismatch is a naming difference, not a different asset, and
+		// parking on it would strand every native buy on whichever chains
+		// answer with the spelling we did not store.
+		if !isNativeTokenAddress(st.ReceivingToken) {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_token_total=1 order=%s got=%s want=%s", order.ID, st.ReceivingToken, dst.token)
 			return nil, o.toRecovery(ctx, order, fmt.Sprintf("LiFi delivered %s, not %s", st.ReceivingToken, dst.token), map[string]any{"holder": models.HolderUser})
 		}

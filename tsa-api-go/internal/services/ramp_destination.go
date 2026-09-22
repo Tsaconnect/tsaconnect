@@ -21,6 +21,21 @@ import (
 
 const evmNativeAddress = "0x0000000000000000000000000000000000000000"
 
+// evmNativeAliasAddress is the OTHER spelling of "this chain's native coin".
+// LiFi, 1inch and most aggregators use it interchangeably with the zero
+// address, and which one comes back varies by chain and by tool.
+const evmNativeAliasAddress = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+// isNativeTokenAddress reports whether addr names the chain's native coin in
+// either accepted spelling. Both mean the same asset everywhere in this
+// ecosystem, so accepting either cannot admit a token we did not ask for —
+// whereas accepting only the one we happened to store would park every native
+// delivery a provider reports with the other.
+func isNativeTokenAddress(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	return strings.EqualFold(addr, evmNativeAddress) || strings.EqualFold(addr, evmNativeAliasAddress)
+}
+
 // ErrBadRequestedAsset: the requested chain id or token can't be resolved
 // server-side. Every field of a requested asset is untrusted input.
 var ErrBadRequestedAsset = errors.New("that token or network can't be bought here")
