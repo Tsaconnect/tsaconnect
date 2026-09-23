@@ -103,7 +103,7 @@ interface Options {
 
 export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = false }: Options) {
   const { listings } = useSpotListings();
-  const { holdings } = useWalletHoldings(visible);
+  const { holdings, loading: holdingsLoading } = useWalletHoldings(visible);
 
   const [majorTokens, setMajorTokens] = useState<LiFiToken[]>([]);
   const [listedTokens, setListedTokens] = useState<LiFiToken[]>([]);
@@ -207,7 +207,15 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
   }, [query, searchAssets, listedTokens, majorTokens, holdings, side, allow, holdingsOnly]);
 
   const isSearch = !holdingsOnly && query.trim().length >= 2;
-  return { sections, loading: loading && !majorTokens.length, searching, error: isSearch ? searchError : error };
+  // In holdings mode the list IS her balances: until they have loaded, an empty
+  // list would read as "you hold nothing", so it counts as loading.
+  const catalogLoading = loading && !majorTokens.length;
+  return {
+    sections,
+    loading: catalogLoading || (holdingsOnly && holdingsLoading),
+    searching,
+    error: isSearch ? searchError : error,
+  };
 }
 
 /** Test seam: forget module-level caches. */

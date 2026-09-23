@@ -89,16 +89,20 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
   // the active wallet is known below.
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [loading, setLoading] = useState(false);
+  // Until the first read settles, "no holdings" means "not read yet" — the
+  // wallet lookup itself is async, so `loading` alone starts out false.
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    const settle = (next: Holding[]) => { setHoldings(next); setSettled(true); };
     (async () => {
       const wallet = await getActiveWallet();
       if (cancelled) return;
-      if (!wallet) { setHoldings([]); return; }
+      if (!wallet) { settle([]); return; }
       if (cache && cache.wallet === wallet && Date.now() - cache.at < CACHE_MS) {
-        setHoldings(cache.holdings);
+        settle(cache.holdings);
         return;
       }
       setLoading(true);
@@ -106,14 +110,14 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
       // A load where nothing answered is not remembered, so the next open retries.
       if (next) cache = { wallet, at: Date.now(), holdings: next };
       if (!cancelled) {
-        setHoldings(next ?? []);
+        settle(next ?? []);
         setLoading(false);
       }
     })();
     return () => { cancelled = true; };
   }, [enabled]);
 
-  return { holdings, loading };
+  return { holdings, loading: enabled && (loading || !settled) };
 }
 
 /** Forget cached balances — after a swap, or in tests — so the next open re-reads them. */

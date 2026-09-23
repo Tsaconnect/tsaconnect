@@ -20,8 +20,15 @@
 // carries a countdown, and starting one against a route the wallet cannot
 // cover burns that window on a sale that was never going to complete. See
 // services/paycrestDeposit.ts#checkFunding.
+//
+// Any other coin she holds (design §5) is a SWAPPED sell: she picks it from
+// her holdings, types how much of it, sees one "~₦" estimate and taps Sell
+// once. useSwappedSell does the rest — swap to USDC on Base in her own wallet,
+// open the payout for what landed, send it — and "Finish your sale" picks up
+// a sale that stopped part-way.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
+import { ethers } from 'ethers';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -39,6 +46,9 @@ import {
   Text,
 } from '@/components/ui';
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
+import AssetPicker from '@/components/assets/AssetPicker';
+import { useSwappedSell, type SellStage } from '@/hooks/useSwappedSell';
+import { useWalletHoldings } from '@/hooks/useWalletHoldings';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import { rampCurrencyLabel, useRampCurrency } from '@/hooks/useRampCurrency';
@@ -82,7 +92,26 @@ import {
   normalizeWalletBalances,
   type WalletBalanceWithChain,
 } from '@/services/walletApi';
-import { CHAINS, type ChainKey } from '@/constants/chains';
+import {
+  getOpenSellIntent,
+  getSellSwapQuote,
+  type SellIntent,
+  type SellSwapQuote,
+} from '@/services/paycrestSellSwap';
+import {
+  isBtcLiFiChain,
+  isSolanaLiFiChain,
+  isSuiLiFiChain,
+  SOLANA_LIFI_CHAIN_ID,
+  type LiFiToken,
+} from '@/services/lifi';
+import { isNativeLiFiToken } from '@/services/assetCatalog';
+import { getSolanaAddress } from '@/services/chains/solanaWallet';
+import { getBtcAddress } from '@/services/chains/btcWallet';
+import { getSuiAddress } from '@/services/chains/suiWallet';
+import { nativeGasReserve } from '@/services/wallet';
+import { spendableNative } from '@/services/gasReserve';
+import { CHAINS, getChainByChainId, type ChainKey } from '@/constants/chains';
 
 const QUOTE_DEBOUNCE_MS = 450;
 /** Warn while the user can still act. An on-chain send needs gas, a signature
@@ -118,6 +147,44 @@ function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | nu
   const n = Number(row?.balance ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
+
+/** A coin Paycrest cannot take, sold by swapping it to USDC on Base first. */
+type SwapPick = { token: LiFiToken; chainId: number; sourceAddress: string };
+
+/** Stablecoins this screen already sells directly — only consulted before
+ *  any quote has said which routes are live. */
+const DIRECT_TOKENS = new Set(['USDC', 'USDT']);
+
+/** Her address on the chain she is selling from — the EVM wallet itself, or
+ *  the Solana/Bitcoin/Sui address derived from the same key. */
+async function sourceAddressFor(chainId: number, evmAddress: string): Promise<string | null> {
+  if (isSolanaLiFiChain(chainId)) return getSolanaAddress(evmAddress);
+  if (isBtcLiFiChain(chainId)) return getBtcAddress(evmAddress);
+  if (isSuiLiFiChain(chainId)) return getSuiAddress(evmAddress);
+  return evmAddress;
+}
+
+function networkName(chainId: number): string {
+  if (isSolanaLiFiChain(chainId)) return 'Solana';
+  if (isBtcLiFiChain(chainId)) return 'Bitcoin';
+  if (isSuiLiFiChain(chainId)) return 'Sui';
+  return getChainByChainId(chainId)?.name ?? 'another network';
+}
+
+/** A float balance as a decimal string, rounded DOWN so MAX never asks for
+ *  more than she holds. */
+function floorBalance(balance: number, decimals: number): string {
+  const places = Math.min(decimals, 8);
+  const scale = 10 ** places;
+  return (Math.floor(balance * scale) / scale).toFixed(places);
+}
+
+const SWAPPED_STAGE_LABELS: Partial<Record<SellStage, string>> = {
+  swapping: 'Swapping your coins…',
+  waiting: 'Waiting for your swap to arrive — this can take a few minutes…',
+  ordering: 'Opening your payout…',
+  sending: 'Sending for payout…',
+};
 
 /** The same verdict as a full sentence, for the form. */
 function fundingMessage(check: FundingCheck): string | null {
@@ -203,6 +270,22 @@ export default function PaycrestSellScreen() {
   const [balances, setBalances] = useState<WalletBalanceWithChain[] | null>(null);
 
   const quoteSeq = useRef(0);
+
+  // ── What she is selling ────────────────────────────────────────────────
+  // Nothing picked, or a stablecoin a live route takes: today's direct sale.
+  // Anything else she holds: the swapped sale.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [directPick, setDirectPick] = useState<{ chain: string; token: string } | null>(null);
+  const [swapPick, setSwapPick] = useState<SwapPick | null>(null);
+  const [swapAmount, setSwapAmount] = useState('');
+  const [swapQuote, setSwapQuote] = useState<SellSwapQuote | null>(null);
+  const [swapQuoting, setSwapQuoting] = useState(false);
+  const [swapQuoteError, setSwapQuoteError] = useState<string | null>(null);
+  const swapQuoteSeq = useRef(0);
+  const swapped = useSwappedSell();
+  const swappedBusy = !!SWAPPED_STAGE_LABELS[swapped.stage];
+  const { holdings, loading: holdingsLoading } = useWalletHoldings(!!swapPick);
+  const [openIntent, setOpenIntent] = useState<SellIntent | null>(null);
 
   // An offramp expires exactly like an onramp does. Sending after the window
   // closes puts crypto at a provider address for an order that no longer
@@ -297,10 +380,13 @@ export default function PaycrestSellScreen() {
         setQuoteError(null);
         setVenue((prev) => {
           const kept = prev && q.venues.find((v) => venueId(v) === venueId(prev));
+          const picked = directPick
+            ? q.venues.find((v) => v.chain === directPick.chain && v.token.toUpperCase() === directPick.token)
+            : undefined;
           const preferred = asset
             ? q.venues.find((v) => v.token.toUpperCase() === asset.toUpperCase())
             : undefined;
-          return kept ?? preferred ?? q.best ?? null;
+          return kept ?? picked ?? preferred ?? q.best ?? null;
         });
       } catch (e) {
         if (seq !== quoteSeq.current) return;
@@ -314,7 +400,168 @@ export default function PaycrestSellScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, asset, currencyCode]);
+  }, [amount, asset, currencyCode, directPick]);
+
+  // ── The swapped sale ───────────────────────────────────────────────────
+
+  // Her unfinished sale, if any, so "Finish your sale" can pick it up. A 404
+  // (swapped sells switched off) is simply no sale.
+  const refreshOpenIntent = useCallback(() => {
+    getOpenSellIntent()
+      .then(setOpenIntent)
+      .catch(() => setOpenIntent(null));
+  }, []);
+  useEffect(() => {
+    if (address) refreshOpenIntent();
+  }, [address, refreshOpenIntent]);
+
+  // The one quote a swapped sale shows: "~₦X", debounced like the direct one.
+  useEffect(() => {
+    const raw = swapAmount.trim();
+    if (!swapPick || !address || !raw || !(Number(raw) > 0)) {
+      swapQuoteSeq.current++;
+      setSwapQuote(null);
+      setSwapQuoteError(null);
+      setSwapQuoting(false);
+      return;
+    }
+    let fromAmount: string;
+    try {
+      fromAmount = ethers.parseUnits(raw, swapPick.token.decimals).toString();
+    } catch {
+      setSwapQuote(null);
+      setSwapQuoteError('Enter a valid amount.');
+      return;
+    }
+    const seq = ++swapQuoteSeq.current;
+    setSwapQuoting(true);
+    const t = setTimeout(async () => {
+      try {
+        const q = await getSellSwapQuote({
+          fromChainId: swapPick.chainId,
+          fromToken: swapPick.token.address,
+          fromAmount,
+          fromAddress: swapPick.sourceAddress,
+          walletAddress: address,
+          currency: currencyCode,
+        });
+        if (seq !== swapQuoteSeq.current) return;
+        setSwapQuote(q);
+        setSwapQuoteError(null);
+      } catch (e) {
+        if (seq !== swapQuoteSeq.current) return;
+        setSwapQuote(null);
+        setSwapQuoteError(
+          e instanceof PaycrestError && e.status === 422
+            ? "This token can't be sold for naira right now"
+            : e instanceof PaycrestError
+              ? e.message
+              : 'Could not fetch a rate. Check your connection.',
+        );
+      } finally {
+        if (seq === swapQuoteSeq.current) setSwapQuoting(false);
+      }
+    }, QUOTE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [swapPick, swapAmount, address, currencyCode]);
+
+  const onPick = useCallback(
+    async (token: LiFiToken, chainId: number) => {
+      if (!address) return;
+      const chain = getChainByChainId(chainId)?.key;
+      const sym = token.symbol.toUpperCase();
+      // A route Paycrest fills directly stays today's sale. Before anything is
+      // typed there is no quote to ask, so the stablecoins it sells stand in.
+      const direct = chain
+        ? quote?.venues.length
+          ? quote.venues.find((v) => v.chain === chain && v.token.toUpperCase() === sym)
+          : DIRECT_TOKENS.has(sym) && chain in CHAIN_LABELS
+            ? true
+            : undefined
+        : undefined;
+      if (chain && direct) {
+        setSwapPick(null);
+        setDirectPick({ chain, token: sym });
+        if (direct !== true) setVenue(direct);
+        setPickerOpen(false);
+        return;
+      }
+      // Deriving a non-EVM address can throw (a locked key store); to her
+      // that is the same as not having one.
+      const sourceAddress = await sourceAddressFor(chainId, address).catch(() => null);
+      if (!sourceAddress) {
+        Alert.alert(
+          `${networkName(chainId)} wallet not ready`,
+          `Set up your ${networkName(chainId)} wallet first, then choose this coin to sell.`,
+        );
+        return;
+      }
+      setDirectPick(null);
+      setSwapPick({ token: { ...token, chainId }, chainId, sourceAddress });
+      setSwapAmount('');
+      setPickerOpen(false);
+    },
+    [address, quote],
+  );
+
+  const pickHolding = useMemo(() => {
+    if (!swapPick) return undefined;
+    const native = isNativeLiFiToken({ chainId: swapPick.chainId, address: swapPick.token.address });
+    return holdings.find(
+      (h) =>
+        h.chainId === swapPick.chainId &&
+        (native ? h.native : h.address.toLowerCase() === swapPick.token.address.toLowerCase()),
+    );
+  }, [swapPick, holdings]);
+
+  // A Solana token moves only with SOL for the fee, and nothing sponsors that
+  // yet (§5.4). Unknown holdings never block.
+  const needsSol =
+    !!swapPick &&
+    isSolanaLiFiChain(swapPick.chainId) &&
+    !isNativeLiFiToken({ chainId: swapPick.chainId, address: swapPick.token.address }) &&
+    !holdingsLoading &&
+    !holdings.some((h) => h.chainId === SOLANA_LIFI_CHAIN_ID && h.native && h.balance > 0);
+
+  const overBalance =
+    !!pickHolding && Number(swapAmount) > 0 && Number(swapAmount) > pickHolding.balance;
+
+  // MAX: her whole balance, less All Swap's gas reserve when the coin being
+  // sold is the one that pays for the swap.
+  const onMaxSwap = useCallback(async () => {
+    if (!swapPick || !pickHolding) return;
+    const { token, chainId } = swapPick;
+    let units = ethers.parseUnits(floorBalance(pickHolding.balance, token.decimals), token.decimals);
+    const chain = getChainByChainId(chainId);
+    if (chain && pickHolding.native) {
+      const toBig = (v?: string) => {
+        try {
+          return v ? BigInt(v) : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      const reserve = await nativeGasReserve(chain.key, {
+        gasUnits: toBig(swapQuote?.quote.transactionRequest?.gasLimit),
+        gasCostWei: toBig(swapQuote?.quote.gasCostWei),
+      });
+      if (reserve != null) units = spendableNative(units, reserve);
+    }
+    setSwapAmount(ethers.formatUnits(units, token.decimals));
+  }, [swapPick, pickHolding, swapQuote]);
+
+  const onSellSwapped = useCallback(() => {
+    if (!swapPick || !address || !bank) return;
+    swapped.start({
+      sourceChainId: swapPick.chainId,
+      token: swapPick.token,
+      amount: swapAmount.trim(),
+      walletAddress: address,
+      sourceAddress: swapPick.sourceAddress,
+      bank: { code: bank.code, account: accountNo, name: accountName || undefined },
+      currency: currencyCode,
+    });
+  }, [swapPick, address, bank, accountNo, accountName, swapAmount, currencyCode, swapped]);
 
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
@@ -401,6 +648,23 @@ export default function PaycrestSellScreen() {
       : `/wallet/paycrest/order/${id}`;
     router.replace(to as never);
   }, []);
+
+  // A finished swapped sale lands on the order screen like a direct one. One
+  // that stopped after its payout opened drops into this screen's own deposit
+  // view, whose Send retries the step that failed.
+  useEffect(() => {
+    if (swapped.stage === 'done' && swapped.order) {
+      const to = swapped.depositTx
+        ? `/wallet/paycrest/order/${swapped.order.id}?sentTx=${encodeURIComponent(swapped.depositTx)}`
+        : `/wallet/paycrest/order/${swapped.order.id}`;
+      router.replace(to as never);
+      return;
+    }
+    if (swapped.stage === 'failed') {
+      if (swapped.order?.status === 'awaiting_deposit') setOrder(swapped.order);
+      refreshOpenIntent();
+    }
+  }, [swapped.stage, swapped.order, swapped.depositTx, refreshOpenIntent]);
 
   const onSend = useCallback(async () => {
     if (!order || !address) return;
@@ -499,6 +763,24 @@ export default function PaycrestSellScreen() {
     isValidAccountNumber(currencyCode, accountNo, destKind) &&
     (!requiresNameCheck || !!accountName) &&
     !fundingBlocks;
+
+  const swapReady =
+    !!swapPick &&
+    !!address &&
+    !!bank &&
+    isValidAccountNumber(currencyCode, accountNo, destKind) &&
+    (!requiresNameCheck || !!accountName) &&
+    !!swapQuote &&
+    !swapQuoting &&
+    !needsSol &&
+    !overBalance &&
+    !swappedBusy;
+
+  const sellingLabel = swapPick
+    ? `${swapPick.token.symbol} on ${networkName(swapPick.chainId)}`
+    : directPick
+      ? `${directPick.token} on ${CHAIN_LABELS[directPick.chain] ?? directPick.chain}`
+      : undefined;
 
   // ── Deposit instructions ────────────────────────────────────────────────
   if (order) {
@@ -672,6 +954,82 @@ export default function PaycrestSellScreen() {
             />
           )}
 
+          {openIntent && !swappedBusy && (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                You have a sale that didn&apos;t finish
+              </Text>
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Nothing is lost. Tap below and we&apos;ll carry on from where it stopped.
+              </Text>
+              <Button
+                title="Finish your sale"
+                onPress={() => swapped.resume(openIntent, address ?? undefined)}
+                fullWidth
+              />
+            </Card>
+          )}
+
+          <SelectRow
+            label="What are you selling?"
+            value={sellingLabel}
+            placeholder="USDC or USDT"
+            onPress={() => setPickerOpen(true)}
+          />
+
+          {swapPick ? (
+            <>
+              <AmountInput
+                label="You sell"
+                value={swapAmount}
+                onChangeText={setSwapAmount}
+                symbol={swapPick.token.symbol}
+                symbolPosition="suffix"
+                onMax={pickHolding ? onMaxSwap : undefined}
+                helper={
+                  pickHolding
+                    ? `Balance: ${fmtTokenAmount(pickHolding.balance)} ${swapPick.token.symbol}`
+                    : undefined
+                }
+              />
+              {swapQuoting && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Spinner size="small" />
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    Checking live rates…
+                  </Text>
+                </View>
+              )}
+              {swapQuote && !swapQuoting && (
+                <Card>
+                  <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+                    You receive about
+                  </Text>
+                  <Text variant="display" weight="700" style={{ color: colors.textPrimary }}>
+                    {`~${symbol}${Number(swapQuote.fiatEstimate).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                  </Text>
+                </Card>
+              )}
+              {swapQuoteError && !swapQuoting && (
+                <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
+                  <Text variant="bodySm" style={{ color: colors.warning }}>
+                    {swapQuoteError}
+                  </Text>
+                </Card>
+              )}
+              {overBalance && (
+                <Text variant="caption" style={{ color: colors.warning }}>
+                  That is more {swapPick.token.symbol} than you have.
+                </Text>
+              )}
+              {needsSol && (
+                <Text variant="caption" style={{ color: colors.warning }}>
+                  You need a little SOL to send this.
+                </Text>
+              )}
+            </>
+          ) : (
+          <>
           <AmountInput
             label="You receive"
             value={amount}
@@ -728,6 +1086,10 @@ export default function PaycrestSellScreen() {
             </View>
           )}
 
+          </>
+          )}
+
+          {/* Where the naira goes — the same for either kind of sale. */}
           <SelectRow
             label="Pay into"
             value={bank?.name}
@@ -769,6 +1131,8 @@ export default function PaycrestSellScreen() {
               </Text>
             )}
 
+          {!swapPick && (
+          <>
           {venue && (
             <SummaryCard>
               <SummaryRow
@@ -794,14 +1158,47 @@ export default function PaycrestSellScreen() {
               )}
             </Card>
           )}
+          </>
+          )}
 
-          <Button
-            title="Continue"
-            onPress={onConfirm}
-            loading={creating}
-            disabled={!ready || quoting || creating}
-            fullWidth
-          />
+          {swappedBusy && (
+            <Card style={{ gap: spacing.sm }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Spinner size="small" />
+                <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, flex: 1 }}>
+                  {SWAPPED_STAGE_LABELS[swapped.stage]}
+                </Text>
+              </View>
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Keep the app open. If it closes, come back here and tap Finish your sale.
+              </Text>
+            </Card>
+          )}
+          {swapped.stage === 'failed' && swapped.error && (
+            <Card style={{ borderWidth: 1, borderColor: colors.danger }}>
+              <Text variant="bodySm" style={{ color: colors.danger }}>
+                {swapped.error}
+              </Text>
+            </Card>
+          )}
+
+          {swapPick ? (
+            <Button
+              title="Sell"
+              onPress={onSellSwapped}
+              loading={swappedBusy}
+              disabled={!swapReady}
+              fullWidth
+            />
+          ) : (
+            <Button
+              title="Continue"
+              onPress={onConfirm}
+              loading={creating}
+              disabled={!ready || quoting || creating || swappedBusy}
+              fullWidth
+            />
+          )}
           {walletReady && !address && (
             <Text variant="caption" style={{ color: colors.textMuted }}>
               Connect a wallet on this device first — you send the crypto yourself.
@@ -810,6 +1207,14 @@ export default function PaycrestSellScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      <AssetPicker
+        visible={pickerOpen}
+        side="from"
+        holdingsOnly
+        title="Choose what to sell"
+        onSelect={onPick}
+        onClose={() => setPickerOpen(false)}
+      />
       <PickerSheet
         visible={currencyPickerOpen}
         onClose={() => setCurrencyPickerOpen(false)}

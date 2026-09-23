@@ -2,7 +2,7 @@ import {
   getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
   SUI_LIFI_CHAIN_ID, isSignableSourceChain, isNativeTokenAddress, chainsForLeg, sumGasCostsWei,
-  findTokenBySymbolForChain, type LiFiToken,
+  findTokenBySymbolForChain, toLiFiQuote, type LiFiToken,
 } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -295,5 +295,27 @@ describe('buildERC20ApproveCalldata', () => {
     const spender = '0x1234567890123456789012345678901234567890';
     const data = buildERC20ApproveCalldata(spender, '1000000');
     expect(data.toLowerCase()).toContain('1234567890123456789012345678901234567890');
+  });
+});
+
+describe('toLiFiQuote', () => {
+  // The sell intent returns LiFi's raw quote body; the swap executor takes the
+  // app's LiFiQuote. One mapping serves both, so they cannot drift apart.
+  it('maps a raw LiFi quote body the same way getLiFiQuote does', async () => {
+    const raw = {
+      ...MOCK_QUOTE,
+      estimate: { toAmount: '42', approvalAddress: '0xspender', gasCosts: [{ amount: '10', amountUSD: '0.01' }, { amount: '5' }] },
+      action: { fromToken: { address: '0xtoken' } },
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => raw });
+    const fetched = await getLiFiQuote({ fromChain: 56, toChain: 1, fromToken: '0xabc', toToken: '0xdef', fromAmount: '1', fromAddress: '0x123' });
+    const mapped = toLiFiQuote(raw);
+    expect(mapped).toEqual(fetched);
+    expect(mapped).toMatchObject({ toAmount: '42', gasCostWei: '15', approvalAddress: '0xspender', approvalToken: '0xtoken' });
+    expect(mapped.transactionRequest.to).toBe('0xrouter');
+  });
+
+  it('tolerates a missing body rather than throwing', () => {
+    expect(toLiFiQuote(null).toAmount).toBe('0');
   });
 });

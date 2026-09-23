@@ -69,7 +69,7 @@ jest.mock('@/hooks/useWalletHoldings', () => {
     { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
   ];
   // One stable object per set of holdings, as the real hook returns state.
-  const state = { DEFAULT_HOLDINGS, value: { holdings: DEFAULT_HOLDINGS } };
+  const state = { DEFAULT_HOLDINGS, value: { holdings: DEFAULT_HOLDINGS, loading: false } };
   return { __esModule: true, __state: state, useWalletHoldings: () => state.value };
 });
 
@@ -122,10 +122,10 @@ import type { Holding } from '@/services/assetCatalog';
 
 const lifiState = (Lifi as unknown as { __state: { oldApi: boolean } }).__state;
 const holdingsState = (Holdings as unknown as {
-  __state: { DEFAULT_HOLDINGS: Holding[]; value: { holdings: Holding[] } };
+  __state: { DEFAULT_HOLDINGS: Holding[]; value: { holdings: Holding[]; loading: boolean } };
 }).__state;
 /** What the wallet holds for one test; reset before each. */
-const setHoldings = (holdings: Holding[]) => { holdingsState.value = { holdings }; };
+const setHoldings = (holdings: Holding[], loading = false) => { holdingsState.value = { holdings, loading }; };
 
 function textNodes(node: any, out: string[] = []): string[] {
   if (node == null) return out;
@@ -306,4 +306,25 @@ it('offers only the networks she holds a coin on in holdings mode', async () => 
   await pressLabel(tree, 'USDT,');
   expect(text(tree)).not.toContain('choose network');
   expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'USDT', chainId: 56 }), 56);
+});
+
+it('never says she holds nothing while her balances are still loading', async () => {
+  // The majors resolve at once (a warm cache); her balances are still in flight.
+  setHoldings([], true);
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  expect(text(tree)).not.toMatch(/no coins in your wallet/i);
+
+  // Once they land empty, then she is told.
+  setHoldings([], false);
+  await act(async () => {
+    tree.update(<AssetPicker visible side="from" holdingsOnly onSelect={() => {}} onClose={() => {}} />);
+  });
+  await flush();
+  expect(text(tree)).toMatch(/no coins in your wallet/i);
+});
+
+it('does not wait on her balances outside holdings mode', async () => {
+  setHoldings([], true);
+  const { tree } = await open({ side: 'to' });
+  expect(text(tree)).toContain('Stablecoins & major coins');
 });

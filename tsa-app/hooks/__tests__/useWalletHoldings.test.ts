@@ -8,7 +8,13 @@ jest.mock('@/services/chains/btcWallet', () => ({ getBtcAddress: jest.fn(), getB
 jest.mock('@/services/chains/suiWallet', () => ({ getSuiAddress: jest.fn(), getSuiBalances: jest.fn() }));
 
 // eslint-disable-next-line import/first -- jest hoists the mocks above.
-import { holdingFromRow } from '../useWalletHoldings';
+import { holdingFromRow, useWalletHoldings, invalidateWalletHoldings } from '../useWalletHoldings';
+// eslint-disable-next-line import/first
+import React from 'react';
+// eslint-disable-next-line import/first
+import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+// eslint-disable-next-line import/first
+import { getActiveWallet } from '@/services/wallet';
 // eslint-disable-next-line import/first
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 
@@ -55,4 +61,31 @@ it('trusts a non-EVM token only when the API lists it', () => {
 
 it('skips empty balances', () => {
   expect(holdingFromRow(row({ balance: '0' }), true)).toBeNull();
+});
+
+describe('loading', () => {
+  let seen: { holdings: unknown[]; loading: boolean }[] = [];
+  function Probe({ enabled }: { enabled: boolean }) {
+    seen.push(useWalletHoldings(enabled));
+    return null;
+  }
+  beforeEach(() => { seen = []; invalidateWalletHoldings(); });
+
+  it('reports loading from the first render, before the active wallet is even known', async () => {
+    let resolveWallet!: (w: string | null) => void;
+    (getActiveWallet as jest.Mock).mockReturnValue(new Promise(r => { resolveWallet = r; }));
+    let tree!: ReactTestRenderer;
+    await act(async () => { tree = TestRenderer.create(React.createElement(Probe, { enabled: true })); });
+    // Not a single render may say "loaded, holds nothing" while the read is pending.
+    expect(seen.every(s => s.loading)).toBe(true);
+
+    await act(async () => { resolveWallet(null); });
+    expect(seen[seen.length - 1]).toEqual({ holdings: [], loading: false });
+    tree.unmount();
+  });
+
+  it('is not loading while disabled', async () => {
+    await act(async () => { TestRenderer.create(React.createElement(Probe, { enabled: false })); });
+    expect(seen[seen.length - 1].loading).toBe(false);
+  });
 });

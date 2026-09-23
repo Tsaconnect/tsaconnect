@@ -324,7 +324,16 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
   const res = await fetch(`${API_BASE_URL}/swap/lifi/quote?${qs.toString()}`, { headers });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.message || 'Failed to fetch quote');
+  return toLiFiQuote(data);
+}
 
+/**
+ * A raw LiFi quote body as the app's LiFiQuote. Shared by getLiFiQuote and by
+ * anything the server hands a LiFi quote through untouched (a sell intent), so
+ * the swap executor always sees one shape.
+ */
+export function toLiFiQuote(raw: unknown): LiFiQuote {
+  const data = (raw ?? {}) as any;
   // LiFi v1: toAmount lives in estimate, not at the top level
   return {
     toAmount: data.estimate?.toAmount ?? data.toAmount ?? '0',
@@ -410,6 +419,12 @@ export type SwapDeliveryStatus = 'PENDING' | 'DONE' | 'FAILED';
 
 export interface SwapDelivery {
   status: SwapDeliveryStatus;
+  /**
+   * LiFi's qualifier on a DONE: 'COMPLETED' (she got what was quoted),
+   * 'PARTIAL' (a different token landed) or 'REFUNDED' (sent back to her).
+   * DONE alone is not a statement that the recipient got the quoted token.
+   */
+  substatus?: string;
   destTxHash?: string;
   receivedAmount?: string;
 }
@@ -432,7 +447,12 @@ export async function getSwapDelivery(txHash: string): Promise<SwapDelivery> {
     const d = body?.data ?? {};
     const status: SwapDeliveryStatus =
       d.status === 'DONE' || d.status === 'FAILED' ? d.status : 'PENDING';
-    return { status, destTxHash: d.destTxHash, receivedAmount: d.receivedAmount };
+    return {
+      status,
+      ...(typeof d.substatus === 'string' && d.substatus ? { substatus: d.substatus } : {}),
+      destTxHash: d.destTxHash,
+      receivedAmount: d.receivedAmount,
+    };
   } catch {
     return { status: 'PENDING' };
   }
