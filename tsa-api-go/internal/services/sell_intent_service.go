@@ -606,9 +606,11 @@ func (s *SellIntentService) CountUnusedSince(ctx context.Context, userID uuid.UU
 
 // MarkToppedUp is the once-per-intent claim: true iff this caller set
 // topped_up_at, so two concurrent requests cannot both send gas for one sale.
+// Eligibility is re-checked on the row itself: the caller's copy may be stale,
+// and a sale swapped or abandoned since it was loaded must not win the claim.
 func (s *SellIntentService) MarkToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ? AND topped_up_at IS NULL", id).
+		Where("id = ? AND topped_up_at IS NULL AND status = ? AND swap_tx_hash IS NULL", id, models.SellIntentSwapping).
 		Update("topped_up_at", at)
 	if res.Error != nil {
 		return false, res.Error

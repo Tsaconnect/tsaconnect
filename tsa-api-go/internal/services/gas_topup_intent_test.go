@@ -24,8 +24,12 @@ type fakeIntentTopUps struct {
 	toppedToday, unused int64
 	claimed             map[uuid.UUID]bool
 	cleared             int
-	toppedSince         time.Time
-	unusedSince         time.Time
+	// marks counts every MarkToppedUp call. The claim map alone cannot tell
+	// "never claimed" from "claimed, then cleared", so a skip or refusal
+	// path that claims first and releases after would still look clean.
+	marks       int
+	toppedSince time.Time
+	unusedSince time.Time
 }
 
 func (f *fakeIntentTopUps) CountToppedUpSince(_ context.Context, _ uuid.UUID, since time.Time) (int64, error) {
@@ -37,6 +41,7 @@ func (f *fakeIntentTopUps) CountUnusedSince(_ context.Context, _ uuid.UUID, sinc
 	return f.unused, nil
 }
 func (f *fakeIntentTopUps) MarkToppedUp(_ context.Context, id uuid.UUID, _ time.Time) (bool, error) {
+	f.marks++
 	if f.claimed == nil {
 		f.claimed = map[uuid.UUID]bool{}
 	}
@@ -121,8 +126,9 @@ func TestTopUpForIntent_DailyAndUnusedCaps(t *testing.T) {
 	if want := sponsorTestNow.Add(-24 * time.Hour); !unused.unusedSince.Equal(want) {
 		t.Fatalf("unused cap counted since %v, want %v", unused.unusedSince, want)
 	}
-	if len(daily.claimed)+len(unused.claimed) != 0 {
-		t.Fatal("a capped request must not claim the intent")
+	if daily.marks+unused.marks != 0 || daily.cleared+unused.cleared != 0 {
+		t.Fatalf("claim attempts: daily %d unused %d; a capped request must never try to claim the intent",
+			daily.marks, unused.marks)
 	}
 }
 
@@ -210,8 +216,8 @@ func TestTopUpForIntent_SkipsWhenHerBalanceCovers(t *testing.T) {
 	store := &fakeIntentTopUps{}
 	in := intentOn(8453, user)
 	res, err := g.TopUpForIntent(context.Background(), user, in, store)
-	if err != nil || !res.Skipped || store.claimed[in.ID] {
-		t.Fatalf("res = %+v err = %v claimed = %v; want skipped and unclaimed", res, err, store.claimed[in.ID])
+	if err != nil || !res.Skipped || store.marks != 0 || store.cleared != 0 {
+		t.Fatalf("res = %+v err = %v claim attempts = %d; want skipped with no claim ever tried", res, err, store.marks)
 	}
 }
 
@@ -281,8 +287,9 @@ func TestTopUpForIntent_RefusesAboveTheLaneCeiling(t *testing.T) {
 	if _, err := g.TopUpForIntent(context.Background(), user, intentWithoutQuotedWei(8453, user), store); !errors.Is(err, ErrTopUpTooExpensive) {
 		t.Fatalf("fallback path: err = %v, want ErrTopUpTooExpensive", err)
 	}
-	if rig.signer.calls() != 0 || len(store.claimed) != 0 {
-		t.Fatal("a refused top-up must not send or claim")
+	if rig.signer.calls() != 0 || store.marks != 0 || store.cleared != 0 {
+		t.Fatalf("sends = %d claim attempts = %d; a refused top-up must not send or even try to claim",
+			rig.signer.calls(), store.marks)
 	}
 }
 
@@ -443,5 +450,46 @@ func TestRampSponsorship_TopUpForIntentUsesItsChainRegistry(t *testing.T) {
 	res, err := s.TopUpForIntent(context.Background(), user, intentOn(8453, user), &fakeIntentTopUps{})
 	if err != nil || res.AmountWei != intentQuotedTopUpWei {
 		t.Fatalf("res = %+v err = %v; want the quoted top-up sent", res, err)
+	}
+}
+
+// The claim is made against the row as it is AT CLAIM TIME, not the copy the
+// handler loaded: a sale that was swapped or abandoned in between must not
+// win the claim, and must not be sent gas.
+func TestTopUpForIntent_NoClaimForASaleThatMovedOnAfterItWasLoaded(t *testing.T) {
+	for name, moveOn := range map[string]func(*sellIntentRig, *models.RampSellIntent) error{
+		"swapped": func(r *sellIntentRig, in *models.RampSellIntent) error {
+			return r.svc.RecordSwap(context.Background(), in.UserID, in.ID, testSwapHash)
+		},
+		"abandoned": func(r *sellIntentRig, in *models.RampSellIntent) error {
+			return r.svc.Abandon(context.Background(), in.UserID, in.ID)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, user, rig := newIntentTopUpRigWith(t)
+			store := newSellIntentRig(t)
+			stale := intentOn(8453, user) // what the handler loaded: still swapping
+			row := *stale
+			row.SourceAmount, row.FiatCode, row.BankCode, row.AccountNumber = "1", "NGN", "044", "0123456789"
+			if err := store.svc.db.Create(&row).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := moveOn(store, stale); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.TopUpForIntent(context.Background(), user, stale, store.svc); err == nil {
+				t.Fatal("a top-up for a sale that has moved on must fail")
+			}
+			if rig.signer.calls() != 0 {
+				t.Fatalf("sends = %d; no gas may go to a sale that has moved on", rig.signer.calls())
+			}
+			var after models.RampSellIntent
+			if err := store.svc.db.First(&after, "id = ?", stale.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if after.ToppedUpAt != nil {
+				t.Fatal("the claim must not land on a sale that has moved on")
+			}
+		})
 	}
 }
