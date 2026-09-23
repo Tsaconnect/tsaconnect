@@ -46,6 +46,8 @@ type PayCheckoutService struct {
 	orders   payOrders
 	intents  payIntents // nil → converted payments unavailable
 	quoter   payQuoter  // nil → no converted quote
+	pricer   payPricer  // nil (with rate) → crypto payments unavailable; see SetCrypto
+	rate     payRate
 	live     bool
 }
 
@@ -79,17 +81,9 @@ func (s *PayCheckoutService) Quote(ctx context.Context, user *models.User, id uu
 	if s.quoter == nil {
 		return nil, ErrSellUnavailable
 	}
-	v, err := s.payments.CheckoutView(ctx, user, id, s.live)
+	v, err := s.quotable(ctx, user, id, models.PaySettlementFiat)
 	if err != nil {
 		return nil, err
-	}
-	// Only a live payment this user could start right now: not a test payment,
-	// not one already in progress (hers or anyone's), not an expired one.
-	if v.Mode != models.PayModeLive || v.Status != models.PayStatusPending || !v.Payable {
-		return nil, ErrPayNotPayable
-	}
-	if v.SettlementMode != models.PaySettlementFiat {
-		return nil, ErrPayWrongRoute
 	}
 	target, err := s.convertedTarget(ctx, payFiatAmount(v.MerchantNet))
 	if err != nil {
@@ -108,11 +102,28 @@ func (s *PayCheckoutService) Quote(ctx context.Context, user *models.User, id uu
 	return &PayQuote{FromAmount: q.Route.FromAmount, USDCTarget: target.String()}, nil
 }
 
+// quotable is the check both quotes share: a live payment this user could start
+// right now — not a test payment, not one already in progress (hers or
+// anyone's), not an expired one — and one that settles the way the route pays.
+func (s *PayCheckoutService) quotable(ctx context.Context, user *models.User, id uuid.UUID, settlement string) (*PayCheckoutView, error) {
+	v, err := s.payments.CheckoutView(ctx, user, id, s.live)
+	if err != nil {
+		return nil, err
+	}
+	if v.Mode != models.PayModeLive || v.Status != models.PayStatusPending || !v.Payable {
+		return nil, ErrPayNotPayable
+	}
+	if v.SettlementMode != settlement {
+		return nil, ErrPayWrongRoute
+	}
+	return v, nil
+}
+
 // PayDirect opens the payment's payout order for exactly the merchant's net,
 // to the merchant's snapshotted bank, and links it as the payment's one
 // attempt. The customer then funds it with the token she named.
 func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, id uuid.UUID, in PayDirectInput) (*models.PaycrestOrderRecord, error) {
-	p, err := s.begin(ctx, user, id)
+	p, err := s.begin(ctx, user, id, models.PaySettlementFiat)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +158,7 @@ func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User
 	if s.intents == nil {
 		return nil, nil, ErrSellUnavailable
 	}
-	p, err := s.begin(ctx, user, id)
+	p, err := s.begin(ctx, user, id, models.PaySettlementFiat)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -157,7 +168,7 @@ func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User
 		s.release(ctx, p.ID, "released: the swap could not be sized")
 		return nil, nil, err
 	}
-	intent, quote, err := s.intents.Create(ctx, user, CreateSellIntentInput{
+	return s.startIntent(ctx, user, p, CreateSellIntentInput{
 		SourceChainID: in.SourceChainID,
 		SourceToken:   in.SourceToken,
 		SourceAddress: in.SourceAddress,
@@ -165,10 +176,16 @@ func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User
 		BankCode:      p.SettleBankCode,
 		AccountNumber: p.SettleAccountNumber,
 		AccountName:   p.SettleAccountName,
-		PayPaymentID:  &p.ID,
 		PayoutFiat:    fiat,
 		ToAmount:      target.String(),
 	})
+}
+
+// startIntent opens the sell intent for p (the caller has already taken the
+// lock) and links it as the payment's one attempt. Both routes end here.
+func (s *PayCheckoutService) startIntent(ctx context.Context, user *models.User, p *models.PayPayment, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error) {
+	in.PayPaymentID = &p.ID
+	intent, quote, err := s.intents.Create(ctx, user, in)
 	if err != nil {
 		// A failed Create inserts no intent: nothing is signable.
 		s.release(ctx, p.ID, "released: the swap could not be started")
@@ -186,10 +203,169 @@ func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User
 	return intent, quote, nil
 }
 
+// ---- crypto settlement: the merchant is paid a token in their own wallet ----
+
+// payPricer is LiFi's USD price for a token and its decimals.
+// *LiFiQuoteClient fills it.
+type payPricer interface {
+	TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error)
+}
+
+// payRate is the provider's naira-per-USDC sell rate, with no sender fee.
+// *PaycrestQuoteService fills it.
+type payRate interface {
+	ProviderRate(ctx context.Context, fiat string) (*big.Rat, error)
+}
+
+// payCryptoSlippageBps is the swap slippage the request is padded for, so
+// LiFi's toAmountMin (at least toAmount x (1 - slippage)) still covers what
+// the merchant is owed.
+const payCryptoSlippageBps = 50
+
+// ErrPaySameToken is returned when the customer would pay the merchant's own
+// token on the merchant's own chain: a plain transfer, which is not provable as
+// hers (a transfer proof is not bound to its sender), so it is deferred.
+var ErrPaySameToken = errors.New("paying with the store's own token on the same network isn't available yet — pick another token")
+
+// SetCrypto wires the pricing a crypto payment needs. Until it is called,
+// CryptoQuote and PayCrypto answer ErrSellUnavailable and naira payments are
+// untouched. Pass nil interfaces, never typed-nil pointers.
+func (s *PayCheckoutService) SetCrypto(p payPricer, rate payRate) { s.pricer, s.rate = p, rate }
+
+// PayCryptoQuote is what paying a crypto merchant with one token would cost:
+// FromAmount of the source token (its base units) delivers DestAmount of the
+// merchant's token (its base units, DestDecimals decimals) to their wallet.
+type PayCryptoQuote struct {
+	FromAmount   string `json:"fromAmount"`
+	DestAmount   string `json:"destAmount"`
+	DestDecimals int    `json:"destDecimals"`
+}
+
+// payCryptoAmounts sizes a crypto payment, all in big.Rat / big.Int:
+//
+//	owed     = floor(kobo x 10^dec / (100 x rate x price))   what the merchant is credited
+//	toAmount = ceil(owed x 10000 / (10000 - slippage))        what the swap is asked to deliver
+//
+// rate is naira per USDC and price is USD per merchant token, so the owed
+// tokens are worth exactly the merchant's naira net at the provider's rate.
+func payCryptoAmounts(kobo int64, dec int, price, rate *big.Rat) (owed, toAmount *big.Int) {
+	num := new(big.Rat).SetInt(big.NewInt(kobo))
+	num.Mul(num, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dec)), nil)))
+	den := new(big.Rat).Mul(rate, price)
+	den.Mul(den, big.NewRat(100, 1))
+	q := num.Quo(num, den)
+	owed = new(big.Int).Div(q.Num(), q.Denom())
+
+	pad := new(big.Int).Mul(owed, big.NewInt(10_000))
+	d := big.NewInt(10_000 - payCryptoSlippageBps)
+	toAmount, rem := new(big.Int).DivMod(pad, d, new(big.Int))
+	if rem.Sign() != 0 {
+		toAmount.Add(toAmount, big.NewInt(1))
+	}
+	return owed, toAmount
+}
+
+// cryptoTarget prices p's merchant net in the merchant's token. A price or
+// rate that cannot be read is ErrSellUnavailable: better to refuse than to
+// owe the merchant a guess.
+func (s *PayCheckoutService) cryptoTarget(ctx context.Context, p *models.PayPayment) (owed, toAmount *big.Int, dec int, err error) {
+	price, dec, err := s.pricer.TokenPriceUSD(ctx, p.SettleChainID, p.SettleTokenAddress)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("%w: pricing the merchant's token: %v", ErrSellUnavailable, err)
+	}
+	rate, err := s.rate.ProviderRate(ctx, "NGN")
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("%w: reading the provider rate: %v", ErrSellUnavailable, err)
+	}
+	owed, toAmount = payCryptoAmounts(p.MerchantNetKobo, dec, price, rate)
+	if owed.Sign() <= 0 {
+		return nil, nil, 0, fmt.Errorf("%w: the amount is too small to deliver in this token", ErrSellUnavailable)
+	}
+	return owed, toAmount, dec, nil
+}
+
+// paySameToken is the merchant's own token on the merchant's own chain.
+func paySameToken(p *models.PayPayment, in PayConvertedInput) bool {
+	return in.SourceChainID == p.SettleChainID && strings.EqualFold(strings.TrimSpace(in.SourceToken), p.SettleTokenAddress)
+}
+
+func (s *PayCheckoutService) cryptoReady() bool {
+	return s.intents != nil && s.pricer != nil && s.rate != nil
+}
+
+// CryptoQuote prices paying a crypto merchant with one token. Like Quote it
+// locks nothing and creates nothing.
+func (s *PayCheckoutService) CryptoQuote(ctx context.Context, user *models.User, id uuid.UUID, in PayConvertedInput) (*PayCryptoQuote, error) {
+	if s.quoter == nil || !s.cryptoReady() {
+		return nil, ErrSellUnavailable
+	}
+	if _, err := s.quotable(ctx, user, id, models.PaySettlementCrypto); err != nil {
+		return nil, err
+	}
+	p, err := s.payments.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if paySameToken(p, in) {
+		return nil, ErrPaySameToken
+	}
+	owed, toAmount, dec, err := s.cryptoTarget(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	q, err := s.quoter.Quote(ctx, SellQuoteInput{
+		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAddress: in.SourceAddress,
+		WalletAddress: user.WalletAddress, FiatCode: "NGN", ToAmount: toAmount.String(),
+		ToChainID: p.SettleChainID, ToToken: p.SettleTokenAddress, ToAddress: p.SettleWalletAddress, BudgetBps: p.FeeBps,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if q == nil || q.Route == nil {
+		return nil, ErrSellUnavailable
+	}
+	return &PayCryptoQuote{FromAmount: q.Route.FromAmount, DestAmount: owed.String(), DestDecimals: dec}, nil
+}
+
+// PayCrypto opens a delivery sale for the payment: the customer's token is
+// swapped, exact-output, into the merchant's token in the merchant's wallet.
+// No Paycrest leg exists, so the whole platform fee is the round-trip budget.
+// The reconciler proves the delivery on-chain and settles the payment.
+func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, id uuid.UUID, in PayConvertedInput) (*models.RampSellIntent, *SellSwapQuote, error) {
+	if !s.cryptoReady() {
+		return nil, nil, ErrSellUnavailable
+	}
+	p, err := s.begin(ctx, user, id, models.PaySettlementCrypto)
+	if err != nil {
+		return nil, nil, err
+	}
+	if paySameToken(p, in) {
+		s.release(ctx, p.ID, "released: the store's own token on its own network")
+		return nil, nil, ErrPaySameToken
+	}
+	owed, toAmount, _, err := s.cryptoTarget(ctx, p)
+	if err != nil {
+		s.release(ctx, p.ID, "released: the transfer could not be sized")
+		return nil, nil, err
+	}
+	return s.startIntent(ctx, user, p, CreateSellIntentInput{
+		SourceChainID:    in.SourceChainID,
+		SourceToken:      in.SourceToken,
+		SourceAddress:    in.SourceAddress,
+		ToAmount:         toAmount.String(),
+		DestChainID:      p.SettleChainID,
+		DestTokenAddress: p.SettleTokenAddress,
+		DestAddress:      p.SettleWalletAddress,
+		DestAmount:       owed.String(),
+		BudgetBps:        p.FeeBps,
+	})
+}
+
 // begin takes the payment's lock for user and checks the payment is one this
-// service may start. Every refusal after a fresh lock hands it back: nothing
-// has been asked of a provider, so no money can be moving.
-func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uuid.UUID) (*models.PayPayment, error) {
+// service may start, on the route for how it settles (models.PaySettlement*).
+// Every refusal after a fresh lock hands it back: nothing has been asked of a
+// provider, so no money can be moving.
+func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uuid.UUID, settlement string) (*models.PayPayment, error) {
 	p, fresh, err := s.payments.Lock(ctx, user, id, s.live)
 	if err != nil {
 		return nil, err
@@ -203,8 +379,8 @@ func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uu
 		s.release(ctx, p.ID, "released: not a live payment")
 		return nil, ErrPayNotPayable
 	}
-	if p.SettlementMode != models.PaySettlementFiat {
-		s.release(ctx, p.ID, "released: this payment settles in crypto")
+	if p.SettlementMode != settlement {
+		s.release(ctx, p.ID, "released: this payment settles another way")
 		return nil, ErrPayWrongRoute
 	}
 	return p, nil

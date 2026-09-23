@@ -202,7 +202,39 @@ func (s *PayPaymentService) reconcileIntent(ctx context.Context, p *models.PayPa
 			return s.Release(ctx, p.ID, "the swap was never sent")
 		})
 	}
+	if in.DestAddress != "" {
+		return s.reconcileDelivery(ctx, p, &in, age)
+	}
 	return s.reconcileSwap(ctx, p, &in, age)
+}
+
+// reconcileDelivery settles a crypto payment (its intent delivers a token to the
+// merchant's wallet). The chain, not LiFi, says whether the merchant was paid in
+// full: ConfirmDelivery proves it, and only that makes the payment succeed.
+// Anything short of a proof follows the swap's own rules (reconcileSwap).
+func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.PayPayment, in *models.RampSellIntent, age time.Duration) error {
+	if in.Status == models.SellIntentSwapped || in.Status == models.SellIntentDelivered {
+		destTx, err := s.intents.ConfirmDelivery(ctx, in.ID)
+		switch {
+		case err == nil:
+			return s.Succeed(ctx, p.ID, destTx)
+		case errors.Is(err, ErrSwapNotLanded):
+			// Not delivered yet, or never going to be: decided below from LiFi's status.
+		case errors.Is(err, ErrSwapMismatch):
+			// LiFi says the swap is done but the merchant's wallet was not credited
+			// in full, or was credited elsewhere. The value may have reached them,
+			// so the payment is never handed back and the swap is not abandoned.
+			payAlert("delivery_mismatch", p, "intent", in.ID)
+			return s.Fail(ctx, p.ID, "the transfer didn't deliver the full amount — support is reviewing it")
+		case errors.Is(err, ErrSellUnavailable):
+			// No verifier for this chain (yet) is not a verdict on the payment.
+			log.Printf("[tsa-pay] payment %s: cannot prove delivery for intent %s yet: %v; waiting", p.ID, in.ID, err)
+			return nil
+		default:
+			return err
+		}
+	}
+	return s.reconcileSwap(ctx, p, in, age)
 }
 
 // reconcileSwap decides a payment whose swap was sent by what LiFi says became
@@ -227,6 +259,13 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 		return s.endIntentThen(ctx, in, func() error {
 			payAlert("swap_partial", p, "intent", in.ID)
 			return s.Fail(ctx, p.ID, "the swap only partly completed — support is reviewing it")
+		})
+	case status == LiFiStatusDone && in.DestAddress != "":
+		// A delivery LiFi calls done that ConfirmDelivery could not prove, or one
+		// already ended: the merchant may have been paid, so it is never released.
+		return s.endIntentThen(ctx, in, func() error {
+			payAlert("delivery_unproven", p, "intent", in.ID)
+			return s.Fail(ctx, p.ID, "the transfer couldn't be confirmed — support is reviewing it")
 		})
 	case status == LiFiStatusDone:
 		if age <= payLandedNoOrderGrace {

@@ -16,12 +16,13 @@ import (
 
 // payIntents is the slice of *SellIntentService the payment's reconciler and
 // the checkout starter drive: open a pay intent, end one that will never
-// settle, and read what became of its swap. A nil payIntents means converted
-// payments are unavailable (ramp sell is off).
+// settle, read what became of its swap, and prove a crypto delivery on-chain.
+// A nil payIntents means converted payments are unavailable (ramp sell is off).
 type payIntents interface {
 	Create(ctx context.Context, user *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error)
 	AbandonForPay(ctx context.Context, id uuid.UUID) error
 	SwapStatus(ctx context.Context, id uuid.UUID) (*LiFiTransferStatus, error)
+	ConfirmDelivery(ctx context.Context, id uuid.UUID) (destTx string, err error)
 }
 
 const (

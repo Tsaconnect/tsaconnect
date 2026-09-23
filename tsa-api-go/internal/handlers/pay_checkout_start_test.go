@@ -48,6 +48,18 @@ func (f *fakePayStarter) PayConverted(_ context.Context, u *models.User, _ uuid.
 		&services.SellSwapQuote{LiFiQuote: json.RawMessage(`{"id":"q"}`), GasTopUp: true}, nil
 }
 
+func (f *fakePayStarter) CryptoQuote(_ context.Context, u *models.User, _ uuid.UUID, in services.PayConvertedInput) (*services.PayCryptoQuote, error) {
+	f.calls, f.lastUser, f.converted = f.calls+1, u, in
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &services.PayCryptoQuote{FromAmount: "17000000000000000", DestAmount: "33323336332433603252", DestDecimals: 18}, nil
+}
+
+func (f *fakePayStarter) PayCrypto(ctx context.Context, u *models.User, id uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error) {
+	return f.PayConverted(ctx, u, id, in)
+}
+
 const payStartWallet = "0x00000000000000000000000000000000000000aa"
 
 func payStartRouter(t *testing.T, starter payCheckoutStarter) (*gin.Engine, string) {
@@ -63,6 +75,8 @@ func payStartRouter(t *testing.T, starter payCheckoutStarter) (*gin.Engine, stri
 	r.GET("/pay/checkout/:id/quote", h.PayQuote)
 	r.POST("/pay/checkout/:id/direct", h.PayDirect)
 	r.POST("/pay/checkout/:id/converted", h.PayConverted)
+	r.GET("/pay/checkout/:id/crypto-quote", h.PayCryptoQuote)
+	r.POST("/pay/checkout/:id/crypto", h.PayCrypto)
 	return r, "/pay/checkout/" + uuid.New().String()
 }
 
@@ -81,6 +95,8 @@ func TestPayStart_UnwiredRoutesAreServiceUnavailable(t *testing.T) {
 		{"GET", base + "/quote?sourceChainId=56&sourceToken=0x0&sourceAddress=0xa"},
 		{"POST", base + "/direct"},
 		{"POST", base + "/converted"},
+		{"GET", base + "/crypto-quote?sourceChainId=56&sourceToken=0x0&sourceAddress=0xa"},
+		{"POST", base + "/crypto"},
 	} {
 		w := payDo(r, tc.method, tc.path, map[string]any{"chainKey": "base", "token": "USDC"}, nil)
 		got := payDecode(t, w.Body.Bytes())
@@ -169,6 +185,7 @@ func TestPayStart_ErrorsMapToTheirStatusesAndCodes(t *testing.T) {
 		{services.ErrKYCVerificationRequired, http.StatusForbidden, "kyc_verification_required"},
 		{services.ErrKYCLegalNameMissing, http.StatusForbidden, "kyc_legal_name_missing"},
 		{services.ErrPayWrongRoute, http.StatusUnprocessableEntity, ""},
+		{services.ErrPaySameToken, http.StatusUnprocessableEntity, ""},
 		{services.ErrSellRouteTooCostly, http.StatusUnprocessableEntity, ""},
 		{services.ErrSellBadSourceAddress, http.StatusBadRequest, ""},
 		{services.ErrSellUnavailable, http.StatusServiceUnavailable, ""},
@@ -181,6 +198,8 @@ func TestPayStart_ErrorsMapToTheirStatusesAndCodes(t *testing.T) {
 			{"POST", base + "/direct"},
 			{"POST", base + "/converted"},
 			{"GET", base + "/quote?sourceChainId=56&sourceToken=0x0&sourceAddress=0xa"},
+			{"POST", base + "/crypto"},
+			{"GET", base + "/crypto-quote?sourceChainId=56&sourceToken=0x0&sourceAddress=0xa"},
 		} {
 			w := payDo(r, route.method, route.path, map[string]any{"chainKey": "base", "token": "USDC", "sourceChainId": 56, "sourceToken": "0x0", "sourceAddress": "0xa"}, nil)
 			got := payDecode(t, w.Body.Bytes())
@@ -188,6 +207,49 @@ func TestPayStart_ErrorsMapToTheirStatusesAndCodes(t *testing.T) {
 			if w.Code != tc.status || code != tc.code || got["success"] != false {
 				t.Fatalf("%v on %s: %d %s", tc.err, route.path, w.Code, w.Body.String())
 			}
+		}
+	}
+}
+
+func TestPayStart_CryptoReturnsTheSameShapeAsConverted(t *testing.T) {
+	f := &fakePayStarter{}
+	r, base := payStartRouter(t, f)
+	body := map[string]any{"sourceChainId": 1, "sourceToken": "0x0000000000000000000000000000000000000000", "sourceAddress": "0xabc"}
+	w := payDo(r, "POST", base+"/crypto", body, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	data := payDecode(t, w.Body.Bytes())["data"].(map[string]any)
+	if data["intent"].(map[string]any)["id"] != "22222222-2222-2222-2222-222222222222" || data["gasTopUp"] != true || data["lifiQuote"].(map[string]any)["id"] != "q" {
+		t.Fatalf("data = %v", data)
+	}
+	if f.converted.SourceChainID != 1 || f.converted.SourceAddress != "0xabc" || f.lastUser.WalletAddress != payStartWallet {
+		t.Fatalf("input %+v user %+v", f.converted, f.lastUser)
+	}
+	for _, bad := range []map[string]any{{"sourceToken": "0x0", "sourceAddress": "0xa"}, {"sourceChainId": 1, "sourceAddress": "0xa"}, {"sourceChainId": 1, "sourceToken": "0x0"}} {
+		if w := payDo(r, "POST", base+"/crypto", bad, nil); w.Code != http.StatusBadRequest {
+			t.Fatalf("body %v: %d", bad, w.Code)
+		}
+	}
+}
+
+func TestPayStart_CryptoQuoteAnswersWhatTheMerchantReceives(t *testing.T) {
+	f := &fakePayStarter{}
+	r, base := payStartRouter(t, f)
+	w := payDo(r, "GET", base+"/crypto-quote?sourceChainId=1&sourceToken=0x0&sourceAddress=0xabc", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	data := payDecode(t, w.Body.Bytes())["data"].(map[string]any)
+	if data["fromAmount"] != "17000000000000000" || data["destAmount"] != "33323336332433603252" || data["destDecimals"] != float64(18) {
+		t.Fatalf("data = %v", data)
+	}
+	if _, ok := data["usdcTarget"]; ok {
+		t.Fatalf("a crypto quote has no USDC target: %v", data)
+	}
+	for _, q := range []string{"", "?sourceChainId=x&sourceToken=0x0&sourceAddress=0xa", "?sourceChainId=1&sourceAddress=0xa"} {
+		if w := payDo(r, "GET", base+"/crypto-quote"+q, nil, nil); w.Code != http.StatusBadRequest {
+			t.Fatalf("query %q: %d", q, w.Code)
 		}
 	}
 }

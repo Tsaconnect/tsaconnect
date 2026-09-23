@@ -1481,6 +1481,7 @@ func main() {
 		payOrders  *services.PaycrestOrderService
 		paySellers *services.SellIntentService
 		payQuoter  *services.RampSellQuoter
+		payRates   *services.PaycrestQuoteService
 	)
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
@@ -1510,6 +1511,7 @@ func main() {
 		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
 		payOrders = paycrestOrders
+		payRates = paycrestQuotes
 		if rampSponsor := buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
 			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
 			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
@@ -1565,7 +1567,7 @@ func main() {
 	// blockchainService.
 	// mrh may have just been reassigned above (corporate PM onboarding), so
 	// PayMerchants is wired onto whichever handler instance mrh now holds.
-	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter)
+	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter, payRates)
 	if ms := payHandler.MerchantService(); ms != nil {
 		mrh.PayMerchants = ms
 	}

@@ -1246,6 +1246,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			checkout.GET("/:id/quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayQuote)
 			checkout.POST("/:id/direct", middleware.Idempotency(config.DB), payStartLimit, payh.PayDirect)
 			checkout.POST("/:id/converted", middleware.Idempotency(config.DB), payStartLimit, payh.PayConverted)
+			// The crypto-merchant twins: the same limits, the same 503 when unwired.
+			checkout.GET("/:id/crypto-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayCryptoQuote)
+			checkout.POST("/:id/crypto", middleware.Idempotency(config.DB), payStartLimit, payh.PayCrypto)
 		}
 	}
 }

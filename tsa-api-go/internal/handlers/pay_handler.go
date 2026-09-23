@@ -50,6 +50,8 @@ type payCheckoutStarter interface {
 	Quote(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*services.PayQuote, error)
 	PayDirect(ctx context.Context, user *models.User, id uuid.UUID, in services.PayDirectInput) (*models.PaycrestOrderRecord, error)
 	PayConverted(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error)
+	CryptoQuote(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*services.PayCryptoQuote, error)
+	PayCrypto(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error)
 }
 
 // PayHandler serves every TSA Pay HTTP surface: merchant administration,
@@ -595,7 +597,7 @@ type payStartBody struct {
 	WalletAddress string `json:"walletAddress"`
 }
 
-// payStartCaller is the preamble the three naira start routes share: the
+// payStartCaller is the preamble the start and quote routes share: the
 // routes exist only when a starter is wired, then a signed-in caller and a
 // payment id.
 func (h *PayHandler) payStartCaller(c *gin.Context) (*models.User, uuid.UUID, bool) {
@@ -636,19 +638,42 @@ func payConvertedSource(c *gin.Context, user *models.User, chainID int64, token,
 	return services.PayConvertedInput{SourceChainID: chainID, SourceToken: token, SourceAddress: address}, true
 }
 
-// GET /api/pay/checkout/:id/quote?sourceChainId=&sourceToken=&sourceAddress=
-// — what paying with this token would cost. A price: it locks nothing.
-func (h *PayHandler) PayQuote(c *gin.Context) {
+// payQuoteRequest is the preamble both quote routes share: the caller, the
+// payment id and the token she would pay with, from the query string.
+func (h *PayHandler) payQuoteRequest(c *gin.Context) (*models.User, uuid.UUID, services.PayConvertedInput, bool) {
 	user, id, ok := h.payStartCaller(c)
 	if !ok {
-		return
+		return nil, uuid.Nil, services.PayConvertedInput{}, false
 	}
 	chainID, _ := strconv.ParseInt(strings.TrimSpace(c.Query("sourceChainId")), 10, 64)
 	in, ok := payConvertedSource(c, user, chainID, c.Query("sourceToken"), c.Query("sourceAddress"), c.Query("walletAddress"))
+	return user, id, in, ok
+}
+
+// GET /api/pay/checkout/:id/quote?sourceChainId=&sourceToken=&sourceAddress=
+// — what paying with this token would cost. A price: it locks nothing.
+func (h *PayHandler) PayQuote(c *gin.Context) {
+	user, id, in, ok := h.payQuoteRequest(c)
 	if !ok {
 		return
 	}
 	q, err := h.checkout.Quote(c.Request.Context(), user, id, in)
+	if err != nil {
+		payStartFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment quote", q)
+}
+
+// GET /api/pay/checkout/:id/crypto-quote?sourceChainId=&sourceToken=&sourceAddress=
+// — the crypto merchant's twin of /quote: what the token costs and how much of
+// the merchant's own token they receive ({fromAmount, destAmount, destDecimals}).
+func (h *PayHandler) PayCryptoQuote(c *gin.Context) {
+	user, id, in, ok := h.payQuoteRequest(c)
+	if !ok {
+		return
+	}
+	q, err := h.checkout.CryptoQuote(c.Request.Context(), user, id, in)
 	if err != nil {
 		payStartFail(c, err)
 		return
@@ -691,6 +716,19 @@ func (h *PayHandler) PayDirect(c *gin.Context) {
 // and answers the executable quote she signs, in the shape
 // POST /api/paycrest/sell-intents answers.
 func (h *PayHandler) PayConverted(c *gin.Context) {
+	h.startIntent(c, payCheckoutStarter.PayConverted)
+}
+
+// POST /api/pay/checkout/:id/crypto {sourceChainId, sourceToken, sourceAddress}
+// — pay a crypto merchant with any token: starts the delivery sale and answers
+// the same {intent, lifiQuote, gasTopUp} as /converted.
+func (h *PayHandler) PayCrypto(c *gin.Context) {
+	h.startIntent(c, payCheckoutStarter.PayCrypto)
+}
+
+// startIntent is the body of both intent-starting routes: read the token she
+// pays with, start the intent through start, and answer the sell-intent shape.
+func (h *PayHandler) startIntent(c *gin.Context, start func(payCheckoutStarter, context.Context, *models.User, uuid.UUID, services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error)) {
 	user, id, ok := h.payStartCaller(c)
 	if !ok {
 		return
@@ -704,7 +742,7 @@ func (h *PayHandler) PayConverted(c *gin.Context) {
 	if !ok {
 		return
 	}
-	intent, quote, err := h.checkout.PayConverted(c.Request.Context(), user, id, in)
+	intent, quote, err := start(h.checkout, c.Request.Context(), user, id, in)
 	if err != nil {
 		payStartFail(c, err)
 		return
@@ -720,7 +758,7 @@ func (h *PayHandler) PayConverted(c *gin.Context) {
 // exactly as the app already receives them from the sell routes.
 func payStartFail(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, services.ErrPayWrongRoute):
+	case errors.Is(err, services.ErrPayWrongRoute), errors.Is(err, services.ErrPaySameToken):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, services.ErrSellRateMoved):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "rate_moved")

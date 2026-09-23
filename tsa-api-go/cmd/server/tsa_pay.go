@@ -23,11 +23,13 @@ const tsaPayMinMasterKeyBytes = 32
 // matching every other optional integration in this file: a deploy that
 // never sets TSA_PAY_* changes nothing.
 //
-// orders, intents and quoter are the ramp's own services (nil when Paycrest, or
-// swapped sells, are off). A naira payment needs orders; converting another
-// token into its USDC also needs intents and the quoter. With no orders the
-// start routes stay unwired and answer 503; with orders but no intents, direct
-// payments work and converted ones answer "unavailable".
+// orders, intents, quoter and rates are the ramp's own services (nil when
+// Paycrest, or swapped sells, are off). A naira payment needs orders; converting
+// another token into its USDC also needs intents and the quoter; paying a crypto
+// merchant needs those plus rates (the provider rate its amount is sized from).
+// With no orders the start routes stay unwired and answer 503; with orders but
+// no intents, direct payments work and converted or crypto ones answer
+// "unavailable".
 //
 // When live, it also registers the two background workers TSA Pay needs to
 // make any progress on its own: tsa-pay-webhooks (delivers signed events to
@@ -36,7 +38,8 @@ const tsaPayMinMasterKeyBytes = 32
 // nothing else ever drives them — a missed tick is simply caught up by the
 // next one (see internal/jobs's package doc on idempotent workers).
 func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler,
-	orders *services.PaycrestOrderService, intents *services.SellIntentService, quoter *services.RampSellQuoter) *handlers.PayHandler {
+	orders *services.PaycrestOrderService, intents *services.SellIntentService, quoter *services.RampSellQuoter,
+	rates *services.PaycrestQuoteService) *handlers.PayHandler {
 	if !cfg.TSAPayEnabled {
 		log.Printf("[tsa-pay] dormant: TSA_PAY_ENABLED is not set")
 		return nil
@@ -62,7 +65,13 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
 	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
-	if checkout := buildPayCheckout(payments, orders, intents, quoter, cfg.TSAPayLiveEnabled); checkout != nil {
+	// LiFi prices the merchant's token; it is only needed where a route to a
+	// crypto merchant can exist at all.
+	var pricer *services.LiFiQuoteClient
+	if quoter != nil {
+		pricer = services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
+	}
+	if checkout := buildPayCheckout(payments, orders, intents, quoter, pricer, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}
 
@@ -71,11 +80,13 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	return handler
 }
 
-// buildPayCheckout wires the naira start path, or returns nil (the routes then
-// answer 503). The nil checks are explicit because a nil *SellIntentService
-// stored in an interface would read as wired.
+// buildPayCheckout wires the start path, or returns nil (the routes then answer
+// 503). The nil checks are explicit because a nil *SellIntentService stored in
+// an interface would read as wired. Crypto payments are switched on only when
+// every piece they need exists; naira payments never depend on them.
 func buildPayCheckout(payments *services.PayPaymentService, orders *services.PaycrestOrderService,
-	intents *services.SellIntentService, quoter *services.RampSellQuoter, live bool) *services.PayCheckoutService {
+	intents *services.SellIntentService, quoter *services.RampSellQuoter,
+	pricer *services.LiFiQuoteClient, rates *services.PaycrestQuoteService, live bool) *services.PayCheckoutService {
 	if orders == nil {
 		return nil
 	}
@@ -83,5 +94,9 @@ func buildPayCheckout(payments *services.PayPaymentService, orders *services.Pay
 		return services.NewPayCheckoutService(payments, orders, nil, nil, live)
 	}
 	payments.SetIntents(intents)
-	return services.NewPayCheckoutService(payments, orders, intents, quoter, live)
+	checkout := services.NewPayCheckoutService(payments, orders, intents, quoter, live)
+	if pricer != nil && rates != nil {
+		checkout.SetCrypto(pricer, rates)
+	}
+	return checkout
 }
