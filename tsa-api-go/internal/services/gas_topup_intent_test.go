@@ -30,6 +30,16 @@ type fakeIntentTopUps struct {
 	marks       int
 	toppedSince time.Time
 	unusedSince time.Time
+	// recorded is what RecordTopUp was told was sent, per intent.
+	recorded map[uuid.UUID][2]string
+}
+
+func (f *fakeIntentTopUps) RecordTopUp(_ context.Context, id uuid.UUID, txHash, amountWei string) error {
+	if f.recorded == nil {
+		f.recorded = map[uuid.UUID][2]string{}
+	}
+	f.recorded[id] = [2]string{txHash, amountWei}
+	return nil
 }
 
 func (f *fakeIntentTopUps) CountToppedUpSince(_ context.Context, _ uuid.UUID, since time.Time) (int64, error) {
@@ -359,6 +369,75 @@ func TestTopUpForIntent_KeepsTheClaimWhenTheReceiptIsSlow(t *testing.T) {
 	}
 	if !store.claimed[in.ID] || store.cleared != 0 {
 		t.Fatal("an unconfirmed top-up must keep the claim")
+	}
+}
+
+// ─── The trail: what a top-up sent is written down ────────────────────────
+//
+// The order path writes a sponsorship row with the tx hash and amount; a
+// sale's top-up used to leave only topped_up_at, so platform gas spent on
+// sells was invisible to any reconciliation that reads the database.
+
+func TestTopUpForIntent_RecordsTheHashAndTheAmountItSent(t *testing.T) {
+	g, user, rig := newIntentTopUpRigWith(t)
+	rig.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(23_456_789_000_000) // only the shortfall is sent
+	store := &fakeIntentTopUps{}
+	in := intentOn(8453, user)
+	res, err := g.TopUpForIntent(context.Background(), user, in, store)
+	if err != nil {
+		t.Fatalf("TopUpForIntent: %v", err)
+	}
+	if got := store.recorded[in.ID]; got != [2]string{res.TxHash, "100000000000000"} || res.TxHash == "" {
+		t.Fatalf("recorded %v, want the sent tx %q and the 100_000 gwei actually sent", got, res.TxHash)
+	}
+}
+
+// Nothing sent, nothing recorded: a skip, and a broadcast with no hash to
+// write down (its claim is kept, which is what stops a second one).
+func TestTopUpForIntent_RecordsNothingItDidNotSend(t *testing.T) {
+	t.Run("her balance covers it", func(t *testing.T) {
+		g, user, rig := newIntentTopUpRigWith(t)
+		rig.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(1_000_000_000_000_000_000)
+		store := &fakeIntentTopUps{}
+		if res, err := g.TopUpForIntent(context.Background(), user, intentOn(8453, user), store); err != nil || !res.Skipped {
+			t.Fatalf("res = %+v err = %v", res, err)
+		}
+		if len(store.recorded) != 0 {
+			t.Fatalf("recorded %v for a skipped top-up", store.recorded)
+		}
+	})
+	t.Run("the broadcast is uncertain", func(t *testing.T) {
+		g, user, rig := newIntentTopUpRigWith(t)
+		rig.signer.err = errors.New("rpc timeout")
+		store := &fakeIntentTopUps{}
+		if _, err := g.TopUpForIntent(context.Background(), user, intentOn(8453, user), store); !errors.Is(err, ErrSponsorshipInProgress) {
+			t.Fatalf("err = %v", err)
+		}
+		if len(store.recorded) != 0 {
+			t.Fatalf("recorded %v with no tx hash to record", store.recorded)
+		}
+	})
+}
+
+// End to end against the real store: the sale's own row carries the trail.
+func TestTopUpForIntent_LeavesTheTrailOnTheSalesRow(t *testing.T) {
+	g, user, _ := newIntentTopUpRigWith(t)
+	sale := newSellIntentRig(t)
+	in := intentOn(8453, user)
+	in.SourceAmount, in.FiatCode, in.BankCode, in.AccountNumber = "1", "NGN", "044", "0123456789"
+	if err := sale.svc.db.Create(in).Error; err != nil {
+		t.Fatal(err)
+	}
+	res, err := g.TopUpForIntent(context.Background(), user, in, sale.svc)
+	if err != nil {
+		t.Fatalf("TopUpForIntent: %v", err)
+	}
+	var row models.RampSellIntent
+	if err := sale.svc.db.First(&row, "id = ?", in.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.TopUpTxHash != res.TxHash || row.TopUpWei != intentQuotedTopUpWei || row.ToppedUpAt == nil {
+		t.Fatalf("row tx=%q wei=%q topped=%v; want %q, %s and the claim", row.TopUpTxHash, row.TopUpWei, row.ToppedUpAt, res.TxHash, intentQuotedTopUpWei)
 	}
 }
 

@@ -579,6 +579,24 @@ func TestPaycrestCreateSellForToken_OneLiveSellPerUser(t *testing.T) {
 	}
 }
 
+// What she is owed is computed the way her quote was — exactly, never through
+// a float64. 1.01 USDC at 1492.50 is ₦1507.425: the quote showed her 1507.43,
+// and float64 arithmetic lands just under the half and says 1507.42.
+func TestPaycrestCreateSellForToken_OwesTheKoboHerQuoteShowed(t *testing.T) {
+	r := newSellIntentRig(t)
+	order, err := r.svc.orders.CreateSellForToken(context.Background(), PaycrestSellRequest{
+		UserID: r.user.ID, WalletAddress: r.user.WalletAddress, FiatCode: "NGN",
+		ChainKey: rampSettlementChainKey, Token: rampSettlementToken,
+		BankCode: "044", AccountNo: "0123456789"}, "1.01", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := new(big.Rat).Mul(usdcRat(big.NewInt(1_010000)), big.NewRat(149250, 100)).FloatString(2)
+	if order.FiatAmount != "1507.43" || order.FiatAmount != quoted {
+		t.Fatalf("fiat = %s, want %s — the figure her quote was priced at", order.FiatAmount, quoted)
+	}
+}
+
 // §5.5: a swap that failed, or was refunded or only partly delivered, is a
 // terminal answer with LiFi's substatus — not "still swapping" forever, and
 // not a mismatch alarm.
@@ -594,6 +612,11 @@ func TestSellIntent_OpenOrderSurfacesAFailedSwap(t *testing.T) {
 			_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
 			if !errors.Is(err, ErrSwapFailed) {
 				t.Fatalf("err = %v, want ErrSwapFailed", err)
+			}
+			// The outcome travels as data, not only inside the message.
+			var ended *SwapEndedShortError
+			if !errors.As(err, &ended) || ended.Status != r.status.st.Status || ended.Substatus != r.status.st.Substatus {
+				t.Fatalf("err = %#v, want SwapEndedShortError{%s, %s}", err, r.status.st.Status, r.status.st.Substatus)
 			}
 			if r.client.offrampCalls != 0 {
 				t.Fatal("a failed swap reached Paycrest")

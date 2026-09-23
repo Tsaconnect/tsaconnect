@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -830,13 +831,18 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 	if err != nil {
 		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
 	}
-	rate, ok := parsePositiveDecimal(venue.Rate)
-	if !ok {
+	// What she is actually owed: the tokens the chain proved, at the rate the
+	// venue just quoted. Never the other way round, and never through a
+	// float64 — fiatAt rounds it exactly the way her quote was rounded.
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(venue.Rate))
+	if _, plain := parsePositiveDecimal(venue.Rate); !ok || !plain {
 		return nil, fmt.Errorf("paycrest: unusable sell rate %q", venue.Rate)
 	}
-	// What she is actually owed: the tokens the chain proved, at the rate the
-	// venue just quoted. Never the other way round.
-	fiatAmount := strconv.FormatFloat(amount*rate, 'f', 2, 64)
+	tokens, ok := new(big.Rat).SetString(strings.TrimSpace(tokenAmount))
+	if !ok {
+		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)
+	}
+	fiatAmount := fiatAt(tokens, rate)
 
 	return s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
 }

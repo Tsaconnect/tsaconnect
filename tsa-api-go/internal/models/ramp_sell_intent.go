@@ -83,10 +83,17 @@ type RampSellIntent struct {
 	LandedUSDC      string     `gorm:"size:40" json:"landedUsdc,omitempty"`
 	PaycrestOrderID *uuid.UUID `gorm:"type:uuid" json:"paycrestOrderId,omitempty"`
 	ToppedUpAt      *time.Time `json:"-"`
-	Status          string     `gorm:"size:16;not null;index" json:"status"`
-	Error           string     `gorm:"size:512" json:"error,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	// TopUpTxHash / TopUpWei are the source-chain gas top-up actually sent
+	// for this sale: its transaction and the wei it moved (the shortfall, not
+	// the budget). The order path's sponsorship row carries the same two
+	// figures; these are the sell side's, for reconciling platform gas.
+	// Empty while nothing has been sent, and after a broadcast whose outcome
+	// was unknown (topped_up_at is still set then).
+	TopUpTxHash string    `gorm:"size:128" json:"-"`
+	TopUpWei    string    `gorm:"size:80" json:"-"`
+	Status      string    `gorm:"size:16;not null;index" json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 func (i *RampSellIntent) BeforeCreate(tx *gorm.DB) error {

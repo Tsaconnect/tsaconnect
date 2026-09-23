@@ -230,6 +230,32 @@ func (h *PaycrestHandler) sellIntentTarget(c *gin.Context) (*models.User, uuid.U
 	return user, id, true
 }
 
+// The machine codes a sale's outcome carries. The app decides "wait and ask
+// again" versus "this sale is over, and how" on these, never on the message,
+// which is copy and free to change.
+const (
+	sellCodeSwapPending   = "swap_pending"   // LiFi has not reported the swap done: wait
+	sellCodePayoutOpening = "payout_opening" // another request is opening the payout: wait
+	sellCodeSwapFailed    = "swap_failed"    // terminal: the swap failed, her tokens never left
+	sellCodeSwapRefunded  = "swap_refunded"  // terminal: refunded, her tokens are coming back
+	sellCodeSwapPartial   = "swap_partial"   // terminal: she got a different token than quoted
+)
+
+// swapEndedCode names how a terminal swap ended. A FAILED status is failed
+// whatever its qualifier; DONE ends short only as REFUNDED or PARTIAL.
+func swapEndedCode(err error) string {
+	var ended *services.SwapEndedShortError
+	if errors.As(err, &ended) && ended.Status == services.LiFiStatusDone {
+		switch ended.Substatus {
+		case services.LiFiSubstatusRefunded:
+			return sellCodeSwapRefunded
+		case services.LiFiSubstatusPartial:
+			return sellCodeSwapPartial
+		}
+	}
+	return sellCodeSwapFailed
+}
+
 // sellIntentError maps the service's sentinels. The distinctions matter to the
 // app's screen: "still swapping" is a wait, "doesn't match" is a dead end she
 // needs help with, and "already selling" comes with the sale she is already in
@@ -243,14 +269,14 @@ func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *model
 			"data": gin.H{"intent": open},
 		})
 	case errors.Is(err, services.ErrSwapNotLanded):
-		utils.ErrorResponse(c, http.StatusConflict, "Still swapping — try again in a moment")
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Still swapping — try again in a moment", sellCodeSwapPending)
 	case errors.Is(err, services.ErrSellIntentOrdering):
 		// Another request is opening this payout: a wait, like "still swapping".
-		utils.ErrorResponse(c, http.StatusConflict, "Opening your payout — try again in a moment")
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Opening your payout — try again in a moment", sellCodePayoutOpening)
 	case errors.Is(err, services.ErrSwapFailed):
 		// Terminal (§5.5), with LiFi's own reason: whatever did not land is
 		// in or back in her wallet, and this sale can be abandoned.
-		utils.ErrorResponse(c, http.StatusConflict, err.Error()+" — nothing was sold; check your wallet")
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error()+" — nothing was sold; check your wallet", swapEndedCode(err))
 	case errors.Is(err, services.ErrSwapMismatch):
 		utils.ErrorResponse(c, http.StatusConflict, "This swap doesn't match your sale")
 	case errors.Is(err, services.ErrSellIntentNotFound):

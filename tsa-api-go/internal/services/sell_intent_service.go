@@ -325,7 +325,7 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 	// boundToIntent still demands COMPLETED; this only names the outcome.
 	if st.Status == LiFiStatusFailed ||
 		(st.Status == LiFiStatusDone && (st.Substatus == LiFiSubstatusRefunded || st.Substatus == LiFiSubstatusPartial)) {
-		return nil, fmt.Errorf("%w (%s)", ErrSwapFailed, lifiOutcome(st))
+		return nil, &SwapEndedShortError{Status: st.Status, Substatus: st.Substatus}
 	}
 	if st.Status != LiFiStatusDone {
 		return nil, ErrSwapNotLanded
@@ -444,6 +444,17 @@ func (s *SellIntentService) lostClaim(ctx context.Context, userID, id uuid.UUID)
 func (s *SellIntentService) claimIsStale(in *models.RampSellIntent) bool {
 	return in.UpdatedAt.Before(s.now().Add(-sellIntentClaimStale))
 }
+
+// SwapEndedShortError is ErrSwapFailed with how LiFi says the swap ended
+// (§5.5), so a caller can tell a refund from a partial fill without reading
+// the message. errors.Is(err, ErrSwapFailed) still holds.
+type SwapEndedShortError struct{ Status, Substatus string }
+
+func (e *SwapEndedShortError) Error() string {
+	return fmt.Sprintf("%s (%s)", ErrSwapFailed, lifiOutcome(&LiFiTransferStatus{Status: e.Status, Substatus: e.Substatus}))
+}
+
+func (e *SwapEndedShortError) Unwrap() error { return ErrSwapFailed }
 
 // lifiOutcome is LiFi's own description of how a swap ended, for §5.5.
 func lifiOutcome(st *LiFiTransferStatus) string {
@@ -665,6 +676,13 @@ func (s *SellIntentService) ClearToppedUp(ctx context.Context, id uuid.UUID) err
 	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ?", id).
 		Update("topped_up_at", nil).Error
+}
+
+// RecordTopUp writes down the top-up a claimed sale was actually sent.
+func (s *SellIntentService) RecordTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
+	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei}).Error
 }
 
 // load reads one intent BY ID AND OWNER. Never by id alone: every step of a

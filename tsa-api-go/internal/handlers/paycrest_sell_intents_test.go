@@ -51,6 +51,9 @@ func (s *stubSellIntents) MarkToppedUp(context.Context, uuid.UUID, time.Time) (b
 	return true, nil
 }
 func (s *stubSellIntents) ClearToppedUp(context.Context, uuid.UUID) error { return nil }
+func (s *stubSellIntents) RecordTopUp(context.Context, uuid.UUID, string, string) error {
+	return nil
+}
 
 func (s *stubSellIntents) Create(_ context.Context, user *models.User, in services.CreateSellIntentInput) (*models.RampSellIntent, *services.SellSwapQuote, error) {
 	s.last, s.lastUser = in, user
@@ -210,6 +213,48 @@ func TestSellIntentRoutes_MapTheServiceSentinels(t *testing.T) {
 			h.OpenSellIntentOrder(c)
 			if w.Code != tc.want {
 				t.Fatalf("code = %d, want %d (body %s)", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+// The app decides wait-versus-terminal on the response's code, not its copy:
+// every outcome it acts on carries one, and the message stays what it was for
+// an app build that still reads the text.
+func TestSellIntentRoutes_NameEachOutcomeWithACode(t *testing.T) {
+	ended := func(status, sub string) error { return &services.SwapEndedShortError{Status: status, Substatus: sub} }
+	for _, tc := range []struct {
+		name, code, message string
+		err                 error
+	}{
+		{"still swapping", "swap_pending", "Still swapping — try again in a moment", services.ErrSwapNotLanded},
+		{"payout being opened", "payout_opening", "Opening your payout — try again in a moment", services.ErrSellIntentOrdering},
+		{"failed", "swap_failed", "your swap didn't complete (FAILED) — nothing was sold; check your wallet",
+			ended(services.LiFiStatusFailed, "")},
+		{"failed with a qualifier", "swap_failed",
+			"your swap didn't complete (FAILED/NOT_PROCESSABLE_REFUND_NEEDED) — nothing was sold; check your wallet",
+			ended(services.LiFiStatusFailed, "NOT_PROCESSABLE_REFUND_NEEDED")},
+		{"refunded", "swap_refunded", "your swap didn't complete (DONE/REFUNDED) — nothing was sold; check your wallet",
+			ended(services.LiFiStatusDone, services.LiFiSubstatusRefunded)},
+		{"partial", "swap_partial", "your swap didn't complete (DONE/PARTIAL) — nothing was sold; check your wallet",
+			ended(services.LiFiStatusDone, services.LiFiSubstatusPartial)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := &models.User{ID: uuid.New(), WalletAddress: sellSwapUserWallet}
+			h := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{err: tc.err})
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/paycrest/sell-intents/x/order", nil)
+			c.Params = gin.Params{{Key: "id", Value: uuid.NewString()}}
+			c.Set("user", user)
+			h.OpenSellIntentOrder(c)
+			var body struct{ Code, Message string }
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusConflict || body.Code != tc.code || body.Message != tc.message {
+				t.Fatalf("%d %+v, want 409 code %q message %q", w.Code, body, tc.code, tc.message)
 			}
 		})
 	}

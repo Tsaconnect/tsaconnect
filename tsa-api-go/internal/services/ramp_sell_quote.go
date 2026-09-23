@@ -447,7 +447,7 @@ func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat string, usdc *big
 		return fmt.Errorf("%w: unusable sell rate %q", ErrSellUnavailable, venue.Rate)
 	}
 	out.Rate = venue.Rate
-	out.FiatEstimate = new(big.Rat).Mul(usdcRat(usdc), rate).FloatString(2)
+	out.FiatEstimate = fiatAt(usdcRat(usdc), rate)
 	return nil
 }
 
@@ -455,6 +455,13 @@ func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat string, usdc *big
 // Derived from the chain id would be nicer, but Paycrest's venues are keyed
 // by our chain key and Base is the one settlement leg — see §3.2.
 const rampSettlementChainKey = "base"
+
+// fiatAt is tokens × rate in fiat, to the kobo (half away from zero). The one
+// way a sell's naira figure is computed — the estimate she is quoted and the
+// amount the order then owes her — so the two cannot differ by rounding.
+func fiatAt(tokens, rate *big.Rat) string {
+	return new(big.Rat).Mul(tokens, rate).FloatString(2)
+}
 
 // usdcRat is a 6dp USDC amount as an exact rational. Money is never floated
 // through a float64 here: 9.98 × 1492.50 has to be 14895.15, not 14895.1499…

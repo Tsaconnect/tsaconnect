@@ -154,13 +154,15 @@ func (g *GasTopUp) TopUp(ctx context.Context, user *models.User, orderID uuid.UU
 // SetChainRegistry lets TopUpForIntent find the lane for a chain id.
 func (g *GasTopUp) SetChainRegistry(chains *BlockchainService) { g.chains = chains }
 
-// IntentTopUpStore is the sell-intent side of a top-up: the per-user caps and
-// the once-per-intent claim on topped_up_at. *SellIntentService fills it.
+// IntentTopUpStore is the sell-intent side of a top-up: the per-user caps,
+// the once-per-intent claim on topped_up_at, and the record of what was sent.
+// *SellIntentService fills it.
 type IntentTopUpStore interface {
 	CountToppedUpSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error)
 	CountUnusedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error)
 	MarkToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error)
 	ClearToppedUp(ctx context.Context, id uuid.UUID) error
+	RecordTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error
 }
 
 // TopUpForIntent sends her the source-chain gas to sign a sale's swap when she
@@ -254,6 +256,16 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 			defer cancel()
 			if err := store.ClearToppedUp(clearCtx, intent.ID); err != nil {
 				log.Printf("[ramp-sponsor] ALERT ramp_intent_topup_clear_failed_total=1 intent=%s err=%v", intent.ID, err)
+			}
+		},
+		// The same trail the order path leaves on its sponsorship row. A
+		// failed write loses the record, never the gas or the claim.
+		record: func(txHash, amountWei string) {
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := store.RecordTopUp(recordCtx, intent.ID, txHash, amountWei); err != nil {
+				log.Printf("[ramp-sponsor] ALERT ramp_intent_topup_record_failed_total=1 intent=%s tx=%s wei=%s err=%v",
+					intent.ID, txHash, amountWei, err)
 			}
 		},
 	})
