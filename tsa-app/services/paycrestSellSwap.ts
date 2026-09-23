@@ -9,7 +9,7 @@
 // numbers and hands back the LiFi quote to sign. Auth and the idempotency key
 // on every POST come from paycrestRequest.
 
-import { paycrestRequest, type PaycrestOrder } from './paycrestApi';
+import { PaycrestError, paycrestRequest, type PaycrestOrder } from './paycrestApi';
 import { toLiFiQuote, type LiFiQuote } from './lifi';
 
 export type SellIntent = {
@@ -23,6 +23,8 @@ export type SellIntent = {
   quotedFiat: string;
   swapTxHash?: string;
   paycrestOrderId?: string;
+  /** ISO time of the sale's last step — how long it has sat where it is. */
+  updatedAt?: string;
 };
 
 export type SellSwapQuote = {
@@ -35,6 +37,8 @@ export type SellSwapQuote = {
   /** An estimate — show it with `~`. */
   fiatEstimate: string;
   rate: string;
+  /** The server priced a source-chain gas top-up into this quote. */
+  gasTopUp?: boolean;
 };
 
 type RawSellSwapQuote = Omit<SellSwapQuote, 'quote'> & { lifiQuote: unknown };
@@ -77,8 +81,8 @@ export async function createSellIntent(input: {
   accountNumber: string;
   accountName?: string;
   currency?: string;
-}): Promise<{ intent: SellIntent; quote: LiFiQuote }> {
-  const data = await paycrestRequest<{ intent: SellIntent; lifiQuote: unknown }>('/sell-intents', {
+}): Promise<{ intent: SellIntent; quote: LiFiQuote; gasTopUp: boolean }> {
+  const data = await paycrestRequest<{ intent: SellIntent; lifiQuote: unknown; gasTopUp?: boolean }>('/sell-intents', {
     method: 'POST',
     body: JSON.stringify({
       sourceChainId: input.sourceChainId,
@@ -91,13 +95,32 @@ export async function createSellIntent(input: {
       ...(input.currency ? { currency: input.currency } : {}),
     }),
   });
-  return { intent: data.intent, quote: toLiFiQuote(data.lifiQuote) };
+  // gasTopUp is the server's verdict, priced into the budget this sale was
+  // admitted on. The app never re-derives it from a balance of its own.
+  return { intent: data.intent, quote: toLiFiQuote(data.lifiQuote), gasTopUp: data.gasTopUp === true };
 }
 
 /** Her unfinished sale, if any — what "Finish your sale" resumes. */
 export async function getOpenSellIntent(): Promise<SellIntent | null> {
   const data = await paycrestRequest<{ intent: SellIntent | null } | null>('/sell-intents/open');
   return data?.intent ?? null;
+}
+
+/**
+ * Whether swapped sells are switched on for this server, and her unfinished
+ * sale if they are. The sale routes are registered only with
+ * RAMP_CONVERSION_SELL, so a 404 here is the capability answer "off" — not a
+ * missing sale, and not the "Naira transfers are unavailable" outage
+ * paycrestRequest would otherwise word it as. Any other failure is thrown: it
+ * says nothing either way.
+ */
+export async function getSwappedSellState(): Promise<{ enabled: boolean; intent: SellIntent | null }> {
+  try {
+    return { enabled: true, intent: await getOpenSellIntent() };
+  } catch (e) {
+    if (e instanceof PaycrestError && e.status === 404) return { enabled: false, intent: null };
+    throw e;
+  }
 }
 
 /** Tell the server which on-chain swap this sale is. */

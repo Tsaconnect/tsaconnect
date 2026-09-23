@@ -47,7 +47,7 @@ import {
 } from '@/components/ui';
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
 import AssetPicker from '@/components/assets/AssetPicker';
-import { useSwappedSell, type SellStage } from '@/hooks/useSwappedSell';
+import { canCancelSale, useSwappedSell, type SellStage } from '@/hooks/useSwappedSell';
 import { useWalletHoldings } from '@/hooks/useWalletHoldings';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
@@ -93,8 +93,8 @@ import {
   type WalletBalanceWithChain,
 } from '@/services/walletApi';
 import {
-  getOpenSellIntent,
   getSellSwapQuote,
+  getSwappedSellState,
   type SellIntent,
   type SellSwapQuote,
 } from '@/services/paycrestSellSwap';
@@ -110,7 +110,7 @@ import { getSolanaAddress } from '@/services/chains/solanaWallet';
 import { getBtcAddress } from '@/services/chains/btcWallet';
 import { getSuiAddress } from '@/services/chains/suiWallet';
 import { nativeGasReserve } from '@/services/wallet';
-import { spendableNative } from '@/services/gasReserve';
+import { SOLANA_SWAP_RESERVE_LAMPORTS, spendableNative } from '@/services/gasReserve';
 import { CHAINS, getChainByChainId, type ChainKey } from '@/constants/chains';
 
 const QUOTE_DEBOUNCE_MS = 450;
@@ -286,6 +286,11 @@ export default function PaycrestSellScreen() {
   const swappedBusy = !!SWAPPED_STAGE_LABELS[swapped.stage];
   const { holdings, loading: holdingsLoading } = useWalletHoldings(!!swapPick);
   const [openIntent, setOpenIntent] = useState<SellIntent | null>(null);
+  // Whether this server sells any token by swapping it first. Off until the
+  // server says so: with RAMP_CONVERSION_SELL unset every non-stable pick
+  // would fail at its quote, so the screen stays the stablecoin sale it was.
+  const [swappedSellOn, setSwappedSellOn] = useState(false);
+  const [cancellingSale, setCancellingSale] = useState(false);
 
   // An offramp expires exactly like an onramp does. Sending after the window
   // closes puts crypto at a provider address for an order that no longer
@@ -404,12 +409,21 @@ export default function PaycrestSellScreen() {
 
   // ── The swapped sale ───────────────────────────────────────────────────
 
-  // Her unfinished sale, if any, so "Finish your sale" can pick it up. A 404
-  // (swapped sells switched off) is simply no sale.
+  // Her unfinished sale, if any, so "Finish your sale" can pick it up — and
+  // whether swapped sells exist at all: a 404 means the routes are not
+  // registered, so no swapped-sell UI is shown. Any other failure proves
+  // nothing either way and leaves the last answer standing.
   const refreshOpenIntent = useCallback(() => {
-    getOpenSellIntent()
-      .then(setOpenIntent)
-      .catch(() => setOpenIntent(null));
+    getSwappedSellState()
+      .then(({ enabled, intent }) => {
+        setSwappedSellOn(enabled);
+        setOpenIntent(intent);
+      })
+      .catch((e) => {
+        // A server that answered at all has the routes; only 404 says it doesn't.
+        if (e instanceof PaycrestError) setSwappedSellOn(true);
+        setOpenIntent(null);
+      });
   }, []);
   useEffect(() => {
     if (address) refreshOpenIntent();
@@ -486,6 +500,15 @@ export default function PaycrestSellScreen() {
         setPickerOpen(false);
         return;
       }
+      // Nothing can sell from Bitcoin or Sui yet (the server refuses them).
+      // Said here, at the pick, rather than as a failed quote later.
+      if (isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId)) {
+        Alert.alert(
+          'Not supported yet',
+          `Selling ${token.symbol} from ${networkName(chainId)} isn't supported yet. Pick a coin on another network.`,
+        );
+        return;
+      }
       // Deriving a non-EVM address can throw (a locked key store); to her
       // that is the same as not having one.
       const sourceAddress = await sourceAddressFor(chainId, address).catch(() => null);
@@ -546,6 +569,9 @@ export default function PaycrestSellScreen() {
         gasCostWei: toBig(swapQuote?.quote.gasCostWei),
       });
       if (reserve != null) units = spendableNative(units, reserve);
+    } else if (pickHolding.native && isSolanaLiFiChain(chainId)) {
+      // Selling SOL pays the swap's fee out of the same SOL.
+      units = spendableNative(units, SOLANA_SWAP_RESERVE_LAMPORTS);
     }
     setSwapAmount(ethers.formatUnits(units, token.decimals));
   }, [swapPick, pickHolding, swapQuote]);
@@ -562,6 +588,35 @@ export default function PaycrestSellScreen() {
       currency: currencyCode,
     });
   }, [swapPick, address, bank, accountNo, accountName, swapAmount, currencyCode, swapped]);
+
+  // A sale stuck before its payout opened (a lost reply, or a swap hash that
+  // someone else recorded first) would otherwise block every new sale.
+  const confirmCancelSale = useCallback(() => {
+    if (!openIntent) return;
+    const intent = openIntent;
+    Alert.alert(
+      'Cancel this sale?',
+      'If your swap still arrives, the USDC will be in your wallet on Base and you can sell it here as USDC.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Cancel sale',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingSale(true);
+            try {
+              await swapped.cancel(intent);
+            } catch (e) {
+              Alert.alert('Could not cancel', e instanceof Error && e.message ? e.message : 'Please try again.');
+            } finally {
+              setCancellingSale(false);
+              refreshOpenIntent();
+            }
+          },
+        },
+      ],
+    );
+  }, [openIntent, swapped, refreshOpenIntent]);
 
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
@@ -967,15 +1022,27 @@ export default function PaycrestSellScreen() {
                 onPress={() => swapped.resume(openIntent, address ?? undefined)}
                 fullWidth
               />
+              {canCancelSale(openIntent) && (
+                <Button
+                  title="Cancel this sale"
+                  variant="ghost"
+                  onPress={confirmCancelSale}
+                  loading={cancellingSale}
+                  disabled={cancellingSale}
+                  fullWidth
+                />
+              )}
             </Card>
           )}
 
-          <SelectRow
-            label="What are you selling?"
-            value={sellingLabel}
-            placeholder="USDC or USDT"
-            onPress={() => setPickerOpen(true)}
-          />
+          {swappedSellOn && (
+            <SelectRow
+              label="What are you selling?"
+              value={sellingLabel}
+              placeholder="USDC or USDT"
+              onPress={() => setPickerOpen(true)}
+            />
+          )}
 
           {swapPick ? (
             <>
@@ -1208,7 +1275,7 @@ export default function PaycrestSellScreen() {
       </KeyboardAvoidingView>
 
       <AssetPicker
-        visible={pickerOpen}
+        visible={swappedSellOn && pickerOpen}
         side="from"
         holdingsOnly
         title="Choose what to sell"

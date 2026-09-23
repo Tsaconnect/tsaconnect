@@ -59,6 +59,14 @@ export function swapGasReserve({
   return [fromPrice, fromQuote, floor].reduce((a, b) => (b > a ? b : a), 0n);
 }
 
+/**
+ * Lamports MAX holds back when the coin being sold is SOL itself: 0.01 SOL
+ * covers a swap's base and priority fees and a new token account's rent, with
+ * room to spare. Solana fees are not priced by gas units, so there is no
+ * quote-derived figure to use instead.
+ */
+export const SOLANA_SWAP_RESERVE_LAMPORTS = 10_000_000n;
+
 /** Balance minus reserve, floored at zero so MAX never offers a negative amount. */
 export function spendableNative(balanceWei: bigint, reserveWei: bigint): bigint {
   const spendable = balanceWei - reserveWei;

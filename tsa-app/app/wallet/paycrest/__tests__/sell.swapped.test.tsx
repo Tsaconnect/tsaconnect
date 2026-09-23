@@ -52,7 +52,9 @@ jest.mock('@/components/ui', () => {
       react.createElement(View, { accessibilityLabel: `row:${props.label}`, onPress: props.onPress },
         label(`${props.label}: ${props.value ?? props.placeholder ?? ''}`)),
     AmountInput: (props: any) =>
-      react.createElement(View, { accessibilityLabel: `amount:${props.label}`, onChangeText: props.onChangeText },
+      react.createElement(View, {
+        accessibilityLabel: `amount:${props.label}`, onChangeText: props.onChangeText, onMax: props.onMax, value: props.value,
+      },
         label(props.label), label(props.helper ?? '')),
     Input: (props: any) =>
       react.createElement(View, { accessibilityLabel: `input:${props.label}`, onChangeText: props.onChangeText }),
@@ -98,9 +100,13 @@ jest.mock('@/hooks/useRampCurrency', () => {
 jest.mock('@/hooks/useScreenTitle', () => ({ __esModule: true, useScreenTitle: () => {} }));
 jest.mock('@/hooks/useSwappedSell', () => {
   const state = {
-    value: { stage: 'idle', error: undefined, order: undefined, depositTx: undefined, start: jest.fn(), resume: jest.fn() },
+    value: {
+      stage: 'idle', error: undefined, order: undefined, depositTx: undefined,
+      start: jest.fn(), resume: jest.fn(), cancel: jest.fn(async () => {}),
+    },
   };
-  return { __esModule: true, __state: state, useSwappedSell: () => state.value };
+  const actual = jest.requireActual('@/hooks/useSwappedSell');
+  return { __esModule: true, __state: state, useSwappedSell: () => state.value, canCancelSale: actual.canCancelSale };
 });
 jest.mock('@/hooks/useWalletHoldings', () => {
   const state = { value: { holdings: [] as any[], loading: false } };
@@ -121,7 +127,7 @@ jest.mock('@/services/paycrestApi', () => ({
 }));
 jest.mock('@/services/paycrestSellSwap', () => ({
   __esModule: true,
-  getOpenSellIntent: jest.fn(async () => null),
+  getSwappedSellState: jest.fn(async () => ({ enabled: true, intent: null })),
   getSellSwapQuote: jest.fn(),
 }));
 jest.mock('@/services/paycrestDeposit', () => ({
@@ -149,6 +155,7 @@ jest.mock('@/services/chains/suiWallet', () => ({ __esModule: true, getSuiAddres
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+import { Alert } from 'react-native';
 import SellScreen from '../sell';
 import * as SellSwap from '@/services/paycrestSellSwap';
 import * as Swapped from '@/hooks/useSwappedSell';
@@ -208,7 +215,7 @@ async function fillBank(tree: ReactTestRenderer) {
 beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
   jest.clearAllMocks();
-  sellSwap.getOpenSellIntent.mockResolvedValue(null);
+  sellSwap.getSwappedSellState.mockResolvedValue({ enabled: true, intent: null });
   swappedState.value = { ...swappedState.value, stage: 'idle', error: undefined, order: undefined };
   holdingsState.value = { holdings: [{ chainId: 56, address: '', native: true, balance: 0.5 }], loading: false };
 });
@@ -278,9 +285,84 @@ it('quotes a Solana coin from her Solana address, and asks for SOL when she has 
 
 it('offers to finish a sale that stopped part-way', async () => {
   const intent = { id: 'i1', status: 'swapped', swapTxHash: '0xs' };
-  sellSwap.getOpenSellIntent.mockResolvedValue(intent as any);
+  sellSwap.getSwappedSellState.mockResolvedValue({ enabled: true, intent: intent as any });
   const tree = await mount();
   expect(text(tree)).toContain("You have a sale that didn't finish");
   await act(async () => { byLabel(tree, 'button:Finish your sale').props.onPress(); });
   expect(swappedState.value.resume).toHaveBeenCalledWith(intent, '0xUser');
+});
+
+// ─── Whole-branch fixes ────────────────────────────────────────────────────
+
+describe('swapped sells switched off on the server (RAMP_CONVERSION_SELL unset)', () => {
+  it('shows no swapped-sell UI at all — the screen is the stablecoin sale it was', async () => {
+    sellSwap.getSwappedSellState.mockResolvedValue({ enabled: false, intent: null });
+    const tree = await mount();
+    expect(tree.root.findAll((n) => n.props.accessibilityLabel === 'row:What are you selling?')).toHaveLength(0);
+    expect(tree.root.findAll((n) => typeof n.props.accessibilityLabel === 'string'
+      && n.props.accessibilityLabel.startsWith('picker:'))).toHaveLength(0);
+    // The direct sale is untouched.
+    expect(text(tree)).toContain('You receive');
+    expect(text(tree)).not.toContain("You have a sale that didn't finish");
+    expect(sellSwap.getSellSwapQuote).not.toHaveBeenCalled();
+  });
+
+  it('offers the picker once the server says swapped sells are on', async () => {
+    const tree = await mount();
+    expect(() => byLabel(tree, 'row:What are you selling?')).not.toThrow();
+  });
+
+  it('keeps it hidden while the answer is unknown (no reply yet, or a network failure)', async () => {
+    sellSwap.getSwappedSellState.mockRejectedValue(new TypeError('Network request failed'));
+    const tree = await mount();
+    expect(tree.root.findAll((n) => n.props.accessibilityLabel === 'row:What are you selling?')).toHaveLength(0);
+  });
+});
+
+it('refuses a Bitcoin or Sui pick up front, rather than failing its quote', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const tree = await mount();
+  await pick(tree, { ...BNB, symbol: 'BTC', address: 'bitcoin', decimals: 8 }, 20000000000001);
+  expect(alert).toHaveBeenCalledWith('Not supported yet', expect.stringMatching(/BTC from Bitcoin isn't supported yet/));
+  expect(text(tree)).not.toContain('You sell');
+  expect(sellSwap.getSellSwapQuote).not.toHaveBeenCalled();
+  alert.mockRestore();
+});
+
+describe('cancelling a stuck sale from Finish your sale', () => {
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+
+  it('is offered once the sale has sat 10 minutes before its payout, and cancels on confirm', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const intent = { id: 'i1', status: 'swapped', swapTxHash: '0xs', updatedAt: ago(15) };
+    sellSwap.getSwappedSellState.mockResolvedValue({ enabled: true, intent: intent as any });
+    const tree = await mount();
+    await act(async () => { byLabel(tree, 'button:Cancel this sale').props.onPress(); });
+    const buttons = alert.mock.calls[0][2] as { text: string; onPress?: () => Promise<void> }[];
+    await act(async () => { await buttons.find((b) => b.text === 'Cancel sale')!.onPress!(); });
+    await flush();
+    expect(swappedState.value.cancel).toHaveBeenCalledWith(intent);
+    alert.mockRestore();
+  });
+
+  it('is not offered while the sale may still be going through', async () => {
+    sellSwap.getSwappedSellState.mockResolvedValue({
+      enabled: true, intent: { id: 'i1', status: 'swapped', swapTxHash: '0xs', updatedAt: ago(2) } as any,
+    });
+    const tree = await mount();
+    expect(text(tree)).toContain('Finish your sale');
+    expect(text(tree)).not.toContain('Cancel this sale');
+  });
+});
+
+it('MAX on a SOL sale holds 0.01 SOL back for the fee', async () => {
+  holdingsState.value = {
+    holdings: [{ chainId: SOLANA_LIFI_CHAIN_ID, address: '11111111111111111111111111111111', native: true, balance: 1 }],
+    loading: false,
+  };
+  const tree = await mount();
+  await pick(tree, { ...BNB, symbol: 'SOL', address: '11111111111111111111111111111111', decimals: 9 }, SOLANA_LIFI_CHAIN_ID);
+  await act(async () => { await byLabel(tree, 'amount:You sell').props.onMax(); });
+  await flush();
+  expect(byLabel(tree, 'amount:You sell').props.value).toBe('0.99');
 });

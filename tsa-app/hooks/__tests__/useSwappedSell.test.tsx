@@ -53,7 +53,7 @@ import * as Wallet from '@/services/wallet';
 import { PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
-import { useSwappedSell, type StartSellArgs } from '../useSwappedSell';
+import { canCancelSale, useSwappedSell, type StartSellArgs } from '../useSwappedSell';
 
 const mocked = {
   ...jest.mocked(SellSwap),
@@ -114,8 +114,11 @@ async function run(p: Promise<void>) {
   });
 }
 
+/** Let pending promises run without stepping the clock. */
+const flush = () => act(async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); });
+
 const intentCreated = () =>
-  mocked.createSellIntent.mockResolvedValue({ intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: q });
+  mocked.createSellIntent.mockResolvedValue({ intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: q, gasTopUp: false });
 
 it('runs intent → swap → wait → order → send, persisting the hash before reporting it', async () => {
   intentCreated();
@@ -251,37 +254,53 @@ it('frees the sale when the swap was refused before or at the node', async () =>
   expect(mocked.recordSellSwap).not.toHaveBeenCalled();
 });
 
-describe('source-chain gas', () => {
+describe('source-chain gas: asked for exactly when the server priced it', () => {
   const ercArgs: StartSellArgs = {
     ...args, token: { address: '0x55d398326f99059fF775485246999027B3197955', symbol: 'USDT', decimals: 18 } as LiFiToken,
     amount: '5',
   };
+  // The quote's gasCostWei is the swap's gas ALONE — the threshold the app
+  // used to judge by, and the one the server stopped using (it counts the
+  // approve as well). Fixtures where the two disagree are the whole point.
+  const created = (gasTopUp: boolean) => mocked.createSellIntent.mockResolvedValue({
+    intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: { gasCostWei: '1000' } as LiFiQuote, gasTopUp,
+  });
   beforeEach(() => {
-    mocked.createSellIntent.mockResolvedValue({
-      intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: { gasCostWei: '1000' } as LiFiQuote,
-    });
     mocked.executeLiFiSwap.mockResolvedValue('0xswap');
     mocked.getSwapDelivery.mockResolvedValue({ status: 'FAILED' });
   });
 
-  it('asks for a top-up when her gas coin is short of the route', async () => {
-    mocked.nativeBalance.mockResolvedValue(10n);
+  it('asks for the top-up the server priced, even when her balance covers the swap alone', async () => {
+    created(true);
+    // 1,500 wei: more than the swap's 1,000, less than swap + approve. The old
+    // local check read this as "funded" and skipped gas the sale was budgeted for.
+    mocked.nativeBalance.mockResolvedValue(1_500n);
     mocked.requestSellIntentGasTopUp.mockResolvedValue({ txHash: '0xgas', skipped: false });
     await run(hook.start(ercArgs));
-    expect(mocked.nativeBalance).toHaveBeenCalledWith('bsc', '0xUser');
     expect(mocked.requestSellIntentGasTopUp).toHaveBeenCalledWith('i1');
     expect(mocked.executeLiFiSwap).toHaveBeenCalled();
+    // The top-up was asked for BEFORE the swap was signed.
+    expect(mocked.requestSellIntentGasTopUp.mock.invocationCallOrder[0])
+      .toBeLessThan(mocked.executeLiFiSwap.mock.invocationCallOrder[0]);
   });
 
-  it('treats an unreadable balance as unknown and just tries the swap', async () => {
-    mocked.nativeBalance.mockResolvedValue(null);
+  it('asks for none when the server priced none, however short her balance looks', async () => {
+    created(false);
+    mocked.nativeBalance.mockResolvedValue(0n);
     await run(hook.start(ercArgs));
     expect(mocked.requestSellIntentGasTopUp).not.toHaveBeenCalled();
     expect(mocked.executeLiFiSwap).toHaveBeenCalled();
   });
 
+  it('never reads her source-chain balance to decide', async () => {
+    created(true);
+    mocked.requestSellIntentGasTopUp.mockResolvedValue({ skipped: true });
+    await run(hook.start(ercArgs));
+    expect(mocked.nativeBalance).not.toHaveBeenCalledWith('bsc', expect.anything());
+  });
+
   it('carries on silently when a top-up fails, and names the gas if the swap then fails', async () => {
-    mocked.nativeBalance.mockResolvedValue(10n);
+    created(true);
     mocked.requestSellIntentGasTopUp.mockRejectedValue(new Error('daily cap'));
     mocked.executeLiFiSwap.mockRejectedValue(new Error('insufficient funds for gas'));
     await run(hook.start(ercArgs));
@@ -289,6 +308,42 @@ describe('source-chain gas', () => {
     expect(hook.error).toMatch(/BNB/);
     expect(hook.error).toMatch(/network fee/i);
     expect(hook.error).not.toMatch(/daily cap/);
+  });
+});
+
+describe('cancelling a stuck sale', () => {
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+
+  it('is offered only once a pre-payout sale has sat 10 minutes', () => {
+    expect(canCancelSale({ id: 'i1', status: 'swapped', updatedAt: at(11) } as SellIntent)).toBe(true);
+    expect(canCancelSale({ id: 'i1', status: 'swapping', updatedAt: at(10) } as SellIntent)).toBe(true);
+    // Still possibly in flight.
+    expect(canCancelSale({ id: 'i1', status: 'swapped', updatedAt: at(9) } as SellIntent)).toBe(false);
+    // The payout is being or has been opened: the server refuses, so it is never offered.
+    expect(canCancelSale({ id: 'i1', status: 'ordering', updatedAt: at(60) } as SellIntent)).toBe(false);
+    expect(canCancelSale({ id: 'i1', status: 'ordered', updatedAt: at(60) } as SellIntent)).toBe(false);
+    // An unknown time never qualifies.
+    expect(canCancelSale({ id: 'i1', status: 'swapped' } as SellIntent)).toBe(false);
+  });
+
+  it('closes the sale and drops its stored hash', async () => {
+    await AsyncStorage.setItem(KEY, '0xswap');
+    await act(async () => { await hook.cancel({ id: 'i1', status: 'swapped' } as SellIntent); });
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+  });
+
+  it("won't cancel a sale this app is still driving", async () => {
+    intentCreated();
+    let release!: (hash: string) => void;
+    mocked.executeLiFiSwap.mockImplementation(() => new Promise<string>((r) => { release = r; }));
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'FAILED' });
+    const first = hook.start(args);
+    await flush();
+    await expect(other.cancel({ id: 'i1', status: 'swapping' } as SellIntent)).rejects.toThrow(/still going through/i);
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    release('0xswap');
+    await run(first);
   });
 });
 
@@ -337,9 +392,6 @@ it('closes a sale with no swap to follow when no run of it is going, and says on
   expect(hook.error).toMatch(/couldn't find a swap/i);
   expect(hook.error).not.toMatch(/never started|nothing was sold/i);
 });
-
-/** Let pending promises run without stepping the clock. */
-const flush = () => act(async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); });
 
 describe('one sale, one run — across every copy of the hook', () => {
   it("won't close a sale another screen is still swapping (she backed out and tapped Finish your sale)", async () => {

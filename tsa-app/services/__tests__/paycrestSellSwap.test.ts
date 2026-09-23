@@ -14,7 +14,7 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 
 import {
-  abandonSellIntent, createSellIntent, getOpenSellIntent, getSellSwapQuote, openSellOrder,
+  abandonSellIntent, createSellIntent, getOpenSellIntent, getSellSwapQuote, getSwappedSellState, openSellOrder,
   recordSellSwap, requestSellIntentGasTopUp,
 } from '../paycrestSellSwap';
 
@@ -112,4 +112,52 @@ it('asks for a gas top-up and abandons through their own routes', async () => {
   expect((global.fetch as jest.Mock).mock.calls.map((c) => c[0])).toEqual([
     `${API}/sell-intents/i1/gas-topup`, `${API}/sell-intents/i1/abandon`,
   ]);
+});
+
+// The server's own verdict on source-chain gas rides on the Create answer; an
+// older server that sends none reads as "no top-up priced", never as "yes".
+it("carries the server's gas top-up verdict from Create", async () => {
+  const body = (gasTopUp?: boolean) => okJson({
+    intent: { id: 'i1', status: 'swapping' }, lifiQuote: rawQuoteFixture, ...(gasTopUp === undefined ? {} : { gasTopUp }),
+  }, 201);
+  const input = {
+    sourceChainId: 56, sourceToken: '0xabc', sourceAmount: '1000', sourceAddress: '0xUser', bankCode: '058', accountNumber: '0123456789',
+  };
+  (global.fetch as jest.Mock).mockResolvedValueOnce(body(true));
+  expect((await createSellIntent(input)).gasTopUp).toBe(true);
+  (global.fetch as jest.Mock).mockResolvedValueOnce(body(false));
+  expect((await createSellIntent(input)).gasTopUp).toBe(false);
+  (global.fetch as jest.Mock).mockResolvedValueOnce(body());
+  expect((await createSellIntent(input)).gasTopUp).toBe(false);
+});
+
+describe('whether swapped sells are on at all', () => {
+  const status = (code: number, message: string) => ({
+    ok: false, status: code,
+    json: async () => ({ success: false, message }),
+    text: async () => JSON.stringify({ success: false, message }),
+  });
+
+  it('reads a 404 from /sell-intents/open as "switched off", not as an outage', async () => {
+    // Gin's own 404 for an unregistered route carries no JSON body at all.
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: false, status: 404, json: async () => { throw new Error('not json'); }, text: async () => '404 page not found',
+    });
+    await expect(getSwappedSellState()).resolves.toEqual({ enabled: false, intent: null });
+    // The handler's own "not available" 404 means the same.
+    (global.fetch as jest.Mock).mockResolvedValueOnce(status(404, "Selling this token isn't available"));
+    await expect(getSwappedSellState()).resolves.toEqual({ enabled: false, intent: null });
+  });
+
+  it('reports "on" with her sale, or none', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ intent: { id: 'i1', status: 'ordered' } }));
+    await expect(getSwappedSellState()).resolves.toMatchObject({ enabled: true, intent: { id: 'i1' } });
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ intent: null }));
+    await expect(getSwappedSellState()).resolves.toEqual({ enabled: true, intent: null });
+  });
+
+  it('says nothing either way on any other failure', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(status(500, 'boom'));
+    await expect(getSwappedSellState()).rejects.toMatchObject({ status: 500 });
+  });
 });

@@ -245,22 +245,22 @@ export function useSwappedSell() {
     } finally {
       startsAwaitingIntent--;
     }
-    const { intent, quote } = created;
+    const { intent, quote, gasTopUp } = created;
     const key = pendingSwapKey(intent.id);
 
-    // Gas on an EVM source: best-effort and silent. null = unknown, never
-    // zero — try the swap; the node refuses cleanly if she is really short.
+    // Gas on the source chain: asked for exactly when the SERVER priced a
+    // top-up into this sale — never off a balance check of our own, which
+    // would judge a different threshold (the server counts the approve too)
+    // and could skip gas the sale was budgeted for. Best-effort and silent:
+    // the server skips it if she already holds enough.
     const chain = isNonEVMLiFiChain(a.sourceChainId) ? undefined : getChainByChainId(a.sourceChainId);
     let topUpFailed = false;
-    if (chain && quote.gasCostWei) {
-      const nb = await nativeBalance(chain.key, a.sourceAddress);
-      if (nb !== null && nb < BigInt(quote.gasCostWei)) {
-        try {
-          await requestSellIntentGasTopUp(intent.id);
-        } catch (e) {
-          console.warn('[sell] gas top-up failed', e);
-          topUpFailed = true;
-        }
+    if (gasTopUp) {
+      try {
+        await requestSellIntentGasTopUp(intent.id);
+      } catch (e) {
+        console.warn('[sell] gas top-up failed', e);
+        topUpFailed = true;
       }
     }
 
@@ -344,5 +344,32 @@ export function useSwappedSell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- as for start.
   }), []);
 
-  return { stage, error, order, depositTx, start, resume };
+  /**
+   * Close a sale that has sat stuck long enough (see canCancelSale) — a lost
+   * reply that left it "on its way" forever, or a hash someone else recorded
+   * first. Never one this app is still driving. If her swap does land later,
+   * the USDC is in her own wallet on Base and sells directly as USDC.
+   */
+  const cancel = useCallback(async (intent: SellIntent) => {
+    if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new Error(STILL_RUNNING);
+    await abandonSellIntent(intent.id);
+    await AsyncStorage.removeItem(pendingSwapKey(intent.id)).catch(() => {});
+  }, []);
+
+  return { stage, error, order, depositTx, start, resume, cancel };
+}
+
+/** How long a sale must sit unmoved before she may cancel it herself. */
+export const CANCEL_AFTER_MS = 10 * 60_000;
+
+/**
+ * Whether "Cancel this sale" is offered: only before the payout opens (the
+ * server refuses anything else) and only once the sale has sat in the same
+ * step for CANCEL_AFTER_MS — so it is never a way to cancel a swap that is
+ * genuinely still going through. An unknown time never qualifies.
+ */
+export function canCancelSale(intent: SellIntent, now: number = Date.now()): boolean {
+  if (intent.status !== 'swapping' && intent.status !== 'swapped') return false;
+  const since = intent.updatedAt ? Date.parse(intent.updatedAt) : NaN;
+  return Number.isFinite(since) && now - since >= CANCEL_AFTER_MS;
 }
