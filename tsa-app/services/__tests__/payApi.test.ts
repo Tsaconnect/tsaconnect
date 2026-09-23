@@ -11,7 +11,8 @@ jest.mock('@react-native-async-storage/async-storage', () =>
 jest.mock('../../hooks/useNetwork', () => ({ getNetwork: () => 'mainnet' }));
 
 import {
-  getCheckout, getPayQuote, isPaymentId, payConverted, payDirect, PayError, returnUrlFor, submitTestOutcome,
+  getCheckout, getCryptoQuote, getPayQuote, isPaymentId, payConverted, payCrypto, payDirect, PayError, returnUrlFor,
+  submitTestOutcome,
 } from '../payApi';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
@@ -190,6 +191,65 @@ describe('paying a naira merchant', () => {
     await expect(payDirect('../x', { chainKey: 'base', token: 'USDC' })).rejects.toThrow('not valid');
     await expect(payConverted('../x', src)).rejects.toThrow('not valid');
     await expect(getPayQuote('../x', src)).rejects.toThrow('not valid');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('paying a crypto-settling merchant', () => {
+  const src = { sourceChainId: 56, sourceToken: '0x0000000000000000000000000000000000000000', sourceAddress: '0xPayer' };
+  const rawQuote = {
+    action: { fromAmount: '84000000000000000' },
+    estimate: { toAmount: '33323336332433603252' },
+    transactionRequest: { to: '0xrouter', data: '0xab', value: '0x0', chainId: 56, gasLimit: '200000', gasPrice: '5' },
+  };
+
+  beforeEach(() => {
+    (global as any).fetch = jest.fn();
+  });
+
+  it('getCryptoQuote GETs crypto-quote with the source in the query and returns what the swap pulls', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue(okJson({ fromAmount: '84000000000000000' }));
+
+    await expect(getCryptoQuote(ID, src)).resolves.toEqual({ fromAmount: '84000000000000000' });
+
+    const [url, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const u = new URL(url);
+    expect(u.origin + u.pathname).toBe(`https://tsa.mcgpchain.com/api/pay/checkout/${ID}/crypto-quote`);
+    expect(Object.fromEntries(u.searchParams)).toEqual({
+      sourceChainId: '56',
+      sourceToken: src.sourceToken,
+      sourceAddress: '0xPayer',
+    });
+    expect(init.method).toBeUndefined();
+  });
+
+  it('payCrypto POSTs the source with an Idempotency-Key and returns the intent, a signable quote and the top-up verdict', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue(
+      okJson({ intent: { id: 'i1', status: 'swapping' }, lifiQuote: rawQuote, gasTopUp: true }, 201),
+    );
+
+    const res = await payCrypto(ID, src);
+
+    const [url, init] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`https://tsa.mcgpchain.com/api/pay/checkout/${ID}/crypto`);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual(src);
+    expect(typeof init.headers['Idempotency-Key']).toBe('string');
+    expect(res.intent.id).toBe('i1');
+    expect(res.quote.fromAmount).toBe('84000000000000000');
+    expect(res.gasTopUp).toBe(true);
+  });
+
+  it('carries the codes of a 409 and of the same-token refusal', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: false, status: 422, json: async () => ({ success: false, message: 'pick another token' }),
+    });
+    await expect(payCrypto(ID, src)).rejects.toMatchObject({ status: 422, message: 'pick another token' });
+  });
+
+  it('refuses a non-payment-id before any request', async () => {
+    await expect(payCrypto('../x', src)).rejects.toThrow('not valid');
+    await expect(getCryptoQuote('../x', src)).rejects.toThrow('not valid');
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });

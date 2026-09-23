@@ -1,4 +1,6 @@
-import { nairaFromKobo, payAmountLabel, payScreenState, shortfallCopy } from '../payCheckout';
+import {
+  errorCode, errorMessage, nairaFromKobo, payAmountLabel, payScreenState, shortfallCopy, unsupportedNetworkMessage,
+} from '../payCheckout';
 import type { PayCheckout } from '@/services/payApi';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
@@ -73,6 +75,26 @@ describe('shortfallCopy', () => {
   it('still asks the question when the server sent no figure', () => {
     expect(shortfallCopy(undefined)).toBe(
       'The rate moved and your swap landed short. Pay the rest from the USDC in your wallet?',
+    );
+  });
+});
+
+describe('error helpers shared by the live payment hooks', () => {
+  it('errorCode reads a server machine code off any error, and nothing else', () => {
+    expect(errorCode(Object.assign(new Error('x'), { code: 'pay_in_progress' }))).toBe('pay_in_progress');
+    expect(errorCode(new Error('x'))).toBeUndefined();
+    expect(errorCode(Object.assign(new Error('x'), { code: 7 }))).toBeUndefined();
+    expect(errorCode('boom')).toBeUndefined();
+    expect(errorCode(null)).toBeUndefined();
+  });
+  it('errorMessage shows the error’s own words, else the fallback', () => {
+    expect(errorMessage(new Error('Verify your identity first'), 'fallback')).toBe('Verify your identity first');
+    expect(errorMessage(new Error(''), 'fallback')).toBe('fallback');
+    expect(errorMessage('boom', 'fallback')).toBe('fallback');
+  });
+  it('unsupportedNetworkMessage names the coin', () => {
+    expect(unsupportedNetworkMessage('SOL')).toBe(
+      "Paying with SOL from that network isn't supported yet. Pick a coin on another network.",
     );
   });
 });

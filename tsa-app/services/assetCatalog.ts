@@ -271,7 +271,9 @@ const preferenceRank = (chainId: number) => {
 
 /**
  * The networks this side may offer for `asset`, best first: the paying side
- * only where this device can sign, and only where `allow` agrees; held
+ * only where this device can sign, and only where `allow` agrees (it sees the
+ * network's token too, so a screen can hide one coin on one network; a search
+ * that has not found a token yet asks about the chain alone); held
  * networks first (largest balance first), then the preference order.
  *
  * In `holdingsOnly` mode only the networks she actually holds it on are offered
@@ -281,11 +283,11 @@ const preferenceRank = (chainId: number) => {
 export function networksForSide(
   asset: Asset,
   side: PickerSide,
-  allow?: (chainId: number) => boolean,
+  allow?: (chainId: number, token?: LiFiToken) => boolean,
   holdingsOnly = false,
 ): AssetNetwork[] {
   return asset.networks
-    .filter(n => (side === 'to' || isSignableSourceChain(n.chainId)) && (!allow || allow(n.chainId))
+    .filter(n => (side === 'to' || isSignableSourceChain(n.chainId)) && (!allow || allow(n.chainId, n.token))
       && (!holdingsOnly || (n.balance ?? 0) > 0))
     .sort((a, b) => {
       const aHeld = (a.balance ?? 0) > 0;
@@ -336,7 +338,7 @@ export function buildSections({
   majors: Asset[];
   held: Asset[];
   side: PickerSide;
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
   /** Only coins the wallet holds a positive balance of. */
   holdingsOnly?: boolean;
 }): AssetSection[] {

@@ -28,11 +28,11 @@ import {
   checkFunding, fundingMessage, nativeBalanceFor, sendSponsoredPaycrestDeposit,
 } from '@/services/paycrestDeposit';
 import { getOpenSellIntent } from '@/services/paycrestSellSwap';
-import { getPayQuote, payConverted, payDirect, PayError, type PayCheckout } from '@/services/payApi';
+import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
-import { nairaFromKobo, payAmountLabel } from '@/utils/payCheckout';
-
-export const PAY_IN_PROGRESS = 'pay_in_progress';
+import {
+  errorCode, errorMessage, nairaFromKobo, PAY_IN_PROGRESS, payAmountLabel, unsupportedNetworkMessage,
+} from '@/utils/payCheckout';
 
 export type PayNairaStage = 'idle' | 'paying' | 'shortfall' | 'waiting' | 'failed';
 
@@ -58,9 +58,6 @@ export type UsePayNaira = {
 
 type Pick = { token: LiFiToken; chainId: number };
 type Direct = { stage: 'paying' | 'waiting' | 'failed'; error?: string; errorCode?: string; order?: PaycrestOrder };
-
-const messageOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
-const codeOf = (e: unknown) => (e instanceof PayError ? e.code : undefined);
 
 /**
  * The venue Paycrest fills as it is for `token` on `chainId` when the merchant
@@ -90,8 +87,8 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
         sourceAddress: a.sourceAddress,
       });
     } catch (e) {
-      if (codeOf(e) === PAY_IN_PROGRESS) inProgress.current = true;
-      else setCreateCode(codeOf(e));
+      if (errorCode(e) === PAY_IN_PROGRESS) inProgress.current = true;
+      else setCreateCode(errorCode(e));
       throw e;
     }
   };
@@ -104,7 +101,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     try {
       open = await getOpenSellIntent();
     } catch (e) {
-      setDirect({ stage: 'failed', error: messageOf(e, 'Could not check on your payment. Please try again.') });
+      setDirect({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
       return;
     }
     if (open) {
@@ -136,7 +133,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     try {
       await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
     } catch (e) {
-      setDirect({ stage: 'failed', error: messageOf(e, 'Could not send. Please try again.'), order });
+      setDirect({ stage: 'failed', error: errorMessage(e, 'Could not send. Please try again.'), order });
       return;
     }
     // The deposit already left; a lost claim only degrades to the ordinary
@@ -150,10 +147,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     setCreateCode(undefined);
     inProgress.current = false;
     if (isNonEVMLiFiChain(chainId)) {
-      setDirect({
-        stage: 'failed',
-        error: `Paying with ${token.symbol} from that network isn't supported yet. Pick a coin on another network.`,
-      });
+      setDirect({ stage: 'failed', error: unsupportedNetworkMessage(token.symbol) });
       return;
     }
     setDirect({ stage: 'paying' });
@@ -176,10 +170,10 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
         }
       }
     } catch (e) {
-      if (codeOf(e) === PAY_IN_PROGRESS) {
+      if (errorCode(e) === PAY_IN_PROGRESS) {
         await resumeOpen();
       } else {
-        setDirect({ stage: 'failed', error: messageOf(e, 'Something went wrong. Please try again.'), errorCode: codeOf(e) });
+        setDirect({ stage: 'failed', error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e) });
       }
     }
   };

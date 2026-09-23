@@ -70,6 +70,13 @@ export async function submitTestOutcome(
 /** Where the payer's tokens are: the chain, the token on it, and her address there. */
 export type PaySource = { sourceChainId: number; sourceToken: string; sourceAddress: string };
 
+const sourceQuery = (src: PaySource) =>
+  new URLSearchParams({
+    sourceChainId: String(src.sourceChainId),
+    sourceToken: src.sourceToken,
+    sourceAddress: src.sourceAddress,
+  }).toString();
+
 const checkoutPath = (id: string, tail: string) => {
   if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
   return `/checkout/${encodeURIComponent(id)}${tail}`;
@@ -85,12 +92,16 @@ export async function getPayQuote(
   id: string,
   src: PaySource,
 ): Promise<{ fromAmount: string; usdcTarget: string }> {
-  const qs = new URLSearchParams({
-    sourceChainId: String(src.sourceChainId),
-    sourceToken: src.sourceToken,
-    sourceAddress: src.sourceAddress,
-  });
-  return request(checkoutPath(id, `/quote?${qs.toString()}`));
+  return request(checkoutPath(id, `/quote?${sourceQuery(src)}`));
+}
+
+/**
+ * What paying a crypto-settling merchant with this token would cost:
+ * `fromAmount` of the source token (base units) delivers the merchant's exact
+ * token amount on their own chain. Moves nothing, locks nothing.
+ */
+export async function getCryptoQuote(id: string, src: PaySource): Promise<{ fromAmount: string }> {
+  return request(checkoutPath(id, `/crypto-quote?${sourceQuery(src)}`));
 }
 
 /**
@@ -107,22 +118,29 @@ export async function payDirect(id: string, route: { chainKey: string; token: st
   return 'order' in data && data.order ? data.order : (data as PaycrestOrder);
 }
 
-type RawConverted = { intent: SellIntent; lifiQuote: unknown; gasTopUp?: boolean };
+type RawSwapStart = { intent: SellIntent; lifiQuote: unknown; gasTopUp?: boolean };
+export type PaySwapStart = { intent: SellIntent; quote: LiFiQuote; gasTopUp: boolean };
 
-/**
- * Pay with any other token: starts the payment's sell intent (a swap into the
- * USDC the payout needs) and hands back the LiFi quote to sign. Same shape as
- * a sell intent, so the swapped-sell pipeline drives it as it is.
- */
-export async function payConverted(
-  id: string,
-  src: PaySource,
-): Promise<{ intent: SellIntent; quote: LiFiQuote; gasTopUp: boolean }> {
-  const data = await request<RawConverted>(checkoutPath(id, '/converted'), {
+/** Both swap routes start the payment's sell intent and hand back the LiFi quote to sign. */
+async function startSwap(id: string, tail: string, src: PaySource): Promise<PaySwapStart> {
+  const data = await request<RawSwapStart>(checkoutPath(id, tail), {
     method: 'POST',
     body: JSON.stringify(src),
   });
   return { intent: data.intent, quote: toLiFiQuote(data.lifiQuote), gasTopUp: data.gasTopUp === true };
+}
+
+/**
+ * Pay a naira merchant with any other token: a swap into the USDC the payout
+ * needs. Same shape as a sell intent, so the swapped-sell pipeline drives it.
+ */
+export async function payConverted(id: string, src: PaySource): Promise<PaySwapStart> {
+  return startSwap(id, '/converted', src);
+}
+
+/** Pay a crypto-settling merchant: one swap that delivers their token straight to their wallet. */
+export async function payCrypto(id: string, src: PaySource): Promise<PaySwapStart> {
+  return startSwap(id, '/crypto', src);
 }
 
 /**

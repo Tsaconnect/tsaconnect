@@ -91,7 +91,7 @@ function chainFitsAddress(chainId: number, kind: AddressKind): boolean {
 interface Options {
   visible: boolean;
   side: PickerSide;
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
   query: string;
   /**
    * Only coins the wallet holds — what the sell flow picks from. The catalogue

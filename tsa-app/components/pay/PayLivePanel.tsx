@@ -36,7 +36,7 @@ type Props = {
   checkout: PayCheckout;
   pay: PayHook;
   /** Limits the picker, e.g. to networks she can sign on. */
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
   /** What the merchant receives, when it is not naira: "The store receives 33.32 USDT on BSC". */
   receives?: string;
   note?: string;

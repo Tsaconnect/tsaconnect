@@ -31,7 +31,7 @@ export interface AssetPickerProps {
   side: PickerSide;
   title?: string;
   /** Optional extra limit on networks, e.g. what a buy can deliver to. */
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
   /**
    * Offer only what the wallet holds, on the networks it holds it — the sell
    * flow's list. Search is hidden with it: the list is what she has.

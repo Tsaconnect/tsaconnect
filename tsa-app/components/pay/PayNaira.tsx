@@ -8,11 +8,8 @@ import React, { useEffect, useRef } from 'react';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { PayLivePanel } from '@/components/pay/PayLivePanel';
 import { usePayNaira } from '@/hooks/usePayNaira';
-import { isNonEVMLiFiChain } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
-
-/** Nothing can be sent from Solana, Bitcoin or Sui for a payment yet. */
-const signableHere = (chainId: number) => !isNonEVMLiFiChain(chainId);
+import { payPickFilter } from '@/utils/payPick';
 
 export function PayNaira({
   checkout, showForm, onWaiting,
@@ -39,7 +36,7 @@ export function PayNaira({
 
   return (
     <>
-      {showForm && <PayLivePanel checkout={checkout} pay={pay} allow={signableHere} />}
+      {showForm && <PayLivePanel checkout={checkout} pay={pay} allow={payPickFilter(checkout)} />}
       <AuthorizationModal {...pay.authorization} />
     </>
   );

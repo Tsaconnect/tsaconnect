@@ -109,3 +109,19 @@ export function shortfallCopy(missingUsdc: string | undefined): string {
   const by = missingUsdc ? `about ${missingUsdc} USDC short` : 'short';
   return `The rate moved and your swap landed ${by}. Pay the rest from the USDC in your wallet?`;
 }
+
+/** 409 from starting a payment: an attempt of hers already exists — follow it, never start another. */
+export const PAY_IN_PROGRESS = 'pay_in_progress';
+
+/** The server's machine code on an error, if it sent one. Keyed on, never the words beside it. */
+export function errorCode(e: unknown): string | undefined {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export const errorMessage = (e: unknown, fallback: string): string =>
+  e instanceof Error && e.message ? e.message : fallback;
+
+/** Nothing can be sent from Solana, Bitcoin or Sui for a payment yet. */
+export const unsupportedNetworkMessage = (symbol: string): string =>
+  `Paying with ${symbol} from that network isn't supported yet. Pick a coin on another network.`;

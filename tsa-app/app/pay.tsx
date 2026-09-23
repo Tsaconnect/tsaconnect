@@ -5,8 +5,8 @@
 // through submitTestOutcome, gated by the same PIN/biometric authorization as
 // every other money-moving action (see AuthorizationModal.tsx — no new
 // unlock path here). Live mode pays a naira merchant with any token
-// (components/pay/PayNaira); a crypto merchant is still a placeholder until
-// its route lands.
+// (components/pay/PayNaira) and a crypto merchant with a swap that delivers
+// straight to their wallet (components/pay/PayCrypto).
 //
 // State is computed by payScreenState (utils/payCheckout.ts) — this file
 // only wires data in and renders whatever it says.
@@ -36,6 +36,7 @@ import { payScreenState } from '@/utils/payCheckout';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
+import { PayCrypto } from '@/components/pay/PayCrypto';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 const DONE_LABEL: Record<PayStatus, string> = {
@@ -202,8 +203,8 @@ export default function PayScreen() {
                 <PayNaira checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout} />
               )}
 
-              {state.kind === 'payable' && state.checkout.mode === 'live' && state.checkout.settlementMode !== 'fiat' && (
-                <ErrorState title="Live payments aren't available in this version of the app yet." />
+              {state.kind !== 'blocked' && state.checkout.mode === 'live' && state.checkout.settlementMode === 'crypto' && (
+                <PayCrypto checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout} />
               )}
             </>
           )}
