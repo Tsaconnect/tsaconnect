@@ -3,6 +3,9 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -133,5 +136,54 @@ func TestPayMerchantUpdate_ConcurrentSameVersionHasOneWinnerOnPostgres(t *testin
 	got, _ := s.merchants.Get(context.Background(), m.ID)
 	if wins != 1 || stale != 7 || got.Version != version+1 {
 		t.Fatalf("wins %d stale %d version %d (started %d)", wins, stale, got.Version, version)
+	}
+}
+
+func TestPayWebhook_PurgeOldOnPostgres(t *testing.T) {
+	s, _ := newPayPostgresRig(t)
+	old := PayWebhookRetention + time.Hour
+	ids := seedRetentionRows(t, s, []retentionRow{{age: old, delivered: true}, {age: old, failed: true}, {age: old}})
+	sender := NewPayWebhookSender(s.db, s.merchants, nil, func() time.Time { return payTestNow })
+	if n, err := sender.PurgeOld(context.Background(), PayWebhookRetention, PayWebhookPurgeBatch); err != nil || n != 2 {
+		t.Fatalf("purged %d err %v, want 2", n, err)
+	}
+	if countDeliveries(t, s, ids[0]) != 0 || countDeliveries(t, s, ids[1]) != 0 || countDeliveries(t, s, ids[2]) != 1 {
+		t.Fatal("wrong rows purged")
+	}
+}
+
+func TestPayWebhook_ConcurrentDeliveryOnPostgresDeliversEachOnce(t *testing.T) {
+	s, _ := newPayPostgresRig(t)
+	var mu sync.Mutex
+	seen := map[string]int{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("X-TSA-Delivery")]++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer srv.Close()
+	want := 0
+	for i := 0; i < 6; i++ {
+		want += len(queueMerchantDeliveries(t, s, fmt.Sprintf("PgAir%02d", i), srv.URL, 2))
+	}
+	sender := NewPayWebhookSender(s.db, s.merchants, srv.Client(), func() time.Time { return payTestNow })
+
+	n, err := sender.DeliverDue(context.Background(), PayWebhookDefaultBatch)
+	if err != nil || n != want {
+		t.Fatalf("delivered %d err %v, want %d", n, err, want)
+	}
+	if len(seen) != want {
+		t.Fatalf("%d distinct deliveries reached the endpoint, want %d", len(seen), want)
+	}
+	for id, c := range seen {
+		if c != 1 {
+			t.Errorf("delivery %s sent %d times", id, c)
+		}
+	}
+	var pending int64
+	s.db.Model(&models.PayWebhookDelivery{}).Where("delivered_at IS NULL").Count(&pending)
+	if pending != 0 {
+		t.Fatalf("%d deliveries left undelivered", pending)
 	}
 }

@@ -380,8 +380,8 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 			payLast4(before.BankCode), payLast4(updated.BankCode),
 			payLast4(before.AccountNumber), payLast4(updated.AccountNumber),
 			before.WalletAddress, updated.WalletAddress,
-			before.WebhookURL, updated.WebhookURL,
-			before.TestWebhookURL, updated.TestWebhookURL,
+			payRedactURL(before.WebhookURL), payRedactURL(updated.WebhookURL),
+			payRedactURL(before.TestWebhookURL), payRedactURL(updated.TestWebhookURL),
 			before.ReturnDomains, updated.ReturnDomains,
 		)
 	}
@@ -490,8 +490,15 @@ func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]an
 	add("customerFeeSharePercent", before.CustomerFeeSharePercent, after.CustomerFeeSharePercent)
 	add("minAmount", before.MinAmountKobo, after.MinAmountKobo)
 	add("maxAmount", before.MaxAmountKobo, after.MaxAmountKobo)
-	add("webhookUrl", before.WebhookURL, after.WebhookURL)
-	add("testWebhookUrl", before.TestWebhookURL, after.TestWebhookURL)
+	// Compared raw (a query-only change is still a change) but recorded
+	// redacted: webhook URLs can carry a token in the query string.
+	addURL := func(field, b, a string) {
+		if b != a {
+			out[field] = map[string]any{"before": payRedactURL(b), "after": payRedactURL(a)}
+		}
+	}
+	addURL("webhookUrl", before.WebhookURL, after.WebhookURL)
+	addURL("testWebhookUrl", before.TestWebhookURL, after.TestWebhookURL)
 	add("returnDomains", before.ReturnDomains, after.ReturnDomains)
 	return out
 }
@@ -504,6 +511,26 @@ func (s *PayMerchantService) writeAudit(tx *gorm.DB, merchantID, actor uuid.UUID
 		return err
 	}
 	return tx.Create(&models.PayAuditEvent{MerchantID: merchantID, ActorID: actor, Action: action, Details: string(raw)}).Error
+}
+
+// payRedactURL makes a merchant-supplied URL safe for an audit row or log
+// line: only scheme and host are kept. Userinfo is dropped, and the path,
+// query and fragment — where a webhook token lives (Slack-style hooks carry
+// it in the path) — become "/…". Empty stays empty; anything that is not an absolute URL is
+// "[unparseable url]" rather than echoed back.
+func payRedactURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "[unparseable url]"
+	}
+	out := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		out += "/…"
+	}
+	return out
 }
 
 // payLast4 returns the last 4 characters of a settlement identifier for an

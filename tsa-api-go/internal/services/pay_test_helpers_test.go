@@ -14,6 +14,13 @@ var payTestNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 func newPayTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := newCurrencyTestDB(t)
+	// Every pooled connection to ":memory:" is its own empty database, and the
+	// webhook sender now uses several goroutines: pin the pool to one.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	createTestUsersTable(t, db)
 	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}); err != nil {
 		t.Fatal(err)

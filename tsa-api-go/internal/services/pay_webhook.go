@@ -5,10 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	neturl "net/url"
+	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,6 +41,31 @@ const payWebhookPerMerchantPerTick = 2
 // itself large; it is not the fairness mechanism (that's every merchant up
 // to this cap getting a fetch, regardless of how earliest-due rows sort).
 const payWebhookMerchantsPerTick = 25
+
+// PayWebhookDefaultBatch is the row budget a worker tick passes to
+// DeliverDue. It is exactly merchants-per-tick x per-merchant-per-tick, so
+// the fairness fetch can always take a full slice from every merchant it
+// picks: a smaller budget would starve the merchants sorted last, a larger
+// one would never be spent.
+const PayWebhookDefaultBatch = payWebhookMerchantsPerTick * payWebhookPerMerchantPerTick
+
+// payWebhookConcurrency bounds how many merchants' deliveries run at once.
+// Deliveries of ONE merchant never overlap (see DeliverDue); the bound only
+// keeps a busy tick from opening an unbounded number of outbound connections.
+const payWebhookConcurrency = 8
+
+// payWebhookRecordTimeout bounds the detached write that records a delivery
+// attempt's outcome after its request was sent.
+const payWebhookRecordTimeout = 5 * time.Second
+
+// PayWebhookRetention is how long a finished (delivered or given-up)
+// delivery, with its full payload, is kept for the admin delivery log before
+// PurgeOld may delete it.
+const PayWebhookRetention = 90 * 24 * time.Hour
+
+// PayWebhookPurgeBatch bounds how many rows one PurgeOld call deletes so a
+// large backlog is worked off over several ticks instead of one long write.
+const PayWebhookPurgeBatch = 500
 
 // payWebhookBodyReadLimit bounds how much of a webhook endpoint's response
 // body is read — enough to see an error message, not enough for a
@@ -118,6 +148,9 @@ func NewPayWebhookHTTPClient() *http.Client {
 // fill the whole batch and starve every other merchant out of the tick,
 // since skipped rows keep the same next_attempt_at and get re-fetched
 // (and re-dominated) next tick too.
+//
+// Delivery of the fetched rows is concurrent across merchants and sequential
+// within one — see deliverRows.
 func (s *PayWebhookSender) DeliverDue(ctx context.Context, limit int) (int, error) {
 	now := s.now()
 	const dueClause = "delivered_at IS NULL AND failed_at IS NULL AND next_attempt_at <= ?"
@@ -153,27 +186,108 @@ func (s *PayWebhookSender) DeliverDue(ctx context.Context, limit int) (int, erro
 		limit -= len(merchantRows)
 	}
 
-	delivered := 0
-	perMerchant := make(map[uuid.UUID]int, len(rows))
-	for i := range rows {
-		if ctx.Err() != nil {
-			return delivered, ctx.Err()
-		}
-		d := &rows[i]
-		if perMerchant[d.MerchantID] >= payWebhookPerMerchantPerTick {
-			continue
-		}
-		perMerchant[d.MerchantID]++
+	return s.deliverRows(ctx, rows)
+}
 
-		ok, err := s.deliverOne(ctx, d)
-		if err != nil {
-			return delivered, err
+// deliverRows sends rows through at most payWebhookConcurrency workers. Each
+// merchant's rows go to a single worker in fetch order, so a merchant's own
+// events keep their order and it is never hit by two requests at once, while
+// different merchants proceed in parallel — a hanging endpoint costs one
+// worker, not the whole tick. It returns the total delivered; a cancelled
+// ctx stops new deliveries from starting (in-flight ones finish), and the
+// first hard error (not an HTTP failure) is returned once in-flight work has
+// finished.
+func (s *PayWebhookSender) deliverRows(ctx context.Context, rows []models.PayWebhookDelivery) (int, error) {
+	var order []uuid.UUID
+	byMerchant := make(map[uuid.UUID][]*models.PayWebhookDelivery)
+	for i := range rows {
+		d := &rows[i]
+		if _, seen := byMerchant[d.MerchantID]; !seen {
+			order = append(order, d.MerchantID)
 		}
-		if ok {
-			delivered++
+		byMerchant[d.MerchantID] = append(byMerchant[d.MerchantID], d)
+	}
+
+	work := make(chan []*models.PayWebhookDelivery)
+	var (
+		delivered atomic.Int64
+		stopped   atomic.Bool
+		skipped   atomic.Bool
+		errOnce   sync.Once
+		firstErr  error
+		wg        sync.WaitGroup
+	)
+	fail := func(err error) { errOnce.Do(func() { firstErr = err }) }
+
+	// deliverGroup sends one merchant's rows in order. A panic inside a worker
+	// goroutine would take the whole process down (the scheduler's recover
+	// only covers its own goroutine), so it is contained here: it aborts this
+	// merchant's group and is reported as the tick's error, while other
+	// merchants carry on. The row that panicked is recorded as a failed
+	// attempt, so it walks the retry schedule (and eventually fails) instead
+	// of being fetched first and panicking every tick, and a panic after the
+	// request went out cannot make the merchant receive it again every tick.
+	deliverGroup := func(group []*models.PayWebhookDelivery) {
+		var current *models.PayWebhookDelivery
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[tsa-pay] webhook delivery panicked: %v\n%s", r, debug.Stack())
+				fail(fmt.Errorf("webhook delivery panic: %v", r))
+				if current != nil {
+					s.recordPanickedAttempt(ctx, current)
+				}
+			}
+		}()
+		for _, d := range group {
+			if stopped.Load() {
+				return
+			}
+			if ctx.Err() != nil {
+				skipped.Store(true)
+				return
+			}
+			current = d
+			ok, err := s.deliverOne(ctx, d)
+			current = nil
+			if err != nil {
+				fail(err)
+				stopped.Store(true)
+				return
+			}
+			if ok {
+				delivered.Add(1)
+			}
 		}
 	}
-	return delivered, nil
+
+	workers := payWebhookConcurrency
+	if len(order) < workers {
+		workers = len(order)
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A worker keeps draining work after a stop so the feeder below
+			// never blocks on a channel nobody reads.
+			for group := range work {
+				deliverGroup(group)
+			}
+		}()
+	}
+	for _, id := range order {
+		work <- byMerchant[id]
+	}
+	close(work)
+	wg.Wait()
+
+	switch {
+	case firstErr != nil:
+		return int(delivered.Load()), firstErr
+	case skipped.Load():
+		return int(delivered.Load()), ctx.Err()
+	}
+	return int(delivered.Load()), nil
 }
 
 // deliverOne attempts one delivery of d and records the outcome. It never
@@ -204,7 +318,9 @@ func (s *PayWebhookSender) deliverOne(ctx context.Context, d *models.PayWebhookD
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(d.Payload))
 	if err != nil {
-		return false, err
+		// The URL can never be requested, so retrying is pointless; the error
+		// itself repeats the URL (query token included), so it is not kept.
+		return s.finalizeNoCall(ctx, d, "webhook url is not a valid request url")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(PayWebhookSignatureHeader, sig)
@@ -214,6 +330,17 @@ func (s *PayWebhookSender) deliverOne(ctx context.Context, d *models.PayWebhookD
 	attempts := d.Attempts + 1
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// client.Do wraps the failure in a *url.Error that repeats the full
+		// URL, query token included; keep only the underlying cause.
+		if ctx.Err() != nil {
+			// Cancelled mid-request: the outcome is unknown, so leave the
+			// row as it was (no retry step consumed) for the next tick.
+			return false, ctx.Err()
+		}
+		var urlErr *neturl.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return s.recordAttempt(ctx, d, attempts, 0, truncate(err.Error(), 255), false)
 	}
 	defer resp.Body.Close()
@@ -231,11 +358,29 @@ func (s *PayWebhookSender) deliverOne(ctx context.Context, d *models.PayWebhookD
 	return s.recordAttempt(ctx, d, attempts, resp.StatusCode, errText, success)
 }
 
+// recordPanickedAttempt books a delivery that panicked as a failed attempt.
+// It must not panic itself: it runs inside the recover of deliverGroup.
+func (s *PayWebhookSender) recordPanickedAttempt(ctx context.Context, d *models.PayWebhookDelivery) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[tsa-pay] recording a panicked webhook delivery failed: %v", r)
+		}
+	}()
+	if _, err := s.recordAttempt(ctx, d, d.Attempts+1, 0, "internal error while delivering", false); err != nil {
+		log.Printf("[tsa-pay] recording a panicked webhook delivery failed: %v", err)
+	}
+}
+
 // recordAttempt writes the outcome of one delivery attempt, guarded on the
 // row's attempts count not having changed since it was read (WHERE id = ?
 // AND attempts = <old>) — a defence against two senders racing the same
 // delivery.
 func (s *PayWebhookSender) recordAttempt(ctx context.Context, d *models.PayWebhookDelivery, attempts, statusCode int, lastErr string, success bool) (bool, error) {
+	// The request already reached the merchant, so its outcome is recorded
+	// even if the tick's ctx was cancelled meanwhile — otherwise the row
+	// would look undelivered and be sent again next tick.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payWebhookRecordTimeout)
+	defer cancel()
 	now := s.now()
 	fields := map[string]any{
 		"attempts":         attempts,
@@ -283,6 +428,44 @@ func (s *PayWebhookSender) finalizeNoCall(ctx context.Context, d *models.PayWebh
 		return false, res.Error
 	}
 	return false, nil
+}
+
+// PurgeOld deletes up to limit finished deliveries — delivered or given up
+// more than retention ago, measured from that terminal timestamp rather than
+// created_at so a row an admin resent and that only just succeeded is not
+// purged for its age — and returns how many went. A delivery still owed to a
+// merchant (neither timestamp set) is never touched, however old.
+func (s *PayWebhookSender) PurgeOld(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	cutoff := s.now().Add(-retention)
+	ids, err := s.purgeableIDs(ctx, cutoff, limit)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	return s.deleteFinished(ctx, ids, cutoff)
+}
+
+const payWebhookPurgePredicate = "(delivered_at < ? OR failed_at < ?)"
+
+// purgeableIDs selects up to limit ids of deliveries finished before cutoff.
+// Ids are selected first and deleted by id so the same statements run on
+// SQLite and Postgres.
+func (s *PayWebhookSender) purgeableIDs(ctx context.Context, cutoff time.Time, limit int) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := s.db.WithContext(ctx).Model(&models.PayWebhookDelivery{}).
+		Where(payWebhookPurgePredicate, cutoff, cutoff).
+		Limit(limit).
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+// deleteFinished deletes ids, re-asserting the finished-before-cutoff
+// predicate in the statement itself: an admin Resend between the select and
+// this delete clears both timestamps, and that now-pending row must survive.
+func (s *PayWebhookSender) deleteFinished(ctx context.Context, ids []uuid.UUID, cutoff time.Time) (int64, error) {
+	res := s.db.WithContext(ctx).
+		Where("id IN ? AND "+payWebhookPurgePredicate, ids, cutoff, cutoff).
+		Delete(&models.PayWebhookDelivery{})
+	return res.RowsAffected, res.Error
 }
 
 // Resend requeues a delivery for immediate redelivery — an admin's "try

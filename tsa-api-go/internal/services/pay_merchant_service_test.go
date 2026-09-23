@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"errors"
+	"log"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -321,7 +323,7 @@ func TestPayMerchant_UpdateWritesOneAuditRowWithBeforeAndAfter(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 	d := rows[0].Details
-	for _, want := range []string{"webhookUrl", "https://skyair.ng/hook", "…3210", "…6789", "bankCode"} {
+	for _, want := range []string{"webhookUrl", "https://skyair.ng/…", "…3210", "…6789", "bankCode"} {
 		if !strings.Contains(d, want) {
 			t.Fatalf("details %s lack %q", d, want)
 		}
@@ -376,5 +378,68 @@ func TestPayMerchant_AuthenticateSeparatesADatabaseFailureFromABadKey(t *testing
 	_, _, err := s.Authenticate(context.Background(), k.LiveKey)
 	if !errors.Is(err, ErrPayAuthUnavailable) || errors.Is(err, ErrPayKeyInvalid) {
 		t.Fatalf("broken store: err = %v, want ErrPayAuthUnavailable", err)
+	}
+}
+
+func TestPayRedactURL(t *testing.T) {
+	cases := map[string]string{
+		"https://shop.ng/hooks/tsa?token=SECRET":         "https://shop.ng/…",
+		"https://shop.ng/hooks/tsa#frag":                 "https://shop.ng/…",
+		"https://shop.ng/hooks/T000/B000/SECRET":         "https://shop.ng/…",
+		"https://shop.ng/hooks/tsa":                      "https://shop.ng/…",
+		"https://user:pw@shop.ng/hooks/tsa?token=SECRET": "https://shop.ng/…",
+		"https://shop.ng":                                "https://shop.ng",
+		"https://shop.ng/":                               "https://shop.ng",
+		"":                                               "",
+		"http://[::1:bad":                                "[unparseable url]",
+		"://no-scheme?token=SECRET":                      "[unparseable url]",
+		"not a url?token=SECRET":                         "[unparseable url]",
+	}
+	for in, want := range cases {
+		got := payRedactURL(in)
+		if got != want {
+			t.Errorf("payRedactURL(%q) = %q, want %q", in, got, want)
+		}
+		if strings.Contains(got, "SECRET") || strings.Contains(got, "pw@") {
+			t.Errorf("payRedactURL(%q) = %q leaks", in, got)
+		}
+	}
+}
+
+func TestPayMerchant_AuditRowAndLogNeverHoldAWebhookURLQuery(t *testing.T) {
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+		WebhookURL: payStr("https://shop.ng/hooks/tsa?token=SECRET")}); err != nil {
+		t.Fatal(err)
+	}
+	// A change that only alters the query must still be recorded.
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+		WebhookURL: payStr("https://shop.ng/hooks/tsa?token=OTHERSECRET")}); err != nil {
+		t.Fatal(err)
+	}
+	rows := payAuditRows(t, s)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r.Details, "SECRET") {
+			t.Fatalf("audit details hold the query secret: %s", r.Details)
+		}
+		if !strings.Contains(r.Details, "webhookUrl") || !strings.Contains(r.Details, "https://shop.ng/…") {
+			t.Fatalf("audit details lost the host/path change: %s", r.Details)
+		}
+	}
+	if strings.Contains(logs.String(), "SECRET") || !strings.Contains(logs.String(), "https://shop.ng/…") || strings.Contains(logs.String(), "hooks/tsa") {
+		t.Fatalf("log output: %s", logs.String())
+	}
+	var stored models.PayMerchant
+	s.db.First(&stored, "id = ?", m.ID)
+	if stored.WebhookURL != "https://shop.ng/hooks/tsa?token=OTHERSECRET" {
+		t.Fatalf("the merchant's real URL must stay intact, got %q", stored.WebhookURL)
 	}
 }

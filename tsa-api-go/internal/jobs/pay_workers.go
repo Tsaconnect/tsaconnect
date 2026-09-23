@@ -2,7 +2,10 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
 // PayWebhookDeliverer is the narrow slice of *services.PayWebhookSender this
@@ -10,6 +13,7 @@ import (
 // real HTTP-calling sender.
 type PayWebhookDeliverer interface {
 	DeliverDue(ctx context.Context, limit int) (int, error)
+	PurgeOld(ctx context.Context, retention time.Duration, limit int) (int64, error)
 }
 
 // PayWebhookWorker delivers due TSA Pay webhook events on a schedule — the
@@ -30,15 +34,18 @@ func NewPayWebhookWorker(sender PayWebhookDeliverer, interval time.Duration) *Pa
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
-	return &PayWebhookWorker{sender: sender, interval: interval, batch: 50}
+	return &PayWebhookWorker{sender: sender, interval: interval, batch: services.PayWebhookDefaultBatch}
 }
 
 func (w *PayWebhookWorker) Name() string            { return "tsa-pay-webhooks" }
 func (w *PayWebhookWorker) Interval() time.Duration { return w.interval }
 
 func (w *PayWebhookWorker) Run(ctx context.Context) error {
-	_, err := w.sender.DeliverDue(ctx, w.batch)
-	return err
+	_, deliverErr := w.sender.DeliverDue(ctx, w.batch)
+	// Retention runs even when delivery failed: the two are independent, and
+	// a failing endpoint must not let finished rows pile up.
+	_, purgeErr := w.sender.PurgeOld(ctx, services.PayWebhookRetention, services.PayWebhookPurgeBatch)
+	return errors.Join(deliverErr, purgeErr)
 }
 
 // PayReconcileRunner is the narrow slice of *services.PayPaymentService this

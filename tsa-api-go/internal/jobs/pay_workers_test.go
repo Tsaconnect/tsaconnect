@@ -5,12 +5,24 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
 type fakePayWebhookSender struct {
-	calls int
-	n     int
-	err   error
+	calls      int
+	n          int
+	err        error
+	purgeCalls int
+	purgeErr   error
+	purgeRet   time.Duration
+	purgeLimit int
+}
+
+func (f *fakePayWebhookSender) PurgeOld(_ context.Context, retention time.Duration, limit int) (int64, error) {
+	f.purgeCalls++
+	f.purgeRet, f.purgeLimit = retention, limit
+	return 0, f.purgeErr
 }
 
 func (f *fakePayWebhookSender) DeliverDue(_ context.Context, _ int) (int, error) {
@@ -77,5 +89,33 @@ func TestPayReconciler_RunCallsThroughOnceAndReturnsTheError(t *testing.T) {
 	}
 	if svc.calls != 1 {
 		t.Fatalf("calls = %d, want 1", svc.calls)
+	}
+}
+
+func TestPayWebhookWorker_RunDeliversThenPurgesWithTheServiceRetention(t *testing.T) {
+	sender := &fakePayWebhookSender{}
+	if err := NewPayWebhookWorker(sender, time.Minute).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sender.calls != 1 || sender.purgeCalls != 1 {
+		t.Fatalf("deliver calls %d, purge calls %d; want 1 and 1", sender.calls, sender.purgeCalls)
+	}
+	if sender.purgeRet != services.PayWebhookRetention || sender.purgeLimit != services.PayWebhookPurgeBatch {
+		t.Fatalf("purge called with %s / %d", sender.purgeRet, sender.purgeLimit)
+	}
+}
+
+func TestPayWebhookWorker_RunStillPurgesWhenDeliveryFailsAndReportsBothErrors(t *testing.T) {
+	deliverErr, purgeErr := errors.New("deliver boom"), errors.New("purge boom")
+	sender := &fakePayWebhookSender{err: deliverErr, purgeErr: purgeErr}
+	err := NewPayWebhookWorker(sender, time.Minute).Run(context.Background())
+	if !errors.Is(err, deliverErr) || !errors.Is(err, purgeErr) || sender.purgeCalls != 1 {
+		t.Fatalf("err %v, purge calls %d", err, sender.purgeCalls)
+	}
+}
+
+func TestPayWebhookWorker_TheBatchIsTheServicesDefault(t *testing.T) {
+	if w := NewPayWebhookWorker(&fakePayWebhookSender{}, time.Minute); w.batch != services.PayWebhookDefaultBatch {
+		t.Fatalf("batch = %d, want %d", w.batch, services.PayWebhookDefaultBatch)
 	}
 }

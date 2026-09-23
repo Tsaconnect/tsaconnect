@@ -2,6 +2,7 @@ package services
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +31,15 @@ func TestValidPayWebhookURL(t *testing.T) {
 		if err := ValidPayWebhookURL(u); err == nil {
 			t.Fatalf("%q accepted", u)
 		}
+	}
+}
+
+func TestValidPayWebhookURL_ParseErrorDoesNotEchoTheURL(t *testing.T) {
+	err := ValidPayWebhookURL("https://shop.ng/a%zz?token=SECRET")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "shop.ng") {
+		t.Fatalf("error echoes the url: %v", err)
 	}
 }

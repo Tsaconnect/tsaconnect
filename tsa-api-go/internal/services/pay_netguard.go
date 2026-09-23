@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -67,6 +68,11 @@ func ValidPayWebhookURL(raw string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		// url.Parse's error repeats the raw URL, query token included.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return fmt.Errorf("invalid webhook url: %w", err)
 	}
 	if u.Scheme != "https" {

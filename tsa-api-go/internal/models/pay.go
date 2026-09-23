@@ -149,8 +149,8 @@ type PayWebhookDelivery struct {
 	NextAttemptAt  *time.Time `gorm:"index" json:"nextAttemptAt,omitempty"`
 	LastStatusCode int        `json:"lastStatusCode"`
 	LastError      string     `gorm:"size:255" json:"lastError,omitempty"`
-	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
-	FailedAt       *time.Time `json:"failedAt,omitempty"`
+	DeliveredAt    *time.Time `gorm:"index" json:"deliveredAt,omitempty"`
+	FailedAt       *time.Time `gorm:"index" json:"failedAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
 }
