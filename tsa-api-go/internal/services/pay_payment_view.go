@@ -56,6 +56,10 @@ type PayCheckoutView struct {
 	Payable            bool      `json:"payable"`
 	NotPayableWhy      string    `json:"notPayableWhy,omitempty"`
 	YouArePaying       bool      `json:"youArePaying"`
+	// OrderID is the payout order this payment's attempt opened, so a payer who
+	// comes back to a processing payment can resume funding it. Only ever set
+	// for the payer of a processing payment: nobody else may see the order.
+	OrderID *uuid.UUID `json:"orderId,omitempty"`
 }
 
 // PayPublicView is the unauthenticated status page a customer's browser (or
@@ -140,6 +144,9 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		Payable:            payable,
 		NotPayableWhy:      why,
 		YouArePaying:       youArePaying,
+	}
+	if youArePaying {
+		v.OrderID = p.PaycrestOrderID
 	}
 	// A return URL often carries the merchant's own order token, so it is
 	// shown only once the payment has succeeded — like PublicView — not to

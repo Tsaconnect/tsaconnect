@@ -374,7 +374,7 @@ func (h *PaycrestHandler) GetOrder(c *gin.Context) {
 	if fresh, err := h.orders.Sync(c.Request.Context(), row); err == nil && fresh != nil {
 		row = fresh
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Order", row)
+	utils.SuccessResponse(c, http.StatusOK, "Order", orderForCaller(row))
 }
 
 // POST /api/paycrest/orders/:id/claim-payment — the user asserts they
@@ -402,7 +402,7 @@ func (h *PaycrestHandler) ClaimPayment(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", row)
+	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", orderForCaller(row))
 }
 
 // POST /api/paycrest/orders/:id/cancel — the user abandons an order they have
@@ -427,7 +427,7 @@ func (h *PaycrestHandler) Cancel(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", row)
+	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", orderForCaller(row))
 }
 
 // GET /api/paycrest/orders — the user's recent orders.
@@ -443,5 +443,5 @@ func (h *PaycrestHandler) ListOrders(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Orders", rows)
+	utils.SuccessResponse(c, http.StatusOK, "Orders", ordersForCaller(rows))
 }

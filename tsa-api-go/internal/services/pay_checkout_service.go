@@ -31,9 +31,70 @@ type payQuoter interface {
 // 0.5% slippage it is about 0.5% of rate headroom.
 const payRateBufferBps = 100
 
-// ErrPayWrongRoute is returned when a naira route is asked to pay a payment
-// that settles in crypto.
-var ErrPayWrongRoute = errors.New("this payment settles in crypto — pick a token to pay with")
+// ErrPayWrongRoute is returned when a route is asked to pay a payment that
+// settles the other way: the naira routes on a crypto merchant's payment, or the
+// crypto routes on a naira merchant's. Its message says which (payWrongRoute).
+var ErrPayWrongRoute = errors.New("this payment can't be paid this way")
+
+// payWrongRoute is ErrPayWrongRoute for a route that pays `wanted`: the message
+// names how the payment really settles, so a naira merchant hit on the crypto
+// route is not told it settles in crypto.
+func payWrongRoute(wanted string) error {
+	if wanted == models.PaySettlementFiat {
+		return fmt.Errorf("%w: it settles in crypto — pick a token to pay with", ErrPayWrongRoute)
+	}
+	return fmt.Errorf("%w: it settles in naira — pay with a stablecoin or another token", ErrPayWrongRoute)
+}
+
+// ErrPayInternal is a start that failed for a reason of ours — a database that
+// would not answer — rather than a refusal of the payment or a provider's
+// answer. Its message is safe to show; the cause is only logged.
+var ErrPayInternal = errors.New("we couldn't start this payment — please try again")
+
+// IsPayServiceError reports whether err is one PayPaymentService itself
+// returns (or the KYC refusal its Lock does), as opposed to a provider's or an
+// internal failure.
+func IsPayServiceError(err error) bool {
+	for _, target := range []error{
+		ErrPayPaymentNotFound, ErrKYCVerificationRequired, ErrPayForbidden,
+		ErrPayNotPayable, ErrPayInProgress, ErrPayTransition,
+		ErrPayPaymentInvalid, ErrPayMerchantNotReady,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// payInternal turns an error the payment's own store raised into ErrPayInternal
+// unless it is one of the service's own refusals; the cause is logged.
+func payInternal(err error) error {
+	if err == nil || IsPayServiceError(err) || errors.Is(err, ErrPayInternal) {
+		return err
+	}
+	log.Printf("[tsa-pay] start failed internally: %v", err)
+	return ErrPayInternal
+}
+
+// ErrSellAttemptMayExist is CreateSellForFiat's answer when it could not prove
+// that no fundable payout order was left behind: a short order it failed to
+// cancel, or an order Paycrest opened that could not be recorded. A caller
+// pairing it with a payment must never hand the payment back.
+var ErrSellAttemptMayExist = errors.New("a payout order may still exist for this attempt")
+
+// payBookkeepingTimeout bounds the writes that record what a provider call just
+// did; sellCancelTimeout is the same 5 s the order service gives its own cancel.
+const payBookkeepingTimeout = sellCancelTimeout
+
+// payBookkeeping is the context for every write a start makes AFTER a provider
+// call created something: linking the attempt, ending an intent, failing or
+// freeing the payment. It outlives the request, the way cancelShortOrder and
+// releaseClaim do — a customer who closes the app must not leave an order she
+// can fund unlinked from the payment it pays.
+func payBookkeeping(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), payBookkeepingTimeout)
+}
 
 // PayCheckoutService starts a naira payment for a signed-in customer — either
 // directly (a Paycrest order she funds with a stablecoin she holds) or
@@ -114,7 +175,7 @@ func (s *PayCheckoutService) quotable(ctx context.Context, user *models.User, id
 		return nil, ErrPayNotPayable
 	}
 	if v.SettlementMode != settlement {
-		return nil, ErrPayWrongRoute
+		return nil, payWrongRoute(settlement)
 	}
 	return v, nil
 }
@@ -137,15 +198,25 @@ func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, i
 		BankCode:      p.SettleBankCode,
 		AccountNo:     p.SettleAccountNumber,
 		AccountName:   p.SettleAccountName,
+		PayPaymentID:  &p.ID,
 	}, false, nil)
+	if errors.Is(err, ErrSellAttemptMayExist) {
+		// An order may be open that she could fund: the payment is failed for
+		// support, never handed to another payer.
+		s.failStart(ctx, p.ID, "start_attempt_may_exist", "", uuid.Nil, err)
+		return nil, err
+	}
 	if err != nil {
-		// CreateSellForFiat cancels a short order itself: nothing fundable exists.
+		// CreateSellForFiat cancels a short order itself, and says so when it
+		// could not: here nothing fundable exists.
 		s.release(ctx, p.ID, "released: the payout order could not be opened")
 		return nil, err
 	}
-	if err := s.payments.LinkOrder(ctx, p.ID, order.ID); err != nil {
-		s.linkFailed(ctx, p.ID, "order", order.ID, err)
-		return nil, err
+	bctx, stop := payBookkeeping(ctx)
+	defer stop()
+	if err := s.payments.LinkOrder(bctx, p.ID, order.ID); err != nil {
+		s.failStart(ctx, p.ID, "link_failed", "order", order.ID, err)
+		return nil, payInternal(err)
 	}
 	return order, nil
 }
@@ -191,14 +262,16 @@ func (s *PayCheckoutService) startIntent(ctx context.Context, user *models.User,
 		s.release(ctx, p.ID, "released: the swap could not be started")
 		return nil, nil, err
 	}
-	if err := s.payments.LinkIntent(ctx, p.ID, intent.ID); err != nil {
+	bctx, stop := payBookkeeping(ctx)
+	defer stop()
+	if err := s.payments.LinkIntent(bctx, p.ID, intent.ID); err != nil {
 		// She has signed nothing yet, so the intent can be ended safely — it
 		// would otherwise hold her one open sale.
-		if aerr := s.intents.AbandonForPay(ctx, intent.ID); aerr != nil {
+		if aerr := s.intents.AbandonForPay(bctx, intent.ID, nil); aerr != nil {
 			log.Printf("[tsa-pay] could not end unlinked intent %s: %v", intent.ID, aerr)
 		}
-		s.linkFailed(ctx, p.ID, "intent", intent.ID, err)
-		return nil, nil, err
+		s.failStart(ctx, p.ID, "link_failed", "intent", intent.ID, err)
+		return nil, nil, payInternal(err)
 	}
 	return intent, quote, nil
 }
@@ -268,20 +341,38 @@ func payCryptoAmounts(kobo int64, dec int, price, rate *big.Rat) (owed, toAmount
 // cryptoTarget prices p's merchant net in the merchant's token. A price or
 // rate that cannot be read is ErrSellUnavailable: better to refuse than to
 // owe the merchant a guess.
-func (s *PayCheckoutService) cryptoTarget(ctx context.Context, p *models.PayPayment) (owed, toAmount *big.Int, dec int, err error) {
+//
+// toUSD is what the padded request is worth at the price it was sized from: the
+// figure the route's own value for it is checked against, so a price nobody
+// else agrees with cannot silently under-pay the merchant.
+func (s *PayCheckoutService) cryptoTarget(ctx context.Context, p *models.PayPayment) (owed, toAmount *big.Int, dec int, toUSD float64, err error) {
 	price, dec, err := s.pricer.TokenPriceUSD(ctx, p.SettleChainID, p.SettleTokenAddress)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("%w: pricing the merchant's token: %v", ErrSellUnavailable, err)
+		return nil, nil, 0, 0, fmt.Errorf("%w: pricing the merchant's token: %v", ErrSellUnavailable, err)
 	}
 	rate, err := s.rate.ProviderRate(ctx, "NGN")
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("%w: reading the provider rate: %v", ErrSellUnavailable, err)
+		return nil, nil, 0, 0, fmt.Errorf("%w: reading the provider rate: %v", ErrSellUnavailable, err)
 	}
 	owed, toAmount = payCryptoAmounts(p.MerchantNetKobo, dec, price, rate)
 	if owed.Sign() <= 0 {
-		return nil, nil, 0, fmt.Errorf("%w: the amount is too small to deliver in this token", ErrSellUnavailable)
+		return nil, nil, 0, 0, fmt.Errorf("%w: the amount is too small to deliver in this token", ErrSellUnavailable)
 	}
-	return owed, toAmount, dec, nil
+	usd := new(big.Rat).Mul(new(big.Rat).SetInt(toAmount), price)
+	usd.Quo(usd, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dec)), nil)))
+	toUSD, _ = usd.Float64()
+	return owed, toAmount, dec, toUSD, nil
+}
+
+// payCryptoFee is the whole platform fee the round trip may spend, snapshotted
+// on the payment. A payment that snapshotted none must not be sold: a zero
+// budget would fall back to the quoter's own B and charge a fee the payment
+// never priced.
+func payCryptoFee(p *models.PayPayment) error {
+	if p.FeeBps <= 0 {
+		return fmt.Errorf("%w: this payment snapshotted no fee", ErrSellUnavailable)
+	}
+	return nil
 }
 
 // paySameToken is the merchant's own token on the merchant's own chain.
@@ -309,20 +400,26 @@ func (s *PayCheckoutService) CryptoQuote(ctx context.Context, user *models.User,
 	if paySameToken(p, in) {
 		return nil, ErrPaySameToken
 	}
-	owed, toAmount, dec, err := s.cryptoTarget(ctx, p)
+	if err := payCryptoFee(p); err != nil {
+		return nil, err
+	}
+	owed, toAmount, dec, toUSD, err := s.cryptoTarget(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 	q, err := s.quoter.Quote(ctx, SellQuoteInput{
 		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAddress: in.SourceAddress,
 		WalletAddress: user.WalletAddress, FiatCode: "NGN", ToAmount: toAmount.String(),
-		ToChainID: p.SettleChainID, ToToken: p.SettleTokenAddress, ToAddress: p.SettleWalletAddress, BudgetBps: p.FeeBps,
+		ToChainID: p.SettleChainID, ToToken: p.SettleTokenAddress, ToAddress: p.SettleWalletAddress, BudgetBps: p.FeeBps, Delivery: true,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if q == nil || q.Route == nil {
 		return nil, ErrSellUnavailable
+	}
+	if !payValueAgrees(toUSD, q.Route.ToAmountUSD) {
+		return nil, fmt.Errorf("%w: the token's price and the route's value disagree", ErrSellUnavailable)
 	}
 	return &PayCryptoQuote{FromAmount: q.Route.FromAmount, DestAmount: owed.String(), DestDecimals: dec}, nil
 }
@@ -343,7 +440,11 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 		s.release(ctx, p.ID, "released: the store's own token on its own network")
 		return nil, nil, ErrPaySameToken
 	}
-	owed, toAmount, _, err := s.cryptoTarget(ctx, p)
+	if err := payCryptoFee(p); err != nil {
+		s.release(ctx, p.ID, "released: the payment has no fee snapshot")
+		return nil, nil, err
+	}
+	owed, toAmount, _, toUSD, err := s.cryptoTarget(ctx, p)
 	if err != nil {
 		s.release(ctx, p.ID, "released: the transfer could not be sized")
 		return nil, nil, err
@@ -358,6 +459,7 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 		DestAddress:      p.SettleWalletAddress,
 		DestAmount:       owed.String(),
 		BudgetBps:        p.FeeBps,
+		ExpectedToUSD:    toUSD,
 	})
 }
 
@@ -368,7 +470,7 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uuid.UUID, settlement string) (*models.PayPayment, error) {
 	p, fresh, err := s.payments.Lock(ctx, user, id, s.live)
 	if err != nil {
-		return nil, err
+		return nil, payInternal(err)
 	}
 	if !fresh {
 		// She already holds this payment: the app resumes her attempt, and a
@@ -381,7 +483,7 @@ func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uu
 	}
 	if p.SettlementMode != settlement {
 		s.release(ctx, p.ID, "released: this payment settles another way")
-		return nil, ErrPayWrongRoute
+		return nil, payWrongRoute(settlement)
 	}
 	return p, nil
 }
@@ -402,20 +504,30 @@ func (s *PayCheckoutService) convertedTarget(ctx context.Context, fiat string) (
 // release hands a payment back after a start that created nothing. A release
 // that itself fails is logged, not returned: the caller's own error is the
 // one the customer needs, and the reconciler frees a lock with no attempt
-// behind it after payLockNoAttemptGrace.
+// behind it after payLockNoAttemptGrace — and only once it has looked for an
+// attempt that may exist.
 func (s *PayCheckoutService) release(ctx context.Context, id uuid.UUID, reason string) {
-	if err := s.payments.Release(ctx, id, reason); err != nil {
+	bctx, stop := payBookkeeping(ctx)
+	defer stop()
+	if err := s.payments.Release(bctx, id, reason); err != nil {
 		log.Printf("[tsa-pay] could not release payment %s after a refused start: %v", id, err)
 	}
 }
 
-// linkFailed is the one way a start can go wrong AFTER a provider created
-// something: the attempt exists but the payment refused to link it. It is
-// never released — an order or intent exists — so it fails, for support.
-func (s *PayCheckoutService) linkFailed(ctx context.Context, id uuid.UUID, kind string, attemptID uuid.UUID, cause error) {
-	log.Printf("[tsa-pay] ALERT pay_link_failed_total=1 payment=%s %s=%s err=%v", id, kind, attemptID, cause)
-	if err := s.payments.Fail(ctx, id, "internal: could not link the attempt"); err != nil {
-		log.Printf("[tsa-pay] ALERT pay_link_fail_stuck_total=1 payment=%s %s=%s err=%v", id, kind, attemptID, err)
+// failStart is the one way a start can go wrong AFTER a provider may have
+// created something: an attempt exists, or may, and it could not be linked or
+// cleanly ruled out. The payment is never released — it fails, for support.
+// kind and attemptID name the attempt when there is one.
+func (s *PayCheckoutService) failStart(ctx context.Context, id uuid.UUID, alert, kind string, attemptID uuid.UUID, cause error) {
+	detail := ""
+	if kind != "" {
+		detail = fmt.Sprintf(" %s=%s", kind, attemptID)
+	}
+	log.Printf("[tsa-pay] ALERT pay_%s_total=1 payment=%s%s err=%v", alert, id, detail, cause)
+	bctx, stop := payBookkeeping(ctx)
+	defer stop()
+	if err := s.payments.Fail(bctx, id, "internal: could not start the attempt cleanly"); err != nil {
+		log.Printf("[tsa-pay] ALERT pay_%s_stuck_total=1 payment=%s%s err=%v", alert, id, detail, err)
 	}
 }
 

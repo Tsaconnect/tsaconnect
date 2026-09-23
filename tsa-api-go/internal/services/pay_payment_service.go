@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +21,7 @@ import (
 // A nil payIntents means converted payments are unavailable (ramp sell is off).
 type payIntents interface {
 	Create(ctx context.Context, user *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error)
-	AbandonForPay(ctx context.Context, id uuid.UUID) error
+	AbandonForPay(ctx context.Context, id uuid.UUID, swapTxHash *string) error
 	SwapStatus(ctx context.Context, id uuid.UUID) (*LiFiTransferStatus, error)
 	ConfirmDelivery(ctx context.Context, id uuid.UUID) (destTx string, err error)
 }
@@ -93,6 +94,7 @@ type PayPaymentService struct {
 	checkoutBase string
 	now          func() time.Time
 	intents      payIntents // nil until SetIntents (ramp sell off: converted payments unavailable)
+	alerted      sync.Map   // alertOnce's memory: what this process has already alerted on
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the

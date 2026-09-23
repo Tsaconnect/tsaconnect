@@ -65,13 +65,7 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
 	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
-	// LiFi prices the merchant's token; it is only needed where a route to a
-	// crypto merchant can exist at all.
-	var pricer *services.LiFiQuoteClient
-	if quoter != nil {
-		pricer = services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
-	}
-	if checkout := buildPayCheckout(payments, orders, intents, quoter, pricer, rates, cfg.TSAPayLiveEnabled); checkout != nil {
+	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}
 
@@ -86,7 +80,7 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 // every piece they need exists; naira payments never depend on them.
 func buildPayCheckout(payments *services.PayPaymentService, orders *services.PaycrestOrderService,
 	intents *services.SellIntentService, quoter *services.RampSellQuoter,
-	pricer *services.LiFiQuoteClient, rates *services.PaycrestQuoteService, live bool) *services.PayCheckoutService {
+	rates *services.PaycrestQuoteService, live bool) *services.PayCheckoutService {
 	if orders == nil {
 		return nil
 	}
@@ -95,8 +89,10 @@ func buildPayCheckout(payments *services.PayPaymentService, orders *services.Pay
 	}
 	payments.SetIntents(intents)
 	checkout := services.NewPayCheckoutService(payments, orders, intents, quoter, live)
-	if pricer != nil && rates != nil {
-		checkout.SetCrypto(pricer, rates)
+	if rates != nil {
+		// The merchant's token is priced through the ramp quoter's own LiFi
+		// client, not a second one.
+		checkout.SetCrypto(quoter, rates)
 	}
 	return checkout
 }

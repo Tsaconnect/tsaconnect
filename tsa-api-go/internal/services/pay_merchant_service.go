@@ -18,11 +18,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// payChainRegistry resolves a chain ID to its name for crypto settlement.
-// Kept narrow (rather than depending on the full BlockchainService) so this
-// service can be constructed and tested without a live chain registry.
+// payChainRegistry resolves a chain ID to its name for crypto settlement — and
+// only for a chain a delivery can be confirmed on (see MainnetChainNameForID):
+// a merchant we can never prove a delivery for must not be configurable. Kept
+// narrow (rather than depending on the full BlockchainService) so this service
+// can be constructed and tested without a live chain registry.
 type payChainRegistry interface {
-	ChainNameForID(id int64) (string, bool)
+	MainnetChainNameForID(id int64) (string, bool)
 }
 
 // ErrPayMerchantNotFound is returned when no PayMerchant matches a lookup.
@@ -472,8 +474,8 @@ func (s *PayMerchantService) validatePayMerchant(ctx context.Context, before, up
 		if s.chains == nil {
 			return fmt.Errorf("%w: no chain registry configured for crypto settlement", ErrPayMerchantInvalid)
 		}
-		if _, ok := s.chains.ChainNameForID(updated.ChainID); !ok {
-			return fmt.Errorf("%w: unknown chain id %d", ErrPayMerchantInvalid, updated.ChainID)
+		if _, ok := s.chains.MainnetChainNameForID(updated.ChainID); !ok {
+			return fmt.Errorf("%w: chain id %d is not a supported settlement chain", ErrPayMerchantInvalid, updated.ChainID)
 		}
 		if !common.IsHexAddress(updated.TokenAddress) {
 			return fmt.Errorf("%w: invalid token address", ErrPayMerchantInvalid)

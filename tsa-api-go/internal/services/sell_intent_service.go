@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"regexp"
 	"strings"
@@ -58,6 +59,28 @@ var (
 // to a caller that died between claiming and writing back.
 const sellIntentClaimStale = 5 * time.Minute
 
+// deliveryReceiptGrace is how long, once a delivery's swap first reads
+// COMPLETED, the destination receipt may show no credit before that is taken as
+// the answer: a node lags its chain, and "no matching Transfer" a few seconds
+// after LiFi says done is usually just that. Past it, the merchant was not paid.
+const deliveryReceiptGrace = 10 * time.Minute
+
+// deliveryValueBand is how far our price for the merchant's token may sit from
+// the route's own value for the amount it delivers (5%, either way) before the
+// sale is refused: a bogus price would size an amount that under-pays the
+// merchant, and nothing after it would notice.
+const deliveryValueBand = 0.05
+
+// payValueAgrees reports whether our USD value for an amount and the route's
+// agree to within deliveryValueBand. A route that names no value cannot be
+// cross-checked, which is a disagreement.
+func payValueAgrees(expectedUSD, routeUSD float64) bool {
+	if expectedUSD <= 0 || routeUSD <= 0 {
+		return false
+	}
+	return math.Abs(routeUSD-expectedUSD)/routeUSD <= deliveryValueBand
+}
+
 // sellQuoter is the price this service re-runs for itself. *RampSellQuoter
 // fills it; the interface exists so a quote can be faked without a live LiFi.
 type sellQuoter interface {
@@ -97,6 +120,10 @@ type CreateSellIntentInput struct {
 	DestChainID                               int64
 	DestTokenAddress, DestAddress, DestAmount string
 	BudgetBps                                 int
+	// ExpectedToUSD is what ToAmount is worth at the price the caller sized it
+	// from; when set, a delivery is refused unless the route's own value for
+	// what it delivers agrees (deliveryValueBand).
+	ExpectedToUSD float64
 }
 
 type SellIntentService struct {
@@ -199,6 +226,11 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		if err := in.checkDelivery(); err != nil {
 			return nil, nil, err
 		}
+		// And it must be provable where it lands: a swap that pays the merchant
+		// on a chain nothing here can read a receipt for is confirmed never.
+		if _, ok := s.destVerifier(in.DestChainID); !ok {
+			return nil, nil, fmt.Errorf("%w: no way to prove a delivery on chain %d", ErrSellUnavailable, in.DestChainID)
+		}
 	} else {
 		if err := s.orders.requirePaycrestEnabled(fiat); err != nil {
 			return nil, nil, err
@@ -228,7 +260,7 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAmount: in.SourceAmount,
 		FromAddress: in.SourceAddress, WalletAddress: user.WalletAddress, FiatCode: fiat,
 		ToChainID: in.DestChainID, ToToken: strings.TrimSpace(in.DestTokenAddress),
-		ToAddress: strings.TrimSpace(in.DestAddress), BudgetBps: in.BudgetBps,
+		ToAddress: strings.TrimSpace(in.DestAddress), BudgetBps: in.BudgetBps, Delivery: delivery,
 	}
 	sourceAmount := strings.TrimSpace(in.SourceAmount)
 	exactOutput := asked != nil
@@ -259,6 +291,11 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		if q.Route.ToAmount == nil || q.Route.ToAmount.Cmp(asked) < 0 ||
 			q.Route.ToAmountMin == nil || q.Route.ToAmountMin.Sign() <= 0 {
 			return nil, nil, fmt.Errorf("%w: the route does not deliver the amount asked", ErrSellUnavailable)
+		}
+		if delivery {
+			if err := checkDeliveryRoute(in, q.Route); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
@@ -300,6 +337,28 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		return nil, nil, err
 	}
 	return row, q, nil
+}
+
+// checkDeliveryRoute is what a delivery needs of its route beyond an ordinary
+// exact-output one, all refused before she signs — a delivery has no naira
+// backstop, so a route that falls short ends with her already charged:
+//
+//   - its floor (toAmountMin) covers what the merchant is owed;
+//   - it carries the transactionId that binds the swap she signs to THIS quote
+//     (checkSwapBinding tolerates an empty one; for a delivery that clause is
+//     the only thing tying the swap to us);
+//   - our price for the token agrees with the route's own value for it.
+func checkDeliveryRoute(in CreateSellIntentInput, route *LiFiRoute) error {
+	owed, _ := new(big.Int).SetString(strings.TrimSpace(in.DestAmount), 10)
+	switch {
+	case route.ToAmountMin.Cmp(owed) < 0:
+		return fmt.Errorf("%w: the route's floor is under what the merchant is owed", ErrSellUnavailable)
+	case strings.TrimSpace(route.TransactionID) == "":
+		return fmt.Errorf("%w: the route carries no transaction id to bind the swap to", ErrSellUnavailable)
+	case in.ExpectedToUSD > 0 && !payValueAgrees(in.ExpectedToUSD, route.ToAmountUSD):
+		return fmt.Errorf("%w: the token's price and the route's value disagree", ErrSellUnavailable)
+	}
+	return nil
 }
 
 // payFieldsOf validates the pay-checkout fields as a set and returns the exact
@@ -535,6 +594,7 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		BankCode:      in.BankCode,
 		AccountNo:     in.AccountNumber,
 		AccountName:   in.AccountName,
+		PayPaymentID:  in.PayPaymentID,
 	}
 	var order *models.PaycrestOrderRecord
 	if in.PayoutFiat != "" {
@@ -613,7 +673,7 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 		return "", err
 	}
 	if st == nil || st.Status != LiFiStatusDone || st.Substatus != LiFiSubstatusCompleted {
-		return "", ErrSwapNotLanded
+		return "", &SwapNotLandedError{Status: st}
 	}
 	if err := checkSwapBinding(st, &in, rampSettlementChainID, s.usdc); err != nil {
 		log.Printf("[ramp-sell] ALERT ramp_sell_swap_mismatch_total=1 intent=%s tx=%s status=%s/%s: %v",
@@ -626,8 +686,29 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_unverifiable_total=1 intent=%s chain=%d", in.ID, in.DestChainID)
 		return "", fmt.Errorf("%w: no way to prove a delivery on chain %d", ErrSellUnavailable, in.DestChainID)
 	}
-	got, err := verifier.VerifyTransfer(ctx, st.DestTxHash, in.DestTokenAddress, in.DestAddress)
+	// The first time the swap reads COMPLETED starts the wait for its receipt to
+	// be readable; it is written once and survives a restart.
+	seen, err := s.deliverySeen(ctx, &in)
 	if err != nil {
+		return "", err
+	}
+	got, err := verifier.VerifyTransfer(ctx, st.DestTxHash, in.DestTokenAddress, in.DestAddress)
+	switch {
+	case errors.Is(err, ErrTransferReverted):
+		// The chain says the destination transaction did nothing.
+		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_reverted_total=1 intent=%s tx=%s: %v", in.ID, st.DestTxHash, err)
+		return "", fmt.Errorf("%w: %v", ErrSwapMismatch, err)
+	case errors.Is(err, ErrTransferNotFound):
+		// The real verifier says "no Transfer log credits the merchant" this way,
+		// never as a zero. Right after LiFi says done it may be a lagging node: a
+		// wait, carrying the status read so the caller need not read it again.
+		if s.now().Sub(seen) < deliveryReceiptGrace {
+			return "", &SwapNotLandedError{Status: st}
+		}
+		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_no_credit_total=1 intent=%s tx=%s seen_for=%s: %v",
+			in.ID, st.DestTxHash, s.now().Sub(seen).Round(time.Second), err)
+		return "", fmt.Errorf("%w: %v", ErrSwapMismatch, err)
+	case err != nil:
 		return "", err
 	}
 	if got == nil || got.Cmp(owed) < 0 {
@@ -639,11 +720,25 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 	if in.Status == models.SellIntentDelivered {
 		return st.DestTxHash, nil
 	}
+	destTx := strings.ToLower(st.DestTxHash)
+	// One destination transaction proves one sale (see RampSellIntent.DestTxHash).
+	// Checked before the fee is booked; the unique index below is the backstop.
+	var reused int64
+	if err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("dest_tx_hash = ? AND id <> ?", destTx, in.ID).Count(&reused).Error; err != nil {
+		return "", err
+	}
+	if reused > 0 {
+		return "", s.deliveryTxReused(&in, st.DestTxHash)
+	}
 	s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND status = ?", in.ID, models.SellIntentSwapped).
-		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentDelivered, "updated_at": s.now()}))
+		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentDelivered, "dest_tx_hash": destTx, "updated_at": s.now()}))
 	if res.Error != nil {
+		if isUniqueViolation(res.Error) {
+			return "", s.deliveryTxReused(&in, st.DestTxHash)
+		}
 		return "", res.Error
 	}
 	if res.RowsAffected == 0 {
@@ -658,6 +753,38 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 		}
 	}
 	return st.DestTxHash, nil
+}
+
+// deliverySeen is when in's swap was first seen COMPLETED, writing now if it is
+// the first time. Guarded, so of two concurrent first sights one time wins.
+func (s *SellIntentService) deliverySeen(ctx context.Context, in *models.RampSellIntent) (time.Time, error) {
+	if in.DeliverySeenAt != nil {
+		return *in.DeliverySeenAt, nil
+	}
+	now := s.now()
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND delivery_seen_at IS NULL", in.ID).
+		Update("delivery_seen_at", now)
+	if res.Error != nil {
+		return time.Time{}, res.Error
+	}
+	if res.RowsAffected == 0 {
+		var cur models.RampSellIntent
+		if err := s.db.WithContext(ctx).First(&cur, "id = ?", in.ID).Error; err != nil {
+			return time.Time{}, err
+		}
+		if cur.DeliverySeenAt != nil {
+			return *cur.DeliverySeenAt, nil
+		}
+	}
+	return now, nil
+}
+
+// deliveryTxReused is the answer for a destination transaction another sale
+// already used to prove its delivery: a mismatch — one credit cannot pay two.
+func (s *SellIntentService) deliveryTxReused(in *models.RampSellIntent, tx string) error {
+	log.Printf("[ramp-sell] ALERT ramp_sell_delivery_tx_reused_total=1 intent=%s tx=%s", in.ID, tx)
+	return fmt.Errorf("%w: %s already proved another sale's delivery", ErrSwapMismatch, tx)
 }
 
 // destVerifier is the on-chain proof for a chain id, by way of the chain key the
@@ -724,8 +851,23 @@ func (s *SellIntentService) lostClaim(ctx context.Context, userID, id uuid.UUID)
 }
 
 func (s *SellIntentService) claimIsStale(in *models.RampSellIntent) bool {
-	return in.UpdatedAt.Before(s.now().Add(-sellIntentClaimStale))
+	return sellClaimIsStale(in, s.now())
 }
+
+// sellClaimIsStale reports an ordering claim nobody has touched for
+// sellIntentClaimStale as of now: its holder is presumed dead. The pay
+// reconciler asks the same question of a payment's intent.
+func sellClaimIsStale(in *models.RampSellIntent, now time.Time) bool {
+	return in.UpdatedAt.Before(now.Add(-sellIntentClaimStale))
+}
+
+// SwapNotLandedError is ErrSwapNotLanded carrying the LiFi status the answer
+// was read from (nil when LiFi has no record), so the pay reconciler decides
+// what the wait means from it instead of asking LiFi again.
+type SwapNotLandedError struct{ Status *LiFiTransferStatus }
+
+func (e *SwapNotLandedError) Error() string { return ErrSwapNotLanded.Error() }
+func (e *SwapNotLandedError) Unwrap() error { return ErrSwapNotLanded }
 
 // SwapEndedShortError is ErrSwapFailed with how LiFi says the swap ended
 // (§5.5), so a caller can tell a refund from a partial fill without reading
@@ -866,15 +1008,22 @@ func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) e
 
 // AbandonForPay is the reconciler's path: it moves a pay intent that will
 // never settle from open to failed, which frees the customer's one-open-sale
-// slot. No owner check and no swap-sent guard — the caller has already decided
-// the swap is not going to deliver.
-func (s *SellIntentService) AbandonForPay(ctx context.Context, id uuid.UUID) error {
+// slot. No owner check and no swap-sent guard on WHO may end it — but the swap
+// the caller decided on is part of the write: swapTxHash is the hash the caller
+// READ (nil = it saw none), and the sale is only ended if it still has exactly
+// that one. A swap she signs between the caller's read and this write is
+// therefore never abandoned out from under the payment; ErrSellIntentState
+// tells the caller to look again.
+func (s *SellIntentService) AbandonForPay(ctx context.Context, id uuid.UUID, swapTxHash *string) error {
 	if !s.ready() {
 		return ErrSellUnavailable
 	}
 	// pay_payment_id: this path is for pay intents only. Nothing else may end
 	// an ordinary sale without its owner.
-	return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL", id)
+	if swapTxHash == nil {
+		return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL AND swap_tx_hash IS NULL", id)
+	}
+	return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL AND swap_tx_hash = ?", id, *swapTxHash)
 }
 
 // failOpenSale fails the sale matched by cond, only while it is swapping or

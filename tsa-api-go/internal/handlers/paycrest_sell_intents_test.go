@@ -39,6 +39,8 @@ type stubSellIntents struct {
 	getErr error
 	// lastUseWallet is the flag OpenOrder was last called with.
 	lastUseWallet bool
+	// order is what OpenOrder answers when there is no error.
+	order *models.PaycrestOrderRecord
 }
 
 func (s *stubSellIntents) Get(context.Context, uuid.UUID, uuid.UUID) (*models.RampSellIntent, error) {
@@ -72,7 +74,7 @@ func (s *stubSellIntents) RecordSwap(context.Context, uuid.UUID, uuid.UUID, stri
 
 func (s *stubSellIntents) OpenOrder(_ context.Context, _ *models.User, _ uuid.UUID, useWalletBalance bool) (*models.PaycrestOrderRecord, error) {
 	s.lastUseWallet = useWalletBalance
-	return nil, s.err
+	return s.order, s.err
 }
 
 func (s *stubSellIntents) Abandon(context.Context, uuid.UUID, uuid.UUID) error { return s.err }

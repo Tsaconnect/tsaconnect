@@ -457,8 +457,8 @@ func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
 	// A pay checkout's crypto route delivers a token to a merchant on ANY
 	// configured chain, and only that chain's own receipt can say the merchant
 	// was credited. The same verifier map converted buys prove their deliveries
-	// with — not a second one — and the registry's own id -> key resolver.
-	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.ChainNameForID)
+	// with — not a second one — and the registry's mainnet id -> key resolver (a testnet id must not resolve).
+	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.MainnetChainNameForID)
 	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
 	return svc
 }

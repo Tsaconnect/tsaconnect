@@ -960,6 +960,36 @@ func TestSellIntent_PayIntentOpensAnExactNairaOrderToTheMerchantFromTheLandedAmo
 	}
 }
 
+// The masked responses are only a view: the order the offramp is opened for is
+// built from the intent's own row, and it is marked as a pay attempt so the
+// customer's routes know to mask it — including after the payment lets it go.
+func TestSellIntent_APayIntentsOrderIsMarkedAsAPaymentsAndStillPaysTheRealAccount(t *testing.T) {
+	r := payRig(t)
+	r.base.amount = big.NewInt(34_000000)
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	pid := uuid.New()
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(pid, r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.client.lastOfframp.Recipient.AccountIdentifier != "9999999999" {
+		t.Fatalf("the offramp was opened for %+v", r.client.lastOfframp.Recipient)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.svc.db.First(&row, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.PayPaymentID == nil || *row.PayPaymentID != pid || row.PayoutAccount != "9999999999" {
+		t.Fatalf("stored order = %+v", row)
+	}
+}
+
 func TestSellIntent_PayIntentShortfallNeedsConsentToUseTheWallet(t *testing.T) {
 	r := payRig(t)
 	r.base.amount = big.NewInt(9_975000) // landed short
@@ -1051,7 +1081,7 @@ func TestSellIntent_ACustomerCannotAbandonAPayIntentWhoseSwapWasSent(t *testing.
 	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("err = %v", err)
 	}
-	if err := r.svc.AbandonForPay(context.Background(), in.ID); err != nil {
+	if err := r.svc.AbandonForPay(context.Background(), in.ID, r.reload(t, in.ID).SwapTxHash); err != nil {
 		t.Fatalf("the reconciler's path: %v", err)
 	}
 	if got := r.reload(t, in.ID); got.Status != models.SellIntentFailed || got.AccountNumber != "" {
@@ -1180,13 +1210,60 @@ func TestSellIntent_PayIntentConsentNeverCapsBelowWhatLanded(t *testing.T) {
 	}
 }
 
+// The reconciler reads an intent, decides its swap is dead, then abandons: a
+// swap recorded in between must not be ended by that stale decision.
+func TestSellIntent_AbandonForPayEndsOnlyTheSwapTheCallerRead(t *testing.T) {
+	ctx := context.Background()
+	r := payRig(t)
+	in, _, err := r.svc.Create(ctx, r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := "0x" + strings.Repeat("cd", 32)
+	if err := r.svc.AbandonForPay(ctx, in.ID, &other); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("a hash that was never recorded: err = %v", err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash) // her swap lands after the reconciler's read
+	if err := r.svc.AbandonForPay(ctx, in.ID, nil); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("'no swap' abandon after a swap was recorded: err = %v", err)
+	}
+	if err := r.svc.AbandonForPay(ctx, in.ID, &other); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("another swap's hash: err = %v", err)
+	}
+	if got := r.reload(t, in.ID); got.Status == models.SellIntentFailed || got.AccountNumber == "" {
+		t.Fatalf("a guarded abandon ended the sale anyway: %+v", got)
+	}
+	hash := testSwapHash
+	if err := r.svc.AbandonForPay(ctx, in.ID, &hash); err != nil {
+		t.Fatalf("abandon guarded on the swap actually recorded: %v", err)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentFailed {
+		t.Fatalf("intent = %+v", got)
+	}
+}
+
+func TestSellIntent_AbandonForPayWithNoSwapEndsAnUnsignedIntent(t *testing.T) {
+	ctx := context.Background()
+	r := payRig(t)
+	in, _, err := r.svc.Create(ctx, r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.AbandonForPay(ctx, in.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentFailed {
+		t.Fatalf("intent = %+v", got)
+	}
+}
+
 // ─── S4: AbandonForPay only ever ends a pay intent ─────────────────────────
 
 func TestSellIntent_AbandonForPayWillNotEndAnOrdinarySale(t *testing.T) {
 	r := newSellIntentRig(t)
 	in := r.create(t)
 	r.mustRecord(t, in.ID, testSwapHash)
-	if err := r.svc.AbandonForPay(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+	if err := r.svc.AbandonForPay(context.Background(), in.ID, r.reload(t, in.ID).SwapTxHash); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("err = %v, want ErrSellIntentState", err)
 	}
 	if got := r.reload(t, in.ID); got.Status == models.SellIntentFailed || got.AccountNumber == "" {
@@ -1435,8 +1512,15 @@ func TestSellIntent_ConfirmDeliveryWaitsUntilLiFiSaysCompleted(t *testing.T) {
 			r, v, fees := newDeliveryRig(t)
 			in := r.createDelivery(t)
 			r.status.st = st
-			if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSwapNotLanded) {
+			_, err := r.svc.ConfirmDelivery(context.Background(), in.ID)
+			if !errors.Is(err, ErrSwapNotLanded) {
 				t.Fatalf("err = %v, want ErrSwapNotLanded", err)
+			}
+			// The answer carries the LiFi status it was read from, so the pay
+			// reconciler need not ask LiFi a second time.
+			var nl *SwapNotLandedError
+			if !errors.As(err, &nl) || nl.Status != st {
+				t.Fatalf("err = %#v, want a SwapNotLandedError carrying %v", err, st)
 			}
 			if v.calls != 0 || len(fees.events) != 0 {
 				t.Fatal("proof or fee before the swap completed")
@@ -1469,8 +1553,8 @@ func TestSellIntent_ConfirmDeliveryFailsClosed(t *testing.T) {
 	})
 	t.Run("no verifier for that chain", func(t *testing.T) {
 		r, _, _ := newDeliveryRig(t)
-		r.svc.SetDestVerifiers(map[string]ERC20TransferVerifier{}, deliveryChainName)
 		in := r.createDelivery(t)
+		r.svc.SetDestVerifiers(map[string]ERC20TransferVerifier{}, deliveryChainName) // unwired after it was created
 		r.status.st = r.deliveredStatus(in)
 		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellUnavailable) {
 			t.Fatalf("err = %v — a chain nothing can prove on is never delivered", err)
@@ -1478,8 +1562,8 @@ func TestSellIntent_ConfirmDeliveryFailsClosed(t *testing.T) {
 	})
 	t.Run("verifiers never wired", func(t *testing.T) {
 		r, _, _ := newDeliveryRig(t)
-		r.svc.SetDestVerifiers(nil, nil)
 		in := r.createDelivery(t)
+		r.svc.SetDestVerifiers(nil, nil)
 		r.status.st = r.deliveredStatus(in)
 		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellUnavailable) {
 			t.Fatalf("err = %v", err)
@@ -1508,7 +1592,7 @@ func TestSellIntent_ConfirmDeliveryOnlyAppliesToAPaidDeliverySale(t *testing.T) 
 		r, _, _ := newDeliveryRig(t)
 		in := r.createDelivery(t)
 		r.status.st = r.deliveredStatus(in)
-		if err := r.svc.AbandonForPay(context.Background(), in.ID); err != nil {
+		if err := r.svc.AbandonForPay(context.Background(), in.ID, r.reload(t, in.ID).SwapTxHash); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
@@ -1556,7 +1640,7 @@ func TestSellIntent_DeliveredIsTerminal(t *testing.T) {
 	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("Abandon: %v", err)
 	}
-	if err := r.svc.AbandonForPay(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+	if err := r.svc.AbandonForPay(context.Background(), in.ID, r.reload(t, in.ID).SwapTxHash); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("AbandonForPay: %v — a paid sale must not be failed", err)
 	}
 	// She is free to sell again.

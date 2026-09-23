@@ -110,6 +110,9 @@ type SellQuoteInput struct {
 	ToToken   string
 	ToAddress string
 	BudgetBps int
+	// Delivery marks the sale as a delivery whatever its target looks like, so
+	// it is never priced as an offramp (see targetFor).
+	Delivery bool
 }
 
 // deliveryTarget is where a quoted route must deliver, and what it may spend.
@@ -140,8 +143,26 @@ func (q *RampSellQuoter) targetFor(in SellQuoteInput, usdc string) deliveryTarge
 	if t.budgetBps == 0 {
 		t.budgetBps = q.budgetBps
 	}
-	t.offramp = t.chainID == rampSettlementChainID && sameTokenAddress(t.token, usdc) && sameAddress(t.address, in.WalletAddress)
+	// A delivery is never an offramp, even one that happens to name Base USDC in
+	// the payer's own wallet (a merchant paying themselves): it must get no Base
+	// relay gas and no naira estimate. Spelling out the default target on an
+	// ordinary sale, by contrast, is still that sale.
+	t.offramp = !in.Delivery && t.chainID == rampSettlementChainID &&
+		sameTokenAddress(t.token, usdc) && sameAddress(t.address, in.WalletAddress)
 	return t
+}
+
+// TokenPriceUSD is LiFi's USD price for a token, read through the quoter's own
+// LiFi client — the one the ramp already holds, so TSA Pay prices the merchant's
+// token with it instead of building a second client.
+func (q *RampSellQuoter) TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error) {
+	p, ok := q.lifi.(interface {
+		TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error)
+	})
+	if !ok {
+		return nil, 0, ErrSellUnavailable
+	}
+	return p.TokenPriceUSD(ctx, chainID, token)
 }
 
 // nativeBalanceReader answers "how much gas coin does this address hold on

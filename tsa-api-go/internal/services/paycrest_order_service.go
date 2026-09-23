@@ -720,6 +720,10 @@ type PaycrestSellRequest struct {
 	BankCode    string
 	AccountNo   string
 	AccountName string
+	// PayPaymentID names the TSA Pay payment this sale is an attempt of, whose
+	// payout bank is the merchant's: the order is marked with it so the
+	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
+	PayPaymentID *uuid.UUID
 }
 
 // CreateSell opens an offramp and returns the address the user must send to.
@@ -902,6 +906,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		PayoutInstitution: payoutInst,
 		PayoutAccount:     req.AccountNo,
 		PayoutAccountName: req.AccountName,
+		PayPaymentID:      req.PayPaymentID,
 	}
 	if pa := order.ProviderAccount; pa != nil {
 		row.DepositAddress = pa.ReceiveAddress
@@ -910,7 +915,10 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
 		log.Printf("[paycrest] ALARM created offramp %s (ref=%s) but could not persist it: %v",
 			order.ID, ref, err)
-		return nil, err
+		// Paycrest has an order we hold no row for: a caller that pairs the
+		// sale with something (a TSA Pay payment) must not treat it as "nothing
+		// was opened".
+		return nil, fmt.Errorf("%w: %v", ErrSellAttemptMayExist, err)
 	}
 	return row, nil
 }
@@ -1515,7 +1523,11 @@ func (s *PaycrestOrderService) CreateSellForFiat(ctx context.Context, req Paycre
 		return nil, err
 	}
 	if !sellPayoutCovers(row, req.FiatAmount) {
-		s.cancelShortOrder(ctx, row, req)
+		if err := s.cancelShortOrder(ctx, row, req); err != nil {
+			// Still awaiting a deposit at an address she can see. Both answers
+			// hold: the rate did move, AND an order may be open.
+			return nil, fmt.Errorf("%w: %w", ErrSellAttemptMayExist, ErrSellRateMoved)
+		}
 		return nil, ErrSellRateMoved
 	}
 	return row, nil
@@ -1531,7 +1543,10 @@ const sellCancelTimeout = 5 * time.Second
 // request must not leave a short order fundable — and it is DB-only, exactly
 // like Cancel: Paycrest has no cancel endpoint, so their copy lapses at its
 // own validUntil, and any deposit sent to it refunds to her wallet.
-func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models.PaycrestOrderRecord, req PaycrestSellRequest) {
+//
+// It returns the write's failure: an order that could not be cancelled is still
+// fundable, and CreateSellForFiat's caller has to know.
+func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models.PaycrestOrderRecord, req PaycrestSellRequest) error {
 	cctx, stop := context.WithTimeout(context.WithoutCancel(ctx), sellCancelTimeout)
 	defer stop()
 	_, err := s.cancelOrder(cctx, req.UserID, row.ID, map[string]any{
@@ -1542,6 +1557,7 @@ func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models
 		log.Printf("[paycrest] ALARM order %s pays short of %s %s and could not be cancelled: %v",
 			row.ID, req.FiatCode, req.FiatAmount, err)
 	}
+	return err
 }
 
 // sellPayoutCovers reports whether the order's own token amount pays the naira

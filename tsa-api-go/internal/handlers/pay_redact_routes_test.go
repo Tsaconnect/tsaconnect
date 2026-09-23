@@ -1,0 +1,198 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+)
+
+// The merchant's bank must not reach a paying customer on ANY route that
+// returns her attempt — the pay routes, and the ordinary sell routes the app
+// uses to resume one. An ordinary sale's own records keep her real details.
+
+const (
+	ordinaryAccount = "5550001111"
+	ordinaryName    = "ADA OKAFOR"
+	ordinaryBank    = "044"
+)
+
+// assertMerchantBankHidden fails if any of the merchant's details is in body.
+func assertMerchantBankHidden(t *testing.T, where, body string) {
+	t.Helper()
+	for _, secret := range []string{merchantAccount, merchantAccountName} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("%s: %q reached a paying customer: %s", where, secret, body)
+		}
+	}
+	if strings.Contains(body, `"payoutBankCode":"`+merchantBankCode) || strings.Contains(body, `"bankCode":"`+merchantBankCode) {
+		t.Fatalf("%s: the merchant's bank code reached a paying customer: %s", where, body)
+	}
+}
+
+func assertOrdinaryBankKept(t *testing.T, where, body string) {
+	t.Helper()
+	for _, want := range []string{ordinaryAccount, ordinaryName} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("%s: an ordinary sale lost %q: %s", where, want, body)
+		}
+	}
+}
+
+func seedRouteOrder(t *testing.T, db *gorm.DB, user *models.User, payment *uuid.UUID, status string) *models.PaycrestOrderRecord {
+	t.Helper()
+	o := &models.PaycrestOrderRecord{UserID: user.ID, Direction: models.PaycrestDirectionSell, Status: status,
+		Reference: "PCS-" + uuid.NewString()[:8], FiatCode: "NGN", FiatAmount: "50000.00", PayPaymentID: payment,
+		PayoutBankCode: ordinaryBank, PayoutAccount: ordinaryAccount, PayoutAccountName: ordinaryName, DepositAddress: "0xdep"}
+	if payment != nil {
+		o.PayoutBankCode, o.PayoutAccount, o.PayoutAccountName = merchantBankCode, merchantAccount, merchantAccountName
+	}
+	if err := db.Create(o).Error; err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
+func callOrderRoute(t *testing.T, handle gin.HandlerFunc, user *models.User, id uuid.UUID, method string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(method, "/api/paycrest/orders", nil)
+	if id != uuid.Nil {
+		c.Params = gin.Params{{Key: "id", Value: id.String()}}
+	}
+	c.Set("user", user)
+	handle(c)
+	return w
+}
+
+func TestPaycrestOrderRoutes_MaskAPayPaymentsOrderAndLeaveOrdinaryOrdersAlone(t *testing.T) {
+	h, db, _ := newPaycrestGateHandler(t)
+	user := seedHandlerUserAt(t, db, models.VerificationStatusVerified)
+	payment := uuid.New()
+	for name, tc := range map[string]struct {
+		handle gin.HandlerFunc
+		method string
+	}{
+		"get":    {h.GetOrder, http.MethodGet},
+		"claim":  {h.ClaimPayment, http.MethodPost},
+		"cancel": {h.Cancel, http.MethodPost},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pay := seedRouteOrder(t, db, user, &payment, models.PaycrestStatusAwaitingDeposit)
+			w := callOrderRoute(t, tc.handle, user, pay.ID, tc.method)
+			if w.Code != http.StatusOK {
+				t.Fatalf("pay order: %d %s", w.Code, w.Body.String())
+			}
+			assertMerchantBankHidden(t, name+" (pay order)", w.Body.String())
+
+			plain := seedRouteOrder(t, db, user, nil, models.PaycrestStatusAwaitingDeposit)
+			w = callOrderRoute(t, tc.handle, user, plain.ID, tc.method)
+			if w.Code != http.StatusOK {
+				t.Fatalf("ordinary order: %d %s", w.Code, w.Body.String())
+			}
+			assertOrdinaryBankKept(t, name+" (ordinary order)", w.Body.String())
+		})
+	}
+}
+
+func TestPaycrestOrderRoutes_TheListMasksOnlyThePayPaymentsOrders(t *testing.T) {
+	h, db, _ := newPaycrestGateHandler(t)
+	user := seedHandlerUserAt(t, db, models.VerificationStatusVerified)
+	payment := uuid.New()
+	pay := seedRouteOrder(t, db, user, &payment, models.PaycrestStatusRefunded)
+	plain := seedRouteOrder(t, db, user, nil, models.PaycrestStatusSettled)
+	w := callOrderRoute(t, h.ListOrders, user, uuid.Nil, http.MethodGet)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Data) != 2 {
+		t.Fatalf("err %v body %s", err, w.Body.String())
+	}
+	for _, row := range body.Data {
+		raw, _ := json.Marshal(row)
+		switch row["id"] {
+		case pay.ID.String():
+			assertMerchantBankHidden(t, "list (pay order)", string(raw))
+			if row["payoutAccount"] != "******6789" {
+				t.Fatalf("pay order row = %s", raw)
+			}
+		case plain.ID.String():
+			assertOrdinaryBankKept(t, "list (ordinary order)", string(raw))
+		default:
+			t.Fatalf("unexpected row %s", raw)
+		}
+	}
+}
+
+func TestSellIntentRoutes_MaskAPayIntentAndOrderAndLeaveOrdinarySalesAlone(t *testing.T) {
+	payment := uuid.New()
+	payIntent := &models.RampSellIntent{ID: uuid.New(), PayPaymentID: &payment, Status: models.SellIntentSwapping,
+		BankCode: merchantBankCode, AccountNumber: merchantAccount, AccountName: merchantAccountName}
+	plainIntent := &models.RampSellIntent{ID: uuid.New(), Status: models.SellIntentSwapping,
+		BankCode: ordinaryBank, AccountNumber: ordinaryAccount, AccountName: ordinaryName}
+	payOrder := &models.PaycrestOrderRecord{ID: uuid.New(), PayPaymentID: &payment,
+		PayoutBankCode: merchantBankCode, PayoutAccount: merchantAccount, PayoutAccountName: merchantAccountName}
+	plainOrder := &models.PaycrestOrderRecord{ID: uuid.New(),
+		PayoutBankCode: ordinaryBank, PayoutAccount: ordinaryAccount, PayoutAccountName: ordinaryName}
+
+	open := func(in *models.RampSellIntent) string {
+		h := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{resumable: in})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/paycrest/sell-intents/open", nil)
+		c.Set("user", &models.User{ID: uuid.New()})
+		h.OpenSellIntent(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	assertMerchantBankHidden(t, "open (pay intent)", open(payIntent))
+	assertOrdinaryBankKept(t, "open (ordinary intent)", open(plainIntent))
+
+	assertMerchantBankHidden(t, "order (pay)", openOrderRequest(t, &stubSellIntents{order: payOrder}, "").Body.String())
+	assertOrdinaryBankKept(t, "order (ordinary)", openOrderRequest(t, &stubSellIntents{order: plainOrder}, "").Body.String())
+
+	// The masked view is a copy: the record the service holds still has the real bank.
+	if payIntent.AccountNumber != merchantAccount || payOrder.PayoutAccount != merchantAccount {
+		t.Fatal("a route changed the record it was handed")
+	}
+}
+
+// A pay-linked record with no bank on it (an ended sale) still answers, blanked.
+func TestPayRecordViews_AreOnlyAppliedToPayLinkedRecords(t *testing.T) {
+	payment := uuid.New()
+	o := &models.PaycrestOrderRecord{PayoutAccount: merchantAccount}
+	if got := orderForCaller(o); got != o {
+		t.Fatal("an ordinary order must be returned as is")
+	}
+	o.PayPaymentID = &payment
+	if got := orderForCaller(o); got.PayoutAccount == merchantAccount {
+		t.Fatal("a pay order was not masked")
+	}
+	in := &models.RampSellIntent{AccountNumber: merchantAccount}
+	if got := intentForCaller(in); got != in {
+		t.Fatal("an ordinary intent must be returned as is")
+	}
+	in.PayPaymentID = &payment
+	if got := intentForCaller(in); got.AccountNumber == merchantAccount {
+		t.Fatal("a pay intent was not masked")
+	}
+	if orderForCaller(nil) != nil || intentForCaller(nil) != nil {
+		t.Fatal("nil in, nil out")
+	}
+	rows := ordersForCaller([]models.PaycrestOrderRecord{*o, {PayoutAccount: ordinaryAccount}})
+	if rows[0].PayoutAccount == merchantAccount || rows[1].PayoutAccount != ordinaryAccount {
+		t.Fatalf("rows = %+v", rows)
+	}
+}

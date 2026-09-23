@@ -117,6 +117,27 @@ func (bs *BlockchainService) ChainNameForID(id int64) (string, bool) {
 	return name, ok
 }
 
+// MainnetChainNameForID resolves a chain ID to its key only when it is a
+// MAINNET chain with a connected client — exactly the set rampTransferVerifiers
+// builds an on-chain proof for. ChainNameForID cannot stand in for it where a
+// proof is needed: it scans testnets too, and a testnet reuses its mainnet's
+// key (chain 97 is "bsc"), so a testnet id would resolve to the MAINNET chain's
+// verifier and prove a delivery against the wrong chain.
+func (bs *BlockchainService) MainnetChainNameForID(id int64) (string, bool) {
+	if bs.cfg == nil {
+		return "", false
+	}
+	for name, chain := range bs.cfg.Networks["mainnet"].Chains {
+		if chain.ChainID == id {
+			if bs.clients["mainnet:"+name] == nil {
+				return "", false
+			}
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // Client returns the mainnet Sonic client for backward compatibility.
 func (bs *BlockchainService) Client() *blockchain.EVMClient {
 	return bs.ClientForChain("sonic")

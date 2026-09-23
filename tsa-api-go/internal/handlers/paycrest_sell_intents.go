@@ -119,7 +119,7 @@ func (h *PaycrestHandler) OpenSellIntent(c *gin.Context) {
 		h.sellIntentError(c, err, user)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Sale in progress", gin.H{"intent": intent})
+	utils.SuccessResponse(c, http.StatusOK, "Sale in progress", gin.H{"intent": intentForCaller(intent)})
 }
 
 // POST /api/paycrest/sell-intents/:id/swap
@@ -162,7 +162,7 @@ func (h *PaycrestHandler) OpenSellIntentOrder(c *gin.Context) {
 		h.sellIntentError(c, err, user)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusCreated, "Your payout is on its way", order)
+	utils.SuccessResponse(c, http.StatusCreated, "Your payout is on its way", orderForCaller(order))
 }
 
 // POST /api/paycrest/sell-intents/:id/abandon
@@ -281,7 +281,8 @@ func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *model
 			"code": "pay_shortfall", "missingUsdc": services.BaseUnitsToDecimal(short.MissingBaseUnits, 6),
 		})
 	case errors.Is(err, services.ErrSellRateMoved):
-		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "rate_moved")
+		// Its own text, not err's: the error may also say an order may exist.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, services.ErrSellRateMoved.Error(), "rate_moved")
 	case errors.Is(err, services.ErrSellIntentOpen):
 		open, _ := h.sellIntents.Open(c.Request.Context(), user.ID)
 		c.JSON(http.StatusConflict, gin.H{

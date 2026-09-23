@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -36,7 +38,8 @@ func (f *fakePayStarter) PayDirect(_ context.Context, u *models.User, _ uuid.UUI
 		return nil, f.err
 	}
 	return &models.PaycrestOrderRecord{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Status: models.PaycrestStatusAwaitingDeposit,
-		DepositAddress: "0xdeposit", FiatAmount: "50000.00", Token: "USDC", ChainKey: "base"}, nil
+		DepositAddress: "0xdeposit", FiatAmount: "50000.00", Token: "USDC", ChainKey: "base",
+		PayoutBankCode: merchantBankCode, PayoutAccount: merchantAccount, PayoutAccountName: merchantAccountName}, nil
 }
 
 func (f *fakePayStarter) PayConverted(_ context.Context, u *models.User, _ uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error) {
@@ -44,7 +47,8 @@ func (f *fakePayStarter) PayConverted(_ context.Context, u *models.User, _ uuid.
 	if f.err != nil {
 		return nil, nil, f.err
 	}
-	return &models.RampSellIntent{ID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Status: models.SellIntentSwapping},
+	return &models.RampSellIntent{ID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Status: models.SellIntentSwapping,
+			BankCode: merchantBankCode, AccountNumber: merchantAccount, AccountName: merchantAccountName},
 		&services.SellSwapQuote{LiFiQuote: json.RawMessage(`{"id":"q"}`), GasTopUp: true}, nil
 }
 
@@ -59,6 +63,13 @@ func (f *fakePayStarter) CryptoQuote(_ context.Context, u *models.User, _ uuid.U
 func (f *fakePayStarter) PayCrypto(ctx context.Context, u *models.User, id uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error) {
 	return f.PayConverted(ctx, u, id, in)
 }
+
+// The merchant's payout bank, which the fake starter's records carry.
+const (
+	merchantBankCode    = "058"
+	merchantAccount     = "0123456789"
+	merchantAccountName = "SKY AIR LTD"
+)
 
 const payStartWallet = "0x00000000000000000000000000000000000000aa"
 
@@ -191,6 +202,9 @@ func TestPayStart_ErrorsMapToTheirStatusesAndCodes(t *testing.T) {
 		{services.ErrSellUnavailable, http.StatusServiceUnavailable, ""},
 		{services.ErrPayPaymentNotFound, http.StatusNotFound, ""},
 		{fmt.Errorf("database exploded: %w", errors.New("boom")), http.StatusBadGateway, ""},
+		{services.ErrPayInternal, http.StatusInternalServerError, ""},
+		{fmt.Errorf("%w: rate moved", services.ErrSellAttemptMayExist), http.StatusConflict, "pay_attempt_uncertain"},
+		{fmt.Errorf("%w: %w", services.ErrSellAttemptMayExist, services.ErrSellRateMoved), http.StatusConflict, "pay_attempt_uncertain"},
 	} {
 		f := &fakePayStarter{err: tc.err}
 		r, base := payStartRouter(t, f)
@@ -250,6 +264,116 @@ func TestPayStart_CryptoQuoteAnswersWhatTheMerchantReceives(t *testing.T) {
 	for _, q := range []string{"", "?sourceChainId=x&sourceToken=0x0&sourceAddress=0xa", "?sourceChainId=1&sourceAddress=0xa"} {
 		if w := payDo(r, "GET", base+"/crypto-quote"+q, nil, nil); w.Code != http.StatusBadRequest {
 			t.Fatalf("query %q: %d", q, w.Code)
+		}
+	}
+}
+
+// ---- I3: the merchant's bank never reaches a paying customer ----
+
+func TestPayStart_NeitherStartRouteAnswersTheMerchantsBankDetails(t *testing.T) {
+	f := &fakePayStarter{}
+	r, base := payStartRouter(t, f)
+	src := map[string]any{"sourceChainId": 56, "sourceToken": "0x0000000000000000000000000000000000000000", "sourceAddress": "0xabc"}
+	for name, tc := range map[string]struct {
+		path string
+		body map[string]any
+	}{
+		"direct":    {"/direct", map[string]any{"chainKey": "base", "token": "USDC"}},
+		"converted": {"/converted", src},
+		"crypto":    {"/crypto", src},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := payDo(r, "POST", base+tc.path, tc.body, nil)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			raw := w.Body.String()
+			for _, secret := range []string{merchantAccount, merchantAccountName, `"payoutBankCode"`, `"bankCode":"` + merchantBankCode} {
+				if strings.Contains(raw, secret) {
+					t.Fatalf("%q reached a paying customer: %s", secret, raw)
+				}
+			}
+			data := payDecode(t, w.Body.Bytes())["data"].(map[string]any)
+			if name == "direct" {
+				order := data["order"].(map[string]any)
+				if order["payoutAccount"] != "******6789" || order["payoutAccountName"] != nil || order["payoutBankCode"] != nil {
+					t.Fatalf("order = %v", order)
+				}
+				return
+			}
+			intent := data["intent"].(map[string]any)
+			if intent["accountNumber"] != "******6789" || intent["accountName"] != nil || intent["bankCode"] != "" {
+				t.Fatalf("intent = %v", intent)
+			}
+		})
+	}
+}
+
+func TestPayView_KeepsEveryOtherFieldAndLeavesTheRecordAlone(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	o := &models.PaycrestOrderRecord{ID: uuid.New(), Status: models.PaycrestStatusAwaitingDeposit, FiatAmount: "50000.00", Token: "USDC",
+		DepositAddress: "0xdeposit", TokenAmount: "33.5", ValidUntil: &now,
+		PayoutBankCode: merchantBankCode, PayoutAccount: merchantAccount, PayoutAccountName: merchantAccountName}
+	want, _ := json.Marshal(o)
+	got, _ := json.Marshal(payOrderView(o))
+	var w, g map[string]any
+	json.Unmarshal(want, &w)
+	json.Unmarshal(got, &g)
+	for _, k := range []string{"payoutBankCode", "payoutAccountName"} {
+		delete(w, k)
+	}
+	w["payoutAccount"] = "******6789"
+	if fmt.Sprint(w) != fmt.Sprint(g) {
+		t.Fatalf("view differs beyond the bank fields:\nwant %v\n got %v", w, g)
+	}
+	if o.PayoutAccount != merchantAccount || o.PayoutAccountName != merchantAccountName || o.PayoutBankCode != merchantBankCode {
+		t.Fatalf("the view changed the service's record: %+v", o)
+	}
+	in := &models.RampSellIntent{ID: uuid.New(), BankCode: merchantBankCode, AccountNumber: merchantAccount, AccountName: merchantAccountName}
+	if v := payIntentView(in); v.AccountNumber != "******6789" || v.BankCode != "" || v.AccountName != "" || in.AccountNumber != merchantAccount {
+		t.Fatalf("view %+v record %+v", v, in)
+	}
+	if payOrderView(nil) != nil || payIntentView(nil) != nil {
+		t.Fatal("nil in, nil out")
+	}
+	for in, want := range map[string]string{"": "", "12": "**", "1234": "****", "12345": "*2345"} {
+		if got := payMaskAccount(in); got != want {
+			t.Fatalf("mask(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The ordinary sell routes return these records as they always did: the masking
+// is a pay-route view, not a change to the models.
+func TestPayView_DoesNotChangeTheModelsJSONForTheSellRoutes(t *testing.T) {
+	o, _ := json.Marshal(&models.PaycrestOrderRecord{PayoutBankCode: "058", PayoutAccount: "0123456789", PayoutAccountName: "Ada"})
+	i, _ := json.Marshal(&models.RampSellIntent{BankCode: "058", AccountNumber: "0123456789", AccountName: "Ada"})
+	for _, want := range []string{`"payoutBankCode":"058"`, `"payoutAccount":"0123456789"`, `"payoutAccountName":"Ada"`} {
+		if !strings.Contains(string(o), want) {
+			t.Fatalf("order JSON lost %s: %s", want, o)
+		}
+	}
+	for _, want := range []string{`"bankCode":"058"`, `"accountNumber":"0123456789"`, `"accountName":"Ada"`} {
+		if !strings.Contains(string(i), want) {
+			t.Fatalf("intent JSON lost %s: %s", want, i)
+		}
+	}
+}
+
+// ---- S3: a GET prices, it does not claim a wallet ----
+
+func TestPayStart_TheQuoteRoutesIgnoreAWalletAddressClaim(t *testing.T) {
+	f := &fakePayStarter{}
+	r, base := payStartRouter(t, f)
+	other := "0x00000000000000000000000000000000000000bb"
+	for _, path := range []string{"/quote", "/crypto-quote"} {
+		f.lastUser = nil
+		w := payDo(r, "GET", base+path+"?sourceChainId=56&sourceToken=0x0&sourceAddress=0xabc&walletAddress="+other, nil, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		if f.lastUser == nil || f.lastUser.WalletAddress != payStartWallet {
+			t.Fatalf("%s: the quote saw wallet %v, want the stored %s", path, f.lastUser, payStartWallet)
 		}
 	}
 }

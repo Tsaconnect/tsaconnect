@@ -100,8 +100,16 @@ type RampSellIntent struct {
 	// SwapTxHash is a POINTER so the unique index ignores intents that have
 	// no swap yet: one on-chain swap can back exactly one sale, and a hash
 	// already claimed elsewhere must not open a second payout.
-	SwapTxHash      *string    `gorm:"size:128;uniqueIndex" json:"swapTxHash,omitempty"`
-	LandedUSDC      string     `gorm:"size:40" json:"landedUsdc,omitempty"`
+	SwapTxHash *string `gorm:"size:128;uniqueIndex" json:"swapTxHash,omitempty"`
+	LandedUSDC string  `gorm:"size:40" json:"landedUsdc,omitempty"`
+	// DeliverySeenAt is when a delivery sale's swap was first seen COMPLETED: the
+	// start of the wait for the destination receipt to be readable (RPC lag).
+	// DestTxHash is the destination transaction that proved the delivery. Its
+	// unique index (NULLs ignored, like SwapTxHash's) means one destination
+	// transaction can prove one sale: a batched relayer transaction that credits
+	// the same merchant for two customers cannot satisfy both.
+	DeliverySeenAt  *time.Time `json:"-"`
+	DestTxHash      *string    `gorm:"size:128;uniqueIndex" json:"-"`
 	PaycrestOrderID *uuid.UUID `gorm:"type:uuid" json:"paycrestOrderId,omitempty"`
 	ToppedUpAt      *time.Time `json:"-"`
 	// TopUpTxHash / TopUpWei are the source-chain gas top-up actually sent

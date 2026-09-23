@@ -639,14 +639,17 @@ func payConvertedSource(c *gin.Context, user *models.User, chainID int64, token,
 }
 
 // payQuoteRequest is the preamble both quote routes share: the caller, the
-// payment id and the token she would pay with, from the query string.
+// payment id and the token she would pay with, from the query string. The
+// wallet is the account's own; a walletAddress query is ignored.
 func (h *PayHandler) payQuoteRequest(c *gin.Context) (*models.User, uuid.UUID, services.PayConvertedInput, bool) {
 	user, id, ok := h.payStartCaller(c)
 	if !ok {
 		return nil, uuid.Nil, services.PayConvertedInput{}, false
 	}
 	chainID, _ := strconv.ParseInt(strings.TrimSpace(c.Query("sourceChainId")), 10, 64)
-	in, ok := payConvertedSource(c, user, chainID, c.Query("sourceToken"), c.Query("sourceAddress"), c.Query("walletAddress"))
+	// A GET prices; it must not persist a wallet claim before the payment is even
+	// validated. The account's stored wallet is used, whatever walletAddress says.
+	in, ok := payConvertedSource(c, user, chainID, c.Query("sourceToken"), c.Query("sourceAddress"), "")
 	return user, id, in, ok
 }
 
@@ -707,8 +710,9 @@ func (h *PayHandler) PayDirect(c *gin.Context) {
 		payStartFail(c, err)
 		return
 	}
-	// The order is the record POST /api/paycrest/sell returns, under "order".
-	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your payment", gin.H{"order": order})
+	// The order is the record POST /api/paycrest/sell returns, under "order" —
+	// with the merchant's bank details masked (payOrderView).
+	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your payment", gin.H{"order": payOrderView(order)})
 }
 
 // POST /api/pay/checkout/:id/converted {sourceChainId, sourceToken,
@@ -748,7 +752,7 @@ func (h *PayHandler) startIntent(c *gin.Context, start func(payCheckoutStarter, 
 		return
 	}
 	utils.SuccessResponse(c, http.StatusCreated, "Payment started — sign the swap", gin.H{
-		"intent": intent, "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
+		"intent": payIntentView(intent), "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
 	})
 }
 
@@ -758,30 +762,25 @@ func (h *PayHandler) startIntent(c *gin.Context, start func(payCheckoutStarter, 
 // exactly as the app already receives them from the sell routes.
 func payStartFail(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, services.ErrSellAttemptMayExist):
+		// Checked before rate_moved, which it may wrap: the payment is failed
+		// for support, so this is not a retry.
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"We couldn't safely start this payment — it has been paused for review. Please contact support before trying again.",
+			"pay_attempt_uncertain")
+	case errors.Is(err, services.ErrPayInternal):
+		// Ours, not the provider's: never say "could not reach the transfer provider".
+		log.Printf("[tsa-pay] start route failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, services.ErrPayInternal.Error())
 	case errors.Is(err, services.ErrPayWrongRoute), errors.Is(err, services.ErrPaySameToken):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, services.ErrSellRateMoved):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "rate_moved")
 	case errors.Is(err, services.ErrSellIntentOpen):
 		utils.ErrorResponse(c, http.StatusConflict, "You already have a sale in progress")
-	case isPayServiceError(err):
+	case services.IsPayServiceError(err):
 		payPaymentFail(c, err)
 	default:
 		sellSwapError(c, err)
 	}
-}
-
-// isPayServiceError reports whether err is one PayPaymentService itself
-// returns (or the KYC refusal its Lock does), as opposed to a provider's.
-func isPayServiceError(err error) bool {
-	for _, target := range []error{
-		services.ErrPayPaymentNotFound, services.ErrKYCVerificationRequired, services.ErrPayForbidden,
-		services.ErrPayNotPayable, services.ErrPayInProgress, services.ErrPayTransition,
-		services.ErrPayPaymentInvalid, services.ErrPayMerchantNotReady,
-	} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
 }

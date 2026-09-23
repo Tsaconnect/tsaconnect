@@ -97,7 +97,7 @@ func TestPayMerchant_CreateFromRequestIsIdempotent(t *testing.T) {
 
 type fakePayChains map[int64]string
 
-func (f fakePayChains) ChainNameForID(id int64) (string, bool) { n, ok := f[id]; return n, ok }
+func (f fakePayChains) MainnetChainNameForID(id int64) (string, bool) { n, ok := f[id]; return n, ok }
 
 func payStr(s string) *string { return &s }
 func payInt(i int) *int       { return &i }
@@ -465,5 +465,28 @@ func TestPayMerchant_CreateFromRequestRefusesAWebsiteThatSmugglesDomains(t *test
 		if _, err := s.CreateFromRequest(context.Background(), req); !errors.Is(err, ErrPayMerchantInvalid) {
 			t.Errorf("website %q: err = %v, want ErrPayMerchantInvalid", site, err)
 		}
+	}
+}
+
+// The admin may only point a merchant at a chain a delivery can be CONFIRMED
+// on: a mainnet chain with a client (so a verifier). The real registry also
+// knows testnets, and a testnet key ("bsc" on chain 97) is the same string as
+// its mainnet's — which would prove a testnet delivery on the mainnet verifier.
+func TestPayMerchant_UpdateRefusesAChainNoDeliveryCouldBeConfirmedOn(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	s.chains = testnetAwareRegistry()
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	upd := func(chain int64) PayMerchantUpdate {
+		return PayMerchantUpdate{SettlementMode: payStr("crypto"), ChainID: payI64(chain),
+			TokenAddress: payStr("0x55d398326f99059fF775485246999027B3197955"), TokenSymbol: payStr("USDT"),
+			WalletAddress: payStr("0x52908400098527886E0F7030069857D2E4169EE7")}
+	}
+	for name, chain := range map[string]int64{"bsc testnet": 97, "mainnet chain with no client": 10, "unknown": 999} {
+		if _, err := s.Update(context.Background(), payActor, m.ID, upd(chain)); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+	}
+	if _, err := s.Update(context.Background(), payActor, m.ID, upd(56)); err != nil {
+		t.Fatalf("bsc mainnet: %v", err)
 	}
 }

@@ -840,3 +840,18 @@ func TestRampSellQuote_NamingBaseUSDCToHerWalletIsTheOrdinarySale(t *testing.T) 
 		t.Fatalf("res = %+v — must equal the ordinary sale (gas 20, fee 10, ₦14,880.23)", res)
 	}
 }
+
+// A delivery is never an offramp — even to the payer's own wallet, in Base
+// USDC. (Naming the default target on an ordinary sale stays that sale: see
+// TestRampSellQuote_NamingBaseUSDCToHerWalletIsTheOrdinarySale.)
+func TestRampSellQuote_AnExplicitDeliveryTargetIsNeverAnOfframp(t *testing.T) {
+	q := &RampSellQuoter{budgetBps: 50}
+	own := SellQuoteInput{WalletAddress: sellTestAddress}
+	if !q.targetFor(own, sellUSDC).offramp {
+		t.Fatal("an ordinary sale is an offramp")
+	}
+	self := SellQuoteInput{WalletAddress: sellTestAddress, ToChainID: rampSettlementChainID, ToToken: sellUSDC, ToAddress: sellTestAddress, Delivery: true}
+	if q.targetFor(self, sellUSDC).offramp {
+		t.Fatal("a delivery to the payer's own wallet was priced as an offramp: it would get Base relay gas and a naira estimate")
+	}
+}

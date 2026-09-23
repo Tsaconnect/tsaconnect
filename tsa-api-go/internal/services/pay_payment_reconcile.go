@@ -24,6 +24,16 @@ const (
 	payLockNoAttemptGrace = 10 * time.Minute
 	// payUnsignedSwapGrace frees an intent whose swap she never sent.
 	payUnsignedSwapGrace = 10 * time.Minute
+	// payDeliveryUnsignedGrace is payUnsignedSwapGrace for a DELIVERY (crypto)
+	// intent with no swap recorded. A naira sale's swap that mines late lands
+	// USDC in her own wallet, so freeing the payment is harmless; a delivery's
+	// pays the MERCHANT, so a Release before it mines lets a second payer pay too.
+	// The app persists the swap hash before it broadcasts and re-reports it on
+	// resume, which is what closes the gap; this grace outlasts a quote's
+	// validity plus mempool time (30 min). RESIDUAL RISK: a swap signed, never
+	// reported (app killed between broadcast and report, hash never persisted)
+	// and mined after this grace still pays the merchant a second time.
+	payDeliveryUnsignedGrace = time.Hour
 	// payLandedNoOrderGrace frees a swap that landed but whose payout order
 	// she never opened; she keeps the USDC.
 	payLandedNoOrderGrace = 2 * time.Hour
@@ -32,7 +42,25 @@ const (
 	// payPendingSwapMax is how long a swap may stay pending before support
 	// takes over: it may still deliver, so the payment is failed, not released.
 	payPendingSwapMax = 24 * time.Hour
+	// payPollEveryTick is how long a sent swap is asked about on every tick
+	// (30 s); past it, payPollDue thins the asking to about once in
+	// payPollEvery. Each ask is a LiFi call, made in sequence for every swapped
+	// payment, for up to payPendingSwapMax.
+	payPollEveryTick = time.Hour
+	payPollEvery     = 5 * time.Minute
 )
+
+// payPollDue reports whether a payment of this age, whose swap was sent, is
+// asked about on this tick. Stateless: within the first payPollEveryTick every
+// tick asks; after it, only the ticks that fall in the first minute of each
+// payPollEvery counted from the payment's own lock — two ticks at the 30 s
+// cadence, and payments spread out by when they were locked.
+func payPollDue(age time.Duration) bool {
+	if age <= payPollEveryTick {
+		return true
+	}
+	return int64(age/time.Minute)%int64(payPollEvery/time.Minute) == 0
+}
 
 // reconcileProcessing moves every in-flight payment along its one attempt. It
 // walks all processing payments in id order, `batch` at a time, so a long run
@@ -187,7 +215,13 @@ func (s *PayPaymentService) reconcileIntent(ctx context.Context, p *models.PayPa
 		}
 		return s.handOverToOrder(ctx, p, *in.PaycrestOrderID)
 	case models.SellIntentOrdering:
-		return nil // her payout order is being opened right now
+		// Her payout order is being opened right now — unless the request
+		// opening it died holding the claim, and nothing here ever ends that:
+		// past the window OpenOrder itself treats as dead, say so.
+		if sellClaimIsStale(&in, s.now()) {
+			s.alertOnce("ordering_claim_stale", p, "intent", in.ID)
+		}
+		return nil
 	}
 	age := s.now().Sub(payLockedAt(p))
 	if in.SwapTxHash == nil {
@@ -195,17 +229,28 @@ func (s *PayPaymentService) reconcileIntent(ctx context.Context, p *models.PayPa
 		if in.Status == models.SellIntentFailed {
 			return s.Release(ctx, p.ID, "the swap was cancelled before it was sent")
 		}
-		if age <= payUnsignedSwapGrace {
+		grace := payUnsignedSwapGrace
+		if in.DestAddress != "" {
+			grace = payDeliveryUnsignedGrace
+		}
+		if age <= grace {
 			return nil
 		}
 		return s.endIntentThen(ctx, &in, func() error {
 			return s.Release(ctx, p.ID, "the swap was never sent")
 		})
 	}
+	if !payPollDue(age) {
+		return nil
+	}
 	if in.DestAddress != "" {
 		return s.reconcileDelivery(ctx, p, &in, age)
 	}
-	return s.reconcileSwap(ctx, p, &in, age)
+	st, err := s.intents.SwapStatus(ctx, in.ID)
+	if err != nil {
+		return err
+	}
+	return s.reconcileSwap(ctx, p, &in, age, st)
 }
 
 // reconcileDelivery settles a crypto payment (its intent delivers a token to the
@@ -219,13 +264,28 @@ func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.Pay
 		case err == nil:
 			return s.Succeed(ctx, p.ID, destTx)
 		case errors.Is(err, ErrSwapNotLanded):
-			// Not delivered yet, or never going to be: decided below from LiFi's status.
+			// Not delivered yet, or never going to be: decided below from LiFi's
+			// status — the one ConfirmDelivery just read, when it says which.
+			var nl *SwapNotLandedError
+			if errors.As(err, &nl) {
+				return s.reconcileSwap(ctx, p, in, age, nl.Status)
+			}
 		case errors.Is(err, ErrSwapMismatch):
 			// LiFi says the swap is done but the merchant's wallet was not credited
 			// in full, or was credited elsewhere. The value may have reached them,
 			// so the payment is never handed back and the swap is not abandoned.
-			payAlert("delivery_mismatch", p, "intent", in.ID)
-			return s.Fail(ctx, p.ID, "the transfer didn't deliver the full amount — support is reviewing it")
+			// The value may have reached them, so the payment is failed, never
+			// released — but the dead sale is ended first, or it would sit
+			// `swapped` (she cannot abandon a pay intent with a swap) and lock
+			// her out of every other sale.
+			failed := func() error {
+				payAlert("delivery_mismatch", p, "intent", in.ID)
+				return s.Fail(ctx, p.ID, "the transfer didn't deliver the full amount — support is reviewing it")
+			}
+			if in.Status == models.SellIntentDelivered {
+				return failed() // a delivered sale is terminal: nothing to end
+			}
+			return s.endIntentThen(ctx, in, failed)
 		case errors.Is(err, ErrSellUnavailable):
 			// No verifier for this chain (yet) is not a verdict on the payment.
 			log.Printf("[tsa-pay] payment %s: cannot prove delivery for intent %s yet: %v; waiting", p.ID, in.ID, err)
@@ -234,17 +294,18 @@ func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.Pay
 			return err
 		}
 	}
-	return s.reconcileSwap(ctx, p, in, age)
-}
-
-// reconcileSwap decides a payment whose swap was sent by what LiFi says became
-// of it. Every ending first ends the intent, so a swap that lands later can no
-// longer open a payout for a payment that has moved on.
-func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPayment, in *models.RampSellIntent, age time.Duration) error {
 	st, err := s.intents.SwapStatus(ctx, in.ID)
 	if err != nil {
 		return err
 	}
+	return s.reconcileSwap(ctx, p, in, age, st)
+}
+
+// reconcileSwap decides a payment whose swap was sent by what LiFi says became
+// of it (st, nil when LiFi has no record). Every ending first ends the intent,
+// so a swap that lands later can no longer open a payout for a payment that has
+// moved on.
+func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPayment, in *models.RampSellIntent, age time.Duration, st *LiFiTransferStatus) error {
 	var status, sub string
 	if st != nil {
 		status, sub = st.Status, st.Substatus
@@ -260,9 +321,16 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 			payAlert("swap_partial", p, "intent", in.ID)
 			return s.Fail(ctx, p.ID, "the swap only partly completed — support is reviewing it")
 		})
+	case status == LiFiStatusDone && sub == LiFiSubstatusCompleted && in.DestAddress != "" &&
+		(in.Status == models.SellIntentSwapped || in.Status == models.SellIntentDelivered):
+		// COMPLETED, on a sale ConfirmDelivery still looks at: the swap finished
+		// between its read and ours, and the merchant WAS paid. Not a failure —
+		// the next tick's proof decides.
+		return nil
 	case status == LiFiStatusDone && in.DestAddress != "":
-		// A delivery LiFi calls done that ConfirmDelivery could not prove, or one
-		// already ended: the merchant may have been paid, so it is never released.
+		// A delivery LiFi calls done that ConfirmDelivery cannot prove — not
+		// completed, or a sale already ended: the merchant may have been paid, so
+		// it is never released.
 		return s.endIntentThen(ctx, in, func() error {
 			payAlert("delivery_unproven", p, "intent", in.ID)
 			return s.Fail(ctx, p.ID, "the transfer couldn't be confirmed — support is reviewing it")
@@ -283,6 +351,18 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 			return s.Fail(ctx, p.ID, "the swap is taking too long — support is reviewing it")
 		})
 	default: // NOT_FOUND, INVALID, or no answer
+		if in.DestAddress != "" {
+			// A recorded swap LiFi cannot find may still be in the mempool, and a
+			// delivery's pays the merchant when it mines: never released on this,
+			// only failed once a day has passed.
+			if age <= payPendingSwapMax {
+				return nil
+			}
+			return s.endIntentThen(ctx, in, func() error {
+				payAlert("delivery_swap_unknown", p, "intent", in.ID)
+				return s.Fail(ctx, p.ID, "the transfer can't be found — support is reviewing it")
+			})
+		}
 		if age <= payUnknownSwapGrace {
 			return nil
 		}
@@ -291,17 +371,26 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 }
 
 // endIntentThen ends the payment's sell intent and, only if it is ended, runs
-// next. An intent that moved on to ordering or ordered while we looked is left
-// alone (the next tick follows it); one already failed is already ended.
+// next. The abandon is guarded on the swap this sweep read (in.SwapTxHash), so a
+// swap she signs in between is never abandoned: the write matches nothing, and
+// next does not run. An intent that moved on to ordering or ordered while we
+// looked is left alone too (the next tick follows it); one already failed is
+// already ended.
 func (s *PayPaymentService) endIntentThen(ctx context.Context, in *models.RampSellIntent, next func() error) error {
 	if in.Status != models.SellIntentFailed {
-		err := s.intents.AbandonForPay(ctx, in.ID)
+		err := s.intents.AbandonForPay(ctx, in.ID, in.SwapTxHash)
 		if errors.Is(err, ErrSellIntentState) {
 			var cur models.RampSellIntent
 			if rerr := s.db.WithContext(ctx).First(&cur, "id = ?", in.ID).Error; rerr != nil {
 				return rerr
 			}
 			if cur.Status != models.SellIntentFailed {
+				if in.SwapTxHash == nil && cur.SwapTxHash != nil {
+					// Her swap was sent after we read the intent. The payment
+					// stays with the swap now: the next tick decides it from
+					// LiFi's answer, as for any sent swap.
+					log.Printf("[tsa-pay] ALERT pay_swap_sent_during_abandon_total=1 intent=%s", in.ID)
+				}
 				return nil
 			}
 			err = nil
@@ -336,6 +425,14 @@ func payLockedAt(p *models.PayPayment) time.Time {
 		return *p.LockedAt
 	}
 	return p.UpdatedAt
+}
+
+// alertOnce is payAlert at most once per process for one attempt and name: for
+// a state that lasts, so the log carries one line rather than one a tick.
+func (s *PayPaymentService) alertOnce(name string, p *models.PayPayment, attempt string, attemptID uuid.UUID) {
+	if _, seen := s.alerted.LoadOrStore(name+"/"+attemptID.String(), struct{}{}); !seen {
+		payAlert(name, p, attempt, attemptID)
+	}
 }
 
 // payAlert writes the log line an operator alerts on for a payment that needs

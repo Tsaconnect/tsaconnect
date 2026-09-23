@@ -21,10 +21,16 @@ type fakePayOrders struct {
 	converted bool
 	err       error
 	deposit   *big.Int
+	// onCreate runs inside the provider call — a test's way of killing the
+	// request the moment the order exists.
+	onCreate func()
 }
 
 func (f *fakePayOrders) CreateSellForFiat(_ context.Context, req PaycrestSellRequest, converted bool, _ *big.Int) (*models.PaycrestOrderRecord, error) {
 	f.sell, f.calls, f.converted = req, f.calls+1, converted
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -39,23 +45,42 @@ type fakePayIntents struct {
 	in        CreateSellIntentInput
 	err       error
 	abandoned int
-	status    *LiFiTransferStatus
+	// abandonedHash is the swap hash the last abandon was guarded on; abandonErr
+	// is its canned answer.
+	abandonedHash *string
+	abandonErr    error
+	abandonHook   func()
+	status        *LiFiTransferStatus
 	// ConfirmDelivery's canned answer, and how often it was asked.
 	destTx     string
 	deliverErr error
 	confirms   int
+	// statusCalls counts SwapStatus (a LiFi call in production); onCreate is
+	// as fakePayOrders'.
+	statusCalls int
+	onCreate    func()
 }
 
 func (f *fakePayIntents) Create(_ context.Context, _ *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error) {
 	f.in = in
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	if f.err != nil {
 		return nil, nil, f.err
 	}
 	return &models.RampSellIntent{ID: uuid.New(), Status: models.SellIntentSwapping, PayPaymentID: in.PayPaymentID,
 		DestChainID: in.DestChainID, DestTokenAddress: in.DestTokenAddress, DestAddress: in.DestAddress, DestAmount: in.DestAmount}, &SellSwapQuote{}, nil
 }
-func (f *fakePayIntents) AbandonForPay(context.Context, uuid.UUID) error { f.abandoned++; return nil }
+func (f *fakePayIntents) AbandonForPay(_ context.Context, _ uuid.UUID, hash *string) error {
+	f.abandoned, f.abandonedHash = f.abandoned+1, hash
+	if f.abandonHook != nil {
+		f.abandonHook()
+	}
+	return f.abandonErr
+}
 func (f *fakePayIntents) SwapStatus(context.Context, uuid.UUID) (*LiFiTransferStatus, error) {
+	f.statusCalls++
 	return f.status, nil
 }
 func (f *fakePayIntents) ConfirmDelivery(context.Context, uuid.UUID) (string, error) {
@@ -96,6 +121,8 @@ func (f *fakePayRate) ProviderRate(_ context.Context, fiat string) (*big.Rat, er
 type fakePayQuoter struct {
 	in  SellQuoteInput
 	err error
+	// toUSD is what the route says the delivered amount is worth.
+	toUSD float64
 }
 
 func (f *fakePayQuoter) Quote(_ context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
@@ -103,7 +130,7 @@ func (f *fakePayQuoter) Quote(_ context.Context, in SellQuoteInput) (*SellSwapQu
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &SellSwapQuote{Route: &LiFiRoute{FromAmount: "17000000000000000"}}, nil
+	return &SellSwapQuote{Route: &LiFiRoute{FromAmount: "17000000000000000", ToAmountUSD: f.toUSD}}, nil
 }
 
 type payCheckoutRig struct {
@@ -125,7 +152,7 @@ func newPayCheckoutRig(t *testing.T) *payCheckoutRig {
 	}
 	p, _, _ := pay.Create(context.Background(), m, models.PayModeLive, payIn())
 	r := &payCheckoutRig{pay: pay, p: p, m: m, alice: payUser(t, pay, true),
-		orders: &fakePayOrders{deposit: big.NewInt(33_500000)}, intents: &fakePayIntents{}, quoter: &fakePayQuoter{}}
+		orders: &fakePayOrders{deposit: big.NewInt(33_500000)}, intents: &fakePayIntents{}, quoter: &fakePayQuoter{toUSD: 33.5}}
 	r.svc = NewPayCheckoutService(pay, r.orders, r.intents, r.quoter, true)
 	pay.SetIntents(r.intents)
 	return r
@@ -153,6 +180,9 @@ func TestPayDirect_SellsExactlyTheSnapshottedNetToTheSnapshottedBank(t *testing.
 	r.pay.db.Model(r.m).Updates(map[string]any{"bank_code": "044", "account_number": "9876543210", "customer_fee_share_percent": 0})
 	if _, err := r.direct(t); err != nil {
 		t.Fatal(err)
+	}
+	if r.orders.sell.PayPaymentID == nil || *r.orders.sell.PayPaymentID != r.p.ID {
+		t.Fatalf("the sell request does not name its payment: %+v", r.orders.sell)
 	}
 	if r.orders.sell.FiatAmount != "50000.00" || r.orders.sell.AccountNo != "0123456789" || r.orders.sell.BankCode != "058" || r.orders.converted {
 		t.Fatalf("sell = %+v converted=%v", r.orders.sell, r.orders.converted)
@@ -898,22 +928,32 @@ func TestPayReconcile_CryptoIntentOutcomes(t *testing.T) {
 		want       string // pending may already have become expired: both mean "released"
 		abandons   int
 	}{
-		"delivered":                          {models.SellIntentSwapped, true, nil, "", "", time.Minute, models.PayStatusSucceeded, 0},
-		"already delivered, payment behind":  {models.SellIntentDelivered, true, nil, "", "", time.Minute, models.PayStatusSucceeded, 0},
-		"mismatch on a done swap":            {models.SellIntentSwapped, true, ErrSwapMismatch, LiFiStatusDone, LiFiSubstatusCompleted, time.Minute, models.PayStatusFailed, 0},
-		"mismatch, even long after":          {models.SellIntentSwapped, true, ErrSwapMismatch, LiFiStatusDone, LiFiSubstatusCompleted, 3 * time.Hour, models.PayStatusFailed, 0},
-		"not landed: lifi failed":            {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusFailed, "", time.Minute, models.PayStatusPending, 1},
-		"not landed: refunded":               {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, LiFiSubstatusRefunded, time.Minute, models.PayStatusPending, 1},
-		"not landed: partial":                {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, LiFiSubstatusPartial, time.Minute, models.PayStatusFailed, 1},
-		"not landed: done but unproven":      {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, "", time.Minute, models.PayStatusFailed, 1},
-		"not landed: pending 1 h":            {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusPending, "", time.Hour, models.PayStatusProcessing, 0},
-		"not landed: pending 25 h":           {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusPending, "", 25 * time.Hour, models.PayStatusFailed, 1},
-		"not landed: not found 10 min":       {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 10 * time.Minute, models.PayStatusProcessing, 0},
-		"not landed: not found 31 min":       {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 31 * time.Minute, models.PayStatusPending, 1},
-		"no way to verify yet":               {models.SellIntentSwapped, true, ErrSellUnavailable, "", "", 3 * time.Hour, models.PayStatusProcessing, 0},
-		"a transient read error":             {models.SellIntentSwapped, true, errors.New("rpc timeout"), "", "", 3 * time.Hour, models.PayStatusProcessing, 0},
-		"swapping, no hash, fresh":           {models.SellIntentSwapping, false, nil, "", "", 5 * time.Minute, models.PayStatusProcessing, 0},
-		"swapping, no hash, 11 min":          {models.SellIntentSwapping, false, nil, "", "", 11 * time.Minute, models.PayStatusPending, 1},
+		"delivered":                         {models.SellIntentSwapped, true, nil, "", "", time.Minute, models.PayStatusSucceeded, 0},
+		"already delivered, payment behind": {models.SellIntentDelivered, true, nil, "", "", time.Minute, models.PayStatusSucceeded, 0},
+		"mismatch on a done swap":           {models.SellIntentSwapped, true, ErrSwapMismatch, LiFiStatusDone, LiFiSubstatusCompleted, time.Minute, models.PayStatusFailed, 1},
+		"mismatch, even long after":         {models.SellIntentSwapped, true, ErrSwapMismatch, LiFiStatusDone, LiFiSubstatusCompleted, 3 * time.Hour, models.PayStatusFailed, 1},
+		"not landed: lifi failed":           {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusFailed, "", time.Minute, models.PayStatusPending, 1},
+		"not landed: refunded":              {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, LiFiSubstatusRefunded, time.Minute, models.PayStatusPending, 1},
+		"not landed: partial":               {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, LiFiSubstatusPartial, time.Minute, models.PayStatusFailed, 1},
+		"not landed: done but unproven":     {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusDone, "", time.Minute, models.PayStatusFailed, 1},
+		"not landed: pending 1 h":           {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusPending, "", time.Hour, models.PayStatusProcessing, 0},
+		"not landed: pending 25 h":          {models.SellIntentSwapped, true, ErrSwapNotLanded, LiFiStatusPending, "", 25 * time.Hour, models.PayStatusFailed, 1},
+		"not landed: not found 10 min":      {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 10 * time.Minute, models.PayStatusProcessing, 0},
+		// A delivery pays the MERCHANT, so a swap LiFi cannot find may still mine:
+		// it is waited on until the day is out, then failed — never released.
+		"not landed: not found 31 min": {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 31 * time.Minute, models.PayStatusProcessing, 0},
+		"not landed: not found 23 h":   {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 23 * time.Hour, models.PayStatusProcessing, 0},
+		"not landed: not found 25 h":   {models.SellIntentSwapped, true, ErrSwapNotLanded, "NOT_FOUND", "", 25 * time.Hour, models.PayStatusFailed, 1},
+		"not landed: invalid 25 h":     {models.SellIntentSwapped, true, ErrSwapNotLanded, "INVALID", "", 25 * time.Hour, models.PayStatusFailed, 1},
+		"no way to verify yet":         {models.SellIntentSwapped, true, ErrSellUnavailable, "", "", 3 * time.Hour, models.PayStatusProcessing, 0},
+		"a transient read error":       {models.SellIntentSwapped, true, errors.New("rpc timeout"), "", "", 3 * time.Hour, models.PayStatusProcessing, 0},
+		"swapping, no hash, fresh":     {models.SellIntentSwapping, false, nil, "", "", 5 * time.Minute, models.PayStatusProcessing, 0},
+		// She may have signed and not yet reported it, and a delivery's swap that
+		// mines after a release pays the merchant twice: a longer grace than a
+		// naira sale's ten minutes.
+		"swapping, no hash, 11 min":          {models.SellIntentSwapping, false, nil, "", "", 11 * time.Minute, models.PayStatusProcessing, 0},
+		"swapping, no hash, 59 min":          {models.SellIntentSwapping, false, nil, "", "", 59 * time.Minute, models.PayStatusProcessing, 0},
+		"swapping, no hash, 61 min":          {models.SellIntentSwapping, false, nil, "", "", 61 * time.Minute, models.PayStatusPending, 1},
 		"failed intent, no hash":             {models.SellIntentFailed, false, nil, "", "", time.Minute, models.PayStatusPending, 0},
 		"failed intent with a swap, done":    {models.SellIntentFailed, true, nil, LiFiStatusDone, LiFiSubstatusCompleted, time.Minute, models.PayStatusFailed, 0},
 		"failed intent with a swap, refused": {models.SellIntentFailed, true, nil, LiFiStatusFailed, "", time.Minute, models.PayStatusPending, 0},
@@ -966,8 +1006,10 @@ func TestPayReconcile_ADeliveryThatMayHaveReachedTheMerchantIsNeverReleased(t *t
 	if got.Status != models.PayStatusFailed || !strings.Contains(got.FailureReason, "didn't deliver the full amount") || got.PayerUserID == nil {
 		t.Fatalf("payment = %+v", got)
 	}
-	if r.intents.abandoned != 0 {
-		t.Fatalf("the swap may have paid the merchant: nothing is abandoned (%d)", r.intents.abandoned)
+	// The intent is ended (she must not stay locked out of selling by a dead
+	// sale) but the payment is failed, never released.
+	if r.intents.abandoned != 1 {
+		t.Fatalf("the failed delivery's intent must be ended (%d)", r.intents.abandoned)
 	}
 }
 

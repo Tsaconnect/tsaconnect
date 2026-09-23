@@ -53,13 +53,13 @@ func TestBuildTSAPay_LiveRegistersTheWebhookAndReconcilerWorkers(t *testing.T) {
 // interface, which would read as wired.
 func TestBuildPayCheckout_NeedsOrdersAndNeverWrapsANilPointer(t *testing.T) {
 	orders := &services.PaycrestOrderService{}
-	if buildPayCheckout(nil, nil, nil, nil, nil, nil, true) != nil {
+	if buildPayCheckout(nil, nil, nil, nil, nil, true) != nil {
 		t.Fatal("no order service must leave the start routes unwired")
 	}
-	if buildPayCheckout(nil, orders, nil, nil, nil, nil, true) == nil {
+	if buildPayCheckout(nil, orders, nil, nil, nil, true) == nil {
 		t.Fatal("direct payments need only the order service")
 	}
-	if buildPayCheckout(nil, orders, &services.SellIntentService{}, nil, nil, nil, true) == nil {
+	if buildPayCheckout(nil, orders, &services.SellIntentService{}, nil, nil, true) == nil {
 		t.Fatal("intents without a quoter must still start direct payments")
 	}
 }

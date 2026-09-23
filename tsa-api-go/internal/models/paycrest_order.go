@@ -241,6 +241,13 @@ type PaycrestOrderRecord struct {
 	// mapPaycrestStatus in paycrest_order_service.go for where this is read.
 	PaymentClaimedAt *time.Time `json:"paymentClaimedAt,omitempty"`
 
+	// PayPaymentID marks an order that is a TSA Pay payment's attempt: its payout
+	// bank is the MERCHANT's, so the customer's routes mask it. Set at creation
+	// and never cleared — the payment's own link to the order is dropped when it
+	// is released, which would leave a refunded attempt unrecognisable. Not part
+	// of the JSON, so no route changes shape.
+	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+
 	// FailureReason is operator-facing text for anything the user cannot fix.
 	FailureReason string `gorm:"size:512" json:"failureReason,omitempty"`
 	// LastCheckedAt drives the poller's ordering. Paycrest webhooks require a

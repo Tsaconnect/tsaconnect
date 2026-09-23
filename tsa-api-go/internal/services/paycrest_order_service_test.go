@@ -759,6 +759,100 @@ func TestCreateSellForFiat_ARateMovedOrderIsCancelledAndUnfundableEvenIfTheReque
 	}
 }
 
+// A pay payment's order is marked at creation, so the customer's routes can
+// mask the merchant's bank on it for good; an ordinary sale's is not.
+func TestCreateSellForFiat_RecordsThePaymentAnOrderIsAnAttemptOf(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	pid := uuid.New()
+	req := payoutReq(t, r)
+	req.PayPaymentID = &pid
+	order, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.First(&row, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.PayPaymentID == nil || *row.PayPaymentID != pid {
+		t.Fatalf("PayPaymentID = %v", row.PayPaymentID)
+	}
+	plain := payoutReq(t, r)
+	if o2, err := r.svc.CreateSell(context.Background(), plain); err != nil || o2.PayPaymentID != nil {
+		t.Fatalf("an ordinary sell is marked as a payment's: %+v %v", o2, err)
+	}
+}
+
+// ─── a sale that cannot prove nothing fundable was left behind ─────────────
+
+// failOrderWrites makes the given kind of write on paycrest_order_records fail.
+func failOrderWrites(t *testing.T, db *gorm.DB, kind string) {
+	t.Helper()
+	fail := func(tx *gorm.DB) {
+		if tx.Statement.Table == "paycrest_order_records" {
+			tx.AddError(errors.New("orders table is unwritable"))
+		}
+	}
+	var err error
+	switch kind {
+	case "update":
+		err = db.Callback().Update().Before("gorm:update").Register("test:fail_order_update", fail)
+	case "create":
+		err = db.Callback().Create().Before("gorm:create").Register("test:fail_order_create", fail)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The short order could not be cancelled, so it is still awaiting a deposit at
+// an address she can see: the caller must be told it may exist, not just that
+// the rate moved — a payment paired with it must not be handed to another payer.
+func TestCreateSellForFiat_AShortOrderThatCouldNotBeCancelledMayStillExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	req := payoutReq(t, r)
+	failOrderWrites(t, r.db, "update")
+	_, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if !errors.Is(err, ErrSellAttemptMayExist) {
+		t.Fatalf("err = %v, want ErrSellAttemptMayExist", err)
+	}
+	// The ordinary sell routes keep answering rate_moved for it.
+	if !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v: the ordinary routes' rate_moved mapping is lost", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusAwaitingDeposit || row.DepositAddress == "" {
+		t.Fatalf("row %+v: the test means an order left open", row)
+	}
+}
+
+func TestCreateSellForFiat_AnOrderThatCouldNotBeRecordedMayStillExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	req := payoutReq(t, r)
+	failOrderWrites(t, r.db, "create")
+	_, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if !errors.Is(err, ErrSellAttemptMayExist) || errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v, want ErrSellAttemptMayExist alone", err)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("the test means an order Paycrest opened: %d calls", r.client.offrampCalls)
+	}
+}
+
+// A cancelled short order is the ordinary refusal, and stays a plain rate-moved.
+func TestCreateSellForFiat_ACancelledShortOrderIsNotAnAttemptThatMayExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	_, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, nil)
+	if !errors.Is(err, ErrSellRateMoved) || errors.Is(err, ErrSellAttemptMayExist) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // ─── S3: the ₦1 tolerance, at its edge ─────────────────────────────────────
 
 // 100 USDC at 1500.00 is judged at 1499.995 (the worst rate that rounds to
