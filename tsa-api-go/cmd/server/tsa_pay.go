@@ -23,13 +23,20 @@ const tsaPayMinMasterKeyBytes = 32
 // matching every other optional integration in this file: a deploy that
 // never sets TSA_PAY_* changes nothing.
 //
+// orders, intents and quoter are the ramp's own services (nil when Paycrest, or
+// swapped sells, are off). A naira payment needs orders; converting another
+// token into its USDC also needs intents and the quoter. With no orders the
+// start routes stay unwired and answer 503; with orders but no intents, direct
+// payments work and converted ones answer "unavailable".
+//
 // When live, it also registers the two background workers TSA Pay needs to
 // make any progress on its own: tsa-pay-webhooks (delivers signed events to
 // merchant endpoints) and tsa-pay-reconciler (the expiry sweep, extended by
 // Parts B/C). Neither has a webhook to receive from any provider, so
 // nothing else ever drives them — a missed tick is simply caught up by the
 // next one (see internal/jobs's package doc on idempotent workers).
-func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler) *handlers.PayHandler {
+func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler,
+	orders *services.PaycrestOrderService, intents *services.SellIntentService, quoter *services.RampSellQuoter) *handlers.PayHandler {
 	if !cfg.TSAPayEnabled {
 		log.Printf("[tsa-pay] dormant: TSA_PAY_ENABLED is not set")
 		return nil
@@ -54,6 +61,27 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
-	log.Printf("[tsa-pay] merchant administration, payment API and webhook delivery ready (live_enabled=%v)", cfg.TSAPayLiveEnabled)
-	return handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
+	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
+	if checkout := buildPayCheckout(payments, orders, intents, quoter, cfg.TSAPayLiveEnabled); checkout != nil {
+		handler.WithCheckout(checkout)
+	}
+
+	log.Printf("[tsa-pay] merchant administration, payment API and webhook delivery ready (live_enabled=%v, naira start=%v)",
+		cfg.TSAPayLiveEnabled, orders != nil)
+	return handler
+}
+
+// buildPayCheckout wires the naira start path, or returns nil (the routes then
+// answer 503). The nil checks are explicit because a nil *SellIntentService
+// stored in an interface would read as wired.
+func buildPayCheckout(payments *services.PayPaymentService, orders *services.PaycrestOrderService,
+	intents *services.SellIntentService, quoter *services.RampSellQuoter, live bool) *services.PayCheckoutService {
+	if orders == nil {
+		return nil
+	}
+	if intents == nil || quoter == nil {
+		return services.NewPayCheckoutService(payments, orders, nil, nil, live)
+	}
+	payments.SetIntents(intents)
+	return services.NewPayCheckoutService(payments, orders, intents, quoter, live)
 }

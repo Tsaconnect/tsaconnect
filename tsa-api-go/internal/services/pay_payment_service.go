@@ -14,11 +14,15 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// payIntents is a placeholder for the sell-intent lookup Part B's
-// checkout/conversion flow needs (Task 13). Declared here as an empty
-// interface so PayPaymentService can carry the field now; Task 13 widens it
-// and wires a real implementation via a setter.
-type payIntents interface{}
+// payIntents is the slice of *SellIntentService the payment's reconciler and
+// the checkout starter drive: open a pay intent, end one that will never
+// settle, and read what became of its swap. A nil payIntents means converted
+// payments are unavailable (ramp sell is off).
+type payIntents interface {
+	Create(ctx context.Context, user *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error)
+	AbandonForPay(ctx context.Context, id uuid.UUID) error
+	SwapStatus(ctx context.Context, id uuid.UUID) (*LiFiTransferStatus, error)
+}
 
 const (
 	payDefaultExpirySeconds = 1800
@@ -87,7 +91,7 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
-	intents      payIntents // Part B (Task 13); nil until SetIntents
+	intents      payIntents // nil until SetIntents (ramp sell off: converted payments unavailable)
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the
@@ -96,6 +100,11 @@ type PayPaymentService struct {
 func NewPayPaymentService(db *gorm.DB, merchants *PayMerchantService, feeBps int, checkoutBase string, now func() time.Time) *PayPaymentService {
 	return &PayPaymentService{db: db, merchants: merchants, feeBps: feeBps, checkoutBase: checkoutBase, now: now}
 }
+
+// SetIntents wires the sell-intent service the reconciler reads converted
+// attempts through. Never called with a typed-nil: a nil interface is how the
+// reconciler knows there are no converted attempts to look after.
+func (s *PayPaymentService) SetIntents(i payIntents) { s.intents = i }
 
 // Create starts (or, for a retried reference, returns) one checkout for
 // merchant m. The bool return is true only when a new row was inserted.

@@ -1084,16 +1084,6 @@ func main() {
 		log.Printf("[pm] onboarding service dormant: no fiat provider configured — corporate PM approval disabled")
 	}
 
-	// TSA Pay merchant administration — dormant by default (see buildTSAPay's
-	// own doc comment for the exact conditions). Built after bankDirectory
-	// and blockchainService exist: settlement verification needs both.
-	// mrh may have just been reassigned above (corporate PM onboarding), so
-	// PayMerchants is wired onto whichever handler instance mrh now holds.
-	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler)
-	if ms := payHandler.MerchantService(); ms != nil {
-		mrh.PayMerchants = ms
-	}
-
 	// P2P trade service — wired only when the contract address is set.
 	// The handler is always constructed (so the Nomba-backed bank/resolve
 	// routes work even before the escrow contract is deployed); trade
@@ -1484,6 +1474,14 @@ func main() {
 	// buildRampConversion actually runs) so the dispute service and handler,
 	// wired further down, can pick it up whether or not it ended up nil.
 	var conversionOrch *services.ConversionOrchestrator
+	// Likewise hoisted for TSA Pay (built after this block): a naira payment
+	// opens its payout through the same order service, sell intents and quoter
+	// the ramp sell uses. Each stays nil when its own gate is off.
+	var (
+		payOrders  *services.PaycrestOrderService
+		paySellers *services.SellIntentService
+		payQuoter  *services.RampSellQuoter
+	)
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1511,6 +1509,7 @@ func main() {
 			itHandler.SetRampLegs(paycrestQuotes)
 		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		payOrders = paycrestOrders
 		if rampSponsor := buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
 			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
 			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
@@ -1522,10 +1521,12 @@ func main() {
 		// it off rather than quoting a sell at a loss.
 		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, paycrestOrders, paycrestQuotes); sellQuoter != nil {
 			paycrestHandler = paycrestHandler.WithSellQuoter(sellQuoter)
+			payQuoter = sellQuoter
 			// The sale itself: the same quote, stored and then held to, with
 			// a Base receipt as the only authority on what landed.
 			if sellIntents := buildSellIntentService(sellQuoter, cfg, blockchainService, paycrestOrders, feeDistributionService); sellIntents != nil {
 				paycrestHandler = paycrestHandler.WithSellIntents(sellIntents)
+				paySellers = sellIntents
 			}
 		}
 		// Converted buys: Paycrest delivers into our own treasury instead of
@@ -1555,6 +1556,18 @@ func main() {
 		}
 	} else {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
+	}
+
+	// TSA Pay — dormant by default (see buildTSAPay's own doc comment for the
+	// exact conditions). Built after the Paycrest block above: a naira payment
+	// opens its payout through that block's order service, sell intents and
+	// quoter, and settlement verification needs bankDirectory and
+	// blockchainService.
+	// mrh may have just been reassigned above (corporate PM onboarding), so
+	// PayMerchants is wired onto whichever handler instance mrh now holds.
+	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter)
+	if ms := payHandler.MerchantService(); ms != nil {
+		mrh.PayMerchants = ms
 	}
 
 	// One dispute queue across every order type that cannot resolve itself.

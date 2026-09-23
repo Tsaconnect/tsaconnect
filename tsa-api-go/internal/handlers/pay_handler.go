@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -42,8 +43,14 @@ type payWebhookAPI interface {
 	Resend(ctx context.Context, deliveryID uuid.UUID) error
 }
 
-// payCheckoutStarter is declared now and widened in Task 13.
-type payCheckoutStarter interface{}
+// payCheckoutStarter is the slice of *services.PayCheckoutService the naira
+// start routes need. Nil (no Paycrest order service, or ramp sell off) means
+// those routes answer 503 — see WithCheckout.
+type payCheckoutStarter interface {
+	Quote(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*services.PayQuote, error)
+	PayDirect(ctx context.Context, user *models.User, id uuid.UUID, in services.PayDirectInput) (*models.PaycrestOrderRecord, error)
+	PayConverted(ctx context.Context, user *models.User, id uuid.UUID, in services.PayConvertedInput) (*models.RampSellIntent, *services.SellSwapQuote, error)
+}
 
 // PayHandler serves every TSA Pay HTTP surface: merchant administration,
 // the merchant API, the app's checkout/test-mode flow, and the admin
@@ -65,6 +72,13 @@ type PayHandler struct {
 // may be nil — see PayHandler's doc comment and Enabled().
 func NewPayHandler(merchants *services.PayMerchantService, payments payPaymentAPI, webhooks payWebhookAPI, liveEnabled bool) *PayHandler {
 	return &PayHandler{merchants: merchants, payments: payments, webhooks: webhooks, liveEnabled: liveEnabled}
+}
+
+// WithCheckout turns the naira start routes on. Callers pass a real starter
+// or nothing at all — never a typed-nil pointer, which would read as wired.
+func (h *PayHandler) WithCheckout(c payCheckoutStarter) *PayHandler {
+	h.checkout = c
+	return h
 }
 
 // Enabled reports whether TSA Pay has enough wired up to serve a request.
@@ -436,7 +450,10 @@ func payPaymentFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
 	case errors.Is(err, services.ErrPayForbidden):
 		utils.ErrorResponse(c, http.StatusForbidden, err.Error())
-	case errors.Is(err, services.ErrPayNotPayable), errors.Is(err, services.ErrPayInProgress), errors.Is(err, services.ErrPayTransition):
+	case errors.Is(err, services.ErrPayInProgress):
+		// The app resumes the attempt it already has rather than start another.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pay_in_progress")
+	case errors.Is(err, services.ErrPayNotPayable), errors.Is(err, services.ErrPayTransition):
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrPayPaymentInvalid), errors.Is(err, services.ErrPayMerchantNotReady):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
@@ -563,4 +580,170 @@ func (h *PayHandler) CancelPayment(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment cancelled", h.payments.View(p))
+}
+
+// payStartBody is what the naira start routes read besides the payment id:
+// direct names the stablecoin the customer funds the order with, converted and
+// quote name the token she pays with and where it is. WalletAddress is
+// optional and goes through callerWallet like every other money route.
+type payStartBody struct {
+	ChainKey      string `json:"chainKey"`
+	Token         string `json:"token"`
+	SourceChainID int64  `json:"sourceChainId"`
+	SourceToken   string `json:"sourceToken"`
+	SourceAddress string `json:"sourceAddress"`
+	WalletAddress string `json:"walletAddress"`
+}
+
+// payStartCaller is the preamble the three naira start routes share: the
+// routes exist only when a starter is wired, then a signed-in caller and a
+// payment id.
+func (h *PayHandler) payStartCaller(c *gin.Context) (*models.User, uuid.UUID, bool) {
+	if h.checkout == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Live payments aren't available right now")
+		return nil, uuid.Nil, false
+	}
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return nil, uuid.Nil, false
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return nil, uuid.Nil, false
+	}
+	return user, id, true
+}
+
+// payConvertedSource validates the token-she-pays-with fields and reconciles
+// her wallet. sourceAddress is where the swap is SENT from — possibly not an
+// EVM address — so only its presence is checked here; the quoter validates it
+// for the chain's own family.
+func payConvertedSource(c *gin.Context, user *models.User, chainID int64, token, address, claimedWallet string) (services.PayConvertedInput, bool) {
+	token, address = strings.TrimSpace(token), strings.TrimSpace(address)
+	if chainID <= 0 || token == "" || address == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "sourceChainId, sourceToken and sourceAddress are required")
+		return services.PayConvertedInput{}, false
+	}
+	// The USDC receiver is the account's own reconciled wallet, never the
+	// request's word for it.
+	wallet, ok := callerWallet(c, user, claimedWallet)
+	if !ok {
+		return services.PayConvertedInput{}, false
+	}
+	user.WalletAddress = wallet
+	return services.PayConvertedInput{SourceChainID: chainID, SourceToken: token, SourceAddress: address}, true
+}
+
+// GET /api/pay/checkout/:id/quote?sourceChainId=&sourceToken=&sourceAddress=
+// — what paying with this token would cost. A price: it locks nothing.
+func (h *PayHandler) PayQuote(c *gin.Context) {
+	user, id, ok := h.payStartCaller(c)
+	if !ok {
+		return
+	}
+	chainID, _ := strconv.ParseInt(strings.TrimSpace(c.Query("sourceChainId")), 10, 64)
+	in, ok := payConvertedSource(c, user, chainID, c.Query("sourceToken"), c.Query("sourceAddress"), c.Query("walletAddress"))
+	if !ok {
+		return
+	}
+	q, err := h.checkout.Quote(c.Request.Context(), user, id, in)
+	if err != nil {
+		payStartFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment quote", q)
+}
+
+// POST /api/pay/checkout/:id/direct {chainKey, token} — pay with a stablecoin
+// Paycrest takes as it is. Answers the payout order she then funds.
+func (h *PayHandler) PayDirect(c *gin.Context) {
+	user, id, ok := h.payStartCaller(c)
+	if !ok {
+		return
+	}
+	var body payStartBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(body.ChainKey) == "" || strings.TrimSpace(body.Token) == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "chainKey and token are required")
+		return
+	}
+	wallet, ok := callerWallet(c, user, body.WalletAddress)
+	if !ok {
+		return
+	}
+	user.WalletAddress = wallet
+	order, err := h.checkout.PayDirect(c.Request.Context(), user, id, services.PayDirectInput{ChainKey: body.ChainKey, Token: body.Token})
+	if err != nil {
+		payStartFail(c, err)
+		return
+	}
+	// The order is the record POST /api/paycrest/sell returns, under "order".
+	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your payment", gin.H{"order": order})
+}
+
+// POST /api/pay/checkout/:id/converted {sourceChainId, sourceToken,
+// sourceAddress} — pay with any other token: starts the payment's sell intent
+// and answers the executable quote she signs, in the shape
+// POST /api/paycrest/sell-intents answers.
+func (h *PayHandler) PayConverted(c *gin.Context) {
+	user, id, ok := h.payStartCaller(c)
+	if !ok {
+		return
+	}
+	var body payStartBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	in, ok := payConvertedSource(c, user, body.SourceChainID, body.SourceToken, body.SourceAddress, body.WalletAddress)
+	if !ok {
+		return
+	}
+	intent, quote, err := h.checkout.PayConverted(c.Request.Context(), user, id, in)
+	if err != nil {
+		payStartFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusCreated, "Payment started — sign the swap", gin.H{
+		"intent": intent, "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
+	})
+}
+
+// payStartFail maps a start route's error. The payment's own refusals go
+// through payPaymentFail; a sell that cannot be opened is the ramp's own
+// vocabulary (paycrestError / sellSwapError), so those sentinels are mapped
+// exactly as the app already receives them from the sell routes.
+func payStartFail(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, services.ErrPayWrongRoute):
+		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, services.ErrSellRateMoved):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "rate_moved")
+	case errors.Is(err, services.ErrSellIntentOpen):
+		utils.ErrorResponse(c, http.StatusConflict, "You already have a sale in progress")
+	case isPayServiceError(err):
+		payPaymentFail(c, err)
+	default:
+		sellSwapError(c, err)
+	}
+}
+
+// isPayServiceError reports whether err is one PayPaymentService itself
+// returns (or the KYC refusal its Lock does), as opposed to a provider's.
+func isPayServiceError(err error) bool {
+	for _, target := range []error{
+		services.ErrPayPaymentNotFound, services.ErrKYCVerificationRequired, services.ErrPayForbidden,
+		services.ErrPayNotPayable, services.ErrPayInProgress, services.ErrPayTransition,
+		services.ErrPayPaymentInvalid, services.ErrPayMerchantNotReady,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }

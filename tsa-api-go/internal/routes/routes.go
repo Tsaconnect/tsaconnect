@@ -1236,6 +1236,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			checkout.GET("/:id", payh.Checkout)
 			checkout.POST("/:id/test-outcome", middleware.Idempotency(config.DB), payh.TestOutcome)
+
+			// The naira start path. With no Paycrest order service wired these
+			// answer 503 "Live payments aren't available right now". The quote
+			// asks LiFi (a paid API), so it is limited like the other quotes;
+			// the two POSTs open a payout or a swap, so they share the ramp's
+			// write budget and are idempotency-protected.
+			payStartLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+			checkout.GET("/:id/quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayQuote)
+			checkout.POST("/:id/direct", middleware.Idempotency(config.DB), payStartLimit, payh.PayDirect)
+			checkout.POST("/:id/converted", middleware.Idempotency(config.DB), payStartLimit, payh.PayConverted)
 		}
 	}
 }

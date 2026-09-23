@@ -174,3 +174,28 @@ func TestPayRoutes_AuthAndKeyGatesAreWired(t *testing.T) {
 		t.Fatalf("a real test key create: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// The naira start routes sit behind the app's JWT and, with no order service
+// wired (Paycrest off), answer 503 rather than 404: the app can tell "not
+// available right now" from "no such route".
+func TestPayRoutes_NairaStartRoutesAreAuthedAndDormantSafe(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	id := uuid.New().String()
+	routes := []struct{ method, path string }{
+		{"GET", "/api/pay/checkout/" + id + "/quote?sourceChainId=56&sourceToken=0x0&sourceAddress=0xa"},
+		{"POST", "/api/pay/checkout/" + id + "/direct"},
+		{"POST", "/api/pay/checkout/" + id + "/converted"},
+	}
+	for _, rt := range routes {
+		if w := payRoutesDo(r, rt.method, rt.path, "", nil); w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s without a jwt: %d %s", rt.method, rt.path, w.Code, w.Body.String())
+		}
+	}
+	tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID)
+	for _, rt := range routes {
+		w := payRoutesDo(r, rt.method, rt.path, tok, map[string]any{"chainKey": "base", "token": "USDC"})
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "Live payments aren't available right now") {
+			t.Fatalf("%s %s unwired: %d %s", rt.method, rt.path, w.Code, w.Body.String())
+		}
+	}
+}

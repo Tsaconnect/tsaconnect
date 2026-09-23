@@ -209,28 +209,44 @@ func (s *PayPaymentService) expireEach(ctx context.Context, ids []uuid.UUID, rea
 	return n, nil
 }
 
-// ReconcileTick is the periodic reconciler's unit of work. Part A is just
-// the expiry sweep; Parts B/C (chain- and Paycrest-order-aware recovery)
-// extend this same entry point rather than adding a second worker.
+// ReconcileTick is the periodic reconciler's unit of work: the expiry sweep,
+// the stuck-test-payment release, and settlement of every in-flight payment
+// (reconcileProcessing). Each step runs whatever the others do, so a failing
+// expiry sweep never holds up settling a payment; the errors are joined for
+// the worker's failure-streak alert.
 func (s *PayPaymentService) ReconcileTick(ctx context.Context) error {
+	var errs []error
 	if _, err := s.ExpireDue(ctx, 100); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-	_, err := s.ReleaseStuckTestPayments(ctx, payStuckTestReleaseAfter, 100)
-	return err
+	if _, err := s.ReleaseStuckTestPayments(ctx, payStuckTestReleaseAfter, 100); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.reconcileProcessing(ctx, 50); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // ReleaseStuckTestPayments releases test-mode payments left in processing
 // with no attempt linked for longer than olderThan, oldest first, up to
 // limit. Live payments are never touched here: releasing one can strand a
-// customer's money mid-flight, so Parts B/C own their release rules. Each
-// release goes through the guarded Release, so a payment that moved on
-// since the select is skipped.
+// customer's money mid-flight, so reconcileProcessing owns their release
+// rules.
 func (s *PayPaymentService) ReleaseStuckTestPayments(ctx context.Context, olderThan time.Duration, limit int) (int, error) {
+	return s.releaseUnattempted(ctx, models.PayModeTest, olderThan, limit, "released: test payment was stuck processing")
+}
+
+// releaseUnattempted releases payments of mode left in processing with NO
+// attempt linked — no order and no intent, so no provider was ever asked for
+// anything and no money can be moving — locked for longer than olderThan,
+// oldest first, up to limit. Each release goes through the guarded Release, so
+// a payment that moved on since the select is skipped.
+func (s *PayPaymentService) releaseUnattempted(ctx context.Context, mode string, olderThan time.Duration, limit int, reason string) (int, error) {
 	var ids []uuid.UUID
 	if err := s.db.WithContext(ctx).Model(&models.PayPayment{}).
 		Where("mode = ? AND status = ? AND paycrest_order_id IS NULL AND sell_intent_id IS NULL AND locked_at < ?",
-			models.PayModeTest, models.PayStatusProcessing, s.now().Add(-olderThan)).
+			mode, models.PayStatusProcessing, s.now().Add(-olderThan)).
 		Order("locked_at").
 		Limit(limit).
 		Pluck("id", &ids).Error; err != nil {
@@ -238,7 +254,7 @@ func (s *PayPaymentService) ReleaseStuckTestPayments(ctx context.Context, olderT
 	}
 	n := 0
 	for _, id := range ids {
-		err := s.Release(ctx, id, "released: test payment was stuck processing")
+		err := s.Release(ctx, id, reason)
 		switch {
 		case err == nil:
 			n++
