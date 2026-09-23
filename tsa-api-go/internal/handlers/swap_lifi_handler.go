@@ -662,6 +662,11 @@ func (h *SwapLiFiHandler) GetSwapStatus(c *gin.Context) {
 	}
 
 	out := gin.H{"status": st.Status, "txHash": txHash}
+	// DONE alone is not delivery: only COMPLETED is; REFUNDED and PARTIAL
+	// are ways a swap ends short, and the app words each one differently.
+	if st.Substatus != "" {
+		out["substatus"] = st.Substatus
+	}
 	if st.DestTxHash != "" {
 		out["destTxHash"] = st.DestTxHash
 	}

@@ -50,7 +50,9 @@ jest.mock('../submitErrors', () => ({
 }));
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
-import { executeLiFiSwap } from '../lifiFlow';
+import { executeLiFiSwap, SwapBroadcastUnconfirmedError } from '../lifiFlow';
+// eslint-disable-next-line import/first -- as above.
+import { keccak256 } from 'ethers';
 
 const WALLET = '0xTRADER';
 
@@ -306,5 +308,49 @@ describe('executeLiFiSwap — failure surfaces', () => {
     q.transactionRequest.chainId = 999999;
     await expect(executeLiFiSwap(params({ quote: q }))).rejects.toThrow(/unsupported chain/i);
     expect(mockSignLiFiTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeLiFiSwap — the swap hash before the broadcast', () => {
+  // Any hex serialises to a hash the same way a real signed tx does: keccak256 of its bytes.
+  const SIGNED = '0x02f8aa';
+  const SIGNED_HASH = keccak256(SIGNED);
+
+  beforeEach(() => { mockSignLiFiTransaction.mockResolvedValue(SIGNED); });
+
+  it('hands over the signed swap\'s hash before submitting it', async () => {
+    const onSigned = jest.fn(async () => {
+      expect(mockSubmitTransaction).not.toHaveBeenCalled();
+    });
+    await executeLiFiSwap(params({ onSigned }));
+    expect(onSigned).toHaveBeenCalledWith(SIGNED_HASH);
+    expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the broadcast is unconfirmed, with the hash, when the reply never came back', async () => {
+    mockSubmitTransaction.mockResolvedValue({ success: false, message: 'Network request failed', unanswered: true });
+    const err = await executeLiFiSwap(params({ onSigned: jest.fn() })).catch((e) => e);
+    expect(err).toBeInstanceOf(SwapBroadcastUnconfirmedError);
+    expect(err.txHash).toBe(SIGNED_HASH);
+  });
+
+  it('says the broadcast is unconfirmed when the submit call itself throws', async () => {
+    mockSubmitTransaction.mockRejectedValue(new Error('socket hang up'));
+    const err = await executeLiFiSwap(params({ onSigned: jest.fn() })).catch((e) => e);
+    expect(err).toBeInstanceOf(SwapBroadcastUnconfirmedError);
+  });
+
+  it('treats the server\'s own refusal as not sent — a plain error, not an unconfirmed one', async () => {
+    mockSubmitTransaction.mockResolvedValue({ success: false, message: 'insufficient funds for gas' });
+    const err = await executeLiFiSwap(params({ onSigned: jest.fn() })).catch((e) => e);
+    expect(err).not.toBeInstanceOf(SwapBroadcastUnconfirmedError);
+    expect(err.message).toMatch(/insufficient funds/);
+  });
+
+  it('never calls onSigned for a failure before the swap is signed', async () => {
+    mockFetchPendingNonce.mockRejectedValue(new Error('boom'));
+    const onSigned = jest.fn();
+    await expect(executeLiFiSwap(params({ onSigned }))).rejects.toThrow();
+    expect(onSigned).not.toHaveBeenCalled();
   });
 });

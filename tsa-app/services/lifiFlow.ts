@@ -22,6 +22,18 @@ import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
 import { executeLiFiSuiSwap } from '@/services/chains/suiLifi';
 import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
 
+/**
+ * The swap was signed and handed to the server, but its answer never came
+ * back — so it may have been broadcast. Callers must not tell her "nothing was
+ * sent" on this error; `txHash` (known before submit) is how to look it up.
+ */
+export class SwapBroadcastUnconfirmedError extends Error {
+  constructor(readonly txHash?: string) {
+    super("We couldn't confirm the swap was sent. Check your wallet's activity before trying again.");
+    this.name = 'SwapBroadcastUnconfirmedError';
+  }
+}
+
 export interface ExecuteLiFiSwapParams {
   quote: LiFiQuote;
   /** Symbol + decimals of the token being paid (the quote's from side). */
@@ -50,6 +62,12 @@ export interface ExecuteLiFiSwapParams {
   feeFeature?: SwapFeeFeature;
   /** Progress labels ("Step 1 of 2: Approving token…", …). */
   onStage?: (label: string) => void;
+  /**
+   * EVM only: the signed swap's hash, awaited BEFORE it is submitted, so a
+   * caller can persist it — a reply lost after the broadcast then still
+   * leaves a hash to follow.
+   */
+  onSigned?: (txHash: string) => Promise<void> | void;
 }
 
 export async function executeLiFiSwap({
@@ -62,6 +80,7 @@ export async function executeLiFiSwap({
   fromChainId,
   feeFeature = 'allswap',
   onStage,
+  onSigned,
 }: ExecuteLiFiSwapParams): Promise<string> {
   if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
     return executeLiFiSolanaSwap({
@@ -195,6 +214,9 @@ export async function executeLiFiSwap({
   onStage?.(quote.approvalAddress ? 'Step 2 of 2: Executing swap…' : 'Executing swap…');
   const swapTx = { ...quote.transactionRequest, to: evmTo, value: evmValue, chainId: evmChainId, gasLimit: evmGasLimit, nonce };
   const signedSwap = await signLiFiTransaction(swapTx);
+  // A signed tx's hash is keccak256 of its serialised bytes, legacy or typed.
+  const signedHash = onSigned ? ethers.keccak256(signedSwap) : undefined;
+  if (signedHash) await onSigned?.(signedHash);
   let res;
   try {
     // feeDeferred: `humanAmount` is a quantity of fromSymbol, and the backend's
@@ -207,7 +229,13 @@ export async function executeLiFiSwap({
     );
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });
-    throw new Error('Swap broadcast failed. The network may be congested — try again.');
+    throw new SwapBroadcastUnconfirmedError(signedHash);
+  }
+  // The server's own refusal happens before or at the node, so nothing went
+  // out. A reply that never arrived says nothing either way.
+  if (!res || res.unanswered) {
+    console.error('[swap] swap submit got no answer from the server', { chainKey, res });
+    throw new SwapBroadcastUnconfirmedError(signedHash);
   }
 
   const swapHash = res.success ? res.data?.txHash : undefined;

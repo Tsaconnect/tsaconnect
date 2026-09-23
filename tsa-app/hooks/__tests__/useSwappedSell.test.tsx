@@ -21,7 +21,14 @@ jest.mock('@/services/paycrestSellSwap', () => ({
   getOpenSellIntent: jest.fn(),
   getSellSwapQuote: jest.fn(),
 }));
-jest.mock('@/services/lifiFlow', () => ({ __esModule: true, executeLiFiSwap: jest.fn() }));
+jest.mock('@/services/lifiFlow', () => ({
+  __esModule: true,
+  executeLiFiSwap: jest.fn(),
+  SwapBroadcastUnconfirmedError: class extends Error {
+    txHash?: string;
+    constructor(mockHash?: string) { super("We couldn't confirm the swap was sent."); this.txHash = mockHash; }
+  },
+}));
 jest.mock('@/services/lifi', () => ({
   ...jest.requireActual('@/services/lifi'),
   getSwapDelivery: jest.fn(),
@@ -65,6 +72,12 @@ function Probe() {
   hook = useSwappedSell();
   return null;
 }
+/** A second screen's copy of the hook: she backed out and came back. */
+let other!: ReturnType<typeof useSwappedSell>;
+function OtherProbe() {
+  other = useSwappedSell();
+  return null;
+}
 
 beforeEach(async () => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
@@ -74,7 +87,7 @@ beforeEach(async () => {
   mocked.recordSellSwap.mockResolvedValue(undefined);
   mocked.abandonSellIntent.mockResolvedValue(undefined);
   mocked.claimPayment.mockResolvedValue({} as PaycrestOrder);
-  await act(async () => { create(<Probe />); });
+  await act(async () => { create(<Probe />); create(<OtherProbe />); });
 });
 
 afterEach(() => { jest.useRealTimers(); });
@@ -228,7 +241,7 @@ it('never abandons a sale once the swap has landed, even when the send fails', a
   expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
 });
 
-it('frees the sale when the swap could not be sent at all', async () => {
+it('frees the sale when the swap was refused before or at the node', async () => {
   intentCreated();
   mocked.executeLiFiSwap.mockRejectedValue(new Error('Swap broadcast failed.'));
   await run(hook.start(args));
@@ -317,9 +330,189 @@ it('does not send twice when a resumed order is already paid', async () => {
   expect(hook.stage).toBe('done');
 });
 
-it('closes a sale whose swap never started, since nothing can be recovered', async () => {
+it('closes a sale with no swap to follow when no run of it is going, and says only what it knows', async () => {
   await run(hook.resume({ id: 'i1', status: 'swapping' } as SellIntent));
   expect(mocked.executeLiFiSwap).not.toHaveBeenCalled();
   expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
-  expect(hook.error).toMatch(/nothing was sold/i);
+  expect(hook.error).toMatch(/couldn't find a swap/i);
+  expect(hook.error).not.toMatch(/never started|nothing was sold/i);
+});
+
+/** Let pending promises run without stepping the clock. */
+const flush = () => act(async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); });
+
+describe('one sale, one run — across every copy of the hook', () => {
+  it("won't close a sale another screen is still swapping (she backed out and tapped Finish your sale)", async () => {
+    intentCreated();
+    let release!: (hash: string) => void;
+    mocked.executeLiFiSwap.mockImplementation(() => new Promise<string>((r) => { release = r; }));
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockResolvedValue(order);
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+
+    const first = hook.start(args); // the screen she left: stuck waiting on the approval
+    await flush();
+    expect(mocked.executeLiFiSwap).toHaveBeenCalled();
+
+    // The new screen sees the open sale, with no hash anywhere yet.
+    await run(other.resume({ id: 'i1', status: 'swapping' } as SellIntent));
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(other.error).not.toMatch(/never started|nothing was sold/i);
+    expect(other.error).toMatch(/still going through/i);
+
+    // The first run carries on and finishes the sale it owns.
+    release('0xswap');
+    await run(first);
+    expect(mocked.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap');
+    expect(hook.stage).toBe('done');
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+
+  it("won't open a second sale while another screen's is still running", async () => {
+    intentCreated();
+    let release!: (hash: string) => void;
+    mocked.executeLiFiSwap.mockImplementation(() => new Promise<string>((r) => { release = r; }));
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'FAILED' });
+
+    const first = hook.start(args);
+    await flush();
+    await run(other.start(args));
+    expect(mocked.createSellIntent).toHaveBeenCalledTimes(1);
+    expect(other.error).toMatch(/still going through/i);
+
+    release('0xswap');
+    await run(first);
+  });
+
+  it('frees the sale for resume once the run that held it ends', async () => {
+    intentCreated();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(/finish your sale/i);
+
+    mocked.recordSellSwap.mockResolvedValue(undefined);
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockResolvedValue(order);
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+    await run(other.resume({ id: 'i1', status: 'swapping' } as SellIntent));
+    expect(other.stage).toBe('done');
+  });
+});
+
+describe('a swap whose broadcast is unconfirmed', () => {
+  beforeEach(() => { intentCreated(); });
+
+  it('keeps the signed hash and the sale when the reply was lost, so Finish your sale can follow it', async () => {
+    mocked.executeLiFiSwap.mockImplementation(async (p) => {
+      await p.onSigned?.('0xsigned');
+      // Persisted before the broadcast call, not after it returns.
+      expect(await AsyncStorage.getItem(KEY)).toBe('0xsigned');
+      throw new LifiFlow.SwapBroadcastUnconfirmedError('0xsigned');
+    });
+    await run(hook.start(args));
+    expect(await AsyncStorage.getItem(KEY)).toBe('0xsigned');
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(hook.error).toMatch(/finish your sale/i);
+    expect(hook.error).not.toMatch(/nothing was sold/i);
+
+    // Later: the resume follows that hash rather than closing the sale.
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockResolvedValue(order);
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+    await run(hook.resume({ id: 'i1', status: 'swapping' } as SellIntent));
+    expect(mocked.recordSellSwap).toHaveBeenCalledWith('i1', '0xsigned');
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('done');
+  });
+
+  it('drops the signed hash and frees the sale when the server refused the swap outright', async () => {
+    mocked.executeLiFiSwap.mockImplementation(async (p) => {
+      await p.onSigned?.('0xsigned');
+      throw new Error('insufficient funds for gas');
+    });
+    await run(hook.start(args));
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+  });
+});
+
+describe('the payout failing to open says nothing about her USDC it cannot back', () => {
+  beforeEach(() => {
+    intentCreated();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+  });
+  const USDC_CLAIM = /USDC is in your wallet/i;
+
+  it('a plain network error', async () => {
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+    mocked.openSellOrder.mockRejectedValue(new Error('Network request failed'));
+    await run(hook.start(args));
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).not.toMatch(USDC_CLAIM);
+    expect(hook.error).toMatch(/finish your sale/i);
+  });
+
+  it('a 409 naming a refund in words the app does not parse', async () => {
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('the bridge refunded this swap', 409));
+    await run(hook.start(args));
+    expect(hook.error).not.toMatch(USDC_CLAIM);
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+
+  it("the server's REFUNDED verdict", async () => {
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError(
+      "your swap didn't complete (DONE/REFUNDED) — nothing was sold; check your wallet", 409));
+    await run(hook.start(args));
+    expect(hook.error).not.toMatch(USDC_CLAIM);
+  });
+
+  it('"still swapping" that never clears, without a confirmed delivery', async () => {
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('Still swapping — try again in a moment', 409));
+    await run(hook.start(args));
+    expect(hook.error).not.toMatch(USDC_CLAIM);
+    expect(hook.error).toMatch(/finish your sale/i);
+  });
+
+  it('keeps the reassurance when LiFi itself confirmed the USDC landed', async () => {
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockRejectedValue(new Error('Network request failed'));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(USDC_CLAIM);
+  });
+});
+
+describe("the server's verdict, read from its 409 when the poll carried no substatus", () => {
+  beforeEach(() => {
+    intentCreated();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+  });
+
+  it('(DONE/PARTIAL): check the wallet, contact support', async () => {
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError(
+      "your swap didn't complete (DONE/PARTIAL) — nothing was sold; check your wallet", 409));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(/different token/i);
+    expect(hook.error).toMatch(/support/i);
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+  });
+
+  it('(FAILED): her tokens are still in her wallet', async () => {
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError(
+      "your swap didn't complete (FAILED) — nothing was sold; check your wallet", 409));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(/didn't go through/i);
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+  });
+
+  it('(FAILED/<qualifier>) reads the same way', async () => {
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError(
+      "your swap didn't complete (FAILED/NOT_PROCESSABLE_REFUND_NEEDED) — nothing was sold; check your wallet", 409));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(/didn't go through/i);
+  });
 });

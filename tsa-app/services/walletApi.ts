@@ -54,6 +54,12 @@ interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
   data?: T;
+  /**
+   * Set when the server's own answer never reached us (the request threw, or
+   * a proxy sent an empty/non-JSON page). Only then is a failure ambiguous: the
+   * server may have acted before its reply was lost.
+   */
+  unanswered?: true;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -68,7 +74,7 @@ function isRecord(value: unknown): value is Record<string, any> {
 async function safeJson<T = any>(response: Response): Promise<ApiResponse<T>> {
   const text = await response.text();
   if (!text) {
-    return { success: false, message: `Empty response (HTTP ${response.status})` };
+    return { success: false, message: `Empty response (HTTP ${response.status})`, unanswered: true };
   }
   try {
     return JSON.parse(text) as ApiResponse<T>;
@@ -76,6 +82,7 @@ async function safeJson<T = any>(response: Response): Promise<ApiResponse<T>> {
     const preview = text.length > 200 ? text.slice(0, 200) + '...' : text;
     return {
       success: false,
+      unanswered: true,
       message: response.ok
         ? `Unexpected server response: ${preview}`
         : `Server error (HTTP ${response.status}): ${preview}`,
@@ -517,7 +524,7 @@ export async function submitTransaction(
     return result;
   } catch (error: any) {
     console.error('Submit transaction error:', error);
-    return { success: false, message: error.message || 'Failed to submit transaction' };
+    return { success: false, message: error.message || 'Failed to submit transaction', unanswered: true };
   }
 }
 
