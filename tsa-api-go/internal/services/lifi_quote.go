@@ -242,27 +242,18 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	}
 	q.Set("integrator", c.integrator)
 
-	httpReq, err := NewLiFiGetRequest(ctx, c.baseURL, c.apiKey, path+"?"+q.Encode())
-	if err != nil {
-		return nil, err
-	}
-	res, err := c.http.Do(httpReq)
+	body, status, err := c.get(ctx, path+"?"+q.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("lifi quote: %w", err)
 	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("lifi quote: %w", err)
-	}
-	if res.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		if IsIntegratorFeeUnconfigured(body) {
 			return nil, ErrLiFiFeeUnconfigured
 		}
-		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusUnprocessableEntity {
+		if status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
 			return nil, ErrLiFiNoRoute
 		}
-		return nil, fmt.Errorf("lifi quote: status %d", res.StatusCode)
+		return nil, fmt.Errorf("lifi quote: status %d", status)
 	}
 	var parsed lifiQuoteResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -329,6 +320,58 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		}
 	}
 	return route, nil
+}
+
+// get is the one authenticated GET this client makes: the body (capped at
+// 1 MiB) and the status, for the caller to interpret.
+func (c *LiFiQuoteClient) get(ctx context.Context, pathWithQuery string) ([]byte, int, error) {
+	req, err := NewLiFiGetRequest(ctx, c.baseURL, c.apiKey, pathWithQuery)
+	if err != nil {
+		return nil, 0, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, res.StatusCode, nil
+}
+
+// TokenPriceUSD is LiFi's own USD price for one token, as an exact rational,
+// with the token's decimals. It sizes what a merchant is owed in a token, so a
+// price that is missing, unparsable or not positive is an error: a zero would
+// price the token as free and owe the merchant nothing (or, inverted, an
+// unbounded amount).
+func (c *LiFiQuoteClient) TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error) {
+	q := url.Values{}
+	q.Set("chain", strconv.FormatInt(chainID, 10))
+	q.Set("token", token)
+	body, status, err := c.get(ctx, "/token?"+q.Encode())
+	if err != nil {
+		return nil, 0, fmt.Errorf("lifi token: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, 0, fmt.Errorf("lifi token: status %d", status)
+	}
+	var parsed struct {
+		PriceUSD string `json:"priceUSD"`
+		Decimals int    `json:"decimals"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, 0, fmt.Errorf("lifi token: %w", err)
+	}
+	price, ok := new(big.Rat).SetString(strings.TrimSpace(parsed.PriceUSD))
+	if !ok || price.Sign() <= 0 {
+		return nil, 0, fmt.Errorf("lifi token: unusable price %q", parsed.PriceUSD)
+	}
+	if parsed.Decimals <= 0 || parsed.Decimals > 36 {
+		return nil, 0, fmt.Errorf("lifi token: unusable decimals %d", parsed.Decimals)
+	}
+	return price, parsed.Decimals, nil
 }
 
 // lifiUSD reads one of LiFi's USD strings. An empty or unparseable one reads

@@ -76,15 +76,27 @@ type CreateSellIntentInput struct {
 	SourceChainID                                  int64
 	SourceToken, SourceAmount, SourceAddress       string
 	FiatCode, BankCode, AccountNumber, AccountName string
-	// The next three are set only by the pay checkout, never from the app's
-	// own request: a sale that pays SOMEONE ELSE an exact naira amount.
+	// The rest are set only by the pay checkout, never from the app's own
+	// request: a sale that pays SOMEONE ELSE an exact amount.
 	//
 	// PayPaymentID names the payment it settles. PayoutFiat is the exact naira
-	// the recipient is owed. ToAmount is the exact USDC (Base, 6dp base units)
-	// the swap must land; with it the quote is exact-output, SourceAmount is
-	// ignored, and the intent stores what the route says it costs instead.
+	// the recipient is owed. ToAmount is the exact amount the swap must land
+	// (USDC on Base, 6dp base units, unless a Dest* target says otherwise);
+	// with it the quote is exact-output, SourceAmount is ignored, and the
+	// intent stores what the route says it costs instead.
 	PayPaymentID         *uuid.UUID
 	PayoutFiat, ToAmount string
+	// A DELIVERY sale (TSA Pay's crypto route) hands a token to a merchant's
+	// wallet instead of opening an offramp: DestAddress set means no bank
+	// details are needed and no Paycrest order is ever made. DestAmount is the
+	// least the merchant must be credited, in the token's base units — what
+	// ConfirmDelivery proves on-chain; ToAmount is that owed amount padded for
+	// slippage, so the route's own minimum still covers it. BudgetBps is the
+	// whole fee the round trip may spend (there is no Paycrest leg to share it
+	// with); zero keeps the quoter's own B.
+	DestChainID                               int64
+	DestTokenAddress, DestAddress, DestAmount string
+	BudgetBps                                 int
 }
 
 type SellIntentService struct {
@@ -106,6 +118,11 @@ type SellIntentService struct {
 	// usdcBalance reads her USDC on Base — only a pay intent's "use my wallet
 	// balance too" consent ever asks for it.
 	usdcBalance func(ctx context.Context, wallet string) (*big.Int, error)
+	// destVerifiers prove a delivery sale's landing on ITS chain, keyed by
+	// chain key, with chainName resolving LiFi's numeric id to that key. Both
+	// are the ramp's own maps, never the client's word for a chain.
+	destVerifiers map[string]ERC20TransferVerifier
+	chainName     func(int64) (string, bool)
 }
 
 func NewSellIntentService(db *gorm.DB, quoter sellQuoter, status lifiStatusReader, base ERC20TransferVerifier, orders *PaycrestOrderService, usdc string, now func() time.Time) *SellIntentService {
@@ -127,9 +144,21 @@ func (s *SellIntentService) SetUSDCBalanceReader(f func(ctx context.Context, wal
 	s.usdcBalance = f
 }
 
+// SetDestVerifiers wires the per-chain on-chain proofs a delivery sale's
+// landing needs (the ramp's rampTransferVerifiers map) and the resolver from a
+// LiFi chain id to that map's key. Unset, no delivery can ever be confirmed:
+// ConfirmDelivery refuses rather than take LiFi's word that a merchant was paid.
+func (s *SellIntentService) SetDestVerifiers(v map[string]ERC20TransferVerifier, chainName func(int64) (string, bool)) {
+	s.destVerifiers, s.chainName = v, chainName
+}
+
 // rampSellFeeSourceType namespaces sell-intent fee distributions in the
-// ledger, alongside "allswap", "it_intent", "p2p_release".
-const rampSellFeeSourceType = "ramp_sell"
+// ledger, alongside "allswap", "it_intent", "p2p_release". A delivery sale's
+// own is tsaPayFeeSourceType.
+const (
+	rampSellFeeSourceType = "ramp_sell"
+	tsaPayFeeSourceType   = "tsa_pay"
+)
 
 func (s *SellIntentService) ready() bool {
 	return s != nil && s.db != nil && s.quoter != nil && s.status != nil &&
@@ -163,21 +192,30 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 	if fiat == "" {
 		fiat = "NGN"
 	}
-	if err := s.orders.requirePaycrestEnabled(fiat); err != nil {
-		return nil, nil, err
-	}
-	// Exactly the checks CreateSell runs, run here instead — see the doc
-	// comment. The institution code they resolve to is not stored: the order
-	// is opened later, from the bank code, through the same resolution.
-	_, kind, err := s.orders.paycrestBankCode(ctx, fiat, in.BankCode)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := validatePayoutIdentifier(kind, fiat, in.AccountNumber); err != nil {
-		return nil, nil, err
-	}
-	if err := s.orders.assertNoOpenOrder(ctx, user.ID, models.PaycrestDirectionSell); err != nil {
-		return nil, nil, err
+	delivery := strings.TrimSpace(in.DestAddress) != ""
+	if delivery {
+		// No bank and no Paycrest order: what has to be described in full is
+		// what ConfirmDelivery will later prove on-chain.
+		if err := in.checkDelivery(); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		if err := s.orders.requirePaycrestEnabled(fiat); err != nil {
+			return nil, nil, err
+		}
+		// Exactly the checks CreateSell runs, run here instead — see the doc
+		// comment. The institution code they resolve to is not stored: the order
+		// is opened later, from the bank code, through the same resolution.
+		_, kind, err := s.orders.paycrestBankCode(ctx, fiat, in.BankCode)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := validatePayoutIdentifier(kind, fiat, in.AccountNumber); err != nil {
+			return nil, nil, err
+		}
+		if err := s.orders.assertNoOpenOrder(ctx, user.ID, models.PaycrestDirectionSell); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	payoutFiat := strings.TrimSpace(in.PayoutFiat)
@@ -189,6 +227,8 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 	quoteIn := SellQuoteInput{
 		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAmount: in.SourceAmount,
 		FromAddress: in.SourceAddress, WalletAddress: user.WalletAddress, FiatCode: fiat,
+		ToChainID: in.DestChainID, ToToken: strings.TrimSpace(in.DestTokenAddress),
+		ToAddress: strings.TrimSpace(in.DestAddress), BudgetBps: in.BudgetBps,
 	}
 	sourceAmount := strings.TrimSpace(in.SourceAmount)
 	exactOutput := asked != nil
@@ -231,6 +271,10 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		SourceAmount:       sourceAmount,
 		PayPaymentID:       in.PayPaymentID,
 		PayoutFiat:         payoutFiat,
+		DestChainID:        in.DestChainID,
+		DestTokenAddress:   strings.TrimSpace(in.DestTokenAddress),
+		DestAddress:        strings.TrimSpace(in.DestAddress),
+		DestAmount:         strings.TrimSpace(in.DestAmount),
 		QuotedUSDC:         q.USDCAmount,
 		QuotedFiat:         q.FiatEstimate,
 		FiatCode:           fiat,
@@ -258,24 +302,46 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 	return row, q, nil
 }
 
-// payFieldsOf validates the three pay-checkout fields as a set and returns the
-// exact USDC asked for (nil for an ordinary sale). All three or none: a
-// PayoutFiat without a PayPaymentID would take the pay path in OpenOrder but
-// escape the Abandon guard, and a ToAmount alone would change the quote and
-// nothing else.
+// payFieldsOf validates the pay-checkout fields as a set and returns the exact
+// output asked of the swap (nil for an ordinary sale). A naira pay sale needs
+// PayoutFiat, ToAmount and PayPaymentID together; a delivery sale (DestAddress
+// set) pays no naira, so it needs ToAmount and PayPaymentID and must carry no
+// PayoutFiat. Partial sets are refused: a PayoutFiat without a PayPaymentID
+// would take the pay path in OpenOrder but escape the Abandon guard, and a
+// ToAmount alone would change the quote and nothing else.
 func payFieldsOf(in CreateSellIntentInput) (*big.Int, error) {
 	fiat, toAmount := strings.TrimSpace(in.PayoutFiat), strings.TrimSpace(in.ToAmount)
-	if fiat == "" && toAmount == "" && in.PayPaymentID == nil {
+	delivery := strings.TrimSpace(in.DestAddress) != ""
+	if fiat == "" && toAmount == "" && in.PayPaymentID == nil && !delivery {
 		return nil, nil
 	}
-	if fiat == "" || toAmount == "" || in.PayPaymentID == nil {
-		return nil, fmt.Errorf("%w: a pay sale needs its payment, its naira amount and its USDC amount together", ErrSellIntentState)
+	switch {
+	case delivery && fiat != "":
+		return nil, fmt.Errorf("%w: a delivery sale pays no naira", ErrSellIntentState)
+	case toAmount == "" || in.PayPaymentID == nil || (!delivery && fiat == ""):
+		return nil, fmt.Errorf("%w: a pay sale needs its payment, its amount to deliver and, for naira, its payout together", ErrSellIntentState)
 	}
 	asked, ok := new(big.Int).SetString(toAmount, 10)
 	if !ok || asked.Sign() <= 0 {
-		return nil, fmt.Errorf("%w: %q is not a USDC amount", ErrSellIntentState, toAmount)
+		return nil, fmt.Errorf("%w: %q is not an amount to swap for", ErrSellIntentState, toAmount)
 	}
 	return asked, nil
+}
+
+// checkDelivery is a delivery sale's own precondition: everything
+// ConfirmDelivery will read must be there before a route is quoted, or the
+// sale could be paid for and never proven.
+func (in CreateSellIntentInput) checkDelivery() error {
+	owed, ok := new(big.Int).SetString(strings.TrimSpace(in.DestAmount), 10)
+	switch {
+	case in.DestChainID <= 0 || strings.TrimSpace(in.DestTokenAddress) == "":
+		return fmt.Errorf("%w: a delivery names its chain and token", ErrSellIntentState)
+	case !ok || owed.Sign() <= 0:
+		return fmt.Errorf("%w: %q is not an amount to deliver", ErrSellIntentState, in.DestAmount)
+	case strings.TrimSpace(in.ToAmount) == "":
+		return fmt.Errorf("%w: a delivery is an exact-output swap", ErrSellIntentState)
+	}
+	return nil
 }
 
 // ─── The swap she signed ───────────────────────────────────────────────────
@@ -390,6 +456,12 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 	if in.SwapTxHash == nil || !in.Open() {
 		return nil, ErrSellIntentState
 	}
+	if in.DestAddress != "" {
+		// A delivery sale has no offramp. The landing proof below reads HER
+		// wallet's USDC; letting it run here could open a naira order the sale
+		// never owed. ConfirmDelivery is its only way forward.
+		return nil, ErrSellIntentState
+	}
 	if in.Status == models.SellIntentOrdering && !s.claimIsStale(in) {
 		return nil, ErrSellIntentOrdering
 	}
@@ -411,10 +483,10 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 	if st.Status != LiFiStatusDone {
 		return nil, ErrSwapNotLanded
 	}
-	if !s.boundToIntent(in, st) {
-		log.Printf("[ramp-sell] ALERT ramp_sell_swap_mismatch_total=1 intent=%s tx=%s status=%s/%s",
-			in.ID, *in.SwapTxHash, st.Status, st.Substatus)
-		return nil, ErrSwapMismatch
+	if err := checkSwapBinding(st, in, rampSettlementChainID, s.usdc); err != nil {
+		log.Printf("[ramp-sell] ALERT ramp_sell_swap_mismatch_total=1 intent=%s tx=%s status=%s/%s: %v",
+			in.ID, *in.SwapTxHash, st.Status, st.Substatus, err)
+		return nil, err
 	}
 
 	landed, err := s.base.VerifyTransfer(ctx, st.DestTxHash, s.usdc, in.WalletAddress)
@@ -495,8 +567,111 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 			order.ID, in.ID, res.RowsAffected, res.Error)
 		return order, nil
 	}
-	s.bookFee(in, user.ID)
+	s.bookFee(in, user.ID, rampSellFeeSourceType)
 	return order, nil
+}
+
+// ConfirmDelivery is OpenOrder's twin for a delivery sale (DestAddress set): it
+// answers "did the merchant's wallet get what it is owed?" and, only when it did,
+// moves the sale to delivered and books our fee. It returns the destination
+// transaction that credited the merchant.
+//
+// This decides whether a merchant was paid, so nothing here takes LiFi's word:
+// LiFi's status finds the swap and binds it to the sale (checkSwapBinding, the
+// receiving side being the merchant's own token, chain and wallet), and the
+// destination chain's own receipt says how much that wallet was credited. Less
+// than DestAmount — by a single base unit — is ErrSwapMismatch: the money may
+// be on its way, elsewhere, or short, and a person has to look.
+//
+// Idempotent: a sale already delivered is re-proven and answers with the same
+// transaction, booking nothing more. The fee is booked before the guarded
+// update so a crash between the two is healed by the next call (the engine's
+// guard makes a repeat a no-op), never lost.
+func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (string, error) {
+	if !s.ready() {
+		return "", ErrSellUnavailable
+	}
+	var in models.RampSellIntent
+	if err := s.db.WithContext(ctx).First(&in, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrSellIntentNotFound
+		}
+		return "", err
+	}
+	if in.DestAddress == "" || in.SwapTxHash == nil ||
+		(in.Status != models.SellIntentSwapped && in.Status != models.SellIntentDelivered) {
+		return "", ErrSellIntentState
+	}
+	owed, ok := new(big.Int).SetString(strings.TrimSpace(in.DestAmount), 10)
+	if !ok || owed.Sign() <= 0 {
+		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_unreadable_total=1 intent=%s dest_amount=%q", in.ID, in.DestAmount)
+		return "", ErrSellIntentState
+	}
+
+	st, err := s.status.Status(ctx, *in.SwapTxHash)
+	if err != nil {
+		return "", err
+	}
+	if st == nil || st.Status != LiFiStatusDone || st.Substatus != LiFiSubstatusCompleted {
+		return "", ErrSwapNotLanded
+	}
+	if err := checkSwapBinding(st, &in, rampSettlementChainID, s.usdc); err != nil {
+		log.Printf("[ramp-sell] ALERT ramp_sell_swap_mismatch_total=1 intent=%s tx=%s status=%s/%s: %v",
+			in.ID, *in.SwapTxHash, st.Status, st.Substatus, err)
+		return "", err
+	}
+
+	verifier, ok := s.destVerifier(in.DestChainID)
+	if !ok {
+		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_unverifiable_total=1 intent=%s chain=%d", in.ID, in.DestChainID)
+		return "", fmt.Errorf("%w: no way to prove a delivery on chain %d", ErrSellUnavailable, in.DestChainID)
+	}
+	got, err := verifier.VerifyTransfer(ctx, st.DestTxHash, in.DestTokenAddress, in.DestAddress)
+	if err != nil {
+		return "", err
+	}
+	if got == nil || got.Cmp(owed) < 0 {
+		log.Printf("[ramp-sell] ALERT ramp_sell_delivery_short_total=1 intent=%s tx=%s credited=%v owed=%s",
+			in.ID, st.DestTxHash, got, owed)
+		return "", fmt.Errorf("%w: %s credited less than the %s owed", ErrSwapMismatch, st.DestTxHash, owed)
+	}
+
+	if in.Status == models.SellIntentDelivered {
+		return st.DestTxHash, nil
+	}
+	s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND status = ?", in.ID, models.SellIntentSwapped).
+		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentDelivered, "updated_at": s.now()}))
+	if res.Error != nil {
+		return "", res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Another caller got there first. Fine if it delivered; anything else
+		// (a reconciler failed the sale in between) is not a delivery we made.
+		var now models.RampSellIntent
+		if err := s.db.WithContext(ctx).First(&now, "id = ?", in.ID).Error; err != nil {
+			return "", err
+		}
+		if now.Status != models.SellIntentDelivered {
+			return "", ErrSellIntentState
+		}
+	}
+	return st.DestTxHash, nil
+}
+
+// destVerifier is the on-chain proof for a chain id, by way of the chain key the
+// ramp's verifiers are stored under.
+func (s *SellIntentService) destVerifier(chainID int64) (ERC20TransferVerifier, bool) {
+	if s.chainName == nil || s.destVerifiers == nil {
+		return nil, false
+	}
+	key, ok := s.chainName(chainID)
+	if !ok {
+		return nil, false
+	}
+	v, ok := s.destVerifiers[key]
+	return v, ok && v != nil
 }
 
 // claim moves the intent from the status this caller read to ordering. false
@@ -571,16 +746,20 @@ func lifiOutcome(st *LiFiTransferStatus) string {
 	return st.Status
 }
 
-// boundToIntent is §5.3: what proves this on-chain swap is the one THIS user
-// opened THIS sale for.
+// checkSwapBinding is §5.3: what proves this on-chain swap is the one THIS user
+// opened THIS sale for. A nil error means it is; every other answer is
+// ErrSwapMismatch, wrapped with the clause that failed (for the alert, never
+// for the client).
 //
 // Every clause answers a different way of being someone else's swap, and
 // none of them is optional:
 //
 //   - COMPLETED, not merely DONE — a partial fill or a refund is also DONE,
 //     and neither delivered what was quoted.
-//   - The destination is USDC on Base, in HER wallet. Without this, any swap
-//     to anywhere could fund a payout to her bank.
+//   - The destination is where the sale said it delivers — in.Dest: USDC on
+//     Base in HER wallet for an ordinary sale, the merchant's token, chain and
+//     wallet for a delivery. Without this, any swap to anywhere could fund a
+//     payout to her bank, or be reported as having paid a merchant.
 //   - The sending chain, token, amount and sender are the intent's own. This
 //     is what stops a swap she made for some other purpose — or a swap of a
 //     tenth the size — from being claimed against a quote for more.
@@ -589,32 +768,37 @@ func lifiOutcome(st *LiFiTransferStatus) string {
 //
 // An unstated field never satisfies a clause: "" and nil are unknowns, and an
 // unknown must not bind money.
-func (s *SellIntentService) boundToIntent(in *models.RampSellIntent, st *LiFiTransferStatus) bool {
+//
+// baseChainID and baseUSDC are the ordinary sale's destination, the defaults
+// in.Dest falls back to.
+func checkSwapBinding(st *LiFiTransferStatus, in *models.RampSellIntent, baseChainID int64, baseUSDC string) error {
+	mismatch := func(clause string) error { return fmt.Errorf("%w: %s", ErrSwapMismatch, clause) }
 	if st.Substatus != LiFiSubstatusCompleted || strings.TrimSpace(st.DestTxHash) == "" {
-		return false
+		return mismatch("not completed, or no destination transaction")
 	}
-	if st.DestChainID != rampSettlementChainID || !sameTokenAddress(st.ReceivingToken, s.usdc) {
-		return false
+	destChain, destToken, destAddress := in.Dest(baseChainID, baseUSDC)
+	if st.DestChainID != destChain || !sameTokenAddress(st.ReceivingToken, destToken) {
+		return mismatch("delivered another token or chain")
 	}
-	if !sameAddress(st.ToAddress, in.WalletAddress) {
-		return false
+	if !sameAddress(st.ToAddress, destAddress) {
+		return mismatch("delivered to another recipient")
 	}
 	if st.SendingChainID != in.SourceChainID || !sameTokenAddress(st.SendingToken, in.SourceTokenAddress) {
-		return false
+		return mismatch("sent from another chain or token")
 	}
 	want, ok := new(big.Int).SetString(strings.TrimSpace(in.SourceAmount), 10)
 	if !ok || st.SendingAmount == nil || st.SendingAmount.Cmp(want) != 0 {
-		return false
+		return mismatch("sent another amount")
 	}
 	if !sameAddress(st.FromAddress, in.SourceAddress) {
-		return false
+		return mismatch("sent by another address")
 	}
 	// A non-EVM route may carry no transactionId at all; the clauses above
 	// are what bind those. When our quote HAD one, it must be the one.
 	if in.LiFiTransactionID != "" && !strings.EqualFold(strings.TrimSpace(st.TransactionID), in.LiFiTransactionID) {
-		return false
+		return mismatch("not our quote")
 	}
-	return true
+	return nil
 }
 
 // sameAddress compares two addresses where neither being stated is a
@@ -639,14 +823,15 @@ func sameTokenAddress(a, b string) bool {
 // bookFee books what we kept on this sale: the integrator fee LiFi collected
 // for us, as bps of the route's own USD input. Through All Swap's engine call,
 // keyed on the intent, so a replay is a guard-row no-op rather than a second
-// accrual.
+// accrual. sourceType says which flow the sale belongs to: ramp_sell for an
+// offramp, tsa_pay for a delivery.
 //
 // Only when the swap was bound to our quote's transactionId. Without one (a
-// Solana source today) boundToIntent cannot tell our fee-carrying route from
+// Solana source today) checkSwapBinding cannot tell our fee-carrying route from
 // an equal-amount route she assembled without it, so there is no evidence the
 // fee was ever collected — and booking it would pay real cashback out of a
 // fee we may never have received.
-func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID) {
+func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID, sourceType string) {
 	if s.fees == nil || in.FeeBps <= 0 || in.QuotedFromUSD <= 0 {
 		return
 	}
@@ -659,7 +844,7 @@ func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID)
 		Token:      rampSettlementToken,
 		FeeUSD:     in.QuotedFromUSD * float64(in.FeeBps) / 10_000,
 		UserID:     userID,
-		SourceType: rampSellFeeSourceType,
+		SourceType: sourceType,
 		SourceID:   in.ID,
 	})
 }

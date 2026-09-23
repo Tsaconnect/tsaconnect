@@ -274,6 +274,20 @@ func TestRampTransferVerifiers_CoverChainsWithoutALane(t *testing.T) {
 	}
 }
 
+// Every chain the registry knows gets a verifier, by the SAME list wherever it
+// is built — a converted buy's destination and a TSA Pay delivery's both need
+// an on-chain proof, on chains the treasury may never source from.
+func TestEVMChainKeys_IsEveryConfiguredMainnetChain(t *testing.T) {
+	cfg := &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: map[string]config.ChainConfig{"base": {}, "bsc": {}, "optimism": {}}},
+		"testnet": {Chains: map[string]config.ChainConfig{"sepolia": {}}},
+	}}
+	got := evmChainKeys(cfg)
+	if strings.Join(got, ",") != "base,bsc,optimism" {
+		t.Fatalf("keys = %v, want the mainnet chains, sorted", got)
+	}
+}
+
 // The sell quote's allowlist is the treasury's own, by chain id, through the
 // treasury's own validation: a chain whose list the treasury would refuse is
 // refused for a sell too (no entry at all, which the quoter treats as "no

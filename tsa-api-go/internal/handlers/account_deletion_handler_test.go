@@ -647,6 +647,7 @@ func TestRequestAccountDeletion_FinishedRampActivityDoesNotBlock(t *testing.T) {
 	user := mkDeletionUser(t, db, "done", models.RoleUser)
 	seedSellIntent(t, db, user.ID, models.SellIntentFailed)
 	seedSellIntent(t, db, user.ID, models.SellIntentOrdered)
+	seedSellIntent(t, db, user.ID, models.SellIntentDelivered)
 	for _, status := range models.PaycrestTerminalStatuses() {
 		seedPaycrestOrder(t, db, user.ID, models.PaycrestDirectionBuy, models.RouteKindConverted, status)
 	}
@@ -682,6 +683,7 @@ func TestCompleteAccountDeletionRequest_ErasesFinishedBankDetails(t *testing.T) 
 	victim := mkDeletionUser(t, db, "leaver", models.RoleUser)
 	failed := seedSellIntent(t, db, victim.ID, models.SellIntentFailed)
 	ordered := seedSellIntent(t, db, victim.ID, models.SellIntentOrdered)
+	delivered := seedSellIntent(t, db, victim.ID, models.SellIntentDelivered)
 	settled := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusSettled)
 	expired := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusExpired)
 	// Kept: an operator is still chasing an unmatched order, and a buy row's
@@ -694,7 +696,7 @@ func TestCompleteAccountDeletionRequest_ErasesFinishedBankDetails(t *testing.T) 
 
 	completeDeletion(t, db, victim.ID)
 
-	for _, id := range []uuid.UUID{failed.ID, ordered.ID} {
+	for _, id := range []uuid.UUID{failed.ID, ordered.ID, delivered.ID} {
 		var in models.RampSellIntent
 		db.First(&in, "id = ?", id)
 		if in.BankCode != "" || in.AccountNumber != "" || in.AccountName != "" {

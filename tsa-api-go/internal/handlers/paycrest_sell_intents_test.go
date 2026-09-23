@@ -430,3 +430,36 @@ func TestOpenSellIntentOrder_TheWalletBalanceConsentDefaultsToNo(t *testing.T) {
 		})
 	}
 }
+
+// The pay-only fields belong to the pay checkout, which sets them itself from
+// a payment it owns. A client that sends any of them must not be able to point
+// her own sale at a wallet, an exact naira payout or a fee budget of her
+// choosing — the body has no such fields, so they arrive at the service empty.
+func TestCreateSellIntent_TheAppCannotSetAnyPayOnlyField(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	user := &models.User{ID: uuid.New(), Username: "seller", WalletAddress: sellSwapUserWallet,
+		AccountStatus: models.AccountStatusActive}
+	insertTestUser(t, db, user)
+	stub := &stubSellIntents{
+		intent: &models.RampSellIntent{ID: uuid.New()},
+		quote:  &services.SellSwapQuote{LiFiQuote: json.RawMessage(`{"ok":true}`)},
+	}
+	h := (&PaycrestHandler{}).WithSellIntents(stub)
+
+	body := sellIntentBody()
+	for k, v := range map[string]any{
+		"payPaymentId": uuid.New().String(), "payoutFiat": "50000.00", "toAmount": "1",
+		"destChainId": 10, "destTokenAddress": "0xToken", "destAddress": "0xAttacker", "destAmount": "1", "budgetBps": 5000,
+		"PayPaymentID": uuid.New().String(), "DestAddress": "0xAttacker", "BudgetBps": 5000,
+	} {
+		body[k] = v
+	}
+	if w := postSellIntent(t, h, user, body); w.Code != http.StatusCreated {
+		t.Fatalf("code = %d, body %s", w.Code, w.Body.String())
+	}
+	got := stub.last
+	if got.PayPaymentID != nil || got.PayoutFiat != "" || got.ToAmount != "" ||
+		got.DestChainID != 0 || got.DestTokenAddress != "" || got.DestAddress != "" || got.DestAmount != "" || got.BudgetBps != 0 {
+		t.Fatalf("a client reached a pay-only field: %+v", got)
+	}
+}

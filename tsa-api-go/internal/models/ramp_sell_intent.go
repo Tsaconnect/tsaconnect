@@ -17,21 +17,28 @@ import (
 // claim time.
 
 // Sell-intent statuses. swapping, swapped and ordering are the open states
-// (she is mid-sale); ordered and failed are terminal.
+// (she is mid-sale); ordered, delivered and failed are terminal.
 //
 // ordering is the claim on the row while its Paycrest order is being opened:
 // exactly one caller moves swapped -> ordering, so exactly one offramp is
 // opened for the USDC that landed.
+//
+// delivered is the terminal state of a sale that pays a token to someone
+// else's wallet (TSA Pay's crypto route, DestAddress set) once the chain has
+// proven the recipient was credited in full. It is the twin of ordered, which
+// a delivery never reaches: there is no Paycrest order to open.
 const (
-	SellIntentSwapping = "swapping"
-	SellIntentSwapped  = "swapped"
-	SellIntentOrdering = "ordering"
-	SellIntentOrdered  = "ordered"
-	SellIntentFailed   = "failed"
+	SellIntentSwapping  = "swapping"
+	SellIntentSwapped   = "swapped"
+	SellIntentOrdering  = "ordering"
+	SellIntentOrdered   = "ordered"
+	SellIntentDelivered = "delivered"
+	SellIntentFailed    = "failed"
 )
 
 // SellIntentOpenStatuses are the statuses of a sale still in progress — the
-// set the one-open-sale index is partial over.
+// set the one-open-sale index is partial over. delivered is terminal, so it is
+// not here: a customer whose payment was delivered is free to sell again.
 var SellIntentOpenStatuses = []string{SellIntentSwapping, SellIntentSwapped, SellIntentOrdering}
 
 type RampSellIntent struct {
@@ -55,6 +62,16 @@ type RampSellIntent struct {
 	// TSA Pay checkout. PayoutFiat is the exact naira the recipient is owed.
 	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"payPaymentId,omitempty"`
 	PayoutFiat   string     `gorm:"size:32" json:"payoutFiat,omitempty"`
+	// DestChainID, DestTokenAddress, DestAddress and DestAmount mark a sale that
+	// DELIVERS a token to someone else's wallet instead of opening an offramp:
+	// TSA Pay's crypto route. DestAmount is the least the recipient must be
+	// credited, in the token's base units; the chain, not LiFi, decides whether
+	// it was. All empty for an ordinary sale, whose destination is USDC on Base
+	// in her own wallet (see Dest).
+	DestChainID      int64  `gorm:"not null;default:0" json:"destChainId,omitempty"`
+	DestTokenAddress string `gorm:"size:128" json:"destTokenAddress,omitempty"`
+	DestAddress      string `gorm:"size:128" json:"destAddress,omitempty"`
+	DestAmount       string `gorm:"size:80" json:"destAmount,omitempty"`
 	// LiFiTransactionID is the quote's own transactionId: what proves she
 	// executed OUR quote, our integrator fee included, rather than a route
 	// she assembled herself. Empty for a non-EVM source, whose calldata may
@@ -128,4 +145,21 @@ func (i *RampSellIntent) Open() bool {
 		}
 	}
 	return false
+}
+
+// Dest is where this sale's swap must deliver: the chain, token and receiver
+// the binding check compares LiFi's status against. An ordinary sale names none
+// of them and lands baseUSDC on baseChainID in her own wallet.
+func (i *RampSellIntent) Dest(baseChainID int64, baseUSDC string) (chainID int64, token, address string) {
+	chainID, token, address = i.DestChainID, i.DestTokenAddress, i.DestAddress
+	if chainID == 0 {
+		chainID = baseChainID
+	}
+	if token == "" {
+		token = baseUSDC
+	}
+	if address == "" {
+		address = i.WalletAddress
+	}
+	return chainID, token, address
 }

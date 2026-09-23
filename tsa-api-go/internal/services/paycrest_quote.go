@@ -760,6 +760,38 @@ func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, 
 	return &bound, nil
 }
 
+// providerRateNominalUSDC is the order size ProviderRate asks the provider
+// about. Paycrest prices by size, so it has to be roughly the size orders are
+// made at; TSA Pay's naira payouts are a few tens of dollars.
+const providerRateNominalUSDC = 100
+
+// ProviderRate is the provider's own SELL rate for USDC on Base with NO sender
+// fee, exactly as it quoted it (fiat per USDC). It is the rate a naira-route
+// order prices from, so a merchant's crypto is sized from it rather than from
+// the cached market mid, which no order is ever opened at. The fee is applied
+// (or not) by whoever opens the order; this is the figure underneath it.
+func (s *PaycrestQuoteService) ProviderRate(ctx context.Context, fiat string) (*big.Rat, error) {
+	fiat = strings.ToUpper(strings.TrimSpace(fiat))
+	market, err := s.cachedMarketRate(ctx, fiat, "sell")
+	if err != nil {
+		return nil, err
+	}
+	mid := new(big.Rat).SetFloat64(market) // nil for NaN/Inf
+	if mid == nil || mid.Sign() <= 0 {
+		return nil, fmt.Errorf("paycrest provider rate: unusable market rate %v", market)
+	}
+	nominal := new(big.Rat).Mul(mid, big.NewRat(providerRateNominalUSDC, 1)).FloatString(2)
+	venue, err := s.VenueForFee(ctx, "sell", fiat, nominal, rampSettlementChainKey, rampSettlementToken, 0)
+	if err != nil {
+		return nil, err
+	}
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(venue.Rate))
+	if !ok || rate.Sign() <= 0 {
+		return nil, fmt.Errorf("paycrest provider rate: unusable rate %q", venue.Rate)
+	}
+	return rate, nil
+}
+
 // ─── Converted venues (Phase 2, Task 8) ────────────────────────────────────
 
 // RequestedAsset is one asset the user asked to receive, that this Paycrest

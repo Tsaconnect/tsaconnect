@@ -1193,3 +1193,377 @@ func TestSellIntent_AbandonForPayWillNotEndAnOrdinarySale(t *testing.T) {
 		t.Fatalf("the reconciler's path ended an ordinary sale: %+v", got)
 	}
 }
+
+// sell_intent_delivery_test.go — a sale that DELIVERS a token to a merchant's
+// wallet instead of opening an offramp (TSA Pay's crypto route).
+//
+// What these pin is the one question the money hangs on: was the merchant's
+// wallet actually credited what it is owed? ConfirmDelivery answers it, and it
+// must answer no to everything short of "yes, in full, there".
+
+const (
+	deliveryOwed    = "33323336332433603252"
+	deliveryToken   = payMerchantToken
+	deliveryMerch   = payMerchantWallet
+	deliveryDestTx  = "0xdesttx"
+	deliveryChain   = payMerchantChainID
+	deliveryChainKy = "optimism"
+)
+
+// recordingVerifier is an ERC20TransferVerifier that says what it was asked.
+type recordingVerifier struct {
+	amount                 *big.Int
+	err                    error
+	calls                  int
+	gotTx, gotToken, gotTo string
+}
+
+func (v *recordingVerifier) VerifyTransfer(_ context.Context, txHash, token, to string) (*big.Int, error) {
+	v.calls++
+	v.gotTx, v.gotToken, v.gotTo = txHash, token, to
+	return v.amount, v.err
+}
+
+func deliveryChainName(id int64) (string, bool) {
+	if id == deliveryChain {
+		return deliveryChainKy, true
+	}
+	return "", false
+}
+
+func deliveryInput(r *sellIntentRig) CreateSellIntentInput {
+	pid := uuid.New()
+	return CreateSellIntentInput{
+		SourceChainID: 56, SourceToken: evmNativeAddress, SourceAddress: r.user.WalletAddress,
+		PayPaymentID: &pid, ToAmount: "33500000000000000000", BudgetBps: 100,
+		DestChainID: deliveryChain, DestTokenAddress: deliveryToken, DestAddress: deliveryMerch, DestAmount: deliveryOwed,
+	}
+}
+
+// deliveryRig is the ramp rig with a delivery quote and a destination verifier.
+func newDeliveryRig(t *testing.T) (*sellIntentRig, *recordingVerifier, *fakeFeeEnqueuer) {
+	t.Helper()
+	r := newSellIntentRig(t)
+	// An exact-output route as LiFi answers one: the requested ToAmount, with
+	// toAmountMin under it by the slippage the caller padded for.
+	r.quoter.quote = &SellSwapQuote{Route: &LiFiRoute{TransactionID: "0xabc", GasLimit: 300_000,
+		FromAmount: "17000000000000000", FromAmountUSD: 10,
+		ToAmount: mustBig(t, "33500000000000000000"), ToAmountMin: mustBig(t, "33332500000000000000")}, FeeBps: 80}
+	v := &recordingVerifier{amount: mustBig(t, deliveryOwed)}
+	r.svc.SetDestVerifiers(map[string]ERC20TransferVerifier{deliveryChainKy: v}, deliveryChainName)
+	fees := &fakeFeeEnqueuer{}
+	r.svc.SetFeeService(fees)
+	return r, v, fees
+}
+
+// createDelivery opens a delivery sale and records its swap: the state a
+// reconciler finds it in.
+func (r *sellIntentRig) createDelivery(t *testing.T) *models.RampSellIntent {
+	t.Helper()
+	in, _, err := r.svc.Create(context.Background(), r.user, deliveryInput(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	return in
+}
+
+// deliveredStatus is a LiFi status that matches the delivery intent in every
+// bound field: the merchant's token, on the merchant's chain, to the merchant.
+func (r *sellIntentRig) deliveredStatus(in *models.RampSellIntent) *LiFiTransferStatus {
+	amt, _ := new(big.Int).SetString(in.SourceAmount, 10)
+	return &LiFiTransferStatus{Status: LiFiStatusDone, Substatus: LiFiSubstatusCompleted, DestTxHash: deliveryDestTx,
+		DestChainID: deliveryChain, ToAddress: deliveryMerch, ReceivingToken: deliveryToken,
+		SendingChainID: in.SourceChainID, SendingToken: in.SourceTokenAddress, SendingAmount: amt,
+		FromAddress: in.SourceAddress, TransactionID: "0xabc"}
+}
+
+func TestSellIntent_DestDefaultsToUSDCOnBaseInHerWallet(t *testing.T) {
+	ordinary := &models.RampSellIntent{WalletAddress: "0xHer"}
+	if c, tok, addr := ordinary.Dest(8453, sellUSDC); c != 8453 || tok != sellUSDC || addr != "0xHer" {
+		t.Fatalf("Dest() = %d %s %s", c, tok, addr)
+	}
+	delivery := &models.RampSellIntent{WalletAddress: "0xHer", DestChainID: 10, DestTokenAddress: "0xTok", DestAddress: "0xMerchant"}
+	if c, tok, addr := delivery.Dest(8453, sellUSDC); c != 10 || tok != "0xTok" || addr != "0xMerchant" {
+		t.Fatalf("Dest() = %d %s %s", c, tok, addr)
+	}
+}
+
+func TestSellIntent_CreateDeliveryAsksTheQuoterForTheMerchantAndNeedsNoBank(t *testing.T) {
+	r, _, _ := newDeliveryRig(t)
+	in, _, err := r.svc.Create(context.Background(), r.user, deliveryInput(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.quoter.lastIn
+	if got.ToChainID != deliveryChain || got.ToToken != deliveryToken || got.ToAddress != deliveryMerch ||
+		got.ToAmount != "33500000000000000000" || got.BudgetBps != 100 || got.FromAmount != "" {
+		t.Fatalf("quoter asked %+v", got)
+	}
+	if in.DestChainID != deliveryChain || in.DestTokenAddress != deliveryToken || in.DestAddress != deliveryMerch ||
+		in.DestAmount != deliveryOwed || in.SourceAmount != "17000000000000000" || in.FeeBps != 80 ||
+		in.BankCode != "" || in.AccountNumber != "" || in.Status != models.SellIntentSwapping || in.PayPaymentID == nil {
+		t.Fatalf("intent = %+v", in)
+	}
+	if r.client.offrampCalls != 0 {
+		t.Fatal("a delivery has no Paycrest leg")
+	}
+}
+
+func TestSellIntent_CreateDeliveryNeedsEveryFieldTheProofWillRead(t *testing.T) {
+	for name, mutate := range map[string]func(*CreateSellIntentInput){
+		"no dest chain":    func(in *CreateSellIntentInput) { in.DestChainID = 0 },
+		"no dest token":    func(in *CreateSellIntentInput) { in.DestTokenAddress = "" },
+		"no dest amount":   func(in *CreateSellIntentInput) { in.DestAmount = "" },
+		"zero dest amount": func(in *CreateSellIntentInput) { in.DestAmount = "0" },
+		"junk dest amount": func(in *CreateSellIntentInput) { in.DestAmount = "1.5" },
+		"no exact output":  func(in *CreateSellIntentInput) { in.ToAmount = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _, _ := newDeliveryRig(t)
+			in := deliveryInput(r)
+			mutate(&in)
+			if _, _, err := r.svc.Create(context.Background(), r.user, in); !errors.Is(err, ErrSellIntentState) {
+				t.Fatalf("err = %v — a delivery that cannot be proven must not be quoted", err)
+			}
+			if r.quoter.calls != 0 {
+				t.Fatal("quoted before the delivery was fully described")
+			}
+		})
+	}
+}
+
+func TestSellIntent_ConfirmDeliveryAcceptsExactlyWhatIsOwedAndBooksOneFee(t *testing.T) {
+	r, v, fees := newDeliveryRig(t)
+	in := r.createDelivery(t)
+	r.status.st = r.deliveredStatus(in)
+
+	tx, err := r.svc.ConfirmDelivery(context.Background(), in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx != deliveryDestTx {
+		t.Fatalf("dest tx = %q", tx)
+	}
+	if v.gotTx != deliveryDestTx || v.gotToken != deliveryToken || v.gotTo != deliveryMerch {
+		t.Fatalf("verified %s %s %s — must be asked about the merchant's token and wallet in the destination tx", v.gotTx, v.gotToken, v.gotTo)
+	}
+	after, _ := r.svc.Get(context.Background(), r.user.ID, in.ID)
+	if after.Status != models.SellIntentDelivered {
+		t.Fatalf("status = %s", after.Status)
+	}
+	// $10 × 80 bps = $0.08, keyed on the intent under tsa_pay.
+	if len(fees.events) != 1 || fees.events[0].SourceType != "tsa_pay" || fees.events[0].SourceID != in.ID ||
+		fees.events[0].UserID != r.user.ID || math.Abs(fees.events[0].FeeUSD-0.08) > 1e-9 {
+		t.Fatalf("fee events = %+v", fees.events)
+	}
+
+	// A repeat (the reconciler died before it wrote the payment) answers the
+	// same and books nothing more.
+	again, err := r.svc.ConfirmDelivery(context.Background(), in.ID)
+	if err != nil || again != deliveryDestTx || len(fees.events) != 1 {
+		t.Fatalf("repeat: tx %q err %v fee events %d", again, err, len(fees.events))
+	}
+}
+
+func TestSellIntent_ConfirmDeliveryRefusesOneBaseUnitShort(t *testing.T) {
+	r, v, fees := newDeliveryRig(t)
+	in := r.createDelivery(t)
+	r.status.st = r.deliveredStatus(in)
+	v.amount = new(big.Int).Sub(mustBig(t, deliveryOwed), big.NewInt(1))
+
+	if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSwapMismatch) {
+		t.Fatalf("err = %v, want ErrSwapMismatch", err)
+	}
+	after, _ := r.svc.Get(context.Background(), r.user.ID, in.ID)
+	if after.Status != models.SellIntentSwapped || len(fees.events) != 0 {
+		t.Fatalf("a short delivery moved the sale to %s / booked %d fees", after.Status, len(fees.events))
+	}
+	// More than owed is fine: the merchant is whole.
+	v.amount = new(big.Int).Add(mustBig(t, deliveryOwed), big.NewInt(1))
+	if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); err != nil {
+		t.Fatalf("an over-delivery: %v", err)
+	}
+}
+
+// LiFi's status names where the swap actually delivered. One that paid the
+// customer's own wallet (or anyone else) is the classic "reported paid, never
+// reached the merchant" failure, whatever the chain says about that wallet.
+func TestSellIntent_ConfirmDeliveryRefusesAStatusThatDidNotPayTheMerchant(t *testing.T) {
+	for name, mutate := range map[string]func(*models.RampSellIntent, *LiFiTransferStatus){
+		"the customer's own wallet": func(in *models.RampSellIntent, s *LiFiTransferStatus) { s.ToAddress = in.WalletAddress },
+		"a stranger":                func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.ToAddress = sellOtherAddress },
+		"no stated recipient":       func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.ToAddress = "" },
+		"another token":             func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.ReceivingToken = sellUSDC },
+		"another chain":             func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.DestChainID = rampSettlementChainID },
+		"the ordinary Base USDC landing in her wallet": func(in *models.RampSellIntent, s *LiFiTransferStatus) {
+			s.DestChainID, s.ReceivingToken, s.ToAddress = rampSettlementChainID, sellUSDC, in.WalletAddress
+		},
+		"another sender": func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.FromAddress = sellOtherAddress },
+		"not our quote":  func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.TransactionID = "0xdef" },
+		"a smaller swap": func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.SendingAmount = big.NewInt(1) },
+		"no dest tx":     func(_ *models.RampSellIntent, s *LiFiTransferStatus) { s.DestTxHash = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, v, fees := newDeliveryRig(t)
+			in := r.createDelivery(t)
+			st := r.deliveredStatus(in)
+			mutate(in, st)
+			r.status.st = st
+			if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSwapMismatch) {
+				t.Fatalf("err = %v, want ErrSwapMismatch", err)
+			}
+			if v.calls != 0 || len(fees.events) != 0 {
+				t.Fatalf("a swap that is not this sale's reached the chain proof (%d) or booked fees (%d)", v.calls, len(fees.events))
+			}
+			if after, _ := r.svc.Get(context.Background(), r.user.ID, in.ID); after.Status != models.SellIntentSwapped {
+				t.Fatalf("status = %s", after.Status)
+			}
+		})
+	}
+}
+
+func TestSellIntent_ConfirmDeliveryWaitsUntilLiFiSaysCompleted(t *testing.T) {
+	for name, st := range map[string]*LiFiTransferStatus{
+		"nothing yet":  nil,
+		"pending":      {Status: LiFiStatusPending},
+		"failed":       {Status: LiFiStatusFailed},
+		"done, refund": {Status: LiFiStatusDone, Substatus: LiFiSubstatusRefunded},
+		"done, part":   {Status: LiFiStatusDone, Substatus: LiFiSubstatusPartial},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, v, fees := newDeliveryRig(t)
+			in := r.createDelivery(t)
+			r.status.st = st
+			if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSwapNotLanded) {
+				t.Fatalf("err = %v, want ErrSwapNotLanded", err)
+			}
+			if v.calls != 0 || len(fees.events) != 0 {
+				t.Fatal("proof or fee before the swap completed")
+			}
+		})
+	}
+}
+
+func TestSellIntent_ConfirmDeliveryFailsClosed(t *testing.T) {
+	t.Run("the chain cannot be read", func(t *testing.T) {
+		r, v, fees := newDeliveryRig(t)
+		in := r.createDelivery(t)
+		r.status.st = r.deliveredStatus(in)
+		v.amount, v.err = nil, errors.New("rpc down")
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); err == nil || errors.Is(err, ErrSwapMismatch) {
+			t.Fatalf("err = %v — an unreadable chain is a retry, not a verdict", err)
+		}
+		if after, _ := r.svc.Get(context.Background(), r.user.ID, in.ID); after.Status != models.SellIntentSwapped || len(fees.events) != 0 {
+			t.Fatal("delivered without a proof")
+		}
+	})
+	t.Run("nothing credited", func(t *testing.T) {
+		r, v, _ := newDeliveryRig(t)
+		in := r.createDelivery(t)
+		r.status.st = r.deliveredStatus(in)
+		v.amount = new(big.Int)
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSwapMismatch) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("no verifier for that chain", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		r.svc.SetDestVerifiers(map[string]ERC20TransferVerifier{}, deliveryChainName)
+		in := r.createDelivery(t)
+		r.status.st = r.deliveredStatus(in)
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellUnavailable) {
+			t.Fatalf("err = %v — a chain nothing can prove on is never delivered", err)
+		}
+	})
+	t.Run("verifiers never wired", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		r.svc.SetDestVerifiers(nil, nil)
+		in := r.createDelivery(t)
+		r.status.st = r.deliveredStatus(in)
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellUnavailable) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestSellIntent_ConfirmDeliveryOnlyAppliesToAPaidDeliverySale(t *testing.T) {
+	t.Run("an ordinary sale", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		in := r.create(t)
+		r.mustRecord(t, in.ID, testSwapHash)
+		r.status.st = r.landed(in)
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("no swap recorded", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		in, _, _ := r.svc.Create(context.Background(), r.user, deliveryInput(r))
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("an abandoned sale", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		in := r.createDelivery(t)
+		r.status.st = r.deliveredStatus(in)
+		if err := r.svc.AbandonForPay(context.Background(), in.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+			t.Fatalf("err = %v — a failed sale is never delivered later", err)
+		}
+	})
+	t.Run("no such sale", func(t *testing.T) {
+		r, _, _ := newDeliveryRig(t)
+		if _, err := r.svc.ConfirmDelivery(context.Background(), uuid.New()); !errors.Is(err, ErrSellIntentNotFound) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+// The offramp path must not be able to act on a delivery sale: it would look
+// for USDC in the customer's wallet and could open a naira order the sale
+// never owed.
+func TestSellIntent_OpenOrderRefusesADeliverySale(t *testing.T) {
+	r, _, _ := newDeliveryRig(t)
+	in := r.createDelivery(t)
+	r.status.st = r.deliveredStatus(in)
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, true); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("err = %v", err)
+	}
+	if r.client.offrampCalls != 0 || r.status.calls != 0 {
+		t.Fatal("OpenOrder went past the state check on a delivery sale")
+	}
+}
+
+// delivered is terminal: it must not read as an open sale (or the customer is
+// locked out of selling), and nothing may reopen, fail or abandon it.
+func TestSellIntent_DeliveredIsTerminal(t *testing.T) {
+	r, _, _ := newDeliveryRig(t)
+	in := r.createDelivery(t)
+	r.status.st = r.deliveredStatus(in)
+	if _, err := r.svc.ConfirmDelivery(context.Background(), in.ID); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+		t.Fatalf("a delivered sale is still open: %+v", open)
+	}
+	if res, _ := r.svc.Resumable(context.Background(), r.user.ID); res != nil {
+		t.Fatalf("a delivered sale is resumable: %+v", res)
+	}
+	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("Abandon: %v", err)
+	}
+	if err := r.svc.AbandonForPay(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("AbandonForPay: %v — a paid sale must not be failed", err)
+	}
+	// She is free to sell again.
+	if _, _, err := r.svc.Create(context.Background(), r.user, deliveryInput(r)); err != nil {
+		t.Fatalf("a new sale after a delivered one: %v", err)
+	}
+	if after, _ := r.svc.Get(context.Background(), r.user.ID, in.ID); after.BankCode != "" || after.AccountNumber != "" {
+		t.Fatalf("bank details kept on a delivered sale: %+v", after)
+	}
+}

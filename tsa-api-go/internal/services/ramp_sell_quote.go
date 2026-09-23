@@ -99,6 +99,49 @@ type SellQuoteInput struct {
 	FromAddress   string
 	WalletAddress string
 	FiatCode      string
+	// ToChainID, ToToken, ToAddress and BudgetBps re-aim the sale at a
+	// DELIVERY instead of an offramp: TSA Pay's crypto route, where the token
+	// must reach a merchant's wallet. Zero values keep the sale's own — Base,
+	// USDC, WalletAddress and the quoter's B. A target that is not Base USDC in
+	// her own wallet has no Paycrest leg: no naira estimate, no Base relay in g,
+	// and BudgetBps (the whole fee, not a slice of it) is what l + g is
+	// admitted against.
+	ToChainID int64
+	ToToken   string
+	ToAddress string
+	BudgetBps int
+}
+
+// deliveryTarget is where a quoted route must deliver, and what it may spend.
+type deliveryTarget struct {
+	chainID   int64
+	token     string
+	address   string
+	budgetBps int
+	// offramp: the route lands USDC on Base in HER wallet for the Paycrest
+	// leg. Only then is there a Base relay to sponsor and a naira figure to show.
+	offramp bool
+}
+
+// targetFor resolves in's delivery target, defaulting each zero field to the
+// ordinary sale's. usdc is Base USDC's configured address.
+func (q *RampSellQuoter) targetFor(in SellQuoteInput, usdc string) deliveryTarget {
+	t := deliveryTarget{chainID: in.ToChainID, token: strings.TrimSpace(in.ToToken),
+		address: strings.TrimSpace(in.ToAddress), budgetBps: in.BudgetBps}
+	if t.chainID == 0 {
+		t.chainID = rampSettlementChainID
+	}
+	if t.token == "" {
+		t.token = usdc
+	}
+	if t.address == "" {
+		t.address = in.WalletAddress
+	}
+	if t.budgetBps == 0 {
+		t.budgetBps = q.budgetBps
+	}
+	t.offramp = t.chainID == rampSettlementChainID && sameTokenAddress(t.token, usdc) && sameAddress(t.address, in.WalletAddress)
+	return t
 }
 
 // nativeBalanceReader answers "how much gas coin does this address hold on
@@ -148,7 +191,7 @@ func (q *RampSellQuoter) SetNativeBalanceReader(f nativeBalanceReader) { q.nativ
 func (q *RampSellQuoter) SetRouterAllowlist(routers map[int64][]common.Address) { q.routers = routers }
 
 func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
-	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 {
+	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 || in.BudgetBps < 0 {
 		return nil, ErrSellUnavailable
 	}
 	if family := addressFamily(in.FromChainID); family != "evm" {
@@ -157,13 +200,17 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if err := validateAddressForChain(in.FromChainID, in.FromAddress, nil); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
 	}
-	// The receiver is her EVM wallet on Base, whoever the sender is.
-	if err := validateAddressForChain(rampSettlementChainID, in.WalletAddress, nil); err != nil {
-		return nil, fmt.Errorf("%w: receiving wallet: %v", ErrSellBadSourceAddress, err)
-	}
 	usdc := q.chains.TokenAddressForChainID(rampSettlementChainID, rampSettlementToken)
 	if usdc == "" {
 		return nil, ErrSellUnavailable
+	}
+	// The receiver is her EVM wallet on Base, whoever the sender is — or, for
+	// a delivery, the named recipient on the named chain. An address that is
+	// not one on that chain (or on a chain nothing can decode a receiver for)
+	// never reaches LiFi.
+	target := q.targetFor(in, usdc)
+	if err := validateAddressForChain(target.chainID, target.address, nil); err != nil {
+		return nil, fmt.Errorf("%w: receiving wallet: %v", ErrSellBadSourceAddress, err)
 	}
 	// Slippage is a tolerance, never a cost: it is not in l. But a route
 	// admitted at 50 bps of total cost must not be quoted with 50 bps of
@@ -172,9 +219,9 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	// same function, as a converted buy's destination.
 	stableSource, _, _ := isStableDestination(q.chains, in.FromChainID, in.FromToken)
 	req := LiFiQuoteRequest{
-		FromChainID: in.FromChainID, ToChainID: rampSettlementChainID,
-		FromToken: in.FromToken, ToToken: usdc,
-		FromAddress: in.FromAddress, ToAddress: in.WalletAddress,
+		FromChainID: in.FromChainID, ToChainID: target.chainID,
+		FromToken: in.FromToken, ToToken: target.token,
+		FromAddress: in.FromAddress, ToAddress: target.address,
 		FromAmount: in.FromAmount, ToAmount: in.ToAmount, Slippage: routeSlippage(stableSource),
 	}
 
@@ -194,13 +241,13 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if !ok {
 		return nil, ErrSellRouteTooCostly
 	}
-	gas := q.gasFor(ctx, in, first)
-	if l+gas.bps > q.budgetBps {
+	gas := q.gasFor(ctx, in, first, target.offramp)
+	if l+gas.bps > target.budgetBps {
 		return nil, ErrSellRouteTooCostly
 	}
 
 	route := first
-	fee := q.budgetBps - l - gas.bps
+	fee := target.budgetBps - l - gas.bps
 	if fee > 0 {
 		req.FeeBps = fee
 		route, err = q.lifi.Quote(ctx, req)
@@ -226,8 +273,8 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		if !ok2 {
 			return nil, ErrSellRouteTooCostly
 		}
-		gas = q.gasFor(ctx, in, route)
-		if l2+gas.bps > q.budgetBps {
+		gas = q.gasFor(ctx, in, route, target.offramp)
+		if l2+gas.bps > target.budgetBps {
 			return nil, ErrSellRouteTooCostly
 		}
 	}
@@ -243,8 +290,12 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		Route: route, LiFiQuote: route.Raw,
 		CostBps: l, GasBps: gas.bps, FeeBps: fee,
 		GasTopUp: gas.topUp, TopUpWei: gas.topUpWei,
-		USDCAmount: BaseUnitsToDecimal(route.ToAmount, 6),
 	}
+	if !target.offramp {
+		// A delivery has no naira leg, and what lands is not USDC on Base.
+		return out, nil
+	}
+	out.USDCAmount = BaseUnitsToDecimal(route.ToAmount, 6)
 	if err := q.priceInFiat(ctx, in.FiatCode, route.ToAmount, out); err != nil {
 		return nil, err
 	}
@@ -269,6 +320,7 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 //     bind and "Finish your sale" with nothing to finish. Same check a
 //     converted buy runs before it offers a venue.
 func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc string) error {
+	target := q.targetFor(in, usdc)
 	signed, err := readSignedRoute(route.Raw)
 	if err != nil {
 		return err
@@ -296,7 +348,7 @@ func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc
 			return fmt.Errorf("%w: route approves %q, not the token being sold", ErrTreasuryInvalidRoute, signed.ApprovalToken)
 		}
 	}
-	return checkLiFiDeliveryTo(signed.Data, in.FromChainID, rampSettlementChainID, in.WalletAddress, "evm", usdc)
+	return checkLiFiDeliveryTo(signed.Data, in.FromChainID, target.chainID, target.address, "evm", target.token)
 }
 
 // signedRoute is the part of a LiFi quote body the app acts on when it signs.
@@ -382,10 +434,14 @@ type sellGas struct {
 	topUpWei string
 }
 
-// gasFor is g: the Base relay we sponsor, plus a source-chain top-up when she
-// holds the token but not the coin that pays for moving it.
-func (q *RampSellQuoter) gasFor(ctx context.Context, in SellQuoteInput, route *LiFiRoute) sellGas {
-	usd := q.sponsoredGasUSD
+// gasFor is g: the Base relay we sponsor (only when an offramp follows), plus a
+// source-chain top-up when she holds the token but not the coin that pays for
+// moving it.
+func (q *RampSellQuoter) gasFor(ctx context.Context, in SellQuoteInput, route *LiFiRoute, offramp bool) sellGas {
+	var usd float64
+	if offramp {
+		usd = q.sponsoredGasUSD
+	}
 	var g sellGas
 	if q.needsTopUp(ctx, in, route) {
 		usd += TopUpUSDForRoute(route)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -143,11 +144,7 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	// converted buy's DESTINATION can be a chain the treasury never sources
 	// funds from directly, and that destination still needs an on-chain
 	// delivery proof.
-	evmChains := make([]string, 0, len(cfg.Networks["mainnet"].Chains))
-	for chain := range cfg.Networks["mainnet"].Chains {
-		evmChains = append(evmChains, chain)
-	}
-	transfers := rampTransferVerifiers(chains, evmChains)
+	transfers := rampTransferVerifiers(chains, evmChainKeys(cfg))
 
 	orchestrator := services.NewConversionOrchestrator(
 		config.DB, treasury, &services.GormRampLegStore{DB: config.DB},
@@ -187,6 +184,18 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	log.Printf("[ramp-conversion] enabled treasury=%s chains=%v caps=order:$%.0f/chain:$%.0f",
 		addr, cfg.RampTreasuryChains, cfg.RampTreasuryMaxInflightUSDPerOrder, cfg.RampTreasuryMaxInflightUSDPerChain)
 	return treasury, orchestrator
+}
+
+// evmChainKeys is every EVM chain key the registry knows on mainnet, sorted:
+// the list rampTransferVerifiers is built from wherever an on-chain delivery
+// proof is needed, so no caller keeps a list of its own that could drift.
+func evmChainKeys(cfg *config.Config) []string {
+	keys := make([]string, 0, len(cfg.Networks["mainnet"].Chains))
+	for chain := range cfg.Networks["mainnet"].Chains {
+		keys = append(keys, chain)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // rampTransferVerifiers builds an ERC20TransferVerifier for every chain key
@@ -445,6 +454,11 @@ func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
 	svc.SetUSDCBalanceReader(func(_ context.Context, wallet string) (*big.Int, error) {
 		return base.GetTokenBalance(usdc, wallet)
 	})
+	// A pay checkout's crypto route delivers a token to a merchant on ANY
+	// configured chain, and only that chain's own receipt can say the merchant
+	// was credited. The same verifier map converted buys prove their deliveries
+	// with — not a second one — and the registry's own id -> key resolver.
+	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.ChainNameForID)
 	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
 	return svc
 }

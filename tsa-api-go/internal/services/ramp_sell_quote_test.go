@@ -711,3 +711,132 @@ func TestRampSellQuote_ARealLiFiRoutePassesTheSignableCheck(t *testing.T) {
 		t.Fatalf("err = %v; the same route must be refused once the diamond is off the list", err)
 	}
 }
+
+// ── A target that is not "USDC on Base in her wallet": TSA Pay's crypto route ──
+
+const (
+	// payMerchantWallet is a merchant's settlement wallet; payMerchantToken the
+	// token it wants, on Optimism — neither is her wallet nor Base USDC.
+	payMerchantWallet  = "0x00000000000000000000000000000000000b0b0b"
+	payMerchantToken   = "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58"
+	payMerchantChainID = int64(10)
+)
+
+// payRoute is a sell route whose calldata delivers to receiver on chainID.
+func payRoute(t *testing.T, toUSD float64, receiver string, chainID int64) *LiFiRoute {
+	t.Helper()
+	r := sellRoute(t, toUSD)
+	r.Data = testBridgeCalldata(t, receiver, chainID, false)
+	return r
+}
+
+func merchantTargetIn() SellQuoteInput {
+	in := sellIn
+	in.FromAmount = ""
+	in.ToChainID, in.ToToken, in.ToAddress = payMerchantChainID, payMerchantToken, payMerchantWallet
+	in.ToAmount, in.BudgetBps = "50500000", 100
+	return in
+}
+
+func TestRampSellQuote_ADeliveryTargetReachesLiFiAndChargesTheBudgetItWasGiven(t *testing.T) {
+	q, lifi := newSellQuoterWithFakes(t,
+		payRoute(t, 9.98, payMerchantWallet, payMerchantChainID), payRoute(t, 9.97, payMerchantWallet, payMerchantChainID))
+	res, err := q.Quote(context.Background(), merchantTargetIn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// l = 20 bps; there is no Paycrest leg, so no Base relay is sponsored and
+	// g = 0 (a native sell needs no top-up either). Fee = 100 − 20 − 0.
+	if res.CostBps != 20 || res.GasBps != 0 || res.FeeBps != 80 {
+		t.Fatalf("cost/gas/fee = %d/%d/%d, want 20/0/80", res.CostBps, res.GasBps, res.FeeBps)
+	}
+	if len(lifi.all) != 2 {
+		t.Fatalf("asks = %d", len(lifi.all))
+	}
+	for i, req := range lifi.all {
+		if req.ToChainID != payMerchantChainID || req.ToToken != payMerchantToken || req.ToAddress != payMerchantWallet ||
+			req.ToAmount != "50500000" || req.FromAmount != "" {
+			t.Fatalf("ask %d = %+v — the merchant is the receiver, never her", i, req)
+		}
+	}
+	if lifi.all[0].FeeBps != 0 || lifi.all[1].FeeBps != 80 {
+		t.Fatalf("fees asked = %d then %d, want 0 then 80", lifi.all[0].FeeBps, lifi.all[1].FeeBps)
+	}
+	// There is no naira and no USDC on Base to speak of.
+	if res.FiatEstimate != "" || res.Rate != "" || res.USDCAmount != "" {
+		t.Fatalf("a non-Base-USDC target must carry no naira/USDC figures: %+v", res)
+	}
+}
+
+func TestRampSellQuote_ADeliveryTargetIsRefusedWhenRoundTripCostsMoreThanItsBudget(t *testing.T) {
+	// l = 50 bps against BudgetBps 40 (the quoter's own B of 50 would admit it).
+	q, _ := newSellQuoterWithFakes(t, payRoute(t, 9.95, payMerchantWallet, payMerchantChainID))
+	in := merchantTargetIn()
+	in.BudgetBps = 40
+	if _, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("err = %v, want ErrSellRouteTooCostly", err)
+	}
+	// Exactly the budget is admitted, with no fee left and so no second ask.
+	q, lifi := newSellQuoterWithFakes(t, payRoute(t, 9.95, payMerchantWallet, payMerchantChainID))
+	in.BudgetBps = 50
+	res, err := q.Quote(context.Background(), in)
+	if err != nil || res.FeeBps != 0 || len(lifi.all) != 1 {
+		t.Fatalf("err %v res %+v asks %d", err, res, len(lifi.all))
+	}
+}
+
+// She signs the route with her own key. One that pays HER (or anyone but the
+// merchant), or delivers on another chain, would let a payment be reported
+// delivered that never reached the merchant — it is never offered.
+func TestRampSellQuote_ADeliveryTargetRefusesARouteThatPaysAnyoneElse(t *testing.T) {
+	for name, data := range map[string]string{
+		"pays her instead":                      testBridgeCalldata(t, sellTestAddress, payMerchantChainID, false),
+		"pays a stranger":                       testBridgeCalldata(t, sellOtherAddress, payMerchantChainID, false),
+		"delivers to Base, not the target":      testBridgeCalldata(t, payMerchantWallet, rampSettlementChainID, false),
+		"hands the funds to a destination call": testBridgeCalldata(t, payMerchantWallet, payMerchantChainID, true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r1, r2 := payRoute(t, 9.98, payMerchantWallet, payMerchantChainID), payRoute(t, 9.97, payMerchantWallet, payMerchantChainID)
+			r2.Data = data
+			q, _ := newSellQuoterWithFakes(t, r1, r2)
+			if _, err := q.Quote(context.Background(), merchantTargetIn()); !errors.Is(err, ErrSellUnavailable) {
+				t.Fatalf("err = %v; a route that does not pay the merchant must never be offered", err)
+			}
+		})
+	}
+}
+
+func TestRampSellQuote_ADeliveryTargetMustBeAnAddressOnItsOwnChain(t *testing.T) {
+	q, lifi := newSellQuoterWithFakes(t, payRoute(t, 9.98, payMerchantWallet, payMerchantChainID))
+	for name, mutate := range map[string]func(*SellQuoteInput){
+		"not an address":   func(in *SellQuoteInput) { in.ToAddress = "merchant" },
+		"a Solana target":  func(in *SellQuoteInput) { in.ToChainID = solanaLiFiChainID },
+		"a Bitcoin target": func(in *SellQuoteInput) { in.ToChainID = bitcoinLiFiChainID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := merchantTargetIn()
+			mutate(&in)
+			if _, err := q.Quote(context.Background(), in); err == nil {
+				t.Fatal("quoted to a target that cannot be delivered to")
+			}
+			if lifi.calls != 0 {
+				t.Fatalf("LiFi was asked (%d calls) about an undeliverable target", lifi.calls)
+			}
+		})
+	}
+}
+
+// Spelling out the default target is the default: Base USDC to her own wallet
+// is still an offramp sale, priced in naira.
+func TestRampSellQuote_NamingBaseUSDCToHerWalletIsTheOrdinarySale(t *testing.T) {
+	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.98), sellRoute(t, 9.97))
+	in := sellIn
+	in.ToChainID, in.ToToken, in.ToAddress = rampSettlementChainID, "0xBaseUSDC00000000000000000000000000001", sellTestAddress
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GasBps != 20 || res.FeeBps != 10 || res.FiatEstimate != "14880.23" || res.USDCAmount != "9.97" {
+		t.Fatalf("res = %+v — must equal the ordinary sale (gas 20, fee 10, ₦14,880.23)", res)
+	}
+}

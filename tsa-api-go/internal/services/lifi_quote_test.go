@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -195,5 +196,46 @@ func TestLiFiQuote_ExposesTheRoutesFromAmount(t *testing.T) {
 	}
 	if route.FromAmount != "17000000000000000" {
 		t.Fatalf("FromAmount = %q", route.FromAmount)
+	}
+}
+
+func TestLiFiTokenPriceUSD_ParsesThePriceExactly(t *testing.T) {
+	var path, query, key string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query, key = r.URL.Path, r.URL.RawQuery, r.Header.Get("x-lifi-api-key")
+		io.WriteString(w, `{"priceUSD":"1.0003","decimals":18,"symbol":"USDT"}`)
+	}))
+	defer srv.Close()
+	price, dec, err := NewLiFiQuoteClient(srv.URL, "k", "tsa").TokenPriceUSD(context.Background(), 56, "0x55d398326f99059fF775485246999027B3197955")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if price.Cmp(big.NewRat(10003, 10000)) != 0 || dec != 18 {
+		t.Fatalf("price %s decimals %d — a float64 would not be exactly 10003/10000", price, dec)
+	}
+	if !strings.HasSuffix(path, "/token") || !strings.Contains(query, "chain=56") ||
+		!strings.Contains(query, "token=0x55d398326f99059fF775485246999027B3197955") || key != "k" {
+		t.Fatalf("path %s query %s key %q", path, query, key)
+	}
+}
+
+func TestLiFiTokenPriceUSD_RefusesAPriceItCannotUse(t *testing.T) {
+	for name, body := range map[string]string{
+		"zero":         `{"priceUSD":"0","decimals":18}`,
+		"negative":     `{"priceUSD":"-1","decimals":18}`,
+		"not a number": `{"priceUSD":"abc","decimals":18}`,
+		"missing":      `{"decimals":18}`,
+		"no decimals":  `{"priceUSD":"1"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := lifiQuoteServer(t, nil, body, http.StatusOK)
+			if price, _, err := NewLiFiQuoteClient(srv.URL, "", "tsa").TokenPriceUSD(context.Background(), 56, "0xA"); err == nil {
+				t.Fatalf("price %s accepted — an owed amount would be sized from it", price)
+			}
+		})
+	}
+	srv := lifiQuoteServer(t, nil, `{"message":"unknown token"}`, http.StatusNotFound)
+	if _, _, err := NewLiFiQuoteClient(srv.URL, "", "tsa").TokenPriceUSD(context.Background(), 56, "0xA"); err == nil {
+		t.Fatal("an upstream 404 must be an error")
 	}
 }

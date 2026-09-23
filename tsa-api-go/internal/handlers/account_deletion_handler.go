@@ -364,7 +364,7 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		// its payout details because an operator is still chasing it.
 		if err := tx.Model(&models.RampSellIntent{}).
 			Where("user_id = ? AND status IN ?", req.UserID,
-				[]string{models.SellIntentOrdered, models.SellIntentFailed}).
+				[]string{models.SellIntentOrdered, models.SellIntentDelivered, models.SellIntentFailed}).
 			Updates(models.WithBankDetailsCleared(map[string]any{})).Error; err != nil {
 			return err
 		}
