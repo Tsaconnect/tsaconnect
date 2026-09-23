@@ -1218,6 +1218,30 @@ func TestSubmitMerchantRequest_AMarketplaceMerchantMayApplyForPaymentsOnce(t *te
 	}
 }
 
+// Reverse direction of TestSubmitMerchantRequest_AMarketplaceMerchantMayApplyForPaymentsOnce
+// (whole-branch review Finding 3): the general, non-PM/non-Pay duplicate check
+// must be scoped by business_type too, or an approved payment_acceptance
+// request permanently blocks the same user from ever submitting a
+// general_products/digital_products/service_provider request — a regression
+// to the existing, live marketplace-merchant flow.
+func TestSubmitMerchantRequest_ApprovedPaymentAcceptanceDoesNotBlockGeneralProducts(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	prov := &fakePayProvisioner{db: db}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
+	user := createMerchantTestUser(t, db, "user")
+	admin := createMerchantTestUser(t, db, "admin")
+	reqID := submitPay(t, h, user)
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK {
+		t.Fatalf("approve payment_acceptance request: %d %s", w.Code, w.Body.String())
+	}
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("general_products submit after an approved payment_acceptance request: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestApproveMerchantRequest_PaymentAcceptanceProvisionsWithoutARoleFlip(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	prov := &fakePayProvisioner{db: db}

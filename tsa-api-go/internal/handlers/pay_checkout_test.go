@@ -134,6 +134,56 @@ func TestPayCheckout_TestOutcomeApprovesAndValidatesBody(t *testing.T) {
 	}
 }
 
+// TestOutcome must hand back the same payer-facing PayCheckoutView shape
+// Checkout itself returns — the app types the response as PayCheckout and
+// substitutes it directly into checkout state (app/pay.tsx). Before this
+// fix TestOutcome returned h.payments.View(p), the merchant-facing
+// PayPaymentView: no merchantName/payable/youArePaying/settlementMode, and
+// it leaked merchant-only reference/settlementRef to the payer.
+func TestPayCheckout_TestOutcomeKeySetMatchesCheckoutView(t *testing.T) {
+	h, payments, db := newPayCheckoutRig(t)
+	m := seedHandlerMerchant(t, db)
+	ctx := context.Background()
+	p, _, err := payments.Create(ctx, m, models.PayModeTest, payCheckoutIn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &models.User{ID: uuid.New()}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	inject := func(c *gin.Context) { c.Set("user", u); c.Next() }
+	r.POST("/pay/checkout/:id/test-outcome", inject, h.TestOutcome)
+
+	w := payDo(r, "POST", "/pay/checkout/"+p.ID.String()+"/test-outcome", map[string]string{"outcome": "approve"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct{ Data map[string]any }
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	wantKeys := []string{
+		"id", "merchantName", "mode", "status", "amount", "customerTotal", "fee",
+		"merchantNet", "currency", "description", "expiresAt", "settlementMode",
+		"returnUrl", "payable", "notPayableWhy", "youArePaying",
+	}
+	if len(resp.Data) != len(wantKeys) {
+		t.Fatalf("key set = %v", resp.Data)
+	}
+	for _, k := range wantKeys {
+		if _, ok := resp.Data[k]; !ok {
+			t.Fatalf("missing key %q: %v", k, resp.Data)
+		}
+	}
+	for _, merchantOnly := range []string{"reference", "settlementRef"} {
+		if _, ok := resp.Data[merchantOnly]; ok {
+			t.Fatalf("merchant-only field %q leaked to the payer: %v", merchantOnly, resp.Data)
+		}
+	}
+}
+
 func TestPayCheckout_CancelPendingThenConflictOnceProcessing(t *testing.T) {
 	h, payments, db := newPayCheckoutRig(t)
 	m := seedHandlerMerchant(t, db)

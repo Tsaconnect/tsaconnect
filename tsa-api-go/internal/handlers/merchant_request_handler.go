@@ -171,22 +171,18 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	// Type-scoped duplicate-request check (Critical-1).
-	// For p2p_merchant: only a prior pending/approved PM request blocks — a stale
-	// approved general_products row from a prior merchant role must NOT block.
-	// For non-PM: unchanged unscoped check (any prior pending/approved row blocks).
+	// Type-scoped duplicate-request check (Critical-1). Every business type gets
+	// its own one-pending-or-approved-at-a-time rule: a pending/approved
+	// payment_acceptance request must not block a general_products/
+	// digital_products/service_provider submit (or vice versa), same as a stale
+	// approved general_products row must not block a p2p_merchant upgrade. Scope
+	// by business_type unconditionally rather than special-casing p2p_merchant/
+	// payment_acceptance — a cross-type block is a bug for any pair of types.
 	var existing models.MerchantRequest
-	var dupErr error
-	if input.BusinessType == models.BusinessTypeP2PMerchant || input.BusinessType == models.BusinessTypePaymentAcceptance {
-		dupErr = h.DB.Where("user_id = ? AND business_type = ? AND status IN ?", user.ID,
-			input.BusinessType,
-			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
-			First(&existing).Error
-	} else {
-		dupErr = h.DB.Where("user_id = ? AND status IN ?", user.ID,
-			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
-			First(&existing).Error
-	}
+	dupErr := h.DB.Where("user_id = ? AND business_type = ? AND status IN ?", user.ID,
+		input.BusinessType,
+		[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
+		First(&existing).Error
 	if dupErr == nil {
 		if existing.Status == models.MerchantRequestStatusApproved {
 			utils.ErrorResponse(c, http.StatusBadRequest, "You already have an approved merchant request")

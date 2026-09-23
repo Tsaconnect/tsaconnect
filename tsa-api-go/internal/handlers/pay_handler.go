@@ -517,12 +517,22 @@ func (h *PayHandler) TestOutcome(c *gin.Context) {
 		return
 	}
 
-	p, err := h.payments.SimulateTestOutcome(c.Request.Context(), user, id, approve)
+	if _, err := h.payments.SimulateTestOutcome(c.Request.Context(), user, id, approve); err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	// The response must be the same payer-facing PayCheckoutView shape
+	// Checkout itself returns (what the app types as PayCheckout and
+	// substitutes directly into checkout state) — not the merchant-facing
+	// PayPaymentView (h.payments.View), which lacks merchantName/payable/
+	// youArePaying/settlementMode and leaks merchant-only fields like
+	// reference/settlementRef to the payer.
+	v, err := h.payments.CheckoutView(c.Request.Context(), user, id, h.liveEnabled)
 	if err != nil {
 		payPaymentFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	utils.SuccessResponse(c, http.StatusOK, "Payment", v)
 }
 
 // POST /api/pay/v1/payments/:id/cancel — a merchant cancels its own pending
