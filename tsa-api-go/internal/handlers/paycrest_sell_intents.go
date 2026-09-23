@@ -26,6 +26,9 @@ type sellIntents interface {
 	OpenOrder(ctx context.Context, user *models.User, id uuid.UUID) (*models.PaycrestOrderRecord, error)
 	Abandon(ctx context.Context, userID, id uuid.UUID) error
 	Open(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error)
+	Get(ctx context.Context, userID, id uuid.UUID) (*models.RampSellIntent, error)
+	// The top-up's caps and once-per-sale claim live on the sale's own row.
+	services.IntentTopUpStore
 }
 
 // WithSellIntents turns the sale routes on. Nil (RAMP_CONVERSION_SELL unset)
@@ -157,6 +160,42 @@ func (h *PaycrestHandler) AbandonSellIntent(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Sale cancelled", nil)
+}
+
+// SellIntentGasTopUpEnabled: the route needs a sale service
+// (RAMP_CONVERSION_SELL) AND a live sponsor (RAMP_GAS_SPONSORSHIP).
+func (h *PaycrestHandler) SellIntentGasTopUpEnabled() bool {
+	return h.SellIntentsEnabled() && h.SponsorshipEnabled()
+}
+
+// POST /api/paycrest/sell-intents/:id/gas-topup — source-chain gas for a sale
+// of an EVM token she holds no gas coin for. Blocks until the gas lands
+// (<=30s), like the order top-up, so the swap she signs next is priced
+// against a real balance. The amount is the service's, from the sale's quote.
+func (h *PaycrestHandler) SellIntentGasTopUp(c *gin.Context) {
+	if !h.SellIntentGasTopUpEnabled() {
+		utils.ErrorResponse(c, http.StatusNotFound, "Gas sponsorship is not available")
+		return
+	}
+	user, id, ok := h.sellIntentTarget(c)
+	if !ok {
+		return
+	}
+	intent, err := h.sellIntents.Get(c.Request.Context(), user.ID, id)
+	if err != nil {
+		h.sellIntentError(c, err, user)
+		return
+	}
+	res, err := h.sponsor.TopUpForIntent(c.Request.Context(), user, intent, h.sellIntents)
+	if err != nil {
+		if errors.Is(err, services.ErrSellIntentNotFound) || errors.Is(err, services.ErrSellIntentState) {
+			h.sellIntentError(c, err, user)
+			return
+		}
+		sponsorshipError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Gas ready", res)
 }
 
 func (h *PaycrestHandler) sellIntentCaller(c *gin.Context) (*models.User, bool) {

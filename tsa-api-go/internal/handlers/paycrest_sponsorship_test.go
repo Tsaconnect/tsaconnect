@@ -23,6 +23,10 @@ type fakeSponsorPort struct {
 	relayOut services.AuthorizationRelayResult
 	topUpOut services.GasTopUpResult
 	err      error
+
+	intentTopUpCalls  int
+	intentTopUpIntent *models.RampSellIntent
+	intentTopUpStore  services.IntentTopUpStore
 }
 
 func (f *fakeSponsorPort) Enabled() bool                               { return f.enabled }
@@ -35,6 +39,11 @@ func (f *fakeSponsorPort) RelayAuthorization(_ context.Context, _ *models.User, 
 	return f.relayOut, f.err
 }
 func (f *fakeSponsorPort) TopUp(context.Context, *models.User, uuid.UUID) (services.GasTopUpResult, error) {
+	return f.topUpOut, f.err
+}
+func (f *fakeSponsorPort) TopUpForIntent(_ context.Context, _ *models.User, in *models.RampSellIntent, store services.IntentTopUpStore) (services.GasTopUpResult, error) {
+	f.intentTopUpCalls++
+	f.intentTopUpIntent, f.intentTopUpStore = in, store
 	return f.topUpOut, f.err
 }
 

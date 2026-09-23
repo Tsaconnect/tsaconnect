@@ -954,12 +954,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
 				pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
 
-				// Gas sponsorship. The status route is always registered so the
-				// app can tell "off" from "old server"; the rest exist only
-				// when RAMP_GAS_SPONSORSHIP built at least one lane. No itIdem:
-				// both writes are idempotent server-side (one row per order and
-				// kind), and a cached replay would hide a top-up that has since
-				// confirmed.
 				// One swapped sale at a time, driven step by step by the
 				// app. Idempotency on the writes because each one is a claim:
 				// a retried create must not open a second sale, and a
@@ -975,11 +969,24 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 					pc.POST("/sell-intents/:id/abandon", itIdem, paycrestWriteLimit, pch.AbandonSellIntent)
 				}
 
+				// Gas sponsorship. The status route is always registered so the
+				// app can tell "off" from "old server"; the rest exist only
+				// when RAMP_GAS_SPONSORSHIP built at least one lane. No itIdem:
+				// both writes are idempotent server-side (one row per order and
+				// kind), and a cached replay would hide a top-up that has since
+				// confirmed.
 				pc.GET("/sponsorship", pch.SponsorshipRoutes)
 				if pch.SponsorshipEnabled() {
 					pc.GET("/orders/:id/sponsorship", pch.SponsorshipOffer)
 					pc.POST("/orders/:id/relay-authorization", paycrestWriteLimit, pch.RelayAuthorization)
 					pc.POST("/orders/:id/gas-topup", paycrestWriteLimit, pch.GasTopUp)
+				}
+				// Source-chain gas for a sale's swap: only when BOTH
+				// RAMP_CONVERSION_SELL and RAMP_GAS_SPONSORSHIP are on. No
+				// itIdem for the same reason as the order top-up: the claim on
+				// the sale's row makes it once-per-sale server-side.
+				if pch.SellIntentGasTopUpEnabled() {
+					pc.POST("/sell-intents/:id/gas-topup", paycrestWriteLimit, pch.SellIntentGasTopUp)
 				}
 			}
 		}

@@ -573,6 +573,56 @@ func (s *SellIntentService) Open(ctx context.Context, userID uuid.UUID) (*models
 	return &in, nil
 }
 
+// Get is one of her sales, by id AND owner (see load).
+func (s *SellIntentService) Get(ctx context.Context, userID, id uuid.UUID) (*models.RampSellIntent, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrSellUnavailable
+	}
+	return s.load(ctx, userID, id)
+}
+
+// ─── Gas top-up bookkeeping (GasTopUp.TopUpForIntent's IntentTopUpStore) ────
+
+// CountToppedUpSince is how many of her sales were topped up at or after
+// since, used or not — the daily cap.
+func (s *SellIntentService) CountToppedUpSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND topped_up_at IS NOT NULL AND topped_up_at >= ?", userID, since).
+		Count(&n).Error
+	return n, err
+}
+
+// CountUnusedSince is how many topped-up sales of hers ended without a swap
+// since `since` — gas we paid for that nothing used, the farming signal.
+func (s *SellIntentService) CountUnusedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND status = ? AND swap_tx_hash IS NULL AND topped_up_at IS NOT NULL AND updated_at >= ?",
+			userID, models.SellIntentFailed, since).
+		Count(&n).Error
+	return n, err
+}
+
+// MarkToppedUp is the once-per-intent claim: true iff this caller set
+// topped_up_at, so two concurrent requests cannot both send gas for one sale.
+func (s *SellIntentService) MarkToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND topped_up_at IS NULL", id).
+		Update("topped_up_at", at)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// ClearToppedUp gives the claim back, for a top-up that provably never left.
+func (s *SellIntentService) ClearToppedUp(ctx context.Context, id uuid.UUID) error {
+	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ?", id).
+		Update("topped_up_at", nil).Error
+}
+
 // load reads one intent BY ID AND OWNER. Never by id alone: every step of a
 // sale is driven by an id the client holds, and a row fetched without its
 // owner would let anyone who learns an id drive someone else's sale.

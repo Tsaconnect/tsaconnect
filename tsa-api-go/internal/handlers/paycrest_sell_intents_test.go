@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -29,7 +30,24 @@ type stubSellIntents struct {
 	quote    *services.SellSwapQuote
 	err      error
 	open     *models.RampSellIntent
+	// got answers Get; getErr overrides it.
+	got    *models.RampSellIntent
+	getErr error
 }
+
+func (s *stubSellIntents) Get(context.Context, uuid.UUID, uuid.UUID) (*models.RampSellIntent, error) {
+	return s.got, s.getErr
+}
+func (s *stubSellIntents) CountToppedUpSince(context.Context, uuid.UUID, time.Time) (int64, error) {
+	return 0, nil
+}
+func (s *stubSellIntents) CountUnusedSince(context.Context, uuid.UUID, time.Time) (int64, error) {
+	return 0, nil
+}
+func (s *stubSellIntents) MarkToppedUp(context.Context, uuid.UUID, time.Time) (bool, error) {
+	return true, nil
+}
+func (s *stubSellIntents) ClearToppedUp(context.Context, uuid.UUID) error { return nil }
 
 func (s *stubSellIntents) Create(_ context.Context, user *models.User, in services.CreateSellIntentInput) (*models.RampSellIntent, *services.SellSwapQuote, error) {
 	s.last, s.lastUser = in, user
@@ -152,5 +170,95 @@ func TestSellIntentRoutes_DormantWithoutTheService(t *testing.T) {
 	}
 	if w := postSellIntent(t, h, user, sellIntentBody()); w.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404", w.Code)
+	}
+}
+
+// ─── Task 14: gas top-up for a sale ────────────────────────────────────────
+
+func postSellIntentTopUp(t *testing.T, h *PaycrestHandler, id string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/paycrest/sell-intents/"+id+"/gas-topup", nil)
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	c.Set("user", &models.User{ID: uuid.New(), WalletAddress: sellSwapUserWallet})
+	h.SellIntentGasTopUp(c)
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	return w, out
+}
+
+// The handler loads HER sale and hands the service its own store: it never
+// decides an amount or a cap itself.
+func TestSellIntentGasTopUp_TopsUpHerOwnSale(t *testing.T) {
+	in := &models.RampSellIntent{ID: uuid.New(), Status: models.SellIntentSwapping}
+	sales := &stubSellIntents{got: in}
+	port := &fakeSponsorPort{enabled: true, topUpOut: services.GasTopUpResult{TxHash: "0xgas", AmountWei: "123"}}
+	h := (&PaycrestHandler{}).WithSellIntents(sales).WithSponsorship(port)
+	w, out := postSellIntentTopUp(t, h, in.ID.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if port.intentTopUpIntent != in || port.intentTopUpStore != services.IntentTopUpStore(sales) {
+		t.Fatalf("port got intent %v store %v; want the loaded sale and the sale service", port.intentTopUpIntent, port.intentTopUpStore)
+	}
+	if out["data"].(map[string]any)["txHash"] != "0xgas" {
+		t.Fatalf("data = %v", out["data"])
+	}
+}
+
+func TestSellIntentGasTopUp_MapsErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		getErr error
+		topErr error
+		want   int
+	}{
+		{"someone else's sale", services.ErrSellIntentNotFound, nil, http.StatusNotFound},
+		{"past its swap", nil, services.ErrSellIntentState, http.StatusConflict},
+		{"daily cap", nil, services.ErrTopUpDailyCap, http.StatusTooManyRequests},
+		{"unused cap", nil, services.ErrTopUpUnusedCap, http.StatusTooManyRequests},
+		{"no KYC", nil, services.ErrKYCRequired, http.StatusForbidden},
+		{"no lane", nil, services.ErrSponsorNotAvailable, http.StatusConflict},
+		{"too expensive", nil, services.ErrTopUpTooExpensive, http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sales := &stubSellIntents{got: &models.RampSellIntent{ID: uuid.New()}, getErr: tc.getErr}
+			port := &fakeSponsorPort{enabled: true, err: tc.topErr}
+			h := (&PaycrestHandler{}).WithSellIntents(sales).WithSponsorship(port)
+			w, _ := postSellIntentTopUp(t, h, uuid.NewString())
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.getErr != nil && port.intentTopUpCalls != 0 {
+				t.Fatal("a sale that could not be loaded must never reach the top-up")
+			}
+		})
+	}
+}
+
+// Dormant unless BOTH the sale service and sponsorship are wired.
+func TestSellIntentGasTopUp_DormantUnlessSellAndSponsorshipAreOn(t *testing.T) {
+	port := &fakeSponsorPort{enabled: true}
+	for name, h := range map[string]*PaycrestHandler{
+		"no sell":         (&PaycrestHandler{}).WithSponsorship(port),
+		"no sponsorship":  (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{got: &models.RampSellIntent{}}),
+		"sponsorship off": (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{got: &models.RampSellIntent{}}).WithSponsorship(&fakeSponsorPort{}),
+	} {
+		if h.SellIntentGasTopUpEnabled() {
+			t.Fatalf("%s: enabled", name)
+		}
+		if w, _ := postSellIntentTopUp(t, h, uuid.NewString()); w.Code != http.StatusNotFound {
+			t.Fatalf("%s: status = %d, want 404", name, w.Code)
+		}
+	}
+	if port.intentTopUpCalls != 0 {
+		t.Fatal("a dormant route must not top up")
+	}
+	on := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{}).WithSponsorship(port)
+	if !on.SellIntentGasTopUpEnabled() {
+		t.Fatal("both on: want enabled")
 	}
 }

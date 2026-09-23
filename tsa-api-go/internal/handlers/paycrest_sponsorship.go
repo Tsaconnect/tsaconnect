@@ -22,6 +22,7 @@ type rampSponsorshipPort interface {
 	Offer(ctx context.Context, user *models.User, orderID uuid.UUID) (services.SponsorshipOffer, error)
 	RelayAuthorization(ctx context.Context, user *models.User, orderID uuid.UUID, auth services.TransferAuthorization) (services.AuthorizationRelayResult, error)
 	TopUp(ctx context.Context, user *models.User, orderID uuid.UUID) (services.GasTopUpResult, error)
+	TopUpForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store services.IntentTopUpStore) (services.GasTopUpResult, error)
 }
 
 func (h *PaycrestHandler) WithSponsorship(s rampSponsorshipPort) *PaycrestHandler {
@@ -162,7 +163,7 @@ func sponsorshipError(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "That approval has expired or could not be read. Tap send again.")
 	case errors.Is(err, services.ErrSimulationReverted):
 		utils.ErrorResponse(c, http.StatusBadRequest, "This transfer would fail on-chain. Check your balance and try again.")
-	case errors.Is(err, services.ErrTopUpUnusedCap):
+	case errors.Is(err, services.ErrTopUpUnusedCap), errors.Is(err, services.ErrTopUpDailyCap):
 		utils.ErrorResponse(c, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, services.ErrTopUpUnconfirmed):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, err.Error())

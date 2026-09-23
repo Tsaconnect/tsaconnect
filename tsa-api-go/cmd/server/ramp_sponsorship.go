@@ -175,6 +175,8 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 	// 30s receipt wait keeps the top-up request under the nginx 60s proxy timeout.
 	sponsor := services.NewRampSponsorship(orders, &services.GormSponsorshipStore{DB: config.DB}, lanes,
 		cfg.RampSponsorTopUpUnusedDailyCap, 30*time.Second, nil)
+	// A sell intent names its source chain by id; lanes are keyed by name.
+	sponsor.SetChainRegistry(chains)
 	log.Printf("[ramp-sponsor] enabled sponsor=%s chains=%v", sponsorAddr.Hex(), cfg.RampSponsorChains)
 	return sponsor
 }
