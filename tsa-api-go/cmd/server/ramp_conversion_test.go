@@ -59,7 +59,7 @@ func TestBuildRampConversion_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
 	cfg.RampSponsorPrivateKey = testKeyA
 	cfg.RampConversionBuyEnabled = true
 	cfg.RampTreasuryPrivateKey = testKeyA
-	if !refusesToStart(t, func() { buildRampConversion(cfg, nil, nil, nil) }) {
+	if !refusesToStart(t, func() { buildRampConversion(cfg, nil, nil, nil, nil) }) {
 		t.Fatal("a shared treasury key must refuse to start")
 	}
 }
@@ -87,7 +87,7 @@ func TestBuildRampConversion_DormantWithoutTheFlag(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RampConversionBuyEnabled = false
 	cfg.RampTreasuryPrivateKey = testKeyB
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
+	treasury, orch := buildRampConversion(cfg, nil, nil, nil, nil)
 	if treasury != nil || orch != nil {
 		t.Fatal("off means dormant")
 	}
@@ -101,7 +101,7 @@ func TestBuildRampConversion_DormantWithoutTheFlagRegistersNoWorkers(t *testing.
 	cfg := testConfig(t)
 	cfg.RampConversionBuyEnabled = false
 	cfg.RampTreasuryPrivateKey = testKeyB
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
+	treasury, orch := buildRampConversion(cfg, nil, nil, nil, nil)
 
 	scheduler := jobs.NewScheduler()
 	registerRampConversionWorkers(scheduler, treasury, orch, 500)
@@ -124,7 +124,7 @@ func TestRegisterRampConversionWorkers_NilOrchestratorRegistersNothing(t *testin
 //
 // This tests rampTreasuryCaps DIRECTLY rather than through
 // buildRampConversion: a version of this test that called
-// buildRampConversion(cfg, nil, nil, nil) and asserted a nil/nil return would
+// buildRampConversion(cfg, nil, nil, nil, nil) and asserted a nil/nil return would
 // be vacuous, because the pre-existing `if chains == nil` guard immediately
 // after the caps check returns that exact same (nil, nil) regardless of
 // whether the caps check ever ran. Asserting on rampTreasuryCaps' own return

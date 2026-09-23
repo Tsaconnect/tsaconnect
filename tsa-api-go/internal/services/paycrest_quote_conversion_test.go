@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -491,5 +492,59 @@ func TestConvertedVenues_RefusesAStableRouteBelowThePromise(t *testing.T) {
 	if venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
 		[]RequestedAsset{{ChainID: 10, Address: usdtOP}}); len(venues) != 0 {
 		t.Fatalf("venues = %+v; toAmountMin under the promise must not be offered", venues)
+	}
+}
+
+// ── a Solana destination ───────────────────────────────────────────────────
+
+// A Solana route is priced to HER SOLANA ADDRESS, never to the EVM wallet the
+// rest of the request is keyed on: nothing on Solana can be delivered to a
+// 20-byte address, so quoting one would price a route that could never run.
+func TestQuote_SolanaVenueIsPricedToHerSolanaAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(1_000_000_000), ToAmountMin: big.NewInt(990_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 9, ToTokenSymbol: "SOL",
+		Tool: "near", Data: loadLiFiFixtures(t)["near_base_solana_sol"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaNativeToken,
+		Recipient: sponsorTestUser, Destination: solRecipient,
+	}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; want one Solana venue", venues, err)
+	}
+	v := venues[0]
+	if v.RequestedChain != "solana" || v.RequestedChainID != solanaLiFiChainID || v.RequestedDestination != solRecipient {
+		t.Fatalf("venue = %+v; want a solana destination carrying her address", v)
+	}
+	// A Solana stablecoin would be just as unpromisable: the treasury holds no
+	// float there, so nothing is ever promised on this chain.
+	if v.PromisedAmount != "" {
+		t.Fatalf("promised %q on a chain with no treasury lane", v.PromisedAmount)
+	}
+	if got := s.lifi.lastRequest(); got.ToAddress != solRecipient || got.ToChainID != solanaLiFiChainID {
+		t.Fatalf("quote = %+v; want it priced to her Solana address", got)
+	}
+}
+
+// Without a Solana address there is nowhere to deliver, so there is nothing to
+// offer — a quote is never priced to a recipient we had to invent.
+func TestQuote_SolanaVenueIsNotOfferedWithoutARecipient(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(1_000_000_000), ToAmountMin: big.NewInt(990_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 9, ToTokenSymbol: "SOL",
+		Tool: "near", Data: loadLiFiFixtures(t)["near_base_solana_sol"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaNativeToken, Recipient: sponsorTestUser,
+	}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v err = %v; want none without a Solana recipient", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("LiFi was called %d times for an asset that cannot be delivered", s.lifi.quoteCalls())
 	}
 }

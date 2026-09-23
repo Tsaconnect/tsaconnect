@@ -46,6 +46,13 @@ type lifiQuoter interface {
 	Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiRoute, error)
 }
 
+// solanaLanding proves what a Solana transaction actually credited an address.
+// Solana has no transfer log to read, so the proof is the destination
+// transaction's own balance changes; *solana.Client satisfies this.
+type solanaLanding interface {
+	ReceivedBy(ctx context.Context, txHash, owner, mint string) (*big.Int, error)
+}
+
 // ConversionOrchestrator drives one converted buy from "Paycrest paid our
 // treasury" to "the user holds at least what we promised" — or, failing that,
 // to a refund or to a human.
@@ -64,7 +71,11 @@ type ConversionOrchestrator struct {
 	// transfers is keyed by chain key: LogTransferVerifier wraps ONE RPC
 	// client, so a single verifier could only ever prove a delivery on its own
 	// chain and would silently never confirm anything on any other.
-	transfers   map[string]ERC20TransferVerifier
+	transfers map[string]ERC20TransferVerifier
+	// solana proves a Solana landing. Nil until the wiring finds a Solana
+	// chain client, and a nil one settles nothing: LiFi's word alone is not a
+	// delivery proof on any chain, and it is not one here either.
+	solana      solanaLanding
 	chains      *BlockchainService
 	retryWindow time.Duration
 	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
@@ -98,6 +109,11 @@ type ConversionOrchestrator struct {
 // zero budget refuses every non-legacy route, which is the fail-closed
 // direction.
 func (o *ConversionOrchestrator) SetRoundTripBudgetBps(bps int) { o.budgetBps = bps }
+
+// SetSolanaLanding wires the chain client that proves a Solana delivery. Left
+// unset (no Solana chain configured) a Solana landing never settles — the same
+// fail-closed shape as a missing EVM transfer verifier.
+func (o *ConversionOrchestrator) SetSolanaLanding(l solanaLanding) { o.solana = l }
 
 // NewConversionOrchestrator wires one converted-buy state machine.
 // stallWindow, legCeiling and maxShortfallUSD are the orchestrator's tunables
@@ -832,7 +848,14 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 	// alone decides who the diamond pays. Checked here, where the order's
 	// wallet and destination are known — LiFi's status would only report a
 	// wrong landing after the treasury's funds had already left.
-	if err := checkLiFiDelivery(route.Data, lane.ChainID, dst.chainID, recipient); err != nil {
+	//
+	// The address FAMILY decides how the receiver is read: a Solana route
+	// carries LiFi's placeholder in BridgeData.receiver and the real recipient
+	// inside the facet's own data, so checking it with the EVM decoder would
+	// compare the order's wallet against that placeholder and pass anything.
+	// The destination token goes through too — on Solana an SPL delivery lands
+	// in a token account, which only the mint can identify.
+	if err := checkLiFiDeliveryTo(route.Data, lane.ChainID, dst.chainID, recipient, dst.family(), dst.token); err != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_delivery_refused_total=1 order=%s bridge#%d tool=%s err=%v",
 			order.ID, attempt, route.Tool, err)
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
@@ -1034,6 +1057,9 @@ func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *model
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
 		return nil, o.toRecovery(ctx, order, err.Error(), nil)
 	}
+	if dst.family() == "solana" {
+		return o.verifySolanaLanding(ctx, order, dst, st)
+	}
 	if !dst.stable && isNativeTokenAddress(dst.token) {
 		// A native coin leaves no Transfer log: LiFi's status is the signal,
 		// held to the right token here and to LiFi's own minimum in settle.
@@ -1055,6 +1081,63 @@ func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *model
 	}
 	// The chain outranks LiFi. Where they disagree, what the wallet was credited
 	// is what the user has, and the shortfall logic works from that.
+	if st.ReceivedBaseUnits != nil && credited.Cmp(st.ReceivedBaseUnits) != 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_mismatch_total=1 order=%s dest_tx=%s lifi=%s chain=%s",
+			order.ID, st.DestTxHash, st.ReceivedBaseUnits, credited)
+	}
+	return credited, nil
+}
+
+// verifySolanaLanding proves a Solana delivery the only way Solana allows.
+// There is no transfer log there, so the proof is the destination
+// transaction's own balance changes: lamports at the recipient's account for
+// native SOL, the mint's own token balances for an SPL token.
+//
+// Same division of labour as every other chain — LiFi says WHICH transaction
+// to read, the chain says what the user got — and the same fail-closed
+// outcomes: anything unproven waits for the next tick (bounded by the leg
+// ceiling) rather than settling.
+func (o *ConversionOrchestrator) verifySolanaLanding(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, st *LiFiTransferStatus) (*big.Int, error) {
+	if o.solana == nil {
+		// Same reasoning as a missing EVM verifier: with nothing to ask, the
+		// alternative is settling on a number nobody checked.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=landing", order.ID, dst.chainKey)
+		return nil, nil
+	}
+	if st.DestTxHash == "" {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_dest_tx_total=1 order=%s stage=landing", order.ID)
+		return nil, nil
+	}
+	// Base58 is case-SENSITIVE: two Solana addresses differing only in case are
+	// two different accounts. observeDone's EqualFold is right for an EVM hex
+	// address and would be a hole here, so the recipient is re-checked exactly
+	// before the chain is asked about it.
+	recipient := firstNonEmpty(order.DestinationAddress, order.WalletAddress)
+	if st.ToAddress != recipient {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_recipient_total=1 order=%s tx=%s reported=%s want=%s",
+			order.ID, st.DestTxHash, st.ToAddress, recipient)
+		return nil, o.toRecovery(ctx, order,
+			fmt.Sprintf("LiFi reported a Solana landing at %s, not %s", st.ToAddress, recipient), nil)
+	}
+	// An empty mint means native SOL to the chain client; the order stores it
+	// as the System Program id, which is how LiFi names it.
+	mint := dst.token
+	if mint == solanaNativeToken {
+		mint = ""
+	}
+	credited, err := o.solana.ReceivedBy(ctx, st.DestTxHash, recipient, mint)
+	if err != nil {
+		// Not readable yet (or at all): look again next tick, bounded by the
+		// leg ceiling. Never settle on an answer we could not get.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_unverified_total=1 order=%s stage=landing tx=%s err=%v",
+			order.ID, st.DestTxHash, err)
+		return nil, nil
+	}
+	if credited == nil || credited.Sign() <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_zero_total=1 order=%s stage=landing tx=%s", order.ID, st.DestTxHash)
+		return nil, nil
+	}
+	// The chain outranks LiFi, exactly as on an EVM landing.
 	if st.ReceivedBaseUnits != nil && credited.Cmp(st.ReceivedBaseUnits) != 0 {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_mismatch_total=1 order=%s dest_tx=%s lifi=%s chain=%s",
 			order.ID, st.DestTxHash, st.ReceivedBaseUnits, credited)
@@ -1539,6 +1622,17 @@ type conversionDestination struct {
 	stable   bool
 	chainID  int64
 	chainKey string
+}
+
+// family is the address family the destination's recipient is written in.
+// It is derived from the chain id alone — never from the order's chain name,
+// which is client-supplied at the edges — and it decides both how a route's
+// calldata is read and how the landing is proven.
+func (d *conversionDestination) family() string {
+	if d.chainID == solanaLiFiChainID {
+		return "solana"
+	}
+	return "evm"
 }
 
 func (o *ConversionOrchestrator) destination(order *models.PaycrestOrderRecord) (*conversionDestination, error) {

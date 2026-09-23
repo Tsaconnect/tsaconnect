@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -105,6 +106,7 @@ type orderConversionRig struct {
 	svc    *PaycrestOrderService
 	client *fakePaycrestConversionClient
 	lifi   *fakeLiFiQuoter
+	quotes *PaycrestQuoteService
 }
 
 func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
@@ -148,7 +150,7 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 		&stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}},
 	)
 
-	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi}
+	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi, quotes: quotes}
 }
 
 // orderTestUserWallet is the buyer's own wallet: a real hex address, because
@@ -401,5 +403,62 @@ func TestSync_RecoveryPendingIsNotOverwrittenByThePoller(t *testing.T) {
 	}
 	if !out.NeedsOperator() {
 		t.Fatal("a recovery_pending order must surface to an operator")
+	}
+}
+
+// A Solana buy is opened against HER SOLANA ADDRESS. The EVM wallet stays on
+// the row — it is still the account's wallet and where a refund's naira is
+// reconciled from — but the delivery leg must pay the address the route was
+// quoted and calldata-checked against, and nothing else.
+func TestCreateBuy_SolanaOrderIsDeliveredToHerSolanaAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.quotes.SetSolanaValidator(solana.ValidateAddress)
+	r.lifi.route.Data = loadLiFiFixtures(t)["near_base_solana_sol"].Data
+	r.lifi.route.ToAmount = big.NewInt(1_000_000_000)
+	r.lifi.route.ToAmountMin = big.NewInt(990_000_000)
+	r.lifi.route.ToTokenDecimals = 9
+	r.lifi.route.ToTokenSymbol = "SOL"
+	user := seedVerifiedUser(t, r.db)
+
+	req := r.buyRequest(user, "base", "USDC", "", "SOL")
+	req.RequestedChainID, req.RequestedTokenAddress = solanaLiFiChainID, solanaNativeToken
+	req.DestinationAddress = solRecipient
+
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if row.RequestedChain != "solana" || row.RequestedChainID != solanaLiFiChainID ||
+		row.RequestedTokenAddress != solanaNativeToken || row.RequestedTokenDecimals != 9 {
+		t.Fatalf("row = %+v", row)
+	}
+	if row.DestinationAddress != solRecipient {
+		t.Fatalf("destination = %q, want her Solana address", row.DestinationAddress)
+	}
+	if row.WalletAddress != req.WalletAddress {
+		t.Fatalf("wallet = %q; the account's EVM wallet must stay on the row", row.WalletAddress)
+	}
+	if row.PromisedAmount != "" {
+		t.Fatalf("promised %q on a chain the treasury holds no float in", row.PromisedAmount)
+	}
+}
+
+// Without a Solana address there is nowhere to deliver, so the order is
+// refused before Paycrest is ever asked to open one.
+func TestCreateBuy_SolanaWithoutADestinationIsRefused(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.quotes.SetSolanaValidator(solana.ValidateAddress)
+	user := seedVerifiedUser(t, r.db)
+
+	req := r.buyRequest(user, "base", "USDC", "", "SOL")
+	req.RequestedChainID, req.RequestedTokenAddress = solanaLiFiChainID, solanaNativeToken
+
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrBadRequestedAsset) {
+		t.Fatalf("err = %v, want ErrBadRequestedAsset", err)
 	}
 }

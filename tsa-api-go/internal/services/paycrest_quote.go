@@ -85,6 +85,11 @@ type PaycrestVenue struct {
 	RequestedChainID  int64  `json:"requestedChainId,omitempty"`
 	RequestedAddress  string `json:"requestedTokenAddress,omitempty"`
 	RequestedDecimals int    `json:"requestedTokenDecimals,omitempty"`
+	// RequestedDestination is where this route was actually priced to deliver,
+	// when that is not the user's EVM wallet — her Solana address. Carried on
+	// the venue rather than re-derived at order time so the order can only
+	// ever record the recipient the quoted route was checked against.
+	RequestedDestination string `json:"requestedDestination,omitempty"`
 	// EstimatedAmount is what the route is expected to deliver, in the
 	// requested token's own base units. An estimate, not a promise — a
 	// volatile destination has no PromisedAmount at all.
@@ -209,6 +214,9 @@ type PaycrestQuoteService struct {
 	// SetConversionMinimums still enforces one.
 	conversionMins       map[string]float64
 	conversionMinDefault float64
+	// solanaValidator validates a Solana mint/recipient. Nil (no Solana chain
+	// configured) refuses every Solana destination — see solanaAddressValidator.
+	solanaValidator solanaAddressValidator
 }
 
 // SetSenderFeePercent prices our sender fee into every quoted rate, so the
@@ -398,6 +406,14 @@ type treasuryLaneChecker interface {
 // nowhere to send it.
 func (s *PaycrestQuoteService) SetTreasuryLanes(t treasuryLaneChecker) {
 	s.treasuryLanes = t
+}
+
+// SetSolanaValidator wires the Solana chain client's own address check, which
+// is what makes a Solana destination resolvable at all. Left unset, a Solana
+// request resolves to nothing and is simply not offered — the same
+// dormant-until-wired shape as a missing LiFi quoter or treasury.
+func (s *PaycrestQuoteService) SetSolanaValidator(v solanaAddressValidator) {
+	s.solanaValidator = v
 }
 
 // SetConversionMinimums installs the per-chain floor a converted buy must
@@ -752,6 +768,11 @@ type RequestedAsset struct {
 	// Recipient is the wallet the route is priced to. Empty prices to the
 	// treasury, which is what an anonymous price check gets.
 	Recipient string
+	// Destination is where the asset is delivered when the user's EVM wallet
+	// cannot receive it — her Solana address. Required for a Solana asset
+	// (nothing can be delivered to a 20-byte address there) and ignored
+	// everywhere else; validated by the chain client, never trusted as given.
+	Destination string
 }
 
 // ConvertedVenues offers routes Paycrest cannot fill directly: it delivers a
@@ -820,7 +841,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// address must never reach LiFi, and the chain key that the checks
 		// below are keyed on comes from the chain id rather than from
 		// whatever chain name the client happened to send.
-		asset, rerr := resolveRequestedAsset(s.chains, req)
+		asset, rerr := resolveRequestedAsset(s.chains, s.solanaValidator, req)
 		if rerr != nil {
 			continue
 		}
@@ -843,10 +864,11 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		if asset.Stable && s.treasuryLanes.Lane(asset.ChainKey) == nil {
 			continue
 		}
-		recipient := req.Recipient
-		if recipient == "" {
-			recipient = s.treasuryAddress // pricing only
-		}
+		// A destination the wallet itself cannot receive on (Solana) names its
+		// own recipient, and resolveRequestedAsset has already validated it.
+		// It outranks req.Recipient, which is the user's EVM wallet and could
+		// only ever be a route to nowhere on that chain.
+		recipient := firstNonEmpty(asset.Destination, req.Recipient, s.treasuryAddress /* pricing only */)
 		// A stable-to-stable route should not move on price, so hold it to
 		// LiFi's tight default; anything else is a real market and needs the
 		// room a normal swap takes.
@@ -917,6 +939,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			ViaChain: src.ChainKey, ViaToken: src.Token,
 			RequestedChain: asset.ChainKey, RequestedToken: symbol,
 			RequestedChainID: asset.ChainID, RequestedAddress: asset.Address, RequestedDecimals: decimals,
+			RequestedDestination: asset.Destination,
 			Rate: src.Rate, TokenAmount: src.TokenAmount, TokenAmountBaseUnits: src.TokenAmountBaseUnits,
 			MarkupBps: s.roundTripBudgetBps, CostBps: l,
 			EstimatedAmount: route.ToAmount.String(), ETASeconds: route.ETASeconds,

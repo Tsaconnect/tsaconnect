@@ -319,6 +319,12 @@ type PaycrestBuyRequest struct {
 	// client — they decide how much of a token she gets.
 	RequestedChainID      int64
 	RequestedTokenAddress string
+	// DestinationAddress is where the requested token is delivered when the
+	// user's EVM wallet cannot receive it — her Solana address. Required for a
+	// Solana request (resolveRequestedAsset refuses one without it) and
+	// ignored on every EVM destination. A refund still goes to WalletAddress:
+	// this names where the ASSET lands, never where money comes back to.
+	DestinationAddress string
 	// RefundAccount is where naira returns if the order fails. Defaults to the
 	// user's own bank, so a refund goes back to whoever paid.
 	RefundBankCode    string // NIBSS
@@ -409,7 +415,8 @@ func (s *PaycrestOrderService) isConvertedRequest(req PaycrestBuyRequest) (bool,
 	chainKey := strings.ToLower(strings.TrimSpace(req.ChainKey))
 	token := strings.ToUpper(strings.TrimSpace(req.Token))
 	if req.RequestedChainID != 0 || req.RequestedTokenAddress != "" {
-		asset, err := resolveRequestedAsset(s.quotes.chains, RequestedAsset{ChainID: req.RequestedChainID, Address: req.RequestedTokenAddress})
+		asset, err := resolveRequestedAsset(s.quotes.chains, s.quotes.solanaValidator,
+			RequestedAsset{ChainID: req.RequestedChainID, Address: req.RequestedTokenAddress, Destination: req.DestinationAddress})
 		if err != nil {
 			return false, err
 		}
@@ -521,6 +528,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		venues, verr := s.quotes.ConvertedVenues(ctx, "buy", fiat, req.FiatAmount, []RequestedAsset{{
 			Chain: req.RequestedChain, Token: req.RequestedToken,
 			ChainID: req.RequestedChainID, Address: req.RequestedTokenAddress, Recipient: req.WalletAddress,
+			Destination: req.DestinationAddress,
 		}})
 		if verr != nil {
 			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
@@ -611,7 +619,12 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		row.RequestedChainID = venue.RequestedChainID
 		row.RequestedTokenAddress = venue.RequestedAddress
 		row.RequestedTokenDecimals = venue.RequestedDecimals
-		row.DestinationAddress = req.WalletAddress
+		// Where the delivery leg actually pays. Taken from the VENUE, never
+		// from the request: the venue carries the recipient the quoted route
+		// was priced and calldata-checked against, so an order can never be
+		// opened pointing somewhere the route does not pay. Empty on every EVM
+		// destination, where the user's own wallet is the recipient.
+		row.DestinationAddress = firstNonEmpty(venue.RequestedDestination, req.WalletAddress)
 		// T, what she is owed, comes from PAYCREST'S OWN delivered amount —
 		// not from the venue's quote. The order was sent at F − B, so the
 		// amount Paycrest will deliver is already B bigger than a direct

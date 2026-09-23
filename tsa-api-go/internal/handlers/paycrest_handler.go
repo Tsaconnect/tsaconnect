@@ -147,6 +147,11 @@ func (h *PaycrestHandler) ConvertedQuote(c *gin.Context) {
 	asset := services.RequestedAsset{
 		ChainID: chainID, Address: strings.TrimSpace(c.Query("requestedTokenAddress")),
 		Token: strings.TrimSpace(c.Query("requestedToken")), Chain: strings.TrimSpace(c.Query("requestedChain")),
+		// Where a non-EVM destination is delivered — her Solana address. The
+		// wallet below cannot stand in for it (nothing on Solana can be paid
+		// to a 20-byte address), and it is validated server-side by the chain
+		// client, never trusted as sent.
+		Destination: strings.TrimSpace(c.Query("destinationAddress")),
 	}
 	// Price the route to where it will really be delivered, so the quote and
 	// the execution are the same route.
@@ -228,6 +233,10 @@ type paycrestBuyBody struct {
 	// server derives them from the route or from config.
 	RequestedChainID      int64  `json:"requestedChainId"`
 	RequestedTokenAddress string `json:"requestedTokenAddress"`
+	// DestinationAddress is where a destination the EVM wallet cannot receive
+	// on is delivered — her Solana address. Validated server-side against the
+	// chain it names; a refund still goes to the wallet, never here.
+	DestinationAddress string `json:"destinationAddress"`
 	// Refund destination — where naira returns if the order fails. The app
 	// prefills this from the user's saved payout account.
 	RefundBankCode    string `json:"refundBankCode" binding:"required"`
@@ -277,6 +286,7 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 		RequestedToken:        requestedToken,
 		RequestedChainID:      body.RequestedChainID,
 		RequestedTokenAddress: strings.TrimSpace(body.RequestedTokenAddress),
+		DestinationAddress:    strings.TrimSpace(body.DestinationAddress),
 		RefundBankCode:        body.RefundBankCode,
 		RefundAccount:         body.RefundAccount,
 		RefundAccountName:     body.RefundAccountName,

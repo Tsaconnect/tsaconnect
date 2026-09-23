@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -57,10 +58,12 @@ type fakeLiFiQuoterForQuote struct {
 	route *services.LiFiRoute
 	err   error
 	calls int
+	last  services.LiFiQuoteRequest
 }
 
-func (f *fakeLiFiQuoterForQuote) Quote(context.Context, services.LiFiQuoteRequest) (*services.LiFiRoute, error) {
+func (f *fakeLiFiQuoterForQuote) Quote(_ context.Context, req services.LiFiQuoteRequest) (*services.LiFiRoute, error) {
 	f.calls++
+	f.last = req
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -409,5 +412,47 @@ func TestPaycrestHandler_Quote_LiFiFailure_StillReturnsDirectVenues(t *testing.T
 	}
 	if len(resp.Data.Venues) != 1 {
 		t.Fatalf("a LiFi failure must leave only the direct venue, got %+v", resp.Data.Venues)
+	}
+}
+
+// A Solana destination is delivered to an address the EVM wallet cannot be:
+// the app sends it as destinationAddress, and that — not the signed-in user's
+// wallet — is what the route must be priced to.
+func TestPaycrestHandler_ConvertedQuote_PricesSolanaToTheGivenAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	svc, lifi := newConvertibleQuoteService(t)
+	svc.SetSolanaValidator(solana.ValidateAddress)
+	lifi.route = optimismUSDTRoute(t) // never accepted as a Solana venue; only the REQUEST matters here
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	doConvertedQuoteRequest(t, h,
+		"amount=150000&requestedChainId=1151111081099710"+
+			"&requestedTokenAddress=11111111111111111111111111111111"+
+			"&destinationAddress="+solRecipient)
+
+	if lifi.calls == 0 {
+		t.Fatal("the Solana asset was not priced at all")
+	}
+	if lifi.last.ToAddress != solRecipient {
+		t.Fatalf("priced to %q, want her Solana address", lifi.last.ToAddress)
+	}
+}
+
+// Without a destination address there is nowhere on Solana to deliver, so
+// nothing is priced — no LiFi call is spent guessing at a recipient.
+func TestPaycrestHandler_ConvertedQuote_SolanaWithoutADestinationIsNotPriced(t *testing.T) {
+	svc, lifi := newConvertibleQuoteService(t)
+	svc.SetSolanaValidator(solana.ValidateAddress)
+	lifi.route = optimismUSDTRoute(t)
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	resp := doConvertedQuoteRequest(t, h,
+		"amount=150000&requestedChainId=1151111081099710&requestedTokenAddress=11111111111111111111111111111111")
+
+	if !resp.Success {
+		t.Fatal("an unpriceable asset must not fail the whole quote")
+	}
+	if lifi.calls != 0 {
+		t.Fatalf("LiFi was called %d times for a Solana asset with no recipient", lifi.calls)
 	}
 }

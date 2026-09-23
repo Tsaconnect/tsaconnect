@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"math/big"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	chainreg "github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -25,7 +27,7 @@ import (
 // to check before then) — but still well before chains/orders/quotes are
 // ever consulted, so a misconfigured key is caught even when the rest of the
 // wiring is unavailable.
-func buildRampConversion(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) (*services.Treasury, *services.ConversionOrchestrator) {
+func buildRampConversion(cfg *config.Config, chains *services.BlockchainService, reg *chainreg.Registry, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) (*services.Treasury, *services.ConversionOrchestrator) {
 	if !cfg.RampConversionBuyEnabled {
 		log.Printf("[ramp-conversion] dormant: RAMP_CONVERSION_BUY is off")
 		return nil, nil
@@ -153,6 +155,8 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		cfg.RampConversionRetryWindow, cfg.RampConversionStallWindow, cfg.RampConversionLegCeiling,
 		cfg.RampConversionMaxShortfallUSD, nil,
 	)
+	wireSolanaDestinations(reg, orchestrator, quotes)
+
 	// The same B the quote and order services are priced on (pushed there by
 	// SetRoundTripBudgetBps in main.go): a route is executed against exactly
 	// the budget the order was quoted on, never a second copy of the number.
@@ -291,4 +295,49 @@ func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services
 	// gas sponsor's own float-monitor registration: same job type, two
 	// independent floats to watch.
 	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute).WithKeptUSDCAlert(keptUSDCAlert))
+}
+
+// rampNonEVMNetwork is which registry network a converted buy's non-EVM
+// destination is read from. Mainnet, to match the EVM side: the treasury's
+// own chains come from cfg.Networks["mainnet"], so proving a landing against
+// a testnet client would prove it on a chain no converted buy ever runs on.
+const rampNonEVMNetwork = "mainnet"
+
+// solanaLandingProver is the one thing the converted-buy state machine needs
+// from a Solana chain client: what a transaction actually credited an address.
+// Declared here (rather than exported from services) so the wiring, not the
+// state machine, owns the type assertion against the registry's ChainClient.
+type solanaLandingProver interface {
+	ReceivedBy(ctx context.Context, txHash, owner, mint string) (*big.Int, error)
+}
+
+// wireSolanaDestinations turns Solana on as a converted-buy destination, or
+// leaves it off with a line saying why. Both halves come from the SAME client:
+// the address check that decides whether a Solana asset can be quoted at all,
+// and the balance read that proves its landing. Wiring one without the other
+// would either offer a destination nothing can prove, or refuse to quote a
+// chain we can in fact settle on.
+func wireSolanaDestinations(reg *chainreg.Registry, orch *services.ConversionOrchestrator, quotes *services.PaycrestQuoteService) {
+	if reg == nil {
+		log.Printf("[ramp-conversion] solana destinations dormant: no non-EVM chain registry")
+		return
+	}
+	client, ok := reg.ForKey(rampNonEVMNetwork, "solana")
+	if !ok {
+		log.Printf("[ramp-conversion] solana destinations dormant: no %s solana chain client", rampNonEVMNetwork)
+		return
+	}
+	land, ok := client.(solanaLandingProver)
+	if !ok {
+		// A Solana client that cannot prove a landing must not make Solana
+		// quotable either — an order it can never settle is worse than one
+		// that was never offered.
+		log.Printf("[ramp-conversion] ALERT ramp_solana_no_landing_proof_total=1 — solana destinations stay off")
+		return
+	}
+	orch.SetSolanaLanding(land)
+	if quotes != nil {
+		quotes.SetSolanaValidator(client.ValidateAddress)
+	}
+	log.Printf("[ramp-conversion] solana destinations enabled (landing proof + address validation from the %s solana client)", rampNonEVMNetwork)
 }

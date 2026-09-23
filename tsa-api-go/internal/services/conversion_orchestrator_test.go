@@ -2291,3 +2291,111 @@ func TestOrchestrator_OwedToUserOnANonStableDeliveryIsUndetermined(t *testing.T)
 		t.Fatalf("OwedToUser err = %v, want ErrOwedUndetermined (and no panic)", err)
 	}
 }
+
+// ── a Solana destination ───────────────────────────────────────────────────
+
+// fakeSolanaLanding stands in for the Solana chain client's ReceivedBy: the
+// chain's own answer to "what did this transaction credit her", which is the
+// only thing a Solana landing may settle on.
+type fakeSolanaLanding struct {
+	amount *big.Int
+	err    error
+	calls  int
+	txHash string
+	owner  string
+	mint   string
+}
+
+func (f *fakeSolanaLanding) ReceivedBy(_ context.Context, txHash, owner, mint string) (*big.Int, error) {
+	f.calls++
+	f.txHash, f.owner, f.mint = txHash, owner, mint
+	return f.amount, f.err
+}
+
+// asSolanaBuy makes the rig order a SOL buy delivered to the receiver of the
+// captured native-SOL Task 10 fixture, with LiFi's minimum at 0.99 SOL.
+//
+// The fixture is named rather than "the first Solana one": loadLiFiFixtures
+// returns a map, so scanning it would pick the SPL capture at random on some
+// runs — a different delivery shape (a token account, not the owner) that this
+// native-SOL order has no business being checked against.
+func asSolanaBuy(t *testing.T, r *conversionRig, land solanaLanding, destination string) {
+	t.Helper()
+	fx := loadLiFiFixtures(t)["near_base_solana_sol"]
+	if fx.Data == "" {
+		t.Fatal("no native-SOL Solana fixture (Task 10)")
+	}
+	if destination == "" {
+		destination = fx.Receiver
+	}
+	if err := r.db.Model(r.order).Updates(map[string]any{
+		"requested_chain": "solana", "requested_token": "SOL", "requested_chain_id": solanaLiFiChainID,
+		"requested_token_address": solanaNativeToken, "requested_token_decimals": 9,
+		"destination_address": destination, "promised_amount": "", "quoted_amount": "99500000",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.lifi.route = &LiFiRoute{To: treasuryTestRouter, Data: fx.Data, ToAmount: big.NewInt(1_000_000_000),
+		ToAmountMin: big.NewInt(990_000_000), FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, Tool: fx.Tool}
+	r.status.toAddress = destination
+	r.status.chainID = solanaLiFiChainID
+	r.status.receivingToken = solanaNativeToken
+	r.svc.SetSolanaLanding(land)
+}
+
+func TestOrchestrator_SolanaDestinationSettlesOnTheChainsProof(t *testing.T) {
+	r := newConversionRig(t)
+	land := &fakeSolanaLanding{amount: big.NewInt(1_000_000_000)}
+	asSolanaBuy(t, r, land, "")
+	mustAdvance(t, r)
+	if r.broadcasts() == 0 {
+		t.Fatal("the Solana bridge was not sent")
+	}
+	r.status.set(LiFiStatusDone, "1000000000")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusSettled {
+		t.Fatalf("status = %s, want settled", got.Status)
+	}
+	// The chain was asked about the destination LiFi named, for the owner the
+	// order pays, in native SOL — not about the user's EVM wallet.
+	if land.calls == 0 || land.txHash != "0xdest" || land.owner != r.reload(t).DestinationAddress || land.mint != "" {
+		t.Fatalf("landing read = %+v; want the destination tx, the Solana recipient, native SOL", land)
+	}
+}
+
+func TestOrchestrator_SolanaLandingShortParks(t *testing.T) {
+	r := newConversionRig(t)
+	asSolanaBuy(t, r, &fakeSolanaLanding{amount: big.NewInt(900_000_000)}, "")
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "1000000000") // LiFi claims more than the chain shows
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending", got.Status)
+	}
+}
+
+func TestOrchestrator_SolanaRouteToSomeoneElseIsRefused(t *testing.T) {
+	r := newConversionRig(t)
+	asSolanaBuy(t, r, &fakeSolanaLanding{}, "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin")
+	mustAdvance(t, r)
+	if r.broadcasts() != 0 {
+		t.Fatalf("broadcasts = %d; a route paying another Solana address must not be signed", r.broadcasts())
+	}
+	legs := r.legsOfKind(t, models.RampLegKindBridge)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusFailed {
+		t.Fatalf("legs = %+v", legs)
+	}
+}
+
+// Nothing settles on a landing the chain was never asked about: with no Solana
+// client wired the order waits for a human rather than trusting LiFi's word.
+func TestOrchestrator_SolanaWithoutAChainClientNeverSettles(t *testing.T) {
+	r := newConversionRig(t)
+	asSolanaBuy(t, r, nil, "")
+	mustAdvance(t, r)
+	r.status.set(LiFiStatusDone, "1000000000")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status == models.PaycrestStatusSettled {
+		t.Fatal("an unproven Solana landing settled the order")
+	}
+}

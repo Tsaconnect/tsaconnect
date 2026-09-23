@@ -21,6 +21,12 @@ import (
 
 const evmNativeAddress = "0x0000000000000000000000000000000000000000"
 
+// solanaChainKey is what a Solana destination is called everywhere a chain key
+// is written — the order's requested_chain, the leg ledger, the logs. It is
+// NOT looked up from the EVM chain registry (Solana is not in it), so it is
+// stated once here rather than spelled out at each site.
+const solanaChainKey = "solana"
+
 // evmNativeAliasAddress is the OTHER spelling of "this chain's native coin".
 // LiFi, 1inch and most aggregators use it interchangeably with the zero
 // address, and which one comes back varies by chain and by tool.
@@ -64,14 +70,29 @@ type resolvedAsset struct {
 	Stable         bool
 	StableDecimals int
 	StableSymbol   string
+	// Destination is where the requested token is actually delivered when
+	// that is NOT the user's EVM wallet — a Solana address today. Empty on
+	// every EVM destination, where the wallet is the recipient.
+	Destination string
 }
+
+// solanaAddressValidator validates a Solana address. It is injected rather
+// than imported so this package keeps no dependency on a chain client: the
+// wiring passes the Solana chain client's own ValidateAddress, which is the
+// same check the wallet validates a send address with. Nil means no Solana
+// chain is configured, and then a Solana destination is refused rather than
+// taken on the client's word.
+type solanaAddressValidator func(addr string) error
 
 // resolveRequestedAsset derives everything server-side: the chain key from
 // the chain id (the client's chain name is ignored) and stable-ness from
-// config. EVM destinations only; Solana arrives in Part 2b.
-func resolveRequestedAsset(chains *BlockchainService, req RequestedAsset) (resolvedAsset, error) {
+// config.
+func resolveRequestedAsset(chains *BlockchainService, validateSolana solanaAddressValidator, req RequestedAsset) (resolvedAsset, error) {
 	if chains == nil {
 		return resolvedAsset{}, ErrBadRequestedAsset
+	}
+	if req.ChainID == solanaLiFiChainID {
+		return resolveSolanaAsset(validateSolana, req)
 	}
 	chainID, address := req.ChainID, strings.TrimSpace(req.Address)
 	if chainID == 0 && req.Chain != "" && req.Token != "" { // legacy symbol request
@@ -91,4 +112,37 @@ func resolveRequestedAsset(chains *BlockchainService, req RequestedAsset) (resol
 		return resolvedAsset{}, fmt.Errorf("%w: token %q", ErrBadRequestedAsset, address)
 	}
 	return resolvedAsset{ChainKey: key, ChainID: chainID, Address: address, Stable: stable, StableDecimals: decimals, StableSymbol: sym}, nil
+}
+
+// resolveSolanaAsset is the Solana half of resolveRequestedAsset. Solana is
+// not in the EVM chain registry — there is no chain id to look a key up by and
+// no treasury lane there — so everything about it is decided here:
+//
+//   - The token is a base58 mint, or the System Program id for native SOL.
+//     An EVM-looking address is not a Solana token however plausible it looks.
+//   - The recipient is required, and it is NOT the user's EVM wallet: nothing
+//     on Solana can be delivered to a 20-byte address, and a route quoted to
+//     the wrong recipient is money sent to a stranger. It is part of naming
+//     the asset here rather than an afterthought at execution time, so a
+//     request that cannot say where the tokens go never reaches LiFi.
+//   - Stable is always false. A Solana stablecoin is still a destination the
+//     treasury holds no float in, so there is nothing to promise against and
+//     nothing to top up with; LiFi's own minimum is the floor (see the
+//     design's §4.4).
+func resolveSolanaAsset(validate solanaAddressValidator, req RequestedAsset) (resolvedAsset, error) {
+	if validate == nil {
+		return resolvedAsset{}, fmt.Errorf("%w: no Solana chain is configured", ErrBadRequestedAsset)
+	}
+	address := strings.TrimSpace(req.Address)
+	if err := validate(address); err != nil {
+		return resolvedAsset{}, fmt.Errorf("%w: token %q: %v", ErrBadRequestedAsset, address, err)
+	}
+	destination := strings.TrimSpace(req.Destination)
+	if err := validate(destination); err != nil {
+		return resolvedAsset{}, fmt.Errorf("%w: solana recipient %q: %v", ErrBadRequestedAsset, destination, err)
+	}
+	return resolvedAsset{
+		ChainKey: solanaChainKey, ChainID: solanaLiFiChainID,
+		Address: address, Destination: destination,
+	}, nil
 }
