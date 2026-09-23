@@ -852,7 +852,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 				req.ChainID, req.Address, label, fmt.Sprintf(reason, args...))
 		}
 
-		src := s.bestSourceVenue(base.Venues) // most liquid direct route we can settle from
+		src := s.bestSourceVenue(base.Venues) // the venue this converted buy settles from, pinned to Base
 		if src == nil {
 			skip("no direct settlement venue is currently quotable")
 			continue
@@ -1031,15 +1031,32 @@ func directVenueFor(venues []PaycrestVenue, req RequestedAsset) *PaycrestVenue {
 	return nil
 }
 
-// bestSourceVenue picks the direct venue most likely to have depth for a
-// converted buy's settlement leg. There is no live liquidity figure at this
-// layer, so it follows the same preference this service already applies
-// everywhere else: s.tokens is USDC-before-USDT because USDC has
+// bestSourceVenue picks the direct venue a converted buy settles from.
+//
+// Pinned to rampSettlementChainKey (Base) — the same chain the sell side
+// already settles every swap to — so the treasury needs standing gas on one
+// chain, not on whichever of Paycrest's own venues happens to quote
+// cheapest this minute. Scanning every configured chain for the best rate
+// used to mean the settlement leg could silently move to a chain the
+// treasury had never been funded on, taking every converted buy down at
+// once with no link back to which chain was actually responsible. The
+// modest rate difference between Base and another chain's direct book is
+// not worth that fragility, especially once a bridge's own gas cost is
+// usually the bigger swing in what a user actually receives.
+//
+// Other chains are only consulted when Base has no direct listing for any
+// preferred token at all — s.tokens is USDC-before-USDT because USDC has
 // consistently carried deeper onramp liquidity (see the tokens field
-// comment); falling back to the cheapest/best-ranked venue (Venues[0], since
-// Quote already sorts best-first) when none of the preferred tokens are
-// present.
+// comment) — falling back to the cheapest/best-ranked venue (Venues[0],
+// since Quote already sorts best-first) when nothing on Base will do.
 func (s *PaycrestQuoteService) bestSourceVenue(venues []PaycrestVenue) *PaycrestVenue {
+	for _, want := range s.tokens {
+		for i := range venues {
+			if strings.EqualFold(venues[i].ChainKey, rampSettlementChainKey) && strings.EqualFold(venues[i].Token, want) {
+				return &venues[i]
+			}
+		}
+	}
 	for _, want := range s.tokens {
 		for i := range venues {
 			if strings.EqualFold(venues[i].Token, want) {

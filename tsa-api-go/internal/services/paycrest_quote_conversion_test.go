@@ -626,3 +626,67 @@ func TestQuote_SolanaSPLVenueExecutionAcceptsIsOffered(t *testing.T) {
 		t.Fatalf("venue = %+v; want USDC delivered to her Solana address", v)
 	}
 }
+
+// bestSourceVenue used to scan every configured chain for whichever quoted
+// cheapest and settle through THAT one — meaning the treasury needed
+// standing gas on every chain Paycrest might ever pick, and which chain that
+// was could change from one quote to the next. One chain running dry took
+// every converted buy down with it, regardless of destination, and there was
+// no way to tell from the outside which chain was actually in play. Base is
+// the one chain both buy and sell already need funded (the sell leg is
+// always Base), so it is the only chain settlement is pinned to now — other
+// chains are consulted only when Base itself has no direct listing at all.
+func rigWithTwoSettlementChains(t *testing.T) *quoteServiceRig {
+	t.Helper()
+	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
+		"base|USDC":            buy("1500"), // worse rate for her: more naira per token
+		"bnb-smart-chain|USDC": buy("1400"), // cheaper — this is the one bestSourceVenue must NOT pick
+	}}
+	svc := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base", "bsc"})
+	lifi := &fakeLiFiQuoter{}
+	svc.SetLiFiQuoter(lifi)
+	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
+	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
+	svc.SetRoundTripBudgetBps(50)
+	return &quoteServiceRig{svc: svc, pc: pc, lifi: lifi}
+}
+
+func TestConvertedVenues_PinsSettlementToBaseEvenWhenAnotherChainIsCheaper(t *testing.T) {
+	s := rigWithTwoSettlementChains(t)
+	s.lifi.route = bnbRoute(t)
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v", venues, err)
+	}
+	// The settlement leg the treasury actually bridges from is whatever
+	// chain the LiFi request was priced from — Base's id, not BSC's, even
+	// though BSC quoted the cheaper rate.
+	if req := s.lifi.lastRequest(); req.FromChainID != 8453 {
+		t.Fatalf("settled from chain %d, want Base (8453) even though bsc was cheaper", req.FromChainID)
+	}
+}
+
+func TestConvertedVenues_FallsBackToAnotherChainWhenBaseHasNoDirectListing(t *testing.T) {
+	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
+		"bnb-smart-chain|USDC": buy("1400"), // no "base|USDC" at all
+	}}
+	svc := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base", "bsc"})
+	lifi := &fakeLiFiQuoter{}
+	svc.SetLiFiQuoter(lifi)
+	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
+	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
+	svc.SetRoundTripBudgetBps(50)
+	lifi.route = bnbRoute(t)
+
+	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; base has nothing to quote, bsc must still fill it", venues, err)
+	}
+	if req := lifi.lastRequest(); req.FromChainID != 56 {
+		t.Fatalf("settled from chain %d, want bsc (56) since base has no direct listing at all", req.FromChainID)
+	}
+}
