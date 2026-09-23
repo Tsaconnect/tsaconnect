@@ -30,7 +30,8 @@ func newPayHandlerRig(t *testing.T) (*PayHandler, *gorm.DB) {
 	}
 	now := func() time.Time { return payHandlerNow }
 	merchants := services.NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
-	return NewPayHandler(merchants, nil, nil, false), db
+	payments := services.NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now)
+	return NewPayHandler(merchants, payments, nil, false), db
 }
 
 func payDo(r *gin.Engine, method, path string, body any, header map[string]string) *httptest.ResponseRecorder {

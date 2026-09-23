@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -13,12 +14,18 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
-// payPaymentAPI and payWebhookAPI are declared empty here and widened by the
-// tasks that build the concrete services (*services.PayPaymentService,
-// *services.PayWebhookSender don't exist yet). buildTSAPay passes an
-// untyped nil for both until then, which keeps Enabled() false — see the
-// package doc on PayHandler.
-type payPaymentAPI interface{}
+// payPaymentAPI is the narrow slice of *services.PayPaymentService that
+// CreatePayment/GetPayment need — kept as an interface (rather than the
+// concrete type) so PayHandler can still be built in tests without a real
+// PayPaymentService. payWebhookAPI stays an empty placeholder, widened by
+// the task that builds *services.PayWebhookSender. buildTSAPay passes an
+// untyped nil for webhooks until then, which is fine: Enabled() only checks
+// payments — see the package doc on PayHandler.
+type payPaymentAPI interface {
+	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
+	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
+	View(p *models.PayPayment) services.PayPaymentView
+}
 type payWebhookAPI interface{}
 
 // payCheckoutStarter is declared now and widened in Task 13.
@@ -229,6 +236,90 @@ func payMerchantAdminFail(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	default:
 		log.Printf("[tsa-pay] admin request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+	}
+}
+
+// payMerchantFromContext reads the *models.PayMerchant and mode
+// middleware.PayMerchantAuth put on the context. false means the request
+// reached this handler without going through that middleware — a routing
+// bug, not a caller error.
+func payMerchantFromContext(c *gin.Context) (*models.PayMerchant, string, bool) {
+	mv, ok := c.Get("payMerchant")
+	if !ok {
+		return nil, "", false
+	}
+	m, ok := mv.(*models.PayMerchant)
+	if !ok || m == nil {
+		return nil, "", false
+	}
+	mode, _ := c.Get("payMode")
+	modeStr, _ := mode.(string)
+	return m, modeStr, true
+}
+
+// POST /api/pay/v1/payments — create (or, for a retried reference, read)
+// one checkout under the authenticated merchant's own mode.
+func (h *PayHandler) CreatePayment(c *gin.Context) {
+	m, mode, ok := payMerchantFromContext(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		return
+	}
+	var in services.CreatePayPaymentInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	p, created, err := h.payments.Create(c.Request.Context(), m, mode, in)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	if created {
+		utils.SuccessResponse(c, http.StatusCreated, "Payment created", h.payments.View(p))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+}
+
+// GET /api/pay/v1/payments/:id — a merchant reads only its own payments,
+// and only in the mode of the key it authenticated with.
+func (h *PayHandler) GetPayment(c *gin.Context) {
+	m, mode, ok := payMerchantFromContext(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+
+	p, err := h.payments.GetForMerchant(c.Request.Context(), m.ID, mode, id)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+}
+
+// payPaymentFail maps a PayPaymentService error to the wire response: not
+// found -> 404, an invalid request or an unconfigured merchant -> 422, a
+// reference reused with different details -> 409, anything else -> a
+// generic 500 with the detail only in the log.
+func payPaymentFail(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, services.ErrPayPaymentNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, services.ErrPayPaymentInvalid), errors.Is(err, services.ErrPayMerchantNotReady):
+		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, services.ErrPayReferenceConflict):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	default:
+		log.Printf("[tsa-pay] merchant api request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
 	}
 }

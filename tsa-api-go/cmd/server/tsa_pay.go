@@ -40,12 +40,14 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		return nil
 	}
 
-	if _, ok := services.PayFeeBps(os.Getenv("PAYCREST_SENDER_FEE_PERCENT")); !ok {
+	feeBps, ok := services.PayFeeBps(os.Getenv("PAYCREST_SENDER_FEE_PERCENT"))
+	if !ok {
 		log.Printf("[tsa-pay] dormant: PAYCREST_SENDER_FEE_PERCENT is unset or unparsable — TSA Pay prices off the same platform fee as the ramp")
 		return nil
 	}
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
-	log.Printf("[tsa-pay] merchant administration ready (live_enabled=%v)", cfg.TSAPayLiveEnabled)
-	return handlers.NewPayHandler(merchants, nil, nil, cfg.TSAPayLiveEnabled)
+	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)
+	log.Printf("[tsa-pay] merchant administration and payment API ready (live_enabled=%v)", cfg.TSAPayLiveEnabled)
+	return handlers.NewPayHandler(merchants, payments, nil, cfg.TSAPayLiveEnabled)
 }
