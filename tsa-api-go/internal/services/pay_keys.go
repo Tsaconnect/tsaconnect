@@ -22,21 +22,17 @@ func GeneratePayKey(mode string) (raw, prefix, hash string, err error) {
 		return "", "", "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
-	// Generate 32 random bytes
 	randomBytes := make([]byte, 32)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", "", "", err
 	}
 
-	// Build raw key: "tsapk_" + mode + "_" + base64url(32 bytes)
 	encodedRandom := base64.RawURLEncoding.EncodeToString(randomBytes)
 	raw = fmt.Sprintf("tsapk_%s_%s", mode, encodedRandom)
 
-	// Prefix is raw[:len("tsapk_"+mode+"_")+6]
 	prefixLen := len("tsapk_"+mode+"_") + 6
 	prefix = raw[:prefixLen]
 
-	// Hash is SHA-256 in lowercase hex
 	hash = HashPayKey(raw)
 
 	return raw, prefix, hash, nil

@@ -31,6 +31,8 @@ const (
 
 // PayMerchant is a business approved to accept payments through TSA Pay.
 // Distinct from PaymentMerchant (P2P liquidity providers) — do not merge.
+// Version is bumped by every settings edit and is the admin console's
+// compare-and-set token.
 type PayMerchant struct {
 	ID                      uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	MerchantRequestID       uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"merchantRequestId"`
@@ -53,6 +55,7 @@ type PayMerchant struct {
 	TestWebhookURL          string    `gorm:"size:512" json:"testWebhookUrl"`
 	WebhookSecretVersion    int       `gorm:"not null;default:1" json:"-"`
 	ReturnDomains           string    `gorm:"size:1024" json:"-"` // comma-separated lowercase hostnames
+	Version                 int       `gorm:"not null;default:1" json:"version"`
 	LiveKeyHash             *string   `gorm:"size:64;uniqueIndex" json:"-"`
 	LiveKeyPrefix           string    `gorm:"size:24" json:"liveKeyPrefix"`
 	TestKeyHash             *string   `gorm:"size:64;uniqueIndex" json:"-"`
@@ -155,6 +158,26 @@ type PayWebhookDelivery struct {
 func (d *PayWebhookDelivery) BeforeCreate(tx *gorm.DB) error {
 	if d.ID == uuid.Nil {
 		d.ID = uuid.New()
+	}
+	return nil
+}
+
+// PayAuditEvent is the durable record of a settlement/credential change to a
+// merchant, written in the same transaction as the change. Details is JSON
+// holding before/after values of non-secret fields only — never a key, key
+// hash or webhook secret.
+type PayAuditEvent struct {
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID uuid.UUID `gorm:"type:uuid;not null;index" json:"merchantId"`
+	ActorID    uuid.UUID `gorm:"type:uuid;not null;index" json:"actorId"`
+	Action     string    `gorm:"size:32;not null" json:"action"` // "merchant.update" | "merchant.keys"
+	Details    string    `gorm:"type:text;not null" json:"details"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+func (e *PayAuditEvent) BeforeCreate(tx *gorm.DB) error {
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
 	}
 	return nil
 }

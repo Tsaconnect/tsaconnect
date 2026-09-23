@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -1195,7 +1196,7 @@ func approvePay(h *MerchantRequestHandler, admin *models.User, reqID string) *ht
 func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T) {
 	for _, site := range []string{"", "skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng"} {
 		db := setupMerchantTestDB(t)
-		h := &MerchantRequestHandler{DB: db}
+		h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
 		in := validPayAcceptanceInput()
 		in["website"] = site
 		w, c := newMerchantContext("POST", "/api/merchant-requests", in, createMerchantTestUser(t, db, "user"))
@@ -1208,7 +1209,7 @@ func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T
 
 func TestSubmitMerchantRequest_AMarketplaceMerchantMayApplyForPaymentsOnce(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	h := &MerchantRequestHandler{DB: db}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
 	u := createMerchantTestUser(t, db, "merchant")
 	submitPay(t, h, u)
 	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), u)
@@ -1280,11 +1281,63 @@ func TestApproveMerchantRequest_PaymentAcceptanceRetriesAFailedProvisioning(t *t
 
 func TestApproveMerchantRequest_PaymentAcceptanceNeedsAnAdminAndTheService(t *testing.T) {
 	db := setupMerchantTestDB(t)
+	// Submitted while TSA Pay was enabled, approved after it went dormant.
+	reqID := submitPay(t, &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}, createMerchantTestUser(t, db, "user"))
 	h := &MerchantRequestHandler{DB: db}
-	reqID := submitPay(t, h, createMerchantTestUser(t, db, "user"))
 	for role, want := range map[string]int{"support": http.StatusForbidden, "admin": http.StatusServiceUnavailable} {
 		if w := approvePay(h, createMerchantTestUser(t, db, role), reqID); w.Code != want {
 			t.Fatalf("%s: status %d, want %d", role, w.Code, want)
 		}
+	}
+}
+
+func TestSubmitMerchantRequest_PaymentAcceptanceRefusedWhileTSAPayIsDormant(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	user := createMerchantTestUser(t, db, "user")
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "TSA Pay isn't available yet") {
+		t.Fatalf("dormant submit: %d %s", w.Code, w.Body.String())
+	}
+	var n int64
+	db.Model(&models.MerchantRequest{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d merchant_requests rows created while TSA Pay is dormant", n)
+	}
+	// Other business types are unaffected by TSA Pay being dormant.
+	w, c = newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("general_products submit: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalMessage_TSAPayHasItsOwnWording(t *testing.T) {
+	if got := approvalMessage(models.BusinessTypePaymentAcceptance); !strings.Contains(got, "TSA Pay application has been approved") || strings.Contains(got, "list products") {
+		t.Fatalf("payment_acceptance message = %q", got)
+	}
+	if got := approvalMessage(models.BusinessTypeGeneralProducts); got != "Your merchant application has been approved. You can now list products." {
+		t.Fatalf("general message = %q", got)
+	}
+}
+
+func TestApproveMerchantRequest_PaymentAcceptanceNotificationDoesNotPromiseProducts(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	bus := newTestEventBus(t)
+	msgs := make(chan string, 1)
+	bus.Subscribe(events.MerchantApproved, func(e events.Event) { msgs <- e.Message })
+	h := &MerchantRequestHandler{DB: db, EventBus: bus, PayMerchants: &fakePayProvisioner{db: db}}
+	reqID := submitPay(t, h, createMerchantTestUser(t, db, "user"))
+	if w := approvePay(h, createMerchantTestUser(t, db, "admin"), reqID); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case m := <-msgs:
+		if strings.Contains(m, "list products") || !strings.Contains(m, "TSA Pay") {
+			t.Fatalf("notification = %q", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no MerchantApproved event")
 	}
 }

@@ -36,7 +36,7 @@ func newPayHandlerAdminRig(t *testing.T) (*PayHandler, *services.PayPaymentServi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}); err != nil {
+	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	now := func() time.Time { return payHandlerNow }
@@ -109,6 +109,41 @@ func TestPayAdmin_SensitiveUpdateNeedsASuperAdmin(t *testing.T) {
 	}
 	if w := payDo(r, "PUT", "/admin/pay/merchants/"+m.ID.String(), map[string]any{"customerFeeSharePercent": 0}, nil); w.Code != http.StatusOK {
 		t.Fatalf("admin changing the share: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPayAdmin_UpdateWithAStaleExpectedVersionAnswers409MerchantStale(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	m := seedHandlerMerchant(t, db)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	admin := &models.User{ID: uuid.New(), Role: models.RoleSuperAdmin}
+	r.PUT("/admin/pay/merchants/:id", func(c *gin.Context) { c.Set("user", admin) }, h.AdminUpdateMerchant)
+	url := "/admin/pay/merchants/" + m.ID.String()
+
+	w := payDo(r, "PUT", url, map[string]any{"customerFeeSharePercent": 50, "expectedVersion": 1}, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"version":2`) {
+		t.Fatalf("current version: %d %s", w.Code, w.Body.String())
+	}
+	w = payDo(r, "PUT", url, map[string]any{"customerFeeSharePercent": 20, "expectedVersion": 1}, nil)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"merchant_stale"`) {
+		t.Fatalf("stale version: %d %s", w.Code, w.Body.String())
+	}
+	var stored models.PayMerchant
+	db.First(&stored, "id = ?", m.ID)
+	if stored.CustomerFeeSharePercent != 50 {
+		t.Fatalf("a stale update landed: share %d", stored.CustomerFeeSharePercent)
+	}
+}
+
+func TestPayAdmin_MerchantReadsIncludeTheVersion(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	m := seedHandlerMerchant(t, db)
+	r := payAdminRouter(h)
+	r.GET("/admin/pay/merchants/:id", h.AdminGetMerchant)
+	w := payDo(r, "GET", "/admin/pay/merchants/"+m.ID.String(), nil, nil)
+	if !strings.Contains(w.Body.String(), `"version":1`) {
+		t.Fatalf("get: %s", w.Body.String())
 	}
 }
 

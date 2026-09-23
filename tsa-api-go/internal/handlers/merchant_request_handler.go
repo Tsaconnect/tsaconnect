@@ -38,8 +38,9 @@ type MerchantRequestHandler struct {
 	// active-PM guard is skipped (no ErrPMNotFound check can run).
 	PMService *services.PMService
 	// PayMerchants provisions a TSA Pay merchant from an approved
-	// payment_acceptance request. Optional: if nil, approving that type of
-	// request returns 503.
+	// payment_acceptance request. Optional: if nil, submitting or approving
+	// that type of request returns 503. Assign only a non-nil service — a
+	// typed-nil pointer here would read as wired.
 	PayMerchants payMerchantProvisioner
 }
 
@@ -142,6 +143,13 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	// payment_acceptance: no role guard — a marketplace merchant (or anyone
 	// else) may apply to accept payments; TSA Pay is a separate capability
 	// from the admin-console merchant role.
+
+	// A TSA Pay application would sit unprovisionable while TSA Pay is
+	// dormant, so refuse it up front rather than take the applicant's details.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance && h.PayMerchants == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay isn't available yet")
+		return
+	}
 
 	// TSA Pay applications must supply a well-formed https website — it
 	// becomes the merchant's checkout/webhook return domain.
@@ -498,7 +506,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			Type:    events.MerchantApproved,
 			UserID:  req.UserID,
 			Title:   "Merchant Request Approved",
-			Message: "Your merchant application has been approved. You can now list products.",
+			Message: approvalMessage(req.BusinessType),
 			Data: map[string]interface{}{
 				"requestId":    req.ID,
 				"businessName": req.BusinessName,
@@ -507,6 +515,16 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
+}
+
+// approvalMessage is the notification text for an approved request. TSA Pay
+// applicants sell nothing on the marketplace, so they must not be told they
+// can list products.
+func approvalMessage(businessType string) string {
+	if businessType == models.BusinessTypePaymentAcceptance {
+		return "Your TSA Pay application has been approved. We'll be in touch to finish setting up your account."
+	}
+	return "Your merchant application has been approved. You can now list products."
 }
 
 // RejectMerchantRequest handles POST /api/admin/merchant-requests/:id/reject.

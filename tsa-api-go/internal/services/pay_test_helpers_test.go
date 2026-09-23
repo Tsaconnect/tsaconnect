@@ -15,7 +15,7 @@ func newPayTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := newCurrencyTestDB(t)
 	createTestUsersTable(t, db)
-	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}); err != nil {
+	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	return db

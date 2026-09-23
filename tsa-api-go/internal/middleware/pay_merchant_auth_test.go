@@ -56,3 +56,43 @@ func TestPayMerchantAuth(t *testing.T) {
 		}
 	}
 }
+
+func TestPayMerchantAuth_BearerSchemeIsCaseInsensitive(t *testing.T) {
+	auth := func(_ context.Context, raw string) (*models.PayMerchant, string, error) {
+		if raw == "tsapk_test_good" {
+			return &models.PayMerchant{}, models.PayModeTest, nil
+		}
+		return nil, "", services.ErrPayKeyInvalid
+	}
+	for header, want := range map[string]int{
+		"bearer tsapk_test_good": 200, "BEARER tsapk_test_good": 200, "Bearer  tsapk_test_good": 200,
+		"Bearer": 401, "Bearer ": 401, "Basic tsapk_test_good": 401, "Bearertsapk_test_good": 401,
+	} {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.GET("/x", PayMerchantAuth(auth, false), func(c *gin.Context) { c.Status(http.StatusOK) })
+		req := httptest.NewRequest("GET", "/x", nil)
+		req.Header.Set("Authorization", header)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%q: %d, want %d", header, w.Code, want)
+		}
+	}
+}
+
+func TestPayMerchantAuth_AnUnavailableAuthStoreIs503NotABadKey(t *testing.T) {
+	auth := func(context.Context, string) (*models.PayMerchant, string, error) {
+		return nil, "", services.ErrPayAuthUnavailable
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/x", PayMerchantAuth(auth, true), func(c *gin.Context) { c.Status(http.StatusOK) })
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Authorization", "Bearer tsapk_live_x")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"auth_unavailable"`) {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}

@@ -357,10 +357,10 @@ type Config struct {
 	// ── TSA Pay (merchant payments) ──
 	// Test mode is on until the licensing question is answered; live mode stays
 	// off until PM gives clearance on compliance.
-	TSAPayEnabled            bool
-	TSAPayLiveEnabled        bool
-	TSAPayWebhookMasterKey   string
-	TSAPayCheckoutBaseURL    string
+	TSAPayEnabled          bool
+	TSAPayLiveEnabled      bool
+	TSAPayWebhookMasterKey string
+	TSAPayCheckoutBaseURL  string
 
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev

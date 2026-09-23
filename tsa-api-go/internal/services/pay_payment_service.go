@@ -32,6 +32,12 @@ const (
 	// A payer already holding the lock may resume past this (and past
 	// expires_at entirely): see Lock.
 	payMinTimeToStart = 5 * time.Minute
+
+	// payStuckTestReleaseAfter is how long a test-mode payment may sit in
+	// processing with no attempt linked before the reconciler releases it.
+	// A test outcome resolves in milliseconds, so anything this old was
+	// stranded by a crash between the lock and the resolve.
+	payStuckTestReleaseAfter = 10 * time.Minute
 )
 
 // CreatePayPaymentInput is a merchant's request to start one checkout.
@@ -390,6 +396,13 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 
 	youArePaying := p.Status == models.PayStatusProcessing && p.PayerUserID != nil && user != nil && *p.PayerUserID == user.ID
 	payable, why := s.payability(p, m, liveEnabled, youArePaying)
+	if payable && !youArePaying && p.Mode == models.PayModeLive && user != nil {
+		// Say so up front rather than let the payer tap Pay and be refused.
+		// Any other lookup error leaves payable as computed; Lock enforces it.
+		if err := requireVerifiedForMoneyIn(ctx, s.db, user.ID); errors.Is(err, ErrKYCVerificationRequired) {
+			payable, why = false, "Verify your identity to pay this"
+		}
+	}
 
 	return &PayCheckoutView{
 		ID:                 p.ID,
@@ -725,8 +738,42 @@ func (s *PayPaymentService) Deliveries(ctx context.Context, paymentID uuid.UUID)
 // the expiry sweep; Parts B/C (chain- and Paycrest-order-aware recovery)
 // extend this same entry point rather than adding a second worker.
 func (s *PayPaymentService) ReconcileTick(ctx context.Context) error {
-	_, err := s.ExpireDue(ctx, 100)
+	if _, err := s.ExpireDue(ctx, 100); err != nil {
+		return err
+	}
+	_, err := s.ReleaseStuckTestPayments(ctx, payStuckTestReleaseAfter, 100)
 	return err
+}
+
+// ReleaseStuckTestPayments releases test-mode payments left in processing
+// with no attempt linked for longer than olderThan, oldest first, up to
+// limit. Live payments are never touched here: releasing one can strand a
+// customer's money mid-flight, so Parts B/C own their release rules. Each
+// release goes through the guarded Release, so a payment that moved on
+// since the select is skipped.
+func (s *PayPaymentService) ReleaseStuckTestPayments(ctx context.Context, olderThan time.Duration, limit int) (int, error) {
+	var ids []uuid.UUID
+	if err := s.db.WithContext(ctx).Model(&models.PayPayment{}).
+		Where("mode = ? AND status = ? AND paycrest_order_id IS NULL AND sell_intent_id IS NULL AND locked_at < ?",
+			models.PayModeTest, models.PayStatusProcessing, s.now().Add(-olderThan)).
+		Order("locked_at").
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		err := s.Release(ctx, id, "released: test payment was stuck processing")
+		switch {
+		case err == nil:
+			n++
+		case errors.Is(err, ErrPayTransition):
+			// resolved or released by someone else since the select
+		default:
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 // SimulateTestOutcome is the in-app "simulate" button for a test-mode
@@ -740,17 +787,23 @@ func (s *PayPaymentService) SimulateTestOutcome(ctx context.Context, user *model
 	if p.Mode != models.PayModeTest {
 		return nil, ErrPayNotPayable
 	}
-	if _, _, err := s.Lock(ctx, user, id, false); err != nil {
+	_, fresh, err := s.Lock(ctx, user, id, false)
+	if err != nil {
 		return nil, err
 	}
 	if approve {
-		if err := s.Succeed(ctx, id, "test"); err != nil {
-			return nil, err
-		}
+		err = s.Succeed(ctx, id, "test")
 	} else {
-		if err := s.Fail(ctx, id, "declined in test mode"); err != nil {
-			return nil, err
+		err = s.Fail(ctx, id, "declined in test mode")
+	}
+	if err != nil {
+		// Lock and resolve are two statements: a failed resolve after a fresh
+		// lock would strand the payment in processing, so hand it back
+		// (best effort; ReconcileTick catches it if this fails too).
+		if fresh {
+			_ = s.Release(ctx, id, "test outcome failed to resolve")
 		}
+		return nil, err
 	}
 	return s.Get(ctx, id)
 }

@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -18,15 +19,16 @@ import (
 // handler to read. authenticate is *services.PayMerchantService.Authenticate
 // — passed as a func so this middleware can be tested without a database.
 //
-// A malformed/missing/unknown key answers 401 invalid_key; a key belonging
+// The Bearer scheme is matched case-insensitively. A malformed/missing/unknown key answers 401 invalid_key; a key belonging
 // to a suspended merchant answers 403 merchant_suspended; a live key while
 // liveEnabled is false answers 403 live_disabled (a test key is always
-// allowed regardless of liveEnabled).
+// allowed regardless of liveEnabled). A failed key lookup (not a bad key)
+// answers 503 auth_unavailable.
 func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models.PayMerchant, string, error), liveEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		raw, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+		scheme, raw, ok := strings.Cut(c.GetHeader("Authorization"), " ")
 		raw = strings.TrimSpace(raw)
-		if !ok || raw == "" {
+		if !ok || !strings.EqualFold(scheme, "Bearer") || raw == "" {
 			utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "invalid API key", "invalid_key")
 			c.Abort()
 			return
@@ -36,6 +38,9 @@ func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models
 		if err != nil {
 			if errors.Is(err, services.ErrPayMerchantSuspended) {
 				utils.ErrorResponseWithCode(c, http.StatusForbidden, "this merchant account is suspended", "merchant_suspended")
+			} else if errors.Is(err, services.ErrPayAuthUnavailable) {
+				log.Printf("[tsa-pay] merchant auth unavailable: %s %s", c.Request.Method, c.FullPath())
+				utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "authentication is temporarily unavailable", "auth_unavailable")
 			} else {
 				utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "invalid API key", "invalid_key")
 			}

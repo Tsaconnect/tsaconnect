@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -37,6 +38,14 @@ var (
 	// ErrPayMerchantSuspended is returned by Authenticate for an otherwise
 	// valid key belonging to a suspended merchant.
 	ErrPayMerchantSuspended = errors.New("this merchant account is suspended")
+	// ErrPayAuthUnavailable is returned by Authenticate when the key lookup
+	// itself failed (database down), so callers answer 503 — a good key must
+	// not read as a bad one during an outage.
+	ErrPayAuthUnavailable = errors.New("authentication is temporarily unavailable")
+	// ErrPayMerchantStale is returned by Update when the merchant changed
+	// since the caller read it — an explicit expectedVersion mismatch, or a
+	// concurrent writer winning the compare-and-set.
+	ErrPayMerchantStale = errors.New("this merchant was changed by someone else — reload and try again")
 )
 
 // Approval defaults for a payment_acceptance merchant request. An admin can
@@ -74,6 +83,9 @@ type PayMerchantUpdate struct {
 	WebhookURL              *string  `json:"webhookUrl"`
 	TestWebhookURL          *string  `json:"testWebhookUrl"`
 	ReturnDomains           []string `json:"returnDomains"` // nil = unchanged
+	// ExpectedVersion, when set, is the merchant version the editor loaded; a
+	// different current version refuses the edit as stale.
+	ExpectedVersion *int `json:"expectedVersion"`
 }
 
 // Sensitive reports whether an update touches where money or events go —
@@ -258,50 +270,71 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 		return nil, err
 	}
 
+	if in.ExpectedVersion != nil && *in.ExpectedVersion != m.Version {
+		return nil, ErrPayMerchantStale
+	}
+
 	before := *m
 	updated := *m
+	// changes holds only the columns this request supplied, so a concurrent
+	// edit to any other column is never overwritten with a stale copy.
+	changes := map[string]interface{}{}
 
 	if in.BusinessName != nil {
 		updated.BusinessName = strings.TrimSpace(*in.BusinessName)
+		changes["business_name"] = updated.BusinessName
 	}
 	if in.Status != nil {
 		updated.Status = *in.Status
+		changes["status"] = updated.Status
 	}
 	if in.SettlementMode != nil {
 		updated.SettlementMode = *in.SettlementMode
+		changes["settlement_mode"] = updated.SettlementMode
 	}
 	if in.BankCode != nil {
 		updated.BankCode = strings.TrimSpace(*in.BankCode)
+		changes["bank_code"] = updated.BankCode
 	}
 	if in.AccountNumber != nil {
 		updated.AccountNumber = strings.TrimSpace(*in.AccountNumber)
+		changes["account_number"] = updated.AccountNumber
 	}
 	if in.ChainID != nil {
 		updated.ChainID = *in.ChainID
+		changes["chain_id"] = updated.ChainID
 	}
 	if in.TokenAddress != nil {
 		updated.TokenAddress = strings.TrimSpace(*in.TokenAddress)
+		changes["token_address"] = updated.TokenAddress
 	}
 	if in.TokenSymbol != nil {
 		updated.TokenSymbol = strings.TrimSpace(*in.TokenSymbol)
+		changes["token_symbol"] = updated.TokenSymbol
 	}
 	if in.WalletAddress != nil {
 		updated.WalletAddress = strings.TrimSpace(*in.WalletAddress)
+		changes["wallet_address"] = updated.WalletAddress
 	}
 	if in.CustomerFeeSharePercent != nil {
 		updated.CustomerFeeSharePercent = *in.CustomerFeeSharePercent
+		changes["customer_fee_share_percent"] = updated.CustomerFeeSharePercent
 	}
 	if in.MinAmountKobo != nil {
 		updated.MinAmountKobo = *in.MinAmountKobo
+		changes["min_amount_kobo"] = updated.MinAmountKobo
 	}
 	if in.MaxAmountKobo != nil {
 		updated.MaxAmountKobo = *in.MaxAmountKobo
+		changes["max_amount_kobo"] = updated.MaxAmountKobo
 	}
 	if in.WebhookURL != nil {
 		updated.WebhookURL = strings.TrimSpace(*in.WebhookURL)
+		changes["webhook_url"] = updated.WebhookURL
 	}
 	if in.TestWebhookURL != nil {
 		updated.TestWebhookURL = strings.TrimSpace(*in.TestWebhookURL)
+		changes["test_webhook_url"] = updated.TestWebhookURL
 	}
 	if in.ReturnDomains != nil {
 		domains := make([]string, 0, len(in.ReturnDomains))
@@ -316,32 +349,30 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 			domains = append(domains, d)
 		}
 		updated.ReturnDomains = strings.Join(domains, ",")
+		changes["return_domains"] = updated.ReturnDomains
 	}
 
 	if err := s.validatePayMerchant(ctx, &before, &updated); err != nil {
 		return nil, err
 	}
+	if updated.AccountName != before.AccountName {
+		changes["account_name"] = updated.AccountName // set by the name enquiry
+	}
 
-	if err := s.db.WithContext(ctx).Model(&models.PayMerchant{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"business_name":              updated.BusinessName,
-		"status":                     updated.Status,
-		"settlement_mode":            updated.SettlementMode,
-		"bank_code":                  updated.BankCode,
-		"account_number":             updated.AccountNumber,
-		"account_name":               updated.AccountName,
-		"chain_id":                   updated.ChainID,
-		"token_address":              updated.TokenAddress,
-		"token_symbol":               updated.TokenSymbol,
-		"wallet_address":             updated.WalletAddress,
-		"customer_fee_share_percent": updated.CustomerFeeSharePercent,
-		"min_amount_kobo":            updated.MinAmountKobo,
-		"max_amount_kobo":            updated.MaxAmountKobo,
-		"webhook_url":                updated.WebhookURL,
-		"test_webhook_url":           updated.TestWebhookURL,
-		"return_domains":             updated.ReturnDomains,
-	}).Error; err != nil {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		won, err := s.casUpdate(tx, id, before.Version, changes)
+		if err != nil {
+			return err
+		}
+		if !won {
+			return ErrPayMerchantStale
+		}
+		return s.writeAudit(tx, id, actor, "merchant.update", payAuditChanges(&before, &updated))
+	})
+	if err != nil {
 		return nil, err
 	}
+	updated.Version = before.Version + 1
 
 	if in.Sensitive() {
 		log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s fields=settlement bank=%s->%s account=%s->%s wallet=%s->%s webhookUrl=%q->%q testWebhookUrl=%q->%q returnDomains=%q->%q",
@@ -356,6 +387,18 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 	}
 
 	return &updated, nil
+}
+
+// casUpdate writes changes to a merchant only if it is still at version, and
+// bumps the version in the same statement. false means another writer got
+// there first (or the row is gone) and nothing was written.
+func (s *PayMerchantService) casUpdate(db *gorm.DB, id uuid.UUID, version int, changes map[string]interface{}) (bool, error) {
+	changes["version"] = gorm.Expr("version + 1")
+	res := db.Model(&models.PayMerchant{}).Where("id = ? AND version = ?", id, version).Updates(changes)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
 }
 
 // validatePayMerchant checks the RESULTING merchant (not just the changed
@@ -425,6 +468,44 @@ func (s *PayMerchantService) validatePayMerchant(ctx context.Context, before, up
 	return nil
 }
 
+// payAuditChanges lists the audited fields that differ between before and
+// after as {field: {before, after}}. Only non-secret fields are audited, and
+// the account number only as its last four digits.
+func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	add := func(field string, b, a any) {
+		if b != a {
+			out[field] = map[string]any{"before": b, "after": a}
+		}
+	}
+	add("businessName", before.BusinessName, after.BusinessName)
+	add("status", before.Status, after.Status)
+	add("settlementMode", before.SettlementMode, after.SettlementMode)
+	add("bankCode", before.BankCode, after.BankCode)
+	add("accountNumber", payLast4(before.AccountNumber), payLast4(after.AccountNumber))
+	add("chainId", before.ChainID, after.ChainID)
+	add("tokenAddress", before.TokenAddress, after.TokenAddress)
+	add("tokenSymbol", before.TokenSymbol, after.TokenSymbol)
+	add("walletAddress", before.WalletAddress, after.WalletAddress)
+	add("customerFeeSharePercent", before.CustomerFeeSharePercent, after.CustomerFeeSharePercent)
+	add("minAmount", before.MinAmountKobo, after.MinAmountKobo)
+	add("maxAmount", before.MaxAmountKobo, after.MaxAmountKobo)
+	add("webhookUrl", before.WebhookURL, after.WebhookURL)
+	add("testWebhookUrl", before.TestWebhookURL, after.TestWebhookURL)
+	add("returnDomains", before.ReturnDomains, after.ReturnDomains)
+	return out
+}
+
+// writeAudit records one audit event inside tx, so it commits or rolls back
+// with the change it describes.
+func (s *PayMerchantService) writeAudit(tx *gorm.DB, merchantID, actor uuid.UUID, action string, details any) error {
+	raw, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	return tx.Create(&models.PayAuditEvent{MerchantID: merchantID, ActorID: actor, Action: action, Details: string(raw)}).Error
+}
+
 // payLast4 returns the last 4 characters of a settlement identifier for an
 // audit log — enough to spot-check a change without logging the full bank
 // account number.
@@ -474,7 +555,13 @@ func (s *PayMerchantService) IssueKeys(ctx context.Context, actor uuid.UUID, id 
 		return nil, fmt.Errorf("%w: unknown key scope %q", ErrPayMerchantInvalid, scope)
 	}
 
-	if err := s.db.WithContext(ctx).Model(&models.PayMerchant{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.PayMerchant{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		return s.writeAudit(tx, id, actor, "merchant.keys", map[string]any{"scope": scope})
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -506,7 +593,11 @@ func (s *PayMerchantService) Authenticate(ctx context.Context, rawKey string) (*
 
 	var m models.PayMerchant
 	if err := s.db.WithContext(ctx).Where(column+" = ?", HashPayKey(rawKey)).First(&m).Error; err != nil {
-		return nil, "", ErrPayKeyInvalid
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", ErrPayKeyInvalid
+		}
+		log.Printf("[tsa-pay] authenticate: key lookup failed: %v", err)
+		return nil, "", ErrPayAuthUnavailable
 	}
 	if m.Status == models.PayMerchantSuspended {
 		return nil, "", ErrPayMerchantSuspended

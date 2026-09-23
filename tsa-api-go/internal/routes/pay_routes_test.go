@@ -69,7 +69,7 @@ func newPayRoutesRig(t *testing.T) (*gin.Engine, *config.Config, *gorm.DB, *hand
 	if err := db.Exec(payRoutesUsersDDL).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}); err != nil {
+	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	config.DB = db

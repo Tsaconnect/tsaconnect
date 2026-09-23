@@ -363,3 +363,124 @@ func TestPayPayment_SimulateTestOutcomeIsTestOnly(t *testing.T) {
 		t.Fatalf("err %v payment %+v", err, got)
 	}
 }
+
+func TestPayPayment_SimulateTestOutcomeReleasesTheLockWhenResolvingFails(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.db.Migrator().DropTable(&models.PayWebhookDelivery{})
+	if _, err := s.SimulateTestOutcome(context.Background(), payUser(t, s, false), p.ID, true); err == nil {
+		t.Fatal("resolved without its webhook row")
+	}
+	got, _ := s.Get(context.Background(), p.ID)
+	if got.Status != models.PayStatusPending || got.PayerUserID != nil || got.LockedAt != nil {
+		t.Fatalf("payment stranded after a failed resolve: %+v", got)
+	}
+}
+
+func TestPayPayment_SimulateTestOutcomeLeavesAnEarlierLockAloneOnFailure(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	alice := payUser(t, s, false)
+	s.Lock(context.Background(), alice, p.ID, false) // Alice's own earlier lock: resume is not fresh
+	s.db.Migrator().DropTable(&models.PayWebhookDelivery{})
+	if _, err := s.SimulateTestOutcome(context.Background(), alice, p.ID, true); err == nil {
+		t.Fatal("resolved without its webhook row")
+	}
+	if got, _ := s.Get(context.Background(), p.ID); got.Status != models.PayStatusProcessing {
+		t.Fatalf("status %s: a resumed (not fresh) lock must not be released", got.Status)
+	}
+}
+
+// lockAt puts a payment into processing with the given lock time and mode,
+// bypassing Lock so a test can age it.
+func lockAt(t *testing.T, s *PayPaymentService, m *models.PayMerchant, mode, ref string, at time.Time, extra map[string]any) *models.PayPayment {
+	t.Helper()
+	in := payIn()
+	in.Reference = ref
+	p, _, err := s.Create(context.Background(), m, mode, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]any{"status": models.PayStatusProcessing, "payer_user_id": uuid.New(), "locked_at": at}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	if err := s.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(fields).Error; err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestPayPayment_ReleaseStuckTestPaymentsTouchesOnlyOldTestOnes(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	old := payTestNow.Add(-30 * time.Minute)
+	stuck := lockAt(t, s, m, models.PayModeTest, "OLD-TEST", old, nil)
+	young := lockAt(t, s, m, models.PayModeTest, "YOUNG-TEST", payTestNow.Add(-2*time.Minute), nil)
+	live := lockAt(t, s, m, models.PayModeLive, "OLD-LIVE", old, nil)
+	linked := lockAt(t, s, m, models.PayModeTest, "OLD-LINKED", old, map[string]any{"paycrest_order_id": uuid.New()})
+
+	n, err := s.ReleaseStuckTestPayments(context.Background(), 10*time.Minute, 100)
+	if err != nil || n != 1 {
+		t.Fatalf("released %d err %v, want 1", n, err)
+	}
+	status := func(id uuid.UUID) string { got, _ := s.Get(context.Background(), id); return got.Status }
+	if status(stuck.ID) != models.PayStatusPending || status(young.ID) != models.PayStatusProcessing ||
+		status(live.ID) != models.PayStatusProcessing || status(linked.ID) != models.PayStatusProcessing {
+		t.Fatalf("stuck %s young %s live %s linked %s", status(stuck.ID), status(young.ID), status(live.ID), status(linked.ID))
+	}
+	got, _ := s.Get(context.Background(), stuck.ID)
+	if got.PayerUserID != nil || got.LockedAt != nil {
+		t.Fatalf("release left the lock behind: %+v", got)
+	}
+}
+
+func TestPayPayment_ReconcileTickReleasesStuckTestPayments(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	stuck := lockAt(t, s, m, models.PayModeTest, "OLD-TEST", payTestNow.Add(-payStuckTestReleaseAfter-time.Minute), nil)
+	if err := s.ReconcileTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(context.Background(), stuck.ID); got.Status != models.PayStatusPending {
+		t.Fatalf("status %s, want pending after a reconcile tick", got.Status)
+	}
+}
+
+func TestPayPayment_CheckoutViewSaysWhenALivePayerIsNotVerified(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	in := payIn()
+	in.Reference = "LIVE-KYC"
+	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
+	v, err := s.CheckoutView(context.Background(), payUser(t, s, false), live.ID, true)
+	if err != nil || v.Payable || v.NotPayableWhy != "Verify your identity to pay this" {
+		t.Fatalf("unverified: %+v err %v", v, err)
+	}
+	v, _ = s.CheckoutView(context.Background(), payUser(t, s, true), live.ID, true)
+	if !v.Payable {
+		t.Fatalf("verified payer must be payable: %+v", v)
+	}
+	// Test mode never needs KYC; an anonymous viewer is not asked either.
+	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	if v, _ := s.CheckoutView(context.Background(), payUser(t, s, false), test.ID, true); !v.Payable {
+		t.Fatalf("test-mode payment must not ask for KYC: %+v", v)
+	}
+	if v, _ := s.CheckoutView(context.Background(), nil, live.ID, true); !v.Payable {
+		t.Fatalf("no viewer: %+v", v)
+	}
+}
+
+func TestPayPayment_CheckoutViewDoesNotReVerifyThePayerAlreadyHoldingTheLock(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	in := payIn()
+	in.Reference = "LIVE-HELD"
+	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
+	payer := payUser(t, s, true)
+	if _, _, err := s.Lock(context.Background(), payer, live.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Table("users").Where("id = ?", payer.ID).Update("verification_status", "pending")
+	if v, _ := s.CheckoutView(context.Background(), payer, live.ID, true); !v.Payable || !v.YouArePaying {
+		t.Fatalf("the holder must still see their own payment: %+v", v)
+	}
+}

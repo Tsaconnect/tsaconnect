@@ -222,3 +222,159 @@ func TestPayMerchant_AuthenticateRefusesSuspendedAndGarbage(t *testing.T) {
 		t.Fatalf("suspended: err = %v", err)
 	}
 }
+
+func TestPayMerchant_UpdateRefusesAStaleExpectedVersionAndWritesNothing(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	if m.Version != 1 {
+		t.Fatalf("a new merchant must start at version 1, got %d", m.Version)
+	}
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{BusinessName: payStr("Renamed")}); err != nil {
+		t.Fatal(err)
+	}
+	stale := 1
+	_, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(10)})
+	if !errors.Is(err, ErrPayMerchantStale) {
+		t.Fatalf("err = %v, want ErrPayMerchantStale", err)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	if stored.CustomerFeeSharePercent != 100 || stored.Version != 2 {
+		t.Fatalf("a stale update wrote something: share %d version %d", stored.CustomerFeeSharePercent, stored.Version)
+	}
+	current := 2
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &current, CustomerFeeSharePercent: payInt(10)}); err != nil {
+		t.Fatalf("the current version must be accepted: %v", err)
+	}
+}
+
+func TestPayMerchant_UpdateIncrementsTheVersionAndReturnsIt(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(50)})
+	if err != nil || got.Version != m.Version+1 {
+		t.Fatalf("err %v version %d, want %d", err, got.Version, m.Version+1)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	if stored.Version != got.Version {
+		t.Fatalf("stored version %d, returned %d", stored.Version, got.Version)
+	}
+}
+
+// A share-only edit must write only the share: it may not resurrect the
+// status (or anything else) it read before another admin changed it.
+func TestPayMerchant_PartialUpdateLeavesOtherColumnsAlone(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	old := m.Version
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{Status: payStr(models.PayMerchantSuspended)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &old, CustomerFeeSharePercent: payInt(40)}); !errors.Is(err, ErrPayMerchantStale) {
+		t.Fatalf("with the old version: err = %v, want stale", err)
+	}
+	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	if got.CustomerFeeSharePercent != 40 || stored.CustomerFeeSharePercent != 40 || stored.Status != models.PayMerchantSuspended ||
+		stored.BankCode != "058" || stored.AccountName != "SKY AIR LIMITED" {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+// casUpdate is the compare-and-set every Update write goes through: a write
+// claiming a version the row no longer has matches nothing.
+func TestPayMerchant_CompareAndSetOnlyLandsAtTheCurrentVersion(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	ok, err := s.casUpdate(s.db, m.ID, m.Version+5, map[string]interface{}{"business_name": "x"})
+	if err != nil || ok {
+		t.Fatalf("a write at the wrong version must not land: ok %v err %v", ok, err)
+	}
+	ok, err = s.casUpdate(s.db, m.ID, m.Version, map[string]interface{}{"business_name": "x"})
+	if err != nil || !ok {
+		t.Fatalf("a write at the current version must land: ok %v err %v", ok, err)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	if stored.BusinessName != "x" || stored.Version != m.Version+1 {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func payAuditRows(t *testing.T, s *PayMerchantService) []models.PayAuditEvent {
+	t.Helper()
+	var rows []models.PayAuditEvent
+	s.db.Order("created_at").Find(&rows)
+	return rows
+}
+
+func TestPayMerchant_UpdateWritesOneAuditRowWithBeforeAndAfter(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+		WebhookURL: payStr("https://skyair.ng/hook"), AccountNumber: payStr("9876543210"), BankCode: payStr("044")}); err != nil {
+		t.Fatal(err)
+	}
+	rows := payAuditRows(t, s)
+	if len(rows) != 1 || rows[0].Action != "merchant.update" || rows[0].MerchantID != m.ID || rows[0].ActorID != payActor {
+		t.Fatalf("rows = %+v", rows)
+	}
+	d := rows[0].Details
+	for _, want := range []string{"webhookUrl", "https://skyair.ng/hook", "…3210", "…6789", "bankCode"} {
+		if !strings.Contains(d, want) {
+			t.Fatalf("details %s lack %q", d, want)
+		}
+	}
+	if strings.Contains(d, "9876543210") || strings.Contains(d, "0123456789") {
+		t.Fatalf("details hold a full account number: %s", d)
+	}
+}
+
+func TestPayMerchant_RefusedUpdatesWriteNoAuditRow(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(101)}); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("err = %v", err)
+	}
+	stale := 99
+	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(5)}); !errors.Is(err, ErrPayMerchantStale) {
+		t.Fatalf("err = %v", err)
+	}
+	if rows := payAuditRows(t, s); len(rows) != 0 {
+		t.Fatalf("refused updates wrote audit rows: %+v", rows)
+	}
+}
+
+func TestPayMerchant_IssueKeysWritesAnAuditRowWithTheScopeAndNoSecrets(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	keys, err := s.IssueKeys(context.Background(), payActor, m.ID, PayKeysAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := payAuditRows(t, s)
+	if len(rows) != 1 || rows[0].Action != "merchant.keys" || !strings.Contains(rows[0].Details, `"scope":"all"`) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	for _, secret := range []string{keys.LiveKey, keys.TestKey, keys.WebhookSecretLive, keys.WebhookSecretTest, *stored.LiveKeyHash, *stored.TestKeyHash} {
+		if secret == "" || strings.Contains(rows[0].Details, secret) {
+			t.Fatalf("details %q hold secret material %q", rows[0].Details, secret)
+		}
+	}
+}
+
+func TestPayMerchant_AuthenticateSeparatesADatabaseFailureFromABadKey(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	k, _ := s.IssueKeys(context.Background(), payActor, m.ID, PayKeysAll)
+	if _, _, err := s.Authenticate(context.Background(), "tsapk_live_"+strings.Repeat("0", 40)); !errors.Is(err, ErrPayKeyInvalid) {
+		t.Fatalf("unknown key: err = %v", err)
+	}
+	s.db.Migrator().DropTable(&models.PayMerchant{})
+	_, _, err := s.Authenticate(context.Background(), k.LiveKey)
+	if !errors.Is(err, ErrPayAuthUnavailable) || errors.Is(err, ErrPayKeyInvalid) {
+		t.Fatalf("broken store: err = %v, want ErrPayAuthUnavailable", err)
+	}
+}

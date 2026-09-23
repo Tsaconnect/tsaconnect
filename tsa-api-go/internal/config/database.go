@@ -190,6 +190,7 @@ func AutoMigrate() error {
 		&models.PayMerchant{},
 		&models.PayPayment{},
 		&models.PayWebhookDelivery{},
+		&models.PayAuditEvent{},
 	); err != nil {
 		return err
 	}

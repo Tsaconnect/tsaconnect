@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +14,7 @@ import (
 
 func newPayPostgresRig(t *testing.T) (*PayPaymentService, *models.PayMerchant) {
 	t.Helper()
-	db := newITPostgresDB(t, &models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{})
+	db := newITPostgresDB(t, &models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{})
 	now := func() time.Time { return payTestNow }
 	merchants := NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
 	return NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now), seedPayMerchant(t, db)
@@ -101,5 +102,36 @@ func TestPayWorkersQueriesRunOnPostgres(t *testing.T) {
 	sender := NewPayWebhookSender(s.db, s.merchants, NewPayWebhookHTTPClient(), s.now)
 	if _, err := sender.DeliverDue(context.Background(), 10); err != nil {
 		t.Fatalf("DeliverDue: %v", err)
+	}
+}
+
+func TestPayMerchantUpdate_ConcurrentSameVersionHasOneWinnerOnPostgres(t *testing.T) {
+	s, m := newPayPostgresRig(t)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins, stale := 0, 0
+	version := m.Version
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		share := 10 + i
+		go func() {
+			defer wg.Done()
+			_, err := s.merchants.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &version, CustomerFeeSharePercent: &share})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			case errors.Is(err, ErrPayMerchantStale):
+				stale++
+			default:
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	got, _ := s.merchants.Get(context.Background(), m.ID)
+	if wins != 1 || stale != 7 || got.Version != version+1 {
+		t.Fatalf("wins %d stale %d version %d (started %d)", wins, stale, got.Version, version)
 	}
 }

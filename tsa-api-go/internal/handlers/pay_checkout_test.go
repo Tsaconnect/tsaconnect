@@ -27,7 +27,7 @@ func newPayCheckoutRig(t *testing.T) (*PayHandler, *services.PayPaymentService, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}); err != nil {
+	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	now := func() time.Time { return payHandlerNow }

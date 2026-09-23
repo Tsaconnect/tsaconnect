@@ -347,6 +347,8 @@ func payMerchantAdminFail(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, services.ErrPayMerchantInvalid):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, services.ErrPayMerchantStale):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "This merchant was changed by someone else — reload and try again", "merchant_stale")
 	default:
 		log.Printf("[tsa-pay] admin request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
