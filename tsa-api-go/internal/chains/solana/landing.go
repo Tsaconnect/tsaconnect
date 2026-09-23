@@ -122,7 +122,7 @@ func ownerLamportDelta(owner solanago.PublicKey, res *solanarpc.GetTransactionRe
 	if err != nil || tx == nil {
 		return nil, -1
 	}
-	for idx, k := range tx.Message.AccountKeys {
+	for idx, k := range accountKeys(tx, res.Meta) {
 		if !k.Equals(owner) {
 			continue
 		}
@@ -135,4 +135,34 @@ func ownerLamportDelta(owner solanago.PublicKey, res *solanarpc.GetTransactionRe
 		), idx
 	}
 	return nil, -1
+}
+
+// accountKeys is every account a transaction touches, in the order the balance
+// arrays are indexed by.
+//
+// A version-0 transaction names only some of its accounts in the message; the
+// rest are loaded from an address lookup table and come back in
+// meta.loadedAddresses, writable first, then read-only. Message.AccountKeys
+// holds the static ones alone until the lookups are resolved, and we ask for
+// them with maxSupportedTransactionVersion 0, so v0 transactions do arrive
+// here. Reading only the static keys does not mis-index anything (the static
+// keys come first) — it simply cannot find an owner that was loaded, which
+// reads as "credited nothing" for an address that was in fact paid.
+//
+// Nothing is fetched: the loaded addresses are already in the response the
+// caller has. The message is not mutated either, since the same decode is
+// shared with whatever else reads this transaction.
+func accountKeys(tx *solanago.Transaction, meta *solanarpc.TransactionMeta) []solanago.PublicKey {
+	static := tx.Message.AccountKeys
+	loaded := len(meta.LoadedAddresses.Writable) + len(meta.LoadedAddresses.ReadOnly)
+	if loaded == 0 || tx.Message.IsResolved() {
+		// IsResolved means the lookups were already appended to AccountKeys;
+		// appending them again would index the same account twice.
+		return static
+	}
+	all := make([]solanago.PublicKey, 0, len(static)+loaded)
+	all = append(all, static...)
+	all = append(all, meta.LoadedAddresses.Writable...)
+	all = append(all, meta.LoadedAddresses.ReadOnly...)
+	return all
 }

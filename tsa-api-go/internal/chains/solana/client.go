@@ -501,8 +501,16 @@ type tokenAmt struct {
 	decimals uint8
 }
 
-// ownerTokenAmounts extracts the owner's token balances (mint → amount+decimals)
-// from a meta token-balance list.
+// ownerTokenAmounts totals the owner's token holdings per mint (mint →
+// amount+decimals) from a meta token-balance list.
+//
+// One owner can hold SEVERAL token accounts of the same mint, and a
+// transaction that touches more than one of them lists each separately. The
+// owner's position in that mint is their SUM: keeping only the last entry
+// reads a delivery into one account as nothing when another account of hers
+// appears later untouched, and reads a move between two of her own accounts as
+// a delivery. Both mistakes are settlement decisions in landing.go, so the
+// total is computed here where every caller gets it.
 func ownerTokenAmounts(owner solanago.PublicKey, bals []solanarpc.TokenBalance) map[string]tokenAmt {
 	out := map[string]tokenAmt{}
 	for _, b := range bals {
@@ -513,7 +521,11 @@ func ownerTokenAmounts(owner solanago.PublicKey, bals []solanarpc.TokenBalance) 
 		if !ok {
 			continue
 		}
-		out[b.Mint.String()] = tokenAmt{amount: amt, decimals: b.UiTokenAmount.Decimals}
+		mint := b.Mint.String()
+		if prev, seen := out[mint]; seen {
+			amt = new(big.Int).Add(prev.amount, amt)
+		}
+		out[mint] = tokenAmt{amount: amt, decimals: b.UiTokenAmount.Decimals}
 	}
 	return out
 }
