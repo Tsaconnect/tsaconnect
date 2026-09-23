@@ -34,11 +34,7 @@ import { getCheckout, returnUrlFor, type PayCheckout, type PayStatus } from '@/s
 import { payScreenState } from '@/utils/payCheckout';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
-
-/** Amounts on the wire are integer kobo (see global-constraints) — this is
- *  the only place this screen converts to a naira display string. */
-const naira = (kobo: number) =>
-  `₦${(kobo / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+import { formatKobo } from '@/utils/stableSellQuote';
 
 const DONE_LABEL: Record<PayStatus, string> = {
   succeeded: 'Payment complete',
@@ -96,8 +92,13 @@ export default function PayScreen() {
   }, [payTest.result]);
 
   useEffect(() => {
-    if (payTest.error) toast.error(payTest.error);
-  }, [payTest.error, toast]);
+    if (!payTest.error) return;
+    toast.error(payTest.error);
+    // A failed test-outcome (someone else took the payment, or it expired)
+    // means our checkout state is stale — re-fetch so the screen reflects
+    // reality instead of keeping the Approve/Decline buttons up.
+    fetchCheckout();
+  }, [payTest.error, toast, fetchCheckout]);
 
   const handleSignIn = async () => {
     if (typeof id === 'string') await rememberPendingPayment(id);
@@ -171,9 +172,9 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
-                  <SummaryRow label="Amount" value={naira(state.checkout.customerTotal)} total />
+                  <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} total />
                   {state.checkout.fee > 0 && (
-                    <SummaryRow label="Fee" value={`includes ${naira(state.checkout.fee)} fee`} />
+                    <SummaryRow label="Fee" value={`includes ${formatKobo(String(state.checkout.fee))} fee`} />
                   )}
                 </SummaryCard>
               </Card>
@@ -214,7 +215,7 @@ export default function PayScreen() {
               <Card style={{ width: '100%' }}>
                 <SummaryCard>
                   <SummaryRow label="Paid to" value={state.checkout.merchantName} />
-                  <SummaryRow label="Amount" value={naira(state.checkout.customerTotal)} />
+                  <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} />
                 </SummaryCard>
               </Card>
               {returnUrlFor(state.checkout) && (

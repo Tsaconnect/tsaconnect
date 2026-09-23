@@ -153,7 +153,7 @@ function hasPmProvisioningData(r: ExistingRequestLike): boolean {
 export type MerchantGate =
   | { screen: 'form' }
   | { screen: 'pending'; pm: boolean }
-  | { screen: 'approved'; pm: boolean }
+  | { screen: 'approved'; pm: boolean; payFlow: boolean }
   | { screen: 'provisioning' }
   | { screen: 'rejected' };
 
@@ -167,6 +167,10 @@ export function resolveMerchantGate(args: {
 
   const existingType = existingRequest.businessType ?? existingRequest.business_type;
   const existingIsPm = existingType === 'p2p_merchant';
+  // TSA Pay's payment_acceptance approval deliberately never grants
+  // RoleMerchant (Task 4) — the marketplace-merchant "Go to Merchant
+  // Dashboard" success screen is wrong for it and its API calls would 403.
+  const existingIsPay = existingType === 'payment_acceptance';
 
   // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) request must
   // NOT short-circuit the PM application — an existing merchant may upgrade to
@@ -190,7 +194,7 @@ export function resolveMerchantGate(args: {
           ? { screen: 'provisioning' }
           : { screen: 'form' };
       }
-      return { screen: 'approved', pm: existingIsPm };
+      return { screen: 'approved', pm: existingIsPm, payFlow: existingIsPay };
     case 'rejected':
       return { screen: 'rejected' };
     default:
@@ -351,7 +355,12 @@ export default function MerchantRequestScreen() {
       setPmActive(pmStatus.isPm);
       if (res.success && res.data) {
         setExistingRequest(res.data);
-        if (res.data.status === 'approved') {
+        // TSA Pay (payment_acceptance) approvals never grant the marketplace
+        // RoleMerchant server-side (Task 4's deliberate design) — caching
+        // role='merchant' here would show the "Go to Merchant Dashboard" gate
+        // for a capability the user doesn't have, whose API calls would 403.
+        const approvedType = res.data.businessType ?? res.data.business_type;
+        if (res.data.status === 'approved' && approvedType !== 'payment_acceptance') {
           await AsyncStorage.setItem('role', 'merchant');
         }
         // Pre-fill the shared business fields from the existing request. This
@@ -480,13 +489,17 @@ export default function MerchantRequestScreen() {
         icon="checkCircle"
         tone={colors.success}
         toneBg={colors.successBg}
-        title={gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
-        body={gate.pm
-          ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
-          : 'Your application has been approved. You now have access to the merchant portal.'}
-        actionTitle="Go to Merchant Dashboard"
-        actionVariant="success"
-        onAction={() => router.push('/merchants/dashboard')}
+        title={gate.payFlow ? 'Your TSA Pay application was approved' : gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
+        body={
+          gate.payFlow
+            ? "Your TSA Pay application has been approved. Accepting payments isn't in this version of the app yet — we'll notify you when it's ready."
+            : gate.pm
+            ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
+            : 'Your application has been approved. You now have access to the merchant portal.'
+        }
+        actionTitle={gate.payFlow ? 'Go Back' : 'Go to Merchant Dashboard'}
+        actionVariant={gate.payFlow ? 'secondary' : 'success'}
+        onAction={() => (gate.payFlow ? router.back() : router.push('/merchants/dashboard'))}
       />
     );
   }
