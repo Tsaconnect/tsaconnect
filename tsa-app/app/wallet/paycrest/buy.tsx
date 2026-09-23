@@ -822,9 +822,10 @@ export default function PaycrestBuyScreen() {
         visible={tokenPickerOpen}
         side="to"
         title="Choose what to buy"
-        // A buy is quoted per EVM chain (want.chainId); a chain outside the
-        // registry could never be priced, so it is not offered. Widens to
-        // Solana in Part 2b.
+        // A buy is quoted per chain (want.chainId): the EVM chains in the
+        // registry, plus Solana, which is delivered to her own Solana
+        // address. A chain outside both could never be priced, so it is not
+        // offered.
         allow={isBuyableChain}
         onSelect={async (token, chainId) => {
           // token.address is the real on-chain address (native coins
@@ -837,9 +838,19 @@ export default function PaycrestBuyScreen() {
           // address, so without her Solana address there is no order to open
           // — say so and leave the choice unchanged rather than quoting a
           // route to a recipient that cannot exist.
+          //
+          // Deriving that address can also THROW (a locked or unreadable
+          // key store), and an onSelect that rejects is an unhandled promise
+          // rejection the user never sees — the sheet just sits there. A
+          // failure to derive and a missing address are the same thing to
+          // her, so they say the same thing.
           let destinationAddress: string | undefined;
           if (isSolanaLiFiChain(chainId)) {
-            destinationAddress = (await getSolanaAddress(address ?? undefined)) ?? undefined;
+            try {
+              destinationAddress = (await getSolanaAddress(address ?? undefined)) ?? undefined;
+            } catch {
+              destinationAddress = undefined;
+            }
             if (!destinationAddress) {
               Alert.alert(
                 'Solana wallet not ready',
