@@ -930,6 +930,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// minute is well above a user re-quoting as they type, and
 				// far below anything worth pointing at LiFi.
 				pc.GET("/converted-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), pch.ConvertedQuote)
+				// The sell side of the same round trip, and the same reasons
+				// for the same limit: one LiFi call per request, for a token
+				// the caller names. Registered only when RAMP_CONVERSION_SELL
+				// built a quoter, so a deploy that leaves the flag unset has
+				// no new route at all.
+				if pch.SellQuoteEnabled() {
+					pc.GET("/sell-swap-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), pch.SellSwapQuote)
+				}
 				// Per user, not per IP. Order creation is the most sensitive
 				// write here and the only one that spends a /v2/rates call —
 				// slow and concurrency-throttled at the provider. One order at

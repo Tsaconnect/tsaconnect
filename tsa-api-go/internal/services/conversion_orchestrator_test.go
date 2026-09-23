@@ -30,6 +30,15 @@ type fakeLiFiQuoter struct {
 	err   error
 	calls int
 	last  LiFiQuoteRequest
+	// routes answers a SEQUENCE of quotes, one per call, falling back to
+	// route once exhausted. The sell quoter asks twice — once to learn the
+	// route's cost, once carrying our fee — and the two answers differ.
+	routes []*LiFiRoute
+	// errAfter delays err until after this many successful calls, so a test
+	// can make the FIRST quote succeed and the fee-carrying one fail. The
+	// zero value fails from the first call, which is what every existing
+	// fixture expects.
+	errAfter int
 }
 
 func (f *fakeLiFiQuoter) Quote(_ context.Context, req LiFiQuoteRequest) (*LiFiRoute, error) {
@@ -37,8 +46,13 @@ func (f *fakeLiFiQuoter) Quote(_ context.Context, req LiFiQuoteRequest) (*LiFiRo
 	defer f.mu.Unlock()
 	f.calls++
 	f.last = req
-	if f.err != nil {
+	if f.err != nil && f.calls > f.errAfter {
 		return nil, f.err
+	}
+	if len(f.routes) > 0 {
+		r := f.routes[0]
+		f.routes = f.routes[1:]
+		return r, nil
 	}
 	return f.route, nil
 }

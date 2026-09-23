@@ -343,6 +343,17 @@ type Config struct {
 	// nothing sweeps it automatically. Zero disables the check.
 	RampTreasuryKeptUSDCAlert float64
 
+	// RampConversionSellEnabled is the sell half of the same round trip: she
+	// swaps her own token into USDC on Base (in her own wallet, we never hold
+	// it) and we offramp that. Independent of RAMP_CONVERSION_BUY — the sell
+	// needs no treasury key, only a LiFi integrator fee wallet — so a deploy
+	// that leaves it unset keeps behaving exactly as before.
+	RampConversionSellEnabled bool
+	// RampSellSponsoredGasUSD is the EIP-3009 relay on Base we pay to move
+	// her USDC into the offramp, in USD. It is part of g, the gas half of the
+	// round-trip budget B (design §3.2).
+	RampSellSponsoredGasUSD float64
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -838,6 +849,8 @@ func Load() *Config {
 	cfg.RampConversionLegCeiling = time.Duration(getEnvInt64("RAMP_CONVERSION_LEG_CEILING_HOURS", 24)) * time.Hour
 	cfg.RampConversionMaxShortfallUSD = getEnvFloat64("RAMP_CONVERSION_MAX_SHORTFALL_USD", 50)
 	cfg.RampTreasuryKeptUSDCAlert = getEnvFloat64("RAMP_TREASURY_KEPT_USDC_ALERT", 500)
+	cfg.RampConversionSellEnabled = getEnvBool("RAMP_CONVERSION_SELL", false)
+	cfg.RampSellSponsoredGasUSD = getEnvFloat64("RAMP_SELL_SPONSORED_GAS_USD", 0.02)
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.

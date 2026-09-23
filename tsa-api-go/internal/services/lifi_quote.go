@@ -53,6 +53,11 @@ type LiFiRoute struct {
 	FromAmountUSD float64
 	ToAmountUSD   float64
 	GasCostUSD    float64
+	// GasCostWei is the same gas cost in the source chain's native units —
+	// what a sell's top-up would actually have to send, and therefore what a
+	// wallet's native balance has to be compared against. The USD figure
+	// cannot answer that question: it prices the gas, not the coin.
+	GasCostWei *big.Int
 	// ToTokenDecimals and ToTokenSymbol come from LiFi's own action.toToken,
 	// never the caller: the server must not trust the client for either.
 	ToTokenDecimals int
@@ -156,6 +161,7 @@ type lifiQuoteResponse struct {
 		FromAmountUSD     string `json:"fromAmountUSD"`
 		ToAmountUSD       string `json:"toAmountUSD"`
 		GasCosts          []struct {
+			Amount    string `json:"amount"`
 			AmountUSD string `json:"amountUSD"`
 		} `json:"gasCosts"`
 	} `json:"estimate"`
@@ -265,6 +271,12 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	for _, g := range parsed.Estimate.GasCosts {
 		v, _ := strconv.ParseFloat(g.AmountUSD, 64)
 		route.GasCostUSD += v
+		if wei, ok := new(big.Int).SetString(strings.TrimSpace(g.Amount), 10); ok {
+			if route.GasCostWei == nil {
+				route.GasCostWei = new(big.Int)
+			}
+			route.GasCostWei.Add(route.GasCostWei, wei)
+		}
 	}
 	if data, derr := hexutil.Decode(route.Data); derr == nil {
 		if id, ok := lifiTransactionID(data); ok {

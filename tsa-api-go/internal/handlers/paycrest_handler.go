@@ -25,6 +25,9 @@ type PaycrestHandler struct {
 	quotes  *services.PaycrestQuoteService
 	dir     *services.PaycrestDirectory
 	sponsor rampSponsorshipPort // nil unless RAMP_GAS_SPONSORSHIP is on
+	// sellQuotes prices a sell that needs a swap. Nil unless
+	// RAMP_CONVERSION_SELL is on — see paycrest_sell_swap.go.
+	sellQuotes sellQuoter
 }
 
 func NewPaycrestHandler(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, dir *services.PaycrestDirectory) *PaycrestHandler {

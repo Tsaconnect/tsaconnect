@@ -38,6 +38,33 @@ func addressFamily(chainID int64) string {
 	return "evm"
 }
 
+// validateAddressForChain checks that addr is written in the family chainID's
+// addresses belong to. It shares addressFamily's single switch rather than
+// re-deciding what a chain id means: a buy's destination and a sell's source
+// are the same question asked from opposite ends.
+//
+// validateSolana is the Solana chain client's own check, injected the same
+// way resolveRequestedAsset takes it. Unset, a Solana address cannot be
+// checked and is refused rather than taken on the client's word.
+func validateAddressForChain(chainID int64, addr string, validateSolana solanaAddressValidator) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return errors.New("address is required")
+	}
+	switch addressFamily(chainID) {
+	case "solana":
+		if validateSolana == nil {
+			return errors.New("no Solana chain is configured")
+		}
+		return validateSolana(addr)
+	default:
+		if !common.IsHexAddress(addr) {
+			return fmt.Errorf("%q is not an address on chain %d", addr, chainID)
+		}
+		return nil
+	}
+}
+
 // evmNativeAliasAddress is the OTHER spelling of "this chain's native coin".
 // LiFi, 1inch and most aggregators use it interchangeably with the zero
 // address, and which one comes back varies by chain and by tool.

@@ -90,17 +90,36 @@ func LiFiCostBps(route *LiFiRoute) (int, bool) {
 	return ceilBps((route.FromAmountUSD - route.ToAmountUSD) / route.FromAmountUSD * 10_000), true
 }
 
-// TreasuryGasBps is the gas the treasury pays for a route plus extraGasUnits
-// (the approve), priced from the route's own gas cost, as bps of the input.
-func TreasuryGasBps(route *LiFiRoute, extraGasUnits uint64) int {
-	if route == nil || route.FromAmountUSD <= 0 {
+// RouteGasUSD is what a route's gas costs in dollars including extraGasUnits
+// (the approve), scaled from the route's own quote. A route with no gas limit
+// is priced at the ceiling, the same figure execution would be held to.
+func RouteGasUSD(route *LiFiRoute, extraGasUnits uint64) float64 {
+	if route == nil {
 		return 0
 	}
 	routeGas := route.GasLimit
 	if routeGas == 0 {
 		routeGas = maxRouteGasLimit
 	}
-	return USDGasBps(route.GasCostUSD*float64(routeGas+extraGasUnits)/float64(routeGas), route.FromAmountUSD)
+	return route.GasCostUSD * float64(routeGas+extraGasUnits) / float64(routeGas)
+}
+
+// TreasuryGasBps is the gas the treasury pays for a route plus extraGasUnits
+// (the approve), priced from the route's own gas cost, as bps of the input.
+func TreasuryGasBps(route *LiFiRoute, extraGasUnits uint64) int {
+	if route == nil || route.FromAmountUSD <= 0 {
+		return 0
+	}
+	return USDGasBps(RouteGasUSD(route, extraGasUnits), route.FromAmountUSD)
+}
+
+// TopUpUSDForRoute is what a sponsored source-chain gas top-up for this route
+// costs us: its gas plus an approve, times topUpGasBuffer — exactly what the
+// top-up sends. The quote prices it into the round-trip budget and the
+// intent later spends it, so both read this one function: a quote that
+// budgets less than the top-up actually costs is money leaking per sell.
+func TopUpUSDForRoute(route *LiFiRoute) float64 {
+	return RouteGasUSD(route, treasuryERC20Gas) * topUpGasBuffer
 }
 
 // USDGasBps is a USD gas cost as bps of an order's USD value.

@@ -1,0 +1,265 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+)
+
+// ramp_sell_quote.go — pricing a sell that needs a swap (design §3.2).
+//
+// She holds a token Paycrest cannot offramp. We route it through LiFi into
+// USDC on Base, in HER OWN wallet — nothing is ever held by us — and then
+// offramp that USDC at the Paycrest sell rate.
+//
+// The whole price is one number she never sees the parts of. F (the sender
+// fee) is what she pays all-in; B is the slice of F a round trip may spend.
+// Admission is l + g ≤ B, where l is LiFi's own cost and g is the gas we
+// sponsor. Whatever is left, B − l − g, is charged as our LiFi integrator fee
+// on the executable quote, so her all-in stays F however cheap the route was.
+// Nothing here moves funds, signs anything or writes a row: it is a price.
+
+// rampSettlementChainID / rampSettlementToken are where a swapped sell lands
+// before the offramp: USDC on Base, the one leg Paycrest fills reliably and
+// the only chain the EIP-3009 relay sponsors.
+const (
+	rampSettlementChainID int64 = 8453
+	rampSettlementToken         = "USDC"
+)
+
+// sellRouteSlippage is the tolerance a sell route is quoted at. Her token is
+// a real market, not a stable pair, so it needs the room a normal swap takes
+// — the same 0.005 ConvertedVenues uses for a non-stable destination.
+// Slippage is a tolerance, never a cost: it is not in l.
+const sellRouteSlippage = 0.005
+
+// ErrSellRouteTooCostly: the round trip costs more than B, so selling this
+// token would eat into the rate she was quoted. Refused rather than quoted at
+// a loss (design §3.2).
+var ErrSellRouteTooCostly = errors.New("this token costs too much to sell for naira right now")
+
+// ErrSellUnavailable: we cannot price this sell at all — no settlement token
+// configured, or LiFi will not let us collect our fee on this chain. Never
+// advertise a fee we cannot collect.
+var ErrSellUnavailable = errors.New("selling this token for naira isn't available right now")
+
+// ErrSellBadSourceAddress: the address the route would be priced from is not
+// an address on that chain. A client bug, not an outage.
+var ErrSellBadSourceAddress = errors.New("that isn't a valid address on that network")
+
+// SellSwapQuote is one priced sell. Route is the executable quote the app
+// signs; LiFiQuote is the same answer verbatim, which is what actually
+// crosses the wire — the app's own swap signer already speaks it.
+type SellSwapQuote struct {
+	Route     *LiFiRoute      `json:"-"`
+	LiFiQuote json.RawMessage `json:"lifiQuote"`
+	// CostBps (l), GasBps (g) and FeeBps (B − l − g) are the budget split.
+	// They are shown to nobody, but they are what an operator reads when a
+	// sell prices differently from what a user reports.
+	CostBps int `json:"costBps"`
+	GasBps  int `json:"gasBps"`
+	FeeBps  int `json:"feeBps"`
+	// USDCAmount is what lands on Base after our fee, in major units.
+	USDCAmount   string `json:"usdcAmount"`
+	FiatEstimate string `json:"fiatEstimate"`
+	Rate         string `json:"rate"`
+}
+
+// SellQuoteInput names the sell. FromAddress is her address on the SOURCE
+// chain (Solana sells are signed from a Solana address); WalletAddress is her
+// EVM wallet, the USDC receiver, and the caller must have reconciled it
+// against the account before calling.
+type SellQuoteInput struct {
+	FromChainID   int64
+	FromToken     string
+	FromAmount    string // base units
+	FromAddress   string
+	WalletAddress string
+	FiatCode      string
+}
+
+// nativeBalanceReader answers "how much gas coin does this address hold on
+// this chain". ok is false when nothing could read it — an unknown balance is
+// treated as "she has none", because pricing a top-up we do not need costs a
+// few bps and skipping one we do need strands her mid-sell.
+type nativeBalanceReader func(ctx context.Context, chainID int64, addr string) (*big.Int, bool)
+
+// RampSellQuoter prices a swapped sell. It owns no state beyond its wiring:
+// every quote is asked fresh, because a route priced a minute ago is a price
+// we cannot honour.
+type RampSellQuoter struct {
+	lifi   lifiQuoter
+	quotes *PaycrestQuoteService
+	chains *BlockchainService
+	// budgetBps is B.
+	budgetBps int
+	// converted is the Paycrest sender fee a converted order is sent at
+	// (F − B), as a percent string — the same value PaycrestOrderService
+	// sends, so the estimate and the order cannot drift.
+	converted string
+	// sponsoredGasUSD is the EIP-3009 relay we pay on Base to move her USDC
+	// into the offramp.
+	sponsoredGasUSD float64
+	nativeBalance   nativeBalanceReader
+	solanaValidator solanaAddressValidator
+}
+
+func NewRampSellQuoter(lifi lifiQuoter, quotes *PaycrestQuoteService, chains *BlockchainService, budgetBps int, convertedFeePercent string, sponsoredGasUSD float64) *RampSellQuoter {
+	return &RampSellQuoter{
+		lifi: lifi, quotes: quotes, chains: chains,
+		budgetBps: budgetBps, converted: convertedFeePercent, sponsoredGasUSD: sponsoredGasUSD,
+	}
+}
+
+// SetNativeBalanceReader wires the source-chain gas check. Unset, no top-up
+// is ever priced in — the shape a chain with no sponsor lane should have,
+// since we would not be sending one.
+func (q *RampSellQuoter) SetNativeBalanceReader(f nativeBalanceReader) { q.nativeBalance = f }
+
+// SetSolanaValidator wires the Solana chain client's own address check, the
+// same one converted buys validate a Solana destination with. Unset, a
+// Solana source is refused rather than taken on the client's word.
+func (q *RampSellQuoter) SetSolanaValidator(v solanaAddressValidator) { q.solanaValidator = v }
+
+func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
+	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 {
+		return nil, ErrSellUnavailable
+	}
+	if err := validateAddressForChain(in.FromChainID, in.FromAddress, q.solanaValidator); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
+	}
+	// The receiver is her EVM wallet on Base, whoever the sender is.
+	if err := validateAddressForChain(rampSettlementChainID, in.WalletAddress, nil); err != nil {
+		return nil, fmt.Errorf("%w: receiving wallet: %v", ErrSellBadSourceAddress, err)
+	}
+	usdc := q.chains.TokenAddressForChainID(rampSettlementChainID, rampSettlementToken)
+	if usdc == "" {
+		return nil, ErrSellUnavailable
+	}
+	req := LiFiQuoteRequest{
+		FromChainID: in.FromChainID, ToChainID: rampSettlementChainID,
+		FromToken: in.FromToken, ToToken: usdc,
+		FromAddress: in.FromAddress, ToAddress: in.WalletAddress,
+		FromAmount: in.FromAmount, Slippage: sellRouteSlippage,
+	}
+
+	// First pass, no fee: what does the round trip cost before we take
+	// anything? Asking with our fee already on would price the fee into l and
+	// charge her for it twice.
+	first, err := q.lifi.Quote(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	l, ok := LiFiCostBps(first)
+	gas := q.gasBps(ctx, in, first)
+	if !ok || l+gas > q.budgetBps {
+		return nil, ErrSellRouteTooCostly
+	}
+
+	route := first
+	fee := q.budgetBps - l - gas
+	if fee > 0 {
+		req.FeeBps = fee
+		route, err = q.lifi.Quote(ctx, req)
+		if err != nil {
+			if errors.Is(err, ErrLiFiFeeUnconfigured) {
+				// LiFi has no fee wallet for us on this chain. We would be
+				// quoting her a rate we cannot fund — refuse the sell.
+				return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
+			}
+			return nil, err
+		}
+		// The fee-carrying ask may land on another tool entirely, so the
+		// budget has to be re-checked against THIS route. l2 now includes our
+		// own fee, which is why it is compared to the whole of B: her all-in
+		// is F − g either way.
+		l2, ok2 := LiFiCostBps(route)
+		if !ok2 || l2+gas > q.budgetBps {
+			return nil, ErrSellRouteTooCostly
+		}
+	}
+
+	out := &SellSwapQuote{
+		Route: route, LiFiQuote: route.Raw,
+		CostBps: l, GasBps: gas, FeeBps: fee,
+		USDCAmount: BaseUnitsToDecimal(route.ToAmount, 6),
+	}
+	if err := q.priceInFiat(ctx, in.FiatCode, route.ToAmount, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// gasBps is g: the Base relay we sponsor, plus a source-chain top-up when she
+// holds the token but not the coin that pays for moving it.
+func (q *RampSellQuoter) gasBps(ctx context.Context, in SellQuoteInput, route *LiFiRoute) int {
+	usd := q.sponsoredGasUSD
+	if q.needsTopUp(ctx, in, route) {
+		usd += TopUpUSDForRoute(route)
+	}
+	return USDGasBps(usd, route.FromAmountUSD)
+}
+
+// needsTopUp reports whether this sell would have us send her gas on the
+// source chain. Only EVM token sells can: a native-coin sell pays its own gas
+// out of what it sends, and a non-EVM source has no sponsor lane.
+func (q *RampSellQuoter) needsTopUp(ctx context.Context, in SellQuoteInput, route *LiFiRoute) bool {
+	if q.nativeBalance == nil || addressFamily(in.FromChainID) != "evm" || isNativeTokenAddress(in.FromToken) {
+		return false
+	}
+	have, ok := q.nativeBalance(ctx, in.FromChainID, in.FromAddress)
+	if !ok || have == nil {
+		return true // unknown: budget for the top-up rather than strand her
+	}
+	return route.GasCostWei == nil || have.Cmp(route.GasCostWei) < 0
+}
+
+// priceInFiat turns the landed USDC into naira at the rate the offramp will
+// actually be opened at (F − B), binding to a live provider quote rather than
+// the cached book.
+func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat string, usdc *big.Int, out *SellSwapQuote) error {
+	if strings.TrimSpace(fiat) == "" {
+		fiat = "NGN"
+	}
+	market, err := q.quotes.cachedMarketRate(ctx, fiat, "sell")
+	if err != nil {
+		return err
+	}
+	// Paycrest prices by order SIZE, so it has to be asked about roughly the
+	// right one. The mid rate is only used to land in the right tier; the
+	// rate that binds is whatever comes back.
+	guess := new(big.Rat).Mul(usdcRat(usdc), new(big.Rat).SetFloat64(market))
+	pct, ok := parseSenderFeePercent(q.converted)
+	if !ok {
+		return ErrSellUnavailable
+	}
+	venue, err := q.quotes.VenueForFee(ctx, "sell", fiat, guess.FloatString(2),
+		rampSettlementChainKey, rampSettlementToken, pct)
+	if err != nil {
+		return err
+	}
+	rate, ok := new(big.Rat).SetString(venue.Rate)
+	if !ok {
+		return fmt.Errorf("%w: unusable sell rate %q", ErrSellUnavailable, venue.Rate)
+	}
+	out.Rate = venue.Rate
+	out.FiatEstimate = new(big.Rat).Mul(usdcRat(usdc), rate).FloatString(2)
+	return nil
+}
+
+// rampSettlementChainKey is the chain key the settlement venue is named by.
+// Derived from the chain id would be nicer, but Paycrest's venues are keyed
+// by our chain key and Base is the one settlement leg — see §3.2.
+const rampSettlementChainKey = "base"
+
+// usdcRat is a 6dp USDC amount as an exact rational. Money is never floated
+// through a float64 here: 9.98 × 1492.50 has to be 14895.15, not 14895.1499…
+func usdcRat(v *big.Int) *big.Rat {
+	if v == nil {
+		return new(big.Rat)
+	}
+	return new(big.Rat).SetFrac(v, pow10(6))
+}

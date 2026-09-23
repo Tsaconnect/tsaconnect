@@ -341,3 +341,53 @@ func wireSolanaDestinations(reg *chainreg.Registry, orch *services.ConversionOrc
 	}
 	log.Printf("[ramp-conversion] solana destinations enabled (landing proof + address validation from the %s solana client)", rampNonEVMNetwork)
 }
+
+// buildRampSellQuoter wires the sell half of the round trip (design §3.2), or
+// returns nil — dormant, route never registered — with a line saying why.
+//
+// It needs no treasury: a swapped sell runs entirely in the user's own
+// wallet, and the only money we spend is gas. What it does need is the same
+// budget B the buy is priced from, so an unpriced conversion leaves it off.
+func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService, reg *chainreg.Registry, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) *services.RampSellQuoter {
+	if !cfg.RampConversionSellEnabled {
+		log.Printf("[ramp-sell] dormant: RAMP_CONVERSION_SELL is off")
+		return nil
+	}
+	if orders == nil || !orders.ConversionPriced() {
+		log.Printf("[ramp-sell] dormant: conversion is not priced (need 0 < B < F)")
+		return nil
+	}
+	if chains == nil || quotes == nil {
+		log.Printf("[ramp-sell] dormant: no chain registry or quote service")
+		return nil
+	}
+	q := services.NewRampSellQuoter(
+		services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
+		quotes, chains, cfg.RampRoundTripBudgetBps, orders.ConvertedFeePercent(), cfg.RampSellSponsoredGasUSD)
+	// Whether she can pay her own gas on the source chain decides whether a
+	// top-up is priced into the budget. A chain we cannot read is treated as
+	// "she has none" by the quoter, which over-prices rather than strands.
+	q.SetNativeBalanceReader(func(_ context.Context, chainID int64, addr string) (*big.Int, bool) {
+		client, _ := chains.ClientForChainID(chainID)
+		if client == nil {
+			return nil, false
+		}
+		bal, err := client.GetBalance(addr)
+		if err != nil {
+			return nil, false
+		}
+		return bal, true
+	})
+	// A Solana sell is signed from a Solana address, which only that chain's
+	// own client can validate — the same wiring converted buys use for a
+	// Solana destination. Unwired, a Solana source is refused rather than
+	// priced on the client's word.
+	if reg != nil {
+		if client, ok := reg.ForKey(rampNonEVMNetwork, "solana"); ok {
+			q.SetSolanaValidator(client.ValidateAddress)
+		}
+	}
+	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
+		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
+	return q
+}

@@ -1500,6 +1500,14 @@ func main() {
 			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
 			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
 		}
+		// Swapped sells: her token → LiFi → USDC on Base in HER wallet → the
+		// offramp. No treasury key is involved (nothing passes through us),
+		// so this turns on independently of converted buys — but it is still
+		// priced out of the same budget B, so an unpriced conversion leaves
+		// it off rather than quoting a sell at a loss.
+		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes); sellQuoter != nil {
+			paycrestHandler = paycrestHandler.WithSellQuoter(sellQuoter)
+		}
 		// Converted buys: Paycrest delivers into our own treasury instead of
 		// the user's wallet, then the treasury bridges it via LiFi. Dormant
 		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The

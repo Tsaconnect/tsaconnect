@@ -692,6 +692,14 @@ func legsByFiat(book *PaycrestMarkets, wantToken map[string]bool, networkFor map
 // venue that has since left must fail here rather than at Paycrest with the
 // user already committed.
 func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string) (*PaycrestVenue, error) {
+	return s.VenueForFee(ctx, side, fiatCode, fiatAmount, chainKey, token, s.senderFeePercent)
+}
+
+// VenueForFee is VenueFor priced at a fee OTHER than the configured one. A
+// converted sell is sent to Paycrest at F − B, not F, so the naira estimate
+// it shows has to be the F − B one: quoting the user at F and ordering at
+// F − B would understate what she receives by the whole budget.
+func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string, feePercent float64) (*PaycrestVenue, error) {
 	res, err := s.Quote(ctx, side, fiatCode, fiatAmount)
 	if err != nil {
 		return nil, err
@@ -734,7 +742,7 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 		return nil, fmt.Errorf("%w: %s on %s has no %s side right now",
 			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey, side)
 	}
-	rateStr, rate, err := quotedRate(side, q.Rate, s.senderFeePercent)
+	rateStr, rate, err := quotedRate(side, q.Rate, feePercent)
 	if err != nil {
 		return nil, fmt.Errorf("paycrest venue: unusable rate %q", q.Rate)
 	}
