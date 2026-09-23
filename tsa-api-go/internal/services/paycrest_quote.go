@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"regexp"
@@ -836,13 +837,30 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 	}
 	out := []PaycrestVenue{}
 	for _, req := range want {
+		// Every drop below is a real, expected outcome (a route this specific
+		// request cannot use) — not an error. Logged anyway, because the
+		// generic "no route can deliver X" the client shows collapses a dozen
+		// distinct reasons into one sentence, and nothing else says which one
+		// fired. requestedAssetLabel matches what the client's own refusal
+		// names, so a support conversation and a log line talk about the same
+		// thing.
+		label := requestedAssetLabel(PaycrestBuyRequest{
+			RequestedChainID: req.ChainID, RequestedTokenAddress: req.Address, Token: req.Token,
+		})
+		skip := func(reason string, args ...any) {
+			log.Printf("[ramp-conversion] quote-skip chain=%d token=%q label=%s reason=%s",
+				req.ChainID, req.Address, label, fmt.Sprintf(reason, args...))
+		}
+
 		src := s.bestSourceVenue(base.Venues) // most liquid direct route we can settle from
 		if src == nil {
+			skip("no direct settlement venue is currently quotable")
 			continue
 		}
 		routeAmount, ok := new(big.Int).SetString(src.TokenAmountBaseUnits, 10)
 		if !ok || routeAmount.Sign() <= 0 {
-			continue // decimals could not be resolved for the settlement leg
+			skip("settlement leg amount %q could not be resolved", src.TokenAmountBaseUnits)
+			continue
 		}
 		// Everything about the destination is derived here, before a paid
 		// third-party call is spent on it: an unresolvable chain id or token
@@ -851,6 +869,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// whatever chain name the client happened to send.
 		asset, rerr := resolveRequestedAsset(s.chains, s.solanaValidator, req)
 		if rerr != nil {
+			skip("requested asset could not be resolved: %v", rerr)
 			continue
 		}
 		// Decision 3: a direct route always wins; never convert what Paycrest
@@ -858,11 +877,13 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// Paycrest fills nothing else — and the match is on the RESOLVED
 		// chain/symbol, since on the address path req.Chain is empty.
 		if asset.Stable && directVenueFor(base.Venues, RequestedAsset{Chain: asset.ChainKey, Token: asset.StableSymbol}) != nil {
+			// Not a refusal — the direct venue wins, on purpose. No skip log.
 			continue
 		}
 		// Decision 6: the per-chain minimum, measured on the settlement leg's
 		// stablecoin amount, checked before spending a LiFi call on it.
 		if !MeetsMinimumOrder(asset.ChainKey, src.TokenAmount, s.conversionMins, s.conversionMinDefault) {
+			skip("below the %s minimum order (settlement amount %g)", asset.ChainKey, src.TokenAmount)
 			continue
 		}
 		// Only a stablecoin destination may need a top-up, so only it needs a
@@ -870,6 +891,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// the lane that has to pay for THAT is the settlement leg's, checked
 		// below against the route's own gas.
 		if asset.Stable && s.treasuryLanes.Lane(asset.ChainKey) == nil {
+			skip("no treasury lane configured for stable destination chain %s", asset.ChainKey)
 			continue
 		}
 		// A destination the wallet itself cannot receive on (Solana) names its
@@ -889,10 +911,12 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// First pass on T to learn l; then price what the treasury will actually bridge.
 		probe, perr := s.lifi.Quote(ctx, lreq)
 		if perr != nil {
+			skip("LiFi probe quote failed: %v", perr)
 			continue
 		}
 		l1, ok := LiFiCostBps(probe)
 		if !ok || l1 >= 10_000 {
+			skip("LiFi probe's cost is unreadable or at/above 100%%")
 			continue
 		}
 		bridge := new(big.Int).Mul(routeAmount, big.NewInt(10_000))
@@ -900,6 +924,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		lreq.FromAmount = bridge.String()
 		route, qerr := s.lifi.Quote(ctx, lreq)
 		if qerr != nil {
+			skip("LiFi bridge quote failed: %v", qerr)
 			continue
 		}
 		// The bridge runs from the settlement leg's chain, so that lane must
@@ -908,11 +933,23 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// that can only wait for a refill. Same gas rules as ExecuteRoute: a
 		// missing limit costs the ceiling, one above it is never executed.
 		routeGas := routeGasUnits(route)
-		if routeGas > maxRouteGasLimit || !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
+		if routeGas > maxRouteGasLimit {
+			skip("route gas %d exceeds the %d ceiling", routeGas, maxRouteGasLimit)
+			continue
+		}
+		if !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
+			skip("treasury cannot currently pay %s's gas for %d units (route+approve)",
+				src.ChainKey, routeGas+treasuryERC20Gas)
 			continue
 		}
 		l, ok := LiFiCostBps(route)
-		if !ok || l+TreasuryGasBps(route, treasuryERC20Gas) > s.roundTripBudgetBps {
+		if !ok {
+			skip("LiFi bridge quote's own cost is unreadable")
+			continue
+		}
+		if g := TreasuryGasBps(route, treasuryERC20Gas); l+g > s.roundTripBudgetBps {
+			skip("cost %dbps + gas %dbps = %dbps exceeds the %dbps round-trip budget",
+				l, g, l+g, s.roundTripBudgetBps)
 			continue
 		}
 		// Offer only what execution accepts: known layout, no destination call, right chain.
@@ -931,14 +968,18 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// compare the calldata against.
 		if family := addressFamily(asset.ChainID); family != "evm" {
 			if err := checkLiFiDeliveryTo(route.Data, s.chainID(src.ChainKey), asset.ChainID, recipient, family, asset.Address); err != nil {
+				skip("non-EVM delivery check failed: %v", err)
 				continue
 			}
 		} else {
 			raw, derr := hexutil.Decode(route.Data)
 			if derr != nil {
+				skip("route calldata could not be decoded: %v", derr)
 				continue
 			}
 			if d, derr := decodeLiFiDelivery(raw, s.chainID(src.ChainKey)); derr != nil || d.HasDestinationCall || d.DestinationChainID != asset.ChainID {
+				skip("structural delivery check failed: decodeErr=%v hasDestinationCall=%v destChainID=%v wantChainID=%d",
+					derr, d.HasDestinationCall, d.DestinationChainID, asset.ChainID)
 				continue
 			}
 		}
@@ -947,6 +988,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			decimals, symbol = asset.StableDecimals, asset.StableSymbol
 		}
 		if decimals <= 0 {
+			skip("resolved decimals %d is not positive", decimals)
 			continue
 		}
 		v := PaycrestVenue{
