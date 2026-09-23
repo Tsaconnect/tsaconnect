@@ -348,7 +348,7 @@ func wireSolanaDestinations(reg *chainreg.Registry, orch *services.ConversionOrc
 // It needs no treasury: a swapped sell runs entirely in the user's own
 // wallet, and the only money we spend is gas. What it does need is the same
 // budget B the buy is priced from, so an unpriced conversion leaves it off.
-func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService, reg *chainreg.Registry, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) *services.RampSellQuoter {
+func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) *services.RampSellQuoter {
 	if !cfg.RampConversionSellEnabled {
 		log.Printf("[ramp-sell] dormant: RAMP_CONVERSION_SELL is off")
 		return nil
@@ -378,18 +378,34 @@ func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService,
 		}
 		return bal, true
 	})
-	// A Solana sell is signed from a Solana address, which only that chain's
-	// own client can validate — the same wiring converted buys use for a
-	// Solana destination. Unwired, a Solana source is refused rather than
-	// priced on the client's word.
-	if reg != nil {
-		if client, ok := reg.ForKey(rampNonEVMNetwork, "solana"); ok {
-			q.SetSolanaValidator(client.ValidateAddress)
-		}
-	}
+	// Where her signature may go: the same pinned, boot-validated router
+	// allowlist the treasury signs against. A chain missing from it cannot be
+	// sold from — refused at the quote, never handed over unchecked.
+	q.SetRouterAllowlist(rampSellRouters(cfg, chains))
 	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
 		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
 	return q
+}
+
+// rampSellRouters is the router allowlist per source chain id, for the sell
+// quote. It is the treasury's own list (RAMP_TREASURY_ROUTERS_<CHAIN>, LiFi's
+// pinned diamond by default) run through the treasury's own validation, so a
+// chain the treasury would refuse to route through is refused for her too.
+func rampSellRouters(cfg *config.Config, chains *services.BlockchainService) map[int64][]common.Address {
+	out := map[int64][]common.Address{}
+	for chain := range cfg.RampTreasuryRouters {
+		id, ok := chains.ChainIDForName(chain)
+		if !ok {
+			continue
+		}
+		routers, skipReason := rampTreasuryLaneRouters(cfg, chain, rampLaneTokens(chains, chain))
+		if skipReason != "" {
+			log.Printf("[ramp-sell] ALERT ramp_sell_routers_skipped_total=1 chain=%s reason=%s — no sells from it", chain, skipReason)
+			continue
+		}
+		out[id] = routers
+	}
+	return out
 }
 
 // buildSellIntentService builds the service that drives one swapped sale to

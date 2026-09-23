@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // ramp_sell_quote.go — pricing a sell that needs a swap (design §3.2).
@@ -45,8 +48,14 @@ var ErrSellUnavailable = errors.New("selling this token for naira isn't availabl
 var ErrSellBadSourceAddress = errors.New("that isn't a valid address on that network")
 
 // ErrSellSourceUnsupported: the source chain is one a sell cannot start from
-// yet (Bitcoin, Sui) — nothing here can check its address, bind its swap or
-// sponsor its gas. Said plainly rather than as a bad address.
+// yet (Solana, Bitcoin, Sui). Said plainly rather than as a bad address.
+//
+// Solana is here because nothing can check what she would sign on it: a
+// Solana route is a serialized transaction against whichever bridge program
+// LiFi picked, not a call to the diamond whose calldata checkLiFiDeliveryTo
+// decodes, and it carries no transactionId to bind the swap to our quote
+// either. Until a Solana route can be verified the way an EVM one is, it is
+// refused rather than handed over unread.
 var ErrSellSourceUnsupported = errors.New("selling from this network isn't supported yet")
 
 // SellSwapQuote is one priced sell. Route is the executable quote the app
@@ -78,9 +87,8 @@ type SellSwapQuote struct {
 }
 
 // SellQuoteInput names the sell. FromAddress is her address on the SOURCE
-// chain (Solana sells are signed from a Solana address); WalletAddress is her
-// EVM wallet, the USDC receiver, and the caller must have reconciled it
-// against the account before calling.
+// chain; WalletAddress is her EVM wallet, the USDC receiver, and the caller
+// must have reconciled it against the account before calling.
 type SellQuoteInput struct {
 	FromChainID   int64
 	FromToken     string
@@ -113,7 +121,10 @@ type RampSellQuoter struct {
 	// into the offramp.
 	sponsoredGasUSD float64
 	nativeBalance   nativeBalanceReader
-	solanaValidator solanaAddressValidator
+	// routers is, per source chain id, the contracts a route may send her
+	// transaction to or have her approve — the same pinned allowlist the
+	// treasury signs against. A chain with none is refused: see checkSignable.
+	routers map[int64][]common.Address
 }
 
 func NewRampSellQuoter(lifi lifiQuoter, quotes *PaycrestQuoteService, chains *BlockchainService, budgetBps int, convertedFeePercent string, sponsoredGasUSD float64) *RampSellQuoter {
@@ -128,19 +139,19 @@ func NewRampSellQuoter(lifi lifiQuoter, quotes *PaycrestQuoteService, chains *Bl
 // since we would not be sending one.
 func (q *RampSellQuoter) SetNativeBalanceReader(f nativeBalanceReader) { q.nativeBalance = f }
 
-// SetSolanaValidator wires the Solana chain client's own address check, the
-// same one converted buys validate a Solana destination with. Unset, a
-// Solana source is refused rather than taken on the client's word.
-func (q *RampSellQuoter) SetSolanaValidator(v solanaAddressValidator) { q.solanaValidator = v }
+// SetRouterAllowlist wires the contracts a route may target, per source chain
+// id. Unset, every sell is refused: a route whose target cannot be checked is
+// never handed to her to sign.
+func (q *RampSellQuoter) SetRouterAllowlist(routers map[int64][]common.Address) { q.routers = routers }
 
 func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
 	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 {
 		return nil, ErrSellUnavailable
 	}
-	if family := addressFamily(in.FromChainID); family != "evm" && family != "solana" {
+	if family := addressFamily(in.FromChainID); family != "evm" {
 		return nil, fmt.Errorf("%w (%s)", ErrSellSourceUnsupported, family)
 	}
-	if err := validateAddressForChain(in.FromChainID, in.FromAddress, q.solanaValidator); err != nil {
+	if err := validateAddressForChain(in.FromChainID, in.FromAddress, nil); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
 	}
 	// The receiver is her EVM wallet on Base, whoever the sender is.
@@ -218,19 +229,11 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		}
 	}
 
-	// She signs this calldata with her own key, and after that her tokens are
+	// She signs this route with her own key, and after that her tokens are
 	// gone. The route is LiFi's answer, not ours, so it is checked before it
-	// is handed over: a route that pays someone else, lands anywhere but USDC
-	// on Base, or hands the funds to a destination call would leave §5.3's
-	// binding check with nothing to bind and "Finish your sale" with nothing
-	// to finish. Same check a converted buy runs before it offers a venue.
-	// A non-EVM source carries a chain-specific payload rather than EVM
-	// calldata, so there is nothing here to decode — that check belongs with
-	// whatever signs it.
-	if addressFamily(in.FromChainID) == "evm" {
-		if err := checkLiFiDeliveryTo(route.Data, in.FromChainID, rampSettlementChainID, in.WalletAddress, "evm", usdc); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
-		}
+	// is handed over — see checkSignable.
+	if err := q.checkSignable(route, in, usdc); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
 	}
 
 	out := &SellSwapQuote{
@@ -243,6 +246,128 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, err
 	}
 	return out, nil
+}
+
+// checkSignable refuses a route she must not sign. Every field it reads is
+// read from the body she is actually handed (route.Raw), by its exact JSON
+// name, the way the app's JSON.parse reads it — and must agree with what this
+// server parsed from the same body, so a body built to read one way here and
+// another way on her phone is refused rather than checked half-way.
+//
+//   - WHERE her signature goes: the transaction's `to` and the approval
+//     spender must be allowlisted routers on the source chain. Checking the
+//     calldata alone would decode a payload "as if" it were a diamond call
+//     while `to` named any contract at all — and her approval is unlimited.
+//   - WHAT she approves: the token the approval names must be the token she
+//     is selling, never another one she happens to hold.
+//   - Which chain she signs for, and what the calldata delivers: a route that
+//     pays someone else, lands anywhere but USDC on Base, or hands the funds
+//     to a destination call would leave §5.3's binding check with nothing to
+//     bind and "Finish your sale" with nothing to finish. Same check a
+//     converted buy runs before it offers a venue.
+func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc string) error {
+	signed, err := readSignedRoute(route.Raw)
+	if err != nil {
+		return err
+	}
+	if signed.To != route.To || signed.Data != route.Data ||
+		signed.ApprovalAddress != route.ApprovalAddress || signed.ApprovalToken != route.ApprovalToken {
+		log.Printf("[ramp-sell] ALERT ramp_sell_route_ambiguous_total=1 chain=%d tool=%s", in.FromChainID, route.Tool)
+		return fmt.Errorf("%w: the quote body reads differently from the route it was parsed as", ErrTreasuryInvalidRoute)
+	}
+	if signed.ChainID != in.FromChainID {
+		return fmt.Errorf("%w: route is for chain %d, not %d", ErrTreasuryInvalidRoute, signed.ChainID, in.FromChainID)
+	}
+	allowed := q.routers[in.FromChainID]
+	if !routerAllowed(allowed, signed.To) {
+		log.Printf("[ramp-sell] ALERT ramp_sell_route_to_refused_total=1 chain=%d to=%s tool=%s", in.FromChainID, signed.To, route.Tool)
+		return fmt.Errorf("%w: route targets an address outside the allowlist", ErrTreasuryInvalidRoute)
+	}
+	if signed.ApprovalAddress != "" {
+		if !routerAllowed(allowed, signed.ApprovalAddress) {
+			log.Printf("[ramp-sell] ALERT ramp_sell_route_spender_refused_total=1 chain=%d spender=%s tool=%s",
+				in.FromChainID, signed.ApprovalAddress, route.Tool)
+			return fmt.Errorf("%w: route names a spender outside the allowlist", ErrTreasuryInvalidRoute)
+		}
+		if !sameTokenAddress(signed.ApprovalToken, in.FromToken) {
+			return fmt.Errorf("%w: route approves %q, not the token being sold", ErrTreasuryInvalidRoute, signed.ApprovalToken)
+		}
+	}
+	return checkLiFiDeliveryTo(signed.Data, in.FromChainID, rampSettlementChainID, in.WalletAddress, "evm", usdc)
+}
+
+// signedRoute is the part of a LiFi quote body the app acts on when it signs.
+type signedRoute struct {
+	To, Data                       string
+	ChainID                        int64
+	ApprovalAddress, ApprovalToken string
+}
+
+// readSignedRoute reads signedRoute out of a raw quote body by exact key.
+// encoding/json matches struct fields case-insensitively (and takes the last
+// of several matching keys), JSON.parse does neither, so the body is walked as
+// maps here: a key the app would not read is not read.
+func readSignedRoute(raw json.RawMessage) (signedRoute, error) {
+	var out signedRoute
+	top, err := jsonObject(raw)
+	if err != nil {
+		return out, fmt.Errorf("%w: quote body: %v", ErrTreasuryInvalidRoute, err)
+	}
+	tx, err := jsonObject(top["transactionRequest"])
+	if err != nil {
+		return out, fmt.Errorf("%w: transactionRequest: %v", ErrTreasuryInvalidRoute, err)
+	}
+	if err := json.Unmarshal(tx["chainId"], &out.ChainID); err != nil {
+		return out, fmt.Errorf("%w: transactionRequest.chainId: %v", ErrTreasuryInvalidRoute, err)
+	}
+	if err := jsonString(tx, "to", &out.To); err != nil {
+		return out, err
+	}
+	if err := jsonString(tx, "data", &out.Data); err != nil {
+		return out, err
+	}
+	// Both optional: a route with no approval step carries neither.
+	if estimate, err := jsonObject(top["estimate"]); err == nil {
+		if err := jsonString(estimate, "approvalAddress", &out.ApprovalAddress); err != nil {
+			return out, err
+		}
+	}
+	if action, err := jsonObject(top["action"]); err == nil {
+		if from, err := jsonObject(action["fromToken"]); err == nil {
+			if err := jsonString(from, "address", &out.ApprovalToken); err != nil {
+				return out, err
+			}
+		}
+	}
+	return out, nil
+}
+
+// jsonString reads obj[key] into dst when it is present. Absent and null both
+// leave dst empty, as they do for the app.
+func jsonString(obj map[string]json.RawMessage, key string, dst *string) error {
+	v, ok := obj[key]
+	if !ok {
+		return nil
+	}
+	if err := json.Unmarshal(v, dst); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrTreasuryInvalidRoute, key, err)
+	}
+	return nil
+}
+
+// jsonObject decodes one JSON object into its raw members, by exact key.
+func jsonObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("missing")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, errors.New("not an object")
+	}
+	return obj, nil
 }
 
 // sellGas is g for one route, and the top-up (if any) it was priced with.

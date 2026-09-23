@@ -273,3 +273,21 @@ func TestRampTransferVerifiers_CoverChainsWithoutALane(t *testing.T) {
 		t.Fatal("a chain with no client gets no verifier")
 	}
 }
+
+// The sell quote's allowlist is the treasury's own, by chain id, through the
+// treasury's own validation: a chain whose list the treasury would refuse is
+// refused for a sell too (no entry at all, which the quoter treats as "no
+// sells from here"), and a chain the registry cannot name gets nothing.
+func TestRampSellRouters_ReusesTheTreasuryAllowlistByChainID(t *testing.T) {
+	const diamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
+	cfg := testConfig(t)
+	cfg.RampTreasuryRouters = map[string][]string{
+		"bsc":     {diamond},
+		"base":    {"0x1231DEB6f5749EF6cE6943a275A1D3E7486F4Ea"}, // a typo: skipped, not trusted
+		"nowhere": {diamond},
+	}
+	got := rampSellRouters(cfg, testBlockchainService(t, "base", "bsc"))
+	if len(got) != 1 || len(got[56]) != 1 || got[56][0] != common.HexToAddress(diamond) {
+		t.Fatalf("routers = %v, want only bsc (56) with the diamond", got)
+	}
+}

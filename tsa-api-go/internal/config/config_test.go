@@ -440,6 +440,20 @@ func TestLoad_RampTreasuryRoutersDefaultToLiFiDiamond(t *testing.T) {
 	}
 }
 
+// Swapped sells check her route against the same allowlist, so narrowing
+// RAMP_TREASURY_CHAINS for buys must not strip a sell's source chain of its
+// pinned router — that would refuse every sell from it.
+func TestLoad_RampTreasuryRoutersCoverPinnedChainsOutsideTheTreasuryList(t *testing.T) {
+	t.Setenv("RAMP_TREASURY_CHAINS", "bsc")
+	cfg := Load()
+	if got := cfg.RampTreasuryRouters["arbitrum"]; len(got) != 1 || got[0] != "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE" {
+		t.Fatalf("arbitrum routers = %v, want the pinned diamond although arbitrum has no treasury lane", got)
+	}
+	if len(cfg.RampTreasuryChains) != 1 || cfg.RampTreasuryChains[0] != "bsc" {
+		t.Fatalf("treasury chains = %v; the lane list itself must stay as configured", cfg.RampTreasuryChains)
+	}
+}
+
 func TestLoad_RampTreasuryRoutersOverride(t *testing.T) {
 	t.Setenv("RAMP_TREASURY_CHAINS", "bsc")
 	t.Setenv("RAMP_TREASURY_ROUTERS_BSC", " 0x1111111111111111111111111111111111111111 , ,0x2222222222222222222222222222222222222222")

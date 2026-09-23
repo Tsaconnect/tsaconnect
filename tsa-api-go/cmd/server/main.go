@@ -1505,7 +1505,7 @@ func main() {
 		// so this turns on independently of converted buys — but it is still
 		// priced out of the same budget B, so an unpriced conversion leaves
 		// it off rather than quoting a sell at a loss.
-		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes); sellQuoter != nil {
+		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, paycrestOrders, paycrestQuotes); sellQuoter != nil {
 			paycrestHandler = paycrestHandler.WithSellQuoter(sellQuoter)
 			// The sale itself: the same quote, stored and then held to, with
 			// a Base receipt as the only authority on what landed.

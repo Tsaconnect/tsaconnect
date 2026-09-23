@@ -7,8 +7,15 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 // ramp_sell_quote_test.go — Task 12: pricing a sell that needs a swap.
@@ -28,7 +35,48 @@ func newSellQuoterWithFakes(t *testing.T, routes ...*LiFiRoute) (*RampSellQuoter
 	quotes.SetSenderFeePercent("1")
 	quotes.SetChainRegistry(testChainRegistry())
 	lifi := &fakeLiFiQuoter{routes: routes}
-	return NewRampSellQuoter(lifi, quotes, testChainRegistry(), 50, "0.5", 0.02), lifi
+	q := NewRampSellQuoter(signedBodyLiFi{lifi}, quotes, testChainRegistry(), 50, "0.5", 0.02)
+	q.SetRouterAllowlist(map[int64][]common.Address{56: {common.HexToAddress(sellTestDiamond)}})
+	return q, lifi
+}
+
+// sellTestDiamond is LiFi's diamond, the one router the fixtures allowlist.
+const sellTestDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
+
+// signedBodyLiFi answers with each route's body (Raw) rebuilt from the route's
+// own fields — the body a real LiFi answer carries — so a fixture that edits
+// Data or To after it is built is judged on that edit, not refused for a body
+// that no longer matches it. Tests of a body that disagrees with its route
+// build their quoter without it.
+type signedBodyLiFi struct{ *fakeLiFiQuoter }
+
+func (f signedBodyLiFi) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiRoute, error) {
+	r, err := f.fakeLiFiQuoter.Quote(ctx, req)
+	if r == nil {
+		return r, err
+	}
+	return withSignedBody(r, req.FromChainID), err
+}
+
+// withSignedBody is r with Raw carrying r's own signable fields on chainID,
+// keeping whatever else Raw already held (the fixtures' "id").
+func withSignedBody(r *LiFiRoute, chainID int64) *LiFiRoute {
+	body := map[string]any{}
+	_ = json.Unmarshal(r.Raw, &body)
+	body["transactionRequest"] = map[string]any{"to": r.To, "data": r.Data, "chainId": chainID}
+	if r.ApprovalAddress != "" {
+		body["estimate"] = map[string]any{"approvalAddress": r.ApprovalAddress}
+	}
+	if r.ApprovalToken != "" {
+		body["action"] = map[string]any{"fromToken": map[string]any{"address": r.ApprovalToken}}
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	cp := *r
+	cp.Raw = raw
+	return &cp
 }
 
 // sellCalldata is a route that really does deliver to receiver, in USDC on
@@ -49,13 +97,27 @@ func sellRoute(t *testing.T, toUSD float64) *LiFiRoute {
 		ToAmount: big.NewInt(to), ToAmountMin: big.NewInt(to - 10_000),
 		FromAmountUSD: 10, ToAmountUSD: toUSD,
 		Raw:  json.RawMessage(fmt.Sprintf(`{"id":"q%d"}`, to)),
+		To:   sellTestDiamond,
 		Data: sellCalldata(t, sellTestAddress),
 	}
 }
 
+// quoteBodyID is the fixture id a quote body carries — which route it is.
+func quoteBodyID(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("quote body %s: %v", raw, err)
+	}
+	return body.ID
+}
+
+// sellRawID is the body the quote hands the app for sellRoute(toUSD).
 func sellRawID(t *testing.T, toUSD float64) string {
 	t.Helper()
-	return string(sellRoute(t, toUSD).Raw)
+	return string(withSignedBody(sellRoute(t, toUSD), sellIn.FromChainID).Raw)
 }
 
 // bscUSDT is the registry's BSC USDT: an EVM token that is NOT the chain's
@@ -171,12 +233,12 @@ func topUpFixture(t *testing.T) (*LiFiRoute, *LiFiRoute) {
 	t.Helper()
 	r1 := &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8,
 		GasCostUSD: 0.10, GasCostWei: big.NewInt(1_000), GasLimit: 1_000_000,
-		Raw: json.RawMessage(`{"id":"r1"}`), Data: sellCalldata(t, sellTestAddress)}
+		Raw: json.RawMessage(`{"id":"r1"}`), To: sellTestDiamond, Data: sellCalldata(t, sellTestAddress)}
 	// r2 runs on the same tool at the same gas: g is re-priced from r2, so a
 	// fixture whose r2 quoted no gas would price a different sale than r1.
 	r2 := &LiFiRoute{ToAmount: big.NewInt(99_740000), ToAmountMin: big.NewInt(99_640000), FromAmountUSD: 100, ToAmountUSD: 99.74,
 		GasCostUSD: 0.10, GasCostWei: big.NewInt(1_000), GasLimit: 1_000_000,
-		Raw: json.RawMessage(`{"id":"r2"}`), Data: sellCalldata(t, sellTestAddress)} // l2 = 26: 26 + 24 = 50 fits
+		Raw: json.RawMessage(`{"id":"r2"}`), To: sellTestDiamond, Data: sellCalldata(t, sellTestAddress)} // l2 = 26: 26 + 24 = 50 fits
 	return r1, r2
 }
 
@@ -196,7 +258,7 @@ func TestRampSellQuote_TopUpIncludesTheApprove(t *testing.T) {
 	if res.GasBps != 24 || res.FeeBps != 6 {
 		t.Fatalf("gas/fee = %d/%d, want 24/6", res.GasBps, res.FeeBps)
 	}
-	if string(res.LiFiQuote) != `{"id":"r2"}` {
+	if id := quoteBodyID(t, res.LiFiQuote); id != "r2" {
 		t.Fatalf("quote = %s, want the fee-carrying route", res.LiFiQuote)
 	}
 }
@@ -431,15 +493,18 @@ func TestRampSellQuote_AFundedWalletCarriesNoTopUp(t *testing.T) {
 	}
 }
 
-// Bitcoin and Sui are named for what they are and refused as unsupported —
-// never as "not a valid address", which a real BTC or Sui address is not.
-func TestRampSellQuote_RefusesBitcoinAndSuiSourcesAsUnsupported(t *testing.T) {
+// Bitcoin, Sui and Solana are named for what they are and refused as
+// unsupported — never as "not a valid address", which a real address on them
+// is not. Solana because nothing can read what she would sign there (see
+// ErrSellSourceUnsupported): refused before LiFi is even asked.
+func TestRampSellQuote_RefusesNonEVMSourcesAsUnsupported(t *testing.T) {
 	for name, tc := range map[string]struct {
 		chain int64
 		addr  string
 	}{
 		"bitcoin": {bitcoinLiFiChainID, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"},
 		"sui":     {suiLiFiChainID, "0x" + strings.Repeat("ab", 32)},
+		"solana":  {solanaLiFiChainID, "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.98))
@@ -453,5 +518,171 @@ func TestRampSellQuote_RefusesBitcoinAndSuiSourcesAsUnsupported(t *testing.T) {
 				t.Fatalf("asked LiFi %d times for a source we cannot sell from", lifi.quoteCalls())
 			}
 		})
+	}
+}
+
+// ─── Five-axis review: where her signature goes ────────────────────────────
+//
+// The calldata check decodes a payload "as if" it were a diamond call; it
+// never confirmed the call goes to the diamond. The app signs a transaction to
+// transactionRequest.to and approves estimate.approvalAddress for an unlimited
+// amount, so both must be allowlisted routers — the treasury's own check,
+// reused.
+
+func TestRampSellQuote_RefusesARouteOffTheRouterAllowlist(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		route func(*LiFiRoute)
+	}{
+		{"sends her transaction elsewhere", func(r *LiFiRoute) { r.To = sellOtherAddress }},
+		{"has her approve someone else", func(r *LiFiRoute) {
+			r.ApprovalAddress, r.ApprovalToken = sellOtherAddress, evmNativeAddress
+		}},
+		{"has her approve another token", func(r *LiFiRoute) {
+			r.ApprovalAddress, r.ApprovalToken = sellTestDiamond, bscUSDT // she is selling BNB
+		}},
+		{"names no target at all", func(r *LiFiRoute) { r.To = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r1, r2 := sellRoute(t, 9.98), sellRoute(t, 9.97)
+			tc.route(r2)
+			q, _ := newSellQuoterWithFakes(t, r1, r2)
+			if res, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellUnavailable) {
+				t.Fatalf("res = %+v err = %v; a route off the allowlist must never be offered", res, err)
+			}
+		})
+	}
+}
+
+// The control for the cases above: the same route, to the diamond and
+// approving the diamond for the token she sells, is offered.
+func TestRampSellQuote_OffersARouteToTheAllowlistedDiamond(t *testing.T) {
+	r1, r2 := sellRoute(t, 9.98), sellRoute(t, 9.97)
+	r2.ApprovalAddress, r2.ApprovalToken = sellTestDiamond, "0x0000000000000000000000000000000000000000" // LiFi's native spelling
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	res, err := q.Quote(context.Background(), sellIn)
+	if err != nil {
+		t.Fatalf("err = %v; the diamond is the one router a sell may target", err)
+	}
+	var body struct {
+		TransactionRequest struct {
+			To string `json:"to"`
+		} `json:"transactionRequest"`
+	}
+	if err := json.Unmarshal(res.LiFiQuote, &body); err != nil || body.TransactionRequest.To != sellTestDiamond {
+		t.Fatalf("handed over %s (%v)", res.LiFiQuote, err)
+	}
+}
+
+// Fail closed: a chain with no allowlist has nothing to check `to` against.
+func TestRampSellQuote_RefusesEverySellWhenNoAllowlistIsWired(t *testing.T) {
+	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.98), sellRoute(t, 9.97))
+	q.SetRouterAllowlist(nil)
+	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellUnavailable) {
+		t.Fatalf("err = %v; an unwired allowlist must refuse, not allow", err)
+	}
+}
+
+func TestRampSellQuote_RefusesARouteForAnotherChain(t *testing.T) {
+	r2 := sellRoute(t, 9.97)
+	r2 = withSignedBody(r2, 137) // she sells on BSC; the body would have her sign on Polygon
+	lifi := &fakeLiFiQuoter{routes: []*LiFiRoute{withSignedBody(sellRoute(t, 9.98), 56), r2}}
+	q, _ := newSellQuoterWithFakes(t)
+	q.lifi = lifi
+	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// encoding/json matches keys case-insensitively and keeps the LAST match;
+// JSON.parse on her phone reads each key exactly. A body carrying both
+// spellings reads one way here and another way when she signs it — so every
+// signable field is read by its exact name, and a body that disagrees with
+// the route this server parsed from it is refused. Parsed through the real
+// client, so each premise is the production parser's.
+func TestRampSellQuote_RefusesABodyThatReadsDifferentlyOnHerPhone(t *testing.T) {
+	// Her real route, stamped with transactionId 0x01…: the id the sale binds to.
+	bound := testBridgeCalldataWithID(t, sellTestAddress, 1)
+	for _, tc := range []struct {
+		name  string
+		txReq string
+		// premise: what the server's own parse must read for the case to matter
+		premise func(*LiFiRoute) bool
+	}{
+		{
+			// Caught by the exact-key read alone: the allowlist sees "to".
+			name:    "to: she signs to someone else",
+			txReq:   fmt.Sprintf(`"to":%q,"To":%q,"data":%q`, sellOtherAddress, sellTestDiamond, bound),
+			premise: func(r *LiFiRoute) bool { return strings.EqualFold(r.To, sellTestDiamond) },
+		},
+		{
+			// Both calldatas pay her, so only the consistency check can see
+			// it: the sale would bind to transactionId 0x02… while she signs
+			// 0x01…, and her sale could never be finished.
+			name:    "data: she signs a swap the sale is not bound to",
+			txReq:   fmt.Sprintf(`"to":%q,"data":%q,"Data":%q`, sellTestDiamond, bound, testBridgeCalldataWithID(t, sellTestAddress, 2)),
+			premise: func(r *LiFiRoute) bool { return strings.HasSuffix(r.TransactionID, "02") },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"estimate":{"toAmount":"9970000","toAmountMin":"9960000"},"transactionRequest":{%s,"chainId":56}}`, tc.txReq)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer srv.Close()
+			route, err := NewLiFiQuoteClient(srv.URL, "", "tsa").Quote(context.Background(), LiFiQuoteRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.premise(route) {
+				t.Fatalf("premise: the server parsed to=%s transactionId=%s", route.To, route.TransactionID)
+			}
+			q, _ := newSellQuoterWithFakes(t)
+			if err := q.checkSignable(route, sellIn, "0xBaseUSDC00000000000000000000000000001"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+				t.Fatalf("err = %v; a body that reads two ways must be refused", err)
+			}
+		})
+	}
+}
+
+// testBridgeCalldataWithID is testBridgeCalldata stamped with a transactionId
+// whose last byte is id, so two otherwise identical routes can be told apart.
+func testBridgeCalldataWithID(t *testing.T, receiver string, id byte) string {
+	t.Helper()
+	var txID [32]byte
+	txID[31] = id
+	packed, err := abi.Arguments{{Type: lifiBridgeDataType}}.Pack(lifiBridgeData{
+		TransactionId: txID, Bridge: "across", Integrator: "tsa",
+		Receiver: common.HexToAddress(receiver), MinAmount: big.NewInt(1),
+		DestinationChainId: big.NewInt(rampSettlementChainID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hexutil.Encode(append([]byte{0x17, 0x94, 0x95, 0x8f}, packed...))
+}
+
+// A real LiFi answer (BSC USDT -> Base USDC, captured 2026-09-23 from
+// li.quest) passes every check: diamond target, diamond spender, the token
+// she sells, her wallet on Base. Without this the checks above could be
+// refusing everything.
+func TestRampSellQuote_ARealLiFiRoutePassesTheSignableCheck(t *testing.T) {
+	body, err := os.ReadFile("testdata/lifi_quote/bsc_usdt_to_base_usdc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer srv.Close()
+	route, err := NewLiFiQuoteClient(srv.URL, "", "tsa").Quote(context.Background(), LiFiQuoteRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := newSellQuoterWithFakes(t)
+	in := sellIn
+	in.FromToken = "0x55d398326f99059fF775485246999027B3197955" // BSC USDT
+	if err := q.checkSignable(route, in, "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"); err != nil {
+		t.Fatalf("a genuine LiFi route was refused: %v", err)
+	}
+	q.SetRouterAllowlist(map[int64][]common.Address{56: {common.HexToAddress(sellOtherAddress)}})
+	if err := q.checkSignable(route, in, "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"); !errors.Is(err, ErrTreasuryInvalidRoute) {
+		t.Fatalf("err = %v; the same route must be refused once the diamond is off the list", err)
 	}
 }

@@ -811,8 +811,16 @@ func Load() *Config {
 		"avalanche": lifiDiamond, "sonic": lifiDiamond,
 		"linea": "0xde1e598b81620773454588b85d6b5d4eec32573e",
 	}
+	// Filled for every treasury chain AND every chain with a pinned default:
+	// swapped sells check her route against the same list, and a sell's
+	// source chain does not stop being checkable because RAMP_TREASURY_CHAINS
+	// was narrowed for buys. Treasury lanes still only read their own chains.
+	routerChains := append([]string{}, cfg.RampTreasuryChains...)
+	for chain := range rampTreasuryRouterDefaults {
+		routerChains = append(routerChains, chain)
+	}
 	cfg.RampTreasuryRouters = map[string][]string{}
-	for _, chain := range cfg.RampTreasuryChains {
+	for _, chain := range routerChains {
 		up := strings.ToUpper(chain)
 		raw := strings.TrimSpace(getEnv("RAMP_TREASURY_ROUTERS_"+up, rampTreasuryRouterDefaults[chain]))
 		var routers []string
