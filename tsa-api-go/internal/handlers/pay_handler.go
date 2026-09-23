@@ -25,6 +25,11 @@ type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
+	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
+	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
+	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
+	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
+	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID) (int, error)
 }
 type payWebhookAPI interface{}
 
@@ -176,6 +181,15 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 		payMerchantAdminFail(c, err)
 		return
 	}
+	// A suspended merchant can no longer be paid, so nothing should sit
+	// around pretending it still can be. Best-effort: the merchant update
+	// itself already landed, and a failure here still leaves the pending
+	// payments refusable at Lock time (a suspended merchant fails Lock too).
+	if in.Status != nil && *in.Status == models.PayMerchantSuspended {
+		if _, err := h.payments.ExpirePendingForMerchant(c.Request.Context(), m.ID); err != nil {
+			log.Printf("[tsa-pay] expire pending payments for suspended merchant %s: %v", m.ID, err)
+		}
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", payMerchantAdminViewFor(m))
 }
 
@@ -307,13 +321,20 @@ func (h *PayHandler) GetPayment(c *gin.Context) {
 }
 
 // payPaymentFail maps a PayPaymentService error to the wire response: not
-// found -> 404, an invalid request or an unconfigured merchant -> 422, a
-// reference reused with different details -> 409, anything else -> a
-// generic 500 with the detail only in the log.
+// found -> 404, unverified (live money-in) -> 403 with a machine code the
+// app routes on, "can't be paid right now" / already in progress / a
+// transition the payment's current state refuses -> 409, an invalid request
+// or an unconfigured merchant -> 422, a reference reused with different
+// details -> 409, anything else -> a generic 500 with the detail only in
+// the log.
 func payPaymentFail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, services.ErrPayPaymentNotFound):
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
+	case errors.Is(err, services.ErrPayNotPayable), errors.Is(err, services.ErrPayInProgress), errors.Is(err, services.ErrPayTransition):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrPayPaymentInvalid), errors.Is(err, services.ErrPayMerchantNotReady):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, services.ErrPayReferenceConflict):
@@ -322,4 +343,111 @@ func payPaymentFail(c *gin.Context, err error) {
 		log.Printf("[tsa-pay] merchant api request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
 	}
+}
+
+// GET /api/pay/checkout/:id — a signed-in user viewing or resuming a
+// checkout.
+func (h *PayHandler) Checkout(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+
+	v, err := h.payments.CheckoutView(c.Request.Context(), user, id, h.liveEnabled)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Checkout", v)
+}
+
+// GET /api/pay/public/:id — the unauthenticated status page a customer's
+// browser (or the merchant's own site) can poll without a session.
+func (h *PayHandler) Public(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+
+	v, err := h.payments.PublicView(c.Request.Context(), id)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", v)
+}
+
+// payTestOutcomeRequest is TestOutcome's body.
+type payTestOutcomeRequest struct {
+	Outcome string `json:"outcome"`
+}
+
+// POST /api/pay/checkout/:id/test-outcome — the app's "simulate" button for
+// a test-mode payment: {"outcome":"approve"|"decline"}.
+func (h *PayHandler) TestOutcome(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+	var in payTestOutcomeRequest
+	if err := c.ShouldBindJSON(&in); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	var approve bool
+	switch in.Outcome {
+	case "approve":
+		approve = true
+	case "decline":
+		approve = false
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, `outcome must be "approve" or "decline"`)
+		return
+	}
+
+	p, err := h.payments.SimulateTestOutcome(c.Request.Context(), user, id, approve)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+}
+
+// POST /api/pay/v1/payments/:id/cancel — a merchant cancels its own pending
+// payment.
+func (h *PayHandler) CancelPayment(c *gin.Context) {
+	m, mode, ok := payMerchantFromContext(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+
+	if err := h.payments.Cancel(c.Request.Context(), m.ID, mode, id); err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	p, err := h.payments.GetForMerchant(c.Request.Context(), m.ID, mode, id)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment cancelled", h.payments.View(p))
 }

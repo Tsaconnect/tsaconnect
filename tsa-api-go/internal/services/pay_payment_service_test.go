@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -124,5 +125,241 @@ func TestPayPayment_AMerchantReadsOnlyItsOwnPaymentsInItsOwnMode(t *testing.T) {
 	}
 	if _, err := s.GetForMerchant(context.Background(), m.ID, models.PayModeTest, p.ID); !errors.Is(err, ErrPayPaymentNotFound) {
 		t.Fatalf("a test key read a live payment: err = %v", err)
+	}
+}
+
+func payUser(t *testing.T, s *PayPaymentService, verified bool) *models.User {
+	t.Helper()
+	if !verified {
+		return &models.User{ID: uuid.New()}
+	}
+	id := seedVerifiedUser(t, s.db)
+	var u models.User
+	s.db.First(&u, "id = ?", id)
+	return &u
+}
+
+func deliveries(t *testing.T, s *PayPaymentService) []models.PayWebhookDelivery {
+	t.Helper()
+	var ds []models.PayWebhookDelivery
+	s.db.Order("created_at").Find(&ds)
+	return ds
+}
+
+func withWebhooks(t *testing.T, s *PayPaymentService, m *models.PayMerchant) {
+	t.Helper()
+	s.db.Model(m).Updates(map[string]any{"webhook_url": "https://skyair.ng/live", "test_webhook_url": "https://skyair.ng/test"})
+	m.WebhookURL, m.TestWebhookURL = "https://skyair.ng/live", "https://skyair.ng/test"
+}
+
+func TestPayPayment_LockIsFirstComeAndResumable(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	alice, bob := payUser(t, s, false), payUser(t, s, false)
+	if _, fresh, err := s.Lock(context.Background(), alice, p.ID, false); err != nil || !fresh {
+		t.Fatalf("first lock: %v fresh=%v", err, fresh)
+	}
+	if _, fresh, err := s.Lock(context.Background(), alice, p.ID, false); err != nil || fresh {
+		t.Fatalf("the same payer resuming: %v fresh=%v", err, fresh)
+	}
+	if _, _, err := s.Lock(context.Background(), bob, p.ID, false); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("second payer: err = %v", err)
+	}
+	bv, _ := s.CheckoutView(context.Background(), bob, p.ID, false)
+	av, _ := s.CheckoutView(context.Background(), alice, p.ID, false)
+	if bv.Payable || bv.YouArePaying || !strings.Contains(bv.NotPayableWhy, "Someone else") || !av.YouArePaying {
+		t.Fatalf("bob %+v alice %+v", bv, av)
+	}
+}
+
+func TestPayPayment_LockRefusals(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.now = func() time.Time { return p.ExpiresAt.Add(-payMinTimeToStart + time.Second) }
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, false), p.ID, false); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("< 5 min left: err = %v", err)
+	}
+	s.now = func() time.Time { return p.ExpiresAt.Add(-payMinTimeToStart) }
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, false), p.ID, false); err != nil {
+		t.Fatalf("exactly 5 min left must be allowed: %v", err)
+	}
+	s.now = func() time.Time { return payTestNow }
+
+	in := payIn()
+	in.Reference = "LIVE-1"
+	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, true), live.ID, false); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("live while disabled: err = %v", err)
+	}
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, false), live.ID, true); !errors.Is(err, ErrKYCVerificationRequired) {
+		t.Fatalf("unverified live payer: err = %v", err)
+	}
+	s.db.Model(m).Update("status", models.PayMerchantSuspended)
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, true), live.ID, true); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("suspended merchant: err = %v", err)
+	}
+}
+
+// Every operation against every state: only the allowed ones change anything,
+// and each terminal transition queues exactly one webhook.
+func TestPayPayment_TransitionTable(t *testing.T) {
+	ops := map[string]func(s *PayPaymentService, p *models.PayPayment) error{
+		"lock": func(s *PayPaymentService, p *models.PayPayment) error {
+			_, _, err := s.Lock(context.Background(), &models.User{ID: uuid.New()}, p.ID, false)
+			return err
+		},
+		"release": func(s *PayPaymentService, p *models.PayPayment) error {
+			return s.Release(context.Background(), p.ID, "x")
+		},
+		"succeed": func(s *PayPaymentService, p *models.PayPayment) error {
+			return s.Succeed(context.Background(), p.ID, "ref")
+		},
+		"fail": func(s *PayPaymentService, p *models.PayPayment) error { return s.Fail(context.Background(), p.ID, "x") },
+		"cancel": func(s *PayPaymentService, p *models.PayPayment) error {
+			return s.Cancel(context.Background(), p.MerchantID, p.Mode, p.ID)
+		},
+	}
+	allowed := map[string]map[string]string{ // from -> op -> resulting status
+		models.PayStatusPending:    {"lock": models.PayStatusProcessing, "cancel": models.PayStatusExpired},
+		models.PayStatusProcessing: {"release": models.PayStatusPending, "succeed": models.PayStatusSucceeded, "fail": models.PayStatusFailed},
+		models.PayStatusSucceeded:  {},
+		models.PayStatusFailed:     {},
+		models.PayStatusExpired:    {},
+	}
+	events := map[string]int{"succeed": 1, "fail": 1, "cancel": 1}
+	for from, allowedOps := range allowed {
+		for op, run := range ops {
+			s, m := newPayPaymentRig(t)
+			withWebhooks(t, s, m)
+			p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+			s.db.Model(p).Updates(map[string]any{"status": from, "payer_user_id": uuid.New()})
+			err := run(s, p)
+			got, _ := s.Get(context.Background(), p.ID)
+			want, ok := allowedOps[op]
+			if ok && (err != nil || got.Status != want) {
+				t.Fatalf("%s from %s: err %v status %s, want %s", op, from, err, got.Status, want)
+			}
+			if !ok && (err == nil || got.Status != from) {
+				t.Fatalf("%s from %s must be refused and change nothing: err %v status %s", op, from, err, got.Status)
+			}
+			wantEvents := 0
+			if ok {
+				wantEvents = events[op]
+			}
+			if n := len(deliveries(t, s)); n != wantEvents {
+				t.Fatalf("%s from %s queued %d webhooks, want %d", op, from, n, wantEvents)
+			}
+		}
+	}
+}
+
+func TestPayPayment_ReleaseClearsThePayerAndTheAttempt(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.Lock(context.Background(), payUser(t, s, false), p.ID, false)
+	if err := s.LinkOrder(context.Background(), p.ID, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LinkIntent(context.Background(), p.ID, uuid.New()); !errors.Is(err, ErrPayInProgress) {
+		t.Fatalf("a second attempt: err = %v", err)
+	}
+	s.Release(context.Background(), p.ID, "x")
+	got, _ := s.Get(context.Background(), p.ID)
+	if got.PayerUserID != nil || got.LockedAt != nil || got.PaycrestOrderID != nil || got.SellIntentID != nil {
+		t.Fatalf("after release: %+v", got)
+	}
+	if _, _, err := s.Lock(context.Background(), payUser(t, s, false), p.ID, false); err != nil {
+		t.Fatalf("another customer may pay after release: %v", err)
+	}
+}
+
+func TestPayPayment_WebhooksAreModeIsolatedAndCarryLivemode(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.SimulateTestOutcome(context.Background(), payUser(t, s, false), test.ID, true)
+	ds := deliveries(t, s)
+	if len(ds) != 1 || ds[0].Mode != models.PayModeTest || !strings.Contains(ds[0].Payload, `"livemode":false`) ||
+		!strings.Contains(ds[0].Payload, `"id":"`+ds[0].ID.String()+`"`) || !strings.Contains(ds[0].Payload, `"settlementRef":"test"`) {
+		t.Fatalf("deliveries = %+v", ds)
+	}
+	s.db.Model(m).Update("test_webhook_url", "")
+	m.TestWebhookURL = ""
+	in := payIn()
+	in.Reference = "PNR-2"
+	quiet, _, _ := s.Create(context.Background(), m, models.PayModeTest, in)
+	s.SimulateTestOutcome(context.Background(), payUser(t, s, false), quiet.ID, false)
+	if n := len(deliveries(t, s)); n != 1 {
+		t.Fatalf("a test event with no test URL was queued (%d)", n)
+	}
+}
+
+func TestPayPayment_ExpireDueTouchesOnlyPendingPastExpiry(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	pending, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	in := payIn()
+	in.Reference = "PNR-2"
+	inFlight, _, _ := s.Create(context.Background(), m, models.PayModeTest, in)
+	payer := payUser(t, s, false)
+	s.Lock(context.Background(), payer, inFlight.ID, false)
+	s.now = func() time.Time { return pending.ExpiresAt } // exactly at expiry: not yet
+	if n, _ := s.ExpireDue(context.Background(), 50); n != 0 {
+		t.Fatal("expired at exactly expires_at")
+	}
+	s.now = func() time.Time { return payTestNow.Add(31 * time.Minute) }
+	if n, err := s.ExpireDue(context.Background(), 50); err != nil || n != 1 {
+		t.Fatalf("expired %d, err %v", n, err)
+	}
+	a, _ := s.Get(context.Background(), pending.ID)
+	b, _ := s.Get(context.Background(), inFlight.ID)
+	if a.Status != models.PayStatusExpired || b.Status != models.PayStatusProcessing {
+		t.Fatalf("statuses %s / %s — a payment in flight must never expire", a.Status, b.Status)
+	}
+	if _, fresh, err := s.Lock(context.Background(), payer, b.ID, false); err != nil || fresh {
+		t.Fatalf("the payer resuming after expires_at: %v", err)
+	}
+	if ds := deliveries(t, s); len(ds) != 1 || ds[0].Event != models.PayEventExpired || ds[0].PaymentID != pending.ID {
+		t.Fatalf("deliveries = %+v", ds)
+	}
+}
+
+func TestPayPayment_SuspensionExpiresPendingPayments(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	if n, err := s.ExpirePendingForMerchant(context.Background(), m.ID); err != nil || n != 1 {
+		t.Fatalf("n %d err %v", n, err)
+	}
+	if got, _ := s.Get(context.Background(), p.ID); got.Status != models.PayStatusExpired {
+		t.Fatalf("status %s", got.Status)
+	}
+}
+
+func TestPayPayment_SucceedRollsBackWhenTheWebhookRowCannotBeWritten(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.Lock(context.Background(), payUser(t, s, false), p.ID, false)
+	s.db.Migrator().DropTable(&models.PayWebhookDelivery{})
+	if err := s.Succeed(context.Background(), p.ID, "x"); err == nil {
+		t.Fatal("succeeded without its webhook row")
+	}
+	if got, _ := s.Get(context.Background(), p.ID); got.Status != models.PayStatusProcessing {
+		t.Fatalf("status %s — the transition must roll back with the webhook", got.Status)
+	}
+}
+
+func TestPayPayment_SimulateTestOutcomeIsTestOnly(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	in := payIn()
+	in.Reference = "LIVE-2"
+	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
+	if _, err := s.SimulateTestOutcome(context.Background(), payUser(t, s, true), live.ID, true); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("simulating a live payment: err = %v", err)
+	}
+	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	got, err := s.SimulateTestOutcome(context.Background(), payUser(t, s, false), test.ID, false)
+	if err != nil || got.Status != models.PayStatusFailed || got.FailureReason != "declined in test mode" {
+		t.Fatalf("err %v payment %+v", err, got)
 	}
 }

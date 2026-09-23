@@ -1212,6 +1212,22 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			merchantAPI.POST("/payments", payh.CreatePayment)
 			merchantAPI.GET("/payments/:id", payh.GetPayment)
 		}
+
+		// The public status page — no auth, IP rate-limited on its own route
+		// (not the merchant-key limiter above, which a customer's browser
+		// never authenticates against).
+		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
+		merchantAPI.POST("/payments/:id/cancel", payh.CancelPayment)
+
+		// The app's checkout screen: JWT user auth, per-user rate limit.
+		// test-outcome is idempotency-protected like every other
+		// POST-with-side-effects endpoint.
+		checkout := api.Group("/pay/checkout")
+		checkout.Use(auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey))
+		{
+			checkout.GET("/:id", payh.Checkout)
+			checkout.POST("/:id/test-outcome", middleware.Idempotency(config.DB), payh.TestOutcome)
+		}
 	}
 }
 
