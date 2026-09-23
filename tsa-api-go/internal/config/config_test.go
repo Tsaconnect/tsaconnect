@@ -473,3 +473,16 @@ func TestLoad_RampRoundTripBudgetBps(t *testing.T) {
 		t.Fatalf("budget = %d, want 35", got)
 	}
 }
+
+func TestLoad_TSAPayDefaultsOff(t *testing.T) {
+	t.Setenv("TSA_PAY_ENABLED", "")
+	t.Setenv("TSA_PAY_LIVE_ENABLED", "")
+	t.Setenv("TSA_PAY_CHECKOUT_BASE_URL", "")
+	cfg := Load()
+	if cfg.TSAPayEnabled || cfg.TSAPayLiveEnabled {
+		t.Fatal("TSA Pay must default off, live mode doubly so")
+	}
+	if cfg.TSAPayCheckoutBaseURL != "https://tsaconnectworld.com/pay" {
+		t.Fatalf("checkout base = %q", cfg.TSAPayCheckoutBaseURL)
+	}
+}

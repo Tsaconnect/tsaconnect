@@ -186,6 +186,10 @@ func AutoMigrate() error {
 		// and cached normalized tx history.
 		&models.WalletAddress{},
 		&models.WalletActivity{},
+		// TSA Pay (merchant payments)
+		&models.PayMerchant{},
+		&models.PayPayment{},
+		&models.PayWebhookDelivery{},
 	); err != nil {
 		return err
 	}

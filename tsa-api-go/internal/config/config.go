@@ -354,6 +354,14 @@ type Config struct {
 	// round-trip budget B (design §3.2).
 	RampSellSponsoredGasUSD float64
 
+	// ── TSA Pay (merchant payments) ──
+	// Test mode is on until the licensing question is answered; live mode stays
+	// off until PM gives clearance on compliance.
+	TSAPayEnabled            bool
+	TSAPayLiveEnabled        bool
+	TSAPayWebhookMasterKey   string
+	TSAPayCheckoutBaseURL    string
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -859,6 +867,16 @@ func Load() *Config {
 	cfg.RampTreasuryKeptUSDCAlert = getEnvFloat64("RAMP_TREASURY_KEPT_USDC_ALERT", 500)
 	cfg.RampConversionSellEnabled = getEnvBool("RAMP_CONVERSION_SELL", false)
 	cfg.RampSellSponsoredGasUSD = getEnvFloat64("RAMP_SELL_SPONSORED_GAS_USD", 0.02)
+
+	// TSA Pay merchant-payments platform.
+	cfg.TSAPayEnabled = getEnvBool("TSA_PAY_ENABLED", false)
+	cfg.TSAPayLiveEnabled = getEnvBool("TSA_PAY_LIVE_ENABLED", false)
+	cfg.TSAPayWebhookMasterKey = strings.TrimSpace(getEnv("TSA_PAY_WEBHOOK_MASTER_KEY", ""))
+	checkoutBaseURL := strings.TrimSpace(getEnv("TSA_PAY_CHECKOUT_BASE_URL", ""))
+	if checkoutBaseURL == "" {
+		checkoutBaseURL = "https://tsaconnectworld.com/pay"
+	}
+	cfg.TSAPayCheckoutBaseURL = checkoutBaseURL
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
