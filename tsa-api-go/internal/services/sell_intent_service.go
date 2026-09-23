@@ -374,12 +374,14 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, models.SellIntentOrdering).
-		Updates(map[string]any{
+		// The order now carries its own copy of her bank details; the
+		// intent's goes in this same write.
+		Updates(models.WithBankDetailsCleared(map[string]any{
 			"landed_usdc":       BaseUnitsToDecimal(landed, 6),
 			"paycrest_order_id": order.ID,
 			"status":            models.SellIntentOrdered,
 			"updated_at":        s.now(),
-		})
+		}))
 	if res.Error != nil || res.RowsAffected == 0 {
 		// We held the claim, so this is a DB failure (or a claim that sat past
 		// the stale window). The offramp exists upstream either way; losing
@@ -569,7 +571,8 @@ func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) e
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND user_id = ? AND status IN ?", id, userID,
 			[]string{models.SellIntentSwapping, models.SellIntentSwapped}).
-		Updates(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()})
+		// A dead sale pays nobody: her bank details go in the same write.
+		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()}))
 	if res.Error != nil {
 		return res.Error
 	}

@@ -37,8 +37,11 @@ type accountDeletionNoteInput struct {
 
 // blockingCommitments reports the in-flight obligations that must be settled
 // before a user can walk away: live P2P trades (someone else's money is locked
-// in escrow against them) and live marketplace orders (goods or funds are in
-// flight). Returns a human-readable list — empty means clear to delete.
+// in escrow against them), live marketplace orders (goods or funds are in
+// flight), a sale to her bank still in progress (her bank details are
+// attached to it) and a converted purchase not yet delivered (the treasury
+// holds what it owes her). Returns a human-readable list — empty means clear
+// to delete.
 //
 // Deliberately NOT a blocker: a non-zero wallet balance. The wallet is
 // non-custodial and the user keeps their seed phrase, so deleting the account
@@ -78,6 +81,27 @@ func blockingCommitments(db *gorm.DB, userID uuid.UUID) ([]string, error) {
 	}
 	if orderCount > 0 {
 		blockers = append(blockers, fmt.Sprintf("%d open marketplace order(s)", orderCount))
+	}
+
+	var saleCount int64
+	if err := db.Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
+		Count(&saleCount).Error; err != nil {
+		return nil, err
+	}
+	if saleCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d sale to your bank still in progress", saleCount))
+	}
+
+	var purchaseCount int64
+	if err := db.Model(&models.PaycrestOrderRecord{}).
+		Where("user_id = ? AND route_kind = ? AND status NOT IN ?",
+			userID, models.RouteKindConverted, models.PaycrestTerminalStatuses()).
+		Count(&purchaseCount).Error; err != nil {
+		return nil, err
+	}
+	if purchaseCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d purchase still being delivered", purchaseCount))
 	}
 
 	return blockers, nil
@@ -331,6 +355,25 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		}
 		anonEmail := fmt.Sprintf("deleted_%s@deleted.local", req.UserID.String())
 		anonUsername := fmt.Sprintf("deleted_%s", anonCleanID)
+
+		// Her bank details on finished ramp activity. blockingCommitments kept
+		// anything open from reaching here; this closes out rows that ended
+		// before the state transitions started clearing them. Only resolved
+		// rows: an open intent is left alone (erasing its destination would
+		// break an order being opened for it), and an unmatched order keeps
+		// its payout details because an operator is still chasing it.
+		if err := tx.Model(&models.RampSellIntent{}).
+			Where("user_id = ? AND status IN ?", req.UserID,
+				[]string{models.SellIntentOrdered, models.SellIntentFailed}).
+			Updates(models.WithBankDetailsCleared(map[string]any{})).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.PaycrestOrderRecord{}).
+			Where("user_id = ? AND status IN ?", req.UserID, models.PaycrestResolvedStatuses()).
+			Updates(models.WithPayoutDetailsCleared(map[string]any{})).Error; err != nil {
+			return err
+		}
+
 		return tx.Model(&models.User{}).Where("id = ?", req.UserID).Updates(map[string]interface{}{
 			"email":          anonEmail,
 			"username":       anonUsername,

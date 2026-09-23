@@ -103,6 +103,19 @@ func (i *RampSellIntent) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// WithBankDetailsCleared adds, to a column update, the blanking of the payout
+// destination she typed in. A sale that ended (failed) or handed off to its
+// Paycrest order (ordered — the order keeps its own copy) no longer needs
+// her bank account, so it is erased in the same write as the status change.
+// Blank, not NULL: the columns are NOT NULL, and a schema change is not
+// needed to forget a value.
+func WithBankDetailsCleared(updates map[string]any) map[string]any {
+	updates["bank_code"] = ""
+	updates["account_number"] = ""
+	updates["account_name"] = ""
+	return updates
+}
+
 // Open reports an intent still in progress.
 func (i *RampSellIntent) Open() bool {
 	for _, st := range SellIntentOpenStatuses {

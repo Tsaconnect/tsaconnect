@@ -17,9 +17,10 @@ import (
 // hash mismatches the incoming request body indicates a key reuse with a
 // different payload and the middleware returns 409 Conflict.
 //
-// Rows older than 24h are eligible for cleanup; a future periodic job
-// (TimeoutWatchdog-style) can prune them. Phase 1: no cleaner yet, table grows
-// unbounded but each row is small (<2KB) and not on the hot path.
+// Rows older than RequestIdempotencyRetention are deleted by
+// jobs.RequestIdempotencyPruner. That matters beyond table size: a cached
+// response is whatever the endpoint answered, which for some endpoints (a
+// sell intent) includes the user's bank details.
 type RequestIdempotency struct {
 	Key            string         `gorm:"primaryKey;size:200" json:"key"`
 	UserID         uuid.UUID      `gorm:"type:uuid;index;not null" json:"userId"`
@@ -36,6 +37,11 @@ type RequestIdempotency struct {
 	ResponseHeaders datatypes.JSON `gorm:"type:jsonb" json:"responseHeaders,omitempty"`
 	CreatedAt       time.Time      `gorm:"index" json:"createdAt"`
 }
+
+// RequestIdempotencyRetention is how long a cached response can be replayed.
+// Clients mint a fresh key per action and retry within seconds or minutes, so
+// a day is far past any legitimate retry of the same key.
+const RequestIdempotencyRetention = 24 * time.Hour
 
 func (RequestIdempotency) TableName() string {
 	return "request_idempotencies"

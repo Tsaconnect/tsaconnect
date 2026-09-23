@@ -510,6 +510,11 @@ func main() {
 	scheduler.Register(jobs.NewBookingRequestExpiry(
 		services.NewBookingRequestService(config.DB), time.Hour))
 
+	// Idempotency-Key cache: delete replayable responses past their 24h window.
+	// They hold whatever the endpoint answered (a sell intent's bank details
+	// among them). Database-only tidy-up, not a money path, so not alert-wired.
+	scheduler.Register(jobs.NewRequestIdempotencyPruner(config.DB, time.Hour))
+
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
 	if billService != nil {

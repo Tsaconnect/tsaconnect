@@ -821,3 +821,85 @@ func TestSellIntent_ResumableFindsAnOrderedSaleAwaitingItsDeposit(t *testing.T) 
 		t.Fatalf("a settled order: got %+v err %v, want nothing to resume", got, err)
 	}
 }
+
+// ─── Bank-detail retention ─────────────────────────────────────────────────
+
+// giveAccountName sets the optional account name on the stored row, so the
+// clearing below is proven for all three bank columns, not just the two the
+// rig's Create fills.
+func (r *sellIntentRig) giveAccountName(t *testing.T, id uuid.UUID) {
+	t.Helper()
+	if err := r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", id).
+		Update("account_name", "ADA OBI").Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertBankDetailsCleared(t *testing.T, in *models.RampSellIntent) {
+	t.Helper()
+	if in.BankCode != "" || in.AccountNumber != "" || in.AccountName != "" {
+		t.Fatalf("bank details survived the %s transition: code=%q number=%q name=%q",
+			in.Status, in.BankCode, in.AccountNumber, in.AccountName)
+	}
+}
+
+// An abandoned sale will never pay anyone: her bank account goes with it, in
+// the same write that fails the intent.
+func TestSellIntent_AbandonClearsBankDetails(t *testing.T) {
+	r := newSellIntentRig(t)
+	in := r.create(t)
+	r.giveAccountName(t, in.ID)
+	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t, in.ID)
+	if got.Status != models.SellIntentFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	assertBankDetailsCleared(t, got)
+}
+
+// Once the order is open it carries its own copy of the payout destination,
+// so the intent's copy is dropped as it moves to ordered — and the order,
+// which still has to pay her, keeps its own.
+func TestSellIntent_OpeningTheOrderClearsTheIntentsBankDetails(t *testing.T) {
+	r, in := landedRig(t)
+	r.giveAccountName(t, in.ID)
+	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.reload(t, in.ID)
+	if got.Status != models.SellIntentOrdered {
+		t.Fatalf("status = %q, want ordered", got.Status)
+	}
+	assertBankDetailsCleared(t, got)
+
+	var stored models.PaycrestOrderRecord
+	if err := r.svc.db.First(&stored, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.PayoutAccount != "0123456789" || stored.PayoutBankCode != "044" || stored.PayoutAccountName != "ADA OBI" {
+		t.Fatalf("the order lost the destination it must still pay: bank=%q account=%q name=%q",
+			stored.PayoutBankCode, stored.PayoutAccount, stored.PayoutAccountName)
+	}
+	// Idempotent replay still answers from the order, not the cleared intent.
+	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	if err != nil || again.ID != order.ID {
+		t.Fatalf("replay after clearing: order %v err %v", again, err)
+	}
+}
+
+// A failed attempt to open the order hands the claim back: she can retry, so
+// the destination she typed must still be there.
+func TestSellIntent_AReleasedClaimKeepsBankDetails(t *testing.T) {
+	r, in := landedRig(t)
+	r.client.offrampErr = errors.New("paycrest down")
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+		t.Fatal("want the Paycrest failure")
+	}
+	got := r.reload(t, in.ID)
+	if got.Status != models.SellIntentSwapped || got.BankCode != "044" || got.AccountNumber != "0123456789" {
+		t.Fatalf("a retryable sale lost its destination: %+v", got)
+	}
+}

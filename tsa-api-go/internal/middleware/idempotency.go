@@ -57,9 +57,8 @@ func (w *idempotencyWriter) WriteString(s string) (int, error) {
 //     (status, body), persist a RequestIdempotency row for future replay.
 //
 // Successful 2xx responses are cached. 4xx/5xx are NOT cached — the client
-// can retry the same key after fixing the underlying problem. Phase 1 doesn't
-// implement a row TTL cleaner; rows are small and inserts are off the hot
-// path.
+// can retry the same key after fixing the underlying problem. Rows are pruned
+// after models.RequestIdempotencyRetention by jobs.RequestIdempotencyPruner.
 func Idempotency(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.GetHeader(idempotencyKeyHeader)

@@ -66,6 +66,10 @@ func setupReactivationTestDB(t *testing.T) *gorm.DB {
 			t.Fatalf("exec %q: %v", sql, err)
 		}
 	}
+	// Account deletion's blocker check and erasure read the ramp tables.
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate ramp tables: %v", err)
+	}
 
 	prev := config.DB
 	config.DB = db

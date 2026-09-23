@@ -82,6 +82,34 @@ func PaycrestTerminalStatuses() []string {
 	return out
 }
 
+// PaycrestResolvedStatuses are the terminal statuses nobody will chase
+// again: every terminal one except unmatched, which is terminal only for the
+// automated path — an operator is still working it by hand, from the payout
+// details on the row. Account erasure scrubs the user's payout destination
+// only from these.
+func PaycrestResolvedStatuses() []string {
+	out := make([]string, 0, len(paycrestTerminalStatuses))
+	for _, st := range paycrestTerminalStatuses {
+		if st != PaycrestStatusUnmatched {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// WithPayoutDetailsCleared adds, to a column update, the blanking of the
+// user's own payout destination on a sell. Only the payout_* columns: the
+// pay_* columns on a buy are the PROVIDER's collection account, not her data,
+// and are what an operator needs to chase a deposit that never matched.
+// Blank, not NULL, matching WithBankDetailsCleared.
+func WithPayoutDetailsCleared(updates map[string]any) map[string]any {
+	updates["payout_bank_code"] = ""
+	updates["payout_institution"] = ""
+	updates["payout_account"] = ""
+	updates["payout_account_name"] = ""
+	return updates
+}
+
 // PaycrestOrderRecord is one brokered ramp order.
 type PaycrestOrderRecord struct {
 	ID     uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
