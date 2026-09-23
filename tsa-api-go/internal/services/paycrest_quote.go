@@ -880,10 +880,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// A stable-to-stable route should not move on price, so hold it to
 		// LiFi's tight default; anything else is a real market and needs the
 		// room a normal swap takes.
-		slippage := 0.005
-		if asset.Stable {
-			slippage = 0.001
-		}
+		slippage := routeSlippage(asset.Stable)
 		lreq := LiFiQuoteRequest{
 			FromChainID: s.chainID(src.ChainKey), ToChainID: asset.ChainID,
 			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: asset.Address,
@@ -910,10 +907,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		// the treasury cannot send takes the user's money into an order
 		// that can only wait for a refill. Same gas rules as ExecuteRoute: a
 		// missing limit costs the ceiling, one above it is never executed.
-		routeGas := route.GasLimit
-		if routeGas == 0 {
-			routeGas = maxRouteGasLimit
-		}
+		routeGas := routeGasUnits(route)
 		if routeGas > maxRouteGasLimit || !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
 			continue
 		}

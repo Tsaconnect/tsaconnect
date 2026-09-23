@@ -30,12 +30,6 @@ const (
 	rampSettlementToken         = "USDC"
 )
 
-// sellRouteSlippage is the tolerance a sell route is quoted at. Her token is
-// a real market, not a stable pair, so it needs the room a normal swap takes
-// — the same 0.005 ConvertedVenues uses for a non-stable destination.
-// Slippage is a tolerance, never a cost: it is not in l.
-const sellRouteSlippage = 0.005
-
 // ErrSellRouteTooCostly: the round trip costs more than B, so selling this
 // token would eat into the rate she was quoted. Refused rather than quoted at
 // a loss (design §3.2).
@@ -139,11 +133,17 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if usdc == "" {
 		return nil, ErrSellUnavailable
 	}
+	// Slippage is a tolerance, never a cost: it is not in l. But a route
+	// admitted at 50 bps of total cost must not be quoted with 50 bps of
+	// tolerance on top when the pair cannot justify it — and the destination
+	// is always USDC, so a stable source makes a stable pair. Same decision,
+	// same function, as a converted buy's destination.
+	stableSource, _, _ := isStableDestination(q.chains, in.FromChainID, in.FromToken)
 	req := LiFiQuoteRequest{
 		FromChainID: in.FromChainID, ToChainID: rampSettlementChainID,
 		FromToken: in.FromToken, ToToken: usdc,
 		FromAddress: in.FromAddress, ToAddress: in.WalletAddress,
-		FromAmount: in.FromAmount, Slippage: sellRouteSlippage,
+		FromAmount: in.FromAmount, Slippage: routeSlippage(stableSource),
 	}
 
 	// First pass, no fee: what does the round trip cost before we take
@@ -153,9 +153,17 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if err != nil {
 		return nil, err
 	}
+	if first == nil {
+		// A quoter that answers with neither a route nor an error is broken,
+		// not expensive. Say so rather than dereferencing it.
+		return nil, ErrSellUnavailable
+	}
 	l, ok := LiFiCostBps(first)
+	if !ok {
+		return nil, ErrSellRouteTooCostly
+	}
 	gas := q.gasBps(ctx, in, first)
-	if !ok || l+gas > q.budgetBps {
+	if l+gas > q.budgetBps {
 		return nil, ErrSellRouteTooCostly
 	}
 
@@ -172,6 +180,9 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 			}
 			return nil, err
 		}
+		if route == nil {
+			return nil, ErrSellUnavailable
+		}
 		// The fee-carrying ask may land on another tool entirely, so the
 		// budget has to be re-checked against THIS route. l2 now includes our
 		// own fee, which is why it is compared to the whole of B: her all-in
@@ -179,6 +190,21 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		l2, ok2 := LiFiCostBps(route)
 		if !ok2 || l2+gas > q.budgetBps {
 			return nil, ErrSellRouteTooCostly
+		}
+	}
+
+	// She signs this calldata with her own key, and after that her tokens are
+	// gone. The route is LiFi's answer, not ours, so it is checked before it
+	// is handed over: a route that pays someone else, lands anywhere but USDC
+	// on Base, or hands the funds to a destination call would leave §5.3's
+	// binding check with nothing to bind and "Finish your sale" with nothing
+	// to finish. Same check a converted buy runs before it offers a venue.
+	// A non-EVM source carries a chain-specific payload rather than EVM
+	// calldata, so there is nothing here to decode — that check belongs with
+	// whatever signs it.
+	if addressFamily(in.FromChainID) == "evm" {
+		if err := checkLiFiDeliveryTo(route.Data, in.FromChainID, rampSettlementChainID, in.WalletAddress, "evm", usdc); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
 		}
 	}
 
@@ -206,15 +232,27 @@ func (q *RampSellQuoter) gasBps(ctx context.Context, in SellQuoteInput, route *L
 // needsTopUp reports whether this sell would have us send her gas on the
 // source chain. Only EVM token sells can: a native-coin sell pays its own gas
 // out of what it sends, and a non-EVM source has no sponsor lane.
+//
+// The threshold is the SAME gas TopUpUSDForRoute prices — the swap plus an
+// approve — because a wallet holding the swap's gas to the wei still cannot
+// send the approve, and judging her funded there leaves her holding a route
+// she cannot execute.
 func (q *RampSellQuoter) needsTopUp(ctx context.Context, in SellQuoteInput, route *LiFiRoute) bool {
 	if q.nativeBalance == nil || addressFamily(in.FromChainID) != "evm" || isNativeTokenAddress(in.FromToken) {
 		return false
 	}
+	need := RouteGasWei(route, treasuryERC20Gas)
 	have, ok := q.nativeBalance(ctx, in.FromChainID, in.FromAddress)
-	if !ok || have == nil {
-		return true // unknown: budget for the top-up rather than strand her
+	if need == nil || !ok || have == nil {
+		// Either side of the comparison can be unknown: LiFi may not have
+		// priced the gas in the coin she pays it in, or her balance may not
+		// have been readable. Both are the same unknown, and both are
+		// budgeted for rather than folded into a comparison that would
+		// quietly answer "she is funded" — pricing a top-up she does not need
+		// costs a few bps, skipping one she does strands her mid-sell.
+		return true
 	}
-	return route.GasCostWei == nil || have.Cmp(route.GasCostWei) < 0
+	return have.Cmp(need) < 0
 }
 
 // priceInFiat turns the landed USDC into naira at the rate the offramp will

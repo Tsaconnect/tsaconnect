@@ -90,6 +90,16 @@ func LiFiCostBps(route *LiFiRoute) (int, bool) {
 	return ceilBps((route.FromAmountUSD - route.ToAmountUSD) / route.FromAmountUSD * 10_000), true
 }
 
+// routeGasUnits is the gas a route is held to: its own limit, or the ceiling
+// when it quoted none — the same figure execution refuses to go past. One
+// function so a price and the check that admits it cannot disagree.
+func routeGasUnits(route *LiFiRoute) uint64 {
+	if route == nil || route.GasLimit == 0 {
+		return maxRouteGasLimit
+	}
+	return route.GasLimit
+}
+
 // RouteGasUSD is what a route's gas costs in dollars including extraGasUnits
 // (the approve), scaled from the route's own quote. A route with no gas limit
 // is priced at the ceiling, the same figure execution would be held to.
@@ -97,11 +107,36 @@ func RouteGasUSD(route *LiFiRoute, extraGasUnits uint64) float64 {
 	if route == nil {
 		return 0
 	}
-	routeGas := route.GasLimit
-	if routeGas == 0 {
-		routeGas = maxRouteGasLimit
-	}
+	routeGas := routeGasUnits(route)
 	return route.GasCostUSD * float64(routeGas+extraGasUnits) / float64(routeGas)
+}
+
+// RouteGasWei is RouteGasUSD's twin in the coin the gas is actually paid in:
+// the same gas, the same approve, the same scaling. It is what a wallet's
+// native balance has to be compared against, because the dollar figure cannot
+// answer "can she pay for this" — it prices the gas, not the coin.
+//
+// nil means the route did not quote its gas in wei, which is an UNKNOWN and
+// not a zero: the caller decides what to do about it rather than having the
+// answer fall out of a comparison against nil.
+func RouteGasWei(route *LiFiRoute, extraGasUnits uint64) *big.Int {
+	if route == nil || route.GasCostWei == nil {
+		return nil
+	}
+	routeGas := routeGasUnits(route)
+	need := new(big.Int).Mul(route.GasCostWei, new(big.Int).SetUint64(routeGas+extraGasUnits))
+	return need.Quo(need, new(big.Int).SetUint64(routeGas))
+}
+
+// routeSlippage is the tolerance a route is quoted at: LiFi's tight default
+// for a stable pair, which should not move on price, and the room a normal
+// swap takes for anything else. Buys and sells share it so the same pair
+// cannot be offered two different worst cases.
+func routeSlippage(stable bool) float64 {
+	if stable {
+		return 0.001
+	}
+	return 0.005
 }
 
 // TreasuryGasBps is the gas the treasury pays for a route plus extraGasUnits
