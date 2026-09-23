@@ -10,6 +10,9 @@
 //     contract address looked up across chains
 //
 // Grouping and ordering live in services/assetCatalog (pure, tested).
+//
+// With `holdingsOnly` the same sections carry only what the wallet holds, and
+// search is off — the sell flow picks from her balances, not the catalogue.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -90,9 +93,15 @@ interface Options {
   side: PickerSide;
   allow?: (chainId: number) => boolean;
   query: string;
+  /**
+   * Only coins the wallet holds — what the sell flow picks from. The catalogue
+   * search is not run at all: searching every coin there is says nothing about
+   * what she can sell.
+   */
+  holdingsOnly?: boolean;
 }
 
-export function useAssetCatalog({ visible, side, allow, query }: Options) {
+export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = false }: Options) {
   const { listings } = useSpotListings();
   const { holdings } = useWalletHoldings(visible);
 
@@ -137,7 +146,7 @@ export function useAssetCatalog({ visible, side, allow, query }: Options) {
     // A new query never shows the previous one's results while it loads.
     setSearchAssets(null);
     setSearchError(null);
-    if (!visible || q.length < 2) {
+    if (!visible || holdingsOnly || q.length < 2) {
       setSearching(false);
       return;
     }
@@ -169,12 +178,12 @@ export function useAssetCatalog({ visible, side, allow, query }: Options) {
     }, 300);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- allow is read at search time; a new function identity must not re-run the search.
-  }, [visible, query, side]);
+  }, [visible, query, side, holdingsOnly]);
 
   const sections: AssetSection[] = useMemo(() => {
     const withHoldings = (list: Asset[]) => attachHoldings(list, holdings).assets;
 
-    if (query.trim().length >= 2) {
+    if (!holdingsOnly && query.trim().length >= 2) {
       if (!searchAssets) return [];
       const found = withHoldings(searchAssets)
         .filter(a => networksForSide(a, side, allow).length > 0)
@@ -194,10 +203,10 @@ export function useAssetCatalog({ visible, side, allow, query }: Options) {
     const majors = known.assets.filter(a => !isListed(a));
     // Held coins not already covered, including tokens LiFi's lists lack.
     const held = known.unmatched.map(assetFromHolding);
-    return buildSections({ listed, majors, held, side, allow });
-  }, [query, searchAssets, listedTokens, majorTokens, holdings, side, allow]);
+    return buildSections({ listed, majors, held, side, allow, holdingsOnly });
+  }, [query, searchAssets, listedTokens, majorTokens, holdings, side, allow, holdingsOnly]);
 
-  const isSearch = query.trim().length >= 2;
+  const isSearch = !holdingsOnly && query.trim().length >= 2;
   return { sections, loading: loading && !majorTokens.length, searching, error: isSearch ? searchError : error };
 }
 
