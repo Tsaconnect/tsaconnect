@@ -32,6 +32,8 @@ export type PayCheckout = {
   payable: boolean;
   notPayableWhy?: string;
   youArePaying: boolean;
+  /** The Paycrest order this payment is linked to — only for the paying user, only once linked. */
+  orderId?: string;
 };
 
 export class PayError extends ApiError {}
@@ -95,12 +97,19 @@ export async function getPayQuote(
   return request(checkoutPath(id, `/quote?${sourceQuery(src)}`));
 }
 
+export type CryptoQuote = {
+  fromAmount: string;
+  /** Exactly what the merchant receives, in the settle token's base units. Absent on an older server. */
+  destAmount?: string;
+  destDecimals?: number;
+};
+
 /**
  * What paying a crypto-settling merchant with this token would cost:
  * `fromAmount` of the source token (base units) delivers the merchant's exact
  * token amount on their own chain. Moves nothing, locks nothing.
  */
-export async function getCryptoQuote(id: string, src: PaySource): Promise<{ fromAmount: string }> {
+export async function getCryptoQuote(id: string, src: PaySource): Promise<CryptoQuote> {
   return request(checkoutPath(id, `/crypto-quote?${sourceQuery(src)}`));
 }
 

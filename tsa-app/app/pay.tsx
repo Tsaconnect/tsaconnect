@@ -57,8 +57,10 @@ export default function PayScreen() {
   const [checkout, setCheckout] = useState<PayCheckout | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [now, setNow] = useState(() => Date.now());
+  // A live attempt of hers is moving money: the expiry warning must not pull the form from under it.
+  const [attemptActive, setAttemptActive] = useState(false);
 
-  const state = payScreenState({ id, authed: isAuthenticated, checkout, error, now });
+  const state = payScreenState({ id, authed: isAuthenticated, checkout, error, now, attemptActive });
 
   const fetchCheckout = useCallback(async () => {
     if (typeof id !== 'string') return;
@@ -200,11 +202,17 @@ export default function PayScreen() {
               )}
 
               {state.kind !== 'blocked' && state.checkout.mode === 'live' && state.checkout.settlementMode === 'fiat' && (
-                <PayNaira checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout} />
+                <PayNaira
+                  checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout}
+                  onActive={setAttemptActive}
+                />
               )}
 
               {state.kind !== 'blocked' && state.checkout.mode === 'live' && state.checkout.settlementMode === 'crypto' && (
-                <PayCrypto checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout} />
+                <PayCrypto
+                  checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout}
+                  onActive={setAttemptActive}
+                />
               )}
             </>
           )}

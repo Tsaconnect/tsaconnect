@@ -15,7 +15,8 @@ import { toLiFiQuote, type LiFiQuote } from './lifi';
 export type SellIntent = {
   id: string;
   // 'ordering': the server is opening the payout right now (a claim in flight).
-  status: 'swapping' | 'swapped' | 'ordering' | 'ordered' | 'failed';
+  // 'delivered': a TSA Pay crypto payment whose token reached the merchant — terminal.
+  status: 'swapping' | 'swapped' | 'ordering' | 'ordered' | 'delivered' | 'failed';
   sourceChainId: number;
   sourceTokenAddress: string;
   /** In the source token's base units. */
@@ -23,6 +24,8 @@ export type SellIntent = {
   quotedFiat: string;
   swapTxHash?: string;
   paycrestOrderId?: string;
+  /** Set when this sale is a TSA Pay payment: which payment it pays. */
+  payPaymentId?: string;
   /** ISO time of the sale's last step — how long it has sat where it is. */
   updatedAt?: string;
 };

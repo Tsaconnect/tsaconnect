@@ -41,9 +41,10 @@ jest.mock('@/services/lifiFlow', () => ({
     constructor(mockHash?: string) { super("We couldn't confirm the swap was sent."); this.txHash = mockHash; }
   },
 }));
+const mockWallet: { address: string | null } = { address: '0xPayer' };
 jest.mock('@/hooks/useSignableWallet', () => ({
   __esModule: true,
-  useSignableWallet: () => ({ address: '0xPayer', ready: true, refresh: jest.fn() }),
+  useSignableWallet: () => ({ address: mockWallet.address, ready: true, refresh: jest.fn() }),
 }));
 
 import React from 'react';
@@ -77,7 +78,7 @@ const checkout = {
 const bnb = { address: '0x0000000000000000000000000000000000000000', symbol: 'BNB', decimals: 18 } as LiFiToken;
 const BSC = 56;
 const KEY = 'paycrest.sellSwap.pendingTx.i1';
-const intent = { id: 'i1', status: 'swapping' } as SellIntent;
+const intent = { id: 'i1', status: 'swapping', payPaymentId: ID } as SellIntent;
 const quote = { fromAmount: '84000000000000000' } as LiFiQuote;
 
 jest.setTimeout(30_000);
@@ -108,6 +109,7 @@ beforeEach(async () => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
   jest.clearAllMocks();
   await AsyncStorage.clear();
+  mockWallet.address = '0xPayer';
   m.payCrypto.mockResolvedValue({ intent, quote, gasTopUp: false });
   m.executeLiFiSwap.mockResolvedValue('0xswap');
   m.recordSellSwap.mockResolvedValue(undefined);
@@ -288,11 +290,323 @@ describe('a payment that is already being paid (409 pay_in_progress)', () => {
   });
 });
 
+describe('follow-only resume and scoping', () => {
+  it('a sale of hers that pays a DIFFERENT payment is never reported on', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, payPaymentId: 'someone-elses' } as SellIntent);
+    await AsyncStorage.setItem(KEY, '0xstored');
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a sale with no payment id at all is not this payment’s either', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ id: 'i1', status: 'swapping' } as SellIntent);
+    await AsyncStorage.setItem(KEY, '0xstored');
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+  });
+
+  it('a delivered payment is done: nothing to report or resume, the server settles it', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'delivered', swapTxHash: '0xswap' } as SellIntent);
+    await AsyncStorage.setItem(KEY, '0xstale');
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a failed sale is not reported on either', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'failed' } as SellIntent);
+    await AsyncStorage.setItem(KEY, '0xstale');
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('never signs or sends on its own — its only server write is reporting a hash already on her phone', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(m.payCrypto).not.toHaveBeenCalled();
+  });
+});
+
+describe('a payment that cannot safely be started over', () => {
+  it('a hash the server never heard: not retryable, and Continue payment checks again without a new payment', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(true);
+
+    m.recordSellSwap.mockResolvedValue(undefined);
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(m.recordSellSwap).toHaveBeenLastCalledWith('i1', '0xswap');
+    expect(m.payCrypto).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a broadcast that could not be confirmed is not retryable', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new (LifiFlow.SwapBroadcastUnconfirmedError as any)());
+    await mount();
+    await pay();
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('a swap refused before it left her wallet is retryable', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new Error('User rejected the request'));
+    await mount();
+    await pay();
+    expect(hook.retryable).toBe(true);
+    expect(hook.canContinue).toBe(false);
+  });
+
+  it('a refusal to start the payment is retryable', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('Verify your identity first', 403, 'kyc_verification_required'));
+    await mount();
+    await pay();
+    expect(hook.retryable).toBe(true);
+  });
+});
+
+describe("the server's uncertain-attempt answer (409 pay_attempt_uncertain)", () => {
+  it('pauses the payment: honest copy, not retryable, nothing to continue, no swap signed', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('We could not tell whether an attempt exists', 409, 'pay_attempt_uncertain'));
+    await mount();
+    await pay();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toMatch(/paused/i);
+    expect(hook.error).toMatch(/don't pay again/i);
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(m.getOpenSellIntent).not.toHaveBeenCalled();
+  });
+
+  it('is never auto-reset', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('x', 409, 'pay_attempt_uncertain'));
+    await mount();
+    await pay();
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+  });
+});
+
+describe("the server's own failure to start (500)", () => {
+  it('is a plain retry: its words, retryable, nothing held', async () => {
+    m.payCrypto.mockRejectedValue(new PayError("We couldn't start this payment — please try again.", 500));
+    await mount();
+    await pay();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toBe("We couldn't start this payment — please try again.");
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('idle');
+  });
+});
+
+describe('the route refusing this token right now (fail-closed 422 / 503)', () => {
+  it.each([422, 503])('a %i on start says try another token or later, retryable, no unresolved state', async (status) => {
+    m.payCrypto.mockRejectedValue(new PayError('any wording the server likes', status));
+    await mount();
+    await pay();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(true);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toMatch(/another token/i);
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('idle');
+  });
+
+  it.each([422, 503])('a %i on the price says the same, instead of a raw server sentence', async (status) => {
+    m.getCryptoQuote.mockRejectedValue(new PayError('route floor below the amount owed', status));
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/another token/i);
+  });
+
+  it('any other price failure keeps its own words', async () => {
+    m.getCryptoQuote.mockRejectedValue(new PayError('Payments are not available right now.', 500));
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).rejects.toThrow('Payments are not available right now.');
+  });
+});
+
+describe('a delivery the server is still confirming (processing for up to 24 h)', () => {
+  it('following a swapped sale of this payment just waits — no failure, no Pay, nothing signed or reported', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'swapped', swapTxHash: '0xswap' } as SellIntent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(hook.stage).toBe('waiting');
+    expect(hook.error).toBeUndefined();
+    expect(hook.retryable).toBe(true);
+    expect(hook.canContinue).toBe(false);
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+  });
+});
+
+describe('reset', () => {
+  it('returns the payment to idle so Pay is offered again once the server frees it', async () => {
+    await mount();
+    await pay();
+    expect(hook.stage).toBe('waiting');
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('idle');
+    expect(hook.error).toBeUndefined();
+    expect(hook.retryable).toBe(true);
+  });
+
+  it('does nothing while an attempt is in flight', async () => {
+    let release!: (v: any) => void;
+    m.payCrypto.mockReturnValue(new Promise((r) => { release = r; }));
+    await mount();
+    act(() => hook.payWith(bnb, BSC));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    expect(hook.stage).toBe('paying');
+
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('paying');
+
+    await act(async () => { release({ intent, quote, gasTopUp: false }); });
+    await settle();
+    expect(hook.stage).toBe('waiting');
+  });
+});
+
+describe('a swap that may have reached the merchant is never forgotten by a reset', () => {
+  it('holds the "don\'t pay again" state when the server flip frees the payment and the hash still cannot be reported', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+    expect(hook.retryable).toBe(false);
+    m.recordSellSwap.mockClear();
+
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+
+    expect(m.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap'); // tried again first
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(true);
+    expect(m.payCrypto).toHaveBeenCalledTimes(1);
+    expect(await AsyncStorage.getItem(KEY)).toBe('0xswap'); // still on the phone
+  });
+
+  it('once the report lands the server has the swap: she waits on it, and Pay does not come back', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+    m.recordSellSwap.mockResolvedValue(undefined);
+
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+
+    expect(hook.stage).toBe('waiting');
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('a broadcast that could not be confirmed and has no hash to report is held too', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new (LifiFlow.SwapBroadcastUnconfirmedError as any)());
+    await mount();
+    await pay();
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('found on reopening (NOT_CONFIRMED from a resume) is held as well', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await AsyncStorage.setItem(KEY, '0xstored');
+    await mount();
+    await act(async () => { const p = hook.resume(); await settle(); await p; });
+    expect(hook.retryable).toBe(false);
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('a swap refused before it left her wallet holds nothing: reset frees Pay', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new Error('User rejected the request'));
+    await mount();
+    await pay();
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('idle');
+  });
+});
+
+describe('Continue payment with nothing to continue', () => {
+  it('says nothing was found instead of silently waiting', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+    m.getOpenSellIntent.mockResolvedValue(null);
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toMatch(/couldn't find/i);
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('opening the screen with nothing to follow still just waits — that is the ordinary case', async () => {
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(hook.stage).toBe('waiting');
+  });
+});
+
+describe('one attempt at a time', () => {
+  it('a double biometric success starts one payment and signs one swap', async () => {
+    await mount();
+    act(() => hook.payWith(bnb, BSC));
+    await act(async () => {
+      hook.authorization.onAuthorized();
+      hook.authorization.onAuthorized();
+    });
+    await settle();
+    expect(m.payCrypto).toHaveBeenCalledTimes(1);
+    expect(m.executeLiFiSwap).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('estimate', () => {
   it('asks the server what the swap pulls and shows it in her token’s decimals', async () => {
     m.getCryptoQuote.mockResolvedValue({ fromAmount: '84000000000000000' });
     await mount();
-    await expect(hook.estimate(bnb, BSC)).resolves.toBe('0.084 BNB');
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB' });
     expect(m.getCryptoQuote).toHaveBeenCalledWith(ID, { sourceChainId: BSC, sourceToken: bnb.address, sourceAddress: '0xPayer' });
+  });
+
+  it('adds what the store receives when the server says, in the settle token’s name and decimals', async () => {
+    m.getCryptoQuote.mockResolvedValue({
+      fromAmount: '84000000000000000', destAmount: '33323336332433603252', destDecimals: 18,
+    });
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB', receives: '33.32 USDT' });
+  });
+
+  it('leaves it out on an older server that sends no destination amount', async () => {
+    m.getCryptoQuote.mockResolvedValue({ fromAmount: '84000000000000000' });
+    await mount();
+    expect((await hook.estimate(bnb, BSC)).receives).toBeUndefined();
+  });
+
+  it('with no signable wallet it says so, rather than returning nothing', async () => {
+    mockWallet.address = null;
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/wallet/i);
   });
 });

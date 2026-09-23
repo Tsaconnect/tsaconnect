@@ -6,6 +6,7 @@
 // out, waiting on your own payment vs. someone else's, expiring soon,
 // terminal) is testable without rendering anything.
 import type { PayCheckout, PayStatus } from '@/services/payApi';
+import type { SellIntent } from '@/services/paycrestSellSwap';
 // From utils/paymentId.ts, not services/payApi.ts: that module's request()
 // chain pulls in walletApi.ts's top-level `import AsyncStorage from
 // '@react-native-async-storage/async-storage'`, which throws outside a
@@ -37,8 +38,14 @@ export function payScreenState(input: {
   checkout?: PayCheckout;
   error?: string;
   now: number;
+  /**
+   * A payment attempt of hers is moving money right now (swapping, waiting on a
+   * payout, asking about a shortfall). The expiry warning must not tear the
+   * form down under it: a bridge swap can outlast the five minutes it warns of.
+   */
+  attemptActive?: boolean;
 }): PayScreenState {
-  const { id, authed, checkout, error, now } = input;
+  const { id, authed, checkout, error, now, attemptActive } = input;
 
   if (!isPaymentId(id)) return { kind: 'invalid' };
   if (!authed) return { kind: 'signin' };
@@ -64,7 +71,7 @@ export function payScreenState(input: {
   }
 
   const msLeft = new Date(checkout.expiresAt).getTime() - now;
-  if (msLeft < EXPIRY_WARNING_MS) {
+  if (msLeft < EXPIRY_WARNING_MS && !attemptActive) {
     return {
       kind: 'blocked',
       checkout,
@@ -104,11 +111,46 @@ export function payAmountLabel(baseUnits: string, decimals: number, symbol: stri
   return `${whole}${frac ? `.${frac}` : ''} ${symbol}`;
 }
 
-/** The shortfall question, in USDC — the only unit the server measures it in. */
-export function shortfallCopy(missingUsdc: string | undefined): string {
+/**
+ * What the merchant receives, from base units: cut down (never rounded up) to
+ * the cent, or to six decimals under one. Empty for a figure it cannot read.
+ */
+export function receiveAmountLabel(baseUnits: string, decimals: number, symbol: string): string {
+  if (!/^\d+$/.test(baseUnits)) return '';
+  const digits = baseUnits.padStart(decimals + 1, '0');
+  const whole = digits.slice(0, digits.length - decimals).replace(/^0+(?=\d)/, '');
+  const frac = digits.slice(digits.length - decimals);
+  if (whole !== '0') return `${whole}.${frac.padEnd(2, '0').slice(0, 2)} ${symbol}`;
+  const cut = frac.padEnd(SHOWN_DECIMALS, '0').slice(0, SHOWN_DECIMALS).replace(/0+$/, '');
+  return `0${cut ? `.${cut}` : ''} ${symbol}`;
+}
+
+/**
+ * The shortfall question, in USDC — the only unit the server measures it in.
+ * `walletTried`: she already offered her wallet's USDC and it did not cover the
+ * rest, so asking again would just repeat itself.
+ */
+export function shortfallCopy(missingUsdc: string | undefined, walletTried = false): string {
+  if (walletTried) {
+    const more = missingUsdc ? `about ${missingUsdc} USDC more is needed` : 'more USDC is needed';
+    return `Your USDC on Base isn't enough to cover the rest — ${more}. Add USDC to your wallet, then tap Use my USDC again.`;
+  }
   const by = missingUsdc ? `about ${missingUsdc} USDC short` : 'short';
   return `The rate moved and your swap landed ${by}. Pay the rest from the USDC in your wallet?`;
 }
+
+/**
+ * Her open sale, but only when it is the one that pays THIS payment. An
+ * unrelated open sale of hers is not this payment's attempt and must never be
+ * followed, resumed or reported on as if it were.
+ */
+export function intentForPayment(open: SellIntent | null | undefined, paymentId: string): SellIntent | null {
+  return open && open.payPaymentId === paymentId ? open : null;
+}
+
+/** Said in place of the swapped sell's own words when a payment cannot safely be started over. */
+export const PAYMENT_STILL_GOING =
+  "Your payment isn't finished yet, but your money is safe. Give it a few minutes, then tap Continue payment — don't pay again.";
 
 /** 409 from starting a payment: an attempt of hers already exists — follow it, never start another. */
 export const PAY_IN_PROGRESS = 'pay_in_progress';
@@ -125,3 +167,24 @@ export const errorMessage = (e: unknown, fallback: string): string =>
 /** Nothing can be sent from Solana, Bitcoin or Sui for a payment yet. */
 export const unsupportedNetworkMessage = (symbol: string): string =>
   `Paying with ${symbol} from that network isn't supported yet. Pick a coin on another network.`;
+
+/** Continue payment found no sale of hers that pays this payment. */
+export const NOTHING_TO_CONTINUE =
+  "We couldn't find a payment of yours to continue. If it doesn't finish within a few minutes it will be released, and you can try again.";
+
+/** 409 on every start route: the server could not prove whether an attempt exists, so it paused the payment for support. */
+export const PAY_ATTEMPT_UNCERTAIN = 'pay_attempt_uncertain';
+
+/** Said for that answer — never offers Pay or Retry: a second payment could double-pay. */
+export const PAYMENT_PAUSED =
+  "This payment is paused while we check it — please don't pay again. We'll update you shortly.";
+
+/** The route refused this token for now (fail-closed): nothing was started and the payment is still payable. */
+export const CANT_PAY_WITH_TOKEN =
+  "You can't pay this merchant with that token right now — try another token, or try again later.";
+
+/** A 422/503 from a start or price route. By status only: the words differ per route and reason. */
+export function isRouteRefused(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  return status === 422 || status === 503;
+}

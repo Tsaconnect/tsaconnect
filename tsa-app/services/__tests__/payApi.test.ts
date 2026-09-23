@@ -208,9 +208,13 @@ describe('paying a crypto-settling merchant', () => {
   });
 
   it('getCryptoQuote GETs crypto-quote with the source in the query and returns what the swap pulls', async () => {
-    (global.fetch as jest.Mock).mockResolvedValue(okJson({ fromAmount: '84000000000000000' }));
+    (global.fetch as jest.Mock).mockResolvedValue(
+      okJson({ fromAmount: '84000000000000000', destAmount: '33323336332433603252', destDecimals: 18 }),
+    );
 
-    await expect(getCryptoQuote(ID, src)).resolves.toEqual({ fromAmount: '84000000000000000' });
+    await expect(getCryptoQuote(ID, src)).resolves.toEqual({
+      fromAmount: '84000000000000000', destAmount: '33323336332433603252', destDecimals: 18,
+    });
 
     const [url, init] = (global.fetch as jest.Mock).mock.calls[0];
     const u = new URL(url);

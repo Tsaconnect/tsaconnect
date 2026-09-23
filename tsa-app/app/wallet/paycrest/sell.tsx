@@ -83,6 +83,7 @@ import {
   balanceOf,
   CHAIN_LABELS,
   checkFunding,
+  fmtTokenAmount,
   fundingMessage,
   nativeBalanceFor,
   sendSponsoredPaycrestDeposit,
@@ -110,8 +111,6 @@ const EXPIRY_WARNING_SECONDS = 420;
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
-const fmtTokenAmount = (n: number) =>
-  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** The trailing half of a route's sublabel — silent when the route is fine. */
 function routeNote(check: FundingCheck): string {

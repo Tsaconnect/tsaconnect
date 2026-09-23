@@ -36,9 +36,28 @@ export type SellSwapRun = {
   sourceChainId: number;
   /** Her address on the source chain. */
   sourceAddress: string;
-  /** Human units, used only when the quote does not carry its own from-amount. */
+  /**
+   * Human units she is spending. Wins when given (a sale signs what she typed);
+   * a payment has no typed amount and signs what the server's quote pulls.
+   */
   amount?: string;
 };
+
+/**
+ * Human units to spend: the caller's explicit amount if given, else what the
+ * quote pulls. Undefined when it is not a positive amount — never "0", never a
+ * guess (formatUnits('0') is "0.0", which is truthy).
+ */
+function spendAmount({ amount, quote, token }: SellSwapRun): string | undefined {
+  try {
+    if (amount !== undefined) return ethers.parseUnits(amount, token.decimals) > 0n ? amount : undefined;
+    if (!quote.fromAmount) return undefined;
+    const base = BigInt(quote.fromAmount);
+    return base > 0n ? ethers.formatUnits(base, token.decimals) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Sign and send the swap; resolves to its hash, already stored on the phone.
@@ -49,6 +68,13 @@ export type SellSwapRun = {
  */
 export async function executeSellSwap(run: SellSwapRun): Promise<string> {
   const { intentId, quote, token, sourceChainId, sourceAddress } = run;
+
+  const fromAmount = spendAmount(run);
+  if (!fromAmount) {
+    // Never sign for "0" or a guess: close the intent so it does not block the next.
+    await abandonSellIntent(intentId).catch((err) => console.warn('[sell] abandon failed', err));
+    throw new Error("We couldn't work out the amount to send, so nothing was sent. Please try again.");
+  }
 
   // Best-effort and silent: the server skips it if she already holds enough.
   const chain = isNonEVMLiFiChain(sourceChainId) ? undefined : getChainByChainId(sourceChainId);
@@ -61,10 +87,6 @@ export async function executeSellSwap(run: SellSwapRun): Promise<string> {
       topUpFailed = true;
     }
   }
-
-  const fromAmount = quote.fromAmount
-    ? ethers.formatUnits(quote.fromAmount, token.decimals)
-    : (run.amount ?? '0');
 
   let hash: string;
   try {

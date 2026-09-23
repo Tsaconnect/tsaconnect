@@ -49,7 +49,7 @@ jest.mock('../gasSponsorship', () => {
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
 import {
-  checkFunding, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
+  checkFunding, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
 } from '../paycrestDeposit';
 // eslint-disable-next-line import/first
 import { PaycrestError } from '../paycrestApi';
@@ -422,5 +422,13 @@ describe('nativeBalanceFor', () => {
 
   it('is null when balances are not known', () => {
     expect(nativeBalanceFor('bsc', null)).toBeNull();
+  });
+});
+
+describe('fmtTokenAmount', () => {
+  it('shows two decimals from one up, six below', () => {
+    expect(fmtTokenAmount(33.5)).toBe('33.5');
+    expect(fmtTokenAmount(1234.567)).toBe('1,234.57');
+    expect(fmtTokenAmount(0.0840001)).toBe('0.084');
   });
 });

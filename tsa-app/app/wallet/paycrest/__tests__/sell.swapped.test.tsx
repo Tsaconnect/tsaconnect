@@ -136,6 +136,7 @@ jest.mock('@/services/paycrestDeposit', () => ({
   checkFunding: () => ({ ok: true }),
   sendSponsoredPaycrestDeposit: jest.fn(),
   CHAIN_LABELS: { base: 'Base', polygon: 'Polygon', bsc: 'BNB Smart Chain', arbitrum: 'Arbitrum', ethereum: 'Ethereum' },
+  fmtTokenAmount: (n: number) => String(n),
   fundingMessage: () => null,
   nativeBalanceFor: () => null,
 }));

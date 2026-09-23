@@ -1,42 +1,36 @@
 // components/pay/PayNaira.tsx
 //
 // Connects usePayNaira to the live panel for a merchant that settles in naira.
-// Also the place a payment of hers that is already under way is picked back up:
-// with no form to show (the screen is 'waiting') it resumes her attempt once,
-// so a swap the app was closed in the middle of is followed to its end.
-import React, { useEffect, useRef } from 'react';
+// usePayLive keeps the hook in step with the checkout (follow a payment under
+// way, reset when the server frees it, report an attempt that is moving money).
+// The panel shows whenever the form is payable OR the hook has something to say:
+// a payment reopened mid-flight has no form, but its prompts must still show.
+import React from 'react';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { PayLivePanel } from '@/components/pay/PayLivePanel';
+import { usePayLive } from '@/hooks/usePayLive';
 import { usePayNaira } from '@/hooks/usePayNaira';
 import type { PayCheckout } from '@/services/payApi';
 import { payPickFilter } from '@/utils/payPick';
 
 export function PayNaira({
-  checkout, showForm, onWaiting,
+  checkout, showForm, onWaiting, onActive,
 }: {
   checkout: PayCheckout;
   showForm: boolean;
   /** The attempt reached the server-settles stage — refresh the checkout. */
   onWaiting: () => void;
+  /** An attempt is moving money (or waiting on her) — keep the form up. */
+  onActive: (active: boolean) => void;
 }) {
   const pay = usePayNaira(checkout);
-
-  const { stage, resume } = pay;
-  useEffect(() => {
-    if (stage === 'waiting') onWaiting();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on the stage change only.
-  }, [stage]);
-
-  const resumedWith = useRef<unknown>(null);
-  useEffect(() => {
-    if (showForm || stage !== 'idle' || resumedWith.current === resume) return;
-    resumedWith.current = resume; // resume changes once her wallet address is known
-    void resume();
-  }, [showForm, stage, resume]);
+  usePayLive({ pay, checkout, showForm, onWaiting, onActive });
 
   return (
     <>
-      {showForm && <PayLivePanel checkout={checkout} pay={pay} allow={payPickFilter(checkout)} />}
+      {(showForm || pay.stage !== 'idle' || !!checkout.orderId) && (
+        <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={payPickFilter(checkout)} />
+      )}
       <AuthorizationModal {...pay.authorization} />
     </>
   );

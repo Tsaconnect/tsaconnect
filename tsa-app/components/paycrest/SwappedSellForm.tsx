@@ -19,6 +19,7 @@ import { nativeGasReserve } from '@/services/wallet';
 import { spendableNative } from '@/services/gasReserve';
 import { getChainByChainId } from '@/constants/chains';
 import type { LiFiToken } from '@/services/lifi';
+import { fmtTokenAmount } from '@/services/paycrestDeposit';
 
 /** A coin Paycrest cannot take, sold by swapping it to USDC on Base first. */
 export type SwapPick = { token: LiFiToken; chainId: number; sourceAddress: string };
@@ -31,7 +32,6 @@ export const SWAPPED_STAGE_LABELS: Partial<Record<SellStage, string>> = {
   sending: 'Sending for payout…',
 };
 
-const fmtTokenAmount = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** A float balance as a decimal string, rounded DOWN so MAX never asks for
  *  more than she holds. */

@@ -31,6 +31,7 @@ jest.mock('@/services/payApi', () => {
 jest.mock('@/services/paycrestApi', () => ({
   ...jest.requireActual('@/services/paycrestApi'),
   getQuote: jest.fn(),
+  getOrder: jest.fn(),
   claimPayment: jest.fn(),
 }));
 jest.mock('@/services/paycrestSellSwap', () => ({ __esModule: true, getOpenSellIntent: jest.fn() }));
@@ -38,6 +39,7 @@ jest.mock('@/services/paycrestDeposit', () => ({
   __esModule: true,
   checkFunding: jest.fn(),
   sendSponsoredPaycrestDeposit: jest.fn(),
+  fmtTokenAmount: (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n >= 1 ? 2 : 6 }),
   fundingMessage: jest.fn(() => 'You have 1 USDC on Base — this payment needs 33.5.'),
   nativeBalanceFor: jest.fn(() => 0.5),
 }));
@@ -51,9 +53,10 @@ jest.mock('@/services/gasSponsorship', () => ({
   getSponsoredRoutes: jest.fn(),
   isGasSponsored: jest.fn(() => false),
 }));
+const mockWallet: { address: string | null } = { address: '0xPayer' };
 jest.mock('@/hooks/useSignableWallet', () => ({
   __esModule: true,
-  useSignableWallet: () => ({ address: '0xPayer', ready: true, refresh: jest.fn() }),
+  useSignableWallet: () => ({ address: mockWallet.address, ready: true, refresh: jest.fn() }),
 }));
 jest.mock('@/hooks/useSwappedSell', () => ({ __esModule: true, useSwappedSell: jest.fn() }));
 
@@ -77,6 +80,7 @@ const m = {
   payConverted: jest.mocked(PayApi.payConverted),
   getPayQuote: jest.mocked(PayApi.getPayQuote),
   getQuote: jest.mocked(PaycrestApi.getQuote),
+  getOrder: jest.mocked(PaycrestApi.getOrder),
   claimPayment: jest.mocked(PaycrestApi.claimPayment),
   getOpenSellIntent: jest.mocked(SellSwap.getOpenSellIntent),
   checkFunding: jest.mocked(Deposit.checkFunding),
@@ -92,7 +96,9 @@ const checkout = {
   fee: 50_506, merchantNet: 5_000_000, currency: 'NGN', settlementMode: 'fiat', payable: true, youArePaying: false,
 } as PayApi.PayCheckout;
 
-const usdcBase = { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 } as LiFiToken;
+const usdcBase = {
+  address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6, coinKey: 'USDC', verificationStatus: 'verified',
+} as LiFiToken;
 const bnb = { address: '0x0000000000000000000000000000000000000000', symbol: 'BNB', decimals: 18 } as LiFiToken;
 const BASE = 8453;
 const BSC = 56;
@@ -100,7 +106,7 @@ const BSC = 56;
 const venue = { chain: 'base', token: 'USDC', rate: '1500', spreadPercent: 0.1, tokenAmount: 33.5 } as PaycrestVenue;
 const quoteWith = (venues: PaycrestVenue[]) => ({ venues, best: venues[0] ?? null }) as PaycrestQuote;
 const order = { id: 'o1', chain: 'base', token: 'USDC', status: 'awaiting_deposit' } as PaycrestOrder;
-const intent = { id: 'i1', status: 'swapping' } as SellIntent;
+const intent = { id: 'i1', status: 'swapping', payPaymentId: ID } as SellIntent;
 
 // The swapped-sell hook, replaced by a stub whose state the tests set.
 const swapped = {
@@ -109,10 +115,12 @@ const swapped = {
   intent: undefined as SellIntent | undefined,
   missingUsdc: undefined as string | undefined,
   order: undefined as PaycrestOrder | undefined,
+  retryable: true,
   start: jest.fn(),
   resume: jest.fn(),
   completeWithWallet: jest.fn(),
   cancel: jest.fn(),
+  reset: jest.fn(),
 };
 let createIntent!: NonNullable<Parameters<typeof Swapped.useSwappedSell>[0]>['createIntent'];
 
@@ -135,8 +143,10 @@ async function pay(token: LiFiToken, chainId: number) {
 beforeEach(() => {
   jest.clearAllMocks();
   Object.assign(swapped, {
-    stage: 'idle', error: undefined, intent: undefined, missingUsdc: undefined, order: undefined,
+    stage: 'idle', error: undefined, intent: undefined, missingUsdc: undefined, order: undefined, retryable: true,
   });
+  mockWallet.address = '0xPayer';
+  m.getOrder.mockResolvedValue(order);
   swapped.start.mockResolvedValue(undefined);
   swapped.resume.mockResolvedValue(undefined);
   swapped.completeWithWallet.mockResolvedValue(undefined);
@@ -228,6 +238,14 @@ describe('a token Paycrest fills directly', () => {
     expect(m.claimPayment).not.toHaveBeenCalled();
   });
 
+  it('a send that fails with no message points at the payment order, not at trying again', async () => {
+    m.send.mockRejectedValue('nope');
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.error).toMatch(/payment order/i);
+    expect(hook.error).not.toMatch(/try again/i);
+  });
+
   it('a lost claim never fails a payment whose deposit already left', async () => {
     m.claimPayment.mockRejectedValue(new Error('offline'));
     await mount();
@@ -305,25 +323,52 @@ describe('the swapped-sell stages, as a payment', () => {
     expect(hook.swapStage).toBe('shortfall');
   });
 
-  it('completeWithWallet finishes the sale that is open at its shortfall', async () => {
+  it('"Use my USDC" asks for authorization first — nothing is opened or signed until she gives it', async () => {
     Object.assign(swapped, { stage: 'shortfall', intent, missingUsdc: '0.42' });
     await mount();
-    await act(async () => { await hook.completeWithWallet(); });
+    act(() => hook.completeWithWallet());
+
+    expect(hook.authorization.visible).toBe(true);
+    expect(hook.authorization.title).toBe('Authorize payment');
+    expect(swapped.completeWithWallet).not.toHaveBeenCalled();
+
+    await act(async () => { hook.authorization.onAuthorized(); });
     expect(swapped.completeWithWallet).toHaveBeenCalledWith(intent);
   });
 
-  it('completeWithWallet with no sale open does nothing', async () => {
+  it('cancelling that authorization leaves her USDC alone', async () => {
+    Object.assign(swapped, { stage: 'shortfall', intent, missingUsdc: '0.42' });
+    await mount();
+    act(() => hook.completeWithWallet());
+    act(() => hook.authorization.onCancel());
+    await flush();
+    expect(swapped.completeWithWallet).not.toHaveBeenCalled();
+  });
+
+  it('with no sale open it does not even ask', async () => {
     Object.assign(swapped, { stage: 'shortfall', intent: undefined });
     await mount();
-    await act(async () => { await hook.completeWithWallet(); });
+    act(() => hook.completeWithWallet());
+    expect(hook.authorization.visible).toBe(false);
     expect(swapped.completeWithWallet).not.toHaveBeenCalled();
+  });
+
+  it('a shortfall that comes back after her wallet was offered says her wallet was not enough', async () => {
+    Object.assign(swapped, { stage: 'shortfall', intent, missingUsdc: '0.42' });
+    await mount();
+    expect(hook.walletShort).toBe(false);
+    act(() => hook.completeWithWallet());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(hook.stage).toBe('shortfall'); // the stub never left it
+    expect(hook.walletShort).toBe(true);
   });
 });
 
 describe('a payment that is already being paid (409 pay_in_progress)', () => {
   const inProgress = () => new PayError('You are already paying this', 409, 'pay_in_progress');
 
-  it('a converted attempt resumes her open sale instead of starting another', async () => {
+  it('a converted attempt FOLLOWS her open sale: nothing is signed or sent until she taps Continue payment', async () => {
     m.payConverted.mockRejectedValue(inProgress());
     m.getOpenSellIntent.mockResolvedValue(intent);
     // The swapped-sell stub runs the creator the way the real hook does: a
@@ -332,8 +377,10 @@ describe('a payment that is already being paid (409 pay_in_progress)', () => {
     await mount();
     await pay(bnb, BSC);
 
-    expect(m.getOpenSellIntent).toHaveBeenCalled();
-    expect(swapped.resume).toHaveBeenCalledWith(intent, '0xPayer');
+    expect(hook.stage).toBe('continue');
+    expect(hook.canContinue).toBe(true);
+    expect(swapped.resume).not.toHaveBeenCalled();
+    expect(m.send).not.toHaveBeenCalled();
   });
 
   it('with no open sale it is a direct order — the server settles it, so she waits', async () => {
@@ -354,14 +401,305 @@ describe('a payment that is already being paid (409 pay_in_progress)', () => {
     await pay(usdcBase, BASE);
 
     expect(m.send).not.toHaveBeenCalled();
-    expect(swapped.resume).toHaveBeenCalledWith(intent, '0xPayer');
+    expect(hook.stage).toBe('continue');
+    expect(swapped.resume).not.toHaveBeenCalled();
   });
+});
 
-  it('resume() alone — the screen re-opened on its own payment — follows the same road', async () => {
+describe('opening the screen on her own payment follows it and never signs', () => {
+  it('a swap under way offers Continue payment, and calls nothing that moves money', async () => {
     m.getOpenSellIntent.mockResolvedValue(intent);
     await mount();
     await act(async () => { await hook.resume(); });
+
+    expect(hook.stage).toBe('continue');
+    expect(swapped.resume).not.toHaveBeenCalled();
+    expect(swapped.start).not.toHaveBeenCalled();
+    expect(swapped.completeWithWallet).not.toHaveBeenCalled();
+    expect(m.send).not.toHaveBeenCalled();
+    expect(m.payDirect).not.toHaveBeenCalled();
+  });
+
+  it('Continue payment asks for authorization, and only then resumes the sale — as the server has it NOW', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+
+    act(() => hook.continuePayment());
+    expect(hook.authorization.visible).toBe(true);
+    expect(swapped.resume).not.toHaveBeenCalled();
+
+    // Between opening the screen and confirming, the swap was recorded: resume
+    // from that, not from the snapshot taken when the screen opened.
+    const fresh = { ...intent, status: 'swapped', swapTxHash: '0xh' } as SellIntent;
+    m.getOpenSellIntent.mockResolvedValue(fresh);
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(swapped.resume).toHaveBeenCalledWith(fresh, '0xPayer');
+  });
+
+  it('Continue payment with nothing of hers left to continue says so, and resumes nothing', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    m.getOpenSellIntent.mockResolvedValue(null); // the server let go of it
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(swapped.resume).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toMatch(/couldn't find/i);
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('Continue payment when the sale is now another payment’s or already over resumes nothing', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, payPaymentId: 'other' } as SellIntent);
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(swapped.resume).not.toHaveBeenCalled();
+  });
+
+  it('cancelling that authorization resumes nothing', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    act(() => hook.authorization.onCancel());
+    await flush();
+    expect(swapped.resume).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('continue');
+  });
+
+  it('an ordered sale whose payout still awaits its deposit needs her to send it — Continue payment', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'ordered', paycrestOrderId: 'o1' } as SellIntent);
+    m.getOrder.mockResolvedValue({ ...order, status: 'awaiting_deposit' } as PaycrestOrder);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.getOrder).toHaveBeenCalledWith('o1');
+    expect(hook.stage).toBe('continue');
+    expect(m.send).not.toHaveBeenCalled();
+  });
+
+  it('an ordered sale whose deposit already left just waits', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'ordered', paycrestOrderId: 'o1' } as SellIntent);
+    m.getOrder.mockResolvedValue({ ...order, status: 'settling' } as PaycrestOrder);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a delivered or failed sale has nothing for her to do — the server settles or frees the payment', async () => {
+    for (const status of ['delivered', 'failed'] as const) {
+      m.getOpenSellIntent.mockResolvedValue({ ...intent, status } as SellIntent);
+      await mount();
+      await act(async () => { await hook.resume(); });
+      expect(hook.stage).toBe('waiting');
+      act(() => renderer.unmount());
+    }
+  });
+
+  it('an open sale that pays a DIFFERENT payment (or none) is not followed', async () => {
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, payPaymentId: 'someone-elses' } as SellIntent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(hook.stage).toBe('waiting');
+    expect(hook.canContinue).toBe(false);
+    act(() => hook.continuePayment());
+    expect(hook.authorization.visible).toBe(false);
+    expect(swapped.resume).not.toHaveBeenCalled();
+  });
+
+  it('with no signable wallet it follows nothing', async () => {
+    mockWallet.address = null;
+    await mount();
+    await act(async () => { await hook.resume(); });
+    expect(m.getOpenSellIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe('a payment that cannot safely be started over', () => {
+  it('says so in payment words, is not retryable, and offers Continue payment for the sale it holds', async () => {
+    Object.assign(swapped, { stage: 'failed', error: 'Tap Finish your sale to try again.', retryable: false, intent });
+    await mount();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.error).toMatch(/Continue payment/);
+    expect(hook.error).toMatch(/don't pay again/i);
+    expect(hook.error).not.toMatch(/Finish your sale/);
+    expect(hook.canContinue).toBe(true);
+    act(() => hook.continuePayment());
+    expect(hook.authorization.visible).toBe(true);
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
     expect(swapped.resume).toHaveBeenCalledWith(intent, '0xPayer');
+  });
+
+  it('a plain failure keeps its own words and stays retryable', async () => {
+    Object.assign(swapped, { stage: 'failed', error: 'User rejected the request' });
+    await mount();
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toBe('User rejected the request');
+    expect(hook.canContinue).toBe(false);
+  });
+
+  it('a direct order that opened but could not be sent is not retryable — the order screen finishes it', async () => {
+    m.send.mockRejectedValue(new Error('Not enough ETH on base to pay gas'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.retryable).toBe(false);
+  });
+});
+
+describe("the server's uncertain-attempt answer (409 pay_attempt_uncertain)", () => {
+  const uncertain = () => new PayError('We could not tell whether an attempt exists', 409, 'pay_attempt_uncertain');
+
+  it('a direct start is paused: honest copy, never retryable, nothing to continue, nothing further called', async () => {
+    m.payDirect.mockRejectedValue(uncertain());
+    await mount();
+    await pay(usdcBase, BASE);
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toMatch(/paused/i);
+    expect(hook.error).toMatch(/don't pay again/i);
+    expect(hook.errorCode).toBe('pay_attempt_uncertain');
+    expect(m.send).not.toHaveBeenCalled();
+    expect(m.getOpenSellIntent).not.toHaveBeenCalled(); // not followed either: the server could not prove one exists
+  });
+
+  it('a converted start is paused the same way, whatever words the swapped sell reports', async () => {
+    m.payConverted.mockRejectedValue(uncertain());
+    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    Object.assign(swapped, { stage: 'failed', error: 'We could not tell whether an attempt exists', retryable: true });
+    await mount();
+    await pay(bnb, BSC);
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.error).toMatch(/paused/i);
+    expect(hook.canContinue).toBe(false);
+  });
+
+  it('is never auto-reset: the payment stays paused when the checkout flips back', async () => {
+    m.payDirect.mockRejectedValue(uncertain());
+    await mount();
+    await pay(usdcBase, BASE);
+    act(() => hook.reset());
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(swapped.reset).not.toHaveBeenCalled();
+  });
+});
+
+describe("the server's own failure to start (500) is just a retry", () => {
+  const ours = () => new PayError("We couldn't start this payment — please try again.", 500);
+
+  it('a direct start: the server words, retryable, and nothing is held', async () => {
+    m.payDirect.mockRejectedValue(ours());
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toBe("We couldn't start this payment — please try again.");
+    expect(hook.retryable).toBe(true);
+    act(() => hook.reset());
+    expect(hook.stage).toBe('idle');
+  });
+
+  it('a converted start likewise', async () => {
+    m.payConverted.mockRejectedValue(ours());
+    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    Object.assign(swapped, { stage: 'failed', error: "We couldn't start this payment — please try again.", retryable: true });
+    await mount();
+    await pay(bnb, BSC);
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toMatch(/please try again/);
+  });
+});
+
+describe('reset', () => {
+  it('does nothing while an attempt is in flight — it must not pull state out from under a payment', async () => {
+    let release!: (o: PaycrestOrder) => void;
+    m.payDirect.mockReturnValue(new Promise<PaycrestOrder>((r) => { release = r; }));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('paying');
+
+    act(() => hook.reset());
+
+    expect(hook.stage).toBe('paying');
+    expect(swapped.reset).not.toHaveBeenCalled();
+    await act(async () => { release(order); });
+    await flush();
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('after a swap that may be under way it still resets: her tokens end up in HER wallet, so freeing the payment strands nothing', async () => {
+    Object.assign(swapped, { stage: 'failed', error: 'x', retryable: false, intent });
+    await mount();
+    expect(hook.retryable).toBe(false);
+    swapped.reset.mockImplementation(() => { Object.assign(swapped, { stage: 'idle', error: undefined, retryable: true }); });
+    act(() => hook.reset());
+    await act(async () => { renderer.update(<Harness c={checkout} />); });
+    expect(swapped.reset).toHaveBeenCalled();
+    expect(hook.stage).toBe('idle');
+  });
+
+  it('returns the payment to idle — hers and the swapped sell’s state both', async () => {
+    m.send.mockRejectedValue(new Error('boom'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('failed');
+
+    act(() => hook.reset());
+
+    expect(hook.stage).toBe('idle');
+    expect(hook.error).toBeUndefined();
+    expect(hook.order).toBeUndefined();
+    expect(swapped.reset).toHaveBeenCalled();
+  });
+});
+
+describe('one attempt at a time', () => {
+  it('a double biometric success starts one payment, not two', async () => {
+    await mount();
+    act(() => hook.payWith(usdcBase, BASE));
+    await act(async () => {
+      hook.authorization.onAuthorized();
+      hook.authorization.onAuthorized();
+    });
+    await flush();
+    expect(m.payDirect).toHaveBeenCalledTimes(1);
+    expect(m.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('only a verified coin of the right name is a direct route', () => {
+  const spamUsdc = { address: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', symbol: 'USDC', decimals: 6 } as LiFiToken;
+
+  it('a lookalike USDC from her holdings is swapped, never sold as the real one', async () => {
+    await mount();
+    await pay(spamUsdc, BASE);
+    expect(m.payDirect).not.toHaveBeenCalled();
+    expect(swapped.start).toHaveBeenCalledWith(expect.objectContaining({ token: { ...spamUsdc, chainId: BASE } }));
+  });
+
+  it('a coin whose LiFi coin key is another coin is not the venue’s token either', async () => {
+    await mount();
+    await pay({ ...usdcBase, coinKey: 'USDT' } as LiFiToken, BASE);
+    expect(m.payDirect).not.toHaveBeenCalled();
+  });
+
+  it('its estimate is the swap’s, not the venue’s', async () => {
+    m.getPayQuote.mockResolvedValue({ fromAmount: '33835000', usdcTarget: '33835000' });
+    await mount();
+    await expect(hook.estimate(spamUsdc, BASE)).resolves.toEqual({ pay: '33.835 USDC' });
+    expect(m.getPayQuote).toHaveBeenCalled();
   });
 });
 
@@ -400,15 +738,20 @@ describe('estimate — what she will pay, before she taps Pay', () => {
   it('a direct route shows the venue amount, rounded up', async () => {
     m.getQuote.mockResolvedValue(quoteWith([{ ...venue, tokenAmount: 33.501 } as PaycrestVenue]));
     await mount();
-    await expect(hook.estimate(usdcBase, BASE)).resolves.toBe('33.51 USDC');
+    await expect(hook.estimate(usdcBase, BASE)).resolves.toEqual({ pay: '33.51 USDC' });
     expect(m.getPayQuote).not.toHaveBeenCalled();
   });
 
   it('a converted route asks the server what the swap pulls, in her token’s decimals', async () => {
     m.getPayQuote.mockResolvedValue({ fromAmount: '84000000000000000', usdcTarget: '33835000' });
     await mount();
-    await expect(hook.estimate(bnb, BSC)).resolves.toBe('0.084 BNB');
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB' });
     expect(m.getPayQuote).toHaveBeenCalledWith(ID, { sourceChainId: BSC, sourceToken: bnb.address, sourceAddress: '0xPayer' });
   });
-});
 
+  it('with no signable wallet it says so, rather than returning nothing', async () => {
+    mockWallet.address = null;
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/wallet/i);
+  });
+});

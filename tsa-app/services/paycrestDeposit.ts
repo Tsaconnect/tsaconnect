@@ -118,6 +118,10 @@ export const CHAIN_LABELS: Record<string, string> = {
   ethereum: 'Ethereum',
 };
 
+/** A token amount for display: two decimals from one up, six below. */
+export const fmtTokenAmount = (n: number): string =>
+  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
+
 /** The wallet's gas balance on a chain, or null when balances aren't known. */
 export function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | null): number | null {
   const symbol = CHAINS[chain as ChainKey]?.nativeCurrency.symbol;

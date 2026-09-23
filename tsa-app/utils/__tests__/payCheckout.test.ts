@@ -1,5 +1,6 @@
 import {
-  errorCode, errorMessage, nairaFromKobo, payAmountLabel, payScreenState, shortfallCopy, unsupportedNetworkMessage,
+  errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
+  shortfallCopy, unsupportedNetworkMessage,
 } from '../payCheckout';
 import type { PayCheckout } from '@/services/payApi';
 
@@ -96,5 +97,78 @@ describe('error helpers shared by the live payment hooks', () => {
     expect(unsupportedNetworkMessage('SOL')).toBe(
       "Paying with SOL from that network isn't supported yet. Pick a coin on another network.",
     );
+  });
+});
+
+describe('intentForPayment', () => {
+  const sale = { id: 'i1', status: 'swapping', payPaymentId: ID } as never;
+  it('is the open sale only when it pays THIS payment', () => {
+    expect(intentForPayment(sale, ID)).toBe(sale);
+  });
+  it('is none for an unrelated sale of hers, one with no payment, or no sale at all', () => {
+    expect(intentForPayment({ id: 'i2', status: 'swapping', payPaymentId: 'other' } as never, ID)).toBeNull();
+    expect(intentForPayment({ id: 'i3', status: 'swapping' } as never, ID)).toBeNull();
+    expect(intentForPayment(null, ID)).toBeNull();
+    expect(intentForPayment(undefined, ID)).toBeNull();
+  });
+});
+
+describe('an attempt under way is never blocked by the expiry warning', () => {
+  const nearlyOut = Date.parse('2026-09-23T12:26:00Z'); // 4 minutes left
+  it('blocks a payer who has not started', () => {
+    expect(payScreenState({ id: ID, authed: true, checkout: base, now: nearlyOut }).kind).toBe('blocked');
+  });
+  it('keeps the form up while money is moving, so progress and the shortfall prompt survive', () => {
+    expect(payScreenState({ id: ID, authed: true, checkout: base, now: nearlyOut, attemptActive: true }).kind).toBe('payable');
+  });
+  it('still blocks on the server’s own word that it is not payable', () => {
+    const s = payScreenState({
+      id: ID, authed: true, checkout: { ...base, payable: false, notPayableWhy: 'Someone else is completing this payment' },
+      now: nearlyOut, attemptActive: true,
+    });
+    expect(s.kind).toBe('blocked');
+  });
+});
+
+describe('receiveAmountLabel', () => {
+  it('shows what the merchant receives, cut (never rounded up) to the cent', () => {
+    expect(receiveAmountLabel('33323336332433603252', 18, 'USDT')).toBe('33.32 USDT');
+    expect(receiveAmountLabel('33999999', 6, 'USDC')).toBe('33.99 USDC');
+    expect(receiveAmountLabel('50000000', 6, 'USDT')).toBe('50.00 USDT');
+  });
+  it('keeps small amounts readable', () => {
+    expect(receiveAmountLabel('1234567890000000', 18, 'ETH')).toBe('0.001234 ETH');
+  });
+  it('is empty for a figure it cannot read', () => {
+    expect(receiveAmountLabel('', 18, 'USDT')).toBe('');
+    expect(receiveAmountLabel('1.5', 6, 'USDT')).toBe('');
+  });
+});
+
+describe('shortfallCopy after her wallet USDC was already tried', () => {
+  it('says her wallet is not enough, instead of repeating the question', () => {
+    expect(shortfallCopy('0.10', true)).toBe(
+      "Your USDC on Base isn't enough to cover the rest — about 0.10 USDC more is needed. Add USDC to your wallet, then tap Use my USDC again.",
+    );
+    expect(shortfallCopy(undefined, true)).toMatch(/isn't enough/);
+  });
+});
+
+describe('what the server’s start-route refusals mean to the payer', () => {
+  it('pay_attempt_uncertain is a machine code, and its copy says the payment is paused and not to pay again', () => {
+    expect(PAY_ATTEMPT_UNCERTAIN).toBe('pay_attempt_uncertain');
+    expect(PAYMENT_PAUSED).toMatch(/paused/i);
+    expect(PAYMENT_PAUSED).toMatch(/don't pay again/i);
+  });
+  it('a 422 or 503 from the route is a refusal to price this token — by status, never by its text', () => {
+    expect(isRouteRefused(Object.assign(new Error('anything at all'), { status: 422 }))).toBe(true);
+    expect(isRouteRefused(Object.assign(new Error('x'), { status: 503 }))).toBe(true);
+    expect(isRouteRefused(Object.assign(new Error('x'), { status: 500 }))).toBe(false);
+    expect(isRouteRefused(Object.assign(new Error('x'), { status: 409 }))).toBe(false);
+    expect(isRouteRefused(new Error('x'))).toBe(false);
+    expect(isRouteRefused(null)).toBe(false);
+  });
+  it('its copy points at another token or later', () => {
+    expect(CANT_PAY_WITH_TOKEN).toMatch(/another token/i);
   });
 });

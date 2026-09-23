@@ -109,8 +109,16 @@ const STILL_RUNNING =
 const ORDER_CLOSED =
   'Your payout order closed before the USDC was sent. The USDC is in your wallet on Base — you can sell it here as USDC.';
 
-/** A stop with a sentence already written for her. */
-class SellStop extends Error {}
+/**
+ * A stop with a sentence already written for her. `retryable: false` means the
+ * sale (or a TSA Pay payment) cannot safely be started over from here: a swap
+ * may be under way, or its USDC is already in her wallet.
+ */
+class SellStop extends Error {
+  constructor(message: string, readonly retryable = true) {
+    super(message);
+  }
+}
 
 /** TSA Pay: the swap landed short. Not a failure — the sale stays open at its own stage. */
 class SellShortfall extends Error {
@@ -174,14 +182,16 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const [depositTx, setDepositTx] = useState<string | undefined>();
   const [intent, setIntent] = useState<SellIntent | undefined>();
   const [missingUsdc, setMissingUsdc] = useState<string | undefined>();
+  const [retryable, setRetryable] = useState(true);
   const running = useRef(false);
   // start is memoised for good, so the creator is read through a ref: a payment
   // screen's creator closes over its own payment id and must never go stale.
   const createIntentRef = useRef(opts?.createIntent);
   createIntentRef.current = opts?.createIntent;
 
-  const fail = (message: string) => {
+  const fail = (message: string, canRetry = true) => {
     setError(message);
+    setRetryable(canRetry);
     setStage('failed');
   };
 
@@ -207,7 +217,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         return d.substatus === 'COMPLETED';
       }
     }
-    throw new SellStop(STILL_ON_ITS_WAY);
+    throw new SellStop(STILL_ON_ITS_WAY, false);
   };
 
   /**
@@ -240,10 +250,10 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         const why = messageOf(e, 'The payout could not be opened.');
         throw new SellStop(landed
           ? `${why} Your USDC is in your wallet on Base.`
-          : `${why} Tap Finish your sale to try again.`);
+          : `${why} Tap Finish your sale to try again.`, false);
       }
     }
-    throw new SellStop(landed ? PAYOUT_NOT_OPEN : PAYOUT_NOT_OPEN_UNPROVEN);
+    throw new SellStop(landed ? PAYOUT_NOT_OPEN : PAYOUT_NOT_OPEN_UNPROVEN, false);
   };
 
   const send = async (o: PaycrestOrder, walletArg: string, intentId: string) => {
@@ -256,7 +266,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     try {
       tx = await sendSponsoredPaycrestDeposit(o, walletAddress, baseNative === null ? null : Number(ethers.formatEther(baseNative)));
     } catch (e) {
-      throw new SellStop(`Your USDC is ready, but sending it for payout failed: ${messageOf(e, 'please try again.')}`);
+      throw new SellStop(`Your USDC is ready, but sending it for payout failed: ${messageOf(e, 'please try again.')}`, false);
     }
     setDepositTx(tx);
     // The deposit already left; a lost claim only degrades to the ordinary
@@ -273,7 +283,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         await recordSellSwap(intentId, hash);
       } catch (e) {
         console.warn('[sell] recordSellSwap failed', e);
-        throw new SellStop(NOT_CONFIRMED);
+        throw new SellStop(NOT_CONFIRMED, false);
       }
     }
     const landed = await waitForSwap(intentId, hash);
@@ -289,6 +299,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     setOrder(undefined);
     setDepositTx(undefined);
     setMissingUsdc(undefined);
+    setRetryable(true);
     const held: string[] = [];
     try {
       await body((intentId) => {
@@ -300,7 +311,10 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         setMissingUsdc(e.missingUsdc);
         setStage('shortfall');
       } else {
-        fail(e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'));
+        fail(
+          e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'),
+          e instanceof SellStop ? e.retryable : true,
+        );
       }
     } finally {
       held.forEach((id) => salesInFlight.delete(id));
@@ -309,7 +323,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   };
 
   const start = useCallback((a: StartSwapArgs) => guarded(async (hold) => {
-    if (anySaleRunning()) throw new SellStop(STILL_RUNNING);
+    if (anySaleRunning()) throw new SellStop(STILL_RUNNING, false);
     setStage('swapping');
     startsAwaitingIntent++;
     let created: CreatedSellIntent;
@@ -335,7 +349,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
       });
     } catch (e) {
       // It may be on its way: keep the hash and the sale for resume.
-      if (e instanceof SwapBroadcastUnconfirmedError) throw new SellStop(BROADCAST_UNCONFIRMED);
+      if (e instanceof SwapBroadcastUnconfirmedError) throw new SellStop(BROADCAST_UNCONFIRMED, false);
       throw e;
     }
     await finishFromHash(intent.id, hash, a.walletAddress, false);
@@ -346,12 +360,12 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const resume = useCallback((intent: SellIntent, walletAddress?: string) => guarded(async (hold) => {
     // Another screen is driving a sale right now (maybe this one, before its
     // id came back): leave it alone rather than race it.
-    if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING);
+    if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(intent.id);
     setIntent(intent);
     const wallet = walletAddress ?? '';
     if (intent.status === 'ordered') {
-      if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN);
+      if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN, false);
       setStage('sending');
       const o = await getOrder(intent.paycrestOrderId);
       setOrder(o);
@@ -360,9 +374,9 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         setStage('done');
         return;
       }
-      throw new SellStop(ORDER_CLOSED);
+      throw new SellStop(ORDER_CLOSED, false);
     }
-    if (intent.status === 'failed') {
+    if (intent.status === 'failed' || intent.status === 'delivered') {
       setStage('idle');
       return;
     }
@@ -388,7 +402,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
    * why the order is opened with `landed`.
    */
   const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (hold) => {
-    if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING);
+    if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(shortIntent.id);
     setIntent(shortIntent);
     const o = await openOrder(shortIntent.id, true, { useWalletBalance: true });
@@ -409,7 +423,21 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     await clearPendingSwapHash(intent.id);
   }, []);
 
-  return { stage, error, order, depositTx, intent, missingUsdc, start, resume, completeWithWallet, cancel };
+  /** Back to idle, dropping what a finished or stopped run held. Never while a run is going. */
+  const reset = useCallback(() => {
+    if (running.current) return;
+    setStage('idle');
+    setError(undefined);
+    setOrder(undefined);
+    setDepositTx(undefined);
+    setIntent(undefined);
+    setMissingUsdc(undefined);
+    setRetryable(true);
+  }, []);
+
+  return {
+    stage, error, retryable, order, depositTx, intent, missingUsdc, start, resume, completeWithWallet, cancel, reset,
+  };
 }
 
 /** How long a sale must sit unmoved before she may cancel it herself. */
