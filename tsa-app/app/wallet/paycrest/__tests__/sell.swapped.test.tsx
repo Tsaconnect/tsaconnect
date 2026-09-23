@@ -160,6 +160,8 @@ import SellScreen from '../sell';
 import * as SellSwap from '@/services/paycrestSellSwap';
 import * as Swapped from '@/hooks/useSwappedSell';
 import * as Holdings from '@/hooks/useWalletHoldings';
+import * as Wallet from '@/services/wallet';
+import * as PaycrestApi from '@/services/paycrestApi';
 import { PaycrestError } from '@/services/paycrestApi';
 import { SOLANA_LIFI_CHAIN_ID } from '@/services/lifi';
 
@@ -267,20 +269,25 @@ it('keeps a stablecoin Paycrest takes on the direct sale', async () => {
   expect(text(tree)).toContain('You receive');
 });
 
-it('quotes a Solana coin from her Solana address, and asks for SOL when she has none', async () => {
-  holdingsState.value = { holdings: [], loading: false };
-  sellSwap.getSellSwapQuote.mockResolvedValue(quote as any);
+// Once a quote is live, it — not the stablecoin shortlist — says which picks
+// are direct, and a direct pick selects its own route.
+it('a pick a live route takes selects that route; any other coin is swapped', async () => {
+  const venue = (chain: string, token: string) => ({ chain, token, rate: '1500', tokenAmount: 10 });
+  jest.mocked(PaycrestApi.getQuote).mockResolvedValue({
+    venues: [venue('base', 'USDC'), venue('bsc', 'USDT')], best: venue('base', 'USDC'),
+  } as any);
   const tree = await mount();
-  await pick(tree, { ...BNB, symbol: 'BONK', address: 'BonkMint111', decimals: 5 }, SOLANA_LIFI_CHAIN_ID);
-  await act(async () => { byLabel(tree, 'amount:You sell').props.onChangeText('100'); });
+  await act(async () => { byLabel(tree, 'amount:You receive').props.onChangeText('15000'); });
   await act(async () => { jest.advanceTimersByTime(500); });
   await flush();
-  expect(sellSwap.getSellSwapQuote).toHaveBeenCalledWith(expect.objectContaining({
-    fromAddress: 'SoLAddr1111', walletAddress: '0xUser',
-  }));
-  expect(text(tree)).toContain('You need a little SOL to send this');
-  await fillBank(tree);
-  expect(byLabel(tree, 'button:Sell').props.disabled).toBe(true);
+  expect(text(tree)).toContain('You send: USDC on Base');
+
+  await pick(tree, { ...BNB, symbol: 'USDT', address: '0xusdt' }, 56);
+  expect(text(tree)).toContain('You send: USDT on BNB Smart Chain');
+  expect(text(tree)).not.toContain('You sell');
+
+  await pick(tree, { ...BNB, symbol: 'USDC', address: '0xusdc' }, 10); // a stablecoin no live route takes
+  expect(text(tree)).toContain('You sell');
 });
 
 it('offers to finish a sale that stopped part-way', async () => {
@@ -319,11 +326,17 @@ describe('swapped sells switched off on the server (RAMP_CONVERSION_SELL unset)'
   });
 });
 
-it('refuses a Bitcoin or Sui pick up front, rather than failing its quote', async () => {
+// Solana joins Bitcoin and Sui: nothing can check a route she would sign
+// there, so the server refuses it — and the screen says so at the pick.
+it.each([
+  ['BTC', 'bitcoin', 8, 20000000000001, /BTC from Bitcoin isn't supported yet/],
+  ['SUI', '0x2::sui::SUI', 9, 9270000000000000, /SUI from Sui isn't supported yet/],
+  ['BONK', 'BonkMint111', 5, SOLANA_LIFI_CHAIN_ID, /BONK from Solana isn't supported yet/],
+])('refuses a %s pick up front, rather than failing its quote', async (symbol, address, decimals, chainId, message) => {
   const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
   const tree = await mount();
-  await pick(tree, { ...BNB, symbol: 'BTC', address: 'bitcoin', decimals: 8 }, 20000000000001);
-  expect(alert).toHaveBeenCalledWith('Not supported yet', expect.stringMatching(/BTC from Bitcoin isn't supported yet/));
+  await pick(tree, { ...BNB, symbol, address, decimals }, chainId);
+  expect(alert).toHaveBeenCalledWith('Not supported yet', expect.stringMatching(message));
   expect(text(tree)).not.toContain('You sell');
   expect(sellSwap.getSellSwapQuote).not.toHaveBeenCalled();
   alert.mockRestore();
@@ -355,14 +368,28 @@ describe('cancelling a stuck sale from Finish your sale', () => {
   });
 });
 
-it('MAX on a SOL sale holds 0.01 SOL back for the fee', async () => {
-  holdingsState.value = {
-    holdings: [{ chainId: SOLANA_LIFI_CHAIN_ID, address: '11111111111111111111111111111111', native: true, balance: 1 }],
-    loading: false,
-  };
+it('MAX on a sale of the chain\'s own coin holds its gas back', async () => {
+  jest.mocked(Wallet.nativeGasReserve).mockResolvedValue(10n ** 16n); // 0.01 BNB for the swap's gas
   const tree = await mount();
-  await pick(tree, { ...BNB, symbol: 'SOL', address: '11111111111111111111111111111111', decimals: 9 }, SOLANA_LIFI_CHAIN_ID);
+  await pick(tree, BNB, 56);
   await act(async () => { await byLabel(tree, 'amount:You sell').props.onMax(); });
   await flush();
-  expect(byLabel(tree, 'amount:You sell').props.value).toBe('0.99');
+  expect(byLabel(tree, 'amount:You sell').props.value).toBe('0.49');
+});
+
+it('a new pick starts from an empty amount', async () => {
+  const tree = await mount();
+  await pick(tree, BNB, 56);
+  await act(async () => { byLabel(tree, 'amount:You sell').props.onChangeText('0.2'); });
+  await pick(tree, BNB, 56);
+  expect(byLabel(tree, 'amount:You sell').props.value).toBe('');
+});
+
+// A sale resumed from "Finish your sale" runs with nothing picked: its
+// progress still shows, and the direct sale cannot be started over it.
+it('shows a running sale on the direct form too', async () => {
+  swappedState.value = { ...swappedState.value, stage: 'waiting' };
+  const tree = await mount();
+  expect(text(tree)).toContain('Waiting for your swap to arrive');
+  expect(byLabel(tree, 'button:Continue').props.disabled).toBe(true);
 });

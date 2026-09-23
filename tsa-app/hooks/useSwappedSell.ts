@@ -84,9 +84,23 @@ class SellStop extends Error {}
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const messageOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
-/** The server's "your swap didn't complete (DONE/REFUNDED)" names the outcome too. */
+/**
+ * The codes the server names a sale's outcome with (tsa-api-go
+ * handlers/paycrest_sell_intents.go). These decide what happens next; the
+ * message beside them is copy, free to change.
+ */
+const TERMINAL_CODES = new Map<string, SwapOutcome>([
+  ['swap_failed', 'FAILED'],
+  ['swap_refunded', 'REFUNDED'],
+  ['swap_partial', 'PARTIAL'],
+]);
+const WAIT_CODES = new Set(['swap_pending', 'payout_opening']);
+
+/** How the server says the swap ended short, or null when it did not say so. */
 function outcomeFromServer(e: unknown): SwapOutcome | null {
   if (!(e instanceof PaycrestError) || e.status !== 409) return null;
+  if (e.code) return TERMINAL_CODES.get(e.code) ?? null;
+  // No code: an API build that predates them. Read its wording, pinned by tests.
   if (/DONE\/REFUNDED/.test(e.message)) return 'REFUNDED';
   if (/DONE\/PARTIAL/.test(e.message)) return 'PARTIAL';
   if (/\(FAILED/.test(e.message)) return 'FAILED';
@@ -94,8 +108,11 @@ function outcomeFromServer(e: unknown): SwapOutcome | null {
 }
 
 /** 409s that mean "not yet" — the server's LiFi view or claim has not caught up. */
-const isWaitAnswer = (e: unknown) =>
-  e instanceof PaycrestError && e.status === 409 && /try again in a moment/i.test(e.message);
+function isWaitAnswer(e: unknown): boolean {
+  if (!(e instanceof PaycrestError) || e.status !== 409) return false;
+  if (e.code) return WAIT_CODES.has(e.code);
+  return /try again in a moment/i.test(e.message);
+}
 
 /** Deposit statuses where the USDC has left her wallet or is on its way. */
 const PAID_STATUSES = new Set(['pending', 'settling', 'settled', 'converting']);

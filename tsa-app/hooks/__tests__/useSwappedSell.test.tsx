@@ -568,3 +568,55 @@ describe("the server's verdict, read from its 409 when the poll carried no subst
     expect(hook.error).toMatch(/didn't go through/i);
   });
 });
+
+// The server names each outcome with a code (tsa-api-go sellIntentError). The
+// code decides, not the copy: these messages say nothing the old parser could
+// read, so only the code can be what routes them. The wording tests above
+// remain as the fallback for a server that sends no code.
+describe("the server's verdict, read from its code", () => {
+  beforeEach(() => {
+    intentCreated();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE' });
+  });
+
+  it.each([
+    ['swap_failed', /didn't go through/i],
+    ['swap_refunded', /on their way back/i],
+    ['swap_partial', /different token/i],
+  ])('%s ends the sale with its own sentence', async (code, sentence) => {
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('Reworded copy', 409, code));
+    await run(hook.start(args));
+    expect(hook.error).toMatch(sentence);
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+  });
+
+  it.each(['swap_pending', 'payout_opening'])('%s is a wait, not a failure', async (code) => {
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+    mocked.openSellOrder
+      .mockRejectedValueOnce(new PaycrestError('Reworded copy', 409, code))
+      .mockResolvedValueOnce(order);
+    await run(hook.start(args));
+    expect(mocked.openSellOrder).toHaveBeenCalledTimes(2);
+    expect(hook.stage).toBe('done');
+  });
+
+  it('a code outranks the words: text that reads as a refund is not one when the code says wait', async () => {
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+    mocked.openSellOrder
+      .mockRejectedValueOnce(new PaycrestError('(DONE/REFUNDED) — try again in a moment', 409, 'swap_pending'))
+      .mockResolvedValueOnce(order);
+    await run(hook.start(args));
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('done');
+  });
+
+  it('an unknown code is neither a wait nor a verdict — the words are not consulted', async () => {
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError(
+      "your swap didn't complete (DONE/REFUNDED) — nothing was sold; check your wallet", 409, 'swap_mismatch'));
+    await run(hook.start(args));
+    expect(mocked.openSellOrder).toHaveBeenCalledTimes(1);
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('failed');
+  });
+});
