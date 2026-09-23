@@ -1084,6 +1084,16 @@ func main() {
 		log.Printf("[pm] onboarding service dormant: no fiat provider configured — corporate PM approval disabled")
 	}
 
+	// TSA Pay merchant administration — dormant by default (see buildTSAPay's
+	// own doc comment for the exact conditions). Built after bankDirectory
+	// and blockchainService exist: settlement verification needs both.
+	// mrh may have just been reassigned above (corporate PM onboarding), so
+	// PayMerchants is wired onto whichever handler instance mrh now holds.
+	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler)
+	if ms := payHandler.MerchantService(); ms != nil {
+		mrh.PayMerchants = ms
+	}
+
 	// P2P trade service — wired only when the contract address is set.
 	// The handler is always constructed (so the Nomba-backed bank/resolve
 	// routes work even before the escrow contract is deployed); trade
@@ -1571,7 +1581,7 @@ func main() {
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

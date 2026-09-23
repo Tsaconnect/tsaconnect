@@ -29,7 +29,7 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler, payh *handlers.PayHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -1174,6 +1174,26 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superInbound.POST("/credits/:id/assign", iah.AssignCredit)
 			superInbound.POST("/credits/:id/refund", iah.MarkRefunded)
 			superInbound.POST("/credits/:id/ignore", iah.MarkIgnored)
+		}
+	}
+
+	// TSA Pay merchant administration. Enabled() is false until Task 6 wires
+	// a payment service into buildTSAPay, so no route here is reachable yet
+	// even though the handler already exists (intended — see cmd/server/tsa_pay.go).
+	//
+	// List/get/update are P2P-admin-gated like the rest of the money-adjacent
+	// consoles; changing where a merchant is paid or notified is checked
+	// in-handler (AdminUpdateMerchant) since only SOME fields on the same PUT
+	// need the stricter gate. Key rotation is unconditionally super_admin —
+	// there's no "safe" field on that endpoint.
+	if payh.Enabled() {
+		adminPay := api.Group("/admin/pay")
+		adminPay.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminPay.GET("/merchants", payh.AdminListMerchants)
+			adminPay.GET("/merchants/:id", payh.AdminGetMerchant)
+			adminPay.PUT("/merchants/:id", payh.AdminUpdateMerchant) // sensitive fields need super admin, checked in-handler
+			adminPay.POST("/merchants/:id/keys", middleware.RequireSuperAdmin(), payh.AdminIssueKeys)
 		}
 	}
 }
