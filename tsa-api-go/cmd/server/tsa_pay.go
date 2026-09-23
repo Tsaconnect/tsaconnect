@@ -23,11 +23,12 @@ const tsaPayMinMasterKeyBytes = 32
 // matching every other optional integration in this file: a deploy that
 // never sets TSA_PAY_* changes nothing.
 //
-// payments/webhooks stay nil here — Task 6/8 fill them in and only then
-// does PayHandler.Enabled() (and so routes.SetupRoutes' /admin/pay group)
-// turn on. scheduler is accepted now, unused, for that same forward
-// compatibility: Task 8 registers the webhook-delivery and reconciler
-// workers here.
+// When live, it also registers the two background workers TSA Pay needs to
+// make any progress on its own: tsa-pay-webhooks (delivers signed events to
+// merchant endpoints) and tsa-pay-reconciler (the expiry sweep, extended by
+// Parts B/C). Neither has a webhook to receive from any provider, so
+// nothing else ever drives them — a missed tick is simply caught up by the
+// next one (see internal/jobs's package doc on idempotent workers).
 func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler) *handlers.PayHandler {
 	if !cfg.TSAPayEnabled {
 		log.Printf("[tsa-pay] dormant: TSA_PAY_ENABLED is not set")
@@ -48,6 +49,11 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
 	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)
-	log.Printf("[tsa-pay] merchant administration and payment API ready (live_enabled=%v)", cfg.TSAPayLiveEnabled)
-	return handlers.NewPayHandler(merchants, payments, nil, cfg.TSAPayLiveEnabled)
+	sender := services.NewPayWebhookSender(db, merchants, services.NewPayWebhookHTTPClient(), time.Now)
+
+	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
+	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
+
+	log.Printf("[tsa-pay] merchant administration, payment API and webhook delivery ready (live_enabled=%v)", cfg.TSAPayLiveEnabled)
+	return handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
 }

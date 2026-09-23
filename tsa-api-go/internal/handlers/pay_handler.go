@@ -14,13 +14,10 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
-// payPaymentAPI is the narrow slice of *services.PayPaymentService that
-// CreatePayment/GetPayment need — kept as an interface (rather than the
-// concrete type) so PayHandler can still be built in tests without a real
-// PayPaymentService. payWebhookAPI stays an empty placeholder, widened by
-// the task that builds *services.PayWebhookSender. buildTSAPay passes an
-// untyped nil for webhooks until then, which is fine: Enabled() only checks
-// payments — see the package doc on PayHandler.
+// payPaymentAPI is the narrow slice of *services.PayPaymentService that the
+// merchant/checkout/admin payment handlers need — kept as an interface
+// (rather than the concrete type) so PayHandler can still be built in tests
+// without a real PayPaymentService.
 type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
@@ -30,20 +27,32 @@ type payPaymentAPI interface {
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID) (int, error)
+	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
+	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 }
-type payWebhookAPI interface{}
+
+// payWebhookAPI is the narrow slice of *services.PayWebhookSender the admin
+// resend endpoint needs — the same narrow-interface pattern payPaymentAPI
+// uses, rather than depending on the concrete type, so it stays testable
+// with a fake. buildTSAPay now always builds a real sender alongside
+// payments (Task 8); a nil payWebhookAPI is still tolerated by Enabled(),
+// same as an untested payments-only construction.
+type payWebhookAPI interface {
+	DeliverDue(ctx context.Context, limit int) (int, error)
+	Resend(ctx context.Context, deliveryID uuid.UUID) error
+}
 
 // payCheckoutStarter is declared now and widened in Task 13.
 type payCheckoutStarter interface{}
 
-// PayHandler serves every TSA Pay HTTP surface: merchant administration
-// (this task), the merchant API and checkout/test-mode flow (later tasks),
-// and webhook delivery admin (later tasks).
+// PayHandler serves every TSA Pay HTTP surface: merchant administration,
+// the merchant API, the app's checkout/test-mode flow, and the admin
+// payments/webhook-delivery console.
 //
-// payments and webhooks stay nil until the tasks that build
-// PayPaymentService/PayWebhookSender wire them through buildTSAPay — until
-// then Enabled() is false, so main.go/routes.go never mount a route that
-// would call through a nil field.
+// payments and webhooks stay nil until buildTSAPay wires a real
+// PayPaymentService/PayWebhookSender — until then Enabled() is false, so
+// main.go/routes.go never mount a route that would call through a nil
+// field.
 type PayHandler struct {
 	merchants   *services.PayMerchantService
 	payments    payPaymentAPI
@@ -227,6 +236,96 @@ func (h *PayHandler) AdminIssueKeys(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Keys issued", keys)
+}
+
+// payAdminPaymentView is one row of the admin payments listing: the same
+// read shape a merchant gets, plus the merchant's name (an admin looking
+// across every merchant has no other way to tell payments apart).
+type payAdminPaymentView struct {
+	services.PayPaymentView
+	MerchantName string `json:"merchantName"`
+}
+
+// GET /admin/pay/payments?merchantId=&mode=&status=&page=&limit=
+func (h *PayHandler) AdminListPayments(c *gin.Context) {
+	var merchantID *uuid.UUID
+	if raw := strings.TrimSpace(c.Query("merchantId")); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid merchant id")
+			return
+		}
+		merchantID = &id
+	}
+	mode := strings.TrimSpace(c.Query("mode"))
+	status := strings.TrimSpace(c.Query("status"))
+	page := clamp(atoiDefault(c.Query("page"), 1), 1, 1<<30)
+	limit := clamp(atoiDefault(c.Query("limit"), 20), 1, 100)
+
+	rows, total, err := h.payments.AdminList(c.Request.Context(), merchantID, mode, status, page, limit)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list payments failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list payments")
+		return
+	}
+
+	// Merchant names are looked up once per distinct merchant id in the
+	// page, not once per row — a page is at most `limit` (<=100) rows, so
+	// this stays cheap without needing a join in the service layer.
+	names := make(map[uuid.UUID]string, len(rows))
+	views := make([]payAdminPaymentView, len(rows))
+	for i := range rows {
+		p := &rows[i]
+		name, looked := names[p.MerchantID]
+		if !looked {
+			if m, err := h.merchants.Get(c.Request.Context(), p.MerchantID); err == nil {
+				name = m.BusinessName
+			}
+			names[p.MerchantID] = name
+		}
+		views[i] = payAdminPaymentView{PayPaymentView: h.payments.View(p), MerchantName: name}
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{
+		"payments": views,
+		"total":    total,
+		"page":     page,
+		"limit":    limit,
+	})
+}
+
+// GET /admin/pay/payments/:id/deliveries
+func (h *PayHandler) AdminPaymentDeliveries(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+		return
+	}
+	rows, err := h.payments.Deliveries(c.Request.Context(), id)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list deliveries for payment %s failed: %v", id, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list deliveries")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Deliveries", gin.H{"deliveries": rows})
+}
+
+// POST /admin/pay/deliveries/:id/resend
+func (h *PayHandler) AdminResendWebhook(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid delivery id")
+		return
+	}
+	if err := h.webhooks.Resend(c.Request.Context(), id); err != nil {
+		if errors.Is(err, services.ErrPayWebhookDeliveryNotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, err.Error())
+			return
+		}
+		log.Printf("[tsa-pay] admin resend webhook delivery %s failed: %v", id, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to resend webhook")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Webhook queued for redelivery", nil)
 }
 
 func payMerchantIDParam(c *gin.Context) (uuid.UUID, bool) {

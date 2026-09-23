@@ -1177,9 +1177,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
-	// TSA Pay merchant administration. Enabled() is false until Task 6 wires
-	// a payment service into buildTSAPay, so no route here is reachable yet
-	// even though the handler already exists (intended — see cmd/server/tsa_pay.go).
+	// TSA Pay merchant administration. Enabled() is false until buildTSAPay
+	// wires a payment service (TSA_PAY_ENABLED unset, or a bad master key),
+	// so no route here is reachable even though the handler always exists —
+	// see cmd/server/tsa_pay.go.
 	//
 	// List/get/update are P2P-admin-gated like the rest of the money-adjacent
 	// consoles; changing where a merchant is paid or notified is checked
@@ -1194,6 +1195,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.GET("/merchants/:id", payh.AdminGetMerchant)
 			adminPay.PUT("/merchants/:id", payh.AdminUpdateMerchant) // sensitive fields need super admin, checked in-handler
 			adminPay.POST("/merchants/:id/keys", middleware.RequireSuperAdmin(), payh.AdminIssueKeys)
+
+			// Payments + webhook-delivery console (Task 8): read-only across
+			// every merchant, plus the one write — requeueing a delivery —
+			// which only redrives an already-signed, already-stored payload
+			// and so needs no stricter gate than the rest of this group.
+			adminPay.GET("/payments", payh.AdminListPayments)
+			adminPay.GET("/payments/:id/deliveries", payh.AdminPaymentDeliveries)
+			adminPay.POST("/deliveries/:id/resend", payh.AdminResendWebhook)
 		}
 
 		// TSA Pay merchant API — its own top-level group, deliberately NOT

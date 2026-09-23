@@ -670,6 +670,65 @@ func (s *PayPaymentService) expireEach(ctx context.Context, ids []uuid.UUID, rea
 	return n, nil
 }
 
+// AdminList is the admin console's payments listing: every payment,
+// optionally narrowed to one merchant/mode/status, newest first.
+// merchantID nil means every merchant; mode/status "" means every
+// mode/status.
+func (s *PayPaymentService) AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	filter := func(q *gorm.DB) *gorm.DB {
+		if merchantID != nil {
+			q = q.Where("merchant_id = ?", *merchantID)
+		}
+		if mode != "" {
+			q = q.Where("mode = ?", mode)
+		}
+		if status != "" {
+			q = q.Where("status = ?", status)
+		}
+		return q
+	}
+
+	var total int64
+	if err := filter(s.db.WithContext(ctx).Model(&models.PayPayment{})).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var rows []models.PayPayment
+	q := filter(s.db.WithContext(ctx).Model(&models.PayPayment{}))
+	if err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
+
+// Deliveries returns every webhook delivery owed for paymentID, newest
+// first — the admin console's per-payment delivery log.
+func (s *PayPaymentService) Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error) {
+	var rows []models.PayWebhookDelivery
+	if err := s.db.WithContext(ctx).Where("payment_id = ?", paymentID).Order("created_at DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ReconcileTick is the periodic reconciler's unit of work. Part A is just
+// the expiry sweep; Parts B/C (chain- and Paycrest-order-aware recovery)
+// extend this same entry point rather than adding a second worker.
+func (s *PayPaymentService) ReconcileTick(ctx context.Context) error {
+	_, err := s.ExpireDue(ctx, 100)
+	return err
+}
+
 // SimulateTestOutcome is the in-app "simulate" button for a test-mode
 // payment: locks it for user (refusing exactly as a real attempt would —
 // another payer, expiry, a suspended merchant) and then resolves it.
