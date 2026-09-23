@@ -764,12 +764,89 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	// still the naira the user entered.
 	tokenAmount := strconv.FormatFloat(venue.TokenAmount, 'f', 6, 64)
 
+	return s.openOfframp(ctx, req, venue, tokenAmount, req.FiatAmount, payoutInst, s.senderFeePercent)
+}
+
+// CreateSellForToken opens an offramp for an EXACT token amount she already
+// holds — the swapped sell (design §5.3), where the USDC on Base is a fact on
+// chain and the naira follows from it, rather than a naira figure she typed
+// that the token amount is derived from.
+//
+// converted picks the sender fee: F − B, because the round-trip budget was
+// already spent getting her token into USDC. It shares openOfframp with
+// CreateSell rather than repeating it — one place opens an offramp and writes
+// its row, whichever direction sized it.
+func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req PaycrestSellRequest, tokenAmount string, converted bool) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		return nil, errors.New("connect a wallet before selling")
+	}
+	if req.BankCode == "" || req.AccountNo == "" {
+		return nil, errors.New("a payout bank account is required")
+	}
+	amount, ok := parsePositiveDecimal(tokenAmount)
+	if !ok {
+		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)
+	}
+	fee := s.senderFeeFor(converted)
+	feeVal, ok := parseSenderFeePercent(fee)
+	if !ok {
+		// A converted sell with no priced F − B would be sent at Paycrest's
+		// dashboard default, which is not the fee she was quoted.
+		return nil, ErrConversionUnavailable
+	}
+
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
+	}
+	payoutInst, payoutKind, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePayoutIdentifier(payoutKind, fiat, req.AccountNo); err != nil {
+		return nil, err
+	}
+
+	// Paycrest quotes by order SIZE, so it has to be asked about roughly the
+	// right one. The mid rate only lands us in the right tier; the rate that
+	// binds is whatever the venue comes back with.
+	market, err := s.quotes.cachedMarketRate(ctx, fiat, "sell")
+	if err != nil {
+		return nil, err
+	}
+	venue, err := s.quotes.VenueForFee(ctx, "sell", fiat,
+		strconv.FormatFloat(amount*market, 'f', 2, 64), req.ChainKey, req.Token, feeVal)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+	}
+	rate, ok := parsePositiveDecimal(venue.Rate)
+	if !ok {
+		return nil, fmt.Errorf("paycrest: unusable sell rate %q", venue.Rate)
+	}
+	// What she is actually owed: the tokens the chain proved, at the rate the
+	// venue just quoted. Never the other way round.
+	fiatAmount := strconv.FormatFloat(amount*rate, 'f', 2, 64)
+
+	return s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+}
+
+// openOfframp is the single offramp-creation path: it sends the order and
+// writes the row. Everything above it decides HOW MUCH; this decides nothing
+// about money at all, which is why both directions can share it.
+func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSellRequest, venue *PaycrestVenue,
+	tokenAmount, fiatAmount, payoutInst, senderFee string) (*models.PaycrestOrderRecord, error) {
 	ref := paycrestReference("PCS", req.UserID)
 	order, err := s.pc.CreateOfframpOrder(ctx, PaycrestOfframpRequest{
 		AmountToken: tokenAmount,
 		Token:       venue.Token,
 		Network:     venue.Network,
-		FiatCode:    fiat,
+		FiatCode:    fiatCodeOf(req),
 		Recipient: PaycrestBankAccount{
 			Institution:       payoutInst,
 			AccountIdentifier: req.AccountNo,
@@ -779,22 +856,22 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		// from — so a failed sale leaves them exactly where they started.
 		RefundAddress:    req.WalletAddress,
 		Reference:        ref,
-		SenderFeePercent: s.senderFeePercent,
+		SenderFeePercent: senderFee,
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	feePercent := s.chargedFeePercent(order, ref, s.senderFeePercent)
+	feePercent := s.chargedFeePercent(order, ref, senderFee)
 	row := &models.PaycrestOrderRecord{
 		UserID:            req.UserID,
 		Direction:         models.PaycrestDirectionSell,
 		Status:            models.PaycrestStatusAwaitingDeposit,
 		Reference:         ref,
 		PaycrestID:        order.ID,
-		FiatCode:          fiat,
-		FiatAmount:        req.FiatAmount,
+		FiatCode:          fiatCodeOf(req),
+		FiatAmount:        fiatAmount,
 		Token:             venue.Token,
 		ChainKey:          venue.ChainKey,
 		Network:           venue.Network,
@@ -819,6 +896,15 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		return nil, err
 	}
 	return row, nil
+}
+
+// fiatCodeOf is the order's currency, defaulted once.
+func fiatCodeOf(req PaycrestSellRequest) string {
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		return "NGN"
+	}
+	return fiat
 }
 
 // ─── Progress ──────────────────────────────────────────────────────────────

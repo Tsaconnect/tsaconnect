@@ -158,6 +158,12 @@ func AutoMigrate() error {
 		// Paycrest order. (order_id, kind, attempt) unique index is the
 		// once-per-attempt rule.
 		&models.RampLeg{},
+		// Ramp conversion (sell) — one row per sale in progress: which swap
+		// was hers, which quote it executed, whether the payout is open. The
+		// unique index on swap_tx_hash is the "one swap backs one sale" rule;
+		// the partial one-open-intent index is built below (AutoMigrate
+		// cannot express a WHERE clause).
+		&models.RampSellIntent{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
@@ -476,6 +482,18 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_pending_refund
 	    ON ramp_legs (order_id)
 	    WHERE kind = 'refund' AND status = 'pending'`)
+
+	// Ramp sell — "at most one sale in progress per user" (design §5.2). The
+	// service checks it first, but the check is read-then-insert: two taps on
+	// one button both read "none open" and both insert. Only a constraint can
+	// refuse the second, and a second open intent means two swaps pointed at
+	// one payout. Partial over the open statuses only, so finishing or
+	// abandoning a sale frees her to start another. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open
+	    ON ramp_sell_intents (user_id)
+	    WHERE status IN ('swapping','swapped')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale. The one-open-sale check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
+	}
 
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot

@@ -1507,6 +1507,11 @@ func main() {
 		// it off rather than quoting a sell at a loss.
 		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes); sellQuoter != nil {
 			paycrestHandler = paycrestHandler.WithSellQuoter(sellQuoter)
+			// The sale itself: the same quote, stored and then held to, with
+			// a Base receipt as the only authority on what landed.
+			if sellIntents := buildSellIntentService(sellQuoter, cfg, blockchainService, paycrestOrders, feeDistributionService); sellIntents != nil {
+				paycrestHandler = paycrestHandler.WithSellIntents(sellIntents)
+			}
 		}
 		// Converted buys: Paycrest delivers into our own treasury instead of
 		// the user's wallet, then the treasury bridges it via LiFi. Dormant

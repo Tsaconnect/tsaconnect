@@ -960,6 +960,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// both writes are idempotent server-side (one row per order and
 				// kind), and a cached replay would hide a top-up that has since
 				// confirmed.
+				// One swapped sale at a time, driven step by step by the
+				// app. Idempotency on the writes because each one is a claim:
+				// a retried create must not open a second sale, and a
+				// retried order must not open a second payout (both are also
+				// idempotent server-side — this just stops the retry
+				// reaching them). Registered only when RAMP_CONVERSION_SELL
+				// built the service.
+				if pch.SellIntentsEnabled() {
+					pc.POST("/sell-intents", itIdem, paycrestWriteLimit, pch.CreateSellIntent)
+					pc.GET("/sell-intents/open", pch.OpenSellIntent)
+					pc.POST("/sell-intents/:id/swap", itIdem, paycrestWriteLimit, pch.RecordSellIntentSwap)
+					pc.POST("/sell-intents/:id/order", itIdem, paycrestWriteLimit, pch.OpenSellIntentOrder)
+					pc.POST("/sell-intents/:id/abandon", itIdem, paycrestWriteLimit, pch.AbandonSellIntent)
+				}
+
 				pc.GET("/sponsorship", pch.SponsorshipRoutes)
 				if pch.SponsorshipEnabled() {
 					pc.GET("/orders/:id/sponsorship", pch.SponsorshipOffer)

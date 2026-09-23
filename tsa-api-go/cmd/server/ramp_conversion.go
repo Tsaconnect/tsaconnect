@@ -391,3 +391,49 @@ func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService,
 		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
 	return q
 }
+
+// buildSellIntentService builds the service that drives one swapped sale to
+// its payout. Nil (and no routes) whenever the sell quote itself is off, or
+// when the two things a §5.3 binding cannot be checked without are missing:
+// a Base RPC to prove the landing, and the settlement token's own address.
+//
+// The USDC address is read with the SAME call the quoter uses
+// (TokenAddressForChainID on the settlement chain id), not a chain-key
+// lookup: the binding compares what landed against this string, so a second
+// spelling of "USDC on Base" would make every honest sale unclaimable.
+func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
+	chains *services.BlockchainService, orders *services.PaycrestOrderService,
+	fees *services.FeeDistributionService) *services.SellIntentService {
+	if quoter == nil || chains == nil || orders == nil {
+		return nil
+	}
+	base := chains.ClientForChain(rampSettlementChainKey)
+	if base == nil {
+		log.Printf("[ramp-sell] sales dormant: no %s client to prove a landing on", rampSettlementChainKey)
+		return nil
+	}
+	usdc := chains.TokenAddressForChainID(rampSettlementChainID, rampSettlementToken)
+	if usdc == "" {
+		log.Printf("[ramp-sell] sales dormant: no %s address configured on chain %d",
+			rampSettlementToken, rampSettlementChainID)
+		return nil
+	}
+	svc := services.NewSellIntentService(config.DB, quoter,
+		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
+		services.NewLogTransferVerifier(base.Client), orders, usdc, time.Now)
+	if fees != nil {
+		svc.SetFeeService(fees)
+	}
+	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
+	return svc
+}
+
+// rampSettlementChainID / rampSettlementChainKey / rampSettlementToken name
+// the one leg a swapped sell lands on, mirroring the service constants
+// (design §3.2). Stated here rather than exported from services because they
+// are wiring, not behaviour.
+const (
+	rampSettlementChainID  int64 = 8453
+	rampSettlementChainKey       = "base"
+	rampSettlementToken          = "USDC"
+)

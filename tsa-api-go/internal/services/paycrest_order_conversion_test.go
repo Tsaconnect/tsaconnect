@@ -42,6 +42,14 @@ type fakePaycrestConversionClient struct {
 	remoteStatus string // GetOrder's Status
 	amountPaid   string // GetOrder's AmountPaid
 	getOrderErr  error
+
+	// The offramp side, for the swapped sell: how many orders were opened and
+	// what the last one asked for. A test that asserts "no Paycrest order was
+	// opened" is asserting on offrampCalls, so it has to be counted even on
+	// the paths that never reach it.
+	offrampCalls int
+	lastOfframp  PaycrestOfframpRequest
+	offrampErr   error
 }
 
 // capturedOnramp is a smaller, test-only view of PaycrestOnrampRequest named
@@ -77,8 +85,20 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 	}, nil
 }
 
-func (f *fakePaycrestConversionClient) CreateOfframpOrder(context.Context, PaycrestOfframpRequest) (*PaycrestOrder, error) {
-	panic("CreateOfframpOrder not used by the conversion buy tests")
+func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error) {
+	f.offrampCalls++
+	f.lastOfframp = req
+	if f.offrampErr != nil {
+		return nil, f.offrampErr
+	}
+	return &PaycrestOrder{
+		ID: "pc-sell-" + req.Reference, Status: PaycrestStatusPending,
+		Rate: "1492.50", Amount: req.AmountToken,
+		SenderFeePercent: req.SenderFeePercent,
+		ProviderAccount: &PaycrestProviderAccount{
+			Institution: "Fake Bank", ReceiveAddress: "0x00000000000000000000000000000000000dep05",
+		},
+	}, nil
 }
 
 func (f *fakePaycrestConversionClient) GetOrder(_ context.Context, id string) (*PaycrestOrder, error) {
@@ -117,8 +137,10 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	}
 	createTestUsersTable(t, db)
 
+	// Both sides of base/USDC: a converted buy settles into it, and a swapped
+	// sell offramps out of it.
 	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
-		"base|USDC": buy("1500"),
+		"base|USDC": {Buy: &PaycrestQuote{Rate: "1500"}, Sell: &PaycrestQuote{Rate: "1500"}},
 	}}
 	quotes := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base"})
 	lifi := &fakeLiFiQuoter{route: &LiFiRoute{
@@ -151,6 +173,27 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	)
 
 	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi, quotes: quotes}
+}
+
+// seedVerifiedUserModel is seedVerifiedUser for the paths that need the whole
+// user, not just the id — a sell intent is opened FOR a user and delivers to
+// her own wallet.
+//
+// The wallet is overridden to orderTestUserWallet: seedVerifiedUser writes the
+// 0x…dEaD burn address, which is also what a "delivered to someone else"
+// fixture uses, and a mismatch test that accidentally names the owner's own
+// wallet proves nothing.
+func seedVerifiedUserModel(t *testing.T, db *gorm.DB) *models.User {
+	t.Helper()
+	id := seedVerifiedUser(t, db)
+	if err := db.Exec(`UPDATE users SET wallet_address = ? WHERE id = ?`, orderTestUserWallet, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	var u models.User
+	if err := db.First(&u, "id = ?", id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &u
 }
 
 // orderTestUserWallet is the buyer's own wallet: a real hex address, because

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -170,5 +171,75 @@ func TestLiFiStatus_LeavesAnUnparseableSendingAmountNil(t *testing.T) {
 	}
 	if got.SendingAmount != nil {
 		t.Fatalf("sendingAmount = %v, want nil", got.SendingAmount)
+	}
+}
+
+// A REAL mainnet status, captured 2026-09-23 from li.quest for a USDT-on-BSC
+// → USDC-on-Base transfer — the exact shape a swapped sell produces. Every
+// field §5.3 binds a user's swap to her intent is asserted against the real
+// body, because the binding is only as good as the parsing underneath it:
+// a field that silently reads empty makes a genuine sell unclaimable.
+//
+// It is what caught the recipient: LiFi reports it at the TOP LEVEL of the
+// status, and leaves receiving.toAddress null (observed on lifiIntents,
+// mayan, relaydepository, nordstern and across alike).
+func TestLiFiStatus_ParsesARealSwappedSellStatus(t *testing.T) {
+	body, err := os.ReadFile("testdata/lifi_status_sell.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	srv := lifiServer(t, 200, string(body))
+	defer srv.Close()
+
+	got, err := NewLiFiStatusClient(srv.URL, "").Status(context.Background(), "0xsrc")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.Status != LiFiStatusDone || got.Substatus != LiFiSubstatusCompleted {
+		t.Errorf("status = %q/%q", got.Status, got.Substatus)
+	}
+	if got.TransactionID != "0xf7a0218118eac132356b3ad9e6021ba32e6c1f35811269fe190fd60c75d5f20b" {
+		t.Errorf("transactionID = %q", got.TransactionID)
+	}
+	if got.FromAddress != "0xe77b1452900b92a9d43cf87a079fe59c31b3f5ab" {
+		t.Errorf("fromAddress = %q", got.FromAddress)
+	}
+	if got.ToAddress != "0xe77b1452900b92a9d43cf87a079fe59c31b3f5ab" {
+		t.Errorf("toAddress = %q — LiFi reports the recipient at the top level, not under receiving", got.ToAddress)
+	}
+	if got.SendingChainID != 56 || got.SendingToken != "0x55d398326f99059fF775485246999027B3197955" {
+		t.Errorf("sending = %d/%s", got.SendingChainID, got.SendingToken)
+	}
+	if got.SendingAmount == nil || got.SendingAmount.String() != "200000000000000000000" {
+		t.Errorf("sendingAmount = %v", got.SendingAmount)
+	}
+	if got.DestChainID != 8453 || got.ReceivingToken != "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" {
+		t.Errorf("receiving = %d/%s", got.DestChainID, got.ReceivingToken)
+	}
+	if got.ReceivedBaseUnits == nil || got.ReceivedBaseUnits.String() != "199875400" {
+		t.Errorf("received = %v", got.ReceivedBaseUnits)
+	}
+	if got.DestTxHash != "0x8fda092974d2e42be633243312f28e3bfe31cca8b962f053f607e5a418f35fd7" {
+		t.Errorf("destTxHash = %q", got.DestTxHash)
+	}
+}
+
+// receiving.toAddress still wins when LiFi does send one: it names the
+// recipient of THIS leg, where the top-level toAddress is the transfer's
+// stated destination. They agree in practice; preferring the specific one
+// keeps a future divergence from being read as the wrong thing.
+func TestLiFiStatus_PrefersTheReceivingLegsOwnRecipient(t *testing.T) {
+	srv := lifiServer(t, 200, `{
+		"status":"DONE","toAddress":"0x1111111111111111111111111111111111111111",
+		"receiving":{"toAddress":"0x2222222222222222222222222222222222222222"}
+	}`)
+	defer srv.Close()
+
+	got, err := NewLiFiStatusClient(srv.URL, "").Status(context.Background(), "0xsrc")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.ToAddress != "0x2222222222222222222222222222222222222222" {
+		t.Fatalf("toAddress = %q", got.ToAddress)
 	}
 }

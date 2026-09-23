@@ -85,7 +85,13 @@ type lifiStatusResponse struct {
 	Substatus     string `json:"substatus"`
 	TransactionID string `json:"transactionId"`
 	FromAddress   string `json:"fromAddress"`
-	Sending       struct {
+	// ToAddress is where LiFi actually reports the recipient. Observed live
+	// on 2026-09-23 across lifiIntents, mayan, relaydepository, nordstern and
+	// across: receiving.toAddress came back NULL on every one of them, and
+	// this top-level field carried the address. Reading only the nested one
+	// left every landing looking like "recipient unknown".
+	ToAddress string `json:"toAddress"`
+	Sending   struct {
 		ChainID int64  `json:"chainId"`
 		Amount  string `json:"amount"`
 		Token   struct {
@@ -135,7 +141,7 @@ func (c *LiFiStatusClient) Status(ctx context.Context, srcTxHash string) (*LiFiT
 		Substatus:      parsed.Substatus,
 		DestTxHash:     parsed.Receiving.TxHash,
 		DestChainID:    parsed.Receiving.ChainID,
-		ToAddress:      parsed.Receiving.ToAddress,
+		ToAddress:      firstNonEmpty(parsed.Receiving.ToAddress, parsed.ToAddress),
 		ReceivingToken: parsed.Receiving.Token.Address,
 		SendingChainID: parsed.Sending.ChainID,
 		SendingToken:   parsed.Sending.Token.Address,

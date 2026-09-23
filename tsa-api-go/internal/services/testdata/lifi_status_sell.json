@@ -1,0 +1,254 @@
+{
+  "transactionId": "0xf7a0218118eac132356b3ad9e6021ba32e6c1f35811269fe190fd60c75d5f20b",
+  "sending": {
+    "txHash": "0xee1d4089c436d5f378466fa44f679935070b807e1745b655d5769a613d83c272",
+    "txLink": "https://bscscan.com/tx/0xee1d4089c436d5f378466fa44f679935070b807e1745b655d5769a613d83c272",
+    "token": {
+      "address": "0x55d398326f99059fF775485246999027B3197955",
+      "chainId": 56,
+      "symbol": "USDT",
+      "decimals": 18,
+      "name": "USDT",
+      "coinKey": "USDT",
+      "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/logo.png",
+      "priceUSD": "0.9997609512",
+      "tags": [
+        "stablecoin"
+      ],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "chainId": 56,
+    "gasPrice": "50000000",
+    "gasUsed": "164443",
+    "gasToken": {
+      "address": "0x0000000000000000000000000000000000000000",
+      "chainId": 56,
+      "symbol": "BNB",
+      "decimals": 18,
+      "name": "BNB",
+      "coinKey": "BNB",
+      "logoURI": "https://assets.coingecko.com/coins/images/825/small/binance-coin-logo.png?1547034615",
+      "priceUSD": "778.9",
+      "tags": [
+        "major_asset"
+      ],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "gasAmount": "8222150000000",
+    "gasAmountUSD": "0.0064",
+    "amountUSD": "199.9522",
+    "value": "0",
+    "includedSteps": [],
+    "amount": "200000000000000000000",
+    "timestamp": 1790166271
+  },
+  "receiving": {
+    "txHash": "0x8fda092974d2e42be633243312f28e3bfe31cca8b962f053f607e5a418f35fd7",
+    "txLink": "https://basescan.org/tx/0x8fda092974d2e42be633243312f28e3bfe31cca8b962f053f607e5a418f35fd7",
+    "token": {
+      "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "chainId": 8453,
+      "symbol": "USDC",
+      "decimals": 6,
+      "name": "USD Coin",
+      "coinKey": "USDC",
+      "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48/logo.png",
+      "priceUSD": "1.003281942",
+      "tags": [
+        "stablecoin"
+      ],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "chainId": 8453,
+    "gasPrice": "5250001",
+    "gasUsed": "184197",
+    "gasToken": {
+      "address": "0x0000000000000000000000000000000000000000",
+      "chainId": 8453,
+      "symbol": "ETH",
+      "decimals": 18,
+      "name": "ETH",
+      "coinKey": "ETH",
+      "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2/logo.png",
+      "priceUSD": "2717.23",
+      "tags": [],
+      "verificationStatus": "verified",
+      "verificationStatusBreakdown": [
+        {
+          "provider": "hypernative",
+          "result": "verified",
+          "providerResult": "accept"
+        }
+      ]
+    },
+    "gasAmount": "967034434197",
+    "gasAmountUSD": "0.0026",
+    "amountUSD": "200.5314",
+    "value": "0",
+    "includedSteps": [],
+    "amount": "199875400",
+    "timestamp": 1790166273
+  },
+  "feeCosts": [],
+  "lifiExplorerLink": "https://scan.li.fi/tx/0xee1d4089c436d5f378466fa44f679935070b807e1745b655d5769a613d83c272",
+  "fromAddress": "0xe77b1452900b92a9d43cf87a079fe59c31b3f5ab",
+  "toAddress": "0xe77b1452900b92a9d43cf87a079fe59c31b3f5ab",
+  "tool": "lifiIntents",
+  "status": "DONE",
+  "substatus": "COMPLETED",
+  "substatusMessage": "The transfer is complete.",
+  "metadata": {
+    "integrator": "jumper.exchange"
+  },
+  "quote": {
+    "stepId": "b5eb9d43-59ec-4710-b07e-3a66f775df69:0",
+    "tool": "lifiIntents",
+    "type": "lifi",
+    "action": {
+      "fromChainId": 56,
+      "fromAmount": "200000000000000000000",
+      "fromToken": {
+        "chainId": 56,
+        "address": "0x55d398326f99059fF775485246999027B3197955",
+        "symbol": "USDT",
+        "decimals": 18,
+        "name": "USDT",
+        "coinKey": "USDT",
+        "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/logo.png",
+        "priceUSD": "0.9997609512"
+      },
+      "fromAddress": "0xE77b1452900b92A9D43Cf87a079fe59c31b3F5ab",
+      "toChainId": 8453,
+      "toToken": {
+        "chainId": 8453,
+        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "symbol": "USDC",
+        "decimals": 6,
+        "name": "USD Coin",
+        "coinKey": "USDC",
+        "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48/logo.png",
+        "priceUSD": "1.003281942"
+      },
+      "toAddress": "0xE77b1452900b92A9D43Cf87a079fe59c31b3F5ab",
+      "slippage": 0.001
+    },
+    "estimate": {
+      "tool": "lifiIntents",
+      "fromAmount": "200000000000000000000",
+      "fromAmountUSD": "199.9522",
+      "toAmount": "199875400",
+      "toAmountMin": "199875400",
+      "toAmountUSD": "200.5314",
+      "approvalAddress": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE",
+      "feeCosts": [],
+      "gasCosts": [
+        {
+          "type": "SEND",
+          "price": "50000001",
+          "estimate": "393000",
+          "limit": "589500",
+          "amount": "19650000393000",
+          "amountUSD": "0.0153",
+          "token": {
+            "chainId": 56,
+            "address": "0x0000000000000000000000000000000000000000",
+            "symbol": "BNB",
+            "decimals": 18,
+            "name": "BNB",
+            "coinKey": "BNB",
+            "logoURI": "https://assets.coingecko.com/coins/images/825/small/binance-coin-logo.png?1547034615",
+            "priceUSD": "778.21"
+          }
+        }
+      ],
+      "executionDuration": 7
+    },
+    "includedSteps": [
+      {
+        "tool": "lifiIntents",
+        "type": "cross",
+        "action": {
+          "fromChainId": 56,
+          "fromAmount": "200000000000000000000",
+          "fromToken": {
+            "chainId": 56,
+            "address": "0x55d398326f99059fF775485246999027B3197955",
+            "symbol": "USDT",
+            "decimals": 18,
+            "name": "USDT",
+            "coinKey": "USDT",
+            "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/logo.png",
+            "priceUSD": "0.9997609512"
+          },
+          "fromAddress": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE",
+          "toChainId": 8453,
+          "toToken": {
+            "chainId": 8453,
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "symbol": "USDC",
+            "decimals": 6,
+            "name": "USD Coin",
+            "coinKey": "USDC",
+            "logoURI": "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48/logo.png",
+            "priceUSD": "1.003281942"
+          },
+          "toAddress": "0xE77b1452900b92A9D43Cf87a079fe59c31b3F5ab",
+          "slippage": 0.001
+        },
+        "estimate": {
+          "tool": "lifiIntents",
+          "fromAmount": "200000000000000000000",
+          "toAmount": "199875400",
+          "toAmountMin": "199875400",
+          "approvalAddress": "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE",
+          "feeCosts": [],
+          "gasCosts": [
+            {
+              "type": "SEND",
+              "price": "50000001",
+              "estimate": "250000",
+              "limit": "375000",
+              "amount": "12500000250000",
+              "amountUSD": "0.0097",
+              "token": {
+                "chainId": 56,
+                "address": "0x0000000000000000000000000000000000000000",
+                "symbol": "BNB",
+                "decimals": 18,
+                "name": "BNB",
+                "coinKey": "BNB",
+                "logoURI": "https://assets.coingecko.com/coins/images/825/small/binance-coin-logo.png?1547034615",
+                "priceUSD": "778.21"
+              }
+            }
+          ],
+          "executionDuration": 7
+        }
+      }
+    ],
+    "gasLimit": "0x8febc",
+    "createdAt": "2026-09-23T12:24:22.634Z",
+    "integrator": "jumper.exchange"
+  }
+}
