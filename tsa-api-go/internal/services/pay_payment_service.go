@@ -75,6 +75,8 @@ var (
 	// ErrPayTransition is returned when a guarded state-changing call finds
 	// the payment not in a state that allows it (the guarded UPDATE matched
 	// zero rows).
+	ErrPayForbidden = errors.New("you can't do this on this payment")
+
 	ErrPayTransition = errors.New("payment is not in a state that allows this")
 )
 

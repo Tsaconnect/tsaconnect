@@ -213,7 +213,7 @@ func TestPayAdmin_PaymentDeliveriesListsAndResendRequeuesAFailedOne(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := payments.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p.ID, true); err != nil {
+	if _, err := payments.SimulateTestOutcome(context.Background(), &models.User{ID: m.UserID}, p.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	var delivery models.PayWebhookDelivery

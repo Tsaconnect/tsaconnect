@@ -118,12 +118,19 @@ func TestPayCheckout_TestOutcomeApprovesAndValidatesBody(t *testing.T) {
 	m := seedHandlerMerchant(t, db)
 	ctx := context.Background()
 	p, _, _ := payments.Create(ctx, m, models.PayModeTest, payCheckoutIn())
-	u := &models.User{ID: uuid.New()}
+	u := &models.User{ID: m.UserID}
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	inject := func(c *gin.Context) { c.Set("user", u); c.Next() }
 	r.POST("/pay/checkout/:id/test-outcome", inject, h.TestOutcome)
+
+	// Someone who merely holds the payment id may not resolve it.
+	stranger := gin.New()
+	stranger.POST("/pay/checkout/:id/test-outcome", func(c *gin.Context) { c.Set("user", &models.User{ID: uuid.New()}); c.Next() }, h.TestOutcome)
+	if w := payDo(stranger, "POST", "/pay/checkout/"+p.ID.String()+"/test-outcome", map[string]string{"outcome": "approve"}, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("stranger: %d %s", w.Code, w.Body.String())
+	}
 
 	if w := payDo(r, "POST", "/pay/checkout/"+p.ID.String()+"/test-outcome", map[string]string{"outcome": "bogus"}, nil); w.Code != http.StatusBadRequest {
 		t.Fatalf("bogus outcome: %d %s", w.Code, w.Body.String())
@@ -148,7 +155,7 @@ func TestPayCheckout_TestOutcomeKeySetMatchesCheckoutView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := &models.User{ID: uuid.New()}
+	u := &models.User{ID: m.UserID}
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

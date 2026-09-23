@@ -1194,7 +1194,8 @@ func approvePay(h *MerchantRequestHandler, admin *models.User, reqID string) *ht
 }
 
 func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T) {
-	for _, site := range []string{"", "skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng"} {
+	for _, site := range []string{"", "skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng",
+		"https://skyair.ng,evil.example/", "https://skyair.ng;evil.example", "https://localhost", "https://203.0.113.5/", "https://[::1]/", "https://" + strings.Repeat("a", 250) + ".ng"} {
 		db := setupMerchantTestDB(t)
 		h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
 		in := validPayAcceptanceInput()

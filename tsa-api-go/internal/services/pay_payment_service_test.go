@@ -139,6 +139,21 @@ func payUser(t *testing.T, s *PayPaymentService, verified bool) *models.User {
 	return &u
 }
 
+// payOwnerOf returns the merchant's own user for a payment — the only kind of
+// non-admin user allowed to simulate a test outcome.
+func payOwnerOf(t *testing.T, s *PayPaymentService, paymentID uuid.UUID) *models.User {
+	t.Helper()
+	p, err := s.Get(context.Background(), paymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.merchants.Get(context.Background(), p.MerchantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &models.User{ID: m.UserID}
+}
+
 func deliveries(t *testing.T, s *PayPaymentService) []models.PayWebhookDelivery {
 	t.Helper()
 	var ds []models.PayWebhookDelivery
@@ -277,7 +292,7 @@ func TestPayPayment_WebhooksAreModeIsolatedAndCarryLivemode(t *testing.T) {
 	s, m := newPayPaymentRig(t)
 	withWebhooks(t, s, m)
 	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	s.SimulateTestOutcome(context.Background(), payUser(t, s, false), test.ID, true)
+	s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, test.ID), test.ID, true)
 	ds := deliveries(t, s)
 	if len(ds) != 1 || ds[0].Mode != models.PayModeTest || !strings.Contains(ds[0].Payload, `"livemode":false`) ||
 		!strings.Contains(ds[0].Payload, `"id":"`+ds[0].ID.String()+`"`) || !strings.Contains(ds[0].Payload, `"settlementRef":"test"`) {
@@ -288,7 +303,7 @@ func TestPayPayment_WebhooksAreModeIsolatedAndCarryLivemode(t *testing.T) {
 	in := payIn()
 	in.Reference = "PNR-2"
 	quiet, _, _ := s.Create(context.Background(), m, models.PayModeTest, in)
-	s.SimulateTestOutcome(context.Background(), payUser(t, s, false), quiet.ID, false)
+	s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, quiet.ID), quiet.ID, false)
 	if n := len(deliveries(t, s)); n != 1 {
 		t.Fatalf("a test event with no test URL was queued (%d)", n)
 	}
@@ -358,7 +373,7 @@ func TestPayPayment_SimulateTestOutcomeIsTestOnly(t *testing.T) {
 		t.Fatalf("simulating a live payment: err = %v", err)
 	}
 	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	got, err := s.SimulateTestOutcome(context.Background(), payUser(t, s, false), test.ID, false)
+	got, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, test.ID), test.ID, false)
 	if err != nil || got.Status != models.PayStatusFailed || got.FailureReason != "declined in test mode" {
 		t.Fatalf("err %v payment %+v", err, got)
 	}
@@ -369,7 +384,7 @@ func TestPayPayment_SimulateTestOutcomeReleasesTheLockWhenResolvingFails(t *test
 	withWebhooks(t, s, m)
 	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
 	s.db.Migrator().DropTable(&models.PayWebhookDelivery{})
-	if _, err := s.SimulateTestOutcome(context.Background(), payUser(t, s, false), p.ID, true); err == nil {
+	if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true); err == nil {
 		t.Fatal("resolved without its webhook row")
 	}
 	got, _ := s.Get(context.Background(), p.ID)
@@ -382,7 +397,7 @@ func TestPayPayment_SimulateTestOutcomeLeavesAnEarlierLockAloneOnFailure(t *test
 	s, m := newPayPaymentRig(t)
 	withWebhooks(t, s, m)
 	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	alice := payUser(t, s, false)
+	alice := payOwnerOf(t, s, p.ID)
 	s.Lock(context.Background(), alice, p.ID, false) // Alice's own earlier lock: resume is not fresh
 	s.db.Migrator().DropTable(&models.PayWebhookDelivery{})
 	if _, err := s.SimulateTestOutcome(context.Background(), alice, p.ID, true); err == nil {
@@ -462,7 +477,7 @@ func TestPayPayment_CheckoutViewSaysWhenALivePayerIsNotVerified(t *testing.T) {
 	}
 	// Test mode never needs KYC; an anonymous viewer is not asked either.
 	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	if v, _ := s.CheckoutView(context.Background(), payUser(t, s, false), test.ID, true); !v.Payable {
+	if v, _ := s.CheckoutView(context.Background(), payOwnerOf(t, s, test.ID), test.ID, true); !v.Payable {
 		t.Fatalf("test-mode payment must not ask for KYC: %+v", v)
 	}
 	if v, _ := s.CheckoutView(context.Background(), nil, live.ID, true); !v.Payable {
@@ -482,5 +497,46 @@ func TestPayPayment_CheckoutViewDoesNotReVerifyThePayerAlreadyHoldingTheLock(t *
 	s.db.Table("users").Where("id = ?", payer.ID).Update("verification_status", "pending")
 	if v, _ := s.CheckoutView(context.Background(), payer, live.ID, true); !v.Payable || !v.YouArePaying {
 		t.Fatalf("the holder must still see their own payment: %+v", v)
+	}
+}
+
+func TestPayPayment_SimulateTestOutcomeIsForTheMerchantOwnerOrAnAdmin(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+
+	stranger := payUser(t, s, false)
+	if _, err := s.SimulateTestOutcome(context.Background(), stranger, p.ID, true); !errors.Is(err, ErrPayForbidden) {
+		t.Fatalf("stranger: err = %v, want ErrPayForbidden", err)
+	}
+	if _, err := s.SimulateTestOutcome(context.Background(), nil, p.ID, true); !errors.Is(err, ErrPayForbidden) {
+		t.Fatalf("nil user: err = %v, want ErrPayForbidden", err)
+	}
+	if got, _ := s.Get(context.Background(), p.ID); got.Status != models.PayStatusPending || len(deliveries(t, s)) != 0 {
+		t.Fatalf("a refused simulation must not lock, resolve or queue a webhook (status %s)", got.Status)
+	}
+
+	admin := payUser(t, s, false)
+	admin.Role = models.RoleAdmin
+	if got, err := s.SimulateTestOutcome(context.Background(), admin, p.ID, true); err != nil || got.Status != models.PayStatusSucceeded {
+		t.Fatalf("admin: %v %v", got, err)
+	}
+}
+
+func TestPayPayment_CheckoutViewHidesTheReturnURLUntilSucceeded(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	stranger := payUser(t, s, false)
+
+	v, err := s.CheckoutView(context.Background(), stranger, p.ID, false)
+	if err != nil || v.ReturnURL != "" {
+		t.Fatalf("pending: returnUrl = %q, err = %v; want it withheld", v.ReturnURL, err)
+	}
+	if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ = s.CheckoutView(context.Background(), stranger, p.ID, false); v.ReturnURL == "" {
+		t.Fatal("succeeded: returnUrl should be shown")
 	}
 }

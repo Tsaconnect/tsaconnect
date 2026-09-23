@@ -154,8 +154,10 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	// TSA Pay applications must supply a well-formed https website — it
 	// becomes the merchant's checkout/webhook return domain.
 	if input.BusinessType == models.BusinessTypePaymentAcceptance {
-		site, err := url.Parse(strings.TrimSpace(input.Website))
-		if err != nil || site.Scheme != "https" || site.Hostname() == "" || site.User != nil {
+		raw := strings.TrimSpace(input.Website)
+		site, err := url.Parse(raw)
+		if err != nil || len(raw) > 255 || site.Scheme != "https" || site.User != nil ||
+			!services.ValidPayDomain(strings.ToLower(site.Hostname())) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Enter your website's https address")
 			return
 		}

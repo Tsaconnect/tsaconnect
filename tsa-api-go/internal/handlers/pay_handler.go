@@ -434,6 +434,8 @@ func payPaymentFail(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, services.ErrKYCVerificationRequired):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
+	case errors.Is(err, services.ErrPayForbidden):
+		utils.ErrorResponse(c, http.StatusForbidden, err.Error())
 	case errors.Is(err, services.ErrPayNotPayable), errors.Is(err, services.ErrPayInProgress), errors.Is(err, services.ErrPayTransition):
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrPayPaymentInvalid), errors.Is(err, services.ErrPayMerchantNotReady):

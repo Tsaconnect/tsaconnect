@@ -121,7 +121,7 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		}
 	}
 
-	return &PayCheckoutView{
+	v := &PayCheckoutView{
 		ID:                 p.ID,
 		MerchantName:       m.BusinessName,
 		Mode:               p.Mode,
@@ -137,11 +137,17 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		SettleTokenSymbol:  p.SettleTokenSymbol,
 		SettleTokenAddress: p.SettleTokenAddress,
 		SettleChainID:      p.SettleChainID,
-		ReturnURL:          p.ReturnURL,
 		Payable:            payable,
 		NotPayableWhy:      why,
 		YouArePaying:       youArePaying,
-	}, nil
+	}
+	// A return URL often carries the merchant's own order token, so it is
+	// shown only once the payment has succeeded — like PublicView — not to
+	// whoever merely holds the payment id.
+	if p.Status == models.PayStatusSucceeded {
+		v.ReturnURL = p.ReturnURL
+	}
+	return v, nil
 }
 
 // payability decides whether p may be paid right now by a viewer for whom

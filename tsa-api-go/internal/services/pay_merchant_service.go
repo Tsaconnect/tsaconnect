@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -59,6 +60,23 @@ const (
 // payReturnDomainRE matches one lowercase hostname label sequence — the
 // stored form of a return domain (no scheme, no path, no port).
 var payReturnDomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// ValidPayDomain reports whether host is a well-formed lowercase DNS name
+// usable as a return domain: at least two labels of at most 63 characters,
+// and not an IP literal
+// (which the label regexp alone would accept).
+func ValidPayDomain(host string) bool {
+	if len(host) > 253 || !payReturnDomainRE.MatchString(host) {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) > 63 {
+			return false
+		}
+	}
+	_, err := netip.ParseAddr(host)
+	return err != nil
+}
 
 // payAccountNumberRE matches a 10-digit NUBAN.
 var payAccountNumberRE = regexp.MustCompile(`^[0-9]{10}$`)
@@ -174,6 +192,13 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 		return nil, fmt.Errorf("pay merchant: invalid website %q: %w", req.Website, err)
 	}
 	domain := strings.ToLower(u.Hostname())
+	// The domain becomes the merchant's initial return-domain list, which is
+	// split on commas: a hostname like "a.com,evil.com" (which url.Parse
+	// accepts) would smuggle a second domain past the super-admin-only
+	// return-domain edit, so a malformed one is refused here too.
+	if !ValidPayDomain(domain) {
+		return nil, fmt.Errorf("%w: website %q is not a valid domain", ErrPayMerchantInvalid, req.Website)
+	}
 
 	m := &models.PayMerchant{
 		MerchantRequestID:       req.ID,
@@ -343,7 +368,7 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 			if d == "" {
 				continue
 			}
-			if !payReturnDomainRE.MatchString(d) {
+			if !ValidPayDomain(d) {
 				return nil, fmt.Errorf("%w: invalid return domain %q", ErrPayMerchantInvalid, d)
 			}
 			domains = append(domains, d)

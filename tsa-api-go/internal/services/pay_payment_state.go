@@ -253,7 +253,10 @@ func (s *PayPaymentService) ReleaseStuckTestPayments(ctx context.Context, olderT
 
 // SimulateTestOutcome is the in-app "simulate" button for a test-mode
 // payment: locks it for user (refusing exactly as a real attempt would —
-// another payer, expiry, a suspended merchant) and then resolves it.
+// another payer, expiry, a suspended merchant) and then resolves it. Only the
+// merchant's own user or an admin may simulate: the outcome fires signed
+// webhooks at the merchant's test URL, so anyone else holding the payment id
+// must not be able to trigger them.
 func (s *PayPaymentService) SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error) {
 	p, err := s.Get(ctx, id)
 	if err != nil {
@@ -261,6 +264,18 @@ func (s *PayPaymentService) SimulateTestOutcome(ctx context.Context, user *model
 	}
 	if p.Mode != models.PayModeTest {
 		return nil, ErrPayNotPayable
+	}
+	if user == nil {
+		return nil, ErrPayForbidden
+	}
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+		m, err := s.merchants.Get(ctx, p.MerchantID)
+		if err != nil {
+			return nil, err
+		}
+		if m.UserID != user.ID {
+			return nil, ErrPayForbidden
+		}
 	}
 	_, fresh, err := s.Lock(ctx, user, id, false)
 	if err != nil {

@@ -443,3 +443,27 @@ func TestPayMerchant_AuditRowAndLogNeverHoldAWebhookURLQuery(t *testing.T) {
 		t.Fatalf("the merchant's real URL must stay intact, got %q", stored.WebhookURL)
 	}
 }
+
+func TestValidPayDomain(t *testing.T) {
+	for host, want := range map[string]bool{
+		"skyair.ng": true, "www.sky-air.co.uk": true, "a1.b2.example": true,
+		"": false, "localhost": false, "203.0.113.5": false, "::1": false,
+		"skyair.ng,evil.example": false, "skyair.ng;evil.example": false, "sky air.ng": false,
+		"Skyair.ng": false, "-a.ng": false, "skyair.ng.": false, strings.Repeat("a", 250) + ".ng": false,
+	} {
+		if got := ValidPayDomain(host); got != want {
+			t.Errorf("ValidPayDomain(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestPayMerchant_CreateFromRequestRefusesAWebsiteThatSmugglesDomains(t *testing.T) {
+	for _, site := range []string{"https://shop.ng,phish.example/", "https://shop.ng;phish.example/", "https://203.0.113.5/", "https://localhost/"} {
+		s, _ := newPayMerchantSvc(t)
+		req := payRequest()
+		req.Website = site
+		if _, err := s.CreateFromRequest(context.Background(), req); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Errorf("website %q: err = %v, want ErrPayMerchantInvalid", site, err)
+		}
+	}
+}

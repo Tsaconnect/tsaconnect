@@ -32,7 +32,7 @@ func queuedDelivery(t *testing.T, s *PayPaymentService, m *models.PayMerchant, u
 	s.db.Model(m).Update("test_webhook_url", url)
 	m.TestWebhookURL = url
 	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	if _, err := s.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p.ID, true); err != nil {
+	if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	var d models.PayWebhookDelivery
@@ -147,7 +147,7 @@ func TestPayWebhook_OneMerchantCannotHogATick(t *testing.T) {
 		in := payIn()
 		in.Reference = "R" + string(rune('A'+i))
 		p, _, _ := s.Create(context.Background(), m, models.PayModeTest, in)
-		s.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p.ID, true)
+		s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true)
 	}
 	sender := NewPayWebhookSender(s.db, s.merchants, srv.Client(), func() time.Time { return payTestNow })
 	if n, _ := sender.DeliverDue(context.Background(), 50); n != payWebhookPerMerchantPerTick {
@@ -199,7 +199,7 @@ func TestPayWebhook_ABusyMerchantCannotStarveAnotherMerchantOutOfATick(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p.ID, true); err != nil {
+		if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestPayWebhook_ABusyMerchantCannotStarveAnotherMerchantOutOfATick(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p2.ID, true); err != nil {
+	if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p2.ID), p2.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +280,7 @@ func queueMerchantDeliveries(t *testing.T, s *PayPaymentService, name, url strin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.SimulateTestOutcome(context.Background(), &models.User{ID: uuid.New()}, p.ID, true); err != nil {
+		if _, err := s.SimulateTestOutcome(context.Background(), payOwnerOf(t, s, p.ID), p.ID, true); err != nil {
 			t.Fatal(err)
 		}
 		s.db.Model(&models.PayWebhookDelivery{}).Where("payment_id = ?", p.ID).
