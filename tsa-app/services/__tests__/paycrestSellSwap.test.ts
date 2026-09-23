@@ -73,6 +73,15 @@ it('reports a swap hash, then opens the order', async () => {
   expect(calls.every((c) => c[1].method === 'POST')).toBe(true);
 });
 
+it('opens the order with no body by default, and asks for the wallet-balance top-up only when told to', async () => {
+  (global.fetch as jest.Mock).mockResolvedValue(okJson({}));
+  await openSellOrder('i1');
+  await openSellOrder('i1', { useWalletBalance: true });
+  const [[, plain], [, wallet]] = (global.fetch as jest.Mock).mock.calls;
+  expect(plain.body).toBeUndefined();
+  expect(JSON.parse(wallet.body)).toEqual({ useWalletBalance: true });
+});
+
 it('returns null when there is no open sale', async () => {
   (global.fetch as jest.Mock).mockResolvedValueOnce(okJson(null));
   await expect(getOpenSellIntent()).resolves.toBeNull();

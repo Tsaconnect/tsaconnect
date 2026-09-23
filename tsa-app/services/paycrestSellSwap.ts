@@ -135,8 +135,17 @@ export async function recordSellSwap(id: string, txHash: string): Promise<void> 
  * Open the offramp for exactly the USDC that landed. The server re-proves the
  * swap first; a 409 "Still swapping" means its own view has not caught up yet.
  */
-export async function openSellOrder(id: string): Promise<PaycrestOrder> {
-  return paycrestRequest<PaycrestOrder>(`/sell-intents/${id}/order`, { method: 'POST' });
+export async function openSellOrder(
+  id: string,
+  opts?: {
+    /** TSA Pay: the swap landed short — cover the rest from the USDC already in her wallet. */
+    useWalletBalance?: boolean;
+  },
+): Promise<PaycrestOrder> {
+  return paycrestRequest<PaycrestOrder>(`/sell-intents/${id}/order`, {
+    method: 'POST',
+    ...(opts?.useWalletBalance ? { body: JSON.stringify({ useWalletBalance: true }) } : {}),
+  });
 }
 
 /** Source-chain gas for a token she holds no gas coin for. Blocks until it lands. */

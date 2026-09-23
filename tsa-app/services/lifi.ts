@@ -157,6 +157,13 @@ export interface LiFiTransactionRequest {
 }
 
 export interface LiFiQuote {
+  /**
+   * What the route pulls from the source wallet, in the source token's base
+   * units (action.fromAmount). For an exact-output quote — TSA Pay — this is
+   * the figure LiFi computed, not one the payer typed. Absent when the body
+   * carries none.
+   */
+  fromAmount?: string;
   toAmount: string;
   toAmountUSD: string;
   estimatedDuration: number;
@@ -336,6 +343,7 @@ export function toLiFiQuote(raw: unknown): LiFiQuote {
   const data = (raw ?? {}) as any;
   // LiFi v1: toAmount lives in estimate, not at the top level
   return {
+    fromAmount: data.action?.fromAmount ?? data.estimate?.fromAmount ?? undefined,
     toAmount: data.estimate?.toAmount ?? data.toAmount ?? '0',
     toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,

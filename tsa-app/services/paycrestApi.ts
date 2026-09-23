@@ -190,11 +190,14 @@ export class PaycrestError extends Error {
   /** Machine error code, when the server sends one (e.g.
    *  "kyc_verification_required" on a buy). Branch on this, not on message. */
   code?: string;
-  constructor(message: string, status: number, code?: string) {
+  /** With `pay_shortfall`: the USDC (whole units) a TSA Pay swap landed short by. */
+  missingUsdc?: string;
+  constructor(message: string, status: number, code?: string, missingUsdc?: string) {
     super(message);
     this.name = 'PaycrestError';
     this.status = status;
     this.code = code;
+    this.missingUsdc = missingUsdc;
   }
 }
 
@@ -210,7 +213,11 @@ const request = createApiRequest({
   // feature that is switched off.
   unavailableMessage: 'Naira transfers are not available right now. Please try again later.',
   networkMessage: 'Could not reach the transfer provider. Check your connection and try again.',
-  makeError: (message, status, code) => new PaycrestError(message, status, code),
+  makeError: (message, status, code, body) => {
+    const b = body as { missingUsdc?: unknown; data?: { missingUsdc?: unknown } } | null;
+    const missing = b?.missingUsdc ?? b?.data?.missingUsdc;
+    return new PaycrestError(message, status, code, missing == null ? undefined : String(missing));
+  },
 });
 
 /**

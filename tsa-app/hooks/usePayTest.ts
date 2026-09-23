@@ -6,18 +6,13 @@
 // action in the app (see components/common/AuthorizationModal.tsx; do not
 // add a second unlock path). `submitTestOutcome` fires from `onAuthorized`.
 //
-// AuthorizationProps is exported so Tasks 14 and 16 (live pay, and whatever
-// authorizes next) can spread the same shape onto their own modal without
-// redeclaring it.
+// AuthorizationProps lives in usePayAuthorization (the one authorization step
+// every live payment hook shares); re-exported so existing imports keep working.
 import { useCallback, useState } from 'react';
 import { PayError, submitTestOutcome, type PayCheckout } from '@/services/payApi';
+import { usePayAuthorization, type AuthorizationProps } from '@/hooks/usePayAuthorization';
 
-export type AuthorizationProps = {
-  visible: boolean;
-  title: string;
-  onAuthorized(): void;
-  onCancel(): void;
-};
+export type { AuthorizationProps };
 
 export type UsePayTest = {
   request(outcome: 'approve' | 'decline'): void;
@@ -28,44 +23,31 @@ export type UsePayTest = {
 };
 
 export function usePayTest(paymentId: string): UsePayTest {
-  const [visible, setVisible] = useState(false);
-  const [pendingOutcome, setPendingOutcome] = useState<'approve' | 'decline' | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [result, setResult] = useState<PayCheckout | undefined>(undefined);
 
-  const request = useCallback((outcome: 'approve' | 'decline') => {
-    setError(undefined);
-    setPendingOutcome(outcome);
-    setVisible(true);
-  }, []);
+  const { request: open, authorization } = usePayAuthorization<'approve' | 'decline'>({
+    title: (outcome) => (outcome === 'decline' ? 'Authorize decline' : 'Authorize payment'),
+    onAuthorized: (outcome) => {
+      setSubmitting(true);
+      setError(undefined);
+      submitTestOutcome(paymentId, outcome)
+        .then((updated) => setResult(updated))
+        .catch((err: unknown) => {
+          setError(err instanceof PayError ? err.message : 'Something went wrong. Please try again.');
+        })
+        .finally(() => setSubmitting(false));
+    },
+  });
 
-  const onCancel = useCallback(() => {
-    setVisible(false);
-    setPendingOutcome(null);
-  }, []);
-
-  const onAuthorized = useCallback(() => {
-    setVisible(false);
-    if (!pendingOutcome) return;
-    const outcome = pendingOutcome;
-    setPendingOutcome(null);
-    setSubmitting(true);
-    setError(undefined);
-    submitTestOutcome(paymentId, outcome)
-      .then((updated) => setResult(updated))
-      .catch((err: unknown) => {
-        setError(err instanceof PayError ? err.message : 'Something went wrong. Please try again.');
-      })
-      .finally(() => setSubmitting(false));
-  }, [pendingOutcome, paymentId]);
-
-  const authorization: AuthorizationProps = {
-    visible,
-    title: pendingOutcome === 'decline' ? 'Authorize decline' : 'Authorize payment',
-    onAuthorized,
-    onCancel,
-  };
+  const request = useCallback(
+    (outcome: 'approve' | 'decline') => {
+      setError(undefined);
+      open(outcome);
+    },
+    [open],
+  );
 
   return { request, authorization, submitting, error, result };
 }

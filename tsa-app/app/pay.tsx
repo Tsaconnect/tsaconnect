@@ -4,8 +4,9 @@
 // (`/pay?id=<uuid>`). Test mode runs Approve/Decline entirely client-side
 // through submitTestOutcome, gated by the same PIN/biometric authorization as
 // every other money-moving action (see AuthorizationModal.tsx — no new
-// unlock path here). Live mode is a placeholder until Parts B/C wire real
-// crypto/fiat settlement onto this screen.
+// unlock path here). Live mode pays a naira merchant with any token
+// (components/pay/PayNaira); a crypto merchant is still a placeholder until
+// its route lands.
 //
 // State is computed by payScreenState (utils/payCheckout.ts) — this file
 // only wires data in and renders whatever it says.
@@ -34,6 +35,7 @@ import { getCheckout, returnUrlFor, type PayCheckout, type PayStatus } from '@/s
 import { payScreenState } from '@/utils/payCheckout';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
+import { PayNaira } from '@/components/pay/PayNaira';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 const DONE_LABEL: Record<PayStatus, string> = {
@@ -196,7 +198,11 @@ export default function PayScreen() {
                 </View>
               )}
 
-              {state.kind === 'payable' && state.checkout.mode === 'live' && (
+              {state.kind !== 'blocked' && state.checkout.mode === 'live' && state.checkout.settlementMode === 'fiat' && (
+                <PayNaira checkout={state.checkout} showForm={state.kind === 'payable'} onWaiting={fetchCheckout} />
+              )}
+
+              {state.kind === 'payable' && state.checkout.mode === 'live' && state.checkout.settlementMode !== 'fiat' && (
                 <ErrorState title="Live payments aren't available in this version of the app yet." />
               )}
             </>

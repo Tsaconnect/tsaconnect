@@ -620,3 +620,213 @@ describe("the server's verdict, read from its code", () => {
     expect(hook.stage).toBe('failed');
   });
 });
+
+// ── TSA Pay: the same pipeline, started by a payment instead of a sale ──────
+
+let payOpts: Parameters<typeof useSwappedSell>[0];
+let payHook!: ReturnType<typeof useSwappedSell>;
+function PayProbe() {
+  payHook = useSwappedSell(payOpts);
+  return null;
+}
+const payArgs = {
+  sourceChainId: 56,
+  token: args.token,
+  walletAddress: '0xUser',
+  sourceAddress: '0xUser',
+};
+const payIntent = { id: 'i1', status: 'swapping' } as SellIntent;
+const mountPay = () => act(async () => { create(<PayProbe />); });
+
+describe('an injected intent creator', () => {
+  beforeEach(() => {
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockResolvedValue(order);
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+  });
+
+  it('starts the sale through it instead of createSellIntent, and runs the same pipeline', async () => {
+    const createIntent = jest.fn().mockResolvedValue({ intent: payIntent, quote: q, gasTopUp: false });
+    payOpts = { createIntent };
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(createIntent).toHaveBeenCalledWith(payArgs);
+    expect(mocked.createSellIntent).not.toHaveBeenCalled();
+    expect(mocked.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap');
+    expect(mocked.openSellOrder).toHaveBeenCalledWith('i1');
+    expect(payHook.stage).toBe('done');
+    expect(payHook.intent?.id).toBe('i1');
+  });
+
+  it('always calls the creator of the latest render, not the first', async () => {
+    const stale = jest.fn().mockRejectedValue(new Error('stale creator'));
+    const fresh = jest.fn().mockResolvedValue({ intent: payIntent, quote: q });
+    payOpts = { createIntent: stale };
+    await mountPay();
+    payOpts = { createIntent: fresh };
+    await act(async () => { create(<PayProbe />); });
+
+    await run(payHook.start(payArgs));
+
+    expect(stale).not.toHaveBeenCalled();
+    expect(fresh).toHaveBeenCalled();
+  });
+
+  it('signs for the amount the server quoted, not one typed here', async () => {
+    const quoted = { fromAmount: '84000000000000000' } as LiFiQuote;
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: quoted }) };
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(mocked.executeLiFiSwap).toHaveBeenCalledWith(expect.objectContaining({ fromAmount: '0.084', feeFeature: 'none' }));
+  });
+
+  it("asks for the gas top-up the creator's answer says was priced", async () => {
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: q, gasTopUp: true }) };
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(mocked.requestSellIntentGasTopUp).toHaveBeenCalledWith('i1');
+  });
+
+  it('a creator that throws fails the run with its message and starts nothing', async () => {
+    payOpts = { createIntent: jest.fn().mockRejectedValue(new Error('You need to verify your identity')) };
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(payHook.stage).toBe('failed');
+    expect(payHook.error).toBe('You need to verify your identity');
+    expect(mocked.executeLiFiSwap).not.toHaveBeenCalled();
+  });
+});
+
+describe('a payment whose swap landed short', () => {
+  const shortfall = () => new PaycrestError('The swap landed short of the payout', 409, 'pay_shortfall', '0.42');
+
+  beforeEach(async () => {
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: q }) };
+    await mountPay();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+  });
+
+  it('stops at a shortfall stage with the figure, keeping the sale open', async () => {
+    mocked.openSellOrder.mockRejectedValue(shortfall());
+
+    await run(payHook.start(payArgs));
+
+    expect(payHook.stage).toBe('shortfall');
+    expect(payHook.missingUsdc).toBe('0.42');
+    expect(payHook.intent?.id).toBe('i1');
+    expect(payHook.error).toBeUndefined();
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+    expect(mocked.sendSponsoredPaycrestDeposit).not.toHaveBeenCalled();
+    expect(await AsyncStorage.getItem(KEY)).toBe('0xswap'); // the swap is still followable
+  });
+
+  it('completeWithWallet opens the order against her wallet USDC, then sends and finishes', async () => {
+    mocked.openSellOrder.mockRejectedValueOnce(shortfall());
+    await run(payHook.start(payArgs));
+    // A resumed run may not know her wallet: the order's own is the USDC's owner.
+    const owned = { ...order, walletAddress: '0xUser' } as PaycrestOrder;
+    mocked.openSellOrder.mockResolvedValue(owned);
+
+    await run(payHook.completeWithWallet(payHook.intent!));
+
+    expect(mocked.openSellOrder).toHaveBeenLastCalledWith('i1', { useWalletBalance: true });
+    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledWith(owned, '0xUser', expect.anything());
+    expect(mocked.claimPayment).toHaveBeenCalledWith('o1');
+    expect(payHook.stage).toBe('done');
+    expect(payHook.missingUsdc).toBeUndefined();
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('a wallet that cannot cover it either stays at shortfall with the new figure', async () => {
+    mocked.openSellOrder.mockRejectedValueOnce(shortfall());
+    await run(payHook.start(payArgs));
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('still short', 409, 'pay_shortfall', '0.10'));
+
+    await run(payHook.completeWithWallet(payHook.intent!));
+
+    expect(payHook.stage).toBe('shortfall');
+    expect(payHook.missingUsdc).toBe('0.10');
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+
+  it('any other refusal to open it fails with the server words and her USDC reassurance', async () => {
+    mocked.openSellOrder.mockRejectedValueOnce(shortfall());
+    await run(payHook.start(payArgs));
+    mocked.openSellOrder.mockRejectedValue(new Error('Paycrest is unavailable'));
+
+    await run(payHook.completeWithWallet(payHook.intent!));
+
+    expect(payHook.stage).toBe('failed');
+    expect(payHook.error).toMatch(/Paycrest is unavailable/);
+    expect(payHook.error).toMatch(/USDC is in your wallet/i);
+  });
+});
+
+describe('the rate moving while the payout opens', () => {
+  const moved = () => new PaycrestError('The rate moved', 409, 'rate_moved');
+
+  beforeEach(async () => {
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: q }) };
+    await mountPay();
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+  });
+
+  it('retries once and carries on', async () => {
+    mocked.openSellOrder.mockRejectedValueOnce(moved()).mockResolvedValueOnce(order);
+
+    await run(payHook.start(payArgs));
+
+    expect(mocked.openSellOrder).toHaveBeenCalledTimes(2);
+    expect(payHook.stage).toBe('done');
+  });
+
+  it('fails with the message when it moves again, closing nothing', async () => {
+    mocked.openSellOrder.mockRejectedValue(moved());
+
+    await run(payHook.start(payArgs));
+
+    expect(mocked.openSellOrder).toHaveBeenCalledTimes(2);
+    expect(payHook.stage).toBe('failed');
+    expect(payHook.error).toMatch(/The rate moved/);
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe('resuming a payment sale', () => {
+  it('a failed intent has nothing to follow — back to idle, nothing called', async () => {
+    payOpts = undefined;
+    await mountPay();
+
+    await run(payHook.resume({ id: 'i1', status: 'failed' } as SellIntent, '0xUser'));
+
+    expect(payHook.stage).toBe('idle');
+    expect(mocked.openSellOrder).not.toHaveBeenCalled();
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+
+  it('a swapped intent that then hits a shortfall resumes into the shortfall stage', async () => {
+    payOpts = undefined;
+    await mountPay();
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('short', 409, 'pay_shortfall', '0.42'));
+
+    await run(payHook.resume({ id: 'i1', status: 'swapped', swapTxHash: '0xserver' } as SellIntent, '0xUser'));
+
+    expect(payHook.stage).toBe('shortfall');
+    expect(payHook.missingUsdc).toBe('0.42');
+    expect(payHook.intent?.id).toBe('i1');
+  });
+});

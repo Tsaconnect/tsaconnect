@@ -17,19 +17,21 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { ethers } from 'ethers';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  abandonSellIntent, createSellIntent, openSellOrder, recordSellSwap, requestSellIntentGasTopUp,
-  type SellIntent,
+  abandonSellIntent, createSellIntent, openSellOrder, recordSellSwap, type SellIntent,
 } from '@/services/paycrestSellSwap';
-import { executeLiFiSwap, SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
-import { getSwapDelivery, isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
+import { SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
+import {
+  clearPendingSwapHash, executeSellSwap, pendingSwapKey, readPendingSwapHash,
+} from '@/services/sellSwapRun';
+import { getSwapDelivery, type LiFiQuote, type LiFiToken } from '@/services/lifi';
 import { sendSponsoredPaycrestDeposit } from '@/services/paycrestDeposit';
 import { claimPayment, getOrder, PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
 import { nativeBalance } from '@/services/wallet';
-import { getChainByChainId } from '@/constants/chains';
 
-export type SellStage = 'idle' | 'swapping' | 'waiting' | 'ordering' | 'sending' | 'done' | 'failed';
+/** 'shortfall' is TSA Pay only: the swap landed short of what the payout needs. */
+export type SellStage =
+  | 'idle' | 'swapping' | 'waiting' | 'ordering' | 'sending' | 'shortfall' | 'done' | 'failed';
 
 export type StartSellArgs = {
   sourceChainId: number;
@@ -44,7 +46,36 @@ export type StartSellArgs = {
   currency?: string;
 };
 
-export const pendingSwapKey = (intentId: string) => `paycrest.sellSwap.pendingTx.${intentId}`;
+/**
+ * What a run is started with. A sale supplies all of StartSellArgs; a payment
+ * (an injected `createIntent`) supplies only where the tokens are — the amount
+ * is the server's quote, and the bank is the merchant's, held server-side.
+ */
+export type StartSwapArgs = Omit<StartSellArgs, 'amount' | 'bank' | 'currency'> &
+  Partial<Pick<StartSellArgs, 'amount' | 'bank' | 'currency'>>;
+
+/** A started intent: what to sign, and whether the server priced a gas top-up into it. */
+export type CreatedSellIntent = { intent: SellIntent; quote: LiFiQuote; gasTopUp?: boolean };
+
+/** Where a sale's intent comes from. The default is her own sale; TSA Pay injects the payment's. */
+export type CreateIntent = (a: StartSwapArgs) => Promise<CreatedSellIntent>;
+
+/** Her own sale: the amount and the bank are hers. */
+const createOwnSale: CreateIntent = async (a) => {
+  if (a.amount === undefined || !a.bank) throw new Error('A sale needs an amount and a payout account.');
+  return createSellIntent({
+    sourceChainId: a.sourceChainId,
+    sourceToken: a.token.address,
+    sourceAmount: ethers.parseUnits(a.amount, a.token.decimals).toString(),
+    sourceAddress: a.sourceAddress,
+    bankCode: a.bank.code,
+    accountNumber: a.bank.account,
+    accountName: a.bank.name,
+    currency: a.currency,
+  });
+};
+
+export { pendingSwapKey };
 
 const POLL_MS = 15_000;
 /** 40 × 15 s = 10 minutes: past any normal bridge, short of giving up on one. */
@@ -81,6 +112,13 @@ const ORDER_CLOSED =
 /** A stop with a sentence already written for her. */
 class SellStop extends Error {}
 
+/** TSA Pay: the swap landed short. Not a failure — the sale stays open at its own stage. */
+class SellShortfall extends Error {
+  constructor(readonly missingUsdc: string | undefined) {
+    super('The swap landed short of the payout.');
+  }
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const messageOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
@@ -108,6 +146,9 @@ function outcomeFromServer(e: unknown): SwapOutcome | null {
 }
 
 /** 409s that mean "not yet" — the server's LiFi view or claim has not caught up. */
+const isCode = (e: unknown, code: string): e is PaycrestError =>
+  e instanceof PaycrestError && e.status === 409 && e.code === code;
+
 function isWaitAnswer(e: unknown): boolean {
   if (!(e instanceof PaycrestError) || e.status !== 409) return false;
   if (e.code) return WAIT_CODES.has(e.code);
@@ -126,12 +167,18 @@ const salesInFlight = new Set<string>();
 let startsAwaitingIntent = 0;
 const anySaleRunning = () => salesInFlight.size > 0 || startsAwaitingIntent > 0;
 
-export function useSwappedSell() {
+export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const [stage, setStage] = useState<SellStage>('idle');
   const [error, setError] = useState<string | undefined>();
   const [order, setOrder] = useState<PaycrestOrder | undefined>();
   const [depositTx, setDepositTx] = useState<string | undefined>();
+  const [intent, setIntent] = useState<SellIntent | undefined>();
+  const [missingUsdc, setMissingUsdc] = useState<string | undefined>();
   const running = useRef(false);
+  // start is memoised for good, so the creator is read through a ref: a payment
+  // screen's creator closes over its own payment id and must never go stale.
+  const createIntentRef = useRef(opts?.createIntent);
+  createIntentRef.current = opts?.createIntent;
 
   const fail = (message: string) => {
     setError(message);
@@ -141,7 +188,7 @@ export function useSwappedSell() {
   /** A swap that ended short: close the sale so she can start another. */
   const endShort = async (intentId: string, outcome: SwapOutcome): Promise<never> => {
     await abandonSellIntent(intentId).catch((e) => console.warn('[sell] abandon failed', e));
-    await AsyncStorage.removeItem(pendingSwapKey(intentId)).catch(() => {});
+    await clearPendingSwapHash(intentId);
     throw new SellStop(SWAP_OUTCOME_COPY[outcome]);
   };
 
@@ -167,13 +214,26 @@ export function useSwappedSell() {
    * `landed`: LiFi itself said DONE/COMPLETED — the only evidence here that
    * her USDC is on Base. Without it no failure message claims so.
    */
-  const openOrder = async (intentId: string, landed: boolean): Promise<PaycrestOrder> => {
+  const openOrder = async (
+    intentId: string,
+    landed: boolean,
+    openOpts?: { useWalletBalance?: boolean },
+  ): Promise<PaycrestOrder> => {
     setStage('ordering');
+    const open = () => (openOpts ? openSellOrder(intentId, openOpts) : openSellOrder(intentId));
     for (let i = 0; i < MAX_ORDER_TRIES; i++) {
       if (i > 0) await sleep(POLL_MS);
       try {
-        return await openSellOrder(intentId);
+        try {
+          return await open();
+        } catch (e) {
+          // The payout's rate moved while it was being opened; the server has
+          // dropped that order and a fresh one is priced from the new rate.
+          if (!isCode(e, 'rate_moved')) throw e;
+          return await open();
+        }
       } catch (e) {
+        if (isCode(e, 'pay_shortfall')) throw new SellShortfall(e.missingUsdc);
         const outcome = outcomeFromServer(e);
         if (outcome) return endShort(intentId, outcome);
         if (isWaitAnswer(e)) continue;
@@ -202,7 +262,7 @@ export function useSwappedSell() {
     // The deposit already left; a lost claim only degrades to the ordinary
     // unmatched-deposit path, so it never fails the sale.
     await claimPayment(o.id).catch((e) => console.warn('[sell] claimPayment failed', e));
-    await AsyncStorage.removeItem(pendingSwapKey(intentId)).catch(() => {});
+    await clearPendingSwapHash(intentId);
     setStage('done');
   };
 
@@ -228,6 +288,7 @@ export function useSwappedSell() {
     setError(undefined);
     setOrder(undefined);
     setDepositTx(undefined);
+    setMissingUsdc(undefined);
     const held: string[] = [];
     try {
       await body((intentId) => {
@@ -235,90 +296,48 @@ export function useSwappedSell() {
         held.push(intentId);
       });
     } catch (e) {
-      fail(e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'));
+      if (e instanceof SellShortfall) {
+        setMissingUsdc(e.missingUsdc);
+        setStage('shortfall');
+      } else {
+        fail(e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'));
+      }
     } finally {
       held.forEach((id) => salesInFlight.delete(id));
       running.current = false;
     }
   };
 
-  const start = useCallback((a: StartSellArgs) => guarded(async (hold) => {
+  const start = useCallback((a: StartSwapArgs) => guarded(async (hold) => {
     if (anySaleRunning()) throw new SellStop(STILL_RUNNING);
     setStage('swapping');
     startsAwaitingIntent++;
-    let created;
+    let created: CreatedSellIntent;
     try {
-      created = await createSellIntent({
-        sourceChainId: a.sourceChainId,
-        sourceToken: a.token.address,
-        sourceAmount: ethers.parseUnits(a.amount, a.token.decimals).toString(),
-        sourceAddress: a.sourceAddress,
-        bankCode: a.bank.code,
-        accountNumber: a.bank.account,
-        accountName: a.bank.name,
-        currency: a.currency,
-      });
+      created = await (createIntentRef.current ?? createOwnSale)(a);
       hold(created.intent.id);
+      setIntent(created.intent);
     } finally {
       startsAwaitingIntent--;
     }
     const { intent, quote, gasTopUp } = created;
-    const key = pendingSwapKey(intent.id);
-
-    // Gas on the source chain: asked for exactly when the SERVER priced a
-    // top-up into this sale — never off a balance check of our own, which
-    // would judge a different threshold (the server counts the approve too)
-    // and could skip gas the sale was budgeted for. Best-effort and silent:
-    // the server skips it if she already holds enough.
-    const chain = isNonEVMLiFiChain(a.sourceChainId) ? undefined : getChainByChainId(a.sourceChainId);
-    let topUpFailed = false;
-    if (gasTopUp) {
-      try {
-        await requestSellIntentGasTopUp(intent.id);
-      } catch (e) {
-        console.warn('[sell] gas top-up failed', e);
-        topUpFailed = true;
-      }
-    }
 
     let hash: string;
     try {
-      hash = await executeLiFiSwap({
+      hash = await executeSellSwap({
+        intentId: intent.id,
         quote,
-        fromSymbol: a.token.symbol,
-        fromDecimals: a.token.decimals,
-        fromTokenAddress: a.token.address,
-        fromAmount: a.amount,
-        walletAddress: a.sourceAddress,
-        fromChainId: a.sourceChainId,
-        // Our fee is inside the quote the server built; nothing is booked at submit.
-        feeFeature: 'none',
-        // On the phone BEFORE the broadcast: a reply lost after the server
-        // sent it must still leave a hash for resume to follow.
-        onSigned: (signed) => AsyncStorage.setItem(key, signed).catch((e) =>
-          console.warn('[sell] could not persist the signed swap hash', e)),
+        gasTopUp: gasTopUp === true,
+        token: a.token,
+        sourceChainId: a.sourceChainId,
+        sourceAddress: a.sourceAddress,
+        amount: a.amount,
       });
     } catch (e) {
-      if (e instanceof SwapBroadcastUnconfirmedError) {
-        // It may be on its way: keep the hash and the sale for resume.
-        throw new SellStop(BROADCAST_UNCONFIRMED);
-      }
-      // Refused before or at the node, so nothing left her wallet: drop any
-      // signed hash and close the sale so it does not block the next.
-      await AsyncStorage.removeItem(key).catch(() => {});
-      await abandonSellIntent(intent.id).catch((err) => console.warn('[sell] abandon failed', err));
-      if (topUpFailed && chain) {
-        throw new SellStop(
-          `You need a little ${chain.nativeCurrency.symbol} on ${chain.name} to pay the network fee, and we couldn't cover it right now. Nothing was sold.`,
-        );
-      }
+      // It may be on its way: keep the hash and the sale for resume.
+      if (e instanceof SwapBroadcastUnconfirmedError) throw new SellStop(BROADCAST_UNCONFIRMED);
       throw e;
     }
-
-    // Already on the phone for an EVM swap (onSigned); the non-EVM paths only
-    // learn their hash here. On the phone first, THEN the server.
-    await AsyncStorage.setItem(key, hash).catch((e) =>
-      console.warn('[sell] could not persist the swap hash', e));
     await finishFromHash(intent.id, hash, a.walletAddress, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the steps read only their arguments and stable setters.
   }), []);
@@ -329,6 +348,7 @@ export function useSwappedSell() {
     // id came back): leave it alone rather than race it.
     if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING);
     hold(intent.id);
+    setIntent(intent);
     const wallet = walletAddress ?? '';
     if (intent.status === 'ordered') {
       if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN);
@@ -348,7 +368,7 @@ export function useSwappedSell() {
     }
     // 'ordering' (a claim in flight, or one the server will reclaim) is the
     // same step as 'swapped': ask for the order, which is idempotent.
-    const stored = await AsyncStorage.getItem(pendingSwapKey(intent.id)).catch(() => null);
+    const stored = await readPendingSwapHash(intent.id);
     const hash = intent.swapTxHash || stored;
     if (!hash) {
       // No run of this sale is going in this app (checked above), and an EVM
@@ -362,6 +382,22 @@ export function useSwappedSell() {
   }), []);
 
   /**
+   * TSA Pay, after a shortfall: open the payout for what the swap landed PLUS
+   * the rest from the USDC already in her wallet on Base, send it, and finish.
+   * Her USDC is not touched until she taps this — the swap having landed is
+   * why the order is opened with `landed`.
+   */
+  const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (hold) => {
+    if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING);
+    hold(shortIntent.id);
+    setIntent(shortIntent);
+    const o = await openOrder(shortIntent.id, true, { useWalletBalance: true });
+    // The order's own wallet is the USDC's owner.
+    await send(o, '', shortIntent.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- as for start.
+  }), []);
+
+  /**
    * Close a sale that has sat stuck long enough (see canCancelSale) — a lost
    * reply that left it "on its way" forever, or a hash someone else recorded
    * first. Never one this app is still driving. If her swap does land later,
@@ -370,10 +406,10 @@ export function useSwappedSell() {
   const cancel = useCallback(async (intent: SellIntent) => {
     if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new Error(STILL_RUNNING);
     await abandonSellIntent(intent.id);
-    await AsyncStorage.removeItem(pendingSwapKey(intent.id)).catch(() => {});
+    await clearPendingSwapHash(intent.id);
   }, []);
 
-  return { stage, error, order, depositTx, start, resume, cancel };
+  return { stage, error, order, depositTx, intent, missingUsdc, start, resume, completeWithWallet, cancel };
 }
 
 /** How long a sale must sit unmoved before she may cancel it herself. */

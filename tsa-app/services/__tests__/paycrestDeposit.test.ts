@@ -48,7 +48,9 @@ jest.mock('../gasSponsorship', () => {
 });
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
-import { checkFunding, sendPaycrestDeposit, sendSponsoredPaycrestDeposit } from '../paycrestDeposit';
+import {
+  checkFunding, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
+} from '../paycrestDeposit';
 // eslint-disable-next-line import/first
 import { PaycrestError } from '../paycrestApi';
 // eslint-disable-next-line import/first
@@ -387,5 +389,38 @@ describe('sendSponsoredPaycrestDeposit', () => {
     const [[, first], [, second]] = mockRelay.mock.calls;
     expect(second.nonce).toBe(first.nonce);
     expect(second.signature).toBe(first.signature);
+  });
+});
+
+describe('fundingMessage', () => {
+  it('is null for a route that can be funded', () => {
+    expect(fundingMessage({ ok: true })).toBeNull();
+  });
+
+  it('says what is short, on which network, in the words of the thing being funded', () => {
+    const short = { ok: false, reason: 'short-token', token: 'USDC', chain: 'bsc', have: 1.5, need: 33.5 } as const;
+    expect(fundingMessage(short)).toBe(
+      'You have 1.5 USDC on BNB Smart Chain — this sale needs 33.5. Pick another network or top up.',
+    );
+    expect(fundingMessage(short, 'payment')).toMatch(/this payment needs 33\.5/);
+  });
+
+  it('names the gas coin when there is none', () => {
+    expect(fundingMessage({ ok: false, reason: 'no-gas', nativeSymbol: 'BNB', chain: 'bsc' })).toMatch(
+      /no BNB on BNB Smart Chain/,
+    );
+  });
+});
+
+describe('nativeBalanceFor', () => {
+  const rows = [{ chainKey: 'bsc', symbol: 'BNB', balance: '0.25' }] as unknown as WalletBalanceWithChain[];
+
+  it('reads the chain’s own coin, and 0 when the wallet holds none', () => {
+    expect(nativeBalanceFor('bsc', rows)).toBe(0.25);
+    expect(nativeBalanceFor('base', rows)).toBe(0);
+  });
+
+  it('is null when balances are not known', () => {
+    expect(nativeBalanceFor('bsc', null)).toBeNull();
   });
 });

@@ -5,6 +5,9 @@
 // (GET /api/pay/checkout/:id, POST /api/pay/checkout/:id/test-outcome), never
 // the merchant's key-authenticated /api/pay/v1 API.
 import { ApiError, createApiRequest } from '@/services/apiRequest';
+import { toLiFiQuote, type LiFiQuote } from '@/services/lifi';
+import type { PaycrestOrder } from '@/services/paycrestApi';
+import type { SellIntent } from '@/services/paycrestSellSwap';
 import { isPaymentId } from '@/utils/paymentId';
 
 export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
@@ -62,6 +65,64 @@ export async function submitTestOutcome(
     method: 'POST',
     body: JSON.stringify({ outcome }),
   });
+}
+
+/** Where the payer's tokens are: the chain, the token on it, and her address there. */
+export type PaySource = { sourceChainId: number; sourceToken: string; sourceAddress: string };
+
+const checkoutPath = (id: string, tail: string) => {
+  if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
+  return `/checkout/${encodeURIComponent(id)}${tail}`;
+};
+
+/**
+ * What paying a naira merchant with this token would cost: `fromAmount` of the
+ * source token (base units) buys `usdcTarget` USDC (base units) on Base, the
+ * deposit the payout needs plus the server's rate buffer. Moves nothing, locks
+ * nothing.
+ */
+export async function getPayQuote(
+  id: string,
+  src: PaySource,
+): Promise<{ fromAmount: string; usdcTarget: string }> {
+  const qs = new URLSearchParams({
+    sourceChainId: String(src.sourceChainId),
+    sourceToken: src.sourceToken,
+    sourceAddress: src.sourceAddress,
+  });
+  return request(checkoutPath(id, `/quote?${qs.toString()}`));
+}
+
+/**
+ * Pay with a stablecoin Paycrest takes as it is: opens the payout order the
+ * payer then funds. The server sizes it to exactly the merchant's net.
+ */
+export async function payDirect(id: string, route: { chainKey: string; token: string }): Promise<PaycrestOrder> {
+  const data = await request<PaycrestOrder | { order: PaycrestOrder }>(checkoutPath(id, '/direct'), {
+    method: 'POST',
+    body: JSON.stringify(route),
+  });
+  // /paycrest/sell returns the order as the data itself; the plan's route table
+  // wraps it as {order}. Either way it is one order.
+  return 'order' in data && data.order ? data.order : (data as PaycrestOrder);
+}
+
+type RawConverted = { intent: SellIntent; lifiQuote: unknown; gasTopUp?: boolean };
+
+/**
+ * Pay with any other token: starts the payment's sell intent (a swap into the
+ * USDC the payout needs) and hands back the LiFi quote to sign. Same shape as
+ * a sell intent, so the swapped-sell pipeline drives it as it is.
+ */
+export async function payConverted(
+  id: string,
+  src: PaySource,
+): Promise<{ intent: SellIntent; quote: LiFiQuote; gasTopUp: boolean }> {
+  const data = await request<RawConverted>(checkoutPath(id, '/converted'), {
+    method: 'POST',
+    body: JSON.stringify(src),
+  });
+  return { intent: data.intent, quote: toLiFiQuote(data.lifiQuote), gasTopUp: data.gasTopUp === true };
 }
 
 /**

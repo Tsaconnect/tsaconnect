@@ -81,7 +81,10 @@ import {
 } from '@/services/paycrestApi';
 import {
   balanceOf,
+  CHAIN_LABELS,
   checkFunding,
+  fundingMessage,
+  nativeBalanceFor,
   sendSponsoredPaycrestDeposit,
   type FundingCheck,
 } from '@/services/paycrestDeposit';
@@ -105,14 +108,6 @@ const QUOTE_DEBOUNCE_MS = 450;
  *  and confirmations — more steps than a bank transfer, so warn earlier. */
 const EXPIRY_WARNING_SECONDS = 420;
 
-const CHAIN_LABELS: Record<string, string> = {
-  base: 'Base',
-  polygon: 'Polygon',
-  bsc: 'BNB Smart Chain',
-  arbitrum: 'Arbitrum',
-  ethereum: 'Ethereum',
-};
-
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
 const fmtTokenAmount = (n: number) =>
@@ -126,15 +121,6 @@ function routeNote(check: FundingCheck): string {
   return ' · not supported in-app';
 }
 
-/** The wallet's gas balance on a chain, or null when balances aren't known. */
-function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | null): number | null {
-  const symbol = CHAINS[chain as ChainKey]?.nativeCurrency.symbol;
-  if (!symbol || !balances) return null;
-  const row = balances.find((b) => b.chainKey === chain && b.symbol === symbol);
-  const n = Number(row?.balance ?? 0);
-  return Number.isFinite(n) ? n : 0;
-}
-
 /** Stablecoins this screen already sells directly — only consulted before
  *  any quote has said which routes are live. */
 const DIRECT_TOKENS = new Set(['USDC', 'USDT']);
@@ -144,19 +130,6 @@ function networkName(chainId: number): string {
   if (isBtcLiFiChain(chainId)) return 'Bitcoin';
   if (isSuiLiFiChain(chainId)) return 'Sui';
   return getChainByChainId(chainId)?.name ?? 'another network';
-}
-
-/** The same verdict as a full sentence, for the form. */
-function fundingMessage(check: FundingCheck): string | null {
-  if (check.ok) return null;
-  const chain = CHAIN_LABELS[check.chain] ?? check.chain;
-  if (check.reason === 'short-token') {
-    return `You have ${check.have} ${check.token} on ${chain} — this sale needs ${check.need}. Pick another network or top up.`;
-  }
-  if (check.reason === 'no-gas') {
-    return `You have no ${check.nativeSymbol} on ${chain} to pay the network fee. Pick another network or add some ${check.nativeSymbol}.`;
-  }
-  return `This app cannot send on ${chain} yet — choose another network, or send from an external wallet.`;
 }
 
 export default function PaycrestSellScreen() {

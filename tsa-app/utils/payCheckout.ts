@@ -74,3 +74,38 @@ export function payScreenState(input: {
 
   return { kind: 'payable', checkout };
 }
+
+/**
+ * Integer kobo as the decimal naira string the rate endpoints take
+ * ("5000000" → "50000.00"). Whole-number string maths: a payment's amount is
+ * money and never passes through a float on its way to a quote.
+ */
+export function nairaFromKobo(kobo: number): string {
+  if (!Number.isSafeInteger(kobo) || kobo < 0) throw new RangeError(`Not a whole number of kobo: ${kobo}`);
+  return `${Math.floor(kobo / 100)}.${String(kobo % 100).padStart(2, '0')}`;
+}
+
+const SHOWN_DECIMALS = 6;
+
+/**
+ * "0.084 BNB": what the payer sends, from base units. At most six decimals, and
+ * a sliver past the last one rounds UP — an "about" figure must never
+ * understate what leaves her wallet. Empty for anything that is not a whole
+ * number of base units, rather than a wrong figure.
+ */
+export function payAmountLabel(baseUnits: string, decimals: number, symbol: string): string {
+  if (!/^\d+$/.test(baseUnits)) return '';
+  const unit = 10n ** BigInt(decimals);
+  const keep = 10n ** BigInt(Math.max(decimals - SHOWN_DECIMALS, 0));
+  const total = BigInt(baseUnits);
+  const rounded = ((total + keep - 1n) / keep) * keep;
+  const whole = rounded / unit;
+  const frac = (rounded % unit).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${whole}${frac ? `.${frac}` : ''} ${symbol}`;
+}
+
+/** The shortfall question, in USDC — the only unit the server measures it in. */
+export function shortfallCopy(missingUsdc: string | undefined): string {
+  const by = missingUsdc ? `about ${missingUsdc} USDC short` : 'short';
+  return `The rate moved and your swap landed ${by}. Pay the rest from the USDC in your wallet?`;
+}

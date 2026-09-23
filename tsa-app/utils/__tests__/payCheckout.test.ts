@@ -1,4 +1,4 @@
-import { payScreenState } from '../payCheckout';
+import { nairaFromKobo, payAmountLabel, payScreenState, shortfallCopy } from '../payCheckout';
 import type { PayCheckout } from '@/services/payApi';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
@@ -29,4 +29,50 @@ it('waits while its own payment is processing, and finishes on a terminal status
   for (const status of ['succeeded', 'failed', 'expired'] as const) {
     expect(payScreenState({ id: ID, authed: true, checkout: { ...base, status, payable: false }, now }).kind).toBe('done');
   }
+});
+
+describe('nairaFromKobo', () => {
+  it('writes an integer kobo amount as the decimal naira string the rate endpoints take', () => {
+    expect(nairaFromKobo(5_000_000)).toBe('50000.00');
+    expect(nairaFromKobo(4_950_000)).toBe('49500.00');
+    expect(nairaFromKobo(100)).toBe('1.00');
+    expect(nairaFromKobo(5)).toBe('0.05');
+    expect(nairaFromKobo(0)).toBe('0.00');
+  });
+  it('refuses anything that is not a non-negative whole number of kobo', () => {
+    expect(() => nairaFromKobo(1.5)).toThrow(RangeError);
+    expect(() => nairaFromKobo(-1)).toThrow(RangeError);
+    expect(() => nairaFromKobo(NaN)).toThrow(RangeError);
+  });
+});
+
+describe('payAmountLabel', () => {
+  it('shows what the payer sends, in the token’s own decimals', () => {
+    expect(payAmountLabel('84000000000000000', 18, 'BNB')).toBe('0.084 BNB');
+    expect(payAmountLabel('33835000', 6, 'USDC')).toBe('33.835 USDC');
+    expect(payAmountLabel('50000000', 6, 'USDT')).toBe('50 USDT');
+  });
+  it('never understates the amount: a sliver past the last shown digit rounds up', () => {
+    expect(payAmountLabel('1', 18, 'BNB')).toBe('0.000001 BNB');
+    expect(payAmountLabel('1000000000000001', 18, 'ETH')).toBe('0.001001 ETH');
+    expect(payAmountLabel('999999999999999999', 18, 'ETH')).toBe('1 ETH');
+  });
+  it('is empty for a figure it cannot read, rather than a wrong one', () => {
+    expect(payAmountLabel('', 18, 'BNB')).toBe('');
+    expect(payAmountLabel('1.5', 18, 'BNB')).toBe('');
+    expect(payAmountLabel('-3', 18, 'BNB')).toBe('');
+  });
+});
+
+describe('shortfallCopy', () => {
+  it('says how far short in USDC and what tapping the button does', () => {
+    expect(shortfallCopy('0.42')).toBe(
+      'The rate moved and your swap landed about 0.42 USDC short. Pay the rest from the USDC in your wallet?',
+    );
+  });
+  it('still asks the question when the server sent no figure', () => {
+    expect(shortfallCopy(undefined)).toBe(
+      'The rate moved and your swap landed short. Pay the rest from the USDC in your wallet?',
+    );
+  });
 });
