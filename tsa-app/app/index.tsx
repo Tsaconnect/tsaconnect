@@ -11,6 +11,7 @@ import { router } from "expo-router";
 import * as Network from "expo-network";
 import { useAuth } from "@/AuthContext/AuthContext";
 import { isLockEnabled } from "@/services/localAuth";
+import { goAfterAuth } from "@/utils/postAuthRoute";
 import { useTheme } from "@/theme";
 import { Icon, Spinner, Text } from "@/components/ui";
 
@@ -28,7 +29,7 @@ const EntryScreen = () => {
         if (lockOn) {
           router.replace("/lock");
         } else {
-          router.replace("/home");
+          await goAfterAuth(router);
         }
       } else {
         router.replace("/login");

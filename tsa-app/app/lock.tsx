@@ -10,6 +10,7 @@ import { router } from 'expo-router';
 import {
   authenticateWithBiometric, verifyPin, getLockState, getBiometricType,
 } from '@/services/localAuth';
+import { goAfterAuth } from '@/utils/postAuthRoute';
 import { useTheme } from '@/theme';
 import { Icon, PressableScale, Spinner, Text } from '@/components/ui';
 
@@ -35,7 +36,7 @@ const LockScreen = () => {
       setLoading(false);
       const success = await authenticateWithBiometric();
       if (success) {
-        router.replace('/home');
+        await goAfterAuth(router);
         return;
       }
       // Biometric failed — show PIN
@@ -49,7 +50,7 @@ const LockScreen = () => {
       setTimeout(() => pinRef.current?.focus(), 300);
     } else {
       // No lock configured — skip
-      router.replace('/home');
+      await goAfterAuth(router);
     }
   };
 
@@ -60,7 +61,7 @@ const LockScreen = () => {
     }
     const valid = await verifyPin(pin);
     if (valid) {
-      router.replace('/home');
+      await goAfterAuth(router);
     } else {
       setError('Incorrect PIN');
       setPin('');
@@ -75,7 +76,7 @@ const LockScreen = () => {
       setTimeout(async () => {
         const valid = await verifyPin(digits);
         if (valid) {
-          router.replace('/home');
+          await goAfterAuth(router);
         } else {
           setError('Incorrect PIN');
           setPin('');

@@ -15,9 +15,7 @@
 //      and show only what comes back.
 
 import { ethers } from 'ethers';
-import { API_BASE_URL } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
-import { makeIdempotencyKey } from '@/services/itApi';
+import { createApiRequest } from '@/services/apiRequest';
 import { getChain, type ChainKey } from '@/constants/chains';
 import { p2pTokenDecimals, formatTokenAmount } from '@/services/p2p';
 // The multi-hop ramp progress UI's own types — reused verbatim, not
@@ -200,33 +198,20 @@ export class PaycrestError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = await getAuthHeaders();
-  // Order creation is the one thing here that must not double-fire. Two orders
-  // means two provider accounts and two countdowns, and the user cannot tell
-  // which to pay. The server's open-order guard catches the sequential case;
-  // this closes the concurrent one.
-  if (init?.method === 'POST') {
-    (headers as Record<string, string>)['Idempotency-Key'] = makeIdempotencyKey();
-  }
-  const res = await fetch(`${API_BASE_URL}/paycrest${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...headers, ...(init?.headers ?? {}) },
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok || body?.success === false) {
-    // A 404 here is not a bug in the request — it is the route not being
-    // registered because the server has no Paycrest credentials. Saying
-    // "something went wrong" sends the user to retry forever against a
-    // feature that is switched off.
-    const fallback =
-      res.status === 404 || res.status === 503
-        ? 'Naira transfers are not available right now. Please try again later.'
-        : 'Could not reach the transfer provider. Check your connection and try again.';
-    throw new PaycrestError(body?.message ?? fallback, res.status, body?.code);
-  }
-  return body?.data as T;
-}
+// Order creation is the one thing here that must not double-fire. Two orders
+// means two provider accounts and two countdowns, and the user cannot tell
+// which to pay. The server's open-order guard catches the sequential case;
+// createApiRequest's Idempotency-Key on every POST closes the concurrent one.
+const request = createApiRequest({
+  prefix: '/paycrest',
+  // A 404 here is not a bug in the request — it is the route not being
+  // registered because the server has no Paycrest credentials. Saying
+  // "something went wrong" sends the user to retry forever against a
+  // feature that is switched off.
+  unavailableMessage: 'Naira transfers are not available right now. Please try again later.',
+  networkMessage: 'Could not reach the transfer provider. Check your connection and try again.',
+  makeError: (message, status, code) => new PaycrestError(message, status, code),
+});
 
 /**
  * What the user actually asked to receive — identified by (LiFi) chain id
