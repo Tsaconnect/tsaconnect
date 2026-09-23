@@ -437,34 +437,25 @@ func (c *Client) activityFor(ctx context.Context, owner solanago.PublicKey, ts *
 	hash := ts.Signature.String()
 	var out []chains.Activity
 
-	// SOL delta at the owner's account index.
-	if tx, err := res.Transaction.GetTransaction(); err == nil {
-		keys := tx.Message.AccountKeys
-		for idx, k := range keys {
-			if !k.Equals(owner) {
-				continue
+	// SOL delta at the owner's account index (see landing.go, which reads the
+	// same delta as a delivery proof).
+	if delta, idx := ownerLamportDelta(owner, res); delta != nil {
+		amount := new(big.Int).Set(delta)
+		dir := "in"
+		if delta.Sign() < 0 {
+			dir = "out"
+			// The fee payer (index 0) pays the base fee; exclude it so the
+			// row shows the amount actually sent, not sent+fee.
+			amount.Neg(amount)
+			if idx == 0 {
+				amount.Sub(amount, new(big.Int).SetUint64(res.Meta.Fee))
 			}
-			if idx < len(res.Meta.PreBalances) && idx < len(res.Meta.PostBalances) {
-				delta := int64(res.Meta.PostBalances[idx]) - int64(res.Meta.PreBalances[idx])
-				amount := delta
-				dir := "in"
-				if delta < 0 {
-					dir = "out"
-					// The fee payer (index 0) pays the base fee; exclude it so the
-					// row shows the amount actually sent, not sent+fee.
-					amount = -delta
-					if idx == 0 {
-						amount -= int64(res.Meta.Fee)
-					}
-				}
-				if amount > 0 {
-					out = append(out, chains.Activity{
-						Hash: hash, Direction: dir, AmountRaw: strconv.FormatInt(amount, 10),
-						Decimals: solDecimals, Symbol: c.cfg.NativeSymbol, Status: status, BlockTime: blockTime,
-					})
-				}
-			}
-			break
+		}
+		if amount.Sign() > 0 {
+			out = append(out, chains.Activity{
+				Hash: hash, Direction: dir, AmountRaw: amount.String(),
+				Decimals: solDecimals, Symbol: c.cfg.NativeSymbol, Status: status, BlockTime: blockTime,
+			})
 		}
 	}
 
