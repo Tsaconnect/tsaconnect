@@ -300,11 +300,17 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 
 // lifiUSD reads one of LiFi's USD strings. An empty or unparseable one reads
 // as 0, as it always has — LiFiCostBps already treats a zero input or output
-// as an unknown cost. finite is false only for a value that parsed to NaN or
-// ±Inf, which no real price is.
+// as an unknown cost. finite is false for a value that parsed to NaN or ±Inf,
+// or that overflowed float64 — ParseFloat returns (±Inf, ErrRange) for the
+// latter, not a plain parse failure, so it must not fall through to the
+// unparseable-string default of 0: a gas figure this large would otherwise
+// price the treasury's gas as free.
 func lifiUSD(s string) (v float64, finite bool) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, false
+		}
 		return 0, true
 	}
 	return v, !math.IsNaN(v) && !math.IsInf(v, 0)

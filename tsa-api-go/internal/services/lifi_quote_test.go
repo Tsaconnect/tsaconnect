@@ -103,6 +103,11 @@ func TestLiFiQuote_RefusesAUSDFigureThatIsNotAFiniteNumber(t *testing.T) {
 		{"gas amountUSD +Infinity", "100.00", "99.70", "+Infinity"},
 		{"gas amountUSD -Inf", "100.00", "99.70", "-Inf"},
 		{"gas amountUSD nan", "100.00", "99.70", "nan"},
+		// ParseFloat returns (+Inf, ErrRange) for a value that overflows
+		// float64 — not a parse failure, so it must not be read as the
+		// unparseable-string default of 0. A gas figure this large would
+		// otherwise price the treasury's gas as free.
+		{"gas amountUSD overflows float64", "100.00", "99.70", "1e400"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.NewReplacer(`"fromAmountUSD":"100.00"`, `"fromAmountUSD":"`+tc.from+`"`,
