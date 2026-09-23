@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,31 @@ func TestLiFiQuote_ParsesUSDDecimalsAndKeepsTheRawBody(t *testing.T) {
 	}
 	if route.ToTokenDecimals != 18 || route.ToTokenSymbol != "BNB" || len(route.Raw) == 0 {
 		t.Fatalf("decimals = %d raw = %d bytes", route.ToTokenDecimals, len(route.Raw))
+	}
+}
+
+// strconv.ParseFloat accepts "NaN" and "Inf". A NaN cost slips past every
+// "<= 0" guard (NaN compares false with everything) and prices a route as
+// free, so a USD figure that is not a finite number makes the whole route
+// unpriceable — refused like no route at all, on buys and sells alike.
+func TestLiFiQuote_RefusesAUSDFigureThatIsNotAFiniteNumber(t *testing.T) {
+	for _, tc := range []struct{ name, from, to, gas string }{
+		{"fromAmountUSD NaN", "NaN", "99.70", "0.02"},
+		{"toAmountUSD Inf", "100.00", "Inf", "0.02"},
+		{"gas amountUSD +Infinity", "100.00", "99.70", "+Infinity"},
+		{"gas amountUSD -Inf", "100.00", "99.70", "-Inf"},
+		{"gas amountUSD nan", "100.00", "99.70", "nan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.NewReplacer(`"fromAmountUSD":"100.00"`, `"fromAmountUSD":"`+tc.from+`"`,
+				`"toAmountUSD":"99.70"`, `"toAmountUSD":"`+tc.to+`"`,
+				`{"amountUSD":"0.02"}`, `{"amountUSD":"`+tc.gas+`"}`).Replace(lifiQuoteFixture)
+			srv := lifiQuoteServer(t, nil, body, 200)
+			route, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{})
+			if !errors.Is(err, ErrLiFiNoRoute) {
+				t.Fatalf("route = %+v err = %v; a route priced with a non-number must not be usable", route, err)
+			}
+		})
 	}
 }
 

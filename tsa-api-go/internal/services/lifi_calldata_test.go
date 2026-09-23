@@ -84,7 +84,7 @@ func TestDecodeLiFiDelivery_LiveFixtures(t *testing.T) {
 func TestCheckLiFiDelivery_AcceptsTheQuotedDelivery(t *testing.T) {
 	f := loadLiFiFixtures(t)["across_polygon_optimism"]
 	// Checksum casing of the stored wallet must not matter.
-	if err := checkLiFiDelivery(f.Data, f.FromChainID, f.ToChainID, common.HexToAddress(f.Receiver).Hex()); err != nil {
+	if err := checkLiFiDeliveryTo(f.Data, f.FromChainID, f.ToChainID, common.HexToAddress(f.Receiver).Hex(), "evm", ""); err != nil {
 		t.Fatalf("the quoted delivery was refused: %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestCheckLiFiDelivery_AcceptsTheQuotedDelivery(t *testing.T) {
 func TestCheckLiFiDelivery_RefusesAnotherReceiver(t *testing.T) {
 	for name, f := range loadLiFiFixtures(t) {
 		t.Run(name, func(t *testing.T) {
-			err := checkLiFiDelivery(f.Data, f.FromChainID, f.ToChainID, sponsorTestUser)
+			err := checkLiFiDeliveryTo(f.Data, f.FromChainID, f.ToChainID, sponsorTestUser, "evm", "")
 			if !errors.Is(err, ErrTreasuryInvalidRoute) {
 				t.Fatalf("want ErrTreasuryInvalidRoute for a route paying someone else, got %v", err)
 			}
@@ -102,7 +102,7 @@ func TestCheckLiFiDelivery_RefusesAnotherReceiver(t *testing.T) {
 
 func TestCheckLiFiDelivery_RefusesAnotherDestinationChain(t *testing.T) {
 	f := loadLiFiFixtures(t)["polymer_base_arbitrum"]
-	err := checkLiFiDelivery(f.Data, f.FromChainID, 10, f.Receiver)
+	err := checkLiFiDeliveryTo(f.Data, f.FromChainID, 10, f.Receiver, "evm", "")
 	if !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("want ErrTreasuryInvalidRoute for a route to the wrong chain, got %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCheckLiFiDelivery_RefusesAnotherDestinationChain(t *testing.T) {
 // with the money.
 func TestCheckLiFiDelivery_RefusesADestinationCall(t *testing.T) {
 	data := testBridgeCalldata(t, sponsorTestUser, 137, true)
-	err := checkLiFiDelivery(data, 8453, 137, sponsorTestUser)
+	err := checkLiFiDeliveryTo(data, 8453, 137, sponsorTestUser, "evm", "")
 	if !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("want ErrTreasuryInvalidRoute for a destination call, got %v", err)
 	}
@@ -145,7 +145,7 @@ func TestCheckLiFiDelivery_GenericSwapIsDecodedByItsOwnLayout(t *testing.T) {
 		t.Fatalf("spoof BridgeData names %s, want the user", bd.Receiver.Hex())
 	}
 
-	err = checkLiFiDelivery(hexutil.Encode(data), f.FromChainID, f.ToChainID, f.Receiver)
+	err = checkLiFiDeliveryTo(hexutil.Encode(data), f.FromChainID, f.ToChainID, f.Receiver, "evm", "")
 	if !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("a swap paying the attacker was accepted: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestCheckLiFiDelivery_GenericSwapIsDecodedByItsOwnLayout(t *testing.T) {
 // A same-chain swap cannot deliver to another chain, whatever it claims.
 func TestCheckLiFiDelivery_GenericSwapIsSameChainOnly(t *testing.T) {
 	f := loadLiFiFixtures(t)["nordstern_base_usdc_to_weth"]
-	err := checkLiFiDelivery(f.Data, f.FromChainID, 137, f.Receiver)
+	err := checkLiFiDeliveryTo(f.Data, f.FromChainID, 137, f.Receiver, "evm", "")
 	if !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("want ErrTreasuryInvalidRoute for a swap asked to cross chains, got %v", err)
 	}
@@ -350,7 +350,7 @@ func TestCheckLiFiDelivery_RefusesUndecodableCalldata(t *testing.T) {
 		"erc20 transfer": transfer,
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := checkLiFiDelivery(data, 8453, 137, sponsorTestUser)
+			err := checkLiFiDeliveryTo(data, 8453, 137, sponsorTestUser, "evm", "")
 			if !errors.Is(err, ErrTreasuryInvalidRoute) {
 				t.Fatalf("want ErrTreasuryInvalidRoute, got %v", err)
 			}

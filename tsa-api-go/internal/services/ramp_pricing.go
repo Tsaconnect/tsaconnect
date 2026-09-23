@@ -33,6 +33,12 @@ const stableHeadroomBps = 30
 // ceilBps rounds a bps figure up — never under-price a route — after shaving
 // float noise, and floors it at zero.
 func ceilBps(x float64) int {
+	// A cost that is not a number is never cheap. int(NaN) is 0 on some
+	// platforms and int(+Inf) wraps negative on others; either would admit
+	// the route. Price it past every budget instead.
+	if math.IsNaN(x) || math.IsInf(x, 1) {
+		return math.MaxInt32
+	}
 	v := int(math.Ceil(x - 1e-6))
 	if v < 0 {
 		return 0
@@ -43,7 +49,10 @@ func ceilBps(x float64) int {
 // LiFiCostBps is LiFi's own cost of a route: USD in less USD out. Gas is paid
 // separately (TreasuryGasBps / USDGasBps) and slippage tolerance is not a cost.
 func LiFiCostBps(route *LiFiRoute) (int, bool) {
-	if route == nil || route.FromAmountUSD <= 0 || route.ToAmountUSD <= 0 {
+	// Written as "not > 0" so NaN, which compares false with everything, is
+	// refused too; +Inf is no price either.
+	if route == nil || !(route.FromAmountUSD > 0) || !(route.ToAmountUSD > 0) ||
+		math.IsInf(route.FromAmountUSD, 1) || math.IsInf(route.ToAmountUSD, 1) {
 		return 0, false
 	}
 	return ceilBps((route.FromAmountUSD - route.ToAmountUSD) / route.FromAmountUSD * 10_000), true

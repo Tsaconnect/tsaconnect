@@ -244,19 +244,16 @@ func lifiTransactionID(data []byte) (string, bool) {
 	return hexutil.Encode(bd.TransactionId[:]), true
 }
 
-// checkLiFiDelivery refuses a route whose calldata would deliver anywhere but
-// receiver on destChainID — or hand the funds to a destination call. Every
-// refusal is ErrTreasuryInvalidRoute: the route is untrusted input that
-// failed a safety check, the same class as an off-allowlist `to`.
-func checkLiFiDelivery(data string, sourceChainID, destChainID int64, receiver string) error {
-	return checkLiFiDeliveryTo(data, sourceChainID, destChainID, receiver, "evm", "")
-}
-
-// checkLiFiDeliveryTo is checkLiFiDelivery for a receiver of any address
-// family ("evm", "solana"). The family decides how the receiver is read out of
-// the calldata, and a family with no decoder is refused rather than checked
-// with the EVM one — on a non-EVM route that would compare the order's wallet
-// against LiFi's placeholder and pass anything.
+// checkLiFiDeliveryTo refuses a route whose calldata would deliver anywhere
+// but receiver on destChainID — or hand the funds to a destination call. Every
+// refusal is ErrTreasuryInvalidRoute: the route is untrusted input that failed
+// a safety check, the same class as an off-allowlist `to`.
+//
+// family ("evm", "solana") is the receiver's address family. It decides how
+// the receiver is read out of the calldata, and a family with no decoder is
+// refused rather than checked with the EVM one — on a non-EVM route that
+// would compare the order's wallet against LiFi's placeholder and pass
+// anything.
 //
 // destToken is the destination token the route was quoted for, which only the
 // caller knows. It matters on Solana: an SPL delivery lands in a token account

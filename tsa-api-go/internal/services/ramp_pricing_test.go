@@ -1,6 +1,7 @@
 package services
 
 import (
+	"math"
 	"math/big"
 	"testing"
 )
@@ -61,6 +62,27 @@ func TestLiFiCostBps(t *testing.T) {
 	}
 	if _, ok := LiFiCostBps(nil); ok {
 		t.Fatal("nil route must be unusable")
+	}
+	// NaN compares false with everything, so "<= 0" alone let it through.
+	for _, r := range []*LiFiRoute{
+		{FromAmountUSD: math.NaN(), ToAmountUSD: 99.7},
+		{FromAmountUSD: 100, ToAmountUSD: math.NaN()},
+		{FromAmountUSD: math.Inf(1), ToAmountUSD: 99.7},
+		{FromAmountUSD: 100, ToAmountUSD: math.Inf(1)},
+	} {
+		if got, ok := LiFiCostBps(r); ok {
+			t.Fatalf("LiFiCostBps(%v/%v) = %d, ok; a non-finite USD figure is an unknown cost", r.FromAmountUSD, r.ToAmountUSD, got)
+		}
+	}
+}
+
+// A gas cost that is not a number is never cheap: it prices past any budget
+// rather than rounding to zero (which int(NaN) does on some platforms).
+func TestUSDGasBps_ANonFiniteCostIsNeverAffordable(t *testing.T) {
+	for _, usd := range []float64{math.NaN(), math.Inf(1)} {
+		if got := USDGasBps(usd, 100); got < 10_000 {
+			t.Fatalf("USDGasBps(%v) = %d; it must price past every budget", usd, got)
+		}
 	}
 }
 

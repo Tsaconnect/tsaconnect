@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -266,10 +267,21 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	route.Raw = json.RawMessage(body)
 	route.ToTokenDecimals = parsed.Action.ToToken.Decimals
 	route.ToTokenSymbol = parsed.Action.ToToken.Symbol
-	route.FromAmountUSD, _ = strconv.ParseFloat(parsed.Estimate.FromAmountUSD, 64)
-	route.ToAmountUSD, _ = strconv.ParseFloat(parsed.Estimate.ToAmountUSD, 64)
+	// Every USD figure prices a budget, so one that is not a finite number
+	// ("NaN", "Inf" — both parse) makes the route unpriceable: NaN slips past
+	// every "<= 0" guard and would price the route as free.
+	var finite bool
+	if route.FromAmountUSD, finite = lifiUSD(parsed.Estimate.FromAmountUSD); !finite {
+		return nil, fmt.Errorf("%w: fromAmountUSD %q is not a number", ErrLiFiNoRoute, parsed.Estimate.FromAmountUSD)
+	}
+	if route.ToAmountUSD, finite = lifiUSD(parsed.Estimate.ToAmountUSD); !finite {
+		return nil, fmt.Errorf("%w: toAmountUSD %q is not a number", ErrLiFiNoRoute, parsed.Estimate.ToAmountUSD)
+	}
 	for _, g := range parsed.Estimate.GasCosts {
-		v, _ := strconv.ParseFloat(g.AmountUSD, 64)
+		v, finite := lifiUSD(g.AmountUSD)
+		if !finite {
+			return nil, fmt.Errorf("%w: gas amountUSD %q is not a number", ErrLiFiNoRoute, g.AmountUSD)
+		}
 		route.GasCostUSD += v
 		if wei, ok := new(big.Int).SetString(strings.TrimSpace(g.Amount), 10); ok {
 			if route.GasCostWei == nil {
@@ -284,6 +296,18 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		}
 	}
 	return route, nil
+}
+
+// lifiUSD reads one of LiFi's USD strings. An empty or unparseable one reads
+// as 0, as it always has — LiFiCostBps already treats a zero input or output
+// as an unknown cost. finite is false only for a value that parsed to NaN or
+// ±Inf, which no real price is.
+func lifiUSD(s string) (v float64, finite bool) {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, true
+	}
+	return v, !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // IsIntegratorFeeUnconfigured spots LiFi's "not configured for collecting fees
