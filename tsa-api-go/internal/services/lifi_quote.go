@@ -29,7 +29,10 @@ var ErrLiFiFeeUnconfigured = errors.New("lifi: integrator fee not configured on 
 // LiFiRoute is one executable quote. The treasury signs transactionRequest as
 // given: a route is never reconstructed from its parts.
 type LiFiRoute struct {
-	Tool            string
+	Tool string
+	// FromAmount is what the quote spends (action.fromAmount, base units).
+	// For an exact-output quote it is the answer, not the ask.
+	FromAmount      string
 	ToAmount        *big.Int
 	ToAmountMin     *big.Int
 	ApprovalAddress string
@@ -83,6 +86,10 @@ type LiFiQuoteRequest struct {
 	FromAddress string
 	ToAddress   string
 	FromAmount  string // base units
+	// ToAmount asks for an EXACT output instead (base units of ToToken):
+	// LiFi then works out what has to be spent. Exactly one of FromAmount and
+	// ToAmount may be set.
+	ToAmount string
 	// FeeBps is the integrator fee in basis points, sent to LiFi as a fraction
 	// (e.g. 25 -> "0.0025"). 0 omits the fee param entirely.
 	FeeBps int
@@ -173,7 +180,8 @@ type lifiQuoteResponse struct {
 		} `json:"gasCosts"`
 	} `json:"estimate"`
 	Action struct {
-		FromToken struct {
+		FromAmount string `json:"fromAmount"`
+		FromToken  struct {
 			Address string `json:"address"`
 		} `json:"fromToken"`
 		ToToken struct {
@@ -195,7 +203,14 @@ type lifiQuoteResponse struct {
 // stable-to-stable conversions inside the promise for a route a human signs
 // later. A caller with no such delay may set req.Order to CHEAPEST instead. A
 // route is never cached, because providers and pools come and go daily.
+//
+// With req.ToAmount set the ask is exact-output (GET /quote/toAmount): the
+// route delivers that much and reports what it costs in route.FromAmount.
 func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiRoute, error) {
+	if req.FromAmount != "" && req.ToAmount != "" {
+		return nil, errors.New("lifi quote: fromAmount and toAmount are mutually exclusive")
+	}
+	path := "/quote"
 	q := url.Values{}
 	q.Set("fromChain", strconv.FormatInt(req.FromChainID, 10))
 	q.Set("toChain", strconv.FormatInt(req.ToChainID, 10))
@@ -203,7 +218,12 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	q.Set("toToken", req.ToToken)
 	q.Set("fromAddress", req.FromAddress)
 	q.Set("toAddress", req.ToAddress)
-	q.Set("fromAmount", req.FromAmount)
+	if req.ToAmount != "" {
+		path = "/quote/toAmount"
+		q.Set("toAmount", req.ToAmount)
+	} else {
+		q.Set("fromAmount", req.FromAmount)
+	}
 	order := req.Order
 	if order == "" {
 		order = "FASTEST"
@@ -222,7 +242,7 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	}
 	q.Set("integrator", c.integrator)
 
-	httpReq, err := NewLiFiGetRequest(ctx, c.baseURL, c.apiKey, "/quote?"+q.Encode())
+	httpReq, err := NewLiFiGetRequest(ctx, c.baseURL, c.apiKey, path+"?"+q.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +285,7 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 
 	route := &LiFiRoute{
 		Tool:            tool,
+		FromAmount:      parsed.Action.FromAmount,
 		ToAmount:        toAmount,
 		ToAmountMin:     toMin,
 		ApprovalAddress: parsed.Estimate.ApprovalAddress,

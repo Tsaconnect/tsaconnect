@@ -30,6 +30,8 @@ type fakeLiFiQuoter struct {
 	err   error
 	calls int
 	last  LiFiQuoteRequest
+	// all is every request, in order — for a test about BOTH asks a quoter makes.
+	all []LiFiQuoteRequest
 	// routes answers a SEQUENCE of quotes, one per call, falling back to
 	// route once exhausted. The sell quoter asks twice — once to learn the
 	// route's cost, once carrying our fee — and the two answers differ.
@@ -46,6 +48,7 @@ func (f *fakeLiFiQuoter) Quote(_ context.Context, req LiFiQuoteRequest) (*LiFiRo
 	defer f.mu.Unlock()
 	f.calls++
 	f.last = req
+	f.all = append(f.all, req)
 	if f.err != nil && f.calls > f.errAfter {
 		return nil, f.err
 	}

@@ -22,13 +22,15 @@ import (
 // and an intent that claims a swap which was never hers.
 
 type fakeSellQuoter struct {
-	quote *SellSwapQuote
-	err   error
-	calls int
+	quote  *SellSwapQuote
+	err    error
+	calls  int
+	lastIn SellQuoteInput
 }
 
-func (f *fakeSellQuoter) Quote(_ context.Context, _ SellQuoteInput) (*SellSwapQuote, error) {
+func (f *fakeSellQuoter) Quote(_ context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
 	f.calls++
+	f.lastIn = in
 	return f.quote, f.err
 }
 
@@ -165,7 +167,7 @@ func TestSellIntent_OpenOrderWaitsForLiFi(t *testing.T) {
 	in := r.create(t)
 	r.mustRecord(t, in.ID, testSwapHash)
 	r.status.st = &LiFiTransferStatus{Status: LiFiStatusPending}
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrSwapNotLanded) {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); !errors.Is(err, ErrSwapNotLanded) {
 		t.Fatalf("err = %v, want ErrSwapNotLanded", err)
 	}
 	if r.client.offrampCalls != 0 {
@@ -178,14 +180,14 @@ func TestSellIntent_OpenOrderSellsTheOnChainLandedAmountAtFMinusB(t *testing.T) 
 	in := r.create(t)
 	r.mustRecord(t, in.ID, testSwapHash)
 	r.status.st = r.landed(in)
-	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.client.lastOfframp.AmountToken != "9.975" || r.client.lastOfframp.SenderFeePercent != "0.5" {
 		t.Fatalf("offramp = %+v, want the chain's 9.975 USDC at fee 0.5", r.client.lastOfframp)
 	}
-	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil || again.ID != order.ID || r.client.offrampCalls != 1 {
 		t.Fatalf("second OpenOrder: err %v, calls %d; must be idempotent", err, r.client.offrampCalls)
 	}
@@ -216,7 +218,7 @@ func TestSellIntent_OpenOrderRefusesAnySwapThatIsNotThisIntents(t *testing.T) {
 			st := r.landed(in)
 			mutate(st)
 			r.status.st = st
-			if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrSwapMismatch) {
+			if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); !errors.Is(err, ErrSwapMismatch) {
 				t.Fatalf("err = %v, want ErrSwapMismatch", err)
 			}
 			if r.client.offrampCalls != 0 {
@@ -232,7 +234,7 @@ func TestSellIntent_OpenOrderNeedsTheOnChainProof(t *testing.T) {
 	r.mustRecord(t, in.ID, testSwapHash)
 	r.status.st = r.landed(in)
 	r.base.err = errors.New("no transfer in that tx")
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err == nil {
 		t.Fatal("an unproven landing opened an order")
 	}
 	if r.client.offrampCalls != 0 {
@@ -249,7 +251,7 @@ func TestSellIntent_OpenOrderSellsWhatTheReceiptProvesNotWhatLiFiClaims(t *testi
 	st := r.landed(in)
 	st.ReceivedBaseUnits = big.NewInt(99_000000) // LiFi claims ten times the truth
 	r.status.st = st
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if r.client.lastOfframp.AmountToken != "9.975" {
@@ -290,7 +292,7 @@ func TestSellIntent_BooksOurFeeOnceThroughTheFeeEngine(t *testing.T) {
 	r.mustRecord(t, in.ID, testSwapHash)
 	r.status.st = r.landed(in)
 	for i := 0; i < 2; i++ {
-		if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+		if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -320,7 +322,7 @@ func TestSellIntent_OnlyTheOwnerCanOpenTheOrder(t *testing.T) {
 	r.status.st = r.landed(in)
 	stranger := *r.user
 	stranger.ID = uuid.New()
-	if _, err := r.svc.OpenOrder(context.Background(), &stranger, in.ID); err == nil {
+	if _, err := r.svc.OpenOrder(context.Background(), &stranger, in.ID, false); err == nil {
 		t.Fatal("another user opened this intent's order")
 	}
 	if r.client.offrampCalls != 0 {
@@ -342,7 +344,7 @@ func TestSellIntent_TerminalIntentsAreNotOpenAndTakeNoMoreSteps(t *testing.T) {
 	if err := r.svc.RecordSwap(context.Background(), r.user.ID, in.ID, testSwapHash); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("recording a swap on an abandoned intent: err = %v", err)
 	}
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrSellIntentState) {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("opening an order on an abandoned intent: err = %v", err)
 	}
 	// And she can start again.
@@ -430,12 +432,12 @@ func TestSellIntent_ConcurrentOpenOrderOpensOneOfframp(t *testing.T) {
 	}
 	first := make(chan result, 1)
 	go func() {
-		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 		first <- result{o, err}
 	}()
 	<-r.client.offrampEntered // the first caller is now inside Paycrest
 
-	second, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	second, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if !errors.Is(err, ErrSellIntentOrdering) || second != nil {
 		close(r.client.offrampGate)
 		t.Fatalf("second OpenOrder mid-flight: order %v, err %v; want ErrSellIntentOrdering", second, err)
@@ -455,7 +457,7 @@ func TestSellIntent_ConcurrentOpenOrderOpensOneOfframp(t *testing.T) {
 		t.Fatalf("paycrest order rows = %d, want 1", n)
 	}
 	// Once the winner has finished, a retry is the idempotent read-back.
-	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil || again.ID != got.order.ID || r.client.offrampCalls != 1 {
 		t.Fatalf("retry after the race: err %v, calls %d", err, r.client.offrampCalls)
 	}
@@ -480,12 +482,12 @@ func TestSellIntent_ALoserThatReadBeforeTheClaimGetsTheWinnersOrder(t *testing.T
 	}
 	slow := make(chan result, 1)
 	go func() {
-		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 		slow <- result{o, err}
 	}()
 	<-r.status.entered // the slow caller has read the row as swapped
 
-	winner, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	winner, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil {
 		close(r.status.gate)
 		t.Fatalf("winner: %v", err)
@@ -512,7 +514,7 @@ func TestSellIntent_AClaimedIntentIsStillHerOpenSale(t *testing.T) {
 	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
 		t.Fatalf("abandon mid-order: err = %v, want ErrSellIntentState", err)
 	}
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrSellIntentOrdering) {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); !errors.Is(err, ErrSellIntentOrdering) {
 		t.Fatalf("OpenOrder on a fresh claim: err = %v", err)
 	}
 	if r.client.offrampCalls != 0 {
@@ -527,7 +529,7 @@ func TestSellIntent_AStaleClaimIsTakenOver(t *testing.T) {
 	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).
 		Updates(map[string]any{"status": models.SellIntentOrdering,
 			"updated_at": sponsorTestNow.Add(-sellIntentClaimStale - time.Second)})
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 		t.Fatalf("stale claim: %v", err)
 	}
 	if got := r.reload(t, in.ID); got.Status != models.SellIntentOrdered || r.client.offrampCalls != 1 {
@@ -539,14 +541,14 @@ func TestSellIntent_AStaleClaimIsTakenOver(t *testing.T) {
 func TestSellIntent_OpenOrderReleasesTheClaimOnFailure(t *testing.T) {
 	r, in := landedRig(t)
 	r.client.offrampErr = errors.New("paycrest down")
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err == nil {
 		t.Fatal("want the Paycrest error")
 	}
 	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped || got.PaycrestOrderID != nil {
 		t.Fatalf("after a failed order the intent is %q; want it back to swapped", got.Status)
 	}
 	r.client.offrampErr = nil
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 		t.Fatalf("retry after release: %v", err)
 	}
 }
@@ -556,7 +558,7 @@ func TestSellIntent_OpenOrderReleasesTheClaimOnFailure(t *testing.T) {
 func TestSellIntent_OpenOrderRespectsADirectSellOpenedMeanwhile(t *testing.T) {
 	r, in := landedRig(t)
 	seedOrder(t, r.svc.db, r.user.ID, models.PaycrestDirectionSell, models.PaycrestStatusAwaitingDeposit)
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrPaycrestOrderOpen) {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); !errors.Is(err, ErrPaycrestOrderOpen) {
 		t.Fatalf("err = %v, want ErrPaycrestOrderOpen", err)
 	}
 	if r.client.offrampCalls != 0 {
@@ -609,7 +611,7 @@ func TestSellIntent_OpenOrderSurfacesAFailedSwap(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r, in := landedRig(t)
 			set(r.status.st)
-			_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+			_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 			if !errors.Is(err, ErrSwapFailed) {
 				t.Fatalf("err = %v, want ErrSwapFailed", err)
 			}
@@ -651,12 +653,12 @@ func TestSellIntent_BothReadSwappedAndTheLaterClaimLoses(t *testing.T) {
 	}
 	first, second := make(chan result, 1), make(chan result, 1)
 	go func() {
-		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 		first <- result{o, err}
 	}()
 	<-r.status.entered // the first caller has read swapped and is paused in LiFi
 	go func() {
-		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 		second <- result{o, err}
 	}()
 	<-r.client.offrampEntered // the second caller has claimed and is inside Paycrest
@@ -690,7 +692,7 @@ func TestSellIntent_AReleaseSurvivesACancelledRequest(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := r.svc.OpenOrder(ctx, r.user, in.ID)
+		_, err := r.svc.OpenOrder(ctx, r.user, in.ID, false)
 		done <- err
 	}()
 	<-r.client.offrampEntered // claimed, inside Paycrest
@@ -724,13 +726,13 @@ func TestSellIntent_ALoserAfterAReleaseIsToldToRetry(t *testing.T) {
 
 	slow := make(chan error, 1)
 	go func() {
-		_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 		slow <- err
 	}()
 	<-r.status.entered // the slow caller read the stale ordering claim
 
 	// Another caller takes the stale claim over, fails at Paycrest, releases.
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err == nil {
 		close(r.status.gate)
 		t.Fatal("takeover: want the Paycrest error")
 	}
@@ -748,7 +750,7 @@ func TestSellIntent_ALoserAfterAReleaseIsToldToRetry(t *testing.T) {
 	}
 
 	r.client.offrampErr = nil
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 		t.Fatalf("retry after the release: %v", err)
 	}
 }
@@ -778,7 +780,7 @@ func TestSellIntent_NoFeeBookedWhenNoTransactionIdBoundTheSwap(t *testing.T) {
 	st := r.landed(in)
 	st.TransactionID = ""
 	r.status.st = st
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err != nil {
 		t.Fatalf("OpenOrder: %v — the sale itself still completes", err)
 	}
 	if len(fees.events) != 0 {
@@ -797,7 +799,7 @@ func TestSellIntent_ResumableFindsAnOrderedSaleAwaitingItsDeposit(t *testing.T) 
 	if got, err := r.svc.Resumable(ctx, r.user.ID); err != nil || got == nil || got.ID != in.ID {
 		t.Fatalf("an open sale: got %+v err %v", got, err)
 	}
-	order, err := r.svc.OpenOrder(ctx, r.user, in.ID)
+	order, err := r.svc.OpenOrder(ctx, r.user, in.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +867,7 @@ func TestSellIntent_AbandonClearsBankDetails(t *testing.T) {
 func TestSellIntent_OpeningTheOrderClearsTheIntentsBankDetails(t *testing.T) {
 	r, in := landedRig(t)
 	r.giveAccountName(t, in.ID)
-	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +886,7 @@ func TestSellIntent_OpeningTheOrderClearsTheIntentsBankDetails(t *testing.T) {
 			stored.PayoutBankCode, stored.PayoutAccount, stored.PayoutAccountName)
 	}
 	// Idempotent replay still answers from the order, not the cleared intent.
-	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
 	if err != nil || again.ID != order.ID {
 		t.Fatalf("replay after clearing: order %v err %v", again, err)
 	}
@@ -895,11 +897,299 @@ func TestSellIntent_OpeningTheOrderClearsTheIntentsBankDetails(t *testing.T) {
 func TestSellIntent_AReleasedClaimKeepsBankDetails(t *testing.T) {
 	r, in := landedRig(t)
 	r.client.offrampErr = errors.New("paycrest down")
-	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false); err == nil {
 		t.Fatal("want the Paycrest failure")
 	}
 	got := r.reload(t, in.ID)
 	if got.Status != models.SellIntentSwapped || got.BankCode != "044" || got.AccountNumber != "0123456789" {
 		t.Fatalf("a retryable sale lost its destination: %+v", got)
+	}
+}
+
+// ─── Pay intents: a sale that pays SOMEONE ELSE an exact naira amount ──────
+
+// payRig is the sale rig with the quoter answering an exact-output route: the
+// quote's own fromAmount is what she signs, so it is what the intent binds to.
+func payRig(t *testing.T) *sellIntentRig {
+	t.Helper()
+	r := newSellIntentRig(t)
+	r.quoter.quote.Route.FromAmount = "17000000000000000"
+	// LiFi answers the exact-output ask for 33.9 USDC with what it will
+	// deliver (toAmount) and its slippage floor (toAmountMin).
+	r.quoter.quote.Route.ToAmount = big.NewInt(33_900000)
+	r.quoter.quote.Route.ToAmountMin = big.NewInt(33_561000)
+	return r
+}
+
+func payIntentInput(pid uuid.UUID, u *models.User) CreateSellIntentInput {
+	return CreateSellIntentInput{SourceChainID: 56, SourceToken: evmNativeAddress, SourceAddress: u.WalletAddress,
+		FiatCode: "NGN", BankCode: "044", AccountNumber: "9999999999", PayPaymentID: &pid, PayoutFiat: "50000.00", ToAmount: "33900000"}
+}
+
+func balanceOf(usdc int64) func(context.Context, string) (*big.Int, error) {
+	return func(context.Context, string) (*big.Int, error) { return big.NewInt(usdc), nil }
+}
+
+func TestSellIntent_PayIntentOpensAnExactNairaOrderToTheMerchantFromTheLandedAmount(t *testing.T) {
+	r := payRig(t)
+	r.base.amount = big.NewInt(34_000000) // landed: enough
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	order, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := r.client.lastOfframp
+	if off.Recipient.AccountIdentifier != "9999999999" || off.SenderFeePercent != "0.5" {
+		t.Fatalf("offramp = %+v", off)
+	}
+	dep, _ := r.svc.orders.SellDepositFor(context.Background(), "NGN", "50000.00", "base", "USDC", true)
+	if off.AmountToken != BaseUnitsToDecimal(dep, 6) {
+		t.Fatalf("order amount %s — must be the deposit for ₦50,000 (%s), never the wallet balance", off.AmountToken, dep)
+	}
+	if order.FiatAmount != "50000.00" {
+		t.Fatalf("order owes %s, want the stated 50000.00", order.FiatAmount)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentOrdered || got.PaycrestOrderID == nil {
+		t.Fatalf("intent = %+v", got)
+	}
+}
+
+func TestSellIntent_PayIntentShortfallNeedsConsentToUseTheWallet(t *testing.T) {
+	r := payRig(t)
+	r.base.amount = big.NewInt(9_975000) // landed short
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	_, err = r.svc.OpenOrder(context.Background(), r.user, in.ID, false)
+	var short *SellShortfallError
+	if !errors.As(err, &short) || r.client.offrampCalls != 0 {
+		t.Fatalf("without consent: err %v calls %d — her other USDC must not be spent silently", err, r.client.offrampCalls)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped {
+		t.Fatalf("status after a shortfall = %q, want the claim given back (swapped) so she can consent and retry", got.Status)
+	}
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, true); err != nil {
+		t.Fatalf("with consent: %v", err)
+	}
+}
+
+func TestSellIntent_PayIntentWalletConsentWithoutABalanceReaderIsRefused(t *testing.T) {
+	r := payRig(t)
+	r.base.amount = big.NewInt(9_975000)
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, true); !errors.Is(err, ErrSellUnavailable) || r.client.offrampCalls != 0 {
+		t.Fatalf("err %v calls %d — an unreadable balance must not be assumed sufficient", err, r.client.offrampCalls)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped {
+		t.Fatalf("status = %q: refusing must not leave the sale claimed", got.Status)
+	}
+}
+
+// The flag is meaningless for an ordinary sale: it always sells exactly what
+// landed, so a client cannot widen it.
+func TestSellIntent_AnOrdinarySaleIgnoresTheWalletBalanceFlag(t *testing.T) {
+	r := newSellIntentRig(t)
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	in := r.create(t)
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if r.client.lastOfframp.AmountToken != "9.975" {
+		t.Fatalf("offramp amount = %q, want the landed 9.975", r.client.lastOfframp.AmountToken)
+	}
+}
+
+func TestSellIntent_ExactOutputStoresTheRoutesFromAmount(t *testing.T) {
+	r := payRig(t)
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil || in.SourceAmount != "17000000000000000" || in.PayoutFiat != "50000.00" || in.PayPaymentID == nil {
+		t.Fatalf("err %v intent %+v", err, in)
+	}
+	if r.quoter.lastIn.ToAmount != "33900000" || r.quoter.lastIn.FromAmount != "" {
+		t.Fatalf("quoted %+v, want an exact-output ask", r.quoter.lastIn)
+	}
+}
+
+// An exact-output route that reports no fromAmount leaves nothing to bind the
+// swap to: refused before a row exists rather than stored with an empty amount
+// that boundToIntent could never match.
+func TestSellIntent_ExactOutputWithoutARouteFromAmountIsRefused(t *testing.T) {
+	r := newSellIntentRig(t)
+	r.quoter.quote.Route.ToAmount, r.quoter.quote.Route.ToAmountMin = big.NewInt(33_900000), big.NewInt(33_561000)
+	if _, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user)); !errors.Is(err, ErrSellUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+		t.Fatalf("an intent was stored: %+v", open)
+	}
+}
+
+func TestSellIntent_ACustomerCannotAbandonAPayIntentWhoseSwapWasSent(t *testing.T) {
+	r := payRig(t)
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("err = %v", err)
+	}
+	if err := r.svc.AbandonForPay(context.Background(), in.ID); err != nil {
+		t.Fatalf("the reconciler's path: %v", err)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentFailed || got.AccountNumber != "" {
+		t.Fatalf("intent = %+v, want failed with the bank details erased", got)
+	}
+	if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+		t.Fatal("the failed pay intent must free the one-open-sale index")
+	}
+}
+
+// Before any swap was sent there is nothing that can still deliver, so she may
+// walk away from a pay intent like any other sale.
+func TestSellIntent_ACustomerCanAbandonAPayIntentBeforeSwapping(t *testing.T) {
+	r := payRig(t)
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSellIntent_SwapStatusReadsLiFiForTheRecordedHash(t *testing.T) {
+	r := payRig(t)
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := r.svc.SwapStatus(context.Background(), in.ID); st != nil || err != nil || r.status.calls != 0 {
+		t.Fatalf("no swap yet: %+v %v (status calls %d) — must be nil, nil without asking LiFi", st, err, r.status.calls)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	st, err := r.svc.SwapStatus(context.Background(), in.ID)
+	if err != nil || st == nil || st.Status != LiFiStatusDone {
+		t.Fatalf("status %+v err %v", st, err)
+	}
+	if _, err := r.svc.SwapStatus(context.Background(), uuid.New()); !errors.Is(err, ErrSellIntentNotFound) {
+		t.Fatalf("unknown intent: err = %v", err)
+	}
+}
+
+// ─── I2: an exact-output route is checked against what was asked ───────────
+
+func TestSellIntent_ExactOutputRouteMustDeliverWhatWasAsked(t *testing.T) {
+	cases := map[string]func(rt *LiFiRoute){
+		"a smaller toAmount than asked": func(rt *LiFiRoute) { rt.ToAmount = big.NewInt(33_899999) },
+		"a missing toAmount":            func(rt *LiFiRoute) { rt.ToAmount = nil },
+		"a zero toAmount":               func(rt *LiFiRoute) { rt.ToAmount = big.NewInt(0) },
+		"a missing toAmountMin":         func(rt *LiFiRoute) { rt.ToAmountMin = nil },
+		"a zero toAmountMin":            func(rt *LiFiRoute) { rt.ToAmountMin = big.NewInt(0) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := payRig(t)
+			mutate(r.quoter.quote.Route)
+			_, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+			if !errors.Is(err, ErrSellUnavailable) {
+				t.Fatalf("err = %v, want ErrSellUnavailable", err)
+			}
+			if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+				t.Fatalf("an intent was stored for a route that under-delivers: %+v", open)
+			}
+		})
+	}
+}
+
+// The caller pads the ask (Task 13: 1% over the deposit; Task 15: 50 bps so
+// toAmountMin still covers what is owed), so a route may deliver MORE than was
+// asked and its toAmountMin may sit BELOW the ask. Neither is refused: the
+// consented-shortfall path is the backstop for slippage, not this check.
+func TestSellIntent_ExactOutputAPaddedRouteIsAccepted(t *testing.T) {
+	r := payRig(t)
+	r.quoter.quote.Route.ToAmount = big.NewInt(34_239000) // 1% over the ask
+	r.quoter.quote.Route.ToAmountMin = big.NewInt(33_800000)
+	if _, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ─── S1: the pay fields travel together ────────────────────────────────────
+
+func TestSellIntent_PartialPayFieldsAreRefusedBeforeAnythingIsQuoted(t *testing.T) {
+	pid := uuid.New()
+	cases := map[string]func(in *CreateSellIntentInput){
+		"payout without a payment id or amount": func(in *CreateSellIntentInput) { in.PayPaymentID, in.ToAmount = nil, "" },
+		"payout and amount without a payment":   func(in *CreateSellIntentInput) { in.PayPaymentID = nil },
+		"payout and payment without an amount":  func(in *CreateSellIntentInput) { in.ToAmount = "" },
+		"payment id alone":                      func(in *CreateSellIntentInput) { in.PayoutFiat, in.ToAmount = "", "" },
+		"amount alone":                          func(in *CreateSellIntentInput) { in.PayoutFiat, in.PayPaymentID = "", nil },
+		"payment id and amount without payout":  func(in *CreateSellIntentInput) { in.PayoutFiat = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := payRig(t)
+			in := payIntentInput(pid, r.user)
+			mutate(&in)
+			_, _, err := r.svc.Create(context.Background(), r.user, in)
+			if !errors.Is(err, ErrSellIntentState) || r.quoter.calls != 0 {
+				t.Fatalf("err %v, quotes %d — a half-set pay intent must be refused up front", err, r.quoter.calls)
+			}
+			if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+				t.Fatalf("an intent was stored: %+v", open)
+			}
+		})
+	}
+}
+
+// ─── S2: consent widens the cap, it never narrows it ───────────────────────
+
+func TestSellIntent_PayIntentConsentNeverCapsBelowWhatLanded(t *testing.T) {
+	r := payRig(t)
+	r.base.amount = big.NewInt(34_000000) // landed covers the ₦50,000 deposit
+	r.svc.SetUSDCBalanceReader(balanceOf(5_000000))
+	in, _, err := r.svc.Create(context.Background(), r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	// The swap's USDC is in her wallet, so a balance below it can only mean a
+	// stale read: it must not turn a covered payment into pay_shortfall.
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID, true); err != nil {
+		t.Fatalf("err = %v: a balance under the proven landed amount produced a shortfall", err)
+	}
+}
+
+// ─── S4: AbandonForPay only ever ends a pay intent ─────────────────────────
+
+func TestSellIntent_AbandonForPayWillNotEndAnOrdinarySale(t *testing.T) {
+	r := newSellIntentRig(t)
+	in := r.create(t)
+	r.mustRecord(t, in.ID, testSwapHash)
+	if err := r.svc.AbandonForPay(context.Background(), in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("err = %v, want ErrSellIntentState", err)
+	}
+	if got := r.reload(t, in.ID); got.Status == models.SellIntentFailed || got.AccountNumber == "" {
+		t.Fatalf("the reconciler's path ended an ordinary sale: %+v", got)
 	}
 }

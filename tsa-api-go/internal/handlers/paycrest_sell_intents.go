@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -23,7 +24,7 @@ import (
 type sellIntents interface {
 	Create(ctx context.Context, user *models.User, in services.CreateSellIntentInput) (*models.RampSellIntent, *services.SellSwapQuote, error)
 	RecordSwap(ctx context.Context, userID, id uuid.UUID, txHash string) error
-	OpenOrder(ctx context.Context, user *models.User, id uuid.UUID) (*models.PaycrestOrderRecord, error)
+	OpenOrder(ctx context.Context, user *models.User, id uuid.UUID, useWalletBalance bool) (*models.PaycrestOrderRecord, error)
 	Abandon(ctx context.Context, userID, id uuid.UUID) error
 	Open(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error)
 	Resumable(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error)
@@ -147,7 +148,16 @@ func (h *PaycrestHandler) OpenSellIntentOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	order, err := h.sellIntents.OpenOrder(c.Request.Context(), user, id)
+	// The body is optional (an ordinary sale sends none): only a pay intent
+	// reads the flag, and it defaults to "do not spend my other USDC".
+	var body struct {
+		UseWalletBalance bool `json:"useWalletBalance"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	order, err := h.sellIntents.OpenOrder(c.Request.Context(), user, id, body.UseWalletBalance)
 	if err != nil {
 		h.sellIntentError(c, err, user)
 		return
@@ -261,7 +271,17 @@ func swapEndedCode(err error) string {
 // needs help with, and "already selling" comes with the sale she is already in
 // so the app can resume it rather than ask her to start over.
 func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *models.User) {
+	var short *services.SellShortfallError
 	switch {
+	case errors.As(err, &short):
+		// A pay intent whose USDC does not cover the naira owed. The app shows
+		// the gap and asks before spending any of her other USDC.
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false, "message": "Not enough USDC on Base to pay the full amount",
+			"code": "pay_shortfall", "missingUsdc": services.BaseUnitsToDecimal(short.MissingBaseUnits, 6),
+		})
+	case errors.Is(err, services.ErrSellRateMoved):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "rate_moved")
 	case errors.Is(err, services.ErrSellIntentOpen):
 		open, _ := h.sellIntents.Open(c.Request.Context(), user.ID)
 		c.JSON(http.StatusConflict, gin.H{

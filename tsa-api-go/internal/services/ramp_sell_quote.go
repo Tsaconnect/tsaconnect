@@ -90,9 +90,12 @@ type SellSwapQuote struct {
 // chain; WalletAddress is her EVM wallet, the USDC receiver, and the caller
 // must have reconciled it against the account before calling.
 type SellQuoteInput struct {
-	FromChainID   int64
-	FromToken     string
-	FromAmount    string // base units
+	FromChainID int64
+	FromToken   string
+	FromAmount  string // base units
+	// ToAmount, when set INSTEAD of FromAmount, asks for exactly this much
+	// USDC (Base, 6dp base units) to land; the route reports what it costs.
+	ToAmount      string
 	FromAddress   string
 	WalletAddress string
 	FiatCode      string
@@ -172,7 +175,7 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		FromChainID: in.FromChainID, ToChainID: rampSettlementChainID,
 		FromToken: in.FromToken, ToToken: usdc,
 		FromAddress: in.FromAddress, ToAddress: in.WalletAddress,
-		FromAmount: in.FromAmount, Slippage: routeSlippage(stableSource),
+		FromAmount: in.FromAmount, ToAmount: in.ToAmount, Slippage: routeSlippage(stableSource),
 	}
 
 	// First pass, no fee: what does the round trip cost before we take

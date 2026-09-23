@@ -51,6 +51,10 @@ type RampSellIntent struct {
 	QuotedFiat   string `gorm:"size:32" json:"quotedFiat"`
 	FiatCode     string `gorm:"size:8;not null" json:"currency"`
 	FeeBps       int    `json:"feeBps"`
+	// PayPaymentID and PayoutFiat mark a sale that pays SOMEONE ELSE: a
+	// TSA Pay checkout. PayoutFiat is the exact naira the recipient is owed.
+	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"payPaymentId,omitempty"`
+	PayoutFiat   string     `gorm:"size:32" json:"payoutFiat,omitempty"`
 	// LiFiTransactionID is the quote's own transactionId: what proves she
 	// executed OUR quote, our integrator fee included, rather than a route
 	// she assembled herself. Empty for a non-EVM source, whose calldata may

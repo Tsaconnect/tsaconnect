@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"math/big"
 	"strconv"
 	"testing"
 	"time"
@@ -606,5 +607,168 @@ func TestPaycrestOrderService_CreateSell_RefusesAMismatchedIdentifier(t *testing
 	svc.db.Model(&models.PaycrestOrderRecord{}).Count(&count)
 	if count != 0 {
 		t.Errorf("%d order rows written; the refusal must happen before an order exists", count)
+	}
+}
+
+// ─── CreateSellForFiat: a sell that pays an exact naira amount ─────────────
+
+func payoutReq(t *testing.T, r *orderConversionRig) PaycrestSellRequest {
+	t.Helper()
+	return PaycrestSellRequest{UserID: seedVerifiedUser(t, r.db), WalletAddress: orderTestUserWallet,
+		FiatCode: "NGN", FiatAmount: "50000.00", ChainKey: "base", Token: "USDC", BankCode: "044", AccountNo: "0123456789"}
+}
+
+func TestCreateSellForFiat_PaysExactNairaToTheGivenBankAtTheConvertedFee(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	dep, err := r.svc.SellDepositFor(context.Background(), "NGN", "50000.00", "base", "USDC", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.client.lastOfframp.SenderFeePercent != "0.5" || order.FiatAmount != "50000.00" ||
+		r.client.lastOfframp.Recipient.AccountIdentifier != "0123456789" || r.client.lastOfframp.AmountToken != BaseUnitsToDecimal(dep, 6) {
+		t.Fatalf("offramp %+v order %+v dep %s", r.client.lastOfframp, order, dep)
+	}
+	// Sized at the rate less a cent of headroom: 50000 / 1492.49 = 33.501061…,
+	// rounded UP, so the payout is never under the naira she was promised even
+	// when Paycrest pays at a rate that only ROUNDS to 1492.50.
+	if dep.String() != "33501062" {
+		t.Fatalf("deposit = %s, want 33501062 (50000 / 1492.49, rounded up)", dep)
+	}
+}
+
+func TestCreateSellForFiat_RefusesAShortfallBeforeCallingPaycrest(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	_, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, big.NewInt(1_000000))
+	var short *SellShortfallError
+	if !errors.As(err, &short) || !errors.Is(err, ErrSellShortfall) || short.MissingBaseUnits.Sign() <= 0 || r.client.offrampCalls != 0 {
+		t.Fatalf("err %v calls %d", err, r.client.offrampCalls)
+	}
+	if short.MissingBaseUnits.String() != "32501062" {
+		t.Fatalf("missing = %s, want deposit 33501062 - cap 1000000", short.MissingBaseUnits)
+	}
+}
+
+func TestCreateSellForFiat_CancelsAnOrderWhosePayoutCameInShort(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400" // the provider's order rate is worse than the venue it was sized at
+	req := payoutReq(t, r)
+	if _, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil); !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusCancelled {
+		t.Fatalf("order status = %q: a deposit address must never be left live for a short order", row.Status)
+	}
+}
+
+// A stated naira figure is what the row records, whatever tokens × rate says:
+// 34 USDC at 1492.50 is 50745.00, and a pay order owes the merchant 50000.00.
+func TestCreateSellForToken_HonoursAStatedFiatAmount(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	req := payoutReq(t, r)
+	order, err := r.svc.CreateSellForToken(context.Background(), req, "34", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.FiatAmount != "50000.00" {
+		t.Fatalf("fiat = %q, want the stated 50000.00", order.FiatAmount)
+	}
+}
+
+// ─── I1: the payout is judged at Paycrest's UNROUNDED rate ─────────────────
+
+// paidAtProvider is what Paycrest actually pays for the deposit the last
+// offramp asked for: the tokens at the provider's own rate, unrounded, less
+// the fee it took. The stored row rate is that rate rounded to the cent, which
+// is the number a check must NOT be the only judge of.
+func paidAtProvider(t *testing.T, r *orderConversionRig, providerRate string) *big.Rat {
+	t.Helper()
+	tokens, ok1 := new(big.Rat).SetString(r.client.lastOfframp.AmountToken)
+	rate, ok2 := new(big.Rat).SetString(providerRate)
+	fee, ok3 := new(big.Rat).SetString(r.client.lastOfframp.SenderFeePercent)
+	if !ok1 || !ok2 || !ok3 {
+		t.Fatalf("unreadable offramp %+v", r.client.lastOfframp)
+	}
+	net := new(big.Rat).Sub(big.NewRat(1, 1), new(big.Rat).Quo(fee, big.NewRat(100, 1)))
+	return new(big.Rat).Mul(tokens, new(big.Rat).Mul(rate, net))
+}
+
+// 1499.995 × 0.995 = 1492.495025: the cent-rounded rate is 1492.50, half a
+// cent ABOVE what Paycrest pays. At ₦5M that is ~₦17 the merchant never sees.
+func TestCreateSellForFiat_ALargeOrderIsSizedForTheUnroundedRate(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.pc.(*stubQuoter).rates["base|USDC"] = &PaycrestRates{
+		Buy: &PaycrestQuote{Rate: "1499.995"}, Sell: &PaycrestQuote{Rate: "1499.995"}}
+	r.client.offrampRate = "1499.995"
+	req := payoutReq(t, r)
+	req.FiatAmount = "5000000.00"
+	if _, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	owed := big.NewRat(5_000_000, 1)
+	paid := paidAtProvider(t, r, "1499.995")
+	if paid.Cmp(new(big.Rat).Sub(owed, sellPayoutTolerance)) < 0 {
+		short, _ := new(big.Rat).Sub(owed, paid).Float64()
+		t.Fatalf("Paycrest would pay ₦%.2f short of the ₦5,000,000 owed: the deposit was sized at the cent-rounded rate", short)
+	}
+}
+
+// The row's rate is rounded to the cent, so the check must assume the worst
+// half-cent: 3350.083751 USDC × 1492.50 is exactly ₦5,000,000, yet the same
+// tokens at 1492.495 pay ₦16.75 less — far outside the ₦1 tolerance.
+func TestSellPayoutCovers_AssumesTheRateWasRoundedUp(t *testing.T) {
+	row := &models.PaycrestOrderRecord{TokenAmount: "3350.083751", Rate: "1492.50"}
+	if sellPayoutCovers(row, "5000000.00") {
+		t.Fatal("a payout that is ₦16.75 short at the unrounded rate passed the check")
+	}
+}
+
+// ─── I3: a short order is taken off the table even if her request dies ─────
+
+// The request is cancelled the instant the order row is written — after
+// Paycrest has an order, before the payout check runs. The cancel and the
+// removal of the fundable deposit address must not depend on that context.
+func TestCreateSellForFiat_ARateMovedOrderIsCancelledAndUnfundableEvenIfTheRequestDies(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	req := payoutReq(t, r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.db.Callback().Create().After("gorm:create").Register("test:cancel_request", func(*gorm.DB) { cancel() }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.CreateSellForFiat(ctx, req, true, nil); !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v, want ErrSellRateMoved", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusCancelled {
+		t.Fatalf("status = %q: a dead request left a short order fundable", row.Status)
+	}
+	if row.DepositAddress != "" {
+		t.Fatalf("deposit address %q still on a cancelled short order", row.DepositAddress)
+	}
+}
+
+// ─── S3: the ₦1 tolerance, at its edge ─────────────────────────────────────
+
+// 100 USDC at 1500.00 is judged at 1499.995 (the worst rate that rounds to
+// it): ₦149,999.50. Owing ₦150,000.50 leaves exactly the ₦1.00 tolerance.
+func TestSellPayoutCovers_ToleranceBoundaryIsInclusive(t *testing.T) {
+	row := &models.PaycrestOrderRecord{TokenAmount: "100", Rate: "1500.00"}
+	if !sellPayoutCovers(row, "150000.50") {
+		t.Fatal("a payout exactly ₦1.00 under was refused; the tolerance is inclusive")
+	}
+	if sellPayoutCovers(row, "150000.51") {
+		t.Fatal("a payout one kobo beyond the tolerance passed")
 	}
 }

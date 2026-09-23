@@ -156,6 +156,31 @@ func TestRampSellQuote_ChargesTheUnspentBudgetAsOurFee(t *testing.T) {
 	}
 }
 
+// A pay intent needs an exact amount of USDC to land, not an exact amount to
+// leave her wallet: both LiFi asks (the fee-free cost probe and the fee-carrying
+// executable one) are exact-output, and neither carries a fromAmount.
+func TestRampSellQuote_ExactOutputAsksLiFiForTheToAmountOnBothPasses(t *testing.T) {
+	q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.98), sellRoute(t, 9.97))
+	in := sellIn
+	in.FromAmount = ""
+	in.ToAmount = "33900000"
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lifi.all) != 2 {
+		t.Fatalf("quotes asked = %d, want the cost probe and the fee-carrying ask", len(lifi.all))
+	}
+	for i, req := range lifi.all {
+		if req.ToAmount != "33900000" || req.FromAmount != "" {
+			t.Fatalf("ask %d = %+v, want toAmount only", i, req)
+		}
+	}
+	if res.FeeBps != 10 || res.GasBps != 20 {
+		t.Fatalf("budget split = %d/%d — exact output must not change how B is spent", res.FeeBps, res.GasBps)
+	}
+}
+
 func TestRampSellQuote_RefusesARouteOverTheBudget(t *testing.T) {
 	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.95)) // l = 50, g = 20 -> 70 > 50
 	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellRouteTooCostly) {

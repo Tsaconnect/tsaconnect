@@ -160,3 +160,40 @@ func TestLiFiQuote_UnconfiguredFeeIsItsOwnError(t *testing.T) {
 		t.Fatalf("err = %v, want ErrLiFiFeeUnconfigured", err)
 	}
 }
+
+func TestLiFiQuote_ExactOutputUsesToAmount(t *testing.T) {
+	var path, query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query = r.URL.Path, r.URL.RawQuery
+		io.WriteString(w, lifiQuoteFixture)
+	}))
+	defer srv.Close()
+	c := NewLiFiQuoteClient(srv.URL, "", "tsa")
+	if _, err := c.Quote(context.Background(), LiFiQuoteRequest{FromChainID: 56, ToChainID: 8453, FromToken: evmNativeAddress,
+		ToToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", FromAddress: "0xa", ToAddress: "0xa", ToAmount: "50500000"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(path, "/quote/toAmount") || !strings.Contains(query, "toAmount=50500000") || strings.Contains(query, "fromAmount=") {
+		t.Fatalf("path %s query %s", path, query)
+	}
+	calls := 0
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++ }))
+	defer counting.Close()
+	if _, err := NewLiFiQuoteClient(counting.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{FromAmount: "1", ToAmount: "1"}); err == nil || calls != 0 {
+		t.Fatalf("both amounts must be refused before any HTTP call: err %v, calls %d", err, calls)
+	}
+}
+
+// What she signs is the quote's action.fromAmount, so it is what the intent
+// stores as SourceAmount for an exact-output swap.
+func TestLiFiQuote_ExposesTheRoutesFromAmount(t *testing.T) {
+	body := strings.Replace(lifiQuoteFixture, `"action":{`, `"action":{"fromAmount":"17000000000000000",`, 1)
+	srv := lifiQuoteServer(t, nil, body, 200)
+	route, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{ToAmount: "990"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.FromAmount != "17000000000000000" {
+		t.Fatalf("FromAmount = %q", route.FromAmount)
+	}
+}

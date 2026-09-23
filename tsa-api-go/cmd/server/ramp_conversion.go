@@ -440,6 +440,11 @@ func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
 	if fees != nil {
 		svc.SetFeeService(fees)
 	}
+	// The same address the binding compares against, read through the same
+	// Base client: a pay intent's "use my wallet balance too" consent checks it.
+	svc.SetUSDCBalanceReader(func(_ context.Context, wallet string) (*big.Int, error) {
+		return base.GetTokenBalance(usdc, wallet)
+	})
 	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
 	return svc
 }

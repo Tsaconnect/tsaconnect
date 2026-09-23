@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,6 +37,8 @@ type stubSellIntents struct {
 	// got answers Get; getErr overrides it.
 	got    *models.RampSellIntent
 	getErr error
+	// lastUseWallet is the flag OpenOrder was last called with.
+	lastUseWallet bool
 }
 
 func (s *stubSellIntents) Get(context.Context, uuid.UUID, uuid.UUID) (*models.RampSellIntent, error) {
@@ -67,7 +70,8 @@ func (s *stubSellIntents) RecordSwap(context.Context, uuid.UUID, uuid.UUID, stri
 	return s.err
 }
 
-func (s *stubSellIntents) OpenOrder(context.Context, *models.User, uuid.UUID) (*models.PaycrestOrderRecord, error) {
+func (s *stubSellIntents) OpenOrder(_ context.Context, _ *models.User, _ uuid.UUID, useWalletBalance bool) (*models.PaycrestOrderRecord, error) {
+	s.lastUseWallet = useWalletBalance
 	return nil, s.err
 }
 
@@ -360,5 +364,69 @@ func TestSellIntentGasTopUp_DormantUnlessSellAndSponsorshipAreOn(t *testing.T) {
 	on := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{}).WithSponsorship(port)
 	if !on.SellIntentGasTopUpEnabled() {
 		t.Fatal("both on: want enabled")
+	}
+}
+
+// openOrderRequest drives POST /sell-intents/:id/order with an optional body.
+func openOrderRequest(t *testing.T, stub *stubSellIntents, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	user := &models.User{ID: uuid.New(), WalletAddress: sellSwapUserWallet}
+	h := (&PaycrestHandler{}).WithSellIntents(stub)
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/paycrest/sell-intents/x/order", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: uuid.NewString()}}
+	c.Set("user", user)
+	h.OpenSellIntentOrder(c)
+	return w
+}
+
+// A pay intent that landed short asks her before spending her other USDC: the
+// 409 carries a machine code and exactly how much more it needs.
+func TestOpenSellIntentOrder_AShortfallIsAskedNotSpent(t *testing.T) {
+	stub := &stubSellIntents{err: &services.SellShortfallError{MissingBaseUnits: big.NewInt(23_525000)}}
+	w := openOrderRequest(t, stub, "")
+	var body struct {
+		Code        string `json:"code"`
+		MissingUSDC string `json:"missingUsdc"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusConflict || body.Code != "pay_shortfall" || body.MissingUSDC != "23.525" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOpenSellIntentOrder_ARateThatMovedIsARetryableConflict(t *testing.T) {
+	w := openOrderRequest(t, &stubSellIntents{err: services.ErrSellRateMoved}, "")
+	var body struct{ Code string }
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusConflict || body.Code != "rate_moved" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOpenSellIntentOrder_TheWalletBalanceConsentDefaultsToNo(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+		code       int
+	}{
+		{"no body", "", false, http.StatusCreated},
+		{"empty object", "{}", false, http.StatusCreated},
+		{"explicit no", `{"useWalletBalance":false}`, false, http.StatusCreated},
+		{"consent", `{"useWalletBalance":true}`, true, http.StatusCreated},
+		{"malformed", `{"useWalletBalance":`, false, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubSellIntents{}
+			w := openOrderRequest(t, stub, tc.body)
+			if w.Code != tc.code || stub.lastUseWallet != tc.want {
+				t.Fatalf("code %d (want %d), flag %v (want %v): %s", w.Code, tc.code, stub.lastUseWallet, tc.want, w.Body.String())
+			}
+		})
 	}
 }

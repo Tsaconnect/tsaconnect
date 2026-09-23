@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -241,5 +242,40 @@ func TestLiFiStatus_PrefersTheReceivingLegsOwnRecipient(t *testing.T) {
 	}
 	if got.ToAddress != "0x2222222222222222222222222222222222222222" {
 		t.Fatalf("toAddress = %q", got.ToAddress)
+	}
+}
+
+// The exact-output fixture is SYNTHETIC (see its _note): it stands in for a
+// live /quote/toAmount capture that needs a funded wallet. What this pins is
+// what the ramp binding depends on — that the parser tolerates the extra
+// top-level keys, and that SendingAmount is the quote's action.fromAmount
+// (not a figure reduced by a refund of unused input). A live capture must
+// replace the file, and re-pass this test, before any deploy.
+func TestLiFiStatus_ExactOutputSendingAmountIsTheQuotesFromAmount(t *testing.T) {
+	body, err := os.ReadFile("testdata/lifi_status_exact_output.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw struct {
+		Quote struct {
+			Action struct {
+				FromAmount string `json:"fromAmount"`
+			} `json:"action"`
+		} `json:"quote"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	srv := lifiServer(t, 200, string(body))
+	defer srv.Close()
+	got, err := NewLiFiStatusClient(srv.URL, "").Status(context.Background(), "0xsrc")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.SendingAmount == nil || got.SendingAmount.String() != raw.Quote.Action.FromAmount {
+		t.Fatalf("sendingAmount = %v, want the quote's action.fromAmount %s", got.SendingAmount, raw.Quote.Action.FromAmount)
+	}
+	if got.Status != LiFiStatusDone || got.Substatus != LiFiSubstatusCompleted {
+		t.Fatalf("status = %s/%s", got.Status, got.Substatus)
 	}
 }

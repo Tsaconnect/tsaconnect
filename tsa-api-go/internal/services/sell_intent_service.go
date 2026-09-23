@@ -76,6 +76,15 @@ type CreateSellIntentInput struct {
 	SourceChainID                                  int64
 	SourceToken, SourceAmount, SourceAddress       string
 	FiatCode, BankCode, AccountNumber, AccountName string
+	// The next three are set only by the pay checkout, never from the app's
+	// own request: a sale that pays SOMEONE ELSE an exact naira amount.
+	//
+	// PayPaymentID names the payment it settles. PayoutFiat is the exact naira
+	// the recipient is owed. ToAmount is the exact USDC (Base, 6dp base units)
+	// the swap must land; with it the quote is exact-output, SourceAmount is
+	// ignored, and the intent stores what the route says it costs instead.
+	PayPaymentID         *uuid.UUID
+	PayoutFiat, ToAmount string
 }
 
 type SellIntentService struct {
@@ -94,6 +103,9 @@ type SellIntentService struct {
 	// through. Optional: unwired, the fee is still collected by LiFi, it just
 	// doesn't fund cashback/TP.
 	fees ITFeeSink
+	// usdcBalance reads her USDC on Base — only a pay intent's "use my wallet
+	// balance too" consent ever asks for it.
+	usdcBalance func(ctx context.Context, wallet string) (*big.Int, error)
 }
 
 func NewSellIntentService(db *gorm.DB, quoter sellQuoter, status lifiStatusReader, base ERC20TransferVerifier, orders *PaycrestOrderService, usdc string, now func() time.Time) *SellIntentService {
@@ -108,6 +120,12 @@ func NewSellIntentService(db *gorm.DB, quoter sellQuoter, status lifiStatusReade
 // redeclared: it is already the package's narrow "somewhere to book a settled
 // fee" seam, and *FeeDistributionService satisfies it.
 func (s *SellIntentService) SetFeeService(f ITFeeSink) { s.fees = f }
+
+// SetUSDCBalanceReader wires the Base USDC balance read a pay intent's wallet
+// consent needs. Unset, that consent is refused rather than assumed.
+func (s *SellIntentService) SetUSDCBalanceReader(f func(ctx context.Context, wallet string) (*big.Int, error)) {
+	s.usdcBalance = f
+}
 
 // rampSellFeeSourceType namespaces sell-intent fee distributions in the
 // ledger, alongside "allswap", "it_intent", "p2p_release".
@@ -128,6 +146,10 @@ func (s *SellIntentService) ready() bool {
 func (s *SellIntentService) Create(ctx context.Context, user *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error) {
 	if !s.ready() || user == nil {
 		return nil, nil, ErrSellUnavailable
+	}
+	asked, err := payFieldsOf(in)
+	if err != nil {
+		return nil, nil, err
 	}
 	open, err := s.Open(ctx, user.ID)
 	if err != nil {
@@ -158,15 +180,46 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		return nil, nil, err
 	}
 
-	q, err := s.quoter.Quote(ctx, SellQuoteInput{
+	payoutFiat := strings.TrimSpace(in.PayoutFiat)
+	if payoutFiat != "" {
+		if _, ok := parsePositiveDecimal(payoutFiat); !ok {
+			return nil, nil, fmt.Errorf("%w: %q is not a naira amount", ErrSellIntentState, payoutFiat)
+		}
+	}
+	quoteIn := SellQuoteInput{
 		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAmount: in.SourceAmount,
 		FromAddress: in.SourceAddress, WalletAddress: user.WalletAddress, FiatCode: fiat,
-	})
+	}
+	sourceAmount := strings.TrimSpace(in.SourceAmount)
+	exactOutput := asked != nil
+	if exactOutput {
+		quoteIn.FromAmount, quoteIn.ToAmount = "", strings.TrimSpace(in.ToAmount)
+	}
+
+	q, err := s.quoter.Quote(ctx, quoteIn)
 	if err != nil {
 		return nil, nil, err
 	}
 	if q == nil || q.Route == nil {
 		return nil, nil, ErrSellUnavailable
+	}
+	if exactOutput {
+		// What she signs is the route's own fromAmount, and boundToIntent
+		// later demands the swap sent exactly that: an exact-output route that
+		// does not say what it spends leaves nothing to bind the swap to.
+		if amt, ok := new(big.Int).SetString(q.Route.FromAmount, 10); !ok || amt.Sign() <= 0 {
+			return nil, nil, fmt.Errorf("%w: the route did not say what it spends", ErrSellUnavailable)
+		}
+		sourceAmount = q.Route.FromAmount
+		// And it must actually deliver what the payment needs. LiFi's
+		// toAmountMin below the ask is expected — the caller pads the ask so
+		// the floor still covers what is owed, and the consented-shortfall
+		// path backstops the rest — but a route that promises LESS than was
+		// asked, or promises nothing, is refused before she signs anything.
+		if q.Route.ToAmount == nil || q.Route.ToAmount.Cmp(asked) < 0 ||
+			q.Route.ToAmountMin == nil || q.Route.ToAmountMin.Sign() <= 0 {
+			return nil, nil, fmt.Errorf("%w: the route does not deliver the amount asked", ErrSellUnavailable)
+		}
 	}
 
 	row := &models.RampSellIntent{
@@ -175,7 +228,9 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		WalletAddress:      user.WalletAddress,
 		SourceChainID:      in.SourceChainID,
 		SourceTokenAddress: strings.TrimSpace(in.SourceToken),
-		SourceAmount:       strings.TrimSpace(in.SourceAmount),
+		SourceAmount:       sourceAmount,
+		PayPaymentID:       in.PayPaymentID,
+		PayoutFiat:         payoutFiat,
 		QuotedUSDC:         q.USDCAmount,
 		QuotedFiat:         q.FiatEstimate,
 		FiatCode:           fiat,
@@ -201,6 +256,26 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		return nil, nil, err
 	}
 	return row, q, nil
+}
+
+// payFieldsOf validates the three pay-checkout fields as a set and returns the
+// exact USDC asked for (nil for an ordinary sale). All three or none: a
+// PayoutFiat without a PayPaymentID would take the pay path in OpenOrder but
+// escape the Abandon guard, and a ToAmount alone would change the quote and
+// nothing else.
+func payFieldsOf(in CreateSellIntentInput) (*big.Int, error) {
+	fiat, toAmount := strings.TrimSpace(in.PayoutFiat), strings.TrimSpace(in.ToAmount)
+	if fiat == "" && toAmount == "" && in.PayPaymentID == nil {
+		return nil, nil
+	}
+	if fiat == "" || toAmount == "" || in.PayPaymentID == nil {
+		return nil, fmt.Errorf("%w: a pay sale needs its payment, its naira amount and its USDC amount together", ErrSellIntentState)
+	}
+	asked, ok := new(big.Int).SetString(toAmount, 10)
+	if !ok || asked.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: %q is not a USDC amount", ErrSellIntentState, toAmount)
+	}
+	return asked, nil
 }
 
 // ─── The swap she signed ───────────────────────────────────────────────────
@@ -293,7 +368,13 @@ func (s *SellIntentService) RecordSwap(ctx context.Context, userID, id uuid.UUID
 // called, so of any number of simultaneous calls exactly one opens an order;
 // the others get that order back, or ErrSellIntentOrdering while it is still
 // being opened.
-func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id uuid.UUID) (*models.PaycrestOrderRecord, error) {
+//
+// A pay intent (PayoutFiat set) is opened for the exact naira it owes, not for
+// what landed: the binding and the landing proof are the same, but the deposit
+// is sized from the naira and capped at the proven landed USDC — or, when she
+// consents with useWalletBalance, at her whole Base USDC balance. A cap the
+// deposit exceeds is a SellShortfallError. An ordinary sale ignores the flag.
+func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id uuid.UUID, useWalletBalance bool) (*models.PaycrestOrderRecord, error) {
 	if !s.ready() || user == nil {
 		return nil, ErrSellUnavailable
 	}
@@ -343,6 +424,23 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 	if landed == nil || landed.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: nothing was credited by %s", ErrSwapMismatch, st.DestTxHash)
 	}
+	// Read before the claim, so a balance that cannot be read leaves nothing
+	// to give back.
+	payCap := landed
+	if in.PayoutFiat != "" && useWalletBalance {
+		if s.usdcBalance == nil {
+			return nil, ErrSellUnavailable
+		}
+		balance, err := s.usdcBalance(ctx, in.WalletAddress)
+		if err != nil {
+			return nil, err
+		}
+		// Consent widens the cap, never narrows it: what landed is already in
+		// her wallet, so a balance under it is a stale read, not a shortfall.
+		if balance.Cmp(payCap) > 0 {
+			payCap = balance
+		}
+	}
 
 	// Claim the row BEFORE Paycrest is asked for anything. The conditional
 	// write is the claim: of two concurrent callers exactly one moves the
@@ -356,7 +454,7 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		return s.lostClaim(ctx, user.ID, in.ID)
 	}
 
-	order, err := s.orders.CreateSellForToken(ctx, PaycrestSellRequest{
+	sellReq := PaycrestSellRequest{
 		UserID:        user.ID,
 		WalletAddress: in.WalletAddress,
 		FiatCode:      in.FiatCode,
@@ -365,7 +463,14 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		BankCode:      in.BankCode,
 		AccountNo:     in.AccountNumber,
 		AccountName:   in.AccountName,
-	}, BaseUnitsToDecimal(landed, 6), true)
+	}
+	var order *models.PaycrestOrderRecord
+	if in.PayoutFiat != "" {
+		sellReq.FiatAmount = in.PayoutFiat
+		order, err = s.orders.CreateSellForFiat(ctx, sellReq, true, payCap)
+	} else {
+		order, err = s.orders.CreateSellForToken(ctx, sellReq, BaseUnitsToDecimal(landed, 6), true)
+	}
 	if err != nil {
 		// No offramp exists: give the claim back so she can simply retry.
 		s.releaseClaim(ctx, in.ID)
@@ -563,14 +668,36 @@ func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID)
 
 // Abandon ends an open sale. She keeps whatever she holds — if the swap
 // landed, the USDC is already hers on Base.
+//
+// A pay intent whose swap was sent cannot be abandoned by her: the swap may
+// still deliver, and a freed payment could then be paid twice. Only the
+// reconciler's AbandonForPay ends one of those.
 func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) error {
 	if !s.ready() {
 		return ErrSellUnavailable
 	}
-	// Not while ordering: an offramp is being opened for it right now.
+	return s.failOpenSale(ctx, "id = ? AND user_id = ? AND (pay_payment_id IS NULL OR swap_tx_hash IS NULL)", id, userID)
+}
+
+// AbandonForPay is the reconciler's path: it moves a pay intent that will
+// never settle from open to failed, which frees the customer's one-open-sale
+// slot. No owner check and no swap-sent guard — the caller has already decided
+// the swap is not going to deliver.
+func (s *SellIntentService) AbandonForPay(ctx context.Context, id uuid.UUID) error {
+	if !s.ready() {
+		return ErrSellUnavailable
+	}
+	// pay_payment_id: this path is for pay intents only. Nothing else may end
+	// an ordinary sale without its owner.
+	return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL", id)
+}
+
+// failOpenSale fails the sale matched by cond, only while it is swapping or
+// swapped. Not while ordering: an offramp is being opened for it right now.
+func (s *SellIntentService) failOpenSale(ctx context.Context, cond string, args ...any) error {
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ? AND user_id = ? AND status IN ?", id, userID,
-			[]string{models.SellIntentSwapping, models.SellIntentSwapped}).
+		Where(cond, args...).
+		Where("status IN ?", []string{models.SellIntentSwapping, models.SellIntentSwapped}).
 		// A dead sale pays nobody: her bank details go in the same write.
 		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()}))
 	if res.Error != nil {
@@ -580,6 +707,25 @@ func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) e
 		return ErrSellIntentState
 	}
 	return nil
+}
+
+// SwapStatus is LiFi's answer for the swap recorded on this intent — the
+// reconciler's read, so it takes no owner. nil, nil when no swap was recorded.
+func (s *SellIntentService) SwapStatus(ctx context.Context, id uuid.UUID) (*LiFiTransferStatus, error) {
+	if !s.ready() {
+		return nil, ErrSellUnavailable
+	}
+	var in models.RampSellIntent
+	if err := s.db.WithContext(ctx).First(&in, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrSellIntentNotFound
+		}
+		return nil, err
+	}
+	if in.SwapTxHash == nil {
+		return nil, nil
+	}
+	return s.status.Status(ctx, *in.SwapTxHash)
 }
 
 // Open is the user's sale in progress, or nil. Newest first, because the
