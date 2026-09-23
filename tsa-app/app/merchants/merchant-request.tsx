@@ -46,6 +46,7 @@ const BUSINESS_TYPES = [
   { label: 'Digital Products', value: 'digital_products' },
   { label: 'Payment Merchant (PM)', value: 'p2p_merchant' },
   { label: 'Service Provider', value: 'service_provider' },
+  { label: 'Accept payments (TSA Pay)', value: 'payment_acceptance' },
 ];
 
 // ─── EVM address validation ──────────────────────────────────────────────────
@@ -220,6 +221,7 @@ export default function MerchantRequestScreen() {
   const [country, setCountry] = useState('');
   const [phone, setPhone] = useState(currentUser?.phoneNumber || '');
   const [registrationNumber, setRegistrationNumber] = useState('');
+  const [website, setWebsite] = useState('');
 
   // ─── PM fields ──────────────────────────────────────────────────────────────
   const [banks, setBanks] = useState<NgBank[]>([]);
@@ -247,11 +249,13 @@ export default function MerchantRequestScreen() {
   const addressRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const regNumberRef = useRef<TextInput>(null);
+  const websiteRef = useRef<TextInput>(null);
   const makerWalletRef = useRef<TextInput>(null);
   const perTradeCapRef = useRef<TextInput>(null);
   const dailyCapRef = useRef<TextInput>(null);
 
   const isPm = businessType === 'p2p_merchant';
+  const isPay = businessType === 'payment_acceptance';
 
   useEffect(() => {
     fetchExistingRequest();
@@ -372,6 +376,11 @@ export default function MerchantRequestScreen() {
       return;
     }
 
+    if (isPay && !website.trim().toLowerCase().startsWith('https://')) {
+      Alert.alert('Error', "Enter your website's https address");
+      return;
+    }
+
     // Validate PM-specific fields before submitting
     if (isPm) {
       const errors = validatePmFields({
@@ -399,6 +408,7 @@ export default function MerchantRequestScreen() {
       country,
       phone,
       registrationNumber: registrationNumber || undefined,
+      ...(isPay ? { website: website.trim() } : {}),
       ...(isPm ? {
         settlementBankCode: settlementBank!.code,
         settlementAccountNumber,
@@ -500,6 +510,7 @@ export default function MerchantRequestScreen() {
           setState('');
           setCountry('');
           setRegistrationNumber('');
+          setWebsite('');
           // Reset PM fields too
           setSettlementBank(null);
           setSettlementAccountNumber('');
@@ -623,9 +634,31 @@ export default function MerchantRequestScreen() {
             value={registrationNumber}
             onChangeText={setRegistrationNumber}
             placeholder="e.g. RC-123456"
-            returnKeyType={isPm ? 'next' : 'done'}
-            onSubmitEditing={isPm ? () => makerWalletRef.current?.focus() : handleSubmit}
+            returnKeyType={isPm || isPay ? 'next' : 'done'}
+            onSubmitEditing={
+              isPay
+                ? () => websiteRef.current?.focus()
+                : isPm
+                ? () => makerWalletRef.current?.focus()
+                : handleSubmit
+            }
           />
+
+          {/* ─── TSA Pay setup (payment_acceptance only) ─────────────────── */}
+          {isPay && (
+            <Field
+              ref={websiteRef}
+              label="Website *"
+              value={website}
+              onChangeText={setWebsite}
+              placeholder="https://example.com"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="done"
+              onSubmitEditing={handleSubmit}
+            />
+          )}
 
           {/* ─── Payment Merchant setup (p2p_merchant only) ──────────────── */}
           {isPm && (

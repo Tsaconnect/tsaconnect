@@ -159,9 +159,13 @@ interface PmPayloadFields {
 function buildPayload(
   base: BaseFields,
   pm?: PmPayloadFields,
-): BaseFields & Partial<PmPayloadFields> {
+  website?: string,
+): BaseFields & Partial<PmPayloadFields> & { website?: string } {
+  // Mirrors the screen's actual conditional-spread order in handleSubmit:
+  // `...(isPay ? { website } : {})` then `...(isPm ? { ...pmFields } : {})`.
   return {
     ...base,
+    ...(website !== undefined ? { website } : {}),
     ...(pm ?? {}),
   };
 }
@@ -222,6 +226,24 @@ describe('payload builder — p2p_merchant submit', () => {
     });
     expect(Object.keys(errors).length).toBeGreaterThan(0);
     // The actual API call would NOT be made (guarded by errors check in handleSubmit)
+  });
+});
+
+describe('payload builder — payment_acceptance submit', () => {
+  it('carries website and no PM-only keys', () => {
+    const base: BaseFields = { ...BASE, businessType: 'payment_acceptance' };
+    // Goes through the same shared buildPayload the other cases use, so a
+    // regression in the screen's actual conditional-spread order/logic would
+    // be caught here too — not just asserting back what the test itself set.
+    const payload = buildPayload(base, undefined, 'https://skyair.ng');
+
+    expect(payload.website).toBe('https://skyair.ng');
+    expect(payload.settlementBankCode).toBeUndefined();
+    expect(payload.settlementAccountNumber).toBeUndefined();
+    expect(payload.settlementAccountName).toBeUndefined();
+    expect(payload.makerWalletAddress).toBeUndefined();
+    expect(payload.requestedPerTradeCapUsd).toBeUndefined();
+    expect(payload.requestedDailyCapUsd).toBeUndefined();
   });
 });
 
