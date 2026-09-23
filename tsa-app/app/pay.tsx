@@ -85,7 +85,7 @@ export default function PayScreen() {
     return () => clearInterval(t);
   }, [state.kind, fetchCheckout]);
 
-  const payTest = usePayTest(checkout ?? ({ id: typeof id === 'string' ? id : '' } as PayCheckout));
+  const payTest = usePayTest(typeof id === 'string' ? id : '');
 
   useEffect(() => {
     if (payTest.result) setCheckout(payTest.result);

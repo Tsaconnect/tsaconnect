@@ -28,7 +28,7 @@ const checkout = { id: ID, status: 'pending' } as PayCheckout;
 
 let hook: UsePayTest;
 const Harness = () => {
-  hook = usePayTest(checkout);
+  hook = usePayTest(ID);
   return null;
 };
 

@@ -27,7 +27,7 @@ export type UsePayTest = {
   result?: PayCheckout;
 };
 
-export function usePayTest(checkout: PayCheckout): UsePayTest {
+export function usePayTest(paymentId: string): UsePayTest {
   const [visible, setVisible] = useState(false);
   const [pendingOutcome, setPendingOutcome] = useState<'approve' | 'decline' | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -52,13 +52,13 @@ export function usePayTest(checkout: PayCheckout): UsePayTest {
     setPendingOutcome(null);
     setSubmitting(true);
     setError(undefined);
-    submitTestOutcome(checkout.id, outcome)
+    submitTestOutcome(paymentId, outcome)
       .then((updated) => setResult(updated))
       .catch((err: unknown) => {
         setError(err instanceof PayError ? err.message : 'Something went wrong. Please try again.');
       })
       .finally(() => setSubmitting(false));
-  }, [pendingOutcome, checkout.id]);
+  }, [pendingOutcome, paymentId]);
 
   const authorization: AuthorizationProps = {
     visible,
