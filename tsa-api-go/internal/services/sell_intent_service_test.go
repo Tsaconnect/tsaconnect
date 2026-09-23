@@ -35,9 +35,19 @@ func (f *fakeSellQuoter) Quote(_ context.Context, _ SellQuoteInput) (*SellSwapQu
 type fakeStatusReader struct {
 	st  *LiFiTransferStatus
 	err error
+	// entered/gate pause the FIRST Status call when set, so a test can run
+	// another caller to completion between a read of the row and its claim.
+	calls   int
+	entered chan struct{}
+	gate    chan struct{}
 }
 
 func (f *fakeStatusReader) Status(_ context.Context, _ string) (*LiFiTransferStatus, error) {
+	f.calls++
+	if f.entered != nil && f.calls == 1 {
+		f.entered <- struct{}{}
+		<-f.gate
+	}
 	return f.st, f.err
 }
 
@@ -195,8 +205,8 @@ func TestSellIntent_OpenOrderRefusesAnySwapThatIsNotThisIntents(t *testing.T) {
 		"another sender":       func(s *LiFiTransferStatus) { s.FromAddress = "0x000000000000000000000000000000000000bEEF" },
 		"not our quote":        func(s *LiFiTransferStatus) { s.TransactionID = "0xdef" },
 		"no quote id at all":   func(s *LiFiTransferStatus) { s.TransactionID = "" },
-		"partial delivery":     func(s *LiFiTransferStatus) { s.Substatus = LiFiSubstatusPartial },
-		"refunded to her":      func(s *LiFiTransferStatus) { s.Substatus = LiFiSubstatusRefunded },
+		"no stated substatus":  func(s *LiFiTransferStatus) { s.Substatus = "" },
+		"an unknown substatus": func(s *LiFiTransferStatus) { s.Substatus = "NOT_PROCESSABLE_REFUND_NEEDED" },
 		"no destination tx":    func(s *LiFiTransferStatus) { s.DestTxHash = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -374,5 +384,219 @@ func TestSellIntent_AnUnpricedRouteStoresNoTopUp(t *testing.T) {
 	in := r.create(t)
 	if in.QuotedTopUpWei != "" {
 		t.Fatalf("quotedTopUpWei = %q, want empty", in.QuotedTopUpWei)
+	}
+}
+
+// ─── Fix round 1: opening the order exactly once ───────────────────────────
+
+// landedRig is a rig with one intent whose swap has landed and binds.
+func landedRig(t *testing.T) (*sellIntentRig, *models.RampSellIntent) {
+	t.Helper()
+	r := newSellIntentRig(t)
+	in := r.create(t)
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	return r, in
+}
+
+func (r *sellIntentRig) reload(t *testing.T, id uuid.UUID) *models.RampSellIntent {
+	t.Helper()
+	var in models.RampSellIntent
+	if err := r.svc.db.First(&in, "id = ?", id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &in
+}
+
+// Two OpenOrder calls racing on one intent. The first is held INSIDE its
+// Paycrest request — the exact window in which the old code let a second
+// caller through (both had read "no order yet") — and the second runs to
+// completion in that window. It must not reach Paycrest, and must say so.
+func TestSellIntent_ConcurrentOpenOrderOpensOneOfframp(t *testing.T) {
+	r, in := landedRig(t)
+	if sqlDB, err := r.svc.db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1) // one :memory: database shared by both goroutines
+	}
+	r.client.offrampEntered = make(chan struct{})
+	r.client.offrampGate = make(chan struct{})
+
+	type result struct {
+		order *models.PaycrestOrderRecord
+		err   error
+	}
+	first := make(chan result, 1)
+	go func() {
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		first <- result{o, err}
+	}()
+	<-r.client.offrampEntered // the first caller is now inside Paycrest
+
+	second, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	if !errors.Is(err, ErrSellIntentOrdering) || second != nil {
+		close(r.client.offrampGate)
+		t.Fatalf("second OpenOrder mid-flight: order %v, err %v; want ErrSellIntentOrdering", second, err)
+	}
+
+	close(r.client.offrampGate)
+	got := <-first
+	if got.err != nil || got.order == nil {
+		t.Fatalf("first OpenOrder: %v", got.err)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("offramp calls = %d, want exactly 1", r.client.offrampCalls)
+	}
+	var n int64
+	r.svc.db.Model(&models.PaycrestOrderRecord{}).Where("user_id = ?", r.user.ID).Count(&n)
+	if n != 1 {
+		t.Fatalf("paycrest order rows = %d, want 1", n)
+	}
+	// Once the winner has finished, a retry is the idempotent read-back.
+	again, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	if err != nil || again.ID != got.order.ID || r.client.offrampCalls != 1 {
+		t.Fatalf("retry after the race: err %v, calls %d", err, r.client.offrampCalls)
+	}
+}
+
+// The other interleaving: both callers read the row as swapped (neither has
+// claimed yet). The first is paused after its read; the second runs to the
+// end and opens the order; then the first resumes and tries to claim a row
+// that is no longer what it read. It must lose the claim and hand back the
+// winner's order — never open its own.
+func TestSellIntent_ALoserThatReadBeforeTheClaimGetsTheWinnersOrder(t *testing.T) {
+	r, in := landedRig(t)
+	if sqlDB, err := r.svc.db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+	r.status.entered = make(chan struct{})
+	r.status.gate = make(chan struct{})
+
+	type result struct {
+		order *models.PaycrestOrderRecord
+		err   error
+	}
+	slow := make(chan result, 1)
+	go func() {
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		slow <- result{o, err}
+	}()
+	<-r.status.entered // the slow caller has read the row as swapped
+
+	winner, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+	if err != nil {
+		close(r.status.gate)
+		t.Fatalf("winner: %v", err)
+	}
+	close(r.status.gate)
+	got := <-slow
+	if got.err != nil || got.order == nil || got.order.ID != winner.ID {
+		t.Fatalf("loser: order %v, err %v; want the winner's order %s", got.order, got.err, winner.ID)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("offramp calls = %d, want exactly 1", r.client.offrampCalls)
+	}
+}
+
+// While claimed, the intent is still her sale in progress: no second intent,
+// and no abandoning it out from under the order being opened.
+func TestSellIntent_AClaimedIntentIsStillHerOpenSale(t *testing.T) {
+	r, in := landedRig(t)
+	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).
+		Updates(map[string]any{"status": models.SellIntentOrdering, "updated_at": sponsorTestNow})
+	if open, _ := r.svc.Open(context.Background(), r.user.ID); open == nil || open.ID != in.ID {
+		t.Fatalf("a claimed intent must read as open, got %+v", open)
+	}
+	if err := r.svc.Abandon(context.Background(), r.user.ID, in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("abandon mid-order: err = %v, want ErrSellIntentState", err)
+	}
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrSellIntentOrdering) {
+		t.Fatalf("OpenOrder on a fresh claim: err = %v", err)
+	}
+	if r.client.offrampCalls != 0 {
+		t.Fatal("a claimed intent reached Paycrest a second time")
+	}
+}
+
+// A claim whose holder died (crash between claim and write-back) must not
+// strand her sale forever: past the stale window the next caller takes over.
+func TestSellIntent_AStaleClaimIsTakenOver(t *testing.T) {
+	r, in := landedRig(t)
+	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).
+		Updates(map[string]any{"status": models.SellIntentOrdering,
+			"updated_at": sponsorTestNow.Add(-sellIntentClaimStale - time.Second)})
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+		t.Fatalf("stale claim: %v", err)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentOrdered || r.client.offrampCalls != 1 {
+		t.Fatalf("status %q, calls %d", got.Status, r.client.offrampCalls)
+	}
+}
+
+// A failed Paycrest request gives the claim back, so she can simply retry.
+func TestSellIntent_OpenOrderReleasesTheClaimOnFailure(t *testing.T) {
+	r, in := landedRig(t)
+	r.client.offrampErr = errors.New("paycrest down")
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+		t.Fatal("want the Paycrest error")
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped || got.PaycrestOrderID != nil {
+		t.Fatalf("after a failed order the intent is %q; want it back to swapped", got.Status)
+	}
+	r.client.offrampErr = nil
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+		t.Fatalf("retry after release: %v", err)
+	}
+}
+
+// Finding 2: the one-live-sell rule is checked when the order is OPENED, not
+// only when the intent was. A direct sell opened in between must win.
+func TestSellIntent_OpenOrderRespectsADirectSellOpenedMeanwhile(t *testing.T) {
+	r, in := landedRig(t)
+	seedOrder(t, r.svc.db, r.user.ID, models.PaycrestDirectionSell, models.PaycrestStatusAwaitingDeposit)
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); !errors.Is(err, ErrPaycrestOrderOpen) {
+		t.Fatalf("err = %v, want ErrPaycrestOrderOpen", err)
+	}
+	if r.client.offrampCalls != 0 {
+		t.Fatal("a second live sell order reached Paycrest")
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped {
+		t.Fatalf("intent left %q; the claim must be released", got.Status)
+	}
+}
+
+func TestPaycrestCreateSellForToken_OneLiveSellPerUser(t *testing.T) {
+	r := newSellIntentRig(t)
+	seedOrder(t, r.svc.db, r.user.ID, models.PaycrestDirectionSell, models.PaycrestStatusAwaitingDeposit)
+	_, err := r.svc.orders.CreateSellForToken(context.Background(), PaycrestSellRequest{
+		UserID: r.user.ID, WalletAddress: r.user.WalletAddress, FiatCode: "NGN",
+		ChainKey: rampSettlementChainKey, Token: rampSettlementToken,
+		BankCode: "044", AccountNo: "0123456789"}, "9.975", true)
+	if !errors.Is(err, ErrPaycrestOrderOpen) || r.client.offrampCalls != 0 {
+		t.Fatalf("err = %v, calls %d; want ErrPaycrestOrderOpen and no Paycrest call", err, r.client.offrampCalls)
+	}
+}
+
+// §5.5: a swap that failed, or was refunded or only partly delivered, is a
+// terminal answer with LiFi's substatus — not "still swapping" forever, and
+// not a mismatch alarm.
+func TestSellIntent_OpenOrderSurfacesAFailedSwap(t *testing.T) {
+	for name, set := range map[string]func(*LiFiTransferStatus){
+		"failed":   func(s *LiFiTransferStatus) { s.Status, s.Substatus = LiFiStatusFailed, "" },
+		"refunded": func(s *LiFiTransferStatus) { s.Substatus = LiFiSubstatusRefunded },
+		"partial":  func(s *LiFiTransferStatus) { s.Substatus = LiFiSubstatusPartial },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, in := landedRig(t)
+			set(r.status.st)
+			_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+			if !errors.Is(err, ErrSwapFailed) {
+				t.Fatalf("err = %v, want ErrSwapFailed", err)
+			}
+			if r.client.offrampCalls != 0 {
+				t.Fatal("a failed swap reached Paycrest")
+			}
+			if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped {
+				t.Fatalf("intent %q; a failed swap must leave it for her to abandon", got.Status)
+			}
+		})
 	}
 }

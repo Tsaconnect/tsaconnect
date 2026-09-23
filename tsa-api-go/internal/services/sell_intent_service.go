@@ -45,7 +45,18 @@ var (
 	// "does not exist" and "belongs to someone else", so an id cannot be
 	// probed for existence.
 	ErrSellIntentNotFound = errors.New("that sale can't be found")
+	// ErrSellIntentOrdering: another request is opening this sale's payout
+	// right now. A wait: retrying returns that order once it exists.
+	ErrSellIntentOrdering = errors.New("your payout is being opened — try again in a moment")
+	// ErrSwapFailed: LiFi reports the swap failed, was refunded or only
+	// partly delivered (§5.5). Terminal for this sale; her funds are with her.
+	ErrSwapFailed = errors.New("your swap didn't complete")
 )
+
+// sellIntentClaimStale is how long an ordering claim protects itself. Far
+// beyond one Paycrest request (30s timeout); a claim older than this belongs
+// to a caller that died between claiming and writing back.
+const sellIntentClaimStale = 5 * time.Minute
 
 // sellQuoter is the price this service re-runs for itself. *RampSellQuoter
 // fills it; the interface exists so a quote can be faked without a live LiFi.
@@ -272,6 +283,11 @@ func (s *SellIntentService) RecordSwap(ctx context.Context, userID, id uuid.UUID
 // says which swap is its own, LiFi says that swap delivered USDC to her Base
 // wallet as quoted (§5.3), and Base's own receipt says how much. The order is
 // opened for the RECEIPT's amount — LiFi's figure is a lead, never the money.
+//
+// Idempotent under concurrency (§5.3): the row is claimed before Paycrest is
+// called, so of any number of simultaneous calls exactly one opens an order;
+// the others get that order back, or ErrSellIntentOrdering while it is still
+// being opened.
 func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id uuid.UUID) (*models.PaycrestOrderRecord, error) {
 	if !s.ready() || user == nil {
 		return nil, ErrSellUnavailable
@@ -288,12 +304,25 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 	if in.SwapTxHash == nil || !in.Open() {
 		return nil, ErrSellIntentState
 	}
+	if in.Status == models.SellIntentOrdering && !s.claimIsStale(in) {
+		return nil, ErrSellIntentOrdering
+	}
 
 	st, err := s.status.Status(ctx, *in.SwapTxHash)
 	if err != nil {
 		return nil, err
 	}
-	if st == nil || st.Status != LiFiStatusDone {
+	if st == nil {
+		return nil, ErrSwapNotLanded
+	}
+	// §5.5: a swap that ended without delivering what was quoted is a final
+	// answer with LiFi's own reason, not a wait and not a mismatch alarm.
+	// boundToIntent still demands COMPLETED; this only names the outcome.
+	if st.Status == LiFiStatusFailed ||
+		(st.Status == LiFiStatusDone && (st.Substatus == LiFiSubstatusRefunded || st.Substatus == LiFiSubstatusPartial)) {
+		return nil, fmt.Errorf("%w (%s)", ErrSwapFailed, lifiOutcome(st))
+	}
+	if st.Status != LiFiStatusDone {
 		return nil, ErrSwapNotLanded
 	}
 	if !s.boundToIntent(in, st) {
@@ -310,6 +339,18 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		return nil, fmt.Errorf("%w: nothing was credited by %s", ErrSwapMismatch, st.DestTxHash)
 	}
 
+	// Claim the row BEFORE Paycrest is asked for anything. The conditional
+	// write is the claim: of two concurrent callers exactly one moves the
+	// status it read to ordering, and only that one opens an offramp. The
+	// same shape as the IT payout's attempt claim.
+	claimed, err := s.claim(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return s.lostClaim(ctx, user.ID, in.ID)
+	}
+
 	order, err := s.orders.CreateSellForToken(ctx, PaycrestSellRequest{
 		UserID:        user.ID,
 		WalletAddress: in.WalletAddress,
@@ -321,15 +362,13 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		AccountName:   in.AccountName,
 	}, BaseUnitsToDecimal(landed, 6), true)
 	if err != nil {
+		// No offramp exists: give the claim back so she can simply retry.
+		s.releaseClaim(ctx, in.ID)
 		return nil, err
 	}
 
-	// One write claims the intent for this order. The WHERE clause is the
-	// claim: whoever changes a row books the fee, and a caller that changes
-	// none has lost the race and must not book a second one.
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ? AND paycrest_order_id IS NULL AND status IN ?",
-			in.ID, []string{models.SellIntentSwapping, models.SellIntentSwapped}).
+		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, models.SellIntentOrdering).
 		Updates(map[string]any{
 			"landed_usdc":       BaseUnitsToDecimal(landed, 6),
 			"paycrest_order_id": order.ID,
@@ -337,14 +376,72 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 			"updated_at":        s.now(),
 		})
 	if res.Error != nil || res.RowsAffected == 0 {
-		// The offramp exists upstream either way; losing the row is an
-		// operator problem, not a reason to fail her sale.
-		log.Printf("[ramp-sell] ALARM opened offramp %s for intent %s but could not claim the row (rows=%d): %v",
+		// We held the claim, so this is a DB failure (or a claim that sat past
+		// the stale window). The offramp exists upstream either way; losing
+		// the row is an operator problem, not a reason to fail her sale.
+		log.Printf("[ramp-sell] ALARM opened offramp %s for intent %s but could not record it (rows=%d): %v",
 			order.ID, in.ID, res.RowsAffected, res.Error)
 		return order, nil
 	}
 	s.bookFee(in, user.ID)
 	return order, nil
+}
+
+// claim moves the intent from the status this caller read to ordering. false
+// means another caller changed it first. A stale ordering claim can be taken
+// over; the one-live-sell check inside CreateSellForToken is what stops a
+// takeover from opening a second offramp if the dead holder's did get opened.
+func (s *SellIntentService) claim(ctx context.Context, in *models.RampSellIntent) (bool, error) {
+	q := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, in.Status)
+	if in.Status == models.SellIntentOrdering {
+		q = q.Where("updated_at < ?", s.now().Add(-sellIntentClaimStale))
+	}
+	res := q.Updates(map[string]any{"status": models.SellIntentOrdering, "updated_at": s.now()})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// releaseClaim returns an ordering intent to swapped (it has a swap recorded,
+// or it could not have been claimed) after its order failed to open.
+func (s *SellIntentService) releaseClaim(ctx context.Context, id uuid.UUID) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", id, models.SellIntentOrdering).
+		Updates(map[string]any{"status": models.SellIntentSwapped, "updated_at": s.now()})
+	if res.Error != nil {
+		log.Printf("[ramp-sell] could not release the ordering claim on intent %s: %v — it frees itself after %s",
+			id, res.Error, sellIntentClaimStale)
+	}
+}
+
+// lostClaim answers the caller that lost the race: the winner's order if it
+// is already recorded, otherwise "being opened, retry".
+func (s *SellIntentService) lostClaim(ctx context.Context, userID, id uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	now, err := s.load(ctx, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if now.PaycrestOrderID != nil {
+		return s.orders.Get(ctx, userID, *now.PaycrestOrderID)
+	}
+	if now.Status == models.SellIntentOrdering {
+		return nil, ErrSellIntentOrdering
+	}
+	return nil, ErrSellIntentState
+}
+
+func (s *SellIntentService) claimIsStale(in *models.RampSellIntent) bool {
+	return in.UpdatedAt.Before(s.now().Add(-sellIntentClaimStale))
+}
+
+// lifiOutcome is LiFi's own description of how a swap ended, for §5.5.
+func lifiOutcome(st *LiFiTransferStatus) string {
+	if st.Substatus != "" {
+		return st.Status + "/" + st.Substatus
+	}
+	return st.Status
 }
 
 // boundToIntent is §5.3: what proves this on-chain swap is the one THIS user
@@ -438,6 +535,7 @@ func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) e
 	if !s.ready() {
 		return ErrSellUnavailable
 	}
+	// Not while ordering: an offramp is being opened for it right now.
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND user_id = ? AND status IN ?", id, userID,
 			[]string{models.SellIntentSwapping, models.SellIntentSwapped}).
@@ -460,8 +558,7 @@ func (s *SellIntentService) Open(ctx context.Context, userID uuid.UUID) (*models
 	}
 	var in models.RampSellIntent
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND status IN ?", userID,
-			[]string{models.SellIntentSwapping, models.SellIntentSwapped}).
+		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
 		Order("created_at DESC").First(&in).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil

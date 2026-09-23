@@ -199,6 +199,13 @@ func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *model
 		})
 	case errors.Is(err, services.ErrSwapNotLanded):
 		utils.ErrorResponse(c, http.StatusConflict, "Still swapping — try again in a moment")
+	case errors.Is(err, services.ErrSellIntentOrdering):
+		// Another request is opening this payout: a wait, like "still swapping".
+		utils.ErrorResponse(c, http.StatusConflict, "Opening your payout — try again in a moment")
+	case errors.Is(err, services.ErrSwapFailed):
+		// Terminal (§5.5), with LiFi's own reason: whatever did not land is
+		// in or back in her wallet, and this sale can be abandoned.
+		utils.ErrorResponse(c, http.StatusConflict, err.Error()+" — nothing was sold; check your wallet")
 	case errors.Is(err, services.ErrSwapMismatch):
 		utils.ErrorResponse(c, http.StatusConflict, "This swap doesn't match your sale")
 	case errors.Is(err, services.ErrSellIntentNotFound):

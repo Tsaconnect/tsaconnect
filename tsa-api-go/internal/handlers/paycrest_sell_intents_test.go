@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -118,6 +119,9 @@ func TestSellIntentRoutes_MapTheServiceSentinels(t *testing.T) {
 		{"wrong step", services.ErrSellIntentState, http.StatusConflict},
 		{"already selling", services.ErrSellIntentOpen, http.StatusConflict},
 		{"no such sale", services.ErrSellIntentNotFound, http.StatusNotFound},
+		{"payout being opened", services.ErrSellIntentOrdering, http.StatusConflict},
+		{"swap failed", fmt.Errorf("%w (FAILED)", services.ErrSwapFailed), http.StatusConflict},
+		{"a direct sell is live", services.ErrPaycrestOrderOpen, http.StatusConflict},
 		{"too costly", services.ErrSellRouteTooCostly, http.StatusUnprocessableEntity},
 		{"unavailable", services.ErrSellUnavailable, http.StatusServiceUnavailable},
 	} {

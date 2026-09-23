@@ -483,7 +483,8 @@ func AutoMigrate() error {
 	    ON ramp_legs (order_id)
 	    WHERE kind = 'refund' AND status = 'pending'`)
 
-	// Ramp sell — "at most one sale in progress per user" (design §5.2). The
+	// Ramp sell — "at most one sale in progress per user" (design §5.2). Keep
+	// the WHERE list equal to models.SellIntentOpenStatuses. The
 	// service checks it first, but the check is read-then-insert: two taps on
 	// one button both read "none open" and both insert. Only a constraint can
 	// refuse the second, and a second open intent means two swaps pointed at
@@ -491,7 +492,7 @@ func AutoMigrate() error {
 	// abandoning a sale frees her to start another. Idempotent.
 	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open
 	    ON ramp_sell_intents (user_id)
-	    WHERE status IN ('swapping','swapped')`).Error; err != nil {
+	    WHERE status IN ('swapping','swapped','ordering')`).Error; err != nil {
 		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale. The one-open-sale check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
 	}
 

@@ -50,6 +50,12 @@ type fakePaycrestConversionClient struct {
 	offrampCalls int
 	lastOfframp  PaycrestOfframpRequest
 	offrampErr   error
+	// offrampEntered/offrampGate pause the FIRST CreateOfframpOrder
+	// mid-request when set, so a test can act while one caller is inside
+	// Paycrest. Later calls pass straight through, so a second caller that
+	// wrongly reaches Paycrest fails the test instead of deadlocking it.
+	offrampEntered chan struct{}
+	offrampGate    chan struct{}
 }
 
 // capturedOnramp is a smaller, test-only view of PaycrestOnrampRequest named
@@ -88,6 +94,10 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error) {
 	f.offrampCalls++
 	f.lastOfframp = req
+	if f.offrampEntered != nil && f.offrampCalls == 1 {
+		f.offrampEntered <- struct{}{}
+		<-f.offrampGate
+	}
 	if f.offrampErr != nil {
 		return nil, f.offrampErr
 	}

@@ -786,6 +786,11 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 	if req.BankCode == "" || req.AccountNo == "" {
 		return nil, errors.New("a payout bank account is required")
 	}
+	// Checked HERE, where the order is opened, not only when the sale began:
+	// a direct sell opened in between must still hold the one live sell.
+	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
+		return nil, err
+	}
 	amount, ok := parsePositiveDecimal(tokenAmount)
 	if !ok {
 		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)

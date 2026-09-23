@@ -16,14 +16,23 @@ import (
 // the server itself computed — nothing here is ever taken from the client at
 // claim time.
 
-// Sell-intent statuses. swapping and swapped are the open states (she is
-// mid-sale); ordered and failed are terminal.
+// Sell-intent statuses. swapping, swapped and ordering are the open states
+// (she is mid-sale); ordered and failed are terminal.
+//
+// ordering is the claim on the row while its Paycrest order is being opened:
+// exactly one caller moves swapped -> ordering, so exactly one offramp is
+// opened for the USDC that landed.
 const (
 	SellIntentSwapping = "swapping"
 	SellIntentSwapped  = "swapped"
+	SellIntentOrdering = "ordering"
 	SellIntentOrdered  = "ordered"
 	SellIntentFailed   = "failed"
 )
+
+// SellIntentOpenStatuses are the statuses of a sale still in progress — the
+// set the one-open-sale index is partial over.
+var SellIntentOpenStatuses = []string{SellIntentSwapping, SellIntentSwapped, SellIntentOrdering}
 
 type RampSellIntent struct {
 	ID     uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
@@ -84,5 +93,10 @@ func (i *RampSellIntent) BeforeCreate(tx *gorm.DB) error {
 
 // Open reports an intent still in progress.
 func (i *RampSellIntent) Open() bool {
-	return i.Status == SellIntentSwapping || i.Status == SellIntentSwapped
+	for _, st := range SellIntentOpenStatuses {
+		if i.Status == st {
+			return true
+		}
+	}
+	return false
 }
