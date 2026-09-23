@@ -414,8 +414,6 @@ export default function PaycrestBuyScreen() {
         requestedChainId: want.chainId,
         requestedTokenAddress: want.address,
         requestedToken: want.token,
-        // Kept for an older API build that still reads the chain-key form.
-        ...(want.chain ? { requestedChain: want.chain } : {}),
         // Where a destination the EVM wallet cannot receive on is delivered
         // (Solana). Absent everywhere else, where the wallet IS the recipient.
         ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
