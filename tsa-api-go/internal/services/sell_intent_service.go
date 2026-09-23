@@ -405,9 +405,11 @@ func (s *SellIntentService) claim(ctx context.Context, in *models.RampSellIntent
 }
 
 // releaseClaim returns an ordering intent to swapped (it has a swap recorded,
-// or it could not have been claimed) after its order failed to open.
+// or it could not have been claimed) after its order failed to open. It runs
+// even if the request was cancelled — a failure caused by her disconnecting
+// must not leave the sale stuck in ordering for the stale window.
 func (s *SellIntentService) releaseClaim(ctx context.Context, id uuid.UUID) {
-	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+	res := s.db.WithContext(context.WithoutCancel(ctx)).Model(&models.RampSellIntent{}).
 		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", id, models.SellIntentOrdering).
 		Updates(map[string]any{"status": models.SellIntentSwapped, "updated_at": s.now()})
 	if res.Error != nil {
@@ -417,7 +419,9 @@ func (s *SellIntentService) releaseClaim(ctx context.Context, id uuid.UUID) {
 }
 
 // lostClaim answers the caller that lost the race: the winner's order if it
-// is already recorded, otherwise "being opened, retry".
+// is already recorded, otherwise "being opened, retry". A row back at swapped
+// was claimed and released in between — nothing is open, so that is a retry
+// too, not a dead sale.
 func (s *SellIntentService) lostClaim(ctx context.Context, userID, id uuid.UUID) (*models.PaycrestOrderRecord, error) {
 	now, err := s.load(ctx, userID, id)
 	if err != nil {
@@ -426,7 +430,7 @@ func (s *SellIntentService) lostClaim(ctx context.Context, userID, id uuid.UUID)
 	if now.PaycrestOrderID != nil {
 		return s.orders.Get(ctx, userID, *now.PaycrestOrderID)
 	}
-	if now.Status == models.SellIntentOrdering {
+	if now.Status == models.SellIntentOrdering || now.Status == models.SellIntentSwapped {
 		return nil, ErrSellIntentOrdering
 	}
 	return nil, ErrSellIntentState

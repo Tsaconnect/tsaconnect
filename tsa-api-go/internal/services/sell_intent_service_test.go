@@ -600,3 +600,128 @@ func TestSellIntent_OpenOrderSurfacesAFailedSwap(t *testing.T) {
 		})
 	}
 }
+
+// ─── Fix round 2: the claim's status clause, and giving a claim back ──────
+
+// The interleaving the status clause exists for: both callers read the row as
+// swapped; the second claims it and is held inside Paycrest; only then does
+// the first try to claim. The row still has no order recorded, so without
+// "status = what I read" in the claim the first caller would win too and open
+// a second offramp. It must lose and be told to retry.
+func TestSellIntent_BothReadSwappedAndTheLaterClaimLoses(t *testing.T) {
+	r, in := landedRig(t)
+	if sqlDB, err := r.svc.db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+	r.status.entered = make(chan struct{})
+	r.status.gate = make(chan struct{})
+	r.client.offrampEntered = make(chan struct{})
+	r.client.offrampGate = make(chan struct{})
+
+	type result struct {
+		order *models.PaycrestOrderRecord
+		err   error
+	}
+	first, second := make(chan result, 1), make(chan result, 1)
+	go func() {
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		first <- result{o, err}
+	}()
+	<-r.status.entered // the first caller has read swapped and is paused in LiFi
+	go func() {
+		o, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		second <- result{o, err}
+	}()
+	<-r.client.offrampEntered // the second caller has claimed and is inside Paycrest
+
+	close(r.status.gate)
+	lost := <-first // its claim runs while the winner is still inside Paycrest
+	close(r.client.offrampGate)
+	won := <-second
+
+	if !errors.Is(lost.err, ErrSellIntentOrdering) || lost.order != nil {
+		t.Fatalf("late claimer: order %v, err %v; want ErrSellIntentOrdering", lost.order, lost.err)
+	}
+	if won.err != nil || won.order == nil {
+		t.Fatalf("winner: %v", won.err)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("offramp calls = %d, want exactly 1", r.client.offrampCalls)
+	}
+}
+
+// She closed the app (the request context was cancelled) while Paycrest was
+// failing. The claim must still be given back: otherwise her sale sits in
+// ordering for the whole stale window, answering "being opened" to every retry.
+func TestSellIntent_AReleaseSurvivesACancelledRequest(t *testing.T) {
+	r, in := landedRig(t)
+	r.client.offrampEntered = make(chan struct{})
+	r.client.offrampGate = make(chan struct{})
+	r.client.offrampErr = errors.New("client went away")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.svc.OpenOrder(ctx, r.user, in.ID)
+		done <- err
+	}()
+	<-r.client.offrampEntered // claimed, inside Paycrest
+	cancel()
+	close(r.client.offrampGate)
+	if err := <-done; err == nil {
+		t.Fatal("want the Paycrest error")
+	}
+
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped || got.PaycrestOrderID != nil {
+		t.Fatalf("after a cancelled, failed order the intent is %q; want it back to swapped", got.Status)
+	}
+}
+
+// A caller can lose its claim because the row was claimed AND given back in
+// between: it read a stale ordering claim, someone else took that claim over,
+// failed at Paycrest and released it to swapped. Nothing is being opened and
+// nothing is dead — the sale is retryable, so the loser must hear "try again",
+// not "this sale can't take that step".
+func TestSellIntent_ALoserAfterAReleaseIsToldToRetry(t *testing.T) {
+	r, in := landedRig(t)
+	if sqlDB, err := r.svc.db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).
+		Updates(map[string]any{"status": models.SellIntentOrdering,
+			"updated_at": sponsorTestNow.Add(-sellIntentClaimStale - time.Second)})
+	r.status.entered = make(chan struct{})
+	r.status.gate = make(chan struct{})
+	r.client.offrampErr = errors.New("paycrest down")
+
+	slow := make(chan error, 1)
+	go func() {
+		_, err := r.svc.OpenOrder(context.Background(), r.user, in.ID)
+		slow <- err
+	}()
+	<-r.status.entered // the slow caller read the stale ordering claim
+
+	// Another caller takes the stale claim over, fails at Paycrest, releases.
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err == nil {
+		close(r.status.gate)
+		t.Fatal("takeover: want the Paycrest error")
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentSwapped {
+		close(r.status.gate)
+		t.Fatalf("after the takeover failed the intent is %q; want swapped", got.Status)
+	}
+
+	close(r.status.gate)
+	if err := <-slow; !errors.Is(err, ErrSellIntentOrdering) {
+		t.Fatalf("loser after a release: err = %v, want ErrSellIntentOrdering", err)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("offramp calls = %d, want 1 (the takeover's)", r.client.offrampCalls)
+	}
+
+	r.client.offrampErr = nil
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+		t.Fatalf("retry after the release: %v", err)
+	}
+}
