@@ -2395,7 +2395,11 @@ func TestOrchestrator_SolanaWithoutAChainClientNeverSettles(t *testing.T) {
 	mustAdvance(t, r)
 	r.status.set(LiFiStatusDone, "1000000000")
 	mustAdvance(t, r)
-	if got := r.reload(t); got.Status == models.PaycrestStatusSettled {
-		t.Fatal("an unproven Solana landing settled the order")
+	// Pinned to the exact status, not merely "not settled": waiting is the
+	// only right answer here. Parking it for recovery would declare a
+	// short-pay we have no proof of, and failing it would throw away an order
+	// the bridge says is done — both are wrong in a way "!= settled" accepts.
+	if got := r.reload(t); got.Status != models.PaycrestStatusConverting {
+		t.Fatalf("status = %s; an unproven Solana landing must keep waiting", got.Status)
 	}
 }

@@ -548,3 +548,81 @@ func TestQuote_SolanaVenueIsNotOfferedWithoutARecipient(t *testing.T) {
 		t.Fatalf("LiFi was called %d times for an asset that cannot be delivered", s.lifi.quoteCalls())
 	}
 }
+
+// solanaUSDCMint is the real USDC mint on Solana — the destination this whole
+// corridor exists for, and the one the polymerCCTP capture was quoted to.
+const solanaUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+// A Solana venue is only worth offering if execution would accept it. The
+// quote-time structural check (known layout, no destination call, right chain)
+// passes calldata that startBridge then refuses every time — and by then she
+// has paid naira for it, so the order can only sit through the retry window
+// and refund. So the Solana family runs the SAME check here that execution
+// runs, against the recipient the quote is priced to.
+//
+// Both cases below are real captured LiFi calldata (Task 10 fixtures):
+//
+//   - the NEAR facet carries no token-account word, so it cannot say where an
+//     SPL delivery lands; checkLiFiDeliveryTo refuses an SPL route on it.
+//   - the polymerCCTP capture pays a specific Solana address; quoting it to
+//     anyone else is a route that pays a stranger.
+func TestQuote_SolanaVenueExecutionWouldRefuseIsNotOffered(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	const someoneElse = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+	cases := []struct {
+		name        string
+		fixture     string
+		token       string
+		destination string
+	}{
+		{
+			name:    "an SPL destination on a facet with no token-account word",
+			fixture: "near_base_solana_sol", token: solanaUSDCMint, destination: solRecipient,
+		},
+		{
+			name:    "a route that pays a different Solana address",
+			fixture: "polymer_base_solana_usdc", token: solanaUSDCMint, destination: someoneElse,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := priceRig(t)
+			s.svc.SetSolanaValidator(solana.ValidateAddress)
+			s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(100_000_000), ToAmountMin: big.NewInt(99_000_000),
+				FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 6, ToTokenSymbol: "USDC",
+				Data: loadLiFiFixtures(t)[tc.fixture].Data}
+
+			venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+				ChainID: solanaLiFiChainID, Address: tc.token,
+				Recipient: sponsorTestUser, Destination: tc.destination,
+			}})
+			if err != nil || len(venues) != 0 {
+				t.Fatalf("venues = %+v err = %v; want none — execution would refuse this route", venues, err)
+			}
+		})
+	}
+}
+
+// The other half of the same rule: an SPL delivery on a facet that DOES carry
+// the token-account word, priced to the address the calldata pays, is still
+// offered. SPL-on-Solana is the corridor this feature is for; refusing it
+// would hide it behind a silent "unsupported".
+func TestQuote_SolanaSPLVenueExecutionAcceptsIsOffered(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(100_000_000), ToAmountMin: big.NewInt(99_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 6, ToTokenSymbol: "USDC",
+		Data: loadLiFiFixtures(t)["polymer_base_solana_usdc"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaUSDCMint,
+		Recipient: sponsorTestUser, Destination: solRecipient,
+	}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; want the SPL Solana venue offered", venues, err)
+	}
+	if v := venues[0]; v.RequestedDestination != solRecipient || v.RequestedAddress != solanaUSDCMint {
+		t.Fatalf("venue = %+v; want USDC delivered to her Solana address", v)
+	}
+}

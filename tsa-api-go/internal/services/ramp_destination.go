@@ -27,6 +27,17 @@ const evmNativeAddress = "0x0000000000000000000000000000000000000000"
 // stated once here rather than spelled out at each site.
 const solanaChainKey = "solana"
 
+// addressFamily is the address family a chain's recipients are written in —
+// the one thing that decides both how a route's calldata names its recipient
+// and how a landing is proven. It is derived from the chain id alone, never
+// from a chain name, which is client-supplied at every edge.
+func addressFamily(chainID int64) string {
+	if chainID == solanaLiFiChainID {
+		return "solana"
+	}
+	return "evm"
+}
+
 // evmNativeAliasAddress is the OTHER spelling of "this chain's native coin".
 // LiFi, 1inch and most aggregators use it interchangeably with the zero
 // address, and which one comes back varies by chain and by tool.

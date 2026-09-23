@@ -914,12 +914,31 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			continue
 		}
 		// Offer only what execution accepts: known layout, no destination call, right chain.
-		raw, derr := hexutil.Decode(route.Data)
-		if derr != nil {
-			continue
-		}
-		if d, derr := decodeLiFiDelivery(raw, s.chainID(src.ChainKey)); derr != nil || d.HasDestinationCall || d.DestinationChainID != asset.ChainID {
-			continue
+		//
+		// Where the recipient is already known here, run the whole check
+		// startBridge will run rather than the structural half. A non-EVM
+		// destination names its own recipient (resolveRequestedAsset has
+		// validated it), and the structural check passes calldata that
+		// execution then refuses on EVERY attempt — a facet whose layout says
+		// nothing about where an SPL delivery lands, say. The user only finds
+		// out after paying naira: the order opens, no bridge can be sent, and
+		// it waits out the retry window to refund.
+		//
+		// The EVM family cannot be held to the same check: an anonymous price
+		// check quotes to the treasury, so there is no user recipient here to
+		// compare the calldata against.
+		if family := addressFamily(asset.ChainID); family != "evm" {
+			if err := checkLiFiDeliveryTo(route.Data, s.chainID(src.ChainKey), asset.ChainID, recipient, family, asset.Address); err != nil {
+				continue
+			}
+		} else {
+			raw, derr := hexutil.Decode(route.Data)
+			if derr != nil {
+				continue
+			}
+			if d, derr := decodeLiFiDelivery(raw, s.chainID(src.ChainKey)); derr != nil || d.HasDestinationCall || d.DestinationChainID != asset.ChainID {
+				continue
+			}
 		}
 		decimals, symbol := route.ToTokenDecimals, strings.ToUpper(route.ToTokenSymbol) // from LiFi, never the client
 		if asset.Stable {

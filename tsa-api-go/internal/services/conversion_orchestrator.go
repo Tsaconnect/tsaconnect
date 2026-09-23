@@ -1628,12 +1628,7 @@ type conversionDestination struct {
 // It is derived from the chain id alone — never from the order's chain name,
 // which is client-supplied at the edges — and it decides both how a route's
 // calldata is read and how the landing is proven.
-func (d *conversionDestination) family() string {
-	if d.chainID == solanaLiFiChainID {
-		return "solana"
-	}
-	return "evm"
-}
+func (d *conversionDestination) family() string { return addressFamily(d.chainID) }
 
 func (o *ConversionOrchestrator) destination(order *models.PaycrestOrderRecord) (*conversionDestination, error) {
 	chainID, token := order.RequestedChainID, order.RequestedTokenAddress
