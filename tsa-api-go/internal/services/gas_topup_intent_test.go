@@ -68,7 +68,8 @@ const intentQuotedTopUpWei = "123456789000000"
 func intentOn(chainID int64, user *models.User) *models.RampSellIntent {
 	return &models.RampSellIntent{ID: uuid.New(), UserID: user.ID, WalletAddress: user.WalletAddress,
 		SourceAddress: user.WalletAddress, SourceChainID: chainID, SourceTokenAddress: sponsorTestUSDC,
-		Status: models.SellIntentSwapping, QuotedGasLimit: 300_000, QuotedTopUpWei: intentQuotedTopUpWei}
+		Status: models.SellIntentSwapping, QuotedGasLimit: 300_000, QuotedTopUpWei: intentQuotedTopUpWei,
+		TopUpBudgeted: true}
 }
 
 // intentWithoutQuotedWei is a sale whose route quoted no gas in wei: the
@@ -492,4 +493,93 @@ func TestTopUpForIntent_NoClaimForASaleThatMovedOnAfterItWasLoaded(t *testing.T)
 			}
 		})
 	}
+}
+
+// ─── Whole-branch fix: only gas the quote paid for ─────────────────────────
+
+// A sale whose quote judged her funded budgeted no top-up, so none may be
+// sent — on either path, whatever the row's wei column holds, and before any
+// claim is even attempted. Before the fix the intent stored a top-up figure
+// from the route whether or not the quote had counted one, and this call sent
+// it out of a budget that never included it.
+func TestTopUpForIntent_RefusesASaleWhoseQuoteBudgetedNoTopUp(t *testing.T) {
+	for name, in := range map[string]func(*models.User) *models.RampSellIntent{
+		"a stored wei figure": func(u *models.User) *models.RampSellIntent { return intentOn(8453, u) },
+		"no wei (live path)":  func(u *models.User) *models.RampSellIntent { return intentWithoutQuotedWei(8453, u) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, user, rig := newIntentTopUpRigWith(t)
+			intent := in(user)
+			intent.TopUpBudgeted = false
+			store := &fakeIntentTopUps{}
+			if _, err := g.TopUpForIntent(context.Background(), user, intent, store); !errors.Is(err, ErrSponsorNotAvailable) {
+				t.Fatalf("err = %v, want ErrSponsorNotAvailable", err)
+			}
+			if rig.signer.calls() != 0 || rig.native.sentWei != nil || store.marks != 0 {
+				t.Fatalf("sends = %d sent = %v claims = %d; an unbudgeted top-up must send nothing",
+					rig.signer.calls(), rig.native.sentWei, store.marks)
+			}
+		})
+	}
+}
+
+// The seam, end to end: quote → admission → the stored row → the send. The
+// fee-carrying route quotes different gas from the fee-free one; whatever is
+// sent has to be the top-up the ADMITTED route priced, and a sale priced with
+// no top-up must never send one.
+func TestSellSeam_TheTopUpSentIsTheOneTheQuoteAdmitted(t *testing.T) {
+	routes := func(t *testing.T) (*LiFiRoute, *LiFiRoute) {
+		r1, r2 := topUpFixture(t)
+		r1.Data = testBridgeCalldata(t, orderTestUserWallet, rampSettlementChainID, false)
+		r2.Data = testBridgeCalldata(t, orderTestUserWallet, rampSettlementChainID, false)
+		r2.GasCostWei = big.NewInt(2_000) // r1 says 1,000: a different answer for the route she signs
+		return r1, r2
+	}
+	run := func(t *testing.T, balance *big.Int) (*models.RampSellIntent, *SellSwapQuote, *sponsorRig, error) {
+		r1, r2 := routes(t)
+		quoter, _ := newSellQuoterWithFakes(t, r1, r2)
+		quoter.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return balance, true })
+		sale := newSellIntentRig(t)
+		sale.svc.quoter = quoter
+		in, q, err := sale.svc.Create(context.Background(), sale.user, CreateSellIntentInput{
+			SourceChainID: 56, SourceToken: bscUSDT, SourceAmount: "100000000000000000000",
+			SourceAddress: sale.user.WalletAddress, FiatCode: "NGN", BankCode: "044", AccountNumber: "0123456789"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		rig, _ := newSponsorRig("bsc", "USDT")
+		rig.chain.balances[strings.ToLower(sale.user.WalletAddress)] = big.NewInt(0) // what she holds at send time
+		g := NewGasTopUp(rig.orders, rig.store, rig.lanes(), 2, time.Second, func() time.Time { return sponsorTestNow })
+		g.SetChainRegistry(testChainRegistry())
+		_, err = g.TopUpForIntent(context.Background(), sale.user, in, &fakeIntentTopUps{})
+		return in, q, rig, err
+	}
+
+	t.Run("priced a top-up: sends exactly the signed route's", func(t *testing.T) {
+		in, q, rig, err := run(t, big.NewInt(0))
+		if err != nil {
+			t.Fatalf("TopUpForIntent: %v", err)
+		}
+		_, r2 := routes(t)
+		want := quotedTopUpWei(r2) // 2,000 × 1.08 × 2 = 4,320 — not r1's 2,160
+		if !q.GasTopUp || q.TopUpWei != want || !in.TopUpBudgeted || in.QuotedTopUpWei != want {
+			t.Fatalf("quote %v/%q, row %v/%q; want the admitted route's %s", q.GasTopUp, q.TopUpWei, in.TopUpBudgeted, in.QuotedTopUpWei, want)
+		}
+		if rig.native.sentWei == nil || rig.native.sentWei.String() != want {
+			t.Fatalf("sent %v, want %s", rig.native.sentWei, want)
+		}
+		// And that top-up is inside the g the sale was admitted on.
+		if q.GasBps != USDGasBps(0.02+TopUpUSDForRoute(r2), r2.FromAmountUSD) {
+			t.Fatalf("gas = %d bps, not the signed route's own g", q.GasBps)
+		}
+	})
+	t.Run("priced none: sends nothing", func(t *testing.T) {
+		in, q, rig, err := run(t, big.NewInt(1_000_000_000))
+		if !errors.Is(err, ErrSponsorNotAvailable) {
+			t.Fatalf("err = %v, want ErrSponsorNotAvailable", err)
+		}
+		if q.GasTopUp || in.TopUpBudgeted || in.QuotedTopUpWei != "" || rig.native.sentWei != nil {
+			t.Fatalf("quote %v, row %v/%q, sent %v; nothing was budgeted", q.GasTopUp, in.TopUpBudgeted, in.QuotedTopUpWei, rig.native.sentWei)
+		}
+	})
 }

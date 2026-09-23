@@ -6,47 +6,6 @@ import (
 	"strings"
 )
 
-const (
-	// conversionMarkupFloorBps is Decision 4: 0.5% on converted orders, on top
-	// of the Paycrest sender fee. When the conversion costs less than this, the
-	// company keeps the difference.
-	conversionMarkupFloorBps = 50
-	// conversionMarkupCapBps is the ceiling (Decision 5). A route needing more
-	// than 1% is not offered at all rather than quoted at a loss.
-	conversionMarkupCapBps = 100
-	// conversionMarkupHeadroomBps is what we add over a costly route's own
-	// cost, so a route that drifts slightly between quote and execution still
-	// covers itself.
-	conversionMarkupHeadroomBps = 10
-)
-
-// ConversionMarkupBps prices a converted route from its guaranteed cost.
-// offered is false when covering the cost would breach the cap.
-func ConversionMarkupBps(costBps int) (int, bool) {
-	if costBps < 0 {
-		costBps = 0
-	}
-	bps := conversionMarkupFloorBps
-	if costBps+conversionMarkupHeadroomBps > bps {
-		bps = costBps + conversionMarkupHeadroomBps
-	}
-	if bps > conversionMarkupCapBps {
-		return 0, false
-	}
-	return bps, true
-}
-
-// ConversionCostBps is the guaranteed cost of a route: how far LiFi's worst
-// case (toAmountMin) falls below what Paycrest delivers, in basis points.
-func ConversionCostBps(routeAmount, toAmountMin *big.Int) int {
-	if routeAmount == nil || toAmountMin == nil || routeAmount.Sign() <= 0 {
-		return conversionMarkupCapBps + 1 // unusable: never offered
-	}
-	diff := new(big.Int).Sub(routeAmount, toAmountMin)
-	diff.Mul(diff, big.NewInt(10_000))
-	return int(new(big.Int).Div(diff, routeAmount).Int64())
-}
-
 // PromisedAmount is what the user is guaranteed to receive: the Paycrest
 // amount less the markup. Integer maths only — this is money.
 func PromisedAmount(routeAmount *big.Int, markupBps int) *big.Int {
@@ -155,6 +114,22 @@ func TreasuryGasBps(route *LiFiRoute, extraGasUnits uint64) int {
 // budgets less than the top-up actually costs is money leaking per sell.
 func TopUpUSDForRoute(route *LiFiRoute) float64 {
 	return RouteGasUSD(route, treasuryERC20Gas) * topUpGasBuffer
+}
+
+// quotedTopUpWei is what a source-chain gas top-up for this route would cost,
+// in wei: exactly the figure TopUpUSDForRoute priced into the round-trip
+// budget, expressed in the coin the gas is actually paid in. Both read
+// RouteGasWei/RouteGasUSD over the same units and multiply by the same
+// buffer, so the price and the spend cannot disagree.
+//
+// "" when the route quoted no gas in wei. That is an unknown, and a caller
+// must decide what to do about it rather than read a zero as "free".
+func quotedTopUpWei(route *LiFiRoute) string {
+	need := RouteGasWei(route, treasuryERC20Gas)
+	if need == nil {
+		return ""
+	}
+	return new(big.Int).Mul(need, big.NewInt(topUpGasBuffer)).String()
 }
 
 // USDGasBps is a USD gas cost as bps of an order's USD value.

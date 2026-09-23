@@ -166,7 +166,8 @@ type IntentTopUpStore interface {
 // TopUpForIntent sends her the source-chain gas to sign a sale's swap when she
 // sells an EVM token and holds none of the chain's coin (design §5.2, §5.4).
 //
-// The amount is the one the sale's QUOTE budgeted (intent.QuotedTopUpWei):
+// Only for a sale whose quote budgeted one (intent.TopUpBudgeted). The amount
+// is the one the sale's QUOTE budgeted (intent.QuotedTopUpWei):
 // that figure was priced into the round trip she was quoted against, so
 // sending a fresh one priced off today's gas would spend a budget nobody set.
 // Only when the route quoted no gas in wei is there nothing to honour, and the
@@ -193,6 +194,11 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 	// Selling the chain's own coin pays its gas out of the coin (§5.4).
 	if isNativeTokenAddress(intent.SourceTokenAddress) {
 		return GasTopUpResult{}, ErrSponsorNotAvailable
+	}
+	// Only gas the quote paid for. A sale admitted with no top-up in its g
+	// has no budget to send one from — sending anyway spends past B.
+	if !intent.TopUpBudgeted {
+		return GasTopUpResult{}, fmt.Errorf("%w: this sale's quote budgeted no gas top-up", ErrSponsorNotAvailable)
 	}
 	lane := g.intentLane(intent.SourceChainID)
 	if lane == nil {

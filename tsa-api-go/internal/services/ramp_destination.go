@@ -31,12 +31,30 @@ const solanaChainKey = "solana"
 // the one thing that decides both how a route's calldata names its recipient
 // and how a landing is proven. It is derived from the chain id alone, never
 // from a chain name, which is client-supplied at every edge.
+//
+// Bitcoin and Sui are named for what they are even though nothing here can
+// check or deliver to them yet: folding them into "evm" made every refusal
+// downstream say "not a valid address" about a perfectly valid one, and left
+// the unknown-family refusals in checkLiFiDeliveryTo/validateAddressForChain
+// with nothing that could ever reach them.
 func addressFamily(chainID int64) string {
-	if chainID == solanaLiFiChainID {
+	switch chainID {
+	case solanaLiFiChainID:
 		return "solana"
+	case bitcoinLiFiChainID:
+		return "bitcoin"
+	case suiLiFiChainID:
+		return "sui"
 	}
 	return "evm"
 }
+
+// bitcoinLiFiChainID / suiLiFiChainID are LiFi's pseudo chain ids for Bitcoin
+// and Sui (the app's BTC_LIFI_CHAIN_ID / SUI_LIFI_CHAIN_ID).
+const (
+	bitcoinLiFiChainID int64 = 20000000000001
+	suiLiFiChainID     int64 = 9270000000000000
+)
 
 // validateAddressForChain checks that addr is written in the family chainID's
 // addresses belong to. It shares addressFamily's single switch rather than
@@ -51,17 +69,19 @@ func validateAddressForChain(chainID int64, addr string, validateSolana solanaAd
 	if addr == "" {
 		return errors.New("address is required")
 	}
-	switch addressFamily(chainID) {
+	switch family := addressFamily(chainID); family {
 	case "solana":
 		if validateSolana == nil {
 			return errors.New("no Solana chain is configured")
 		}
 		return validateSolana(addr)
-	default:
+	case "evm":
 		if !common.IsHexAddress(addr) {
 			return fmt.Errorf("%q is not an address on chain %d", addr, chainID)
 		}
 		return nil
+	default:
+		return fmt.Errorf("no address check for the %s family", family)
 	}
 }
 

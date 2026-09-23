@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,8 @@ type stubSellIntents struct {
 	quote    *services.SellSwapQuote
 	err      error
 	open     *models.RampSellIntent
+	// resumable answers Resumable when set; otherwise it answers with open.
+	resumable *models.RampSellIntent
 	// got answers Get; getErr overrides it.
 	got    *models.RampSellIntent
 	getErr error
@@ -68,6 +71,13 @@ func (s *stubSellIntents) OpenOrder(context.Context, *models.User, uuid.UUID) (*
 func (s *stubSellIntents) Abandon(context.Context, uuid.UUID, uuid.UUID) error { return s.err }
 
 func (s *stubSellIntents) Open(context.Context, uuid.UUID) (*models.RampSellIntent, error) {
+	return s.open, nil
+}
+
+func (s *stubSellIntents) Resumable(context.Context, uuid.UUID) (*models.RampSellIntent, error) {
+	if s.resumable != nil {
+		return s.resumable, nil
+	}
 	return s.open, nil
 }
 
@@ -120,6 +130,51 @@ func TestCreateSellIntent_SellsToTheReconciledWallet(t *testing.T) {
 	body["walletAddress"] = sellSwapOtherWallet
 	if w := postSellIntent(t, h, user, body); w.Code != http.StatusConflict {
 		t.Fatalf("claiming another account's wallet: code = %d", w.Code)
+	}
+}
+
+// The app asks for a source-chain top-up exactly when the server priced one,
+// so the Create answer has to carry that verdict — both ways.
+func TestCreateSellIntent_SaysWhetherAGasTopUpWasPriced(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	user := &models.User{ID: uuid.New(), Username: "seller", WalletAddress: sellSwapUserWallet,
+		AccountStatus: models.AccountStatusActive}
+	insertTestUser(t, db, user)
+	for _, priced := range []bool{true, false} {
+		stub := &stubSellIntents{
+			intent: &models.RampSellIntent{ID: uuid.New()},
+			quote:  &services.SellSwapQuote{LiFiQuote: json.RawMessage(`{}`), GasTopUp: priced, TopUpWei: "4320"},
+		}
+		w := postSellIntent(t, (&PaycrestHandler{}).WithSellIntents(stub), user, sellIntentBody())
+		var out struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != http.StatusCreated {
+			t.Fatalf("code = %d err = %v body = %s", w.Code, err, w.Body.String())
+		}
+		if got, ok := out.Data["gasTopUp"].(bool); !ok || got != priced {
+			t.Fatalf("gasTopUp = %v (present %v), want %v", out.Data["gasTopUp"], ok, priced)
+		}
+		if strings.Contains(w.Body.String(), "4320") {
+			t.Fatal("the wei figure is the server's; it never leaves it")
+		}
+	}
+}
+
+// GET /sell-intents/open answers with what "Finish your sale" can resume —
+// including an ordered sale still awaiting its deposit, which Open() alone
+// (the one-open-sale rule's view) deliberately does not report.
+func TestOpenSellIntent_ReturnsTheResumableSale(t *testing.T) {
+	ordered := &models.RampSellIntent{ID: uuid.New(), Status: models.SellIntentOrdered}
+	h := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{resumable: ordered})
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/paycrest/sell-intents/open", nil)
+	c.Set("user", &models.User{ID: uuid.New(), WalletAddress: sellSwapUserWallet})
+	h.OpenSellIntent(c)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), ordered.ID.String()) {
+		t.Fatalf("code = %d body = %s; want the ordered sale", w.Code, w.Body.String())
 	}
 }
 

@@ -182,12 +182,15 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		FeeBps:             q.FeeBps,
 		LiFiTransactionID:  q.Route.TransactionID,
 		QuotedGasLimit:     q.Route.GasLimit,
-		QuotedTopUpWei:     quotedTopUpWei(q.Route),
-		QuotedFromUSD:      q.Route.FromAmountUSD,
-		BankCode:           strings.TrimSpace(in.BankCode),
-		AccountNumber:      strings.TrimSpace(in.AccountNumber),
-		AccountName:        strings.TrimSpace(in.AccountName),
-		Status:             models.SellIntentSwapping,
+		// Stored as the quote priced them, never re-derived from the route:
+		// the top-up a sale may send is the one its admission paid for.
+		QuotedTopUpWei: q.TopUpWei,
+		TopUpBudgeted:  q.GasTopUp,
+		QuotedFromUSD:  q.Route.FromAmountUSD,
+		BankCode:       strings.TrimSpace(in.BankCode),
+		AccountNumber:  strings.TrimSpace(in.AccountNumber),
+		AccountName:    strings.TrimSpace(in.AccountName),
+		Status:         models.SellIntentSwapping,
 	}
 	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
 		// The partial unique index is the real one-open-intent rule: two
@@ -215,19 +218,21 @@ var (
 // malformed hash is a client bug, and looking it up would put an arbitrary
 // string into an upstream request.
 //
-// Only the two families a sell can actually be QUOTED from exist here: EVM
-// and Solana. addressFamily draws the same line, and Task 12 refuses a source
-// address it cannot place, so a BTC or Sui sell cannot reach this point at
-// all — a shape for them would be a rule nothing can test.
+// Only the two families a sell can actually be QUOTED from have a shape here:
+// EVM and Solana. Any other family (Bitcoin, Sui) is refused outright — the
+// quote already refuses those sources, so no sale of theirs should exist.
 func swapHashForChain(chainID int64, hash string) (string, bool) {
 	hash = strings.TrimSpace(hash)
-	if addressFamily(chainID) == "solana" {
+	switch addressFamily(chainID) {
+	case "solana":
 		return hash, solanaTxSigRe.MatchString(hash)
+	case "evm":
+		// Hex is case-insensitive but the unique index is not: one casing, so
+		// the same swap cannot be recorded twice under two spellings.
+		hash = strings.ToLower(hash)
+		return hash, evmTxHashRe.MatchString(hash)
 	}
-	// Hex is case-insensitive but the unique index is not: one casing, so the
-	// same swap cannot be recorded twice under two spellings.
-	hash = strings.ToLower(hash)
-	return hash, evmTxHashRe.MatchString(hash)
+	return hash, false
 }
 
 // RecordSwap attaches the transaction she broadcast to her sale.
@@ -517,8 +522,18 @@ func sameTokenAddress(a, b string) bool {
 // for us, as bps of the route's own USD input. Through All Swap's engine call,
 // keyed on the intent, so a replay is a guard-row no-op rather than a second
 // accrual.
+//
+// Only when the swap was bound to our quote's transactionId. Without one (a
+// Solana source today) boundToIntent cannot tell our fee-carrying route from
+// an equal-amount route she assembled without it, so there is no evidence the
+// fee was ever collected — and booking it would pay real cashback out of a
+// fee we may never have received.
 func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID) {
 	if s.fees == nil || in.FeeBps <= 0 || in.QuotedFromUSD <= 0 {
+		return
+	}
+	if strings.TrimSpace(in.LiFiTransactionID) == "" {
+		log.Printf("[ramp-sell] fee not booked for intent %s: no LiFi transactionId bound the swap to our quote", in.ID)
 		return
 	}
 	s.fees.EnqueueFeeSettled(FeeEvent{
@@ -563,6 +578,33 @@ func (s *SellIntentService) Open(ctx context.Context, userID uuid.UUID) (*models
 	var in models.RampSellIntent
 	err := s.db.WithContext(ctx).
 		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
+		Order("created_at DESC").First(&in).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &in, nil
+}
+
+// Resumable is the sale "Finish your sale" offers: her open sale if she has
+// one, otherwise her newest ORDERED sale whose payout still awaits the USDC
+// deposit — a sale killed between opening the payout and sending into it.
+//
+// A separate query rather than a widening of SellIntentOpenStatuses: ordered
+// is deliberately not "open" (the one-open-sale index and Create's check are
+// built on that), it is only still worth resuming while its order waits.
+func (s *SellIntentService) Resumable(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error) {
+	open, err := s.Open(ctx, userID)
+	if err != nil || open != nil {
+		return open, err
+	}
+	waiting := s.db.Model(&models.PaycrestOrderRecord{}).Select("id").
+		Where("user_id = ? AND status = ?", userID, models.PaycrestStatusAwaitingDeposit)
+	var in models.RampSellIntent
+	err = s.db.WithContext(ctx).
+		Where("user_id = ? AND status = ? AND paycrest_order_id IN (?)", userID, models.SellIntentOrdered, waiting).
 		Order("created_at DESC").First(&in).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -638,20 +680,4 @@ func (s *SellIntentService) load(ctx context.Context, userID, id uuid.UUID) (*mo
 		return nil, err
 	}
 	return &in, nil
-}
-
-// quotedTopUpWei is what a source-chain gas top-up for this route would cost,
-// in wei: exactly the figure TopUpUSDForRoute priced into the round-trip
-// budget, expressed in the coin the gas is actually paid in. Both read
-// RouteGasWei/RouteGasUSD over the same units and multiply by the same
-// buffer, so the price and the spend cannot disagree.
-//
-// "" when the route quoted no gas in wei. That is an unknown, and a caller
-// must decide what to do about it rather than read a zero as "free".
-func quotedTopUpWei(route *LiFiRoute) string {
-	need := RouteGasWei(route, treasuryERC20Gas)
-	if need == nil {
-		return ""
-	}
-	return new(big.Int).Mul(need, big.NewInt(topUpGasBuffer)).String()
 }

@@ -1073,6 +1073,13 @@ func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *model
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_token_total=1 order=%s got=%s want=%s", order.ID, st.ReceivingToken, dst.token)
 			return nil, o.toRecovery(ctx, order, fmt.Sprintf("LiFi delivered %s, not %s", st.ReceivingToken, dst.token), map[string]any{"holder": models.HolderUser})
 		}
+		// "Native" matches the coin of EVERY chain, and this is the one
+		// landing with no on-chain proof behind it — so the chain LiFi says it
+		// landed on is all that pins which coin she actually got.
+		if st.DestChainID != dst.chainID {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_chain_total=1 order=%s got=%d want=%d", order.ID, st.DestChainID, dst.chainID)
+			return nil, o.toRecovery(ctx, order, fmt.Sprintf("LiFi delivered on chain %d, not %d", st.DestChainID, dst.chainID), map[string]any{"holder": models.HolderUser})
+		}
 		return st.ReceivedBaseUnits, nil
 	}
 	credited, err := o.verifyTransferOnChain(ctx, order, dst.chainKey, dst.token, st.DestTxHash, "landing")

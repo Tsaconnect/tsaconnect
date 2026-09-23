@@ -66,11 +66,16 @@ type RampSellIntent struct {
 	// sends a top-up for this sale must send this figure, not a fresh one
 	// priced off a live gas price minutes later. Empty when the route quoted
 	// no gas in wei — an unknown, which is not a zero.
-	QuotedTopUpWei string  `gorm:"size:40" json:"-"`
-	QuotedFromUSD  float64 `json:"-"` // the quote's fromAmountUSD, the basis our fee is booked on
-	BankCode       string  `gorm:"size:16;not null" json:"bankCode"`
-	AccountNumber  string  `gorm:"size:32;not null" json:"accountNumber"`
-	AccountName    string  `gorm:"size:128" json:"accountName,omitempty"`
+	QuotedTopUpWei string `gorm:"size:40" json:"-"`
+	// TopUpBudgeted is whether the quote priced a top-up into the budget it
+	// admitted this sale on. False means none was paid for, so none may be
+	// sent — whatever QuotedTopUpWei says. Kept apart from QuotedTopUpWei
+	// because "" there already means "budgeted, but the route quoted no wei".
+	TopUpBudgeted bool    `gorm:"not null;default:false" json:"-"`
+	QuotedFromUSD float64 `json:"-"` // the quote's fromAmountUSD, the basis our fee is booked on
+	BankCode      string  `gorm:"size:16;not null" json:"bankCode"`
+	AccountNumber string  `gorm:"size:32;not null" json:"accountNumber"`
+	AccountName   string  `gorm:"size:128" json:"accountName,omitempty"`
 	// SwapTxHash is a POINTER so the unique index ignores intents that have
 	// no swap yet: one on-chain swap can back exactly one sale, and a hash
 	// already claimed elsewhere must not open a second payout.

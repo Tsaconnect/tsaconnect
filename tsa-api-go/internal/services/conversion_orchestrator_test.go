@@ -2214,6 +2214,21 @@ func TestOrchestrator_WrongReceivingTokenStopsForAHuman(t *testing.T) {
 	}
 }
 
+// "Native" names the coin of every chain, and a native landing has no
+// on-chain proof behind it — so a delivery LiFi reports on another chain is
+// not hers to settle on, however right the token spelling looks.
+func TestOrchestrator_NativeLandingOnAnotherChainStopsForAHuman(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	mustAdvance(t, r)
+	r.status.chainID = 137 // Polygon's native coin, not the BNB she bought
+	r.status.set(LiFiStatusDone, "995")
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s; a native landing on the wrong chain must park", got.Status)
+	}
+}
+
 // At 80 bps, T/(1 − l) is 100302419 — more than the 100000000 that actually
 // landed. The attempt is refused before the budget is ever consulted: the
 // treasury can only send what it holds.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -171,7 +172,10 @@ func topUpFixture(t *testing.T) (*LiFiRoute, *LiFiRoute) {
 	r1 := &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), FromAmountUSD: 100, ToAmountUSD: 99.8,
 		GasCostUSD: 0.10, GasCostWei: big.NewInt(1_000), GasLimit: 1_000_000,
 		Raw: json.RawMessage(`{"id":"r1"}`), Data: sellCalldata(t, sellTestAddress)}
+	// r2 runs on the same tool at the same gas: g is re-priced from r2, so a
+	// fixture whose r2 quoted no gas would price a different sale than r1.
 	r2 := &LiFiRoute{ToAmount: big.NewInt(99_740000), ToAmountMin: big.NewInt(99_640000), FromAmountUSD: 100, ToAmountUSD: 99.74,
+		GasCostUSD: 0.10, GasCostWei: big.NewInt(1_000), GasLimit: 1_000_000,
 		Raw: json.RawMessage(`{"id":"r2"}`), Data: sellCalldata(t, sellTestAddress)} // l2 = 26: 26 + 24 = 50 fits
 	return r1, r2
 }
@@ -252,7 +256,7 @@ func TestRampSellQuote_AnUnreadableRouteGasIsTreatedAsUnknown(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r1, r2 := topUpFixture(t)
-			r1.GasCostWei = nil // LiFi did not answer in wei
+			r1.GasCostWei, r2.GasCostWei = nil, nil // LiFi did not answer in wei
 			q, _ := newSellQuoterWithFakes(t, r1, r2)
 			q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return tc.balance() })
 			in := sellIn
@@ -263,6 +267,10 @@ func TestRampSellQuote_AnUnreadableRouteGasIsTreatedAsUnknown(t *testing.T) {
 			}
 			if res.GasBps != 24 || res.FeeBps != 6 {
 				t.Fatalf("gas/fee = %d/%d, want 24/6 — an unknown must budget the top-up", res.GasBps, res.FeeBps)
+			}
+			// Budgeted, with no wei to send: the send prices it live.
+			if !res.GasTopUp || res.TopUpWei != "" {
+				t.Fatalf("gasTopUp = %v topUpWei = %q, want a budgeted top-up with no quoted wei", res.GasTopUp, res.TopUpWei)
 			}
 		})
 	}
@@ -337,5 +345,113 @@ func TestRampSellQuote_RefusesASourceAddressOfTheWrongFamily(t *testing.T) {
 	}
 	if lifi.quoteCalls() != 0 {
 		t.Fatalf("quoted %d times for an unusable source address", lifi.quoteCalls())
+	}
+}
+
+// ─── Whole-branch fix: the top-up admitted is the top-up sent ──────────────
+//
+// g used to be priced once, off the FIRST (fee-free) route, while the sale
+// stored — and later sent — the top-up of the SECOND, fee-carrying route. The
+// two are different LiFi answers and may be different tools. Every test below
+// is a second route whose gas differs from the first's, the shape no earlier
+// fixture had.
+
+// The fee-carrying ask lands on a tool that costs twice the gas. Admitted on
+// the first route's g (24 bps) it fits exactly — l2 26 + 24 = 50 — while the
+// top-up it would actually send is priced at 46 bps: 72 against a budget of 50.
+func TestRampSellQuote_AdmitsTheFeeRouteOnItsOwnGas(t *testing.T) {
+	r1, r2 := topUpFixture(t)
+	r2.GasCostUSD = 0.20 // $0.20 × 1.08 × 2 + $0.02 relay = 45.2 -> 46 bps
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(0), true })
+	in := sellIn
+	in.FromToken = bscUSDT
+	if res, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("res = %+v err = %v; the route she signs must fit B on its own gas", res, err)
+	}
+}
+
+// She holds enough for the first route's gas (1,080 wei with the approve) but
+// not the second's (5,400). Judged off the first route she is "funded": g is
+// just the relay, the whole rest of B becomes our fee — and the sale then
+// needs a top-up nobody budgeted. Judged off the route she signs, it does not
+// fit and is refused.
+func TestRampSellQuote_AFeeRouteThatNewlyNeedsATopUpIsJudgedOnItsOwnGas(t *testing.T) {
+	r1, r2 := topUpFixture(t)
+	r2.GasCostWei = big.NewInt(5_000)
+	r2.ToAmount, r2.ToAmountUSD = big.NewInt(99_520000), 99.52 // l2 = 48 = l + the 28 bps fee
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(2_000), true })
+	in := sellIn
+	in.FromToken = bscUSDT
+	if res, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("res = %+v err = %v; r2 needs a top-up (48 + 24 > 50), which r1's g never counted", res, err)
+	}
+}
+
+// The quote carries the top-up it priced, from the route she signs: r2 quotes
+// its gas at 2,000 wei for 1M gas, so the top-up is 2,000 × 1.08M/1M × 2.
+func TestRampSellQuote_CarriesTheTopUpItPricedFromTheSignedRoute(t *testing.T) {
+	r1, r2 := topUpFixture(t)
+	r2.GasCostWei = big.NewInt(2_000)
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(0), true })
+	in := sellIn
+	in.FromToken = bscUSDT
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.GasTopUp || res.TopUpWei != "4320" || res.GasBps != 24 {
+		t.Fatalf("gasTopUp = %v topUpWei = %q gas = %d; want r2's top-up, 4320 wei, in 24 bps", res.GasTopUp, res.TopUpWei, res.GasBps)
+	}
+	if want := quotedTopUpWei(r2); res.TopUpWei != want {
+		t.Fatalf("topUpWei = %s, want r2's own %s", res.TopUpWei, want)
+	}
+}
+
+// A funded wallet was priced no top-up, so the quote says so and carries no
+// wei — even though the route quoted its gas in wei and one COULD be derived.
+func TestRampSellQuote_AFundedWalletCarriesNoTopUp(t *testing.T) {
+	r1, r2 := topUpFixture(t)
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(1_000_000_000), true })
+	in := sellIn
+	in.FromToken = bscUSDT
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GasTopUp || res.TopUpWei != "" {
+		t.Fatalf("gasTopUp = %v topUpWei = %q; nothing was budgeted, so nothing may be sent", res.GasTopUp, res.TopUpWei)
+	}
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), `"gasTopUp":false`) {
+		t.Fatalf("json = %s; the app reads gasTopUp", raw)
+	}
+}
+
+// Bitcoin and Sui are named for what they are and refused as unsupported —
+// never as "not a valid address", which a real BTC or Sui address is not.
+func TestRampSellQuote_RefusesBitcoinAndSuiSourcesAsUnsupported(t *testing.T) {
+	for name, tc := range map[string]struct {
+		chain int64
+		addr  string
+	}{
+		"bitcoin": {bitcoinLiFiChainID, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"},
+		"sui":     {suiLiFiChainID, "0x" + strings.Repeat("ab", 32)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.98))
+			in := sellIn
+			in.FromChainID, in.FromAddress = tc.chain, tc.addr
+			_, err := q.Quote(context.Background(), in)
+			if !errors.Is(err, ErrSellSourceUnsupported) || errors.Is(err, ErrSellBadSourceAddress) {
+				t.Fatalf("err = %v, want ErrSellSourceUnsupported", err)
+			}
+			if lifi.quoteCalls() != 0 {
+				t.Fatalf("asked LiFi %d times for a source we cannot sell from", lifi.quoteCalls())
+			}
+		})
 	}
 }

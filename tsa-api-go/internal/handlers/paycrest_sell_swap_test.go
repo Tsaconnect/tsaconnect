@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -137,5 +138,22 @@ func TestSellSwapQuote_RequiresTheSourceFields(t *testing.T) {
 		if w := doSellSwapQuote(t, h, user, q); w.Code != http.StatusBadRequest {
 			t.Fatalf("%q: status = %d, want 400", q, w.Code)
 		}
+	}
+}
+
+// A Bitcoin or Sui source is refused as unsupported, not as a bad address:
+// her address is fine, the network is what we cannot sell from yet.
+func TestSellSwapQuote_AnUnsupportedSourceIs422NotABadAddress(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	user := &models.User{ID: uuid.New(), Username: "seller", WalletAddress: sellSwapUserWallet,
+		AccountStatus: models.AccountStatusActive}
+	insertTestUser(t, db, user)
+
+	h := NewPaycrestHandler(nil, nil, nil).WithSellQuoter(&stubSellQuoter{err: services.ErrSellSourceUnsupported})
+	w := doSellSwapQuote(t, h, user,
+		"fromChainId=20000000000001&fromToken=bitcoin&fromAmount=1&fromAddress=bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu")
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "isn't supported yet") ||
+		strings.Contains(w.Body.String(), "valid address") {
+		t.Fatalf("status = %d body = %s; want 422 naming the network, not the address", w.Code, w.Body.String())
 	}
 }

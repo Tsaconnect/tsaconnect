@@ -103,3 +103,30 @@ func TestResolveRequestedAsset_Solana(t *testing.T) {
 		t.Errorf("dormant Solana: err = %v, want ErrBadRequestedAsset", err)
 	}
 }
+
+// Bitcoin and Sui are their own families. Folded into "evm", a real BTC or
+// Sui address failed an EVM hex check ("not a valid address") and the
+// unknown-family refusals downstream could never fire at all.
+func TestAddressFamily_NamesBitcoinAndSui(t *testing.T) {
+	for id, want := range map[int64]string{
+		56: "evm", 8453: "evm", solanaLiFiChainID: "solana",
+		bitcoinLiFiChainID: "bitcoin", suiLiFiChainID: "sui",
+	} {
+		if got := addressFamily(id); got != want {
+			t.Errorf("addressFamily(%d) = %q, want %q", id, got, want)
+		}
+	}
+	// Nothing validates, decodes or hashes for them yet — each says so.
+	if err := validateAddressForChain(bitcoinLiFiChainID, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", nil); err == nil ||
+		!strings.Contains(err.Error(), "bitcoin family") {
+		t.Fatalf("bitcoin address check: err = %v", err)
+	}
+	if err := checkLiFiDeliveryTo(testBridgeCalldata(t, sponsorTestUser, suiLiFiChainID, false), 56, suiLiFiChainID,
+		"0x"+strings.Repeat("ab", 32), addressFamily(suiLiFiChainID), ""); err == nil ||
+		!strings.Contains(err.Error(), `no receiver decoder for the "sui" address family`) {
+		t.Fatalf("sui delivery check: err = %v", err)
+	}
+	if _, ok := swapHashForChain(bitcoinLiFiChainID, strings.Repeat("ab", 32)); ok {
+		t.Fatal("a Bitcoin hash was accepted by a shape written for another family")
+	}
+}

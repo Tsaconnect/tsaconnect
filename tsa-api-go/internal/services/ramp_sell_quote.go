@@ -44,6 +44,11 @@ var ErrSellUnavailable = errors.New("selling this token for naira isn't availabl
 // an address on that chain. A client bug, not an outage.
 var ErrSellBadSourceAddress = errors.New("that isn't a valid address on that network")
 
+// ErrSellSourceUnsupported: the source chain is one a sell cannot start from
+// yet (Bitcoin, Sui) — nothing here can check its address, bind its swap or
+// sponsor its gas. Said plainly rather than as a bad address.
+var ErrSellSourceUnsupported = errors.New("selling from this network isn't supported yet")
+
 // SellSwapQuote is one priced sell. Route is the executable quote the app
 // signs; LiFiQuote is the same answer verbatim, which is what actually
 // crosses the wire — the app's own swap signer already speaks it.
@@ -56,6 +61,16 @@ type SellSwapQuote struct {
 	CostBps int `json:"costBps"`
 	GasBps  int `json:"gasBps"`
 	FeeBps  int `json:"feeBps"`
+	// GasTopUp: this quote budgeted a source-chain gas top-up into GasBps,
+	// for THIS route. The app asks for a top-up exactly when this is set and
+	// never re-derives the threshold itself — the server's answer is the one
+	// the budget was admitted on.
+	GasTopUp bool `json:"gasTopUp"`
+	// TopUpWei is that top-up in the coin it is paid in (quotedTopUpWei of
+	// Route). Empty when GasTopUp is false — nothing was budgeted, so nothing
+	// may be sent — and also when it is true but the route quoted no gas in
+	// wei (an unknown, priced live at send time from the route's gas limit).
+	TopUpWei string `json:"-"`
 	// USDCAmount is what lands on Base after our fee, in major units.
 	USDCAmount   string `json:"usdcAmount"`
 	FiatEstimate string `json:"fiatEstimate"`
@@ -122,6 +137,9 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 {
 		return nil, ErrSellUnavailable
 	}
+	if family := addressFamily(in.FromChainID); family != "evm" && family != "solana" {
+		return nil, fmt.Errorf("%w (%s)", ErrSellSourceUnsupported, family)
+	}
 	if err := validateAddressForChain(in.FromChainID, in.FromAddress, q.solanaValidator); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
 	}
@@ -162,13 +180,13 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if !ok {
 		return nil, ErrSellRouteTooCostly
 	}
-	gas := q.gasBps(ctx, in, first)
-	if l+gas > q.budgetBps {
+	gas := q.gasFor(ctx, in, first)
+	if l+gas.bps > q.budgetBps {
 		return nil, ErrSellRouteTooCostly
 	}
 
 	route := first
-	fee := q.budgetBps - l - gas
+	fee := q.budgetBps - l - gas.bps
 	if fee > 0 {
 		req.FeeBps = fee
 		route, err = q.lifi.Quote(ctx, req)
@@ -184,11 +202,18 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 			return nil, ErrSellUnavailable
 		}
 		// The fee-carrying ask may land on another tool entirely, so the
-		// budget has to be re-checked against THIS route. l2 now includes our
-		// own fee, which is why it is compared to the whole of B: her all-in
-		// is F − g either way.
+		// budget has to be re-checked against THIS route — both halves of it.
+		// l2 now includes our own fee, which is why it is compared to the
+		// whole of B. g is re-priced from this route too: its gas, and
+		// whether she can pay it, are this route's, and the top-up this sale
+		// may later send is priced from this route alone. Admitting on the
+		// first route's g would let a costlier tool spend past B.
 		l2, ok2 := LiFiCostBps(route)
-		if !ok2 || l2+gas > q.budgetBps {
+		if !ok2 {
+			return nil, ErrSellRouteTooCostly
+		}
+		gas = q.gasFor(ctx, in, route)
+		if l2+gas.bps > q.budgetBps {
 			return nil, ErrSellRouteTooCostly
 		}
 	}
@@ -210,7 +235,8 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 
 	out := &SellSwapQuote{
 		Route: route, LiFiQuote: route.Raw,
-		CostBps: l, GasBps: gas, FeeBps: fee,
+		CostBps: l, GasBps: gas.bps, FeeBps: fee,
+		GasTopUp: gas.topUp, TopUpWei: gas.topUpWei,
 		USDCAmount: BaseUnitsToDecimal(route.ToAmount, 6),
 	}
 	if err := q.priceInFiat(ctx, in.FiatCode, route.ToAmount, out); err != nil {
@@ -219,14 +245,26 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	return out, nil
 }
 
-// gasBps is g: the Base relay we sponsor, plus a source-chain top-up when she
+// sellGas is g for one route, and the top-up (if any) it was priced with.
+// One value so the bps admitted and the wei later sent come from the same
+// route and the same decision, never from two different asks.
+type sellGas struct {
+	bps      int
+	topUp    bool
+	topUpWei string
+}
+
+// gasFor is g: the Base relay we sponsor, plus a source-chain top-up when she
 // holds the token but not the coin that pays for moving it.
-func (q *RampSellQuoter) gasBps(ctx context.Context, in SellQuoteInput, route *LiFiRoute) int {
+func (q *RampSellQuoter) gasFor(ctx context.Context, in SellQuoteInput, route *LiFiRoute) sellGas {
 	usd := q.sponsoredGasUSD
+	var g sellGas
 	if q.needsTopUp(ctx, in, route) {
 		usd += TopUpUSDForRoute(route)
+		g.topUp, g.topUpWei = true, quotedTopUpWei(route)
 	}
-	return USDGasBps(usd, route.FromAmountUSD)
+	g.bps = USDGasBps(usd, route.FromAmountUSD)
+	return g
 }
 
 // needsTopUp reports whether this sell would have us send her gas on the

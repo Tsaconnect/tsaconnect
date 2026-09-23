@@ -26,6 +26,7 @@ type sellIntents interface {
 	OpenOrder(ctx context.Context, user *models.User, id uuid.UUID) (*models.PaycrestOrderRecord, error)
 	Abandon(ctx context.Context, userID, id uuid.UUID) error
 	Open(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error)
+	Resumable(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error)
 	Get(ctx context.Context, userID, id uuid.UUID) (*models.RampSellIntent, error)
 	// The top-up's caps and once-per-sale claim live on the sale's own row.
 	services.IntentTopUpStore
@@ -96,18 +97,23 @@ func (h *PaycrestHandler) CreateSellIntent(c *gin.Context) {
 		h.sellIntentError(c, err, user)
 		return
 	}
+	// gasTopUp is the server's own verdict on whether this sale needs gas on
+	// the source chain: the app asks for a top-up exactly when it is set,
+	// because only then was one priced into the budget the sale was admitted on.
 	utils.SuccessResponse(c, http.StatusCreated, "Sale started — sign the swap", gin.H{
-		"intent": intent, "lifiQuote": quote.LiFiQuote,
+		"intent": intent, "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
 	})
 }
 
-// GET /api/paycrest/sell-intents/open
+// GET /api/paycrest/sell-intents/open — the sale "Finish your sale" resumes:
+// one in progress, or an ordered one whose payout still awaits her deposit.
+// A 404 (the routes unregistered) is how the app learns swapped sells are off.
 func (h *PaycrestHandler) OpenSellIntent(c *gin.Context) {
 	user, ok := h.sellIntentCaller(c)
 	if !ok {
 		return
 	}
-	intent, err := h.sellIntents.Open(c.Request.Context(), user.ID)
+	intent, err := h.sellIntents.Resumable(c.Request.Context(), user.ID)
 	if err != nil {
 		h.sellIntentError(c, err, user)
 		return

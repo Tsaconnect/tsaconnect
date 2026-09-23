@@ -353,37 +353,41 @@ func TestSellIntent_TerminalIntentsAreNotOpenAndTakeNoMoreSteps(t *testing.T) {
 	}
 }
 
-// THE ACCEPTANCE POINT (brief, "USD vs wei"). The quote budgets a
-// source-chain gas top-up out of the round trip in DOLLARS, from the route's
-// own quoted gas (TopUpUSDForRoute = RouteGasUSD(route, treasuryERC20Gas) ×
-// topUpGasBuffer). Whatever later SENDS that top-up has to send the same
-// figure, in the coin it is paid in — so the wei twin of it, RouteGasWei on
-// the same units, is stored on the intent at quote time.
-//
-// Derive it from a live gas price instead and the two are only equal by
-// coincidence: the quote priced LiFi's gas price and the send would pay
-// whatever the chain costs minutes later, with the difference coming out of a
-// budget the user was already priced against.
+// THE ACCEPTANCE POINT (brief, "USD vs wei"), as the whole-branch fix
+// restated it. The quote budgets a source-chain gas top-up out of the round
+// trip in DOLLARS; whatever later SENDS it must send that same top-up, in wei.
+// The quote carries the wei it priced (SellSwapQuote.TopUpWei) and the intent
+// stores exactly that — never a figure re-derived from the route afterwards,
+// which is how a top-up nobody budgeted used to reach the row.
 func TestSellIntent_StoresTheTopUpTheQuoteBudgeted(t *testing.T) {
 	r := newSellIntentRig(t)
-	r.quoter.quote.Route.GasCostWei = big.NewInt(3_000_000)
+	r.quoter.quote.GasTopUp, r.quoter.quote.TopUpWei = true, "7600000"
+	r.quoter.quote.Route.GasCostWei = big.NewInt(1) // re-deriving from the route would give 2
 	in := r.create(t)
-	// 3,000,000 wei for 300k gas, rescaled to 380k (the swap plus an approve),
-	// doubled by topUpGasBuffer.
-	if in.QuotedTopUpWei != "7600000" {
-		t.Fatalf("quotedTopUpWei = %q, want 7600000 — the same figure the quote budgeted", in.QuotedTopUpWei)
+	if in.QuotedTopUpWei != "7600000" || !in.TopUpBudgeted {
+		t.Fatalf("quotedTopUpWei = %q budgeted = %v, want the quote's own 7600000", in.QuotedTopUpWei, in.TopUpBudgeted)
 	}
 }
 
-// A route that quoted no gas in wei leaves the field empty rather than "0": a
-// top-up of zero is not the same claim as "we do not know what this costs",
-// and only one of them may be sent.
-func TestSellIntent_AnUnpricedRouteStoresNoTopUp(t *testing.T) {
+// A quote that judged her funded budgeted nothing, so the row says so — even
+// when the route quoted its gas in wei and a figure COULD be derived from it.
+func TestSellIntent_AQuoteThatBudgetedNoTopUpStoresNone(t *testing.T) {
 	r := newSellIntentRig(t)
-	r.quoter.quote.Route.GasCostWei = nil
+	r.quoter.quote.Route.GasCostWei = big.NewInt(3_000_000)
 	in := r.create(t)
-	if in.QuotedTopUpWei != "" {
-		t.Fatalf("quotedTopUpWei = %q, want empty", in.QuotedTopUpWei)
+	if in.QuotedTopUpWei != "" || in.TopUpBudgeted {
+		t.Fatalf("quotedTopUpWei = %q budgeted = %v, want none", in.QuotedTopUpWei, in.TopUpBudgeted)
+	}
+}
+
+// Budgeted with no wei (the route quoted none) is kept apart from "not
+// budgeted": the first may be priced live at send time, the second never sent.
+func TestSellIntent_ABudgetedTopUpWithNoWeiStaysBudgeted(t *testing.T) {
+	r := newSellIntentRig(t)
+	r.quoter.quote.GasTopUp = true
+	in := r.create(t)
+	if in.QuotedTopUpWei != "" || !in.TopUpBudgeted {
+		t.Fatalf("quotedTopUpWei = %q budgeted = %v, want budgeted with no wei", in.QuotedTopUpWei, in.TopUpBudgeted)
 	}
 }
 
@@ -723,5 +727,74 @@ func TestSellIntent_ALoserAfterAReleaseIsToldToRetry(t *testing.T) {
 	r.client.offrampErr = nil
 	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
 		t.Fatalf("retry after the release: %v", err)
+	}
+}
+
+// ─── Whole-branch fix: no cashback on a fee we cannot show was collected ───
+
+// A Solana route carries no transactionId, so nothing binds her swap to OUR
+// fee-carrying quote: an equal-amount route she assembled without our fee
+// passes every other clause. Booking the fee anyway would pay buyer and upline
+// cashback — real money — out of a fee that may never have been collected.
+func TestSellIntent_NoFeeBookedWhenNoTransactionIdBoundTheSwap(t *testing.T) {
+	const solOwner = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+	const solMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+	sig := strings.Repeat("5", 88)
+	r := newSellIntentRig(t)
+	fees := &fakeFeeEnqueuer{}
+	r.svc.SetFeeService(fees)
+	r.quoter.quote.Route.TransactionID = "" // a Solana quote: nothing to bind
+	r.quoter.quote.Route.FromAmountUSD = 10
+	in, _, err := r.svc.Create(context.Background(), r.user, CreateSellIntentInput{
+		SourceChainID: solanaLiFiChainID, SourceToken: solMint, SourceAmount: "10000000",
+		SourceAddress: solOwner, FiatCode: "NGN", BankCode: "044", AccountNumber: "0123456789"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, sig)
+	st := r.landed(in)
+	st.TransactionID = ""
+	r.status.st = st
+	if _, err := r.svc.OpenOrder(context.Background(), r.user, in.ID); err != nil {
+		t.Fatalf("OpenOrder: %v — the sale itself still completes", err)
+	}
+	if len(fees.events) != 0 {
+		t.Fatalf("fee events = %+v; no cashback may be paid on an unbound Solana sale", fees.events)
+	}
+}
+
+// ─── Whole-branch fix: an ordered sale is still resumable ──────────────────
+
+// A sale killed after its payout opened but before the USDC was sent into it
+// is ordered — not open, by design — yet "Finish your sale" has to find it
+// while its order still awaits the deposit, and only then.
+func TestSellIntent_ResumableFindsAnOrderedSaleAwaitingItsDeposit(t *testing.T) {
+	r, in := landedRig(t)
+	ctx := context.Background()
+	if got, err := r.svc.Resumable(ctx, r.user.ID); err != nil || got == nil || got.ID != in.ID {
+		t.Fatalf("an open sale: got %+v err %v", got, err)
+	}
+	order, err := r.svc.OpenOrder(ctx, r.user, in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := r.svc.Open(ctx, r.user.ID); open != nil {
+		t.Fatalf("ordered must stay out of Open (the one-open-sale rule): %+v", open)
+	}
+	got, err := r.svc.Resumable(ctx, r.user.ID)
+	if err != nil || got == nil || got.ID != in.ID || got.Status != models.SellIntentOrdered {
+		t.Fatalf("an ordered sale awaiting its deposit: got %+v err %v", got, err)
+	}
+	// Another user never sees it.
+	if other, _ := r.svc.Resumable(ctx, uuid.New()); other != nil {
+		t.Fatalf("a stranger resumed %+v", other)
+	}
+	// Once the order stops waiting for her deposit there is nothing to finish.
+	if err := r.svc.db.Model(&models.PaycrestOrderRecord{}).Where("id = ?", order.ID).
+		Update("status", models.PaycrestStatusSettled).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.svc.Resumable(ctx, r.user.ID); err != nil || got != nil {
+		t.Fatalf("a settled order: got %+v err %v, want nothing to resume", got, err)
 	}
 }
