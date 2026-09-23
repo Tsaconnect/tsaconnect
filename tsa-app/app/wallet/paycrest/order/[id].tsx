@@ -259,7 +259,12 @@ export default function PaycrestOrderScreen() {
           {awaiting && !expired && (
             <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               {order.direction === 'buy'
-                ? `Transfer ₦${order.payAmount} to the account below. ${countdown} left.`
+                ? order.paymentClaimedAt
+                  ? // Same principle as the sell leg below: once she has told
+                    // us she paid, re-asking her to transfer reads as if her
+                    // tap did nothing. Report that we're checking instead.
+                    `We're checking for your ₦${order.payAmount}. This usually takes under a minute.`
+                  : `Transfer ₦${order.payAmount} to the account below. ${countdown} left.`
                 : depositUnderway
                   ? // Instructing a user to send money they have already sent is
                     // how a sale becomes two. Once it is moving, report, do not ask.
