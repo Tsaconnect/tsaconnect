@@ -235,7 +235,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  * carried alongside only for a DIRECT match (see selectVenue) and for
  * display; it is never sent as the matching key on its own.
  */
-export type RequestedAsset = { token: string; chainId: number; address: string; chain?: string };
+export type RequestedAsset = {
+  token: string;
+  chainId: number;
+  address: string;
+  chain?: string;
+  /** Where this asset is actually delivered when the EVM wallet cannot
+   *  receive it — her Solana address. Required for a Solana destination: the
+   *  server refuses to price one without it (nothing on Solana can be paid to
+   *  a 20-byte address), and it is validated there, never trusted as sent. */
+  destinationAddress?: string;
+};
 
 /**
  * Ask what is actually fillable at this amount, right now.
@@ -260,6 +270,7 @@ export async function getQuote(
     q.set('requestedTokenAddress', requested.address);
     q.set('requestedToken', requested.token);
     if (requested.chain) q.set('requestedChain', requested.chain);
+    if (requested.destinationAddress) q.set('destinationAddress', requested.destinationAddress);
     return request<PaycrestQuote>(`/converted-quote?${q.toString()}`);
   }
   return request<PaycrestQuote>(`/quote?${q.toString()}`);
@@ -307,6 +318,10 @@ export interface CreateBuyInput {
    *  never sent; the server derives them itself. */
   requestedChainId?: number;
   requestedTokenAddress?: string;
+  /** Where the requested token lands when the EVM wallet cannot receive it —
+   *  her Solana address. The order still carries walletAddress: that is the
+   *  account's own wallet, and where a refund is reconciled against. */
+  destinationAddress?: string;
 }
 
 /** Opens an onramp. The returned order carries the provider account to pay. */

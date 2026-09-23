@@ -87,7 +87,11 @@ import { promptKycRefusal } from '@/utils/kycRefusal';
 // want to receive" picker needs.
 import AssetPicker from '@/components/assets/AssetPicker';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
-import { getLiFiTokens, findTokenBySymbolForChain, type LiFiToken } from '@/services/lifi';
+import { getLiFiTokens, findTokenBySymbolForChain, isSolanaLiFiChain, type LiFiToken } from '@/services/lifi';
+// Her Solana address is derived from the same seed as the EVM wallet — read
+// through the wallet service that already owns that derivation, never
+// re-derived here.
+import { getSolanaAddress } from '@/services/chains/solanaWallet';
 import { getChainByChainId, getChainDisplay, getChain, type ChainKey } from '@/constants/chains';
 
 /** Debounce on the amount field: every keystroke would otherwise fan a live
@@ -130,8 +134,17 @@ const DEFAULT_CHAIN_ID = getChain(DEFAULT_CHAIN_KEY)?.chainId ?? 8453;
  *  destination. */
 const REFUND_STORE_KEY = (currency: string) => `paycrest.refundAccount.v1.${currency}`;
 
-/** Chains a Naira buy can be quoted on: the wallet's EVM registry. */
-const isBuyableChain = (chainId: number) => getChainByChainId(chainId) !== undefined;
+/** Chains a Naira buy can be quoted on: the wallet's EVM registry, plus
+ *  Solana — LiFi delivers there and the destination transaction's own balance
+ *  changes prove the landing, so it is as settleable as any EVM chain. */
+const isBuyableChain = (chainId: number) =>
+  getChainByChainId(chainId) !== undefined || isSolanaLiFiChain(chainId);
+
+/** The chain key for a picked chain id. Solana is not in the EVM registry, so
+ *  it is named here rather than looked up — every other chain still comes from
+ *  the registry, never from a table that could drift out of date. */
+const chainKeyForPicked = (chainId: number): string | undefined =>
+  getChainByChainId(chainId)?.key ?? (isSolanaLiFiChain(chainId) ? 'solana' : undefined);
 
 export default function PaycrestBuyScreen() {
   const { colors, spacing } = useTheme();
@@ -403,6 +416,9 @@ export default function PaycrestBuyScreen() {
         requestedToken: want.token,
         // Kept for an older API build that still reads the chain-key form.
         ...(want.chain ? { requestedChain: want.chain } : {}),
+        // Where a destination the EVM wallet cannot receive on is delivered
+        // (Solana). Absent everywhere else, where the wallet IS the recipient.
+        ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
         walletAddress: address,
         refundBankCode: refundBank.code,
         refundAccount,
@@ -810,16 +826,34 @@ export default function PaycrestBuyScreen() {
         // registry could never be priced, so it is not offered. Widens to
         // Solana in Part 2b.
         allow={isBuyableChain}
-        onSelect={(token, chainId) => {
+        onSelect={async (token, chainId) => {
           // token.address is the real on-chain address (native coins
           // included) — exactly the (chainId, address) pair the server now
           // identifies the requested asset by, so no address resolution is
           // needed here.
+          //
+          // A Solana pick needs one more thing the EVM wallet cannot supply:
+          // WHERE it lands. Nothing on Solana can be paid to a 20-byte
+          // address, so without her Solana address there is no order to open
+          // — say so and leave the choice unchanged rather than quoting a
+          // route to a recipient that cannot exist.
+          let destinationAddress: string | undefined;
+          if (isSolanaLiFiChain(chainId)) {
+            destinationAddress = (await getSolanaAddress(address ?? undefined)) ?? undefined;
+            if (!destinationAddress) {
+              Alert.alert(
+                'Solana wallet not ready',
+                'Set up your Solana wallet first, then choose a Solana token to buy.',
+              );
+              return;
+            }
+          }
           setWant({
             token: token.symbol.toUpperCase(),
             chainId,
             address: token.address,
-            chain: getChainByChainId(chainId)?.key,
+            chain: chainKeyForPicked(chainId),
+            destinationAddress,
           });
           setWantTokenMeta(token);
           setTokenPickerOpen(false);

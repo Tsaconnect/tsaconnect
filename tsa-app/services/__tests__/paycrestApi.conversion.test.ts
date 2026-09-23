@@ -56,6 +56,36 @@ describe('getQuote — asking for a specific (chain id, address)', () => {
     expect(url).toContain('requestedChain=optimism');
   });
 
+  it('carries destinationAddress for a Solana request — the address the route must actually be priced to', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue(okJson({ venues: [], best: null }));
+
+    await getQuote('buy', '150000', 'NGN', {
+      token: 'SOL',
+      chainId: 1151111081099710,
+      address: '11111111111111111111111111111111',
+      chain: 'solana',
+      destinationAddress: '5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9',
+    });
+
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toContain('requestedChainId=1151111081099710');
+    expect(url).toContain('destinationAddress=5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9');
+  });
+
+  it('omits destinationAddress on an EVM request, where the wallet is the recipient', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue(okJson({ venues: [], best: null }));
+
+    await getQuote('buy', '150000', 'NGN', {
+      token: 'USDT',
+      chainId: 10,
+      address: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58',
+      chain: 'optimism',
+    });
+
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).not.toContain('destinationAddress');
+  });
+
   it('stays on the public direct-only quote when no destination is given', async () => {
     (global.fetch as jest.Mock).mockResolvedValue(okJson({ venues: [], best: null }));
 
@@ -115,6 +145,26 @@ describe('createBuy — passing through what the user actually wants', () => {
     expect(body.requestedTokenAddress).toBe('0x94b008aa00579c1307b0ef2c499ad98a8ce58e58');
     // The server derives decimals itself — never trust a client-side guess.
     expect(body.requestedTokenDecimals).toBeUndefined();
+  });
+
+  it('sends destinationAddress so a Solana order is opened against her Solana wallet', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(okJson({ id: 'o1', status: 'awaiting_payment' }));
+
+    await createBuy({
+      ...baseInput,
+      requestedChain: 'solana',
+      requestedToken: 'SOL',
+      requestedChainId: 1151111081099710,
+      requestedTokenAddress: '11111111111111111111111111111111',
+      destinationAddress: '5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9',
+    });
+
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.destinationAddress).toBe('5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9');
+    // The EVM wallet still goes up: it is the account's own address, and
+    // where a refund is reconciled against.
+    expect(body.walletAddress).toBe(baseInput.walletAddress);
   });
 
   it('omits requestedChain/requestedToken on a direct buy, matching old behaviour exactly', async () => {
