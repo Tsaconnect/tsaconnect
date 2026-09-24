@@ -1,22 +1,13 @@
 import { useEffect } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Route, useLocation } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { RequireSession, SessionProvider } from '@/session/session';
+import { RequireSession } from '@/session/session';
+import { ada, fail, ok, renderWith } from '@/test/harness';
 import { SignIn } from './SignIn';
 import { SignInCode } from './SignInCode';
-
-const ok = (data: unknown) => new Response(JSON.stringify({ success: true, data }), { status: 200 });
-const fail = (status: number, message: string, code?: string) => new Response(JSON.stringify({ success: false, message, code }), { status });
-const ada = { id: 'u1', name: 'Ada Obi', email: 'ada@skyair.ng', verificationStatus: 'verified' };
-
-function LocationProbe() {
-  const l = useLocation();
-  return <p data-testid="location">{l.pathname}</p>;
-}
 
 // A signed-in page whose request the server refuses (Review Focus 2).
 function Payouts() {
@@ -39,21 +30,15 @@ function Visits({ log }: { log: string[] }) {
 }
 
 function mount(start: string, signInVisits: string[] = []) {
-  return render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter initialEntries={[start]}>
-        <SessionProvider>
-          <Routes>
-            <Route path="/signin" element={<><SignIn /><Visits log={signInVisits} /></>} />
-            <Route path="/signin/code" element={<SignInCode />} />
-            <Route path="/business/live/overview" element={<p>overview</p>} />
-            <Route path="/business/live/payouts" element={<RequireSession><Payouts /></RequireSession>} />
-            <Route path="/business/live/both" element={<RequireSession><TwoAtOnce /></RequireSession>} />
-          </Routes>
-          <LocationProbe />
-        </SessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
+  return renderWith(
+    <>
+      <Route path="/signin" element={<><SignIn /><Visits log={signInVisits} /></>} />
+      <Route path="/signin/code" element={<SignInCode />} />
+      <Route path="/business/live/overview" element={<p>overview</p>} />
+      <Route path="/business/live/payouts" element={<RequireSession><Payouts /></RequireSession>} />
+      <Route path="/business/live/both" element={<RequireSession><TwoAtOnce /></RequireSession>} />
+    </>,
+    start,
   );
 }
 

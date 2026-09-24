@@ -17,7 +17,7 @@ it('a loading button is disabled and says so to screen readers', () => {
   expect(b).toHaveAttribute('aria-busy', 'true');
 });
 
-it('the primary button is the gold fill with white text', () => {
+it('the primary button is the gold fill with dark slate text', () => {
   render(<Button>Continue</Button>);
   expect(screen.getByRole('button', { name: 'Continue' })).toHaveClass('bg-accent', 'text-on-accent-strong', 'rounded-md');
 });

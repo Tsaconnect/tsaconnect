@@ -6,7 +6,8 @@ import { returnPath, useSession, type SessionUser, type SignInState } from '@/se
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { AuthLayout, FormError } from './AuthLayout';
+import { FormError } from '@/components/ui/form-error';
+import { AuthLayout } from './AuthLayout';
 
 type Problem = { message: string; expired?: boolean };
 

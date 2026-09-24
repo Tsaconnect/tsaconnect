@@ -25,4 +25,6 @@ export default defineConfig([
         { object: 'globalThis', property: 'indexedDB', message: noWebStorage }],
     },
   },
+  // Test helpers are never hot-reloaded; they share fixtures and builders with components.
+  { files: ['src/test/**/*.{ts,tsx}', '**/*.test.{ts,tsx}'], rules: { 'react-refresh/only-export-components': 'off' } },
 ]);

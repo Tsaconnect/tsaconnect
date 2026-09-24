@@ -47,34 +47,46 @@ function combine(caller: AbortSignal | undefined, timeout: AbortController): { s
   return { signal: timeout.signal, release: () => caller.removeEventListener('abort', forward) };
 }
 
-async function send(path: string, init: ApiInit): Promise<Response> {
+type Envelope = { success?: boolean; message?: string; code?: string; data?: unknown };
+type Reply = { ok: boolean; status: number; body: Envelope | null };
+
+const unreachable = () => new ApiError('Could not reach TSA Connect. Check your connection and try again.', 0, 'transport');
+
+/**
+ * One request, body and all. The timeout covers the body too: headers can
+ * arrive and the body stall, so the timer and the caller's abort stay wired
+ * until the body is read.
+ */
+async function exchange(path: string, init: ApiInit): Promise<Reply> {
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(), TIMEOUT_MS);
   const { signal, release } = combine(init.signal, timeout);
   try {
-    return await fetch(`/api${path}`, {
+    const res = await fetch(`/api${path}`, {
       method: init.method ?? 'GET',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-TSA-Web': '1' },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
       signal,
     });
+    const body = (await res.json().catch((err: unknown) => {
+      if (signal.aborted) throw err;
+      return null; // not JSON: a proxy's error page
+    })) as Envelope | null;
+    return { ok: res.ok, status: res.status, body };
   } catch (err) {
     // A caller's own cancel stays a cancel (TanStack Query relies on it).
     if (init.signal?.aborted) throw err;
-    throw new ApiError('Could not reach TSA Connect. Check your connection and try again.', 0, 'transport');
+    throw unreachable();
   } finally {
     clearTimeout(timer);
     release();
   }
 }
 
-type Envelope = { success?: boolean; message?: string; code?: string; data?: unknown };
-
-async function read<T>(res: Response): Promise<T> {
-  const body = (await res.json().catch(() => null)) as Envelope | null;
-  if (!res.ok || body === null || body.success === false) {
-    throw new ApiError(body?.message || 'Something went wrong. Please try again.', res.status, body?.code);
+function unwrap<T>({ ok, status, body }: Reply): T {
+  if (!ok || body === null || body.success === false) {
+    throw new ApiError(body?.message || 'Something went wrong. Please try again.', status, body?.code);
   }
   return body.data as T;
 }
@@ -83,7 +95,7 @@ let refreshing: Promise<boolean> | null = null;
 
 /** One refresh at a time, shared by every request that hit a 401 together. */
 function refresh(): Promise<boolean> {
-  refreshing ??= send('/auth/web/refresh', { method: 'POST' })
+  refreshing ??= exchange('/auth/web/refresh', { method: 'POST' })
     .then((r) => r.ok)
     .catch(() => false)
     .finally(() => {
@@ -92,14 +104,22 @@ function refresh(): Promise<boolean> {
   return refreshing;
 }
 
+/**
+ * Only an uncoded 401 (the auth middleware's "Please authenticate") means the
+ * session is gone. A 401 with a machine code was answered by a handler that had
+ * already accepted the session — a guarded change's wrong password — and is a
+ * refusal to show, never a reason to refresh or sign out.
+ */
+const sessionEnded = (r: Reply) => r.status === 401 && !r.body?.code;
+
 export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
-  let res = await send(path, init);
-  if (res.status === 401 && !NO_REFRESH.has(path)) {
+  let reply = await exchange(path, init);
+  if (!NO_REFRESH.has(path) && sessionEnded(reply)) {
     // Retry even when this refresh failed: losing a race to a concurrent refresh
     // answers 401 while the winner has already put fresh cookies in the browser.
     await refresh();
-    res = await send(path, init);
-    if (res.status === 401 && !init.silent) listeners.forEach((cb) => cb());
+    reply = await exchange(path, init);
+    if (!init.silent && sessionEnded(reply)) listeners.forEach((cb) => cb());
   }
-  return read<T>(res);
+  return unwrap<T>(reply);
 }

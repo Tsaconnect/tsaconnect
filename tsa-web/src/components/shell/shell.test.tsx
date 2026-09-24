@@ -1,35 +1,20 @@
-import { act, render, screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { SessionProvider } from '@/session/session';
+import { Route } from 'react-router-dom';
 import { Account } from '@/features/account/Account';
-import { Toaster } from '@/components/ui/toaster';
+import { ada, ok, renderWith } from '@/test/harness';
 import { AppShell } from './AppShell';
 
-const ok = (data: unknown) => new Response(JSON.stringify({ success: true, data }), { status: 200 });
-const ada = { id: 'u1', name: 'Ada Obi', email: 'ada@skyair.ng', verificationStatus: 'verified' };
 const skyAir = { businessName: 'Sky Air Ltd', settlementMode: 'fiat' as const };
 
-function LocationProbe() {
-  return <p data-testid="location">{useLocation().pathname}</p>;
-}
-
 function mount(start: string, merchant: typeof skyAir | null | undefined = skyAir) {
-  return render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter initialEntries={[start]}>
-        <SessionProvider>
-          <Routes>
-            <Route path="/signin" element={<p>sign in page</p>} />
-            <Route path="/account" element={<Account />} />
-            <Route path="/business/:mode/*" element={<AppShell section="business" title="Payments" merchant={merchant}><p>page</p></AppShell>} />
-          </Routes>
-          <LocationProbe />
-          <Toaster />
-        </SessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
+  return renderWith(
+    <>
+      <Route path="/signin" element={<p>sign in page</p>} />
+      <Route path="/account" element={<Account />} />
+      <Route path="/business/:mode/*" element={<AppShell section="business" title="Payments" merchant={merchant}><p>page</p></AppShell>} />
+    </>,
+    start,
   );
 }
 
