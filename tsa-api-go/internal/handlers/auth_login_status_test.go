@@ -205,3 +205,30 @@ func TestLogin_ActiveAccountSucceeds(t *testing.T) {
 		t.Fatalf("expected 200 OK for active account, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// The app branches on these refusals: their bytes must not change.
+func TestLogin_RefusalBodiesAreUnchanged(t *testing.T) {
+	db := setupAuthTestDB(t)
+	h := &Handlers{Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"}}
+	for _, u := range []models.User{
+		{ID: uuid.New(), Name: "Deleted", Username: "gone", Email: "gone@example.com", AccountStatus: models.AccountStatusDeleted},
+		{ID: uuid.New(), Name: "Suspended", Username: "held", Email: "held@example.com", AccountStatus: models.AccountStatusSuspended},
+	} {
+		insertAuthUser(t, db, &u)
+	}
+	cases := map[string]string{
+		"gone@example.com": `{"code":"ACCOUNT_DELETED","message":"This account has been deleted. Please contact support if you wish to restore it.","success":false}`,
+		"held@example.com": `{"code":"ACCOUNT_NOT_ACTIVE","message":"Account is suspended. Please contact support.","success":false}`,
+	}
+	for identifier, want := range cases {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/login",
+			bytes.NewReader([]byte(`{"identifier":"`+identifier+`","password":"StrongPass1!"}`)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Login(c)
+		if w.Code != http.StatusForbidden || w.Body.String() != want {
+			t.Errorf("%s: %d %s, want 403 %s", identifier, w.Code, w.Body.String(), want)
+		}
+	}
+}

@@ -6,9 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -346,143 +344,19 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Look up by email if the identifier looks like an email, otherwise by username.
-	// Falls through to the opposite lookup so both formats work even if misclassified.
-	var user models.User
-	var err error
-	lowered := strings.ToLower(identifier)
-	if isValidEmail(identifier) {
-		err = config.DB.Where("email = ?", lowered).First(&user).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
-		}
-	} else {
-		err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = config.DB.Where("email = ?", lowered).First(&user).Error
-		}
+	user, ok := h.authenticateCredentials(c, identifier, req.Password)
+	if !ok {
+		return
 	}
+	h.recordLogin(c, user)
+
+	token, rawRefresh, err := h.issueSession(user)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(req.Password))
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Invalid credentials",
-			})
-			return
-		}
-		log.Printf("Login DB error: %v", err)
+		log.Printf("Login session error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",
 		})
-		return
-	}
-
-	// A locked account is refused before the password is checked; a wrong
-	// password counts toward the lockout.
-	switch err := checkPasswordWithLockout(config.DB, h.EventBus, &user, req.Password); {
-	case errors.Is(err, errAccountLocked):
-		c.JSON(http.StatusLocked, gin.H{
-			"success": false,
-			"message": "Account is temporarily locked. Try again later.",
-		})
-		return
-	case err != nil:
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Invalid credentials",
-		})
-		return
-	}
-
-	// Check account status — deleted or suspended accounts must not receive session tokens
-	if user.AccountStatus == models.AccountStatusDeleted {
-		// Check if there is a pending deletion request within the grace window
-		var delReq models.AccountDeletionRequest
-		if config.DB != nil {
-			if err := config.DB.Where("user_id = ? AND status = ? AND purge_after > ?",
-				user.ID, models.AccountDeletionStatusPending, time.Now()).
-				Order("created_at DESC").First(&delReq).Error; err == nil {
-				daysLeft := int(math.Ceil(time.Until(delReq.PurgeAfter).Hours() / 24))
-				if daysLeft < 1 {
-					daysLeft = 1
-				}
-				c.JSON(http.StatusForbidden, gin.H{
-					"success": false,
-					"message": fmt.Sprintf("Your account is scheduled for deletion on %s (%d days left). You can restore your account to continue.",
-						delReq.PurgeAfter.Format("2 January 2006"), daysLeft),
-					"code": "ACCOUNT_DELETED_GRACE_PERIOD",
-					"data": gin.H{
-						"canRestore":    true,
-						"purgeAfter":    delReq.PurgeAfter,
-						"graceDaysLeft": daysLeft,
-					},
-				})
-				return
-			}
-		}
-
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": "This account has been deleted. Please contact support if you wish to restore it.",
-			"code":    "ACCOUNT_DELETED",
-		})
-		return
-	}
-	if user.AccountStatus != models.AccountStatusActive {
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("Account is %s. Please contact support.", user.AccountStatus),
-			"code":    "ACCOUNT_NOT_ACTIVE",
-		})
-		return
-	}
-
-	// Reset login attempts on success
-	now := time.Now()
-	config.DB.Model(&user).Updates(map[string]interface{}{
-		"login_attempts": 0,
-		"last_login":     now,
-		"updated_at":     now,
-		"lock_until":     nil,
-	})
-
-	// Generate JWT token
-	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
-	if err != nil {
-		log.Printf("Token generation error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Internal server error",
-		})
-		return
-	}
-
-	if h.EventBus != nil {
-		h.EventBus.Publish(events.Event{
-			Type:    events.SecurityLoginNewDevice,
-			UserID:  user.ID,
-			Title:   "New Login",
-			Message: "A new login was detected on your account",
-			Data: map[string]interface{}{
-				"ip": c.ClientIP(),
-			},
-		})
-	}
-
-	rawRefresh, hashedRefresh, err := generateRefreshToken()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate refresh token"})
-		return
-	}
-	rt := models.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: hashedRefresh,
-		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
-	}
-	if err := config.DB.Create(&rt).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
 		return
 	}
 
