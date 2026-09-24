@@ -540,3 +540,64 @@ func TestPayPayment_CheckoutViewHidesTheReturnURLUntilSucceeded(t *testing.T) {
 		t.Fatal("succeeded: returnUrl should be shown")
 	}
 }
+
+func TestPayPayment_ListFiltersByMerchantModeStatusAndSearch(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	mk := func(ref, desc, mode string) *models.PayPayment {
+		in := payIn()
+		in.Reference, in.Description = ref, desc
+		p, _, err := s.Create(ctx, m, mode, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	a := mk("PNR-AAA111", "LOS-ABV 12 Oct", models.PayModeLive)
+	mk("PNR-BBB222", "LOS-PHC 13 Oct", models.PayModeLive)
+	mk("PNR-CCC333", "LOS-ABV test", models.PayModeTest)
+	mk("PNR-100%_\\", "wildcards", models.PayModeLive)
+	other := seedPayMerchant(t, s.db)
+	if _, _, err := s.Create(ctx, other, models.PayModeLive, payIn()); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Query: "abv"})
+	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != a.ID {
+		t.Fatalf("err %v total %d rows %+v: search must match description, case-insensitively, within merchant and mode", err, total, rows)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Query: "pnr-bbb"}); total != 1 {
+		t.Fatalf("reference search: total %d", total)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Query: a.ID.String()[:8]}); total != 1 {
+		t.Fatalf("id-prefix search: total %d", total)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Query: "%"}); total != 1 {
+		t.Fatalf("a %% in the search is a literal, not a wildcard: total %d", total)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Query: "_"}); total != 1 {
+		t.Fatalf("an _ in the search is a literal, not a wildcard: total %d", total)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive}); total != 3 {
+		t.Fatalf("all live: total %d — another merchant's or test payments leaked in", total)
+	}
+	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive, Status: models.PayStatusSucceeded}); total != 0 {
+		t.Fatalf("status filter: total %d", total)
+	}
+}
+
+// The owner's payments list filters by merchant and mode and sorts newest
+// first; one index serves all three.
+func TestPayPayment_OwnerListHasItsIndex(t *testing.T) {
+	db := newPayTestDB(t)
+	if !db.Migrator().HasIndex(&models.PayPayment{}, "idx_pay_payments_merchant_mode_created") {
+		t.Fatal("pay_payments has no (merchant_id, mode, created_at) index")
+	}
+	var ddl string
+	if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_pay_payments_merchant_mode_created'`).Scan(&ddl).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ReplaceAll(ddl, "`", ""), "(merchant_id,mode,created_at)") {
+		t.Fatalf("index columns: %s", ddl)
+	}
+}

@@ -3,7 +3,7 @@
 // A TSA Pay merchant's own account, from the app: where they are paid
 // (GET /api/pay/merchant), changing it (PUT /api/pay/merchant/settlement), and
 // confirming a crypto change with the code emailed to them
-// (POST /api/pay/merchant/settlement/confirm). The payer's side of TSA Pay is
+// (POST /api/pay/merchant/actions/:id/confirm). The payer's side of TSA Pay is
 // services/payApi.ts; the merchant's server API (/api/pay/v1, key-authenticated)
 // is never called from the app.
 import { createApiRequest } from '@/services/apiRequest';
@@ -33,8 +33,8 @@ export type SettlementChange =
   | { settlementMode: 'fiat'; bankCode: string; accountNumber: string }
   | { settlementMode: 'crypto'; chainId: number; tokenAddress: string; walletAddress: string };
 
-/** A crypto change waits for the code emailed to the owner. */
-export type PendingConfirmation = { expiresAt: string; sentTo: string };
+/** A guarded change (a crypto wallet) waits for the code emailed to the owner. */
+export type PendingConfirmation = { id: string; kind: string; expiresAt: string; sentTo: string };
 
 /** A change was applied (merchant), or is waiting on the emailed code (confirmation). */
 export type SettlementAnswer = { merchant?: OwnMerchant; confirmation?: PendingConfirmation };
@@ -70,7 +70,10 @@ export function updateSettlement(change: SettlementChange, password: string, exp
   });
 }
 
-/** Apply the waiting crypto change with the code from her email. */
-export function confirmSettlement(code: string): Promise<SettlementAnswer> {
-  return request<SettlementAnswer>('/settlement/confirm', { method: 'POST', body: JSON.stringify({ code: code.trim() }) });
+/** Apply a waiting guarded change with the code from her email. */
+export function confirmOwnerAction(actionId: string, code: string): Promise<SettlementAnswer> {
+  return request<SettlementAnswer>(`/actions/${encodeURIComponent(actionId)}/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({ code: code.trim() }),
+  });
 }

@@ -2,16 +2,10 @@ package services
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -31,6 +25,8 @@ import (
 // can be constructed and tested without a live chain registry.
 type payChainRegistry interface {
 	MainnetChainNameForID(id int64) (string, bool)
+	// MainnetChainIDs is every id MainnetChainNameForID resolves, ascending.
+	MainnetChainIDs() []int64
 	// TokenAddress is the configured mainnet address of a symbol on a chain
 	// ("" when there is none) — how an owner's crypto payout is held to the
 	// stablecoins the platform lists.
@@ -70,21 +66,9 @@ var (
 	// ErrPayMerchantAmbiguous: a user owns more than one merchant, which nothing
 	// should ever produce; the owner routes refuse rather than guess which.
 	ErrPayMerchantAmbiguous = errors.New("more than one merchant account belongs to this user")
-	// ErrPaySettlementConfirmUnavailable: a crypto payout change needs an email
-	// confirmation and none can be sent (no mailer, or no email on the account).
-	ErrPaySettlementConfirmUnavailable = errors.New("crypto payout changes can't be confirmed right now")
-	// ErrPaySettlementNoPending: no crypto payout change is waiting for this
-	// owner — none was requested, it expired, or it ran out of attempts.
-	ErrPaySettlementNoPending = errors.New("there is no payout change waiting to be confirmed")
-	// ErrPaySettlementCodeInvalid: the code does not match the waiting change.
-	ErrPaySettlementCodeInvalid = errors.New("that code isn't right")
-)
-
-const (
-	// paySettlementCodeTTL is how long an emailed payout-change code lives.
-	paySettlementCodeTTL = 15 * time.Minute
-	// paySettlementCodeAttempts is how many wrong codes end a waiting change.
-	paySettlementCodeAttempts = 5
+	// ErrPayBanksUnavailable: no bank directory is configured, so banks can be
+	// neither listed nor resolved.
+	ErrPayBanksUnavailable = errors.New("the bank directory is unavailable")
 )
 
 // payOwnerSettlementTokens are what an owner may be paid in on a chain: the
@@ -193,7 +177,7 @@ type PayMerchantService struct {
 	db     *gorm.DB
 	banks  BankDirectory    // nil → settlement can't be verified, so it stays unset
 	chains payChainRegistry // nil → crypto settlement refused
-	mailer payCodeMailer    // nil → owners cannot change a crypto payout
+	mailer CodeMailer       // nil → owners cannot confirm a guarded action
 	master []byte
 	now    func() time.Time
 }
@@ -357,24 +341,16 @@ type PaySettlementChange struct {
 type PaySettlementResult struct {
 	Merchant *models.PayMerchant
 	Changed  bool
-	Pending  *PaySettlementPending
+	Pending  *PayOwnerActionPending
 }
 
-// PaySettlementPending tells the owner a code is on its way, and where.
-type PaySettlementPending struct {
-	ExpiresAt time.Time `json:"expiresAt"`
-	SentTo    string    `json:"sentTo"`
+// paySettlementPayload is a crypto payout change as it waits on its code.
+type paySettlementPayload struct {
+	ChainID       int64  `json:"chainId"`
+	TokenAddress  string `json:"tokenAddress"`
+	TokenSymbol   string `json:"tokenSymbol"`
+	WalletAddress string `json:"walletAddress"`
 }
-
-// payCodeMailer sends the payout-change code. Straight to the address on the
-// account, never through the notification bus: the code must arrive even for an
-// owner who muted notifications, and must never be stored in their inbox rows.
-type payCodeMailer interface {
-	Send(toEmail, toName, subject, title, message, ctaText, ctaURL string) error
-}
-
-// SetMailer lets owners change a crypto payout; without it they cannot.
-func (s *PayMerchantService) SetMailer(m payCodeMailer) { s.mailer = m }
 
 // GetByOwner returns the merchant a user owns, or ErrPayMerchantNotFound. A
 // user has at most one — a merchant is provisioned from their one approved
@@ -405,18 +381,15 @@ func (s *PayMerchantService) GetByOwner(ctx context.Context, userID uuid.UUID) (
 //     AccountNameWithin). The account itself is the proof;
 //   - a crypto destination has no such proof, so it is only ever a listed
 //     stablecoin and is not applied until the owner enters the code emailed to
-//     them (ConfirmSettlementByOwner);
+//     them (a guarded owner action — see ConfirmOwnerAction);
 //   - a change to the destination it already has writes and announces nothing.
 //
 // Everything else — resolving the account, the chain and token rules, the
 // version check and the audit row (with the owner as its actor) — is Update's.
 func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerID uuid.UUID, ch PaySettlementChange) (*PaySettlementResult, error) {
-	m, err := s.GetByOwner(ctx, ownerID)
+	m, err := s.activeOwnedMerchant(ctx, ownerID)
 	if err != nil {
 		return nil, err
-	}
-	if m.Status == models.PayMerchantSuspended {
-		return nil, ErrPayMerchantSuspended
 	}
 	in, err := s.ownerUpdate(m, ch)
 	if err != nil {
@@ -435,7 +408,10 @@ func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerI
 		return &PaySettlementResult{Merchant: m}, nil
 	}
 	if edit.updated.SettlementMode == models.PaySettlementCrypto {
-		pending, err := s.requestConfirmation(ctx, ownerID, &edit.updated)
+		u := &edit.updated
+		pending, err := s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionSettlement,
+			paySettlementPayload{ChainID: u.ChainID, TokenAddress: u.TokenAddress, TokenSymbol: u.TokenSymbol, WalletAddress: u.WalletAddress},
+			fmt.Sprintf("be paid in %s to the wallet %s", u.TokenSymbol, PayShortAddress(u.WalletAddress)))
 		if err != nil {
 			return nil, err
 		}
@@ -445,58 +421,12 @@ func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerI
 	if err != nil {
 		return nil, err
 	}
-	s.dropConfirmation(ctx, m.ID)
+	// A bank account now stands: a crypto change still waiting would undo it.
+	if err := s.db.WithContext(ctx).Where("merchant_id = ? AND kind = ?", m.ID, models.PayOwnerActionSettlement).
+		Delete(&models.PayOwnerAction{}).Error; err != nil {
+		log.Printf("[tsa-pay] could not clear the waiting payout change for merchant %s: %v", m.ID, err)
+	}
 	return &PaySettlementResult{Merchant: updated, Changed: true}, nil
-}
-
-// ConfirmSettlementByOwner applies the crypto payout change waiting on code. The
-// change is applied against the merchant version it was requested at, so any
-// edit since (by the owner or an admin) makes it stale; a wrong code counts
-// against the attempts, and the last one ends the change.
-func (s *PayMerchantService) ConfirmSettlementByOwner(ctx context.Context, ownerID uuid.UUID, code string) (*models.PayMerchant, error) {
-	m, err := s.GetByOwner(ctx, ownerID)
-	if err != nil {
-		return nil, err
-	}
-	if m.Status == models.PayMerchantSuspended {
-		return nil, ErrPayMerchantSuspended
-	}
-	var pending models.PaySettlementConfirmation
-	if err := s.db.WithContext(ctx).Where("merchant_id = ? AND owner_id = ?", m.ID, ownerID).First(&pending).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrPaySettlementNoPending
-		}
-		return nil, err
-	}
-	if !s.now().Before(pending.ExpiresAt) {
-		s.dropConfirmation(ctx, m.ID)
-		return nil, ErrPaySettlementNoPending
-	}
-	// The attempt is spent before the code is compared, in one guarded write, so
-	// concurrent guesses cannot share an attempt.
-	res := s.db.WithContext(ctx).Model(&models.PaySettlementConfirmation{}).
-		Where("id = ? AND attempts < ?", pending.ID, paySettlementCodeAttempts).
-		Update("attempts", gorm.Expr("attempts + 1"))
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		s.dropConfirmation(ctx, m.ID)
-		return nil, ErrPaySettlementNoPending
-	}
-	if subtle.ConstantTimeCompare([]byte(paySettlementCodeHash(m.ID, strings.TrimSpace(code))), []byte(pending.CodeHash)) != 1 {
-		if pending.Attempts+1 >= paySettlementCodeAttempts {
-			s.dropConfirmation(ctx, m.ID)
-		}
-		return nil, ErrPaySettlementCodeInvalid
-	}
-	mode := models.PaySettlementCrypto
-	updated, err := s.update(ctx, ownerID, m.ID, PayMerchantUpdate{
-		SettlementMode: &mode, ChainID: &pending.ChainID, TokenAddress: &pending.TokenAddress,
-		TokenSymbol: &pending.TokenSymbol, WalletAddress: &pending.WalletAddress, ExpectedVersion: &pending.BaseVersion,
-	}, nil)
-	s.dropConfirmation(ctx, m.ID)
-	return updated, err
 }
 
 // ownerUpdate is the admin edit an owner's change amounts to: the settlement
@@ -543,6 +473,55 @@ func (s *PayMerchantService) listedStablecoin(chainID int64, token string) (stri
 	return "", fmt.Errorf("%w: you can be paid in %s on %s", ErrPayMerchantInvalid, strings.Join(payOwnerSettlementTokens, " or "), chain)
 }
 
+// PaySettlementOption is one stablecoin an owner may be paid in: exactly what
+// listedStablecoin accepts, so a picker built from these can only offer what a
+// change will take.
+type PaySettlementOption struct {
+	ChainID      int64  `json:"chainId"`
+	Chain        string `json:"chain"`
+	Symbol       string `json:"symbol"`
+	TokenAddress string `json:"tokenAddress"`
+}
+
+// SettlementOptions is every (chain, stablecoin) an owner may be paid in,
+// ordered by chain id then symbol. None without a chain registry.
+func (s *PayMerchantService) SettlementOptions() []PaySettlementOption {
+	out := []PaySettlementOption{}
+	if s.chains == nil {
+		return out
+	}
+	for _, id := range s.chains.MainnetChainIDs() {
+		chain, ok := s.chains.MainnetChainNameForID(id)
+		if !ok {
+			continue
+		}
+		for _, symbol := range payOwnerSettlementTokens { // already in symbol order
+			if addr := s.chains.TokenAddress(chain, symbol); addr != "" {
+				out = append(out, PaySettlementOption{ChainID: id, Chain: chain, Symbol: symbol, TokenAddress: addr})
+			}
+		}
+	}
+	return out
+}
+
+// Banks is the bank directory an owner picks a payout bank from — the same one
+// a settlement change is resolved against.
+func (s *PayMerchantService) Banks(ctx context.Context) ([]NombaBank, error) {
+	if s.banks == nil {
+		return nil, ErrPayBanksUnavailable
+	}
+	return s.banks.ListBanks(ctx)
+}
+
+// ResolveBank is the name enquiry an owner checks an account with before
+// saving it.
+func (s *PayMerchantService) ResolveBank(ctx context.Context, bankCode, accountNumber string) (NombaLookupResult, error) {
+	if s.banks == nil {
+		return NombaLookupResult{}, ErrPayBanksUnavailable
+	}
+	return s.banks.Resolve(ctx, bankCode, accountNumber)
+}
+
 // accountInOwnName checks the resolved account name against the business name
 // and, only while the owner IS KYC-verified, their verified legal name — a
 // rejected or expired verification keeps its name on the row, and vouches for
@@ -561,59 +540,6 @@ func (s *PayMerchantService) accountInOwnName(ctx context.Context, ownerID uuid.
 	return ErrPaySettlementNameMismatch
 }
 
-// requestConfirmation stores the crypto change for updated and emails its code
-// to the owner. A code that could not be sent leaves nothing waiting.
-func (s *PayMerchantService) requestConfirmation(ctx context.Context, ownerID uuid.UUID, updated *models.PayMerchant) (*PaySettlementPending, error) {
-	if s.mailer == nil {
-		return nil, ErrPaySettlementConfirmUnavailable
-	}
-	var owner struct {
-		Email sql.NullString
-		Name  sql.NullString
-	}
-	if err := s.db.WithContext(ctx).Table("users").Select("email", "name").Where("id = ?", ownerID).Limit(1).Scan(&owner).Error; err != nil {
-		return nil, err
-	}
-	email := strings.TrimSpace(owner.Email.String)
-	if email == "" {
-		return nil, ErrPaySettlementConfirmUnavailable
-	}
-	code, err := paySettlementCode()
-	if err != nil {
-		return nil, err
-	}
-	pending := models.PaySettlementConfirmation{
-		MerchantID: updated.ID, OwnerID: ownerID, ChainID: updated.ChainID, TokenAddress: updated.TokenAddress,
-		TokenSymbol: updated.TokenSymbol, WalletAddress: updated.WalletAddress, BaseVersion: updated.Version,
-		CodeHash: paySettlementCodeHash(updated.ID, code), ExpiresAt: s.now().Add(paySettlementCodeTTL),
-	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("merchant_id = ?", updated.ID).Delete(&models.PaySettlementConfirmation{}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&pending).Error
-	}); err != nil {
-		return nil, err
-	}
-	message := fmt.Sprintf("Your code to confirm that %s will be paid in %s to the wallet %s is %s. It expires in %d minutes.\n\n"+
-		"If you didn't ask for this, don't share the code: change your password and contact support.",
-		updated.BusinessName, updated.TokenSymbol, PayShortAddress(updated.WalletAddress), code, int(paySettlementCodeTTL/time.Minute))
-	if err := s.mailer.Send(email, owner.Name.String, "Confirm your TSA Pay payout change", "Confirm your payout change", message, "", ""); err != nil {
-		log.Printf("[tsa-pay] payout-change code for merchant %s could not be sent: %v", updated.ID, err)
-		s.dropConfirmation(ctx, updated.ID)
-		return nil, ErrPaySettlementConfirmUnavailable
-	}
-	return &PaySettlementPending{ExpiresAt: pending.ExpiresAt, SentTo: payMaskEmail(email)}, nil
-}
-
-// dropConfirmation ends any crypto change waiting for merchantID. Best effort: a
-// row left behind is stale by version and expires on its own.
-func (s *PayMerchantService) dropConfirmation(ctx context.Context, merchantID uuid.UUID) {
-	if err := s.db.WithContext(ctx).Where("merchant_id = ?", merchantID).Delete(&models.PaySettlementConfirmation{}).Error; err != nil {
-		log.Printf("[tsa-pay] could not clear the waiting payout change for merchant %s: %v", merchantID, err)
-	}
-}
-
 // sameSettlement reports whether two merchants are paid to the same place.
 func sameSettlement(a, b *models.PayMerchant) bool {
 	if a.SettlementMode != b.SettlementMode {
@@ -628,21 +554,6 @@ func sameSettlement(a, b *models.PayMerchant) bool {
 	return true
 }
 
-// paySettlementCode is a six-digit code from crypto/rand.
-func paySettlementCode() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
-}
-
-// paySettlementCodeHash binds a code to its merchant; only the hash is stored.
-func paySettlementCodeHash(merchantID uuid.UUID, code string) string {
-	sum := sha256.Sum256([]byte(merchantID.String() + ":" + code))
-	return hex.EncodeToString(sum[:])
-}
-
 // PayShortAddress is a wallet as the owner should compare it: its first six and
 // last four characters, never only a suffix a lookalike address could share.
 func PayShortAddress(a string) string {
@@ -651,15 +562,6 @@ func PayShortAddress(a string) string {
 		return a
 	}
 	return a[:6] + "…" + a[len(a)-4:]
-}
-
-// payMaskEmail shows where a code went without printing the address in full.
-func payMaskEmail(email string) string {
-	local, domain, ok := strings.Cut(email, "@")
-	if !ok || local == "" {
-		return "your email"
-	}
-	return local[:1] + "***@" + domain
 }
 
 // update is Update with an optional check on the resulting merchant, run after
@@ -807,8 +709,8 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 			payLast4(before.BankCode), payLast4(updated.BankCode),
 			payLast4(before.AccountNumber), payLast4(updated.AccountNumber),
 			before.WalletAddress, updated.WalletAddress,
-			payRedactURL(before.WebhookURL), payRedactURL(updated.WebhookURL),
-			payRedactURL(before.TestWebhookURL), payRedactURL(updated.TestWebhookURL),
+			PayRedactURL(before.WebhookURL), PayRedactURL(updated.WebhookURL),
+			PayRedactURL(before.TestWebhookURL), PayRedactURL(updated.TestWebhookURL),
 			before.ReturnDomains, updated.ReturnDomains,
 		)
 	}
@@ -929,7 +831,7 @@ func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]an
 	// redacted: webhook URLs can carry a token in the query string.
 	addURL := func(field, b, a string) {
 		if b != a {
-			out[field] = map[string]any{"before": payRedactURL(b), "after": payRedactURL(a)}
+			out[field] = map[string]any{"before": PayRedactURL(b), "after": PayRedactURL(a)}
 		}
 	}
 	addURL("webhookUrl", before.WebhookURL, after.WebhookURL)
@@ -948,12 +850,12 @@ func (s *PayMerchantService) writeAudit(tx *gorm.DB, merchantID, actor uuid.UUID
 	return tx.Create(&models.PayAuditEvent{MerchantID: merchantID, ActorID: actor, Action: action, Details: string(raw)}).Error
 }
 
-// payRedactURL makes a merchant-supplied URL safe for an audit row or log
+// PayRedactURL makes a merchant-supplied URL safe for an audit row or log
 // line: only scheme and host are kept. Userinfo is dropped, and the path,
 // query and fragment — where a webhook token lives (Slack-style hooks carry
 // it in the path) — become "/…". Empty stays empty; anything that is not an absolute URL is
 // "[unparseable url]" rather than echoed back.
-func payRedactURL(raw string) string {
+func PayRedactURL(raw string) string {
 	if raw == "" {
 		return ""
 	}

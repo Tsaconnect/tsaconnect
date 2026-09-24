@@ -23,7 +23,7 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import type { LiFiToken } from '@/services/lifi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import {
-  confirmSettlement, getOwnMerchant, OWNER_CODES, updateSettlement,
+  confirmOwnerAction, getOwnMerchant, OWNER_CODES, updateSettlement,
   type OwnMerchant, type PendingConfirmation, type SettlementChange, type SettlementMode,
 } from '@/services/payMerchantApi';
 import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
@@ -145,13 +145,13 @@ export default function PaySettings() {
   };
 
   const confirm = async () => {
-    if (submitting.current) return;
+    if (submitting.current || !pending) return;
     if (!/^\d{6}$/.test(code.trim())) { setFormError('Enter the 6-digit code from your email.'); return; }
     submitting.current = true;
     setSaving(true);
     setFormError(undefined);
     try {
-      const answer = await confirmSettlement(code);
+      const answer = await confirmOwnerAction(pending.id, code);
       if (answer.merchant) applied(answer.merchant);
     } catch (e) {
       const why = codeOf(e);

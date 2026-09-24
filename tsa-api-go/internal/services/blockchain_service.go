@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -176,6 +177,22 @@ func (bs *BlockchainService) MainnetChainNameForID(id int64) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// MainnetChainIDs is every id MainnetChainNameForID resolves — the mainnet
+// chains with a connected client — ascending.
+func (bs *BlockchainService) MainnetChainIDs() []int64 {
+	if bs == nil || bs.cfg == nil {
+		return nil
+	}
+	var ids []int64
+	for name, chain := range bs.cfg.Networks["mainnet"].Chains {
+		if bs.clients["mainnet:"+name] != nil {
+			ids = append(ids, chain.ChainID)
+		}
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // Client returns the mainnet Sonic client for backward compatibility.

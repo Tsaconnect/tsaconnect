@@ -208,7 +208,15 @@ func TestPayRoutes_OwnerSettlementIsAuthedAndTightlyLimited(t *testing.T) {
 	for _, rt := range []struct{ method, path string }{
 		{http.MethodGet, "/api/pay/merchant"},
 		{http.MethodPut, "/api/pay/merchant/settlement"},
-		{http.MethodPost, "/api/pay/merchant/settlement/confirm"},
+		{http.MethodPost, "/api/pay/merchant/actions/" + uuid.NewString() + "/confirm"},
+		{http.MethodGet, "/api/pay/merchant/payments"},
+		{http.MethodGet, "/api/pay/merchant/payments/" + uuid.NewString()},
+		{http.MethodPost, "/api/pay/merchant/keys"},
+		{http.MethodPut, "/api/pay/merchant/endpoints"},
+		{http.MethodPost, "/api/pay/merchant/webhook-secret"},
+		{http.MethodGet, "/api/pay/merchant/banks"},
+		{http.MethodGet, "/api/pay/merchant/banks/resolve"},
+		{http.MethodGet, "/api/pay/merchant/settlement-options"},
 	} {
 		if w := payRoutesDo(r, rt.method, rt.path, "", map[string]any{}); w.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s without a session: %d", rt.method, rt.path, w.Code)
@@ -222,5 +230,49 @@ func TestPayRoutes_OwnerSettlementIsAuthedAndTightlyLimited(t *testing.T) {
 	}
 	if codes[5] != http.StatusTooManyRequests {
 		t.Fatalf("codes %v: the sixth change within 15 minutes must be refused", codes)
+	}
+}
+
+// Each guarded request (payouts, keys, webhooks, the webhook secret) checks the
+// password, so each has its own tight limit: using up one never spends another.
+func TestPayRoutes_OwnerGuardedRequestsEachHaveTheirOwnLimit(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID)
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodPut, "/api/pay/merchant/settlement"},
+		{http.MethodPost, "/api/pay/merchant/keys"},
+		{http.MethodPut, "/api/pay/merchant/endpoints"},
+		{http.MethodPost, "/api/pay/merchant/webhook-secret"},
+	} {
+		codes := []int{}
+		for i := 0; i < 6; i++ {
+			codes = append(codes, payRoutesDo(r, rt.method, rt.path, tok, map[string]any{"password": "x"}).Code)
+		}
+		if codes[4] == http.StatusTooManyRequests || codes[5] != http.StatusTooManyRequests {
+			t.Fatalf("%s %s codes %v: five within 15 minutes, then refused", rt.method, rt.path, codes)
+		}
+	}
+}
+
+// The owner area's pages read several routes at once, so the group allows 120 a
+// minute; the bank name enquiry, which calls a provider, keeps 30.
+func TestPayRoutes_OwnerReadLimits(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID)
+	for i := 1; i <= 30; i++ {
+		if w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant/banks/resolve?bankCode=044&accountNumber=0123456789", tok, nil); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("resolve %d refused", i)
+		}
+	}
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant/banks/resolve?bankCode=044&accountNumber=0123456789", tok, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("the 31st resolve in a minute: %d", w.Code)
+	}
+	for i := 32; i <= 120; i++ {
+		if w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant", tok, nil); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("owner read %d refused", i)
+		}
+	}
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant", tok, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("the 121st owner request in a minute: %d", w.Code)
 	}
 }

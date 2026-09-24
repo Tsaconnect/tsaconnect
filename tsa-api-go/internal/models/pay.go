@@ -97,8 +97,8 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // intent) is linked at a time.
 type PayPayment struct {
 	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1" json:"merchantId"`
-	Mode                    string     `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2" json:"mode"`
+	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
+	Mode                    string     `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2;index:idx_pay_payments_merchant_mode_created,priority:2" json:"mode"`
 	Reference               string     `gorm:"size:128;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:3" json:"reference"`
 	AmountKobo              int64      `gorm:"not null" json:"amount"`
 	Currency                string     `gorm:"size:3;not null" json:"currency"`
@@ -125,7 +125,7 @@ type PayPayment struct {
 	SettlementRef           string     `gorm:"size:128" json:"settlementRef,omitempty"`
 	FailureReason           string     `gorm:"size:255" json:"failureReason,omitempty"`
 	SucceededAt             *time.Time `json:"succeededAt,omitempty"`
-	CreatedAt               time.Time  `json:"createdAt"`
+	CreatedAt               time.Time  `gorm:"index:idx_pay_payments_merchant_mode_created,priority:3" json:"createdAt"`
 	UpdatedAt               time.Time  `json:"updatedAt"`
 }
 
@@ -194,32 +194,38 @@ func (e *PayAuditEvent) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-// PaySettlementConfirmation is a merchant owner's crypto payout change waiting
-// on the code emailed to them. A crypto destination has no bank name to check
-// against the owner, so a change made with the account password alone could be
-// a stolen login pointing the merchant's money at the thief's wallet: nothing is
-// written to the merchant until the owner proves they read the owner's email.
-// One per merchant (a new request replaces an older one); deleted once used,
-// exhausted or superseded. BaseVersion is the merchant version the change was
-// requested against, so any edit in between makes the confirmation stale.
-type PaySettlementConfirmation struct {
-	ID            uuid.UUID `gorm:"type:uuid;primaryKey" json:"-"`
-	MerchantID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"-"`
-	OwnerID       uuid.UUID `gorm:"type:uuid;not null" json:"-"`
-	ChainID       int64     `gorm:"not null" json:"-"`
-	TokenAddress  string    `gorm:"size:128;not null" json:"-"`
-	TokenSymbol   string    `gorm:"size:16;not null" json:"-"`
-	WalletAddress string    `gorm:"size:128;not null" json:"-"`
-	BaseVersion   int       `gorm:"not null" json:"-"`
-	CodeHash      string    `gorm:"size:64;not null" json:"-"`
-	Attempts      int       `gorm:"not null;default:0" json:"-"`
-	ExpiresAt     time.Time `gorm:"not null" json:"-"`
-	CreatedAt     time.Time `json:"-"`
+// PayOwnerAction is a merchant owner's sensitive change waiting on the code
+// emailed to them: a crypto payout, a key roll, webhook/return-domain changes, or
+// revealing/rolling the webhook secret. A change made with the account password
+// alone could be a stolen login, so nothing is applied until the owner proves
+// they read the owner's email. One per merchant per kind (a new request replaces
+// an older one); deleted once used, exhausted, expired or superseded.
+// BaseVersion is the merchant version the change was requested against, so any
+// edit in between makes it stale.
+type PayOwnerAction struct {
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey" json:"-"`
+	MerchantID  uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:uq_pay_owner_action_kind" json:"-"`
+	Kind        string    `gorm:"size:24;not null;uniqueIndex:uq_pay_owner_action_kind" json:"-"`
+	OwnerID     uuid.UUID `gorm:"type:uuid;not null" json:"-"`
+	Payload     string    `gorm:"type:text;not null" json:"-"`
+	BaseVersion int       `gorm:"not null" json:"-"`
+	CodeHash    string    `gorm:"size:64;not null" json:"-"`
+	Attempts    int       `gorm:"not null;default:0" json:"-"`
+	ExpiresAt   time.Time `gorm:"not null" json:"-"`
+	CreatedAt   time.Time `json:"-"`
 }
 
-func (c *PaySettlementConfirmation) BeforeCreate(tx *gorm.DB) error {
-	if c.ID == uuid.Nil {
-		c.ID = uuid.New()
+// PayOwnerAction kinds.
+const (
+	PayOwnerActionSettlement    = "settlement"
+	PayOwnerActionKeys          = "keys"
+	PayOwnerActionEndpoints     = "endpoints"
+	PayOwnerActionWebhookSecret = "webhook_secret"
+)
+
+func (a *PayOwnerAction) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
 	}
 	return nil
 }

@@ -1251,17 +1251,28 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			checkout.POST("/:id/crypto", middleware.Idempotency(config.DB), payStartLimit, payh.PayCrypto)
 		}
 
-		// A merchant's own account, from the app: JWT user auth. Changing where
-		// the merchant is paid re-checks the password in-handler and has its own
-		// tight limit, so a password cannot be guessed through it.
+		// A merchant's own account, from the app and the web: JWT user auth.
+		// Every guarded request (payouts, keys, webhooks, the webhook secret)
+		// re-checks the password in-handler and has its own tight limit — a
+		// separate store per route, so a password cannot be guessed through any
+		// of them and using up one never spends another.
 		owner := api.Group("/pay/merchant")
-		owner.Use(auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey))
+		owner.Use(auth, middleware.RateLimiterBy(120, time.Minute, perUserRateKey))
 		{
 			owner.GET("", payh.OwnerMerchant)
+			owner.GET("/payments", payh.OwnerPayments)
+			owner.GET("/payments/:id", payh.OwnerPayment)
+			owner.GET("/settlement-options", payh.OwnerSettlementOptions)
+			owner.GET("/banks", payh.OwnerBanks)
+			// A name enquiry calls the bank provider.
+			owner.GET("/banks/resolve", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerResolveBank)
 			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
-			// The emailed code for a crypto payout change; wrong codes also end
-			// the waiting change after a handful (see ConfirmSettlementByOwner).
-			owner.POST("/settlement/confirm", middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), payh.OwnerConfirmSettlement)
+			owner.POST("/keys", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestKeys)
+			owner.PUT("/endpoints", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestEndpoints)
+			owner.POST("/webhook-secret", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestWebhookSecret)
+			// The emailed code for any guarded owner action; wrong codes also end
+			// the waiting action after a handful (see ConfirmOwnerAction).
+			owner.POST("/actions/:id/confirm", middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), payh.OwnerConfirmAction)
 		}
 	}
 }

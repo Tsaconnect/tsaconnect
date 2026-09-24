@@ -30,6 +30,7 @@ type payPaymentAPI interface {
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
+	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 }
 

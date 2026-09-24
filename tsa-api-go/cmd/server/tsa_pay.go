@@ -60,8 +60,9 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
 	if mailer != nil {
-		// An owner's crypto payout change waits on a code emailed to them; with
-		// no working mailer those changes are refused rather than left waiting.
+		// An owner's guarded changes (crypto payout, keys, webhooks, the webhook
+		// secret) wait on a code emailed to them; with no working mailer those
+		// changes are refused rather than left waiting.
 		merchants.SetMailer(mailer)
 	}
 	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)

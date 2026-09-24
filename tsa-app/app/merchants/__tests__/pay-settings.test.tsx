@@ -60,12 +60,12 @@ jest.mock('@/services/payMerchantApi', () => ({
   OWNER_CODES: jest.requireActual('@/services/payMerchantApi').OWNER_CODES,
   getOwnMerchant: jest.fn(),
   updateSettlement: jest.fn(),
-  confirmSettlement: jest.fn(),
+  confirmOwnerAction: jest.fn(),
 }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
-import { confirmSettlement, getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
+import { confirmOwnerAction, getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
 import PaySettings from '../pay-settings';
 
 const merchant = {
@@ -127,8 +127,10 @@ it('sends nothing until PIN/biometric, then the change she entered with her pass
 });
 
 it('a wallet waits for the emailed code, and only the code applies it', async () => {
-  jest.mocked(updateSettlement).mockResolvedValue({ confirmation: { expiresAt: '2026-09-24T15:00:00Z', sentTo: 'o***@skyair.ng' } });
-  jest.mocked(confirmSettlement).mockResolvedValue({
+  jest.mocked(updateSettlement).mockResolvedValue({
+    confirmation: { id: 'act-1', kind: 'settlement', expiresAt: '2026-09-24T15:00:00Z', sentTo: 'o***@skyair.ng' },
+  });
+  jest.mocked(confirmOwnerAction).mockResolvedValue({
     merchant: { ...merchant, settlementMode: 'crypto', chainId: 8453, tokenSymbol: 'USDC', walletAddress: '0x52908400098527886E0F7030069857D2E4169EE7' },
   });
   const tree = await mount();
@@ -151,7 +153,7 @@ it('a wallet waits for the emailed code, and only the code applies it', async ()
   await act(async () => { byLabel(tree, 'input:Code').props.onChangeText('123456'); });
   await act(async () => { byLabel(tree, 'button:Confirm').props.onPress(); });
   await flush();
-  expect(confirmSettlement).toHaveBeenCalledWith('123456');
+  expect(confirmOwnerAction).toHaveBeenCalledWith('act-1', '123456');
   expect(mockToast.success).toHaveBeenCalled();
   expect(text(tree)).toContain('USDC on Base to 0x5290…9EE7');
 });

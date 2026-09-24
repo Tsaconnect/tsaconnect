@@ -36,6 +36,9 @@ var emailEvents = map[string]bool{
 	events.SecurityPasswordChanged:      true,
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
 	// Account deletion: the departing user needs a written record of what was
 	// closed and how to come back inside the grace window, and a reinstatement
 	// they didn't ask for must be visible to them out-of-band. In-app delivery
@@ -80,6 +83,9 @@ var pushEvents = map[string]bool{
 	events.SecurityPasswordChanged:      true,
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
 	events.VerificationApproved:         true,
 	events.VerificationRejected:         true,
 	events.MerchantApproved:             true,
@@ -111,6 +117,9 @@ var pushEvents = map[string]bool{
 // take money, and would want the owner not to see.
 var unmutableEvents = map[string]bool{
 	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
 }
 
 // deliveryChannels is whether an event reaches the user live (socket and push)

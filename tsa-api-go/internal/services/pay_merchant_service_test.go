@@ -6,12 +6,14 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 type fakePayBanks struct {
@@ -20,7 +22,9 @@ type fakePayBanks struct {
 	calls int
 }
 
-func (f *fakePayBanks) ListBanks(context.Context) ([]NombaBank, error) { return nil, nil }
+func (f *fakePayBanks) ListBanks(context.Context) ([]NombaBank, error) {
+	return []NombaBank{{Code: "044", Name: "Access Bank"}}, f.err
+}
 func (f *fakePayBanks) Resolve(_ context.Context, _, acct string) (NombaLookupResult, error) {
 	f.calls++
 	return NombaLookupResult{AccountNumber: acct, AccountName: f.name}, f.err
@@ -99,6 +103,15 @@ func TestPayMerchant_CreateFromRequestIsIdempotent(t *testing.T) {
 type fakePayChains map[int64]string
 
 func (f fakePayChains) MainnetChainNameForID(id int64) (string, bool) { n, ok := f[id]; return n, ok }
+
+func (f fakePayChains) MainnetChainIDs() []int64 {
+	ids := make([]int64, 0, len(f))
+	for id := range f {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
 
 // fakePayListedTokens is the stablecoin listing the fake registry answers with.
 var fakePayListedTokens = map[string]string{
@@ -438,12 +451,12 @@ func TestPayRedactURL(t *testing.T) {
 		"not a url?token=SECRET":                         "[unparseable url]",
 	}
 	for in, want := range cases {
-		got := payRedactURL(in)
+		got := PayRedactURL(in)
 		if got != want {
-			t.Errorf("payRedactURL(%q) = %q, want %q", in, got, want)
+			t.Errorf("PayRedactURL(%q) = %q, want %q", in, got, want)
 		}
 		if strings.Contains(got, "SECRET") || strings.Contains(got, "pw@") {
-			t.Errorf("payRedactURL(%q) = %q leaks", in, got)
+			t.Errorf("PayRedactURL(%q) = %q leaks", in, got)
 		}
 	}
 }
@@ -615,6 +628,16 @@ func (f *ownerFixture) stored(t *testing.T) *models.PayMerchant {
 	return m
 }
 
+// requestWallet asks for the crypto payout change and returns what is waiting.
+func (f *ownerFixture) requestWallet(t *testing.T) *PaySettlementResult {
+	t.Helper()
+	res, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, walletChange())
+	if err != nil || res.Pending == nil {
+		t.Fatalf("err %v result %+v", err, res)
+	}
+	return res
+}
+
 func TestPayMerchant_OwnerSettlementToAnAccountInTheBusinessName(t *testing.T) {
 	f := ownedMerchant(t, "", "")
 	f.banks.name = "SKY AIR LIMITED"
@@ -684,14 +707,17 @@ func TestPayMerchant_OwnerWalletChangeWaitsForTheEmailedCode(t *testing.T) {
 	if f.mail.code(t) == wrong {
 		wrong = "111111"
 	}
-	if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, wrong); !errors.Is(err, ErrPaySettlementCodeInvalid) {
+	if res.Pending.Kind != models.PayOwnerActionSettlement {
+		t.Fatalf("pending kind %q", res.Pending.Kind)
+	}
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, wrong); !errors.Is(err, ErrPayCodeInvalid) {
 		t.Fatalf("a wrong code: err = %v", err)
 	}
-	m, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t))
-	if err != nil || m.SettlementMode != models.PaySettlementCrypto || m.WalletAddress != ownerWallet || m.TokenSymbol != "USDC" {
-		t.Fatalf("err %v merchant %+v", err, m)
+	r, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t))
+	if err != nil || r.Merchant.SettlementMode != models.PaySettlementCrypto || r.Merchant.WalletAddress != ownerWallet || r.Merchant.TokenSymbol != "USDC" {
+		t.Fatalf("err %v result %+v", err, r)
 	}
-	if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayActionNoPending) {
 		t.Fatalf("a used code: err = %v", err)
 	}
 }
@@ -700,35 +726,35 @@ func TestPayMerchant_OwnerWalletCodeRefusals(t *testing.T) {
 	ctx := context.Background()
 	t.Run("too many wrong codes end the change", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
-		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		res := f.requestWallet(t)
 		wrong := "000000"
 		if f.mail.code(t) == wrong {
 			wrong = "111111"
 		}
-		for i := 0; i < paySettlementCodeAttempts; i++ {
-			if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, wrong); !errors.Is(err, ErrPaySettlementCodeInvalid) {
+		for i := 0; i < EmailCodeAttempts; i++ {
+			if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, wrong); !errors.Is(err, ErrPayCodeInvalid) {
 				t.Fatalf("attempt %d: err = %v", i, err)
 			}
 		}
-		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+		if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayActionNoPending) {
 			t.Fatalf("the right code after the attempts ran out: err = %v", err)
 		}
 	})
 	t.Run("an expired code", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
-		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
-		f.s.now = func() time.Time { return payTestNow.Add(paySettlementCodeTTL) }
-		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+		res := f.requestWallet(t)
+		f.s.now = func() time.Time { return payTestNow.Add(EmailCodeTTL) }
+		if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayActionNoPending) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("an edit since the request makes it stale", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
-		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		res := f.requestWallet(t)
 		if _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPayMerchantStale) {
+		if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayMerchantStale) {
 			t.Fatalf("err = %v", err)
 		}
 		if f.stored(t).SettlementMode == models.PaySettlementCrypto {
@@ -737,24 +763,24 @@ func TestPayMerchant_OwnerWalletCodeRefusals(t *testing.T) {
 	})
 	t.Run("another user's code is no code", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
-		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
-		if _, err := f.s.ConfirmSettlementByOwner(ctx, uuid.New(), f.mail.code(t)); !errors.Is(err, ErrPayMerchantNotFound) {
+		res := f.requestWallet(t)
+		if _, err := f.s.ConfirmOwnerAction(ctx, uuid.New(), res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayMerchantNotFound) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("no way to send a code refuses the change and leaves nothing waiting", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
 		f.mail.err = errors.New("smtp down")
-		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPaySettlementConfirmUnavailable) {
+		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPayCodeUnavailable) {
 			t.Fatalf("err = %v", err)
 		}
 		var n int64
-		f.s.db.Model(&models.PaySettlementConfirmation{}).Count(&n)
+		f.s.db.Model(&models.PayOwnerAction{}).Count(&n)
 		if n != 0 {
 			t.Fatalf("%d changes left waiting on a code nobody received", n)
 		}
 		f.s.SetMailer(nil)
-		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPaySettlementConfirmUnavailable) {
+		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPayCodeUnavailable) {
 			t.Fatalf("no mailer: err = %v", err)
 		}
 	})
@@ -772,11 +798,11 @@ func TestPayMerchant_OwnerWalletIsAListedStablecoinWithItsListedSymbol(t *testin
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
-	var pending models.PaySettlementConfirmation
+	var pending models.PayOwnerAction
 	f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
 	f.s.db.First(&pending)
-	if pending.TokenSymbol != "USDC" {
-		t.Fatalf("symbol %q: it is the listing's, never the caller's", pending.TokenSymbol)
+	if !strings.Contains(pending.Payload, `"tokenSymbol":"USDC"`) {
+		t.Fatalf("payload %s: the symbol is the listing's, never the caller's", pending.Payload)
 	}
 }
 
@@ -828,5 +854,192 @@ func TestPayMerchant_OwnerWithTwoMerchantsIsRefusedNotGuessed(t *testing.T) {
 	}
 	if _, err := f.s.GetByOwner(context.Background(), f.owner); !errors.Is(err, ErrPayMerchantAmbiguous) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPayMerchant_AConfirmedActionCannotBeConfirmedAgain(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	pending, err := f.s.RequestKeyRoll(ctx, f.owner, models.PayModeTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := f.mail.code(t)
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, code); err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := *f.stored(t).TestKeyHash
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, code); !errors.Is(err, ErrPayActionNoPending) {
+		t.Fatalf("second confirm: err = %v", err)
+	}
+	if *f.stored(t).TestKeyHash != afterFirst {
+		t.Fatal("a second confirm minted another key")
+	}
+}
+
+func TestPayMerchant_OwnerKeyRollIsGuardedAndReturnsTheKeyOnce(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	if _, err := f.s.IssueKeys(ctx, payActor, f.m.ID, PayKeysAll); err != nil {
+		t.Fatal(err)
+	}
+	before := f.stored(t)
+	pending, err := f.s.RequestKeyRoll(ctx, f.owner, models.PayModeLive)
+	if err != nil || pending.Kind != models.PayOwnerActionKeys {
+		t.Fatalf("err %v pending %+v", err, pending)
+	}
+	if *f.stored(t).LiveKeyHash != *before.LiveKeyHash {
+		t.Fatal("the key rolled before the code was entered")
+	}
+	res, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, f.mail.code(t))
+	if err != nil || res.Mode != models.PayModeLive || !strings.HasPrefix(res.Key, "tsapk_live_") {
+		t.Fatalf("err %v res %+v", err, res)
+	}
+	if *f.stored(t).LiveKeyHash == *before.LiveKeyHash || *f.stored(t).TestKeyHash != *before.TestKeyHash {
+		t.Fatal("rolling live must change the live key and only the live key")
+	}
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayActionNoPending) {
+		t.Fatalf("a second confirm: err = %v", err)
+	}
+	if _, err := f.s.RequestKeyRoll(ctx, f.owner, "staging"); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("unknown mode: err = %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerEndpointsAreValidatedBeforeACodeIsSent(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	if _, err := f.s.RequestEndpointsChange(ctx, f.owner, PayEndpointsChange{WebhookURL: "http://127.0.0.1/hook"}); !errors.Is(err, ErrPayMerchantInvalid) || f.mail.sent != 0 {
+		t.Fatalf("err %v sent %d: a private webhook URL must be refused before any code", err, f.mail.sent)
+	}
+	pending, err := f.s.RequestEndpointsChange(ctx, f.owner, PayEndpointsChange{
+		WebhookURL: "https://api.skyair.ng/tsa/webhook", ReturnDomains: []string{"skyair.ng"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.stored(t); got.WebhookURL != "" {
+		t.Fatalf("the webhook changed before the code was entered: %+v", got)
+	}
+	res, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, f.mail.code(t))
+	if err != nil || res.Merchant.WebhookURL != "https://api.skyair.ng/tsa/webhook" || res.Merchant.ReturnDomains != "skyair.ng" {
+		t.Fatalf("err %v merchant %+v", err, res.Merchant)
+	}
+}
+
+func TestPayMerchant_OwnerWebhookSecretRevealAndRoll(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	reveal, err := f.s.RequestWebhookSecret(ctx, f.owner, "reveal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, err := f.s.ConfirmOwnerAction(ctx, f.owner, reveal.ID, f.mail.code(t))
+	if err != nil || r1.WebhookSecretLive == "" || r1.WebhookSecretLive != f.s.WebhookSecret(f.stored(t), models.PayModeLive) {
+		t.Fatalf("reveal: err %v res %+v", err, r1)
+	}
+	roll, err := f.s.RequestWebhookSecret(ctx, f.owner, "roll")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := f.s.ConfirmOwnerAction(ctx, f.owner, roll.ID, f.mail.code(t))
+	if err != nil || r2.WebhookSecretLive == r1.WebhookSecretLive || r2.SecretAction != "roll" {
+		t.Fatalf("roll: err %v — the secret must change", err)
+	}
+	if _, err := f.s.RequestWebhookSecret(ctx, f.owner, "delete"); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("unknown action: err = %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerActionsBelongToTheirOwnerAndKind(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	first, _ := f.s.RequestKeyRoll(ctx, f.owner, models.PayModeTest)
+	firstCode := f.mail.code(t)
+	second, _ := f.s.RequestKeyRoll(ctx, f.owner, models.PayModeTest)
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, first.ID, firstCode); !errors.Is(err, ErrPayActionNoPending) {
+		t.Fatalf("a superseded request: err = %v", err)
+	}
+	if _, err := f.s.ConfirmOwnerAction(ctx, uuid.New(), second.ID, f.mail.code(t)); !errors.Is(err, ErrPayMerchantNotFound) {
+		t.Fatalf("someone else's action: err = %v", err)
+	}
+}
+
+func TestPayMerchant_SettlementOptionsAreTheListedStablecoins(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	if got := s.SettlementOptions(); len(got) != 0 {
+		t.Fatalf("no chain registry: %+v", got)
+	}
+	s.chains = fakePayChains{8453: "base", 56: "bsc"}
+	got := s.SettlementOptions()
+	want := []PaySettlementOption{
+		{ChainID: 56, Chain: "bsc", Symbol: "USDT", TokenAddress: fakePayListedTokens["bsc:USDT"]},
+		{ChainID: 8453, Chain: "base", Symbol: "USDC", TokenAddress: fakePayListedTokens["base:USDC"]},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("options %+v, want %+v", got, want)
+	}
+}
+
+func TestPayMerchant_BankDirectoryForOwners(t *testing.T) {
+	ctx := context.Background()
+	s, banks := newPayMerchantSvc(t)
+	list, err := s.Banks(ctx)
+	if err != nil || len(list) != 1 || list[0].Code != "044" {
+		t.Fatalf("banks %+v err %v", list, err)
+	}
+	res, err := s.ResolveBank(ctx, "044", "0123456789")
+	if err != nil || res.AccountName != "SKY AIR LIMITED" || banks.calls != 1 {
+		t.Fatalf("resolve %+v err %v", res, err)
+	}
+	s.banks = nil
+	if _, err := s.Banks(ctx); !errors.Is(err, ErrPayBanksUnavailable) {
+		t.Fatalf("no directory, list: err = %v", err)
+	}
+	if _, err := s.ResolveBank(ctx, "044", "0123456789"); !errors.Is(err, ErrPayBanksUnavailable) {
+		t.Fatalf("no directory, resolve: err = %v", err)
+	}
+}
+
+// raceOwnerActionInsert makes another request's action of the same kind land
+// between requestOwnerAction's delete and its insert, times times.
+func raceOwnerActionInsert(t *testing.T, f *ownerFixture, kind string, times int) {
+	t.Helper()
+	left := times
+	if err := f.s.db.Callback().Create().Before("gorm:create").Register("test:race_owner_action", func(tx *gorm.DB) {
+		if tx.Statement.Table != "pay_owner_actions" || left == 0 {
+			return
+		}
+		left--
+		if err := tx.Session(&gorm.Session{NewDB: true}).Exec(
+			`INSERT INTO pay_owner_actions (id, merchant_id, kind, owner_id, payload, base_version, code_hash, attempts, expires_at, created_at)
+			 VALUES (?, ?, ?, ?, '{}', 0, 'x', 0, ?, ?)`, uuid.New(), f.m.ID, kind, f.owner, payTestNow.Add(time.Hour), payTestNow).Error; err != nil {
+			t.Fatal(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPayMerchant_AConcurrentRequestOfTheSameKindIsRetriedOnce(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	raceOwnerActionInsert(t, f, models.PayOwnerActionKeys, 1)
+	pending, err := f.s.RequestKeyRoll(ctx, f.owner, models.PayModeLive)
+	if err != nil {
+		t.Fatalf("one lost race must be retried: err = %v", err)
+	}
+	if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, f.mail.code(t)); err != nil {
+		t.Fatalf("the retried action: err = %v", err)
+	}
+}
+
+func TestPayMerchant_ARequestThatKeepsLosingTheRaceIsBusy(t *testing.T) {
+	f := ownedMerchant(t, "", "")
+	raceOwnerActionInsert(t, f, models.PayOwnerActionKeys, 2)
+	if _, err := f.s.RequestKeyRoll(context.Background(), f.owner, models.PayModeLive); !errors.Is(err, ErrPayActionBusy) {
+		t.Fatalf("err = %v, want ErrPayActionBusy", err)
+	}
+	if f.mail.sent != 0 {
+		t.Fatal("a code was sent for an action that was never stored")
 	}
 }

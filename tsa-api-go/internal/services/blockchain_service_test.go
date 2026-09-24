@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -103,6 +104,20 @@ func TestMainnetChainNameForID_OnlyAMainnetChainWithAClient(t *testing.T) {
 	}
 	if _, ok := (&BlockchainService{}).MainnetChainNameForID(56); ok {
 		t.Fatal("a registry with no config resolved a chain")
+	}
+}
+
+// MainnetChainIDs lists the same set MainnetChainNameForID resolves, in order.
+func TestMainnetChainIDs_OnlyMainnetChainsWithAClient(t *testing.T) {
+	b := testnetAwareRegistry()
+	b.cfg.Networks["mainnet"].Chains["base"] = config.ChainConfig{ChainID: 8453}
+	b.clients["mainnet:base"] = &blockchain.EVMClient{}
+	if got := b.MainnetChainIDs(); !slices.Equal(got, []int64{56, 8453}) {
+		t.Fatalf("ids %v, want [56 8453]", got)
+	}
+	var none *BlockchainService
+	if got := none.MainnetChainIDs(); len(got) != 0 {
+		t.Fatalf("a nil registry listed %v", got)
 	}
 }
 

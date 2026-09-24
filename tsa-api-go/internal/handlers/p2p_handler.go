@@ -427,12 +427,11 @@ func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
 		})
 		return
 	}
-	bankCode := strings.TrimSpace(c.Query("bankCode"))
-	accountNumber := strings.TrimSpace(c.Query("accountNumber"))
-	if bankCode == "" || len(accountNumber) != 10 {
+	bankCode, accountNumber, ok := validBankLookup(c.Query("bankCode"), c.Query("accountNumber"))
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"message": "bankCode and a 10-digit accountNumber are required",
+			"message": bankLookupInvalidMessage,
 		})
 		return
 	}

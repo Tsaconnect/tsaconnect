@@ -328,30 +328,43 @@ func validatePayReturnURL(raw string, allowed []string) error {
 	return fmt.Errorf("return url host %q is not an allowed return domain", host)
 }
 
-// AdminList is the admin console's payments listing: every payment,
-// optionally narrowed to one merchant/mode/status, newest first.
-// merchantID nil means every merchant; mode/status "" means every
-// mode/status.
-func (s *PayPaymentService) AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error) {
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
+// PayListFilter selects payments. MerchantID nil means every merchant;
+// Mode/Status "" mean every mode/status. Query matches the reference or
+// description (case-insensitive substring) or an id prefix.
+type PayListFilter struct {
+	MerchantID          *uuid.UUID
+	Mode, Status, Query string
+	Page, Limit         int
+}
 
+// List is one page of payments, newest first, with the total that matched.
+func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models.PayPayment, int64, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Limit < 1 {
+		f.Limit = 20
+	}
+	if f.Limit > 100 {
+		f.Limit = 100
+	}
 	filter := func(q *gorm.DB) *gorm.DB {
-		if merchantID != nil {
-			q = q.Where("merchant_id = ?", *merchantID)
+		if f.MerchantID != nil {
+			q = q.Where("merchant_id = ?", *f.MerchantID)
 		}
-		if mode != "" {
-			q = q.Where("mode = ?", mode)
+		if f.Mode != "" {
+			q = q.Where("mode = ?", f.Mode)
 		}
-		if status != "" {
-			q = q.Where("status = ?", status)
+		if f.Status != "" {
+			q = q.Where("status = ?", f.Status)
+		}
+		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
+			// What she typed is matched literally: % and _ are not wildcards.
+			esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(term)
+			// One group, so the ORs never widen the merchant/mode/status filter.
+			q = q.Where(s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
+				Or(`LOWER(description) LIKE ? ESCAPE '\'`, "%"+esc+"%").
+				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%"))
 		}
 		return q
 	}
@@ -360,13 +373,18 @@ func (s *PayPaymentService) AdminList(ctx context.Context, merchantID *uuid.UUID
 	if err := filter(s.db.WithContext(ctx).Model(&models.PayPayment{})).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-
 	var rows []models.PayPayment
-	q := filter(s.db.WithContext(ctx).Model(&models.PayPayment{}))
-	if err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
+	if err := filter(s.db.WithContext(ctx).Model(&models.PayPayment{})).
+		Order("created_at DESC").Offset((f.Page - 1) * f.Limit).Limit(f.Limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+// AdminList is the admin console's payments listing: every payment,
+// optionally narrowed to one merchant/mode/status, newest first.
+func (s *PayPaymentService) AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error) {
+	return s.List(ctx, PayListFilter{MerchantID: merchantID, Mode: mode, Status: status, Page: page, Limit: limit})
 }
 
 // Deliveries returns every webhook delivery owed for paymentID, newest
