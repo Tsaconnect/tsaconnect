@@ -760,6 +760,10 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		FromAddress: o.treasury.Address(),
 		ToAddress:   recipient, // LiFi delivers straight to the user
 		Slippage:    slippage,
+		// Broadcast immediately by the treasury, not signed by her — must
+		// match ConvertedVenues's admission-time order or this could execute
+		// at a worse cost than what was priced and promised.
+		Order: "CHEAPEST",
 	}
 	bridge := amount // legacy: the full delivery
 	var route *LiFiRoute

@@ -907,6 +907,11 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			FromChainID: s.chainID(src.ChainKey), ToChainID: asset.ChainID,
 			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: asset.Address,
 			FromAddress: s.treasuryAddress, ToAddress: recipient, FromAmount: routeAmount.String(), Slippage: slippage,
+			// The treasury bridges this itself the moment the order settles —
+			// no human signs it — so the cheapest route is safe to take, and
+			// conversion_orchestrator's execution-time quote must ask for the
+			// same order or it could see a different cost than was admitted.
+			Order: "CHEAPEST",
 		}
 		// First pass on T to learn l; then price what the treasury will actually bridge.
 		probe, perr := s.lifi.Quote(ctx, lreq)

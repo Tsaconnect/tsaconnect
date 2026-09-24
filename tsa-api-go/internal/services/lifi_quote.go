@@ -95,6 +95,12 @@ type LiFiQuoteRequest struct {
 	// allowDestinationCall=false, since a destination call can forward funds
 	// anywhere the checked receiver does not name.
 	AllowDestinationCall bool
+	// Order is LiFi's route-selection strategy ("FASTEST" or "CHEAPEST").
+	// Empty defaults to FASTEST. A caller that executes immediately with no
+	// human signing delay (the treasury's own bridging) can ask for CHEAPEST
+	// without risking a route going stale before it is used; a caller whose
+	// route is handed to a human to sign later should leave this unset.
+	Order string
 }
 
 // LiFiQuoteClient is the one shared client for LiFi's /quote endpoint. Both
@@ -184,8 +190,10 @@ type lifiQuoteResponse struct {
 	} `json:"transactionRequest"`
 }
 
-// Quote asks LiFi for one route, priced for immediate execution. order=FASTEST
-// and a tight slippage keep stable-to-stable conversions inside the promise; a
+// Quote asks LiFi for one route, priced for immediate execution. order
+// defaults to FASTEST — paired with a tight slippage, that keeps
+// stable-to-stable conversions inside the promise for a route a human signs
+// later. A caller with no such delay may set req.Order to CHEAPEST instead. A
 // route is never cached, because providers and pools come and go daily.
 func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiRoute, error) {
 	q := url.Values{}
@@ -196,7 +204,11 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 	q.Set("fromAddress", req.FromAddress)
 	q.Set("toAddress", req.ToAddress)
 	q.Set("fromAmount", req.FromAmount)
-	q.Set("order", "FASTEST")
+	order := req.Order
+	if order == "" {
+		order = "FASTEST"
+	}
+	q.Set("order", order)
 	slippage := req.Slippage
 	if slippage <= 0 {
 		slippage = 0.001

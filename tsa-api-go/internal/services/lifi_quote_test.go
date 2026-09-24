@@ -133,6 +133,26 @@ func TestLiFiQuote_DefaultsToStableSlippageAndNoFee(t *testing.T) {
 	}
 }
 
+func TestLiFiQuote_OrderDefaultsToFastestButIsOverridable(t *testing.T) {
+	srv := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("order") != "FASTEST" {
+			t.Errorf("order = %q, want FASTEST when Order is left unset", q.Get("order"))
+		}
+	}, lifiQuoteFixture, 200)
+	if _, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv2 := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("order") != "CHEAPEST" {
+			t.Errorf("order = %q, want CHEAPEST when Order is set explicitly", q.Get("order"))
+		}
+	}, lifiQuoteFixture, 200)
+	if _, err := NewLiFiQuoteClient(srv2.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{Order: "CHEAPEST"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLiFiQuote_UnconfiguredFeeIsItsOwnError(t *testing.T) {
 	srv := lifiQuoteServer(t, nil, `{"message":"Integrator tsa-connect is not configured for collecting fees on chain 56"}`, 400)
 	_, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{FeeBps: 30})
