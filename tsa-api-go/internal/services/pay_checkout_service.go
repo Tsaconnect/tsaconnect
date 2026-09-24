@@ -77,12 +77,6 @@ func payInternal(err error) error {
 	return ErrPayInternal
 }
 
-// ErrSellAttemptMayExist is CreateSellForFiat's answer when it could not prove
-// that no fundable payout order was left behind: a short order it failed to
-// cancel, or an order Paycrest opened that could not be recorded. A caller
-// pairing it with a payment must never hand the payment back.
-var ErrSellAttemptMayExist = errors.New("a payout order may still exist for this attempt")
-
 // payBookkeepingTimeout bounds the writes that record what a provider call just
 // did; sellCancelTimeout is the same 5 s the order service gives its own cancel.
 const payBookkeepingTimeout = sellCancelTimeout

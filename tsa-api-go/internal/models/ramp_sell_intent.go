@@ -155,6 +155,14 @@ func (i *RampSellIntent) Open() bool {
 	return false
 }
 
+// IsDelivery reports a sale that hands a token to someone else's wallet
+// (TSA Pay's crypto route) instead of opening an offramp.
+func (i *RampSellIntent) IsDelivery() bool { return i.DestAddress != "" }
+
+// IsNairaPay reports a sale that pays an exact naira amount to someone else's
+// bank (TSA Pay's naira route).
+func (i *RampSellIntent) IsNairaPay() bool { return i.PayoutFiat != "" }
+
 // Dest is where this sale's swap must deliver: the chain, token and receiver
 // the binding check compares LiFi's status against. An ordinary sale names none
 // of them and lands baseUSDC on baseChainID in her own wallet.

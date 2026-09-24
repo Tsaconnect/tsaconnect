@@ -335,7 +335,7 @@ func (s *PayPaymentService) reconcileIntent(ctx context.Context, p *models.PayPa
 		return s.reconcileStaleOrdering(ctx, p, &in)
 	}
 	age := s.now().Sub(payLockedAt(p))
-	delivery := in.DestAddress != ""
+	delivery := in.IsDelivery()
 	if in.SwapTxHash == nil {
 		// No swap was recorded. For a naira sale nothing has left her wallet that
 		// could reach the merchant, so a cancelled intent frees the payment at
@@ -480,13 +480,13 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 			payAlert("swap_partial", p, "intent", in.ID)
 			return s.failFrom(ctx, p, "the swap only partly completed — support is reviewing it")
 		})
-	case status == LiFiStatusDone && sub == LiFiSubstatusCompleted && in.DestAddress != "" &&
+	case status == LiFiStatusDone && sub == LiFiSubstatusCompleted && in.IsDelivery() &&
 		(in.Status == models.SellIntentSwapped || in.Status == models.SellIntentDelivered):
 		// COMPLETED, on a sale ConfirmDelivery still looks at: the swap finished
 		// between its read and ours, and the merchant WAS paid. Not a failure —
 		// the next tick's proof decides.
 		return nil
-	case status == LiFiStatusDone && in.DestAddress != "":
+	case status == LiFiStatusDone && in.IsDelivery():
 		// A delivery LiFi calls done that ConfirmDelivery cannot prove — not
 		// completed, or a sale already ended: the merchant may have been paid, so
 		// it is never released.
@@ -510,7 +510,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 			return s.failFrom(ctx, p, "the swap is taking too long — support is reviewing it")
 		})
 	default: // NOT_FOUND, INVALID, or no answer
-		if in.DestAddress != "" {
+		if in.IsDelivery() {
 			// A recorded swap LiFi cannot find may still be in the mempool, and a
 			// delivery's pays the merchant when it mines: never released on this,
 			// only failed once a day has passed.
