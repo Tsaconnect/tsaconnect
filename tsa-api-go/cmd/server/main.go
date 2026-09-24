@@ -1567,7 +1567,13 @@ func main() {
 	// blockchainService.
 	// mrh may have just been reassigned above (corporate PM onboarding), so
 	// PayMerchants is wired onto whichever handler instance mrh now holds.
-	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter, payRates, eventBus)
+	// A mailer that has no credentials "sends" by skipping: TSA Pay gets one only
+	// when it can really deliver an owner's payout-change code.
+	var payCodeMailer *services.EmailService
+	if services.MailerConfigured(cfg.MailjetAPIKey, cfg.MailjetSecretKey) {
+		payCodeMailer = emailService
+	}
+	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter, payRates, eventBus, payCodeMailer)
 	if ms := payHandler.MerchantService(); ms != nil {
 		mrh.PayMerchants = ms
 	}

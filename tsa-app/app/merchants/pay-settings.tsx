@@ -2,10 +2,11 @@
 //
 // Where a TSA Pay merchant is paid, read and changed by the merchant. Changing
 // it is the one thing a stolen phone or login would do to redirect a merchant's
-// money, so it asks for the account password (checked by the server) and then
-// PIN or biometric (AuthorizationModal — the app's one unlock path), and the
-// server only accepts a bank account in the business's or the owner's verified
-// name. The owner is told of every change by email and push.
+// money, so it asks for the account password (checked by the server, counted
+// toward the login lockout) and then PIN or biometric (AuthorizationModal — the
+// app's one unlock path). The server only accepts a bank account in the
+// business's or the owner's verified name, and a crypto wallet only once she
+// enters the code it emails her. She is told of every change by email and push.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -22,13 +23,15 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import type { LiFiToken } from '@/services/lifi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import {
-  getOwnMerchant, NAME_MISMATCH, updateSettlement, type OwnMerchant, type SettlementChange, type SettlementMode,
+  confirmSettlement, getOwnMerchant, OWNER_CODES, updateSettlement,
+  type OwnMerchant, type PendingConfirmation, type SettlementChange, type SettlementMode,
 } from '@/services/payMerchantApi';
 import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
 
 type Load = { kind: 'loading' } | { kind: 'none' } | { kind: 'error'; message: string } | { kind: 'ready'; merchant: OwnMerchant };
 
 const errorOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+const codeOf = (e: unknown) => (e as { code?: string } | null)?.code;
 
 export default function PaySettings() {
   const { colors, spacing } = useTheme();
@@ -51,24 +54,42 @@ export default function PaySettings() {
   const [password, setPassword] = useState('');
   const [formError, setFormError] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
+  // A crypto change waiting on the code emailed to her.
+  const [pending, setPending] = useState<PendingConfirmation | null>(null);
+  const [code, setCode] = useState('');
   // A double biometric success must not send the change twice.
   const submitting = useRef(false);
+  // The wallet field is filled once — never again after she clears it.
+  const walletFilled = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const merchant = await getOwnMerchant();
       setLoad({ kind: 'ready', merchant });
       if (merchant.settlementMode) setMode(merchant.settlementMode);
+      if (!walletFilled.current && merchant.walletAddress) {
+        walletFilled.current = true;
+        setWallet(merchant.walletAddress);
+      }
     } catch (e) {
-      const status = (e as { status?: number } | null)?.status;
-      setLoad(status === 404 ? { kind: 'none' } : { kind: 'error', message: errorOf(e, 'Could not load your payment settings.') });
+      // Only the server saying "no merchant" means she has none; any other 404
+      // is the feature being off, not an invitation to apply again.
+      setLoad(codeOf(e) === OWNER_CODES.NO_MERCHANT
+        ? { kind: 'none' }
+        : { kind: 'error', message: errorOf(e, 'Could not load your payment settings.') });
     }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => { getNigerianBanks().then(setBanks).catch(() => {}); }, []);
-  // Her own wallet on this device is the natural place to be paid; she can type another.
-  useEffect(() => { if (address && !wallet) setWallet(address); }, [address, wallet]);
+  // With no crypto destination yet, her own wallet on this device is the natural
+  // place to be paid; she can type another.
+  useEffect(() => {
+    if (address && !walletFilled.current && load.kind === 'ready') {
+      walletFilled.current = true;
+      setWallet(address);
+    }
+  }, [address, load.kind]);
 
   // The bank's own name for the account, shown before she saves: it is what the
   // server will check against her business and verified names.
@@ -92,22 +113,52 @@ export default function PaySettings() {
   );
   const bankName = useCallback((code: string) => banks.find((b) => b.code === code)?.name, [banks]);
 
+  const applied = (merchant: OwnMerchant) => {
+    setLoad({ kind: 'ready', merchant });
+    setPassword('');
+    setAccountNumber('');
+    setPending(null);
+    setCode('');
+    toast.success('Payment settings saved');
+  };
+
   const save = async (change: SettlementChange) => {
-    if (submitting.current) return;
+    if (submitting.current || load.kind !== 'ready') return;
     submitting.current = true;
     setSaving(true);
     setFormError(undefined);
     try {
-      const merchant = await updateSettlement(change, password);
-      setLoad({ kind: 'ready', merchant });
+      const answer = await updateSettlement(change, password, load.merchant.version);
       setPassword('');
-      setAccountNumber('');
-      toast.success('Payment settings saved');
+      if (answer.confirmation) setPending(answer.confirmation);
+      else if (answer.merchant) applied(answer.merchant);
     } catch (e) {
-      const code = (e as { code?: string } | null)?.code;
-      setFormError(code === NAME_MISMATCH && resolvedName
+      const why = codeOf(e);
+      setFormError(why === OWNER_CODES.NAME_MISMATCH && resolvedName
         ? `${errorOf(e, '')} The bank says this account belongs to ${resolvedName}.`
         : errorOf(e, 'Could not save your payment settings.'));
+      if (why === OWNER_CODES.STALE) void refresh();
+    } finally {
+      submitting.current = false;
+      setSaving(false);
+    }
+  };
+
+  const confirm = async () => {
+    if (submitting.current) return;
+    if (!/^\d{6}$/.test(code.trim())) { setFormError('Enter the 6-digit code from your email.'); return; }
+    submitting.current = true;
+    setSaving(true);
+    setFormError(undefined);
+    try {
+      const answer = await confirmSettlement(code);
+      if (answer.merchant) applied(answer.merchant);
+    } catch (e) {
+      const why = codeOf(e);
+      setFormError(errorOf(e, 'Could not confirm the change.'));
+      // Expired, used up, or overtaken by another edit: this code is done.
+      if (why === OWNER_CODES.NO_PENDING || why === OWNER_CODES.STALE) { setPending(null); setCode(''); }
+      if (why === OWNER_CODES.STALE) void refresh();
     } finally {
       submitting.current = false;
       setSaving(false);
@@ -149,7 +200,25 @@ export default function PaySettings() {
           <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
         </Card>
 
-        {suspended ? (
+        {pending ? (
+          <Card style={{ gap: spacing.sm }}>
+            <Text variant="bodyMed" weight="700">Check your email</Text>
+            <Text variant="bodySm">
+              We sent a 6-digit code to {pending.sentTo}. Enter it to confirm the new wallet — nothing changes until you do.
+            </Text>
+            <Input
+              label="Code"
+              value={code}
+              onChangeText={(v) => setCode(v.replace(/\D/g, ''))}
+              keyboardType="number-pad"
+              maxLength={6}
+              placeholder="123456"
+            />
+            {formError ? <Text variant="bodySm" style={{ color: colors.danger }}>{formError}</Text> : null}
+            <Button title="Confirm" onPress={confirm} loading={saving} disabled={saving} fullWidth />
+            <Button title="Cancel" variant="ghost" onPress={() => { setPending(null); setCode(''); setFormError(undefined); }} fullWidth />
+          </Card>
+        ) : suspended ? (
           <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
             <Text variant="bodySm">Your merchant account is suspended. Contact support to change where you are paid.</Text>
           </Card>

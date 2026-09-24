@@ -193,3 +193,33 @@ func (e *PayAuditEvent) BeforeCreate(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+// PaySettlementConfirmation is a merchant owner's crypto payout change waiting
+// on the code emailed to them. A crypto destination has no bank name to check
+// against the owner, so a change made with the account password alone could be
+// a stolen login pointing the merchant's money at the thief's wallet: nothing is
+// written to the merchant until the owner proves they read the owner's email.
+// One per merchant (a new request replaces an older one); deleted once used,
+// exhausted or superseded. BaseVersion is the merchant version the change was
+// requested against, so any edit in between makes the confirmation stale.
+type PaySettlementConfirmation struct {
+	ID            uuid.UUID `gorm:"type:uuid;primaryKey" json:"-"`
+	MerchantID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"-"`
+	OwnerID       uuid.UUID `gorm:"type:uuid;not null" json:"-"`
+	ChainID       int64     `gorm:"not null" json:"-"`
+	TokenAddress  string    `gorm:"size:128;not null" json:"-"`
+	TokenSymbol   string    `gorm:"size:16;not null" json:"-"`
+	WalletAddress string    `gorm:"size:128;not null" json:"-"`
+	BaseVersion   int       `gorm:"not null" json:"-"`
+	CodeHash      string    `gorm:"size:64;not null" json:"-"`
+	Attempts      int       `gorm:"not null;default:0" json:"-"`
+	ExpiresAt     time.Time `gorm:"not null" json:"-"`
+	CreatedAt     time.Time `json:"-"`
+}
+
+func (c *PaySettlementConfirmation) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
+	}
+	return nil
+}

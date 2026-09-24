@@ -8,12 +8,14 @@ import type { OwnMerchant } from '@/services/payMerchantApi';
 const USDC_BASE = { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6, chainId: 8453 } as any;
 const WALLET = '0x52908400098527886E0F7030069857D2E4169EE7';
 
-describe('settlesIn — what a merchant can be paid in', () => {
-  it('an ERC-20 on a chain the app knows', () => {
+describe('settlesIn — what a merchant can pick to be paid in', () => {
+  it('USDC or USDT on a chain the app knows', () => {
     expect(settlesIn(8453, USDC_BASE)).toBe(true);
+    expect(settlesIn(56, { address: '0x55d398326f99059fF775485246999027B3197955', symbol: 'USDT' })).toBe(true);
   });
-  it('never the chain’s own coin, nor a chain the app does not know', () => {
-    expect(settlesIn(8453, { address: '0x0000000000000000000000000000000000000000' })).toBe(false);
+  it('never another token, the chain’s own coin, or a chain the app does not know', () => {
+    expect(settlesIn(8453, { address: '0x4200000000000000000000000000000000000006', symbol: 'WETH' })).toBe(false);
+    expect(settlesIn(8453, { address: '0x0000000000000000000000000000000000000000', symbol: 'USDC' })).toBe(false);
     expect(settlesIn(999_999, USDC_BASE)).toBe(false);
   });
 });
@@ -29,13 +31,14 @@ describe('settlementChangeFrom', () => {
     [{ mode: 'crypto', walletAddress: WALLET }, /token/i],
     [{ mode: 'crypto', token: USDC_BASE, walletAddress: 'not-an-address' }, /wallet address/i],
     [{ mode: 'crypto', token: { ...USDC_BASE, address: '0x0000000000000000000000000000000000000000', symbol: 'ETH' }, walletAddress: WALLET }, /ETH/],
+    [{ mode: 'crypto', token: { ...USDC_BASE, address: '0x4200000000000000000000000000000000000006', symbol: 'WETH' }, walletAddress: WALLET }, /WETH/],
   ])('%#: says what is missing', (form, why) => {
     const out = settlementChangeFrom(form as any);
     expect('missing' in out && out.missing).toMatch(why);
   });
-  it('a complete wallet is sent with the token and chain it was picked on', () => {
+  it('a complete wallet is sent with the token and chain it was picked on — the symbol is the server’s', () => {
     expect(settlementChangeFrom({ mode: 'crypto', token: USDC_BASE, walletAddress: WALLET })).toEqual({
-      change: { settlementMode: 'crypto', chainId: 8453, tokenAddress: USDC_BASE.address, tokenSymbol: 'USDC', walletAddress: WALLET },
+      change: { settlementMode: 'crypto', chainId: 8453, tokenAddress: USDC_BASE.address, walletAddress: WALLET },
     });
   });
 });

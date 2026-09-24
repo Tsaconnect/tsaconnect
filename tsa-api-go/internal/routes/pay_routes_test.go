@@ -199,3 +199,28 @@ func TestPayRoutes_NairaStartRoutesAreAuthedAndDormantSafe(t *testing.T) {
 		}
 	}
 }
+
+// The owner routes are behind the user's session, and changing where the
+// merchant is paid has its own tight limit, so a password cannot be guessed
+// through it however the lockout is configured.
+func TestPayRoutes_OwnerSettlementIsAuthedAndTightlyLimited(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/api/pay/merchant"},
+		{http.MethodPut, "/api/pay/merchant/settlement"},
+		{http.MethodPost, "/api/pay/merchant/settlement/confirm"},
+	} {
+		if w := payRoutesDo(r, rt.method, rt.path, "", map[string]any{}); w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s without a session: %d", rt.method, rt.path, w.Code)
+		}
+	}
+	u := payRoutesUser(t, db, models.RoleUser)
+	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	codes := []int{}
+	for i := 0; i < 6; i++ {
+		codes = append(codes, payRoutesDo(r, http.MethodPut, "/api/pay/merchant/settlement", tok, map[string]any{"password": "x"}).Code)
+	}
+	if codes[5] != http.StatusTooManyRequests {
+		t.Fatalf("codes %v: the sixth change within 15 minutes must be refused", codes)
+	}
+}

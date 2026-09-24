@@ -164,3 +164,20 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 		})
 	}
 }
+
+// A muted user still gets every channel for a payout change: muting needs only a
+// session, so an attacker could otherwise silence the one alert that shows them.
+func TestDeliveryChannels_APayoutChangeCannotBeMuted(t *testing.T) {
+	for _, mute := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
+		if live, email := deliveryChannels(events.SecurityPaySettlementChanged, mute[0], mute[1]); !live || !email {
+			t.Fatalf("mute %v: live=%v email=%v", mute, live, email)
+		}
+	}
+	// Everything else still honours the user's settings.
+	if live, email := deliveryChannels(events.OrderShipped, true, false); live || email {
+		t.Fatalf("muted order event: live=%v email=%v", live, email)
+	}
+	if live, email := deliveryChannels(events.OrderShipped, false, true); !live || email {
+		t.Fatalf("email-muted order event: live=%v email=%v", live, email)
+	}
+}

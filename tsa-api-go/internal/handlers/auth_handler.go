@@ -379,37 +379,16 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Check if account is locked
-	if user.IsLocked() {
+	// A locked account is refused before the password is checked; a wrong
+	// password counts toward the lockout.
+	switch err := checkPasswordWithLockout(config.DB, h.EventBus, &user, req.Password); {
+	case errors.Is(err, errAccountLocked):
 		c.JSON(http.StatusLocked, gin.H{
 			"success": false,
 			"message": "Account is temporarily locked. Try again later.",
 		})
 		return
-	}
-
-	// Compare password
-	if err := user.ComparePassword(req.Password); err != nil {
-		// Increment login attempts
-		attempts, lockUntil := user.IncrementLoginAttempts()
-		updates := map[string]interface{}{
-			"login_attempts": attempts,
-			"updated_at":     time.Now(),
-		}
-		if lockUntil != nil {
-			updates["lock_until"] = lockUntil
-			h.EventBus.Publish(events.Event{
-				Type:    events.SecurityAccountLocked,
-				UserID:  user.ID,
-				Title:   "Account Locked",
-				Message: "Your account has been temporarily locked due to multiple failed login attempts",
-				Data: map[string]interface{}{
-					"attempts": attempts,
-				},
-			})
-		}
-		config.DB.Model(&user).Updates(updates)
-
+	case err != nil:
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "Invalid credentials",
@@ -631,38 +610,16 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
-	// 1. Check if account is locked
-	if user.IsLocked() {
+	// 1-2. A locked account is refused; a wrong password counts toward the
+	// lockout (protects against brute-force).
+	switch err := checkPasswordWithLockout(config.DB, h.EventBus, &user, req.Password); {
+	case errors.Is(err, errAccountLocked):
 		c.JSON(http.StatusLocked, gin.H{
 			"success": false,
 			"message": "Account is temporarily locked. Try again later.",
 		})
 		return
-	}
-
-	// 2. Compare password and increment login attempts on failure (protects against brute-force)
-	if err := user.ComparePassword(req.Password); err != nil {
-		attempts, lockUntil := user.IncrementLoginAttempts()
-		updates := map[string]interface{}{
-			"login_attempts": attempts,
-			"updated_at":     time.Now(),
-		}
-		if lockUntil != nil {
-			updates["lock_until"] = lockUntil
-			if h.EventBus != nil {
-				h.EventBus.Publish(events.Event{
-					Type:    events.SecurityAccountLocked,
-					UserID:  user.ID,
-					Title:   "Account Locked",
-					Message: "Your account has been temporarily locked due to multiple failed login attempts",
-					Data: map[string]interface{}{
-						"attempts": attempts,
-					},
-				})
-			}
-		}
-		config.DB.Model(&user).Updates(updates)
-
+	case err != nil:
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "Invalid credentials",

@@ -44,7 +44,11 @@ jest.mock('@/components/common/AuthorizationModal', () => ({
   __esModule: true,
   default: (props: any) => { mockAuthorization.props = props; return null; },
 }));
-jest.mock('@/components/assets/AssetPicker', () => ({ __esModule: true, default: () => null }));
+const mockAssetPicker: { props: any } = { props: {} };
+jest.mock('@/components/assets/AssetPicker', () => ({
+  __esModule: true,
+  default: (props: any) => { mockAssetPicker.props = props; return null; },
+}));
 jest.mock('@/hooks/useSignableWallet', () => ({ __esModule: true, useSignableWallet: () => ({ address: '0xPayer' }) }));
 jest.mock('@/services/ngBanks', () => ({
   __esModule: true,
@@ -53,18 +57,19 @@ jest.mock('@/services/ngBanks', () => ({
 }));
 jest.mock('@/services/payMerchantApi', () => ({
   __esModule: true,
-  NAME_MISMATCH: 'name_mismatch',
+  OWNER_CODES: jest.requireActual('@/services/payMerchantApi').OWNER_CODES,
   getOwnMerchant: jest.fn(),
   updateSettlement: jest.fn(),
+  confirmSettlement: jest.fn(),
 }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
-import { getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
+import { confirmSettlement, getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
 import PaySettings from '../pay-settings';
 
 const merchant = {
-  id: 'm1', businessName: 'Sky Air', status: 'active', settlementMode: 'fiat',
+  id: 'm1', businessName: 'Sky Air', status: 'active', version: 7, settlementMode: 'fiat',
   bankCode: '044', accountNumber: '******6789', accountName: 'SKY AIR LTD',
 } as OwnMerchant;
 
@@ -105,19 +110,59 @@ it('shows where she is paid today', async () => {
 });
 
 it('sends nothing until PIN/biometric, then the change she entered with her password', async () => {
-  jest.mocked(updateSettlement).mockResolvedValue({ ...merchant, accountNumber: '******3210' });
+  jest.mocked(updateSettlement).mockResolvedValue({ merchant: { ...merchant, accountNumber: '******3210' } });
   const tree = await mount();
   await fillBankChange(tree, 'correct-horse');
   await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
   expect(updateSettlement).not.toHaveBeenCalled();
   expect(mockAuthorization.props.visible).toBe(true);
 
-  await act(async () => { mockAuthorization.props.onAuthorized(); });
+  // A double biometric success must still send one change.
+  await act(async () => { mockAuthorization.props.onAuthorized(); mockAuthorization.props.onAuthorized(); });
   await flush();
   expect(updateSettlement).toHaveBeenCalledTimes(1);
   expect(updateSettlement).toHaveBeenCalledWith(
-    { settlementMode: 'fiat', bankCode: '044', accountNumber: '9876543210' }, 'correct-horse');
+    { settlementMode: 'fiat', bankCode: '044', accountNumber: '9876543210' }, 'correct-horse', 7);
   expect(mockToast.success).toHaveBeenCalled();
+});
+
+it('a wallet waits for the emailed code, and only the code applies it', async () => {
+  jest.mocked(updateSettlement).mockResolvedValue({ confirmation: { expiresAt: '2026-09-24T15:00:00Z', sentTo: 'o***@skyair.ng' } });
+  jest.mocked(confirmSettlement).mockResolvedValue({
+    merchant: { ...merchant, settlementMode: 'crypto', chainId: 8453, tokenSymbol: 'USDC', walletAddress: '0x52908400098527886E0F7030069857D2E4169EE7' },
+  });
+  const tree = await mount();
+  await act(async () => { byLabel(tree, 'segment:crypto').props.onPress(); });
+  await act(async () => {
+    mockAssetPicker.props.onSelect({ address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 }, 8453);
+  });
+  await act(async () => { byLabel(tree, 'input:Wallet address').props.onChangeText('0x52908400098527886E0F7030069857D2E4169EE7'); });
+  await act(async () => { byLabel(tree, 'input:Account password').props.onChangeText('correct-horse'); });
+  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
+  await act(async () => { mockAuthorization.props.onAuthorized(); });
+  await flush();
+  expect(updateSettlement).toHaveBeenCalledWith({
+    settlementMode: 'crypto', chainId: 8453, tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    walletAddress: '0x52908400098527886E0F7030069857D2E4169EE7',
+  }, 'correct-horse', 7);
+  expect(text(tree)).toContain('o***@skyair.ng');
+  expect(mockToast.success).not.toHaveBeenCalled();
+
+  await act(async () => { byLabel(tree, 'input:Code').props.onChangeText('123456'); });
+  await act(async () => { byLabel(tree, 'button:Confirm').props.onPress(); });
+  await flush();
+  expect(confirmSettlement).toHaveBeenCalledWith('123456');
+  expect(mockToast.success).toHaveBeenCalled();
+  expect(text(tree)).toContain('USDC on Base to 0x5290…9EE7');
+});
+
+it('only the server saying "no merchant" sends her to apply', async () => {
+  jest.mocked(getOwnMerchant).mockRejectedValue(Object.assign(new Error('Payment settings are not available right now.'), { status: 404 }));
+  let tree = await mount();
+  expect(text(tree)).toContain('Could not load your payment settings');
+  jest.mocked(getOwnMerchant).mockRejectedValue(Object.assign(new Error('none'), { status: 404, code: 'no_merchant' }));
+  tree = await mount();
+  expect(text(tree)).toContain('No TSA Pay account');
 });
 
 it('asks for the password before anything else', async () => {

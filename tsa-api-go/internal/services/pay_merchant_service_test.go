@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,16 @@ func TestPayMerchant_CreateFromRequestIsIdempotent(t *testing.T) {
 type fakePayChains map[int64]string
 
 func (f fakePayChains) MainnetChainNameForID(id int64) (string, bool) { n, ok := f[id]; return n, ok }
+
+// fakePayListedTokens is the stablecoin listing the fake registry answers with.
+var fakePayListedTokens = map[string]string{
+	"base:USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+	"bsc:USDT":  "0x55d398326f99059fF775485246999027B3197955",
+}
+
+func (f fakePayChains) TokenAddress(chain, symbol string) string {
+	return fakePayListedTokens[chain+":"+symbol]
+}
 
 func payStr(s string) *string { return &s }
 func payInt(i int) *int       { return &i }
@@ -524,19 +535,53 @@ func TestPayMerchant_UpdateRefusesAChainNoDeliveryCouldBeConfirmedOn(t *testing.
 
 // ---- a merchant changing their own settlement ----
 
-// ownedMerchant is a merchant approved for owner, whose verified legal name is
-// legalName ("" = not KYC-verified).
-func ownedMerchant(t *testing.T, legalName string) (*PayMerchantService, *fakePayBanks, *models.PayMerchant, uuid.UUID) {
+// fakeCodeMailer records the one email a crypto payout change sends.
+type fakeCodeMailer struct {
+	to, message string
+	sent        int
+	err         error
+}
+
+func (f *fakeCodeMailer) Send(to, _, _, _, message, _, _ string) error {
+	f.to, f.message = to, message
+	f.sent++
+	return f.err
+}
+
+// code is the six digits in the last email.
+func (f *fakeCodeMailer) code(t *testing.T) string {
+	t.Helper()
+	m := regexp.MustCompile(`\b\d{6}\b`).FindString(f.message)
+	if m == "" {
+		t.Fatalf("no code in %q", f.message)
+	}
+	return m
+}
+
+type ownerFixture struct {
+	s     *PayMerchantService
+	banks *fakePayBanks
+	mail  *fakeCodeMailer
+	m     *models.PayMerchant
+	owner uuid.UUID
+}
+
+// ownedMerchant is a merchant approved for an owner whose KYC status and legal
+// name are as given (status "" = never verified; legalName "NULL" = the column
+// is NULL, as on rows that predate it).
+func ownedMerchant(t *testing.T, status, legalName string) *ownerFixture {
 	t.Helper()
 	s, banks := newPayMerchantSvc(t)
-	s.chains = fakePayChains{8453: "base"}
+	s.chains = fakePayChains{8453: "base", 56: "bsc"}
+	mail := &fakeCodeMailer{}
+	s.SetMailer(mail)
 	owner := uuid.New()
-	status := models.VerificationStatusVerified
-	if legalName == "" {
-		status = "pending"
+	var legal any = legalName
+	if legalName == "NULL" {
+		legal = nil
 	}
 	if err := s.db.Exec(`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?)`,
-		owner, "typed at signup", owner.String()+"@test.com", "0x000000000000000000000000000000000000dEaD", status, legalName).Error; err != nil {
+		owner, "typed at signup", "owner@skyair.ng", "0x000000000000000000000000000000000000dEaD", status, legal).Error; err != nil {
 		t.Fatal(err)
 	}
 	req := payRequest()
@@ -545,85 +590,243 @@ func ownedMerchant(t *testing.T, legalName string) (*PayMerchantService, *fakePa
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, banks, m, owner
+	return &ownerFixture{s: s, banks: banks, mail: mail, m: m, owner: owner}
 }
 
 func bankChange(account string) PaySettlementChange {
 	return PaySettlementChange{SettlementMode: models.PaySettlementFiat, BankCode: "044", AccountNumber: account}
 }
 
+const (
+	ownerBaseUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	ownerWallet   = "0x52908400098527886E0F7030069857D2E4169EE7"
+)
+
+func walletChange() PaySettlementChange {
+	return PaySettlementChange{SettlementMode: models.PaySettlementCrypto, ChainID: 8453, TokenAddress: ownerBaseUSDC, WalletAddress: ownerWallet}
+}
+
+func (f *ownerFixture) stored(t *testing.T) *models.PayMerchant {
+	t.Helper()
+	m, err := f.s.Get(context.Background(), f.m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 func TestPayMerchant_OwnerSettlementToAnAccountInTheBusinessName(t *testing.T) {
-	ctx := context.Background()
-	s, banks, m, owner := ownedMerchant(t, "")
-	banks.name = "SKY AIR LIMITED"
-	got, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210"))
-	if err != nil || got.AccountNumber != "9876543210" || got.BankCode != "044" || got.AccountName != "SKY AIR LIMITED" {
-		t.Fatalf("err %v merchant %+v", err, got)
+	f := ownedMerchant(t, "", "")
+	f.banks.name = "SKY AIR LIMITED"
+	res, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, bankChange("9876543210"))
+	if err != nil || !res.Changed || res.Pending != nil || res.Merchant.AccountNumber != "9876543210" || res.Merchant.AccountName != "SKY AIR LIMITED" {
+		t.Fatalf("err %v result %+v", err, res)
 	}
 	var audit models.PayAuditEvent
-	if err := s.db.Where("merchant_id = ?", m.ID).Order("created_at desc").First(&audit).Error; err != nil || audit.ActorID != owner {
+	if err := f.s.db.Where("merchant_id = ?", f.m.ID).Order("created_at desc").First(&audit).Error; err != nil || audit.ActorID != f.owner {
 		t.Fatalf("audit %+v err %v: the owner's change must be audited as theirs", audit, err)
 	}
 }
 
 func TestPayMerchant_OwnerSettlementToAnAccountInTheirVerifiedName(t *testing.T) {
-	s, banks, _, owner := ownedMerchant(t, "Ada Chioma Obi")
-	banks.name = "OBI ADA"
-	if _, err := s.UpdateSettlementByOwner(context.Background(), owner, bankChange("9876543210")); err != nil {
+	f := ownedMerchant(t, models.VerificationStatusVerified, "Ada Chioma Obi")
+	f.banks.name = "OBI ADA" // the bank dropped her middle name
+	if _, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, bankChange("9876543210")); err != nil {
 		t.Fatalf("an account in her verified name was refused: %v", err)
 	}
 }
 
-func TestPayMerchant_OwnerSettlementRefusesAnAccountInSomeoneElsesName(t *testing.T) {
-	for name, legal := range map[string]string{"KYC-verified": "Ada Chioma Obi", "not verified": ""} {
+func TestPayMerchant_OwnerSettlementRefusesAnAccountThatIsNotTheirs(t *testing.T) {
+	for name, tc := range map[string]struct{ status, legal, bank string }{
+		"someone else's name":                                 {models.VerificationStatusVerified, "Ada Chioma Obi", "EMEKA NWOSU"},
+		"a longer business name that contains theirs":         {"", "", "SKY AIR CARGO LIMITED"},
+		"their own name padded with another's":                {models.VerificationStatusVerified, "Ada Obi", "ADA OBI EMEKA"},
+		"a verification that was rejected keeps no authority": {"rejected", "Emeka Nwosu", "EMEKA NWOSU"},
+		"a legal name column that is NULL is simply no match": {models.VerificationStatusVerified, "NULL", "EMEKA NWOSU"},
+	} {
 		t.Run(name, func(t *testing.T) {
-			ctx := context.Background()
-			s, banks, m, owner := ownedMerchant(t, legal)
-			banks.name = "EMEKA NWOSU"
-			if _, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210")); !errors.Is(err, ErrPaySettlementNameMismatch) {
-				t.Fatalf("err = %v", err)
+			f := ownedMerchant(t, tc.status, tc.legal)
+			f.banks.name = tc.bank
+			if _, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, bankChange("9876543210")); !errors.Is(err, ErrPaySettlementNameMismatch) {
+				t.Fatalf("err = %v, want a name mismatch", err)
 			}
-			stored, _ := s.Get(ctx, m.ID)
-			if stored.AccountNumber == "9876543210" || stored.Version != m.Version {
-				t.Fatalf("a refused change landed: %+v", stored)
+			if got := f.stored(t); got.AccountNumber == "9876543210" || got.Version != f.m.Version {
+				t.Fatalf("a refused change landed: %+v", got)
 			}
 		})
 	}
 }
 
-func TestPayMerchant_OwnerSettlementToAWallet(t *testing.T) {
-	s, _, _, owner := ownedMerchant(t, "")
-	got, err := s.UpdateSettlementByOwner(context.Background(), owner, PaySettlementChange{
-		SettlementMode: models.PaySettlementCrypto, ChainID: 8453,
-		TokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", TokenSymbol: "USDC",
-		WalletAddress: "0x52908400098527886E0F7030069857D2E4169EE7",
-	})
-	if err != nil || got.SettlementMode != models.PaySettlementCrypto || got.ChainID != 8453 {
-		t.Fatalf("err %v merchant %+v", err, got)
+func TestPayMerchant_OwnerSettlementHidesTheBanksOwnWords(t *testing.T) {
+	f := ownedMerchant(t, "", "")
+	f.banks.err = errors.New("nomba: 401 upstream token expired")
+	_, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, bankChange("9876543210"))
+	if !errors.Is(err, ErrPayAccountUnverifiable) || !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("err = %v: an unresolvable account must be told apart from other refusals", err)
 	}
-	// The chain rules still apply: a chain no delivery can be proven on is refused.
-	if _, err := s.UpdateSettlementByOwner(context.Background(), owner, PaySettlementChange{
-		SettlementMode: models.PaySettlementCrypto, ChainID: 999, TokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-		TokenSymbol: "USDC", WalletAddress: "0x52908400098527886E0F7030069857D2E4169EE7",
-	}); !errors.Is(err, ErrPayMerchantInvalid) {
-		t.Fatalf("unsupported chain: err = %v", err)
+}
+
+func TestPayMerchant_OwnerWalletChangeWaitsForTheEmailedCode(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	res, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+	if err != nil || res.Pending == nil || res.Changed {
+		t.Fatalf("err %v result %+v", err, res)
+	}
+	if got := f.stored(t); got.SettlementMode == models.PaySettlementCrypto || got.Version != f.m.Version {
+		t.Fatalf("the wallet was applied before the code was entered: %+v", got)
+	}
+	if f.mail.sent != 1 || f.mail.to != "owner@skyair.ng" || res.Pending.SentTo != "o***@skyair.ng" ||
+		!strings.Contains(f.mail.message, "0x5290…9EE7") {
+		t.Fatalf("mail %+v pending %+v", f.mail, res.Pending)
+	}
+	wrong := "000000"
+	if f.mail.code(t) == wrong {
+		wrong = "111111"
+	}
+	if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, wrong); !errors.Is(err, ErrPaySettlementCodeInvalid) {
+		t.Fatalf("a wrong code: err = %v", err)
+	}
+	m, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t))
+	if err != nil || m.SettlementMode != models.PaySettlementCrypto || m.WalletAddress != ownerWallet || m.TokenSymbol != "USDC" {
+		t.Fatalf("err %v merchant %+v", err, m)
+	}
+	if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+		t.Fatalf("a used code: err = %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerWalletCodeRefusals(t *testing.T) {
+	ctx := context.Background()
+	t.Run("too many wrong codes end the change", func(t *testing.T) {
+		f := ownedMerchant(t, "", "")
+		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		wrong := "000000"
+		if f.mail.code(t) == wrong {
+			wrong = "111111"
+		}
+		for i := 0; i < paySettlementCodeAttempts; i++ {
+			if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, wrong); !errors.Is(err, ErrPaySettlementCodeInvalid) {
+				t.Fatalf("attempt %d: err = %v", i, err)
+			}
+		}
+		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+			t.Fatalf("the right code after the attempts ran out: err = %v", err)
+		}
+	})
+	t.Run("an expired code", func(t *testing.T) {
+		f := ownedMerchant(t, "", "")
+		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		f.s.now = func() time.Time { return payTestNow.Add(paySettlementCodeTTL) }
+		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPaySettlementNoPending) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("an edit since the request makes it stale", func(t *testing.T) {
+		f := ownedMerchant(t, "", "")
+		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		if _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.s.ConfirmSettlementByOwner(ctx, f.owner, f.mail.code(t)); !errors.Is(err, ErrPayMerchantStale) {
+			t.Fatalf("err = %v", err)
+		}
+		if f.stored(t).SettlementMode == models.PaySettlementCrypto {
+			t.Fatal("a stale confirmation applied the wallet")
+		}
+	})
+	t.Run("another user's code is no code", func(t *testing.T) {
+		f := ownedMerchant(t, "", "")
+		f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+		if _, err := f.s.ConfirmSettlementByOwner(ctx, uuid.New(), f.mail.code(t)); !errors.Is(err, ErrPayMerchantNotFound) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("no way to send a code refuses the change and leaves nothing waiting", func(t *testing.T) {
+		f := ownedMerchant(t, "", "")
+		f.mail.err = errors.New("smtp down")
+		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPaySettlementConfirmUnavailable) {
+			t.Fatalf("err = %v", err)
+		}
+		var n int64
+		f.s.db.Model(&models.PaySettlementConfirmation{}).Count(&n)
+		if n != 0 {
+			t.Fatalf("%d changes left waiting on a code nobody received", n)
+		}
+		f.s.SetMailer(nil)
+		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange()); !errors.Is(err, ErrPaySettlementConfirmUnavailable) {
+			t.Fatalf("no mailer: err = %v", err)
+		}
+	})
+}
+
+func TestPayMerchant_OwnerWalletIsAListedStablecoinWithItsListedSymbol(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	for name, ch := range map[string]PaySettlementChange{
+		"a token that isn't listed":            {SettlementMode: "crypto", ChainID: 8453, TokenAddress: "0x4200000000000000000000000000000000000006", WalletAddress: ownerWallet},
+		"a listed token on the wrong chain":    {SettlementMode: "crypto", ChainID: 56, TokenAddress: ownerBaseUSDC, WalletAddress: ownerWallet},
+		"a chain no delivery can be proven on": {SettlementMode: "crypto", ChainID: 999, TokenAddress: ownerBaseUSDC, WalletAddress: ownerWallet},
+	} {
+		if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, ch); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	var pending models.PaySettlementConfirmation
+	f.s.UpdateSettlementByOwner(ctx, f.owner, walletChange())
+	f.s.db.First(&pending)
+	if pending.TokenSymbol != "USDC" {
+		t.Fatalf("symbol %q: it is the listing's, never the caller's", pending.TokenSymbol)
+	}
+}
+
+func TestPayMerchant_OwnerSettlementToWhereTheyArePaidAlreadyChangesNothing(t *testing.T) {
+	f := ownedMerchant(t, "", "")
+	f.banks.name = "SKY AIR LTD"
+	same := PaySettlementChange{SettlementMode: models.PaySettlementFiat, BankCode: f.m.BankCode, AccountNumber: f.m.AccountNumber}
+	res, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, same)
+	if err != nil || res.Changed || res.Pending != nil {
+		t.Fatalf("err %v result %+v", err, res)
+	}
+	var audits int64
+	f.s.db.Model(&models.PayAuditEvent{}).Where("merchant_id = ?", f.m.ID).Count(&audits)
+	if got := f.stored(t); got.Version != f.m.Version || audits != 0 {
+		t.Fatalf("a no-op wrote version %d and %d audit rows", got.Version, audits)
 	}
 }
 
 func TestPayMerchant_OwnerSettlementRefusals(t *testing.T) {
 	ctx := context.Background()
-	s, banks, m, owner := ownedMerchant(t, "")
-	banks.name = "SKY AIR LTD"
-	if _, err := s.UpdateSettlementByOwner(ctx, uuid.New(), bankChange("9876543210")); !errors.Is(err, ErrPayMerchantNotFound) {
+	f := ownedMerchant(t, "", "")
+	f.banks.name = "SKY AIR LTD"
+	if _, err := f.s.UpdateSettlementByOwner(ctx, uuid.New(), bankChange("9876543210")); !errors.Is(err, ErrPayMerchantNotFound) {
 		t.Fatalf("someone else's change: err = %v", err)
 	}
-	if _, err := s.UpdateSettlementByOwner(ctx, owner, PaySettlementChange{SettlementMode: ""}); !errors.Is(err, ErrPayMerchantInvalid) {
+	if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, PaySettlementChange{SettlementMode: ""}); !errors.Is(err, ErrPayMerchantInvalid) {
 		t.Fatalf("unconfiguring: err = %v", err)
 	}
-	if err := s.db.Model(m).Update("status", models.PayMerchantSuspended).Error; err != nil {
+	stale := f.m.Version - 1
+	ch := bankChange("9876543210")
+	ch.ExpectedVersion = &stale
+	if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, ch); !errors.Is(err, ErrPayMerchantStale) {
+		t.Fatalf("from a stale screen: err = %v", err)
+	}
+	if err := f.s.db.Model(f.m).Update("status", models.PayMerchantSuspended).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210")); !errors.Is(err, ErrPayMerchantSuspended) {
+	if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, bankChange("9876543210")); !errors.Is(err, ErrPayMerchantSuspended) {
 		t.Fatalf("suspended: err = %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerWithTwoMerchantsIsRefusedNotGuessed(t *testing.T) {
+	f := ownedMerchant(t, "", "")
+	second := payRequest()
+	second.ID, second.UserID = uuid.New(), f.owner
+	if _, err := f.s.CreateFromRequest(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.GetByOwner(context.Background(), f.owner); !errors.Is(err, ErrPayMerchantAmbiguous) {
+		t.Fatalf("err = %v", err)
 	}
 }

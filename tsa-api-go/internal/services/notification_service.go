@@ -105,6 +105,24 @@ var pushEvents = map[string]bool{
 	events.TPLevelUp: true,
 }
 
+// unmutableEvents are delivered on every channel whatever the user's mute
+// settings: an alert a stolen session could first silence (muting needs only
+// the session) protects nothing. Kept to the changes an attacker would make to
+// take money, and would want the owner not to see.
+var unmutableEvents = map[string]bool{
+	events.SecurityPaySettlementChanged: true,
+}
+
+// deliveryChannels is whether an event reaches the user live (socket and push)
+// and by email, given their mute settings. The notification row is written
+// either way.
+func deliveryChannels(eventType string, muteAll, muteEmail bool) (live, email bool) {
+	if unmutableEvents[eventType] {
+		return true, true
+	}
+	return !muteAll, !muteAll && !muteEmail
+}
+
 // pushWorthy reports whether an event type should also be delivered as a push.
 func pushWorthy(eventType string) bool { return pushEvents[eventType] }
 
@@ -159,8 +177,10 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		return
 	}
 
+	live, byEmail := deliveryChannels(event.Type, user.MuteNotifications, user.MuteEmail)
+
 	// Push via WebSocket (unless muted)
-	if !user.MuteNotifications {
+	if live {
 		wsPayload, _ := json.Marshal(map[string]interface{}{
 			"id":        notification.ID,
 			"type":      notification.Type,
@@ -178,7 +198,7 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	// Email delivery (if applicable and not muted).
-	if !user.MuteNotifications && !user.MuteEmail && user.Email != "" && ns.emailService != nil {
+	if byEmail && user.Email != "" && ns.emailService != nil {
 		switch {
 		case p2pTradeEmailEvents[event.Type]:
 			// Rich, role-aware P2P trade email (loads the trade + composes per

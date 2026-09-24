@@ -40,7 +40,7 @@ const tsaPayMinMasterKeyBytes = 32
 // next one (see internal/jobs's package doc on idempotent workers).
 func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler,
 	orders *services.PaycrestOrderService, intents *services.SellIntentService, quoter *services.RampSellQuoter,
-	rates *services.PaycrestQuoteService, bus *events.Bus) *handlers.PayHandler {
+	rates *services.PaycrestQuoteService, bus *events.Bus, mailer *services.EmailService) *handlers.PayHandler {
 	if !cfg.TSAPayEnabled {
 		log.Printf("[tsa-pay] dormant: TSA_PAY_ENABLED is not set")
 		return nil
@@ -59,6 +59,11 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	}
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
+	if mailer != nil {
+		// An owner's crypto payout change waits on a code emailed to them; with
+		// no working mailer those changes are refused rather than left waiting.
+		merchants.SetMailer(mailer)
+	}
 	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)
 	if chains != nil {
 		// Proves an expired order's deposit address is empty before its payment is

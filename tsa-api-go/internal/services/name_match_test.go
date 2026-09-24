@@ -321,24 +321,42 @@ func FuzzNameMatchAccountName(f *testing.F) {
 	})
 }
 
-func TestMatchBusinessAccountName(t *testing.T) {
+func TestAccountNameWithin(t *testing.T) {
 	for _, tc := range []struct {
-		a, b string
-		want bool
+		ref, bank string
+		want      bool
 	}{
-		{"SKY AIR LTD", "Sky Air Limited", true},      // company suffix spellings
-		{"SKY AIR LTD", "Sky Air", true},              // suffix dropped entirely
-		{"OBI ADA CHIOMA", "Ada Chioma Obi", true},    // word order
-		{"ADA OBI", "Ada Chioma Obi", true},           // a middle name on one side
-		{"SKY-AIR NIG. LTD", "Sky Air Nig Ltd", true}, // punctuation
-		{"SKY AIR LTD", "Sky Airways Ltd", false},     // a different name
-		{"ADA", "Ada Obi", false},                     // one word proves nothing
-		{"ADA OBI", "Ada Okafor", false},              // a shared first name is not a match
-		{"", "Sky Air", false},                        // nothing to match
-		{"LIMITED", "Sky Air Limited", false},         // only a suffix
+		{"Ada Chioma Obi", "OBI ADA CHIOMA", true}, // same name, any order
+		{"Ada Chioma Obi", "ADA OBI", true},        // the bank dropped a middle name
+		{"Ada Obi", "ADA CHIOMA OBI", false},       // the bank's name is LONGER: someone else can be
+		{"Ada Chioma Obi", "ADA", false},           // one word proves nothing
+		{"Ada Obi", "ADA OKAFOR", false},           // a shared first name is not a match
+		{"Ada", "ADA", true},                       // a one-word name matches only itself
+		{"", "ADA OBI", false},                     // no reference name at all
+		{"Ada Obi", "", false},                     // the bank resolved nothing
 	} {
-		if got := MatchBusinessAccountName(tc.a, tc.b).IsMatch(); got != tc.want {
-			t.Errorf("MatchBusinessAccountName(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		if got := AccountNameWithin(tc.ref, tc.bank); got != tc.want {
+			t.Errorf("AccountNameWithin(%q, %q) = %v, want %v", tc.ref, tc.bank, got, tc.want)
+		}
+	}
+}
+
+func TestBusinessAccountNameWithin(t *testing.T) {
+	for _, tc := range []struct {
+		business, bank string
+		want           bool
+	}{
+		{"Sky Air Limited", "SKY AIR LTD", true},              // suffix spellings
+		{"Sky Air", "SKY AIR LTD", true},                      // a suffix the registration left off
+		{"SKY-AIR NIG. LTD", "Sky Air Nig Ltd", true},         // punctuation
+		{"Sky Air Nigeria Ltd", "SKY AIR", true},              // the bank printed a shorter trading name
+		{"Sky Air Ltd", "SKY AIR CARGO LTD", false},           // a longer name containing ours: an impostor
+		{"Sky Air", "SKY AIR EMEKA NWOSU ENTERPRISES", false}, // ditto
+		{"Sky Air Ltd", "SKY AIRWAYS LTD", false},             // a different name
+		{"Sky Air Limited", "LIMITED", false},                 // only a suffix
+	} {
+		if got := BusinessAccountNameWithin(tc.business, tc.bank); got != tc.want {
+			t.Errorf("BusinessAccountNameWithin(%q, %q) = %v, want %v", tc.business, tc.bank, got, tc.want)
 		}
 	}
 }

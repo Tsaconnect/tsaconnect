@@ -14,11 +14,11 @@ import (
 
 func TestBuildTSAPay_DormantUnlessEnabledAndKeyed(t *testing.T) {
 	sched := jobs.NewScheduler()
-	if h := buildTSAPay(&config.Config{TSAPayEnabled: false}, nil, nil, nil, sched, nil, nil, nil, nil, nil); h != nil {
+	if h := buildTSAPay(&config.Config{TSAPayEnabled: false}, nil, nil, nil, sched, nil, nil, nil, nil, nil, nil); h != nil {
 		t.Fatal("disabled TSA Pay built a handler")
 	}
 	t.Setenv("PAYCREST_SENDER_FEE_PERCENT", "1")
-	if h := buildTSAPay(&config.Config{TSAPayEnabled: true, TSAPayWebhookMasterKey: "abcd"}, nil, nil, nil, sched, nil, nil, nil, nil, nil); h != nil {
+	if h := buildTSAPay(&config.Config{TSAPayEnabled: true, TSAPayWebhookMasterKey: "abcd"}, nil, nil, nil, sched, nil, nil, nil, nil, nil, nil); h != nil {
 		t.Fatal("a short master key must leave TSA Pay dormant")
 	}
 	if sched.Count() != 0 {
@@ -39,7 +39,7 @@ func TestBuildTSAPay_LiveRegistersTheWebhookAndReconcilerWorkers(t *testing.T) {
 	sched := jobs.NewScheduler()
 	cfg := &config.Config{TSAPayEnabled: true, TSAPayWebhookMasterKey: strings.Repeat("ab", 32)}
 
-	h := buildTSAPay(cfg, db, nil, nil, sched, nil, nil, nil, nil, nil)
+	h := buildTSAPay(cfg, db, nil, nil, sched, nil, nil, nil, nil, nil, nil)
 	if h == nil {
 		t.Fatal("a valid config left TSA Pay dormant")
 	}

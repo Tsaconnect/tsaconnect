@@ -10,14 +10,19 @@ import { getChainByChainId } from '@/constants/chains';
 import { isNativeTokenAddress, type LiFiToken } from '@/services/lifi';
 import type { OwnMerchant, SettlementChange } from '@/services/payMerchantApi';
 
+/** What a merchant can choose to be paid in themselves; anything else is an admin's call. */
+export const OWNER_SETTLEMENT_SYMBOLS = ['USDC', 'USDT'];
+
 /**
- * A token the merchant can be paid in: an ERC-20 on an EVM chain this app knows.
- * The chain's own coin is not offered — a delivery is proven from the token's
- * Transfer log, which a native coin does not have.
+ * A token the merchant can pick: USDC or USDT on an EVM chain this app knows.
+ * The server holds the choice to the listed contract on that chain (a token
+ * merely CALLED "USDC" is refused there), and never a native coin — a delivery
+ * is proven from the token's Transfer log, which a native coin does not have.
  */
-export function settlesIn(chainId: number, token?: Pick<LiFiToken, 'address'>): boolean {
+export function settlesIn(chainId: number, token?: Pick<LiFiToken, 'address' | 'symbol'>): boolean {
   if (!getChainByChainId(chainId)) return false;
-  return !token || !isNativeTokenAddress(token.address);
+  if (!token) return true;
+  return !isNativeTokenAddress(token.address) && OWNER_SETTLEMENT_SYMBOLS.includes(token.symbol?.toUpperCase());
 }
 
 export type SettlementForm =
@@ -36,12 +41,7 @@ export function settlementChangeFrom(form: SettlementForm): { change: Settlement
   if (!form.token) return { missing: 'Choose the token you want to be paid in.' };
   if (!settlesIn(form.token.chainId, form.token)) return { missing: `You can't be paid in ${form.token.symbol} on that network.` };
   if (!ethers.isAddress(wallet)) return { missing: 'Enter a valid wallet address.' };
-  return {
-    change: {
-      settlementMode: 'crypto', chainId: form.token.chainId, tokenAddress: form.token.address,
-      tokenSymbol: form.token.symbol, walletAddress: wallet,
-    },
-  };
+  return { change: { settlementMode: 'crypto', chainId: form.token.chainId, tokenAddress: form.token.address, walletAddress: wallet } };
 }
 
 const shortAddress = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);

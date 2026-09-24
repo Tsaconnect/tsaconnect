@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
@@ -130,4 +132,48 @@ func claimWalletTx(db *gorm.DB, user *models.User, claimed string) error {
 		}
 		return nil
 	})
+}
+
+var (
+	// errAccountLocked: the account is locked out after repeated wrong passwords.
+	errAccountLocked = errors.New("account is temporarily locked")
+	// errPasswordIncorrect: the password did not match.
+	errPasswordIncorrect = errors.New("incorrect password")
+)
+
+// checkPasswordWithLockout is the one password check that counts toward the
+// login lockout: a locked account is refused before bcrypt runs, and a wrong
+// password is recorded — locking the account (and saying so, when bus is set)
+// on the attempt that reaches the limit. Every place a password guards
+// something (login, reactivation, a merchant changing where they are paid) goes
+// through here, so a stolen session cannot guess a password somewhere the
+// lockout does not see.
+func checkPasswordWithLockout(db *gorm.DB, bus *events.Bus, user *models.User, password string) error {
+	if user.IsLocked() {
+		return errAccountLocked
+	}
+	if err := user.ComparePassword(password); err != nil {
+		attempts, lockUntil := user.IncrementLoginAttempts()
+		updates := map[string]interface{}{
+			"login_attempts": attempts,
+			"updated_at":     time.Now(),
+		}
+		if lockUntil != nil {
+			updates["lock_until"] = lockUntil
+			if bus != nil {
+				bus.Publish(events.Event{
+					Type:    events.SecurityAccountLocked,
+					UserID:  user.ID,
+					Title:   "Account Locked",
+					Message: "Your account has been temporarily locked due to multiple failed login attempts",
+					Data: map[string]interface{}{
+						"attempts": attempts,
+					},
+				})
+			}
+		}
+		db.Model(user).Updates(updates)
+		return errPasswordIncorrect
+	}
+	return nil
 }

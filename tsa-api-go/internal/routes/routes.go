@@ -1259,6 +1259,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			owner.GET("", payh.OwnerMerchant)
 			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
+			// The emailed code for a crypto payout change; wrong codes also end
+			// the waiting change after a handful (see ConfirmSettlementByOwner).
+			owner.POST("/settlement/confirm", middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), payh.OwnerConfirmSettlement)
 		}
 	}
 }

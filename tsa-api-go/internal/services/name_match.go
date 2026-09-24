@@ -262,11 +262,33 @@ var companyNameSuffixes = map[string]struct{}{
 	"LTD": {}, "LIMITED": {}, "PLC": {}, "INC": {}, "LLC": {}, "CO": {}, "COMPANY": {},
 }
 
-// MatchBusinessAccountName is MatchAccountName for a business: the registered
-// name and the bank's account name, compared after dropping legal-form suffixes.
-// The same floors apply — a lone suffix, or one shared word, is never a match.
-func MatchBusinessAccountName(businessName, bankName string) NameMatchStrength {
-	return MatchAccountName(withoutCompanySuffixes(businessName), withoutCompanySuffixes(bankName))
+// AccountNameWithin reports whether bankName, the name a bank resolved for a
+// payout account, is the same name as reference or a shorter form of it — never
+// a longer one. It is stricter than MatchAccountName on purpose: attribution
+// pairs that verdict with an exact amount and a single candidate, but here the
+// name is the only thing standing between a stolen login and a merchant's money.
+// A superset is exactly what an impostor can manufacture: "SKY AIR CARGO LTD"
+// contains every word of "SKY AIR LTD", and a registered business name costs
+// little. A subset is what banks actually print — a dropped middle name, a
+// shortened trading name — so it is allowed, with the same two-word floor: one
+// shared word proves nothing.
+func AccountNameWithin(reference, bankName string) bool {
+	ref := accountNameTokenSet(reference)
+	bank := accountNameTokenSet(bankName)
+	if len(ref) == 0 || len(bank) == 0 {
+		return false
+	}
+	shared := intersectionSize(ref, bank)
+	if shared != len(bank) {
+		return false // the bank's name carries a word the reference does not
+	}
+	return shared == len(ref) || shared >= 2
+}
+
+// BusinessAccountNameWithin is AccountNameWithin for a registered business:
+// both names are compared without their legal-form suffixes.
+func BusinessAccountNameWithin(businessName, bankName string) bool {
+	return AccountNameWithin(withoutCompanySuffixes(businessName), withoutCompanySuffixes(bankName))
 }
 
 func withoutCompanySuffixes(s string) string {
