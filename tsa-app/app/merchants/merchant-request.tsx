@@ -99,17 +99,18 @@ export function validatePmFields(fields: PmFields): PmValidationErrors {
  * values (including absent) default to `'general_products'`.
  */
 export function initBusinessType(type: string | undefined): string {
-  return type === 'p2p_merchant' ? 'p2p_merchant' : 'general_products';
+  return type === 'p2p_merchant' || type === 'payment_acceptance' ? type : 'general_products';
 }
 
 /**
  * Returns true when the business-type picker should be locked to a single
- * static "P2P Merchant" chip (no `onPress`). This happens when the form was
- * reached via a `?type=p2p_merchant` URL param — the user explicitly chose
- * the PM path, so we prevent switching away.
+ * static chip (no `onPress`). This happens when the form was reached via a
+ * `?type=p2p_merchant` or `?type=payment_acceptance` URL param — the user
+ * explicitly chose that path (a deep link, e.g. from the merchant dashboard
+ * or a "not now, something else" prompt), so we prevent switching away.
  */
 export function isPickerLocked(type: string | undefined): boolean {
-  return type === 'p2p_merchant';
+  return type === 'p2p_merchant' || type === 'payment_acceptance';
 }
 
 // ─── Existing-request gate (exported for tests) ──────────────────────────────
@@ -157,12 +158,20 @@ export type MerchantGate =
   | { screen: 'provisioning' }
   | { screen: 'rejected' };
 
+// Business types the backend has NO "already a merchant" role guard for —
+// each may be applied for on top of whatever else the user already has
+// (PayMerchantUpgrade's own carve-out for p2p_merchant; payment_acceptance's
+// deliberate "no role guard — a marketplace merchant, or anyone else, may
+// apply" in merchant_request_handler.go). Every OTHER business type keeps the
+// original rule: in the normal flow, any existing request blocks a new one.
+const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance'];
+
 export function resolveMerchantGate(args: {
   existingRequest: ExistingRequestLike | null | undefined;
-  formIsPm: boolean;
+  formType: string;
   pmActive: boolean;
 }): MerchantGate {
-  const { existingRequest, formIsPm, pmActive } = args;
+  const { existingRequest, formType, pmActive } = args;
   if (!existingRequest) return { screen: 'form' };
 
   const existingType = existingRequest.businessType ?? existingRequest.business_type;
@@ -172,11 +181,13 @@ export function resolveMerchantGate(args: {
   // Dashboard" success screen is wrong for it and its API calls would 403.
   const existingIsPay = existingType === 'payment_acceptance';
 
-  // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) request must
-  // NOT short-circuit the PM application — an existing merchant may upgrade to
-  // PM. Only a prior PM request gates the PM form. In the normal flow, any
-  // existing request blocks. (Mirrors the backend's type-scoped carve-out.)
-  const blockExisting = !formIsPm || existingIsPm;
+  // Upgrade mode (?type=p2p_merchant or ?type=payment_acceptance): a prior
+  // request of a DIFFERENT type must NOT short-circuit this one — an existing
+  // merchant may add either on top of what she already has. Only a prior
+  // request of the SAME add-on type gates its own form (so re-visiting after
+  // an approval, say, still shows her that status rather than a blank form).
+  const formIsAddOn = ADD_ON_BUSINESS_TYPES.includes(formType);
+  const blockExisting = !formIsAddOn || existingType === formType;
   if (!blockExisting) return { screen: 'form' };
 
   switch (existingRequest.status) {
@@ -451,7 +462,7 @@ export default function MerchantRequestScreen() {
   // Decide which gate screen (if any) to show. resolveMerchantGate also factors
   // in the real PM-active status so an approved-but-not-yet-active PM request
   // shows a "provisioning" state rather than a false "You're a Payment Merchant!".
-  const gate = resolveMerchantGate({ existingRequest, formIsPm: isPm, pmActive });
+  const gate = resolveMerchantGate({ existingRequest, formType: businessType, pmActive });
 
   if (gate.screen === 'pending') {
     return (
@@ -559,10 +570,11 @@ export default function MerchantRequestScreen() {
             Business Type *
           </Text>
           {isPickerLocked(type) ? (
-            // Locked single-chip: entered via ?type=p2p_merchant — cannot be changed.
+            // Locked single-chip: entered via ?type=p2p_merchant or
+            // ?type=payment_acceptance — cannot be changed.
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
               <Chip
-                label="Payment Merchant (PM)"
+                label={BUSINESS_TYPES.find((bt) => bt.value === type)?.label ?? businessType}
                 selected
               />
             </View>

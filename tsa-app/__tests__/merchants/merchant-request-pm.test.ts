@@ -291,6 +291,10 @@ describe('initBusinessType — initialize from URL param', () => {
     expect(initBusinessType('p2p_merchant')).toBe('p2p_merchant');
   });
 
+  it("returns 'payment_acceptance' when type param is 'payment_acceptance'", () => {
+    expect(initBusinessType('payment_acceptance')).toBe('payment_acceptance');
+  });
+
   it("returns 'general_products' when type param is absent (undefined)", () => {
     expect(initBusinessType(undefined)).toBe('general_products');
   });
@@ -307,6 +311,10 @@ describe('initBusinessType — initialize from URL param', () => {
 describe('isPickerLocked — locked single-chip mode vs selectable chip row', () => {
   it('returns true when type param is p2p_merchant (picker locked)', () => {
     expect(isPickerLocked('p2p_merchant')).toBe(true);
+  });
+
+  it('returns true when type param is payment_acceptance (picker locked)', () => {
+    expect(isPickerLocked('payment_acceptance')).toBe(true);
   });
 
   it('returns false when type param is absent (full selectable chip row)', () => {
@@ -327,19 +335,19 @@ describe('isPickerLocked — locked single-chip mode vs selectable chip row', ()
 
 describe('resolveMerchantGate', () => {
   it('shows the form when there is no existing request', () => {
-    expect(resolveMerchantGate({ existingRequest: null, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest: null, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'form' });
   });
 
   it('PM-upgrade mode: a prior GENERAL request does not block the PM form', () => {
     const existingRequest = { status: 'approved', business_type: 'general_products' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'form' });
   });
 
   it('normal mode: any existing approved request blocks with approved screen', () => {
     const existingRequest = { status: 'approved', business_type: 'general_products' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: false, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
       .toEqual({ screen: 'approved', pm: false, payFlow: false });
   });
 
@@ -349,7 +357,7 @@ describe('resolveMerchantGate', () => {
     // gate — the caller uses payFlow to show a distinct message and skip the
     // "Go to Merchant Dashboard" CTA.
     const existingRequest = { status: 'approved', business_type: 'payment_acceptance' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: false, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
       .toEqual({ screen: 'approved', pm: false, payFlow: true });
   });
 
@@ -362,7 +370,7 @@ describe('resolveMerchantGate', () => {
       makerWalletAddress: '0x1111111111111111111111111111111111111111',
       settlementBankCode: '058',
     };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'provisioning' });
   });
 
@@ -372,25 +380,25 @@ describe('resolveMerchantGate', () => {
     // Must route back to the form so the user can supply the missing details,
     // NOT dead-end on the "Activating…" screen.
     const existingRequest = { status: 'approved', business_type: 'p2p_merchant' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'form' });
   });
 
   it('approved PM request WITH an active PM → real success screen', () => {
     const existingRequest = { status: 'approved', businessType: 'p2p_merchant' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: true }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: true }))
       .toEqual({ screen: 'approved', pm: true, payFlow: false });
   });
 
   it('pending PM request → pending screen (pm flag set)', () => {
     const existingRequest = { status: 'pending', business_type: 'p2p_merchant' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'pending', pm: true });
   });
 
   it('rejected request → rejected screen', () => {
     const existingRequest = { status: 'rejected', business_type: 'p2p_merchant' };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'rejected' });
   });
 
@@ -400,8 +408,50 @@ describe('resolveMerchantGate', () => {
       businessType: 'p2p_merchant',
       makerWalletAddress: '0x1111111111111111111111111111111111111111',
     };
-    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'provisioning' });
+  });
+
+  // The bug this fix addresses: an existing merchant (any type) could never
+  // reach the "Accept payments (TSA Pay)" option, because only p2p_merchant
+  // carved itself out of the "any existing request blocks" rule. Backend has
+  // no role guard for payment_acceptance — any user, including an existing
+  // merchant, may apply — so the app must not block it either.
+
+  it('Pay-upgrade mode: a prior GENERAL request does not block the Pay form', () => {
+    const existingRequest = { status: 'approved', business_type: 'general_products' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('Pay-upgrade mode: a prior active PM request does not block the Pay form', () => {
+    const existingRequest = { status: 'approved', business_type: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: true }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('PM-upgrade mode symmetric: a prior approved Pay request does not block the PM form', () => {
+    const existingRequest = { status: 'approved', business_type: 'payment_acceptance' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'p2p_merchant', pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('pending Pay request blocks re-visiting the Pay form → pending screen', () => {
+    const existingRequest = { status: 'pending', business_type: 'payment_acceptance' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
+      .toEqual({ screen: 'pending', pm: false });
+  });
+
+  it('approved Pay request blocks re-visiting the Pay form → approved screen with payFlow set', () => {
+    const existingRequest = { status: 'approved', business_type: 'payment_acceptance' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
+      .toEqual({ screen: 'approved', pm: false, payFlow: true });
+  });
+
+  it('rejected Pay request blocks re-visiting the Pay form → rejected screen', () => {
+    const existingRequest = { status: 'rejected', business_type: 'payment_acceptance' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
+      .toEqual({ screen: 'rejected' });
   });
 });
 
