@@ -122,6 +122,20 @@ const swapped = {
   cancel: jest.fn(),
   reset: jest.fn(),
 };
+/**
+ * The pipeline is stubbed, and the hook reads the pipeline through EVENTS
+ * (onStage / onStop / onShortfall). `replay` tells the hook what the real one
+ * would have told it, from the `swapped` fields each test sets.
+ */
+let latestOpts: any;
+const replay = (opts: any) => {
+  const snap = { intent: swapped.intent, order: swapped.order };
+  if (swapped.stage === 'failed') opts?.onStop?.({ message: swapped.error, retryable: swapped.retryable }, snap);
+  else if (swapped.stage === 'shortfall') opts?.onShortfall?.(swapped.missingUsdc, snap);
+  else if (swapped.stage !== 'idle') opts?.onStage?.(swapped.stage, snap);
+};
+/** Stubbed `start`: the intent is created for real (the hook's own creator), then the pipeline "runs". */
+const pipelineStart = async (a: any) => { await createIntent!(a).catch(() => {}); replay(latestOpts); };
 let createIntent!: NonNullable<Parameters<typeof Swapped.useSwappedSell>[0]>['createIntent'];
 
 let hook: UsePayNaira;
@@ -152,6 +166,9 @@ beforeEach(() => {
   swapped.completeWithWallet.mockResolvedValue(undefined);
   m.useSwappedSell.mockImplementation(((opts: any) => {
     createIntent = opts?.createIntent;
+    latestOpts = opts;
+    // A hook mounted while the (stubbed) pipeline is already somewhere has been told so.
+    React.useEffect(() => { replay(opts); }, []); // eslint-disable-line react-hooks/exhaustive-deps
     return { ...swapped };
   }) as any);
   m.getQuote.mockResolvedValue(quoteWith([venue]));
@@ -355,6 +372,7 @@ describe('the swapped-sell stages, as a payment', () => {
 
   it('a shortfall that comes back after her wallet was offered says her wallet was not enough', async () => {
     Object.assign(swapped, { stage: 'shortfall', intent, missingUsdc: '0.42' });
+    swapped.completeWithWallet.mockImplementation(async () => { replay(latestOpts); }); // still short
     await mount();
     expect(hook.walletShort).toBe(false);
     act(() => hook.completeWithWallet());
@@ -373,7 +391,7 @@ describe('a payment that is already being paid (409 pay_in_progress)', () => {
     m.getOpenSellIntent.mockResolvedValue(intent);
     // The swapped-sell stub runs the creator the way the real hook does: a
     // rejection ends its run.
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     await mount();
     await pay(bnb, BSC);
 
@@ -386,7 +404,7 @@ describe('a payment that is already being paid (409 pay_in_progress)', () => {
   it('with no open sale it is a direct order — the server settles it, so she waits', async () => {
     m.payConverted.mockRejectedValue(inProgress());
     m.getOpenSellIntent.mockResolvedValue(null);
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     await mount();
     await pay(bnb, BSC);
 
@@ -575,7 +593,7 @@ describe("the server's uncertain-attempt answer (409 pay_attempt_uncertain)", ()
 
   it('a converted start is paused the same way, whatever words the swapped sell reports', async () => {
     m.payConverted.mockRejectedValue(uncertain());
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     Object.assign(swapped, { stage: 'failed', error: 'We could not tell whether an attempt exists', retryable: true });
     await mount();
     await pay(bnb, BSC);
@@ -613,7 +631,7 @@ describe("the server's own failure to start (500) is just a retry", () => {
 
   it('a converted start likewise', async () => {
     m.payConverted.mockRejectedValue(ours());
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     Object.assign(swapped, { stage: 'failed', error: "We couldn't start this payment — please try again.", retryable: true });
     await mount();
     await pay(bnb, BSC);
@@ -706,7 +724,7 @@ describe('only a verified coin of the right name is a direct route', () => {
 describe('refusals keep their machine code', () => {
   it('a KYC refusal from starting the payment is exposed by code, not by words', async () => {
     m.payConverted.mockRejectedValue(new PayError('Verify your identity first', 403, 'kyc_verification_required'));
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     // The real pipeline ends its run at 'failed' with the refusal's words.
     Object.assign(swapped, { stage: 'failed', error: 'Verify your identity first' });
     await mount();
@@ -828,7 +846,7 @@ describe('the route refusing this token — the same reading as crypto', () => {
 
   it.each([422, 503])('a %i on a converted start likewise, whatever words the swapped sell reports', async (status) => {
     m.payConverted.mockRejectedValue(refusal(status));
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     Object.assign(swapped, { stage: 'failed', error: 'any words the server likes', retryable: true });
     await mount();
     await pay(bnb, BSC);
@@ -844,7 +862,7 @@ describe('the route refusing this token — the same reading as crypto', () => {
 
   it('a refused converted start does not leave the hook refused for the next attempt', async () => {
     m.payConverted.mockRejectedValueOnce(refusal(422));
-    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    swapped.start.mockImplementation(pipelineStart);
     Object.assign(swapped, { stage: 'failed', error: 'x', retryable: true });
     await mount();
     await pay(bnb, BSC);

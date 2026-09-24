@@ -219,13 +219,19 @@ export function classifyStartError(e: unknown): StartErrorKind {
   return isRouteRefused(e) ? 'refused' : 'other';
 }
 
+type Failure = { error: string; errorCode?: string; retryable: boolean };
+/** A payment the server paused: never retried, never followed. */
+export const PAUSED_FAILURE: Failure = { error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false };
+/** A route that refused this token for now: nothing started, so try another. */
+export const REFUSED_FAILURE: Failure = { error: CANT_PAY_WITH_TOKEN, retryable: true };
+
 /** What a failed start looks like to the payer, per kind. `follow` is the caller's own. */
-export function startFailure(e: unknown): { error: string; errorCode?: string; retryable: boolean } {
+export function startFailure(e: unknown): Failure {
   switch (classifyStartError(e)) {
     case 'paused':
-      return { error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false };
+      return PAUSED_FAILURE;
     case 'refused':
-      return { error: CANT_PAY_WITH_TOKEN, retryable: true };
+      return REFUSED_FAILURE;
     default:
       return { error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e), retryable: true };
   }

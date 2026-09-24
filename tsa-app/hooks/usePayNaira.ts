@@ -16,10 +16,11 @@
 // signs. A 409 `pay_in_progress` means an attempt of hers already exists: it is
 // followed, never duplicated. Codes are keyed on, never sentences.
 import { ethers } from 'ethers';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef } from 'react';
 import { getChainByChainId } from '@/constants/chains';
 import { usePayAuthorization, type AuthorizationProps } from '@/hooks/usePayAuthorization';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { payAttemptView, useAttempt, type PayLiveStage } from '@/hooks/payAttempt';
 import {
   useSwappedSell, type CreateIntent, type SellStage, type StartSwapArgs,
 } from '@/hooks/useSwappedSell';
@@ -35,11 +36,11 @@ import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap'
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
-  CANT_PAY_WITH_TOKEN, classifyStartError, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment,
-  nairaFromKobo, NOTHING_TO_CONTINUE, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage,
-  startFailure, unsupportedNetworkMessage,
+  classifyStartError, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
+  NOTHING_TO_CONTINUE, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
+  type StartErrorKind,
 } from '@/utils/payCheckout';
-import type { PayEstimate, PayLiveStage } from '@/hooks/usePayLive';
+import type { PayEstimate } from '@/hooks/usePayLive';
 
 export type PayNairaStage = PayLiveStage;
 
@@ -89,16 +90,6 @@ const authorizationTitle = (a: Action | null): string => {
   return 'Authorize payment';
 };
 
-type Direct = {
-  stage: 'paying' | 'waiting' | 'failed' | 'continue';
-  error?: string;
-  errorCode?: string;
-  order?: PaycrestOrder;
-  /** With `continue`: the sale that pays this payment. */
-  intent?: SellIntent;
-  retryable?: boolean;
-};
-
 /**
  * The venue Paycrest fills as it is for `token` on `chainId` when the merchant
  * is owed `merchantNetKobo` — or null, meaning the token must be swapped first.
@@ -119,24 +110,14 @@ async function directVenue(merchantNetKobo: number, token: LiFiToken, chainId: n
 
 export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   const { address } = useSignableWallet();
-  const [direct, setDirect] = useState<Direct | null>(null);
-  const [createCode, setCreateCode] = useState<string | undefined>();
-  const [walletTried, setWalletTried] = useState(false);
-  // The server could not prove whether an attempt exists and paused the payment
-  // for support: not retryable, not followed, never reset by us. (A ref beside
-  // the state so `reset`, a stable callback, sees it.)
-  const [startKind, setStartKind] = useState<'paused' | 'refused' | null>(null);
-  const paused = startKind === 'paused';
-  const pausedRef = useRef(false);
-  const inProgress = useRef(false);
-  const running = useRef(false);
-  const markStartKind = (k: 'paused' | 'refused' | null) => {
-    pausedRef.current = k === 'paused';
-    setStartKind(k);
-  };
+  // One state machine (hooks/payAttempt): every stage, guard and public flag is decided there.
+  const { attempt, ref, dispatch } = useAttempt();
+  // What the last failed start left for the pipeline's own stop to be read against.
+  const startError = useRef<{ kind: StartErrorKind; code?: string } | null>(null);
+  const lastStart = () => startError.current; // read fresh: the pipeline sets it mid-await
 
-  // The payment's own intent, through the swapped-sell pipeline. Refusals are
-  // remembered by code: the pipeline reports only their words.
+  // The payment's own intent, through the swapped-sell pipeline. A failed start
+  // is remembered by kind: the pipeline itself reports only the server's words.
   const createIntent: CreateIntent = async (a) => {
     try {
       return await payConverted(checkout.id, {
@@ -145,14 +126,37 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
         sourceAddress: a.sourceAddress,
       });
     } catch (e) {
-      const kind = classifyStartError(e);
-      if (kind === 'follow') inProgress.current = true;
-      else if (kind === 'paused' || kind === 'refused') markStartKind(kind);
-      else setCreateCode(errorCode(e));
+      startError.current = { kind: classifyStartError(e), code: errorCode(e) };
       throw e;
     }
   };
-  const swapped = useSwappedSell({ createIntent });
+
+  const swapped = useSwappedSell({
+    createIntent,
+    onStage: (stage, snap) => {
+      if (stage === 'done') dispatch({ type: 'waiting', swapStage: 'done', order: snap.order });
+      else if (stage !== 'idle') dispatch({ type: 'progress', swapStage: stage, order: snap.order });
+    },
+    onShortfall: (missingUsdc, snap) => dispatch({ type: 'shortfall', missingUsdc, intent: snap.intent }),
+    onStop: ({ message, retryable }, snap) => {
+      const start = startError.current;
+      if (start?.kind === 'follow') return; // an attempt already exists: run() follows it
+      if (start?.kind === 'paused' || start?.kind === 'refused') {
+        dispatch({
+          type: 'fail',
+          ...(start.kind === 'paused' ? PAUSED_FAILURE : REFUSED_FAILURE),
+          paused: start.kind === 'paused',
+        });
+        return;
+      }
+      if (start?.code) {
+        dispatch({ type: 'fail', error: message, errorCode: start.code, retryable, intent: snap.intent, order: snap.order });
+        return;
+      }
+      // Her own words when it is safe to start over; payment words when a swap may be under way.
+      dispatch({ type: 'stop', message: retryable ? message : PAYMENT_STILL_GOING, retryable, intent: snap.intent, order: snap.order });
+    },
+  });
 
   /**
    * An attempt of hers already exists: FOLLOW it. Only reads — nothing here
@@ -167,11 +171,11 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     try {
       open = intentForPayment(await getOpenSellIntent(), checkout.id);
     } catch (e) {
-      setDirect({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+      dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
       return;
     }
     if (!open || open.status === 'delivered' || open.status === 'failed') {
-      setDirect({ stage: 'waiting' });
+      dispatch({ type: 'waiting' });
       return;
     }
     if (open.status === 'ordered') {
@@ -179,16 +183,16 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
         const o = open.paycrestOrderId ? await getOrder(open.paycrestOrderId) : null;
         // Her deposit is still to send only while the payout waits for it.
         if (o && o.status !== 'awaiting_deposit') {
-          setDirect({ stage: 'waiting', order: o });
+          dispatch({ type: 'waiting', order: o });
           return;
         }
       } catch (e) {
-        setDirect({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+        dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
         return;
       }
     }
-    setDirect({ stage: 'continue', intent: open });
-  }, [address, checkout.id]);
+    dispatch({ type: 'continue', intent: open });
+  }, [address, checkout.id, dispatch]);
 
   const payDirectly = async (venue: PaycrestVenue, wallet: string) => {
     let balances: WalletBalanceWithChain[] | null = null;
@@ -201,89 +205,78 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     const routes = await getSponsoredRoutes().catch(() => []);
     const funding = checkFunding(venue, balances, { gasSponsored: isGasSponsored(routes, venue.chain, venue.token) });
     if (!funding.ok) {
-      setDirect({ stage: 'failed', error: fundingMessage(funding, 'payment') ?? 'This payment cannot be funded.' });
+      dispatch({ type: 'fail', error: fundingMessage(funding, 'payment') ?? 'This payment cannot be funded.', retryable: true });
       return;
     }
 
     const order = await payDirect(checkout.id, { chainKey: venue.chain, token: venue.token });
-    setDirect({ stage: 'paying', order });
+    dispatch({ type: 'progress', swapStage: 'idle', order });
     try {
       await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
     } catch (e) {
       // The order exists and Pay is gone: the way forward is the order screen.
-      setDirect({
-        stage: 'failed',
+      dispatch({
+        type: 'fail',
         error: errorMessage(e, 'Could not send the deposit. Open the payment order to finish it.'),
-        order,
         retryable: false,
+        order,
       });
       return;
     }
     // The deposit already left; a lost claim only degrades to the ordinary
     // unmatched-deposit path, so it never fails the payment.
     await claimPayment(order.id).catch((e) => console.warn('[pay] claimPayment failed', e));
-    setDirect({ stage: 'waiting', order });
+    dispatch({ type: 'waiting', order });
   };
 
   const run = async (token: LiFiToken, chainId: number, priced?: PayEstimate) => {
-    if (!address || running.current) return;
-    running.current = true;
+    // One attempt at a time: `begin` is refused (and the ref says so at once) while one is in flight.
+    if (!address || ref.current.kind === 'paying') return;
+    dispatch({ type: 'begin' });
+    startError.current = null;
+    if (isNonEVMLiFiChain(chainId)) {
+      dispatch({ type: 'fail', error: unsupportedNetworkMessage(token.symbol), retryable: true });
+      return;
+    }
+    let venue: PaycrestVenue | null;
     try {
-      setCreateCode(undefined);
-      setWalletTried(false);
-      markStartKind(null);
-      inProgress.current = false;
-      if (isNonEVMLiFiChain(chainId)) {
-        setDirect({ stage: 'failed', error: unsupportedNetworkMessage(token.symbol) });
-        return;
-      }
-      setDirect({ stage: 'paying' });
-      let venue: PaycrestVenue | null;
-      try {
-        venue = await directVenue(checkout.merchantNet, token, chainId);
-      } catch (e) {
-        // The rate lookup is not a start route: its words (e.g. the provider being unavailable) are the useful ones.
-        setDirect({ stage: 'failed', error: errorMessage(e, 'Could not get a rate. Please try again.') });
-        return;
-      }
-      try {
-        if (venue) {
-          // The fresh amount, held to the price she was shown — before any order exists.
-          const fresh = ethers.parseUnits((Math.ceil(venue.tokenAmount * 100) / 100).toFixed(2), token.decimals);
-          if (priced && exceedsPriced(fresh, BigInt(priced.fromAmount))) {
-            setDirect({
-              stage: 'failed',
-              error: priceMovedMessage(fresh.toString(), priced.fromAmount, token.decimals, venue.token),
-            });
-            return;
-          }
-          await payDirectly(venue, address);
-        } else {
-          setDirect(null);
-          const args: StartSwapArgs = {
-            sourceChainId: chainId,
-            token: { ...token, chainId },
-            walletAddress: address,
-            sourceAddress: address,
-            pricedFromAmount: priced?.fromAmount,
-          };
-          await swapped.start(args);
-          if (inProgress.current) {
-            inProgress.current = false;
-            await followOpen();
-          }
+      venue = await directVenue(checkout.merchantNet, token, chainId);
+    } catch (e) {
+      // The rate lookup is not a start route: its words (e.g. the provider being unavailable) are the useful ones.
+      dispatch({ type: 'fail', error: errorMessage(e, 'Could not get a rate. Please try again.'), retryable: true });
+      return;
+    }
+    try {
+      if (venue) {
+        // The fresh amount, held to the price she was shown — before any order exists.
+        const fresh = ethers.parseUnits((Math.ceil(venue.tokenAmount * 100) / 100).toFixed(2), token.decimals);
+        if (priced && exceedsPriced(fresh, BigInt(priced.fromAmount))) {
+          dispatch({
+            type: 'fail',
+            error: priceMovedMessage(fresh.toString(), priced.fromAmount, token.decimals, venue.token),
+            retryable: true,
+          });
+          return;
         }
-      } catch (e) {
-        const kind = classifyStartError(e);
-        if (kind === 'follow') {
+        await payDirectly(venue, address);
+      } else {
+        const args: StartSwapArgs = {
+          sourceChainId: chainId,
+          token: { ...token, chainId },
+          walletAddress: address,
+          sourceAddress: address,
+          pricedFromAmount: priced?.fromAmount,
+        };
+        await swapped.start(args);
+        if (lastStart()?.kind === 'follow') {
+          startError.current = null;
           await followOpen();
-        } else {
-          if (kind === 'paused') markStartKind('paused');
-          setDirect({ stage: 'failed', ...startFailure(e) });
         }
       }
-    } finally {
-      running.current = false;
+    } catch (e) {
+      const kind = classifyStartError(e);
+      if (kind === 'follow') await followOpen();
+      else dispatch({ type: 'fail', ...startFailure(e), paused: kind === 'paused' });
     }
   };
 
@@ -293,7 +286,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       if (action.kind === 'pay') {
         void run(action.token, action.chainId, action.priced);
       } else if (action.kind === 'wallet') {
-        setWalletTried(true);
+        dispatch({ type: 'walletOffered' });
         void swapped.completeWithWallet(action.intent);
       } else {
         void continueFresh();
@@ -313,15 +306,15 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     try {
       fresh = intentForPayment(await getOpenSellIntent(), checkout.id);
     } catch (e) {
-      setDirect({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+      dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
       return;
     }
     if (!fresh) {
-      setDirect({ stage: 'failed', error: NOTHING_TO_CONTINUE, retryable: false });
+      dispatch({ type: 'fail', error: NOTHING_TO_CONTINUE, retryable: false });
     } else if (fresh.status === 'delivered' || fresh.status === 'failed') {
-      setDirect({ stage: 'waiting' });
+      dispatch({ type: 'waiting' });
     } else {
-      setDirect(null);
+      dispatch({ type: 'begin' });
       void swapped.resume(fresh, address);
     }
   }
@@ -354,57 +347,33 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     }
   };
 
-  const heldIntent = direct?.intent ?? swapped.intent;
+  const heldIntent = attempt.kind === 'continue' || attempt.kind === 'failed' ? attempt.intent : undefined;
   const completeWithWallet = useCallback(() => {
-    if (swapped.intent) request({ kind: 'wallet', intent: swapped.intent, missingUsdc: swapped.missingUsdc });
-  }, [swapped.intent, swapped.missingUsdc, request]);
+    if (attempt.kind === 'shortfall' && attempt.intent) {
+      request({ kind: 'wallet', intent: attempt.intent, missingUsdc: attempt.missingUsdc });
+    }
+  }, [attempt, request]);
   const continuePayment = useCallback(() => {
     if (heldIntent) request({ kind: 'continue', intent: heldIntent });
   }, [heldIntent, request]);
 
   const reset = useCallback(() => {
-    // Never pull state out from under an attempt that is running. (The swapped
-    // sell guards its own run the same way.) A swap that may be under way does
-    // not hold a naira reset: it lands in HER wallet, so freeing the payment
-    // strands nothing — unlike a crypto payment, which is delivered to the
-    // merchant (see usePayCrypto).
-    if (running.current || pausedRef.current) return;
-    setDirect(null);
-    setCreateCode(undefined);
-    setWalletTried(false);
-    markStartKind(null);
-    swapped.reset();
+    // The machine refuses while an attempt is in flight and for a payment the
+    // server paused. A swap that may be under way does not hold a naira reset:
+    // it lands in HER wallet, so freeing the payment strands nothing — unlike a
+    // crypto payment, which is delivered to the merchant (see usePayCrypto).
+    dispatch({ type: 'reset' });
+    if (ref.current.kind === 'idle') {
+      startError.current = null;
+      swapped.reset();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- swapped.reset is stable.
-  }, [swapped.reset]);
-
-  const fromSwap: PayNairaStage =
-    swapped.stage === 'idle' ? 'idle'
-      : swapped.stage === 'shortfall' ? 'shortfall'
-        : swapped.stage === 'done' ? 'waiting'
-          : swapped.stage === 'failed' ? 'failed'
-            : 'paying';
-  const stage = direct?.stage ?? fromSwap;
-  const swapStopped = !direct && stage === 'failed';
-  const retryable = paused
-    ? false
-    : direct ? direct.retryable !== false : !(swapStopped && swapped.retryable === false);
-  // The swapped sell reports its own words; a start the server refused or paused has better ones.
-  const swapError = paused ? PAYMENT_PAUSED
-    : startKind === 'refused' ? CANT_PAY_WITH_TOKEN
-      : retryable ? swapped.error : PAYMENT_STILL_GOING;
+  }, [dispatch, swapped.reset]);
 
   return {
-    stage,
-    missingUsdc: stage === 'shortfall' ? swapped.missingUsdc : undefined,
-    walletShort: stage === 'shortfall' && walletTried,
-    error: direct?.error ?? (swapStopped ? swapError : undefined),
-    errorCode: direct?.errorCode ?? (swapStopped ? (paused ? PAY_ATTEMPT_UNCERTAIN : createCode) : undefined),
-    retryable,
-    canContinue: !paused && !!heldIntent && (stage === 'continue' || (stage === 'failed' && !retryable)),
-    swapStage: swapped.stage,
-    walletAddress: address,
-    order: direct?.order ?? swapped.order,
+    ...payAttemptView(attempt),
     authorization,
+    walletAddress: address,
     payWith,
     estimate,
     completeWithWallet,

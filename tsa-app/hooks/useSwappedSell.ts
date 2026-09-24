@@ -180,7 +180,24 @@ const salesInFlight = new Set<string>();
 let startsAwaitingIntent = 0;
 const anySaleRunning = () => salesInFlight.size > 0 || startsAwaitingIntent > 0;
 
-export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
+/** What a run holds at the moment an event is emitted. */
+export type SellSnapshot = { intent?: SellIntent; order?: PaycrestOrder };
+
+/**
+ * A run's progress as events, for a caller that drives it rather than renders
+ * it (TSA Pay keeps its own state machine and dispatches these into it). The
+ * ordinary sell screen passes none and reads the returned state instead.
+ */
+export type SellEvents = {
+  /** Each stage a run enters: swapping, waiting, ordering, sending, done (and idle when a resume has nothing to follow). */
+  onStage?: (stage: SellStage, snapshot: SellSnapshot) => void;
+  /** The run stopped with a sentence for her, and whether it is safe to start over from. */
+  onStop?: (stop: { message: string; retryable: boolean }, snapshot: SellSnapshot) => void;
+  /** The swap landed short of what the payout needs (TSA Pay). */
+  onShortfall?: (missingUsdc: string | undefined, snapshot: SellSnapshot) => void;
+};
+
+export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEvents) {
   const [stage, setStage] = useState<SellStage>('idle');
   const [error, setError] = useState<string | undefined>();
   const [order, setOrder] = useState<PaycrestOrder | undefined>();
@@ -193,11 +210,25 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   // screen's creator closes over its own payment id and must never go stale.
   const createIntentRef = useRef(opts?.createIntent);
   createIntentRef.current = opts?.createIntent;
+  // Events are read through a ref too, and from what the run holds RIGHT NOW.
+  const eventsRef = useRef<SellEvents>({});
+  eventsRef.current = opts ?? {};
+  const held = useRef<SellSnapshot>({});
+  const keepIntent = (i: SellIntent | undefined) => { held.current = { ...held.current, intent: i }; setIntent(i); };
+  const keepOrder = (o: PaycrestOrder | undefined) => { held.current = { ...held.current, order: o }; setOrder(o); };
+  const snapshot = (): SellSnapshot => ({ intent: held.current.intent, order: held.current.order });
+
+  /** Enter a stage, and tell whoever is listening. */
+  const enter = (next: SellStage) => {
+    setStage(next);
+    eventsRef.current.onStage?.(next, snapshot());
+  };
 
   const fail = (message: string, canRetry = true) => {
     setError(message);
     setRetryable(canRetry);
     setStage('failed');
+    eventsRef.current.onStop?.({ message, retryable: canRetry }, snapshot());
   };
 
   /** A swap that ended short: close the sale so she can start another. */
@@ -209,7 +240,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
 
   /** Resolves true only when LiFi confirmed DONE/COMPLETED. */
   const waitForSwap = async (intentId: string, hash: string): Promise<boolean> => {
-    setStage('waiting');
+    enter('waiting');
     for (let i = 0; i < MAX_POLLS; i++) {
       if (i > 0) await sleep(POLL_MS);
       const d = await getSwapDelivery(hash);
@@ -234,7 +265,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     landed: boolean,
     openOpts?: { useWalletBalance?: boolean },
   ): Promise<PaycrestOrder> => {
-    setStage('ordering');
+    enter('ordering');
     const open = () => (openOpts ? openSellOrder(intentId, openOpts) : openSellOrder(intentId));
     for (let i = 0; i < MAX_ORDER_TRIES; i++) {
       if (i > 0) await sleep(POLL_MS);
@@ -264,8 +295,8 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const send = async (o: PaycrestOrder, walletArg: string, intentId: string) => {
     // The order's own wallet is the USDC's owner; a resume may not know it otherwise.
     const walletAddress = walletArg || o.walletAddress;
-    setOrder(o);
-    setStage('sending');
+    keepOrder(o);
+    enter('sending');
     const baseNative = await nativeBalance('base', walletAddress);
     let tx: string;
     try {
@@ -278,7 +309,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     // unmatched-deposit path, so it never fails the sale.
     await claimPayment(o.id).catch((e) => console.warn('[sell] claimPayment failed', e));
     await clearPendingSwapHash(intentId);
-    setStage('done');
+    enter('done');
   };
 
   /** Report the hash (idempotent server-side), wait, order, send. */
@@ -301,20 +332,21 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     if (running.current) return;
     running.current = true;
     setError(undefined);
-    setOrder(undefined);
+    keepOrder(undefined);
     setDepositTx(undefined);
     setMissingUsdc(undefined);
     setRetryable(true);
-    const held: string[] = [];
+    const heldIds: string[] = [];
     try {
       await body((intentId) => {
         salesInFlight.add(intentId);
-        held.push(intentId);
+        heldIds.push(intentId);
       });
     } catch (e) {
       if (e instanceof SellShortfall) {
         setMissingUsdc(e.missingUsdc);
         setStage('shortfall');
+        eventsRef.current.onShortfall?.(e.missingUsdc, snapshot());
       } else {
         fail(
           e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'),
@@ -322,20 +354,20 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         );
       }
     } finally {
-      held.forEach((id) => salesInFlight.delete(id));
+      heldIds.forEach((id) => salesInFlight.delete(id));
       running.current = false;
     }
   };
 
   const start = useCallback((a: StartSwapArgs) => guarded(async (hold) => {
     if (anySaleRunning()) throw new SellStop(STILL_RUNNING, false);
-    setStage('swapping');
+    enter('swapping');
     startsAwaitingIntent++;
     let created: CreatedSellIntent;
     try {
       created = await (createIntentRef.current ?? createOwnSale)(a);
       hold(created.intent.id);
-      setIntent(created.intent);
+      keepIntent(created.intent);
     } finally {
       startsAwaitingIntent--;
     }
@@ -369,22 +401,22 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
     // id came back): leave it alone rather than race it.
     if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(intent.id);
-    setIntent(intent);
+    keepIntent(intent);
     const wallet = walletAddress ?? '';
     if (intent.status === 'ordered') {
       if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN, false);
-      setStage('sending');
+      enter('sending');
       const o = await getOrder(intent.paycrestOrderId);
-      setOrder(o);
+      keepOrder(o);
       if (o.status === 'awaiting_deposit') return send(o, wallet, intent.id);
       if (PAID_STATUSES.has(o.status)) {
-        setStage('done');
+        enter('done');
         return;
       }
       throw new SellStop(ORDER_CLOSED, false);
     }
     if (intent.status === 'failed' || intent.status === 'delivered') {
-      setStage('idle');
+      enter('idle');
       return;
     }
     // 'ordering' (a claim in flight, or one the server will reclaim) is the
@@ -411,7 +443,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (hold) => {
     if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(shortIntent.id);
-    setIntent(shortIntent);
+    keepIntent(shortIntent);
     const o = await openOrder(shortIntent.id, true, { useWalletBalance: true });
     // The order's own wallet is the USDC's owner.
     await send(o, '', shortIntent.id);
@@ -434,6 +466,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
   const reset = useCallback(() => {
     if (running.current) return;
     setStage('idle');
+    held.current = {};
     setError(undefined);
     setOrder(undefined);
     setDepositTx(undefined);

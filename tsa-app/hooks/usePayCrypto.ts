@@ -22,8 +22,9 @@
 // the swap, the payment is terminal, or 24 h have passed. A server that refuses
 // a late hash (the intent was reaped) does NOT lift it: the swap may still mine.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { canReset, payAttemptView, useAttempt, type PayLiveStage } from '@/hooks/payAttempt';
 import { usePayAuthorization, type AuthorizationProps } from '@/hooks/usePayAuthorization';
-import type { PayEstimate, PayLiveStage } from '@/hooks/usePayLive';
+import type { PayEstimate } from '@/hooks/usePayLive';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
 import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
@@ -36,10 +37,9 @@ import {
   receiveAmountLabel, startFailure, unconfirmedCopy, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 
-export type PayCryptoStage = Exclude<PayLiveStage, 'continue' | 'shortfall'>;
-
 export type UsePayCrypto = {
-  stage: PayCryptoStage;
+  /** A crypto payment has no `continue` or `shortfall`: one swap, delivered straight to the merchant. */
+  stage: PayLiveStage;
   error?: string;
   /** The server's machine code behind `error`, when it sent one (e.g. KYC). */
   errorCode?: string;
@@ -77,14 +77,6 @@ const BROADCAST_UNCONFIRMED =
   "We couldn't confirm your payment was sent. Don't pay again — give it a few minutes and reopen this payment to check on it.";
 
 type Pick = { token: LiFiToken; chainId: number; priced?: PayEstimate };
-type Outcome = {
-  stage: PayCryptoStage; error?: string; errorCode?: string; retryable?: boolean;
-  /** The server paused the payment: never followed, retried or reset by us. */
-  paused?: boolean;
-  /** Nothing left to continue: the failure is final on this phone (support, or the clock, resolves it). */
-  noContinue?: boolean;
-};
-
 /** How the server took (or did not take) the swap's hash. */
 type Reported = 'reported' | 'rejected' | 'unreachable';
 
@@ -117,13 +109,11 @@ async function reportSwap(paymentId: string, intentId: string, hash: string): Pr
 
 export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   const { address } = useSignableWallet();
-  const [outcome, setOutcome] = useState<Outcome>({ stage: 'idle' });
+  // One state machine (hooks/payAttempt): every stage, guard and public flag is decided there.
+  const { attempt, ref, dispatch } = useAttempt();
   // Pay is withheld until the persisted hold has been looked at: a kill may have left one.
   const [holdChecked, setHoldChecked] = useState(false);
-  const running = useRef(false);
   const checking = useRef(false);
-  const outcomeRef = useRef(outcome);
-  outcomeRef.current = outcome;
 
   /** The swap is known to the server, or the hold has run out: let go of the phone's copy. */
   const liftHold = useCallback(async (intentId?: string) => {
@@ -134,10 +124,10 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   /** A swap that may have reached the merchant and is not known to the server: hold, and say so. */
   const failHeld = useCallback(async (intentId: string, why: Reported | 'nohash') => {
     await writePayHold(checkout.id, intentId);
-    setOutcome(why === 'unreachable'
-      ? { stage: 'failed', error: NOT_CONFIRMED, retryable: false }
-      : { stage: 'failed', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true });
-  }, [checkout.id]);
+    dispatch(why === 'unreachable'
+      ? { type: 'fail', error: NOT_CONFIRMED, retryable: false, noContinue: false }
+      : { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true });
+  }, [checkout.id, dispatch]);
 
   /**
    * Look at where this payment stands, and act only on what is safe: make sure
@@ -159,41 +149,41 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         open = intentForPayment(await getOpenSellIntent(), checkout.id);
       } catch (e) {
         if (hold) await failHeld(hold.intentId, 'unreachable');
-        else setOutcome({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+        else dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
         return;
       }
       if (open && serverHasSwap(open)) {
         await liftHold(open.id);
-        setOutcome({ stage: 'waiting' });
+        dispatch({ type: 'waiting' });
         return;
       }
       // A sale that is not waiting for a hash (already closed, say) has nothing to report — unless a hold says the swap is out there.
       if (open && open.status !== 'swapping' && !hold) {
-        setOutcome({ stage: 'waiting' });
+        dispatch({ type: 'waiting' });
         return;
       }
       const intentId = open?.id ?? hold?.intentId;
       if (!intentId) {
         // She asked to continue and there is nothing of hers: say so, and offer no dead button.
-        setOutcome(explicit
-          ? { stage: 'failed', error: NOTHING_TO_CONTINUE, retryable: false, noContinue: true }
-          : { stage: 'waiting' });
+        dispatch(explicit
+          ? { type: 'fail', error: NOTHING_TO_CONTINUE, retryable: false, noContinue: true }
+          : { type: 'waiting' });
         return;
       }
       const hash = await readPendingSwapHash(intentId);
       if (!hash) {
         // Nothing to report. With a hold the swap may still be out there; without one there was never a swap.
         if (hold) await failHeld(intentId, 'nohash');
-        else setOutcome({ stage: 'waiting' });
+        else dispatch({ type: 'waiting' });
         return;
       }
       const reported = await reportSwap(checkout.id, intentId, hash);
-      if (reported === 'reported') setOutcome({ stage: 'waiting' });
+      if (reported === 'reported') dispatch({ type: 'waiting' });
       else await failHeld(intentId, reported);
     } finally {
       checking.current = false;
     }
-  }, [checkout.id, failHeld, liftHold]);
+  }, [checkout.id, dispatch, failHeld, liftHold]);
 
   // Opening the screen: a live hold (a kill left one) is looked at before Pay is offered.
   useEffect(() => {
@@ -212,21 +202,17 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   const continuePayment = useCallback(() => check(true), [check]);
 
   const run = async ({ token, chainId, priced }: Pick) => {
-    if (!address || running.current) return;
-    running.current = true;
-    try {
-      await startPayment(token, chainId, address, priced);
-    } finally {
-      running.current = false;
-    }
+    // One attempt at a time: `begin` is refused (and the ref says so at once) while one is in flight.
+    if (!address || ref.current.kind === 'paying') return;
+    dispatch({ type: 'begin' });
+    await startPayment(token, chainId, address, priced);
   };
 
   const startPayment = async (token: LiFiToken, chainId: number, address: string, priced?: PayEstimate) => {
     if (isNonEVMLiFiChain(chainId)) {
-      setOutcome({ stage: 'failed', error: unsupportedNetworkMessage(token.symbol) });
+      dispatch({ type: 'fail', error: unsupportedNetworkMessage(token.symbol), retryable: true });
       return;
     }
-    setOutcome({ stage: 'paying' });
 
     let started;
     try {
@@ -237,9 +223,8 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
       });
     } catch (e) {
       if (classifyStartError(e) === 'follow') return resumeOpen();
-      const failure = startFailure(e);
       // Paused: never followed, retried or reset by us. Anything else: nothing started.
-      setOutcome({ stage: 'failed', ...failure, paused: classifyStartError(e) === 'paused' });
+      dispatch({ type: 'fail', ...startFailure(e), paused: classifyStartError(e) === 'paused' });
       return;
     }
 
@@ -261,21 +246,21 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         // It may be on its way: never a retry — the server decides from the hash.
         const known = e.txHash ?? (await readPendingSwapHash(intent.id));
         const reported = known ? await reportSwap(checkout.id, intent.id, known) : 'unreachable';
-        if (reported === 'reported') setOutcome({ stage: 'waiting' });
+        if (reported === 'reported') dispatch({ type: 'waiting' });
         else {
           await writePayHold(checkout.id, intent.id);
-          setOutcome(reported === 'rejected'
-            ? { stage: 'failed', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true }
-            : { stage: 'failed', error: BROADCAST_UNCONFIRMED, retryable: false });
+          dispatch(reported === 'rejected'
+            ? { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true }
+            : { type: 'fail', error: BROADCAST_UNCONFIRMED, retryable: false, noContinue: false });
         }
         return;
       }
-      setOutcome({ stage: 'failed', error: `${errorMessage(e, 'The swap did not go through.')}${NOT_SENT}` });
+      dispatch({ type: 'fail', error: `${errorMessage(e, 'The swap did not go through.')}${NOT_SENT}`, retryable: true });
       return;
     }
 
     const reported = await reportSwap(checkout.id, intent.id, hash);
-    if (reported === 'reported') setOutcome({ stage: 'waiting' });
+    if (reported === 'reported') dispatch({ type: 'waiting' });
     else await failHeld(intent.id, reported);
   };
 
@@ -310,7 +295,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   };
 
   const reset = useCallback(async () => {
-    if (running.current || outcomeRef.current.paused) return;
+    if (!canReset(ref.current)) return; // in flight, or paused by the server
     const stored = await readPayHold(checkout.id);
     if (holdActive(stored)) {
       // A swap that may have reached the merchant: the payment being freed must
@@ -319,16 +304,16 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
       return;
     }
     if (stored) await liftHold(stored.intentId);
-    setOutcome({ stage: 'idle' });
-  }, [check, checkout.id, liftHold]);
-  const retryable = outcome.retryable !== false && holdChecked;
+    dispatch({ type: 'reset' });
+  }, [check, checkout.id, dispatch, liftHold, ref]);
+  const view = payAttemptView(attempt);
 
   return {
-    stage: outcome.stage,
-    error: outcome.error,
-    errorCode: outcome.errorCode,
-    retryable,
-    canContinue: outcome.stage === 'failed' && outcome.retryable === false && !outcome.paused && !outcome.noContinue,
+    stage: view.stage,
+    error: view.error,
+    errorCode: view.errorCode,
+    retryable: view.retryable && holdChecked,
+    canContinue: view.canContinue,
     authorization,
     walletAddress: address,
     payWith,

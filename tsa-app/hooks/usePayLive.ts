@@ -15,11 +15,12 @@
 //   - refresh the checkout when the attempt hands over to the server.
 import { useEffect, useRef } from 'react';
 import type { LiFiToken } from '@/services/lifi';
+import { isUnresolved, type PayLiveStage } from '@/hooks/payAttempt';
 import type { SellStage } from '@/hooks/useSwappedSell';
 import type { PaycrestOrder } from '@/services/paycrestApi';
 import type { PayCheckout } from '@/services/payApi';
 
-export type PayLiveStage = 'idle' | 'paying' | 'continue' | 'shortfall' | 'waiting' | 'failed';
+export type { PayLiveStage };
 
 /**
  * What paying would cost her, and — for a crypto merchant — what they receive.
@@ -62,7 +63,7 @@ export function usePayLive({
   onActive: (active: boolean) => void;
 }) {
   const { stage, resume, reset } = pay;
-  const unresolved = stage !== 'idle' && !(stage === 'failed' && pay.retryable !== false);
+  const unresolved = isUnresolved(stage, pay.retryable !== false);
 
   useEffect(() => {
     if (stage === 'waiting') onWaiting();

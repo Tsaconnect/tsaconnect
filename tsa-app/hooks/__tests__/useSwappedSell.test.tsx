@@ -965,3 +965,66 @@ describe('the priced amount bound, through the pipeline', () => {
     expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
   });
 });
+
+describe('events — what a payment reads instead of six state slices', () => {
+  const events = () => ({ onStage: jest.fn(), onStop: jest.fn(), onShortfall: jest.fn() });
+  beforeEach(() => {
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+  });
+
+  it('emits each stage of a run in order, with the intent and, once it exists, the order', async () => {
+    const ev = events();
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: qp }), ...ev };
+    mocked.openSellOrder.mockResolvedValue(order);
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(ev.onStage.mock.calls.map((c) => c[0])).toEqual(['swapping', 'waiting', 'ordering', 'sending', 'done']);
+    expect(ev.onStage.mock.calls[1][1]).toEqual({ intent: payIntent, order: undefined });
+    expect(ev.onStage.mock.calls[4][1]).toEqual({ intent: payIntent, order });
+    expect(ev.onStop).not.toHaveBeenCalled();
+    expect(ev.onShortfall).not.toHaveBeenCalled();
+  });
+
+  it('emits a stop with its words, whether it is safe to start over, and the intent it holds', async () => {
+    const ev = events();
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: qp }), ...ev };
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'PENDING' });
+    await mountPay();
+
+    await run(payHook.start(payArgs));
+
+    expect(ev.onStop).toHaveBeenCalledTimes(1);
+    expect(ev.onStop).toHaveBeenCalledWith({ message: expect.stringMatching(/still on its way/i), retryable: false }, { intent: payIntent, order: undefined });
+  });
+
+  it('a generic failure is a retryable stop with its message', async () => {
+    const ev = events();
+    payOpts = { createIntent: jest.fn().mockRejectedValue(new Error('You need to verify your identity')), ...ev };
+    await mountPay();
+    await run(payHook.start(payArgs));
+    expect(ev.onStop).toHaveBeenCalledWith({ message: 'You need to verify your identity', retryable: true }, { intent: undefined, order: undefined });
+  });
+
+  it('emits a shortfall with the figure — and no stop', async () => {
+    const ev = events();
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: qp }), ...ev };
+    mocked.openSellOrder.mockRejectedValue(new PaycrestError('short', 409, 'pay_shortfall', '0.42'));
+    await mountPay();
+    await run(payHook.start(payArgs));
+    expect(ev.onShortfall).toHaveBeenCalledWith('0.42', { intent: payIntent, order: undefined });
+    expect(ev.onStop).not.toHaveBeenCalled();
+  });
+
+  it('a sale with no events (the ordinary sell) behaves exactly as before — and still returns its own state', async () => {
+    mocked.createSellIntent.mockResolvedValue({ intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: q, gasTopUp: false });
+    mocked.openSellOrder.mockResolvedValue(order);
+    await run(hook.start(args));
+    expect(hook.stage).toBe('done');
+    expect(hook.order?.id).toBe('o1');
+    expect(hook.depositTx).toBe('0xdeposit');
+  });
+});
