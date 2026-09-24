@@ -81,6 +81,19 @@ func (c *EVMClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.In
 	return balance, nil
 }
 
+// HasContractCode reports whether an address holds contract code on this chain.
+// An eth_call to an address with none returns empty data, which GetTokenBalance
+// reads as a zero balance: only a contract can honestly answer "empty".
+func (c *EVMClient) HasContractCode(address string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	code, err := c.Client.CodeAt(ctx, common.HexToAddress(address), nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to read code at %s: %w", address, err)
+	}
+	return len(code) > 0, nil
+}
+
 // GetTokenDecimals returns the on-chain decimals() value for an ERC-20 token,
 // memoised per contract address. This is the only safe way to handle the same
 // symbol with different decimals on different chains (e.g. USDT is 6 on

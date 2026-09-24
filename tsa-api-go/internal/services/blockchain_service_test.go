@@ -1,6 +1,8 @@
 package services
 
 import (
+	"errors"
+	"math/big"
 	"testing"
 
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -101,5 +103,49 @@ func TestMainnetChainNameForID_OnlyAMainnetChainWithAClient(t *testing.T) {
 	}
 	if _, ok := (&BlockchainService{}).MainnetChainNameForID(56); ok {
 		t.Fatal("a registry with no config resolved a chain")
+	}
+}
+
+type fakeBalanceChain struct {
+	code     bool
+	codeErr  error
+	bal      *big.Int
+	balErr   error
+	gotToken string
+	gotOwner string
+}
+
+func (f *fakeBalanceChain) HasContractCode(string) (bool, error) { return f.code, f.codeErr }
+func (f *fakeBalanceChain) GetTokenBalance(token, owner string) (*big.Int, error) {
+	f.gotToken, f.gotOwner = token, owner
+	return f.bal, f.balErr
+}
+
+// A balance — zero above all — is only reported for a token address that is a
+// contract on the chain; otherwise it is an error the reconciler waits on.
+func TestDepositBalanceFrom_OnlyAContractCanAnswerEmpty(t *testing.T) {
+	zero := big.NewInt(0)
+	for name, tc := range map[string]struct {
+		f       *fakeBalanceChain
+		wantErr bool
+	}{
+		"a contract holding nothing":   {&fakeBalanceChain{code: true, bal: zero}, false},
+		"a contract holding something": {&fakeBalanceChain{code: true, bal: big.NewInt(5)}, false},
+		"no code at the token address": {&fakeBalanceChain{code: false, bal: zero}, true},
+		"the code cannot be read":      {&fakeBalanceChain{codeErr: errors.New("rpc down"), bal: zero}, true},
+		"the balance cannot be read":   {&fakeBalanceChain{code: true, balErr: errors.New("rpc down")}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := depositBalanceFrom(tc.f, "bsc", "USDT", "0xtoken", "0xdeposit")
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("bal %v err %v", got, err)
+			}
+			if tc.wantErr && got != nil {
+				t.Fatalf("an unprovable read returned a balance: %v", got)
+			}
+			if !tc.wantErr && (tc.f.gotToken != "0xtoken" || tc.f.gotOwner != "0xdeposit") {
+				t.Fatalf("asked about %s / %s", tc.f.gotToken, tc.f.gotOwner)
+			}
+		})
 	}
 }

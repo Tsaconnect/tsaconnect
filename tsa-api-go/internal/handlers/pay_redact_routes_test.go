@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -252,16 +253,73 @@ func TestCreateSellIntent_TheSaleInProgressAnswerMasksAPayIntentsBank(t *testing
 // reach a response through the caller views. It reads the handlers' source, so a
 // new route or a new error branch that serialises a raw record fails here.
 //
-// Records are recognised by the variable names the handlers give them; the
-// canary below proves the check bites, and the route tests above prove the
-// behaviour of each masked site.
+// go/types would be exact but drags the whole dependency graph into a unit test,
+// so records are found by data flow lite: a variable is a record when it is
+// assigned from a call to a method whose declared result is one (collected from
+// the services package and the handlers' own port interfaces), or when it has one
+// of the names the handlers have always used for them. A record is only flagged
+// when it is passed to the response as itself — bare, or inside a gin.H / slice
+// literal; passed through any call (a mask, or View(p)) it is transformed. The
+// canaries below prove each way of getting one past the guard is caught.
 var rawRecordNames = map[string]bool{"intent": true, "open": true, "order": true, "row": true, "rows": true, "resumable": true}
 
 var maskFuncs = map[string]bool{"intentForCaller": true, "orderForCaller": true, "ordersForCaller": true, "payIntentView": true, "payOrderView": true}
 
-// rawRecordResponses returns "file:line name" for every raw record identifier
-// passed to a response call in src.
-func rawRecordResponses(t *testing.T, filename string, src any) (found []string, responses int) {
+// recordReturningMethods is every method name whose declared result mentions a
+// pay-bank-bearing record, from the services package and the handler files.
+func recordReturningMethods(t *testing.T, handlerFiles []string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	mentions := func(fl *ast.FieldList, src []byte, fset *token.FileSet) bool {
+		if fl == nil {
+			return false
+		}
+		for _, f := range fl.List {
+			txt := string(src[fset.Position(f.Type.Pos()).Offset:fset.Position(f.Type.End()).Offset])
+			if strings.Contains(txt, "PaycrestOrderRecord") || strings.Contains(txt, "RampSellIntent") {
+				return true
+			}
+		}
+		return false
+	}
+	scan := func(path string) {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.FuncDecl:
+				if v.Recv != nil && mentions(v.Type.Results, src, fset) {
+					out[v.Name.Name] = true
+				}
+			case *ast.InterfaceType:
+				for _, m := range v.Methods.List {
+					if ft, ok := m.Type.(*ast.FuncType); ok && len(m.Names) == 1 && mentions(ft.Results, src, fset) {
+						out[m.Names[0].Name] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	svc, _ := filepath.Glob("../services/*.go")
+	for _, f := range append(svc, handlerFiles...) {
+		if !strings.HasSuffix(f, "_test.go") {
+			scan(f)
+		}
+	}
+	return out
+}
+
+// rawRecordResponses returns "file:line name" for every raw record passed to a
+// response call in src, and how many response calls it saw.
+func rawRecordResponses(t *testing.T, filename string, src any, methods map[string]bool) (found []string, responses int) {
 	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filename, src, 0)
@@ -279,43 +337,79 @@ func rawRecordResponses(t *testing.T, filename string, src any) (found []string,
 		}
 		return false
 	}
-	var walk func(n ast.Node)
-	walk = func(n ast.Node) {
-		ast.Inspect(n, func(n ast.Node) bool {
-			switch v := n.(type) {
-			case *ast.CallExpr:
-				if id, ok := v.Fun.(*ast.Ident); ok && maskFuncs[id.Name] {
-					return false // whatever is inside is masked
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		// The variables of this function that hold a record.
+		vars := map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Rhs) != 1 {
+				return true
+			}
+			call, ok := as.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && methods[sel.Sel.Name] {
+				// The record is the first result of every such method.
+				if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+					vars[id.Name] = true
 				}
+			}
+			return true
+		})
+		// Bare identifiers only: a call (a mask, View(p), len(x)) transforms it.
+		var direct func(n ast.Node)
+		direct = func(n ast.Node) {
+			switch v := n.(type) {
 			case *ast.Ident:
-				if rawRecordNames[v.Name] {
+				if vars[v.Name] || rawRecordNames[v.Name] {
 					found = append(found, fmt.Sprintf("%s:%d %s", filename, fset.Position(v.Pos()).Line, v.Name))
+				}
+			case *ast.CompositeLit:
+				for _, e := range v.Elts {
+					direct(e)
+				}
+			case *ast.KeyValueExpr:
+				direct(v.Value)
+			case *ast.UnaryExpr:
+				direct(v.X)
+			}
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && isResponse(call) {
+				responses++
+				for _, arg := range call.Args {
+					direct(arg)
 				}
 			}
 			return true
 		})
 	}
-	ast.Inspect(f, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isResponse(call) {
-			responses++
-			for _, arg := range call.Args {
-				walk(arg)
-			}
-		}
-		return true
-	})
 	return found, responses
 }
 
 func TestEveryResponseThatCarriesARecordGoesThroughACallerView(t *testing.T) {
 	files, _ := filepath.Glob("paycrest*.go")
 	files = append(files, "pay_handler.go")
-	total := 0
+	var handlerFiles []string
 	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
+		if !strings.HasSuffix(name, "_test.go") {
+			handlerFiles = append(handlerFiles, name)
 		}
-		found, n := rawRecordResponses(t, name, nil)
+	}
+	methods := recordReturningMethods(t, handlerFiles)
+	for _, m := range []string{"OpenOrder", "Resumable", "ClaimPayment", "CreateSell", "PayDirect", "Get"} {
+		if !methods[m] {
+			t.Fatalf("the guard did not learn that %s returns a record: %v", m, methods)
+		}
+	}
+	total := 0
+	for _, name := range handlerFiles {
+		found, n := rawRecordResponses(t, name, nil, methods)
 		total += n
 		for _, f := range found {
 			t.Errorf("a response carries a raw record (use intentForCaller/orderForCaller/ordersForCaller): %s", f)
@@ -324,13 +418,33 @@ func TestEveryResponseThatCarriesARecordGoesThroughACallerView(t *testing.T) {
 	if total < 10 {
 		t.Fatalf("only %d response calls found: the guard is not reading the handlers", total)
 	}
-	// The canary: the same check flags the bypass it exists for.
-	bad := `package handlers
-func f(c *gin.Context, open *models.RampSellIntent) {
-	c.JSON(409, gin.H{"data": gin.H{"intent": open}})
-	utils.SuccessResponse(c, 200, "ok", gin.H{"intent": intentForCaller(open)})
-}`
-	if found, _ := rawRecordResponses(t, "canary.go", bad); len(found) != 1 {
-		t.Fatalf("canary: %v, want exactly the unmasked one", found)
+
+	// Canaries: every way past the guard that a future branch might take.
+	bypass := map[string]string{
+		"a named variable":           `open, _ := h.sellIntents.Open(ctx, id); c.JSON(409, gin.H{"intent": open})`,
+		"a short name":               `o, err := h.orders.Get(ctx, uid, id); utils.SuccessResponse(c, 200, "x", o)`,
+		"an unusual name":            `sale, err := h.sellIntents.Resumable(ctx, uid); utils.SuccessResponse(c, 200, "x", gin.H{"sale": sale})`,
+		"a result named res":         `res, err := h.orders.ClaimPayment(ctx, uid, id); utils.SuccessResponse(c, 200, "x", res)`,
+		"a slice":                    `list, err := h.orders.List(ctx, uid, 5); utils.SuccessResponse(c, 200, "x", gin.H{"orders": list})`,
+		"an error response":          `existing, _ := h.sellIntents.Get(ctx, uid, id); utils.ErrorResponseWithCode(c, 409, "m", "x", existing)`,
+		"the pay start's own record": `order, err := h.checkout.PayDirect(ctx, u, id, in); utils.SuccessResponse(c, 201, "x", gin.H{"order": order})`,
+	}
+	for name, body := range bypass {
+		src := "package handlers\nfunc f(h *H, c *gin.Context) {\n" + body + "\n}"
+		if found, _ := rawRecordResponses(t, "canary.go", src, methods); len(found) != 1 {
+			t.Errorf("canary %q: %v, want exactly one raw record flagged", name, found)
+		}
+	}
+	// And what is allowed stays allowed.
+	allowed := map[string]string{
+		"masked":         `open, _ := h.sellIntents.Open(ctx, id); c.JSON(409, gin.H{"intent": intentForCaller(open)})`,
+		"transformed":    `p, _ := h.payments.GetForMerchant(ctx, m, mode, id); utils.SuccessResponse(c, 200, "x", h.payments.View(p))`,
+		"a field of one": `o, _ := h.orders.Get(ctx, uid, id); utils.SuccessResponse(c, 200, "x", gin.H{"id": o.ID})`,
+	}
+	for name, body := range allowed {
+		src := "package handlers\nfunc f(h *H, c *gin.Context) {\n" + body + "\n}"
+		if found, _ := rawRecordResponses(t, "ok.go", src, methods); len(found) != 0 {
+			t.Errorf("%q flagged: %v", name, found)
+		}
 	}
 }

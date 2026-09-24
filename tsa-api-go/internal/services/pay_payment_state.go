@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -87,11 +89,18 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 // made from that reading only matches while the payment still carries exactly
 // that, so a reconciler that read, then made a slow provider call, cannot
 // Release or Fail an attempt a new payer linked in the meantime.
-type payAttempt struct{ order, intent *uuid.UUID }
+//
+// It also carries the lock the caller read (locked_at): a payment released and
+// locked again by someone else between the read and the write is a different
+// payment attempt altogether, whatever its links say.
+type payAttempt struct {
+	order, intent *uuid.UUID
+	lockedAt      *time.Time
+}
 
 // attemptOf is the attempt p carries.
 func attemptOf(p *models.PayPayment) *payAttempt {
-	return &payAttempt{order: p.PaycrestOrderID, intent: p.SellIntentID}
+	return &payAttempt{order: p.PaycrestOrderID, intent: p.SellIntentID, lockedAt: p.LockedAt}
 }
 
 // payGuard is what a transition requires of the row it updates: its status, the
@@ -122,6 +131,11 @@ func (g payGuard) scope(q *gorm.DB, id uuid.UUID) *gorm.DB {
 	if g.attempt != nil {
 		q = attemptColumn(q, "paycrest_order_id", g.attempt.order)
 		q = attemptColumn(q, "sell_intent_id", g.attempt.intent)
+		if g.attempt.lockedAt == nil {
+			q = q.Where("locked_at IS NULL")
+		} else {
+			q = q.Where("locked_at = ?", *g.attempt.lockedAt)
+		}
 	}
 	return q
 }
@@ -298,6 +312,12 @@ func (s *PayPaymentService) expireEach(ctx context.Context, ids []uuid.UUID, rea
 // runs a reconcile tick ("TSAPAYC").
 const payReconcileLockKey int64 = 0x54534150415943
 
+// payReconcileSkipAlertAfter is how many ticks in a row may be skipped because
+// another instance holds the lock before it is ALERTed (and again every that
+// many): at the 30 s cadence, five minutes. One instance running a tick is
+// normal; nobody having run one for this long is payments not settling.
+const payReconcileSkipAlertAfter = 10
+
 // ReconcileTick is the periodic reconciler's unit of work: the expiry sweep,
 // the stuck-test-payment release, and settlement of every in-flight payment
 // (reconcileProcessing). Each step runs whatever the others do, so a failing
@@ -305,29 +325,51 @@ const payReconcileLockKey int64 = 0x54534150415943
 // the worker's failure-streak alert.
 //
 // On Postgres one instance runs a tick at a time: a second instance (a deploy
-// overlap, a scale-out) finds the advisory lock held and skips the tick. The
-// guarded transitions already refuse a stale write; this stops two instances
-// making the same slow provider calls and racing each other at all. SQLite (the
-// tests) has no such lock and always runs.
+// overlap, a scale-out) finds the advisory lock held and skips the tick, loudly
+// (noteTick). The guarded transitions already refuse a stale write; this stops
+// two instances making the same slow provider calls and racing each other at
+// all. SQLite (the tests) has no such lock and always runs.
+//
+// The lock is transaction-scoped: a short-lived transaction does nothing but
+// hold it, on its own connection, while the tick runs on others — so no LiFi or
+// RPC call happens inside a DB transaction, and the lock's release is tied to
+// that transaction's end (commit, rollback, a dropped connection, a cancelled
+// context). A session lock would need an explicit unlock, and one that failed on
+// a healthy pooled connection would silence every instance's tick for good.
 func (s *PayPaymentService) ReconcileTick(ctx context.Context) error {
 	if s.db.Dialector == nil || s.db.Dialector.Name() != "postgres" {
 		return s.reconcileTick(ctx)
 	}
 	var tickErr error
-	err := s.db.WithContext(ctx).Connection(func(conn *gorm.DB) error {
+	ran := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var got bool
-		if err := conn.Raw("SELECT pg_try_advisory_lock(?)", payReconcileLockKey).Scan(&got).Error; err != nil {
+		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", payReconcileLockKey).Scan(&got).Error; err != nil {
 			return err
 		}
 		if !got {
 			return nil // another instance is reconciling
 		}
-		// Session locks outlive the statement: release it even if ctx is done.
-		defer conn.WithContext(context.WithoutCancel(ctx)).Exec("SELECT pg_advisory_unlock(?)", payReconcileLockKey)
+		ran = true
 		tickErr = s.reconcileTick(ctx)
 		return nil
 	})
+	s.noteTick(ran)
 	return errors.Join(tickErr, err)
+}
+
+// noteTick keeps the count of ticks skipped in a row: every skip is logged, the
+// Nth (and every Nth after) is an ALERT, and a tick that ran resets the count.
+func (s *PayPaymentService) noteTick(ran bool) {
+	if ran {
+		s.skipped.Store(0)
+		return
+	}
+	n := s.skipped.Add(1)
+	log.Printf("[tsa-pay] reconcile tick skipped: another instance holds the lock (consecutive=%d)", n)
+	if n%payReconcileSkipAlertAfter == 0 {
+		log.Printf("[tsa-pay] ALERT pay_reconcile_skipped_total=1 consecutive=%d", n)
+	}
 }
 
 func (s *PayPaymentService) reconcileTick(ctx context.Context) error {
@@ -399,22 +441,28 @@ func (s *PayPaymentService) SimulateTestOutcome(ctx context.Context, user *model
 // state change back with it.
 func (s *PayPaymentService) transition(ctx context.Context, id uuid.UUID, g payGuard, fields map[string]any, event string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := g.scope(tx.Model(&models.PayPayment{}), id).Updates(fields)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return ErrPayTransition
-		}
-		if event == "" {
-			return nil
-		}
-		var p models.PayPayment
-		if err := tx.First(&p, "id = ?", id).Error; err != nil {
-			return err
-		}
-		return s.enqueueWebhook(tx, &p, event)
+		return s.transitionIn(tx, id, g, fields, event)
 	})
+}
+
+// transitionIn is transition inside a transaction the caller owns, for a change
+// that must commit or roll back together with another write.
+func (s *PayPaymentService) transitionIn(tx *gorm.DB, id uuid.UUID, g payGuard, fields map[string]any, event string) error {
+	res := g.scope(tx.Model(&models.PayPayment{}), id).Updates(fields)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrPayTransition
+	}
+	if event == "" {
+		return nil
+	}
+	var p models.PayPayment
+	if err := tx.First(&p, "id = ?", id).Error; err != nil {
+		return err
+	}
+	return s.enqueueWebhook(tx, &p, event)
 }
 
 // enqueueWebhook inserts the delivery p's transition to event owes, inside

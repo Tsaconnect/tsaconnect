@@ -132,7 +132,7 @@ func TestPayReconcile_AStaleOrderingClaimIsNeverReleasedAndAdoptsNoOneElsesOrder
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newPayCheckoutRig(t)
-			r.staleOrdering(t)
+			in := r.staleOrdering(t)
 			if mutate != nil {
 				o := &models.PaycrestOrderRecord{UserID: r.alice.ID, Direction: models.PaycrestDirectionSell, Status: models.PaycrestStatusAwaitingDeposit,
 					Reference: "PCS-" + uuid.NewString()[:8], DepositAddress: "0xdep", PayPaymentID: &r.p.ID}
@@ -142,8 +142,14 @@ func TestPayReconcile_AStaleOrderingClaimIsNeverReleasedAndAdoptsNoOneElsesOrder
 				}
 			}
 			got := r.tickAt(t, sellIntentClaimStale+time.Minute)
-			if got.Status != models.PayStatusFailed || got.PaycrestOrderID != nil || r.intents.abandoned != 0 {
-				t.Fatalf("payment %+v abandoned %d", got, r.intents.abandoned)
+			var stored models.RampSellIntent
+			r.pay.db.First(&stored, "id = ?", in.ID)
+			// Failed for support — never released, never handed to AbandonForPay
+			// (the intent is ended by the reconciler's own guarded write), and no
+			// order adopted.
+			if got.Status != models.PayStatusFailed || got.PayerUserID == nil || got.PaycrestOrderID != nil ||
+				stored.Status != models.SellIntentFailed || r.intents.abandoned != 0 {
+				t.Fatalf("payment %+v intent %s abandoned %d", got, stored.Status, r.intents.abandoned)
 			}
 		})
 	}
@@ -690,5 +696,259 @@ func TestSellIntent_AnIntentEndedOverAStaleClaimCanNeverHaveItsPayoutOpened(t *t
 	}
 	if r.client.offrampCalls != 0 {
 		t.Fatalf("%d offramps opened for a failed payment's intent", r.client.offrampCalls)
+	}
+}
+
+// ---- scoped re-review ----
+
+// I1: a stale claim on a PAY intent is never taken over by a retry: the
+// reconciler owns it, because an order that pays the merchant may exist.
+func TestSellIntent_AStaleClaimOnAPayIntentIsNeverTakenOver(t *testing.T) {
+	ctx := context.Background()
+	r := payRig(t)
+	r.base.amount = big.NewInt(34_000000)
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	pid := uuid.New()
+	in, _, err := r.svc.Create(ctx, r.user, payIntentInput(pid, r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	r.svc.db.Create(&models.PaycrestOrderRecord{UserID: r.user.ID, Direction: models.PaycrestDirectionSell,
+		Status: models.PaycrestStatusAwaitingDeposit, Reference: "PCS-open", DepositAddress: "0xdep", PayPaymentID: &pid})
+	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Updates(map[string]any{
+		"status": models.SellIntentOrdering, "updated_at": sponsorTestNow.Add(-sellIntentClaimStale - time.Second)})
+	var read models.RampSellIntent
+	r.svc.db.First(&read, "id = ?", in.ID)
+
+	if _, err := r.svc.OpenOrder(ctx, r.user, in.ID, false); !errors.Is(err, ErrSellIntentOrdering) {
+		t.Fatalf("err = %v, want ErrSellIntentOrdering: a retry must leave a pay claim to the reconciler", err)
+	}
+	if claimed, err := r.svc.claim(ctx, &read); err != nil || claimed {
+		t.Fatalf("claim took over a pay intent's stale claim: %v %v", claimed, err)
+	}
+	if got := r.reload(t, in.ID); got.Status != models.SellIntentOrdering || r.client.offrampCalls != 0 {
+		t.Fatalf("intent %s offramps %d: dropped back to swapped, or an order opened", got.Status, r.client.offrampCalls)
+	}
+}
+
+// A retry that finds this payment's own order open must not hand the intent back
+// to `swapped` (where a release could follow while that order is fundable); an
+// unrelated open order of hers still gives the claim back as before.
+func TestSellIntent_APayIntentWhoseOwnOrderIsOpenKeepsItsClaimOnRetry(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		marked bool
+		want   string
+	}{"this payment's own order": {true, models.SellIntentOrdering}, "an unrelated open order": {false, models.SellIntentSwapped}} {
+		t.Run(name, func(t *testing.T) {
+			r := payRig(t)
+			r.base.amount = big.NewInt(34_000000)
+			r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+			pid := uuid.New()
+			in, _, err := r.svc.Create(ctx, r.user, payIntentInput(pid, r.user))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.mustRecord(t, in.ID, testSwapHash)
+			r.status.st = r.landed(in)
+			o := &models.PaycrestOrderRecord{UserID: r.user.ID, Direction: models.PaycrestDirectionSell,
+				Status: models.PaycrestStatusAwaitingDeposit, Reference: "PCS-open", DepositAddress: "0xdep"}
+			if tc.marked {
+				o.PayPaymentID = &pid
+			}
+			r.svc.db.Create(o)
+			if _, err := r.svc.OpenOrder(ctx, r.user, in.ID, false); !errors.Is(err, ErrPaycrestOrderOpen) {
+				t.Fatalf("err = %v", err)
+			}
+			if got := r.reload(t, in.ID); got.Status != tc.want {
+				t.Fatalf("intent %s, want %s", got.Status, tc.want)
+			}
+		})
+	}
+}
+
+// The adoption write is guarded like the end: a retry that took the claim over
+// meanwhile holds it, and adopting would race its order.
+func TestPayReconcile_AdoptionIsGuardedOnTheClaimItRead(t *testing.T) {
+	ctx := context.Background()
+	r := newPayCheckoutRig(t)
+	in := r.staleOrdering(t)
+	r.pay.db.Create(&models.PaycrestOrderRecord{UserID: r.alice.ID, Direction: models.PaycrestDirectionSell, Status: models.PaycrestStatusAwaitingDeposit,
+		Reference: "PCS-adopt2", DepositAddress: "0xdep", PayPaymentID: &r.p.ID})
+	var read models.RampSellIntent
+	r.pay.db.First(&read, "id = ?", in.ID)
+	r.pay.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Update("updated_at", payTestNow.Add(sellIntentClaimStale+30*time.Second))
+	r.pay.now = func() time.Time { return payTestNow.Add(sellIntentClaimStale + time.Minute) }
+	if err := r.pay.reconcileStaleOrdering(ctx, r.get(t), &read); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.RampSellIntent
+	r.pay.db.First(&stored, "id = ?", in.ID)
+	if got := r.get(t); got.PaycrestOrderID != nil || stored.Status != models.SellIntentOrdering {
+		t.Fatalf("payment %+v intent %s: adopted under a live claim", got, stored.Status)
+	}
+}
+
+// S4: ending the intent and failing the payment are ONE transaction, so a
+// transient failure between them cannot leave an ended intent behind a payment
+// that then reads as an ordinary swapped-and-done one and is released.
+func TestPayReconcile_EndingAStaleClaimAndFailingItsPaymentAreOneTransaction(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	in := r.staleOrdering(t)
+	var failing atomic.Bool
+	failing.Store(true)
+	if err := r.pay.db.Callback().Update().Before("gorm:update").Register("test:fail_pay_fail", func(tx *gorm.DB) {
+		m, ok := tx.Statement.Dest.(map[string]any)
+		if ok && failing.Load() && tx.Statement.Table == "pay_payments" && m["status"] == models.PayStatusFailed {
+			tx.AddError(errors.New("payment write dropped"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.pay.now = func() time.Time { return payTestNow.Add(sellIntentClaimStale + time.Minute) }
+	if err := r.pay.ReconcileTick(context.Background()); err == nil {
+		t.Fatal("the dropped write must reach the failure-streak alert")
+	}
+	var stored models.RampSellIntent
+	r.pay.db.First(&stored, "id = ?", in.ID)
+	if stored.Status != models.SellIntentOrdering || r.get(t).Status != models.PayStatusProcessing {
+		t.Fatalf("intent %s payment %s: the end survived a payment write that did not", stored.Status, r.get(t).Status)
+	}
+	failing.Store(false)
+	r.pay.now = func() time.Time { return payTestNow.Add(sellIntentClaimStale + 2*time.Minute) }
+	r.pay.ReconcileTick(context.Background())
+	r.pay.db.First(&stored, "id = ?", in.ID)
+	if stored.Status != models.SellIntentFailed || r.get(t).Status != models.PayStatusFailed {
+		t.Fatalf("intent %s payment %s", stored.Status, r.get(t).Status)
+	}
+}
+
+// S5: a payment released and locked again between a reconciler's read and its
+// write is a different lock; the stale decision must not touch it.
+func TestPayTransitions_AreGuardedOnTheLockTheCallerRead(t *testing.T) {
+	ctx := context.Background()
+	r := newPayCheckoutRig(t)
+	r.lockAlice(t)
+	stale := r.get(t) // no attempt, locked at payTestNow
+	if err := r.pay.Release(ctx, r.p.ID, "x"); err != nil {
+		t.Fatal(err)
+	}
+	r.pay.now = func() time.Time { return payTestNow.Add(5 * time.Minute) }
+	bob := payUser(t, r.pay, true)
+	if _, fresh, err := r.pay.Lock(ctx, bob, r.p.ID, true); err != nil || !fresh {
+		t.Fatalf("relock: %v %v", err, fresh)
+	}
+	for name, err := range map[string]error{
+		"release": r.pay.releaseFrom(ctx, stale, "x"),
+		"fail":    r.pay.failFrom(ctx, stale, "x"),
+		"succeed": r.pay.succeedFrom(ctx, stale, "x"),
+	} {
+		if !errors.Is(err, ErrPayTransition) {
+			t.Fatalf("%s: err = %v: a stale decision moved a fresh lock", name, err)
+		}
+	}
+	if got := r.get(t); got.Status != models.PayStatusProcessing || got.PayerUserID == nil || *got.PayerUserID != bob.ID {
+		t.Fatalf("payment = %+v", got)
+	}
+}
+
+// I3: the deposit read asks about the order's own chain, token and address.
+func TestPayReconcile_TheDepositReadAsksAboutTheOrdersOwnChainTokenAndAddress(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	o := r.startedOrder(t, models.PaycrestStatusExpired, func(o *models.PaycrestOrderRecord) {
+		o.ChainKey, o.Token, o.DepositAddress = "bsc", "USDT", "0xOrdersOwnDepositAddress"
+	})
+	r.deposit.want = &fakeDepositArgs{"bsc", "USDT", o.DepositAddress}
+	if got := r.tickAt(t, time.Hour); got.Status != models.PayStatusPending {
+		t.Fatalf("payment = %+v", got)
+	}
+	if len(r.deposit.got) != 1 || r.deposit.got[0] != *r.deposit.want {
+		t.Fatalf("read %+v", r.deposit.got)
+	}
+	// Mangled arguments are an error, which is unknown, never "proven empty".
+	r2 := newPayCheckoutRig(t)
+	r2.startedOrder(t, models.PaycrestStatusExpired, nil)
+	r2.deposit.want = &fakeDepositArgs{"somewhere-else", "USDC", "0xdeposit"}
+	if got := r2.tickAt(t, time.Hour); got.Status != models.PayStatusProcessing {
+		t.Fatalf("a read of the wrong place released the payment: %+v", got)
+	}
+}
+
+// I2: a skipped reconcile tick is never silent.
+func TestPayReconcileTick_ASkippedTickIsLoggedAndTheStreakAlertsEveryNAndResets(t *testing.T) {
+	s := &PayPaymentService{}
+	logs := captureLog(t)
+	for i := 1; i <= 2*payReconcileSkipAlertAfter+3; i++ {
+		s.noteTick(false)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "reconcile tick skipped"); n != 2*payReconcileSkipAlertAfter+3 {
+		t.Fatalf("%d skip lines: every skip is logged", n)
+	}
+	for _, want := range []int{payReconcileSkipAlertAfter, 2 * payReconcileSkipAlertAfter} {
+		if !strings.Contains(out, fmt.Sprintf("ALERT pay_reconcile_skipped_total=1 consecutive=%d", want)) {
+			t.Fatalf("no ALERT at %d skips in %q", want, out)
+		}
+	}
+	if n := strings.Count(out, "ALERT pay_reconcile_skipped_total"); n != 2 {
+		t.Fatalf("%d alerts, want one per %d skips", n, payReconcileSkipAlertAfter)
+	}
+	// A tick that ran resets the streak: the next alert is N skips away again.
+	s.noteTick(true)
+	logs.Reset()
+	for i := 1; i < payReconcileSkipAlertAfter; i++ {
+		s.noteTick(false)
+	}
+	if strings.Contains(logs.String(), "ALERT") {
+		t.Fatalf("alerted before %d consecutive skips after a recovery: %q", payReconcileSkipAlertAfter, logs.String())
+	}
+}
+
+func TestPayReconcileTick_APersistentlyLockedTickAlertsAndARecoveredOneResetsOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	r := newPayCheckoutPostgresRig(t)
+	sqlDB, _ := r.pay.db.DB()
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", payReconcileLockKey); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	for i := 0; i < payReconcileSkipAlertAfter; i++ {
+		if err := r.pay.ReconcileTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(logs.String(), fmt.Sprintf("ALERT pay_reconcile_skipped_total=1 consecutive=%d", payReconcileSkipAlertAfter)) {
+		t.Fatalf("no ALERT after %d skipped ticks in %q", payReconcileSkipAlertAfter, logs.String())
+	}
+	unlockAdvisory(t, conn)
+	if err := r.pay.ReconcileTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r.pay.skipped.Load() != 0 {
+		t.Fatalf("streak = %d after a tick that ran", r.pay.skipped.Load())
+	}
+}
+
+// The lock dies with its transaction: a tick whose context is already cancelled
+// (its transaction never commits) leaves nothing held, so no instance is silenced.
+func TestPayReconcileTick_TheLockIsReleasedWhenTheTickEndsHoweverItEndsOnPostgres(t *testing.T) {
+	r := newPayCheckoutPostgresRig(t)
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.pay.ReconcileTick(cctx) // errors: nothing to assert but the lock afterwards
+	for i := 0; i < 3; i++ {
+		if err := r.pay.ReconcileTick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.pay.skipped.Load() != 0 {
+		t.Fatalf("%d ticks skipped: a lock outlived its tick", r.pay.skipped.Load())
 	}
 }

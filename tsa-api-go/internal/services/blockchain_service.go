@@ -130,7 +130,31 @@ func (bs *BlockchainService) DepositBalance(chainKey, token, address string) (*b
 	if addr == "" {
 		return nil, fmt.Errorf("no %s address on chain %q", token, chainKey)
 	}
-	return client.GetTokenBalance(addr, address)
+	return depositBalanceFrom(client, chainKey, token, addr, address)
+}
+
+// tokenBalanceReader is the slice of an EVM client a deposit read needs.
+// *blockchain.EVMClient fills it.
+type tokenBalanceReader interface {
+	HasContractCode(address string) (bool, error)
+	GetTokenBalance(tokenAddress, walletAddress string) (*big.Int, error)
+}
+
+// depositBalanceFrom reads the balance, but only reports one — zero above all —
+// when the token address is a contract with code on the chain: a balanceOf call
+// to an address with none returns empty data that reads as zero, and a registry
+// token that differs from the order's (a bridged variant) or a mis-set address
+// would otherwise show an expired FUNDED order as proven empty. Anything else is
+// an error, which the reconciler treats as "unknown" and waits on.
+func depositBalanceFrom(c tokenBalanceReader, chainKey, token, tokenAddr, deposit string) (*big.Int, error) {
+	has, err := c.HasContractCode(tokenAddr)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		return nil, fmt.Errorf("%s %s (%s) is not a contract on that chain: its balance cannot be proven", chainKey, token, tokenAddr)
+	}
+	return c.GetTokenBalance(tokenAddr, deposit)
 }
 
 // MainnetChainNameForID resolves a chain ID to its key only when it is a

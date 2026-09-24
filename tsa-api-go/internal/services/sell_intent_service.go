@@ -464,7 +464,11 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		// never owed. ConfirmDelivery is its only way forward.
 		return nil, ErrSellIntentState
 	}
-	if in.Status == models.SellIntentOrdering && !s.claimIsStale(in) {
+	if in.Status == models.SellIntentOrdering && (in.PayPaymentID != nil || !s.claimIsStale(in)) {
+		// A pay intent's dead claim is never taken over here: an order that pays
+		// the merchant may exist behind it, and only the pay reconciler (which
+		// looks for that order, and ends the intent before failing the payment)
+		// may decide what became of it.
 		return nil, ErrSellIntentOrdering
 	}
 
@@ -547,7 +551,7 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		order, err = s.orders.CreateSellForToken(ctx, sellReq, BaseUnitsToDecimal(landed, 6), true)
 	}
 	if err != nil {
-		if errors.Is(err, ErrSellAttemptMayExist) {
+		if errors.Is(err, ErrSellAttemptMayExist) || s.payOrderIsOpen(ctx, in, err) {
 			// An order may be open — a short one that could not be cancelled, or
 			// one Paycrest opened that could not be recorded. Giving the claim back
 			// would invite a retry against it; leave it `ordering`, so the intent
@@ -591,6 +595,9 @@ func (s *SellIntentService) claim(ctx context.Context, in *models.RampSellIntent
 	q := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, in.Status)
 	if in.Status == models.SellIntentOrdering {
+		if in.PayPaymentID != nil {
+			return false, nil // never taken over: see OpenOrder
+		}
 		q = q.Where("updated_at < ?", s.now().Add(-sellIntentClaimStale))
 	}
 	res := q.Updates(map[string]any{"status": models.SellIntentOrdering, "updated_at": s.now()})
@@ -598,6 +605,24 @@ func (s *SellIntentService) claim(ctx context.Context, in *models.RampSellIntent
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// payOrderIsOpen reports that a pay intent's order failed to open BECAUSE one of
+// this payment's own orders is already open (the answer to a retry after an
+// earlier attempt that may have left one): giving the claim back would hand the
+// intent to the swapped rules while that order is still fundable. The order is
+// found by the payment marker on the order record itself — the ramp's own table.
+func (s *SellIntentService) payOrderIsOpen(ctx context.Context, in *models.RampSellIntent, cause error) bool {
+	if in.PayPaymentID == nil || !errors.Is(cause, ErrPaycrestOrderOpen) {
+		return false
+	}
+	var n int64
+	err := s.db.WithContext(context.WithoutCancel(ctx)).Model(&models.PaycrestOrderRecord{}).
+		Where("pay_payment_id = ? AND user_id = ? AND status IN ?", *in.PayPaymentID, in.UserID,
+			[]string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusAwaitingDeposit,
+				models.PaycrestStatusPending, models.PaycrestStatusSettling}).
+		Count(&n).Error
+	return err != nil || n > 0 // an unreadable answer keeps the claim: the safe side
 }
 
 // releaseClaim returns an ordering intent to swapped (it has a swap recorded,

@@ -149,10 +149,22 @@ type fakeDeposits struct {
 	bal   *big.Int
 	err   error
 	calls int
+	// want, when set, is what the read must ask about (chain key, token symbol,
+	// deposit address): anything else is an error, so a reconciler that mangles
+	// its arguments cannot read a stranger's empty address as "proven empty".
+	want *fakeDepositArgs
+	got  []fakeDepositArgs
 }
 
-func (f *fakeDeposits) DepositBalance(_, _, _ string) (*big.Int, error) {
+type fakeDepositArgs struct{ chain, token, address string }
+
+func (f *fakeDeposits) DepositBalance(chain, token, address string) (*big.Int, error) {
 	f.calls++
+	a := fakeDepositArgs{chain, token, address}
+	f.got = append(f.got, a)
+	if f.want != nil && *f.want != a {
+		return nil, fmt.Errorf("fake: asked about %+v, want %+v", a, *f.want)
+	}
 	return f.bal, f.err
 }
 

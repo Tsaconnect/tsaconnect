@@ -373,8 +373,10 @@ func (s *PayPaymentService) reconcileStaleOrdering(ctx context.Context, p *model
 		Order("created_at DESC").First(&o).Error
 	switch {
 	case err == nil:
+		// Guarded on the claim as read, like the end below: a retry that took it
+		// over holds it and is opening its own order.
 		res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-			Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, models.SellIntentOrdering).
+			Where("id = ? AND status = ? AND paycrest_order_id IS NULL AND updated_at <= ?", in.ID, models.SellIntentOrdering, in.UpdatedAt).
 			Updates(models.WithBankDetailsCleared(map[string]any{
 				"status": models.SellIntentOrdered, "paycrest_order_id": o.ID, "updated_at": s.now()}))
 		if res.Error != nil {
@@ -393,17 +395,32 @@ func (s *PayPaymentService) reconcileStaleOrdering(ctx context.Context, p *model
 		// touched since — a retry that took the claim over bumps updated_at), so it
 		// can never end a live claim under its holder; and a retry arriving after
 		// finds a failed intent, which claim() and OpenOrder both refuse.
-		res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-			Where("id = ? AND status = ? AND paycrest_order_id IS NULL AND updated_at <= ?", in.ID, models.SellIntentOrdering, in.UpdatedAt).
-			Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()}))
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
+		//
+		// The end and the failure are ONE transaction: were the payment's write to
+		// fail after the intent was ended, the next tick would find an ordinary
+		// failed-with-a-swap intent and could release the payment.
+		moved := false
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&models.RampSellIntent{}).
+				Where("id = ? AND status = ? AND paycrest_order_id IS NULL AND updated_at <= ?", in.ID, models.SellIntentOrdering, in.UpdatedAt).
+				Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()}))
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				moved = true
+				return nil
+			}
+			payAlert("ordering_claim_stale", p, "intent", in.ID)
+			return s.transitionIn(tx, p.ID, payProcessing(attemptOf(p)), map[string]any{
+				"status":         models.PayStatusFailed,
+				"failure_reason": "the payout order was never opened — support is reviewing it",
+			}, models.PayEventFailed)
+		})
+		if moved {
 			return s.followMovedClaim(ctx, p, in.ID)
 		}
-		payAlert("ordering_claim_stale", p, "intent", in.ID)
-		return s.failFrom(ctx, p, "the payout order was never opened — support is reviewing it")
+		return err
 	}
 	return err
 }

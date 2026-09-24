@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,6 +98,7 @@ type PayPaymentService struct {
 	now          func() time.Time
 	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
 	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
+	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
 	alerted      sync.Map         // alertOnce's memory: what this process has already alerted on
 }
 
