@@ -521,3 +521,109 @@ func TestPayMerchant_UpdateRefusesAChainNoDeliveryCouldBeConfirmedOn(t *testing.
 		t.Fatalf("bsc mainnet: %v", err)
 	}
 }
+
+// ---- a merchant changing their own settlement ----
+
+// ownedMerchant is a merchant approved for owner, whose verified legal name is
+// legalName ("" = not KYC-verified).
+func ownedMerchant(t *testing.T, legalName string) (*PayMerchantService, *fakePayBanks, *models.PayMerchant, uuid.UUID) {
+	t.Helper()
+	s, banks := newPayMerchantSvc(t)
+	s.chains = fakePayChains{8453: "base"}
+	owner := uuid.New()
+	status := models.VerificationStatusVerified
+	if legalName == "" {
+		status = "pending"
+	}
+	if err := s.db.Exec(`INSERT INTO users (id, name, email, wallet_address, verification_status, verified_legal_name) VALUES (?, ?, ?, ?, ?, ?)`,
+		owner, "typed at signup", owner.String()+"@test.com", "0x000000000000000000000000000000000000dEaD", status, legalName).Error; err != nil {
+		t.Fatal(err)
+	}
+	req := payRequest()
+	req.UserID = owner
+	m, err := s.CreateFromRequest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, banks, m, owner
+}
+
+func bankChange(account string) PaySettlementChange {
+	return PaySettlementChange{SettlementMode: models.PaySettlementFiat, BankCode: "044", AccountNumber: account}
+}
+
+func TestPayMerchant_OwnerSettlementToAnAccountInTheBusinessName(t *testing.T) {
+	ctx := context.Background()
+	s, banks, m, owner := ownedMerchant(t, "")
+	banks.name = "SKY AIR LIMITED"
+	got, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210"))
+	if err != nil || got.AccountNumber != "9876543210" || got.BankCode != "044" || got.AccountName != "SKY AIR LIMITED" {
+		t.Fatalf("err %v merchant %+v", err, got)
+	}
+	var audit models.PayAuditEvent
+	if err := s.db.Where("merchant_id = ?", m.ID).Order("created_at desc").First(&audit).Error; err != nil || audit.ActorID != owner {
+		t.Fatalf("audit %+v err %v: the owner's change must be audited as theirs", audit, err)
+	}
+}
+
+func TestPayMerchant_OwnerSettlementToAnAccountInTheirVerifiedName(t *testing.T) {
+	s, banks, _, owner := ownedMerchant(t, "Ada Chioma Obi")
+	banks.name = "OBI ADA"
+	if _, err := s.UpdateSettlementByOwner(context.Background(), owner, bankChange("9876543210")); err != nil {
+		t.Fatalf("an account in her verified name was refused: %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerSettlementRefusesAnAccountInSomeoneElsesName(t *testing.T) {
+	for name, legal := range map[string]string{"KYC-verified": "Ada Chioma Obi", "not verified": ""} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s, banks, m, owner := ownedMerchant(t, legal)
+			banks.name = "EMEKA NWOSU"
+			if _, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210")); !errors.Is(err, ErrPaySettlementNameMismatch) {
+				t.Fatalf("err = %v", err)
+			}
+			stored, _ := s.Get(ctx, m.ID)
+			if stored.AccountNumber == "9876543210" || stored.Version != m.Version {
+				t.Fatalf("a refused change landed: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestPayMerchant_OwnerSettlementToAWallet(t *testing.T) {
+	s, _, _, owner := ownedMerchant(t, "")
+	got, err := s.UpdateSettlementByOwner(context.Background(), owner, PaySettlementChange{
+		SettlementMode: models.PaySettlementCrypto, ChainID: 8453,
+		TokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", TokenSymbol: "USDC",
+		WalletAddress: "0x52908400098527886E0F7030069857D2E4169EE7",
+	})
+	if err != nil || got.SettlementMode != models.PaySettlementCrypto || got.ChainID != 8453 {
+		t.Fatalf("err %v merchant %+v", err, got)
+	}
+	// The chain rules still apply: a chain no delivery can be proven on is refused.
+	if _, err := s.UpdateSettlementByOwner(context.Background(), owner, PaySettlementChange{
+		SettlementMode: models.PaySettlementCrypto, ChainID: 999, TokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+		TokenSymbol: "USDC", WalletAddress: "0x52908400098527886E0F7030069857D2E4169EE7",
+	}); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("unsupported chain: err = %v", err)
+	}
+}
+
+func TestPayMerchant_OwnerSettlementRefusals(t *testing.T) {
+	ctx := context.Background()
+	s, banks, m, owner := ownedMerchant(t, "")
+	banks.name = "SKY AIR LTD"
+	if _, err := s.UpdateSettlementByOwner(ctx, uuid.New(), bankChange("9876543210")); !errors.Is(err, ErrPayMerchantNotFound) {
+		t.Fatalf("someone else's change: err = %v", err)
+	}
+	if _, err := s.UpdateSettlementByOwner(ctx, owner, PaySettlementChange{SettlementMode: ""}); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("unconfiguring: err = %v", err)
+	}
+	if err := s.db.Model(m).Update("status", models.PayMerchantSuspended).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateSettlementByOwner(ctx, owner, bankChange("9876543210")); !errors.Is(err, ErrPayMerchantSuspended) {
+		t.Fatalf("suspended: err = %v", err)
+	}
+}

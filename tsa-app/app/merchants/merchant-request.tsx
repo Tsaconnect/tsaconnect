@@ -492,14 +492,14 @@ export default function MerchantRequestScreen() {
         title={gate.payFlow ? 'Your TSA Pay application was approved' : gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
         body={
           gate.payFlow
-            ? "Your TSA Pay application has been approved. Accepting payments isn't in this version of the app yet — we'll notify you when it's ready."
+            ? 'Your TSA Pay application has been approved. Choose where you want to be paid — a bank account in your business or verified name, or a crypto wallet.'
             : gate.pm
             ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
             : 'Your application has been approved. You now have access to the merchant portal.'
         }
-        actionTitle={gate.payFlow ? 'Go Back' : 'Go to Merchant Dashboard'}
-        actionVariant={gate.payFlow ? 'secondary' : 'success'}
-        onAction={() => (gate.payFlow ? router.back() : router.push('/merchants/dashboard'))}
+        actionTitle={gate.payFlow ? 'Payment Settings' : 'Go to Merchant Dashboard'}
+        actionVariant="success"
+        onAction={() => router.push(gate.payFlow ? '/merchants/pay-settings' : '/merchants/dashboard')}
       />
     );
   }

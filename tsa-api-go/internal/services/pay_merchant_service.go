@@ -49,6 +49,10 @@ var (
 	// since the caller read it — an explicit expectedVersion mismatch, or a
 	// concurrent writer winning the compare-and-set.
 	ErrPayMerchantStale = errors.New("this merchant was changed by someone else — reload and try again")
+	// ErrPaySettlementNameMismatch is UpdateSettlementByOwner's refusal of a
+	// bank account whose name (as the bank resolved it) is neither the
+	// merchant's business name nor the owner's KYC-verified legal name.
+	ErrPaySettlementNameMismatch = errors.New("the account name doesn't match your business name or your verified name")
 )
 
 // Approval defaults for a payment_acceptance merchant request. An admin can
@@ -292,6 +296,96 @@ func (s *PayMerchantService) List(ctx context.Context, page, limit int) ([]PayMe
 // lands. Settlement changes are verified against the bank/chain the money
 // actually needs to reach before they're accepted.
 func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate) (*models.PayMerchant, error) {
+	return s.update(ctx, actor, id, in, nil)
+}
+
+// PaySettlementChange is where a merchant asks to be paid: the only settings a
+// merchant may change about their own account. A naira destination names a
+// bank account; a crypto one names a token on a chain and a wallet.
+type PaySettlementChange struct {
+	SettlementMode string `json:"settlementMode"`
+	BankCode       string `json:"bankCode"`
+	AccountNumber  string `json:"accountNumber"`
+	ChainID        int64  `json:"chainId"`
+	TokenAddress   string `json:"tokenAddress"`
+	TokenSymbol    string `json:"tokenSymbol"`
+	WalletAddress  string `json:"walletAddress"`
+}
+
+// GetByOwner returns the merchant a user owns, or ErrPayMerchantNotFound. A
+// user has at most one: a merchant is provisioned from their one approved
+// payment_acceptance request.
+func (s *PayMerchantService) GetByOwner(ctx context.Context, userID uuid.UUID) (*models.PayMerchant, error) {
+	var m models.PayMerchant
+	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at desc").First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPayMerchantNotFound
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+// UpdateSettlementByOwner is a merchant changing where they are paid. It is the
+// admin Update with three more rules, because the caller is the account an
+// attacker would take over to redirect a merchant's money:
+//   - only the settlement destination can change, never the merchant's name,
+//     status, limits, webhooks or return domains;
+//   - a suspended merchant cannot change it (suspension is an incident control);
+//   - a bank account must be in the merchant's own name — the name the bank
+//     resolves must match the business name or the owner's KYC-verified legal
+//     name — so a stolen login cannot point payouts at the thief's account.
+//
+// Everything else — resolving the account, the chain and token rules, the
+// version check and the audit row (with the owner as its actor) — is Update's.
+func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerID uuid.UUID, ch PaySettlementChange) (*models.PayMerchant, error) {
+	m, err := s.GetByOwner(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if m.Status == models.PayMerchantSuspended {
+		return nil, ErrPayMerchantSuspended
+	}
+	mode := strings.TrimSpace(ch.SettlementMode)
+	in := PayMerchantUpdate{SettlementMode: &mode, ExpectedVersion: &m.Version}
+	switch mode {
+	case models.PaySettlementFiat:
+		in.BankCode, in.AccountNumber = &ch.BankCode, &ch.AccountNumber
+	case models.PaySettlementCrypto:
+		in.ChainID, in.TokenAddress, in.TokenSymbol, in.WalletAddress = &ch.ChainID, &ch.TokenAddress, &ch.TokenSymbol, &ch.WalletAddress
+	default:
+		return nil, fmt.Errorf("%w: settlement must be %q or %q", ErrPayMerchantInvalid, models.PaySettlementFiat, models.PaySettlementCrypto)
+	}
+	return s.update(ctx, ownerID, m.ID, in, func(updated *models.PayMerchant) error {
+		if updated.SettlementMode != models.PaySettlementFiat {
+			return nil
+		}
+		return s.accountInOwnName(ctx, ownerID, updated)
+	})
+}
+
+// accountInOwnName checks the resolved account name against the business name
+// and, when the owner is KYC-verified, their verified legal name — read fresh,
+// since it is the one name on the user that was checked against anything.
+func (s *PayMerchantService) accountInOwnName(ctx context.Context, ownerID uuid.UUID, m *models.PayMerchant) error {
+	if MatchBusinessAccountName(m.BusinessName, m.AccountName).IsMatch() {
+		return nil
+	}
+	var legal string
+	if err := s.db.WithContext(ctx).Model(&models.User{}).Where("id = ?", ownerID).
+		Select("verified_legal_name").Scan(&legal).Error; err != nil {
+		return err
+	}
+	if MatchAccountName(legal, m.AccountName).IsMatch() {
+		return nil
+	}
+	return ErrPaySettlementNameMismatch
+}
+
+// update is Update with an optional check on the resulting merchant, run after
+// validatePayMerchant (which resolves a bank account's name) and before
+// anything is written: a refusal from check persists nothing.
+func (s *PayMerchantService) update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate, check func(*models.PayMerchant) error) (*models.PayMerchant, error) {
 	m, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -381,6 +475,11 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 
 	if err := s.validatePayMerchant(ctx, &before, &updated); err != nil {
 		return nil, err
+	}
+	if check != nil {
+		if err := check(&updated); err != nil {
+			return nil, err
+		}
 	}
 	if updated.AccountName != before.AccountName {
 		changes["account_name"] = updated.AccountName // set by the name enquiry

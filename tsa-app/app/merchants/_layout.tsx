@@ -96,6 +96,12 @@ export default function MerchantLayout() {
                 }}
             />
             <Stack.Screen
+                name="pay-settings"
+                options={{
+                    title: 'Payment Settings',
+                }}
+            />
+            <Stack.Screen
                 name="activate-pm"
                 options={{
                     title: 'Activate Payment Merchant',

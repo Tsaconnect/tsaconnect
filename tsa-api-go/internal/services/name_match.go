@@ -251,3 +251,30 @@ func intersectionSize(a, b map[string]struct{}) int {
 	}
 	return n
 }
+
+// companyNameSuffixes are legal-form words a bank may add to, drop from, or
+// spell differently in a registered business's account name ("SKY AIR LTD",
+// "Sky Air Limited", "Sky Air"). They say what kind of entity it is, never which
+// one, so they are dropped before a business name is matched. Kept out of
+// accountNameHonorifics on purpose: inbound attribution matches people, and a
+// looser person matcher is a riskier one.
+var companyNameSuffixes = map[string]struct{}{
+	"LTD": {}, "LIMITED": {}, "PLC": {}, "INC": {}, "LLC": {}, "CO": {}, "COMPANY": {},
+}
+
+// MatchBusinessAccountName is MatchAccountName for a business: the registered
+// name and the bank's account name, compared after dropping legal-form suffixes.
+// The same floors apply — a lone suffix, or one shared word, is never a match.
+func MatchBusinessAccountName(businessName, bankName string) NameMatchStrength {
+	return MatchAccountName(withoutCompanySuffixes(businessName), withoutCompanySuffixes(bankName))
+}
+
+func withoutCompanySuffixes(s string) string {
+	kept := make([]string, 0, 4)
+	for _, tok := range AccountNameTokens(s) {
+		if _, suffix := companyNameSuffixes[tok]; !suffix {
+			kept = append(kept, tok)
+		}
+	}
+	return strings.Join(kept, " ")
+}

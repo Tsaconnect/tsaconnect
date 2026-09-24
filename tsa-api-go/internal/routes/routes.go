@@ -1250,6 +1250,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			checkout.GET("/:id/crypto-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayCryptoQuote)
 			checkout.POST("/:id/crypto", middleware.Idempotency(config.DB), payStartLimit, payh.PayCrypto)
 		}
+
+		// A merchant's own account, from the app: JWT user auth. Changing where
+		// the merchant is paid re-checks the password in-handler and has its own
+		// tight limit, so a password cannot be guessed through it.
+		owner := api.Group("/pay/merchant")
+		owner.Use(auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey))
+		{
+			owner.GET("", payh.OwnerMerchant)
+			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
+		}
 	}
 }
 

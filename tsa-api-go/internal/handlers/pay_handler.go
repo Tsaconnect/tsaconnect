@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -67,6 +68,7 @@ type PayHandler struct {
 	payments    payPaymentAPI
 	webhooks    payWebhookAPI
 	checkout    payCheckoutStarter
+	events      *events.Bus
 	liveEnabled bool
 }
 

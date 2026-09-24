@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -39,7 +40,7 @@ const tsaPayMinMasterKeyBytes = 32
 // next one (see internal/jobs's package doc on idempotent workers).
 func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, chains *services.BlockchainService, scheduler *jobs.Scheduler,
 	orders *services.PaycrestOrderService, intents *services.SellIntentService, quoter *services.RampSellQuoter,
-	rates *services.PaycrestQuoteService) *handlers.PayHandler {
+	rates *services.PaycrestQuoteService, bus *events.Bus) *handlers.PayHandler {
 	if !cfg.TSAPayEnabled {
 		log.Printf("[tsa-pay] dormant: TSA_PAY_ENABLED is not set")
 		return nil
@@ -69,7 +70,7 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
-	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled)
+	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus)
 	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}

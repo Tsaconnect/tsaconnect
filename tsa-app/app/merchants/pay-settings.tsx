@@ -1,0 +1,246 @@
+// app/merchants/pay-settings.tsx
+//
+// Where a TSA Pay merchant is paid, read and changed by the merchant. Changing
+// it is the one thing a stolen phone or login would do to redirect a merchant's
+// money, so it asks for the account password (checked by the server) and then
+// PIN or biometric (AuthorizationModal — the app's one unlock path), and the
+// server only accepts a bank account in the business's or the owner's verified
+// name. The owner is told of every change by email and push.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ScrollView, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import { getChainByChainId } from '@/constants/chains';
+import AuthorizationModal from '@/components/common/AuthorizationModal';
+import AssetPicker from '@/components/assets/AssetPicker';
+import {
+  Button, Card, ErrorState, Input, PickerSheet, SegmentedControl, SelectRow, Spinner, Text, useToast,
+} from '@/components/ui';
+import type { PickerItem } from '@/components/ui';
+import { usePayAuthorization } from '@/hooks/usePayAuthorization';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
+import type { LiFiToken } from '@/services/lifi';
+import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
+import {
+  getOwnMerchant, NAME_MISMATCH, updateSettlement, type OwnMerchant, type SettlementChange, type SettlementMode,
+} from '@/services/payMerchantApi';
+import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
+
+type Load = { kind: 'loading' } | { kind: 'none' } | { kind: 'error'; message: string } | { kind: 'ready'; merchant: OwnMerchant };
+
+const errorOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+
+export default function PaySettings() {
+  const { colors, spacing } = useTheme();
+  const toast = useToast();
+  const { address } = useSignableWallet();
+  const [load, setLoad] = useState<Load>({ kind: 'loading' });
+  const [mode, setMode] = useState<SettlementMode>('fiat');
+
+  const [banks, setBanks] = useState<NgBank[]>([]);
+  const [bankPickerOpen, setBankPickerOpen] = useState(false);
+  const [bank, setBank] = useState<NgBank | null>(null);
+  const [accountNumber, setAccountNumber] = useState('');
+  const [resolvedName, setResolvedName] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
+  const [token, setToken] = useState<(LiFiToken & { chainId: number }) | undefined>();
+  const [wallet, setWallet] = useState('');
+
+  const [password, setPassword] = useState('');
+  const [formError, setFormError] = useState<string | undefined>();
+  const [saving, setSaving] = useState(false);
+  // A double biometric success must not send the change twice.
+  const submitting = useRef(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const merchant = await getOwnMerchant();
+      setLoad({ kind: 'ready', merchant });
+      if (merchant.settlementMode) setMode(merchant.settlementMode);
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status;
+      setLoad(status === 404 ? { kind: 'none' } : { kind: 'error', message: errorOf(e, 'Could not load your payment settings.') });
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { getNigerianBanks().then(setBanks).catch(() => {}); }, []);
+  // Her own wallet on this device is the natural place to be paid; she can type another.
+  useEffect(() => { if (address && !wallet) setWallet(address); }, [address, wallet]);
+
+  // The bank's own name for the account, shown before she saves: it is what the
+  // server will check against her business and verified names.
+  useEffect(() => {
+    setResolvedName(null);
+    if (!bank || accountNumber.length !== 10) { setResolving(false); return; }
+    let cancelled = false;
+    setResolving(true);
+    const t = setTimeout(async () => {
+      const res = await resolveAccountName(bank.code, accountNumber);
+      if (cancelled) return;
+      setResolving(false);
+      setResolvedName(res.ok ? res.accountName : null);
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [bank, accountNumber]);
+
+  const bankItems: PickerItem[] = useMemo(
+    () => banks.map((b) => ({ id: b.code, label: b.name, icon: 'bank' as const })),
+    [banks],
+  );
+  const bankName = useCallback((code: string) => banks.find((b) => b.code === code)?.name, [banks]);
+
+  const save = async (change: SettlementChange) => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setSaving(true);
+    setFormError(undefined);
+    try {
+      const merchant = await updateSettlement(change, password);
+      setLoad({ kind: 'ready', merchant });
+      setPassword('');
+      setAccountNumber('');
+      toast.success('Payment settings saved');
+    } catch (e) {
+      const code = (e as { code?: string } | null)?.code;
+      setFormError(code === NAME_MISMATCH && resolvedName
+        ? `${errorOf(e, '')} The bank says this account belongs to ${resolvedName}.`
+        : errorOf(e, 'Could not save your payment settings.'));
+    } finally {
+      submitting.current = false;
+      setSaving(false);
+    }
+  };
+
+  const { request, authorization } = usePayAuthorization<SettlementChange>({
+    title: () => 'Authorize changing where you are paid',
+    onAuthorized: (change) => { void save(change); },
+  });
+
+  const onSave = () => {
+    const out = settlementChangeFrom(mode === 'fiat'
+      ? { mode, bankCode: bank?.code, accountNumber }
+      : { mode, token, walletAddress: wallet });
+    if ('missing' in out) { setFormError(out.missing); return; }
+    if (!password) { setFormError('Enter your account password to confirm.'); return; }
+    setFormError(undefined);
+    request(out.change);
+  };
+
+  if (load.kind === 'loading') {
+    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
+  }
+  if (load.kind === 'error') {
+    return <ErrorState title="Could not load your payment settings" subtitle={load.message} onRetry={refresh} />;
+  }
+  if (load.kind === 'none') {
+    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
+  }
+  const { merchant } = load;
+  const suspended = merchant.status === 'suspended';
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }} keyboardShouldPersistTaps="handled">
+        <Card style={{ gap: spacing.xs }}>
+          <Text variant="caption" color="textMuted">{merchant.businessName} is paid to</Text>
+          <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
+        </Card>
+
+        {suspended ? (
+          <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
+            <Text variant="bodySm">Your merchant account is suspended. Contact support to change where you are paid.</Text>
+          </Card>
+        ) : (
+          <>
+            <Text variant="bodyMed" weight="700">Change where you are paid</Text>
+            <SegmentedControl<SettlementMode>
+              segments={[{ key: 'fiat', label: 'Bank account' }, { key: 'crypto', label: 'Crypto wallet' }]}
+              value={mode}
+              onChange={(m) => { setMode(m); setFormError(undefined); }}
+            />
+
+            {mode === 'fiat' ? (
+              <View style={{ gap: spacing.sm }}>
+                <SelectRow label="Bank" placeholder="Choose your bank" value={bank?.name} leftIcon="bank" onPress={() => setBankPickerOpen(true)} />
+                <Input
+                  label="Account number"
+                  value={accountNumber}
+                  onChangeText={(v) => setAccountNumber(v.replace(/\D/g, ''))}
+                  placeholder="10-digit account number"
+                  keyboardType="number-pad"
+                  maxLength={10}
+                />
+                {resolving ? <Text variant="caption" color="textMuted">Checking the account…</Text> : null}
+                {resolvedName ? <Text variant="caption" weight="600">Account name: {resolvedName}</Text> : null}
+                <Text variant="caption" color="textMuted">
+                  The account must be in your business name or the name on your verified ID.
+                </Text>
+              </View>
+            ) : (
+              <View style={{ gap: spacing.sm }}>
+                <SelectRow
+                  label="Paid in"
+                  placeholder="Choose a token"
+                  value={token ? `${token.symbol} on ${getChainByChainId(token.chainId)?.name ?? `chain ${token.chainId}`}` : undefined}
+                  leftIcon="wallet"
+                  onPress={() => setTokenPickerOpen(true)}
+                />
+                <Input
+                  label="Wallet address"
+                  value={wallet}
+                  onChangeText={setWallet}
+                  placeholder="0x…"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <Text variant="caption" color="textMuted">
+                  Payments arrive in this wallet on that network. Only use a wallet you control.
+                </Text>
+              </View>
+            )}
+
+            <Input
+              label="Account password"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="To confirm it's you"
+            />
+            {formError ? <Text variant="bodySm" style={{ color: colors.danger }}>{formError}</Text> : null}
+            <Button title="Save" onPress={onSave} loading={saving} disabled={saving} fullWidth />
+          </>
+        )}
+      </ScrollView>
+
+      <PickerSheet
+        visible={bankPickerOpen}
+        onClose={() => setBankPickerOpen(false)}
+        title="Choose your bank"
+        items={bankItems}
+        loading={banks.length === 0}
+        selectedId={bank?.code}
+        emptyText="No banks found."
+        onSelect={(item) => {
+          const b = banks.find((x) => x.code === item.id);
+          if (!b) return;
+          setBank(b);
+          setBankPickerOpen(false);
+          setAccountNumber('');
+        }}
+      />
+      <AssetPicker
+        visible={tokenPickerOpen}
+        side="to"
+        title="Choose the token you are paid in"
+        allow={settlesIn}
+        onSelect={(t, chainId) => { setToken({ ...t, chainId }); setTokenPickerOpen(false); }}
+        onClose={() => setTokenPickerOpen(false)}
+      />
+      <AuthorizationModal {...authorization} />
+    </SafeAreaView>
+  );
+}

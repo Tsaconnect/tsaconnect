@@ -320,3 +320,25 @@ func FuzzNameMatchAccountName(f *testing.F) {
 		}
 	})
 }
+
+func TestMatchBusinessAccountName(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"SKY AIR LTD", "Sky Air Limited", true},      // company suffix spellings
+		{"SKY AIR LTD", "Sky Air", true},              // suffix dropped entirely
+		{"OBI ADA CHIOMA", "Ada Chioma Obi", true},    // word order
+		{"ADA OBI", "Ada Chioma Obi", true},           // a middle name on one side
+		{"SKY-AIR NIG. LTD", "Sky Air Nig Ltd", true}, // punctuation
+		{"SKY AIR LTD", "Sky Airways Ltd", false},     // a different name
+		{"ADA", "Ada Obi", false},                     // one word proves nothing
+		{"ADA OBI", "Ada Okafor", false},              // a shared first name is not a match
+		{"", "Sky Air", false},                        // nothing to match
+		{"LIMITED", "Sky Air Limited", false},         // only a suffix
+	} {
+		if got := MatchBusinessAccountName(tc.a, tc.b).IsMatch(); got != tc.want {
+			t.Errorf("MatchBusinessAccountName(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

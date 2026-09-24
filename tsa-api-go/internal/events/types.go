@@ -31,6 +31,11 @@ const (
 	SecurityFailedAttempts  = "security.failed_attempts"
 	SecurityPasswordChanged = "security.password_changed"
 	SecurityAccountLocked   = "security.account_locked"
+	// SecurityPaySettlementChanged: where a TSA Pay merchant is paid was
+	// changed from their own account. The one change a stolen login would make
+	// to redirect a merchant's money, so it is told to the owner on every
+	// channel — the change stands, but it is never silent.
+	SecurityPaySettlementChanged = "security.pay_settlement_changed"
 
 	// Account-deletion events (Apple 5.1.1(v) self-service deletion).
 	// AccountDeletionRequested fires twice per request: once for the departing
