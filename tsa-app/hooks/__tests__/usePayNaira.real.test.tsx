@@ -55,7 +55,7 @@ import { PaycrestError, type PaycrestOrder, type PaycrestVenue } from '@/service
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 import type { PayCheckout } from '@/services/payApi';
-import { priceMovedMessage } from '@/utils/payCheckout';
+import { PAYMENT_PAUSED, priceMovedMessage } from '@/utils/payCheckout';
 import { usePayNaira, type UsePayNaira } from '../usePayNaira';
 
 const m = {
@@ -169,4 +169,16 @@ it('the sale is handed back from the payment to the pipeline and forth without l
   await pay();
   expect(stages).toEqual(['paying']); // mid-run the payment reads as paying, not idle or failed
   expect(hook.stage).toBe('waiting');
+});
+
+it('opening the payout, a server that paused the payment is shown paused — never Continue, never Pay', async () => {
+  m.openSellOrder.mockRejectedValue(new PaycrestError('We could not tell whether a payout order was left open', 409, 'pay_attempt_uncertain'));
+  await pay();
+  expect(m.openSellOrder).toHaveBeenCalledTimes(1); // not retried: the server has handed it to support
+  expect(hook.stage).toBe('failed');
+  expect(hook.errorCode).toBe('pay_attempt_uncertain');
+  expect(hook.error).toBe(PAYMENT_PAUSED);
+  expect(hook.retryable).toBe(false);
+  expect(hook.canContinue).toBe(false);
+  expect(m.abandon).not.toHaveBeenCalled();
 });

@@ -8,7 +8,8 @@
 //   - the signed swap's hash written to AsyncStorage BEFORE it is broadcast, so
 //     neither a kill nor a lost reply loses it (resume reads it);
 //   - a swap refused before or at the node closes the intent, so it does not
-//     block the next one. A swap that may have been broadcast never does.
+//     block the next one. A swap that may have been broadcast never does;
+//   - one run per sale across every screen (holdSale / startHeld below).
 
 import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -18,6 +19,48 @@ import { isNativeTokenAddress, isNonEVMLiFiChain, type LiFiQuote, type LiFiToken
 import { abandonSellIntent, requestSellIntentGasTopUp } from '@/services/paycrestSellSwap';
 import { clearPayHold, writePayHold } from '@/services/payHold';
 import { exceedsPriced, priceMovedMessage } from '@/utils/payCheckout';
+
+// ─── One run per sale, app-wide ────────────────────────────────────────────
+//
+// Module scope, not per hook or screen: she can leave a screen mid-swap (an
+// approval wait, a gas top-up) and open another that drives a sell intent — the
+// sell screen, or a TSA Pay link. "No hash yet" then means "not signed yet", not
+// "never will be", so a sale held here is never resumed or closed from
+// elsewhere. Every driver goes through these: a TSA Pay crypto payment that
+// skipped them let "Finish your sale" close its intent under an approval wait,
+// and the swap then paid the merchant for a sale the server had written off.
+const salesInFlight = new Set<string>();
+/** Starts that have not heard their intent id back yet — their sale may already exist. */
+let startsAwaitingIntent = 0;
+
+/** Some sale or payment swap is being driven in this app right now. */
+export const anySaleRunning = () => salesInFlight.size > 0 || startsAwaitingIntent > 0;
+
+/** This intent is being driven here — or a start that may have created it has not answered yet. */
+export const saleRunning = (intentId: string) => salesInFlight.has(intentId) || startsAwaitingIntent > 0;
+
+/** Claim an intent for this run; call the returned function when the run ends. */
+export function holdSale(intentId: string): () => void {
+  salesInFlight.add(intentId);
+  return () => { salesInFlight.delete(intentId); };
+}
+
+/**
+ * Create a sale's intent as a start (counted before its id is known), and hold
+ * the intent it returns before the start stops counting — with nothing in
+ * between, so there is no moment another screen could take it for idle.
+ */
+export async function startHeld<T extends { intent: { id: string } }>(
+  create: () => Promise<T>,
+): Promise<{ created: T; release: () => void }> {
+  startsAwaitingIntent++;
+  try {
+    const created = await create();
+    return { created, release: holdSale(created.intent.id) };
+  } finally {
+    startsAwaitingIntent--;
+  }
+}
 
 export const pendingSwapKey = (intentId: string) => `paycrest.sellSwap.pendingTx.${intentId}`;
 
@@ -55,9 +98,13 @@ export type SellSwapRun = {
   paymentId?: string;
 };
 
-/** The fresh quote costs more than she agreed to (or cannot be checked against it). A plain refusal: retry after a new price. */
+/**
+ * The fresh quote costs more than she agreed to (or cannot be checked against
+ * it). Nothing was signed. `moved` carries the two amounts when they could be
+ * compared, so a caller whose payment stays reserved can say so in its own words.
+ */
 export class SwapPriceMovedError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly moved?: { freshBase: string; pricedBase: string }) {
     super(message);
     this.name = 'SwapPriceMovedError';
   }
@@ -82,7 +129,8 @@ function checkAgainstPrice(run: SellSwapRun): void {
     throw cannotCheck;
   }
   if (exceedsPriced(fresh, priced)) {
-    throw new SwapPriceMovedError(priceMovedMessage(quote.fromAmount, pricedFromAmount, token.decimals, token.symbol));
+    throw new SwapPriceMovedError(priceMovedMessage(quote.fromAmount, pricedFromAmount, token.decimals, token.symbol),
+      { freshBase: quote.fromAmount, pricedBase: pricedFromAmount });
   }
   // A native coin is spent through the transaction's own value: it must be exactly what the quote says.
   if (isNativeTokenAddress(token.address)) {

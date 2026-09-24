@@ -10,7 +10,7 @@
 //   - the signed swap's hash is written to AsyncStorage BEFORE it is
 //     broadcast, so neither a kill nor a lost reply loses it (resume reads it);
 //   - one run per sale across every screen: a sale being driven here is never
-//     resumed or closed from another copy of this hook (see salesInFlight);
+//     resumed or closed from another screen (services/sellSwapRun holdSale);
 //   - nothing is ever held by us — before the swap her tokens are in her
 //     wallet, after it the USDC is. A sale that stops is finished later from
 //     "Finish your sale", never started over.
@@ -22,7 +22,7 @@ import {
 } from '@/services/paycrestSellSwap';
 import { SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
 import {
-  clearPendingSwapHash, executeSellSwap, pendingSwapKey, readPendingSwapHash,
+  anySaleRunning, clearPendingSwapHash, executeSellSwap, holdSale, pendingSwapKey, readPendingSwapHash, saleRunning, startHeld,
 } from '@/services/sellSwapRun';
 import { getSwapDelivery, type LiFiQuote, type LiFiToken } from '@/services/lifi';
 import { sendSponsoredPaycrestDeposit } from '@/services/paycrestDeposit';
@@ -120,7 +120,8 @@ const ORDER_CLOSED =
  * may be under way, or its USDC is already in her wallet.
  */
 class SellStop extends Error {
-  constructor(message: string, readonly retryable = true) {
+  /** `code`: the server's machine code behind the stop, when its answer named one a caller must act on. */
+  constructor(message: string, readonly retryable = true, readonly code?: string) {
     super(message);
   }
 }
@@ -171,15 +172,6 @@ function isWaitAnswer(e: unknown): boolean {
 /** Deposit statuses where the USDC has left her wallet or is on its way. */
 const PAID_STATUSES = new Set(['pending', 'settling', 'settled', 'converting']);
 
-// Module scope, not per hook: she can leave the screen mid-swap and come back
-// to a NEW copy of this hook while the first run is still going (an approval
-// wait, a gas top-up). "No hash yet" then means "not signed yet", not "never
-// will be" — so a sale held here is never resumed or closed from elsewhere.
-const salesInFlight = new Set<string>();
-/** Starts that have not heard their intent id back yet — their sale may already exist. */
-let startsAwaitingIntent = 0;
-const anySaleRunning = () => salesInFlight.size > 0 || startsAwaitingIntent > 0;
-
 /** What a run holds at the moment an event is emitted. */
 export type SellSnapshot = { intent?: SellIntent; order?: PaycrestOrder };
 
@@ -191,8 +183,8 @@ export type SellSnapshot = { intent?: SellIntent; order?: PaycrestOrder };
 export type SellEvents = {
   /** Each stage a run enters: swapping, waiting, ordering, sending, done (and idle when a resume has nothing to follow). */
   onStage?: (stage: SellStage, snapshot: SellSnapshot) => void;
-  /** The run stopped with a sentence for her, and whether it is safe to start over from. */
-  onStop?: (stop: { message: string; retryable: boolean }, snapshot: SellSnapshot) => void;
+  /** The run stopped with a sentence for her, whether it is safe to start over from, and the server's code if it named one. */
+  onStop?: (stop: { message: string; retryable: boolean; code?: string }, snapshot: SellSnapshot) => void;
   /** The swap landed short of what the payout needs (TSA Pay). */
   onShortfall?: (missingUsdc: string | undefined, snapshot: SellSnapshot) => void;
 };
@@ -224,11 +216,11 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
     eventsRef.current.onStage?.(next, snapshot());
   };
 
-  const fail = (message: string, canRetry = true) => {
+  const fail = (message: string, canRetry = true, code?: string) => {
     setError(message);
     setRetryable(canRetry);
     setStage('failed');
-    eventsRef.current.onStop?.({ message, retryable: canRetry }, snapshot());
+    eventsRef.current.onStop?.({ message, retryable: canRetry, code }, snapshot());
   };
 
   /** A swap that ended short: close the sale so she can start another. */
@@ -280,6 +272,9 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
         }
       } catch (e) {
         if (isCode(e, 'pay_shortfall')) throw new SellShortfall(e.missingUsdc);
+        // TSA Pay: the server could not prove whether a payout order was left
+        // open, so it paused the payment for support. Never retried from here.
+        if (isCode(e, 'pay_attempt_uncertain')) throw new SellStop(e.message, false, e.code);
         const outcome = outcomeFromServer(e);
         if (outcome) return endShort(intentId, outcome);
         if (isWaitAnswer(e)) continue;
@@ -327,8 +322,8 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
     await send(o, walletAddress, intentId);
   };
 
-  /** `hold(id)` claims a sale for this run app-wide; the claim ends with the run. */
-  const guarded = async (body: (hold: (intentId: string) => void) => Promise<void>) => {
+  /** `keep(release)` ties a claim on a sale (holdSale / startHeld) to this run; it ends with the run. */
+  const guarded = async (body: (keep: (release: () => void) => void) => Promise<void>) => {
     if (running.current) return;
     running.current = true;
     setError(undefined);
@@ -338,12 +333,10 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
     setDepositTx(undefined);
     setMissingUsdc(undefined);
     setRetryable(true);
-    const heldIds: string[] = [];
+    // One run per sale app-wide (services/sellSwapRun): what this run holds is let go when it ends.
+    const releases: (() => void)[] = [];
     try {
-      await body((intentId) => {
-        salesInFlight.add(intentId);
-        heldIds.push(intentId);
-      });
+      await body((release) => { releases.push(release); });
     } catch (e) {
       if (e instanceof SellShortfall) {
         setMissingUsdc(e.missingUsdc);
@@ -353,26 +346,21 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
         fail(
           e instanceof SellStop ? e.message : messageOf(e, 'Something went wrong. Please try again.'),
           e instanceof SellStop ? e.retryable : true,
+          e instanceof SellStop ? e.code : undefined,
         );
       }
     } finally {
-      heldIds.forEach((id) => salesInFlight.delete(id));
+      releases.forEach((release) => release());
       running.current = false;
     }
   };
 
-  const start = useCallback((a: StartSwapArgs) => guarded(async (hold) => {
+  const start = useCallback((a: StartSwapArgs) => guarded(async (keep) => {
     if (anySaleRunning()) throw new SellStop(STILL_RUNNING, false);
     enter('swapping');
-    startsAwaitingIntent++;
-    let created: CreatedSellIntent;
-    try {
-      created = await (createIntentRef.current ?? createOwnSale)(a);
-      hold(created.intent.id);
-      keepIntent(created.intent);
-    } finally {
-      startsAwaitingIntent--;
-    }
+    const { created, release } = await startHeld(() => (createIntentRef.current ?? createOwnSale)(a));
+    keep(release);
+    keepIntent(created.intent);
     const { intent, quote, gasTopUp } = created;
 
     let hash: string;
@@ -398,14 +386,14 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
   }), []);
 
   /** Pick up a sale where it stopped. `walletAddress` is her EVM wallet. */
-  const resume = useCallback((intent: SellIntent, walletAddress?: string) => guarded(async (hold) => {
+  const resume = useCallback((intent: SellIntent, walletAddress?: string) => guarded(async (keep) => {
     // Another screen is driving a sale right now (maybe this one, before its
     // id came back): leave it alone rather than race it.
     // Its own intent goes on the record BEFORE the still-running check: that stop is about this sale, and
     // whoever is listening (TSA Pay's Continue) must be able to carry on with it.
     keepIntent(intent);
-    if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
-    hold(intent.id);
+    if (saleRunning(intent.id)) throw new SellStop(STILL_RUNNING, false);
+    keep(holdSale(intent.id));
     const wallet = walletAddress ?? '';
     if (intent.status === 'ordered') {
       if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN, false);
@@ -444,10 +432,10 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
    * Her USDC is not touched until she taps this — the swap having landed is
    * why the order is opened with `landed`.
    */
-  const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (hold) => {
+  const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (keep) => {
     keepIntent(shortIntent); // as in resume: a still-running stop is about this sale
-    if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
-    hold(shortIntent.id);
+    if (saleRunning(shortIntent.id)) throw new SellStop(STILL_RUNNING, false);
+    keep(holdSale(shortIntent.id));
     const o = await openOrder(shortIntent.id, true, { useWalletBalance: true });
     // The order's own wallet is the USDC's owner.
     await send(o, '', shortIntent.id);
@@ -461,7 +449,7 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
    * the USDC is in her own wallet on Base and sells directly as USDC.
    */
   const cancel = useCallback(async (intent: SellIntent) => {
-    if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new Error(STILL_RUNNING);
+    if (saleRunning(intent.id)) throw new Error(STILL_RUNNING);
     await abandonSellIntent(intent.id);
     await clearPendingSwapHash(intent.id);
   }, []);

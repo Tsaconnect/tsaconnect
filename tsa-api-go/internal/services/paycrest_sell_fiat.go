@@ -40,7 +40,17 @@ func (e *SellShortfallError) Unwrap() error { return ErrSellShortfall }
 // sellPayoutTolerance is how many naira a provider's order rate may come in
 // under the venue the deposit was sized at before the order is refused: the
 // two quotes are asked moments apart, and a kobo of drift is not a shortfall.
+//
+// It is paid for up front, never taken out of the merchant's naira: the deposit
+// is sized for the amount owed PLUS this, and the order must then pay the full
+// amount owed. The customer puts in about ₦1 more; the merchant is never short.
 var sellPayoutTolerance = big.NewRat(1, 1)
+
+// sellFeeRounding is what Paycrest's rounding of its sender fee (to 4 decimal
+// places of the token) can take off the deposit before it is paid out: at most
+// 0.0001 token. Doubled, so the allowance still holds after the fee's own share
+// of the rate. Added to every deposit and taken off every token amount judged.
+var sellFeeRounding = big.NewRat(2, 10_000)
 
 // The stored and quoted rates are the provider's rate × (1 − fee) ROUNDED to
 // the cent (quotedRate), while Paycrest pays at the unrounded figure. The
@@ -95,7 +105,10 @@ func (s *PaycrestOrderService) SellDepositFor(ctx context.Context, fiatCode, fia
 	if sizing.Sign() <= 0 {
 		return nil, fmt.Errorf("paycrest: unusable sell rate %q", venue.Rate)
 	}
-	baseUnits := new(big.Rat).Quo(fiatWanted, sizing)
+	// Sized for the naira owed plus the drift tolerance, then the fee rounding on
+	// top: sellPayoutCovers accepts only an order that pays the whole amount.
+	baseUnits := new(big.Rat).Quo(new(big.Rat).Add(fiatWanted, sellPayoutTolerance), sizing)
+	baseUnits.Add(baseUnits, sellFeeRounding)
 	baseUnits.Mul(baseUnits, new(big.Rat).SetInt(pow10(s.sellTokenDecimals(chainKey, token))))
 	dep, rem := new(big.Int).QuoRem(baseUnits.Num(), baseUnits.Denom(), new(big.Int))
 	if rem.Sign() > 0 {
@@ -174,9 +187,11 @@ func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models
 }
 
 // sellPayoutCovers reports whether the order's own token amount pays the naira
-// owed, to within sellPayoutTolerance. The row's rate is rounded to the cent,
-// so it is judged at the worst rate that rounds to it (less sellRateRounding):
-// a payout that only clears at the rounded figure is not proven.
+// owed in full. The row's rate is rounded to the cent, so it is judged at the
+// worst rate that rounds to it (less sellRateRounding), and on the tokens left
+// after the worst fee rounding (less sellFeeRounding): a payout that only
+// clears at the rounded figures is not proven. The drift tolerance is not
+// subtracted here — SellDepositFor already paid for it.
 func sellPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string) bool {
 	tokens, ok1 := new(big.Rat).SetString(strings.TrimSpace(row.TokenAmount))
 	rate, ok2 := new(big.Rat).SetString(strings.TrimSpace(row.Rate))
@@ -185,6 +200,10 @@ func sellPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string) bool {
 		return false
 	}
 	worst := new(big.Rat).Sub(rate, sellRateRounding)
-	payout, _ := new(big.Rat).SetString(fiatAt(tokens, worst))
-	return payout.Cmp(new(big.Rat).Sub(owed, sellPayoutTolerance)) >= 0
+	paid := new(big.Rat).Sub(tokens, sellFeeRounding)
+	if paid.Sign() <= 0 {
+		return false
+	}
+	payout, _ := new(big.Rat).SetString(fiatAt(paid, worst))
+	return payout.Cmp(owed) >= 0
 }

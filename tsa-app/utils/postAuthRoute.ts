@@ -10,7 +10,8 @@
 // tap), so what gets replayed after sign-in is built entirely from our own
 // '/pay?id=' shape, never from stored freeform text — see isPaymentId.
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { isPaymentId } from '@/services/payApi';
+import type { Href } from 'expo-router';
+import { isPaymentId } from '@/utils/paymentId';
 
 export const PENDING_PAY_KEY = 'tsapay.pendingPayment';
 
@@ -30,26 +31,30 @@ export async function rememberPendingPayment(id: string, now: number = Date.now(
  * Where to land right after authentication. Consumes the stored pending
  * payment (so a second call never replays it) and only honours it when it is
  * a valid payment id saved less than 30 minutes ago — otherwise home.
+ *
+ * Never throws: every launch and every sign-in waits on this, so a storage
+ * failure or a mangled record lands on home rather than leaving the app stuck
+ * on its entry screen.
  */
 export async function postAuthRoute(now: number = Date.now()): Promise<string> {
-  const raw = await AsyncStorage.getItem(PENDING_PAY_KEY);
-  if (!raw) return '/home';
-  await AsyncStorage.removeItem(PENDING_PAY_KEY);
-
-  let pending: Pending;
   try {
-    pending = JSON.parse(raw);
+    const raw = await AsyncStorage.getItem(PENDING_PAY_KEY);
+    if (!raw) return '/home';
+    await AsyncStorage.removeItem(PENDING_PAY_KEY).catch(() => {});
+    const pending: unknown = JSON.parse(raw);
+    if (!pending || typeof pending !== 'object') return '/home';
+    const { id, savedAt } = pending as Partial<Pending>;
+    if (!isPaymentId(id)) return '/home';
+    if (typeof savedAt !== 'number' || now - savedAt >= TTL_MS) return '/home';
+    return `/pay?id=${id}`;
   } catch {
     return '/home';
   }
-  if (!isPaymentId(pending.id)) return '/home';
-  if (now - pending.savedAt >= TTL_MS) return '/home';
-  return `/pay?id=${pending.id}`;
 }
 
 /** Every post-auth call site (login, cold-start index, lock unlock) hands off
  *  through here instead of hardcoding '/home', so a pending payment always
  *  wins over the default landing screen. */
-export async function goAfterAuth(router: { replace(href: string): void }): Promise<void> {
-  router.replace(await postAuthRoute());
+export async function goAfterAuth(router: { replace(href: Href): void }): Promise<void> {
+  router.replace((await postAuthRoute()) as Href);
 }

@@ -632,11 +632,13 @@ func TestCreateSellForFiat_PaysExactNairaToTheGivenBankAtTheConvertedFee(t *test
 		r.client.lastOfframp.Recipient.AccountIdentifier != "0123456789" || r.client.lastOfframp.AmountToken != BaseUnitsToDecimal(dep, 6) {
 		t.Fatalf("offramp %+v order %+v dep %s", r.client.lastOfframp, order, dep)
 	}
-	// Sized at the rate less a cent of headroom: 50000 / 1492.49 = 33.501061…,
-	// rounded UP, so the payout is never under the naira she was promised even
-	// when Paycrest pays at a rate that only ROUNDS to 1492.50.
-	if dep.String() != "33501062" {
-		t.Fatalf("deposit = %s, want 33501062 (50000 / 1492.49, rounded up)", dep)
+	// Sized at the rate less a cent of headroom, for the naira owed plus the ₦1
+	// drift tolerance, plus the fee-rounding allowance: (50001 / 1492.49) +
+	// 0.0002 = 33.5019324…, rounded UP. The payout is never under the naira
+	// promised, even when Paycrest pays at a rate that only ROUNDS to 1492.50,
+	// rounds its fee against her, and the order rate drifts by up to ₦1's worth.
+	if dep.String() != "33501933" {
+		t.Fatalf("deposit = %s, want 33501933 ((50001 / 1492.49) + 0.0002, rounded up)", dep)
 	}
 }
 
@@ -647,8 +649,8 @@ func TestCreateSellForFiat_RefusesAShortfallBeforeCallingPaycrest(t *testing.T) 
 	if !errors.As(err, &short) || !errors.Is(err, ErrSellShortfall) || short.MissingBaseUnits.Sign() <= 0 || r.client.offrampCalls != 0 {
 		t.Fatalf("err %v calls %d", err, r.client.offrampCalls)
 	}
-	if short.MissingBaseUnits.String() != "32501062" {
-		t.Fatalf("missing = %s, want deposit 33501062 - cap 1000000", short.MissingBaseUnits)
+	if short.MissingBaseUnits.String() != "32501933" {
+		t.Fatalf("missing = %s, want deposit 33501933 - cap 1000000", short.MissingBaseUnits)
 	}
 }
 
@@ -853,16 +855,39 @@ func TestCreateSellForFiat_ACancelledShortOrderIsNotAnAttemptThatMayExist(t *tes
 	}
 }
 
-// ─── S3: the ₦1 tolerance, at its edge ─────────────────────────────────────
+// ─── S3: the merchant is paid in full, at the edge ─────────────────────────
 
-// 100 USDC at 1500.00 is judged at 1499.995 (the worst rate that rounds to
-// it): ₦149,999.50. Owing ₦150,000.50 leaves exactly the ₦1.00 tolerance.
-func TestSellPayoutCovers_ToleranceBoundaryIsInclusive(t *testing.T) {
+// 100 USDC at 1500.00 is judged on 99.9998 USDC (the worst fee rounding) at
+// 1499.995 (the worst rate that rounds to 1500.00): ₦149,999.20. That covers
+// owing exactly ₦149,999.20 and not one kobo more — no tolerance comes out of
+// the merchant's naira.
+func TestSellPayoutCovers_TheWholeAmountOwedAtTheWorstRounding(t *testing.T) {
 	row := &models.PaycrestOrderRecord{TokenAmount: "100", Rate: "1500.00"}
-	if !sellPayoutCovers(row, "150000.50") {
-		t.Fatal("a payout exactly ₦1.00 under was refused; the tolerance is inclusive")
+	if !sellPayoutCovers(row, "149999.20") {
+		t.Fatal("a payout that covers the amount exactly was refused")
 	}
-	if sellPayoutCovers(row, "150000.51") {
-		t.Fatal("a payout one kobo beyond the tolerance passed")
+	if sellPayoutCovers(row, "149999.21") {
+		t.Fatal("a payout one kobo short passed")
+	}
+}
+
+// Whatever the amount, a deposit sized by SellDepositFor, opened at a rate up to
+// ₦1's worth worse than the venue it was sized at, still pays the merchant the
+// whole amount at the worst rounding.
+func TestSellDepositFor_CoversTheAmountThroughDriftAndRounding(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	for _, owed := range []string{"1500.00", "50000.00", "149999.00", "5000000.00"} {
+		dep, err := r.svc.SellDepositFor(context.Background(), "NGN", owed, "base", "USDC", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens := new(big.Rat).SetFrac(dep, pow10(6))
+		// The venue is 1492.50; drift the order rate down by ₦1 over the deposit.
+		drift := new(big.Rat).Quo(big.NewRat(1, 1), tokens)
+		rate := new(big.Rat).Sub(big.NewRat(149250, 100), drift)
+		row := &models.PaycrestOrderRecord{TokenAmount: tokens.FloatString(6), Rate: rate.FloatString(2)}
+		if !sellPayoutCovers(row, owed) {
+			t.Fatalf("owed %s: deposit %s at %s does not cover it", owed, dep, row.Rate)
+		}
 	}
 }

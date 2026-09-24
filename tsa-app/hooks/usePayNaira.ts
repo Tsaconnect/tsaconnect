@@ -37,7 +37,7 @@ import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/servic
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
   classifyStartError, directPriceMovedCopy, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
-  nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, ORDER_MISMATCH, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
+  nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, ORDER_MISMATCH, PAUSED_FAILURE, PAY_ATTEMPT_UNCERTAIN, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
   type StartErrorKind,
 } from '@/utils/payCheckout';
 import type { PayEstimate } from '@/hooks/usePayLive';
@@ -154,9 +154,15 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       else dispatch({ type: 'progress', swapStage: stage, order: snap.order });
     },
     onShortfall: (missingUsdc, snap) => dispatch({ type: 'shortfall', missingUsdc, intent: snap.intent }),
-    onStop: ({ message, retryable }, snap) => {
+    onStop: ({ message, retryable, code }, snap) => {
       const start = startError.current;
       if (start?.kind === 'follow') return; // an attempt already exists: run() follows it
+      // Opening the payout, the server paused the payment for support: the same answer as a
+      // paused start, so the same state — never Continue, never Pay.
+      if (code === PAY_ATTEMPT_UNCERTAIN) {
+        dispatch({ type: 'fail', ...PAUSED_FAILURE, paused: true, intent: snap.intent, order: snap.order });
+        return;
+      }
       if (start?.kind === 'paused' || start?.kind === 'refused') {
         dispatch({
           type: 'fail',

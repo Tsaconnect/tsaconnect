@@ -55,21 +55,40 @@ func (f signedBodyLiFi) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiR
 	if r == nil {
 		return r, err
 	}
-	return withSignedBody(r, req.FromChainID), err
+	return withSignedBodyTo(r, req.FromChainID, req.ToChainID, req.ToToken), err
 }
 
-// withSignedBody is r with Raw carrying r's own signable fields on chainID,
-// keeping whatever else Raw already held (the fixtures' "id").
+// withSignedBody is withSignedBodyTo for an ordinary sale: USDC on Base.
 func withSignedBody(r *LiFiRoute, chainID int64) *LiFiRoute {
+	return withSignedBodyTo(r, chainID, rampSettlementChainID,
+		testChainRegistry().TokenAddressForChainID(rampSettlementChainID, rampSettlementToken))
+}
+
+// withSignedBodyTo is r with Raw carrying r's own signable fields on chainID,
+// and — as a real LiFi answer does — the destination it was asked for in
+// action.toToken / action.toChainId, keeping whatever else Raw already held (the
+// fixtures' "id", or an action.toToken a test plants to disagree).
+func withSignedBodyTo(r *LiFiRoute, chainID, toChainID int64, toToken string) *LiFiRoute {
 	body := map[string]any{}
 	_ = json.Unmarshal(r.Raw, &body)
 	body["transactionRequest"] = map[string]any{"to": r.To, "data": r.Data, "chainId": chainID}
 	if r.ApprovalAddress != "" {
 		body["estimate"] = map[string]any{"approvalAddress": r.ApprovalAddress}
 	}
-	if r.ApprovalToken != "" {
-		body["action"] = map[string]any{"fromToken": map[string]any{"address": r.ApprovalToken}}
+	action, _ := body["action"].(map[string]any)
+	if action == nil {
+		action = map[string]any{}
 	}
+	if r.ApprovalToken != "" {
+		action["fromToken"] = map[string]any{"address": r.ApprovalToken}
+	}
+	if _, set := action["toToken"]; !set {
+		action["toToken"] = map[string]any{"address": toToken}
+	}
+	if _, set := action["toChainId"]; !set {
+		action["toChainId"] = toChainID
+	}
+	body["action"] = action
 	raw, err := json.Marshal(body)
 	if err != nil {
 		panic(err)
@@ -853,5 +872,25 @@ func TestRampSellQuote_AnExplicitDeliveryTargetIsNeverAnOfframp(t *testing.T) {
 	self := SellQuoteInput{WalletAddress: sellTestAddress, ToChainID: rampSettlementChainID, ToToken: sellUSDC, ToAddress: sellTestAddress, Delivery: true}
 	if q.targetFor(self, sellUSDC).offramp {
 		t.Fatal("a delivery to the payer's own wallet was priced as an offramp: it would get Base relay gas and a naira estimate")
+	}
+}
+
+// LiFi's calldata names the receiver and chain but not the asset: a route that
+// pays her wallet on Base in some OTHER token (a bridged USDC.e) must be
+// refused before she signs it, on what the quote itself says it delivers.
+func TestRampSellQuote_RefusesARouteThatDeliversAnotherToken(t *testing.T) {
+	for name, action := range map[string]string{
+		"another token":         `{"toToken":{"address":"0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"},"toChainId":8453}`,
+		"another chain":         `{"toChainId":42161}`,
+		"no destination at all": `{"toToken":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := sellRoute(t, 9.97)
+			bad.Raw = json.RawMessage(`{"id":"bad","action":` + action + `}`)
+			q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.98), bad)
+			if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellUnavailable) {
+				t.Fatalf("err = %v: she would sign a route that delivers the wrong asset", err)
+			}
+		})
 	}
 }

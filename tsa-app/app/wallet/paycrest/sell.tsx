@@ -864,7 +864,20 @@ export default function PaycrestSellScreen() {
             />
           )}
 
-          {openIntent && !swappedBusy && (
+          {/* A TSA Pay payment's sale belongs to its payment: finished or closed from here, it could be
+              written off under a swap still being signed there — and that swap pays the merchant. */}
+          {openIntent?.payPaymentId && !swappedBusy && (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                A payment of yours is still going through
+              </Text>
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Open its payment link to check on it. You can start a new sale once it has finished.
+              </Text>
+            </Card>
+          )}
+
+          {openIntent && !openIntent.payPaymentId && !swappedBusy && (
             <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
               <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
                 You have a sale that didn&apos;t finish

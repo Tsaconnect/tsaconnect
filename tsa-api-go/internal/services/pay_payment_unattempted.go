@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,13 +39,19 @@ func (s *PayPaymentService) releaseUnattempted(ctx context.Context, mode string,
 		Find(&stale).Error; err != nil {
 		return 0, err
 	}
+	// One payment's error never stops the sweep: selection is oldest first, so an
+	// abort would hand the same payment the head of every tick and leave every
+	// live payment behind it locked forever.
 	n := 0
+	var errs []error
 	for i := range stale {
 		p := &stale[i]
 		if mode == models.PayModeLive {
 			adopted, err := s.adoptStrayAttempt(ctx, p)
 			if err != nil {
-				return n, err
+				log.Printf("[tsa-pay] release unattempted payment %s: %v", p.ID, err)
+				errs = append(errs, err)
+				continue
 			}
 			if adopted {
 				continue
@@ -59,10 +66,11 @@ func (s *PayPaymentService) releaseUnattempted(ctx context.Context, mode string,
 		case errors.Is(err, ErrPayTransition):
 			// resolved or released by someone else since the select
 		default:
-			return n, err
+			log.Printf("[tsa-pay] release unattempted payment %s: %v", p.ID, err)
+			errs = append(errs, err)
 		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // adoptStrayAttempt looks for what a start opened for p but never linked, and
@@ -73,14 +81,19 @@ func (s *PayPaymentService) releaseUnattempted(ctx context.Context, mode string,
 //
 //   - an intent whose pay_payment_id is p, in any state but failed — the key is
 //     exact, and an ended (failed) intent moves nothing;
-//   - her sell order to THIS merchant's snapshotted bank for the merchant's
-//     net, opened since she locked, unless it is a short order that was
-//     cancelled with its deposit address withdrawn (cancelShortOrder) — the one
-//     order that provably cannot be funded. An order that pays any other
-//     account or amount cannot reach this merchant, so it does not count.
+//   - an order whose pay_payment_id is p, opened since she locked, unless it is
+//     a short order that was cancelled with its deposit address withdrawn
+//     (cancelShortOrder) — the one order that provably cannot be funded.
+//
+// Both are matched on pay_payment_id and nothing else. Matching an order by its
+// amount and payout bank instead adopted ANOTHER payment's order whenever she
+// paid the same merchant the same net twice, and the reconciler then settled
+// the wrong payment on it.
 //
 // An error linking (the store is down) is returned and leaves the payment
-// processing: the next tick looks again.
+// processing: the next tick looks again. An attempt some other payment already
+// carries can never be this one's to follow, and nothing can release it either:
+// it waits for support, bounded like every other wait.
 func (s *PayPaymentService) adoptStrayAttempt(ctx context.Context, p *models.PayPayment) (bool, error) {
 	column, attemptID, kind, err := s.findStrayAttempt(ctx, p)
 	if err != nil || attemptID == uuid.Nil {
@@ -91,6 +104,9 @@ func (s *PayPaymentService) adoptStrayAttempt(ctx context.Context, p *models.Pay
 		payAlert("unlinked_attempt", p, kind, attemptID)
 	case errors.Is(err, ErrPayInProgress):
 		// Linked, or moved on, since the select: not ours to release either way.
+	case isUniqueViolation(err):
+		return true, s.waitOrFail(ctx, p, "stray_attempt_linked_elsewhere", kind, attemptID,
+			"the payment's attempt is recorded against another payment — support is reviewing it")
 	default:
 		return true, err
 	}
@@ -118,8 +134,7 @@ func (s *PayPaymentService) findStrayAttempt(ctx context.Context, p *models.PayP
 	}
 	var o models.PaycrestOrderRecord
 	switch err := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND created_at >= ? AND fiat_code = ? AND fiat_amount = ? AND payout_bank_code = ? AND payout_account = ?",
-			*p.PayerUserID, models.PaycrestDirectionSell, *p.LockedAt, "NGN", payFiatAmount(p.MerchantNetKobo), p.SettleBankCode, p.SettleAccountNumber).
+		Where("pay_payment_id = ? AND user_id = ? AND created_at >= ?", p.ID, *p.PayerUserID, *p.LockedAt).
 		Where("NOT (status = ? AND deposit_address = '')", models.PaycrestStatusCancelled).
 		Order("created_at DESC").First(&o).Error; {
 	case err == nil:

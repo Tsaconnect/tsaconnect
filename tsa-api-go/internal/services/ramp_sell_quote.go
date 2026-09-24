@@ -345,6 +345,11 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 //     to a destination call would leave §5.3's binding check with nothing to
 //     bind and "Finish your sale" with nothing to finish. Same check a
 //     converted buy runs before it offers a venue.
+//   - WHICH token arrives: LiFi's calldata names the receiver and the
+//     destination chain but not the asset, so the quote's own action.toToken
+//     and action.toChainId must be the target's. A route delivering USDC.e
+//     where the merchant asked for native USDC is refused before she signs,
+//     not discovered by the delivery proof after her money has moved.
 func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc string) error {
 	target := q.targetFor(in, usdc)
 	signed, err := readSignedRoute(route.Raw)
@@ -358,6 +363,13 @@ func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc
 	}
 	if signed.ChainID != in.FromChainID {
 		return fmt.Errorf("%w: route is for chain %d, not %d", ErrTreasuryInvalidRoute, signed.ChainID, in.FromChainID)
+	}
+	if signed.DestChainID != target.chainID {
+		return fmt.Errorf("%w: route's action delivers on chain %d, not %d", ErrTreasuryInvalidRoute, signed.DestChainID, target.chainID)
+	}
+	if !sameTokenAddress(signed.DestToken, target.token) {
+		log.Printf("[ramp-sell] ALERT ramp_sell_route_dest_token_refused_total=1 chain=%d dest=%s tool=%s", target.chainID, signed.DestToken, route.Tool)
+		return fmt.Errorf("%w: route delivers %q, not the token owed", ErrTreasuryInvalidRoute, signed.DestToken)
 	}
 	allowed := q.routers[in.FromChainID]
 	if !routerAllowed(allowed, signed.To) {
@@ -377,11 +389,14 @@ func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc
 	return checkLiFiDeliveryTo(signed.Data, in.FromChainID, target.chainID, target.address, "evm", target.token)
 }
 
-// signedRoute is the part of a LiFi quote body the app acts on when it signs.
+// signedRoute is the part of a LiFi quote body the app acts on when it signs,
+// and what the quote says it delivers.
 type signedRoute struct {
 	To, Data                       string
 	ChainID                        int64
 	ApprovalAddress, ApprovalToken string
+	DestToken                      string
+	DestChainID                    int64
 }
 
 // readSignedRoute reads signedRoute out of a raw quote body by exact key.
@@ -413,12 +428,25 @@ func readSignedRoute(raw json.RawMessage) (signedRoute, error) {
 			return out, err
 		}
 	}
-	if action, err := jsonObject(top["action"]); err == nil {
-		if from, err := jsonObject(action["fromToken"]); err == nil {
-			if err := jsonString(from, "address", &out.ApprovalToken); err != nil {
-				return out, err
-			}
+	action, err := jsonObject(top["action"])
+	if err != nil {
+		return out, fmt.Errorf("%w: action: %v", ErrTreasuryInvalidRoute, err)
+	}
+	if from, err := jsonObject(action["fromToken"]); err == nil {
+		if err := jsonString(from, "address", &out.ApprovalToken); err != nil {
+			return out, err
 		}
+	}
+	// Required: a quote that does not say what it delivers cannot be checked.
+	to, err := jsonObject(action["toToken"])
+	if err != nil {
+		return out, fmt.Errorf("%w: action.toToken: %v", ErrTreasuryInvalidRoute, err)
+	}
+	if err := jsonString(to, "address", &out.DestToken); err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(action["toChainId"], &out.DestChainID); err != nil {
+		return out, fmt.Errorf("%w: action.toChainId: %v", ErrTreasuryInvalidRoute, err)
 	}
 	return out, nil
 }

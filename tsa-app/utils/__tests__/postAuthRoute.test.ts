@@ -37,3 +37,13 @@ it('login, index and lock hand off through goAfterAuth', async () => {
   await goAfterAuth(router);
   expect(router.replace).toHaveBeenCalledWith(`/pay?id=${ID}`);
 });
+
+it('lands on home, never throws, when the stored record is unreadable or mangled', async () => {
+  for (const raw of ['null', '42', '"a string"', '{not json', JSON.stringify({ id: ID, savedAt: 'soon' })]) {
+    await AsyncStorage.setItem('tsapay.pendingPayment', raw);
+    expect(await postAuthRoute(T0)).toBe('/home');
+  }
+  const read = jest.spyOn(AsyncStorage, 'getItem').mockRejectedValueOnce(new Error('storage unavailable'));
+  expect(await postAuthRoute(T0)).toBe('/home');
+  read.mockRestore();
+});

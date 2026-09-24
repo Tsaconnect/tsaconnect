@@ -79,7 +79,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 
 	// The ramp tables come from their models, so the blocker and erasure
 	// queries are tested against the real column names.
-	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}); err != nil {
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}); err != nil {
 		t.Fatalf("migrate ramp tables: %v", err)
 	}
 
@@ -734,5 +734,104 @@ func TestCompleteAccountDeletionRequest_ErasesFinishedBankDetails(t *testing.T) 
 	db.First(&oo, "id = ?", othersOrder.ID)
 	if oi.AccountNumber != "0123456789" || oo.PayoutAccount != "0123456789" {
 		t.Error("another user's bank details were scrubbed")
+	}
+}
+
+// seedPayMerchant is her TSA Pay merchant account, live and settling to a bank.
+func seedPayMerchant(t *testing.T, db *gorm.DB, userID uuid.UUID) *models.PayMerchant {
+	t.Helper()
+	live, test := "livehash-"+uuid.NewString(), "testhash-"+uuid.NewString()
+	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: userID, BusinessName: "Sky Air",
+		Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat, BankCode: "058",
+		AccountNumber: "0123456789", AccountName: "SKY AIR LTD", WalletAddress: "0xmerchant",
+		WebhookURL: "https://hooks.skyair.ng/tsa", TestWebhookURL: "https://hooks.skyair.ng/test",
+		MinAmountKobo: 100, MaxAmountKobo: 1_000_000_00, LiveKeyHash: &live, LiveKeyPrefix: "tsapk_live_ab",
+		TestKeyHash: &test, TestKeyPrefix: "tsapk_test_ab"}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed merchant: %v", err)
+	}
+	return m
+}
+
+func seedPayPayment(t *testing.T, db *gorm.DB, merchantID uuid.UUID, payer *uuid.UUID, mode, status string) {
+	t.Helper()
+	p := &models.PayPayment{MerchantID: merchantID, Mode: mode, Reference: "PNR-" + uuid.NewString()[:8],
+		AmountKobo: 5_000_000, Currency: "NGN", Status: status, PayerUserID: payer, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed payment: %v", err)
+	}
+}
+
+func TestRequestAccountDeletion_BlockedByAPayPaymentInFlight(t *testing.T) {
+	for name, seed := range map[string]func(t *testing.T, db *gorm.DB, user *models.User){
+		"a customer is paying her merchant account": func(t *testing.T, db *gorm.DB, user *models.User) {
+			m := seedPayMerchant(t, db, user.ID)
+			payer := uuid.New()
+			seedPayPayment(t, db, m.ID, &payer, models.PayModeLive, models.PayStatusProcessing)
+		},
+		"she is paying a merchant": func(t *testing.T, db *gorm.DB, user *models.User) {
+			seedPayPayment(t, db, uuid.New(), &user.ID, models.PayModeLive, models.PayStatusProcessing)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := setupDeletionTestDB(t)
+			user := mkDeletionUser(t, db, "payer", models.RoleUser)
+			seed(t, db, user)
+			w, c := newDeletionContext("POST", "/api/users/account/deletion-request",
+				map[string]string{"password": "correct-horse"}, user)
+			(&Handlers{}).RequestAccountDeletion(c)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("want 409, got %d — body %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRequestAccountDeletion_SuspendsHerMerchantAccount(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	user := mkDeletionUser(t, db, "owner", models.RoleUser)
+	m := seedPayMerchant(t, db, user.ID)
+	// Finished and test-mode payments are not money in flight.
+	seedPayPayment(t, db, m.ID, nil, models.PayModeLive, models.PayStatusSucceeded)
+	seedPayPayment(t, db, m.ID, &user.ID, models.PayModeTest, models.PayStatusProcessing)
+	others := seedPayMerchant(t, db, uuid.New())
+
+	w, c := newDeletionContext("POST", "/api/users/account/deletion-request",
+		map[string]string{"password": "correct-horse"}, user)
+	(&Handlers{}).RequestAccountDeletion(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d — body %s", w.Code, w.Body.String())
+	}
+	var got, other models.PayMerchant
+	db.First(&got, "id = ?", m.ID)
+	db.First(&other, "id = ?", others.ID)
+	if got.Status != models.PayMerchantSuspended || got.Version != m.Version+1 {
+		t.Fatalf("merchant = %+v: a deleted account's keys and payments still work", got)
+	}
+	if other.Status != models.PayMerchantActive {
+		t.Fatal("another user's merchant was suspended")
+	}
+}
+
+func TestCompleteAccountDeletionRequest_ErasesHerMerchantAccountsDestinationsAndKeys(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	victim := mkDeletionUser(t, db, "leaver", models.RoleUser)
+	m := seedPayMerchant(t, db, victim.ID)
+	others := seedPayMerchant(t, db, uuid.New())
+
+	completeDeletion(t, db, victim.ID)
+
+	var got models.PayMerchant
+	db.First(&got, "id = ?", m.ID)
+	if got.Status != models.PayMerchantSuspended || got.SettlementMode != "" || got.BankCode != "" ||
+		got.AccountNumber != "" || got.AccountName != "" || got.WalletAddress != "" ||
+		got.WebhookURL != "" || got.TestWebhookURL != "" || got.LiveKeyHash != nil || got.TestKeyHash != nil ||
+		got.LiveKeyPrefix != "" || got.TestKeyPrefix != "" {
+		t.Fatalf("merchant kept a destination or credential after erasure: %+v", got)
+	}
+	var other models.PayMerchant
+	db.First(&other, "id = ?", others.ID)
+	if other.AccountNumber != "0123456789" || other.LiveKeyHash == nil {
+		t.Fatal("another user's merchant account was scrubbed")
 	}
 }

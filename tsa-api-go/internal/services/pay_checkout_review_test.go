@@ -161,12 +161,13 @@ func (r *payCheckoutRig) tickAt(t *testing.T, d time.Duration) *models.PayPaymen
 }
 
 // orphanOrder is a payout order her start opened for this payment whose link
-// was lost: her sell to the merchant's snapshotted bank for the merchant's net.
+// was lost: her sell to the merchant's snapshotted bank for the merchant's net,
+// marked as this payment's the way every pay start marks its order.
 func (r *payCheckoutRig) orphanOrder(t *testing.T, mutate func(*models.PaycrestOrderRecord)) *models.PaycrestOrderRecord {
 	t.Helper()
 	o := &models.PaycrestOrderRecord{UserID: r.alice.ID, Direction: models.PaycrestDirectionSell, Status: models.PaycrestStatusAwaitingDeposit,
 		Reference: "PCS-" + uuid.NewString()[:8], FiatCode: "NGN", FiatAmount: "50000.00", DepositAddress: "0xdeposit",
-		PayoutBankCode: "058", PayoutAccount: "0123456789", CreatedAt: payTestNow.Add(time.Minute)}
+		PayoutBankCode: "058", PayoutAccount: "0123456789", CreatedAt: payTestNow.Add(time.Minute), PayPaymentID: &r.p.ID}
 	if mutate != nil {
 		mutate(o)
 	}
@@ -208,12 +209,10 @@ func TestPayReconcile_AnUnlinkedSettledOrderSucceedsThePayment(t *testing.T) {
 
 func TestPayReconcile_OrdersThatCannotPayThisMerchantDoNotBlockTheRelease(t *testing.T) {
 	for name, mutate := range map[string]func(*models.PaycrestOrderRecord){
-		"her own sale to another account": func(o *models.PaycrestOrderRecord) { o.PayoutAccount = "9999999999" },
-		"another amount":                  func(o *models.PaycrestOrderRecord) { o.FiatAmount = "1000.00" },
-		"another bank":                    func(o *models.PaycrestOrderRecord) { o.PayoutBankCode = "044" },
-		"opened before she locked":        func(o *models.PaycrestOrderRecord) { o.CreatedAt = payTestNow.Add(-time.Hour) },
-		"someone else's":                  func(o *models.PaycrestOrderRecord) { o.UserID = uuid.New() },
-		"a buy":                           func(o *models.PaycrestOrderRecord) { o.Direction = models.PaycrestDirectionBuy },
+		"her own sale, no payment's attempt": func(o *models.PaycrestOrderRecord) { o.PayPaymentID = nil },
+		"another payment's attempt":          func(o *models.PaycrestOrderRecord) { id := uuid.New(); o.PayPaymentID = &id },
+		"opened before she locked":           func(o *models.PaycrestOrderRecord) { o.CreatedAt = payTestNow.Add(-time.Hour) },
+		"someone else's":                     func(o *models.PaycrestOrderRecord) { o.UserID = uuid.New() },
 		"cancelled with its deposit address withdrawn": func(o *models.PaycrestOrderRecord) {
 			o.Status, o.DepositAddress = models.PaycrestStatusCancelled, ""
 		},
@@ -226,6 +225,82 @@ func TestPayReconcile_OrdersThatCannotPayThisMerchantDoNotBlockTheRelease(t *tes
 				t.Fatalf("payment = %+v", got)
 			}
 		})
+	}
+}
+
+// secondPayment is another payment to the same merchant for the same net —
+// her second booking with the same fare — which is exactly the case an
+// amount-and-bank match cannot tell apart from the first.
+func (r *payCheckoutRig) secondPayment(t *testing.T, reference string) *models.PayPayment {
+	t.Helper()
+	in := payIn()
+	in.Reference = reference
+	p, _, err := r.pay.Create(context.Background(), r.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestPayReconcile_AStuckPaymentNeverAdoptsAnotherPaymentsOrder(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	r.lockAlice(t) // payment A: locked, its start died before anything was opened
+	b := r.secondPayment(t, "PNR-SECOND")
+	if _, _, err := r.pay.Lock(context.Background(), r.alice, b.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// B's order: same customer, merchant, bank and net as A, opened after A's
+	// lock, and not yet linked to B (a converted start links it on the next tick).
+	ob := r.orphanOrder(t, func(o *models.PaycrestOrderRecord) { o.PayPaymentID = &b.ID })
+
+	got := r.tickAt(t, 11*time.Minute)
+	if got.PaycrestOrderID != nil {
+		t.Fatalf("payment A adopted payment B's order %s: %+v", ob.ID, got)
+	}
+	if got.Status != models.PayStatusPending {
+		t.Fatalf("A with nothing behind its lock = %+v, want released", got)
+	}
+}
+
+func TestPayReconcile_OnePaymentsAdoptionErrorDoesNotStopTheReleaseSweep(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	ctx := context.Background()
+	r.lockAlice(t)
+	// A corrupt row: A's order is already carried by another payment, so linking
+	// it to A hits the unique index on paycrest_order_id.
+	o := r.orphanOrder(t, nil)
+	other := r.secondPayment(t, "PNR-SECOND")
+	if err := r.pay.db.Model(&models.PayPayment{}).Where("id = ?", other.ID).
+		Updates(map[string]any{"status": models.PayStatusProcessing, "paycrest_order_id": o.ID, "locked_at": payTestNow}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A third payment, someone else's lock with nothing behind it, locked after
+	// A so the oldest-first sweep reaches A first.
+	third := r.secondPayment(t, "PNR-THIRD")
+	bob := payUser(t, r.pay, true)
+	r.pay.now = func() time.Time { return payTestNow.Add(time.Second) }
+	if _, _, err := r.pay.Lock(ctx, bob, third.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLog(t)
+	r.pay.now = func() time.Time { return payTestNow.Add(11 * time.Minute) }
+	_ = r.pay.ReconcileTick(ctx) // the corrupt row may report an error; the sweep must go on
+
+	if got, _ := r.pay.Get(ctx, third.ID); got.Status != models.PayStatusPending {
+		t.Fatalf("the payment behind A was never released: %+v", got)
+	}
+	if got := r.get(t); got.Status != models.PayStatusProcessing {
+		t.Fatalf("A = %+v: a payment whose order is claimed elsewhere must never be released", got)
+	}
+	if !strings.Contains(logs.String(), "ALERT pay_stray_attempt_linked_elsewhere_total=1 payment="+r.p.ID.String()) {
+		t.Fatalf("no ALERT in %q", logs.String())
+	}
+	// Bounded like every other wait: failed for support once it has run too long.
+	r.pay.now = func() time.Time { return payTestNow.Add(payStuckWaitMax + time.Minute) }
+	_ = r.pay.ReconcileTick(ctx)
+	if got := r.get(t); got.Status != models.PayStatusFailed {
+		t.Fatalf("A = %+v, want failed for support after the bound", got)
 	}
 }
 

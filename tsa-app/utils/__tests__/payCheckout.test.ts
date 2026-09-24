@@ -1,5 +1,5 @@
 import {
-  directPriceMovedCopy, BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
+  directPriceMovedCopy, BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, heldNotSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage,
@@ -206,6 +206,8 @@ describe('classifyStartError — one reading of a start route’s answer for bot
     [err(503), 'refused'],
     [err(500), 'other'],
     [err(403, 'kyc_verification_required'), 'other'],
+    // No answer at all: the server may have opened the attempt before the reply was lost.
+    [err(0, 'transport'), 'follow'],
     [new Error('offline'), 'other'],
   ])('%#: %s', (e, kind) => {
     expect(classifyStartError(e)).toBe(kind);
@@ -243,11 +245,17 @@ describe('how long a payment stays reserved — one constant per settlement mode
   });
 
   it('a cancelled or refused attempt says its own mode’s window, and never the other’s', () => {
-    expect(notSentCopy('fiat')).toContain(RESERVE_WINDOW.fiat);
-    expect(notSentCopy('fiat')).not.toMatch(/hour/i);
-    expect(notSentCopy('crypto')).toContain(RESERVE_WINDOW.crypto);
-    expect(notSentCopy('crypto')).not.toMatch(/10 minutes|ten minutes/i);
-    expect(notSentCopy('crypto')).toMatch(/nothing was sent/i);
+    expect(heldNotSentCopy('fiat', 'The swap did not go through.')).toContain(RESERVE_WINDOW.fiat);
+    expect(heldNotSentCopy('fiat', 'The swap did not go through.')).not.toMatch(/hour/i);
+    expect(heldNotSentCopy('crypto', 'The swap did not go through.')).toContain(RESERVE_WINDOW.crypto);
+    expect(heldNotSentCopy('crypto', 'The swap did not go through.')).not.toMatch(/10 minutes|ten minutes/i);
+    expect(heldNotSentCopy('crypto', 'The swap did not go through.')).toMatch(/nothing was sent/i);
+  });
+
+  it('a held refusal never tells her to try again now, and says "nothing was sent" once', () => {
+    const said = heldNotSentCopy('crypto', "We couldn't check the price of this payment, so nothing was sent. Please try again.");
+    expect(said).toBe("We couldn't check the price of this payment, so nothing was sent. This payment is held for about an hour; after that you can try again.");
+    expect(said.match(/nothing was sent/gi)).toHaveLength(1);
   });
 
   it('"nothing to continue" says its own mode’s window too', () => {

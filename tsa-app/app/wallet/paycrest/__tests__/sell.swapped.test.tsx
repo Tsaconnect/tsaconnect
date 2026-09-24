@@ -303,6 +303,18 @@ it('offers to finish a sale that stopped part-way', async () => {
   expect(swappedState.value.resume).toHaveBeenCalledWith(intent, '0xUser');
 });
 
+// A TSA Pay payment's sale is not hers to finish or close here: its payment may be
+// signing its swap right now, and that swap pays the merchant.
+it('shows a payment still going through, with no Finish or Cancel', async () => {
+  const intent = { id: 'i1', status: 'swapping', payPaymentId: '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f',
+    updatedAt: new Date(Date.now() - 60 * 60_000).toISOString() };
+  sellSwap.getSwappedSellState.mockResolvedValue({ enabled: true, intent: intent as any });
+  const tree = await mount();
+  expect(text(tree)).toContain('A payment of yours is still going through');
+  expect(text(tree)).not.toContain('Finish your sale');
+  expect(text(tree)).not.toContain('Cancel this sale');
+});
+
 // ─── Whole-branch fixes ────────────────────────────────────────────────────
 
 describe('swapped sells switched off on the server (RAMP_CONVERSION_SELL unset)', () => {

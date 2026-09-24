@@ -174,8 +174,9 @@ func (s *PayPaymentService) reconcileOne(ctx context.Context, id uuid.UUID) erro
 }
 
 // reconcileOrder settles a payment by its Paycrest order's status. Only two
-// endings free the payment for a retry — refunded, and expired with no sign
-// of a deposit: everything else either waits or is failed for support.
+// endings free the payment for a retry — refunded, and expired with no deposit
+// address to have paid into: everything else either waits or is failed for
+// support.
 func (s *PayPaymentService) reconcileOrder(ctx context.Context, p *models.PayPayment) error {
 	var o models.PaycrestOrderRecord
 	if err := s.db.WithContext(ctx).First(&o, "id = ?", *p.PaycrestOrderID).Error; err != nil {
@@ -255,6 +256,12 @@ const (
 // not tapped "I've sent it", so the sources above can all read empty while the
 // money sits at the address. With no reader wired, or one that fails, the answer
 // is depositUnknown, never depositNone.
+//
+// A balance can prove money arrived, never that it did not: a deposit Paycrest
+// already swept onward, or one a lagging node has not seen yet, reads as zero
+// too. So a zero balance is depositUnknown, and only an order with no deposit
+// address at all is depositNone. Releasing on a zero read let a second payer
+// pay while the first's money sat stranded at Paycrest.
 func (s *PayPaymentService) expiredOrderDeposit(ctx context.Context, o *models.PaycrestOrderRecord) (depositEvidence, error) {
 	seen, err := s.orderShowsDeposit(ctx, o)
 	if err != nil {
@@ -277,7 +284,7 @@ func (s *PayPaymentService) expiredOrderDeposit(ctx context.Context, o *models.P
 	if bal != nil && bal.Sign() > 0 {
 		return depositSeen, nil
 	}
-	return depositNone, nil
+	return depositUnknown, nil
 }
 
 // orderShowsDeposit reports any sign in our own records that the customer's
@@ -555,10 +562,19 @@ func (s *PayPaymentService) endIntentThen(ctx context.Context, in *models.RampSe
 // handOverToOrder makes a converted payment's payout order its own attempt:
 // the intent opened it, so it continues the same attempt and the order rules
 // take over next tick.
+//
+// An order another payment already carries (the unique index on
+// paycrest_order_id) is not a store error to retry forever: it pays this
+// merchant but is claimed elsewhere, so a human must look. It waits, alerted
+// and bounded, and is never released.
 func (s *PayPaymentService) handOverToOrder(ctx context.Context, p *models.PayPayment, orderID uuid.UUID) error {
 	res := s.db.WithContext(ctx).Model(&models.PayPayment{}).
 		Where("id = ? AND status = ? AND sell_intent_id = ?", p.ID, models.PayStatusProcessing, *p.SellIntentID).
 		Updates(map[string]any{"paycrest_order_id": orderID, "sell_intent_id": nil})
+	if isUniqueViolation(res.Error) {
+		return s.waitOrFail(ctx, p, "order_already_linked", "order", orderID,
+			"the payment's payout order is recorded against another payment — support is reviewing it")
+	}
 	if res.Error != nil {
 		return res.Error
 	}

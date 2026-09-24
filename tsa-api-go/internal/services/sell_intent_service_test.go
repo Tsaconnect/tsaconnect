@@ -279,15 +279,20 @@ func TestSellIntent_RecordSwapRejectsAMalformedHash(t *testing.T) {
 	}
 }
 
+// fakeFeeEnqueuer books like the real engine: one fee per (source type, source
+// id) — its guard row — so a replayed booking is recorded as a call, not as a
+// second fee.
 type fakeFeeEnqueuer struct {
 	events []FeeEvent
-	// onEnqueue runs as the fee is booked — between ConfirmDelivery's checks and its write.
-	onEnqueue func()
+	calls  int
 }
 
 func (f *fakeFeeEnqueuer) EnqueueFeeSettled(e FeeEvent) {
-	if f.onEnqueue != nil {
-		f.onEnqueue()
+	f.calls++
+	for _, got := range f.events {
+		if got.SourceType == e.SourceType && got.SourceID == e.SourceID {
+			return
+		}
 	}
 	f.events = append(f.events, e)
 }

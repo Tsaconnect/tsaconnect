@@ -55,7 +55,8 @@ import * as SellSwap from '@/services/paycrestSellSwap';
 import * as LifiFlow from '@/services/lifiFlow';
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
-import { priceMovedMessage } from '@/utils/payCheckout';
+import { heldPriceMovedCopy, OTHER_SALE_RUNNING } from '@/utils/payCheckout';
+import { anySaleRunning, holdSale, saleRunning } from '@/services/sellSwapRun';
 import { usePayCrypto, type UsePayCrypto } from '../usePayCrypto';
 
 const { PayError } = PayApi;
@@ -380,12 +381,15 @@ describe('a payment that cannot safely be started over', () => {
     expect(hook.retryable).toBe(false);
   });
 
-  it('a swap refused before it left her wallet is retryable', async () => {
+  // Nothing left her wallet, but the closed intent keeps a crypto payment reserved for the hour
+  // (the server cannot tell "never signed" from "signed, never reported"): Pay now would be refused.
+  it('a swap refused before it left her wallet says the payment is held, and offers no Pay', async () => {
     m.executeLiFiSwap.mockRejectedValue(new Error('User rejected the request'));
     await mount();
     await pay();
-    expect(hook.retryable).toBe(true);
+    expect(hook.retryable).toBe(false);
     expect(hook.canContinue).toBe(false);
+    expect(hook.error).toBe('User rejected the request Nothing was sent. This payment is held for about an hour; after that you can try again.');
   });
 
   it('a refusal to start the payment is retryable', async () => {
@@ -638,7 +642,7 @@ describe('the price she was shown is the price she pays', () => {
     expect(hook.authorization.title).toBe('Authorize payment of about 0.084 BNB');
   });
 
-  it('a fresh quote past 2% is refused before anything is signed: retryable, in plain words, nothing held', async () => {
+  it('a fresh quote past 2% is refused before anything is signed: in plain words, held for the window, no Pay', async () => {
     m.payCrypto.mockResolvedValue({ intent, quote: withValue('99000000000000000'), gasTopUp: false });
     await mount();
     act(() => hook.payWith(bnb, BSC, priced));
@@ -646,7 +650,7 @@ describe('the price she was shown is the price she pays', () => {
     await settle();
 
     expect(hook.stage).toBe('failed');
-    expect(hook.retryable).toBe(true);
+    expect(hook.retryable).toBe(false);
     expect(hook.error).toMatch(/price moved/i);
     expect(m.executeLiFiSwap).not.toHaveBeenCalled();
     expect(m.abandonSellIntent).toHaveBeenCalledWith('i1');
@@ -970,8 +974,8 @@ describe('one attempt, and only one that is accepted', () => {
   });
 });
 
-describe('a price the server moved is not "reserved" — the intent was closed', () => {
-  it('shows the bare refusal, exactly, with no second "nothing was sent" and no reservation', async () => {
+describe('a price the server moved: the closed intent still holds the payment for the window', () => {
+  it('says so once, exactly — no "try again" now, which the server would only refuse', async () => {
     const moved = {
       fromAmount: '99000000000000000', transactionRequest: { value: `0x${BigInt('99000000000000000').toString(16)}` },
     } as unknown as LiFiQuote;
@@ -980,8 +984,56 @@ describe('a price the server moved is not "reserved" — the intent was closed',
     act(() => hook.payWith(bnb, BSC, { pay: '0.084 BNB', fromAmount: '84000000000000000' }));
     await act(async () => { hook.authorization.onAuthorized(); });
     await settle();
-    expect(hook.error).toBe(priceMovedMessage('99000000000000000', '84000000000000000', 18, 'BNB'));
-    expect(hook.error).not.toMatch(/hour/i);
+    expect(hook.error).toBe(heldPriceMovedCopy('crypto', '99000000000000000', '84000000000000000', 18, 'BNB'));
+    expect(hook.error!.match(/nothing was sent/gi)).toHaveLength(1);
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false);
+  });
+});
+
+describe('one run per sale, app-wide: the payment holds the same claim a sale does', () => {
+  it('is refused while another sale or payment is being signed on this phone — nothing is started', async () => {
+    const release = holdSale('someone-elses-sale');
+    try {
+      await mount();
+      await pay();
+      expect(m.payCrypto).not.toHaveBeenCalled();
+      expect(hook.error).toBe(OTHER_SALE_RUNNING);
+      expect(hook.retryable).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  it('holds its intent while the swap waits, so "Finish your sale" cannot close it, and lets go after', async () => {
+    let finishSwap!: (hash: string) => void;
+    m.payCrypto.mockResolvedValue({ intent, quote, gasTopUp: false });
+    m.executeLiFiSwap.mockImplementation((p: any) => new Promise((resolve) => {
+      // An approval wait: nothing is signed yet, and the intent has no hash.
+      finishSwap = async (h: string) => { await p.onSigned(h); resolve(h); };
+    }));
+    m.recordSellSwap.mockResolvedValue(undefined as any);
+    await mount();
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await settle();
+    expect(saleRunning('i1')).toBe(true);
+    expect(anySaleRunning()).toBe(true);
+    await act(async () => { finishSwap('0xswap'); });
+    await settle();
+    expect(hook.stage).toBe('waiting');
+    expect(anySaleRunning()).toBe(false);
+  });
+
+  it('counts as running from the moment it asks for its intent, before the id comes back', async () => {
+    let answer!: (v: unknown) => void;
+    m.payCrypto.mockImplementation(() => new Promise((r) => { answer = r; }) as any);
+    await mount();
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    expect(anySaleRunning()).toBe(true);
+    await act(async () => { answer({ intent, quote, gasTopUp: false }); });
+    await settle();
   });
 });
 

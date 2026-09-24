@@ -239,8 +239,12 @@ func TestPayReleaseUnattempted_NeverReleasesAPaymentThatLinkedAnAttemptSinceTheS
 }
 
 // ---- B5: an expired order is proven empty before its payment is handed back ----
+//
+// A balance read can prove money arrived, never that it did not (Paycrest may
+// have swept it on, a node may lag), so only an order that never had a deposit
+// address is handed back; every other expired order waits for support.
 
-func TestPayReconcile_AnExpiredOrderIsOnlyReleasedOnceItsDepositAddressIsProvenEmpty(t *testing.T) {
+func TestPayReconcile_AnExpiredOrderIsReleasedOnlyWhenNoDepositCouldHaveBeenMade(t *testing.T) {
 	for name, tc := range map[string]struct {
 		setup    func(r *payCheckoutRig, o *models.PaycrestOrderRecord)
 		want     string
@@ -254,7 +258,10 @@ func TestPayReconcile_AnExpiredOrderIsOnlyReleasedOnceItsDepositAddressIsProvenE
 		"Paycrest returned money to her": {func(r *payCheckoutRig, o *models.PaycrestOrderRecord) {
 			r.pay.db.Model(o).Update("amount_returned", "12.5")
 		}, models.PayStatusFailed, 0, "order_expired_after_deposit"},
-		"the address is empty":     {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) {}, models.PayStatusPending, 1, ""},
+		"the address reads empty": {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) {}, models.PayStatusProcessing, 1, "expired_order_unverified"},
+		"the order never had a deposit address": {func(r *payCheckoutRig, o *models.PaycrestOrderRecord) {
+			r.pay.db.Model(o).Update("deposit_address", "")
+		}, models.PayStatusPending, 0, ""},
 		"the chain cannot be read": {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) { r.deposit.err = errors.New("rpc down") }, models.PayStatusProcessing, 1, "expired_order_unverified"},
 		"no reader is wired":       {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) { r.pay.SetDepositReader(nil) }, models.PayStatusProcessing, 0, "expired_order_unverified"},
 	} {
@@ -290,13 +297,13 @@ func TestPayReconcile_AnUnverifiableExpiredOrderAlertsOnceAndFailsAfterTheBound(
 	if got := r.tickAt(t, payStuckWaitMax+time.Hour); got.Status != models.PayStatusFailed || got.PayerUserID == nil {
 		t.Fatalf("payment = %+v: never released, failed for support once the wait ran out", got)
 	}
-	// Once the chain can be read the wait would have ended differently.
+	// A chain that can be read again and shows the money ends the wait for support.
 	r2 := newPayCheckoutRig(t)
 	r2.startedOrder(t, models.PaycrestStatusExpired, nil)
 	r2.deposit.err = errors.New("rpc down")
 	r2.tickAt(t, time.Hour)
-	r2.deposit.err = nil
-	if got := r2.tickAt(t, time.Hour+time.Minute); got.Status != models.PayStatusPending {
+	r2.deposit.err, r2.deposit.bal = nil, big.NewInt(1)
+	if got := r2.tickAt(t, time.Hour+time.Minute); got.Status != models.PayStatusFailed {
 		t.Fatalf("payment = %+v", got)
 	}
 }
@@ -509,17 +516,28 @@ func TestSellIntent_ConfirmDeliveryRefusesWhenTheUniqueIndexCatchesAReusedTransa
 	in := r.createDelivery(t)
 	r.status.st = r.deliveredStatus(in)
 	other := "0x" + strings.Repeat("ee", 32)
-	fees.onEnqueue = func() { // runs as the fee is booked: after the pre-check, before the update
+	// Runs just before the delivered write: after the pre-check, before the update.
+	taken := false
+	if err := r.svc.db.Callback().Update().Before("gorm:update").Register("test:take_dest_tx", func(tx *gorm.DB) {
+		if taken || tx.Statement.Table != "ramp_sell_intents" {
+			return
+		}
+		taken = true
 		row := models.RampSellIntent{UserID: r.user.ID, WalletAddress: r.user.WalletAddress, SourceAddress: r.user.WalletAddress,
 			SourceChainID: 56, SourceTokenAddress: evmNativeAddress, SourceAmount: "1", FiatCode: "NGN",
 			Status: models.SellIntentDelivered, DestTxHash: &[]string{deliveryDestTx}[0], SwapTxHash: &other}
-		if err := r.svc.db.Create(&row).Error; err != nil {
-			t.Fatal(err)
+		if err := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true}).Create(&row).Error; err != nil {
+			t.Error(err)
 		}
+	}); err != nil {
+		t.Fatal(err)
 	}
 	logs := captureLog(t)
 	if _, err := r.svc.ConfirmDelivery(ctx, in.ID); !errors.Is(err, ErrSwapMismatch) {
 		t.Fatalf("err = %v, want ErrSwapMismatch from the unique index", err)
+	}
+	if fees.calls != 0 {
+		t.Fatalf("a delivery the write refused still booked a fee: %+v", fees.events)
 	}
 	if !strings.Contains(logs.String(), "ALERT ramp_sell_delivery_tx_reused_total=1 intent="+in.ID.String()) {
 		t.Fatalf("no ALERT in %q", logs.String())
@@ -861,8 +879,9 @@ func TestPayReconcile_TheDepositReadAsksAboutTheOrdersOwnChainTokenAndAddress(t 
 		o.ChainKey, o.Token, o.DepositAddress = "bsc", "USDT", "0xOrdersOwnDepositAddress"
 	})
 	r.deposit.want = &fakeDepositArgs{"bsc", "USDT", o.DepositAddress}
-	if got := r.tickAt(t, time.Hour); got.Status != models.PayStatusPending {
-		t.Fatalf("payment = %+v", got)
+	r.deposit.bal = big.NewInt(1)
+	if got := r.tickAt(t, time.Hour); got.Status != models.PayStatusFailed {
+		t.Fatalf("payment = %+v: the money at the order's own address was not seen", got)
 	}
 	if len(r.deposit.got) != 1 || r.deposit.got[0] != *r.deposit.want {
 		t.Fatalf("read %+v", r.deposit.got)
@@ -950,5 +969,34 @@ func TestPayReconcileTick_TheLockIsReleasedWhenTheTickEndsHoweverItEndsOnPostgre
 	}
 	if r.pay.skipped.Load() != 0 {
 		t.Fatalf("%d ticks skipped: a lock outlived its tick", r.pay.skipped.Load())
+	}
+}
+
+// ConfirmDelivery books its fee only once the delivered write has landed: a
+// reconciler that fails the sale between the proof and the write leaves a sale
+// in review, with no fee booked against it.
+func TestSellIntent_ConfirmDeliveryBooksNoFeeForASaleFailedUnderIt(t *testing.T) {
+	ctx := context.Background()
+	r, _, fees := newDeliveryRig(t)
+	in := r.createDelivery(t)
+	r.status.st = r.deliveredStatus(in)
+	failed := false
+	if err := r.svc.db.Callback().Update().Before("gorm:update").Register("test:fail_sale", func(tx *gorm.DB) {
+		if failed || tx.Statement.Table != "ramp_sell_intents" {
+			return
+		}
+		failed = true
+		if err := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true}).Model(&models.RampSellIntent{}).
+			Where("id = ?", in.ID).Update("status", models.SellIntentFailed).Error; err != nil {
+			t.Error(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.ConfirmDelivery(ctx, in.ID); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("err = %v, want ErrSellIntentState", err)
+	}
+	if fees.calls != 0 {
+		t.Fatalf("a sale failed under the proof still booked a fee: %+v", fees.events)
 	}
 }

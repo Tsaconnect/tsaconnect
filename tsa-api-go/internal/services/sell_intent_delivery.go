@@ -165,12 +165,18 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 		return "", fmt.Errorf("%w: %s credited less than the %s owed", ErrSwapMismatch, st.DestTxHash, owed)
 	}
 
+	// The fee is booked only once the sale is recorded as delivered — never
+	// before the guarded write, which a racing proof of the same destination tx
+	// or a reconciler failing the sale can still refuse. Booking is keyed on the
+	// intent (a repeat is a no-op), so every path that finds the sale delivered
+	// books it: that is what heals a crash between the write and the booking.
 	if in.Status == models.SellIntentDelivered {
+		s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
 		return st.DestTxHash, nil
 	}
 	destTx := strings.ToLower(st.DestTxHash)
 	// One destination transaction proves one sale (see RampSellIntent.DestTxHash).
-	// Checked before the fee is booked; the unique index below is the backstop.
+	// Checked before the write; the unique index below is the backstop.
 	var reused int64
 	if err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("dest_tx_hash = ? AND id <> ?", destTx, in.ID).Count(&reused).Error; err != nil {
@@ -179,7 +185,6 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 	if reused > 0 {
 		return "", s.deliveryTxReused(&in, st.DestTxHash)
 	}
-	s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND status = ?", in.ID, models.SellIntentSwapped).
 		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentDelivered, "dest_tx_hash": destTx, "updated_at": s.now()}))
@@ -200,6 +205,7 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 			return "", ErrSellIntentState
 		}
 	}
+	s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
 	return st.DestTxHash, nil
 }
 

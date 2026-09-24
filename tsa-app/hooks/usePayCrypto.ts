@@ -31,9 +31,12 @@ import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
 import { getOpenSellIntent, recordSellSwap, type SellIntent } from '@/services/paycrestSellSwap';
 import { clearPayHold, holdActive, readPayHold, writePayHold, type PayHold } from '@/services/payHold';
 import { getCryptoQuote, payCrypto, type PayCheckout } from '@/services/payApi';
-import { clearPendingSwapHash, executeSellSwap, readPendingSwapHash, SwapPriceMovedError } from '@/services/sellSwapRun';
 import {
-  classifyStartError, errorMessage, estimateError, HOLD_UNREADABLE, intentForPayment, BROADCAST_UNCONFIRMED, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, payAmountLabel,
+  anySaleRunning, clearPendingSwapHash, executeSellSwap, readPendingSwapHash, startHeld, SwapPriceMovedError,
+} from '@/services/sellSwapRun';
+import {
+  classifyStartError, errorMessage, estimateError, heldNotSentCopy, heldPriceMovedCopy, HOLD_UNREADABLE, intentForPayment,
+  BROADCAST_UNCONFIRMED, nothingToContinueCopy, NOT_CONFIRMED, OTHER_SALE_RUNNING, payAmountLabel,
   receiveAmountLabel, startFailure, unconfirmedCopy, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 
@@ -254,22 +257,38 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
       dispatch({ type: 'fail', error: unsupportedNetworkMessage(token.symbol), retryable: true });
       return;
     }
+    // One run per sale app-wide, the same claim the swapped sell takes: while this
+    // payment's swap waits on an approval or a top-up, "Finish your sale" must not
+    // close its intent — the swap would then pay the merchant for a written-off sale.
+    if (anySaleRunning()) {
+      dispatch({ type: 'fail', error: OTHER_SALE_RUNNING, retryable: true });
+      return;
+    }
 
-    let started;
+    let held;
     try {
-      started = await payCrypto(checkout.id, {
+      held = await startHeld(() => payCrypto(checkout.id, {
         sourceChainId: chainId,
         sourceToken: token.address,
         sourceAddress: address,
-      });
+      }));
     } catch (e) {
       if (classifyStartError(e) === 'follow') return resumeOpen();
       // Paused: never followed, retried or reset by us. Anything else: nothing started.
       dispatch({ type: 'fail', ...startFailure(e), paused: classifyStartError(e) === 'paused' });
       return;
     }
+    try {
+      await swapAndReport(held.created, token, chainId, address, priced);
+    } finally {
+      held.release();
+    }
+  };
 
-    const { intent, quote, gasTopUp } = started;
+  const swapAndReport = async (
+    { intent, quote, gasTopUp }: Awaited<ReturnType<typeof payCrypto>>,
+    token: LiFiToken, chainId: number, address: string, priced: PayEstimate,
+  ) => {
     let hash: string;
     try {
       hash = await executeSellSwap({
@@ -296,13 +315,16 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         }
         return;
       }
-      // The price moved: its own words say nothing was sent, and the intent was closed — not "reserved".
+      // Nothing was signed, and the intent was closed — but a closed delivery intent keeps the payment
+      // reserved for the crypto window (the server cannot tell "never signed" from "signed, never
+      // reported"), so a tap now would only be refused: say how long, and offer no Pay.
       dispatch({
         type: 'fail',
-        error: e instanceof SwapPriceMovedError
-          ? e.message
-          : `${errorMessage(e, 'The swap did not go through.')}${notSentCopy('crypto')}`,
-        retryable: true,
+        error: e instanceof SwapPriceMovedError && e.moved
+          ? heldPriceMovedCopy('crypto', e.moved.freshBase, e.moved.pricedBase, token.decimals, token.symbol)
+          : heldNotSentCopy('crypto', errorMessage(e, 'The swap did not go through.')),
+        retryable: false,
+        noContinue: true,
       });
       return;
     }

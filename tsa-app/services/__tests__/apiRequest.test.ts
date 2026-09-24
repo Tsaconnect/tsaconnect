@@ -150,4 +150,35 @@ describe('createApiRequest', () => {
     expect(caught).toBeInstanceOf(MyError);
     expect(caught.body).toEqual(body);
   });
+
+  describe('a request with no answer', () => {
+    const make = () => createApiRequest({ prefix: '/pay', unavailableMessage: 'unavailable', networkMessage: 'network' });
+
+    it('a dropped connection is an ApiError coded transport, never the platform\'s own words', async () => {
+      (global.fetch as jest.Mock).mockRejectedValue(new TypeError('Network request failed'));
+      await expect(make()('/checkout/1/direct', { method: 'POST' })).rejects.toMatchObject({
+        name: 'ApiError', message: 'network', status: 0, code: 'transport',
+      });
+    });
+
+    it('a request that never answers is aborted at the timeout, as transport', async () => {
+      jest.useFakeTimers();
+      try {
+        (global.fetch as jest.Mock).mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('Aborted')));
+        }));
+        const pending = make()('/checkout/1/crypto', { method: 'POST' });
+        const assertion = expect(pending).rejects.toMatchObject({ status: 0, code: 'transport' });
+        await jest.advanceTimersByTimeAsync(30_000);
+        await assertion;
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('a success whose body is not our JSON is an error, not undefined data', async () => {
+      (global.fetch as jest.Mock).mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('html'); } });
+      await expect(make()('/checkout/1/converted', { method: 'POST' })).rejects.toBeInstanceOf(ApiError);
+    });
+  });
 });

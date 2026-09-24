@@ -123,6 +123,37 @@ func TestPayMerchant_UpdateResolvesTheBankAccountName(t *testing.T) {
 	}
 }
 
+// Bank fields saved while unconfigured, then the mode switched on its own: the
+// account must still be resolved before the merchant goes live on it.
+func TestPayMerchant_SwitchingIntoFiatAlwaysResolvesTheAccount(t *testing.T) {
+	ctx := context.Background()
+	s, banks := newPayMerchantSvc(t)
+	banks.err = ErrNombaAccountNotFound
+	m, err := s.CreateFromRequest(ctx, payRequest())
+	if err != nil || m.SettlementMode != "" {
+		t.Fatalf("an unresolved applicant account should leave settlement unconfigured: %v %+v", err, m)
+	}
+	banks.err = nil
+	if _, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); err != nil {
+		t.Fatal(err)
+	}
+	before := banks.calls
+	banks.name = "SKY AIR NIGERIA"
+	got, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{SettlementMode: payStr("fiat")})
+	if err != nil || banks.calls != before+1 || got.AccountName != "SKY AIR NIGERIA" {
+		t.Fatalf("err %v resolves %d->%d merchant %+v: fiat went live on an unverified account", err, before, banks.calls, got)
+	}
+
+	// An account that resolves to no name is not a verified account.
+	s2, banks2 := newPayMerchantSvc(t)
+	banks2.err = ErrNombaAccountNotFound
+	m2, _ := s2.CreateFromRequest(ctx, payRequest())
+	banks2.err, banks2.name = nil, "  "
+	if _, err := s2.Update(ctx, payActor, m2.ID, PayMerchantUpdate{SettlementMode: payStr("fiat"), BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("err = %v, want a refusal for a nameless account", err)
+	}
+}
+
 func TestPayMerchant_UpdateValidatesCryptoSettlement(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	s.chains = fakePayChains{56: "bsc"}

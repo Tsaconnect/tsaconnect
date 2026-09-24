@@ -460,7 +460,12 @@ func (s *PayMerchantService) validatePayMerchant(ctx context.Context, before, up
 		if updated.BankCode == "" || !payAccountNumberRE.MatchString(updated.AccountNumber) {
 			return fmt.Errorf("%w: fiat settlement needs a bank code and a 10-digit account number", ErrPayMerchantInvalid)
 		}
-		if before.BankCode != updated.BankCode || before.AccountNumber != updated.AccountNumber {
+		// Resolved on every way INTO fiat, not only when the account changes: bank
+		// fields saved while unconfigured (or kept from an earlier fiat spell)
+		// were never verified for this settlement, and a two-step edit — account
+		// first, then the mode — would otherwise go live on an unverified account.
+		if before.SettlementMode != models.PaySettlementFiat || updated.AccountName == "" ||
+			before.BankCode != updated.BankCode || before.AccountNumber != updated.AccountNumber {
 			if s.banks == nil {
 				return fmt.Errorf("%w: no bank directory configured to resolve the account", ErrPayMerchantInvalid)
 			}
@@ -468,7 +473,10 @@ func (s *PayMerchantService) validatePayMerchant(ctx context.Context, before, up
 			if err != nil {
 				return fmt.Errorf("%w: could not resolve bank account: %v", ErrPayMerchantInvalid, err)
 			}
-			updated.AccountName = res.AccountName
+			updated.AccountName = strings.TrimSpace(res.AccountName)
+		}
+		if updated.AccountName == "" {
+			return fmt.Errorf("%w: the bank account resolved to no account name", ErrPayMerchantInvalid)
 		}
 	case models.PaySettlementCrypto:
 		if s.chains == nil {

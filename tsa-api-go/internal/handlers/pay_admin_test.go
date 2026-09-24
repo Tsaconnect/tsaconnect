@@ -64,7 +64,7 @@ func payDo(r *gin.Engine, method, path string, body any, header map[string]strin
 func seedHandlerMerchant(t *testing.T, db *gorm.DB) *models.PayMerchant {
 	t.Helper()
 	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: uuid.New(), BusinessName: "Sky Air", Status: models.PayMerchantActive,
-		SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0123456789", CustomerFeeSharePercent: 100,
+		SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0123456789", AccountName: "SKY AIR LTD", CustomerFeeSharePercent: 100,
 		MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000, WebhookSecretVersion: 1, ReturnDomains: "skyair.ng"}
 	if err := db.Create(m).Error; err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestPayAdmin_ListPaymentsFiltersByMerchantAndAddsMerchantName(t *testing.T)
 	h, payments, db := newPayHandlerAdminRig(t)
 	m1 := seedHandlerMerchant(t, db)
 	m2 := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: uuid.New(), BusinessName: "Blue Air", Status: models.PayMerchantActive,
-		SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0000000001", CustomerFeeSharePercent: 100,
+		SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0000000001", AccountName: "SKY AIR LTD", CustomerFeeSharePercent: 100,
 		MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000, WebhookSecretVersion: 1, ReturnDomains: "blueair.ng"}
 	if err := db.Create(m2).Error; err != nil {
 		t.Fatal(err)

@@ -104,6 +104,20 @@ func blockingCommitments(db *gorm.DB, userID uuid.UUID) ([]string, error) {
 		blockers = append(blockers, fmt.Sprintf("%d purchase still being delivered", purchaseCount))
 	}
 
+	// A TSA Pay payment in flight moves money either way: hers to a merchant, or
+	// a customer's to her own merchant account's bank or wallet.
+	var payCount int64
+	if err := db.Model(&models.PayPayment{}).
+		Where("status = ? AND mode = ? AND (payer_user_id = ? OR merchant_id IN (?))",
+			models.PayStatusProcessing, models.PayModeLive, userID,
+			db.Model(&models.PayMerchant{}).Select("id").Where("user_id = ?", userID)).
+		Count(&payCount).Error; err != nil {
+		return nil, err
+	}
+	if payCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d TSA Pay payment(s) still being settled", payCount))
+	}
+
 	return blockers, nil
 }
 
@@ -171,6 +185,22 @@ func (h *Handlers) RequestAccountDeletion(c *gin.Context) {
 			"deleted_at":     now,
 			"updated_at":     now,
 		}).Error; err != nil {
+			return err
+		}
+		// Her TSA Pay merchant account stops with her: a suspended merchant's API
+		// keys are refused and its payments can no longer be started, so no
+		// customer money is taken for an account that no longer exists. Its
+		// pending payments expire on their own clock. Reinstating the account
+		// does not reactivate the merchant — that stays a super admin's call.
+		// The version bump makes any in-flight admin edit fail rather than
+		// overwrite the suspension.
+		if err := tx.Model(&models.PayMerchant{}).
+			Where("user_id = ? AND status = ?", user.ID, models.PayMerchantActive).
+			Updates(map[string]interface{}{
+				"status":     models.PayMerchantSuspended,
+				"version":    gorm.Expr("version + 1"),
+				"updated_at": now,
+			}).Error; err != nil {
 			return err
 		}
 		// Revoke all active refresh tokens so stale sessions cannot be reused upon reactivation
@@ -371,6 +401,27 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		if err := tx.Model(&models.PaycrestOrderRecord{}).
 			Where("user_id = ? AND status IN ?", req.UserID, models.PaycrestResolvedStatuses()).
 			Updates(models.WithPayoutDetailsCleared(map[string]any{})).Error; err != nil {
+			return err
+		}
+
+		// Her merchant account's payout destinations and credentials: nothing
+		// may settle to them or authenticate with them after erasure.
+		if err := tx.Model(&models.PayMerchant{}).Where("user_id = ?", req.UserID).Updates(map[string]interface{}{
+			"status":           models.PayMerchantSuspended,
+			"settlement_mode":  "",
+			"bank_code":        "",
+			"account_number":   "",
+			"account_name":     "",
+			"wallet_address":   "",
+			"webhook_url":      "",
+			"test_webhook_url": "",
+			"live_key_hash":    nil,
+			"live_key_prefix":  "",
+			"test_key_hash":    nil,
+			"test_key_prefix":  "",
+			"version":          gorm.Expr("version + 1"),
+			"updated_at":       now,
+		}).Error; err != nil {
 			return err
 		}
 

@@ -13,6 +13,7 @@ import type { SellIntent } from '@/services/paycrestSellSwap';
 // mocked test — and this file is a pure function that must stay importable
 // (and testable) on its own. utils/paymentId.ts has no such dependency.
 import { isPaymentId } from '@/utils/paymentId';
+import { TRANSPORT_ERROR } from '@/constants/api/config';
 
 export type PayScreenState =
   | { kind: 'loading' }
@@ -170,10 +171,6 @@ export const RESERVE_WINDOW: Record<SettlementMode, string> = {
  */
 export const KEEP_CHECKING = "We'll keep checking";
 
-/** A refused or cancelled attempt left nothing behind; when it frees up depends on the mode. */
-export const notSentCopy = (mode: SettlementMode): string =>
-  ` Nothing was sent. If you can't try again right away, the payment frees up again in ${RESERVE_WINDOW[mode]}.`;
-
 /** Continue payment found no sale of hers that pays this payment. */
 export const nothingToContinueCopy = (mode: SettlementMode): string =>
   `We couldn't find a payment of yours to continue. If nothing is under way, the payment frees up again in ${RESERVE_WINDOW[mode]}, and you can try again.`;
@@ -254,14 +251,35 @@ export const ORDER_MISMATCH =
   `The payment order didn't match what you chose, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
 
 /**
- * The same refusal when a naira payment's payout ORDER was already opened at
- * the higher amount: nothing was sent, but the payment is linked to that order,
- * so it is held for the window before she can try again at the new price.
+ * The price moved after the payment's attempt was already opened — a naira
+ * payout order at the higher amount, or a crypto payment's intent: nothing was
+ * sent, but the payment stays reserved for the mode's window before she can try
+ * again at the new price.
  */
-export function directPriceMovedCopy(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+export function heldPriceMovedCopy(mode: SettlementMode, freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
   return `${priceMovedStatement(freshBase, pricedBase, decimals, symbol)} Nothing was sent. `
-    + `This payment is held for ${RESERVE_WINDOW.fiat}; after that you can try again with the new price.`;
+    + `This payment is held for ${RESERVE_WINDOW[mode]}; after that you can try again with the new price.`;
 }
+
+/** The naira case of heldPriceMovedCopy: the payout order was opened at the higher amount. */
+export const directPriceMovedCopy = (freshBase: string, pricedBase: string, decimals: number, symbol: string): string =>
+  heldPriceMovedCopy('fiat', freshBase, pricedBase, decimals, symbol);
+
+/**
+ * A crypto payment's swap that stopped before it was signed: nothing was sent,
+ * but its attempt was opened, so the server keeps the payment reserved for the
+ * window — never "try again" now, which would only be refused.
+ */
+export function heldNotSentCopy(mode: SettlementMode, why: string): string {
+  // The reason's own "try again" is exactly what must not be said; its "nothing was sent" is kept, not repeated.
+  const reason = why.replace(/\s*Please try again\.?\s*$/i, '').trim();
+  const said = /nothing was sent/i.test(reason);
+  return `${reason}${said ? '' : ' Nothing was sent.'} This payment is held for ${RESERVE_WINDOW[mode]}; after that you can try again.`;
+}
+
+/** Another sale or payment is being signed on this phone: nothing was started. */
+export const OTHER_SALE_RUNNING =
+  'Another sale or payment is still going through on this phone. Give it a few minutes, then try again — nothing was sent.';
 
 export type StartErrorKind = 'follow' | 'paused' | 'refused' | 'other';
 
@@ -269,10 +287,15 @@ export type StartErrorKind = 'follow' | 'paused' | 'refused' | 'other';
  * One reading of a start route's answer, for both hooks: an attempt of hers
  * already exists (follow it), the server paused the payment, the route refused
  * this token for now, or anything else. By code and status — never by words.
+ *
+ * No answer at all (a dropped connection, a timeout) is also followed: the
+ * server may have opened the attempt before the reply was lost, so "failed,
+ * try again" could be false. Following only reads; if nothing was started, the
+ * payment is still payable and the screen offers Pay again.
  */
 export function classifyStartError(e: unknown): StartErrorKind {
   const code = errorCode(e);
-  if (code === PAY_IN_PROGRESS) return 'follow';
+  if (code === PAY_IN_PROGRESS || code === TRANSPORT_ERROR) return 'follow';
   if (code === PAY_ATTEMPT_UNCERTAIN) return 'paused';
   return isRouteRefused(e) ? 'refused' : 'other';
 }
