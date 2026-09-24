@@ -531,17 +531,17 @@ func (s *PayCheckoutService) release(ctx context.Context, p *models.PayPayment, 
 // cleanly ruled out. The payment is never released — it fails, for support.
 // kind and attemptID name the attempt when there is one.
 func (s *PayCheckoutService) failStart(ctx context.Context, p *models.PayPayment, alert, kind string, attemptID uuid.UUID, cause error) {
-	detail := ""
+	var fields []string
 	if kind != "" {
-		detail = fmt.Sprintf(" %s=%s", kind, attemptID)
+		fields = append(fields, kind+"="+attemptID.String())
 	}
-	log.Printf("[tsa-pay] ALERT pay_%s_total=1 payment=%s%s err=%v", alert, p.ID, detail, cause)
+	payAlertf(alert, p.ID, append(fields, fmt.Sprintf("err=%v", cause))...)
 	bctx, stop := payBookkeeping(ctx)
 	defer stop()
 	// Not guarded on an attempt: when linking failed, whether the write landed
 	// is exactly what is unknown, and either way the payment must fail.
 	if err := s.payments.Fail(bctx, p.ID, "internal: could not start the attempt cleanly"); err != nil {
-		log.Printf("[tsa-pay] ALERT pay_%s_stuck_total=1 payment=%s%s err=%v", alert, p.ID, detail, err)
+		payAlertf(alert+"_stuck", p.ID, append(fields, fmt.Sprintf("err=%v", err))...)
 	}
 }
 
