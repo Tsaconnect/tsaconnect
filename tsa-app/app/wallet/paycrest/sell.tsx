@@ -162,9 +162,12 @@ function fundingMessage(check: FundingCheck): string | null {
 export default function PaycrestSellScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
-  const { asset, currency: currencyParam } = useLocalSearchParams<{
+  const { asset, currency: currencyParam, openPicker } = useLocalSearchParams<{
     asset?: string;
     currency?: string;
+    /** Set by the IT hub's "Any other token" row — see the identical param on
+     *  the buy screen. */
+    openPicker?: string;
   }>();
 
   // The currency this order settles in — NOT the display currency. See
@@ -235,6 +238,12 @@ export default function PaycrestSellScreen() {
   // Nothing picked, or a stablecoin a live route takes: today's direct sale.
   // Anything else she holds: the swapped sale.
   const [pickerOpen, setPickerOpen] = useState(false);
+  useEffect(() => {
+    // Visibility still passes through swappedSellOn below
+    // (visible={swappedSellOn && pickerOpen}), so this cannot show the picker
+    // before the capability check itself says the feature is live.
+    if (openPicker) setPickerOpen(true);
+  }, [openPicker]);
   const [directPick, setDirectPick] = useState<{ chain: string; token: string } | null>(null);
   const [swapPick, setSwapPick] = useState<SwapPick | null>(null);
   const swapped = useSwappedSell();

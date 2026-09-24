@@ -153,9 +153,13 @@ export default function PaycrestBuyScreen() {
   // token+chain picker below (see `want`), never a filter: the user can
   // change either one, and the quote says plainly when the pair they land on
   // cannot be filled.
-  const { asset, currency: currencyParam } = useLocalSearchParams<{
+  const { asset, currency: currencyParam, openPicker } = useLocalSearchParams<{
     asset?: string;
     currency?: string;
+    /** Set by the IT hub's "Any other token" row — she arrives with nothing
+     *  pre-selected, so the picker opens immediately instead of waiting for
+     *  her to notice and tap the token field herself. */
+    openPicker?: string;
   }>();
 
   // The currency this order settles in — NOT the display currency (see
@@ -216,6 +220,11 @@ export default function PaycrestBuyScreen() {
   // LiFiToken object at all).
   const [wantTokenMeta, setWantTokenMeta] = useState<LiFiToken | null>(null);
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
+  useEffect(() => {
+    // Only ever opens it — never closes it back if the param disappears from
+    // a later re-render, which would fight her own use of the picker.
+    if (openPicker) setTokenPickerOpen(true);
+  }, [openPicker]);
   // Tagged with the chain id it was actually fetched FOR — not just "the
   // current list" — because getLiFiTokens resolves asynchronously: on the
   // very render `want.chainId` changes, this can still hold the PREVIOUS
