@@ -37,7 +37,7 @@ import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/servic
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
   classifyStartError, directPriceMovedCopy, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
-  nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
+  nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, ORDER_MISMATCH, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
   type StartErrorKind,
 } from '@/utils/payCheckout';
 import type { PayEstimate } from '@/hooks/usePayLive';
@@ -228,6 +228,11 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     const order = await payDirect(checkout.id, { chainKey: venue.chain, token: venue.token });
     // The money that moves is the deposit built from THIS order — the server's own quote, made after
     // our check above — so the bound is applied to it, before anything is signed.
+    // ...and it must be for what she chose (compared the way the venue was matched), or it is not funded.
+    if (order.chain?.toLowerCase() !== venue.chain.toLowerCase() || order.token?.toUpperCase() !== venue.token.toUpperCase()) {
+      dispatch({ type: 'fail', error: ORDER_MISMATCH, retryable: false });
+      return;
+    }
     const moved = orderAboveTolerance(order.tokenAmount, token.decimals, priced.fromAmount);
     if (moved) {
       // No money moved and none will: the order simply lapses. But the payment is linked to it, so
@@ -356,7 +361,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
 
   const payWith = useCallback(
     // Never without the price she was shown: nothing is authorized (or signed) unbound.
-    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced) request({ kind: 'pay', token, chainId, priced }); },
+    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced?.fromAmount) request({ kind: 'pay', token, chainId, priced }); },
     [request],
   );
 

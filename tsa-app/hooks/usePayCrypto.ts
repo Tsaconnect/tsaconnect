@@ -319,7 +319,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
 
   const payWith = useCallback(
     // Never without the price she was shown: nothing is authorized (or signed) unbound.
-    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced) request({ token, chainId, priced }); },
+    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced?.fromAmount) request({ token, chainId, priced }); },
     [request],
   );
 

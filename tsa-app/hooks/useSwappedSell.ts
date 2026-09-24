@@ -401,9 +401,11 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
   const resume = useCallback((intent: SellIntent, walletAddress?: string) => guarded(async (hold) => {
     // Another screen is driving a sale right now (maybe this one, before its
     // id came back): leave it alone rather than race it.
+    // Its own intent goes on the record BEFORE the still-running check: that stop is about this sale, and
+    // whoever is listening (TSA Pay's Continue) must be able to carry on with it.
+    keepIntent(intent);
     if (salesInFlight.has(intent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(intent.id);
-    keepIntent(intent);
     const wallet = walletAddress ?? '';
     if (intent.status === 'ordered') {
       if (!intent.paycrestOrderId) throw new SellStop(PAYOUT_NOT_OPEN, false);
@@ -443,9 +445,9 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
    * why the order is opened with `landed`.
    */
   const completeWithWallet = useCallback((shortIntent: SellIntent) => guarded(async (hold) => {
+    keepIntent(shortIntent); // as in resume: a still-running stop is about this sale
     if (salesInFlight.has(shortIntent.id) || startsAwaitingIntent > 0) throw new SellStop(STILL_RUNNING, false);
     hold(shortIntent.id);
-    keepIntent(shortIntent);
     const o = await openOrder(shortIntent.id, true, { useWalletBalance: true });
     // The order's own wallet is the USDC's owner.
     await send(o, '', shortIntent.id);

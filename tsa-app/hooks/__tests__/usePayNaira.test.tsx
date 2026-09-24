@@ -984,3 +984,43 @@ describe('a resume that finds nothing left to follow', () => {
     expect(hook.stage).toBe('waiting');
   });
 });
+
+describe('an empty price is no price', () => {
+  it('payWith with a price that has no base-unit amount authorizes nothing', async () => {
+    await mount();
+    act(() => hook.payWith(usdcBase, BASE, { pay: '33.5 USDC', fromAmount: '' }));
+    expect(hook.authorization.visible).toBe(false);
+  });
+});
+
+describe('the order must be for what she chose', () => {
+  const priced = { pay: '33.51 USDC', fromAmount: '33510000' };
+  const authorize = async () => {
+    act(() => hook.payWith(usdcBase, BASE, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+  };
+
+  it.each([
+    ['another network', { chain: 'polygon' }],
+    ['another token', { token: 'USDT' }],
+  ])('an order on %s is not funded: no deposit, non-retryable, honest copy', async (_n, over) => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '33.5', ...over } as PaycrestOrder);
+    await mount();
+    await authorize();
+    expect(m.send).not.toHaveBeenCalled();
+    expect(m.claimPayment).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toMatch(/nothing was sent/i);
+    expect(hook.error).toContain('about 10 minutes');
+  });
+
+  it('the same asset in another letter case is fine — compared the way the venue match compares them', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '33.5', chain: 'BASE', token: 'usdc' } as PaycrestOrder);
+    await mount();
+    await authorize();
+    expect(m.send).toHaveBeenCalledTimes(1);
+  });
+});

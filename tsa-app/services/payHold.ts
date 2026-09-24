@@ -21,19 +21,23 @@ export type PayHold = { intentId: string; at: number };
 export const payHoldKey = (paymentId: string) => `tsapay.pendingSwap.${paymentId}`;
 
 /**
- * The hold for a payment, or null when there is none (a corrupt value is none).
- * THROWS when storage cannot be read: "I could not look" is not "there is
+ * The hold for a payment, or null when there is none.
+ * THROWS when storage cannot be read, or holds a value that cannot be: "I could not look" is not "there is
  * nothing" — the caller holds rather than offering Pay again.
  */
 export async function readPayHold(paymentId: string): Promise<PayHold | null> {
   const raw = await AsyncStorage.getItem(payHoldKey(paymentId));
   if (!raw) return null;
+  // The key exists, so something was recorded: a value that cannot be read is
+  // not "no hold" — throw, so the caller holds.
+  let v: { intentId?: unknown; at?: unknown } | null;
   try {
-    const v = JSON.parse(raw);
-    return typeof v?.intentId === 'string' && typeof v?.at === 'number' ? { intentId: v.intentId, at: v.at } : null;
+    v = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error('The recorded hold is unreadable');
   }
+  if (typeof v?.intentId !== 'string' || typeof v?.at !== 'number') throw new Error('The recorded hold is unreadable');
+  return { intentId: v.intentId, at: v.at };
 }
 
 /**

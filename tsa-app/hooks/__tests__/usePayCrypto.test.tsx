@@ -984,3 +984,24 @@ describe('a price the server moved is not "reserved" — the intent was closed',
     expect(hook.error).not.toMatch(/hour/i);
   });
 });
+
+describe('an empty price is no price', () => {
+  it('payWith with a price that has no base-unit amount authorizes nothing', async () => {
+    await mount();
+    act(() => hook.payWith(bnb, BSC, { pay: '0.084 BNB', fromAmount: '' }));
+    expect(hook.authorization.visible).toBe(false);
+    expect(m.payCrypto).not.toHaveBeenCalled();
+  });
+});
+
+describe('a hold that is present but unreadable is held', () => {
+  it('on opening: on hold to be safe, Pay withheld, Continue offered', async () => {
+    await AsyncStorage.setItem(HOLD, 'not json');
+    await mount();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(true);
+    expect(hook.error).toMatch(/couldn't check/i);
+    expect(m.payCrypto).not.toHaveBeenCalled();
+  });
+});

@@ -1045,3 +1045,64 @@ describe('events — what a payment reads instead of six state slices', () => {
     expect(hook.depositTx).toBe('0xdeposit');
   });
 });
+
+describe('a stop for "still running" keeps the intent it is about — Continue must survive it', () => {
+  const events = () => ({ onStage: jest.fn(), onStop: jest.fn(), onShortfall: jest.fn() });
+
+  /** Another drive of the same sale is in flight (a swap awaiting its approval). */
+  async function otherDriveInFlight() {
+    let release!: (h: string) => void;
+    mocked.executeLiFiSwap.mockReturnValue(new Promise<string>((r) => { release = r; }));
+    mocked.createSellIntent.mockResolvedValue({ intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: q, gasTopUp: false });
+    const first = hook.start(args);
+    await flush();
+    return { release, first };
+  }
+
+  it('resume: the stop carries the intent, so the payment can still offer Continue', async () => {
+    const ev = events();
+    payOpts = { ...ev };
+    await mountPay();
+    const { release, first } = await otherDriveInFlight();
+
+    await run(payHook.resume(payIntent));
+
+    expect(ev.onStop).toHaveBeenCalledWith(
+      { message: expect.stringMatching(/still going through/i), retryable: false },
+      { intent: payIntent, order: undefined },
+    );
+    release('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'FAILED' });
+    await run(first);
+  });
+
+  it('completeWithWallet: the same', async () => {
+    const ev = events();
+    payOpts = { ...ev };
+    await mountPay();
+    const { release, first } = await otherDriveInFlight();
+
+    await run(payHook.completeWithWallet(payIntent));
+
+    expect(ev.onStop).toHaveBeenCalledWith(
+      { message: expect.stringMatching(/still going through/i), retryable: false },
+      { intent: payIntent, order: undefined },
+    );
+    release('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'FAILED' });
+    await run(first);
+  });
+
+  it('but a NEW run that fails at start still does not carry the previous run’s intent', async () => {
+    const ev = events();
+    payOpts = { createIntent: jest.fn().mockRejectedValue(new Error('Verify first')), ...ev };
+    await mountPay();
+    // A previous run left its intent behind.
+    await run(payHook.resume({ ...payIntent, status: 'failed' } as SellIntent));
+    ev.onStop.mockClear();
+
+    await run(payHook.start(payArgs));
+
+    expect(ev.onStop).toHaveBeenCalledWith({ message: 'Verify first', retryable: true }, { intent: undefined, order: undefined });
+  });
+});

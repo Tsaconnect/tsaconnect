@@ -35,11 +35,11 @@ it('clears', async () => {
   expect(await readPayHold('pay-1')).toBeNull();
 });
 
-it('reads a corrupt or foreign value as no hold, never throwing', async () => {
+it('a value that is PRESENT but corrupt or foreign throws: the key exists, so something was recorded — hold, do not assume none', async () => {
   await AsyncStorage.setItem(payHoldKey('pay-1'), 'not json');
-  expect(await readPayHold('pay-1')).toBeNull();
+  await expect(readPayHold('pay-1')).rejects.toThrow(/unreadable/i);
   await AsyncStorage.setItem(payHoldKey('pay-1'), JSON.stringify({ intentId: 5 }));
-  expect(await readPayHold('pay-1')).toBeNull();
+  await expect(readPayHold('pay-1')).rejects.toThrow(/unreadable/i);
 });
 
 it('holds for 24 hours from the signature, then lifts', () => {
@@ -71,8 +71,7 @@ describe('storage that fails is not "no hold"', () => {
     await expect(writePayHold('pay-1', 'i1')).rejects.toThrow('disk full');
   });
 
-  it('a corrupt value is still just no hold', async () => {
-    await AsyncStorage.setItem(payHoldKey('pay-1'), 'not json');
+  it('an absent value is still just no hold', async () => {
     await expect(readPayHold('pay-1')).resolves.toBeNull();
   });
 });

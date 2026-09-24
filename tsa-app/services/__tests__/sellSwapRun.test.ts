@@ -28,6 +28,9 @@ import { executeSellSwap, SwapPriceMovedError } from '../sellSwapRun';
 const exec = jest.mocked(LifiFlow.executeLiFiSwap);
 const abandon = jest.mocked(SellSwap.abandonSellIntent);
 const bnb = { address: '0x0000000000000000000000000000000000000000', symbol: 'BNB', decimals: 18 } as LiFiToken;
+/** A native-coin quote as the server builds it, and the amount it was priced at. */
+const PRICED = '1000000000000000';
+const pricedQuote = { fromAmount: PRICED, transactionRequest: { value: `0x${BigInt(PRICED).toString(16)}` } } as unknown as LiFiQuote;
 const base = { intentId: 'i1', gasTopUp: false, token: bnb, sourceChainId: 56, sourceAddress: '0xUser' };
 
 beforeEach(async () => {
@@ -139,7 +142,7 @@ describe('the hold that survives an app kill', () => {
       expect(JSON.parse((await AsyncStorage.getItem('tsapay.pendingSwap.pay-1'))!)).toEqual({ intentId: 'i1', at: expect.any(Number) });
       return '0xsigned';
     });
-    await executeSellSwap({ ...base, quote: { fromAmount: '1000000000000000' } as LiFiQuote, paymentId: 'pay-1' });
+    await executeSellSwap({ ...base, quote: pricedQuote, paymentId: 'pay-1', pricedFromAmount: PRICED });
   });
 
   it('writes nothing for an ordinary sale', async () => {
@@ -151,7 +154,7 @@ describe('the hold that survives an app kill', () => {
   it('drops the hold when the swap is refused before it left her wallet', async () => {
     await AsyncStorage.setItem('tsapay.pendingSwap.pay-1', JSON.stringify({ intentId: 'i1', at: 1 }));
     exec.mockRejectedValue(new Error('User rejected'));
-    await expect(executeSellSwap({ ...base, quote: { fromAmount: '1000' } as LiFiQuote, paymentId: 'pay-1' })).rejects.toThrow();
+    await expect(executeSellSwap({ ...base, quote: pricedQuote, paymentId: 'pay-1', pricedFromAmount: PRICED })).rejects.toThrow();
     expect(await AsyncStorage.getItem('tsapay.pendingSwap.pay-1')).toBeNull();
   });
 });
@@ -167,7 +170,7 @@ describe('storage that fails closes the swap, it does not skip the safeguard (TS
   };
   afterEach(() => { undo.splice(0).forEach((u) => u()); });
   afterEach(() => { jest.restoreAllMocks(); }); // (console spies only: AsyncStorage is patched, not spied)
-  const payRun = { ...base, quote: { fromAmount: '1000000000000000' } as LiFiQuote, paymentId: 'pay-1' };
+  const payRun = { ...base, quote: pricedQuote, paymentId: 'pay-1', pricedFromAmount: PRICED };
   const signs = () => exec.mockImplementation(async (p: any) => { await p.onSigned('0xsigned'); return '0xsigned'; });
 
   it('a hash that cannot be written stops the swap before it is broadcast: intent closed, error thrown', async () => {
@@ -195,5 +198,20 @@ describe('storage that fails closes the swap, it does not skip the safeguard (TS
     patch('setItem', async () => { throw new Error('disk full'); });
     await expect(executeSellSwap({ ...base, quote: {} as LiFiQuote, amount: '0.016' })).resolves.toBe('0xsigned');
     expect(abandon).not.toHaveBeenCalled();
+  });
+});
+
+describe('a payment with no priced amount is not signed — it fails closed', () => {
+  it.each([undefined, ''])('paymentId set and pricedFromAmount %j: refused before signing, intent closed', async (priced) => {
+    await expect(executeSellSwap({
+      ...base, quote: { fromAmount: '1000000000000000' } as LiFiQuote, paymentId: 'pay-1', pricedFromAmount: priced,
+    })).rejects.toBeInstanceOf(SwapPriceMovedError);
+    expect(exec).not.toHaveBeenCalled();
+    expect(abandon).toHaveBeenCalledWith('i1');
+  });
+
+  it('an ordinary sale (no paymentId) with no priced amount is bounded by nothing, as before', async () => {
+    await executeSellSwap({ ...base, quote: {} as LiFiQuote, amount: '0.016' });
+    expect(exec).toHaveBeenCalled();
   });
 });

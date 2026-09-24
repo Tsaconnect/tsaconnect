@@ -66,8 +66,12 @@ export class SwapPriceMovedError extends Error {
 /** Refuse (before anything is signed) unless the quote honours the priced amount. Throws SwapPriceMovedError. */
 function checkAgainstPrice(run: SellSwapRun): void {
   const { pricedFromAmount, quote, token } = run;
-  if (pricedFromAmount === undefined) return;
   const cannotCheck = new SwapPriceMovedError("We couldn't check the price of this payment, so nothing was sent. Please try again.");
+  // An ordinary sale is bounded by nothing; a payment with no priced amount is not signed.
+  if (!pricedFromAmount) {
+    if (run.paymentId) throw cannotCheck;
+    return;
+  }
   if (!quote.fromAmount) throw cannotCheck;
   let fresh: bigint;
   let priced: bigint;

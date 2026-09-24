@@ -249,6 +249,10 @@ export function priceMovedMessage(freshBase: string, pricedBase: string, decimal
 export const ORDER_AMOUNT_UNCHECKABLE =
   `We couldn't check the amount of this payment, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
 
+/** The payout order opened for another network or token than she chose, so it was not funded. */
+export const ORDER_MISMATCH =
+  `The payment order didn't match what you chose, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
+
 /**
  * The same refusal when a naira payment's payout ORDER was already opened at
  * the higher amount: nothing was sent, but the payment is linked to that order,
