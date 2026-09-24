@@ -251,29 +251,6 @@ export default function MerchantDashboard() {
             </PressableScale>
           )}
 
-          {/* TSA Pay CTA — always visible; the merchant-request gate itself
-              routes to the form, or to the pending/approved/rejected status
-              screen, based on any existing payment_acceptance request. */}
-          <PressableScale
-            onPress={() => router.push('/merchants/merchant-request?type=payment_acceptance' as any)}
-            style={{ marginBottom: spacing.lg }}
-          >
-            <AccentCard padding="md" railColor={colors.accent}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="card" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Accept payments (TSA Pay)
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Let customers pay you in any token, settled to naira or crypto.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-
           {/* Stat tiles — three product KPIs followed by service KPIs. Each tile
               is a Card with a colored top rail keyed to its semantic meaning. */}
           <View style={{ marginBottom: spacing.xs }}>
