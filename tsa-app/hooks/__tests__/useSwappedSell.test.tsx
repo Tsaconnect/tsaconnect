@@ -924,3 +924,44 @@ describe('a delivered payment has nothing left to resume', () => {
     expect(mocked.openSellOrder).not.toHaveBeenCalled();
   });
 });
+
+describe('the priced amount bound, through the pipeline', () => {
+  beforeEach(async () => {
+    mocked.executeLiFiSwap.mockResolvedValue('0xswap');
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'DONE', substatus: 'COMPLETED' });
+    mocked.openSellOrder.mockResolvedValue(order);
+    mocked.sendSponsoredPaycrestDeposit.mockResolvedValue('0xdeposit');
+  });
+  const native = { ...payArgs, pricedFromAmount: '84000000000000000' };
+  const quoteOf = (fromAmount: string) =>
+    ({ fromAmount, transactionRequest: { value: `0x${BigInt(fromAmount).toString(16)}` } }) as unknown as LiFiQuote;
+
+  it('a fresh quote past the tolerance is refused before signing: retryable, closed, in plain words', async () => {
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: quoteOf('99000000000000000') }) };
+    await mountPay();
+
+    await run(payHook.start(native));
+
+    expect(mocked.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(mocked.abandonSellIntent).toHaveBeenCalledWith('i1');
+    expect(payHook.stage).toBe('failed');
+    expect(payHook.retryable).toBe(true);
+    expect(payHook.error).toMatch(/price moved/i);
+  });
+
+  it('a quote within it is signed, and the amount signed is the quote’s', async () => {
+    payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: quoteOf('85000000000000000') }) };
+    await mountPay();
+    await run(payHook.start(native));
+    expect(mocked.executeLiFiSwap).toHaveBeenCalledWith(expect.objectContaining({ fromAmount: '0.085' }));
+  });
+
+  it('an ordinary sale supplies no priced amount and is bounded by nothing — unchanged', async () => {
+    mocked.createSellIntent.mockResolvedValue({
+      intent: { id: 'i1', status: 'swapping' } as SellIntent, quote: quoteOf('999000000000000000'), gasTopUp: false,
+    });
+    await run(hook.start(args));
+    expect(mocked.executeLiFiSwap).toHaveBeenCalledWith(expect.objectContaining({ fromAmount: '0.016' }));
+    expect(mocked.abandonSellIntent).not.toHaveBeenCalled();
+  });
+});

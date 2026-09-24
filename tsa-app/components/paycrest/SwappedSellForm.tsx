@@ -32,7 +32,6 @@ export const SWAPPED_STAGE_LABELS: Partial<Record<SellStage, string>> = {
   sending: 'Sending for payout…',
 };
 
-
 /** A float balance as a decimal string, rounded DOWN so MAX never asks for
  *  more than she holds. */
 function floorBalance(balance: number, decimals: number): string {

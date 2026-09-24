@@ -14,19 +14,26 @@
 // the broadcast (services/sellSwapRun, the same code the swapped sell uses), the
 // server is told with retries, and a payment that is already under way is
 // followed rather than started again (409 `pay_in_progress`).
-import { useCallback, useRef, useState } from 'react';
+//
+// And because the swap goes straight to the MERCHANT, a second payment would pay
+// them twice. So beside the hash a hold is persisted (services/payHold) the
+// moment the swap is signed. It survives an app kill: on opening, a live hold is
+// looked at before Pay is offered again, and it lifts only when the server has
+// the swap, the payment is terminal, or 24 h have passed. A server that refuses
+// a late hash (the intent was reaped) does NOT lift it: the swap may still mine.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePayAuthorization, type AuthorizationProps } from '@/hooks/usePayAuthorization';
 import type { PayEstimate, PayLiveStage } from '@/hooks/usePayLive';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
 import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
 import { getOpenSellIntent, recordSellSwap, type SellIntent } from '@/services/paycrestSellSwap';
+import { clearPayHold, holdActive, readPayHold, writePayHold } from '@/services/payHold';
 import { getCryptoQuote, payCrypto, type PayCheckout } from '@/services/payApi';
 import { clearPendingSwapHash, executeSellSwap, readPendingSwapHash } from '@/services/sellSwapRun';
 import {
-  CANT_PAY_WITH_TOKEN, errorCode, errorMessage, intentForPayment, isRouteRefused, NOTHING_TO_CONTINUE,
-  PAY_ATTEMPT_UNCERTAIN, PAY_IN_PROGRESS, PAYMENT_PAUSED, payAmountLabel, receiveAmountLabel,
-  unsupportedNetworkMessage,
+  classifyStartError, errorMessage, estimateError, intentForPayment, NOTHING_TO_CONTINUE, payAmountLabel,
+  receiveAmountLabel, startFailure, unconfirmedCopy, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 
 export type PayCryptoStage = Exclude<PayLiveStage, 'continue' | 'shortfall'>;
@@ -41,7 +48,9 @@ export type UsePayCrypto = {
   /** Continue payment (check on it again) is the way forward. */
   canContinue: boolean;
   authorization: AuthorizationProps;
-  payWith(token: LiFiToken, chainId: number): void;
+  walletAddress: string | null;
+  /** `priced` is what she was shown: the authorization says so, and the signature is held to it. */
+  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
   /** What she will send, e.g. "0.084 BNB", and what the store receives — before she taps Pay. */
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   /** Follow her own attempt at this payment, e.g. after the app was closed mid-swap. */
@@ -50,9 +59,9 @@ export type UsePayCrypto = {
   continuePayment(): Promise<void>;
   /**
    * Back to idle — the server released the payment. Refuses while an attempt is
-   * in flight, and while a swap that may have reached the merchant is not yet
-   * known to the server (a re-pay would pay them twice): it retries the report
-   * first and only then lets go.
+   * in flight, while the server has paused it, and while a swap that may have
+   * reached the merchant is not yet known to the server (a re-pay would pay them
+   * twice): it looks at the hold again first and only then lets go.
    */
   reset(): Promise<void>;
 };
@@ -67,81 +76,152 @@ const NOT_CONFIRMED =
 const BROADCAST_UNCONFIRMED =
   "We couldn't confirm your payment was sent. Don't pay again — give it a few minutes and reopen this payment to check on it.";
 
-type Pick = { token: LiFiToken; chainId: number };
+type Pick = { token: LiFiToken; chainId: number; priced?: PayEstimate };
 type Outcome = {
   stage: PayCryptoStage; error?: string; errorCode?: string; retryable?: boolean;
-  /** The server paused the payment: nothing to continue, nothing to retry. */
+  /** The server paused the payment: never followed, retried or reset by us. */
   paused?: boolean;
+  /** Nothing left to continue: the failure is final on this phone (support, or the clock, resolves it). */
+  noContinue?: boolean;
 };
 
-/** Tell the server which swap this payment is, retrying; the hash stays on the phone until it has heard. */
-async function reportSwap(intentId: string, hash: string): Promise<boolean> {
+/** How the server took (or did not take) the swap's hash. */
+type Reported = 'reported' | 'rejected' | 'unreachable';
+
+/** The intent states in which the server has the swap's hash (or has settled what became of it). */
+const SERVER_HAS_SWAP = new Set<SellIntent['status']>(['swapped', 'ordering', 'ordered', 'delivered']);
+const serverHasSwap = (i: SellIntent) => !!i.swapTxHash || SERVER_HAS_SWAP.has(i.status);
+
+/**
+ * Tell the server which swap this payment is. A 4xx is the server's final word
+ * (it takes a hash only for an intent still `swapping`, so a reaped one is
+ * refused for good): no retries. Anything else is retried, then given up as
+ * unreachable. The hash and the hold stay on the phone until the server has it.
+ */
+async function reportSwap(paymentId: string, intentId: string, hash: string): Promise<Reported> {
   for (let i = 0; i < REPORT_TRIES; i++) {
     if (i > 0) await sleep(REPORT_DELAY_MS);
     try {
       await recordSellSwap(intentId, hash);
       await clearPendingSwapHash(intentId);
-      return true;
+      await clearPayHold(paymentId);
+      return 'reported';
     } catch (e) {
       console.warn('[pay] recordSellSwap failed', e);
+      const status = (e as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429) return 'rejected';
     }
   }
-  return false;
-}
-
-/** A hash on this phone the server never got: report it. Returns false only when reporting failed. */
-async function reportStoredSwap(intent: SellIntent): Promise<boolean> {
-  // Only a payment still waiting for its hash has anything to report.
-  if (intent.swapTxHash || intent.status !== 'swapping') return true;
-  const stored = await readPendingSwapHash(intent.id);
-  return stored ? reportSwap(intent.id, stored) : true;
+  return 'unreachable';
 }
 
 export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   const { address } = useSignableWallet();
   const [outcome, setOutcome] = useState<Outcome>({ stage: 'idle' });
+  // Pay is withheld until the persisted hold has been looked at: a kill may have left one.
+  const [holdChecked, setHoldChecked] = useState(false);
   const running = useRef(false);
+  const checking = useRef(false);
   const outcomeRef = useRef(outcome);
   outcomeRef.current = outcome;
-  // The intent whose swap may have left her wallet without the server hearing of it.
-  const held = useRef<string | null>(null);
 
-  /** An attempt of hers already exists: make sure the server has its hash, then wait. */
-  const follow = useCallback(async (explicit: boolean) => {
-    if (!address) return;
+  /** The swap is known to the server, or the hold has run out: let go of the phone's copy. */
+  const liftHold = useCallback(async (intentId?: string) => {
+    await clearPayHold(checkout.id);
+    if (intentId) await clearPendingSwapHash(intentId);
+  }, [checkout.id]);
+
+  /** A swap that may have reached the merchant and is not known to the server: hold, and say so. */
+  const failHeld = useCallback(async (intentId: string, why: Reported | 'nohash') => {
+    await writePayHold(checkout.id, intentId);
+    setOutcome(why === 'unreachable'
+      ? { stage: 'failed', error: NOT_CONFIRMED, retryable: false }
+      : { stage: 'failed', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true });
+  }, [checkout.id]);
+
+  /**
+   * Look at where this payment stands, and act only on what is safe: make sure
+   * the server has the swap's hash (a report is not a signature), or hold. Never
+   * signs, never sends. `explicit`: she asked to continue, so finding nothing
+   * is said, not silently waited on.
+   */
+  const check = useCallback(async (explicit: boolean) => {
+    if (checking.current) return;
+    checking.current = true;
     try {
-      // Only the sale that pays THIS payment; an unrelated open sale of hers is not ours to touch.
-      const open = intentForPayment(await getOpenSellIntent(), checkout.id);
-      if (!open && explicit) {
-        // She asked to continue: silently waiting on nothing would be a lie.
-        setOutcome({ stage: 'failed', error: NOTHING_TO_CONTINUE, retryable: false });
-        return;
-      }
-      if (open && !(await reportStoredSwap(open))) {
-        held.current = open.id;
-        setOutcome({ stage: 'failed', error: NOT_CONFIRMED, retryable: false });
-        return;
-      }
-      held.current = null;
-      setOutcome({ stage: 'waiting' });
-    } catch (e) {
-      setOutcome({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
-    }
-  }, [address, checkout.id]);
-  const resumeOpen = useCallback(() => follow(false), [follow]);
-  const continuePayment = useCallback(() => follow(true), [follow]);
+      const stored = await readPayHold(checkout.id);
+      const hold = holdActive(stored) ? stored : null;
+      if (stored && !hold) await liftHold(stored.intentId); // 24 h on: the server has given up on it too
 
-  const run = async ({ token, chainId }: Pick) => {
+      let open: SellIntent | null;
+      try {
+        // Only the sale that pays THIS payment; an unrelated open sale of hers is not ours to touch.
+        open = intentForPayment(await getOpenSellIntent(), checkout.id);
+      } catch (e) {
+        if (hold) await failHeld(hold.intentId, 'unreachable');
+        else setOutcome({ stage: 'failed', error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+        return;
+      }
+      if (open && serverHasSwap(open)) {
+        await liftHold(open.id);
+        setOutcome({ stage: 'waiting' });
+        return;
+      }
+      // A sale that is not waiting for a hash (already closed, say) has nothing to report — unless a hold says the swap is out there.
+      if (open && open.status !== 'swapping' && !hold) {
+        setOutcome({ stage: 'waiting' });
+        return;
+      }
+      const intentId = open?.id ?? hold?.intentId;
+      if (!intentId) {
+        // She asked to continue and there is nothing of hers: say so, and offer no dead button.
+        setOutcome(explicit
+          ? { stage: 'failed', error: NOTHING_TO_CONTINUE, retryable: false, noContinue: true }
+          : { stage: 'waiting' });
+        return;
+      }
+      const hash = await readPendingSwapHash(intentId);
+      if (!hash) {
+        // Nothing to report. With a hold the swap may still be out there; without one there was never a swap.
+        if (hold) await failHeld(intentId, 'nohash');
+        else setOutcome({ stage: 'waiting' });
+        return;
+      }
+      const reported = await reportSwap(checkout.id, intentId, hash);
+      if (reported === 'reported') setOutcome({ stage: 'waiting' });
+      else await failHeld(intentId, reported);
+    } finally {
+      checking.current = false;
+    }
+  }, [checkout.id, failHeld, liftHold]);
+
+  // Opening the screen: a live hold (a kill left one) is looked at before Pay is offered.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const stored = await readPayHold(checkout.id);
+      if (holdActive(stored)) await check(false);
+      else if (stored) await liftHold(stored.intentId);
+      if (!cancelled) setHoldChecked(true);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per payment.
+  }, [checkout.id]);
+
+  const resumeOpen = useCallback(() => check(false), [check]);
+  const continuePayment = useCallback(() => check(true), [check]);
+
+  const run = async ({ token, chainId, priced }: Pick) => {
     if (!address || running.current) return;
     running.current = true;
     try {
-      await startPayment(token, chainId, address);
+      await startPayment(token, chainId, address, priced);
     } finally {
       running.current = false;
     }
   };
 
-  const startPayment = async (token: LiFiToken, chainId: number, address: string) => {
+  const startPayment = async (token: LiFiToken, chainId: number, address: string, priced?: PayEstimate) => {
     if (isNonEVMLiFiChain(chainId)) {
       setOutcome({ stage: 'failed', error: unsupportedNetworkMessage(token.symbol) });
       return;
@@ -156,19 +236,10 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         sourceAddress: address,
       });
     } catch (e) {
-      if (errorCode(e) === PAY_IN_PROGRESS) return resumeOpen();
-      if (errorCode(e) === PAY_ATTEMPT_UNCERTAIN) {
-        // The server could not prove whether an attempt exists and paused the
-        // payment for support. Never followed, never retried, never reset by us.
-        setOutcome({ stage: 'failed', error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false, paused: true });
-        return;
-      }
-      if (isRouteRefused(e)) {
-        // The route said no for this token (fail-closed): nothing started, the payment is still payable.
-        setOutcome({ stage: 'failed', error: CANT_PAY_WITH_TOKEN, retryable: true });
-        return;
-      }
-      setOutcome({ stage: 'failed', error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e) });
+      if (classifyStartError(e) === 'follow') return resumeOpen();
+      const failure = startFailure(e);
+      // Paused: never followed, retried or reset by us. Anything else: nothing started.
+      setOutcome({ stage: 'failed', ...failure, paused: classifyStartError(e) === 'paused' });
       return;
     }
 
@@ -182,16 +253,20 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         token: { ...token, chainId },
         sourceChainId: chainId,
         sourceAddress: address,
+        pricedFromAmount: priced?.fromAmount,
+        paymentId: checkout.id,
       });
     } catch (e) {
       if (e instanceof SwapBroadcastUnconfirmedError) {
         // It may be on its way: never a retry — the server decides from the hash.
         const known = e.txHash ?? (await readPendingSwapHash(intent.id));
-        if (known && (await reportSwap(intent.id, known))) {
-          setOutcome({ stage: 'waiting' });
-        } else {
-          held.current = intent.id;
-          setOutcome({ stage: 'failed', error: BROADCAST_UNCONFIRMED, retryable: false });
+        const reported = known ? await reportSwap(checkout.id, intent.id, known) : 'unreachable';
+        if (reported === 'reported') setOutcome({ stage: 'waiting' });
+        else {
+          await writePayHold(checkout.id, intent.id);
+          setOutcome(reported === 'rejected'
+            ? { stage: 'failed', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true }
+            : { stage: 'failed', error: BROADCAST_UNCONFIRMED, retryable: false });
         }
         return;
       }
@@ -199,20 +274,20 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
       return;
     }
 
-    if (await reportSwap(intent.id, hash)) {
-      setOutcome({ stage: 'waiting' });
-    } else {
-      held.current = intent.id;
-      setOutcome({ stage: 'failed', error: NOT_CONFIRMED, retryable: false });
-    }
+    const reported = await reportSwap(checkout.id, intent.id, hash);
+    if (reported === 'reported') setOutcome({ stage: 'waiting' });
+    else await failHeld(intent.id, reported);
   };
 
   const { request, authorization } = usePayAuthorization<Pick>({
-    title: () => 'Authorize payment',
+    title: (pending) => (pending?.priced ? `Authorize payment of about ${pending.priced.pay}` : 'Authorize payment'),
     onAuthorized: (pick) => { void run(pick); },
   });
 
-  const payWith = useCallback((token: LiFiToken, chainId: number) => request({ token, chainId }), [request]);
+  const payWith = useCallback(
+    (token: LiFiToken, chainId: number, priced?: PayEstimate) => request({ token, chainId, priced }),
+    [request],
+  );
 
   const estimate = async (token: LiFiToken, chainId: number): Promise<PayEstimate> => {
     if (!address) throw new Error('Connect a wallet on this device first — you pay from it yourself.');
@@ -224,39 +299,38 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         sourceAddress: address,
       });
     } catch (e) {
-      throw isRouteRefused(e) ? new Error(CANT_PAY_WITH_TOKEN) : e;
+      throw estimateError(e);
     }
     const pay = payAmountLabel(q.fromAmount, token.decimals, token.symbol);
     const symbol = checkout.settleTokenSymbol;
     const receives = q.destAmount && q.destDecimals != null && symbol
       ? receiveAmountLabel(q.destAmount, q.destDecimals, symbol)
       : '';
-    return receives ? { pay, receives } : { pay };
+    return receives ? { pay, fromAmount: q.fromAmount, receives } : { pay, fromAmount: q.fromAmount };
   };
 
   const reset = useCallback(async () => {
-    if (running.current) return;
-    if (outcomeRef.current.retryable === false) {
-      // A swap that may have reached the merchant, unknown to the server: the
-      // payment being freed must not become a second payment. Try the report
-      // again; let go only into waiting once it lands, otherwise hold the state.
-      const id = held.current;
-      const hash = id ? await readPendingSwapHash(id) : null;
-      if (id && hash && (await reportSwap(id, hash))) {
-        held.current = null;
-        setOutcome({ stage: 'waiting' });
-      }
+    if (running.current || outcomeRef.current.paused) return;
+    const stored = await readPayHold(checkout.id);
+    if (holdActive(stored)) {
+      // A swap that may have reached the merchant: the payment being freed must
+      // not become a second payment. Look again; never let go into idle.
+      await check(false);
       return;
     }
+    if (stored) await liftHold(stored.intentId);
     setOutcome({ stage: 'idle' });
-  }, []);
-  const retryable = outcome.retryable !== false;
+  }, [check, checkout.id, liftHold]);
+  const retryable = outcome.retryable !== false && holdChecked;
 
   return {
-    ...outcome,
+    stage: outcome.stage,
+    error: outcome.error,
+    errorCode: outcome.errorCode,
     retryable,
-    canContinue: outcome.stage === 'failed' && !retryable && !outcome.paused,
+    canContinue: outcome.stage === 'failed' && outcome.retryable === false && !outcome.paused && !outcome.noContinue,
     authorization,
+    walletAddress: address,
     payWith,
     estimate,
     resume: resumeOpen,

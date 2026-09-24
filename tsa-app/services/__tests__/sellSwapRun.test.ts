@@ -22,15 +22,17 @@ jest.mock('@/services/paycrestSellSwap', () => ({
 import * as LifiFlow from '@/services/lifiFlow';
 import * as SellSwap from '@/services/paycrestSellSwap';
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
-import { executeSellSwap } from '../sellSwapRun';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { executeSellSwap, SwapPriceMovedError } from '../sellSwapRun';
 
 const exec = jest.mocked(LifiFlow.executeLiFiSwap);
 const abandon = jest.mocked(SellSwap.abandonSellIntent);
 const bnb = { address: '0x0000000000000000000000000000000000000000', symbol: 'BNB', decimals: 18 } as LiFiToken;
 const base = { intentId: 'i1', gasTopUp: false, token: bnb, sourceChainId: 56, sourceAddress: '0xUser' };
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.clearAllMocks();
+  await AsyncStorage.clear();
   exec.mockResolvedValue('0xswap');
   abandon.mockResolvedValue(undefined);
 });
@@ -61,5 +63,95 @@ describe('an amount that is zero is no amount', () => {
     await expect(executeSellSwap({ ...base, ...extra })).rejects.toThrow(/amount/i);
     expect(exec).not.toHaveBeenCalled();
     expect(abandon).toHaveBeenCalledWith('i1');
+  });
+});
+
+describe('the bound between the price she was shown and what is signed', () => {
+  const priced = '84000000000000000'; // 0.084 BNB
+  const within = '85680000000000000'; // +2%
+  const over = '85680000000000001'; // one wei past it
+  const native = { ...base, token: { ...bnb } };
+  const quoteOf = (fromAmount: string, value = `0x${BigInt(fromAmount).toString(16)}`) =>
+    ({ fromAmount, transactionRequest: { value } }) as unknown as LiFiQuote;
+
+  it('signs a quote within 2% of the priced amount', async () => {
+    await executeSellSwap({ ...native, quote: quoteOf(within), pricedFromAmount: priced });
+    expect(exec).toHaveBeenCalled();
+  });
+
+  it('signs a quote cheaper than the priced amount', async () => {
+    await executeSellSwap({ ...native, quote: quoteOf('80000000000000000'), pricedFromAmount: priced });
+    expect(exec).toHaveBeenCalled();
+  });
+
+  it('refuses a quote past it BEFORE signing: closes the intent, says what happened, a plain Error the caller can retry', async () => {
+    const err = await executeSellSwap({ ...native, quote: quoteOf(over), pricedFromAmount: priced }).catch((e) => e);
+    expect(err).toBeInstanceOf(SwapPriceMovedError);
+    expect(err.message).toMatch(/nothing was sent/i);
+    expect(err.message).toContain('0.084 BNB');
+    expect(exec).not.toHaveBeenCalled();
+    expect(abandon).toHaveBeenCalledWith('i1');
+  });
+
+  it('refuses when there is a priced amount but the quote does not say what it pulls', async () => {
+    await expect(executeSellSwap({ ...native, quote: {} as LiFiQuote, pricedFromAmount: priced })).rejects.toThrow();
+    expect(exec).not.toHaveBeenCalled();
+    expect(abandon).toHaveBeenCalledWith('i1');
+  });
+
+  it('a native coin whose transaction sends a different value is refused, never signed', async () => {
+    const q = quoteOf(priced, '0x1');
+    await expect(executeSellSwap({ ...native, quote: q, pricedFromAmount: priced })).rejects.toThrow(/nothing was sent/i);
+    expect(exec).not.toHaveBeenCalled();
+    expect(abandon).toHaveBeenCalledWith('i1');
+  });
+
+  it('a native coin whose value equals the quote (hex or decimal) is fine', async () => {
+    await executeSellSwap({ ...native, quote: quoteOf(priced, `0x${BigInt(priced).toString(16)}`), pricedFromAmount: priced });
+    await executeSellSwap({ ...native, quote: quoteOf(priced, priced), pricedFromAmount: priced });
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('a token (not the native coin) carries no value to check', async () => {
+    const usdc = { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 } as LiFiToken;
+    await executeSellSwap({
+      ...base, token: usdc, quote: { fromAmount: '33500000', transactionRequest: { value: '0x0' } } as unknown as LiFiQuote,
+      pricedFromAmount: '33500000',
+    });
+    expect(exec).toHaveBeenCalled();
+  });
+
+  it('an ordinary sale (no priced amount) is bounded by nothing: what she typed is signed, as before', async () => {
+    await executeSellSwap({
+      ...native, amount: '0.016',
+      quote: { fromAmount: '999000000000000000', transactionRequest: { value: '0x1' } } as unknown as LiFiQuote,
+    });
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ fromAmount: '0.016' }));
+    expect(abandon).not.toHaveBeenCalled();
+  });
+});
+
+describe('the hold that survives an app kill', () => {
+  it('writes tsapay.pendingSwap.<payment> beside the hash the moment the swap is signed, before it is broadcast', async () => {
+    exec.mockImplementation(async (p: any) => {
+      await p.onSigned('0xsigned');
+      expect(await AsyncStorage.getItem('paycrest.sellSwap.pendingTx.i1')).toBe('0xsigned');
+      expect(JSON.parse((await AsyncStorage.getItem('tsapay.pendingSwap.pay-1'))!)).toEqual({ intentId: 'i1', at: expect.any(Number) });
+      return '0xsigned';
+    });
+    await executeSellSwap({ ...base, quote: { fromAmount: '1000000000000000' } as LiFiQuote, paymentId: 'pay-1' });
+  });
+
+  it('writes nothing for an ordinary sale', async () => {
+    exec.mockImplementation(async (p: any) => { await p.onSigned('0xsigned'); return '0xsigned'; });
+    await executeSellSwap({ ...base, quote: {} as LiFiQuote, amount: '0.016' });
+    expect(await AsyncStorage.getAllKeys()).not.toEqual(expect.arrayContaining([expect.stringContaining('tsapay.')]));
+  });
+
+  it('drops the hold when the swap is refused before it left her wallet', async () => {
+    await AsyncStorage.setItem('tsapay.pendingSwap.pay-1', JSON.stringify({ intentId: 'i1', at: 1 }));
+    exec.mockRejectedValue(new Error('User rejected'));
+    await expect(executeSellSwap({ ...base, quote: { fromAmount: '1000' } as LiFiQuote, paymentId: 'pay-1' })).rejects.toThrow();
+    expect(await AsyncStorage.getItem('tsapay.pendingSwap.pay-1')).toBeNull();
   });
 });

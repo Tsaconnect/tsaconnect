@@ -14,8 +14,10 @@ import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getChainByChainId } from '@/constants/chains';
 import { executeLiFiSwap, SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
-import { isNonEVMLiFiChain, type LiFiQuote, type LiFiToken } from '@/services/lifi';
+import { isNativeTokenAddress, isNonEVMLiFiChain, type LiFiQuote, type LiFiToken } from '@/services/lifi';
 import { abandonSellIntent, requestSellIntentGasTopUp } from '@/services/paycrestSellSwap';
+import { clearPayHold, writePayHold } from '@/services/payHold';
+import { exceedsPriced, priceMovedMessage } from '@/utils/payCheckout';
 
 export const pendingSwapKey = (intentId: string) => `paycrest.sellSwap.pendingTx.${intentId}`;
 
@@ -41,7 +43,56 @@ export type SellSwapRun = {
    * a payment has no typed amount and signs what the server's quote pulls.
    */
   amount?: string;
+  /**
+   * TSA Pay: the amount (source base units) she was SHOWN and agreed to. The
+   * quote actually signed comes from the server AFTER she authorises, so it is
+   * held to this: past a 2% tolerance, or (for a native coin) with a value
+   * that is not the amount, nothing is signed. An ordinary sale supplies none
+   * and is bounded by nothing here, exactly as before.
+   */
+  pricedFromAmount?: string;
+  /** TSA Pay: the payment this swap pays. Its "don't pay again" hold is persisted beside the hash. */
+  paymentId?: string;
 };
+
+/** The fresh quote costs more than she agreed to (or cannot be checked against it). A plain refusal: retry after a new price. */
+export class SwapPriceMovedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SwapPriceMovedError';
+  }
+}
+
+/** Refuse (before anything is signed) unless the quote honours the priced amount. Throws SwapPriceMovedError. */
+function checkAgainstPrice(run: SellSwapRun): void {
+  const { pricedFromAmount, quote, token } = run;
+  if (pricedFromAmount === undefined) return;
+  const cannotCheck = new SwapPriceMovedError("We couldn't check the price of this payment, so nothing was sent. Please try again.");
+  if (!quote.fromAmount) throw cannotCheck;
+  let fresh: bigint;
+  let priced: bigint;
+  try {
+    fresh = BigInt(quote.fromAmount);
+    priced = BigInt(pricedFromAmount);
+  } catch {
+    throw cannotCheck;
+  }
+  if (exceedsPriced(fresh, priced)) {
+    throw new SwapPriceMovedError(priceMovedMessage(quote.fromAmount, pricedFromAmount, token.decimals, token.symbol));
+  }
+  // A native coin is spent through the transaction's own value: it must be exactly what the quote says.
+  if (isNativeTokenAddress(token.address)) {
+    let value: bigint | undefined;
+    try {
+      value = quote.transactionRequest?.value === undefined ? undefined : BigInt(quote.transactionRequest.value);
+    } catch {
+      value = undefined;
+    }
+    if (value !== fresh) {
+      throw new SwapPriceMovedError("This payment's transaction doesn't match the price you were shown, so nothing was sent. Please try again.");
+    }
+  }
+}
 
 /**
  * Human units to spend: the caller's explicit amount if given, else what the
@@ -68,6 +119,14 @@ function spendAmount({ amount, quote, token }: SellSwapRun): string | undefined 
  */
 export async function executeSellSwap(run: SellSwapRun): Promise<string> {
   const { intentId, quote, token, sourceChainId, sourceAddress } = run;
+
+  try {
+    checkAgainstPrice(run);
+  } catch (e) {
+    // Before anything is signed: close the intent so the payment is not left waiting on it.
+    await abandonSellIntent(intentId).catch((err) => console.warn('[sell] abandon failed', err));
+    throw e;
+  }
 
   const fromAmount = spendAmount(run);
   if (!fromAmount) {
@@ -102,13 +161,19 @@ export async function executeSellSwap(run: SellSwapRun): Promise<string> {
       feeFeature: 'none',
       // On the phone BEFORE the broadcast: a reply lost after the server
       // sent it must still leave a hash for resume to follow.
-      onSigned: (signed) => AsyncStorage.setItem(pendingSwapKey(intentId), signed).catch((e) =>
-        console.warn('[sell] could not persist the signed swap hash', e)),
+      onSigned: async (signed) => {
+        await AsyncStorage.setItem(pendingSwapKey(intentId), signed).catch((e) =>
+          console.warn('[sell] could not persist the signed swap hash', e));
+        // A crypto payment's swap goes straight to the merchant: from here on a
+        // second payment could pay them twice, even across an app kill.
+        if (run.paymentId) await writePayHold(run.paymentId, intentId);
+      },
     });
   } catch (e) {
     if (e instanceof SwapBroadcastUnconfirmedError) throw e;
     // Refused before or at the node, so nothing left her wallet.
     await clearPendingSwapHash(intentId);
+    if (run.paymentId) await clearPayHold(run.paymentId);
     await abandonSellIntent(intentId).catch((err) => console.warn('[sell] abandon failed', err));
     if (topUpFailed && chain) {
       throw new Error(

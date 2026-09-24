@@ -52,7 +52,12 @@ export type StartSellArgs = {
  * is the server's quote, and the bank is the merchant's, held server-side.
  */
 export type StartSwapArgs = Omit<StartSellArgs, 'amount' | 'bank' | 'currency'> &
-  Partial<Pick<StartSellArgs, 'amount' | 'bank' | 'currency'>>;
+  Partial<Pick<StartSellArgs, 'amount' | 'bank' | 'currency'>> & {
+    /** A payment: the amount (source base units) she was shown. The quote signed is held to it. */
+    pricedFromAmount?: string;
+    /** A crypto payment: its "don't pay again" hold is persisted when the swap is signed. */
+    paymentId?: string;
+  };
 
 /** A started intent: what to sign, and whether the server priced a gas top-up into it. */
 export type CreatedSellIntent = { intent: SellIntent; quote: LiFiQuote; gasTopUp?: boolean };
@@ -153,10 +158,10 @@ function outcomeFromServer(e: unknown): SwapOutcome | null {
   return null;
 }
 
-/** 409s that mean "not yet" — the server's LiFi view or claim has not caught up. */
 const isCode = (e: unknown, code: string): e is PaycrestError =>
   e instanceof PaycrestError && e.status === 409 && e.code === code;
 
+/** 409s that mean "not yet" — the server's LiFi view or claim has not caught up. */
 function isWaitAnswer(e: unknown): boolean {
   if (!(e instanceof PaycrestError) || e.status !== 409) return false;
   if (e.code) return WAIT_CODES.has(e.code);
@@ -346,6 +351,8 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent }) {
         sourceChainId: a.sourceChainId,
         sourceAddress: a.sourceAddress,
         amount: a.amount,
+        pricedFromAmount: a.pricedFromAmount,
+        paymentId: a.paymentId,
       });
     } catch (e) {
       // It may be on its way: keep the hash and the sale for resume.

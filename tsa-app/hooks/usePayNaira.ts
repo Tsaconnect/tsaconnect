@@ -15,6 +15,7 @@
 // screen on a payment already under way only FOLLOWS it (`resume`): reads, never
 // signs. A 409 `pay_in_progress` means an attempt of hers already exists: it is
 // followed, never duplicated. Codes are keyed on, never sentences.
+import { ethers } from 'ethers';
 import { useCallback, useRef, useState } from 'react';
 import { getChainByChainId } from '@/constants/chains';
 import { usePayAuthorization, type AuthorizationProps } from '@/hooks/usePayAuthorization';
@@ -34,8 +35,9 @@ import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap'
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
-  errorCode, errorMessage, intentForPayment, NOTHING_TO_CONTINUE, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, nairaFromKobo, PAY_IN_PROGRESS, PAYMENT_STILL_GOING, payAmountLabel,
-  unsupportedNetworkMessage,
+  CANT_PAY_WITH_TOKEN, classifyStartError, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment,
+  nairaFromKobo, NOTHING_TO_CONTINUE, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage,
+  startFailure, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 import type { PayEstimate, PayLiveStage } from '@/hooks/usePayLive';
 
@@ -59,9 +61,12 @@ export type UsePayNaira = {
   /** A direct payment's payout order — reachable from the order screen if the send failed. */
   order?: PaycrestOrder;
   authorization: AuthorizationProps;
-  payWith(token: LiFiToken, chainId: number): void;
+  /** `priced` is what she was shown: the authorization says so, and what is signed is held to it. */
+  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
   /** What she will send, e.g. "0.084 BNB" — an estimate, before she taps Pay. */
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
+  /** Her wallet on this device, once known. */
+  walletAddress: string | null;
   /** After a shortfall: pay the rest from her wallet's USDC. Asks for authorization first. */
   completeWithWallet(): void;
   /** Carry on a payment that is under way. Asks for authorization first. */
@@ -73,9 +78,16 @@ export type UsePayNaira = {
 };
 
 type Action =
-  | { kind: 'pay'; token: LiFiToken; chainId: number }
-  | { kind: 'wallet'; intent: SellIntent }
+  | { kind: 'pay'; token: LiFiToken; chainId: number; priced?: PayEstimate }
+  | { kind: 'wallet'; intent: SellIntent; missingUsdc?: string }
   | { kind: 'continue'; intent: SellIntent };
+
+const authorizationTitle = (a: Action | null): string => {
+  if (a?.kind === 'pay' && a.priced) return `Authorize payment of about ${a.priced.pay}`;
+  if (a?.kind === 'wallet') return a.missingUsdc ? `Authorize paying about ${a.missingUsdc} USDC from your wallet` : 'Authorize paying from your wallet';
+  if (a?.kind === 'continue') return 'Authorize continuing your payment';
+  return 'Authorize payment';
+};
 
 type Direct = {
   stage: 'paying' | 'waiting' | 'failed' | 'continue';
@@ -113,11 +125,15 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   // The server could not prove whether an attempt exists and paused the payment
   // for support: not retryable, not followed, never reset by us. (A ref beside
   // the state so `reset`, a stable callback, sees it.)
-  const [paused, setPaused] = useState(false);
+  const [startKind, setStartKind] = useState<'paused' | 'refused' | null>(null);
+  const paused = startKind === 'paused';
   const pausedRef = useRef(false);
   const inProgress = useRef(false);
   const running = useRef(false);
-  const markPaused = () => { pausedRef.current = true; setPaused(true); };
+  const markStartKind = (k: 'paused' | 'refused' | null) => {
+    pausedRef.current = k === 'paused';
+    setStartKind(k);
+  };
 
   // The payment's own intent, through the swapped-sell pipeline. Refusals are
   // remembered by code: the pipeline reports only their words.
@@ -129,8 +145,9 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
         sourceAddress: a.sourceAddress,
       });
     } catch (e) {
-      if (errorCode(e) === PAY_IN_PROGRESS) inProgress.current = true;
-      else if (errorCode(e) === PAY_ATTEMPT_UNCERTAIN) markPaused();
+      const kind = classifyStartError(e);
+      if (kind === 'follow') inProgress.current = true;
+      else if (kind === 'paused' || kind === 'refused') markStartKind(kind);
       else setCreateCode(errorCode(e));
       throw e;
     }
@@ -208,21 +225,38 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     setDirect({ stage: 'waiting', order });
   };
 
-  const run = async (token: LiFiToken, chainId: number) => {
+  const run = async (token: LiFiToken, chainId: number, priced?: PayEstimate) => {
     if (!address || running.current) return;
     running.current = true;
     try {
       setCreateCode(undefined);
       setWalletTried(false);
+      markStartKind(null);
       inProgress.current = false;
       if (isNonEVMLiFiChain(chainId)) {
         setDirect({ stage: 'failed', error: unsupportedNetworkMessage(token.symbol) });
         return;
       }
       setDirect({ stage: 'paying' });
+      let venue: PaycrestVenue | null;
       try {
-        const venue = await directVenue(checkout.merchantNet, token, chainId);
+        venue = await directVenue(checkout.merchantNet, token, chainId);
+      } catch (e) {
+        // The rate lookup is not a start route: its words (e.g. the provider being unavailable) are the useful ones.
+        setDirect({ stage: 'failed', error: errorMessage(e, 'Could not get a rate. Please try again.') });
+        return;
+      }
+      try {
         if (venue) {
+          // The fresh amount, held to the price she was shown — before any order exists.
+          const fresh = ethers.parseUnits((Math.ceil(venue.tokenAmount * 100) / 100).toFixed(2), token.decimals);
+          if (priced && exceedsPriced(fresh, BigInt(priced.fromAmount))) {
+            setDirect({
+              stage: 'failed',
+              error: priceMovedMessage(fresh.toString(), priced.fromAmount, token.decimals, venue.token),
+            });
+            return;
+          }
           await payDirectly(venue, address);
         } else {
           setDirect(null);
@@ -231,6 +265,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
             token: { ...token, chainId },
             walletAddress: address,
             sourceAddress: address,
+            pricedFromAmount: priced?.fromAmount,
           };
           await swapped.start(args);
           if (inProgress.current) {
@@ -239,13 +274,12 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
           }
         }
       } catch (e) {
-        if (errorCode(e) === PAY_IN_PROGRESS) {
+        const kind = classifyStartError(e);
+        if (kind === 'follow') {
           await followOpen();
-        } else if (errorCode(e) === PAY_ATTEMPT_UNCERTAIN) {
-          markPaused();
-          setDirect({ stage: 'failed', error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false });
         } else {
-          setDirect({ stage: 'failed', error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e) });
+          if (kind === 'paused') markStartKind('paused');
+          setDirect({ stage: 'failed', ...startFailure(e) });
         }
       }
     } finally {
@@ -254,10 +288,10 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   };
 
   const { request, authorization } = usePayAuthorization<Action>({
-    title: () => 'Authorize payment',
+    title: authorizationTitle,
     onAuthorized: (action) => {
       if (action.kind === 'pay') {
-        void run(action.token, action.chainId);
+        void run(action.token, action.chainId, action.priced);
       } else if (action.kind === 'wallet') {
         setWalletTried(true);
         void swapped.completeWithWallet(action.intent);
@@ -293,29 +327,37 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   }
 
   const payWith = useCallback(
-    (token: LiFiToken, chainId: number) => request({ kind: 'pay', token, chainId }),
+    (token: LiFiToken, chainId: number, priced?: PayEstimate) => request({ kind: 'pay', token, chainId, priced }),
     [request],
   );
 
   const estimate = async (token: LiFiToken, chainId: number): Promise<PayEstimate> => {
     if (!address) throw new Error('Connect a wallet on this device first — you pay from it yourself.');
-    const venue = await directVenue(checkout.merchantNet, token, chainId);
-    if (venue) {
-      // Stablecoins: to the cent, upward — an "about" figure never understates.
-      return { pay: `${fmtTokenAmount(Math.ceil(venue.tokenAmount * 100) / 100)} ${venue.token}` };
+    try {
+      const venue = await directVenue(checkout.merchantNet, token, chainId);
+      if (venue) {
+        // Stablecoins: to the cent, upward — an "about" figure never understates.
+        const amount = Math.ceil(venue.tokenAmount * 100) / 100;
+        return {
+          pay: `${fmtTokenAmount(amount)} ${venue.token}`,
+          fromAmount: ethers.parseUnits(amount.toFixed(2), token.decimals).toString(),
+        };
+      }
+      const q = await getPayQuote(checkout.id, {
+        sourceChainId: chainId,
+        sourceToken: token.address,
+        sourceAddress: address,
+      });
+      return { pay: payAmountLabel(q.fromAmount, token.decimals, token.symbol), fromAmount: q.fromAmount };
+    } catch (e) {
+      throw estimateError(e);
     }
-    const q = await getPayQuote(checkout.id, {
-      sourceChainId: chainId,
-      sourceToken: token.address,
-      sourceAddress: address,
-    });
-    return { pay: payAmountLabel(q.fromAmount, token.decimals, token.symbol) };
   };
 
   const heldIntent = direct?.intent ?? swapped.intent;
   const completeWithWallet = useCallback(() => {
-    if (swapped.intent) request({ kind: 'wallet', intent: swapped.intent });
-  }, [swapped.intent, request]);
+    if (swapped.intent) request({ kind: 'wallet', intent: swapped.intent, missingUsdc: swapped.missingUsdc });
+  }, [swapped.intent, swapped.missingUsdc, request]);
   const continuePayment = useCallback(() => {
     if (heldIntent) request({ kind: 'continue', intent: heldIntent });
   }, [heldIntent, request]);
@@ -330,6 +372,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     setDirect(null);
     setCreateCode(undefined);
     setWalletTried(false);
+    markStartKind(null);
     swapped.reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- swapped.reset is stable.
   }, [swapped.reset]);
@@ -345,16 +388,21 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   const retryable = paused
     ? false
     : direct ? direct.retryable !== false : !(swapStopped && swapped.retryable === false);
+  // The swapped sell reports its own words; a start the server refused or paused has better ones.
+  const swapError = paused ? PAYMENT_PAUSED
+    : startKind === 'refused' ? CANT_PAY_WITH_TOKEN
+      : retryable ? swapped.error : PAYMENT_STILL_GOING;
 
   return {
     stage,
     missingUsdc: stage === 'shortfall' ? swapped.missingUsdc : undefined,
     walletShort: stage === 'shortfall' && walletTried,
-    error: direct?.error ?? (swapStopped ? (paused ? PAYMENT_PAUSED : retryable ? swapped.error : PAYMENT_STILL_GOING) : undefined),
+    error: direct?.error ?? (swapStopped ? swapError : undefined),
     errorCode: direct?.errorCode ?? (swapStopped ? (paused ? PAY_ATTEMPT_UNCERTAIN : createCode) : undefined),
     retryable,
     canContinue: !paused && !!heldIntent && (stage === 'continue' || (stage === 'failed' && !retryable)),
     swapStage: swapped.stage,
+    walletAddress: address,
     order: direct?.order ?? swapped.order,
     authorization,
     payWith,

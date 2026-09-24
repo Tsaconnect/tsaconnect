@@ -10,7 +10,7 @@
 //
 // State is computed by payScreenState (utils/payCheckout.ts) — this file
 // only wires data in and renders whatever it says.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
@@ -32,7 +32,8 @@ import {
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getCheckout, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
-import { payScreenState } from '@/utils/payCheckout';
+import { clearPayHold } from '@/services/payHold';
+import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
@@ -62,16 +63,26 @@ export default function PayScreen() {
 
   const state = payScreenState({ id, authed: isAuthenticated, checkout, error, now, attemptActive });
 
+  // Only the latest read counts: the 5 s poll can overlap, and a slow older
+  // answer landing after a newer one must not put the screen back in time.
+  const fetchSeq = useRef(0);
   const fetchCheckout = useCallback(async () => {
     if (typeof id !== 'string') return;
+    const mine = ++fetchSeq.current;
     try {
       const c = await getCheckout(id);
+      if (mine !== fetchSeq.current) return;
       setCheckout(c);
       setError(undefined);
     } catch (e: any) {
-      setError(e?.message ?? 'Could not load this payment.');
+      if (mine === fetchSeq.current) setError(e?.message ?? 'Could not load this payment.');
     }
   }, [id]);
+
+  // A payment the server has finished with needs no "don't pay again" hold on this phone.
+  useEffect(() => {
+    if (checkout && TERMINAL_STATUSES.includes(checkout.status)) void clearPayHold(checkout.id);
+  }, [checkout]);
 
   // Initial load, once we actually know the customer is signed in.
   useEffect(() => {

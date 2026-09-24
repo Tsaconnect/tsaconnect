@@ -21,8 +21,12 @@ import type { PayCheckout } from '@/services/payApi';
 
 export type PayLiveStage = 'idle' | 'paying' | 'continue' | 'shortfall' | 'waiting' | 'failed';
 
-/** What paying would cost her, and — for a crypto merchant — what they receive. */
-export type PayEstimate = { pay: string; receives?: string };
+/**
+ * What paying would cost her, and — for a crypto merchant — what they receive.
+ * `fromAmount` is the same figure in the paying token's base units: what she is
+ * shown is what the signature is held to (see executeSellSwap).
+ */
+export type PayEstimate = { pay: string; fromAmount: string; receives?: string };
 
 /** What the panel and the effects need of either live-payment hook. */
 export type PayHook = {
@@ -36,7 +40,9 @@ export type PayHook = {
   order?: PaycrestOrder;
   missingUsdc?: string;
   walletShort?: boolean;
-  payWith(token: LiFiToken, chainId: number): void;
+  /** Her wallet on this device, once known — a price needs it, so a wait for it is retried on arrival. */
+  walletAddress?: string | null;
+  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   completeWithWallet?(): void;
   continuePayment?(): void;

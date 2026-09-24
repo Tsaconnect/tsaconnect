@@ -89,7 +89,18 @@ const Harness = () => {
   return null;
 };
 let renderer: ReactTestRenderer;
-const mount = () => act(() => { renderer = TestRenderer.create(<Harness />); });
+/** Mount, and let the hook's own look at the persisted hold finish (Pay is withheld until it has). */
+const mount = () => act(async () => {
+  renderer = TestRenderer.create(<Harness />);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+});
+const HOLD = `tsapay.pendingSwap.${ID}`;
+/** What an app kill leaves behind: the hash, and the hold written the moment the swap was signed. */
+const leaveHold = async (at = Date.now()) => {
+  await AsyncStorage.setItem(KEY, '0xswap');
+  await AsyncStorage.setItem(HOLD, JSON.stringify({ intentId: 'i1', at }));
+};
+const rejection = (status: number) => Object.assign(new Error('The server will not take a hash for this intent'), { status });
 
 /** Let promises settle, stepping the fake clock past any retry delay. */
 const settle = () => act(async () => {
@@ -550,9 +561,7 @@ describe('a swap that may have reached the merchant is never forgotten by a rese
 
 describe('Continue payment with nothing to continue', () => {
   it('says nothing was found instead of silently waiting', async () => {
-    m.recordSellSwap.mockRejectedValue(new Error('offline'));
     await mount();
-    await pay();
     m.getOpenSellIntent.mockResolvedValue(null);
     await act(async () => { hook.continuePayment(); });
     await settle();
@@ -586,7 +595,7 @@ describe('estimate', () => {
   it('asks the server what the swap pulls and shows it in her token’s decimals', async () => {
     m.getCryptoQuote.mockResolvedValue({ fromAmount: '84000000000000000' });
     await mount();
-    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB' });
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB', fromAmount: '84000000000000000' });
     expect(m.getCryptoQuote).toHaveBeenCalledWith(ID, { sourceChainId: BSC, sourceToken: bnb.address, sourceAddress: '0xPayer' });
   });
 
@@ -595,7 +604,7 @@ describe('estimate', () => {
       fromAmount: '84000000000000000', destAmount: '33323336332433603252', destDecimals: 18,
     });
     await mount();
-    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB', receives: '33.32 USDT' });
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB', fromAmount: '84000000000000000', receives: '33.32 USDT' });
   });
 
   it('leaves it out on an older server that sends no destination amount', async () => {
@@ -608,5 +617,209 @@ describe('estimate', () => {
     mockWallet.address = null;
     await mount();
     await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/wallet/i);
+  });
+});
+
+describe('the price she was shown is the price she pays', () => {
+  const priced = { pay: '0.084 BNB', fromAmount: '84000000000000000' };
+  const withValue = (fromAmount: string) =>
+    ({ fromAmount, transactionRequest: { value: `0x${BigInt(fromAmount).toString(16)}` } }) as unknown as LiFiQuote;
+
+  it('the authorization says how much', async () => {
+    await mount();
+    act(() => hook.payWith(bnb, BSC, priced));
+    expect(hook.authorization.title).toBe('Authorize payment of about 0.084 BNB');
+  });
+
+  it('a fresh quote past 2% is refused before anything is signed: retryable, in plain words, nothing held', async () => {
+    m.payCrypto.mockResolvedValue({ intent, quote: withValue('99000000000000000'), gasTopUp: false });
+    await mount();
+    act(() => hook.payWith(bnb, BSC, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await settle();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toMatch(/price moved/i);
+    expect(m.executeLiFiSwap).not.toHaveBeenCalled();
+    expect(m.abandonSellIntent).toHaveBeenCalledWith('i1');
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+  });
+
+  it('a quote within the bound is signed, and the hold is recorded for the payment as it is signed', async () => {
+    m.payCrypto.mockResolvedValue({ intent, quote: withValue('85000000000000000'), gasTopUp: false });
+    m.executeLiFiSwap.mockImplementation(async (p: any) => { await p.onSigned('0xswap'); return '0xswap'; });
+    await mount();
+    act(() => hook.payWith(bnb, BSC, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await settle();
+    expect(m.executeLiFiSwap).toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+  });
+});
+
+describe('the same start-error reading as naira', () => {
+  it('follows a 409 pay_in_progress; refuses a 422 with the shared copy; keeps the words and code of anything else', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('Verify first', 403, 'kyc_verification_required'));
+    await mount();
+    await pay();
+    expect(hook.error).toBe('Verify first');
+    expect(hook.errorCode).toBe('kyc_verification_required');
+    expect(hook.retryable).toBe(true);
+  });
+});
+
+describe('a hold that survives an app kill', () => {
+  it('Pay is withheld until the persisted hold has been looked at', async () => {
+    act(() => { renderer = TestRenderer.create(<Harness />); });
+    expect(hook.retryable).toBe(false);
+    await act(async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); });
+    expect(hook.retryable).toBe(true);
+  });
+
+  it('records the hold when the report fails, so a kill leaves it behind', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+    expect(JSON.parse((await AsyncStorage.getItem(HOLD))!)).toEqual({ intentId: 'i1', at: expect.any(Number) });
+  });
+
+  it('records it for a broadcast that could not be confirmed, even with no hash to report', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new (LifiFlow.SwapBroadcastUnconfirmedError as any)());
+    await mount();
+    await pay();
+    expect(await AsyncStorage.getItem(HOLD)).not.toBeNull();
+  });
+
+  it('clears the hold and the hash once the server has heard', async () => {
+    await mount();
+    await pay();
+    expect(hook.stage).toBe('waiting');
+    expect(await AsyncStorage.getItem(HOLD)).toBeNull();
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('after a kill, the server took the late hash: she waits on it, and the hold lifts', async () => {
+    await leaveHold();
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    expect(m.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap');
+    expect(hook.stage).toBe('waiting');
+    expect(await AsyncStorage.getItem(HOLD)).toBeNull();
+  });
+
+  it('after a kill, the server already has the swap: nothing to report, hold lifts', async () => {
+    await leaveHold();
+    m.getOpenSellIntent.mockResolvedValue({ ...intent, status: 'swapped', swapTxHash: '0xswap' } as SellIntent);
+    await mount();
+    expect(m.recordSellSwap).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+    expect(await AsyncStorage.getItem(HOLD)).toBeNull();
+  });
+
+  it('after a kill and a reap (no open sale) the server refuses the late hash: held, honest terminal state, Pay never comes back', async () => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(rejection(409));
+    await mount();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false); // no dead Continue button
+    expect(hook.error).toMatch(/don't pay again/i);
+    expect(hook.error).toContain(ID); // the reference for support
+    expect(m.payCrypto).not.toHaveBeenCalled();
+    expect(await AsyncStorage.getItem(HOLD)).not.toBeNull(); // still held
+    expect(m.recordSellSwap).toHaveBeenCalledTimes(1); // a 4xx is final for the report loop: no 3 tries
+  });
+
+  it('a report that cannot reach the server is held with Continue available — it may yet land', async () => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await settle();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(true);
+  });
+
+  it('a hold with no hash left is held too — the swap may be out there', async () => {
+    await AsyncStorage.setItem(HOLD, JSON.stringify({ intentId: 'i1', at: Date.now() }));
+    await mount();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toContain(ID);
+  });
+
+  it('lifts after 24 hours: the server gives such a payment up by then', async () => {
+    await leaveHold(Date.now() - 24 * 60 * 60_000 - 5_000);
+    await mount();
+    expect(hook.stage).toBe('idle');
+    expect(hook.retryable).toBe(true);
+    expect(await AsyncStorage.getItem(HOLD)).toBeNull();
+    expect(await AsyncStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('with no hold nothing is asked of the server on opening', async () => {
+    await mount();
+    expect(m.getOpenSellIntent).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('idle');
+  });
+
+  it('the reaped-then-released flip cannot free Pay: reset keeps the hold', async () => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(rejection(404));
+    await mount();
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('but once the hold has run out, reset frees it', async () => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(rejection(404));
+    await mount();
+    await AsyncStorage.setItem(HOLD, JSON.stringify({ intentId: 'i1', at: Date.now() - 25 * 60 * 60_000 }));
+    await act(async () => { const p = hook.reset(); await settle(); await p; });
+    expect(hook.stage).toBe('idle');
+    expect(await AsyncStorage.getItem(HOLD)).toBeNull();
+  });
+});
+
+describe('Continue and reset never dead-end', () => {
+  it('Continue after the intent was reaped ends in the terminal state, not in a silent nothing', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay(); // hold recorded, hash stored, report failed
+    m.recordSellSwap.mockRejectedValue(rejection(409));
+    m.getOpenSellIntent.mockResolvedValue(null); // the reaper let go of the intent
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toContain(ID);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.retryable).toBe(false);
+  });
+
+  it('Continue with nothing at all to continue offers no Continue button, and reset frees Pay', async () => {
+    await mount();
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toMatch(/couldn't find/i);
+    expect(hook.canContinue).toBe(false);
+
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('idle');
+    expect(hook.retryable).toBe(true);
+  });
+
+  it('a server-paused payment is still never reset by us', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('x', 409, 'pay_attempt_uncertain'));
+    await mount();
+    await pay();
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).toBe('failed');
   });
 });

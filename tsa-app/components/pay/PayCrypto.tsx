@@ -6,7 +6,7 @@
 // the swap yet). usePayLive keeps the hook in step with the checkout, exactly
 // as for naira; the panel shows for a payment reopened mid-flight too, so a
 // swap the server never heard of is never hidden behind "Waiting…".
-import React from 'react';
+import React, { useMemo } from 'react';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { PayLivePanel } from '@/components/pay/PayLivePanel';
 import { usePayCrypto } from '@/hooks/usePayCrypto';
@@ -28,6 +28,12 @@ export function PayCrypto({
 }) {
   const pay = usePayCrypto(checkout);
   usePayLive({ pay, checkout, showForm, onWaiting, onActive });
+  // Stable across the screen's 5 s re-renders: the picker rebuilds its list whenever `allow` changes.
+  const allow = useMemo(
+    () => payPickFilter(checkout),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only these fields decide what is hidden.
+    [checkout.settlementMode, checkout.settleChainId, checkout.settleTokenAddress],
+  );
 
   const symbol = checkout.settleTokenSymbol;
   const chain = checkout.settleChainId ? getChainByChainId(checkout.settleChainId) : undefined;
@@ -42,7 +48,7 @@ export function PayCrypto({
     <>
       {(showForm || pay.stage !== 'idle') && (
         <PayLivePanel
-          checkout={checkout} pay={pay} showForm={showForm} allow={payPickFilter(checkout)}
+          checkout={checkout} pay={pay} showForm={showForm} allow={allow}
           receives={receives} note={note}
         />
       )}

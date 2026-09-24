@@ -5,7 +5,7 @@
 // way, reset when the server frees it, report an attempt that is moving money).
 // The panel shows whenever the form is payable OR the hook has something to say:
 // a payment reopened mid-flight has no form, but its prompts must still show.
-import React from 'react';
+import React, { useMemo } from 'react';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { PayLivePanel } from '@/components/pay/PayLivePanel';
 import { usePayLive } from '@/hooks/usePayLive';
@@ -25,11 +25,17 @@ export function PayNaira({
 }) {
   const pay = usePayNaira(checkout);
   usePayLive({ pay, checkout, showForm, onWaiting, onActive });
+  // Stable across the screen's 5 s re-renders: the picker rebuilds its list whenever `allow` changes.
+  const allow = useMemo(
+    () => payPickFilter(checkout),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only these fields decide what is hidden.
+    [checkout.settlementMode, checkout.settleChainId, checkout.settleTokenAddress],
+  );
 
   return (
     <>
       {(showForm || pay.stage !== 'idle' || !!checkout.orderId) && (
-        <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={payPickFilter(checkout)} />
+        <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={allow} />
       )}
       <AuthorizationModal {...pay.authorization} />
     </>

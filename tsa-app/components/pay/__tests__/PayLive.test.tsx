@@ -40,13 +40,14 @@ jest.mock('@/components/ui', () => {
       react.createElement(View, { accessibilityLabel: 'row:Pay with', onPress: props.onPress }, props.children),
   };
 });
+const mockAllows: unknown[] = [];
 jest.mock('@/components/assets/AssetPicker', () => {
   const react = jest.requireActual('react');
   const { View } = jest.requireActual('react-native');
   return {
     __esModule: true,
     default: (props: any) =>
-      props.visible ? react.createElement(View, { accessibilityLabel: 'picker', onSelect: props.onSelect }) : null,
+      (mockAllows.push(props.allow), props.visible ? react.createElement(View, { accessibilityLabel: 'picker', onSelect: props.onSelect }) : null),
   };
 });
 jest.mock('@/components/paycrest/SwappedSellForm', () => ({
@@ -80,8 +81,8 @@ const cryptoCheckout = {
 const bnb = { address: '0x0', symbol: 'BNB', decimals: 18 };
 
 const hookState = (over: Record<string, unknown> = {}) => ({
-  stage: 'idle', retryable: true, canContinue: false, walletShort: false,
-  payWith: jest.fn(), estimate: jest.fn(async () => ({ pay: '0.084 BNB' })),
+  stage: 'idle', retryable: true, canContinue: false, walletShort: false, walletAddress: '0xPayer',
+  payWith: jest.fn(), estimate: jest.fn(async () => ({ pay: '0.084 BNB', fromAmount: '84000000000000000' })),
   completeWithWallet: jest.fn(), continuePayment: jest.fn(), resume: jest.fn(async () => {}), reset: jest.fn(),
   authorization: { visible: false, title: '', onAuthorized: jest.fn(), onCancel: jest.fn() },
   ...over,
@@ -217,7 +218,7 @@ describe('the price line', () => {
   });
 
   it('says so when the estimate comes back empty', async () => {
-    await panel(hookState({ estimate: jest.fn(async () => ({ pay: '' })) }));
+    await panel(hookState({ estimate: jest.fn(async () => ({ pay: '', fromAmount: '' })) }));
     await pick();
     expect(text(tree)).toContain("couldn't work out the price");
     expect(find(tree, 'button:Pay ₦50,505.06').props.disabled).toBe(true);
@@ -226,7 +227,7 @@ describe('the price line', () => {
   it('a crypto merchant: what the store receives, with the amount when the server gave one', async () => {
     const receives = (amount?: string) => `The store receives ${amount ?? 'USDT'} on BNB Smart Chain.`;
     await panel(
-      hookState({ estimate: jest.fn(async () => ({ pay: '0.084 BNB', receives: '33.32 USDT' })) }),
+      hookState({ estimate: jest.fn(async () => ({ pay: '0.084 BNB', fromAmount: '84000000000000000', receives: '33.32 USDT' })) }),
       { checkout: cryptoCheckout, receives },
     );
     expect(text(tree)).toContain('The store receives USDT on BNB Smart Chain.');
@@ -375,5 +376,98 @@ describe('PayNaira / PayCrypto keep the hook in step with the checkout', () => {
     });
     expect(text(tree)).toContain('The store receives USDT on BNB Smart Chain.');
     expect(text(tree)).toContain('Paying with USDT on BNB Smart Chain directly is coming soon');
+  });
+});
+
+describe('the price she is shown is the price she pays', () => {
+  beforeEach(() => { jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }); });
+  afterEach(() => { jest.useRealTimers(); });
+  const settleTimers = async (ms: number) => { await act(async () => { jest.advanceTimersByTime(ms); }); await flush(); };
+
+  it('Pay hands the hook the very figure she saw, base units and all', async () => {
+    const pay = hookState();
+    await panel(pay);
+    await pick();
+    await act(async () => { find(tree, 'button:Pay ₦50,505.06').props.onPress(); });
+    expect(pay.payWith).toHaveBeenCalledWith(
+      { ...bnb, chainId: 56 }, 56, { pay: '0.084 BNB', fromAmount: '84000000000000000' },
+    );
+  });
+
+  it('re-prices on its own when the figure is 30 seconds old, and shows the new one', async () => {
+    const estimate = jest.fn()
+      .mockResolvedValueOnce({ pay: '0.084 BNB', fromAmount: '84000000000000000' })
+      .mockResolvedValue({ pay: '0.09 BNB', fromAmount: '90000000000000000' });
+    await panel(hookState({ estimate }));
+    await pick();
+    expect(text(tree)).toContain("You'll pay about 0.084 BNB");
+    await settleTimers(31_000);
+    expect(estimate).toHaveBeenCalledTimes(2);
+    expect(text(tree)).toContain("You'll pay about 0.09 BNB");
+  });
+
+  it('does not keep re-pricing while a payment is being made', async () => {
+    const estimate = jest.fn(async () => ({ pay: '0.084 BNB', fromAmount: '84000000000000000' }));
+    const pay = hookState({ estimate });
+    await panel(pay);
+    await pick();
+    await act(async () => { tree.update(<PayLivePanel checkout={fiat} pay={{ ...pay, stage: 'paying' } as any} showForm />); });
+    await settleTimers(61_000);
+    expect(estimate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Pay tap on a stale figure re-prices instead of paying it: she confirms what it is now', async () => {
+    const pay = hookState();
+    await panel(pay);
+    await pick();
+    // Hold the timer refresh off and let the figure go stale.
+    const realNow = Date.now();
+    const spy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 45_000);
+    pay.estimate.mockResolvedValue({ pay: '0.09 BNB', fromAmount: '90000000000000000' });
+    await act(async () => { find(tree, 'button:Pay ₦50,505.06').props.onPress(); });
+    await flush();
+    expect(pay.payWith).not.toHaveBeenCalled();
+    expect(text(tree)).toContain("You'll pay about 0.09 BNB");
+
+    await act(async () => { find(tree, 'button:Pay ₦50,505.06').props.onPress(); });
+    expect(pay.payWith).toHaveBeenCalledWith(expect.anything(), 56, { pay: '0.09 BNB', fromAmount: '90000000000000000' });
+    spy.mockRestore();
+  });
+
+  it('a wallet that arrives after the pick is priced when it arrives — the "Connect a wallet" wait is not final', async () => {
+    const estimate = jest.fn()
+      .mockRejectedValueOnce(new Error('Connect a wallet on this device first — you pay from it yourself.'))
+      .mockResolvedValue({ pay: '0.084 BNB', fromAmount: '84000000000000000' });
+    const pay = hookState({ estimate, walletAddress: null });
+    await panel(pay);
+    await pick();
+    expect(text(tree)).toContain('Connect a wallet');
+
+    await act(async () => { tree.update(<PayLivePanel checkout={fiat} pay={{ ...pay, walletAddress: '0xPayer' } as any} showForm />); });
+    await flush();
+    expect(text(tree)).toContain("You'll pay about 0.084 BNB");
+  });
+});
+
+describe('the picker is not rebuilt every time the screen re-renders', () => {
+  it('PayNaira hands the picker the same `allow` across renders of an unchanged merchant', async () => {
+    mockHooks.naira = hookState({ stage: 'idle' });
+    mockAllows.length = 0;
+    const c1 = { ...fiat } as PayCheckout;
+    await act(async () => { tree = TestRenderer.create(<PayNaira checkout={c1} showForm onWaiting={jest.fn()} onActive={jest.fn()} />); });
+    await act(async () => { tree.update(<PayNaira checkout={{ ...fiat } as PayCheckout} showForm onWaiting={jest.fn()} onActive={jest.fn()} />); });
+    const seen = mockAllows.filter(Boolean);
+    expect(seen.length).toBeGreaterThan(1);
+    expect(new Set(seen).size).toBe(1);
+  });
+
+  it('but a different merchant token gets a new one', async () => {
+    mockHooks.crypto = hookState({ stage: 'idle' });
+    mockAllows.length = 0;
+    await act(async () => { tree = TestRenderer.create(<PayCrypto checkout={cryptoCheckout} showForm onWaiting={jest.fn()} onActive={jest.fn()} />); });
+    await act(async () => {
+      tree.update(<PayCrypto checkout={{ ...cryptoCheckout, settleChainId: 8453 } as PayCheckout} showForm onWaiting={jest.fn()} onActive={jest.fn()} />);
+    });
+    expect(new Set(mockAllows.filter(Boolean)).size).toBe(2);
   });
 });

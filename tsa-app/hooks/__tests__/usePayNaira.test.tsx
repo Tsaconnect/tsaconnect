@@ -329,7 +329,7 @@ describe('the swapped-sell stages, as a payment', () => {
     act(() => hook.completeWithWallet());
 
     expect(hook.authorization.visible).toBe(true);
-    expect(hook.authorization.title).toBe('Authorize payment');
+    expect(hook.authorization.title).toBe('Authorize paying about 0.42 USDC from your wallet');
     expect(swapped.completeWithWallet).not.toHaveBeenCalled();
 
     await act(async () => { hook.authorization.onAuthorized(); });
@@ -698,7 +698,7 @@ describe('only a verified coin of the right name is a direct route', () => {
   it('its estimate is the swap’s, not the venue’s', async () => {
     m.getPayQuote.mockResolvedValue({ fromAmount: '33835000', usdcTarget: '33835000' });
     await mount();
-    await expect(hook.estimate(spamUsdc, BASE)).resolves.toEqual({ pay: '33.835 USDC' });
+    await expect(hook.estimate(spamUsdc, BASE)).resolves.toEqual({ pay: '33.835 USDC', fromAmount: '33835000' });
     expect(m.getPayQuote).toHaveBeenCalled();
   });
 });
@@ -738,14 +738,14 @@ describe('estimate — what she will pay, before she taps Pay', () => {
   it('a direct route shows the venue amount, rounded up', async () => {
     m.getQuote.mockResolvedValue(quoteWith([{ ...venue, tokenAmount: 33.501 } as PaycrestVenue]));
     await mount();
-    await expect(hook.estimate(usdcBase, BASE)).resolves.toEqual({ pay: '33.51 USDC' });
+    await expect(hook.estimate(usdcBase, BASE)).resolves.toEqual({ pay: '33.51 USDC', fromAmount: '33510000' });
     expect(m.getPayQuote).not.toHaveBeenCalled();
   });
 
   it('a converted route asks the server what the swap pulls, in her token’s decimals', async () => {
     m.getPayQuote.mockResolvedValue({ fromAmount: '84000000000000000', usdcTarget: '33835000' });
     await mount();
-    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB' });
+    await expect(hook.estimate(bnb, BSC)).resolves.toEqual({ pay: '0.084 BNB', fromAmount: '84000000000000000' });
     expect(m.getPayQuote).toHaveBeenCalledWith(ID, { sourceChainId: BSC, sourceToken: bnb.address, sourceAddress: '0xPayer' });
   });
 
@@ -753,5 +753,105 @@ describe('estimate — what she will pay, before she taps Pay', () => {
     mockWallet.address = null;
     await mount();
     await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/wallet/i);
+  });
+});
+
+describe('the price she was shown is the price she pays', () => {
+  const priced = { pay: '33.51 USDC', fromAmount: '33510000' };
+  const pricedBnb = { pay: '0.084 BNB', fromAmount: '84000000000000000' };
+
+  it('the authorization says how much: "Authorize payment of about 33.51 USDC"', async () => {
+    await mount();
+    act(() => hook.payWith(usdcBase, BASE, priced));
+    expect(hook.authorization.title).toBe('Authorize payment of about 33.51 USDC');
+  });
+
+  it('Continue payment has its own title', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    expect(hook.authorization.title).toBe('Authorize continuing your payment');
+  });
+
+  it('a direct route whose fresh amount moved past 2% is refused BEFORE an order is opened — retryable', async () => {
+    m.getQuote.mockResolvedValue(quoteWith([{ ...venue, tokenAmount: 34.5 } as PaycrestVenue]));
+    await mount();
+    act(() => hook.payWith(usdcBase, BASE, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+
+    expect(m.payDirect).not.toHaveBeenCalled();
+    expect(m.send).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toMatch(/price moved/i);
+    expect(hook.error).toContain('34.5 USDC');
+    expect(hook.error).toContain('33.51 USDC');
+  });
+
+  it('a direct route within 2% goes ahead', async () => {
+    m.getQuote.mockResolvedValue(quoteWith([{ ...venue, tokenAmount: 34.1 } as PaycrestVenue]));
+    await mount();
+    act(() => hook.payWith(usdcBase, BASE, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(m.payDirect).toHaveBeenCalled();
+  });
+
+  it('a swapped route hands the pipeline the priced amount to hold the fresh quote to', async () => {
+    await mount();
+    act(() => hook.payWith(bnb, BSC, pricedBnb));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(swapped.start).toHaveBeenCalledWith(expect.objectContaining({ pricedFromAmount: '84000000000000000' }));
+  });
+
+  it('with no priced amount (never from the panel) there is simply no bound', async () => {
+    await mount();
+    await pay(bnb, BSC);
+    expect(swapped.start).toHaveBeenCalledWith(expect.not.objectContaining({ pricedFromAmount: expect.anything() }));
+  });
+});
+
+describe('the route refusing this token — the same reading as crypto', () => {
+  const refusal = (status: number) => new PayError('any words the server likes', status);
+
+  it.each([422, 503])('a %i on a direct start says try another token, retryable', async (status) => {
+    m.payDirect.mockRejectedValue(refusal(status));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(true);
+    expect(hook.error).toMatch(/another token/i);
+  });
+
+  it.each([422, 503])('a %i on a converted start likewise, whatever words the swapped sell reports', async (status) => {
+    m.payConverted.mockRejectedValue(refusal(status));
+    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    Object.assign(swapped, { stage: 'failed', error: 'any words the server likes', retryable: true });
+    await mount();
+    await pay(bnb, BSC);
+    expect(hook.error).toMatch(/another token/i);
+    expect(hook.retryable).toBe(true);
+  });
+
+  it.each([422, 503])('a %i when pricing gives the same copy, not a raw server sentence', async (status) => {
+    m.getPayQuote.mockRejectedValue(refusal(status));
+    await mount();
+    await expect(hook.estimate(bnb, BSC)).rejects.toThrow(/another token/i);
+  });
+
+  it('a refused converted start does not leave the hook refused for the next attempt', async () => {
+    m.payConverted.mockRejectedValueOnce(refusal(422));
+    swapped.start.mockImplementation(async (a: any) => { await createIntent!(a).catch(() => {}); });
+    Object.assign(swapped, { stage: 'failed', error: 'x', retryable: true });
+    await mount();
+    await pay(bnb, BSC);
+    act(() => hook.reset());
+    Object.assign(swapped, { stage: 'failed', error: 'a different failure', retryable: true });
+    m.payConverted.mockRejectedValue(new PayError('a different failure', 500));
+    await pay(bnb, BSC);
+    expect(hook.error).toBe('a different failure');
   });
 });

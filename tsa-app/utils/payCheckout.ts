@@ -24,7 +24,7 @@ export type PayScreenState =
   | { kind: 'done'; checkout: PayCheckout }
   | { kind: 'blocked'; checkout: PayCheckout; why: string };
 
-const TERMINAL: PayStatus[] = ['succeeded', 'failed', 'expired'];
+export const TERMINAL_STATUSES: PayStatus[] = ['succeeded', 'failed', 'expired'];
 
 // Below this, an approve/decline (or the bank transfer behind a live payment)
 // may not finish before the checkout expires server-side — better to block
@@ -54,7 +54,7 @@ export function payScreenState(input: {
     return error ? { kind: 'error', message: error } : { kind: 'loading' };
   }
 
-  if (TERMINAL.includes(checkout.status)) return { kind: 'done', checkout };
+  if (TERMINAL_STATUSES.includes(checkout.status)) return { kind: 'done', checkout };
 
   // Own attempt still settling — keep polling rather than showing Approve/
   // Decline again, which would let the same payer fire a second attempt.
@@ -188,3 +188,57 @@ export function isRouteRefused(e: unknown): boolean {
   const status = (e as { status?: unknown } | null)?.status;
   return status === 422 || status === 503;
 }
+
+/** How far the fresh quote may exceed the price she was shown before we refuse to sign it. */
+export const PRICE_TOLERANCE_BPS = 200;
+/** A price older than this is looked up again (and never trusted at the Pay tap). */
+export const PRICE_STALE_MS = 30_000;
+
+/** Whether `fresh` costs more than `priced` by over the tolerance. Base units, exact. */
+export function exceedsPriced(fresh: bigint, priced: bigint, toleranceBps: number = PRICE_TOLERANCE_BPS): boolean {
+  return fresh * 10_000n > priced * BigInt(10_000 + toleranceBps);
+}
+
+/** The refusal when the price moved past what she agreed to: nothing was sent, and what to do. */
+export function priceMovedMessage(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `The price moved while you were deciding: this would now cost about ${payAmountLabel(freshBase, decimals, symbol)}, `
+    + `not the ${payAmountLabel(pricedBase, decimals, symbol)} you were shown. Nothing was sent. Check the new price and try again.`;
+}
+
+export type StartErrorKind = 'follow' | 'paused' | 'refused' | 'other';
+
+/**
+ * One reading of a start route's answer, for both hooks: an attempt of hers
+ * already exists (follow it), the server paused the payment, the route refused
+ * this token for now, or anything else. By code and status — never by words.
+ */
+export function classifyStartError(e: unknown): StartErrorKind {
+  const code = errorCode(e);
+  if (code === PAY_IN_PROGRESS) return 'follow';
+  if (code === PAY_ATTEMPT_UNCERTAIN) return 'paused';
+  return isRouteRefused(e) ? 'refused' : 'other';
+}
+
+/** What a failed start looks like to the payer, per kind. `follow` is the caller's own. */
+export function startFailure(e: unknown): { error: string; errorCode?: string; retryable: boolean } {
+  switch (classifyStartError(e)) {
+    case 'paused':
+      return { error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false };
+    case 'refused':
+      return { error: CANT_PAY_WITH_TOKEN, retryable: true };
+    default:
+      return { error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e), retryable: true };
+  }
+}
+
+/** A price lookup that failed: a refusal becomes the shared copy, anything else passes through. */
+export const estimateError = (e: unknown): Error => (isRouteRefused(e) ? new Error(CANT_PAY_WITH_TOKEN) : (e as Error));
+
+/**
+ * The terminal state for a swap the server will not take a hash for: it may
+ * still be mining and reach the merchant, so she must not pay again, and only
+ * support can settle it — with the payment's reference.
+ */
+export const unconfirmedCopy = (paymentId: string): string =>
+  `We couldn't confirm this payment with our server. Your payment may still go through, so please don't pay again. `
+  + `Contact support and quote payment reference ${paymentId}.`;

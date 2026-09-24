@@ -1,4 +1,5 @@
 import {
+  classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage,
 } from '../payCheckout';
@@ -170,5 +171,67 @@ describe('what the server’s start-route refusals mean to the payer', () => {
   });
   it('its copy points at another token or later', () => {
     expect(CANT_PAY_WITH_TOKEN).toMatch(/another token/i);
+  });
+});
+
+describe('the bound between the price she was shown and the amount signed', () => {
+  it('tolerates 2% over the priced amount, and no more', () => {
+    expect(PRICE_TOLERANCE_BPS).toBe(200);
+    expect(exceedsPriced(1_000_000n, 1_000_000n)).toBe(false);
+    expect(exceedsPriced(900_000n, 1_000_000n)).toBe(false); // cheaper is never a refusal
+    expect(exceedsPriced(1_020_000n, 1_000_000n)).toBe(false); // exactly 2%
+    expect(exceedsPriced(1_020_001n, 1_000_000n)).toBe(true);
+  });
+  it('is exact for 18-decimal amounts far past a float', () => {
+    const priced = 84_000_000_000_000_000n;
+    expect(exceedsPriced(priced + priced / 50n, priced)).toBe(false);
+    expect(exceedsPriced(priced + priced / 50n + 1n, priced)).toBe(true);
+  });
+  it('the refusal names both amounts, says nothing was sent, and says what to do', () => {
+    const m = priceMovedMessage('90720000000000000', '84000000000000000', 18, 'BNB');
+    expect(m).toContain('0.09072 BNB');
+    expect(m).toContain('0.084 BNB');
+    expect(m).toMatch(/nothing was sent/i);
+    expect(m).toMatch(/try again/i);
+  });
+});
+
+describe('classifyStartError — one reading of a start route’s answer for both hooks', () => {
+  const err = (status: number, code?: string) => Object.assign(new Error('server words'), { status, code });
+  it.each([
+    [err(409, 'pay_in_progress'), 'follow'],
+    [err(409, 'pay_attempt_uncertain'), 'paused'],
+    [err(422), 'refused'],
+    [err(503), 'refused'],
+    [err(500), 'other'],
+    [err(403, 'kyc_verification_required'), 'other'],
+    [new Error('offline'), 'other'],
+  ])('%#: %s', (e, kind) => {
+    expect(classifyStartError(e)).toBe(kind);
+  });
+
+  it('startFailure gives each kind its state: paused is held, refused is retryable, other keeps the words and code', () => {
+    expect(startFailure(err(409, 'pay_attempt_uncertain'))).toMatchObject({ retryable: false, errorCode: 'pay_attempt_uncertain' });
+    expect(startFailure(err(409, 'pay_attempt_uncertain')).error).toMatch(/paused/i);
+    expect(startFailure(err(422))).toMatchObject({ retryable: true, error: expect.stringMatching(/another token/i) });
+    expect(startFailure(err(403, 'kyc_verification_required'))).toEqual({
+      error: 'server words', errorCode: 'kyc_verification_required', retryable: true,
+    });
+    expect(startFailure(Object.assign(new Error(''), { status: 500 })).error).toMatch(/try again/i);
+  });
+
+  it('estimateError maps a refusal to the same copy and passes anything else through', () => {
+    expect(estimateError(err(422)).message).toMatch(/another token/i);
+    const other = err(500);
+    expect(estimateError(other)).toBe(other);
+  });
+});
+
+describe('unconfirmedCopy', () => {
+  it('is honest, says not to pay again, and carries the payment reference for support', () => {
+    const c = unconfirmedCopy('pay-123');
+    expect(c).toMatch(/couldn't confirm/i);
+    expect(c).toMatch(/don't pay again/i);
+    expect(c).toContain('pay-123');
   });
 });

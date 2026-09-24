@@ -10,7 +10,7 @@
 // `showForm` is whether the checkout is payable right now. The form (picker,
 // price, Pay) needs it; the prompts about an attempt do not — a payment reopened
 // mid-flight has no form, but its shortfall must still be answerable.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -21,7 +21,7 @@ import type { PayHook } from '@/hooks/usePayLive';
 import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
-import { shortfallCopy } from '@/utils/payCheckout';
+import { PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 type Props = {
@@ -37,7 +37,8 @@ type Props = {
 };
 
 type Pick = { token: LiFiToken; chainId: number };
-type Priced = { pick: Pick; label?: string; receives?: string; error?: string };
+/** A price lookup for one pick: what she would pay, in words and base units, and when it was looked up. */
+type Priced = { pick: Pick; label?: string; fromAmount?: string; receives?: string; error?: string; at: number };
 
 export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }: Props) {
   const { colors, spacing } = useTheme();
@@ -47,17 +48,39 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
   const seq = useRef(0);
   const estimateFor = pay.estimate;
 
-  useEffect(() => {
-    if (!pick) return;
+  /** Look the price up again. Only the latest lookup counts, so a slow old one cannot overwrite a newer figure. */
+  const reprice = useCallback(async (p: Pick) => {
     const mine = ++seq.current;
-    estimateFor(pick.token, pick.chainId)
-      .then((e) => { if (mine === seq.current) setPriced({ pick, label: e.pay, receives: e.receives }); })
-      .catch((e) => {
-        if (mine === seq.current) setPriced({ pick, error: e instanceof Error ? e.message : 'Could not price this.' });
-      });
-    // estimate closes over the checkout and wallet; only a new pick re-prices.
+    try {
+      const e = await estimateFor(p.token, p.chainId);
+      if (mine === seq.current) setPriced({ pick: p, label: e.pay, fromAmount: e.fromAmount, receives: e.receives, at: Date.now() });
+    } catch (e) {
+      if (mine === seq.current) setPriced({ pick: p, error: e instanceof Error ? e.message : 'Could not price this.', at: Date.now() });
+    }
+  }, [estimateFor]);
+
+  // A new pick — or her wallet arriving, which a price needs — is priced.
+  useEffect(() => {
+    if (pick) void reprice(pick);
+    // estimate closes over the checkout and wallet; only the pick and the wallet re-price.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pick]);
+  }, [pick, pay.walletAddress]);
+
+  // What she was shown is what she pays: a figure is looked up again when it is
+  // 30 s old, for as long as she may still tap Pay.
+  const mayPay = showForm && (pay.stage === 'idle' || (pay.stage === 'failed' && pay.retryable !== false));
+  useEffect(() => {
+    if (!pick || !mayPay) return;
+    const t = setInterval(() => { void reprice(pick); }, PRICE_STALE_MS);
+    return () => clearInterval(t);
+  }, [pick, mayPay, reprice]);
+
+  const onPay = () => {
+    if (!pick || !price?.label || !price.fromAmount) return;
+    // A stale figure is not paid: look it up, show what it is now, and let her confirm that.
+    if (Date.now() - price.at > PRICE_STALE_MS) { void reprice(pick); return; }
+    pay.payWith(pick.token, pick.chainId, { pay: price.label, fromAmount: price.fromAmount });
+  };
 
   const price = priced && priced.pick === pick ? priced : null;
   const pricing = !!pick && !price;
@@ -164,7 +187,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
         <Button
           title={`Pay ${formatKobo(String(checkout.customerTotal))}`}
           size="lg"
-          onPress={() => pick && pay.payWith(pick.token, pick.chainId)}
+          onPress={onPay}
           loading={running}
           disabled={!pick || !price?.label || running}
         />
