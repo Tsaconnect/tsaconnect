@@ -54,10 +54,10 @@ type PayReconcileRunner interface {
 	ReconcileTick(ctx context.Context) error
 }
 
-// PayReconciler runs TSA Pay's periodic reconciliation tick: Part A is just
-// the expiry sweep (ExpireDue), and Parts B/C extend ReconcileTick itself
-// with chain- and Paycrest-order-aware recovery rather than adding a second
-// worker here.
+// PayReconciler runs TSA Pay's periodic reconciliation tick: the expiry sweep,
+// the stuck-test-payment release, and settlement of every in-flight live
+// payment against its Paycrest order or sell intent (ReconcileTick). On
+// Postgres one instance runs a tick at a time.
 type PayReconciler struct {
 	svc      PayReconcileRunner
 	interval time.Duration

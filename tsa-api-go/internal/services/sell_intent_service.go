@@ -395,6 +395,10 @@ func (in CreateSellIntentInput) checkDelivery() error {
 	switch {
 	case in.DestChainID <= 0 || strings.TrimSpace(in.DestTokenAddress) == "":
 		return fmt.Errorf("%w: a delivery names its chain and token", ErrSellIntentState)
+	case strings.EqualFold(strings.TrimSpace(in.DestTokenAddress), evmNativeAddress) ||
+		strings.EqualFold(strings.TrimSpace(in.DestTokenAddress), evmNativeAliasAddress):
+		// The proof reads ERC-20 Transfer logs; a native coin leaves none.
+		return fmt.Errorf("%w: a delivery is an ERC-20 token, not a native coin", ErrSellIntentState)
 	case !ok || owed.Sign() <= 0:
 		return fmt.Errorf("%w: %q is not an amount to deliver", ErrSellIntentState, in.DestAmount)
 	case strings.TrimSpace(in.ToAmount) == "":
@@ -604,6 +608,15 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		order, err = s.orders.CreateSellForToken(ctx, sellReq, BaseUnitsToDecimal(landed, 6), true)
 	}
 	if err != nil {
+		if errors.Is(err, ErrSellAttemptMayExist) {
+			// An order may be open — a short one that could not be cancelled, or
+			// one Paycrest opened that could not be recorded. Giving the claim back
+			// would invite a retry against it; leave it `ordering`, so the intent
+			// stays out of any release path until the claim goes stale and the pay
+			// reconciler (which looks for that order) takes it from there.
+			log.Printf("[ramp-sell] ALERT ramp_sell_attempt_may_exist_total=1 intent=%s: %v", in.ID, err)
+			return nil, err
+		}
 		// No offramp exists: give the claim back so she can simply retry.
 		s.releaseClaim(ctx, in.ID)
 		return nil, err

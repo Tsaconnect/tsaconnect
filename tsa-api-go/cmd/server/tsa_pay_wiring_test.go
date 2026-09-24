@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -61,5 +62,23 @@ func TestBuildPayCheckout_NeedsOrdersAndNeverWrapsANilPointer(t *testing.T) {
 	}
 	if buildPayCheckout(nil, orders, &services.SellIntentService{}, nil, nil, true) == nil {
 		t.Fatal("intents without a quoter must still start direct payments")
+	}
+}
+
+// The reconciler follows converted and crypto payments through the intent
+// service alone: turning the ramp-sell quoter (or Paycrest orders) off must not
+// leave payments already in flight with nothing following them.
+func TestBuildPayCheckout_TheReconcilerFollowsIntentsWhateverElseIsOff(t *testing.T) {
+	for name, orders := range map[string]*services.PaycrestOrderService{"no quoter": &services.PaycrestOrderService{}, "no orders and no quoter": nil} {
+		payments := services.NewPayPaymentService(nil, nil, 100, "", time.Now)
+		buildPayCheckout(payments, orders, &services.SellIntentService{}, nil, nil, true)
+		if !payments.IntentsWired() {
+			t.Fatalf("%s: in-flight converted payments are stranded", name)
+		}
+	}
+	payments := services.NewPayPaymentService(nil, nil, 100, "", time.Now)
+	buildPayCheckout(payments, &services.PaycrestOrderService{}, nil, nil, nil, true)
+	if payments.IntentsWired() {
+		t.Fatal("no intent service must leave the reconciler with none")
 	}
 }

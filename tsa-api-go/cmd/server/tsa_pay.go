@@ -59,6 +59,11 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
 	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)
+	if chains != nil {
+		// Proves an expired order's deposit address is empty before its payment is
+		// handed back; without it no expired order is ever released.
+		payments.SetDepositReader(chains)
+	}
 	sender := services.NewPayWebhookSender(db, merchants, services.NewPayWebhookHTTPClient(), time.Now)
 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
@@ -81,13 +86,18 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 func buildPayCheckout(payments *services.PayPaymentService, orders *services.PaycrestOrderService,
 	intents *services.SellIntentService, quoter *services.RampSellQuoter,
 	rates *services.PaycrestQuoteService, live bool) *services.PayCheckoutService {
+	// The reconciler follows converted and crypto payments through the intent
+	// service alone; it needs no quoter or order service. Turning either off must
+	// not strand payments already in flight, so it is wired whenever intents exist.
+	if intents != nil && payments != nil {
+		payments.SetIntents(intents)
+	}
 	if orders == nil {
 		return nil
 	}
 	if intents == nil || quoter == nil {
 		return services.NewPayCheckoutService(payments, orders, nil, nil, live)
 	}
-	payments.SetIntents(intents)
 	checkout := services.NewPayCheckoutService(payments, orders, intents, quoter, live)
 	if rates != nil {
 		// The merchant's token is priced through the ramp quoter's own LiFi

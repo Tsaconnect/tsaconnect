@@ -316,13 +316,13 @@ func (h *PayHandler) AdminPaymentDeliveries(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
 		return
 	}
-	rows, err := h.payments.Deliveries(c.Request.Context(), id)
+	deliveries, err := h.payments.Deliveries(c.Request.Context(), id)
 	if err != nil {
 		log.Printf("[tsa-pay] admin list deliveries for payment %s failed: %v", id, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list deliveries")
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Deliveries", gin.H{"deliveries": rows})
+	utils.SuccessResponse(c, http.StatusOK, "Deliveries", gin.H{"deliveries": deliveries})
 }
 
 // POST /admin/pay/deliveries/:id/resend
@@ -756,6 +756,13 @@ func (h *PayHandler) startIntent(c *gin.Context, start func(payCheckoutStarter, 
 	})
 }
 
+// The answer for a start that may have left a payout order open: the same on the
+// pay start routes and on the ordinary sell-intent order route.
+const (
+	payAttemptUncertainCode    = "pay_attempt_uncertain"
+	payAttemptUncertainMessage = "We couldn't safely start this payment — it has been paused for review. Please contact support before trying again."
+)
+
 // payStartFail maps a start route's error. The payment's own refusals go
 // through payPaymentFail; a sell that cannot be opened is the ramp's own
 // vocabulary (paycrestError / sellSwapError), so those sentinels are mapped
@@ -765,9 +772,7 @@ func payStartFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrSellAttemptMayExist):
 		// Checked before rate_moved, which it may wrap: the payment is failed
 		// for support, so this is not a retry.
-		utils.ErrorResponseWithCode(c, http.StatusConflict,
-			"We couldn't safely start this payment — it has been paused for review. Please contact support before trying again.",
-			"pay_attempt_uncertain")
+		utils.ErrorResponseWithCode(c, http.StatusConflict, payAttemptUncertainMessage, payAttemptUncertainCode)
 	case errors.Is(err, services.ErrPayInternal):
 		// Ours, not the provider's: never say "could not reach the transfer provider".
 		log.Printf("[tsa-pay] start route failed: %s %s: %v", c.Request.Method, c.FullPath(), err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
 	"sync"
@@ -78,11 +79,12 @@ var (
 	// ErrPayInProgress is returned by LinkOrder/LinkIntent when a payment
 	// already carries an attempt — a processing payment holds at most one.
 	ErrPayInProgress = errors.New("you already started paying this — finish or wait for it")
+	// ErrPayForbidden is returned when the caller may not act on this payment
+	// (someone else's test payment, say).
+	ErrPayForbidden = errors.New("you can't do this on this payment")
 	// ErrPayTransition is returned when a guarded state-changing call finds
 	// the payment not in a state that allows it (the guarded UPDATE matched
 	// zero rows).
-	ErrPayForbidden = errors.New("you can't do this on this payment")
-
 	ErrPayTransition = errors.New("payment is not in a state that allows this")
 )
 
@@ -93,8 +95,9 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
-	intents      payIntents // nil until SetIntents (ramp sell off: converted payments unavailable)
-	alerted      sync.Map   // alertOnce's memory: what this process has already alerted on
+	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
+	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
+	alerted      sync.Map         // alertOnce's memory: what this process has already alerted on
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the
@@ -104,10 +107,25 @@ func NewPayPaymentService(db *gorm.DB, merchants *PayMerchantService, feeBps int
 	return &PayPaymentService{db: db, merchants: merchants, feeBps: feeBps, checkoutBase: checkoutBase, now: now}
 }
 
+// payDepositReader reads the balance of a token at an address on one of our
+// chains, keyed the way an order records them (chain key, token symbol).
+// *BlockchainService fills it.
+type payDepositReader interface {
+	DepositBalance(chainKey, token, address string) (*big.Int, error)
+}
+
+// SetDepositReader wires the on-chain read that proves an expired order's
+// deposit address is empty. Unset, no expired order is ever released: it waits
+// and alerts. Never called with a typed-nil.
+func (s *PayPaymentService) SetDepositReader(r payDepositReader) { s.deposits = r }
+
 // SetIntents wires the sell-intent service the reconciler reads converted
 // attempts through. Never called with a typed-nil: a nil interface is how the
 // reconciler knows there are no converted attempts to look after.
 func (s *PayPaymentService) SetIntents(i payIntents) { s.intents = i }
+
+// IntentsWired reports whether converted and crypto payments can be followed.
+func (s *PayPaymentService) IntentsWired() bool { return s.intents != nil }
 
 // Create starts (or, for a retried reference, returns) one checkout for
 // merchant m. The bool return is true only when a new row was inserted.

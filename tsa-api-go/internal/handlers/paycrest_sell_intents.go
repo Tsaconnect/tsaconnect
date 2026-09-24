@@ -102,7 +102,7 @@ func (h *PaycrestHandler) CreateSellIntent(c *gin.Context) {
 	// the source chain: the app asks for a top-up exactly when it is set,
 	// because only then was one priced into the budget the sale was admitted on.
 	utils.SuccessResponse(c, http.StatusCreated, "Sale started — sign the swap", gin.H{
-		"intent": intent, "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
+		"intent": intentForCaller(intent), "lifiQuote": quote.LiFiQuote, "gasTopUp": quote.GasTopUp,
 	})
 }
 
@@ -280,6 +280,11 @@ func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *model
 			"success": false, "message": "Not enough USDC on Base to pay the full amount",
 			"code": "pay_shortfall", "missingUsdc": services.BaseUnitsToDecimal(short.MissingBaseUnits, 6),
 		})
+	case errors.Is(err, services.ErrSellAttemptMayExist):
+		// Before rate_moved, which it wraps when a short order could not be
+		// cancelled: a retry against an order that may still be open is exactly
+		// what must not be invited. The payment is failed for support.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, payAttemptUncertainMessage, payAttemptUncertainCode)
 	case errors.Is(err, services.ErrSellRateMoved):
 		// Its own text, not err's: the error may also say an order may exist.
 		utils.ErrorResponseWithCode(c, http.StatusConflict, services.ErrSellRateMoved.Error(), "rate_moved")
@@ -287,7 +292,9 @@ func (h *PaycrestHandler) sellIntentError(c *gin.Context, err error, user *model
 		open, _ := h.sellIntents.Open(c.Request.Context(), user.ID)
 		c.JSON(http.StatusConflict, gin.H{
 			"success": false, "message": "You already have a sale in progress",
-			"data": gin.H{"intent": open},
+			// intentForCaller: the open sale may be a pay payment's, whose bank is
+			// the merchant's.
+			"data": gin.H{"intent": intentForCaller(open)},
 		})
 	case errors.Is(err, services.ErrSwapNotLanded):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "Still swapping — try again in a moment", sellCodeSwapPending)

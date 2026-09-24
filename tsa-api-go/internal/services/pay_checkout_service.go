@@ -203,19 +203,19 @@ func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, i
 	if errors.Is(err, ErrSellAttemptMayExist) {
 		// An order may be open that she could fund: the payment is failed for
 		// support, never handed to another payer.
-		s.failStart(ctx, p.ID, "start_attempt_may_exist", "", uuid.Nil, err)
+		s.failStart(ctx, p, "start_attempt_may_exist", "", uuid.Nil, err)
 		return nil, err
 	}
 	if err != nil {
 		// CreateSellForFiat cancels a short order itself, and says so when it
 		// could not: here nothing fundable exists.
-		s.release(ctx, p.ID, "released: the payout order could not be opened")
+		s.release(ctx, p, "released: the payout order could not be opened")
 		return nil, err
 	}
 	bctx, stop := payBookkeeping(ctx)
 	defer stop()
 	if err := s.payments.LinkOrder(bctx, p.ID, order.ID); err != nil {
-		s.failStart(ctx, p.ID, "link_failed", "order", order.ID, err)
+		s.failStart(ctx, p, "link_failed", "order", order.ID, err)
 		return nil, payInternal(err)
 	}
 	return order, nil
@@ -236,7 +236,7 @@ func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User
 	fiat := payFiatAmount(p.MerchantNetKobo)
 	target, err := s.convertedTarget(ctx, fiat)
 	if err != nil {
-		s.release(ctx, p.ID, "released: the swap could not be sized")
+		s.release(ctx, p, "released: the swap could not be sized")
 		return nil, nil, err
 	}
 	return s.startIntent(ctx, user, p, CreateSellIntentInput{
@@ -259,7 +259,7 @@ func (s *PayCheckoutService) startIntent(ctx context.Context, user *models.User,
 	intent, quote, err := s.intents.Create(ctx, user, in)
 	if err != nil {
 		// A failed Create inserts no intent: nothing is signable.
-		s.release(ctx, p.ID, "released: the swap could not be started")
+		s.release(ctx, p, "released: the swap could not be started")
 		return nil, nil, err
 	}
 	bctx, stop := payBookkeeping(ctx)
@@ -270,7 +270,7 @@ func (s *PayCheckoutService) startIntent(ctx context.Context, user *models.User,
 		if aerr := s.intents.AbandonForPay(bctx, intent.ID, nil); aerr != nil {
 			log.Printf("[tsa-pay] could not end unlinked intent %s: %v", intent.ID, aerr)
 		}
-		s.failStart(ctx, p.ID, "link_failed", "intent", intent.ID, err)
+		s.failStart(ctx, p, "link_failed", "intent", intent.ID, err)
 		return nil, nil, payInternal(err)
 	}
 	return intent, quote, nil
@@ -437,16 +437,16 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 		return nil, nil, err
 	}
 	if paySameToken(p, in) {
-		s.release(ctx, p.ID, "released: the store's own token on its own network")
+		s.release(ctx, p, "released: the store's own token on its own network")
 		return nil, nil, ErrPaySameToken
 	}
 	if err := payCryptoFee(p); err != nil {
-		s.release(ctx, p.ID, "released: the payment has no fee snapshot")
+		s.release(ctx, p, "released: the payment has no fee snapshot")
 		return nil, nil, err
 	}
 	owed, toAmount, _, toUSD, err := s.cryptoTarget(ctx, p)
 	if err != nil {
-		s.release(ctx, p.ID, "released: the transfer could not be sized")
+		s.release(ctx, p, "released: the transfer could not be sized")
 		return nil, nil, err
 	}
 	return s.startIntent(ctx, user, p, CreateSellIntentInput{
@@ -463,11 +463,27 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 	})
 }
 
-// begin takes the payment's lock for user and checks the payment is one this
-// service may start, on the route for how it settles (models.PaySettlement*).
-// Every refusal after a fresh lock hands it back: nothing has been asked of a
+// begin takes the payment's lock for user, on the route for how it settles
+// (models.PaySettlement*). The payment is READ and validated first — a live
+// payment on the route it settles by — so a call on the wrong route or a test
+// payment never takes anyone's lock at all; only then is it locked. Every
+// refusal after a fresh lock still hands it back: nothing has been asked of a
 // provider, so no money can be moving.
 func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uuid.UUID, settlement string) (*models.PayPayment, error) {
+	read, err := s.payments.Get(ctx, id)
+	if err != nil {
+		return nil, payInternal(err)
+	}
+	// The payer resuming her own attempt is told so whatever else is true.
+	holds := read.Status == models.PayStatusProcessing && read.PayerUserID != nil && *read.PayerUserID == user.ID
+	if !holds {
+		if read.Mode != models.PayModeLive {
+			return nil, ErrPayNotPayable
+		}
+		if read.SettlementMode != settlement {
+			return nil, payWrongRoute(settlement)
+		}
+	}
 	p, fresh, err := s.payments.Lock(ctx, user, id, s.live)
 	if err != nil {
 		return nil, payInternal(err)
@@ -477,12 +493,13 @@ func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uu
 		// second one is never started.
 		return nil, ErrPayInProgress
 	}
+	// The snapshot cannot change under a lock, so this is a backstop only.
 	if p.Mode != models.PayModeLive {
-		s.release(ctx, p.ID, "released: not a live payment")
+		s.release(ctx, p, "released: not a live payment")
 		return nil, ErrPayNotPayable
 	}
 	if p.SettlementMode != settlement {
-		s.release(ctx, p.ID, "released: this payment settles another way")
+		s.release(ctx, p, "released: this payment settles another way")
 		return nil, payWrongRoute(settlement)
 	}
 	return p, nil
@@ -506,11 +523,12 @@ func (s *PayCheckoutService) convertedTarget(ctx context.Context, fiat string) (
 // one the customer needs, and the reconciler frees a lock with no attempt
 // behind it after payLockNoAttemptGrace — and only once it has looked for an
 // attempt that may exist.
-func (s *PayCheckoutService) release(ctx context.Context, id uuid.UUID, reason string) {
+func (s *PayCheckoutService) release(ctx context.Context, p *models.PayPayment, reason string) {
 	bctx, stop := payBookkeeping(ctx)
 	defer stop()
-	if err := s.payments.Release(bctx, id, reason); err != nil {
-		log.Printf("[tsa-pay] could not release payment %s after a refused start: %v", id, err)
+	// Guarded on p's reading — a locked payment with no attempt yet.
+	if err := s.payments.releaseFrom(bctx, p, reason); err != nil {
+		log.Printf("[tsa-pay] could not release payment %s after a refused start: %v", p.ID, err)
 	}
 }
 
@@ -518,16 +536,18 @@ func (s *PayCheckoutService) release(ctx context.Context, id uuid.UUID, reason s
 // created something: an attempt exists, or may, and it could not be linked or
 // cleanly ruled out. The payment is never released — it fails, for support.
 // kind and attemptID name the attempt when there is one.
-func (s *PayCheckoutService) failStart(ctx context.Context, id uuid.UUID, alert, kind string, attemptID uuid.UUID, cause error) {
+func (s *PayCheckoutService) failStart(ctx context.Context, p *models.PayPayment, alert, kind string, attemptID uuid.UUID, cause error) {
 	detail := ""
 	if kind != "" {
 		detail = fmt.Sprintf(" %s=%s", kind, attemptID)
 	}
-	log.Printf("[tsa-pay] ALERT pay_%s_total=1 payment=%s%s err=%v", alert, id, detail, cause)
+	log.Printf("[tsa-pay] ALERT pay_%s_total=1 payment=%s%s err=%v", alert, p.ID, detail, cause)
 	bctx, stop := payBookkeeping(ctx)
 	defer stop()
-	if err := s.payments.Fail(bctx, id, "internal: could not start the attempt cleanly"); err != nil {
-		log.Printf("[tsa-pay] ALERT pay_%s_stuck_total=1 payment=%s%s err=%v", alert, id, detail, err)
+	// Not guarded on an attempt: when linking failed, whether the write landed
+	// is exactly what is unknown, and either way the payment must fail.
+	if err := s.payments.Fail(bctx, p.ID, "internal: could not start the attempt cleanly"); err != nil {
+		log.Printf("[tsa-pay] ALERT pay_%s_stuck_total=1 payment=%s%s err=%v", alert, p.ID, detail, err)
 	}
 }
 

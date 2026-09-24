@@ -363,7 +363,7 @@ func TestPayDirect_ACancelledShortOrderStillReleasesThePayment(t *testing.T) {
 
 // ---- S1: a claim that died holding the ordering state is not silent ----
 
-func TestPayReconcile_AnOrderingClaimPastTheStaleWindowAlertsOnce(t *testing.T) {
+func TestPayReconcile_AnOrderingClaimPastTheStaleWindowFailsThePaymentWithOneAlert(t *testing.T) {
 	r := newPayCheckoutRig(t)
 	in := r.startConverted(t)
 	r.pay.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Updates(map[string]any{
@@ -379,8 +379,10 @@ func TestPayReconcile_AnOrderingClaimPastTheStaleWindowAlertsOnce(t *testing.T) 
 	if n := strings.Count(logs.String(), "ALERT pay_ordering_claim_stale_total=1 payment="+r.p.ID.String()); n != 1 {
 		t.Fatalf("%d alerts, want exactly 1: %q", n, logs.String())
 	}
-	if got := r.get(t); got.Status != models.PayStatusProcessing {
-		t.Fatalf("the payment must keep waiting: %+v", got)
+	// A claim that died with no order to show for it: never released, never
+	// abandoned — failed for support.
+	if got := r.get(t); got.Status != models.PayStatusFailed || r.intents.abandoned != 0 {
+		t.Fatalf("payment %+v abandoned %d", got, r.intents.abandoned)
 	}
 }
 

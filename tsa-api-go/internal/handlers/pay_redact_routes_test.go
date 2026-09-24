@@ -2,14 +2,20 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/gorm"
 )
 
@@ -194,5 +200,137 @@ func TestPayRecordViews_AreOnlyAppliedToPayLinkedRecords(t *testing.T) {
 	rows := ordersForCaller([]models.PaycrestOrderRecord{*o, {PayoutAccount: ordinaryAccount}})
 	if rows[0].PayoutAccount == merchantAccount || rows[1].PayoutAccount != ordinaryAccount {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// ---- B2 / B3 ----
+
+// The intent order route answers an order that may still be open exactly as the
+// pay start routes do — before rate_moved, which it also wraps when a short
+// order could not be cancelled, or the app would auto-retry against it.
+func TestOpenSellIntentOrder_AnOrderThatMayStillExistIsPayAttemptUncertain(t *testing.T) {
+	for name, err := range map[string]error{
+		"a short order that could not be cancelled": fmt.Errorf("%w: %w", services.ErrSellAttemptMayExist, services.ErrSellRateMoved),
+		"an order that could not be recorded":       fmt.Errorf("%w: db down", services.ErrSellAttemptMayExist),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := openOrderRequest(t, &stubSellIntents{err: err}, "")
+			got := payDecode(t, w.Body.Bytes())
+			if w.Code != http.StatusConflict || got["code"] != "pay_attempt_uncertain" || got["message"] != payAttemptUncertainMessage {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// The 409 an ordinary sell gets while a sale is open carries that open sale: for a
+// customer paying a merchant it is a pay intent, whose bank is the merchant's.
+func TestCreateSellIntent_TheSaleInProgressAnswerMasksAPayIntentsBank(t *testing.T) {
+	user := &models.User{ID: uuid.New(), WalletAddress: sellSwapUserWallet}
+	payment := uuid.New()
+	payIntent := &models.RampSellIntent{ID: uuid.New(), PayPaymentID: &payment, Status: models.SellIntentSwapping,
+		BankCode: merchantBankCode, AccountNumber: merchantAccount, AccountName: merchantAccountName}
+	plainIntent := &models.RampSellIntent{ID: uuid.New(), Status: models.SellIntentSwapping,
+		BankCode: ordinaryBank, AccountNumber: ordinaryAccount, AccountName: ordinaryName}
+	for name, tc := range map[string]struct {
+		open *models.RampSellIntent
+		ok   func(t *testing.T, where, body string)
+	}{"pay": {payIntent, assertMerchantBankHidden}, "ordinary": {plainIntent, assertOrdinaryBankKept}} {
+		t.Run(name, func(t *testing.T) {
+			h := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{err: services.ErrSellIntentOpen, open: tc.open})
+			w := postSellIntent(t, h, user, sellIntentBody())
+			if w.Code != http.StatusConflict {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			tc.ok(t, "409 sale in progress", w.Body.String())
+		})
+	}
+}
+
+// A guard for every response the paycrest and pay handlers write: the records
+// that carry a pay payment's bank (RampSellIntent, PaycrestOrderRecord) may only
+// reach a response through the caller views. It reads the handlers' source, so a
+// new route or a new error branch that serialises a raw record fails here.
+//
+// Records are recognised by the variable names the handlers give them; the
+// canary below proves the check bites, and the route tests above prove the
+// behaviour of each masked site.
+var rawRecordNames = map[string]bool{"intent": true, "open": true, "order": true, "row": true, "rows": true, "resumable": true}
+
+var maskFuncs = map[string]bool{"intentForCaller": true, "orderForCaller": true, "ordersForCaller": true, "payIntentView": true, "payOrderView": true}
+
+// rawRecordResponses returns "file:line name" for every raw record identifier
+// passed to a response call in src.
+func rawRecordResponses(t *testing.T, filename string, src any) (found []string, responses int) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isResponse := func(call *ast.CallExpr) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		switch sel.Sel.Name {
+		case "SuccessResponse", "ErrorResponse", "ErrorResponseWithCode", "JSON":
+			return true
+		}
+		return false
+	}
+	var walk func(n ast.Node)
+	walk = func(n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.CallExpr:
+				if id, ok := v.Fun.(*ast.Ident); ok && maskFuncs[id.Name] {
+					return false // whatever is inside is masked
+				}
+			case *ast.Ident:
+				if rawRecordNames[v.Name] {
+					found = append(found, fmt.Sprintf("%s:%d %s", filename, fset.Position(v.Pos()).Line, v.Name))
+				}
+			}
+			return true
+		})
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && isResponse(call) {
+			responses++
+			for _, arg := range call.Args {
+				walk(arg)
+			}
+		}
+		return true
+	})
+	return found, responses
+}
+
+func TestEveryResponseThatCarriesARecordGoesThroughACallerView(t *testing.T) {
+	files, _ := filepath.Glob("paycrest*.go")
+	files = append(files, "pay_handler.go")
+	total := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		found, n := rawRecordResponses(t, name, nil)
+		total += n
+		for _, f := range found {
+			t.Errorf("a response carries a raw record (use intentForCaller/orderForCaller/ordersForCaller): %s", f)
+		}
+	}
+	if total < 10 {
+		t.Fatalf("only %d response calls found: the guard is not reading the handlers", total)
+	}
+	// The canary: the same check flags the bypass it exists for.
+	bad := `package handlers
+func f(c *gin.Context, open *models.RampSellIntent) {
+	c.JSON(409, gin.H{"data": gin.H{"intent": open}})
+	utils.SuccessResponse(c, 200, "ok", gin.H{"intent": intentForCaller(open)})
+}`
+	if found, _ := rawRecordResponses(t, "canary.go", bad); len(found) != 1 {
+		t.Fatalf("canary: %v, want exactly the unmasked one", found)
 	}
 }

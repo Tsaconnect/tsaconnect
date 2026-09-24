@@ -59,6 +59,11 @@ type fakePayIntents struct {
 	// as fakePayOrders'.
 	statusCalls int
 	onCreate    func()
+	// statusHook runs inside SwapStatus (the slow LiFi read) — a test's way of
+	// changing the payment under a reconciler that has already read it; statusErr
+	// is SwapStatus's failure.
+	statusHook func()
+	statusErr  error
 }
 
 func (f *fakePayIntents) Create(_ context.Context, _ *models.User, in CreateSellIntentInput) (*models.RampSellIntent, *SellSwapQuote, error) {
@@ -81,6 +86,12 @@ func (f *fakePayIntents) AbandonForPay(_ context.Context, _ uuid.UUID, hash *str
 }
 func (f *fakePayIntents) SwapStatus(context.Context, uuid.UUID) (*LiFiTransferStatus, error) {
 	f.statusCalls++
+	if f.statusHook != nil {
+		f.statusHook()
+	}
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
 	return f.status, nil
 }
 func (f *fakePayIntents) ConfirmDelivery(context.Context, uuid.UUID) (string, error) {
@@ -133,6 +144,18 @@ func (f *fakePayQuoter) Quote(_ context.Context, in SellQuoteInput) (*SellSwapQu
 	return &SellSwapQuote{Route: &LiFiRoute{FromAmount: "17000000000000000", ToAmountUSD: f.toUSD}}, nil
 }
 
+// fakeDeposits answers the balance of an expired order's deposit address.
+type fakeDeposits struct {
+	bal   *big.Int
+	err   error
+	calls int
+}
+
+func (f *fakeDeposits) DepositBalance(_, _, _ string) (*big.Int, error) {
+	f.calls++
+	return f.bal, f.err
+}
+
 type payCheckoutRig struct {
 	svc     *PayCheckoutService
 	pay     *PayPaymentService
@@ -142,6 +165,7 @@ type payCheckoutRig struct {
 	orders  *fakePayOrders
 	intents *fakePayIntents
 	quoter  *fakePayQuoter
+	deposit *fakeDeposits
 }
 
 func newPayCheckoutRig(t *testing.T) *payCheckoutRig {
@@ -152,9 +176,10 @@ func newPayCheckoutRig(t *testing.T) *payCheckoutRig {
 	}
 	p, _, _ := pay.Create(context.Background(), m, models.PayModeLive, payIn())
 	r := &payCheckoutRig{pay: pay, p: p, m: m, alice: payUser(t, pay, true),
-		orders: &fakePayOrders{deposit: big.NewInt(33_500000)}, intents: &fakePayIntents{}, quoter: &fakePayQuoter{toUSD: 33.5}}
+		orders: &fakePayOrders{deposit: big.NewInt(33_500000)}, intents: &fakePayIntents{}, quoter: &fakePayQuoter{toUSD: 33.5}, deposit: &fakeDeposits{bal: new(big.Int)}}
 	r.svc = NewPayCheckoutService(pay, r.orders, r.intents, r.quoter, true)
 	pay.SetIntents(r.intents)
+	pay.SetDepositReader(r.deposit)
 	return r
 }
 
@@ -951,10 +976,14 @@ func TestPayReconcile_CryptoIntentOutcomes(t *testing.T) {
 		// She may have signed and not yet reported it, and a delivery's swap that
 		// mines after a release pays the merchant twice: a longer grace than a
 		// naira sale's ten minutes.
-		"swapping, no hash, 11 min":          {models.SellIntentSwapping, false, nil, "", "", 11 * time.Minute, models.PayStatusProcessing, 0},
-		"swapping, no hash, 59 min":          {models.SellIntentSwapping, false, nil, "", "", 59 * time.Minute, models.PayStatusProcessing, 0},
-		"swapping, no hash, 61 min":          {models.SellIntentSwapping, false, nil, "", "", 61 * time.Minute, models.PayStatusPending, 1},
-		"failed intent, no hash":             {models.SellIntentFailed, false, nil, "", "", time.Minute, models.PayStatusPending, 0},
+		"swapping, no hash, 11 min": {models.SellIntentSwapping, false, nil, "", "", 11 * time.Minute, models.PayStatusProcessing, 0},
+		"swapping, no hash, 59 min": {models.SellIntentSwapping, false, nil, "", "", 59 * time.Minute, models.PayStatusProcessing, 0},
+		"swapping, no hash, 61 min": {models.SellIntentSwapping, false, nil, "", "", 61 * time.Minute, models.PayStatusPending, 1},
+		// She can cancel a sale whose swap she already broadcast: the delivery
+		// grace applies here too (the naira table above keeps its immediate release).
+		"failed intent, no hash":             {models.SellIntentFailed, false, nil, "", "", time.Minute, models.PayStatusProcessing, 0},
+		"failed intent, no hash, 59 min":     {models.SellIntentFailed, false, nil, "", "", 59 * time.Minute, models.PayStatusProcessing, 0},
+		"failed intent, no hash, 61 min":     {models.SellIntentFailed, false, nil, "", "", 61 * time.Minute, models.PayStatusPending, 0},
 		"failed intent with a swap, done":    {models.SellIntentFailed, true, nil, LiFiStatusDone, LiFiSubstatusCompleted, time.Minute, models.PayStatusFailed, 0},
 		"failed intent with a swap, refused": {models.SellIntentFailed, true, nil, LiFiStatusFailed, "", time.Minute, models.PayStatusPending, 0},
 	} {
@@ -1039,6 +1068,8 @@ func newPayCheckoutPostgresRig(t *testing.T) *payCheckoutRig {
 		orders: &fakePayOrders{deposit: big.NewInt(33_500000)}, intents: &fakePayIntents{}, quoter: &fakePayQuoter{}}
 	r.svc = NewPayCheckoutService(pay, r.orders, r.intents, r.quoter, true)
 	pay.SetIntents(r.intents)
+	r.deposit = &fakeDeposits{bal: new(big.Int)}
+	pay.SetDepositReader(r.deposit)
 	return r
 }
 

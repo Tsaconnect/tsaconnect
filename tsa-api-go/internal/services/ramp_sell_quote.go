@@ -156,13 +156,18 @@ func (q *RampSellQuoter) targetFor(in SellQuoteInput, usdc string) deliveryTarge
 // LiFi client — the one the ramp already holds, so TSA Pay prices the merchant's
 // token with it instead of building a second client.
 func (q *RampSellQuoter) TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error) {
-	p, ok := q.lifi.(interface {
-		TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error)
-	})
+	p, ok := q.lifi.(tokenPricer)
 	if !ok {
-		return nil, 0, ErrSellUnavailable
+		return nil, 0, fmt.Errorf("%w: the ramp's LiFi client cannot price a token", ErrSellUnavailable)
 	}
 	return p.TokenPriceUSD(ctx, chainID, token)
+}
+
+// tokenPricer is the price read *LiFiQuoteClient adds to the quoter interface.
+// It is a separate interface so the quoter's fakes need not implement it; a
+// client without it answers ErrSellUnavailable (never a wrong price).
+type tokenPricer interface {
+	TokenPriceUSD(ctx context.Context, chainID int64, token string) (*big.Rat, int, error)
 }
 
 // nativeBalanceReader answers "how much gas coin does this address hold on

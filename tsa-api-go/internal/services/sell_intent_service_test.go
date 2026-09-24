@@ -279,9 +279,18 @@ func TestSellIntent_RecordSwapRejectsAMalformedHash(t *testing.T) {
 	}
 }
 
-type fakeFeeEnqueuer struct{ events []FeeEvent }
+type fakeFeeEnqueuer struct {
+	events []FeeEvent
+	// onEnqueue runs as the fee is booked — between ConfirmDelivery's checks and its write.
+	onEnqueue func()
+}
 
-func (f *fakeFeeEnqueuer) EnqueueFeeSettled(e FeeEvent) { f.events = append(f.events, e) }
+func (f *fakeFeeEnqueuer) EnqueueFeeSettled(e FeeEvent) {
+	if f.onEnqueue != nil {
+		f.onEnqueue()
+	}
+	f.events = append(f.events, e)
+}
 
 func TestSellIntent_BooksOurFeeOnceThroughTheFeeEngine(t *testing.T) {
 	r := newSellIntentRig(t)

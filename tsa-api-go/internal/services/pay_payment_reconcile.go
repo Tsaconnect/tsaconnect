@@ -48,6 +48,11 @@ const (
 	// payment, for up to payPendingSwapMax.
 	payPollEveryTick = time.Hour
 	payPollEvery     = 5 * time.Minute
+	// payStuckWaitMax bounds every wait this sweep cannot resolve on its own — a
+	// missing service, an unknown provider status, an order with no row — so none
+	// is silent forever: each alerts once when it starts and the payment is failed
+	// for support once it has gone on this long from the lock.
+	payStuckWaitMax = 6 * time.Hour
 )
 
 // payPollDue reports whether a payment of this age, whose swap was sent, is
@@ -73,25 +78,70 @@ func (s *PayPaymentService) reconcileProcessing(ctx context.Context, batch int) 
 		"released: no payment was started"); err != nil {
 		errs = append(errs, err)
 	}
+	// Orders first: settling a direct payment needs only our own table, so a
+	// LiFi or RPC outage met on the intents that follow can never stall it.
+	ctx = context.WithValue(ctx, payTickKey{}, &payTick{})
+	for _, where := range []string{
+		"paycrest_order_id IS NOT NULL",
+		"paycrest_order_id IS NULL AND sell_intent_id IS NOT NULL",
+	} {
+		if err := s.sweep(ctx, batch, where, &errs); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// payTickKey / payTick carry what one sweep has learned to the steps in it: once
+// LiFi has failed to answer, the rest of the tick does not ask again (each ask
+// waits out a timeout, and they are made one after another).
+type (
+	payTickKey struct{}
+	payTick    struct{ lifiDown bool }
+)
+
+// errPayLiFiSkipped is what a step returns for a LiFi read it did not make.
+var errPayLiFiSkipped = errors.New("lifi already failed this tick")
+
+// swapStatus is intents.SwapStatus for the sweep: a failure marks LiFi down for
+// the rest of the tick, and later reads are skipped without a call.
+func (s *PayPaymentService) swapStatus(ctx context.Context, id uuid.UUID) (*LiFiTransferStatus, error) {
+	t, _ := ctx.Value(payTickKey{}).(*payTick)
+	if t != nil && t.lifiDown {
+		return nil, errPayLiFiSkipped
+	}
+	st, err := s.intents.SwapStatus(ctx, id)
+	if err != nil && t != nil {
+		t.lifiDown = true
+	}
+	return st, err
+}
+
+// sweep walks the processing payments matching where in id order, batch at a
+// time, so a long run of payments waiting on a customer can never starve a newer
+// one. A payment whose step fails is logged and appended to errs.
+func (s *PayPaymentService) sweep(ctx context.Context, batch int, where string, errs *[]error) error {
 	var after *uuid.UUID
 	for {
 		q := s.db.WithContext(ctx).Model(&models.PayPayment{}).
-			Where("status = ? AND (paycrest_order_id IS NOT NULL OR sell_intent_id IS NOT NULL)", models.PayStatusProcessing)
+			Where("status = ? AND "+where, models.PayStatusProcessing)
 		if after != nil {
 			q = q.Where("id > ?", *after)
 		}
 		var ids []uuid.UUID
 		if err := q.Order("id").Limit(batch).Pluck("id", &ids).Error; err != nil {
-			return errors.Join(append(errs, err)...)
+			return err
 		}
 		for _, id := range ids {
-			if err := s.reconcileOne(ctx, id); err != nil {
+			switch err := s.reconcileOne(ctx, id); {
+			case err == nil, errors.Is(err, errPayLiFiSkipped):
+			default:
 				log.Printf("[tsa-pay] reconcile payment %s: %v", id, err)
-				errs = append(errs, err)
+				*errs = append(*errs, err)
 			}
 		}
 		if len(ids) < batch {
-			return errors.Join(errs...)
+			return nil
 		}
 		after = &ids[len(ids)-1]
 	}
@@ -129,51 +179,112 @@ func (s *PayPaymentService) reconcileOrder(ctx context.Context, p *models.PayPay
 	var o models.PaycrestOrderRecord
 	if err := s.db.WithContext(ctx).First(&o, "id = ?", *p.PaycrestOrderID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("[tsa-pay] payment %s links order %s which has no row; waiting", p.ID, *p.PaycrestOrderID)
-			return nil
+			return s.waitOrFail(ctx, p, "order_row_missing", "order", *p.PaycrestOrderID, "the payment's order can't be found — support is reviewing it")
 		}
 		return err
 	}
 	switch o.Status {
 	case models.PaycrestStatusSettled:
-		return s.Succeed(ctx, p.ID, o.ID.String())
+		return s.succeedFrom(ctx, p, o.ID.String())
 	case models.PaycrestStatusRefunded:
-		return s.Release(ctx, p.ID, "the payout was refunded to the customer — they can try again")
+		return s.releaseFrom(ctx, p, "the payout was refunded to the customer — they can try again")
 	case models.PaycrestStatusExpired:
-		deposit, err := s.orderShowsDeposit(ctx, &o)
+		deposit, err := s.expiredOrderDeposit(ctx, &o)
 		if err != nil {
 			return err
 		}
-		if deposit {
+		switch deposit {
+		case depositSeen:
 			payAlert("order_expired_after_deposit", p, "order", o.ID)
-			return s.Fail(ctx, p.ID, "the order expired after a deposit may have been sent — support is reviewing it")
+			return s.failFrom(ctx, p, "the order expired after a deposit may have been sent — support is reviewing it")
+		case depositUnknown:
+			// Nothing says money arrived, and nothing could rule it out: a
+			// released payment lets a second payer pay while the first's funds
+			// sit stranded. Wait, and say so.
+			return s.waitOrFail(ctx, p, "expired_order_unverified", "order", o.ID,
+				"we couldn't confirm whether a deposit reached the order — support is reviewing it")
 		}
-		return s.Release(ctx, p.ID, "the order lapsed before payment")
+		return s.releaseFrom(ctx, p, "the order lapsed before payment")
 	case models.PaycrestStatusUnmatched:
 		payAlert("order_unmatched", p, "order", o.ID)
-		return s.Fail(ctx, p.ID, "the deposit couldn't be matched — support is reviewing it")
+		return s.failFrom(ctx, p, "the deposit couldn't be matched — support is reviewing it")
 	case models.PaycrestStatusFailed:
 		if payAmountPositive(o.AmountPaid) {
 			payAlert("order_failed_with_deposit", p, "order", o.ID)
 		}
-		return s.Fail(ctx, p.ID, "the payment wasn't completed")
+		return s.failFrom(ctx, p, "the payment wasn't completed")
 	case models.PaycrestStatusCancelled:
 		// Cancelled on OUR side only: Paycrest's copy may still take a deposit,
 		// so the payment is never handed back.
-		return s.Fail(ctx, p.ID, "the payment wasn't completed")
+		return s.failFrom(ctx, p, "the payment wasn't completed")
 	case models.PaycrestStatusAwaitingDeposit, models.PaycrestStatusPending, models.PaycrestStatusSettling:
 		return nil
 	default:
-		log.Printf("[tsa-pay] payment %s: order %s is %q; waiting", p.ID, o.ID, o.Status)
-		return nil
+		return s.waitOrFail(ctx, p, "order_status_unknown", "order", o.ID, "the payment's order is in a state we don't recognise — support is reviewing it")
 	}
 }
 
-// orderShowsDeposit reports any sign the customer's money reached, or may
-// have reached, the order: a paid amount, her "I've sent it" claim, or a
-// deposit we relayed for her. An unreadable sign is an error, never "none".
+// waitOrFail is the ending for a state this sweep can only wait on: it alerts
+// once, and fails the payment for support once the wait has run payStuckWaitMax
+// from the lock, so nothing waits in silence forever. It never releases: what it
+// waits on may still move money.
+func (s *PayPaymentService) waitOrFail(ctx context.Context, p *models.PayPayment, name, attempt string, attemptID uuid.UUID, reason string) error {
+	s.alertOnce(name, p, attempt, attemptID)
+	if s.now().Sub(payLockedAt(p)) <= payStuckWaitMax {
+		return nil
+	}
+	payAlert(name+"_timeout", p, attempt, attemptID)
+	return s.failFrom(ctx, p, reason)
+}
+
+// depositEvidence is what is known of whether the customer's money reached an
+// order that expired.
+type depositEvidence int
+
+const (
+	depositNone    depositEvidence = iota // every place it could show was read, and it is not there
+	depositSeen                           // some sign of money
+	depositUnknown                        // nothing seen, but the chain could not be read
+)
+
+// expiredOrderDeposit reads every sign that money reached an expired order, in
+// order of cost: what Paycrest and the customer say (orderShowsDeposit), then the
+// chain itself — the deposit address's token balance. Paycrest reported the
+// 2026-09-03 order as expired with amountPaid=0 after a full payment, and she had
+// not tapped "I've sent it", so the sources above can all read empty while the
+// money sits at the address. With no reader wired, or one that fails, the answer
+// is depositUnknown, never depositNone.
+func (s *PayPaymentService) expiredOrderDeposit(ctx context.Context, o *models.PaycrestOrderRecord) (depositEvidence, error) {
+	seen, err := s.orderShowsDeposit(ctx, o)
+	if err != nil {
+		return 0, err
+	}
+	if seen {
+		return depositSeen, nil
+	}
+	if strings.TrimSpace(o.DepositAddress) == "" {
+		return depositNone, nil // nowhere to have sent it
+	}
+	if s.deposits == nil {
+		return depositUnknown, nil
+	}
+	bal, err := s.deposits.DepositBalance(o.ChainKey, o.Token, o.DepositAddress)
+	if err != nil {
+		log.Printf("[tsa-pay] cannot read the deposit address of order %s: %v", o.ID, err)
+		return depositUnknown, nil
+	}
+	if bal != nil && bal.Sign() > 0 {
+		return depositSeen, nil
+	}
+	return depositNone, nil
+}
+
+// orderShowsDeposit reports any sign in our own records that the customer's
+// money reached, or may have reached, the order: a paid amount, a deposit
+// transaction Paycrest reported, her "I've sent it" claim, or a deposit we
+// relayed for her. An unreadable sign is an error, never "none".
 func (s *PayPaymentService) orderShowsDeposit(ctx context.Context, o *models.PaycrestOrderRecord) (bool, error) {
-	if payAmountPositive(o.AmountPaid) || o.PaymentClaimedAt != nil {
+	if payAmountPositive(o.AmountPaid) || o.PaymentClaimedAt != nil || strings.TrimSpace(o.TxHash) != "" {
 		return true, nil
 	}
 	var relayed int64
@@ -197,60 +308,108 @@ func payAmountPositive(v string) bool {
 // reconcileIntent moves a converted payment along its sell intent.
 func (s *PayPaymentService) reconcileIntent(ctx context.Context, p *models.PayPayment) error {
 	if s.intents == nil {
-		log.Printf("[tsa-pay] payment %s links intent %s but no intent service is wired; waiting", p.ID, *p.SellIntentID)
-		return nil
+		return s.waitOrFail(ctx, p, "no_intent_service", "intent", *p.SellIntentID,
+			"the payment's swap can't be followed right now — support is reviewing it")
 	}
 	var in models.RampSellIntent
 	if err := s.db.WithContext(ctx).First(&in, "id = ?", *p.SellIntentID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("[tsa-pay] payment %s links intent %s which has no row; waiting", p.ID, *p.SellIntentID)
-			return nil
+			return s.waitOrFail(ctx, p, "intent_row_missing", "intent", *p.SellIntentID,
+				"the payment's swap can't be found — support is reviewing it")
 		}
 		return err
 	}
 	switch in.Status {
 	case models.SellIntentOrdered:
 		if in.PaycrestOrderID == nil {
-			return nil
+			return s.waitOrFail(ctx, p, "ordered_without_order", "intent", in.ID,
+				"the payment's payout order isn't recorded — support is reviewing it")
 		}
 		return s.handOverToOrder(ctx, p, *in.PaycrestOrderID)
 	case models.SellIntentOrdering:
 		// Her payout order is being opened right now — unless the request
-		// opening it died holding the claim, and nothing here ever ends that:
-		// past the window OpenOrder itself treats as dead, say so.
-		if sellClaimIsStale(&in, s.now()) {
-			s.alertOnce("ordering_claim_stale", p, "intent", in.ID)
+		// opening it died holding the claim.
+		if !sellClaimIsStale(&in, s.now()) {
+			return nil
 		}
-		return nil
+		return s.reconcileStaleOrdering(ctx, p, &in)
 	}
 	age := s.now().Sub(payLockedAt(p))
+	delivery := in.DestAddress != ""
 	if in.SwapTxHash == nil {
-		// No swap was ever sent, so no money left her wallet.
-		if in.Status == models.SellIntentFailed {
-			return s.Release(ctx, p.ID, "the swap was cancelled before it was sent")
-		}
+		// No swap was recorded. For a naira sale nothing has left her wallet that
+		// could reach the merchant, so a cancelled intent frees the payment at
+		// once. A delivery's swap, if she signed and never reported it, pays the
+		// MERCHANT when it mines — a cancel by her (which ends the intent and
+		// bars any later hash) proves nothing about that, so the delivery grace
+		// applies to a failed intent too.
 		grace := payUnsignedSwapGrace
-		if in.DestAddress != "" {
+		if delivery {
 			grace = payDeliveryUnsignedGrace
+		}
+		if in.Status == models.SellIntentFailed {
+			if delivery && age <= grace {
+				return nil
+			}
+			return s.releaseFrom(ctx, p, "the swap was cancelled before it was sent")
 		}
 		if age <= grace {
 			return nil
 		}
 		return s.endIntentThen(ctx, &in, func() error {
-			return s.Release(ctx, p.ID, "the swap was never sent")
+			return s.releaseFrom(ctx, p, "the swap was never sent")
 		})
 	}
 	if !payPollDue(age) {
 		return nil
 	}
-	if in.DestAddress != "" {
+	if delivery {
 		return s.reconcileDelivery(ctx, p, &in, age)
 	}
-	st, err := s.intents.SwapStatus(ctx, in.ID)
+	st, err := s.swapStatus(ctx, in.ID)
 	if err != nil {
 		return err
 	}
 	return s.reconcileSwap(ctx, p, &in, age, st)
+}
+
+// reconcileStaleOrdering follows an intent whose ordering claim is past the
+// window OpenOrder itself treats as dead. The holder may have opened her payout
+// order and died before recording it, or its short order may not have been
+// cancelled: an order that pays this merchant may exist, so this never releases
+// the payment and never ends the intent.
+//
+//   - An order marked as this payment's, opened by her since the lock (and not
+//     one cancelled with its deposit address withdrawn), is adopted: the intent is
+//     recorded as ordered with it, exactly as OpenOrder would have, and the
+//     payment follows the order from there.
+//   - With none, the claim is dead with nothing to show for it: the payment is
+//     failed for support with an alert.
+func (s *PayPaymentService) reconcileStaleOrdering(ctx context.Context, p *models.PayPayment, in *models.RampSellIntent) error {
+	var o models.PaycrestOrderRecord
+	err := s.db.WithContext(ctx).
+		Where("pay_payment_id = ? AND user_id = ? AND created_at >= ?", p.ID, in.UserID, payLockedAt(p)).
+		Where("NOT (status = ? AND deposit_address = '')", models.PaycrestStatusCancelled).
+		Order("created_at DESC").First(&o).Error
+	switch {
+	case err == nil:
+		res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+			Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, models.SellIntentOrdering).
+			Updates(models.WithBankDetailsCleared(map[string]any{
+				"status": models.SellIntentOrdered, "paycrest_order_id": o.ID, "updated_at": s.now()}))
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil // it moved on while we looked; the next tick follows it
+		}
+		payAlert("ordering_order_adopted", p, "order", o.ID)
+		return s.handOverToOrder(ctx, p, o.ID)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		payAlert("ordering_claim_stale", p, "intent", in.ID)
+		return s.failFrom(ctx, p, "the payout order was never opened — support is reviewing it")
+	}
+	return err
 }
 
 // reconcileDelivery settles a crypto payment (its intent delivers a token to the
@@ -262,7 +421,7 @@ func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.Pay
 		destTx, err := s.intents.ConfirmDelivery(ctx, in.ID)
 		switch {
 		case err == nil:
-			return s.Succeed(ctx, p.ID, destTx)
+			return s.succeedFrom(ctx, p, destTx)
 		case errors.Is(err, ErrSwapNotLanded):
 			// Not delivered yet, or never going to be: decided below from LiFi's
 			// status — the one ConfirmDelivery just read, when it says which.
@@ -280,7 +439,7 @@ func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.Pay
 			// her out of every other sale.
 			failed := func() error {
 				payAlert("delivery_mismatch", p, "intent", in.ID)
-				return s.Fail(ctx, p.ID, "the transfer didn't deliver the full amount — support is reviewing it")
+				return s.failFrom(ctx, p, "the transfer didn't deliver the full amount — support is reviewing it")
 			}
 			if in.Status == models.SellIntentDelivered {
 				return failed() // a delivered sale is terminal: nothing to end
@@ -288,13 +447,13 @@ func (s *PayPaymentService) reconcileDelivery(ctx context.Context, p *models.Pay
 			return s.endIntentThen(ctx, in, failed)
 		case errors.Is(err, ErrSellUnavailable):
 			// No verifier for this chain (yet) is not a verdict on the payment.
-			log.Printf("[tsa-pay] payment %s: cannot prove delivery for intent %s yet: %v; waiting", p.ID, in.ID, err)
-			return nil
+			return s.waitOrFail(ctx, p, "delivery_unverifiable", "intent", in.ID,
+				"the transfer can't be confirmed right now — support is reviewing it")
 		default:
 			return err
 		}
 	}
-	st, err := s.intents.SwapStatus(ctx, in.ID)
+	st, err := s.swapStatus(ctx, in.ID)
 	if err != nil {
 		return err
 	}
@@ -311,7 +470,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 		status, sub = st.Status, st.Substatus
 	}
 	release := func(reason string) error {
-		return s.endIntentThen(ctx, in, func() error { return s.Release(ctx, p.ID, reason) })
+		return s.endIntentThen(ctx, in, func() error { return s.releaseFrom(ctx, p, reason) })
 	}
 	switch {
 	case status == LiFiStatusFailed || (status == LiFiStatusDone && sub == LiFiSubstatusRefunded):
@@ -319,7 +478,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 	case status == LiFiStatusDone && sub == LiFiSubstatusPartial:
 		return s.endIntentThen(ctx, in, func() error {
 			payAlert("swap_partial", p, "intent", in.ID)
-			return s.Fail(ctx, p.ID, "the swap only partly completed — support is reviewing it")
+			return s.failFrom(ctx, p, "the swap only partly completed — support is reviewing it")
 		})
 	case status == LiFiStatusDone && sub == LiFiSubstatusCompleted && in.DestAddress != "" &&
 		(in.Status == models.SellIntentSwapped || in.Status == models.SellIntentDelivered):
@@ -333,7 +492,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 		// it is never released.
 		return s.endIntentThen(ctx, in, func() error {
 			payAlert("delivery_unproven", p, "intent", in.ID)
-			return s.Fail(ctx, p.ID, "the transfer couldn't be confirmed — support is reviewing it")
+			return s.failFrom(ctx, p, "the transfer couldn't be confirmed — support is reviewing it")
 		})
 	case status == LiFiStatusDone:
 		if age <= payLandedNoOrderGrace {
@@ -348,7 +507,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 		}
 		return s.endIntentThen(ctx, in, func() error {
 			payAlert("swap_pending_too_long", p, "intent", in.ID)
-			return s.Fail(ctx, p.ID, "the swap is taking too long — support is reviewing it")
+			return s.failFrom(ctx, p, "the swap is taking too long — support is reviewing it")
 		})
 	default: // NOT_FOUND, INVALID, or no answer
 		if in.DestAddress != "" {
@@ -360,7 +519,7 @@ func (s *PayPaymentService) reconcileSwap(ctx context.Context, p *models.PayPaym
 			}
 			return s.endIntentThen(ctx, in, func() error {
 				payAlert("delivery_swap_unknown", p, "intent", in.ID)
-				return s.Fail(ctx, p.ID, "the transfer can't be found — support is reviewing it")
+				return s.failFrom(ctx, p, "the transfer can't be found — support is reviewing it")
 			})
 		}
 		if age <= payUnknownSwapGrace {

@@ -65,6 +65,9 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 			"status":        models.PayStatusProcessing,
 			"payer_user_id": user.ID,
 			"locked_at":     &now,
+			// A released payment keeps the reason it was released for; a new
+			// attempt must not carry it into whatever it ends as.
+			"failure_reason": "",
 		})
 	if res.Error != nil {
 		return nil, false, res.Error
@@ -80,12 +83,75 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 	return locked, true, nil
 }
 
+// payAttempt is the attempt a payment carried when a caller read it: the
+// paycrest_order_id and sell_intent_id it saw, nil meaning "none". A transition
+// made from that reading only matches while the payment still carries exactly
+// that, so a reconciler that read, then made a slow provider call, cannot
+// Release or Fail an attempt a new payer linked in the meantime.
+type payAttempt struct{ order, intent *uuid.UUID }
+
+// attemptOf is the attempt p carries.
+func attemptOf(p *models.PayPayment) *payAttempt {
+	return &payAttempt{order: p.PaycrestOrderID, intent: p.SellIntentID}
+}
+
+// payGuard is what a transition requires of the row it updates: its status, the
+// merchant and mode it belongs to (Cancel), and — when attempt is set — the
+// attempt it was decided from. It replaces free-form WHERE strings, so every
+// guard is spelled the same way and none can be forgotten.
+type payGuard struct {
+	statuses   []string
+	merchantID *uuid.UUID
+	mode       string
+	attempt    *payAttempt
+}
+
+// payProcessing is the guard every settle/release/fail transition starts from.
+func payProcessing(at *payAttempt) payGuard {
+	return payGuard{statuses: []string{models.PayStatusProcessing}, attempt: at}
+}
+
+// scope narrows q to the rows g allows.
+func (g payGuard) scope(q *gorm.DB, id uuid.UUID) *gorm.DB {
+	q = q.Where("id = ? AND status IN ?", id, g.statuses)
+	if g.merchantID != nil {
+		q = q.Where("merchant_id = ?", *g.merchantID)
+	}
+	if g.mode != "" {
+		q = q.Where("mode = ?", g.mode)
+	}
+	if g.attempt != nil {
+		q = attemptColumn(q, "paycrest_order_id", g.attempt.order)
+		q = attemptColumn(q, "sell_intent_id", g.attempt.intent)
+	}
+	return q
+}
+
+// attemptColumn requires col to equal v, or to be NULL when v is nil.
+func attemptColumn(q *gorm.DB, col string, v *uuid.UUID) *gorm.DB {
+	if v == nil {
+		return q.Where(col + " IS NULL")
+	}
+	return q.Where(col+" = ?", *v)
+}
+
 // Release moves processing → pending and clears the payer, locked_at and
 // both attempt links in one guarded UPDATE, so another customer can pay a
 // payment whose attempt died. See the Global Constraints for when a caller
-// may call this.
+// may call this. Guarded on status only; a caller acting on a reading of the
+// payment uses releaseFrom.
 func (s *PayPaymentService) Release(ctx context.Context, id uuid.UUID, reason string) error {
-	return s.transition(ctx, id, "id = ? AND status IN ?", []any{id, []string{models.PayStatusProcessing}},
+	return s.release(ctx, id, nil, reason)
+}
+
+// releaseFrom is Release, but only while the payment still carries the attempt
+// p was read with.
+func (s *PayPaymentService) releaseFrom(ctx context.Context, p *models.PayPayment, reason string) error {
+	return s.release(ctx, p.ID, attemptOf(p), reason)
+}
+
+func (s *PayPaymentService) release(ctx context.Context, id uuid.UUID, at *payAttempt, reason string) error {
+	return s.transition(ctx, id, payProcessing(at),
 		map[string]any{
 			"status":            models.PayStatusPending,
 			"payer_user_id":     nil,
@@ -126,19 +192,40 @@ func (s *PayPaymentService) linkAttempt(ctx context.Context, id uuid.UUID, colum
 // Succeed moves processing → succeeded and queues the payment.succeeded
 // webhook in the same transaction as the state change.
 func (s *PayPaymentService) Succeed(ctx context.Context, id uuid.UUID, settlementRef string) error {
+	return s.succeed(ctx, id, nil, settlementRef)
+}
+
+// succeedFrom is Succeed, guarded on the attempt p was read with.
+func (s *PayPaymentService) succeedFrom(ctx context.Context, p *models.PayPayment, settlementRef string) error {
+	return s.succeed(ctx, p.ID, attemptOf(p), settlementRef)
+}
+
+func (s *PayPaymentService) succeed(ctx context.Context, id uuid.UUID, at *payAttempt, settlementRef string) error {
 	now := s.now()
-	return s.transition(ctx, id, "id = ? AND status IN ?", []any{id, []string{models.PayStatusProcessing}},
+	return s.transition(ctx, id, payProcessing(at),
 		map[string]any{
 			"status":         models.PayStatusSucceeded,
 			"settlement_ref": settlementRef,
 			"succeeded_at":   &now,
+			// A payment released and retried succeeds with no memory of why
+			// the earlier attempt was released.
+			"failure_reason": "",
 		}, models.PayEventSucceeded)
 }
 
 // Fail moves processing → failed and queues the payment.failed webhook in
 // the same transaction as the state change.
 func (s *PayPaymentService) Fail(ctx context.Context, id uuid.UUID, reason string) error {
-	return s.transition(ctx, id, "id = ? AND status IN ?", []any{id, []string{models.PayStatusProcessing}},
+	return s.fail(ctx, id, nil, reason)
+}
+
+// failFrom is Fail, guarded on the attempt p was read with.
+func (s *PayPaymentService) failFrom(ctx context.Context, p *models.PayPayment, reason string) error {
+	return s.fail(ctx, p.ID, attemptOf(p), reason)
+}
+
+func (s *PayPaymentService) fail(ctx context.Context, id uuid.UUID, at *payAttempt, reason string) error {
+	return s.transition(ctx, id, payProcessing(at),
 		map[string]any{
 			"status":         models.PayStatusFailed,
 			"failure_reason": reason,
@@ -149,8 +236,7 @@ func (s *PayPaymentService) Fail(ctx context.Context, id uuid.UUID, reason strin
 // merchant changed its mind before any customer started paying — and queues
 // the payment.expired webhook in the same transaction.
 func (s *PayPaymentService) Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error {
-	return s.transition(ctx, id, "id = ? AND merchant_id = ? AND mode = ? AND status IN ?",
-		[]any{id, merchantID, mode, []string{models.PayStatusPending}},
+	return s.transition(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode},
 		map[string]any{
 			"status":         models.PayStatusExpired,
 			"failure_reason": "cancelled by the merchant",
@@ -192,7 +278,7 @@ func (s *PayPaymentService) ExpireDue(ctx context.Context, limit int) (int, erro
 func (s *PayPaymentService) expireEach(ctx context.Context, ids []uuid.UUID, reason string) (int, error) {
 	n := 0
 	for _, id := range ids {
-		err := s.transition(ctx, id, "id = ? AND status IN ?", []any{id, []string{models.PayStatusPending}},
+		err := s.transition(ctx, id, payGuard{statuses: []string{models.PayStatusPending}},
 			map[string]any{
 				"status":         models.PayStatusExpired,
 				"failure_reason": reason,
@@ -209,12 +295,43 @@ func (s *PayPaymentService) expireEach(ctx context.Context, ids []uuid.UUID, rea
 	return n, nil
 }
 
+// payReconcileLockKey is the Postgres advisory lock one instance holds while it
+// runs a reconcile tick ("TSAPAYC").
+const payReconcileLockKey int64 = 0x54534150415943
+
 // ReconcileTick is the periodic reconciler's unit of work: the expiry sweep,
 // the stuck-test-payment release, and settlement of every in-flight payment
 // (reconcileProcessing). Each step runs whatever the others do, so a failing
 // expiry sweep never holds up settling a payment; the errors are joined for
 // the worker's failure-streak alert.
+//
+// On Postgres one instance runs a tick at a time: a second instance (a deploy
+// overlap, a scale-out) finds the advisory lock held and skips the tick. The
+// guarded transitions already refuse a stale write; this stops two instances
+// making the same slow provider calls and racing each other at all. SQLite (the
+// tests) has no such lock and always runs.
 func (s *PayPaymentService) ReconcileTick(ctx context.Context) error {
+	if s.db.Dialector == nil || s.db.Dialector.Name() != "postgres" {
+		return s.reconcileTick(ctx)
+	}
+	var tickErr error
+	err := s.db.WithContext(ctx).Connection(func(conn *gorm.DB) error {
+		var got bool
+		if err := conn.Raw("SELECT pg_try_advisory_lock(?)", payReconcileLockKey).Scan(&got).Error; err != nil {
+			return err
+		}
+		if !got {
+			return nil // another instance is reconciling
+		}
+		// Session locks outlive the statement: release it even if ctx is done.
+		defer conn.WithContext(context.WithoutCancel(ctx)).Exec("SELECT pg_advisory_unlock(?)", payReconcileLockKey)
+		tickErr = s.reconcileTick(ctx)
+		return nil
+	})
+	return errors.Join(tickErr, err)
+}
+
+func (s *PayPaymentService) reconcileTick(ctx context.Context) error {
 	var errs []error
 	if _, err := s.ExpireDue(ctx, 100); err != nil {
 		errs = append(errs, err)
@@ -268,7 +385,9 @@ func (s *PayPaymentService) releaseUnattempted(ctx context.Context, mode string,
 				continue
 			}
 		}
-		err := s.Release(ctx, p.ID, reason)
+		// releaseFrom guards on the reading (no order, no intent): an attempt
+		// linked since the select above is never released.
+		err := s.releaseFrom(ctx, p, reason)
 		switch {
 		case err == nil:
 			n++
@@ -316,9 +435,14 @@ func (s *PayPaymentService) adoptStrayAttempt(ctx context.Context, p *models.Pay
 // findStrayAttempt is adoptStrayAttempt's read: the link column, id and kind of
 // the attempt p has that nothing points at, or uuid.Nil for none.
 func (s *PayPaymentService) findStrayAttempt(ctx context.Context, p *models.PayPayment) (column string, id uuid.UUID, kind string, err error) {
+	// An intent of an EARLIER attempt at this payment (released, then paid again)
+	// is not this attempt's: only one opened since the lock counts.
 	var in models.RampSellIntent
-	switch err := s.db.WithContext(ctx).Where("pay_payment_id = ? AND status <> ?", p.ID, models.SellIntentFailed).
-		Order("created_at DESC").First(&in).Error; {
+	iq := s.db.WithContext(ctx).Where("pay_payment_id = ? AND status <> ?", p.ID, models.SellIntentFailed)
+	if p.LockedAt != nil {
+		iq = iq.Where("created_at >= ?", *p.LockedAt)
+	}
+	switch err := iq.Order("created_at DESC").First(&in).Error; {
 	case err == nil:
 		return "sell_intent_id", in.ID, "intent", nil
 	case !errors.Is(err, gorm.ErrRecordNotFound):
@@ -389,15 +513,14 @@ func (s *PayPaymentService) SimulateTestOutcome(ctx context.Context, user *model
 }
 
 // transition performs one guarded state change — a single
-// `UPDATE ... WHERE <where>` that only ever matches the payment's current
-// legal predecessor state(s) — and, when event != "", the webhook delivery
-// that transition owes, in one database transaction: a failure to write the
-// delivery rolls the state change back with it. where/args must include
-// `status IN ?` (every caller here follows `"id = ? AND status IN ?"` /
-// `[]any{id, from}`, Cancel additionally scoping to merchant_id + mode).
-func (s *PayPaymentService) transition(ctx context.Context, id uuid.UUID, where string, args []any, fields map[string]any, event string) error {
+// `UPDATE ... WHERE <guard>` that only ever matches the payment's current
+// legal predecessor (status, and the attempt when the caller read one, see
+// payGuard) — and, when event != "", the webhook delivery that transition
+// owes, in one database transaction: a failure to write the delivery rolls the
+// state change back with it.
+func (s *PayPaymentService) transition(ctx context.Context, id uuid.UUID, g payGuard, fields map[string]any, event string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&models.PayPayment{}).Where(where, args...).Updates(fields)
+		res := g.scope(tx.Model(&models.PayPayment{}), id).Updates(fields)
 		if res.Error != nil {
 			return res.Error
 		}

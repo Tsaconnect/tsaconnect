@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"log"
 	"math/big"
 	"time"
@@ -115,6 +116,21 @@ func (bs *BlockchainService) ClientForChainID(chainID int64) (*blockchain.EVMCli
 func (bs *BlockchainService) ChainNameForID(id int64) (string, bool) {
 	_, name, ok := bs.chainLocation(id)
 	return name, ok
+}
+
+// DepositBalance is the balance of a token, named by symbol, at an address on a
+// mainnet chain, named by key — the read behind "did money reach this deposit
+// address" (see PayPaymentService.expiredOrderDeposit).
+func (bs *BlockchainService) DepositBalance(chainKey, token, address string) (*big.Int, error) {
+	client := bs.ClientForChain(chainKey)
+	if client == nil {
+		return nil, fmt.Errorf("no client for chain %q", chainKey)
+	}
+	addr := bs.TokenAddress(chainKey, token)
+	if addr == "" {
+		return nil, fmt.Errorf("no %s address on chain %q", token, chainKey)
+	}
+	return client.GetTokenBalance(addr, address)
 }
 
 // MainnetChainNameForID resolves a chain ID to its key only when it is a

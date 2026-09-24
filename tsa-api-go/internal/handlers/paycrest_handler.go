@@ -301,7 +301,7 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", row)
+	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", orderForCaller(row))
 }
 
 type paycrestSellBody struct {
@@ -347,7 +347,7 @@ func (h *PaycrestHandler) Sell(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your sale", row)
+	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your sale", orderForCaller(row))
 }
 
 // GET /api/paycrest/orders/:id — a single order, refreshed from the provider.
