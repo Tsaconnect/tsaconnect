@@ -1,0 +1,29 @@
+/* TSA Signature design tokens — the same names and values as tsa-app/theme
+   (tokens.ts + colors.ts lightColors). Change them there first; this file mirrors it. */
+:root {
+  /* Surfaces */
+  --background: #FAFAF8; --background-alt: #F2F3F1;
+  --surface: #FFFFFF; --surface-alt: #F2F3F1; --surface-elevated: #FFFFFF; --surface-disabled: #F2F3F1;
+  /* Lines / overlays */
+  --border: #DCDFDB; --border-disabled: #E8EAE7; --hairline: #E8EAE7; --overlay: #16201F99;
+  /* Text */
+  --text-primary: #16201F; --text-secondary: #5B6B6A; --text-muted: #9AA3A0; --text-disabled: #C3C8C3; --text-inverse: #FFFFFF;
+  /* Accent (brand gold) */
+  --accent: #C8961E; --accent-hover: #A87B16; --accent-muted: #C8961E1F; --accent-disabled: #C8961E66; --on-accent: #FFFFFF;
+  --accent-rail: #D9A92F; --focus-ring: #C8961E66;
+  /* Semantic */
+  --success: #10B981; --success-bg: #10B9811F; --warning: #F59E0B; --warning-bg: #F59E0B1F;
+  --danger: #EF4444; --danger-bg: #EF44441F; --info: #3B82F6; --info-bg: #3B82F61F;
+  --escrow: #7C6FB0; --escrow-bg: #7C6FB01F; --buy: #10B981; --sell: #F0584B; --online: #10B981;
+  /* Palette entries the web shell uses directly (the app's dark-theme surfaces) */
+  --slate-900: #16201F; --slate-950: #10181A; --slate-elevated: #1E2A29; --n800: #26302F; --gold-bright: #E5C04B; --gold-100: #F6E7BC;
+  --rail: linear-gradient(180deg, #E6BF53, #9D6B38);
+  /* Radius / spacing */
+  --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-xl: 20px; --radius-pill: 999px;
+  --space-xs: 4px; --space-sm: 8px; --space-md: 12px; --space-lg: 16px; --space-xl: 20px; --space-2xl: 24px; --space-3xl: 32px; --space-4xl: 40px;
+  /* Elevation / type */
+  --shadow-sm: 0 1px 2px rgba(22,32,31,.06), 0 1px 1px rgba(22,32,31,.04);
+  --shadow-lg: 0 12px 32px rgba(22,32,31,.14), 0 2px 6px rgba(22,32,31,.06);
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}

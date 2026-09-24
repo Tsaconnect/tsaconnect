@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+/* Web-only semantic tokens, layered on the app's tokens (tokens.css stays a
+   mirror of tsa-app/theme). The app's tint colours are too light for text at
+   WCAG AA, so text on a tint or on the gold fill uses these darker shades.
+   Ratios are for the 12% tint laid over white, then over --surface-alt. */
+:root {
+  --on-accent-strong: var(--slate-950); /* 6.7:1 on --accent, 4.7:1 on --accent-hover */
+  --success-strong: #036B4E;            /* 5.8:1 / 5.3:1 on --success-bg */
+  --warning-strong: #92400E;            /* 6.5:1 / 5.9:1 on --warning-bg */
+  --danger-strong: #B91C1C;             /* 5.5:1 / 5.0:1 on --danger-bg */
+  --info-strong: #1D4ED8;               /* 5.8:1 / 5.3:1 on --info-bg */
+  --accent-strong: #7A5A10;             /* 5.7:1 / 5.2:1 on --accent-muted, 6.4:1 on white */
+  /* Form controls (WCAG 1.4.11: 3:1 for what identifies a control). --border is 1.3:1. */
+  --control-border: #858E8A;            /* 3.4:1 on white, 3.0:1 on --surface-alt */
+  --control-icon: #6B7774;              /* 4.6:1 on white */
+  /* Text and lines on the dark slate surfaces (sidebar, docs header, code blocks). */
+  --on-slate: #E6EBE9;                  /* 14.9:1 on --slate-950 */
+  --on-slate-muted: #C9D1CF;            /* 10.7:1 on --slate-900 */
+  --slate-line: #26332F;
+  --slate-raised: #2B3937;
+}
+
+@theme inline {
+  --color-background: var(--background); --color-background-alt: var(--background-alt);
+  --color-surface: var(--surface); --color-surface-alt: var(--surface-alt);
+  --color-border: var(--border); --color-hairline: var(--hairline);
+  --color-text-primary: var(--text-primary); --color-text-secondary: var(--text-secondary); --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent); --color-accent-hover: var(--accent-hover); --color-accent-muted: var(--accent-muted); --color-on-accent: var(--on-accent);
+  --color-on-accent-strong: var(--on-accent-strong); --color-accent-strong: var(--accent-strong);
+  --color-success-strong: var(--success-strong); --color-warning-strong: var(--warning-strong);
+  --color-danger-strong: var(--danger-strong); --color-info-strong: var(--info-strong);
+  --color-control-border: var(--control-border); --color-control-icon: var(--control-icon);
+  --color-on-slate: var(--on-slate); --color-on-slate-muted: var(--on-slate-muted); --color-slate-line: var(--slate-line); --color-slate-raised: var(--slate-raised);
+  --color-success: var(--success); --color-success-bg: var(--success-bg); --color-warning: var(--warning); --color-warning-bg: var(--warning-bg);
+  --color-danger: var(--danger); --color-danger-bg: var(--danger-bg); --color-info: var(--info); --color-info-bg: var(--info-bg);
+  --color-slate-900: var(--slate-900); --color-slate-950: var(--slate-950); --color-slate-elevated: var(--slate-elevated); --color-gold-bright: var(--gold-bright);
+  --color-gold-100: var(--gold-100);
+  --radius-sm: var(--radius-sm); --radius-md: var(--radius-md); --radius-lg: var(--radius-lg); --radius-xl: var(--radius-xl);
+  --font-sans: var(--font-sans); --font-mono: var(--font-mono);
+  /* TSA type scale (tokens.ts typography) */
+  --text-display: 32px; --text-display--line-height: 40px; --text-display--letter-spacing: -0.5px;
+  --text-title1: 26px; --text-title1--line-height: 32px; --text-title1--letter-spacing: -0.3px;
+  --text-title2: 21px; --text-title2--line-height: 28px; --text-title2--letter-spacing: -0.2px;
+  --text-title3: 17px; --text-title3--line-height: 24px;
+  --text-body: 16px; --text-body--line-height: 23px;
+  --text-body-sm: 14px; --text-body-sm--line-height: 20px;
+  --text-caption: 12px; --text-caption--line-height: 16px;
+  --text-overline: 11px; --text-overline--line-height: 14px; --text-overline--letter-spacing: 0.6px;
+}
+
+/* In the base layer so component utilities (e.g. an input's own focus ring) win. */
+@layer base {
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: var(--background); color: var(--text-primary); font-family: var(--font-sans); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+  :focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; box-shadow: 0 0 0 4px var(--focus-ring); }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+}
+
+@utility tabular { font-variant-numeric: tabular-nums; }
