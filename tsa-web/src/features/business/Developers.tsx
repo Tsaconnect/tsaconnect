@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { BookOpen, Copy, Lock } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import { copyText } from '@/lib/clipboard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -31,23 +32,12 @@ type Draft = { webhookUrl: string; testWebhookUrl: string; returnDomains: string
 
 const modeName = (m: Mode) => (m === 'live' ? 'live' : 'test');
 
-function copy(value: string) {
-  if (!navigator.clipboard) {
-    toast.error("Couldn't copy — select it and copy it by hand.");
-    return;
-  }
-  navigator.clipboard.writeText(value).then(
-    () => toast.success('Copied'),
-    () => toast.error("Couldn't copy — select it and copy it by hand."),
-  );
-}
-
 /** A secret shown once, in a box that selects whole on click, with Copy. */
 function SecretBox({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center gap-2">
       <code className="min-w-0 flex-1 rounded-sm border border-hairline bg-background px-3 py-2.5 font-mono text-[12.5px] break-all select-all">{value}</code>
-      <Button size="sm" onClick={() => copy(value)} aria-label={`Copy ${label}`}>
+      <Button size="sm" onClick={() => copyText(value)} aria-label={`Copy ${label}`}>
         <Copy className="size-3.5" aria-hidden />Copy
       </Button>
     </div>

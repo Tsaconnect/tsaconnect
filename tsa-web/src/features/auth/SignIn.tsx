@@ -15,6 +15,8 @@ function signInMessage(err: unknown): string {
   if (!(err instanceof ApiError)) return 'Something went wrong. Please try again.';
   if (err.code === 'invalid_credentials' || err.status === 401) return "Your email or password isn't right.";
   if (err.code === 'account_locked' || err.status === 423) return 'Too many attempts. Your account is locked for a while — try again later.';
+  // The server offers a restore (data.canRestore); only the app can do that.
+  if (err.code === 'ACCOUNT_DELETED_GRACE_PERIOD') return 'This account is scheduled for deletion. Open the TSA Connect app to restore it.';
   return err.message;
 }
 

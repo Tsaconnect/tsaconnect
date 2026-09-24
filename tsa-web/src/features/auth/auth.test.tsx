@@ -90,6 +90,24 @@ describe('sign in', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/too many attempts/i);
   });
 
+  // The web has no restore flow, so the server's "you can restore" offer is not repeated here.
+  it('an account in its deletion grace period is sent to the app to restore it', async () => {
+    const graceBody = {
+      success: false,
+      message: 'Your account is scheduled for deletion on 8 October 2026 (14 days left). You can restore your account to continue.',
+      code: 'ACCOUNT_DELETED_GRACE_PERIOD',
+      data: { canRestore: true, purgeAfter: '2026-10-08T10:00:00Z', graceDaysLeft: 14 },
+    };
+    signedOutProbe(f).mockResolvedValueOnce(new Response(JSON.stringify(graceBody), { status: 403 }));
+    mount('/signin');
+    await submitPassword();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('This account is scheduled for deletion. Open the TSA Connect app to restore it.');
+    expect(alert).not.toHaveTextContent(/days left/);
+    expect(screen.queryByRole('button', { name: /restore/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('location')).toHaveTextContent(/^\/signin$/);
+  });
+
   // Review Focus 5, client side: the server's 503 is shown, not swallowed.
   it("a mailer outage says the code couldn't be sent", async () => {
     signedOutProbe(f).mockResolvedValueOnce(fail(503, "We couldn't send your sign-in code right now. Try again in a few minutes.", 'code_unavailable'));
