@@ -373,6 +373,7 @@ func (s *PayPaymentService) noteTick(ran bool) {
 }
 
 func (s *PayPaymentService) reconcileTick(ctx context.Context) error {
+	s.pruneAlerted()
 	var errs []error
 	if _, err := s.ExpireDue(ctx, 100); err != nil {
 		errs = append(errs, err)

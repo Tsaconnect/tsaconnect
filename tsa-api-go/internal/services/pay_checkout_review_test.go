@@ -207,6 +207,47 @@ func TestPayReconcile_AnUnlinkedSettledOrderSucceedsThePayment(t *testing.T) {
 	}
 }
 
+// Optional finding from the whole-branch review: the heuristic order match
+// (same bank+account+amount) could in principle misattribute between two of
+// the SAME payer's own concurrent payments if they coincide on every one of
+// those fields — e.g. two payments to the same merchant for the same amount.
+// The exact pay_payment_id match tried first is what actually prevents it:
+// every order this codebase opens for a payment carries the payment's own id
+// from the moment it is created. Prove each payment adopts its OWN order,
+// never the other's, even with identical heuristic fields.
+func TestPayReconcile_TwoOfHerOwnPaymentsThatCoincideOnEveryHeuristicFieldEachAdoptTheirOwnOrder(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	in2 := payIn()
+	in2.Reference = "PNR-XYZ789" // same merchant, same amount, same settlement bank+account — a DIFFERENT payment
+	p2, _, err := r.pay.Create(context.Background(), r.m, models.PayModeLive, in2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh, err := r.pay.Lock(context.Background(), r.alice, r.p.ID, true); err != nil || !fresh {
+		t.Fatalf("lock p1: %v fresh=%v", err, fresh)
+	}
+	if _, fresh, err := r.pay.Lock(context.Background(), r.alice, p2.ID, true); err != nil || !fresh {
+		t.Fatalf("lock p2: %v fresh=%v", err, fresh)
+	}
+
+	o1 := r.orphanOrder(t, func(o *models.PaycrestOrderRecord) { o.PayPaymentID = &r.p.ID; o.Reference = "PCS-p1" })
+	o2 := r.orphanOrder(t, func(o *models.PaycrestOrderRecord) { o.PayPaymentID = &p2.ID; o.Reference = "PCS-p2" })
+
+	r.tickAt(t, 11*time.Minute)
+
+	got1 := r.get(t)
+	var got2 models.PayPayment
+	if err := r.pay.db.First(&got2, "id = ?", p2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got1.PaycrestOrderID == nil || *got1.PaycrestOrderID != o1.ID {
+		t.Fatalf("payment 1 adopted %v, want its own order %s (never o2 %s)", got1.PaycrestOrderID, o1.ID, o2.ID)
+	}
+	if got2.PaycrestOrderID == nil || *got2.PaycrestOrderID != o2.ID {
+		t.Fatalf("payment 2 adopted %v, want its own order %s (never o1 %s)", got2.PaycrestOrderID, o2.ID, o1.ID)
+	}
+}
+
 func TestPayReconcile_OrdersThatCannotPayThisMerchantDoNotBlockTheRelease(t *testing.T) {
 	for name, mutate := range map[string]func(*models.PaycrestOrderRecord){
 		"her own sale, no payment's attempt": func(o *models.PaycrestOrderRecord) { o.PayPaymentID = nil },

@@ -162,17 +162,29 @@ func (d *PayWebhookDelivery) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// PayAuditAction names what a PayAuditEvent row records. Go has no closed
+// enum, so this does not stop a stray string literal at some future call
+// site — but it gives the two the codebase writes today one place to be
+// spelled correctly from, rather than retyped (and possibly mistyped) at
+// each writeAudit call.
+type PayAuditAction string
+
+const (
+	PayAuditActionMerchantUpdate PayAuditAction = "merchant.update"
+	PayAuditActionMerchantKeys   PayAuditAction = "merchant.keys"
+)
+
 // PayAuditEvent is the durable record of a settlement/credential change to a
 // merchant, written in the same transaction as the change. Details is JSON
 // holding before/after values of non-secret fields only — never a key, key
 // hash or webhook secret.
 type PayAuditEvent struct {
-	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantID uuid.UUID `gorm:"type:uuid;not null;index" json:"merchantId"`
-	ActorID    uuid.UUID `gorm:"type:uuid;not null;index" json:"actorId"`
-	Action     string    `gorm:"size:32;not null" json:"action"` // "merchant.update" | "merchant.keys"
-	Details    string    `gorm:"type:text;not null" json:"details"`
-	CreatedAt  time.Time `json:"createdAt"`
+	ID         uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID uuid.UUID      `gorm:"type:uuid;not null;index" json:"merchantId"`
+	ActorID    uuid.UUID      `gorm:"type:uuid;not null;index" json:"actorId"`
+	Action     PayAuditAction `gorm:"size:32;not null" json:"action"`
+	Details    string         `gorm:"type:text;not null" json:"details"`
+	CreatedAt  time.Time      `json:"createdAt"`
 }
 
 func (e *PayAuditEvent) BeforeCreate(tx *gorm.DB) error {

@@ -69,6 +69,23 @@ var sellRateRounding = big.NewRat(1, 200) // ₦0.005 per USD
 // the one who is short.
 var sellRateHeadroom = big.NewRat(1, 100)
 
+// assertSellRateHeadroomSound panics if sellRateHeadroom no longer exceeds
+// sellRateRounding — the margin SellDepositFor's doc comment (above) derives
+// the merchant-never-short proof from. Neither is a Go const (big.Rat can't
+// be), so nothing else catches a change to either that silently breaks the
+// proof; this fails at boot instead of leaving a payout to come in short.
+func assertSellRateHeadroomSound(headroom, rounding *big.Rat) {
+	if headroom.Cmp(rounding) <= 0 {
+		panic(fmt.Sprintf(
+			"sellRateHeadroom (%s) must exceed sellRateRounding (%s): SellDepositFor's merchant-never-short proof depends on it",
+			headroom.RatString(), rounding.RatString()))
+	}
+}
+
+func init() {
+	assertSellRateHeadroomSound(sellRateHeadroom, sellRateRounding)
+}
+
 // SellDepositFor is the deposit, in the token's base units, that a sell paying
 // exactly fiatAmount needs at the sender fee for converted (F − B, or F). It is
 // the same VenueForFee call CreateSellForFiat sizes with; nothing is created.

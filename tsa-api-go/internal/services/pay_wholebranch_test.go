@@ -549,6 +549,48 @@ func TestSellIntent_ConfirmDeliveryRefusesWhenTheUniqueIndexCatchesAReusedTransa
 
 // ---- B4 on Postgres (skipped without DATABASE_URL) ----
 
+// Nit from the whole-branch review: ramp_sell_intents.pay_payment_id had only
+// a plain index, no DB backstop for "at most one open sale per payment" — the
+// application already enforces it (the payment's own Lock, and the one-
+// open-sale-per-USER partial index), but config.Migrate now ALSO adds a
+// partial unique index scoped to pay_payment_id and the open statuses (see
+// database.go, uq_ramp_sell_intents_one_open_per_payment). That migration
+// isn't run by AutoMigrate, so this proves the DDL itself is correct: it
+// refuses a second OPEN intent for one payment, and allows a later one once
+// the first has closed — the exact shape a retry after an abandoned attempt
+// needs.
+func TestRampSellIntent_OneOpenSalePerPaymentPartialIndexOnPostgres(t *testing.T) {
+	r := newPayCheckoutPostgresRig(t)
+	if err := r.pay.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open_per_payment
+	    ON ramp_sell_intents (pay_payment_id)
+	    WHERE pay_payment_id IS NOT NULL AND status IN ('swapping','swapped','ordering')`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	newIntent := func(status string) *models.RampSellIntent {
+		return &models.RampSellIntent{ID: uuid.New(), UserID: r.alice.ID, SourceAddress: "0xsrc", WalletAddress: "0xwallet",
+			SourceChainID: 56, SourceTokenAddress: "0xtoken", SourceAmount: "1", FiatCode: "NGN", BankCode: "058",
+			AccountNumber: "0123456789", PayPaymentID: &r.p.ID, Status: status}
+	}
+
+	first := newIntent(models.SellIntentSwapping)
+	if err := r.pay.db.Create(first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.pay.db.Create(newIntent(models.SellIntentOrdering)).Error; err == nil {
+		t.Fatal("a second OPEN intent for the same payment was not refused")
+	}
+
+	// Once the first closes, a retry's intent is free to open — the partial
+	// index must not treat this payment's CLOSED history as still "open".
+	if err := r.pay.db.Model(first).Update("status", models.SellIntentFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.pay.db.Create(newIntent(models.SellIntentSwapping)).Error; err != nil {
+		t.Fatalf("a retry after the first attempt closed was refused: %v", err)
+	}
+}
+
 func TestPayReconcile_AnAttemptThatChangesUnderAReconcilerIsNotReleasedOnPostgres(t *testing.T) {
 	r := newPayCheckoutPostgresRig(t)
 	r.lockAlice(t)
@@ -922,6 +964,49 @@ func TestPayReconcileTick_ASkippedTickIsLoggedAndTheStreakAlertsEveryNAndResets(
 	}
 	if strings.Contains(logs.String(), "ALERT") {
 		t.Fatalf("alerted before %d consecutive skips after a recovery: %q", payReconcileSkipAlertAfter, logs.String())
+	}
+}
+
+// Optional finding from the whole-branch review: alertOnce's memory (s.alerted)
+// never shrank, so a long-lived process accumulated one entry per attempt ever
+// alerted on, forever. pruneAlerted bounds it to payAlertedTTL.
+func TestPayReconcileTick_AlertOnceForgetsAnAttemptOncePruneAlertedPassesTheTTL(t *testing.T) {
+	now := payTestNow
+	s := &PayPaymentService{now: func() time.Time { return now }}
+	p := &models.PayPayment{ID: uuid.New(), MerchantID: uuid.New()}
+	attemptID := uuid.New()
+
+	logs := captureLog(t)
+	s.alertOnce("stuck", p, "order", attemptID)
+	s.alertOnce("stuck", p, "order", attemptID) // still remembered: no second line
+	if n := strings.Count(logs.String(), "ALERT"); n != 1 {
+		t.Fatalf("%d ALERT lines before any prune, want 1", n)
+	}
+
+	now = payTestNow.Add(payAlertedTTL - time.Minute)
+	s.pruneAlerted()
+	logs.Reset()
+	s.alertOnce("stuck", p, "order", attemptID)
+	if logs.String() != "" {
+		t.Fatalf("re-alerted before the TTL passed: %q", logs.String())
+	}
+
+	now = payTestNow.Add(payAlertedTTL + time.Minute)
+	s.pruneAlerted()
+	logs.Reset()
+	s.alertOnce("stuck", p, "order", attemptID)
+	if n := strings.Count(logs.String(), "ALERT"); n != 1 {
+		t.Fatalf("%d ALERT lines once the TTL had passed, want 1 (forgotten, so it can alert again)", n)
+	}
+
+	// Pruning never touches an attempt alerted on inside the window.
+	fresh := uuid.New()
+	s.alertOnce("stuck", p, "order", fresh)
+	s.pruneAlerted()
+	logs.Reset()
+	s.alertOnce("stuck", p, "order", fresh)
+	if logs.String() != "" {
+		t.Fatalf("a fresh entry was pruned early: %q", logs.String())
 	}
 }
 

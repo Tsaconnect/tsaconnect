@@ -99,7 +99,7 @@ type PayPaymentService struct {
 	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
 	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
 	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
-	alerted      sync.Map         // alertOnce's memory: what this process has already alerted on
+	alerted      sync.Map         // alertOnce's memory: name+"/"+attemptID -> time.Time last alerted; pruneAlerted bounds it
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the

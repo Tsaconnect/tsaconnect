@@ -596,9 +596,30 @@ func payLockedAt(p *models.PayPayment) time.Time {
 // alertOnce is payAlert at most once per process for one attempt and name: for
 // a state that lasts, so the log carries one line rather than one a tick.
 func (s *PayPaymentService) alertOnce(name string, p *models.PayPayment, attempt string, attemptID uuid.UUID) {
-	if _, seen := s.alerted.LoadOrStore(name+"/"+attemptID.String(), struct{}{}); !seen {
+	if _, seen := s.alerted.LoadOrStore(name+"/"+attemptID.String(), s.now()); !seen {
 		payAlert(name, p, attempt, attemptID)
 	}
+}
+
+// payAlertedTTL is how long alertOnce remembers an attempt it has already
+// alerted on — comfortably past payPendingSwapMax (24 h), the longest wait
+// this file has. Every entry is a live payment stuck long enough to alert, so
+// the process only ever holds a handful; this is memory hygiene for a process
+// that outlives many payments, not a correctness bound. An attempt still
+// stuck past the TTL alerting again is a feature, not a bug: an operator
+// should hear about something that has been wrong for two days twice.
+const payAlertedTTL = 48 * time.Hour
+
+// pruneAlerted drops alertOnce's memory of anything older than payAlertedTTL,
+// so the map a long-lived process holds does not grow forever.
+func (s *PayPaymentService) pruneAlerted() {
+	cutoff := s.now().Add(-payAlertedTTL)
+	s.alerted.Range(func(key, value any) bool {
+		if at, ok := value.(time.Time); !ok || at.Before(cutoff) {
+			s.alerted.Delete(key)
+		}
+		return true
+	})
 }
 
 // payAlertf is the one writer of the log line an operator alerts on for a payment

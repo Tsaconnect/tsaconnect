@@ -501,6 +501,22 @@ func AutoMigrate() error {
 		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale. The one-open-sale check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
 	}
 
+	// TSA Pay — "at most one open sale per PAYMENT" (a plain index on
+	// pay_payment_id is not unique: a payment can legitimately have several
+	// sell_intent rows over its life, one per attempt, so a bare unique index
+	// would refuse a retry after the first attempt was abandoned or failed).
+	// The user-level index above already caps her to one open sale system-wide
+	// while a payment is locked to her, so this is a second line of defence,
+	// not the only one — the same posture as every other partial index here:
+	// a two-open-intents-for-one-payment bug is exactly a second swap able to
+	// pay (or be mistaken for) the same attempt. Partial over the open
+	// statuses and non-null pay_payment_id only. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open_per_payment
+	    ON ramp_sell_intents (pay_payment_id)
+	    WHERE pay_payment_id IS NOT NULL AND status IN ('swapping','swapped','ordering')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open_per_payment: %v — a TSA Pay payment most likely holds MORE THAN ONE open sale. The one-open-sale check still runs in the service; migrate again once the duplicates are resolved.", err)
+	}
+
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
 	// flow. All other Service categories default to 'contact' (the AutoMigrate

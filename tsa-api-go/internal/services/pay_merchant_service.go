@@ -394,7 +394,7 @@ func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uui
 		if !won {
 			return ErrPayMerchantStale
 		}
-		return s.writeAudit(tx, id, actor, "merchant.update", payAuditChanges(&before, &updated))
+		return s.writeAudit(tx, id, actor, models.PayAuditActionMerchantUpdate, payAuditChanges(&before, &updated))
 	})
 	if err != nil {
 		return nil, err
@@ -540,7 +540,7 @@ func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]an
 
 // writeAudit records one audit event inside tx, so it commits or rolls back
 // with the change it describes.
-func (s *PayMerchantService) writeAudit(tx *gorm.DB, merchantID, actor uuid.UUID, action string, details any) error {
+func (s *PayMerchantService) writeAudit(tx *gorm.DB, merchantID, actor uuid.UUID, action models.PayAuditAction, details any) error {
 	raw, err := json.Marshal(details)
 	if err != nil {
 		return err
@@ -621,7 +621,7 @@ func (s *PayMerchantService) IssueKeys(ctx context.Context, actor uuid.UUID, id 
 		if err := tx.Model(&models.PayMerchant{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
-		return s.writeAudit(tx, id, actor, "merchant.keys", map[string]any{"scope": scope})
+		return s.writeAudit(tx, id, actor, models.PayAuditActionMerchantKeys, map[string]any{"scope": scope})
 	})
 	if err != nil {
 		return nil, err

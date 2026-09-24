@@ -891,3 +891,33 @@ func TestSellDepositFor_CoversTheAmountThroughDriftAndRounding(t *testing.T) {
 		}
 	}
 }
+
+// Optional finding from the whole-branch review: the margin between
+// sellRateHeadroom and sellRateRounding had no runtime assertion, so a later
+// change to either could silently break the merchant-never-short proof
+// SellDepositFor's doc comment derives from it. assertSellRateHeadroomSound
+// (called from init) is that assertion; prove it actually catches a
+// violation rather than only documenting one.
+func TestAssertSellRateHeadroomSound(t *testing.T) {
+	// The real package values must themselves pass — this is what init runs at boot.
+	assertSellRateHeadroomSound(sellRateHeadroom, sellRateRounding)
+
+	for name, headroom := range map[string]*big.Rat{
+		"equal to the rounding it must exceed": new(big.Rat).Set(sellRateRounding),
+		"below the rounding":                   big.NewRat(1, 1000),
+		"zero":                                 new(big.Rat),
+		"negative":                             big.NewRat(-1, 100),
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("want a panic: the merchant-never-short proof no longer holds at this margin")
+				}
+			}()
+			assertSellRateHeadroomSound(headroom, sellRateRounding)
+		})
+	}
+
+	// A margin comfortably above the rounding is fine, whatever the rounding is.
+	assertSellRateHeadroomSound(big.NewRat(1, 50), sellRateRounding)
+}
