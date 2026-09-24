@@ -207,7 +207,11 @@ type Config struct {
 	FrontendURL string
 	AdminURL    string
 	LandingURL  string
-	Port        string
+	// WebAppOrigin is the TSA Connect web app's origin (e.g.
+	// https://app.tsaconnectworld.com). Unset = the web sign-in routes are not
+	// registered.
+	WebAppOrigin string
+	Port         string
 	// Env is normalised at Load() time (trim, lower-case, "prod" -> "production")
 	// so a stray space or differing case can never desync the checks below —
 	// call IsProduction() rather than comparing this field directly.
@@ -712,6 +716,7 @@ func Load() *Config {
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
+		WebAppOrigin:        normalizeOrigin(getEnv("WEB_APP_ORIGIN", "")),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 normalizeEnv(getEnv("ENV", "development")),
 		AllowRawSignerKeys:  getEnvBool("ALLOW_RAW_SIGNER_KEYS", false),
@@ -1468,6 +1473,21 @@ func normalizeEnv(raw string) string {
 	}
 	return e
 }
+
+// normalizeOrigin turns a configured origin into the form a browser sends in
+// its Origin header: scheme and host lower-cased, no trailing slash. The
+// cookie-session origin check compares against it byte for byte.
+func normalizeOrigin(raw string) string {
+	origin := strings.TrimRight(strings.TrimSpace(raw), "/")
+	scheme, host, ok := strings.Cut(origin, "://")
+	if !ok || scheme == "" || host == "" {
+		return origin
+	}
+	return strings.ToLower(scheme) + "://" + strings.ToLower(host)
+}
+
+// WebAuthEnabled reports whether the web app's sign-in routes are on.
+func (c *Config) WebAuthEnabled() bool { return c != nil && c.WebAppOrigin != "" }
 
 // IsProduction reports whether this process is running in production. It
 // re-normalises c.Env so it is correct even for a Config built by hand (e.g.

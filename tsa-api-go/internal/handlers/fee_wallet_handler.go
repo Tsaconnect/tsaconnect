@@ -56,13 +56,13 @@ func (h *FeeWalletHandler) requireAdmin(c *gin.Context, superOnly bool) *models.
 		return nil
 	}
 	if superOnly {
-		if user.Role != models.RoleSuperAdmin {
+		if !hasSuperAdminPrivilege(c, user) {
 			utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Super admin only.")
 			return nil
 		}
 		return user
 	}
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return nil
 	}

@@ -199,7 +199,7 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if in.Sensitive() && admin.Role != models.RoleSuperAdmin {
+	if in.Sensitive() && !hasSuperAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can change where a merchant is paid or notified")
 		return
 	}
@@ -543,7 +543,7 @@ func (h *PayHandler) TestOutcome(c *gin.Context) {
 		return
 	}
 
-	if _, err := h.payments.SimulateTestOutcome(c.Request.Context(), user, id, approve); err != nil {
+	if _, err := h.payments.SimulateTestOutcome(c.Request.Context(), actingUser(c, user), id, approve); err != nil {
 		payPaymentFail(c, err)
 		return
 	}

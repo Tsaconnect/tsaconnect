@@ -25,6 +25,16 @@ import (
 
 const refreshTokenTTL = 30 * 24 * time.Hour
 
+// sessionKind is which front door a session belongs to. A web session's access
+// token carries middleware.WebTokenClaim, and its refresh token rotates only on
+// the web, so a web session never becomes an app session.
+type sessionKind bool
+
+const (
+	appSession sessionKind = false
+	webSession sessionKind = true
+)
+
 var (
 	errRefreshInvalid  = errors.New("invalid or expired refresh token")
 	errRefreshNoUser   = errors.New("refresh token user not found")
@@ -54,10 +64,7 @@ func (h *Handlers) authenticateCredentials(c *gin.Context, identifier, password 
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Invalid credentials",
-			})
+			utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "Invalid credentials", "invalid_credentials")
 			return nil, false
 		}
 		log.Printf("Login DB error: %v", err)
@@ -69,16 +76,10 @@ func (h *Handlers) authenticateCredentials(c *gin.Context, identifier, password 
 	// password counts toward the lockout.
 	switch err := checkPasswordWithLockout(config.DB, h.EventBus, &user, password); {
 	case errors.Is(err, errAccountLocked):
-		c.JSON(http.StatusLocked, gin.H{
-			"success": false,
-			"message": "Account is temporarily locked. Try again later.",
-		})
+		utils.ErrorResponseWithCode(c, http.StatusLocked, "Account is temporarily locked. Try again later.", "account_locked")
 		return nil, false
 	case err != nil:
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Invalid credentials",
-		})
+		utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "Invalid credentials", "invalid_credentials")
 		return nil, false
 	}
 
@@ -121,6 +122,16 @@ func (h *Handlers) authenticateCredentials(c *gin.Context, identifier, password 
 	return &user, true
 }
 
+// clearLoginAttempts resets the lockout counters after a right password whose
+// session still waits on something else (the web's emailed code).
+func clearLoginAttempts(user *models.User) {
+	config.DB.Model(user).Updates(map[string]interface{}{
+		"login_attempts": 0,
+		"lock_until":     nil,
+		"updated_at":     time.Now(),
+	})
+}
+
 // recordLogin clears the lockout counters, stamps the login and tells the user
 // about it.
 func (h *Handlers) recordLogin(c *gin.Context, user *models.User) {
@@ -146,14 +157,14 @@ func (h *Handlers) recordLogin(c *gin.Context, user *models.User) {
 }
 
 // issueSession mints an access token and a new refresh token for user.
-func (h *Handlers) issueSession(user *models.User) (access, refresh string, err error) {
-	return h.issueSessionIn(config.DB, user)
+func (h *Handlers) issueSession(user *models.User, kind sessionKind) (access, refresh string, err error) {
+	return h.issueSessionIn(config.DB, user, kind)
 }
 
 // issueSessionIn is issueSession inside db, so rotation can store the new
 // refresh token in the same transaction that revokes the old one.
-func (h *Handlers) issueSessionIn(db *gorm.DB, user *models.User) (access, refresh string, err error) {
-	access, err = generateToken(user.ID, user.Email, h.Config.JWTSecret)
+func (h *Handlers) issueSessionIn(db *gorm.DB, user *models.User, kind sessionKind) (access, refresh string, err error) {
+	access, err = generateAccessToken(user.ID, user.Email, h.Config.JWTSecret, kind)
 	if err != nil {
 		return "", "", fmt.Errorf("generate access token: %w", err)
 	}
@@ -165,6 +176,7 @@ func (h *Handlers) issueSessionIn(db *gorm.DB, user *models.User) (access, refre
 		UserID:    user.ID,
 		TokenHash: hashedRefresh,
 		ExpiresAt: time.Now().Add(refreshTokenTTL),
+		Web:       kind == webSession,
 	}
 	if err := db.Create(&rt).Error; err != nil {
 		return "", "", fmt.Errorf("store refresh token: %w", err)
@@ -172,12 +184,13 @@ func (h *Handlers) issueSessionIn(db *gorm.DB, user *models.User) (access, refre
 	return access, refresh, nil
 }
 
-// rotateRefresh trades a live refresh token for a new session, revoking the
-// old token. The revoke is conditional, so two requests racing with the same
-// token cannot both rotate it: the loser gets errRefreshInvalid.
-func (h *Handlers) rotateRefresh(raw string) (user *models.User, access, refresh string, err error) {
+// rotateRefresh trades a live refresh token of kind for a new session of the
+// same kind, revoking the old token. A token of the other kind is invalid here.
+// The revoke is conditional, so two requests racing with the same token cannot
+// both rotate it: the loser gets errRefreshInvalid.
+func (h *Handlers) rotateRefresh(raw string, kind sessionKind) (user *models.User, access, refresh string, err error) {
 	var stored models.RefreshToken
-	if err := config.DB.Where("token_hash = ? AND revoked = false AND expires_at > ?", hashToken(raw), time.Now()).First(&stored).Error; err != nil {
+	if err := config.DB.Where("token_hash = ? AND revoked = false AND expires_at > ? AND web = ?", hashToken(raw), time.Now(), kind == webSession).First(&stored).Error; err != nil {
 		return nil, "", "", errRefreshInvalid
 	}
 
@@ -198,7 +211,7 @@ func (h *Handlers) rotateRefresh(raw string) (user *models.User, access, refresh
 			return errRefreshInvalid
 		}
 		var ierr error
-		access, refresh, ierr = h.issueSessionIn(tx, &u)
+		access, refresh, ierr = h.issueSessionIn(tx, &u, kind)
 		return ierr
 	})
 	if err != nil {

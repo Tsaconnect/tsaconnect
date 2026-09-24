@@ -15,19 +15,22 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// newRefreshRig is the app's login + refresh over SQLite. refresh_tokens gets a
-// generated, hyphenated uuid id, as Postgres's gen_random_uuid() default gives it
-// in production: rotation revokes the old token by id.
+// refreshTokensTestDDL gives refresh_tokens a generated, hyphenated uuid id, as
+// Postgres's gen_random_uuid() default does in production: rotation revokes the
+// old token by id.
+const refreshTokensTestDDL = `CREATE TABLE refresh_tokens (
+	id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(6)))),
+	user_id TEXT, token_hash TEXT UNIQUE, expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, web INTEGER NOT NULL DEFAULT 0, created_at DATETIME
+)`
+
+// newRefreshRig is the app's login + refresh over SQLite.
 func newRefreshRig(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	db := setupAuthTestDB(t)
 	if err := db.Exec(`DROP TABLE refresh_tokens`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Exec(`CREATE TABLE refresh_tokens (
-		id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(6)))), user_id TEXT, token_hash TEXT UNIQUE,
-		expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
-	)`).Error; err != nil {
+	if err := db.Exec(refreshTokensTestDDL).Error; err != nil {
 		t.Fatal(err)
 	}
 	insertAuthUser(t, db, &models.User{ID: uuid.New(), Name: "Ada", Username: "ada", Email: "ada@example.com", AccountStatus: models.AccountStatusActive})

@@ -21,6 +21,7 @@ import (
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
+	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -350,7 +351,7 @@ func (h *Handlers) Login(c *gin.Context) {
 	}
 	h.recordLogin(c, user)
 
-	token, rawRefresh, err := h.issueSession(user)
+	token, rawRefresh, err := h.issueSession(user, appSession)
 	if err != nil {
 		log.Printf("Login session error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -381,11 +382,20 @@ func (h *Handlers) Login(c *gin.Context) {
 // generateToken creates a JWT access token with userId and email claims, 1-hour
 // expiry (refresh-token rotation extends the session; see the refresh flow).
 func generateToken(userID uuid.UUID, email, secret string) (string, error) {
+	return generateAccessToken(userID, email, secret, appSession)
+}
+
+// generateAccessToken is generateToken for either front door: a web session's
+// token also carries middleware.WebTokenClaim.
+func generateAccessToken(userID uuid.UUID, email, secret string, kind sessionKind) (string, error) {
 	claims := jwt.MapClaims{
 		"userId": userID.String(),
 		"email":  email,
 		"exp":    time.Now().Add(1 * time.Hour).Unix(),
 		"iat":    time.Now().Unix(),
+	}
+	if kind == webSession {
+		claims[middleware.WebTokenClaim] = true
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))

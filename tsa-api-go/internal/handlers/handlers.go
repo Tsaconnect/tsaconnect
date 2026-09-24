@@ -35,6 +35,11 @@ type Handlers struct {
 	// main.go after construction). Non-EVM wallet endpoints return 503 when
 	// their chain key is absent from the registry.
 	ChainRegistry *chains.Registry
+
+	// WebCodeMailer sends the TSA Connect web app's sign-in codes straight to
+	// the account's email. nil = web sign-in from a new browser is refused
+	// (a trusted browser still signs in).
+	WebCodeMailer services.CodeMailer
 }
 
 // NewHandlers creates a new Handlers instance with the given services.

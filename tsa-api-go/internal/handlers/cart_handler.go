@@ -963,7 +963,7 @@ func (h *Handlers) GetAbandonedCarts(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin privileges required.")
 		return
 	}
@@ -1024,7 +1024,7 @@ func (h *Handlers) GetCartByID(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin privileges required.")
 		return
 	}
@@ -1052,7 +1052,7 @@ func (h *Handlers) CleanupExpiredCarts(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin privileges required.")
 		return
 	}

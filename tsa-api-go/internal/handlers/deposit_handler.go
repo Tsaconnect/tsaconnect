@@ -61,7 +61,7 @@ func (h *Handlers) UpdateDepositStatus(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only admins can approve or reject deposits")
 		return
 	}

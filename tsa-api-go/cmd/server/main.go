@@ -515,6 +515,10 @@ func main() {
 	// among them). Database-only tidy-up, not a money path, so not alert-wired.
 	scheduler.Register(jobs.NewRequestIdempotencyPruner(config.DB, time.Hour))
 
+	// Refresh tokens: delete revoked or expired ones past a 7-day grace. Web
+	// sessions rotate hourly, so without this the table only ever grows.
+	scheduler.Register(jobs.NewRefreshTokenPruner(config.DB, 24*time.Hour), jobs.AlertOnFailureStreak())
+
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
 	if billService != nil {
@@ -1572,6 +1576,11 @@ func main() {
 	var payCodeMailer *services.EmailService
 	if services.MailerConfigured(cfg.MailjetAPIKey, cfg.MailjetSecretKey) {
 		payCodeMailer = emailService
+	}
+	// The web app's sign-in codes use the same really-delivering mailer. A nil
+	// *EmailService must not become a non-nil interface, so assign only when set.
+	if payCodeMailer != nil {
+		h.WebCodeMailer = payCodeMailer
 	}
 	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter, payRates, eventBus, payCodeMailer)
 	if ms := payHandler.MerchantService(); ms != nil {

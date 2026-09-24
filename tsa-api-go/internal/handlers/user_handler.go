@@ -404,10 +404,18 @@ func (h *Handlers) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
-		"password":   hashedPassword,
-		"updated_at": time.Now(),
-	}).Error; err != nil {
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+			"password":   hashedPassword,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+			return err
+		}
+		if err := forgetTrustedBrowsers(tx, user.ID); err != nil {
+			return err
+		}
+		return revokeRefreshTokens(tx, user.ID)
+	}); err != nil {
 		log.Printf("ChangePassword update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -550,7 +558,7 @@ func (h *Handlers) GetUserByID(c *gin.Context) {
 		return
 	}
 
-	if currentUser.Role != models.RoleAdmin && currentUser.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, currentUser) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Access denied",
@@ -602,7 +610,7 @@ func (h *Handlers) GetAllUsers(c *gin.Context) {
 		return
 	}
 
-	if currentUser.Role != models.RoleAdmin && currentUser.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, currentUser) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Access denied",
@@ -682,7 +690,7 @@ func (h *Handlers) GetAllUsers(c *gin.Context) {
 // UpdateUserRole handles PATCH /api/users/:id/role - super admin only.
 func (h *Handlers) UpdateUserRole(c *gin.Context) {
 	caller := getUserFromContext(c)
-	if caller == nil || caller.Role != models.RoleSuperAdmin {
+	if !hasSuperAdminPrivilege(c, caller) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only super admins can change roles")
 		return
 	}

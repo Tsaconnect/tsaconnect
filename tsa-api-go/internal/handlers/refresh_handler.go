@@ -22,7 +22,7 @@ func (h *Handlers) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	user, accessToken, rawRefresh, err := h.rotateRefresh(req.RefreshToken)
+	user, accessToken, rawRefresh, err := h.rotateRefresh(req.RefreshToken, appSession)
 	switch {
 	case errors.Is(err, errRefreshInvalid):
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid or expired refresh token"})

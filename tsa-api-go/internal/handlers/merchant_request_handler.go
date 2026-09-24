@@ -361,7 +361,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		// money path) is reserved for true admins. The route middleware
 		// (adminAuth) also admits merchant/support for generic merchant
 		// approvals, so we re-check the role here.
-		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+		if !hasAdminPrivilege(c, admin) {
 			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a payment merchant")
 			return
 		}
@@ -375,7 +375,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// as the PM gate above: admin-only, and the provisioner must be wired up,
 	// checked before any state mutation.
 	if req.BusinessType == models.BusinessTypePaymentAcceptance {
-		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+		if !hasAdminPrivilege(c, admin) {
 			utils.ErrorResponse(c, http.StatusForbidden, "Admin role required to approve a TSA Pay merchant")
 			return
 		}

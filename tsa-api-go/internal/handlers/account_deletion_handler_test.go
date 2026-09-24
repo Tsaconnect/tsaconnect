@@ -68,7 +68,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE refresh_tokens (
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
-			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, web INTEGER NOT NULL DEFAULT 0, created_at DATETIME
 		)`,
 	}
 	for _, s := range stmts {
@@ -79,7 +79,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 
 	// The ramp tables come from their models, so the blocker and erasure
 	// queries are tested against the real column names.
-	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}); err != nil {
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}, &models.WebTrustedBrowser{}); err != nil {
 		t.Fatalf("migrate ramp tables: %v", err)
 	}
 

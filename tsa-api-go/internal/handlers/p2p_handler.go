@@ -705,7 +705,7 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 	// counterparty behind every ad to keep the marketplace clean of spam /
 	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
 	// stay open to all authenticated users.
-	if user.Role != models.RoleMerchant && user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Merchant account required to publish P2P ads.",

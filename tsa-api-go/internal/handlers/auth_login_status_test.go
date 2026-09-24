@@ -40,7 +40,7 @@ func setupAuthTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE refresh_tokens (
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
-			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, web INTEGER NOT NULL DEFAULT 0, created_at DATETIME
 		)`,
 		`CREATE TABLE account_deletion_requests (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, reason TEXT,
@@ -229,6 +229,37 @@ func TestLogin_RefusalBodiesAreUnchanged(t *testing.T) {
 		h.Login(c)
 		if w.Code != http.StatusForbidden || w.Body.String() != want {
 			t.Errorf("%s: %d %s, want 403 %s", identifier, w.Code, w.Body.String(), want)
+		}
+	}
+}
+
+func TestLogin_CredentialRefusalBodiesAreUnchanged(t *testing.T) {
+	db := setupAuthTestDB(t)
+	h := &Handlers{Config: &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"}}
+	insertAuthUser(t, db, &models.User{ID: uuid.New(), Name: "Ada", Username: "ada", Email: "ada@example.com", AccountStatus: models.AccountStatusActive})
+	locked := models.User{ID: uuid.New(), Name: "Locked", Username: "locked", Email: "locked@example.com", AccountStatus: models.AccountStatusActive}
+	insertAuthUser(t, db, &locked)
+	db.Exec(`UPDATE users SET lock_until = ? WHERE id = ?`, time.Now().Add(time.Hour), locked.ID.String())
+
+	const invalid = `{"code":"invalid_credentials","message":"Invalid credentials","success":false}`
+	cases := []struct {
+		identifier, password string
+		status               int
+		want                 string
+	}{
+		{"ada@example.com", "WrongPass1!", http.StatusUnauthorized, invalid},
+		{"nobody@example.com", "StrongPass1!", http.StatusUnauthorized, invalid},
+		{"locked@example.com", "StrongPass1!", http.StatusLocked, `{"code":"account_locked","message":"Account is temporarily locked. Try again later.","success":false}`},
+	}
+	for _, tc := range cases {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/auth/login",
+			bytes.NewReader([]byte(`{"identifier":"`+tc.identifier+`","password":"`+tc.password+`"}`)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Login(c)
+		if w.Code != tc.status || w.Body.String() != tc.want {
+			t.Errorf("%s: %d %s, want %d %s", tc.identifier, w.Code, w.Body.String(), tc.status, tc.want)
 		}
 	}
 }

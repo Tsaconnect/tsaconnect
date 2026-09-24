@@ -203,9 +203,11 @@ func (h *Handlers) RequestAccountDeletion(c *gin.Context) {
 			}).Error; err != nil {
 			return err
 		}
+		if err := forgetTrustedBrowsers(tx, user.ID); err != nil {
+			return err
+		}
 		// Revoke all active refresh tokens so stale sessions cannot be reused upon reactivation
-		return tx.Model(&models.RefreshToken{}).Where("user_id = ? AND revoked = false", user.ID).
-			Update("revoked", true).Error
+		return revokeRefreshTokens(tx, user.ID)
 	})
 	if txErr != nil {
 		log.Printf("RequestAccountDeletion: %s: %v", user.ID, txErr)
@@ -347,7 +349,7 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Admin role required")
 		return
 	}
@@ -460,7 +462,7 @@ func (h *Handlers) RestoreAccountDeletionRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Admin role required")
 		return
 	}

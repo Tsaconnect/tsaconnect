@@ -61,6 +61,22 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		authGroup.POST("/reactivate", h.ReactivateAccount)
 	}
 
+	// TSA Connect web app sign-in (cookie session). Off unless WEB_APP_ORIGIN
+	// is set. Every route needs the CSRF header and the app's own origin.
+	if cfg.WebAuthEnabled() {
+		web := api.Group("/auth/web", middleware.WebAuthGuard(cfg))
+		// Per IP, and loose: an office behind one NAT signs in from one address,
+		// and the per-account lockout is what protects each account.
+		web.POST("/login", middleware.RateLimiter(30, 15*time.Minute), h.WebLogin)
+		// Twice login's budget, as before: every sign-in may need a retyped code.
+		// Guessing is bounded per challenge (services.EmailCodeAttempts).
+		web.POST("/verify", middleware.RateLimiter(60, 15*time.Minute), h.WebVerify)
+		// Per IP: an office behind one NAT refreshes from many people and tabs.
+		web.POST("/refresh", middleware.RateLimiter(300, 15*time.Minute), h.WebRefresh)
+		web.POST("/logout", h.WebLogout)
+		web.GET("/me", auth, h.WebMe)
+	}
+
 	// User routes
 	userGroup := api.Group("/users")
 	userGroup.Use(auth)

@@ -387,7 +387,7 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 	}
 	if !product.IsVisibleToPublic(&seller) {
 		viewer := getUserFromContext(c)
-		if viewer == nil || (viewer.ID != product.UserID && !isAdminUser(viewer)) {
+		if viewer == nil || (viewer.ID != product.UserID && !hasAdminPrivilege(c, viewer)) {
 			utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 			return
 		}
@@ -899,7 +899,8 @@ func (h *Handlers) ToggleFeatured(c *gin.Context) {
 	}
 
 	// Check ownership or admin
-	if product.UserID != user.ID && user.Role != models.RoleAdmin {
+	// Only the admin role (not super_admin) has ever had this override.
+	if product.UserID != user.ID && !(user.Role == models.RoleAdmin && hasAdminPrivilege(c, user)) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Not authorized to update this product")
 		return
 	}

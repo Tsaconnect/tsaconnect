@@ -2814,8 +2814,7 @@ func (ch *CheckoutHandler) GetOrderDetail(c *gin.Context) {
 	}
 
 	// Check access: buyer, seller, or admin
-	if order.BuyerID != user.ID && order.SellerID != user.ID &&
-		user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if order.BuyerID != user.ID && order.SellerID != user.ID && !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied")
 		return
 	}
