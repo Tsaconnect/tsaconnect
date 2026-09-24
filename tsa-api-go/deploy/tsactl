@@ -4,6 +4,7 @@
 #   tsactl status                    what is running (no privilege needed)
 #   tsactl deploy [<ref>] [--force]  build and ship a ref (default origin/main)
 #   tsactl rollback [--list] [<dir>] previous release; never rebuilds
+#   tsactl env-sync [--dry-run] [--restart]  write shared/env from Doppler
 #   tsactl logs [-f|-n N]            journal for the API service
 #   tsactl audit [-n N]              who deployed what, and when
 #   tsactl update                    pull the deploy scripts themselves
@@ -31,7 +32,7 @@ require() {
   [ -x "$D/$1" ] || die "$D/$1 not found — the deploy checkout predates it. Run: tsactl update"
 }
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 case "${1:-}" in
   status)
@@ -40,6 +41,8 @@ case "${1:-}" in
     shift; require deploy.sh;   exec "${AS_DEPLOY[@]}" "$D/deploy.sh" "$@" ;;
   rollback)
     shift; require rollback.sh; exec "${AS_DEPLOY[@]}" "$D/rollback.sh" "$@" ;;
+  env-sync)
+    shift; require env-sync.sh; exec "${AS_DEPLOY[@]}" "$D/env-sync.sh" "$@" ;;
   logs)
     shift
     # if/fi, not `[ ] && set --`: under set -e a false test as the last simple

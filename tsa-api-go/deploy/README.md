@@ -8,7 +8,9 @@
   releases/<stamp>-<sha>/     git worktree + built binary
   current -> releases/...     what is running
   bin/                        migrate.sh, backup.sh (run by systemd oneshots)
-  shared/env                  0600, service config
+  shared/env                  0600 + ACL u:tsa:r, service config — written from Doppler
+  shared/env.prev             0600, the file before the last Doppler sync
+  shared/doppler-token        0600, read-only Doppler service token for tsa-app/prd
   shared/pgenv                0600, PG* vars for pg_dump only
   shared/backups/             0700, pre-migration dumps
   .release-target             release the migrate oneshot should act on
@@ -41,7 +43,9 @@ sudo install -m 600 -o tsa-deploy -g tsa-deploy /path/to/deploy_key /srv/tsa-api
 sudo -u tsa-deploy -H git clone git@github.com:ojimcy/tsa-dev.git /srv/tsa-api/repo
 
 # Config. shared/env is systemd EnvironmentFile syntax: KEY=value, no `export`,
-# no shell expansion, no CRLF, no quotes unless you mean them literally.
+# no shell expansion, no CRLF. systemd strips one pair of surrounding double
+# quotes, which is what Doppler writes. After this first install, the content
+# comes from Doppler (see "Configuration" below); the ACL is what must survive.
 sudo install -m 600 -o tsa-deploy -g tsa-deploy /path/to/env /srv/tsa-api/shared/env
 sudo setfacl -m u:tsa:r /srv/tsa-api/shared/env    # service reads it; cannot write
 
@@ -144,6 +148,64 @@ current build is broken.
 health check can fail. This is safe only because of the rule below; if release N-1
 cannot run against release N's schema, recovery is a manual, data-losing restore — stop
 and escalate rather than improvising.
+
+## Configuration (Doppler)
+
+Production config lives in Doppler, project `tsa-app`, config `prd`. `shared/env` is
+the copy systemd reads, rewritten from Doppler by `deploy/env-sync.sh`. **Change
+values in Doppler only**: a hand edit to `shared/env` is overwritten by the next sync.
+
+```bash
+tsactl env-sync --dry-run     # which keys differ from Doppler (names only, never values)
+tsactl env-sync --restart     # write shared/env, restart, wait for health
+tsactl env-sync               # write only; the next restart or deploy picks it up
+```
+
+Every `tsactl deploy` also syncs, before the migration (which reads `shared/env`
+too). If the deploy then fails — migration, restart or health — it puts the previous
+file back along with the previous release. A Doppler outage never blocks a deploy:
+the sync fails, says so, and the release ships on the config already in place.
+
+The sync refuses, leaving `shared/env` untouched, when the download is empty, lacks
+`DATABASE_URL` or `JWT_SECRET`, has a carriage return or a non-`KEY=value` line, or
+would remove more than 3 keys at once (`--allow-removals` for a deliberate cleanup).
+With `--restart`, a service that does not come back healthy on the same commit
+within 60s gets the previous file back and another restart.
+
+**Never `doppler login` on this box.** A login stores a personal token that can write
+to every project. The box gets a read-only service token scoped to `prd` alone, which
+can be revoked by itself if the box is compromised again.
+
+### One-time setup
+
+```bash
+# 1. The CLI (Doppler's apt repository — check https://docs.doppler.com/docs/install-cli)
+sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+curl -sLf --retry 3 --tlsv1.2 --proto "=https" \
+  'https://packages.doppler.com/public/cli/gpg.DE2A7741A397C129.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/doppler-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/doppler-archive-keyring.gpg] https://packages.doppler.com/public/cli/deb/debian any-version main" \
+  | sudo tee /etc/apt/sources.list.d/doppler-cli.list
+sudo apt-get update && sudo apt-get install -y doppler
+
+# 2. The token: Doppler dashboard → tsa-app → prd → Access → service token, READ only.
+#    Paste it in an editor, not with echo, so it stays out of shell history.
+sudo install -m 600 -o tsa-deploy -g tsa-deploy /dev/null /srv/tsa-api/shared/doppler-token
+sudo -u tsa-deploy nano /srv/tsa-api/shared/doppler-token
+
+# 3. tsactl gained env-sync; the root-owned copy on PATH must be reinstalled.
+tsactl update
+sudo install -m 755 -o root -g root \
+    /srv/tsa-api/repo/tsa-api-go/deploy/tsactl /usr/local/bin/tsactl
+
+# 4. First sync: dry run, and read the key list before writing anything. Quoting
+#    differences are ignored; every key it names has a different value in Doppler.
+tsactl env-sync --dry-run
+tsactl env-sync --restart
+```
+
+Until `shared/doppler-token` exists, `env-sync.sh` is a no-op and deploys behave
+exactly as before.
 
 ## The migration rule
 

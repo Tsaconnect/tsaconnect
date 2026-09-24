@@ -11,11 +11,12 @@ set -Eeuo pipefail
 # `go build` produces a 0700 binary that tsa-api.service cannot exec, and the
 # service never starts — verified on a rehearsal host.
 #
-# Nothing secret is written by this script: shared/env is provisioned once at 0600
-# with an ACL for tsa, and the database dumps are written by tsa-api-backup.service,
-# which carries its own UMask=0077.
+# Nothing secret is written by this script: shared/env is written by env-sync.sh,
+# which sets its own umask 077 and keeps the file's ACL for tsa, and the database
+# dumps are written by tsa-api-backup.service, which carries its own UMask=0077.
 umask 022
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=/srv/tsa-api
 REPO=$ROOT/repo
 RELEASES=$ROOT/releases
@@ -91,8 +92,18 @@ REL=$RELEASES/$STAMP-$SHORT
 # EXIT, not ERR: bash does not run an ERR trap for the left side of `||`, and the
 # `exit` inside fail() is not a failing command. An ERR trap here never fires.
 DEPLOYED=0
+ENV_CHANGED=0
+# A deploy that fails must not leave behind a config the running release never
+# booted with — the next unrelated restart would pick it up.
+restore_env() {
+  [ "$ENV_CHANGED" = "1" ] || return 0
+  log "restoring the previous shared/env"
+  cat "$SHARED/env.prev" > "$SHARED/env"   # in place: keeps the u:tsa:r ACL
+  ENV_CHANGED=0
+}
 cleanup() {
   [ "$DEPLOYED" = "1" ] && return 0
+  restore_env
   log "cleaning up failed release $REL"
   git -C "$REPO" worktree remove --force "$REL" 2>/dev/null || rm -rf "$REL"
   git -C "$REPO" worktree prune 2>/dev/null || true
@@ -119,6 +130,14 @@ log "building $SHORT"
 # Explicit, so a future umask change cannot silently make the binary unexecutable
 # by the service user again.
 chmod 755 "$REL/tsa-api"
+
+# ── config ───────────────────────────────────────────────────────────────
+# Before the migration, which reads shared/env too. A Doppler outage must never
+# block a deploy: on failure the release ships on the config already in place.
+log "syncing shared/env from Doppler"
+ENV_SUM=$(sha256sum < "$SHARED/env")
+"$HERE/env-sync.sh" || log "WARNING: env sync failed — deploying with the current shared/env"
+[ "$(sha256sum < "$SHARED/env")" = "$ENV_SUM" ] || ENV_CHANGED=1
 
 # ── back up, then migrate ────────────────────────────────────────────────
 log "backing up the database"
@@ -153,6 +172,7 @@ DEPLOYED=1     # the worktree is live now; cleanup must not remove it
 
 sudo -n "$SYSTEMCTL" restart tsa-api.service || {
   printf '\nrestart failed — reverting symlink\n' >&2
+  restore_env
   if [ -n "$PREV" ] && [ -x "$PREV/tsa-api" ]; then
     ln -sfn "$PREV" "$TMPLINK" && mv -T "$TMPLINK" "$ROOT/current"
     sudo -n "$SYSTEMCTL" restart tsa-api.service || true
@@ -175,6 +195,8 @@ done
 
 if [ "$HEALTHY" != "1" ]; then
   printf '\nunhealthy after %ds (reported commit: %s, wanted %s)\n' "$SECONDS" "${GOT:-none}" "$SHORT" >&2
+  # The new config may be what broke it; the rollback restores both halves.
+  restore_env
   if [ -n "$PREV" ] && [ -x "$PREV/tsa-api" ]; then
     log "rolling back to $PREV"
     ln -sfn "$PREV" "$TMPLINK" && mv -T "$TMPLINK" "$ROOT/current"
