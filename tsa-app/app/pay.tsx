@@ -60,8 +60,10 @@ export default function PayScreen() {
   const [now, setNow] = useState(() => Date.now());
   // A live attempt of hers is moving money: the expiry warning must not pull the form from under it.
   const [attemptActive, setAttemptActive] = useState(false);
+  // The server decides whether she is signed in: the context flag can drift from the stored token.
+  const [needsSignIn, setNeedsSignIn] = useState(false);
 
-  const state = payScreenState({ id, authed: isAuthenticated, checkout, error, now, attemptActive });
+  const state = payScreenState({ id, authed: !needsSignIn, checkout, error, now, attemptActive });
 
   // Only the latest read counts: the 5 s poll can overlap, and a slow older
   // answer landing after a newer one must not put the screen back in time.
@@ -74,8 +76,15 @@ export default function PayScreen() {
       if (mine !== fetchSeq.current) return;
       setCheckout(c);
       setError(undefined);
+      setNeedsSignIn(false);
     } catch (e: any) {
-      if (mine === fetchSeq.current) setError(e?.message ?? 'Could not load this payment.');
+      if (mine !== fetchSeq.current) return;
+      if (e?.status === 401) {
+        setNeedsSignIn(true);
+        setError(undefined);
+        return;
+      }
+      setError(e?.message ?? 'Could not load this payment.');
     }
   }, [id]);
 
@@ -84,9 +93,10 @@ export default function PayScreen() {
     if (checkout && TERMINAL_STATUSES.includes(checkout.status)) void clearPayHold(checkout.id);
   }, [checkout]);
 
-  // Initial load, once we actually know the customer is signed in.
+  // Load once auth has hydrated, signed in or not — a 401 is what shows the
+  // sign-in prompt. Re-runs when the session changes.
   useEffect(() => {
-    if (!isHydrated || !isAuthenticated || typeof id !== 'string') return;
+    if (!isHydrated || typeof id !== 'string') return;
     fetchCheckout();
   }, [isHydrated, isAuthenticated, id, fetchCheckout]);
 
@@ -188,10 +198,15 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
-                  <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} total />
-                  {state.checkout.fee > 0 && (
-                    <SummaryRow label="Fee" value={`includes ${formatKobo(String(state.checkout.fee))} fee`} />
+                  <SummaryRow label="Amount" value={formatKobo(String(state.checkout.amount))} />
+                  {/* Only the payer's share: a merchant may absorb part or all of the fee. */}
+                  {state.checkout.customerTotal > state.checkout.amount && (
+                    <SummaryRow
+                      label="Fee"
+                      value={formatKobo(String(state.checkout.customerTotal - state.checkout.amount))}
+                    />
                   )}
+                  <SummaryRow label="Total" value={formatKobo(String(state.checkout.customerTotal))} total />
                 </SummaryCard>
               </Card>
 
