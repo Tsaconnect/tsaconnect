@@ -1,4 +1,5 @@
 import {
+  BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage,
@@ -233,5 +234,56 @@ describe('unconfirmedCopy', () => {
     expect(c).toMatch(/couldn't confirm/i);
     expect(c).toMatch(/don't pay again/i);
     expect(c).toContain('pay-123');
+  });
+});
+
+describe('how long a payment stays reserved — one constant per settlement mode', () => {
+  it('naira is freed in about ten minutes, crypto (a delivery to the merchant) in about an hour', () => {
+    expect(RESERVE_WINDOW).toEqual({ fiat: 'about 10 minutes', crypto: 'about an hour' });
+  });
+
+  it('a cancelled or refused attempt says its own mode’s window, and never the other’s', () => {
+    expect(notSentCopy('fiat')).toContain(RESERVE_WINDOW.fiat);
+    expect(notSentCopy('fiat')).not.toMatch(/hour/i);
+    expect(notSentCopy('crypto')).toContain(RESERVE_WINDOW.crypto);
+    expect(notSentCopy('crypto')).not.toMatch(/10 minutes|ten minutes/i);
+    expect(notSentCopy('crypto')).toMatch(/nothing was sent/i);
+  });
+
+  it('"nothing to continue" says its own mode’s window too', () => {
+    expect(nothingToContinueCopy('fiat')).toContain(RESERVE_WINDOW.fiat);
+    expect(nothingToContinueCopy('crypto')).toContain(RESERVE_WINDOW.crypto);
+    expect(nothingToContinueCopy('crypto')).not.toMatch(/10 minutes|ten minutes/i);
+    expect(nothingToContinueCopy('crypto')).toMatch(/couldn't find/i);
+  });
+
+  it('a swap that is still being followed promises no time: "we\'ll keep checking", and never to pay again', () => {
+    expect(KEEP_CHECKING).toMatch(/keep checking/i);
+    for (const c of [PAYMENT_STILL_GOING, NOT_CONFIRMED, BROADCAST_UNCONFIRMED]) {
+      expect(c).toContain(KEEP_CHECKING);
+      expect(c).toMatch(/don't pay again/i);
+      expect(c).not.toMatch(/\d|minute|hour/i);
+    }
+  });
+
+  it('the terminal "couldn\'t confirm" state promises no time either — the 24 h hold lifts silently, not by a promise', () => {
+    const c = unconfirmedCopy('pay-1');
+    expect(c).not.toMatch(/\d+\s*(minute|hour|h\b)|an hour|ten minutes|24/i);
+  });
+});
+
+describe('no time promise is scattered outside payCheckout.ts', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.resolve(__dirname, '../..');
+  it.each([
+    'hooks/usePayNaira.ts', 'hooks/usePayCrypto.ts', 'hooks/payAttempt.ts', 'hooks/usePayLive.ts',
+    'components/pay/PayLivePanel.tsx', 'components/pay/PayNaira.tsx', 'components/pay/PayCrypto.tsx',
+    'services/payHold.ts', 'services/sellSwapRun.ts', 'app/pay.tsx',
+  ])('%s', (file) => {
+    const src: string = fs.readFileSync(path.join(root, file), 'utf8');
+    // Only user-facing string literals matter; comments may talk about the hold's 24 h.
+    const strings = (src.match(/(['"`])(?:\\.|(?!\1).)*\1/g) ?? []).join('\n');
+    expect(strings).not.toMatch(/ten minutes|10 minutes|about ten|an hour|few minutes/i);
   });
 });

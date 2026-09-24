@@ -37,7 +37,7 @@ import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/servic
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
   classifyStartError, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
-  NOTHING_TO_CONTINUE, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
+  nothingToContinueCopy, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
   type StartErrorKind,
 } from '@/utils/payCheckout';
 import type { PayEstimate } from '@/hooks/usePayLive';
@@ -310,7 +310,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       return;
     }
     if (!fresh) {
-      dispatch({ type: 'fail', error: NOTHING_TO_CONTINUE, retryable: false });
+      dispatch({ type: 'fail', error: nothingToContinueCopy('fiat'), retryable: false });
     } else if (fresh.status === 'delivered' || fresh.status === 'failed') {
       dispatch({ type: 'waiting' });
     } else {

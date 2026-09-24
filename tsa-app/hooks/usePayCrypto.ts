@@ -33,7 +33,7 @@ import { clearPayHold, holdActive, readPayHold, writePayHold } from '@/services/
 import { getCryptoQuote, payCrypto, type PayCheckout } from '@/services/payApi';
 import { clearPendingSwapHash, executeSellSwap, readPendingSwapHash } from '@/services/sellSwapRun';
 import {
-  classifyStartError, errorMessage, estimateError, intentForPayment, NOTHING_TO_CONTINUE, payAmountLabel,
+  classifyStartError, errorMessage, estimateError, intentForPayment, BROADCAST_UNCONFIRMED, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, payAmountLabel,
   receiveAmountLabel, startFailure, unconfirmedCopy, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 
@@ -69,12 +69,6 @@ export type UsePayCrypto = {
 const REPORT_TRIES = 3;
 const REPORT_DELAY_MS = 2_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-const NOT_SENT = ' Nothing was sent. If you cannot try again right away, the payment frees up again within about ten minutes.';
-const NOT_CONFIRMED =
-  "Your payment was sent, but we couldn't confirm it with our server yet. Don't pay again — reopen this payment in a few minutes and it will be picked up.";
-const BROADCAST_UNCONFIRMED =
-  "We couldn't confirm your payment was sent. Don't pay again — give it a few minutes and reopen this payment to check on it.";
 
 type Pick = { token: LiFiToken; chainId: number; priced?: PayEstimate };
 /** How the server took (or did not take) the swap's hash. */
@@ -166,7 +160,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
       if (!intentId) {
         // She asked to continue and there is nothing of hers: say so, and offer no dead button.
         dispatch(explicit
-          ? { type: 'fail', error: NOTHING_TO_CONTINUE, retryable: false, noContinue: true }
+          ? { type: 'fail', error: nothingToContinueCopy('crypto'), retryable: false, noContinue: true }
           : { type: 'waiting' });
         return;
       }
@@ -255,7 +249,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         }
         return;
       }
-      dispatch({ type: 'fail', error: `${errorMessage(e, 'The swap did not go through.')}${NOT_SENT}`, retryable: true });
+      dispatch({ type: 'fail', error: `${errorMessage(e, 'The swap did not go through.')}${notSentCopy('crypto')}`, retryable: true });
       return;
     }
 

@@ -873,3 +873,24 @@ describe('the route refusing this token — the same reading as crypto', () => {
     expect(hook.error).toBe('a different failure');
   });
 });
+
+describe('the reservation window in words, for a naira payment', () => {
+  it('nothing to continue says about 10 minutes', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    m.getOpenSellIntent.mockResolvedValue(null);
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(hook.error).toContain('about 10 minutes');
+    expect(hook.error).not.toMatch(/hour/i);
+  });
+
+  it('a swap still going says we will keep checking, with no time promised', async () => {
+    Object.assign(swapped, { stage: 'failed', error: 'x', retryable: false, intent });
+    await mount();
+    expect(hook.error).toMatch(/keep checking/i);
+    expect(hook.error).not.toMatch(/\d|minute|hour/i);
+  });
+});

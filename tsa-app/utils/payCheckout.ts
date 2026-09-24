@@ -148,9 +148,47 @@ export function intentForPayment(open: SellIntent | null | undefined, paymentId:
   return open && open.payPaymentId === paymentId ? open : null;
 }
 
+/** How a payment settles: naira to the merchant's bank, or crypto delivered to their wallet. */
+export type SettlementMode = 'fiat' | 'crypto';
+
+/**
+ * How long the server keeps a payment reserved after an attempt that was
+ * cancelled or never reported — ONE phrase per settlement mode, and the only
+ * place a wait is written down. A naira payment is freed after about ten
+ * minutes; a crypto one is a delivery straight to the merchant, so it is kept
+ * for an hour. Every user-facing "it will free up" statement reads from here.
+ */
+export const RESERVE_WINDOW: Record<SettlementMode, string> = {
+  fiat: 'about 10 minutes',
+  crypto: 'about an hour',
+};
+
+/**
+ * For a swap the server is still following (or cannot find yet) no time is
+ * promised: it is followed until it resolves. The 24 h after which the phone
+ * lets go of its own hold is deliberately NOT said to her either.
+ */
+export const KEEP_CHECKING = "We'll keep checking";
+
+/** A refused or cancelled attempt left nothing behind; when it frees up depends on the mode. */
+export const notSentCopy = (mode: SettlementMode): string =>
+  ` Nothing was sent. If you can't try again right away, the payment frees up again in ${RESERVE_WINDOW[mode]}.`;
+
+/** Continue payment found no sale of hers that pays this payment. */
+export const nothingToContinueCopy = (mode: SettlementMode): string =>
+  `We couldn't find a payment of yours to continue. If nothing is under way, the payment frees up again in ${RESERVE_WINDOW[mode]}, and you can try again.`;
+
 /** Said in place of the swapped sell's own words when a payment cannot safely be started over. */
 export const PAYMENT_STILL_GOING =
-  "Your payment isn't finished yet, but your money is safe. Give it a few minutes, then tap Continue payment — don't pay again.";
+  `Your payment isn't finished yet, but your money is safe. ${KEEP_CHECKING} — tap Continue payment to check now. Don't pay again.`;
+
+/** Crypto: the swap was sent but the server has not confirmed it. */
+export const NOT_CONFIRMED =
+  `Your payment was sent, but we couldn't confirm it with our server yet. Don't pay again. ${KEEP_CHECKING} — tap Continue payment to check now.`;
+
+/** Crypto: it is not known whether the swap was broadcast. */
+export const BROADCAST_UNCONFIRMED =
+  `We couldn't confirm your payment was sent. Don't pay again. ${KEEP_CHECKING} — tap Continue payment to check now.`;
 
 /** 409 from starting a payment: an attempt of hers already exists — follow it, never start another. */
 export const PAY_IN_PROGRESS = 'pay_in_progress';
@@ -168,9 +206,6 @@ export const errorMessage = (e: unknown, fallback: string): string =>
 export const unsupportedNetworkMessage = (symbol: string): string =>
   `Paying with ${symbol} from that network isn't supported yet. Pick a coin on another network.`;
 
-/** Continue payment found no sale of hers that pays this payment. */
-export const NOTHING_TO_CONTINUE =
-  "We couldn't find a payment of yours to continue. If it doesn't finish within a few minutes it will be released, and you can try again.";
 
 /** 409 on every start route: the server could not prove whether an attempt exists, so it paused the payment for support. */
 export const PAY_ATTEMPT_UNCERTAIN = 'pay_attempt_uncertain';

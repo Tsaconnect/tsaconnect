@@ -823,3 +823,28 @@ describe('Continue and reset never dead-end', () => {
     expect(hook.stage).toBe('failed');
   });
 });
+
+describe('the reservation window in words, for a crypto payment', () => {
+  it('a swap refused before it left her wallet says the payment frees up in about an hour — not ten minutes', async () => {
+    m.executeLiFiSwap.mockRejectedValue(new Error('User rejected the request'));
+    await mount();
+    await pay();
+    expect(hook.error).toContain('about an hour');
+    expect(hook.error).not.toMatch(/ten minutes|10 minutes/i);
+  });
+
+  it('nothing to continue says about an hour', async () => {
+    await mount();
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(hook.error).toContain('about an hour');
+  });
+
+  it('an unconfirmed swap says we will keep checking, and promises no time', async () => {
+    m.recordSellSwap.mockRejectedValue(new Error('offline'));
+    await mount();
+    await pay();
+    expect(hook.error).toMatch(/keep checking/i);
+    expect(hook.error).not.toMatch(/minute|hour/i);
+  });
+});
