@@ -245,6 +245,9 @@ func TestPayReconcile_AnExpiredOrderIsOnlyReleasedOnceItsDepositAddressIsProvenE
 		"Paycrest reported the deposit tx": {func(r *payCheckoutRig, o *models.PaycrestOrderRecord) {
 			r.pay.db.Model(o).Update("tx_hash", "0xdeposit")
 		}, models.PayStatusFailed, 0, "order_expired_after_deposit"},
+		"Paycrest returned money to her": {func(r *payCheckoutRig, o *models.PaycrestOrderRecord) {
+			r.pay.db.Model(o).Update("amount_returned", "12.5")
+		}, models.PayStatusFailed, 0, "order_expired_after_deposit"},
 		"the address is empty":     {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) {}, models.PayStatusPending, 1, ""},
 		"the chain cannot be read": {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) { r.deposit.err = errors.New("rpc down") }, models.PayStatusProcessing, 1, "expired_order_unverified"},
 		"no reader is wired":       {func(r *payCheckoutRig, _ *models.PaycrestOrderRecord) { r.pay.SetDepositReader(nil) }, models.PayStatusProcessing, 0, "expired_order_unverified"},
@@ -596,5 +599,96 @@ func unlockAdvisory(t *testing.T, conn *sql.Conn) {
 	t.Helper()
 	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", payReconcileLockKey); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---- a payment failed over a stale ordering claim can never have its payout opened later ----
+
+// The reconciler ends the intent FIRST, atomically and only while it is still the
+// dead claim it read, so an OpenOrder retry finds a failed intent.
+func TestPayReconcile_AStaleOrderingClaimEndsTheIntentBeforeFailingThePayment(t *testing.T) {
+	r := newPayCheckoutRig(t)
+	in := r.staleOrdering(t)
+	got := r.tickAt(t, sellIntentClaimStale+time.Minute)
+	if got.Status != models.PayStatusFailed {
+		t.Fatalf("payment = %+v", got)
+	}
+	var stored models.RampSellIntent
+	r.pay.db.First(&stored, "id = ?", in.ID)
+	if stored.Status != models.SellIntentFailed || stored.AccountNumber != "" || stored.BankCode != "" || stored.PaycrestOrderID != nil {
+		t.Fatalf("intent = %+v: ended, its bank details scrubbed like any failed sale", stored)
+	}
+}
+
+// A retry that took over the dead claim between the reconciler's read and its
+// write holds a live claim and is opening the order: the end must not match it.
+func TestPayReconcile_AClaimTakenOverBeforeTheEndIsNeverEnded(t *testing.T) {
+	ctx := context.Background()
+	r := newPayCheckoutRig(t)
+	in := r.staleOrdering(t)
+	var read models.RampSellIntent
+	r.pay.db.First(&read, "id = ?", in.ID) // what the reconciler read: a dead claim
+	takeover := payTestNow.Add(sellIntentClaimStale + 30*time.Second)
+	r.pay.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Update("updated_at", takeover) // the retry's claim
+	r.pay.now = func() time.Time { return payTestNow.Add(sellIntentClaimStale + time.Minute) }
+	if err := r.pay.reconcileStaleOrdering(ctx, r.get(t), &read); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.RampSellIntent
+	r.pay.db.First(&stored, "id = ?", in.ID)
+	if got := r.get(t); got.Status != models.PayStatusProcessing || stored.Status != models.SellIntentOrdering {
+		t.Fatalf("payment %+v intent %s: a live claim was ended under its holder", got, stored.Status)
+	}
+}
+
+// The claim finished between the read and the write: follow what it did.
+func TestPayReconcile_AClaimThatCompletedBeforeTheEndIsFollowedNotFailed(t *testing.T) {
+	ctx := context.Background()
+	r := newPayCheckoutRig(t)
+	in := r.staleOrdering(t)
+	var read models.RampSellIntent
+	r.pay.db.First(&read, "id = ?", in.ID)
+	orderID := uuid.New()
+	r.pay.db.Create(&models.PaycrestOrderRecord{ID: orderID, UserID: r.alice.ID, Direction: models.PaycrestDirectionSell,
+		Status: models.PaycrestStatusAwaitingDeposit, Reference: "PCS-done", DepositAddress: "0xdep"}) // not marked: found only via the intent
+	r.pay.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Updates(map[string]any{"status": models.SellIntentOrdered, "paycrest_order_id": orderID})
+	r.pay.now = func() time.Time { return payTestNow.Add(sellIntentClaimStale + time.Minute) }
+	if err := r.pay.reconcileStaleOrdering(ctx, r.get(t), &read); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.get(t); got.Status != models.PayStatusProcessing || got.PaycrestOrderID == nil || *got.PaycrestOrderID != orderID {
+		t.Fatalf("payment = %+v", got)
+	}
+}
+
+// The other half: once the intent is failed, no retry can claim it or open an order.
+func TestSellIntent_AnIntentEndedOverAStaleClaimCanNeverHaveItsPayoutOpened(t *testing.T) {
+	ctx := context.Background()
+	r := payRig(t)
+	r.base.amount = big.NewInt(34_000000)
+	r.svc.SetUSDCBalanceReader(balanceOf(500_000000))
+	in, _, err := r.svc.Create(ctx, r.user, payIntentInput(uuid.New(), r.user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mustRecord(t, in.ID, testSwapHash)
+	r.status.st = r.landed(in)
+	stale := sponsorTestNow.Add(-time.Hour)
+	r.svc.db.Model(&models.RampSellIntent{}).Where("id = ?", in.ID).Updates(map[string]any{"status": models.SellIntentOrdering, "updated_at": stale})
+	var read models.RampSellIntent
+	r.svc.db.First(&read, "id = ?", in.ID) // the retry's read: a stale ordering claim it may take over
+	// The reconciler's end.
+	if res := r.svc.db.Model(&models.RampSellIntent{}).Where("id = ? AND status = ? AND paycrest_order_id IS NULL", in.ID, models.SellIntentOrdering).
+		Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed})); res.RowsAffected != 1 {
+		t.Fatalf("setup: %v", res.Error)
+	}
+	if claimed, err := r.svc.claim(ctx, &read); err != nil || claimed {
+		t.Fatalf("claim on a stale read of an ended intent: claimed=%v err=%v", claimed, err)
+	}
+	if _, err := r.svc.OpenOrder(ctx, r.user, in.ID, false); !errors.Is(err, ErrSellIntentState) {
+		t.Fatalf("err = %v", err)
+	}
+	if r.client.offrampCalls != 0 {
+		t.Fatalf("%d offramps opened for a failed payment's intent", r.client.offrampCalls)
 	}
 }

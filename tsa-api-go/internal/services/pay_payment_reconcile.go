@@ -282,10 +282,10 @@ func (s *PayPaymentService) expiredOrderDeposit(ctx context.Context, o *models.P
 
 // orderShowsDeposit reports any sign in our own records that the customer's
 // money reached, or may have reached, the order: a paid amount, a deposit
-// transaction Paycrest reported, her "I've sent it" claim, or a deposit we
+// transaction Paycrest reported, an amount it returned to her, her "I've sent it" claim, or a deposit we
 // relayed for her. An unreadable sign is an error, never "none".
 func (s *PayPaymentService) orderShowsDeposit(ctx context.Context, o *models.PaycrestOrderRecord) (bool, error) {
-	if payAmountPositive(o.AmountPaid) || o.PaymentClaimedAt != nil || strings.TrimSpace(o.TxHash) != "" {
+	if payAmountPositive(o.AmountPaid) || payAmountPositive(o.AmountReturned) || o.PaymentClaimedAt != nil || strings.TrimSpace(o.TxHash) != "" {
 		return true, nil
 	}
 	var relayed int64
@@ -386,10 +386,41 @@ func (s *PayPaymentService) reconcileStaleOrdering(ctx context.Context, p *model
 		payAlert("ordering_order_adopted", p, "order", o.ID)
 		return s.handOverToOrder(ctx, p, o.ID)
 	case errors.Is(err, gorm.ErrRecordNotFound):
+		// No order to adopt. The payment is failed — but only after the intent is
+		// ended, or a retry of OpenOrder could still open her payout for a payment
+		// that has already failed. The end is one guarded write: it matches only
+		// the dead claim this sweep read (still ordering, still no order, and not
+		// touched since — a retry that took the claim over bumps updated_at), so it
+		// can never end a live claim under its holder; and a retry arriving after
+		// finds a failed intent, which claim() and OpenOrder both refuse.
+		res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+			Where("id = ? AND status = ? AND paycrest_order_id IS NULL AND updated_at <= ?", in.ID, models.SellIntentOrdering, in.UpdatedAt).
+			Updates(models.WithBankDetailsCleared(map[string]any{"status": models.SellIntentFailed, "updated_at": s.now()}))
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return s.followMovedClaim(ctx, p, in.ID)
+		}
 		payAlert("ordering_claim_stale", p, "intent", in.ID)
 		return s.failFrom(ctx, p, "the payout order was never opened — support is reviewing it")
 	}
 	return err
+}
+
+// followMovedClaim is what a sweep does when the dead claim it meant to end had
+// moved on: it re-reads the intent and, if the claim completed, follows the order
+// it opened. Anything else (a retry holds a fresh claim, the sale fell back to
+// swapped) is followed by the ordinary rules on the next tick.
+func (s *PayPaymentService) followMovedClaim(ctx context.Context, p *models.PayPayment, intentID uuid.UUID) error {
+	var cur models.RampSellIntent
+	if err := s.db.WithContext(ctx).First(&cur, "id = ?", intentID).Error; err != nil {
+		return err
+	}
+	if cur.Status == models.SellIntentOrdered && cur.PaycrestOrderID != nil {
+		return s.handOverToOrder(ctx, p, *cur.PaycrestOrderID)
+	}
+	return nil
 }
 
 // reconcileDelivery settles a crypto payment (its intent delivers a token to the
