@@ -1009,6 +1009,23 @@ describe('events — what a payment reads instead of six state slices', () => {
     expect(ev.onStop).toHaveBeenCalledWith({ message: 'You need to verify your identity', retryable: true }, { intent: undefined, order: undefined });
   });
 
+  it('a later run that fails before it creates an intent does not report the previous run’s intent', async () => {
+    const ev = events();
+    const createIntent = jest.fn()
+      .mockResolvedValueOnce({ intent: payIntent, quote: qp })
+      .mockRejectedValueOnce(Object.assign(new Error('Verify first'), { code: 'kyc_verification_required' }));
+    payOpts = { createIntent, ...ev };
+    mocked.getSwapDelivery.mockResolvedValue({ status: 'PENDING' });
+    await mountPay();
+
+    await run(payHook.start(payArgs)); // creates i1, then stops (the swap is still on its way)
+    await run(payHook.start(payArgs)); // fails at the creator
+
+    expect(ev.onStop).toHaveBeenCalledTimes(2);
+    expect(ev.onStop.mock.calls[0][1].intent).toEqual(payIntent);
+    expect(ev.onStop.mock.calls[1][1]).toEqual({ intent: undefined, order: undefined });
+  });
+
   it('emits a shortfall with the figure — and no stop', async () => {
     const ev = events();
     payOpts = { createIntent: jest.fn().mockResolvedValue({ intent: payIntent, quote: qp }), ...ev };

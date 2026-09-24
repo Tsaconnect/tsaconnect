@@ -36,8 +36,8 @@ import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap'
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
-  classifyStartError, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
-  nothingToContinueCopy, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
+  classifyStartError, directPriceMovedCopy, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
+  nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, PAUSED_FAILURE, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
   type StartErrorKind,
 } from '@/utils/payCheckout';
 import type { PayEstimate } from '@/hooks/usePayLive';
@@ -63,7 +63,7 @@ export type UsePayNaira = {
   order?: PaycrestOrder;
   authorization: AuthorizationProps;
   /** `priced` is what she was shown: the authorization says so, and what is signed is held to it. */
-  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
+  payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
   /** What she will send, e.g. "0.084 BNB" — an estimate, before she taps Pay. */
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   /** Her wallet on this device, once known. */
@@ -79,16 +79,30 @@ export type UsePayNaira = {
 };
 
 type Action =
-  | { kind: 'pay'; token: LiFiToken; chainId: number; priced?: PayEstimate }
+  | { kind: 'pay'; token: LiFiToken; chainId: number; priced: PayEstimate }
   | { kind: 'wallet'; intent: SellIntent; missingUsdc?: string }
   | { kind: 'continue'; intent: SellIntent };
 
 const authorizationTitle = (a: Action | null): string => {
-  if (a?.kind === 'pay' && a.priced) return `Authorize payment of about ${a.priced.pay}`;
+  if (a?.kind === 'pay') return `Authorize payment of about ${a.priced.pay}`;
   if (a?.kind === 'wallet') return a.missingUsdc ? `Authorize paying about ${a.missingUsdc} USDC from your wallet` : 'Authorize paying from your wallet';
   if (a?.kind === 'continue') return 'Authorize continuing your payment';
   return 'Authorize payment';
 };
+
+/**
+ * The payout order's deposit against the price she was shown: the amount in the
+ * token's base units when it exceeds the tolerance, 'unreadable' when it cannot
+ * be checked (never funded), null when it is fine.
+ */
+function orderAboveTolerance(tokenAmount: string | undefined, decimals: number, pricedBase: string): bigint | 'unreadable' | null {
+  try {
+    const amount = ethers.parseUnits(String(tokenAmount ?? ''), decimals);
+    return exceedsPriced(amount, BigInt(pricedBase)) ? amount : null;
+  } catch {
+    return 'unreadable';
+  }
+}
 
 /**
  * The venue Paycrest fills as it is for `token` on `chainId` when the merchant
@@ -135,7 +149,9 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     createIntent,
     onStage: (stage, snap) => {
       if (stage === 'done') dispatch({ type: 'waiting', swapStage: 'done', order: snap.order });
-      else if (stage !== 'idle') dispatch({ type: 'progress', swapStage: stage, order: snap.order });
+      // 'idle' from a resume: the sale had nothing left to follow (already delivered or closed) — the server settles it.
+      else if (stage === 'idle') { if (ref.current.kind === 'paying') dispatch({ type: 'waiting' }); }
+      else dispatch({ type: 'progress', swapStage: stage, order: snap.order });
     },
     onShortfall: (missingUsdc, snap) => dispatch({ type: 'shortfall', missingUsdc, intent: snap.intent }),
     onStop: ({ message, retryable }, snap) => {
@@ -194,7 +210,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     dispatch({ type: 'continue', intent: open });
   }, [address, checkout.id, dispatch]);
 
-  const payDirectly = async (venue: PaycrestVenue, wallet: string) => {
+  const payDirectly = async (venue: PaycrestVenue, wallet: string, token: LiFiToken, priced: PayEstimate) => {
     let balances: WalletBalanceWithChain[] | null = null;
     try {
       const res = await getWalletBalances(undefined, wallet);
@@ -210,6 +226,21 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     }
 
     const order = await payDirect(checkout.id, { chainKey: venue.chain, token: venue.token });
+    // The money that moves is the deposit built from THIS order — the server's own quote, made after
+    // our check above — so the bound is applied to it, before anything is signed.
+    const moved = orderAboveTolerance(order.tokenAmount, token.decimals, priced.fromAmount);
+    if (moved) {
+      // No money moved and none will: the order simply lapses. But the payment is linked to it, so
+      // a tap would only be refused — hold it for the window rather than offer Pay.
+      dispatch({
+        type: 'fail',
+        error: moved === 'unreadable'
+          ? ORDER_AMOUNT_UNCHECKABLE
+          : directPriceMovedCopy(moved.toString(), priced.fromAmount, token.decimals, venue.token),
+        retryable: false,
+      });
+      return;
+    }
     dispatch({ type: 'progress', swapStage: 'idle', order });
     try {
       await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
@@ -229,10 +260,14 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     dispatch({ type: 'waiting', order });
   };
 
-  const run = async (token: LiFiToken, chainId: number, priced?: PayEstimate) => {
+  // Read fresh (not narrowed): the machine's answer to what was just dispatched.
+  const isPaying = () => ref.current.kind === 'paying';
+
+  const run = async (token: LiFiToken, chainId: number, priced: PayEstimate) => {
     // One attempt at a time: `begin` is refused (and the ref says so at once) while one is in flight.
-    if (!address || ref.current.kind === 'paying') return;
+    if (!address || isPaying()) return;
     dispatch({ type: 'begin' });
+    if (!isPaying()) return; // refused (a payment the server paused): nothing is started
     startError.current = null;
     if (isNonEVMLiFiChain(chainId)) {
       dispatch({ type: 'fail', error: unsupportedNetworkMessage(token.symbol), retryable: true });
@@ -250,7 +285,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       if (venue) {
         // The fresh amount, held to the price she was shown — before any order exists.
         const fresh = ethers.parseUnits((Math.ceil(venue.tokenAmount * 100) / 100).toFixed(2), token.decimals);
-        if (priced && exceedsPriced(fresh, BigInt(priced.fromAmount))) {
+        if (exceedsPriced(fresh, BigInt(priced.fromAmount))) {
           dispatch({
             type: 'fail',
             error: priceMovedMessage(fresh.toString(), priced.fromAmount, token.decimals, venue.token),
@@ -258,14 +293,14 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
           });
           return;
         }
-        await payDirectly(venue, address);
+        await payDirectly(venue, address, token, priced);
       } else {
         const args: StartSwapArgs = {
           sourceChainId: chainId,
           token: { ...token, chainId },
           walletAddress: address,
           sourceAddress: address,
-          pricedFromAmount: priced?.fromAmount,
+          pricedFromAmount: priced.fromAmount,
         };
         await swapped.start(args);
         if (lastStart()?.kind === 'follow') {
@@ -320,7 +355,8 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   }
 
   const payWith = useCallback(
-    (token: LiFiToken, chainId: number, priced?: PayEstimate) => request({ kind: 'pay', token, chainId, priced }),
+    // Never without the price she was shown: nothing is authorized (or signed) unbound.
+    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced) request({ kind: 'pay', token, chainId, priced }); },
     [request],
   );
 

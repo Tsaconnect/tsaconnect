@@ -20,11 +20,15 @@ export type PayHold = { intentId: string; at: number };
 
 export const payHoldKey = (paymentId: string) => `tsapay.pendingSwap.${paymentId}`;
 
-/** The hold for a payment, or null — never throws: a corrupt value is no hold. */
+/**
+ * The hold for a payment, or null when there is none (a corrupt value is none).
+ * THROWS when storage cannot be read: "I could not look" is not "there is
+ * nothing" — the caller holds rather than offering Pay again.
+ */
 export async function readPayHold(paymentId: string): Promise<PayHold | null> {
+  const raw = await AsyncStorage.getItem(payHoldKey(paymentId));
+  if (!raw) return null;
   try {
-    const raw = await AsyncStorage.getItem(payHoldKey(paymentId));
-    if (!raw) return null;
     const v = JSON.parse(raw);
     return typeof v?.intentId === 'string' && typeof v?.at === 'number' ? { intentId: v.intentId, at: v.at } : null;
   } catch {
@@ -32,11 +36,14 @@ export async function readPayHold(paymentId: string): Promise<PayHold | null> {
   }
 }
 
-/** Record a hold. An existing one keeps its original time: the 24 h runs from the signature. */
+/**
+ * Record a hold. An existing one keeps its original time: the 24 h runs from
+ * the signature. THROWS when it cannot be recorded: a swap must not be
+ * broadcast without the safeguard that survives an app kill.
+ */
 export async function writePayHold(paymentId: string, intentId: string, at: number = Date.now()): Promise<void> {
   if (await readPayHold(paymentId)) return;
-  await AsyncStorage.setItem(payHoldKey(paymentId), JSON.stringify({ intentId, at } satisfies PayHold))
-    .catch((e) => console.warn('[pay] could not persist the hold', e));
+  await AsyncStorage.setItem(payHoldKey(paymentId), JSON.stringify({ intentId, at } satisfies PayHold));
 }
 
 export const clearPayHold = (paymentId: string): Promise<void> =>

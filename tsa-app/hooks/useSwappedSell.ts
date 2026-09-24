@@ -333,6 +333,8 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
     running.current = true;
     setError(undefined);
     keepOrder(undefined);
+    // What events report is THIS run's: the previous run's intent must not ride along on a failure before this one has its own.
+    held.current = {};
     setDepositTx(undefined);
     setMissingUsdc(undefined);
     setRetryable(true);

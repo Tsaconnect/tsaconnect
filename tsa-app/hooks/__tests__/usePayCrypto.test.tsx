@@ -55,6 +55,7 @@ import * as SellSwap from '@/services/paycrestSellSwap';
 import * as LifiFlow from '@/services/lifiFlow';
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
+import { priceMovedMessage } from '@/utils/payCheckout';
 import { usePayCrypto, type UsePayCrypto } from '../usePayCrypto';
 
 const { PayError } = PayApi;
@@ -79,9 +80,15 @@ const bnb = { address: '0x0000000000000000000000000000000000000000', symbol: 'BN
 const BSC = 56;
 const KEY = 'paycrest.sellSwap.pendingTx.i1';
 const intent = { id: 'i1', status: 'swapping', payPaymentId: ID } as SellIntent;
-const quote = { fromAmount: '84000000000000000' } as LiFiQuote;
+/** A native-coin quote as the server builds it: the transaction sends exactly what the quote pulls. */
+const quote = {
+  fromAmount: '84000000000000000', transactionRequest: { value: `0x${BigInt('84000000000000000').toString(16)}` },
+} as unknown as LiFiQuote;
 
 jest.setTimeout(30_000);
+
+/** A price no fresh quote can exceed — for tests that are not about the bound. */
+const ANY_PRICE = { pay: '0.084 BNB', fromAmount: `1${'0'.repeat(40)}` };
 
 let hook: UsePayCrypto;
 const Harness = () => {
@@ -111,7 +118,7 @@ const settle = () => act(async () => {
 });
 
 async function pay(token: LiFiToken = bnb, chainId = BSC) {
-  act(() => hook.payWith(token, chainId));
+  act(() => hook.payWith(token, chainId, ANY_PRICE));
   await act(async () => { hook.authorization.onAuthorized(); });
   await settle();
 }
@@ -136,9 +143,9 @@ afterEach(() => {
 describe('authorization', () => {
   it('payWith only opens the modal — nothing is sent, nothing asked of the server', async () => {
     await mount();
-    act(() => hook.payWith(bnb, BSC));
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
     expect(hook.authorization.visible).toBe(true);
-    expect(hook.authorization.title).toBe('Authorize payment');
+    expect(hook.authorization.title).toBe('Authorize payment of about 0.084 BNB');
     expect(m.payCrypto).not.toHaveBeenCalled();
     expect(m.executeLiFiSwap).not.toHaveBeenCalled();
     expect(hook.stage).toBe('idle');
@@ -146,7 +153,7 @@ describe('authorization', () => {
 
   it('cancelling sends nothing', async () => {
     await mount();
-    act(() => hook.payWith(bnb, BSC));
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
     act(() => hook.authorization.onCancel());
     await settle();
     expect(hook.authorization.visible).toBe(false);
@@ -486,7 +493,7 @@ describe('reset', () => {
     let release!: (v: any) => void;
     m.payCrypto.mockReturnValue(new Promise((r) => { release = r; }));
     await mount();
-    act(() => hook.payWith(bnb, BSC));
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
     await act(async () => { hook.authorization.onAuthorized(); });
     expect(hook.stage).toBe('paying');
 
@@ -580,7 +587,7 @@ describe('Continue payment with nothing to continue', () => {
 describe('one attempt at a time', () => {
   it('a double biometric success starts one payment and signs one swap', async () => {
     await mount();
-    act(() => hook.payWith(bnb, BSC));
+    act(() => hook.payWith(bnb, BSC, ANY_PRICE));
     await act(async () => {
       hook.authorization.onAuthorized();
       hook.authorization.onAuthorized();
@@ -846,5 +853,134 @@ describe('the reservation window in words, for a crypto payment', () => {
     await pay();
     expect(hook.error).toMatch(/keep checking/i);
     expect(hook.error).not.toMatch(/minute|hour/i);
+  });
+});
+
+describe('a call with no priced amount is refused outright', () => {
+  it('nothing to authorize, nothing started', async () => {
+    await mount();
+    act(() => (hook.payWith as any)(bnb, BSC));
+    expect(hook.authorization.visible).toBe(false);
+    expect(m.payCrypto).not.toHaveBeenCalled();
+  });
+});
+
+describe('storage that cannot be read holds — it does not say "nothing is out there"', () => {
+  // Patch (and put back) the AsyncStorage mock's method: restoreAllMocks / mockRestore would reset its own implementation.
+  let originalGet: typeof AsyncStorage.getItem | undefined;
+  afterEach(() => { if (originalGet) { (AsyncStorage as any).getItem = originalGet; originalGet = undefined; } });
+  const breakHoldReads = () => {
+    originalGet = AsyncStorage.getItem;
+    const real = originalGet.bind(AsyncStorage);
+    (AsyncStorage as any).getItem = async (k: string) => {
+      if (k.startsWith('tsapay.')) throw new Error('storage unavailable');
+      return real(k);
+    };
+    return { mockRestore: () => { (AsyncStorage as any).getItem = originalGet; originalGet = undefined; } };
+  };
+
+  it('on opening: held at once, Pay withheld, with a way out — Continue payment checks again', async () => {
+    breakHoldReads();
+    await mount();
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false);
+    expect(hook.canContinue).toBe(true);
+    expect(hook.error).toMatch(/couldn't check/i);
+    expect(hook.error).toMatch(/don't pay again|to be safe/i);
+    expect(m.payCrypto).not.toHaveBeenCalled();
+  });
+
+  it('once storage answers and there is no hold, Continue payment frees Pay', async () => {
+    const spy = breakHoldReads();
+    await mount();
+    spy.mockRestore();
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(hook.stage).toBe('idle');
+    expect(hook.retryable).toBe(true);
+  });
+
+  it('and if there IS a hold once it can be read, it is honoured', async () => {
+    const spy = breakHoldReads();
+    await mount();
+    spy.mockRestore();
+    await leaveHold();
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await act(async () => { hook.continuePayment(); });
+    await settle();
+    expect(hook.stage).toBe('waiting'); // the server took the late hash
+  });
+
+  it('a reset (the server freed the payment) cannot free Pay while the hold cannot be read', async () => {
+    await mount();
+    breakHoldReads();
+    await act(async () => { await hook.reset(); });
+    expect(hook.stage).not.toBe('idle');
+  });
+
+  it('a Pay tap cannot start a payment while the hold cannot be read', async () => {
+    await mount();
+    breakHoldReads();
+    await pay();
+    expect(m.payCrypto).not.toHaveBeenCalled();
+    expect(hook.retryable).toBe(false);
+  });
+});
+
+describe('a rejected report is final only when the server means it', () => {
+  it.each([401, 403])('a %i (an expired session, a permissions blip) is retried and stays recoverable — never the terminal state', async (status) => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(Object.assign(new Error('auth'), { status }));
+    await mount();
+    await settle();
+    expect(m.recordSellSwap).toHaveBeenCalledTimes(3);
+    expect(hook.stage).toBe('failed');
+    expect(hook.canContinue).toBe(true); // Continue payment can try again once she is signed in
+    expect(hook.error).not.toContain(ID);
+  });
+
+  it.each([404, 409, 422])('a %i is the server’s final word', async (status) => {
+    await leaveHold();
+    m.recordSellSwap.mockRejectedValue(rejection(status));
+    await mount();
+    expect(m.recordSellSwap).toHaveBeenCalledTimes(1);
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toContain(ID);
+  });
+});
+
+describe('one attempt, and only one that is accepted', () => {
+  it('a payment the server paused does not call the start route again', async () => {
+    m.payCrypto.mockRejectedValue(new PayError('x', 409, 'pay_attempt_uncertain'));
+    await mount();
+    await pay();
+    expect(m.payCrypto).toHaveBeenCalledTimes(1);
+    await pay();
+    expect(m.payCrypto).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('failed');
+  });
+
+  it('re-reads the hold before it starts: one recorded since opening stops the start', async () => {
+    await mount(); // nothing held at this point
+    await leaveHold(); // ...and then a swap of hers is signed elsewhere
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await pay();
+    expect(m.payCrypto).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('waiting');
+  });
+});
+
+describe('a price the server moved is not "reserved" — the intent was closed', () => {
+  it('shows the bare refusal, exactly, with no second "nothing was sent" and no reservation', async () => {
+    const moved = {
+      fromAmount: '99000000000000000', transactionRequest: { value: `0x${BigInt('99000000000000000').toString(16)}` },
+    } as unknown as LiFiQuote;
+    m.payCrypto.mockResolvedValue({ intent, quote: moved, gasTopUp: false });
+    await mount();
+    act(() => hook.payWith(bnb, BSC, { pay: '0.084 BNB', fromAmount: '84000000000000000' }));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await settle();
+    expect(hook.error).toBe(priceMovedMessage('99000000000000000', '84000000000000000', 18, 'BNB'));
+    expect(hook.error).not.toMatch(/hour/i);
   });
 });

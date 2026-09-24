@@ -75,6 +75,13 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
     return () => clearInterval(t);
   }, [pick, mayPay, reprice]);
 
+  // A refusal (the price moved past what she agreed to) means the figure on screen is stale: look it up again now.
+  useEffect(() => {
+    if (pick && showForm && pay.stage === 'failed' && pay.retryable !== false) void reprice(pick);
+    // only the flip to failed re-prices.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pay.stage]);
+
   const onPay = () => {
     if (!pick || !price?.label || !price.fromAmount) return;
     // A stale figure is not paid: look it up, show what it is now, and let her confirm that.
@@ -83,6 +90,8 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
   };
 
   const price = priced && priced.pick === pick ? priced : null;
+  // Payable only with BOTH the words and the base-unit amount the signature will be held to.
+  const priceOk = !!price?.label && !!price.fromAmount;
   const pricing = !!pick && !price;
   const running = pay.stage === 'paying';
   const orderId = pay.order?.id ?? checkout.orderId;
@@ -120,8 +129,8 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
           <Text variant="caption" style={{ color: colors.textMuted }}>Checking the price…</Text>
         </View>
       )}
-      {showForm && price?.label ? <Text variant="body">{`You'll pay about ${price.label}`}</Text> : null}
-      {showForm && price && !price.label && !price.error && (
+      {showForm && priceOk ? <Text variant="body">{`You'll pay about ${price?.label}`}</Text> : null}
+      {showForm && price && !priceOk && !price.error && (
         <Text variant="bodySm" style={{ color: colors.warning }}>
           {"We couldn't work out the price for this token. Pick another."}
         </Text>
@@ -189,7 +198,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
           size="lg"
           onPress={onPay}
           loading={running}
-          disabled={!pick || !price?.label || running}
+          disabled={!pick || !priceOk || running}
         />
       )}
 

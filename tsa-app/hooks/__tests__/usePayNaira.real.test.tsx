@@ -55,6 +55,7 @@ import { PaycrestError, type PaycrestOrder, type PaycrestVenue } from '@/service
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 import type { PayCheckout } from '@/services/payApi';
+import { priceMovedMessage } from '@/utils/payCheckout';
 import { usePayNaira, type UsePayNaira } from '../usePayNaira';
 
 const m = {
@@ -158,7 +159,7 @@ it('a fresh quote past the priced amount is refused before signing: retryable, c
   expect(m.abandon).toHaveBeenCalledWith('i1');
   expect(hook.stage).toBe('failed');
   expect(hook.retryable).toBe(true);
-  expect(hook.error).toMatch(/price moved/i);
+  expect(hook.error).toBe(priceMovedMessage('99000000000000000', '84000000000000000', 18, 'BNB')); // the bare refusal, no reservation
 });
 
 it('the sale is handed back from the payment to the pipeline and forth without leaving a stale stage', async () => {

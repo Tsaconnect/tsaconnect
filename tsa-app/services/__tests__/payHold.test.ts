@@ -49,3 +49,30 @@ it('holds for 24 hours from the signature, then lifts', () => {
   expect(holdActive(hold, 1_000 + HOLD_MAX_MS + 1)).toBe(false);
   expect(holdActive(null, 5)).toBe(false);
 });
+
+describe('storage that fails is not "no hold"', () => {
+  // Patch the AsyncStorage mock's methods and put them back (jest's restoreAllMocks/mockRestore would also
+  // reset the mock's own implementations, breaking every later test).
+  const undo: Array<() => void> = [];
+  const patch = (name: 'getItem' | 'setItem', impl: (...a: any[]) => Promise<any>) => {
+    const original = AsyncStorage[name];
+    (AsyncStorage as any)[name] = impl;
+    undo.push(() => { (AsyncStorage as any)[name] = original; });
+  };
+  afterEach(() => { undo.splice(0).forEach((u) => u()); });
+
+  it('a read that fails throws — the caller must hold, not assume nothing is out there', async () => {
+    patch('getItem', async () => { throw new Error('disk full'); });
+    await expect(readPayHold('pay-1')).rejects.toThrow('disk full');
+  });
+
+  it('a write that fails throws — a hold that cannot be recorded must stop the swap', async () => {
+    patch('setItem', async () => { throw new Error('disk full'); });
+    await expect(writePayHold('pay-1', 'i1')).rejects.toThrow('disk full');
+  });
+
+  it('a corrupt value is still just no hold', async () => {
+    await AsyncStorage.setItem(payHoldKey('pay-1'), 'not json');
+    await expect(readPayHold('pay-1')).resolves.toBeNull();
+  });
+});

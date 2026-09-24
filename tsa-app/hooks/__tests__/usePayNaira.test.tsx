@@ -72,6 +72,7 @@ import * as Swapped from '@/hooks/useSwappedSell';
 import type { LiFiToken } from '@/services/lifi';
 import { PaycrestError, type PaycrestOrder, type PaycrestQuote, type PaycrestVenue } from '@/services/paycrestApi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
+import { directPriceMovedCopy } from '@/utils/payCheckout';
 import { usePayNaira, type UsePayNaira } from '../usePayNaira';
 
 const { PayError } = PayApi;
@@ -105,7 +106,7 @@ const BSC = 56;
 
 const venue = { chain: 'base', token: 'USDC', rate: '1500', spreadPercent: 0.1, tokenAmount: 33.5 } as PaycrestVenue;
 const quoteWith = (venues: PaycrestVenue[]) => ({ venues, best: venues[0] ?? null }) as PaycrestQuote;
-const order = { id: 'o1', chain: 'base', token: 'USDC', status: 'awaiting_deposit' } as PaycrestOrder;
+const order = { id: 'o1', chain: 'base', token: 'USDC', status: 'awaiting_deposit', tokenAmount: '33.5' } as PaycrestOrder;
 const intent = { id: 'i1', status: 'swapping', payPaymentId: ID } as SellIntent;
 
 // The swapped-sell hook, replaced by a stub whose state the tests set.
@@ -138,6 +139,9 @@ const replay = (opts: any) => {
 const pipelineStart = async (a: any) => { await createIntent!(a).catch(() => {}); replay(latestOpts); };
 let createIntent!: NonNullable<Parameters<typeof Swapped.useSwappedSell>[0]>['createIntent'];
 
+/** A price no fresh quote can exceed — for tests that are not about the bound. */
+const ANY_PRICE = { pay: '33.5 USDC', fromAmount: `1${'0'.repeat(40)}` };
+
 let hook: UsePayNaira;
 const Harness = ({ c }: { c: PayApi.PayCheckout }) => {
   hook = usePayNaira(c);
@@ -149,7 +153,7 @@ const flush = () => act(async () => { for (let i = 0; i < 10; i++) await Promise
 
 /** Tap a token, then authorize. */
 async function pay(token: LiFiToken, chainId: number) {
-  act(() => hook.payWith(token, chainId));
+  act(() => hook.payWith(token, chainId, ANY_PRICE));
   await act(async () => { hook.authorization.onAuthorized(); });
   await flush();
 }
@@ -186,9 +190,9 @@ afterEach(() => act(() => renderer?.unmount()));
 describe('authorization', () => {
   it('payWith only opens the modal — nothing is asked of the server yet', async () => {
     await mount();
-    act(() => hook.payWith(usdcBase, BASE));
+    act(() => hook.payWith(usdcBase, BASE, ANY_PRICE));
     expect(hook.authorization.visible).toBe(true);
-    expect(hook.authorization.title).toBe('Authorize payment');
+    expect(hook.authorization.title).toBe('Authorize payment of about 33.5 USDC');
     expect(m.getQuote).not.toHaveBeenCalled();
     expect(m.payDirect).not.toHaveBeenCalled();
     expect(swapped.start).not.toHaveBeenCalled();
@@ -197,7 +201,7 @@ describe('authorization', () => {
 
   it('cancelling asks for nothing', async () => {
     await mount();
-    act(() => hook.payWith(usdcBase, BASE));
+    act(() => hook.payWith(usdcBase, BASE, ANY_PRICE));
     act(() => hook.authorization.onCancel());
     await flush();
     expect(hook.authorization.visible).toBe(false);
@@ -284,6 +288,7 @@ describe('any other token', () => {
       token: { ...bnb, chainId: BSC },
       walletAddress: '0xPayer',
       sourceAddress: '0xPayer',
+      pricedFromAmount: ANY_PRICE.fromAmount,
     });
   });
 
@@ -686,7 +691,7 @@ describe('reset', () => {
 describe('one attempt at a time', () => {
   it('a double biometric success starts one payment, not two', async () => {
     await mount();
-    act(() => hook.payWith(usdcBase, BASE));
+    act(() => hook.payWith(usdcBase, BASE, ANY_PRICE));
     await act(async () => {
       hook.authorization.onAuthorized();
       hook.authorization.onAuthorized();
@@ -825,10 +830,11 @@ describe('the price she was shown is the price she pays', () => {
     expect(swapped.start).toHaveBeenCalledWith(expect.objectContaining({ pricedFromAmount: '84000000000000000' }));
   });
 
-  it('with no priced amount (never from the panel) there is simply no bound', async () => {
+  it('a call with no priced amount is refused outright — nothing to authorize, nothing started', async () => {
     await mount();
-    await pay(bnb, BSC);
-    expect(swapped.start).toHaveBeenCalledWith(expect.not.objectContaining({ pricedFromAmount: expect.anything() }));
+    act(() => (hook.payWith as any)(bnb, BSC));
+    expect(hook.authorization.visible).toBe(false);
+    expect(swapped.start).not.toHaveBeenCalled();
   });
 });
 
@@ -892,5 +898,89 @@ describe('the reservation window in words, for a naira payment', () => {
     await mount();
     expect(hook.error).toMatch(/keep checking/i);
     expect(hook.error).not.toMatch(/\d|minute|hour/i);
+  });
+});
+
+describe('the deposit is bound to the price she was shown — by the SERVER’s order, not our own quote', () => {
+  const priced = { pay: '33.51 USDC', fromAmount: '33510000' };
+  const authorize = async () => {
+    act(() => hook.payWith(usdcBase, BASE, priced));
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+  };
+
+  it('an order opened for more than 2% above the price is NOT funded: no deposit, no claim', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '35.00' } as PaycrestOrder); // our own quote said 33.5 and passed
+    await mount();
+    await authorize();
+
+    expect(m.payDirect).toHaveBeenCalledTimes(1);
+    expect(m.send).not.toHaveBeenCalled();
+    expect(m.claimPayment).not.toHaveBeenCalled();
+  });
+
+  it('and the state is honest: price moved, nothing sent, held for the window, Pay hidden, nothing to continue', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '35.00' } as PaycrestOrder);
+    await mount();
+    await authorize();
+
+    expect(hook.stage).toBe('failed');
+    expect(hook.retryable).toBe(false); // the payment is linked to an order: a tap would only be refused
+    expect(hook.canContinue).toBe(false);
+    expect(hook.error).toBe(directPriceMovedCopy('35000000', '33510000', 6, 'USDC'));
+    expect(hook.error).toContain('about 10 minutes');
+  });
+
+  it('once the server frees the payment, it can be reset and paid again', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '35.00' } as PaycrestOrder);
+    await mount();
+    await authorize();
+    act(() => hook.reset());
+    expect(hook.stage).toBe('idle');
+    expect(hook.retryable).toBe(true);
+  });
+
+  it('an order within 2% is funded as before', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: '34.10' } as PaycrestOrder);
+    await mount();
+    await authorize();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('an order whose amount cannot be read is not funded either', async () => {
+    m.payDirect.mockResolvedValue({ ...order, tokenAmount: undefined } as unknown as PaycrestOrder);
+    await mount();
+    await authorize();
+    expect(m.send).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toMatch(/nothing was sent/i);
+  });
+});
+
+describe('one attempt, and only one that is accepted', () => {
+  it('a payment the server paused does not call the start route again', async () => {
+    m.payDirect.mockRejectedValue(new PayError('x', 409, 'pay_attempt_uncertain'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(m.payDirect).toHaveBeenCalledTimes(1);
+    await pay(usdcBase, BASE);
+    expect(m.payDirect).toHaveBeenCalledTimes(1);
+    expect(m.getQuote).toHaveBeenCalledTimes(1); // not even the rate lookup
+    expect(hook.stage).toBe('failed');
+  });
+});
+
+describe('a resume that finds nothing left to follow', () => {
+  it('ends in a wait on the server — the attempt does not stay "paying" forever', async () => {
+    m.getOpenSellIntent.mockResolvedValue(intent);
+    await mount();
+    await act(async () => { await hook.resume(); });
+    act(() => hook.continuePayment());
+    // The sale finished between the read and the resume: the pipeline has nothing to do and says "idle".
+    swapped.resume.mockImplementation(async () => { latestOpts.onStage('idle', { intent }); });
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(hook.stage).toBe('waiting');
   });
 });

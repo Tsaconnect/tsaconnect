@@ -43,6 +43,8 @@ export type PayAttempt =
       retryable: boolean;
       /** The server paused it: never followed, retried or reset by us. */
       paused: boolean;
+      /** A swap may have reached the merchant and the server may not know: never downgraded to a failure that offers Pay. */
+      held: boolean;
       /** Nothing to continue: the failure is final on this phone. */
       noContinue: boolean;
       intent?: SellIntent;
@@ -65,7 +67,7 @@ export type PayAttemptEvent =
   | { type: 'continue'; intent: SellIntent }
   /** A failure the hook itself detected. */
   | ({
-      type: 'fail'; error: string; errorCode?: string; retryable: boolean; paused?: boolean; noContinue?: boolean;
+      type: 'fail'; error: string; errorCode?: string; retryable: boolean; paused?: boolean; held?: boolean; noContinue?: boolean;
       intent?: SellIntent;
     } & Pick<Detail, 'order'>)
   /** The server let go of the payment. */
@@ -73,13 +75,16 @@ export type PayAttemptEvent =
 
 const walletTried = (a: PayAttempt): boolean => (a.kind === 'paying' || a.kind === 'shortfall') && a.walletTried;
 const isPaused = (a: PayAttempt): boolean => a.kind === 'failed' && a.paused;
+const isHeld = (a: PayAttempt): boolean => a.kind === 'failed' && a.held;
 
 /** An attempt in flight is never pulled out from under itself, and a payment the server paused is never reset by us. */
 export const canReset = (a: PayAttempt): boolean => a.kind !== 'paying' && !isPaused(a);
 
 export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt {
-  // A payment the server paused is final on this phone: nothing rewrites it.
-  if (isPaused(a) && e.type !== 'fail') return a;
+  // A payment the server paused is final on this phone: nothing rewrites it, not even a later failure.
+  if (isPaused(a)) return a;
+  // A held failure is never downgraded to one that offers Pay (only lifted, by the hold lifting or a reset).
+  if (isHeld(a) && (e.type === 'fail' || e.type === 'stop') && e.retryable) return a;
   switch (e.type) {
     case 'begin':
       // An attempt in flight is never begun twice.
@@ -90,7 +95,7 @@ export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt 
       return { kind: 'waiting', swapStage: e.swapStage, order: e.order };
     case 'stop':
       return {
-        kind: 'failed', error: e.message, retryable: e.retryable, paused: false, noContinue: !e.intent,
+        kind: 'failed', error: e.message, retryable: e.retryable, paused: false, held: false, noContinue: !e.intent,
         intent: e.intent, order: e.order,
       };
     case 'shortfall':
@@ -103,7 +108,7 @@ export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt 
       return { kind: 'continue', intent: e.intent };
     case 'fail':
       return {
-        kind: 'failed', error: e.error, code: e.errorCode, retryable: e.retryable, paused: !!e.paused,
+        kind: 'failed', error: e.error, code: e.errorCode, retryable: e.retryable, paused: !!e.paused, held: !!e.held,
         noContinue: e.noContinue ?? !e.intent, intent: e.intent, order: e.order,
       };
     case 'reset':

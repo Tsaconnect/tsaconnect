@@ -155,3 +155,45 @@ describe('the hold that survives an app kill', () => {
     expect(await AsyncStorage.getItem('tsapay.pendingSwap.pay-1')).toBeNull();
   });
 });
+
+describe('storage that fails closes the swap, it does not skip the safeguard (TSA Pay)', () => {
+  // Patch the AsyncStorage mock's methods and put them back (jest's restoreAllMocks/mockRestore would also
+  // reset the mock's own implementations, breaking every later test).
+  const undo: Array<() => void> = [];
+  const patch = (name: 'getItem' | 'setItem', impl: (...a: any[]) => Promise<any>) => {
+    const original = AsyncStorage[name];
+    (AsyncStorage as any)[name] = impl;
+    undo.push(() => { (AsyncStorage as any)[name] = original; });
+  };
+  afterEach(() => { undo.splice(0).forEach((u) => u()); });
+  afterEach(() => { jest.restoreAllMocks(); }); // (console spies only: AsyncStorage is patched, not spied)
+  const payRun = { ...base, quote: { fromAmount: '1000000000000000' } as LiFiQuote, paymentId: 'pay-1' };
+  const signs = () => exec.mockImplementation(async (p: any) => { await p.onSigned('0xsigned'); return '0xsigned'; });
+
+  it('a hash that cannot be written stops the swap before it is broadcast: intent closed, error thrown', async () => {
+    signs();
+    patch('setItem', async () => { throw new Error('disk full'); });
+    await expect(executeSellSwap(payRun)).rejects.toThrow(/nothing was sent/i);
+    expect(abandon).toHaveBeenCalledWith('i1');
+  });
+
+  it('a hold that cannot be written does the same, and the hash written beside it is dropped', async () => {
+    signs();
+    const real = AsyncStorage.setItem.bind(AsyncStorage);
+    patch('setItem', async (k: string, v: string) => {
+      if (k.startsWith('tsapay.')) throw new Error('disk full');
+      return real(k, v);
+    });
+    await expect(executeSellSwap(payRun)).rejects.toThrow(/nothing was sent/i);
+    expect(abandon).toHaveBeenCalledWith('i1');
+    expect(await AsyncStorage.getItem('paycrest.sellSwap.pendingTx.i1')).toBeNull();
+  });
+
+  it('the ORDINARY sale is exactly as strict as it was: a hash that cannot be written is only logged', async () => {
+    signs();
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    patch('setItem', async () => { throw new Error('disk full'); });
+    await expect(executeSellSwap({ ...base, quote: {} as LiFiQuote, amount: '0.016' })).resolves.toBe('0xsigned');
+    expect(abandon).not.toHaveBeenCalled();
+  });
+});

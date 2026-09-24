@@ -14,7 +14,7 @@ const order = { id: 'o1' } as PaycrestOrder;
 const IDLE: PayAttempt = { kind: 'idle' };
 const paying: PayAttempt = { kind: 'paying', swapStage: 'swapping', walletTried: false };
 const failed = (over: Partial<Extract<PayAttempt, { kind: 'failed' }>> = {}): PayAttempt => ({
-  kind: 'failed', error: 'x', retryable: true, paused: false, noContinue: false, ...over,
+  kind: 'failed', error: 'x', retryable: true, paused: false, held: false, noContinue: false, ...over,
 });
 
 describe('reducePayAttempt — transitions', () => {
@@ -54,6 +54,26 @@ describe('reducePayAttempt — transitions', () => {
     expect(reducePayAttempt(paused, { type: 'stop', message: 'other', retryable: true })).toBe(paused);
     expect(reducePayAttempt(paused, { type: 'progress', swapStage: 'waiting' })).toBe(paused);
     expect(reducePayAttempt(paused, { type: 'begin' })).toBe(paused);
+  });
+
+  it('nor can a later fail — even a paused one — overwrite it or downgrade it to a retryable failure', () => {
+    const paused = failed({ retryable: false, paused: true, error: 'paused' });
+    expect(reducePayAttempt(paused, { type: 'fail', error: 'later', retryable: true })).toBe(paused);
+    expect(reducePayAttempt(paused, { type: 'fail', error: 'again', retryable: false, paused: true })).toBe(paused);
+  });
+
+  it('a held failure (a swap that may have reached the merchant) is never downgraded to one that offers Pay', () => {
+    const held = failed({ retryable: false, held: true, error: 'held' });
+    expect(reducePayAttempt(held, { type: 'fail', error: 'later', retryable: true })).toBe(held);
+    expect(reducePayAttempt(held, { type: 'stop', message: 'later', retryable: true })).toBe(held);
+  });
+
+  it('but a held failure can be replaced by another one that is no less safe, and lifted by the hold lifting', () => {
+    const held = failed({ retryable: false, held: true, error: 'held' });
+    expect(reducePayAttempt(held, { type: 'fail', error: 'terminal', retryable: false, noContinue: true, held: true }))
+      .toMatchObject({ kind: 'failed', error: 'terminal', held: true, retryable: false });
+    expect(reducePayAttempt(held, { type: 'waiting' })).toMatchObject({ kind: 'waiting' });
+    expect(reducePayAttempt(held, { type: 'reset' })).toMatchObject({ kind: 'idle' });
   });
 
   it('a stop after a wait is still a failure — the pipeline said so', () => {

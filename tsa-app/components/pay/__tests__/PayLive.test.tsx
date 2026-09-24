@@ -434,6 +434,32 @@ describe('the price she is shown is the price she pays', () => {
     spy.mockRestore();
   });
 
+  it('when a refusal comes back (the stage flips to failed) the figure is looked up again at once — the next tap must not be on a stale price', async () => {
+    const estimate = jest.fn()
+      .mockResolvedValueOnce({ pay: '0.084 BNB', fromAmount: '84000000000000000' })
+      .mockResolvedValue({ pay: '0.09 BNB', fromAmount: '90000000000000000' });
+    const pay = hookState({ estimate });
+    await panel(pay);
+    await pick();
+    expect(estimate).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      tree.update(<PayLivePanel checkout={fiat} pay={{ ...pay, stage: 'failed', error: 'The price moved' } as any} showForm />);
+    });
+    await flush();
+    expect(estimate).toHaveBeenCalledTimes(2);
+    expect(text(tree)).toContain("You'll pay about 0.09 BNB");
+  });
+
+  it('a figure with no base-unit amount cannot be paid: the button is disabled and it says why', async () => {
+    const pay = hookState({ estimate: jest.fn(async () => ({ pay: '0.084 BNB', fromAmount: '' })) });
+    await panel(pay);
+    await pick();
+    expect(find(tree, 'button:Pay ₦50,505.06').props.disabled).toBe(true);
+    expect(text(tree)).toContain("couldn't work out the price");
+    expect(text(tree)).not.toContain("You'll pay about");
+  });
+
   it('a wallet that arrives after the pick is priced when it arrives — the "Connect a wallet" wait is not final', async () => {
     const estimate = jest.fn()
       .mockRejectedValueOnce(new Error('Connect a wallet on this device first — you pay from it yourself.'))

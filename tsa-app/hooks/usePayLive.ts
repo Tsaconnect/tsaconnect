@@ -43,7 +43,8 @@ export type PayHook = {
   walletShort?: boolean;
   /** Her wallet on this device, once known — a price needs it, so a wait for it is retried on arrival. */
   walletAddress?: string | null;
-  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
+  /** `priced` is what she was shown — required: the signature is always held to it. */
+  payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   completeWithWallet?(): void;
   continuePayment?(): void;

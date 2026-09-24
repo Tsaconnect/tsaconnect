@@ -29,11 +29,11 @@ import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
 import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
 import { getOpenSellIntent, recordSellSwap, type SellIntent } from '@/services/paycrestSellSwap';
-import { clearPayHold, holdActive, readPayHold, writePayHold } from '@/services/payHold';
+import { clearPayHold, holdActive, readPayHold, writePayHold, type PayHold } from '@/services/payHold';
 import { getCryptoQuote, payCrypto, type PayCheckout } from '@/services/payApi';
-import { clearPendingSwapHash, executeSellSwap, readPendingSwapHash } from '@/services/sellSwapRun';
+import { clearPendingSwapHash, executeSellSwap, readPendingSwapHash, SwapPriceMovedError } from '@/services/sellSwapRun';
 import {
-  classifyStartError, errorMessage, estimateError, intentForPayment, BROADCAST_UNCONFIRMED, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, payAmountLabel,
+  classifyStartError, errorMessage, estimateError, HOLD_UNREADABLE, intentForPayment, BROADCAST_UNCONFIRMED, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, payAmountLabel,
   receiveAmountLabel, startFailure, unconfirmedCopy, unsupportedNetworkMessage,
 } from '@/utils/payCheckout';
 
@@ -50,7 +50,7 @@ export type UsePayCrypto = {
   authorization: AuthorizationProps;
   walletAddress: string | null;
   /** `priced` is what she was shown: the authorization says so, and the signature is held to it. */
-  payWith(token: LiFiToken, chainId: number, priced?: PayEstimate): void;
+  payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
   /** What she will send, e.g. "0.084 BNB", and what the store receives — before she taps Pay. */
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   /** Follow her own attempt at this payment, e.g. after the app was closed mid-swap. */
@@ -70,7 +70,7 @@ const REPORT_TRIES = 3;
 const REPORT_DELAY_MS = 2_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-type Pick = { token: LiFiToken; chainId: number; priced?: PayEstimate };
+type Pick = { token: LiFiToken; chainId: number; priced: PayEstimate };
 /** How the server took (or did not take) the swap's hash. */
 type Reported = 'reported' | 'rejected' | 'unreachable';
 
@@ -81,7 +81,7 @@ const serverHasSwap = (i: SellIntent) => !!i.swapTxHash || SERVER_HAS_SWAP.has(i
 /**
  * Tell the server which swap this payment is. A 4xx is the server's final word
  * (it takes a hash only for an intent still `swapping`, so a reaped one is
- * refused for good): no retries. Anything else is retried, then given up as
+ * refused for good; a 401/403 is not its word on the intent): no retries. Anything else is retried, then given up as
  * unreachable. The hash and the hold stay on the phone until the server has it.
  */
 async function reportSwap(paymentId: string, intentId: string, hash: string): Promise<Reported> {
@@ -95,7 +95,8 @@ async function reportSwap(paymentId: string, intentId: string, hash: string): Pr
     } catch (e) {
       console.warn('[pay] recordSellSwap failed', e);
       const status = (e as { status?: unknown } | null)?.status;
-      if (typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429) return 'rejected';
+      // 401/403 are a session or permissions problem, not the server's word on this intent: retry later.
+      if (typeof status === 'number' && status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)) return 'rejected';
     }
   }
   return 'unreachable';
@@ -108,6 +109,8 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   // Pay is withheld until the persisted hold has been looked at: a kill may have left one.
   const [holdChecked, setHoldChecked] = useState(false);
   const checking = useRef(false);
+  // The hold could not be read (storage failed): treated as "may exist" until it can be.
+  const storageUnknown = useRef(false);
 
   /** The swap is known to the server, or the hold has run out: let go of the phone's copy. */
   const liftHold = useCallback(async (intentId?: string) => {
@@ -117,11 +120,40 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
 
   /** A swap that may have reached the merchant and is not known to the server: hold, and say so. */
   const failHeld = useCallback(async (intentId: string, why: Reported | 'nohash') => {
-    await writePayHold(checkout.id, intentId);
+    // The state holds even if the record cannot be written (this session at least).
+    await writePayHold(checkout.id, intentId).catch((e) => console.warn('[pay] could not persist the hold', e));
     dispatch(why === 'unreachable'
-      ? { type: 'fail', error: NOT_CONFIRMED, retryable: false, noContinue: false }
-      : { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true });
+      ? { type: 'fail', error: NOT_CONFIRMED, retryable: false, held: true, noContinue: false }
+      : { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, held: true, noContinue: true });
   }, [checkout.id, dispatch]);
+
+  /** The hold could not be read: hold rather than offer Pay, with a way out (Continue payment reads again). */
+  const holdUnknown = useCallback(() => {
+    storageUnknown.current = true;
+    dispatch({ type: 'fail', error: HOLD_UNREADABLE, retryable: false, held: true, noContinue: false });
+  }, [dispatch]);
+
+  /**
+   * Read the persisted hold. Null result means "could not read" — already held.
+   * A read that works after one that did not frees the hold-on-doubt (unless a
+   * real hold is found), so the way out really is a way out.
+   */
+  const readHold = useCallback(async (): Promise<{ hold: PayHold | null; recovered: boolean } | null> => {
+    let stored: PayHold | null;
+    try {
+      stored = await readPayHold(checkout.id);
+    } catch (e) {
+      console.warn('[pay] could not read the hold', e);
+      holdUnknown();
+      return null;
+    }
+    const hold = holdActive(stored) ? stored : null;
+    if (stored && !hold) await liftHold(stored.intentId); // 24 h on: the server has given up on it too
+    const recovered = storageUnknown.current && !hold;
+    storageUnknown.current = false;
+    if (recovered) dispatch({ type: 'reset' }); // it was only doubt
+    return { hold, recovered };
+  }, [checkout.id, dispatch, holdUnknown, liftHold]);
 
   /**
    * Look at where this payment stands, and act only on what is safe: make sure
@@ -133,9 +165,10 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
     if (checking.current) return;
     checking.current = true;
     try {
-      const stored = await readPayHold(checkout.id);
-      const hold = holdActive(stored) ? stored : null;
-      if (stored && !hold) await liftHold(stored.intentId); // 24 h on: the server has given up on it too
+      const read = await readHold();
+      if (!read) return;
+      const { hold } = read;
+      if (read.recovered) return; // the doubt is cleared and nothing is held: back to idle, nothing to follow
 
       let open: SellIntent | null;
       try {
@@ -177,15 +210,14 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
     } finally {
       checking.current = false;
     }
-  }, [checkout.id, dispatch, failHeld, liftHold]);
+  }, [checkout.id, dispatch, failHeld, liftHold, readHold]);
 
   // Opening the screen: a live hold (a kill left one) is looked at before Pay is offered.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const stored = await readPayHold(checkout.id);
-      if (holdActive(stored)) await check(false);
-      else if (stored) await liftHold(stored.intentId);
+      const read = await readHold();
+      if (read?.hold) await check(false);
       if (!cancelled) setHoldChecked(true);
     })();
     return () => { cancelled = true; };
@@ -195,14 +227,29 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   const resumeOpen = useCallback(() => check(false), [check]);
   const continuePayment = useCallback(() => check(true), [check]);
 
+  // Read fresh (not narrowed): the machine's answer to what was just dispatched.
+  const isPaying = () => ref.current.kind === 'paying';
+
   const run = async ({ token, chainId, priced }: Pick) => {
     // One attempt at a time: `begin` is refused (and the ref says so at once) while one is in flight.
-    if (!address || ref.current.kind === 'paying') return;
+    if (!address || isPaying()) return;
     dispatch({ type: 'begin' });
+    // Refused (a payment the server paused): nothing is started.
+    if (!isPaying()) return;
+    // A hold recorded since the screen opened (or one that cannot be read) stops the start: the
+    // persisted record is the truth, not what this render last saw.
+    const read = await readHold();
+    if (!read) return; // held: the storage could not be read
+    if (read.hold) {
+      await check(false);
+      // If a look is already under way it left this attempt as it was: hold, never proceed.
+      if (isPaying()) dispatch({ type: 'fail', error: NOT_CONFIRMED, retryable: false, held: true, noContinue: false });
+      return;
+    }
     await startPayment(token, chainId, address, priced);
   };
 
-  const startPayment = async (token: LiFiToken, chainId: number, address: string, priced?: PayEstimate) => {
+  const startPayment = async (token: LiFiToken, chainId: number, address: string, priced: PayEstimate) => {
     if (isNonEVMLiFiChain(chainId)) {
       dispatch({ type: 'fail', error: unsupportedNetworkMessage(token.symbol), retryable: true });
       return;
@@ -232,7 +279,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         token: { ...token, chainId },
         sourceChainId: chainId,
         sourceAddress: address,
-        pricedFromAmount: priced?.fromAmount,
+        pricedFromAmount: priced.fromAmount,
         paymentId: checkout.id,
       });
     } catch (e) {
@@ -242,14 +289,21 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
         const reported = known ? await reportSwap(checkout.id, intent.id, known) : 'unreachable';
         if (reported === 'reported') dispatch({ type: 'waiting' });
         else {
-          await writePayHold(checkout.id, intent.id);
+          await writePayHold(checkout.id, intent.id).catch((err) => console.warn('[pay] could not persist the hold', err));
           dispatch(reported === 'rejected'
-            ? { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, noContinue: true }
-            : { type: 'fail', error: BROADCAST_UNCONFIRMED, retryable: false, noContinue: false });
+            ? { type: 'fail', error: unconfirmedCopy(checkout.id), retryable: false, held: true, noContinue: true }
+            : { type: 'fail', error: BROADCAST_UNCONFIRMED, retryable: false, held: true, noContinue: false });
         }
         return;
       }
-      dispatch({ type: 'fail', error: `${errorMessage(e, 'The swap did not go through.')}${notSentCopy('crypto')}`, retryable: true });
+      // The price moved: its own words say nothing was sent, and the intent was closed — not "reserved".
+      dispatch({
+        type: 'fail',
+        error: e instanceof SwapPriceMovedError
+          ? e.message
+          : `${errorMessage(e, 'The swap did not go through.')}${notSentCopy('crypto')}`,
+        retryable: true,
+      });
       return;
     }
 
@@ -259,12 +313,13 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
   };
 
   const { request, authorization } = usePayAuthorization<Pick>({
-    title: (pending) => (pending?.priced ? `Authorize payment of about ${pending.priced.pay}` : 'Authorize payment'),
+    title: (pending) => (pending ? `Authorize payment of about ${pending.priced.pay}` : 'Authorize payment'),
     onAuthorized: (pick) => { void run(pick); },
   });
 
   const payWith = useCallback(
-    (token: LiFiToken, chainId: number, priced?: PayEstimate) => request({ token, chainId, priced }),
+    // Never without the price she was shown: nothing is authorized (or signed) unbound.
+    (token: LiFiToken, chainId: number, priced: PayEstimate) => { if (priced) request({ token, chainId, priced }); },
     [request],
   );
 
@@ -290,16 +345,16 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
 
   const reset = useCallback(async () => {
     if (!canReset(ref.current)) return; // in flight, or paused by the server
-    const stored = await readPayHold(checkout.id);
-    if (holdActive(stored)) {
+    const read = await readHold();
+    if (!read) return; // the hold cannot be read: it stays held
+    if (read.hold) {
       // A swap that may have reached the merchant: the payment being freed must
       // not become a second payment. Look again; never let go into idle.
       await check(false);
       return;
     }
-    if (stored) await liftHold(stored.intentId);
     dispatch({ type: 'reset' });
-  }, [check, checkout.id, dispatch, liftHold, ref]);
+  }, [check, dispatch, readHold, ref]);
   const view = payAttemptView(attempt);
 
   return {

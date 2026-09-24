@@ -1,5 +1,5 @@
 import {
-  BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
+  directPriceMovedCopy, BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, notSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage,
@@ -285,5 +285,22 @@ describe('no time promise is scattered outside payCheckout.ts', () => {
     // Only user-facing string literals matter; comments may talk about the hold's 24 h.
     const strings = (src.match(/(['"`])(?:\\.|(?!\1).)*\1/g) ?? []).join('\n');
     expect(strings).not.toMatch(/ten minutes|10 minutes|about ten|an hour|few minutes/i);
+  });
+});
+
+describe('directPriceMovedCopy — the order opened for more than she was shown', () => {
+  const c = directPriceMovedCopy('35000000', '33510000', 6, 'USDC');
+  it('names both amounts and says nothing was sent', () => {
+    expect(c).toContain('35 USDC');
+    expect(c).toContain('33.51 USDC');
+    expect(c).toMatch(/nothing was sent/i);
+  });
+  it('says the payment is held for the naira window — an order exists, so she cannot just tap again — then she can retry', () => {
+    expect(c).toContain(RESERVE_WINDOW.fiat);
+    expect(c).toMatch(/after that you can try again/i);
+    expect(c).not.toMatch(/hour/i);
+  });
+  it('is not the "check the new price and try again" text: trying again now would be refused', () => {
+    expect(c).not.toMatch(/check the new price and try again/i);
   });
 });

@@ -162,11 +162,23 @@ export async function executeSellSwap(run: SellSwapRun): Promise<string> {
       // On the phone BEFORE the broadcast: a reply lost after the server
       // sent it must still leave a hash for resume to follow.
       onSigned: async (signed) => {
-        await AsyncStorage.setItem(pendingSwapKey(intentId), signed).catch((e) =>
-          console.warn('[sell] could not persist the signed swap hash', e));
+        if (!run.paymentId) {
+          // An ordinary sale: what it always did — best effort, logged.
+          await AsyncStorage.setItem(pendingSwapKey(intentId), signed).catch((e) =>
+            console.warn('[sell] could not persist the signed swap hash', e));
+          return;
+        }
         // A crypto payment's swap goes straight to the merchant: from here on a
-        // second payment could pay them twice, even across an app kill.
-        if (run.paymentId) await writePayHold(run.paymentId, intentId);
+        // second payment could pay them twice, even across an app kill. The hash
+        // and the hold are what prevent that, so a swap that cannot record them
+        // is not broadcast — throwing here stops it before it is sent.
+        try {
+          await AsyncStorage.setItem(pendingSwapKey(intentId), signed);
+          await writePayHold(run.paymentId, intentId);
+        } catch (e) {
+          console.warn('[pay] could not persist the safeguard', e);
+          throw new Error("We couldn't save this payment's safeguard on your phone, so nothing was sent. Please try again.");
+        }
       },
     });
   } catch (e) {

@@ -234,10 +234,29 @@ export function exceedsPriced(fresh: bigint, priced: bigint, toleranceBps: numbe
   return fresh * 10_000n > priced * BigInt(10_000 + toleranceBps);
 }
 
+/** The price moved past what she agreed to — the sentence both refusals open with. */
+function priceMovedStatement(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `The price moved while you were deciding: this would now cost about ${payAmountLabel(freshBase, decimals, symbol)}, `
+    + `not the ${payAmountLabel(pricedBase, decimals, symbol)} you were shown.`;
+}
+
 /** The refusal when the price moved past what she agreed to: nothing was sent, and what to do. */
 export function priceMovedMessage(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
-  return `The price moved while you were deciding: this would now cost about ${payAmountLabel(freshBase, decimals, symbol)}, `
-    + `not the ${payAmountLabel(pricedBase, decimals, symbol)} you were shown. Nothing was sent. Check the new price and try again.`;
+  return `${priceMovedStatement(freshBase, pricedBase, decimals, symbol)} Nothing was sent. Check the new price and try again.`;
+}
+
+/** The payout order's amount could not be read, so it was not funded. The payment is linked to that order. */
+export const ORDER_AMOUNT_UNCHECKABLE =
+  `We couldn't check the amount of this payment, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
+
+/**
+ * The same refusal when a naira payment's payout ORDER was already opened at
+ * the higher amount: nothing was sent, but the payment is linked to that order,
+ * so it is held for the window before she can try again at the new price.
+ */
+export function directPriceMovedCopy(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `${priceMovedStatement(freshBase, pricedBase, decimals, symbol)} Nothing was sent. `
+    + `This payment is held for ${RESERVE_WINDOW.fiat}; after that you can try again with the new price.`;
 }
 
 export type StartErrorKind = 'follow' | 'paused' | 'refused' | 'other';
@@ -283,3 +302,7 @@ export const estimateError = (e: unknown): Error => (isRouteRefused(e) ? new Err
 export const unconfirmedCopy = (paymentId: string): string =>
   `We couldn't confirm this payment with our server. Your payment may still go through, so please don't pay again. `
   + `Contact support and quote payment reference ${paymentId}.`;
+
+/** The hold on a crypto payment could not be read from this phone: held to be safe, with a way out. */
+export const HOLD_UNREADABLE =
+  "We couldn't check whether a payment of yours is already under way, so this one is on hold to be safe. Don't pay again — tap Continue payment to check again.";
