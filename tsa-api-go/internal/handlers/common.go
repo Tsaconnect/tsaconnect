@@ -131,3 +131,15 @@ func claimWalletTx(db *gorm.DB, user *models.User, claimed string) error {
 		return nil
 	})
 }
+
+// splitCommaList splits a comma-separated query value, trimming each part and
+// dropping empty ones. A blank input yields nil.
+func splitCommaList(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
