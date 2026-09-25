@@ -724,6 +724,11 @@ type PaycrestSellRequest struct {
 	// payout bank is the merchant's: the order is marked with it so the
 	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
 	PayPaymentID *uuid.UUID
+	// KeepSurplus: the payout is owed EXACTLY FiatAmount (a TSA Pay merchant is
+	// paid what they invoiced), so the deposit's cushion above it is ours. The
+	// order's sender fee is raised to take it, never below the configured fee,
+	// leaving the merchant FiatAmount plus payMerchantMargin. Direct sells only.
+	KeepSurplus bool
 }
 
 // CreateSell opens an offramp and returns the address the user must send to.
@@ -852,6 +857,9 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 		// that figure, not whatever tokens × rate rounds to; CreateSellForFiat
 		// then proves the order's payout actually covers it.
 		fiatAmount = stated
+		if owed, ok := new(big.Rat).SetString(stated); ok && req.KeepSurplus && !converted {
+			fee = keepSurplusFeePercent(tokens, venue.ProviderRate, fee, owed)
+		}
 	}
 
 	return s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)

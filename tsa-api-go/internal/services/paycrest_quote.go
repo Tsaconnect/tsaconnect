@@ -47,6 +47,10 @@ type PaycrestVenue struct {
 	Token    string `json:"token"`
 	// Rate is fiat per token, as quoted.
 	Rate string `json:"rate"`
+	// ProviderRate is the provider's own rate for this size before any sender
+	// fee, exactly as it quoted it — what Rate was priced from. Set by
+	// VenueForFee only.
+	ProviderRate string `json:"-"`
 	// SpreadPercent is Rate against the protocol's market reference. Positive
 	// means the user pays above mid on a buy; negative means they receive
 	// below mid on a sell. Surfaced so the app can show a real cost.
@@ -751,6 +755,7 @@ func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, 
 	// Bind to what the provider just said, not to the book.
 	bound := *venue
 	bound.Rate = rateStr
+	bound.ProviderRate = strings.TrimSpace(q.Rate)
 	bound.TokenAmount = amt / rate
 	bound.TokenAmountBaseUnits = s.baseUnitsFor(bound.ChainKey, bound.Token, fiatAmount, rateStr)
 	bound.SpreadPercent = (rate/res.MarketRate - 1) * 100

@@ -921,3 +921,129 @@ func TestAssertSellRateHeadroomSound(t *testing.T) {
 	// A margin comfortably above the rounding is fine, whatever the rounding is.
 	assertSellRateHeadroomSound(big.NewRat(1, 50), sellRateRounding)
 }
+
+// ─── KeepSurplus: the merchant is paid what they invoiced; the cushion is ours ─
+
+// keepSurplusReq is a TSA Pay direct checkout's sell: an exact naira figure
+// owed to the merchant, with the deposit's cushion above it kept as our fee.
+func keepSurplusReq(t *testing.T, r *orderConversionRig, fiat string) PaycrestSellRequest {
+	t.Helper()
+	req := payoutReq(t, r)
+	req.FiatAmount = fiat
+	req.KeepSurplus = true
+	return req
+}
+
+func sentFee(t *testing.T, r *orderConversionRig) float64 {
+	t.Helper()
+	v, ok := parseSenderFeePercent(r.client.lastOfframp.SenderFeePercent)
+	if !ok {
+		t.Fatalf("unreadable fee %q", r.client.lastOfframp.SenderFeePercent)
+	}
+	return v
+}
+
+func TestCreateSellForFiat_KeepSurplusPaysTheMerchantTheInvoiceAndKeepsTheCushion(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	if _, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, "50000.00"), false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fee := sentFee(t, r); fee <= 1 {
+		t.Fatalf("fee = %v%%: the cushion above the invoice should be ours, on top of the configured 1%%", fee)
+	}
+	paid := paidAtProvider(t, r, "1500")
+	t.Logf("deposit %s USDC, fee %s%%, merchant paid ₦%s", r.client.lastOfframp.AmountToken, r.client.lastOfframp.SenderFeePercent, paid.FloatString(2))
+	if paid.Cmp(big.NewRat(50000, 1)) < 0 {
+		t.Fatalf("merchant paid ₦%s: short of the ₦50,000 invoiced", paid.FloatString(2))
+	}
+	// Bound: the margin, plus what the check's cent rounding of the rate cannot see
+	// (≤ ₦0.01 per token) and the fee-rounding allowance — well under the ₦1.6 a
+	// plain order leaves the merchant.
+	if paid.Cmp(big.NewRat(50001, 1)) >= 0 {
+		t.Fatalf("merchant paid ₦%s: the cushion still went to the merchant", paid.FloatString(2))
+	}
+}
+
+// The first live payment: ₦1,000 at ₦1,362.66 paid the merchant ₦1,001.45.
+func TestCreateSellForFiat_KeepSurplusOnTheFirstLivePayment(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.pc.(*stubQuoter).rates["base|USDC"] = &PaycrestRates{
+		Buy: &PaycrestQuote{Rate: "1362.66"}, Sell: &PaycrestQuote{Rate: "1362.66"}}
+	r.client.offrampRate = "1362.66"
+	if _, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, "1000.00"), false, nil); err != nil {
+		t.Fatal(err)
+	}
+	paid := paidAtProvider(t, r, "1362.66")
+	t.Logf("deposit %s USDC, fee %s%%, merchant paid ₦%s", r.client.lastOfframp.AmountToken, r.client.lastOfframp.SenderFeePercent, paid.FloatString(2))
+	if paid.Cmp(big.NewRat(1000, 1)) < 0 || paid.Cmp(big.NewRat(100050, 100)) >= 0 {
+		t.Fatalf("merchant paid ₦%s, want ₦1,000.00–₦1,000.49 (it was ₦1,001.45 before)", paid.FloatString(2))
+	}
+	if fee := sentFee(t, r); fee <= 1 || fee > 1.2 {
+		t.Fatalf("fee = %v%%, want a little over 1%%", fee)
+	}
+}
+
+func TestCreateSellForFiat_WithoutKeepSurplusTheFeeIsTheConfiguredOne(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	if _, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.client.lastOfframp.SenderFeePercent; got != "1" {
+		t.Fatalf("fee = %q: an ordinary sell must keep the configured fee", got)
+	}
+}
+
+func TestCreateSellForFiat_KeepSurplusNeverTouchesAConvertedSell(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	if _, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, "50000.00"), true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.client.lastOfframp.SenderFeePercent; got != "0.5" {
+		t.Fatalf("fee = %q: a converted sell is sent at F − B, whose budget is priced separately", got)
+	}
+}
+
+// The trade-off, pinned: a move in the provider's rate that the ₦1 drift
+// tolerance used to absorb now refuses the order, because that tolerance is our
+// fee — the merchant is still never short.
+func TestCreateSellForFiat_KeepSurplusRefusesARateThatMovedAgainstTheMerchant(t *testing.T) {
+	plain := newOrderServiceWithFakes(t)
+	plain.client.offrampRate = "1499.97"
+	if _, err := plain.svc.CreateSellForFiat(context.Background(), payoutReq(t, plain), false, nil); err != nil {
+		t.Fatalf("a plain order absorbs a 3-kobo move in its tolerance: %v", err)
+	}
+	keep := newOrderServiceWithFakes(t)
+	keep.client.offrampRate = "1499.97"
+	if _, err := keep.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, keep, "50000.00"), false, nil); !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v, want ErrSellRateMoved: a KeepSurplus payout must not come in short", err)
+	}
+}
+
+func TestKeepSurplusFeePercent_TakesTheHighestFeeThatStillClearsTheInvoicePlusTheMargin(t *testing.T) {
+	tokens := new(big.Rat).SetFrac64(33_671045, 1_000000)
+	owed := big.NewRat(50000, 1)
+	got := keepSurplusFeePercent(tokens, "1500", "1", owed)
+	pct, ok := parseSenderFeePercent(got)
+	if !ok || pct <= 1 {
+		t.Fatalf("fee = %q", got)
+	}
+	target := new(big.Rat).Add(owed, payMerchantMargin)
+	if !payoutCovers(tokens, userRate("sell", "1500", got), target) {
+		t.Fatalf("fee %s%% does not clear the invoice plus the margin", got)
+	}
+	next := strconv.FormatFloat(pct+1.0/surplusFeeStepsPerPercent, 'f', -1, 64)
+	if payoutCovers(tokens, userRate("sell", "1500", next), target) {
+		t.Fatalf("fee %s%% still clears: %s%% is not the highest", next, got)
+	}
+}
+
+func TestKeepSurplusFeePercent_WithNoCushionTheFeeStaysAtTheConfiguredOne(t *testing.T) {
+	// Exactly what ₦50,000 needs at 1%: nothing above the invoice to keep.
+	tokens := new(big.Rat).SetFrac64(50000_00, 1485_00)
+	if got := keepSurplusFeePercent(tokens, "1500", "1", big.NewRat(50000, 1)); got != "1" {
+		t.Fatalf("fee = %q, want the configured 1", got)
+	}
+	if got := keepSurplusFeePercent(tokens, "", "1", big.NewRat(50000, 1)); got != "1" {
+		t.Fatalf("with no provider rate the fee = %q, want the configured 1", got)
+	}
+}
