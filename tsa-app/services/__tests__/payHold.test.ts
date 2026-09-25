@@ -9,12 +9,44 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { clearPayHold, HOLD_MAX_MS, holdActive, payHoldKey, readPayHold, writePayHold } from '../payHold';
+import {
+  clearHold, clearPayHold, depositHoldKey, HOLD_MAX_MS, holdActive, payHoldKey, readHold, readPayHold, writeHold, writePayHold,
+} from '../payHold';
 
 beforeEach(async () => { await AsyncStorage.clear(); });
 
 it('is keyed by the payment', () => {
   expect(payHoldKey('pay-1')).toBe('tsapay.pendingSwap.pay-1');
+});
+
+// The storage is shared with a sale's deposit hold (keyed by the Paycrest
+// order); a pay hold already on a device must read exactly as before.
+describe('one hold store, two keys', () => {
+  it('a pay hold recorded before the generalisation still reads, and still under its old key', async () => {
+    await AsyncStorage.setItem('tsapay.pendingSwap.pay-1', JSON.stringify({ intentId: 'i1', at: 1000 }));
+    expect(await readPayHold('pay-1')).toEqual({ intentId: 'i1', at: 1000 });
+    await writePayHold('pay-2', 'i2', 2000);
+    expect(JSON.parse((await AsyncStorage.getItem('tsapay.pendingSwap.pay-2'))!)).toEqual({ intentId: 'i2', at: 2000 });
+    await clearPayHold('pay-1');
+    expect(await AsyncStorage.getItem('tsapay.pendingSwap.pay-1')).toBeNull();
+  });
+
+  it("a sale's deposit hold is keyed by its order and never collides with a payment's", async () => {
+    expect(depositHoldKey('o1')).toBe('paycrest.sellDeposit.o1');
+    await writeHold(depositHoldKey('o1'), 'o1', 1000);
+    expect(await readHold(depositHoldKey('o1'))).toEqual({ intentId: 'o1', at: 1000 });
+    expect(await readPayHold('o1')).toBeNull();
+    await clearHold(depositHoldKey('o1'));
+    expect(await readHold(depositHoldKey('o1'))).toBeNull();
+  });
+
+  it('the same rules hold for either key: first time kept, unreadable throws', async () => {
+    await writeHold(depositHoldKey('o1'), 'o1', 1000);
+    await writeHold(depositHoldKey('o1'), 'o1', 9000);
+    expect((await readHold(depositHoldKey('o1')))?.at).toBe(1000);
+    await AsyncStorage.setItem(depositHoldKey('o2'), 'not json');
+    await expect(readHold(depositHoldKey('o2'))).rejects.toThrow(/unreadable/i);
+  });
 });
 
 it('writes and reads back {intentId, at}', async () => {

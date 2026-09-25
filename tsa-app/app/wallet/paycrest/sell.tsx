@@ -71,8 +71,10 @@ import {
   cancelOrder,
   claimPayment,
   createSell,
+  getOrder,
   getPayoutInstitutions,
   getQuote,
+  isTerminal,
   PaycrestError,
   type PaycrestOrder,
   type PaycrestQuote,
@@ -83,12 +85,20 @@ import {
   balanceOf,
   CHAIN_LABELS,
   checkFunding,
+  DEPOSIT_OUTCOME_UNKNOWN,
   fmtTokenAmount,
   fundingMessage,
   nativeBalanceFor,
-  sendSponsoredPaycrestDeposit,
   type FundingCheck,
 } from '@/services/paycrestDeposit';
+import {
+  depositMayBeOut,
+  depositOutcomeUnknown,
+  sameDeposit,
+  sendHeldDeposit,
+  stillToSend,
+} from '@/services/depositGuard';
+import { clearHold, depositHoldKey } from '@/services/payHold';
 import {
   getSponsoredRoutes,
   getSponsorshipOffer,
@@ -108,6 +118,12 @@ const QUOTE_DEBOUNCE_MS = 450;
 /** Warn while the user can still act. An on-chain send needs gas, a signature
  *  and confirmations — more steps than a bank transfer, so warn earlier. */
 const EXPIRY_WARNING_SECONDS = 420;
+
+const CHECK_FAILED = 'Could not check on your order, so nothing was sent. Please try again.';
+const OTHER_WALLET =
+  'This sale was started from a different wallet, so nothing was sent. Switch back to that wallet to send it.';
+const ORDER_CHANGED =
+  'This order changed since you opened it, so nothing was sent. Check the amount and address above before sending.';
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
@@ -195,6 +211,10 @@ export default function PaycrestSellScreen() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Whether this order's deposit may already have left this phone (its hold —
+  // services/depositGuard). null until read: neither Send nor Cancel is offered
+  // on a guess.
+  const [held, setHeld] = useState<boolean | null>(null);
 
   // Every chain's balances in one request — the un-filtered endpoint already
   // fans out server-side, so annotating all five routes costs no more than
@@ -274,6 +294,20 @@ export default function PaycrestSellScreen() {
       .catch(() => {
         if (!cancelled) setOrderSponsored(false);
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.id]);
+
+  // A deposit that may be out (a lost answer, a kill after the broadcast — the
+  // swapped sale's own send lands here too) is waited on, never offered again.
+  useEffect(() => {
+    setHeld(null);
+    if (!order?.id) return;
+    let cancelled = false;
+    depositMayBeOut(depositHoldKey(order.id), order.id).then((h) => {
+      if (!cancelled) setHeld(h);
+    });
     return () => {
       cancelled = true;
     };
@@ -524,6 +558,14 @@ export default function PaycrestSellScreen() {
     router.replace(to as never);
   }, []);
 
+  /** The order screen, where an order that must not be sent to (again) is followed.
+   *  `unconfirmed`: a send whose outcome is unknown — it says so, and offers no way to send. */
+  const showOrder = useCallback((id: string, unconfirmed = false) => {
+    router.replace(
+      (unconfirmed ? `/wallet/paycrest/order/${id}?unconfirmed=1` : `/wallet/paycrest/order/${id}`) as never,
+    );
+  }, []);
+
   // A finished swapped sale lands on the order screen like a direct one. One
   // that stopped after its payout opened drops into this screen's own deposit
   // view, whose Send retries the step that failed.
@@ -541,24 +583,64 @@ export default function PaycrestSellScreen() {
     }
   }, [swapped.stage, swapped.order, swapped.depositTx, refreshOpenIntent]);
 
+  /**
+   * Send the deposit — once. The order is read first and sent only while it
+   * still waits on a deposit nothing says left (not reported, not claimed, no
+   * hold on this phone), from the wallet that opened it, for exactly what is on
+   * screen. A self-paid send is held under the order right before it is
+   * broadcast (services/depositGuard); only a refusal the server answered lifts
+   * that, and an unanswered send is followed on the order screen, never offered
+   * again.
+   */
   const onSend = useCallback(async () => {
     if (!order || !address) return;
     setSending(true);
     setSendError(null);
+    const holdKey = depositHoldKey(order.id);
     try {
-      const txHash = await sendSponsoredPaycrestDeposit(
-        order,
-        address,
-        nativeBalanceFor(order.chain, balances),
-      );
-      goToOrder(order.id, txHash);
-    } catch (e) {
-      // Server and RPC messages here are written to be read — show them.
-      setSendError(e instanceof Error ? e.message : 'Could not send. Please try again.');
+      let fresh: PaycrestOrder;
+      try {
+        fresh = await getOrder(order.id);
+      } catch (e) {
+        setSendError(e instanceof PaycrestError ? e.message : CHECK_FAILED);
+        return;
+      }
+      if (!(await stillToSend(holdKey, fresh))) {
+        // Reported, claimed, possibly sent from here, or moved on: the order
+        // screen says which. Nothing is sent again.
+        if (isTerminal(fresh.status)) await clearHold(holdKey);
+        showOrder(fresh.id);
+        return;
+      }
+      if (fresh.walletAddress?.toLowerCase() !== address.toLowerCase()) {
+        setOrder(fresh);
+        setSendError(OTHER_WALLET);
+        return;
+      }
+      if (!sameDeposit(order, fresh)) {
+        // Shown as it is now; a further tap sends what she then sees.
+        setOrder(fresh);
+        setSendError(ORDER_CHANGED);
+        return;
+      }
+      let txHash: string;
+      try {
+        txHash = await sendHeldDeposit(fresh, address, nativeBalanceFor(fresh.chain, balances), holdKey);
+      } catch (e) {
+        if (depositOutcomeUnknown(e)) {
+          showOrder(fresh.id, true);
+          return;
+        }
+        // A refusal the server answered: nothing left the wallet. Server and
+        // RPC messages here are written to be read — show them.
+        setSendError(e instanceof Error ? e.message : 'Could not send. Please try again.');
+        return;
+      }
+      goToOrder(fresh.id, txHash);
     } finally {
       setSending(false);
     }
-  }, [order, address, balances, goToOrder]);
+  }, [order, address, balances, goToOrder, showOrder]);
 
   // Backing out here is the common case — the user got to the deposit screen
   // and changed their mind. Without this the abandoned order holds the
@@ -727,70 +809,88 @@ export default function PaycrestSellScreen() {
             />
           )}
 
-          {/* The wallet holding the key is right here — asking the user to
-              copy an address into another app was never the shorter path. */}
-          {canSendInApp && (
-            <Button
-              title={`Send ${order.tokenAmount} ${order.token}`}
-              onPress={onSend}
-              loading={sending}
-              disabled={expired || sending}
-              fullWidth
-            />
-          )}
-
-          {canSendInApp && orderSponsored && (
-            <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
-              Network fee covered — you don&apos;t need{' '}
-              {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
-            </Text>
-          )}
-
-          {/* Kept for funds that live somewhere else — an exchange, a hardware
-              wallet, MetaMask. Collapsed rather than removed, and out of the
-              way entirely while we are sending from this device. */}
-          {(manualOpen || !canSendInApp) && !sending ? (
-            <Card>
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-                To this address
+          {/* This order's deposit may already have left this phone: nothing
+              here may send it again, show where to send it, or cancel the
+              order under it. It is followed on the order screen. */}
+          {held ? (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                Your deposit may already be on its way
               </Text>
-              {/* Full address, never truncated: a send to a mistyped address is
-                  irreversible and nothing on our side can recover it. */}
-              <CopyableField value={order.depositAddress ?? ''} />
-              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-                Send only {order.token} on {CHAIN_LABELS[order.chain] ?? order.chain}. A different
-                token, or the right token on a different network, will not reach the provider.
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                {DEPOSIT_OUTCOME_UNKNOWN}
               </Text>
-              <View style={{ marginTop: spacing.md }}>
-                <Button
-                  title="I've sent it"
-                  variant={canSendInApp ? 'secondary' : 'primary'}
-                  onPress={() => goToOrder(order.id)}
-                  disabled={expired}
-                  fullWidth
-                />
-              </View>
+              <Button title="Check on this order" onPress={() => showOrder(order.id, true)} fullWidth />
             </Card>
           ) : (
-            <Button
-              title="Send from another wallet"
-              variant="ghost"
-              onPress={() => setManualOpen(true)}
-              fullWidth
-            />
-          )}
+            <>
+              {/* The wallet holding the key is right here — asking the user to
+                  copy an address into another app was never the shorter path. */}
+              {canSendInApp && (
+                <Button
+                  title={`Send ${order.tokenAmount} ${order.token}`}
+                  onPress={onSend}
+                  loading={sending}
+                  disabled={expired || sending || held === null}
+                  fullWidth
+                />
+              )}
 
-          {/* Hidden once the user says they have sent — cancelling then would
-              claim the order is dead while their deposit is still in flight. */}
-          {!order.paymentClaimedAt && (
-            <Button
-              title="Cancel this sale"
-              variant="ghost"
-              onPress={confirmCancel}
-              loading={cancelling}
-              disabled={cancelling}
-              fullWidth
-            />
+              {canSendInApp && orderSponsored && (
+                <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+                  Network fee covered — you don&apos;t need{' '}
+                  {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
+                </Text>
+              )}
+
+              {/* Kept for funds that live somewhere else — an exchange, a hardware
+                  wallet, MetaMask. Collapsed rather than removed, and out of the
+                  way entirely while we are sending from this device. */}
+              {(manualOpen || !canSendInApp) && !sending ? (
+                <Card>
+                  <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
+                    To this address
+                  </Text>
+                  {/* Full address, never truncated: a send to a mistyped address is
+                      irreversible and nothing on our side can recover it. */}
+                  <CopyableField value={order.depositAddress ?? ''} />
+                  <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+                    Send only {order.token} on {CHAIN_LABELS[order.chain] ?? order.chain}. A different
+                    token, or the right token on a different network, will not reach the provider.
+                  </Text>
+                  <View style={{ marginTop: spacing.md }}>
+                    <Button
+                      title="I've sent it"
+                      variant={canSendInApp ? 'secondary' : 'primary'}
+                      onPress={() => goToOrder(order.id)}
+                      disabled={expired}
+                      fullWidth
+                    />
+                  </View>
+                </Card>
+              ) : (
+                <Button
+                  title="Send from another wallet"
+                  variant="ghost"
+                  onPress={() => setManualOpen(true)}
+                  fullWidth
+                />
+              )}
+
+              {/* Hidden once the user says they have sent — cancelling then would
+                  claim the order is dead while their deposit is still in flight —
+                  and until the hold is known to be clear. */}
+              {!order.paymentClaimedAt && held === false && (
+                <Button
+                  title="Cancel this sale"
+                  variant="ghost"
+                  onPress={confirmCancel}
+                  loading={cancelling}
+                  disabled={cancelling}
+                  fullWidth
+                />
+              )}
+            </>
           )}
         </ScrollView>
       </SafeAreaView>

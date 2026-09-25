@@ -25,8 +25,10 @@ import {
   anySaleRunning, clearPendingSwapHash, executeSellSwap, holdSale, pendingSwapKey, readPendingSwapHash, saleRunning, startHeld,
 } from '@/services/sellSwapRun';
 import { getSwapDelivery, type LiFiQuote, type LiFiToken } from '@/services/lifi';
-import { sendSponsoredPaycrestDeposit } from '@/services/paycrestDeposit';
-import { claimPayment, getOrder, PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
+import { DEPOSIT_OUTCOME_UNKNOWN } from '@/services/paycrestDeposit';
+import { depositMayBeOut, depositOutcomeUnknown, sendHeldDeposit } from '@/services/depositGuard';
+import { clearHold, depositHoldKey } from '@/services/payHold';
+import { claimPayment, getOrder, isTerminal, PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
 import { nativeBalance } from '@/services/wallet';
 
 /** 'shortfall' is TSA Pay only: the swap landed short of what the payout needs. */
@@ -113,6 +115,8 @@ const STILL_RUNNING =
   'Your sale is still going through. Give it a few minutes, then tap Finish your sale if it has not finished.';
 const ORDER_CLOSED =
   'Your payout order closed before the USDC was sent. The USDC is in your wallet on Base — you can sell it here as USDC.';
+const OTHER_WALLET =
+  'This payout was opened for a different wallet, so nothing was sent. Switch back to that wallet and tap Finish your sale.';
 
 /**
  * A stop with a sentence already written for her. `retryable: false` means the
@@ -287,16 +291,33 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
     throw new SellStop(landed ? PAYOUT_NOT_OPEN : PAYOUT_NOT_OPEN_UNPROVEN, false);
   };
 
+  /**
+   * Send the payout's deposit — once. A resume (Finish your sale, Continue
+   * payment) lands here on an order that still reads awaiting_deposit, which
+   * Paycrest also reports for a while after a deposit lands. So a deposit this
+   * phone may already have sent (its order's hold, services/depositGuard) or
+   * that was claimed is waited on, never sent again; a self-paid send is held
+   * under the order before it is broadcast, and an unanswered one stops with
+   * the hold kept.
+   */
   const send = async (o: PaycrestOrder, walletArg: string, intentId: string) => {
     // The order's own wallet is the USDC's owner; a resume may not know it otherwise.
     const walletAddress = walletArg || o.walletAddress;
     keepOrder(o);
     enter('sending');
+    if (o.paymentClaimedAt || (await depositMayBeOut(depositHoldKey(o.id), o.id))) {
+      enter('done');
+      return;
+    }
+    if (o.walletAddress && walletAddress.toLowerCase() !== o.walletAddress.toLowerCase()) {
+      throw new SellStop(OTHER_WALLET, false);
+    }
     const baseNative = await nativeBalance('base', walletAddress);
     let tx: string;
     try {
-      tx = await sendSponsoredPaycrestDeposit(o, walletAddress, baseNative === null ? null : Number(ethers.formatEther(baseNative)));
+      tx = await sendHeldDeposit(o, walletAddress, baseNative === null ? null : Number(ethers.formatEther(baseNative)), depositHoldKey(o.id));
     } catch (e) {
+      if (depositOutcomeUnknown(e)) throw new SellStop(DEPOSIT_OUTCOME_UNKNOWN, false);
       throw new SellStop(`Your USDC is ready, but sending it for payout failed: ${messageOf(e, 'please try again.')}`, false);
     }
     setDepositTx(tx);
@@ -401,6 +422,8 @@ export function useSwappedSell(opts?: { createIntent?: CreateIntent } & SellEven
       const o = await getOrder(intent.paycrestOrderId);
       keepOrder(o);
       if (o.status === 'awaiting_deposit') return send(o, wallet, intent.id);
+      // Nothing more can happen to this order's deposit: its hold has done its job.
+      if (isTerminal(o.status)) await clearHold(depositHoldKey(o.id));
       if (PAID_STATUSES.has(o.status)) {
         enter('done');
         return;

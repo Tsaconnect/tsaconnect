@@ -119,7 +119,8 @@ it('a swapped payment runs the real pipeline start to finish and hands over to t
   expect(m.payConverted).toHaveBeenCalledWith(ID, { sourceChainId: 56, sourceToken: bnb.address, sourceAddress: '0xPayer' });
   expect(m.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap');
   expect(m.openSellOrder).toHaveBeenCalledWith('i1');
-  expect(m.send).toHaveBeenCalledWith(order, '0xPayer', expect.anything());
+  // Held under its order before any self-paid broadcast (services/depositGuard).
+  expect(m.send).toHaveBeenCalledWith(order, '0xPayer', expect.anything(), { beforeBroadcast: expect.any(Function) });
   expect(hook.stage).toBe('waiting'); // the pipeline's 'done' read as the payment's wait
   expect(hook.swapStage).toBe('done');
   expect(hook.retryable).toBe(true);

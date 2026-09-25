@@ -33,7 +33,12 @@ jest.mock('@/services/lifi', () => ({
   ...jest.requireActual('@/services/lifi'),
   getSwapDelivery: jest.fn(),
 }));
-jest.mock('@/services/paycrestDeposit', () => ({ __esModule: true, sendSponsoredPaycrestDeposit: jest.fn() }));
+// Only the send is replaced: the outcome-unknown error and its copy are the real ones.
+jest.mock('@/services/paycrestDeposit', () => ({
+  ...jest.requireActual('@/services/paycrestDeposit'),
+  __esModule: true,
+  sendSponsoredPaycrestDeposit: jest.fn(),
+}));
 jest.mock('@/services/paycrestApi', () => ({
   ...jest.requireActual('@/services/paycrestApi'),
   claimPayment: jest.fn(),
@@ -53,6 +58,8 @@ import * as Wallet from '@/services/wallet';
 import { PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
 import type { LiFiQuote, LiFiToken } from '@/services/lifi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
+import { DEPOSIT_OUTCOME_UNKNOWN, DepositOutcomeUnknownError } from '@/services/paycrestDeposit';
+import { depositHoldKey, readHold, writeHold } from '@/services/payHold';
 import { canCancelSale, useSwappedSell, type StartSellArgs } from '../useSwappedSell';
 
 const mocked = {
@@ -100,6 +107,8 @@ const args: StartSellArgs = {
   amount: '0.016', walletAddress: '0xUser', sourceAddress: '0xUser', bank: { code: '058', account: '0123456789' },
 };
 const KEY = 'paycrest.sellSwap.pendingTx.i1';
+/** Every deposit goes out with its order's hold hook (services/depositGuard). */
+const HELD = { beforeBroadcast: expect.any(Function) };
 
 /** Drive the hook to its end: flush promises, step the 15 s poll clock, repeat. */
 async function run(p: Promise<void>) {
@@ -144,7 +153,7 @@ it('runs intent → swap → wait → order → send, persisting the hash before
   }));
   expect(mocked.recordSellSwap).toHaveBeenCalledWith('i1', '0xswap');
   expect(mocked.openSellOrder).toHaveBeenCalledWith('i1');
-  expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledWith(order, '0xUser', expect.anything());
+  expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledWith(order, '0xUser', expect.anything(), HELD);
   expect(mocked.claimPayment).toHaveBeenCalledWith('o1');
   expect(await AsyncStorage.getItem(KEY)).toBeNull(); // cleared on success
   expect(hook.stage).toBe('done');
@@ -743,7 +752,7 @@ describe('a payment whose swap landed short', () => {
     await run(payHook.completeWithWallet(payHook.intent!));
 
     expect(mocked.openSellOrder).toHaveBeenLastCalledWith('i1', { useWalletBalance: true });
-    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledWith(owned, '0xUser', expect.anything());
+    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledWith(owned, '0xUser', expect.anything(), HELD);
     expect(mocked.claimPayment).toHaveBeenCalledWith('o1');
     expect(payHook.stage).toBe('done');
     expect(payHook.missingUsdc).toBeUndefined();
@@ -1104,5 +1113,98 @@ describe('a stop for "still running" keeps the intent it is about — Continue m
     await run(payHook.start(payArgs));
 
     expect(ev.onStop).toHaveBeenCalledWith({ message: 'Verify first', retryable: true }, { intent: undefined, order: undefined });
+  });
+});
+
+// A payout that reads awaiting_deposit does not mean nothing was sent: Paycrest
+// reports a deposit a while after it lands. Finish your sale / Continue payment
+// resume here, so a deposit this phone may have sent is never sent again.
+describe('the payout deposit is never sent twice', () => {
+  const HOLD = depositHoldKey('o1');
+  const ordered = { id: 'i1', status: 'ordered', paycrestOrderId: 'o1' } as SellIntent;
+  const mine = { ...order, walletAddress: '0xUser' } as PaycrestOrder;
+  type SendOpts = { beforeBroadcast?: () => Promise<void> };
+  /** The real send runs beforeBroadcast right before a self-paid broadcast — so does this stand-in. */
+  const broadcastThen = (outcome: () => Promise<string>) =>
+    async (_o: unknown, _w: unknown, _n: unknown, opts?: SendOpts) => { await opts?.beforeBroadcast?.(); return outcome(); };
+
+  beforeEach(() => { mocked.getOrder.mockResolvedValue(mine); });
+
+  it('a broadcast whose answer was lost stops with the honest notice, keeps its hold, and is not sent again on resume', async () => {
+    mocked.sendSponsoredPaycrestDeposit.mockImplementationOnce(
+      broadcastThen(async () => { throw new DepositOutcomeUnknownError(); }));
+    await run(hook.resume(ordered, '0xUser'));
+    expect(hook.stage).toBe('failed');
+    expect(hook.error).toBe(DEPOSIT_OUTCOME_UNKNOWN);
+    expect(hook.retryable).toBe(false);
+    expect((await readHold(HOLD))?.intentId).toBe('o1');
+    expect(mocked.claimPayment).not.toHaveBeenCalled();
+
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('done');
+  });
+
+  it('a relay the server says may already be on-chain is the same unknown outcome', async () => {
+    mocked.sendSponsoredPaycrestDeposit.mockRejectedValueOnce(
+      new PaycrestError('Already sending. Check the order in a moment.', 409, 'sponsorship_in_progress'));
+    await run(hook.resume(ordered, '0xUser'));
+    expect(hook.error).toBe(DEPOSIT_OUTCOME_UNKNOWN);
+  });
+
+  it('reopened after a kill mid-send (hold on the phone, nothing reported yet): no send', async () => {
+    await writeHold(HOLD, 'o1');
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('done');
+  });
+
+  it('a hold that cannot be read counts as sent', async () => {
+    await AsyncStorage.setItem(HOLD, 'not json');
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).not.toHaveBeenCalled();
+  });
+
+  it('a claimed deposit is not sent again, even with no hold on this phone', async () => {
+    mocked.getOrder.mockResolvedValue({ ...mine, paymentClaimedAt: '2026-09-25T10:00:00Z' });
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).not.toHaveBeenCalled();
+    expect(hook.stage).toBe('done');
+  });
+
+  it('a refusal the server answered lifts the hold — nothing left, so the next resume sends', async () => {
+    mocked.sendSponsoredPaycrestDeposit.mockImplementationOnce(broadcastThen(async () => { throw new Error('nonce too low'); }));
+    await run(hook.resume(ordered, '0xUser'));
+    expect(hook.error).toMatch(/sending it for payout failed: nonce too low/);
+    expect(await readHold(HOLD)).toBeNull();
+
+    mocked.sendSponsoredPaycrestDeposit.mockImplementationOnce(broadcastThen(async () => '0xdeposit'));
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledTimes(2);
+    expect(hook.stage).toBe('done');
+  });
+
+  it('a good send whose claim failed keeps its hold, so a resume does not send it again', async () => {
+    mocked.sendSponsoredPaycrestDeposit.mockImplementationOnce(broadcastThen(async () => '0xdeposit'));
+    mocked.claimPayment.mockRejectedValueOnce(new Error('offline'));
+    await run(hook.resume(ordered, '0xUser'));
+    expect(hook.stage).toBe('done');
+    expect((await readHold(HOLD))?.intentId).toBe('o1');
+
+    await run(hook.resume(ordered, '0xUser'));
+    expect(mocked.sendSponsoredPaycrestDeposit).toHaveBeenCalledTimes(1);
+  });
+
+  it('the hold lifts once the order is terminal', async () => {
+    await writeHold(HOLD, 'o1');
+    mocked.getOrder.mockResolvedValue({ ...mine, status: 'settled' });
+    await run(hook.resume(ordered, '0xUser'));
+    expect(await readHold(HOLD)).toBeNull();
+  });
+
+  it('refuses to send from a wallet the payout was not opened for', async () => {
+    await run(hook.resume(ordered, '0xSomeoneElse'));
+    expect(mocked.sendSponsoredPaycrestDeposit).not.toHaveBeenCalled();
+    expect(hook.error).toMatch(/different wallet/);
   });
 });

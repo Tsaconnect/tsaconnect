@@ -43,6 +43,9 @@ import {
   PaycrestError,
   type PaycrestOrder,
 } from '@/services/paycrestApi';
+import { DEPOSIT_OUTCOME_UNKNOWN } from '@/services/paycrestDeposit';
+import { depositMayBeOut } from '@/services/depositGuard';
+import { clearHold, depositHoldKey } from '@/services/payHold';
 import { getChainDisplay, type ChainKey } from '@/constants/chains';
 
 /** Delivery landed in ~73s end to end in live testing, so a 5s poll shows the
@@ -72,9 +75,13 @@ export default function PaycrestOrderScreen() {
   // sentTx is set when this app just broadcast the deposit itself (sell.tsx →
   // goToOrder). Without it this screen cannot tell "the user still has to
   // send" from "we already sent, on their behalf, seconds ago".
-  const { id, sentTx } = useLocalSearchParams<{ id: string; sentTx?: string }>();
+  // unconfirmed is set when the send's outcome is unknown (its answer was lost,
+  // or a relay may already be on-chain): waited on, never asked for again.
+  const { id, sentTx, unconfirmed } = useLocalSearchParams<{ id: string; sentTx?: string; unconfirmed?: string }>();
 
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
+  // The deposit may already have left this phone (its hold, services/depositGuard).
+  const [held, setHeld] = useState(false);
   const [addressShown, setAddressShown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,10 +92,16 @@ export default function PaycrestOrderScreen() {
     if (!id) return;
     try {
       const o = await getOrder(id);
+      const terminal = isTerminal(o.status);
+      const holdKey = depositHoldKey(o.id);
+      // Nothing more can happen to a terminal order's deposit: its hold has done its job.
+      if (terminal) await clearHold(holdKey);
+      // Read before the order is shown, so a held deposit is never asked for, even for a frame.
+      setHeld(!terminal && o.direction === 'sell' && (await depositMayBeOut(holdKey, o.id)));
       setOrder(o);
       setError(null);
       // Stop polling the moment nothing upstream can change.
-      if (isTerminal(o.status)) stopped.current = true;
+      if (terminal) stopped.current = true;
     } catch (e) {
       // Keep whatever we already have on screen — a dropped poll must not
       // blank out payment instructions the user is mid-transfer against.
@@ -203,15 +216,18 @@ export default function PaycrestOrderScreen() {
   const recoveryPending = order.status === 'recovery_pending';
   const needsOperator = unmatched || recoveryPending;
 
+  /** This phone may have sent the deposit, with nothing yet to confirm it. */
+  const mayBeOut = held || unconfirmed === '1';
   const deposit = depositCardState({
     direction: order.direction,
     status: order.status,
     expired,
     sentTxHash: typeof sentTx === 'string' ? sentTx : undefined,
     paymentClaimedAt: order.paymentClaimedAt,
+    mayBeOut,
   });
   /** The deposit is on its way, so stop asking for it in the status line too. */
-  const depositUnderway = deposit.kind === 'progress' || deposit.kind === 'claimed';
+  const depositUnderway = deposit.kind === 'progress' || deposit.kind === 'claimed' || deposit.kind === 'unconfirmed';
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
@@ -388,6 +404,20 @@ export default function PaycrestOrderScreen() {
           </Card>
         )}
 
+        {/* The deposit may have left this phone, but nothing confirms it yet —
+            a lost answer, or an app kill after the broadcast. No address and
+            no way to cancel: sending again could pay the order twice. */}
+        {deposit.kind === 'unconfirmed' && (
+          <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
+            <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+              Your deposit may already be on its way
+            </Text>
+            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+              {DEPOSIT_OUTCOME_UNKNOWN} This order updates on its own once the provider sees it.
+            </Text>
+          </Card>
+        )}
+
         {deposit.kind === 'address' && (
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
@@ -483,8 +513,9 @@ export default function PaycrestOrderScreen() {
 
         {/* Only while the order is still waiting on the user AND they have not
             claimed to have paid — past either point the server refuses, and
-            offering a button that always fails is worse than not offering it. */}
-        {awaiting && !order.paymentClaimedAt && (
+            offering a button that always fails is worse than not offering it.
+            Nor once this phone sent the deposit, or may have. */}
+        {awaiting && !order.paymentClaimedAt && !mayBeOut && !sentTx && (
           <Button
             title="Cancel order"
             variant="ghost"

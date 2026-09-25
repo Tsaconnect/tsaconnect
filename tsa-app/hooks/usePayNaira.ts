@@ -24,15 +24,16 @@ import { payAttemptView, useAttempt, type PayLiveStage } from '@/hooks/payAttemp
 import {
   useSwappedSell, type CreateIntent, type SellStage, type StartSwapArgs,
 } from '@/hooks/useSwappedSell';
-import { getSponsoredRoutes, isGasSponsored, SPONSORSHIP_IN_PROGRESS } from '@/services/gasSponsorship';
+import { getSponsoredRoutes, isGasSponsored } from '@/services/gasSponsorship';
 import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
 import {
   claimPayment, getOrder, getQuote, isConvertedVenue, selectVenue, type PaycrestOrder, type PaycrestVenue,
 } from '@/services/paycrestApi';
 import {
-  checkFunding, DEPOSIT_OUTCOME_UNKNOWN, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendSponsoredPaycrestDeposit,
+  checkFunding, DEPOSIT_OUTCOME_UNKNOWN, fmtTokenAmount, fundingMessage, nativeBalanceFor,
 } from '@/services/paycrestDeposit';
-import { clearPayHold, holdActive, readPayHold, writePayHold } from '@/services/payHold';
+import { depositOutcomeUnknown, sameDeposit, sendHeldDeposit, stillToSend } from '@/services/depositGuard';
+import { payHoldKey } from '@/services/payHold';
 import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap';
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
@@ -130,64 +131,17 @@ async function balancesOf(wallet: string): Promise<WalletBalanceWithChain[] | nu
  * can), then tell the server it left. The deposit already left once this
  * returns; a lost claim only degrades to the ordinary unmatched-deposit path.
  *
- * A deposit she pays gas for is broadcast from this phone, and Paycrest reports
- * it only a while after it lands — so the payment's hold (services/payHold) is
+ * A deposit she pays gas for is held under the PAYMENT (services/depositGuard):
  * recorded before each broadcast, for this order, and kept until the payment is
  * final. Only a refusal the server answered lifts it: nothing left the wallet.
- * A relayed deposit needs none (the server holds one relay per order).
  */
 async function sendAndClaim(paymentId: string, order: PaycrestOrder, wallet: string, balances: WalletBalanceWithChain[] | null): Promise<void> {
-  let held = false;
-  try {
-    await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances), {
-      beforeBroadcast: async () => {
-        // A hold left by an earlier order of this payment covers that order, not this one.
-        const prior = await readPayHold(paymentId);
-        if (prior && prior.intentId !== order.id) await clearPayHold(paymentId);
-        await writePayHold(paymentId, order.id);
-        held = true;
-      },
-    });
-  } catch (e) {
-    if (held && !outcomeUnknown(e)) await clearPayHold(paymentId);
-    throw e;
-  }
+  await sendHeldDeposit(order, wallet, nativeBalanceFor(order.chain, balances), payHoldKey(paymentId));
   await claimPayment(order.id).catch((e) => console.warn('[pay] claimPayment failed', e));
 }
 
-/** A send whose deposit may be on-chain although no hash came back: waited on, never sent again. */
-const outcomeUnknown = (e: unknown): boolean =>
-  e instanceof DepositOutcomeUnknownError || errorCode(e) === SPONSORSHIP_IN_PROGRESS;
-
-/**
- * Whether this order's deposit may already have left this phone: its hold is
- * active. A hold that cannot be read counts — "I could not look" is not "nothing
- * was sent".
- */
-async function depositMayBeOut(paymentId: string, orderId: string): Promise<boolean> {
-  try {
-    const hold = await readPayHold(paymentId);
-    return !!hold && hold.intentId === orderId && holdActive(hold);
-  } catch {
-    return true;
-  }
-}
-
-/** Her deposit is still to send: the order waits for it, and nothing says it left. */
-async function stillToSend(paymentId: string, o: PaycrestOrder): Promise<boolean> {
-  return o.status === 'awaiting_deposit' && !o.paymentClaimedAt && !(await depositMayBeOut(paymentId, o.id));
-}
-
-/**
- * A resend moves exactly what she was shown and authorized: the same chain,
- * token, deposit address and amount. The first send held the order to her
- * price; a resend holds it to the order she saw.
- */
-const sameDeposit = (shown: PaycrestOrder, now: PaycrestOrder): boolean =>
-  shown.chain?.toLowerCase() === now.chain?.toLowerCase() &&
-  shown.token?.toUpperCase() === now.token?.toUpperCase() &&
-  !!now.depositAddress && shown.depositAddress?.toLowerCase() === now.depositAddress.toLowerCase() &&
-  !!now.tokenAmount && shown.tokenAmount === now.tokenAmount;
+/** Her deposit is still to send: the order waits for it, and nothing (claim or payment hold) says it left. */
+const stillToSendFor = (paymentId: string, o: PaycrestOrder): Promise<boolean> => stillToSend(payHoldKey(paymentId), o);
 
 const SEND_FAILED = 'Could not send your payment. Please try again.';
 const OTHER_WALLET = 'This payment was started from a different wallet. Switch back to it to send the payment.';
@@ -283,7 +237,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     }
     try {
       const o = await getOrder(checkout.orderId);
-      dispatch((await stillToSend(checkout.id, o)) ? { type: 'deposit', order: o } : { type: 'waiting', order: o });
+      dispatch((await stillToSendFor(checkout.id, o)) ? { type: 'deposit', order: o } : { type: 'waiting', order: o });
     } catch (e) {
       dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
     }
@@ -372,7 +326,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     try {
       await sendAndClaim(checkout.id, order, wallet, balances);
     } catch (e) {
-      if (outcomeUnknown(e)) {
+      if (depositOutcomeUnknown(e)) {
         dispatch({ type: 'waiting', order, note: errorMessage(e, DEPOSIT_OUTCOME_UNKNOWN) });
         return;
       }
@@ -401,7 +355,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       dispatch({ type: 'deposit', order: held, error: errorMessage(e, 'Could not check on your payment. Please try again.') });
       return;
     }
-    if (!(await stillToSend(checkout.id, fresh))) {
+    if (!(await stillToSendFor(checkout.id, fresh))) {
       dispatch({ type: 'waiting', order: fresh });
       return;
     }
