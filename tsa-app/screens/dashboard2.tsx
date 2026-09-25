@@ -209,6 +209,14 @@ const Dashboard: React.FC = () => {
           </Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
             <CurrencySelector variant="header" />
+            <PressableScale
+              onPress={() => router.push('/activity' as never)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Activity"
+            >
+              <Icon name="clock" size={24} color={colors.accent} />
+            </PressableScale>
             <CartIconBadge color={colors.accent} size={24} />
           </View>
         </View>
