@@ -40,6 +40,16 @@ npm run dev          # http://localhost:5174
 
 The session cookies are `Secure`; Chrome and Firefox keep them on `http://localhost`.
 
+To run the local web app against the **production** API instead (no local API needed):
+
+```bash
+npm run dev:prod-api # http://localhost:5174 → https://tsa.mcgpchain.com/api
+```
+
+`vite.prodapi.config.mjs` presents prod's `WEB_APP_ORIGIN` through the dev proxy so the
+cookie session works on localhost. It is real data: rolling keys, changing webhooks or
+payouts changes the live merchant.
+
 ## Test
 
 ```bash

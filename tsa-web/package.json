@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "dev:prod-api": "vite --config vite.prodapi.config.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
