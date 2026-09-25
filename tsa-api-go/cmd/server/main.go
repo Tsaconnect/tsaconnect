@@ -115,6 +115,17 @@ func isNUBAN(s string) bool {
 	return true
 }
 
+// newRouter is the engine every route hangs off. Not gin.Default: gin's Logger
+// writes the raw query string (the app's /ws/notifications?token=<JWT>) and its
+// Recovery dumps every request header, the web session Cookie included, on a
+// panic. RequestLogger is outermost so a recovered panic is still logged as its
+// 500.
+func newRouter() *gin.Engine {
+	router := gin.New()
+	router.Use(middleware.RequestLogger(), middleware.Recover())
+	return router
+}
+
 func main() {
 	migrateFlag := flag.Bool("migrate", false,
 		"run database migrations and exit; used by the deploy between build and restart")
@@ -1447,8 +1458,7 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Create router with default middleware (logger and recovery)
-	router := gin.Default()
+	router := newRouter()
 
 	// nginx is the only proxy in front of this service and it always overwrites
 	// X-Forwarded-For (see deploy/nginx-tsa-api-site.conf). Without this, Gin trusts
@@ -1461,7 +1471,6 @@ func main() {
 	// Apply global middleware
 	router.Use(middleware.CORS(cfg))
 	router.Use(middleware.SecurityHeaders())
-	router.Use(middleware.RequestLogger())
 
 	// Override health check with DB status
 	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
