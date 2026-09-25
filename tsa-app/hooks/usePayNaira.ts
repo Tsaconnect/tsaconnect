@@ -24,14 +24,15 @@ import { payAttemptView, useAttempt, type PayLiveStage } from '@/hooks/payAttemp
 import {
   useSwappedSell, type CreateIntent, type SellStage, type StartSwapArgs,
 } from '@/hooks/useSwappedSell';
-import { getSponsoredRoutes, isGasSponsored } from '@/services/gasSponsorship';
+import { getSponsoredRoutes, isGasSponsored, SPONSORSHIP_IN_PROGRESS } from '@/services/gasSponsorship';
 import { isNonEVMLiFiChain, type LiFiToken } from '@/services/lifi';
 import {
   claimPayment, getOrder, getQuote, isConvertedVenue, selectVenue, type PaycrestOrder, type PaycrestVenue,
 } from '@/services/paycrestApi';
 import {
-  checkFunding, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendSponsoredPaycrestDeposit,
+  checkFunding, DEPOSIT_OUTCOME_UNKNOWN, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendSponsoredPaycrestDeposit,
 } from '@/services/paycrestDeposit';
+import { clearPayHold, holdActive, readPayHold, writePayHold } from '@/services/payHold';
 import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap';
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
@@ -61,6 +62,8 @@ export type UsePayNaira = {
   swapStage: SellStage;
   /** A direct payment's payout order — reachable from the order screen if the send failed. */
   order?: PaycrestOrder;
+  /** With `waiting`: what she should know while it waits (e.g. a send whose outcome is unknown). */
+  notice?: string;
   authorization: AuthorizationProps;
   /** `priced` is what she was shown: the authorization says so, and what is signed is held to it. */
   payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
@@ -68,6 +71,8 @@ export type UsePayNaira = {
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   /** Her wallet on this device, once known. */
   walletAddress: string | null;
+  /** Looked, and this device holds no wallet that can sign: nothing here can be checked on or paid. */
+  walletUnavailable: boolean;
   /** After a shortfall: pay the rest from her wallet's USDC. Asks for authorization first. */
   completeWithWallet(): void;
   /** Carry on a payment that is under way. Asks for authorization first. */
@@ -124,16 +129,69 @@ async function balancesOf(wallet: string): Promise<WalletBalanceWithChain[] | nu
  * Send a direct order's deposit from her wallet (the sponsor covers gas where it
  * can), then tell the server it left. The deposit already left once this
  * returns; a lost claim only degrades to the ordinary unmatched-deposit path.
+ *
+ * A deposit she pays gas for is broadcast from this phone, and Paycrest reports
+ * it only a while after it lands — so the payment's hold (services/payHold) is
+ * recorded before each broadcast, for this order, and kept until the payment is
+ * final. Only a refusal the server answered lifts it: nothing left the wallet.
+ * A relayed deposit needs none (the server holds one relay per order).
  */
-async function sendAndClaim(order: PaycrestOrder, wallet: string, balances: WalletBalanceWithChain[] | null): Promise<void> {
-  await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
+async function sendAndClaim(paymentId: string, order: PaycrestOrder, wallet: string, balances: WalletBalanceWithChain[] | null): Promise<void> {
+  let held = false;
+  try {
+    await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances), {
+      beforeBroadcast: async () => {
+        // A hold left by an earlier order of this payment covers that order, not this one.
+        const prior = await readPayHold(paymentId);
+        if (prior && prior.intentId !== order.id) await clearPayHold(paymentId);
+        await writePayHold(paymentId, order.id);
+        held = true;
+      },
+    });
+  } catch (e) {
+    if (held && !outcomeUnknown(e)) await clearPayHold(paymentId);
+    throw e;
+  }
   await claimPayment(order.id).catch((e) => console.warn('[pay] claimPayment failed', e));
 }
 
-/** Her deposit is still to send: the order waits for it, and nothing from this app said it left. */
-const awaitsHerDeposit = (o: PaycrestOrder): boolean => o.status === 'awaiting_deposit' && !o.paymentClaimedAt;
+/** A send whose deposit may be on-chain although no hash came back: waited on, never sent again. */
+const outcomeUnknown = (e: unknown): boolean =>
+  e instanceof DepositOutcomeUnknownError || errorCode(e) === SPONSORSHIP_IN_PROGRESS;
+
+/**
+ * Whether this order's deposit may already have left this phone: its hold is
+ * active. A hold that cannot be read counts — "I could not look" is not "nothing
+ * was sent".
+ */
+async function depositMayBeOut(paymentId: string, orderId: string): Promise<boolean> {
+  try {
+    const hold = await readPayHold(paymentId);
+    return !!hold && hold.intentId === orderId && holdActive(hold);
+  } catch {
+    return true;
+  }
+}
+
+/** Her deposit is still to send: the order waits for it, and nothing says it left. */
+async function stillToSend(paymentId: string, o: PaycrestOrder): Promise<boolean> {
+  return o.status === 'awaiting_deposit' && !o.paymentClaimedAt && !(await depositMayBeOut(paymentId, o.id));
+}
+
+/**
+ * A resend moves exactly what she was shown and authorized: the same chain,
+ * token, deposit address and amount. The first send held the order to her
+ * price; a resend holds it to the order she saw.
+ */
+const sameDeposit = (shown: PaycrestOrder, now: PaycrestOrder): boolean =>
+  shown.chain?.toLowerCase() === now.chain?.toLowerCase() &&
+  shown.token?.toUpperCase() === now.token?.toUpperCase() &&
+  !!now.depositAddress && shown.depositAddress?.toLowerCase() === now.depositAddress.toLowerCase() &&
+  !!now.tokenAmount && shown.tokenAmount === now.tokenAmount;
 
 const SEND_FAILED = 'Could not send your payment. Please try again.';
+const OTHER_WALLET = 'This payment was started from a different wallet. Switch back to it to send the payment.';
+const ORDER_CHANGED = 'This payment order changed since you opened it, so nothing was sent. Close and reopen the payment to see it as it is now.';
 
 /**
  * The venue Paycrest fills as it is for `token` on `chainId` when the merchant
@@ -154,7 +212,7 @@ async function directVenue(merchantNetKobo: number, token: LiFiToken, chainId: n
 }
 
 export function usePayNaira(checkout: PayCheckout): UsePayNaira {
-  const { address } = useSignableWallet();
+  const { address, ready } = useSignableWallet();
   // One state machine (hooks/payAttempt): every stage, guard and public flag is decided there.
   const { attempt, ref, dispatch } = useAttempt();
   // What the last failed start left for the pipeline's own stop to be read against.
@@ -212,6 +270,26 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   });
 
   /**
+   * No sale of hers pays this payment: it is a direct order, or none. Read the
+   * order rather than assume it was sent — a send that failed leaves it waiting
+   * on a deposit that never left her wallet, and "waiting for confirmation"
+   * would then wait for nothing until the order lapsed. A deposit that may be
+   * out there (its hold is active) is waited on, never offered again.
+   */
+  const followDirect = useCallback(async () => {
+    if (!checkout.orderId) {
+      dispatch({ type: 'waiting' });
+      return;
+    }
+    try {
+      const o = await getOrder(checkout.orderId);
+      dispatch((await stillToSend(checkout.id, o)) ? { type: 'deposit', order: o } : { type: 'waiting', order: o });
+    } catch (e) {
+      dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
+    }
+  }, [checkout.id, checkout.orderId, dispatch]);
+
+  /**
    * An attempt of hers already exists: FOLLOW it. Only reads — nothing here
    * signs or sends. Where her own signature is needed (swap under way, deposit
    * still to send) the answer is `continue`, and Continue payment asks for
@@ -249,27 +327,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       }
     }
     dispatch({ type: 'continue', intent: open });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- followDirect reads only checkout.orderId.
-  }, [address, checkout.id, checkout.orderId, dispatch]);
-
-  /**
-   * No sale of hers pays this payment: it is a direct order, or none. Read the
-   * order rather than assume it was sent — a send that failed leaves it waiting
-   * on a deposit that never left her wallet, and "waiting for confirmation"
-   * would then wait for nothing until the order lapsed.
-   */
-  async function followDirect() {
-    if (!checkout.orderId) {
-      dispatch({ type: 'waiting' });
-      return;
-    }
-    try {
-      const o = await getOrder(checkout.orderId);
-      dispatch(awaitsHerDeposit(o) ? { type: 'deposit', order: o } : { type: 'waiting', order: o });
-    } catch (e) {
-      dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
-    }
-  }
+  }, [address, checkout.id, dispatch, followDirect]);
 
   const payDirectly = async (venue: PaycrestVenue, wallet: string, token: LiFiToken, priced: PayEstimate) => {
     const balances = await balancesOf(wallet);
@@ -302,9 +360,22 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       return;
     }
     dispatch({ type: 'progress', swapStage: 'idle', order });
+    await sendDirectDeposit(order, wallet, balances);
+  };
+
+  /**
+   * Send THIS order's deposit and say where that leaves her: waiting once it
+   * left — or may have (outcome unknown: never offered again) — or the order
+   * still to send, with the reason, when nothing left her wallet.
+   */
+  const sendDirectDeposit = async (order: PaycrestOrder, wallet: string, balances: WalletBalanceWithChain[] | null) => {
     try {
-      await sendAndClaim(order, wallet, balances);
+      await sendAndClaim(checkout.id, order, wallet, balances);
     } catch (e) {
+      if (outcomeUnknown(e)) {
+        dispatch({ type: 'waiting', order, note: errorMessage(e, DEPOSIT_OUTCOME_UNKNOWN) });
+        return;
+      }
       // The order exists, so Pay (a new one) is gone: the way forward is sending THIS order's deposit again.
       dispatch({ type: 'deposit', order, error: errorMessage(e, SEND_FAILED) });
       return;
@@ -313,10 +384,11 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   };
 
   /**
-   * Send a direct order's deposit again. The order is read first: one no longer
-   * waiting for a deposit, or whose deposit this app already reported sent, is
-   * only waited on — never paid twice. A sponsored relay is idempotent per order
-   * on the server as well.
+   * Send a direct order's deposit again. The order is read first and sent only
+   * while it still waits on a deposit nothing says left (not reported, no
+   * active hold), from the wallet that opened it, for exactly what she was
+   * shown and authorized. Anything else is waited on or refused — never paid
+   * twice, never paid differently. A relay is also one-per-order on the server.
    */
   const depositAgain = async (held: PaycrestOrder) => {
     if (!address || isPaying()) return;
@@ -329,18 +401,20 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       dispatch({ type: 'deposit', order: held, error: errorMessage(e, 'Could not check on your payment. Please try again.') });
       return;
     }
-    if (!awaitsHerDeposit(fresh)) {
+    if (!(await stillToSend(checkout.id, fresh))) {
       dispatch({ type: 'waiting', order: fresh });
       return;
     }
-    dispatch({ type: 'progress', swapStage: 'sending', order: fresh });
-    try {
-      await sendAndClaim(fresh, address, await balancesOf(address));
-    } catch (e) {
-      dispatch({ type: 'deposit', order: fresh, error: errorMessage(e, SEND_FAILED) });
+    if (fresh.walletAddress?.toLowerCase() !== address.toLowerCase()) {
+      dispatch({ type: 'deposit', order: fresh, error: OTHER_WALLET });
       return;
     }
-    dispatch({ type: 'waiting', order: fresh });
+    if (!sameDeposit(held, fresh)) {
+      dispatch({ type: 'deposit', order: fresh, error: ORDER_CHANGED });
+      return;
+    }
+    dispatch({ type: 'progress', swapStage: 'sending', order: fresh });
+    await sendDirectDeposit(fresh, address, await balancesOf(address));
   };
 
   // Read fresh (not narrowed): the machine's answer to what was just dispatched.
@@ -504,6 +578,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     completeWithWallet,
     continuePayment,
     sendDeposit,
+    walletUnavailable: ready && !address,
     resume: followOpen,
     reset,
   };

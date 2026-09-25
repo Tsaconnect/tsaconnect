@@ -52,6 +52,8 @@ export type UsePayCrypto = {
   canContinue: boolean;
   authorization: AuthorizationProps;
   walletAddress: string | null;
+  /** Looked, and this device holds no wallet that can sign: nothing here can be checked on or paid. */
+  walletUnavailable: boolean;
   /** `priced` is what she was shown: the authorization says so, and the signature is held to it. */
   payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
   /** What she will send, e.g. "0.084 BNB", and what the store receives — before she taps Pay. */
@@ -106,7 +108,7 @@ async function reportSwap(paymentId: string, intentId: string, hash: string): Pr
 }
 
 export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
-  const { address } = useSignableWallet();
+  const { address, ready } = useSignableWallet();
   // One state machine (hooks/payAttempt): every stage, guard and public flag is decided there.
   const { attempt, ref, dispatch } = useAttempt();
   // Pay is withheld until the persisted hold has been looked at: a kill may have left one.
@@ -387,6 +389,7 @@ export function usePayCrypto(checkout: PayCheckout): UsePayCrypto {
     canContinue: view.canContinue,
     authorization,
     walletAddress: address,
+    walletUnavailable: ready && !address,
     payWith,
     estimate,
     resume: resumeOpen,

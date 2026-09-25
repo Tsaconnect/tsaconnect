@@ -337,10 +337,11 @@ export const HOLD_UNREADABLE =
   "We couldn't check whether a payment of yours is already under way, so this one is on hold to be safe. Don't pay again — tap Continue payment to check again.";
 
 /**
- * A direct order still waiting for her deposit: what is left to send, and what
- * leaving it does. Leaving it is safe — the order lapses and the server frees
- * the payment — whereas cancelling the order fails the payment for good (its
- * Paycrest copy can still take a deposit), so leaving is what is offered.
+ * A direct order still waiting for her deposit (nothing says it left: no claim,
+ * no hold): what is left to send, and what leaving it does. Leaving takes none
+ * of her money, but it does not free the payment: a lapsed order's empty deposit
+ * address proves nothing (Paycrest sweeps them), so the server holds the payment
+ * for support and then fails it. Hence the store's new link, not "try again".
  */
 export function depositStillToSendCopy(
   order: Pick<PaycrestOrder, 'tokenAmount' | 'token' | 'chain' | 'validUntil'>,
@@ -352,6 +353,6 @@ export function depositStillToSendCopy(
   const closes = minutes >= 1 ? ` in about ${minutes} minute${minutes === 1 ? '' : 's'}` : '';
   return {
     body: `${what} on ${chain} still needs to leave your wallet to finish this payment.`,
-    leave: `Rather not? Leave it — the order closes by itself${closes} and nothing is taken.`,
+    leave: `Rather not? Leave it — none of your money is taken. Once the order closes${closes}, this payment can't be finished, so ask the store for a new payment link.`,
   };
 }

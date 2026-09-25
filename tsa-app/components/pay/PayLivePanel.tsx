@@ -213,11 +213,19 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
           <Text variant="bodySm" color="textSecondary">Waiting for confirmation…</Text>
         </View>
       )}
-      {!showForm && pay.stage === 'idle' && (
+      {pay.stage === 'waiting' && pay.notice && (
+        <Text variant="bodySm" style={{ color: colors.warning }}>{pay.notice}</Text>
+      )}
+      {!showForm && pay.stage === 'idle' && !pay.walletUnavailable && (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <Spinner inline />
           <Text variant="bodySm" color="textSecondary">Checking on your payment…</Text>
         </View>
+      )}
+      {!showForm && pay.stage === 'idle' && pay.walletUnavailable && (
+        <Text variant="bodySm" color="textSecondary">
+          {"This device has no wallet that can sign for this payment, so it can't be checked on here. Open it on the phone you paid from."}
+        </Text>
       )}
 
       {showPay && (

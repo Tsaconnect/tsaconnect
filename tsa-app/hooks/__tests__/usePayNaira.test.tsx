@@ -39,6 +39,8 @@ jest.mock('@/services/paycrestDeposit', () => ({
   __esModule: true,
   checkFunding: jest.fn(),
   sendSponsoredPaycrestDeposit: jest.fn(),
+  DepositOutcomeUnknownError: class DepositOutcomeUnknownError extends Error {},
+  DEPOSIT_OUTCOME_UNKNOWN: 'We could not confirm whether your payment was sent.',
   fmtTokenAmount: (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n >= 1 ? 2 : 6 }),
   fundingMessage: jest.fn(() => 'You have 1 USDC on Base — this payment needs 33.5.'),
   nativeBalanceFor: jest.fn(() => 0.5),
@@ -52,6 +54,7 @@ jest.mock('@/services/gasSponsorship', () => ({
   __esModule: true,
   getSponsoredRoutes: jest.fn(),
   isGasSponsored: jest.fn(() => false),
+  SPONSORSHIP_IN_PROGRESS: 'sponsorship_in_progress',
 }));
 const mockWallet: { address: string | null } = { address: '0xPayer' };
 jest.mock('@/hooks/useSignableWallet', () => ({
@@ -73,6 +76,8 @@ import type { LiFiToken } from '@/services/lifi';
 import { PaycrestError, type PaycrestOrder, type PaycrestQuote, type PaycrestVenue } from '@/services/paycrestApi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 import { directPriceMovedCopy } from '@/utils/payCheckout';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { payHoldKey, readPayHold, writePayHold } from '@/services/payHold';
 import { usePayNaira, type UsePayNaira } from '../usePayNaira';
 
 const { PayError } = PayApi;
@@ -106,7 +111,10 @@ const BSC = 56;
 
 const venue = { chain: 'base', token: 'USDC', rate: '1500', spreadPercent: 0.1, tokenAmount: 33.5 } as PaycrestVenue;
 const quoteWith = (venues: PaycrestVenue[]) => ({ venues, best: venues[0] ?? null }) as PaycrestQuote;
-const order = { id: 'o1', chain: 'base', token: 'USDC', status: 'awaiting_deposit', tokenAmount: '33.5' } as PaycrestOrder;
+const order = {
+  id: 'o1', chain: 'base', token: 'USDC', status: 'awaiting_deposit', tokenAmount: '33.5',
+  walletAddress: '0xPayer', depositAddress: '0xDeposit',
+} as PaycrestOrder;
 const intent = { id: 'i1', status: 'swapping', payPaymentId: ID } as SellIntent;
 
 // The swapped-sell hook, replaced by a stub whose state the tests set.
@@ -219,7 +227,7 @@ describe('a token Paycrest fills directly', () => {
     expect(m.getQuote).toHaveBeenCalledWith('sell', '50000.00');
     expect(m.checkFunding).toHaveBeenCalledWith(venue, expect.anything(), { gasSponsored: false });
     expect(m.payDirect).toHaveBeenCalledWith(ID, { chainKey: 'base', token: 'USDC' });
-    expect(m.send).toHaveBeenCalledWith(order, '0xPayer', 0.5);
+    expect(m.send).toHaveBeenCalledWith(order, '0xPayer', 0.5, { beforeBroadcast: expect.any(Function) });
     expect(m.claimPayment).toHaveBeenCalledWith('o1');
     expect(swapped.start).not.toHaveBeenCalled();
     expect(hook.stage).toBe('waiting');
@@ -1148,5 +1156,133 @@ describe('a direct order whose deposit never left her wallet', () => {
       expect(hook.stage).toBe('failed');
       expect(hook.error).toBe('offline');
     });
+  });
+});
+
+describe('a deposit that may already be out there is never sent twice', () => {
+  type SendOpts = { beforeBroadcast?: () => Promise<void> };
+  /** The real send runs beforeBroadcast just before each broadcast — so does this stand-in. */
+  const broadcastThen = (outcome: () => Promise<string>) =>
+    async (_o: unknown, _w: unknown, _n: unknown, opts?: SendOpts) => { await opts?.beforeBroadcast?.(); return outcome(); };
+  const reopened = { ...checkout, status: 'processing', youArePaying: true, payable: false, orderId: 'o1' } as PayApi.PayCheckout;
+  const reopen = async () => {
+    await mount(reopened);
+    await act(async () => { await hook.resume(); });
+  };
+
+  beforeEach(async () => { await AsyncStorage.clear(); });
+
+  it('a broadcast whose answer never came back is waited on, with a notice — no Send, and its hold stays', async () => {
+    m.send.mockImplementationOnce(broadcastThen(async () => { throw new Deposit.DepositOutcomeUnknownError('lost in transit'); }));
+    await mount();
+    await pay(usdcBase, BASE);
+
+    expect(hook.stage).toBe('waiting');
+    expect(hook.notice).toBe('lost in transit');
+    expect((await readPayHold(ID))?.intentId).toBe('o1');
+    expect(m.claimPayment).not.toHaveBeenCalled();
+  });
+
+  it('a refusal the server answered lifts the hold — nothing left, so Send is offered', async () => {
+    m.send.mockImplementationOnce(broadcastThen(async () => { throw new Error('nonce too low'); }));
+    await mount();
+    await pay(usdcBase, BASE);
+
+    expect(hook.stage).toBe('deposit');
+    expect(hook.error).toBe('nonce too low');
+    expect(await readPayHold(ID)).toBeNull();
+  });
+
+  it('a relay the server says is already under way is waited on, never offered again', async () => {
+    m.send.mockRejectedValueOnce(Object.assign(new Error('Already sending. Check the order in a moment.'), { code: 'sponsorship_in_progress' }));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('waiting');
+    expect(hook.notice).toBe('Already sending. Check the order in a moment.');
+  });
+
+  it('a send that went through keeps its hold — the payment going final lifts it, not us', async () => {
+    m.send.mockImplementationOnce(broadcastThen(async () => '0xdeposit'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('waiting');
+    expect((await readPayHold(ID))?.intentId).toBe('o1');
+  });
+
+  it('reopened after a kill mid-send, or after a lost claim: the hold says it may be out — waiting, no Send', async () => {
+    await writePayHold(ID, 'o1');
+    await reopen();
+    expect(hook.stage).toBe('waiting');
+    expect(m.send).not.toHaveBeenCalled();
+  });
+
+  it('and Send itself refuses once a hold appeared (another tab of the flow sent it meanwhile)', async () => {
+    m.send.mockRejectedValueOnce(new Error('no gas'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('deposit');
+    await writePayHold(ID, 'o1');
+    act(() => hook.sendDeposit());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a hold left by an EARLIER order of the payment does not block this one — and is replaced by this order', async () => {
+    await writePayHold(ID, 'o0');
+    await reopen();
+    expect(hook.stage).toBe('deposit');
+
+    m.send.mockImplementationOnce(broadcastThen(async () => '0xdeposit'));
+    act(() => hook.sendDeposit());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect((await readPayHold(ID))?.intentId).toBe('o1');
+  });
+
+  it('a hold that cannot be read counts as sent', async () => {
+    await AsyncStorage.setItem(payHoldKey(ID), 'not json');
+    await reopen();
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('Send refuses an order opened from a different wallet', async () => {
+    m.send.mockRejectedValueOnce(new Error('no gas'));
+    await mount();
+    await pay(usdcBase, BASE);
+    m.getOrder.mockResolvedValue({ ...order, walletAddress: '0xSomeoneElse' });
+    act(() => hook.sendDeposit());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('deposit');
+    expect(hook.error).toMatch(/different wallet/);
+  });
+
+  it.each([
+    ['deposit address', { depositAddress: '0xElsewhere' }],
+    ['amount', { tokenAmount: '34.0' }],
+    ['token', { token: 'USDT' }],
+    ['chain', { chain: 'polygon' }],
+    ['a missing deposit address', { depositAddress: undefined }],
+  ])('Send refuses an order whose %s changed since she saw it — nothing is sent', async (_n, change) => {
+    m.send.mockRejectedValueOnce(new Error('no gas'));
+    await mount();
+    await pay(usdcBase, BASE);
+    m.getOrder.mockResolvedValue({ ...order, ...change } as PaycrestOrder);
+    act(() => hook.sendDeposit());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('deposit');
+    expect(hook.error).toMatch(/changed/);
+  });
+
+  it('says so when this device holds no wallet that can sign', async () => {
+    mockWallet.address = null;
+    await mount(reopened);
+    expect(hook.walletUnavailable).toBe(true);
   });
 });

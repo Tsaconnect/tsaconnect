@@ -43,6 +43,10 @@ export type PayHook = {
   walletShort?: boolean;
   /** Her wallet on this device, once known — a price needs it, so a wait for it is retried on arrival. */
   walletAddress?: string | null;
+  /** Looked, and this device holds no wallet that can sign: a payment here can't be checked on or paid. */
+  walletUnavailable?: boolean;
+  /** With `waiting`: what she should know while it waits. Not a failure. */
+  notice?: string;
   /** `priced` is what she was shown — required: the signature is always held to it. */
   payWith(token: LiFiToken, chainId: number, priced: PayEstimate): void;
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;

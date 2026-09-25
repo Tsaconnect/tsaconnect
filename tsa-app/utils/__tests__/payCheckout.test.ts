@@ -321,15 +321,22 @@ describe('depositStillToSendCopy — a direct order still waiting for her deposi
     expect(depositStillToSendCopy(order, now).body).toBe('0.742116 USDC on Base still needs to leave your wallet to finish this payment.');
   });
 
-  it('offers leaving it — the order lapses on its own and takes nothing — with the minutes left, rounded down', () => {
-    expect(depositStillToSendCopy(order, now).leave).toBe('Rather not? Leave it — the order closes by itself in about 42 minutes and nothing is taken.');
-    expect(depositStillToSendCopy({ ...order, validUntil: '2026-09-25T10:01:59Z' }, now).leave).toContain('in about 1 minute and');
+  it('is honest about leaving it: none of her money is taken, but the payment cannot be finished — a new link is needed', () => {
+    expect(depositStillToSendCopy(order, now).leave).toBe(
+      "Rather not? Leave it — none of your money is taken. Once the order closes in about 42 minutes, this payment can't be finished, so ask the store for a new payment link.",
+    );
+    expect(depositStillToSendCopy({ ...order, validUntil: '2026-09-25T10:01:59Z' }, now).leave).toContain('in about 1 minute,');
+  });
+
+  it('never promises the payment is freed to try again', () => {
+    expect(depositStillToSendCopy(order, now).leave).not.toMatch(/pay again|try again|freed/i);
   });
 
   it('promises no time it does not know, or that has run out', () => {
     for (const validUntil of [undefined, '2026-09-25T10:00:30Z', '2026-09-25T09:00:00Z', 'garbage']) {
-      expect(depositStillToSendCopy({ ...order, validUntil }, now).leave)
-        .toBe('Rather not? Leave it — the order closes by itself and nothing is taken.');
+      expect(depositStillToSendCopy({ ...order, validUntil }, now).leave).toBe(
+        "Rather not? Leave it — none of your money is taken. Once the order closes, this payment can't be finished, so ask the store for a new payment link.",
+      );
     }
   });
 

@@ -189,6 +189,19 @@ describe('the panel, by state', () => {
     expect(text(tree)).toContain('Checking on your payment');
     expect(text(tree)).not.toContain('Waiting for confirmation');
   });
+
+  it('with no wallet on this device that can sign, it says so instead of checking forever', async () => {
+    await panel(hookState({ stage: 'idle', walletAddress: null, walletUnavailable: true }), { showForm: false });
+    expect(text(tree)).toContain('no wallet that can sign for this payment');
+    expect(text(tree)).not.toContain('Checking on your payment');
+  });
+
+  it('a wait with a notice (a send whose outcome is unknown) shows it under the spinner — and offers no Send', async () => {
+    await panel(hookState({ stage: 'waiting', notice: "We couldn't confirm whether your payment was sent." }), { showForm: false });
+    expect(text(tree)).toContain('Waiting for confirmation');
+    expect(text(tree)).toContain("We couldn't confirm whether your payment was sent.");
+    expect(text(tree)).not.toMatch(/Send /);
+  });
 });
 
 describe('a direct order whose deposit never left her wallet', () => {
@@ -204,14 +217,19 @@ describe('a direct order whose deposit never left her wallet', () => {
     expect(t).toContain('Finish sending your payment');
     expect(t).toContain('0.742116 USDC on Base still needs to leave your wallet');
     expect(t).toContain('Covering the network fee is temporarily unavailable.');
-    expect(t).toContain('the order closes by itself in about 42 minutes and nothing is taken');
+    expect(t).toContain('none of your money is taken. Once the order closes in about 42 minutes');
     expect(find(tree, 'button:Send 0.742116 USDC')).toBeDefined();
     expect(t).not.toContain('Waiting for confirmation');
-    expect(find(tree, 'button:Pay ₦50,505.06')).toBeUndefined();
     expect(find(tree, 'button:Continue payment')).toBeUndefined();
 
     act(() => find(tree, 'button:Send 0.742116 USDC').props.onPress());
     expect(sendDeposit).toHaveBeenCalledTimes(1);
+  });
+
+  it('never offers Pay — even with the form up, where Pay could otherwise show: the order exists', async () => {
+    await panel(hookState({ stage: 'deposit', retryable: false, order, sendDeposit: jest.fn() }), { showForm: true });
+    expect(find(tree, 'button:Pay ₦50,505.06')).toBeUndefined();
+    expect(find(tree, 'button:Send 0.742116 USDC')).toBeDefined();
   });
 
   it('does not link the order screen, whose Cancel would fail the payment for good', async () => {

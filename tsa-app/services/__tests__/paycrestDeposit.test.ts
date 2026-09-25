@@ -49,7 +49,7 @@ jest.mock('../gasSponsorship', () => {
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
 import {
-  checkFunding, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
+  checkFunding, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
 } from '../paycrestDeposit';
 // eslint-disable-next-line import/first
 import { PaycrestError } from '../paycrestApi';
@@ -277,6 +277,45 @@ describe('sendPaycrestDeposit', () => {
     // Balances failed to load — the same rule as checkFunding: never block.
     await expect(sendPaycrestDeposit(order, '0xfrom', null)).resolves.toBe('0xhash');
   });
+
+  it('runs beforeBroadcast after signing and just before the broadcast — and not at all when the send is refused first', async () => {
+    const order_: string[] = [];
+    mockSignTransaction.mockImplementation(async () => { order_.push('sign'); return '0xsigned'; });
+    mockSubmit.mockImplementation(async () => { order_.push('submit'); return { success: true, data: { txHash: '0xhash' } }; });
+    const beforeBroadcast = jest.fn(async () => { order_.push('before'); });
+    await sendPaycrestDeposit(order, '0xfrom', 0.01, { beforeBroadcast });
+    expect(order_).toEqual(['sign', 'before', 'submit']);
+
+    beforeBroadcast.mockClear();
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.00001, { beforeBroadcast })).rejects.toThrow(/gas/);
+    expect(beforeBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('a beforeBroadcast that throws stops the broadcast', async () => {
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.01, {
+      beforeBroadcast: async () => { throw new Error('storage unavailable'); },
+    })).rejects.toThrow('storage unavailable');
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('a broadcast whose answer never came back is an unknown outcome, not a plain failure', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: 'Network request failed', unanswered: true });
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.01)).rejects.toBeInstanceOf(DepositOutcomeUnknownError);
+  });
+
+  it('a broadcast the server refused is a plain failure — nothing left the wallet', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: 'insufficient funds for transfer' });
+    const err = await sendPaycrestDeposit(order, '0xfrom', 0.01).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(DepositOutcomeUnknownError);
+  });
+
+  it('the sponsored send hands beforeBroadcast to the self-paid path it falls back to', async () => {
+    mockGetOffer.mockRejectedValue(new PaycrestError('off', 404));
+    const beforeBroadcast = jest.fn(async () => {});
+    await sendSponsoredPaycrestDeposit({ ...order, id: 'o1', walletAddress: '0xfrom' }, '0xfrom', 0.01, { beforeBroadcast });
+    expect(beforeBroadcast).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('checkFunding with gas sponsorship', () => {
@@ -318,6 +357,16 @@ describe('sendSponsoredPaycrestDeposit', () => {
     mockPrepare.mockResolvedValue({ success: true, data: prepared });
     mockSubmit.mockResolvedValue({ success: true, data: { txHash: '0xhash' } });
     mockSignTransaction.mockResolvedValue('0xsigned');
+  });
+
+  it('a relayed deposit never runs beforeBroadcast — the server holds one relay per order, so a hold would only block a safe retry', async () => {
+    mockGetOffer.mockResolvedValue(authOffer);
+    mockSignTypedData.mockResolvedValue('0x' + '00'.repeat(65));
+    mockRelay.mockResolvedValue({ txHash: '0xrelayed', alreadyUsed: false });
+    const beforeBroadcast = jest.fn(async () => {});
+    await sendSponsoredPaycrestDeposit(order, SIGNER, 0, { beforeBroadcast });
+    expect(beforeBroadcast).not.toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('signs and relays an authorization without sending from the wallet', async () => {

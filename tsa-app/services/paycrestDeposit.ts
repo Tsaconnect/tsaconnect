@@ -157,6 +157,30 @@ export interface DepositOrder {
 }
 
 /**
+ * A deposit may have been broadcast, but the server's answer never arrived (a
+ * timeout, an HTML error page). Its outcome is unknown: sending again could pay
+ * twice, so a caller waits on the order rather than offering to send.
+ */
+export const DEPOSIT_OUTCOME_UNKNOWN =
+  "We couldn't confirm whether your payment was sent. It may still arrive — don't send it again yet.";
+
+export class DepositOutcomeUnknownError extends Error {
+  constructor(message = DEPOSIT_OUTCOME_UNKNOWN) {
+    super(message);
+    this.name = 'DepositOutcomeUnknownError';
+  }
+}
+
+export interface DepositSendOptions {
+  /**
+   * Runs right before each broadcast, after everything that can refuse the
+   * send without sending (gas, prepare, sign) has passed — the moment to
+   * record a "this may be out there" safeguard. A throw stops the broadcast.
+   */
+  beforeBroadcast?: () => Promise<void>;
+}
+
+/**
  * Move the stablecoin from the device wallet to the provider's deposit
  * address, fulfilling a sell order.
  *
@@ -166,12 +190,15 @@ export interface DepositOrder {
  * Pass null when balances are unavailable and the send proceeds unguarded.
  *
  * Resolves to the broadcast hash; rejects with a message already mapped for
- * display, which screens can show verbatim.
+ * display, which screens can show verbatim — or with DepositOutcomeUnknownError
+ * when a broadcast went unanswered. Any other rejection means the server
+ * refused every broadcast it was given, so nothing left the wallet.
  */
 export async function sendPaycrestDeposit(
   order: DepositOrder,
   fromAddress: string,
   nativeBalance?: number | null,
+  opts: DepositSendOptions = {},
 ): Promise<string> {
   const chainCfg = CHAINS[order.chain as ChainKey];
   if (!chainCfg) {
@@ -184,6 +211,8 @@ export async function sendPaycrestDeposit(
 
   const { chainId, nativeCurrency } = chainCfg;
 
+  // Set by any broadcast whose answer never came back — including a retry's.
+  let unanswered = false;
   const res = await sendPreparedTransaction({
     prepare: () =>
       prepareSendTransaction(order.token, to, amount, chainId, { fromAddress }),
@@ -203,10 +232,15 @@ export async function sendPaycrestDeposit(
         fromAddress,
       );
     },
-    submit: (signed) =>
-      submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress),
+    submit: async (signed) => {
+      await opts.beforeBroadcast?.();
+      const r = await submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress);
+      if (r.unanswered) unanswered = true;
+      return r;
+    },
   });
 
+  if (!(res.success && res.data?.txHash) && unanswered) throw new DepositOutcomeUnknownError();
   // The backend surfaces the RPC's own words here ("max fee per gas less than
   // block base fee: address 0x…, maxFeePerGas: …"). Map before it reaches a
   // screen — every caller of this function shows the message verbatim.
@@ -245,6 +279,7 @@ export async function sendSponsoredPaycrestDeposit(
   order: SponsoredDepositOrder,
   fromAddress: string,
   nativeBalance?: number | null,
+  opts: DepositSendOptions = {},
 ): Promise<string> {
   let offer: SponsorshipOffer | null = null;
   try {
@@ -287,12 +322,14 @@ export async function sendSponsoredPaycrestDeposit(
     return res.txHash ?? '';
   }
 
+  // A relay needs no beforeBroadcast: the server holds one relay per order and
+  // hands a retry the first one's hash. The two self-sent paths below do.
   if (offer?.mode === 'topup') {
     await requestGasTopUp(order.id);
-    return sendPaycrestDeposit(order, fromAddress, null);
+    return sendPaycrestDeposit(order, fromAddress, null, opts);
   }
 
-  return sendPaycrestDeposit(order, fromAddress, nativeBalance);
+  return sendPaycrestDeposit(order, fromAddress, nativeBalance, opts);
 }
 
 /**

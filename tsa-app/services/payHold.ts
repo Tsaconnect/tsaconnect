@@ -1,6 +1,6 @@
 // services/payHold.ts
 //
-// The persisted "don't pay again" hold for a crypto-settling TSA Pay payment.
+// The persisted "don't pay again" hold for a TSA Pay payment.
 //
 // A crypto payment's swap delivers straight to the MERCHANT, so once it may have
 // been broadcast, paying again pays them twice. What keeps that from happening
@@ -9,6 +9,11 @@
 // swap's hash. It says: a swap for this payment may be out there, and the
 // server may not know of it.
 //
+// A naira payment's direct deposit that she pays gas for herself uses the same
+// record, written right before its broadcast (usePayNaira): Paycrest reports a
+// deposit only some time after it lands, so without it a resend could pay the
+// order twice. `intentId` is then the Paycrest order's id.
+//
 // It lifts only when the payment is terminal (the server's own answer) or
 // HOLD_MAX_MS after the signature — the server gives a payment up after 24 h of
 // a swap it cannot resolve, so holding longer would protect nothing.
@@ -16,6 +21,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const HOLD_MAX_MS = 24 * 60 * 60_000;
 
+/** `intentId`: what may be out there — the swap's sell intent, or a direct deposit's Paycrest order. */
 export type PayHold = { intentId: string; at: number };
 
 export const payHoldKey = (paymentId: string) => `tsapay.pendingSwap.${paymentId}`;

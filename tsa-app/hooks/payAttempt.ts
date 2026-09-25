@@ -37,7 +37,8 @@ export type PayAttempt =
   /** A direct order waits for her deposit, and none left her wallet: the same order is sent, never a new one. */
   | { kind: 'deposit'; order: PaycrestOrder; error?: string }
   | ({ kind: 'shortfall'; intent?: SellIntent; missingUsdc?: string; walletTried: boolean } & Detail)
-  | ({ kind: 'waiting' } & Detail)
+  /** `note`: what she should know while it waits, e.g. that a send's outcome is not known yet. */
+  | ({ kind: 'waiting'; note?: string } & Detail)
   | ({
       kind: 'failed';
       error: string;
@@ -58,8 +59,8 @@ export type PayAttemptEvent =
   | { type: 'begin' }
   /** The pipeline moved to a new stage. */
   | ({ type: 'progress'; swapStage: SellStage } & Pick<Detail, 'order'>)
-  /** Handed to the server (the pipeline finished, or a direct order was funded). */
-  | ({ type: 'waiting' } & Detail)
+  /** Handed to the server (the pipeline finished, or a direct order was funded — or may have been). */
+  | ({ type: 'waiting'; note?: string } & Detail)
   /** The pipeline stopped with a sentence for her. */
   | ({ type: 'stop'; message: string; retryable: boolean; intent?: SellIntent } & Pick<Detail, 'order'>)
   /** The swap landed short of what the payout needs. */
@@ -97,7 +98,7 @@ export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt 
     case 'progress':
       return { kind: 'paying', walletTried: walletTried(a), swapStage: e.swapStage, order: e.order };
     case 'waiting':
-      return { kind: 'waiting', swapStage: e.swapStage, order: e.order };
+      return { kind: 'waiting', swapStage: e.swapStage, order: e.order, note: e.note };
     case 'stop':
       return {
         kind: 'failed', error: e.message, retryable: e.retryable, paused: false, held: false, noContinue: !e.intent,
@@ -134,6 +135,8 @@ export type PayAttemptView = {
   walletShort: boolean;
   swapStage: SellStage;
   order?: PaycrestOrder;
+  /** With `waiting`: what she should know while it waits. Not a failure. */
+  notice?: string;
 };
 
 export function payAttemptView(a: PayAttempt): PayAttemptView {
@@ -154,7 +157,7 @@ export function payAttemptView(a: PayAttempt): PayAttemptView {
         swapStage: a.swapStage ?? 'shortfall', order: a.order,
       };
     case 'waiting':
-      return { stage: 'waiting', ...base, swapStage: a.swapStage ?? 'idle', order: a.order };
+      return { stage: 'waiting', ...base, swapStage: a.swapStage ?? 'idle', order: a.order, notice: a.note };
     case 'failed':
       return {
         stage: 'failed', ...base, error: a.error, errorCode: a.code, retryable: a.retryable,

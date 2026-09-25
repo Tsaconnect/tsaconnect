@@ -103,6 +103,12 @@ describe('payAttemptView — what the payer and the screen read', () => {
     expect(payAttemptView({ kind: 'continue', intent })).toMatchObject({ stage: 'continue', canContinue: true });
   });
 
+  it('a wait carries its note as a notice — not as an error', () => {
+    const waiting = reducePayAttempt(paying, { type: 'waiting', order, note: 'outcome unknown' });
+    expect(payAttemptView(waiting)).toMatchObject({ stage: 'waiting', notice: 'outcome unknown', order });
+    expect(payAttemptView(waiting).error).toBeUndefined();
+  });
+
   it('a deposit prompt carries its order and reason, and never offers Pay or Continue', () => {
     expect(payAttemptView({ kind: 'deposit', order, error: 'no gas' })).toMatchObject({
       stage: 'deposit', order, error: 'no gas', retryable: false, canContinue: false,
