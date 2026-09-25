@@ -120,3 +120,16 @@ func TestGetAssetPriceHistory_DaysFallBackAndSnap(t *testing.T) {
 		}
 	}
 }
+
+func TestGetAssetOHLC_UpstreamFailureIs503(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	ps := services.NewPriceService()
+	ps.SetBaseURLForTest(srv.URL)
+	code, body := serveMarket(t, ps, "/market/ohlc/ETH")
+	if code != http.StatusServiceUnavailable || body["success"] != false {
+		t.Fatalf("status = %d, body = %v; want 503 so the app offers a retry", code, body)
+	}
+}

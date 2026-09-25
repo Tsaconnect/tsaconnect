@@ -14,12 +14,14 @@ import { getTokenOHLC, getTokenPriceHistory } from '@/services/walletApi';
 import { formatUSD } from '@/utils/formatPrice';
 import {
   CHART_RANGES,
+  chartFetchOutcome,
   formatChartTime,
   indexAtX,
   pctChange,
   priceDomain,
   priceFractionDigits,
   type Candle,
+  type ChartFetchOutcome,
   type ChartMode,
 } from '@/utils/priceChart';
 
@@ -39,15 +41,21 @@ const MODE_SEGMENTS: { key: ChartMode; label: string }[] = [
 
 const formatPrice = (v: number) => formatUSD(v, { maxDecimals: priceFractionDigits(v) });
 
-async function fetchSeries(symbol: string, mode: ChartMode, days: number): Promise<Candle[]> {
+type SeriesResult = { series: Candle[]; outcome: ChartFetchOutcome };
+
+async function fetchSeries(symbol: string, mode: ChartMode, days: number): Promise<SeriesResult> {
   if (mode === 'candle') {
     const res = await getTokenOHLC(symbol, days, MAX_CANDLES);
-    return res.success && Array.isArray(res.data) ? res.data : [];
+    const series = res.success && Array.isArray(res.data) ? res.data : [];
+    return { series, outcome: chartFetchOutcome(res, series.length) };
   }
   const res = await getTokenPriceHistory(symbol, days, LINE_POINTS);
-  if (!res.success || !Array.isArray(res.data)) return [];
   // Both modes render from candles: a line point is a candle whose OHLC are all its price.
-  return res.data.map((p) => ({ timestamp: p.timestamp, open: p.price, high: p.price, low: p.price, close: p.price }));
+  const series =
+    res.success && Array.isArray(res.data)
+      ? res.data.map((p) => ({ timestamp: p.timestamp, open: p.price, high: p.price, low: p.price, close: p.price }))
+      : [];
+  return { series, outcome: chartFetchOutcome(res, series.length) };
 }
 
 export default function PriceChart({ symbol }: { symbol: string }) {
@@ -57,7 +65,8 @@ export default function PriceChart({ symbol }: { symbol: string }) {
   const mode: ChartMode = savedMode ?? 'line';
   const [days, setDays] = useState<number>(CHART_RANGES[0].days);
   // Data is tagged with the request it answers; a stale answer never renders under a new mode/range.
-  const [loaded, setLoaded] = useState<{ key: string; series: Candle[] } | null>(null);
+  const [loaded, setLoaded] = useState<({ key: string } & SeriesResult) | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
   const [width, setWidth] = useState(0);
   const [active, setActive] = useState<number | null>(null);
   const cache = useRef(new Map<string, Candle[]>());
@@ -79,19 +88,20 @@ export default function PriceChart({ symbol }: { symbol: string }) {
     setActive(null);
     const hit = cache.current.get(requestKey);
     if (hit) {
-      setLoaded({ key: requestKey, series: hit });
+      setLoaded({ key: requestKey, series: hit, outcome: 'ok' });
       return;
     }
     let cancelled = false;
-    fetchSeries(symbol, savedMode, days).then((series) => {
+    setLoaded(null);
+    fetchSeries(symbol, savedMode, days).then((result) => {
       if (cancelled) return;
-      if (series.length >= 2) cache.current.set(requestKey, series);
-      setLoaded({ key: requestKey, series });
+      if (result.outcome === 'ok') cache.current.set(requestKey, result.series);
+      setLoaded({ key: requestKey, ...result });
     });
     return () => {
       cancelled = true;
     };
-  }, [symbol, savedMode, days, requestKey]);
+  }, [symbol, savedMode, days, requestKey, retryCount]);
 
   const loading = loaded?.key !== requestKey;
   const series = useMemo(() => (loading || !loaded ? [] : loaded.series), [loading, loaded]);
@@ -225,8 +235,12 @@ export default function PriceChart({ symbol }: { symbol: string }) {
       );
     }
     if (!hasData) {
+      const failed = loaded?.outcome === 'failed';
       return (
-        <View
+        <PressableScale
+          disabled={!failed}
+          onPress={() => setRetryCount((c) => c + 1)}
+          accessibilityRole={failed ? 'button' : undefined}
           style={{
             height: EMPTY_HEIGHT,
             alignItems: 'center',
@@ -236,11 +250,11 @@ export default function PriceChart({ symbol }: { symbol: string }) {
             borderRadius: radius.sm,
           }}
         >
-          <Icon name="trendingUp" size={20} color={colors.textMuted} />
+          <Icon name={failed ? 'refresh' : 'trendingUp'} size={20} color={colors.textMuted} />
           <Text variant="bodySm" color="textMuted">
-            No price data yet
+            {failed ? "Couldn't load the chart. Tap to retry" : `No price data for ${symbol}`}
           </Text>
-        </View>
+        </PressableScale>
       );
     }
     if (!chart) return <View style={{ height: CHART_HEIGHT }} />;

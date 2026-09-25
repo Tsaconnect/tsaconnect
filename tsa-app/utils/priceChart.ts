@@ -84,3 +84,15 @@ export function formatChartTime(ts: number, days: number): string {
 export function pctChange(from: number, to: number): number {
   return from > 0 ? ((to - from) / from) * 100 : 0;
 }
+
+export type ChartFetchOutcome = 'ok' | 'none' | 'failed';
+
+/**
+ * Classify a chart response. 404 means the asset has no price source (show
+ * "no price data"); any other failure, including a request that never got a
+ * JSON answer, is temporary (offer a retry).
+ */
+export function chartFetchOutcome(res: { success: boolean; status?: number }, points: number): ChartFetchOutcome {
+  if (res.success) return points >= 2 ? 'ok' : 'none';
+  return res.status === 404 ? 'none' : 'failed';
+}

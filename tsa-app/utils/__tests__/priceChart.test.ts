@@ -1,4 +1,5 @@
 import {
+  chartFetchOutcome,
   formatChartTime,
   indexAtX,
   pctChange,
@@ -81,5 +82,19 @@ describe('pctChange', () => {
   });
   it('is 0 when there is no base', () => {
     expect(pctChange(0, 5)).toBe(0);
+  });
+});
+
+describe('chartFetchOutcome', () => {
+  it('is ok with at least two points', () => {
+    expect(chartFetchOutcome({ success: true, status: 200 }, 2)).toBe('ok');
+  });
+  it('is none when the server has no data for the asset', () => {
+    expect(chartFetchOutcome({ success: false, status: 404 }, 0)).toBe('none');
+    expect(chartFetchOutcome({ success: true, status: 200 }, 1)).toBe('none');
+  });
+  it('is failed when the server or network failed, so the user can retry', () => {
+    expect(chartFetchOutcome({ success: false, status: 503 }, 0)).toBe('failed');
+    expect(chartFetchOutcome({ success: false }, 0)).toBe('failed'); // request threw / non-JSON reply
   });
 });
