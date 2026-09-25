@@ -90,11 +90,13 @@ beforeEach(() => { jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 
 afterEach(() => { act(() => tree?.unmount()); jest.useRealTimers(); });
 
 it('a slow older read cannot overwrite a newer one', async () => {
+  // A test payment: the screen draws its own "waiting" line only for those (a
+  // live one's is the panel's), and that line is how this test reads the state.
   let slow!: (c: PayCheckout) => void;
   jest.mocked(getCheckout)
-    .mockResolvedValueOnce(checkoutWith({}))                       // initial: processing, ours
-    .mockReturnValueOnce(new Promise((r) => { slow = r; }))        // poll 1: slow
-    .mockResolvedValueOnce(checkoutWith({ status: 'succeeded' })); // poll 2: fast, and final
+    .mockResolvedValueOnce(checkoutWith({ mode: 'test' }))                       // initial: processing, ours
+    .mockReturnValueOnce(new Promise((r) => { slow = r; }))                      // poll 1: slow
+    .mockResolvedValueOnce(checkoutWith({ mode: 'test', status: 'succeeded' })); // poll 2: fast, and final
   await act(async () => { tree = TestRenderer.create(<PayScreen />); });
   await flush();
   expect(text()).toContain('Waiting for confirmation');
@@ -103,7 +105,7 @@ it('a slow older read cannot overwrite a newer one', async () => {
   await tick(5_000); // poll 2 lands: the payment succeeded
   expect(text()).toContain('Payment complete');
 
-  await act(async () => { slow(checkoutWith({})); }); // the old answer finally arrives
+  await act(async () => { slow(checkoutWith({ mode: 'test' })); }); // the old answer finally arrives
   await flush();
   expect(text()).toContain('Payment complete');
   expect(text()).not.toContain('Waiting for confirmation');

@@ -3,8 +3,8 @@
 // Connects usePayNaira to the live panel for a merchant that settles in naira.
 // usePayLive keeps the hook in step with the checkout (follow a payment under
 // way, reset when the server frees it, report an attempt that is moving money).
-// The panel shows whenever the form is payable OR the hook has something to say:
-// a payment reopened mid-flight has no form, but its prompts must still show.
+// The panel always shows: a payment reopened mid-flight has no form, but what it
+// is waiting on — or still needs from her — must show, from the first render.
 import React, { useMemo } from 'react';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { PayLivePanel } from '@/components/pay/PayLivePanel';
@@ -34,9 +34,7 @@ export function PayNaira({
 
   return (
     <>
-      {(showForm || pay.stage !== 'idle' || !!checkout.orderId) && (
-        <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={allow} />
-      )}
+      <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={allow} />
       <AuthorizationModal {...pay.authorization} />
     </>
   );

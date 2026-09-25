@@ -21,7 +21,7 @@ import type { PayHook } from '@/hooks/usePayLive';
 import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
-import { PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
+import { depositStillToSendCopy, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 type Props = {
@@ -103,6 +103,9 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
   // asking for her, waiting on the server, or may be under way ("don't pay again").
   const showPay = showForm && retryable && !orderId && !['shortfall', 'waiting', 'continue'].includes(pay.stage);
   const showContinue = !!pay.continuePayment && (pay.stage === 'continue' || (pay.stage === 'failed' && !!pay.canContinue));
+  // Re-read on every render: the screen re-renders every 5 s, which keeps "minutes left" current.
+  const toSend = pay.stage === 'deposit' && pay.order ? pay.order : undefined;
+  const toSendCopy = toSend ? depositStillToSendCopy(toSend, Date.now()) : undefined;
 
   return (
     <>
@@ -177,6 +180,25 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
 
       {showContinue && <Button title="Continue payment" size="lg" onPress={() => pay.continuePayment?.()} />}
 
+      {toSend && toSendCopy && (
+        <AccentCard railColor={colors.warning} padding="md" style={{ backgroundColor: colors.warningBg }}>
+          <View style={{ gap: spacing.xs }}>
+            <Text variant="bodySm" weight="700">Finish sending your payment</Text>
+            <Text variant="bodySm">{toSendCopy.body}</Text>
+            {pay.error && <Text variant="bodySm" color="danger">{pay.error}</Text>}
+          </View>
+        </AccentCard>
+      )}
+      {toSend && pay.sendDeposit && (
+        <Button
+          title={toSend.tokenAmount ? `Send ${toSend.tokenAmount} ${toSend.token}` : 'Send payment'}
+          size="lg"
+          onPress={() => pay.sendDeposit?.()}
+        />
+      )}
+      {toSendCopy && <Text variant="caption" style={{ color: colors.textMuted }}>{toSendCopy.leave}</Text>}
+
+      {/* Not while a deposit is still to send: that screen's Cancel fails the payment for good. */}
       {orderId && ['failed', 'waiting', 'continue'].includes(pay.stage) && (
         <Button
           title="Open the payment order"
@@ -185,10 +207,16 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
         />
       )}
 
-      {showForm && pay.stage === 'waiting' && (
+      {pay.stage === 'waiting' && (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <Spinner inline />
           <Text variant="bodySm" color="textSecondary">Waiting for confirmation…</Text>
+        </View>
+      )}
+      {!showForm && pay.stage === 'idle' && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+          <Spinner inline />
+          <Text variant="bodySm" color="textSecondary">Checking on your payment…</Text>
         </View>
       )}
 

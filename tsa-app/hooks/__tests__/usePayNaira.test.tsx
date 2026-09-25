@@ -248,23 +248,24 @@ describe('a token Paycrest fills directly', () => {
     expect(m.send).not.toHaveBeenCalled();
   });
 
-  it('a failed send keeps the order so she can send it by hand from the order screen', async () => {
+  it('a failed send keeps the order and its reason, so THIS order can be sent again — never a new one', async () => {
     m.send.mockRejectedValue(new Error('Not enough ETH on base to pay gas'));
     await mount();
     await pay(usdcBase, BASE);
 
-    expect(hook.stage).toBe('failed');
+    expect(hook.stage).toBe('deposit');
     expect(hook.error).toBe('Not enough ETH on base to pay gas');
     expect(hook.order?.id).toBe('o1');
+    expect(hook.retryable).toBe(false);
     expect(m.claimPayment).not.toHaveBeenCalled();
   });
 
-  it('a send that fails with no message points at the payment order, not at trying again', async () => {
+  it('a send that fails with no message says to try again', async () => {
     m.send.mockRejectedValue('nope');
     await mount();
     await pay(usdcBase, BASE);
-    expect(hook.error).toMatch(/payment order/i);
-    expect(hook.error).not.toMatch(/try again/i);
+    expect(hook.stage).toBe('deposit');
+    expect(hook.error).toMatch(/try again/i);
   });
 
   it('a lost claim never fails a payment whose deposit already left', async () => {
@@ -570,7 +571,7 @@ describe('a payment that cannot safely be started over', () => {
     expect(hook.canContinue).toBe(false);
   });
 
-  it('a direct order that opened but could not be sent is not retryable — the order screen finishes it', async () => {
+  it('a direct order that opened but could not be sent is not retryable — Pay would open a second order', async () => {
     m.send.mockRejectedValue(new Error('Not enough ETH on base to pay gas'));
     await mount();
     await pay(usdcBase, BASE);
@@ -677,7 +678,7 @@ describe('reset', () => {
     m.send.mockRejectedValue(new Error('boom'));
     await mount();
     await pay(usdcBase, BASE);
-    expect(hook.stage).toBe('failed');
+    expect(hook.stage).toBe('deposit');
 
     act(() => hook.reset());
 
@@ -1022,5 +1023,130 @@ describe('the order must be for what she chose', () => {
     await mount();
     await authorize();
     expect(m.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a direct order whose deposit never left her wallet', () => {
+  const failedSend = async () => {
+    m.send.mockRejectedValueOnce(new Error('Covering the network fee is temporarily unavailable. Please try again shortly.'));
+    await mount();
+    await pay(usdcBase, BASE);
+    expect(hook.stage).toBe('deposit');
+  };
+  const sendAgain = async () => {
+    act(() => hook.sendDeposit());
+    await act(async () => { hook.authorization.onAuthorized(); });
+    await flush();
+  };
+
+  it('Send asks for authorization first, naming the amount — nothing is read or sent until she gives it', async () => {
+    await failedSend();
+    m.getOrder.mockClear();
+    act(() => hook.sendDeposit());
+    expect(hook.authorization.visible).toBe(true);
+    expect(hook.authorization.title).toBe('Authorize sending 33.5 USDC');
+    expect(m.getOrder).not.toHaveBeenCalled();
+    expect(m.send).toHaveBeenCalledTimes(1); // only the first, failed attempt
+  });
+
+  it('then re-reads the order, sends THIS order and claims it, and waits — no second order is opened', async () => {
+    await failedSend();
+    await sendAgain();
+
+    expect(m.getOrder).toHaveBeenCalledWith('o1');
+    expect(m.send).toHaveBeenCalledTimes(2);
+    expect(m.send.mock.calls[1][0]).toMatchObject({ id: 'o1' });
+    expect(m.claimPayment).toHaveBeenCalledWith('o1');
+    expect(m.payDirect).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('an order no longer waiting for a deposit is only waited on — nothing is sent', async () => {
+    await failedSend();
+    m.getOrder.mockResolvedValue({ ...order, status: 'pending' });
+    await sendAgain();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('an order this app already reported sent is never sent twice', async () => {
+    await failedSend();
+    m.getOrder.mockResolvedValue({ ...order, paymentClaimedAt: '2026-09-25T10:00:00Z' });
+    await sendAgain();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('waiting');
+  });
+
+  it('a second failure keeps the same order, with the new reason', async () => {
+    await failedSend();
+    m.send.mockRejectedValueOnce(new Error('Not enough ETH on Base to pay gas'));
+    await sendAgain();
+    expect(hook.stage).toBe('deposit');
+    expect(hook.order?.id).toBe('o1');
+    expect(hook.error).toBe('Not enough ETH on Base to pay gas');
+  });
+
+  it('an order that cannot be read is not sent blind', async () => {
+    await failedSend();
+    m.getOrder.mockRejectedValueOnce(new Error('offline'));
+    await sendAgain();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('deposit');
+    expect(hook.error).toBe('offline');
+  });
+
+  it('cancelling the authorization sends nothing', async () => {
+    await failedSend();
+    act(() => hook.sendDeposit());
+    act(() => hook.authorization.onCancel());
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(1);
+    expect(hook.stage).toBe('deposit');
+  });
+
+  it('a double biometric success sends once', async () => {
+    await failedSend();
+    act(() => hook.sendDeposit());
+    await act(async () => {
+      hook.authorization.onAuthorized();
+      hook.authorization.onAuthorized();
+    });
+    await flush();
+    expect(m.send).toHaveBeenCalledTimes(2); // the failed first, and one resend
+  });
+
+  describe('opening the screen on it', () => {
+    const reopened = { ...checkout, status: 'processing', youArePaying: true, payable: false, orderId: 'o1' } as PayApi.PayCheckout;
+
+    it('offers Send when the order still waits for a deposit that never left — and sends nothing on its own', async () => {
+      await mount(reopened);
+      await act(async () => { await hook.resume(); });
+      expect(m.getOrder).toHaveBeenCalledWith('o1');
+      expect(hook.stage).toBe('deposit');
+      expect(hook.order?.id).toBe('o1');
+      expect(m.send).not.toHaveBeenCalled();
+    });
+
+    it('waits when the deposit was reported sent, even before the provider has seen it', async () => {
+      m.getOrder.mockResolvedValue({ ...order, paymentClaimedAt: '2026-09-25T10:00:00Z' });
+      await mount(reopened);
+      await act(async () => { await hook.resume(); });
+      expect(hook.stage).toBe('waiting');
+    });
+
+    it('waits when the order has moved on', async () => {
+      m.getOrder.mockResolvedValue({ ...order, status: 'settling' });
+      await mount(reopened);
+      await act(async () => { await hook.resume(); });
+      expect(hook.stage).toBe('waiting');
+    });
+
+    it('says so, rather than claiming to wait, when the order cannot be read', async () => {
+      m.getOrder.mockRejectedValue(new Error('offline'));
+      await mount(reopened);
+      await act(async () => { await hook.resume(); });
+      expect(hook.stage).toBe('failed');
+      expect(hook.error).toBe('offline');
+    });
   });
 });

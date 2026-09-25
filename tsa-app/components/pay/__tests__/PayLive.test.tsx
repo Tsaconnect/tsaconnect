@@ -176,12 +176,54 @@ describe('the panel, by state', () => {
     expect(find(tree, 'button:Pay ₦50,505.06')).toBeDefined();
   });
 
-  it('the spinner for waiting is the panel’s only when it also shows the form (the screen has its own)', async () => {
+  it('the panel owns "waiting" for a live payment, with the form or without (the screen shows its own only for test payments)', async () => {
     await panel(hookState({ stage: 'waiting' }), { showForm: false });
-    expect(text(tree)).not.toContain('Waiting for confirmation');
+    expect(text(tree).match(/Waiting for confirmation/g)).toHaveLength(1);
     act(() => tree.unmount());
     await panel(hookState({ stage: 'waiting' }), { showForm: true });
-    expect(text(tree)).toContain('Waiting for confirmation');
+    expect(text(tree).match(/Waiting for confirmation/g)).toHaveLength(1);
+  });
+
+  it('a reopened payment the hook has not read yet says it is checking — never "waiting" for something unknown', async () => {
+    await panel(hookState({ stage: 'idle' }), { showForm: false });
+    expect(text(tree)).toContain('Checking on your payment');
+    expect(text(tree)).not.toContain('Waiting for confirmation');
+  });
+});
+
+describe('a direct order whose deposit never left her wallet', () => {
+  const order = {
+    id: 'o1', chain: 'base', token: 'USDC', tokenAmount: '0.742116', status: 'awaiting_deposit',
+    validUntil: new Date(Date.now() + 42 * 60_000 + 30_000).toISOString(),
+  };
+
+  it('says what is left to send, why the last try failed, and offers Send for THAT amount — not Pay, not Waiting', async () => {
+    const sendDeposit = jest.fn();
+    await panel(hookState({ stage: 'deposit', retryable: false, order, error: 'Covering the network fee is temporarily unavailable.', sendDeposit }), { showForm: false });
+    const t = text(tree);
+    expect(t).toContain('Finish sending your payment');
+    expect(t).toContain('0.742116 USDC on Base still needs to leave your wallet');
+    expect(t).toContain('Covering the network fee is temporarily unavailable.');
+    expect(t).toContain('the order closes by itself in about 42 minutes and nothing is taken');
+    expect(find(tree, 'button:Send 0.742116 USDC')).toBeDefined();
+    expect(t).not.toContain('Waiting for confirmation');
+    expect(find(tree, 'button:Pay ₦50,505.06')).toBeUndefined();
+    expect(find(tree, 'button:Continue payment')).toBeUndefined();
+
+    act(() => find(tree, 'button:Send 0.742116 USDC').props.onPress());
+    expect(sendDeposit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not link the order screen, whose Cancel would fail the payment for good', async () => {
+    await panel(hookState({ stage: 'deposit', retryable: false, order, sendDeposit: jest.fn() }), {
+      showForm: false, checkout: { ...fiat, orderId: 'o1' } as PayCheckout,
+    });
+    expect(find(tree, 'button:Open the payment order')).toBeUndefined();
+  });
+
+  it('with no reason from a failed send it shows none', async () => {
+    await panel(hookState({ stage: 'deposit', retryable: false, order, sendDeposit: jest.fn() }), { showForm: false });
+    expect(text(tree)).not.toMatch(/unavailable|failed|could not/i);
   });
 });
 
@@ -253,6 +295,22 @@ describe('PayNaira / PayCrypto keep the hook in step with the checkout', () => {
     await act(async () => { tree.update(naira()); });
     expect(text(tree)).toContain('Use my USDC');
     expect(mockHooks.naira.resume).not.toHaveBeenCalled(); // once only
+  });
+
+  it('while that follow is still reading, both wrappers say they are checking — never a blank panel', async () => {
+    mockHooks.naira = hookState({ stage: 'idle' });
+    await act(async () => { tree = TestRenderer.create(naira()); });
+    expect(text(tree)).toContain('Checking on your payment');
+    act(() => tree.unmount());
+
+    mockHooks.crypto = hookState({ stage: 'idle' });
+    await act(async () => {
+      tree = TestRenderer.create(
+        <PayCrypto checkout={{ ...cryptoCheckout, status: 'processing', youArePaying: true } as PayCheckout} showForm={false}
+          onWaiting={jest.fn()} onActive={jest.fn()} />,
+      );
+    });
+    expect(text(tree)).toContain('Checking on your payment');
   });
 
   it('a failure found on resume is shown too', async () => {

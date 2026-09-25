@@ -32,6 +32,10 @@ describe('reducePayAttempt — transitions', () => {
     ['a shortfall after her wallet was offered remembers it', { ...paying, walletTried: true }, { type: 'shortfall', missingUsdc: '0.10', intent }, { kind: 'shortfall', walletTried: true }],
     ['offering her wallet resumes paying and remembers it', { kind: 'shortfall', intent, missingUsdc: '0.42', walletTried: false }, { type: 'walletOffered' }, { kind: 'paying', walletTried: true }],
     ['a payment under way that needs her', IDLE, { type: 'continue', intent }, { kind: 'continue' }],
+    ['a direct order whose send failed keeps the order and the reason', paying, { type: 'deposit', order, error: 'no gas' }, { kind: 'deposit', order, error: 'no gas' }],
+    ['a direct order found still waiting for her deposit', IDLE, { type: 'deposit', order }, { kind: 'deposit', order }],
+    ['sending it again begins an attempt', { kind: 'deposit', order }, { type: 'begin' }, { kind: 'paying' }],
+    ['reset a deposit prompt (the server freed the payment)', { kind: 'deposit', order }, { type: 'reset' }, { kind: 'idle' }],
     ['a failure with its code', paying, { type: 'fail', error: 'kyc', errorCode: 'kyc_verification_required', retryable: true }, { kind: 'failed', code: 'kyc_verification_required', retryable: true }],
     ['a server-paused payment', paying, { type: 'fail', error: 'paused', retryable: false, paused: true }, { kind: 'failed', paused: true, retryable: false }],
     ['reset from idle', IDLE, { type: 'reset' }, { kind: 'idle' }],
@@ -54,6 +58,7 @@ describe('reducePayAttempt — transitions', () => {
     expect(reducePayAttempt(paused, { type: 'stop', message: 'other', retryable: true })).toBe(paused);
     expect(reducePayAttempt(paused, { type: 'progress', swapStage: 'waiting' })).toBe(paused);
     expect(reducePayAttempt(paused, { type: 'begin' })).toBe(paused);
+    expect(reducePayAttempt(paused, { type: 'deposit', order })).toBe(paused);
   });
 
   it('nor can a later fail — even a paused one — overwrite it or downgrade it to a retryable failure', () => {
@@ -98,6 +103,12 @@ describe('payAttemptView — what the payer and the screen read', () => {
     expect(payAttemptView({ kind: 'continue', intent })).toMatchObject({ stage: 'continue', canContinue: true });
   });
 
+  it('a deposit prompt carries its order and reason, and never offers Pay or Continue', () => {
+    expect(payAttemptView({ kind: 'deposit', order, error: 'no gas' })).toMatchObject({
+      stage: 'deposit', order, error: 'no gas', retryable: false, canContinue: false,
+    });
+  });
+
   it('a shortfall says how far, and whether her wallet was already offered', () => {
     expect(payAttemptView({ kind: 'shortfall', intent, missingUsdc: '0.42', walletTried: false })).toMatchObject({
       stage: 'shortfall', missingUsdc: '0.42', walletShort: false, swapStage: 'shortfall',
@@ -126,6 +137,7 @@ describe('isUnresolved — does the form stay up under the expiry warning', () =
     ['idle', 'idle', true, false],
     ['paying', 'paying', true, true],
     ['continue', 'continue', true, true],
+    ['a deposit still to send', 'deposit', false, true],
     ['shortfall', 'shortfall', true, true],
     ['waiting', 'waiting', true, true],
     ['a retryable failure (nothing under way)', 'failed', true, false],

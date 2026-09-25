@@ -14,6 +14,8 @@ import type { SellIntent } from '@/services/paycrestSellSwap';
 // (and testable) on its own. utils/paymentId.ts has no such dependency.
 import { isPaymentId } from '@/utils/paymentId';
 import { TRANSPORT_ERROR } from '@/constants/api/config';
+import { MAINNET_CHAINS, type ChainKey } from '@/constants/chains';
+import type { PaycrestOrder } from '@/services/paycrestApi';
 
 export type PayScreenState =
   | { kind: 'loading' }
@@ -333,3 +335,23 @@ export const unconfirmedCopy = (paymentId: string): string =>
 /** The hold on a crypto payment could not be read from this phone: held to be safe, with a way out. */
 export const HOLD_UNREADABLE =
   "We couldn't check whether a payment of yours is already under way, so this one is on hold to be safe. Don't pay again — tap Continue payment to check again.";
+
+/**
+ * A direct order still waiting for her deposit: what is left to send, and what
+ * leaving it does. Leaving it is safe — the order lapses and the server frees
+ * the payment — whereas cancelling the order fails the payment for good (its
+ * Paycrest copy can still take a deposit), so leaving is what is offered.
+ */
+export function depositStillToSendCopy(
+  order: Pick<PaycrestOrder, 'tokenAmount' | 'token' | 'chain' | 'validUntil'>,
+  now: number,
+): { body: string; leave: string } {
+  const chain = MAINNET_CHAINS[order.chain as ChainKey]?.name ?? order.chain;
+  const what = order.tokenAmount ? `${order.tokenAmount} ${order.token}` : order.token;
+  const minutes = order.validUntil ? Math.floor((new Date(order.validUntil).getTime() - now) / 60_000) : NaN;
+  const closes = minutes >= 1 ? ` in about ${minutes} minute${minutes === 1 ? '' : 's'}` : '';
+  return {
+    body: `${what} on ${chain} still needs to leave your wallet to finish this payment.`,
+    leave: `Rather not? Leave it — the order closes by itself${closes} and nothing is taken.`,
+  };
+}

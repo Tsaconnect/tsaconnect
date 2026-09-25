@@ -72,6 +72,8 @@ export type UsePayNaira = {
   completeWithWallet(): void;
   /** Carry on a payment that is under way. Asks for authorization first. */
   continuePayment(): void;
+  /** With `deposit`: send the direct order's deposit again. Asks for authorization, then re-reads the order first. */
+  sendDeposit(): void;
   /** Follow her own attempt at this payment, e.g. on opening the screen. Reads only; never signs or sends. */
   resume(): Promise<void>;
   /** Back to idle — the server released the payment. */
@@ -81,10 +83,14 @@ export type UsePayNaira = {
 type Action =
   | { kind: 'pay'; token: LiFiToken; chainId: number; priced: PayEstimate }
   | { kind: 'wallet'; intent: SellIntent; missingUsdc?: string }
-  | { kind: 'continue'; intent: SellIntent };
+  | { kind: 'continue'; intent: SellIntent }
+  | { kind: 'deposit'; order: PaycrestOrder };
 
 const authorizationTitle = (a: Action | null): string => {
   if (a?.kind === 'pay') return `Authorize payment of about ${a.priced.pay}`;
+  if (a?.kind === 'deposit') {
+    return a.order.tokenAmount ? `Authorize sending ${a.order.tokenAmount} ${a.order.token}` : `Authorize sending ${a.order.token}`;
+  }
   if (a?.kind === 'wallet') return a.missingUsdc ? `Authorize paying about ${a.missingUsdc} USDC from your wallet` : 'Authorize paying from your wallet';
   if (a?.kind === 'continue') return 'Authorize continuing your payment';
   return 'Authorize payment';
@@ -103,6 +109,31 @@ function orderAboveTolerance(tokenAmount: string | undefined, decimals: number, 
     return 'unreadable';
   }
 }
+
+/** Her wallet's balances, or null — a flaky indexer must not block a payment she can fund. */
+async function balancesOf(wallet: string): Promise<WalletBalanceWithChain[] | null> {
+  try {
+    const res = await getWalletBalances(undefined, wallet);
+    return res.success ? normalizeWalletBalances(res.data) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a direct order's deposit from her wallet (the sponsor covers gas where it
+ * can), then tell the server it left. The deposit already left once this
+ * returns; a lost claim only degrades to the ordinary unmatched-deposit path.
+ */
+async function sendAndClaim(order: PaycrestOrder, wallet: string, balances: WalletBalanceWithChain[] | null): Promise<void> {
+  await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
+  await claimPayment(order.id).catch((e) => console.warn('[pay] claimPayment failed', e));
+}
+
+/** Her deposit is still to send: the order waits for it, and nothing from this app said it left. */
+const awaitsHerDeposit = (o: PaycrestOrder): boolean => o.status === 'awaiting_deposit' && !o.paymentClaimedAt;
+
+const SEND_FAILED = 'Could not send your payment. Please try again.';
 
 /**
  * The venue Paycrest fills as it is for `token` on `chainId` when the merchant
@@ -196,7 +227,11 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
       return;
     }
-    if (!open || open.status === 'delivered' || open.status === 'failed') {
+    if (!open) {
+      await followDirect();
+      return;
+    }
+    if (open.status === 'delivered' || open.status === 'failed') {
       dispatch({ type: 'waiting' });
       return;
     }
@@ -214,16 +249,30 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       }
     }
     dispatch({ type: 'continue', intent: open });
-  }, [address, checkout.id, dispatch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- followDirect reads only checkout.orderId.
+  }, [address, checkout.id, checkout.orderId, dispatch]);
+
+  /**
+   * No sale of hers pays this payment: it is a direct order, or none. Read the
+   * order rather than assume it was sent — a send that failed leaves it waiting
+   * on a deposit that never left her wallet, and "waiting for confirmation"
+   * would then wait for nothing until the order lapsed.
+   */
+  async function followDirect() {
+    if (!checkout.orderId) {
+      dispatch({ type: 'waiting' });
+      return;
+    }
+    try {
+      const o = await getOrder(checkout.orderId);
+      dispatch(awaitsHerDeposit(o) ? { type: 'deposit', order: o } : { type: 'waiting', order: o });
+    } catch (e) {
+      dispatch({ type: 'fail', error: errorMessage(e, 'Could not check on your payment. Please try again.'), retryable: true });
+    }
+  }
 
   const payDirectly = async (venue: PaycrestVenue, wallet: string, token: LiFiToken, priced: PayEstimate) => {
-    let balances: WalletBalanceWithChain[] | null = null;
-    try {
-      const res = await getWalletBalances(undefined, wallet);
-      balances = res.success ? normalizeWalletBalances(res.data) : null;
-    } catch {
-      balances = null; // a flaky indexer must not block a payment she can fund
-    }
+    const balances = await balancesOf(wallet);
     const routes = await getSponsoredRoutes().catch(() => []);
     const funding = checkFunding(venue, balances, { gasSponsored: isGasSponsored(routes, venue.chain, venue.token) });
     if (!funding.ok) {
@@ -254,21 +303,44 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     }
     dispatch({ type: 'progress', swapStage: 'idle', order });
     try {
-      await sendSponsoredPaycrestDeposit(order, wallet, nativeBalanceFor(order.chain, balances));
+      await sendAndClaim(order, wallet, balances);
     } catch (e) {
-      // The order exists and Pay is gone: the way forward is the order screen.
-      dispatch({
-        type: 'fail',
-        error: errorMessage(e, 'Could not send the deposit. Open the payment order to finish it.'),
-        retryable: false,
-        order,
-      });
+      // The order exists, so Pay (a new one) is gone: the way forward is sending THIS order's deposit again.
+      dispatch({ type: 'deposit', order, error: errorMessage(e, SEND_FAILED) });
       return;
     }
-    // The deposit already left; a lost claim only degrades to the ordinary
-    // unmatched-deposit path, so it never fails the payment.
-    await claimPayment(order.id).catch((e) => console.warn('[pay] claimPayment failed', e));
     dispatch({ type: 'waiting', order });
+  };
+
+  /**
+   * Send a direct order's deposit again. The order is read first: one no longer
+   * waiting for a deposit, or whose deposit this app already reported sent, is
+   * only waited on — never paid twice. A sponsored relay is idempotent per order
+   * on the server as well.
+   */
+  const depositAgain = async (held: PaycrestOrder) => {
+    if (!address || isPaying()) return;
+    dispatch({ type: 'begin' });
+    if (!isPaying()) return;
+    let fresh: PaycrestOrder;
+    try {
+      fresh = await getOrder(held.id);
+    } catch (e) {
+      dispatch({ type: 'deposit', order: held, error: errorMessage(e, 'Could not check on your payment. Please try again.') });
+      return;
+    }
+    if (!awaitsHerDeposit(fresh)) {
+      dispatch({ type: 'waiting', order: fresh });
+      return;
+    }
+    dispatch({ type: 'progress', swapStage: 'sending', order: fresh });
+    try {
+      await sendAndClaim(fresh, address, await balancesOf(address));
+    } catch (e) {
+      dispatch({ type: 'deposit', order: fresh, error: errorMessage(e, SEND_FAILED) });
+      return;
+    }
+    dispatch({ type: 'waiting', order: fresh });
   };
 
   // Read fresh (not narrowed): the machine's answer to what was just dispatched.
@@ -334,6 +406,8 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       } else if (action.kind === 'wallet') {
         dispatch({ type: 'walletOffered' });
         void swapped.completeWithWallet(action.intent);
+      } else if (action.kind === 'deposit') {
+        void depositAgain(action.order);
       } else {
         void continueFresh();
       }
@@ -403,6 +477,10 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   const continuePayment = useCallback(() => {
     if (heldIntent) request({ kind: 'continue', intent: heldIntent });
   }, [heldIntent, request]);
+  const depositOrder = attempt.kind === 'deposit' ? attempt.order : undefined;
+  const sendDeposit = useCallback(() => {
+    if (depositOrder) request({ kind: 'deposit', order: depositOrder });
+  }, [depositOrder, request]);
 
   const reset = useCallback(() => {
     // The machine refuses while an attempt is in flight and for a payment the
@@ -425,6 +503,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
     estimate,
     completeWithWallet,
     continuePayment,
+    sendDeposit,
     resume: followOpen,
     reset,
   };

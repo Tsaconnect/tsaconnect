@@ -218,7 +218,8 @@ export default function PayScreen() {
                 </AccentCard>
               )}
 
-              {state.kind === 'waiting' && (
+              {/* Live payments: the panel says what their attempt is waiting on — or that it still needs her. */}
+              {state.kind === 'waiting' && state.checkout.mode === 'test' && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                   <Spinner inline />
                   <Text variant="bodySm" color="textSecondary">

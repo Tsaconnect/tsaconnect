@@ -48,6 +48,8 @@ export type PayHook = {
   estimate(token: LiFiToken, chainId: number): Promise<PayEstimate>;
   completeWithWallet?(): void;
   continuePayment?(): void;
+  /** With `deposit`: send the direct order's deposit again (asks for authorization first). */
+  sendDeposit?(): void;
   resume(): Promise<void>;
   /** Back to idle. A hook may refuse (an attempt in flight, or a swap that may have reached the merchant). */
   reset(): void | Promise<void>;
@@ -88,8 +90,8 @@ export function usePayLive({
 
   // The server let go of the payment. Two ways to see it, both on a REFETCH (a
   // new checkout object, never on mount): it was processing and is pending
-  // again (reaped), or the hook only waits while the checkout says pending
-  // (nothing of hers ever belonged to it). A hook that must not forget an
+  // again (reaped), or the hook only waits — or holds a deposit to send — while
+  // the checkout says pending (the order lapsed, or nothing of hers belonged to it). A hook that must not forget an
   // attempt (crypto, hash unreported) refuses the reset itself.
   const previous = useRef(checkout);
   useEffect(() => {
@@ -97,7 +99,7 @@ export function usePayLive({
     previous.current = checkout;
     if (was === checkout) return;
     const released = was.status === 'processing' && checkout.status === 'pending';
-    const stuck = stage === 'waiting' && checkout.status === 'pending';
+    const stuck = (stage === 'waiting' || stage === 'deposit') && checkout.status === 'pending';
     if (released || stuck) {
       followed.current = null;
       void reset();

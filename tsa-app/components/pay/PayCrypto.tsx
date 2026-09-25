@@ -46,12 +46,10 @@ export function PayCrypto({
 
   return (
     <>
-      {(showForm || pay.stage !== 'idle') && (
-        <PayLivePanel
-          checkout={checkout} pay={pay} showForm={showForm} allow={allow}
-          receives={receives} note={note}
-        />
-      )}
+      <PayLivePanel
+        checkout={checkout} pay={pay} showForm={showForm} allow={allow}
+        receives={receives} note={note}
+      />
       <AuthorizationModal {...pay.authorization} />
     </>
   );

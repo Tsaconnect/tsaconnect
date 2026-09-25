@@ -2,7 +2,7 @@ import {
   directPriceMovedCopy, BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, heldNotSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
-  shortfallCopy, unsupportedNetworkMessage,
+  shortfallCopy, unsupportedNetworkMessage, depositStillToSendCopy,
 } from '../payCheckout';
 import type { PayCheckout } from '@/services/payApi';
 
@@ -310,5 +310,31 @@ describe('directPriceMovedCopy — the order opened for more than she was shown'
   });
   it('is not the "check the new price and try again" text: trying again now would be refused', () => {
     expect(c).not.toMatch(/check the new price and try again/i);
+  });
+});
+
+describe('depositStillToSendCopy — a direct order still waiting for her deposit', () => {
+  const now = Date.parse('2026-09-25T10:00:00Z');
+  const order = { tokenAmount: '0.742116', token: 'USDC', chain: 'base', validUntil: '2026-09-25T10:42:30Z' };
+
+  it('names the exact amount, the token and the chain by its name', () => {
+    expect(depositStillToSendCopy(order, now).body).toBe('0.742116 USDC on Base still needs to leave your wallet to finish this payment.');
+  });
+
+  it('offers leaving it — the order lapses on its own and takes nothing — with the minutes left, rounded down', () => {
+    expect(depositStillToSendCopy(order, now).leave).toBe('Rather not? Leave it — the order closes by itself in about 42 minutes and nothing is taken.');
+    expect(depositStillToSendCopy({ ...order, validUntil: '2026-09-25T10:01:59Z' }, now).leave).toContain('in about 1 minute and');
+  });
+
+  it('promises no time it does not know, or that has run out', () => {
+    for (const validUntil of [undefined, '2026-09-25T10:00:30Z', '2026-09-25T09:00:00Z', 'garbage']) {
+      expect(depositStillToSendCopy({ ...order, validUntil }, now).leave)
+        .toBe('Rather not? Leave it — the order closes by itself and nothing is taken.');
+    }
+  });
+
+  it('falls back to the chain key and the bare token when it knows no better', () => {
+    expect(depositStillToSendCopy({ ...order, chain: 'somechain', tokenAmount: undefined }, now).body)
+      .toBe('USDC on somechain still needs to leave your wallet to finish this payment.');
   });
 });

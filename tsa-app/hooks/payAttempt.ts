@@ -6,9 +6,10 @@
 // canContinue / error out of nested ternaries; this is the single place those
 // are decided.
 //
-//   idle → paying → waiting | shortfall | failed
-//   idle | failed | waiting → begin → paying
+//   idle → paying → waiting | shortfall | failed | deposit
+//   idle | failed | waiting | deposit → begin → paying
 //   idle → continue (a payment of hers under way, needing her) → paying
+//   idle → deposit (a direct order waiting on a deposit that never left her wallet) → paying
 //
 // Pure (reducePayAttempt, payAttemptView, isUnresolved) so every transition and
 // every guard is a table test. `useAttempt` is the thin React shell: it keeps
@@ -20,7 +21,7 @@ import type { SellStage } from '@/hooks/useSwappedSell';
 import type { PaycrestOrder } from '@/services/paycrestApi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 
-export type PayLiveStage = 'idle' | 'paying' | 'continue' | 'shortfall' | 'waiting' | 'failed';
+export type PayLiveStage = 'idle' | 'paying' | 'continue' | 'deposit' | 'shortfall' | 'waiting' | 'failed';
 
 /** Detail every non-idle attempt may carry. */
 type Detail = {
@@ -33,6 +34,8 @@ export type PayAttempt =
   | { kind: 'idle' }
   | ({ kind: 'paying'; walletTried: boolean } & Detail)
   | ({ kind: 'continue'; intent: SellIntent } & Detail)
+  /** A direct order waits for her deposit, and none left her wallet: the same order is sent, never a new one. */
+  | { kind: 'deposit'; order: PaycrestOrder; error?: string }
   | ({ kind: 'shortfall'; intent?: SellIntent; missingUsdc?: string; walletTried: boolean } & Detail)
   | ({ kind: 'waiting' } & Detail)
   | ({
@@ -65,6 +68,8 @@ export type PayAttemptEvent =
   | { type: 'walletOffered' }
   /** A payment of hers is under way and needs her. */
   | { type: 'continue'; intent: SellIntent }
+  /** Her direct order still waits for its deposit — with the reason the last send failed, if one did. */
+  | { type: 'deposit'; order: PaycrestOrder; error?: string }
   /** A failure the hook itself detected. */
   | ({
       type: 'fail'; error: string; errorCode?: string; retryable: boolean; paused?: boolean; held?: boolean; noContinue?: boolean;
@@ -106,6 +111,8 @@ export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt 
       return { kind: 'paying', walletTried: true, swapStage: 'ordering' };
     case 'continue':
       return { kind: 'continue', intent: e.intent };
+    case 'deposit':
+      return { kind: 'deposit', order: e.order, error: e.error };
     case 'fail':
       return {
         kind: 'failed', error: e.error, code: e.errorCode, retryable: e.retryable, paused: !!e.paused, held: !!e.held,
@@ -138,6 +145,9 @@ export function payAttemptView(a: PayAttempt): PayAttemptView {
       return { stage: 'paying', ...base, swapStage: a.swapStage ?? 'idle', order: a.order };
     case 'continue':
       return { stage: 'continue', ...base, canContinue: true, swapStage: a.swapStage ?? 'idle', order: a.order };
+    case 'deposit':
+      // Not retryable: the order exists, so Pay (a new order) is never the way forward.
+      return { stage: 'deposit', ...base, retryable: false, error: a.error, order: a.order };
     case 'shortfall':
       return {
         stage: 'shortfall', ...base, missingUsdc: a.missingUsdc, walletShort: a.walletTried,
