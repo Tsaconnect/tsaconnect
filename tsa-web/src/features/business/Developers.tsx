@@ -62,7 +62,7 @@ function KeyRow({ merchant: m, mode, onRoll, locked }: { merchant: OwnMerchant; 
       <Badge tone={mode} className="w-12 justify-center">{mode === 'live' ? 'Live' : 'Test'}</Badge>
       <Box muted={!has}>{has ? `${prefix ?? ''}••••••••••••` : 'No key yet'}</Box>
       <Button size="sm" variant={mode === 'live' && has ? 'danger' : 'secondary'} onClick={onRoll} disabled={locked}>
-        {has ? 'Roll' : 'Create'} {modeName(mode)} key
+        {has ? 'Create new' : 'Create'} {modeName(mode)} key
       </Button>
     </Row>
   );
@@ -89,13 +89,13 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
     if (!action) return null;
     if (action.kind === 'key') {
       const has = action.mode === 'live' ? m.hasLiveKey : m.hasTestKey;
-      const verb = has ? 'Roll' : 'Create';
+      const name = modeName(action.mode);
       return {
-        title: `${verb} your ${modeName(action.mode)} API key`,
-        confirmLabel: `${verb} ${modeName(action.mode)} key`,
+        title: has ? `Create a new ${name} API key` : `Create your ${name} API key`,
+        confirmLabel: has ? `Create new ${name} key` : `Create ${name} key`,
         danger: action.mode === 'live' && has,
         warning: has
-          ? `Your current ${modeName(action.mode)} key stops working as soon as the new one is created. Update your server straight after.`
+          ? `Your current ${name} key stops working immediately when you confirm. Any server still using it will be refused until you update it with the new key.`
           : undefined,
         request: (password: string) => requestKeyRoll(action.mode, password),
       };
@@ -193,10 +193,10 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
       </section>
 
       {locked ? (
-        <SuspendedNote>roll a key, change your webhooks or see your signing secret</SuspendedNote>
+        <SuspendedNote>create a key, change your webhooks or see your signing secret</SuspendedNote>
       ) : (
         <Note tone="warning" icon={<Lock />}>
-          Rolling a key, changing webhooks or revealing the secret asks for your password and a code we email you — and we tell you by email every time.
+          Creating a new key, changing webhooks or revealing the secret asks for your password and a code we email you — and we tell you by email every time.
         </Note>
       )}
 

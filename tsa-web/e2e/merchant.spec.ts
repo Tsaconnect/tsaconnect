@@ -20,12 +20,12 @@ test('a merchant signs in on a new browser, rolls a test key and sets a webhook'
   await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'API keys & webhooks' }).click();
   await expect(page).toHaveURL(/\/business\/test\/developers$/);
 
-  await page.getByRole('button', { name: /roll test key/i }).click();
-  const roll = page.getByRole('dialog', { name: 'Roll your test API key' });
+  await page.getByRole('button', { name: /create new test key/i }).click();
+  const roll = page.getByRole('dialog', { name: 'Create a new test API key' });
   await roll.getByLabel('Password', { exact: true }).fill(PASSWORD);
   await roll.getByRole('button', { name: /send code/i }).click();
   await roll.getByLabel('Code from your email').fill(CODE);
-  await roll.getByRole('button', { name: /roll test key/i }).click();
+  await roll.getByRole('button', { name: /create new test key/i }).click();
   const shown = page.getByRole('dialog', { name: 'Your new test key' });
   // The mock mints the key when the confirm lands; read it only once it exists.
   await expect.poll(() => api.lastKey).toBeTruthy();

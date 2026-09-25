@@ -31,13 +31,15 @@ describe('API keys & webhooks', () => {
       '/api/pay/merchant/actions/a1/confirm': ok({ mode: 'live', key: 'tsapk_live_NEWKEY' }),
     });
     mountAt('/business/live/developers');
-    await userEvent.click(await screen.findByRole('button', { name: /roll live key/i }));
-    expect(screen.getByText(/stops working as soon as the new one is created/i)).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /create new live key/i }));
+    expect(screen.getByText(/stops working immediately when you confirm/i)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     expect(await screen.findByText(/a\*\*\*@skyair\.ng/)).toBeInTheDocument();
+    // The confirm step is the click that kills the old key, so it says so again.
+    expect(screen.getByText(/stops working immediately when you confirm/i)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('Code from your email'), '482913');
-    await userEvent.click(screen.getByRole('button', { name: /roll live key/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create new live key/i }));
     expect(await screen.findByText('tsapk_live_NEWKEY')).toBeInTheDocument();
     expect(screen.getByText(/only time you'll see this key/i)).toBeInTheDocument();
     expect(f.mock.calls.filter(([u]) => u === '/api/pay/merchant/actions/a1/confirm')).toHaveLength(1);
@@ -82,7 +84,7 @@ describe('API keys & webhooks', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     // The confirm has no merchant in it, so the merchant is read again for the new prefix.
     expect(await screen.findByText('tsapk_test_N3w0••••••••••••')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Roll test key' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create new test key' })).toBeInTheDocument();
   });
 
   // Review Focus 1.
@@ -94,11 +96,11 @@ describe('API keys & webhooks', () => {
       '/api/pay/merchant/actions/a1/confirm': () => new Promise<Response>((r) => { resolve = r; }),
     });
     mountAt('/business/live/developers');
-    await userEvent.click(await screen.findByRole('button', { name: /roll test key/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create new test key/i }));
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     await userEvent.type(await screen.findByLabelText('Code from your email'), '482913');
-    const confirm = screen.getByRole('button', { name: /roll test key/i });
+    const confirm = screen.getByRole('button', { name: /create new test key/i });
     await userEvent.click(confirm);
     await userEvent.click(confirm);
     resolve(ok({ mode: 'test', key: 'tsapk_test_X' }));
@@ -116,7 +118,7 @@ describe('API keys & webhooks', () => {
       '/api/pay/merchant/actions/a1/confirm': () => new Promise<Response>((r) => { resolve = r; }),
     });
     mountAt('/business/live/developers');
-    await passwordThenCode(/roll test key/i);
+    await passwordThenCode(/create new test key/i);
     const form = screen.getByLabelText('Code from your email').closest('form')!;
     act(() => {
       form.requestSubmit();
@@ -130,7 +132,7 @@ describe('API keys & webhooks', () => {
   it('a wrong password is said plainly and asks again', async () => {
     stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/keys': fail(401, 'Incorrect password', 'password_incorrect') });
     mountAt('/business/live/developers');
-    await userEvent.click(await screen.findByRole('button', { name: /roll test key/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create new test key/i }));
     await userEvent.type(screen.getByLabelText('Password'), 'nope');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent("That password isn't right.");
@@ -145,14 +147,14 @@ describe('API keys & webhooks', () => {
       '/api/pay/merchant/actions/a1/confirm': () => answer,
     });
     mountAt('/business/live/developers');
-    await passwordThenCode(/roll test key/i, '111111');
-    await userEvent.click(screen.getByRole('button', { name: /roll test key/i }));
+    await passwordThenCode(/create new test key/i, '111111');
+    await userEvent.click(screen.getByRole('button', { name: /create new test key/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent("That code isn't right.");
     expect(screen.getByLabelText('Code from your email')).toHaveValue('');
 
     answer = fail(410, 'This change has expired or had too many wrong codes — start again', 'no_pending_change');
     await userEvent.type(screen.getByLabelText('Code from your email'), '222222');
-    await userEvent.click(screen.getByRole('button', { name: /roll test key/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create new test key/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This change expired or had too many wrong codes. Start again.');
     expect(screen.getByLabelText('Password')).toBeInTheDocument();
     expect(screen.queryByLabelText('Code from your email')).not.toBeInTheDocument();
@@ -266,8 +268,8 @@ describe('API keys & webhooks', () => {
   it('a suspended merchant sees every change locked, and why', async () => {
     stubFetch({ '/api/pay/merchant': ok({ ...merchant, status: 'suspended' }) });
     mountAt('/business/live/developers');
-    expect(await screen.findByText(/suspended — contact support to roll a key, change your webhooks or see your signing secret/i)).toBeInTheDocument();
-    for (const name of ['Roll live key', 'Roll test key', 'Edit webhooks', 'Edit return domains', 'Reveal', 'Roll secret']) {
+    expect(await screen.findByText(/suspended — contact support to create a key, change your webhooks or see your signing secret/i)).toBeInTheDocument();
+    for (const name of ['Create new live key', 'Create new test key', 'Edit webhooks', 'Edit return domains', 'Reveal', 'Roll secret']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
   });
@@ -312,7 +314,7 @@ describe('API keys & webhooks', () => {
     let answer = fail(401, 'Incorrect password', 'password_incorrect');
     stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/keys': () => answer });
     mountAt('/business/live/developers');
-    await userEvent.click(await screen.findByRole('button', { name: /roll test key/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create new test key/i }));
     await userEvent.type(screen.getByLabelText('Password'), 'nope');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     await screen.findByRole('alert');

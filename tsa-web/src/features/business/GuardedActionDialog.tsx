@@ -145,6 +145,8 @@ function Flow({ onOpenChange, title, warning, confirmLabel, danger, request, onD
         </form>
       ) : (
         <form id={formId} onSubmit={confirm} noValidate className="grid gap-4">
+          {/* Repeated here: this is the click that makes the change. */}
+          {warning && <Note tone="warning" icon={<TriangleAlert />}>{warning}</Note>}
           {problem && <FormError>{problem.message}</FormError>}
           <Note id={noteId} tone="gold" icon={<MailCheck />}>
             We sent a 6-digit code to <b className="font-semibold">{pending!.sentTo}</b>. It expires in 15 minutes.
