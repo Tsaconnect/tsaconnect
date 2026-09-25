@@ -51,6 +51,30 @@ export function stableRowActions(input: {
 }
 
 /**
+ * "Any other token" — the any-token ramp (buy or sell whatever LiFi can
+ * swap). Delivery on a buy lands in her wallet the same way MCGP/stablecoin
+ * buys do, so the wallet check comes first, as it does for those. The ramp
+ * itself is NGN-only. Unlike the other two rows, sell can drop on its own
+ * (`RAMP_CONVERSION_SELL` off server-side) while buy stays live — there is no
+ * equivalent buy-side flag yet, so buy is never gated on it.
+ */
+export function anyTokenRowActions(input: {
+  currency: string;
+  hasWallet: boolean;
+  swappedSellEnabled: boolean;
+}): RampRowActions {
+  const { currency, hasWallet, swappedSellEnabled } = input;
+
+  if (!hasWallet) return { buy: false, sell: false, unavailable: CONNECT_WALLET };
+
+  if (currency !== 'NGN') {
+    return { buy: false, sell: false, unavailable: `Not available in ${currency}` };
+  }
+
+  return { buy: true, sell: swappedSellEnabled };
+}
+
+/**
  * MCGP has no provider or legs — it trades at the admin rate. The backend
  * refuses MCGP buy and sell for an account with no registered wallet, and the
  * hub asks for a wallet this device can sign for, as the stablecoin rows do.

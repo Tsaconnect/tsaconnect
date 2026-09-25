@@ -16,7 +16,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 jest.mock('expo-router', () => ({
   __esModule: true,
   router: { replace: jest.fn(), back: jest.fn() },
-  useLocalSearchParams: () => ({}),
+  useLocalSearchParams: jest.fn(() => ({})),
 }));
 
 jest.mock('react-native-safe-area-context', () => {
@@ -160,6 +160,7 @@ jest.mock('@/services/chains/suiWallet', () => ({ __esModule: true, getSuiAddres
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { Alert } from 'react-native';
+import { useLocalSearchParams } from 'expo-router';
 import SellScreen from '../sell';
 import * as SellSwap from '@/services/paycrestSellSwap';
 import * as Swapped from '@/hooks/useSwappedSell';
@@ -170,6 +171,7 @@ import { PaycrestError } from '@/services/paycrestApi';
 import { SOLANA_LIFI_CHAIN_ID } from '@/services/lifi';
 
 const sellSwap = jest.mocked(SellSwap);
+const localSearchParams = jest.mocked(useLocalSearchParams);
 const swappedState = (Swapped as unknown as { __state: { value: any } }).__state;
 const holdingsState = (Holdings as unknown as { __state: { value: { holdings: any[]; loading: boolean } } }).__state;
 
@@ -313,6 +315,15 @@ it('shows a payment still going through, with no Finish or Cancel', async () => 
   expect(text(tree)).toContain('A payment of yours is still going through');
   expect(text(tree)).not.toContain('Finish your sale');
   expect(text(tree)).not.toContain('Cancel this sale');
+});
+
+// The IT hub's "Any other token" row arrives here with nothing pre-selected,
+// so the picker must be open on arrival — not require a tap on a row she has
+// no reason to know about yet.
+it('opens the picker immediately when the hub sends her here to search', async () => {
+  localSearchParams.mockReturnValueOnce({ openPicker: '1' });
+  const tree = await mount();
+  expect(() => byLabel(tree, 'picker:Choose what to sell:holdings:from')).not.toThrow();
 });
 
 // ─── Whole-branch fixes ────────────────────────────────────────────────────
