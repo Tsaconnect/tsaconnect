@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,5 +134,33 @@ func TestPaycrestSponsorship_DomainMismatchIs503(t *testing.T) {
 	w, _ := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// The 503 shares one generic message across five causes, and an RPC failure
+// during simulation logs nothing on its own — so the handler must log the cause,
+// without echoing a keyed provider URL.
+func TestPaycrestSponsorship_ServerSideRefusalLogsRedactedCause(t *testing.T) {
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	cause := fmt.Errorf("%w: authorizationState: Post \"https://base-mainnet.g.alchemy.com/v2/SeCrEtKeY123\": dial tcp: i/o timeout",
+		services.ErrSimulationUnavailable)
+	h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: cause})
+	body := `{"validAfter":0,"validBefore":1790000000,"nonce":"0x` + strings.Repeat("ab", 32) +
+		`","signature":"0x` + strings.Repeat("11", 65) + `"}`
+	w, _ := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "relay-authorization -> 503") || !strings.Contains(got, "authorizationState") {
+		t.Fatalf("log does not name the route and cause: %q", got)
+	}
+	if strings.Contains(got, "SeCrEtKeY123") {
+		t.Fatalf("log leaked the provider key: %q", got)
 	}
 }

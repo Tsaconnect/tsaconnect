@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -170,10 +171,21 @@ func sponsorshipError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrTopUpTooExpensive), errors.Is(err, services.ErrDailyCapExceeded),
 		errors.Is(err, services.ErrRelayerUnderfunded), errors.Is(err, services.ErrSimulationUnavailable),
 		errors.Is(err, services.ErrSponsorDomainMismatch):
+		logSponsorshipFailure(c, http.StatusServiceUnavailable, err)
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Covering the network fee is temporarily unavailable. Please try again shortly.")
 	case errors.Is(err, services.ErrTopUpFailed):
+		logSponsorshipFailure(c, http.StatusBadGateway, err)
 		utils.ErrorResponse(c, http.StatusBadGateway, "Sending gas failed. Please try again.")
 	default:
+		logSponsorshipFailure(c, http.StatusInternalServerError, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not cover the network fee right now. Please try again.")
 	}
+}
+
+// logSponsorshipFailure records why the server, not the payer, refused: these
+// responses share one generic message, and several causes (an RPC error during
+// simulation among them) log nothing on their own. Redacted because RPC errors
+// can echo a keyed provider URL.
+func logSponsorshipFailure(c *gin.Context, status int, err error) {
+	log.Printf("[ramp-sponsor] %s %s -> %d: %s", c.Request.Method, c.FullPath(), status, services.RedactAlertText(err.Error()))
 }
