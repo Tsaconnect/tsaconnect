@@ -1,0 +1,8 @@
+# Netlify site for app.tsaconnectworld.com. Set the site's base directory to
+# tsa-web; the proxy and headers live in public/_redirects and public/_headers.
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"

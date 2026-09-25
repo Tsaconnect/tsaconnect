@@ -73,6 +73,28 @@ npm run build        # tsc -b && vite build → dist/
 
 ## Deploy (app.tsaconnectworld.com)
 
+The API must be deployed and migrated first (step 2 below), whichever host serves the app.
+
+### Netlify (recommended — admin and landing are already there)
+
+1. **API:** step 2 below.
+2. **Netlify site:** new site from the `tsa-dev` repo, **base directory `tsa-web`**; the
+   build command and publish directory come from `netlify.toml`. `public/_redirects` proxies
+   `/api/*` to `https://tsa.mcgpchain.com/api/*`, so the browser sees one origin — the
+   SameSite=Strict session cookies and the API's Origin check both depend on that. Never
+   point the app at the API's own domain instead. `public/_headers` sets the same security
+   headers as the nginx example.
+3. **Domain:** add `app.tsaconnectworld.com` to the site and create the DNS record in
+   Cloudflare the same way `admin` is set up.
+4. **Check:** `curl -s -X POST https://app.tsaconnectworld.com/api/auth/web/login -H 'X-TSA-Web: 1'
+   -H 'Origin: https://app.tsaconnectworld.com'` answers `400` (the proxy reaches the API and the
+   origin is accepted); a `403` with `"code":"origin"` means `WEB_APP_ORIGIN` does not match.
+
+Behind the proxy the API sees Netlify's addresses, not each visitor's; the web sign-in
+limits are keyed per account, sign-in and session for that reason (`routes.go`).
+
+### nginx on the API server
+
 Order matters: the API first, then the files, then nginx.
 
 1. **DNS and TLS first:** an A record for `app.tsaconnectworld.com` → the API server, then

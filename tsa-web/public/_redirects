@@ -1,0 +1,7 @@
+# Netlify. /api is proxied to the Go API so the browser sees ONE origin
+# (app.tsaconnectworld.com): the session cookies are SameSite=Strict and the API
+# only accepts cookie requests whose Origin is WEB_APP_ORIGIN. Must come first.
+/api/*  https://tsa.mcgpchain.com/api/:splat  200
+
+# Client-side routes: every other path is the app.
+/*      /index.html                            200

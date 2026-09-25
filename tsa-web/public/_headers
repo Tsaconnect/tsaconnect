@@ -1,0 +1,12 @@
+# Netlify. Same headers as deploy/nginx.conf.example.
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+
+# Hashed build output never changes under the same name. (Cache-Control is set
+# only here: Netlify joins the values of every rule that matches a path.)
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
