@@ -211,7 +211,13 @@ type Config struct {
 	// https://app.tsaconnectworld.com). Unset = the web sign-in routes are not
 	// registered.
 	WebAppOrigin string
-	Port         string
+	// NetlifyProxySecret is the secret the web app's Netlify site signs its
+	// /api proxy requests with (x-nf-sign). Set = a request whose signature
+	// verifies is attributed to the visitor Netlify names, not to Netlify.
+	// Unset = Netlify's own address is the client, and every web visitor
+	// shares it for per-IP limits.
+	NetlifyProxySecret string
+	Port               string
 	// Env is normalised at Load() time (trim, lower-case, "prod" -> "production")
 	// so a stray space or differing case can never desync the checks below —
 	// call IsProduction() rather than comparing this field directly.
@@ -717,6 +723,7 @@ func Load() *Config {
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
 		WebAppOrigin:        normalizeOrigin(getEnv("WEB_APP_ORIGIN", "")),
+		NetlifyProxySecret:  getEnv("NETLIFY_PROXY_SECRET", ""),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 normalizeEnv(getEnv("ENV", "development")),
 		AllowRawSignerKeys:  getEnvBool("ALLOW_RAW_SIGNER_KEYS", false),

@@ -9,34 +9,12 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
-// Rate-limit keys for the web app. The web app reaches the API through a proxy
-// (Netlify, then Cloudflare), so the API sees a handful of proxy addresses, not
-// each visitor's. A limit keyed on the client IP alone would make every web user
-// share one budget. These keys count per user, account or session instead; each
-// returns "" when it has nothing to go on, and RateLimiterBy then falls back to
-// the client IP, so a missing or forged value never escapes the limit.
-
-// WebSessionRateKey keys the API-wide limit: a request carrying a valid web
-// access cookie counts against its user. A forged or expired cookie keys by IP.
-func WebSessionRateKey(cfg *config.Config) func(*gin.Context) string {
-	return func(c *gin.Context) string {
-		if !cfg.WebAuthEnabled() {
-			return ""
-		}
-		raw, ok := SingleWebCookie(c, WebAccessCookie)
-		if !ok {
-			return ""
-		}
-		claims, userID, ok := parseAccessToken(cfg.JWTSecret, raw)
-		if !ok || !isWebToken(claims) {
-			return ""
-		}
-		return "web-user:" + userID.String()
-	}
-}
+// Rate-limit keys for the web app's sign-in routes: per account, pending sign-in
+// or session, used under a per-address ceiling. Each returns "" when it has
+// nothing to go on, and RateLimiterBy then falls back to the client IP, so a
+// missing value never escapes the limit.
 
 // webLoginBodyLimit bounds how much of a sign-in body is read to find the email.
 const webLoginBodyLimit = 4 << 10

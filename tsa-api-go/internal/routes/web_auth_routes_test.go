@@ -1,12 +1,15 @@
 package routes
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
@@ -96,5 +99,40 @@ func TestWebAuthRoutes_SignInLimitsArePerAccountAndPerChallenge(t *testing.T) {
 	}
 	if code := post("/api/auth/web/verify", `{"code":""}`, challenge); code != http.StatusTooManyRequests {
 		t.Fatalf("verify 21 on one sign-in: %d", code)
+	}
+}
+
+// Behind the web app's signed Netlify proxy the per-address ceiling counts each
+// visitor, not Netlify: one visitor spending it (with any number of emails)
+// leaves another visitor through the same proxy untouched. This is the ceiling
+// that stops one person spraying many accounts.
+func TestWebAuthRoutes_LoginCeilingIsPerNetlifyVisitor(t *testing.T) {
+	const secret = "netlify-proxy-secret"
+	r := webAuthRouter(&config.Config{JWTSecret: "s", WebAppOrigin: "https://app.test", NetlifyProxySecret: secret})
+	sign, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"iss": "netlify", "exp": time.Now().Add(time.Minute).Unix()}).SignedString([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func(visitor string, n int) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/web/login", strings.NewReader(fmt.Sprintf(`{"email":"user%d@skyair.ng"}`, n)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-TSA-Web", "1")
+		req.Header.Set(middleware.NetlifySignHeader, sign)
+		req.Header.Set(middleware.NetlifyClientIPHeader, visitor)
+		req.RemoteAddr = "104.23.1.9:443" // Netlify's egress, the same for everyone
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	for i := 1; i <= 300; i++ {
+		if code := login("41.58.3.7", i); code == http.StatusTooManyRequests {
+			t.Fatalf("visitor A's sign-in %d limited", i)
+		}
+	}
+	if code := login("41.58.3.7", 301); code != http.StatusTooManyRequests {
+		t.Fatalf("visitor A past the ceiling: %d", code)
+	}
+	if code := login("102.89.40.2", 1); code == http.StatusTooManyRequests {
+		t.Fatal("visitor B was blocked by visitor A through the same Netlify address")
 	}
 }

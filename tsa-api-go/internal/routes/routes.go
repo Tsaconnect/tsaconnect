@@ -30,6 +30,10 @@ var wsUpgrader = websocket.Upgrader{
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
 func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler, payh *handlers.PayHandler) {
+	// First, before any rate limit: a request through the web app's signed
+	// Netlify proxy counts as coming from its visitor, not from Netlify.
+	router.Use(middleware.NetlifyClientIP(cfg.NetlifyProxySecret))
+
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -41,9 +45,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 
 	// API group with rate limiter
 	api := router.Group("/api")
-	// Per IP, except that a signed-in web session counts against its user: the
-	// web app arrives through a proxy, so its visitors share a few addresses.
-	api.Use(middleware.RateLimiterBy(500, 15*time.Minute, middleware.WebSessionRateKey(cfg)))
+	api.Use(middleware.RateLimiter(500, 15*time.Minute))
 
 	auth := middleware.Auth(cfg)
 	adminAuth := middleware.AdminAuth(cfg)
@@ -67,19 +69,27 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// is set. Every route needs the CSRF header and the app's own origin.
 	if cfg.WebAuthEnabled() {
 		web := api.Group("/auth/web", middleware.WebAuthGuard(cfg))
-		// The web app arrives through a proxy (Netlify), so its visitors share a
-		// few addresses: limits are per account or session, with a loose per-IP
-		// ceiling against spraying many accounts. The per-account lockout is
-		// what protects each account's password.
+		// Per visitor address (NetlifyClientIP above makes that the real one),
+		// loose because an office signs in from one address; and per address
+		// and account, so one person's failures don't block a colleague. The
+		// per-account lockout is what protects each password.
 		web.POST("/login",
 			middleware.RateLimiter(300, 15*time.Minute),
 			middleware.RateLimiterBy(10, 15*time.Minute, middleware.WebLoginRateKey),
 			h.WebLogin)
-		// Per pending sign-in; guessing is bounded per challenge anyway
-		// (services.EmailCodeAttempts).
-		web.POST("/verify", middleware.RateLimiterBy(20, 15*time.Minute, middleware.WebChallengeRateKey), h.WebVerify)
-		// Per session: every tab refreshes on its own.
-		web.POST("/refresh", middleware.RateLimiterBy(60, 15*time.Minute, middleware.WebRefreshRateKey), h.WebRefresh)
+		// Per pending sign-in, under a per-address ceiling (a made-up challenge
+		// cookie gets its own bucket, so the ceiling is what bounds those).
+		// Guessing is bounded per challenge anyway (services.EmailCodeAttempts).
+		web.POST("/verify",
+			middleware.RateLimiter(60, 15*time.Minute),
+			middleware.RateLimiterBy(20, 15*time.Minute, middleware.WebChallengeRateKey),
+			h.WebVerify)
+		// Per session (every tab refreshes on its own), under a per-address
+		// ceiling for the same reason.
+		web.POST("/refresh",
+			middleware.RateLimiter(300, 15*time.Minute),
+			middleware.RateLimiterBy(60, 15*time.Minute, middleware.WebRefreshRateKey),
+			h.WebRefresh)
 		web.POST("/logout", h.WebLogout)
 		web.GET("/me", auth, h.WebMe)
 	}
