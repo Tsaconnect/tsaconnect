@@ -84,7 +84,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	}
 	// The columns the owner routes read and the lockout writes.
 	if err := db.Exec(`CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT, email TEXT, verification_status TEXT,
-		verified_legal_name TEXT, login_attempts INTEGER DEFAULT 0, lock_until DATETIME, updated_at DATETIME)`).Error; err != nil {
+		verified_legal_name TEXT, account_status TEXT DEFAULT 'active', login_attempts INTEGER DEFAULT 0, lock_until DATETIME, updated_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
 	prev := config.DB
@@ -578,8 +578,8 @@ func TestPayOwner_ABusyActionIsAConflictToRetry(t *testing.T) {
 	}
 }
 
-// The detail tells the merchant which TSA Connect account paid: a name, and
-// whether it is the name on a verified ID — never the payer's email.
+// The detail tells the merchant which TSA Connect account paid — a name only,
+// never the payer's email or account id, and nothing once the account is deleted.
 func TestPayOwner_PaymentDetailNamesThePayerButNotTheirContact(t *testing.T) {
 	o := newOwnerRig(t)
 	ctx := context.Background()
@@ -587,6 +587,12 @@ func TestPayOwner_PaymentDetailNamesThePayerButNotTheirContact(t *testing.T) {
 	p, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
 	if err != nil {
 		t.Fatal(err)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := o.db.Exec(q, args...).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	detail := func() string {
 		t.Helper()
@@ -601,18 +607,26 @@ func TestPayOwner_PaymentDetailNamesThePayerButNotTheirContact(t *testing.T) {
 	}
 
 	payer := uuid.New()
-	o.db.Exec(`INSERT INTO users (id, name, email, verification_status) VALUES (?, 'Tolu', 'tolu.private@gmail.com', 'pending')`, payer)
-	o.db.Exec(`UPDATE pay_payments SET payer_user_id = ?, status = ? WHERE id = ?`, payer, models.PayStatusProcessing, p.ID)
+	exec(`INSERT INTO users (id, name, email, verification_status, account_status) VALUES (?, 'Tolu', 'tolu.private@gmail.com', 'pending', 'active')`, payer)
+	exec(`UPDATE pay_payments SET payer_user_id = ?, status = ? WHERE id = ?`, payer, models.PayStatusProcessing, p.ID)
 	raw := detail()
-	if !strings.Contains(raw, `"payer":{"name":"Tolu","verified":false}`) {
+	if !strings.Contains(raw, `"payer":{"name":"Tolu"}`) {
 		t.Fatalf("unverified payer: %s", raw)
 	}
 	if strings.Contains(raw, "tolu.private") || strings.Contains(raw, payer.String()) {
 		t.Fatalf("the payer's email or account id leaked: %s", raw)
 	}
 
-	o.db.Exec(`UPDATE users SET verification_status = 'verified', verified_legal_name = 'TOLUWANI ADEYEMI' WHERE id = ?`, payer)
-	if raw := detail(); !strings.Contains(raw, `"payer":{"name":"TOLUWANI ADEYEMI","verified":true}`) {
+	exec(`UPDATE users SET verification_status = 'verified', verified_legal_name = 'TOLUWANI ADEYEMI' WHERE id = ?`, payer)
+	if raw := detail(); !strings.Contains(raw, `"payer":{"name":"TOLUWANI ADEYEMI"}`) {
 		t.Fatalf("a verified payer shows the name on their ID: %s", raw)
+	}
+
+	// Deletion (as the handler does it): status deleted, profile anonymised —
+	// the legal name stays in the row for KYC but must never be served.
+	exec(`UPDATE users SET account_status = 'deleted', name = 'Deleted User', email = 'deleted@x' WHERE id = ?`, payer)
+	raw = detail()
+	if !strings.Contains(raw, `"payer":{"name":"Deleted account"}`) || strings.Contains(raw, "TOLUWANI") {
+		t.Fatalf("a deleted payer's ID name reached the merchant: %s", raw)
 	}
 }
