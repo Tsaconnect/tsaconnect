@@ -25,6 +25,16 @@ describe('isTranslucentColor', () => {
     expect(isTranslucentColor('rgba(239, 68, 68, 0.12)')).toBe(true);
     expect(isTranslucentColor('hsla(0, 84%, 60%, 50%)')).toBe(true);
     expect(isTranslucentColor('transparent')).toBe(true);
+    expect(isTranslucentColor('rgb(0 0 0 / 50%)')).toBe(true);
+    expect(isTranslucentColor('rgb(239 68 68 / 0.12)')).toBe(true);
+    expect(isTranslucentColor('hsl(0 84% 60% / .5)')).toBe(true);
+  });
+
+  it('never mistakes a three-part colour for one with an alpha', () => {
+    expect(isTranslucentColor('rgb(255, 0, 0)')).toBe(false);
+    expect(isTranslucentColor('rgb(0 0 0)')).toBe(false);
+    expect(isTranslucentColor('rgb(0 0 0 / 1)')).toBe(false);
+    expect(isTranslucentColor('hsla(0, 84%, 60%, 100%)')).toBe(false);
   });
 
   it('treats opaque and unknown values as opaque', () => {

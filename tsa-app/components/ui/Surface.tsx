@@ -28,16 +28,25 @@ export function useElevationStyle(elevation: Elevation): ViewStyle {
   return map[elevation];
 }
 
-/** True for a colour with alpha below 1: #RGBA, #RRGGBBAA, rgba()/hsla(), or 'transparent'. */
+/**
+ * True for a colour with alpha below 1: #RGBA, #RRGGBBAA, rgb()/rgba()/hsl()/hsla()
+ * with a fourth comma-separated or slash-separated alpha, or 'transparent'.
+ * Anything else (named colours, PlatformColor objects) reads as opaque.
+ */
 export function isTranslucentColor(color: unknown): boolean {
   if (typeof color !== 'string') return false;
   const c = color.trim().toLowerCase();
   if (c === 'transparent') return true;
   const hex = /^#([0-9a-f]{4}|[0-9a-f]{8})$/.exec(c);
   if (hex) return !hex[1].endsWith(hex[1].length === 4 ? 'f' : 'ff');
-  const fn = /^(?:rgba|hsla)\(.*,\s*([\d.]+%?)\s*\)$/.exec(c);
-  if (fn) return fn[1].endsWith('%') ? parseFloat(fn[1]) < 100 : parseFloat(fn[1]) < 1;
-  return false;
+  const fn = /^(?:rgba?|hsla?)\((.*)\)$/.exec(c);
+  if (!fn) return false;
+  const slash = fn[1].split('/');
+  const commas = fn[1].split(',');
+  const alpha = slash.length === 2 ? slash[1] : commas.length === 4 ? commas[3] : undefined;
+  if (alpha === undefined) return false;
+  const a = alpha.trim();
+  return a.endsWith('%') ? parseFloat(a) < 100 : parseFloat(a) < 1;
 }
 
 export const Surface: React.FC<SurfaceProps> = ({
