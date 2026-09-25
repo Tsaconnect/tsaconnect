@@ -8,17 +8,18 @@
 // rendering, and send/receive navigation (including the discovered-ERC-20 param
 // passthrough) is preserved verbatim — this is a visual/structural restyle only.
 // The legacy ChainSelector + ActivityFeed wallet components are reused unchanged,
-// and the custom View-based MiniChart keeps its rendering logic (theme-tinted only).
+// The price chart lives in components/wallet/PriceChart (line/candles, scrubbing).
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import ActivityFeed from '@/components/activity/ActivityFeed';
-import { View, ScrollView, Dimensions } from 'react-native';
+import { View, ScrollView } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CHAINS, getChainDisplay, isNonEVMChain, type ChainKey, type AnyChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import TokenAvatar from '../../components/wallet/TokenAvatar';
-import { getWalletBalances, normalizeWalletBalances, getTokenPriceHistory } from '../../services/walletApi';
+import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
+import PriceChart from '../../components/wallet/PriceChart';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
 import { getSolanaAddress, getSolanaBalances } from '../../services/chains/solanaWallet';
@@ -27,131 +28,13 @@ import {
   AmountText,
   Button,
   Card,
-  Chip,
-  Icon,
   Spinner,
   Text,
 } from '@/components/ui';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const CHART_WIDTH = SCREEN_WIDTH - 64;
-const CHART_HEIGHT = 150;
-// Empty/loading states don't need the full chart height — a tall blank box
-// dominates the viewport and reads as "broken". Keep the placeholder compact.
-const CHART_PLACEHOLDER_HEIGHT = 96;
-
-// ── Time range options ──
-const TIME_RANGES = [
-  { label: '24H', days: 1 },
-  { label: '7D', days: 7 },
-  { label: '1M', days: 30 },
-  { label: '3M', days: 90 },
-  { label: '1Y', days: 365 },
-] as const;
-
-// ── Simple SVG-like line chart using Views ──
-const MiniChart: React.FC<{
-  data: number[];
-  width: number;
-  height: number;
-  color: string;
-  loading: boolean;
-}> = ({ data, width, height, color, loading }) => {
-  const { colors, radius } = useTheme();
-
-  if (loading) {
-    return (
-      <View
-        style={{
-          width,
-          height: CHART_PLACEHOLDER_HEIGHT,
-          justifyContent: 'center',
-          alignItems: 'center',
-          backgroundColor: colors.surfaceAlt,
-          borderRadius: radius.sm,
-        }}
-      >
-        <Spinner color={color} />
-      </View>
-    );
-  }
-
-  if (data.length < 2) {
-    return (
-      <View
-        style={{
-          width,
-          height: CHART_PLACEHOLDER_HEIGHT,
-          justifyContent: 'center',
-          alignItems: 'center',
-          gap: 6,
-          backgroundColor: colors.surfaceAlt,
-          borderRadius: radius.sm,
-        }}
-      >
-        <Icon name="trendingUp" size={20} color={colors.textMuted} />
-        <Text variant="bodySm" color="textMuted">
-          No price data yet
-        </Text>
-      </View>
-    );
-  }
-
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const range = max - min || 1;
-
-  // Render as a series of positioned dots connected visually
-  const barWidth = width / data.length;
-
-  return (
-    <View style={{ width, height, position: 'relative', overflow: 'hidden' }}>
-      {data.map((val, i) => {
-        const normalised = (val - min) / range;
-        const barHeight = Math.max(2, normalised * (height - 8));
-        return (
-          <View
-            key={i}
-            style={{
-              position: 'absolute',
-              left: i * barWidth,
-              bottom: 0,
-              width: Math.max(1, barWidth - 1),
-              height: barHeight,
-              backgroundColor: color + '40',
-              borderTopLeftRadius: 1,
-              borderTopRightRadius: 1,
-            }}
-          />
-        );
-      })}
-      {/* Overlay line */}
-      {data.map((val, i) => {
-        if (i === 0) return null;
-        const normalised = (val - min) / range;
-        const y = height - 8 - normalised * (height - 8);
-        return (
-          <View
-            key={`dot-${i}`}
-            style={{
-              position: 'absolute',
-              left: i * barWidth + barWidth / 2 - 2,
-              top: y,
-              width: 4,
-              height: 4,
-              borderRadius: 2,
-              backgroundColor: color,
-            }}
-          />
-        );
-      })}
-    </View>
-  );
-};
-
 // ── Main Screen ──
 const TokenDetailScreen: React.FC = () => {
-  const { colors, spacing, radius } = useTheme();
+  const { colors, spacing } = useTheme();
   const insets = useSafeAreaInsets();
 
   const params = useLocalSearchParams<{
@@ -179,6 +62,9 @@ const TokenDetailScreen: React.FC = () => {
     decimals: discoveredDecimalsParam,
   } = params;
   const isDiscovered = discovered === '1';
+  // Discovered/imported contracts can reuse a real token's symbol (airdrop spoofs),
+  // so only registry tokens carry their identity onto the Receive screen.
+  const isCurated = !isDiscovered && type !== 'Imported';
   const discoveredDecimals = discoveredDecimalsParam ? parseInt(discoveredDecimalsParam, 10) : undefined;
 
   const { tokens: allTokens } = useTokens();
@@ -194,11 +80,7 @@ const TokenDetailScreen: React.FC = () => {
   const [balance, setBalance] = useState(0);
   const [usdPrice, setUsdPrice] = useState(0);
   const [usdValue, setUsdValue] = useState(0);
-  const [priceHistory, setPriceHistory] = useState<number[]>([]);
-  const [selectedRange, setSelectedRange] = useState(1);
   const [loadingBalance, setLoadingBalance] = useState(true);
-  const [loadingChart, setLoadingChart] = useState(true);
-  const [priceChange, setPriceChange] = useState(0);
 
   const fetchBalance = useCallback(async () => {
     setLoadingBalance(true);
@@ -257,38 +139,9 @@ const TokenDetailScreen: React.FC = () => {
     }
   }, [activeChainKey, symbol, isDiscovered, discoveredBalanceParam, discoveredUsdValueParam]);
 
-  const fetchPriceHistory = useCallback(async (days: number) => {
-    setLoadingChart(true);
-    try {
-      const result = await getTokenPriceHistory(symbol, days);
-      if (result.success && Array.isArray(result.data) && result.data.length > 0) {
-        const prices = result.data.map((p: any) => p.price);
-        setPriceHistory(prices);
-        // Calculate price change %
-        if (prices.length >= 2) {
-          const first = prices[0];
-          const last = prices[prices.length - 1];
-          setPriceChange(first > 0 ? ((last - first) / first) * 100 : 0);
-        }
-      } else {
-        setPriceHistory([]);
-        setPriceChange(0);
-      }
-    } catch {
-      setPriceHistory([]);
-      setPriceChange(0);
-    } finally {
-      setLoadingChart(false);
-    }
-  }, [symbol]);
-
   useEffect(() => { fetchBalance(); }, [fetchBalance]);
-  useEffect(() => { fetchPriceHistory(selectedRange); }, [fetchPriceHistory, selectedRange]);
 
   const isNative = type === 'Native Token';
-  const isUp = priceChange >= 0;
-  const changeColor = isUp ? colors.success : colors.danger;
-  const changeBg = isUp ? colors.successBg : colors.dangerBg;
   const displayColor = iconColor || activeChainConfig?.iconColor || colors.textMuted;
 
   const sendParams = {
@@ -321,14 +174,14 @@ const TokenDetailScreen: React.FC = () => {
           borderBottomColor: colors.hairline,
         }}
       >
-        {/* Identity row + 24h change pill */}
+        {/* Identity row */}
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <View style={{ marginRight: spacing.md }}>
             <TokenAvatar
               symbol={symbol || ''}
               iconUrl={iconUrl}
               iconColor={displayColor}
-              curated={!isDiscovered && type !== 'Imported'}
+              curated={isCurated}
               size={44}
             />
           </View>
@@ -340,24 +193,6 @@ const TokenDetailScreen: React.FC = () => {
               {name}
             </Text>
           </View>
-          {priceHistory.length >= 2 && (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.xs,
-                paddingHorizontal: spacing.sm,
-                paddingVertical: 4,
-                borderRadius: radius.sm,
-                backgroundColor: changeBg,
-              }}
-            >
-              <Icon name={isUp ? 'trendingUp' : 'trendingDown'} size={14} color={changeColor} />
-              <Text variant="caption" weight="600" style={{ color: changeColor }}>
-                {Math.abs(priceChange).toFixed(2)}%
-              </Text>
-            </View>
-          )}
         </View>
 
         {/* Balance */}
@@ -423,41 +258,7 @@ const TokenDetailScreen: React.FC = () => {
       >
         {/* Chart */}
         <Card padding="lg" style={{ marginBottom: spacing.md }}>
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: spacing.md,
-            }}
-          >
-            <Text variant="title3" weight="700">
-              Price Chart
-            </Text>
-          </View>
-          <MiniChart
-            data={priceHistory}
-            width={CHART_WIDTH}
-            height={CHART_HEIGHT}
-            color={displayColor}
-            loading={loadingChart}
-          />
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-around',
-              marginTop: spacing.md,
-            }}
-          >
-            {TIME_RANGES.map(r => (
-              <Chip
-                key={r.days}
-                label={r.label}
-                selected={selectedRange === r.days}
-                onPress={() => setSelectedRange(r.days)}
-              />
-            ))}
-          </View>
+          <PriceChart symbol={symbol} />
         </Card>
 
         {/* Token Info */}
@@ -513,7 +314,9 @@ const TokenDetailScreen: React.FC = () => {
           variant="secondary"
           leftIcon="arrowDown"
           style={{ flex: 1 }}
-          onPress={() => router.push('/wallet/receive')}
+          onPress={() =>
+            router.push({ pathname: '/wallet/receive', params: { chainKey: activeChainKey, ...(isCurated ? { symbol } : {}) } } as any)
+          }
         />
       </View>
     </SafeAreaView>

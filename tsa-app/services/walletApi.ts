@@ -6,6 +6,7 @@ import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constant
 import { getNetwork } from '../hooks/useNetwork';
 import { getActiveWallet } from './wallet';
 import { toFiniteNumber } from './txFields';
+import type { Candle } from '../utils/priceChart';
 
 export interface WalletBalance {
   symbol: string;
@@ -724,12 +725,14 @@ export interface SupportedTokenResponse {
  */
 export async function getTokenPriceHistory(
   symbol: string,
-  days: number = 7
+  days: number = 7,
+  /** Cap the series at this many evenly spaced points (server keeps both ends). */
+  maxPoints?: number
 ): Promise<ApiResponse<{ timestamp: number; price: number }[]>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(
-      `${API_BASE_URL}/market/history/${symbol}?days=${days}`,
+      `${API_BASE_URL}/market/history/${encodeURIComponent(symbol)}?days=${days}${maxPoints ? `&points=${maxPoints}` : ''}`,
       { method: 'GET', headers }
     );
     const json = await response.json();
@@ -741,6 +744,30 @@ export async function getTokenPriceHistory(
   } catch (error: any) {
     console.error('Get token price history error:', error);
     return { success: false, message: error.message || 'Failed to fetch price history' };
+  }
+}
+
+/**
+ * Fetch OHLC candles for a token symbol. The server snaps `days` to a range
+ * CoinGecko serves and merges neighbouring bars down to at most `candles`.
+ */
+export async function getTokenOHLC(
+  symbol: string,
+  days: number,
+  candles?: number
+): Promise<ApiResponse<Candle[]>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(
+      `${API_BASE_URL}/market/ohlc/${encodeURIComponent(symbol)}?days=${days}${candles ? `&candles=${candles}` : ''}`,
+      { method: 'GET', headers }
+    );
+    const json = await response.json();
+    const rows = json?.data?.candles;
+    return { ...json, data: Array.isArray(rows) ? rows : [] };
+  } catch (error: any) {
+    console.error('Get token OHLC error:', error);
+    return { success: false, message: error.message || 'Failed to fetch candles' };
   }
 }
 

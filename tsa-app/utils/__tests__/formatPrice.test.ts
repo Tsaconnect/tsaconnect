@@ -125,3 +125,19 @@ describe("formatPrice micro-price integration", () => {
     expect(formatPrice(100, { rate: 1617.75, currency: NGN })).toContain("161,775");
   });
 });
+
+describe("formatUSD maxDecimals", () => {
+  it("shows up to maxDecimals for prices that need the precision", () => {
+    expect(formatUSD(0.999851, { maxDecimals: 6 })).toBe("$0.999851");
+    expect(formatUSD(4215.3, { maxDecimals: 2 })).toBe("$4,215.30");
+  });
+  it("still pads to 2 decimals", () => {
+    expect(formatUSD(1, { maxDecimals: 4 })).toBe("$1.00");
+  });
+  it("keeps micro-price compression regardless of maxDecimals", () => {
+    expect(formatUSD(0.00001234, { maxDecimals: 8 })).toBe("$0.0₄1234");
+  });
+  it("defaults to 2 decimals", () => {
+    expect(formatUSD(0.999851)).toBe("$1.00");
+  });
+});
