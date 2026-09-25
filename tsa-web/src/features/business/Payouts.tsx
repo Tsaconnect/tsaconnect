@@ -276,8 +276,8 @@ function PayoutsBody({ merchant: m }: { merchant: OwnMerchant }) {
               <CryptoForm key={`crypto-${round}`} merchant={m} options={options} onSaved={saved} />
             )}
             <p className="text-caption text-text-secondary">
-              The account must be in your business name or the name on your verified ID. A crypto wallet only takes effect after you
-              confirm a code we email you. We email you whenever this changes.
+              The account must be in your business name or the name on your verified ID. Every payout change takes effect only after
+              you confirm a code we email you. We email you whenever this changes.
             </p>
           </CardBody>
         </Card>
@@ -287,7 +287,7 @@ function PayoutsBody({ merchant: m }: { merchant: OwnMerchant }) {
         <GuardedActionDialog
           open
           onOpenChange={(open) => !open && setWaiting(null)}
-          title="Confirm your payout wallet"
+          title={waiting.change.settlementMode === 'fiat' ? 'Confirm your payout bank account' : 'Confirm your payout wallet'}
           confirmLabel="Confirm"
           initialPending={waiting.pending}
           request={async (password) => {

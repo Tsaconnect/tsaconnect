@@ -22,9 +22,9 @@ import (
 // paid, their keys, webhooks and return domains, read and changed by the user
 // who owns the merchant. These are the changes a stolen login would make to
 // redirect a merchant's money or impersonate them, so each asks for the account
-// password again (counted toward the login lockout); a bank account must be in
-// the owner's own name, and everything else waits for a code emailed to the
-// owner (a guarded owner action — see services.ConfirmOwnerAction). Every
+// password again (counted toward the login lockout), a bank account must be in
+// the owner's own name, and every change waits for a code emailed to the owner
+// (a guarded owner action — see services.ConfirmOwnerAction). Every
 // applied change is announced to the owner on every channel.
 
 // WithEvents lets the owner routes tell the owner what changed. Nil leaves the
@@ -85,8 +85,9 @@ func payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 	return v
 }
 
-// payOwnerSettlementAnswer is a change's outcome: the merchant as it now is, or
-// — for a crypto wallet — where the confirmation code was sent.
+// payOwnerSettlementAnswer is a change's outcome: where the confirmation code
+// was sent, or — for a change to where the merchant is already paid — the
+// merchant as it is.
 type payOwnerSettlementAnswer struct {
 	Merchant     *payOwnerMerchantView           `json:"merchant,omitempty"`
 	Confirmation *services.PayOwnerActionPending `json:"confirmation,omitempty"`
@@ -124,8 +125,9 @@ type payOwnerSettlementRequest struct {
 }
 
 // PUT /api/pay/merchant/settlement — the owner changes where they are paid. A
-// bank account is applied at once; a crypto wallet answers 202 and waits for
-// the emailed code (POST /api/pay/merchant/actions/:id/confirm).
+// bank account or a crypto wallet answers 202 and waits for the emailed code
+// (POST /api/pay/merchant/actions/:id/confirm), which applies and announces it.
+// Saving the destination it already has answers 200 with the merchant unchanged.
 func (h *PayHandler) OwnerUpdateSettlement(c *gin.Context) {
 	var req payOwnerSettlementRequest
 	user, ok := payOwnerBind(c, &req)
@@ -141,11 +143,8 @@ func (h *PayHandler) OwnerUpdateSettlement(c *gin.Context) {
 		payOwnerPending(c, res.Pending)
 		return
 	}
-	if res.Changed {
-		h.announceSettlement(user.ID, res.Merchant)
-	}
 	view := payOwnerView(res.Merchant)
-	utils.SuccessResponse(c, http.StatusOK, "Settlement updated", payOwnerSettlementAnswer{Merchant: &view})
+	utils.SuccessResponse(c, http.StatusOK, "Settlement unchanged", payOwnerSettlementAnswer{Merchant: &view})
 }
 
 type payOwnerActionAnswer struct {

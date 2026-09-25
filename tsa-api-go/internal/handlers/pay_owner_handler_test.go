@@ -164,14 +164,29 @@ func (o *ownerRig) stored(t *testing.T) models.PayMerchant {
 	return m
 }
 
-func TestPayOwner_ChangesSettlementToAnAccountInTheBusinessNameAndIsTold(t *testing.T) {
+func TestPayOwner_ABankAccountWaitsForTheEmailedCodeAndIsToldOnlyThen(t *testing.T) {
 	o := newOwnerRig(t)
 	res := o.bankChange("correct-horse", "9876543210")
-	if res.status != http.StatusOK || res.Data.Merchant == nil {
+	if res.status != http.StatusAccepted || res.Data.Confirmation == nil || res.Data.Merchant != nil ||
+		res.Data.Confirmation.Kind != models.PayOwnerActionSettlement || res.Data.Confirmation.SentTo != "o***@skyair.ng" {
 		t.Fatalf("status %d body %s", res.status, res.raw)
 	}
-	if v := res.Data.Merchant; v.AccountNumber != "******3210" || v.AccountName != "SKY AIR LIMITED" || strings.Contains(res.raw, "9876543210") {
-		t.Fatalf("view %s: the account number must come back masked", res.raw)
+	if got := o.stored(t); got.AccountNumber != "0123456789" || len(o.events()) != 0 {
+		t.Fatalf("stored %+v: the bank account was applied or announced before the code", got)
+	}
+	confirm := "/api/pay/merchant/actions/" + res.Data.Confirmation.ID.String() + "/confirm"
+	if bad := o.do(http.MethodPost, confirm, map[string]any{"code": "abc"}); bad.status != http.StatusUnprocessableEntity || bad.Code != "code_invalid" {
+		t.Fatalf("a wrong code: status %d code %q", bad.status, bad.Code)
+	}
+	if got := o.stored(t); got.AccountNumber != "0123456789" {
+		t.Fatalf("stored %+v: a wrong code applied the bank account", got)
+	}
+	ok := o.confirm(t, res)
+	if ok.status != http.StatusOK || ok.Data.Merchant == nil {
+		t.Fatalf("status %d body %s", ok.status, ok.raw)
+	}
+	if v := ok.Data.Merchant; v.AccountNumber != "******3210" || v.AccountName != "SKY AIR LIMITED" || strings.Contains(ok.raw, "9876543210") {
+		t.Fatalf("view %s: the account number must come back masked", ok.raw)
 	}
 	if got := o.stored(t); got.AccountNumber != "9876543210" || got.BankCode != "044" {
 		t.Fatalf("stored %+v", got)
@@ -210,8 +225,8 @@ func TestPayOwner_AnAccountInSomeoneElsesNameIsRefused(t *testing.T) {
 	if res := o.bankChange("correct-horse", "9876543210"); res.status != http.StatusUnprocessableEntity || res.Code != "name_mismatch" {
 		t.Fatalf("status %d code %q", res.status, res.Code)
 	}
-	if got := o.stored(t); got.AccountNumber != "0123456789" || len(o.events()) != 0 {
-		t.Fatalf("stored %+v: a refused change landed or was announced", got)
+	if got := o.stored(t); got.AccountNumber != "0123456789" || len(o.events()) != 0 || o.mail.message != "" {
+		t.Fatalf("stored %+v: a refused change landed, was announced or sent a code", got)
 	}
 }
 
@@ -221,6 +236,9 @@ func TestPayOwner_TheBankProvidersOwnWordsAreNeverShown(t *testing.T) {
 	res := o.bankChange("correct-horse", "9876543210")
 	if res.status != http.StatusUnprocessableEntity || res.Code != "account_unverifiable" || strings.Contains(res.raw, "nomba") {
 		t.Fatalf("status %d body %s", res.status, res.raw)
+	}
+	if o.mail.message != "" {
+		t.Fatal("an unverifiable account sent a code")
 	}
 }
 
@@ -265,10 +283,13 @@ func TestPayOwner_OnlyTheSettlementCanChange(t *testing.T) {
 		"businessName": "Someone Else Ltd", "status": "active", "webhookUrl": "https://evil.example/hook",
 		"returnDomains": []string{"evil.example"}, "minAmount": 1, "maxAmount": 1, "customerFeeSharePercent": 0,
 	})
-	if res.status != http.StatusOK {
-		t.Fatalf("status %d body %s", res.status, res.raw)
+	if ok := o.confirm(t, res); ok.status != http.StatusOK {
+		t.Fatalf("status %d body %s", ok.status, ok.raw)
 	}
 	got := o.stored(t)
+	if got.AccountNumber != "9876543210" {
+		t.Fatalf("stored %+v: the settlement itself did not change", got)
+	}
 	if got.BusinessName != o.m.BusinessName || got.WebhookURL != o.m.WebhookURL || got.ReturnDomains != o.m.ReturnDomains ||
 		got.MinAmountKobo != o.m.MinAmountKobo || got.MaxAmountKobo != o.m.MaxAmountKobo || got.CustomerFeeSharePercent != o.m.CustomerFeeSharePercent {
 		t.Fatalf("stored %+v: an owner changed more than where they are paid", got)
@@ -281,8 +302,8 @@ func TestPayOwner_ChangingToWhereTheyArePaidAlreadyIsNotAnnounced(t *testing.T) 
 	res := o.do(http.MethodPut, "/api/pay/merchant/settlement", map[string]any{
 		"settlementMode": "fiat", "bankCode": o.m.BankCode, "accountNumber": o.m.AccountNumber, "password": "correct-horse",
 	})
-	if res.status != http.StatusOK || len(o.events()) != 0 || o.stored(t).Version != o.m.Version {
-		t.Fatalf("status %d events %d", res.status, len(o.events()))
+	if res.status != http.StatusOK || len(o.events()) != 0 || o.stored(t).Version != o.m.Version || o.mail.message != "" {
+		t.Fatalf("status %d events %d: a no-op must write, announce and email nothing", res.status, len(o.events()))
 	}
 }
 

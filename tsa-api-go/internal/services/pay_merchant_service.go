@@ -336,20 +336,52 @@ type PaySettlementChange struct {
 	ExpectedVersion *int `json:"expectedVersion"`
 }
 
-// PaySettlementResult is what an owner's change came to: applied (Changed), a
-// no-op (the destination was already this), or waiting on an emailed code.
+// PaySettlementResult is what an owner's change came to: waiting on an emailed
+// code (Pending), or a no-op because the destination was already this.
 type PaySettlementResult struct {
 	Merchant *models.PayMerchant
-	Changed  bool
 	Pending  *PayOwnerActionPending
 }
 
-// paySettlementPayload is a crypto payout change as it waits on its code.
+// paySettlementPayload is a payout change as it waits on its code: the
+// destination as the request validated it and, for a bank account, the name the
+// bank resolved it to — the name the owner was shown and the code's email named.
 type paySettlementPayload struct {
-	ChainID       int64  `json:"chainId"`
-	TokenAddress  string `json:"tokenAddress"`
-	TokenSymbol   string `json:"tokenSymbol"`
-	WalletAddress string `json:"walletAddress"`
+	// SettlementMode is empty on a crypto change requested before bank changes
+	// also needed a code.
+	SettlementMode string `json:"settlementMode,omitempty"`
+	BankCode       string `json:"bankCode,omitempty"`
+	AccountNumber  string `json:"accountNumber,omitempty"`
+	AccountName    string `json:"accountName,omitempty"`
+	ChainID        int64  `json:"chainId,omitempty"`
+	TokenAddress   string `json:"tokenAddress,omitempty"`
+	WalletAddress  string `json:"walletAddress,omitempty"`
+}
+
+// newPaySettlementPayload is the waiting form of a validated destination.
+func newPaySettlementPayload(u *models.PayMerchant) paySettlementPayload {
+	if u.SettlementMode == models.PaySettlementFiat {
+		return paySettlementPayload{SettlementMode: u.SettlementMode, BankCode: u.BankCode, AccountNumber: u.AccountNumber, AccountName: u.AccountName}
+	}
+	return paySettlementPayload{SettlementMode: u.SettlementMode, ChainID: u.ChainID, TokenAddress: u.TokenAddress, WalletAddress: u.WalletAddress}
+}
+
+// change is the owner's change the payload holds, made against version.
+func (p paySettlementPayload) change(version int) PaySettlementChange {
+	mode := p.SettlementMode
+	if mode == "" {
+		mode = models.PaySettlementCrypto
+	}
+	return PaySettlementChange{SettlementMode: mode, BankCode: p.BankCode, AccountNumber: p.AccountNumber,
+		ChainID: p.ChainID, TokenAddress: p.TokenAddress, WalletAddress: p.WalletAddress, ExpectedVersion: &version}
+}
+
+// paySettlementDoing is what the code's email says the owner is confirming.
+func paySettlementDoing(u *models.PayMerchant) string {
+	if u.SettlementMode == models.PaySettlementFiat {
+		return fmt.Sprintf("be paid to the bank account %s (%s)", payLast4(u.AccountNumber), u.AccountName)
+	}
+	return fmt.Sprintf("be paid in %s to the wallet %s", u.TokenSymbol, PayShortAddress(u.WalletAddress))
 }
 
 // GetByOwner returns the merchant a user owns, or ErrPayMerchantNotFound. A
@@ -380,8 +412,10 @@ func (s *PayMerchantService) GetByOwner(ctx context.Context, userID uuid.UUID) (
 //     name, or a shorter form of either (never a longer one — see
 //     AccountNameWithin). The account itself is the proof;
 //   - a crypto destination has no such proof, so it is only ever a listed
-//     stablecoin and is not applied until the owner enters the code emailed to
-//     them (a guarded owner action — see ConfirmOwnerAction);
+//     stablecoin;
+//   - either is applied only once the owner enters the code emailed to them (a
+//     guarded owner action — see ConfirmOwnerAction). Everything above is
+//     checked first, so a change that would be refused sends no code;
 //   - a change to the destination it already has writes and announces nothing.
 //
 // Everything else — resolving the account, the chain and token rules, the
@@ -395,38 +429,52 @@ func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerI
 	if err != nil {
 		return nil, err
 	}
-	edit, err := s.prepare(ctx, m, in, func(updated *models.PayMerchant) error {
-		if updated.SettlementMode != models.PaySettlementFiat {
-			return nil
-		}
-		return s.accountInOwnName(ctx, ownerID, updated)
-	})
+	edit, err := s.prepare(ctx, m, in, s.ownerSettlementCheck(ctx, ownerID))
 	if err != nil {
 		return nil, err
 	}
 	if sameSettlement(&edit.before, &edit.updated) {
 		return &PaySettlementResult{Merchant: m}, nil
 	}
-	if edit.updated.SettlementMode == models.PaySettlementCrypto {
-		u := &edit.updated
-		pending, err := s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionSettlement,
-			paySettlementPayload{ChainID: u.ChainID, TokenAddress: u.TokenAddress, TokenSymbol: u.TokenSymbol, WalletAddress: u.WalletAddress},
-			fmt.Sprintf("be paid in %s to the wallet %s", u.TokenSymbol, PayShortAddress(u.WalletAddress)))
-		if err != nil {
-			return nil, err
-		}
-		return &PaySettlementResult{Merchant: m, Pending: pending}, nil
-	}
-	updated, err := s.commit(ctx, ownerID, edit, true)
+	u := &edit.updated
+	pending, err := s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionSettlement, newPaySettlementPayload(u), paySettlementDoing(u))
 	if err != nil {
 		return nil, err
 	}
-	// A bank account now stands: a crypto change still waiting would undo it.
-	if err := s.db.WithContext(ctx).Where("merchant_id = ? AND kind = ?", m.ID, models.PayOwnerActionSettlement).
-		Delete(&models.PayOwnerAction{}).Error; err != nil {
-		log.Printf("[tsa-pay] could not clear the waiting payout change for merchant %s: %v", m.ID, err)
+	return &PaySettlementResult{Merchant: m, Pending: pending}, nil
+}
+
+// confirmSettlementByOwner applies a payout change the owner confirmed with the
+// emailed code, through Update against the version it was requested at and to
+// the rules it was requested under. A bank account must still resolve to the
+// name the owner was shown.
+func (s *PayMerchantService) confirmSettlementByOwner(ctx context.Context, ownerID uuid.UUID, m *models.PayMerchant, a *models.PayOwnerAction) (*models.PayMerchant, error) {
+	var p paySettlementPayload
+	if err := json.Unmarshal([]byte(a.Payload), &p); err != nil {
+		return nil, err
 	}
-	return &PaySettlementResult{Merchant: updated, Changed: true}, nil
+	in, err := s.ownerUpdate(m, p.change(a.BaseVersion))
+	if err != nil {
+		return nil, err
+	}
+	inOwnName := s.ownerSettlementCheck(ctx, ownerID)
+	return s.update(ctx, ownerID, m.ID, in, func(u *models.PayMerchant) error {
+		if u.SettlementMode == models.PaySettlementFiat && u.AccountName != p.AccountName {
+			return fmt.Errorf("%w: %w: the account no longer resolves to the name that was confirmed", ErrPayMerchantInvalid, ErrPayAccountUnverifiable)
+		}
+		return inOwnName(u)
+	})
+}
+
+// ownerSettlementCheck is the rule an owner's own payout change is held to on
+// top of Update's: a bank account in the owner's own name.
+func (s *PayMerchantService) ownerSettlementCheck(ctx context.Context, ownerID uuid.UUID) func(*models.PayMerchant) error {
+	return func(u *models.PayMerchant) error {
+		if u.SettlementMode != models.PaySettlementFiat {
+			return nil
+		}
+		return s.accountInOwnName(ctx, ownerID, u)
+	}
 }
 
 // ownerUpdate is the admin edit an owner's change amounts to: the settlement

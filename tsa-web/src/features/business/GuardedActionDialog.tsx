@@ -22,7 +22,7 @@ type Props = {
   /** Checks the password and emails the code; answers where it went. */
   request: (password: string) => Promise<{ confirmation: Pending }>;
   onDone: (result: ActionResult) => void;
-  /** Already requested (a crypto payout's 202): open at the code step. */
+  /** Already requested (a payout change's 202): open at the code step. */
   initialPending?: Pending;
   /** The merchant changed under this screen and was reloaded. Default: close. */
   onStale?: () => void;
@@ -50,7 +50,7 @@ function problemOf(err: unknown): Problem {
 
 /**
  * A change that needs the account password and then a code we email: the one way
- * keys, webhooks, the signing secret and a crypto payout wallet are changed.
+ * keys, webhooks, the signing secret and where payouts go are changed.
  * Mounted fresh on every open, so nothing from a previous attempt lingers.
  */
 export function GuardedActionDialog(props: Props) {

@@ -5,7 +5,7 @@ import { accepted, fail, merchant, mountAt, ok, soon, stubFetch } from '@/test/h
 const banks = ok([{ code: '044', name: 'Access Bank' }, { code: '057', name: 'Zenith Bank' }]);
 const usdcOnBase = ok([{ chainId: 8453, chain: 'base', symbol: 'USDC', tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' }]);
 const wallet = '0x52908400098527886E0F7030069857D2E4169EE7';
-const walletPending = (id: string) => accepted({ confirmation: { id, kind: 'settlement', expiresAt: soon, sentTo: 'a***@skyair.ng' } });
+const settlementPending = (id: string) => accepted({ confirmation: { id, kind: 'settlement', expiresAt: soon, sentTo: 'a***@skyair.ng' } });
 const cryptoMerchant = { ...merchant, version: 8, settlementMode: 'crypto', tokenSymbol: 'USDC', chainId: 8453, walletAddress: wallet };
 
 async function chooseWallet(address = wallet) {
@@ -26,12 +26,13 @@ describe('payouts', () => {
     expect(await screen.findByText(/Access Bank · \*\*\*\*\*\*3210/)).toBeInTheDocument();
   });
 
-  it('a bank change shows the resolved name before saving and applies with the password', async () => {
+  it('a bank change shows the resolved name, then waits for the emailed code before it applies', async () => {
     const f = stubFetch({
       '/api/pay/merchant': ok(merchant),
       '/api/pay/merchant/banks': banks,
       '/api/pay/merchant/banks/resolve': ok({ accountNumber: '1023456789', accountName: 'SKY AIR LTD' }),
-      '/api/pay/merchant/settlement': ok({ merchant: { ...merchant, version: 8, bankCode: '057', accountNumber: '******6789', accountName: 'SKY AIR LTD' } }),
+      '/api/pay/merchant/settlement': settlementPending('b1'),
+      '/api/pay/merchant/actions/b1/confirm': ok({ merchant: { ...merchant, version: 8, bankCode: '057', accountNumber: '******6789', accountName: 'SKY AIR LTD' } }),
     });
     mountAt('/business/live/payouts');
     await userEvent.selectOptions(await screen.findByLabelText('Bank'), '057');
@@ -45,9 +46,34 @@ describe('payouts', () => {
       const call = f.mock.calls.find(([u]) => u === '/api/pay/merchant/settlement');
       expect(JSON.parse(call![1].body)).toEqual({ settlementMode: 'fiat', bankCode: '057', accountNumber: '1023456789', password: 'correct-horse', expectedVersion: merchant.version });
     });
-    // The saved merchant replaces the old one: the new account shows, the form clears.
+    // Nothing has changed yet: the code step is open and the old account still shows.
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm your payout bank account' });
+    expect(within(dialog).getByText(/a\*\*\*@skyair\.ng/)).toBeInTheDocument();
+    expect(screen.getByText(/Access Bank · \*\*\*\*\*\*3210/)).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText('Code from your email'), '482913');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const confirm = f.mock.calls.find(([u]) => u === '/api/pay/merchant/actions/b1/confirm');
+    expect(JSON.parse(confirm![1].body)).toEqual({ code: '482913' });
+    // The confirmed merchant replaces the old one: the new account shows, the form clears.
     expect(await screen.findByText(/Zenith Bank · \*\*\*\*\*\*6789/)).toBeInTheDocument();
     expect(screen.getByLabelText('Password')).toHaveValue('');
+  });
+
+  it('saving where the merchant is already paid changes nothing and asks for no code', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/banks': banks,
+      '/api/pay/merchant/banks/resolve': ok({ accountNumber: '0123453210', accountName: 'SKY AIR LIMITED' }),
+      '/api/pay/merchant/settlement': ok({ merchant }),
+    });
+    mountAt('/business/live/payouts');
+    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '044');
+    await userEvent.type(screen.getByLabelText('Account number'), '0123453210');
+    await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect((await screen.findAllByText('Payment settings saved'))[0]).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('two submits in the same tick send one save', async () => {
@@ -67,8 +93,8 @@ describe('payouts', () => {
       form.requestSubmit();
       form.requestSubmit();
     });
-    resolve(ok({ merchant: { ...merchant, version: 8, bankCode: '057', accountNumber: '******6789' } }));
-    expect(await screen.findByText(/Zenith Bank · \*\*\*\*\*\*6789/)).toBeInTheDocument();
+    resolve(settlementPending('b1'));
+    expect(await screen.findByRole('dialog', { name: 'Confirm your payout bank account' })).toBeInTheDocument();
     expect(f.mock.calls.filter(([u]) => u === '/api/pay/merchant/settlement')).toHaveLength(1);
   });
 
@@ -135,7 +161,7 @@ describe('payouts', () => {
     stubFetch({
       '/api/pay/merchant': ok(merchant),
       '/api/pay/merchant/settlement-options': usdcOnBase,
-      '/api/pay/merchant/settlement': walletPending('s1'),
+      '/api/pay/merchant/settlement': settlementPending('s1'),
       '/api/pay/merchant/actions/s1/confirm': ok({ merchant: cryptoMerchant }),
     });
     mountAt('/business/live/payouts');
@@ -157,7 +183,7 @@ describe('payouts', () => {
       '/api/pay/merchant/settlement-options': usdcOnBase,
       '/api/pay/merchant/settlement': (() => {
         let n = 0;
-        return () => walletPending(++n === 1 ? 's1' : 's2');
+        return () => settlementPending(++n === 1 ? 's1' : 's2');
       })(),
       '/api/pay/merchant/actions/s1/confirm': () => {
         confirms++;

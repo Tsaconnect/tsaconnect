@@ -3,7 +3,8 @@
 /**
  * A TSA Pay merchant changing where they are paid. What this pins: nothing is
  * sent without PIN/biometric AND the account password; the change sent is the
- * one she filled in; a refused name says whose account the bank thinks it is.
+ * one she filled in; a bank account or a wallet applies only with the emailed
+ * code; a refused name says whose account the bank thinks it is.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -109,8 +110,12 @@ it('shows where she is paid today', async () => {
   expect(text(tree)).toContain('SKY AIR LTD · Access Bank ******6789');
 });
 
+const pendingCode = {
+  confirmation: { id: 'act-1', kind: 'settlement', expiresAt: '2026-09-24T15:00:00Z', sentTo: 'o***@skyair.ng' },
+};
+
 it('sends nothing until PIN/biometric, then the change she entered with her password', async () => {
-  jest.mocked(updateSettlement).mockResolvedValue({ merchant: { ...merchant, accountNumber: '******3210' } });
+  jest.mocked(updateSettlement).mockResolvedValue(pendingCode);
   const tree = await mount();
   await fillBankChange(tree, 'correct-horse');
   await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
@@ -123,13 +128,31 @@ it('sends nothing until PIN/biometric, then the change she entered with her pass
   expect(updateSettlement).toHaveBeenCalledTimes(1);
   expect(updateSettlement).toHaveBeenCalledWith(
     { settlementMode: 'fiat', bankCode: '044', accountNumber: '9876543210' }, 'correct-horse', 7);
+});
+
+it('a bank account waits for the emailed code, and only the code applies it', async () => {
+  jest.mocked(updateSettlement).mockResolvedValue(pendingCode);
+  jest.mocked(confirmOwnerAction).mockResolvedValue({ merchant: { ...merchant, version: 8, accountNumber: '******3210', accountName: 'SKY AIR LIMITED' } });
+  const tree = await mount();
+  await fillBankChange(tree, 'correct-horse');
+  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
+  await act(async () => { mockAuthorization.props.onAuthorized(); });
+  await flush();
+  expect(text(tree)).toContain('o***@skyair.ng');
+  expect(text(tree)).toContain('confirm the new bank account');
+  expect(text(tree)).toContain('SKY AIR LTD · Access Bank ******6789');
+  expect(mockToast.success).not.toHaveBeenCalled();
+
+  await act(async () => { byLabel(tree, 'input:Code').props.onChangeText('123456'); });
+  await act(async () => { byLabel(tree, 'button:Confirm').props.onPress(); });
+  await flush();
+  expect(confirmOwnerAction).toHaveBeenCalledWith('act-1', '123456');
   expect(mockToast.success).toHaveBeenCalled();
+  expect(text(tree)).toContain('SKY AIR LIMITED · Access Bank ******3210');
 });
 
 it('a wallet waits for the emailed code, and only the code applies it', async () => {
-  jest.mocked(updateSettlement).mockResolvedValue({
-    confirmation: { id: 'act-1', kind: 'settlement', expiresAt: '2026-09-24T15:00:00Z', sentTo: 'o***@skyair.ng' },
-  });
+  jest.mocked(updateSettlement).mockResolvedValue(pendingCode);
   jest.mocked(confirmOwnerAction).mockResolvedValue({
     merchant: { ...merchant, settlementMode: 'crypto', chainId: 8453, tokenSymbol: 'USDC', walletAddress: '0x52908400098527886E0F7030069857D2E4169EE7' },
   });

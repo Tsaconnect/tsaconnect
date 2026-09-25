@@ -111,7 +111,7 @@ export type SettlementChange =
   | { settlementMode: 'fiat'; bankCode: string; accountNumber: string }
   | { settlementMode: 'crypto'; chainId: number; tokenAddress: string; walletAddress: string };
 
-/** A bank account applies at once (merchant); a crypto wallet waits for the emailed code (confirmation). */
+/** A bank account or a crypto wallet waits for the emailed code (confirmation); saving where you're already paid changes nothing (merchant). */
 export const updateSettlement = (change: SettlementChange, password: string, expectedVersion: number) =>
   api<{ merchant?: OwnMerchant; confirmation?: Pending }>('/pay/merchant/settlement', {
     method: 'PUT',

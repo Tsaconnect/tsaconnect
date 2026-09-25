@@ -2,7 +2,7 @@
 //
 // A TSA Pay merchant's own account, from the app: where they are paid
 // (GET /api/pay/merchant), changing it (PUT /api/pay/merchant/settlement), and
-// confirming a crypto change with the code emailed to them
+// confirming the change with the code emailed to them
 // (POST /api/pay/merchant/actions/:id/confirm). The payer's side of TSA Pay is
 // services/payApi.ts; the merchant's server API (/api/pay/v1, key-authenticated)
 // is never called from the app.
@@ -33,10 +33,13 @@ export type SettlementChange =
   | { settlementMode: 'fiat'; bankCode: string; accountNumber: string }
   | { settlementMode: 'crypto'; chainId: number; tokenAddress: string; walletAddress: string };
 
-/** A guarded change (a crypto wallet) waits for the code emailed to the owner. */
+/** A guarded change (every payout change) waits for the code emailed to the owner. */
 export type PendingConfirmation = { id: string; kind: string; expiresAt: string; sentTo: string };
 
-/** A change was applied (merchant), or is waiting on the emailed code (confirmation). */
+/**
+ * A change waiting on the emailed code (confirmation), or the merchant as it now
+ * is (merchant): after a confirmed code, or when she saved where she is already paid.
+ */
 export type SettlementAnswer = { merchant?: OwnMerchant; confirmation?: PendingConfirmation };
 
 /** Machine codes the owner routes answer with — keyed on, never the words beside them. */

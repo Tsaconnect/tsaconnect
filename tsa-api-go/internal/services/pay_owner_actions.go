@@ -248,13 +248,7 @@ func (s *PayMerchantService) applyOwnerAction(ctx context.Context, ownerID uuid.
 	out := &PayOwnerActionResult{Kind: a.Kind}
 	switch a.Kind {
 	case models.PayOwnerActionSettlement:
-		var p paySettlementPayload
-		if err := json.Unmarshal([]byte(a.Payload), &p); err != nil {
-			return nil, err
-		}
-		mode := models.PaySettlementCrypto
-		updated, err := s.update(ctx, ownerID, m.ID, PayMerchantUpdate{SettlementMode: &mode, ChainID: &p.ChainID,
-			TokenAddress: &p.TokenAddress, TokenSymbol: &p.TokenSymbol, WalletAddress: &p.WalletAddress, ExpectedVersion: &a.BaseVersion}, nil)
+		updated, err := s.confirmSettlementByOwner(ctx, ownerID, m, a)
 		if err != nil {
 			return nil, err
 		}

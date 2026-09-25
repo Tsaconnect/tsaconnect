@@ -5,8 +5,9 @@
 // money, so it asks for the account password (checked by the server, counted
 // toward the login lockout) and then PIN or biometric (AuthorizationModal — the
 // app's one unlock path). The server only accepts a bank account in the
-// business's or the owner's verified name, and a crypto wallet only once she
-// enters the code it emails her. She is told of every change by email and push.
+// business's or the owner's verified name, and applies any change — bank or
+// wallet — only once she enters the code it emails her. She is told of every
+// change by email and push.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -54,7 +55,7 @@ export default function PaySettings() {
   const [password, setPassword] = useState('');
   const [formError, setFormError] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
-  // A crypto change waiting on the code emailed to her.
+  // A change waiting on the code emailed to her.
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
   const [code, setCode] = useState('');
   // A double biometric success must not send the change twice.
@@ -204,7 +205,8 @@ export default function PaySettings() {
           <Card style={{ gap: spacing.sm }}>
             <Text variant="bodyMed" weight="700">Check your email</Text>
             <Text variant="bodySm">
-              We sent a 6-digit code to {pending.sentTo}. Enter it to confirm the new wallet — nothing changes until you do.
+              {`We sent a 6-digit code to ${pending.sentTo}. Enter it to confirm the new ${mode === 'fiat' ? 'bank account' : 'wallet'}`
+                + ' — nothing changes until you do.'}
             </Text>
             <Input
               label="Code"
@@ -245,7 +247,7 @@ export default function PaySettings() {
                 {resolving ? <Text variant="caption" color="textMuted">Checking the account…</Text> : null}
                 {resolvedName ? <Text variant="caption" weight="600">Account name: {resolvedName}</Text> : null}
                 <Text variant="caption" color="textMuted">
-                  The account must be in your business name or the name on your verified ID.
+                  The account must be in your business name or the name on your verified ID. We email you a code to confirm the change.
                 </Text>
               </View>
             ) : (
