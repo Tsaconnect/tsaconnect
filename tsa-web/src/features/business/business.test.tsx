@@ -68,6 +68,7 @@ describe('business area', () => {
       '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
       [`/api/pay/merchant/payments/${payment.id}`]: ok({
         payment,
+        payer: { name: 'TOLUWANI ADEYEMI', verified: true },
         deliveries: [{ id: 'd1', event: 'payment.succeeded', attempts: 2, lastStatusCode: 200, createdAt: payment.createdAt, deliveredAt: payment.createdAt }],
       }),
     });
@@ -75,6 +76,11 @@ describe('business area', () => {
     await userEvent.click(await screen.findByText('PNR-K8Q2ZL'));
     const drawer = await screen.findByRole('dialog');
     expect(within(drawer).getByText('₦84,500.00', { selector: 'b' })).toBeInTheDocument();
+    // Who paid, their own reference and what it was for — each labelled.
+    expect(within(drawer).getByText('TOLUWANI ADEYEMI')).toBeInTheDocument();
+    expect(within(drawer).getByText('Verified')).toBeInTheDocument();
+    expect(within(drawer).getByText('Your reference').nextElementSibling).toHaveTextContent('PNR-K8Q2ZL');
+    expect(within(drawer).getByText('For').nextElementSibling).toHaveTextContent(payment.description);
     expect(within(drawer).getByText('payment.succeeded')).toBeInTheDocument();
     expect(within(drawer).getByText('200')).toBeInTheDocument();
     expect(screen.getByTestId('location')).toHaveTextContent(`/business/live/payments/${payment.id}`);
@@ -84,7 +90,7 @@ describe('business area', () => {
     stubFetch({
       '/api/pay/merchant': ok(merchant),
       '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
-      [`/api/pay/merchant/payments/${payment.id}`]: ok({ payment, deliveries: [] }),
+      [`/api/pay/merchant/payments/${payment.id}`]: ok({ payment, payer: null, deliveries: [] }),
     });
     mountAt('/business/live/payments?status=succeeded');
     await userEvent.click(await screen.findByText('PNR-K8Q2ZL'));

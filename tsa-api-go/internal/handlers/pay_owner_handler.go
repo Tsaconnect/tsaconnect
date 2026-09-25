@@ -319,12 +319,17 @@ func (h *PayHandler) OwnerPayment(c *gin.Context) {
 		payOwnerFail(c, err)
 		return
 	}
+	payer, err := h.payments.Payer(c.Request.Context(), p)
+	if err != nil {
+		payOwnerFail(c, err)
+		return
+	}
 	views := make([]payOwnerDeliveryView, len(deliveries))
 	for i, d := range deliveries {
 		views[i] = payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
 			LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", gin.H{"payment": h.payments.View(p), "deliveries": views})
+	utils.SuccessResponse(c, http.StatusOK, "Payment", gin.H{"payment": h.payments.View(p), "payer": payer, "deliveries": views})
 }
 
 // payOwnerDeliveryView is one webhook attempt as the owner sees it: how it went,

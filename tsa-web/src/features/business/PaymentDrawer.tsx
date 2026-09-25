@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { BadgeCheck } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { dateTime, naira } from '@/lib/format';
@@ -9,7 +10,7 @@ import { Drawer } from '@/components/ui/drawer';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/states';
 import { StatusPill } from '@/components/ui/status-pill';
-import { getPayment, type Delivery, type Payment } from './api';
+import { getPayment, type Delivery, type Payer, type Payment } from './api';
 import { youReceive } from './display';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -62,7 +63,23 @@ function Deliveries({ items }: { items: Delivery[] }) {
   );
 }
 
-function Detail({ payment: p, deliveries }: { payment: Payment; deliveries: Delivery[] }) {
+function PaidBy({ payer, status }: { payer: Payer | null; status: Payment['status'] }) {
+  if (!payer) {
+    return <span className="text-text-secondary">{status === 'pending' || status === 'expired' ? 'No one yet' : '—'}</span>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+      <b className="font-semibold">{payer.name}</b>
+      {payer.verified && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-success-bg px-2 py-0.5 text-caption font-semibold text-success-strong">
+          <BadgeCheck aria-hidden className="size-3.5" /> Verified
+        </span>
+      )}
+    </span>
+  );
+}
+
+function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Payer | null; deliveries: Delivery[] }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">
@@ -70,9 +87,11 @@ function Detail({ payment: p, deliveries }: { payment: Payment; deliveries: Deli
         <span className="min-w-0 truncate font-mono text-caption text-text-secondary" title={p.id}>{p.id}</span>
       </div>
       <p className="mt-2.5 text-title1 font-bold tabular">{naira(p.amount)}</p>
-      {p.description && <p className="text-body-sm text-text-secondary">{p.description}</p>}
 
       <dl className="mt-5 grid grid-cols-[130px_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-body-sm">
+        <Row label="Paid by"><PaidBy payer={payer} status={p.status} /></Row>
+        <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
+        {p.description && <Row label="For">{p.description}</Row>}
         <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>
         <Row label="Customer paid">
           <span className="tabular">{naira(p.customerTotal)}</span>{' '}
@@ -122,7 +141,7 @@ export function PaymentDrawer() {
       title={q.data?.payment.reference ?? 'Payment'}
     >
       {q.data ? (
-        <Detail payment={q.data.payment} deliveries={q.data.deliveries} />
+        <Detail payment={q.data.payment} payer={q.data.payer} deliveries={q.data.deliveries} />
       ) : q.isPending ? (
         <DetailSkeleton />
       ) : notFound ? (

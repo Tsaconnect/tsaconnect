@@ -32,6 +32,7 @@ type payPaymentAPI interface {
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
+	Payer(ctx context.Context, p *models.PayPayment) (*services.PayPayerView, error)
 }
 
 // payWebhookAPI is the narrow slice of *services.PayWebhookSender the admin

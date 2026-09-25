@@ -76,8 +76,11 @@ export const listPayments = (mode: Mode, p: PaymentFilter, signal?: AbortSignal)
     ...(p.limit ? { limit: String(p.limit) } : {}),
   })}`, { signal });
 
+/** Who paid: a name, and whether it is the name on a verified ID. Never contact details. */
+export type Payer = { name: string; verified: boolean };
+
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
-  api<{ payment: Payment; deliveries: Delivery[] }>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
+  api<{ payment: Payment; payer: Payer | null; deliveries: Delivery[] }>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
 
 // Guarded actions: password → emailed code → confirm.
 export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret'; expiresAt: string; sentTo: string };

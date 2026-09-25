@@ -577,3 +577,42 @@ func TestPayOwner_ABusyActionIsAConflictToRetry(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }
+
+// The detail tells the merchant which TSA Connect account paid: a name, and
+// whether it is the name on a verified ID — never the payer's email.
+func TestPayOwner_PaymentDetailNamesThePayerButNotTheirContact(t *testing.T) {
+	o := newOwnerRig(t)
+	ctx := context.Background()
+	in := services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-PAYER", Description: "LOS-ABV"}
+	p, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := func() string {
+		t.Helper()
+		res := o.do(http.MethodGet, "/api/pay/merchant/payments/"+p.ID.String()+"?mode=live", nil)
+		if res.status != http.StatusOK {
+			t.Fatalf("detail %d %s", res.status, res.raw)
+		}
+		return res.raw
+	}
+	if raw := detail(); !strings.Contains(raw, `"payer":null`) {
+		t.Fatalf("nobody has paid yet, want payer null: %s", raw)
+	}
+
+	payer := uuid.New()
+	o.db.Exec(`INSERT INTO users (id, name, email, verification_status) VALUES (?, 'Tolu', 'tolu.private@gmail.com', 'pending')`, payer)
+	o.db.Exec(`UPDATE pay_payments SET payer_user_id = ?, status = ? WHERE id = ?`, payer, models.PayStatusProcessing, p.ID)
+	raw := detail()
+	if !strings.Contains(raw, `"payer":{"name":"Tolu","verified":false}`) {
+		t.Fatalf("unverified payer: %s", raw)
+	}
+	if strings.Contains(raw, "tolu.private") || strings.Contains(raw, payer.String()) {
+		t.Fatalf("the payer's email or account id leaked: %s", raw)
+	}
+
+	o.db.Exec(`UPDATE users SET verification_status = 'verified', verified_legal_name = 'TOLUWANI ADEYEMI' WHERE id = ?`, payer)
+	if raw := detail(); !strings.Contains(raw, `"payer":{"name":"TOLUWANI ADEYEMI","verified":true}`) {
+		t.Fatalf("a verified payer shows the name on their ID: %s", raw)
+	}
+}

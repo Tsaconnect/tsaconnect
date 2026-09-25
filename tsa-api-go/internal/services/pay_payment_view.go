@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -214,4 +215,38 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID) (*PayP
 		v.ReturnURL = p.ReturnURL
 	}
 	return v, nil
+}
+
+// PayPayerView is who paid (or is paying) a payment, as its merchant sees it in
+// the dashboard: a name and whether it is the name on a verified ID — never an
+// email, phone or account id. The merchant already knows its customer through
+// its own reference; this tells it which TSA Connect account actually paid.
+type PayPayerView struct {
+	Name     string `json:"name"`
+	Verified bool   `json:"verified"`
+}
+
+// Payer is the payment's payer, or nil when nobody has taken it up (a payment
+// back to pending has no payer) or the account no longer has a name.
+func (s *PayPaymentService) Payer(ctx context.Context, p *models.PayPayment) (*PayPayerView, error) {
+	if p.PayerUserID == nil {
+		return nil, nil
+	}
+	verified, legalName, err := verifiedIdentity(ctx, s.db, *p.PayerUserID)
+	if err != nil {
+		return nil, err
+	}
+	if verified && legalName != "" {
+		return &PayPayerView{Name: legalName, Verified: true}, nil
+	}
+	var row struct{ Name sql.NullString }
+	if err := s.db.WithContext(ctx).Table("users").Select("name").
+		Where("id = ?", *p.PayerUserID).Limit(1).Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(row.Name.String)
+	if name == "" {
+		return nil, nil
+	}
+	return &PayPayerView{Name: name, Verified: verified}, nil
 }
