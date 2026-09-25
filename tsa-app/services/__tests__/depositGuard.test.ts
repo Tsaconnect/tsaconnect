@@ -108,17 +108,50 @@ describe('sendHeldDeposit', () => {
     expect(mockSubmit).not.toHaveBeenCalled();
   });
 
-  it('the relayed deposit never writes a hold — the server holds one relay per order', async () => {
-    mockGetOffer.mockResolvedValue({
-      mode: 'authorization', chain: 'base', token: 'USDC', decimals: 6, from: SIGNER, to: order.depositAddress,
-      value: '36421800', validBefore: 1790000000,
-      domain: { name: 'USD Coin', version: '2', chainId: '8453', verifyingContract: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+  describe('a relayed deposit', () => {
+    beforeEach(() => {
+      mockGetOffer.mockResolvedValue({
+        mode: 'authorization', chain: 'base', token: 'USDC', decimals: 6, from: SIGNER, to: order.depositAddress,
+        value: '36421800', validBefore: 1790000000,
+        domain: { name: 'USD Coin', version: '2', chainId: '8453', verifyingContract: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+      });
+      mockSignTypedData.mockResolvedValue('0x' + '00'.repeat(65));
     });
-    mockSignTypedData.mockResolvedValue('0x' + '00'.repeat(65));
-    mockRelay.mockResolvedValue({ txHash: '0xrelayed', alreadyUsed: false });
-    await expect(sendHeldDeposit(order, SIGNER, 0, KEY)).resolves.toBe('0xrelayed');
-    expect(await AsyncStorage.getItem(KEY)).toBeNull();
-    expect(mockSubmit).not.toHaveBeenCalled();
+
+    it('is held once it went out — a later retry could fall back to a self-paid send the server lock does not cover', async () => {
+      mockRelay.mockImplementation(async () => {
+        expect(await AsyncStorage.getItem(KEY)).toBeNull(); // never before: a refused relay must leave a retry open
+        return { txHash: '0xrelayed', alreadyUsed: false };
+      });
+      await expect(sendHeldDeposit(order, SIGNER, 0, KEY)).resolves.toBe('0xrelayed');
+      expect((await readHold(KEY))?.intentId).toBe('o1');
+      expect(mockSubmit).not.toHaveBeenCalled();
+    });
+
+    it('is held when the server says a relay for the order may already be on-chain', async () => {
+      mockRelay.mockRejectedValue(new PaycrestError('Already sending.', 409, 'sponsorship_in_progress'));
+      await expect(sendHeldDeposit(order, SIGNER, 0, KEY)).rejects.toThrow('Already sending.');
+      expect((await readHold(KEY))?.intentId).toBe('o1');
+    });
+
+    it('is not held when the sponsor refused it — nothing went out, so the retry stays open', async () => {
+      mockRelay.mockRejectedValue(new PaycrestError('Covering the network fee is temporarily unavailable.', 503));
+      await expect(sendHeldDeposit(order, SIGNER, 0, KEY)).rejects.toThrow(/temporarily unavailable/);
+      expect(await AsyncStorage.getItem(KEY)).toBeNull();
+    });
+
+    it('a hold that cannot be recorded AFTER it went out does not report the sent deposit as failed', async () => {
+      mockRelay.mockResolvedValue({ txHash: '0xrelayed', alreadyUsed: false });
+      const setItem = AsyncStorage.setItem;
+      (AsyncStorage as any).setItem = async () => { throw new Error('disk full'); };
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await expect(sendHeldDeposit(order, SIGNER, 0, KEY)).resolves.toBe('0xrelayed');
+      } finally {
+        (AsyncStorage as any).setItem = setItem;
+        warn.mockRestore();
+      }
+    });
   });
 
   it("a hold left under the key by a payment's EARLIER order is replaced by this order's", async () => {

@@ -39,8 +39,13 @@ export const depositOutcomeUnknown = (e: unknown): boolean =>
  * DIFFERENT order (a payment's earlier order) covers that order, not this one,
  * so it is replaced. Only a refusal the server answered lifts it — nothing left
  * the wallet. An unknown outcome and a success keep it: the order going
- * terminal lifts it. A relayed deposit needs none (the server holds one relay
- * per order and hands a retry the first one's hash), so it never writes one.
+ * terminal lifts it.
+ *
+ * A relayed deposit is recorded too, once it went out or may have (success, or
+ * an unknown outcome) — never before, so a relay the sponsor refused (a 503)
+ * leaves a retry open. The server holds one relay per order, but that lock does
+ * not cover a retry that falls back to a SELF-PAID send (the offer answers
+ * "none" once too little of the order's window is left), which would pay twice.
  */
 export async function sendHeldDeposit(
   order: SponsoredDepositOrder,
@@ -49,17 +54,25 @@ export async function sendHeldDeposit(
   holdKey: string,
 ): Promise<string> {
   let held = false;
+  const hold = async () => {
+    const prior = await readHold(holdKey);
+    if (prior && prior.intentId !== order.id) await clearHold(holdKey);
+    await writeHold(holdKey, order.id);
+    held = true;
+  };
+  // After the fact the deposit already left (or may have): a hold that cannot be
+  // written then must not turn a sent deposit into a reported failure.
+  const holdAfter = () => (held ? Promise.resolve() : hold().catch((e) => console.warn('[deposit] hold not recorded', e)));
   try {
-    return await sendSponsoredPaycrestDeposit(order, wallet, nativeBalance, {
-      beforeBroadcast: async () => {
-        const prior = await readHold(holdKey);
-        if (prior && prior.intentId !== order.id) await clearHold(holdKey);
-        await writeHold(holdKey, order.id);
-        held = true;
-      },
-    });
+    const hash = await sendSponsoredPaycrestDeposit(order, wallet, nativeBalance, { beforeBroadcast: hold });
+    await holdAfter();
+    return hash;
   } catch (e) {
-    if (held && !depositOutcomeUnknown(e)) await clearHold(holdKey);
+    if (depositOutcomeUnknown(e)) {
+      await holdAfter();
+    } else if (held) {
+      await clearHold(holdKey);
+    }
     throw e;
   }
 }

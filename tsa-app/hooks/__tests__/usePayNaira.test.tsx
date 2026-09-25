@@ -166,7 +166,9 @@ async function pay(token: LiFiToken, chainId: number) {
   await flush();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Holds persist in AsyncStorage: a send in one test must not hold the payment in the next.
+  await AsyncStorage.clear();
   jest.clearAllMocks();
   Object.assign(swapped, {
     stage: 'idle', error: undefined, intent: undefined, missingUsdc: undefined, order: undefined, retryable: true,

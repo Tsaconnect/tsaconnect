@@ -45,6 +45,7 @@ jest.mock('@/hooks/useSignableWallet', () => ({
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as PayApi from '@/services/payApi';
 import * as PaycrestApi from '@/services/paycrestApi';
 import * as SellSwap from '@/services/paycrestSellSwap';
@@ -99,6 +100,8 @@ async function pay() {
 }
 
 beforeEach(async () => {
+  // Holds persist in AsyncStorage: a send in one test must not hold the payment in the next.
+  await AsyncStorage.clear();
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
   jest.clearAllMocks();
   m.getQuote.mockResolvedValue({ venues: [{ chain: 'base', token: 'USDC', tokenAmount: 33.5 } as PaycrestVenue], best: null } as any);
