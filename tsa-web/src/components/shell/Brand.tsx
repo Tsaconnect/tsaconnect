@@ -1,14 +1,16 @@
 import { cn } from '@/lib/cn';
 
-/** The gold "T" tile. */
+/** The TSA app icon (tsa-app/assets/images/icon.png), as a rounded tile. */
 export function BrandMark({ className }: { className?: string }) {
   return (
-    <span
+    <img
+      src="/tsa-mark.png"
+      alt=""
       aria-hidden
-      className={cn('grid size-7 shrink-0 place-items-center rounded-sm bg-[linear-gradient(135deg,var(--gold-bright),var(--accent-hover))] text-[13px] font-extrabold text-slate-950', className)}
-    >
-      T
-    </span>
+      width={28}
+      height={28}
+      className={cn('size-7 shrink-0 rounded-sm bg-black', className)}
+    />
   );
 }
 

@@ -103,7 +103,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 export function SessionLoading() {
   return (
     <div className="grid h-full place-items-center" role="status" aria-label="Loading">
-      <BrandMark className="size-9 animate-pulse text-[15px]" />
+      <BrandMark className="size-9 animate-pulse" />
     </div>
   );
 }

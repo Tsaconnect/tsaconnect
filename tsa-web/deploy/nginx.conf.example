@@ -83,7 +83,8 @@ server {
     proxy_read_timeout 60s;
   }
 
-  # No favicon yet: answer empty rather than let the SPA fallback serve index.html as one.
+  # The icon is /favicon.png (linked from index.html); answer the legacy .ico probe empty
+  # rather than let the SPA fallback serve index.html as one.
   location = /favicon.ico {
     return 204;
     access_log off;
