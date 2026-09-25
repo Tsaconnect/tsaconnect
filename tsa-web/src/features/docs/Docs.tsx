@@ -134,7 +134,7 @@ export function Docs() {
             />
             <Note tone="warning">
               Keep your keys on your server. Anyone holding a key can create and cancel payments as you — never put one in a web page or an app.
-              If one leaks, roll it from your dashboard: the old key stops working at once.
+              If one leaks, create a new one from your dashboard: the old key stops working at once.
             </Note>
           </Section>
 
@@ -236,7 +236,7 @@ export function Docs() {
             <P>
               Each request carries <C>X-TSA-Signature</C> in the form <C>t=&lt;timestamp&gt;,v1=&lt;signature&gt;</C>. <C>t</C> is when we signed it, in Unix
               seconds, and <C>v1</C> is the hex HMAC-SHA256 of <C>&lt;t&gt;.&lt;raw body&gt;</C> — the timestamp, a full stop, then the body exactly as sent — keyed
-              with your signing secret. Each mode has its own secret (<C>whsec_…</C>); reveal or roll them in your dashboard.
+              with your signing secret. Each mode has its own secret (<C>whsec_…</C>); reveal them or create new ones in your dashboard.
             </P>
             <ol className="grid max-w-[72ch] list-decimal gap-2 pl-5 text-body">
               <li>Read the raw body before any JSON parsing — re-serialised JSON will not match.</li>
@@ -272,7 +272,7 @@ export function Docs() {
               head={['Status', 'Code', 'Why']}
               rows={[
                 [<C>400</C>, '—', <>The body is not valid JSON of the right shape, or the payment id is not a UUID.</>],
-                [<C>401</C>, <C>invalid_key</C>, <>The <C>Authorization</C> header is missing or malformed, or the key is unknown or was rolled.</>],
+                [<C>401</C>, <C>invalid_key</C>, <>The <C>Authorization</C> header is missing or malformed, or the key is unknown or was replaced by a new one.</>],
                 [<C>403</C>, <C>merchant_suspended</C>, 'Your merchant account is suspended.'],
                 [<C>403</C>, <C>live_disabled</C>, 'A live key while live payments are not enabled.'],
                 [<C>404</C>, '—', 'Reading a payment this key cannot see: a wrong id, another merchant\'s, or one from the other mode.'],

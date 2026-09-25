@@ -76,8 +76,8 @@ export const listPayments = (mode: Mode, p: PaymentFilter, signal?: AbortSignal)
     ...(p.limit ? { limit: String(p.limit) } : {}),
   })}`, { signal });
 
-/** Who paid: a name (the name on their verified ID when verified). Never contact details. */
-export type Payer = { name: string; verified: boolean };
+/** Who paid: a name (as on their ID when verified; "Deleted account" once deleted). Never contact details. */
+export type Payer = { name: string };
 
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
   api<{ payment: Payment; payer: Payer | null; deliveries: Delivery[] }>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });

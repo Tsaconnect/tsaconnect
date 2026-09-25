@@ -116,10 +116,10 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
     }
     const roll = action.action === 'roll';
     return {
-      title: roll ? 'Roll your signing secret' : 'Reveal your signing secret',
-      confirmLabel: roll ? 'Roll secret' : 'Reveal secret',
+      title: roll ? 'Create a new signing secret' : 'Reveal your signing secret',
+      confirmLabel: roll ? 'Create new secret' : 'Reveal secret',
       danger: roll,
-      warning: roll ? 'Your current signing secret stops working as soon as the new one is created, for live and test. Update your server straight after.' : undefined,
+      warning: roll ? 'Your current signing secret stops working immediately when you confirm, for live and test. Webhooks your server receives will fail its signature check until you update it with the new secret.' : undefined,
       request: (password: string) => requestWebhookSecret(action.action, password),
     };
   })();
@@ -165,11 +165,11 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
           <div className="min-w-[240px] flex-1">
             <p className="text-body-sm font-semibold">Signing secret</p>
             <p className="text-caption text-text-secondary">
-              Verify the <code className="font-mono text-text-primary">X-TSA-Signature</code> header with it. Rolling it changes the secret for live and test.
+              Verify the <code className="font-mono text-text-primary">X-TSA-Signature</code> header with it. Creating a new one replaces the secret for live and test.
             </p>
           </div>
           <Button size="sm" variant="secondary" onClick={() => setAction({ kind: 'secret', action: 'reveal' })} disabled={locked}>Reveal</Button>
-          <Button size="sm" variant="danger" onClick={() => setAction({ kind: 'secret', action: 'roll' })} disabled={locked}>Roll secret</Button>
+          <Button size="sm" variant="danger" onClick={() => setAction({ kind: 'secret', action: 'roll' })} disabled={locked}>Create new secret</Button>
         </div>
       </Card>
 

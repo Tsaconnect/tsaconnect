@@ -68,7 +68,7 @@ describe('business area', () => {
       '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
       [`/api/pay/merchant/payments/${payment.id}`]: ok({
         payment,
-        payer: { name: 'TOLUWANI ADEYEMI', verified: true },
+        payer: { name: 'TOLUWANI ADEYEMI' },
         deliveries: [{ id: 'd1', event: 'payment.succeeded', attempts: 2, lastStatusCode: 200, createdAt: payment.createdAt, deliveredAt: payment.createdAt }],
       }),
     });
@@ -77,7 +77,7 @@ describe('business area', () => {
     const drawer = await screen.findByRole('dialog');
     expect(within(drawer).getByText('₦84,500.00', { selector: 'b' })).toBeInTheDocument();
     // Who paid, their own reference and what it was for — each labelled.
-    expect(within(drawer).getByText('TOLUWANI ADEYEMI')).toBeInTheDocument();
+    expect(within(drawer).getByText('Paid by').nextElementSibling).toHaveTextContent('TOLUWANI ADEYEMI');
     expect(within(drawer).queryByText('Verified')).not.toBeInTheDocument();
     expect(within(drawer).getByText('Your reference').nextElementSibling).toHaveTextContent('PNR-K8Q2ZL');
     expect(within(drawer).getByText('For').nextElementSibling).toHaveTextContent(payment.description);

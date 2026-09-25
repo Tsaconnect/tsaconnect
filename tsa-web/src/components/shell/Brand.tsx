@@ -6,7 +6,6 @@ export function BrandMark({ className }: { className?: string }) {
     <img
       src="/tsa-mark.png"
       alt=""
-      aria-hidden
       width={28}
       height={28}
       className={cn('size-7 shrink-0 rounded-sm bg-black', className)}

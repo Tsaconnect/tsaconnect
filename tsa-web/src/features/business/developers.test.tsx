@@ -269,7 +269,7 @@ describe('API keys & webhooks', () => {
     stubFetch({ '/api/pay/merchant': ok({ ...merchant, status: 'suspended' }) });
     mountAt('/business/live/developers');
     expect(await screen.findByText(/suspended — contact support to create a key, change your webhooks or see your signing secret/i)).toBeInTheDocument();
-    for (const name of ['Create new live key', 'Create new test key', 'Edit webhooks', 'Edit return domains', 'Reveal', 'Roll secret']) {
+    for (const name of ['Create new live key', 'Create new test key', 'Edit webhooks', 'Edit return domains', 'Reveal', 'Create new secret']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
   });
@@ -297,12 +297,12 @@ describe('API keys & webhooks', () => {
       '/api/pay/merchant/actions/w2/confirm': ok({ secretAction: 'roll', webhookSecretLive: 'whsec_live_NEW', webhookSecretTest: 'whsec_test_NEW' }),
     });
     mountAt('/business/live/developers');
-    await userEvent.click(await screen.findByRole('button', { name: 'Roll secret' }));
-    expect(screen.getByRole('dialog', { name: 'Roll your signing secret' })).toHaveTextContent(/stops working as soon as the new one is created, for live and test/);
+    await userEvent.click(await screen.findByRole('button', { name: 'Create new secret' }));
+    expect(screen.getByRole('dialog', { name: 'Create a new signing secret' })).toHaveTextContent(/stops working immediately when you confirm, for live and test/);
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     await userEvent.type(await screen.findByLabelText('Code from your email'), '482913');
-    await userEvent.click(screen.getByRole('button', { name: 'Roll secret' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Create new secret' }));
     const result = await screen.findByRole('dialog', { name: /signing secret/i });
     expect(within(result).getByText('whsec_live_NEW')).toBeInTheDocument();
     expect(within(result).getByText('whsec_test_NEW')).toBeInTheDocument();

@@ -79,7 +79,8 @@ function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Pa
       <p className="mt-2.5 text-title1 font-bold tabular">{naira(p.amount)}</p>
 
       <dl className="mt-5 grid grid-cols-[130px_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-body-sm">
-        <Row label="Paid by"><PaidBy payer={payer} status={p.status} /></Row>
+        {/* Only a succeeded payment was paid; before that it's whoever took it up. */}
+        <Row label={p.status === 'succeeded' ? 'Paid by' : 'Payer'}><PaidBy payer={payer} status={p.status} /></Row>
         <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
         {p.description && <Row label="For">{p.description}</Row>}
         <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>

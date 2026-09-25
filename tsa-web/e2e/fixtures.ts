@@ -147,7 +147,7 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
         id: 'b7e0c1d2-5a4f-4c3e-8d2b-9f1a6e7c3d40', event: 'payment.succeeded', attempts: 1, lastStatusCode: 200,
         deliveredAt: p.succeededAt, createdAt: p.succeededAt!,
       }] : [];
-      return ok({ payment: p, payer: p.status === 'pending' || p.status === 'expired' ? null : { name: 'Ada Obi', verified: true }, deliveries }, 'Payment');
+      return ok({ payment: p, payer: p.status === 'pending' || p.status === 'expired' ? null : { name: 'Ada Obi' }, deliveries }, 'Payment');
     }
     if (route === 'GET /api/pay/merchant/banks') return ok([{ code: '044', name: 'Access Bank' }, { code: '058', name: 'GTBank' }], 'Banks');
     if (route === 'GET /api/pay/merchant/settlement-options') {
