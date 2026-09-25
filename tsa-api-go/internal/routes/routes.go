@@ -41,7 +41,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 
 	// API group with rate limiter
 	api := router.Group("/api")
-	api.Use(middleware.RateLimiter(500, 15*time.Minute))
+	// Per IP, except that a signed-in web session counts against its user: the
+	// web app arrives through a proxy, so its visitors share a few addresses.
+	api.Use(middleware.RateLimiterBy(500, 15*time.Minute, middleware.WebSessionRateKey(cfg)))
 
 	auth := middleware.Auth(cfg)
 	adminAuth := middleware.AdminAuth(cfg)
@@ -65,14 +67,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// is set. Every route needs the CSRF header and the app's own origin.
 	if cfg.WebAuthEnabled() {
 		web := api.Group("/auth/web", middleware.WebAuthGuard(cfg))
-		// Per IP, and loose: an office behind one NAT signs in from one address,
-		// and the per-account lockout is what protects each account.
-		web.POST("/login", middleware.RateLimiter(30, 15*time.Minute), h.WebLogin)
-		// Twice login's budget, as before: every sign-in may need a retyped code.
-		// Guessing is bounded per challenge (services.EmailCodeAttempts).
-		web.POST("/verify", middleware.RateLimiter(60, 15*time.Minute), h.WebVerify)
-		// Per IP: an office behind one NAT refreshes from many people and tabs.
-		web.POST("/refresh", middleware.RateLimiter(300, 15*time.Minute), h.WebRefresh)
+		// The web app arrives through a proxy (Netlify), so its visitors share a
+		// few addresses: limits are per account or session, with a loose per-IP
+		// ceiling against spraying many accounts. The per-account lockout is
+		// what protects each account's password.
+		web.POST("/login",
+			middleware.RateLimiter(300, 15*time.Minute),
+			middleware.RateLimiterBy(10, 15*time.Minute, middleware.WebLoginRateKey),
+			h.WebLogin)
+		// Per pending sign-in; guessing is bounded per challenge anyway
+		// (services.EmailCodeAttempts).
+		web.POST("/verify", middleware.RateLimiterBy(20, 15*time.Minute, middleware.WebChallengeRateKey), h.WebVerify)
+		// Per session: every tab refreshes on its own.
+		web.POST("/refresh", middleware.RateLimiterBy(60, 15*time.Minute, middleware.WebRefreshRateKey), h.WebRefresh)
 		web.POST("/logout", h.WebLogout)
 		web.GET("/me", auth, h.WebMe)
 	}

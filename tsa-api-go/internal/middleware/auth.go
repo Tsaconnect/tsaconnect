@@ -58,40 +58,8 @@ func Auth(cfg *config.Config) gin.HandlerFunc {
 			}
 		}
 
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return []byte(cfg.JWTSecret), nil
-		})
-		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Please authenticate",
-			})
-			return
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
+		claims, userID, ok := parseAccessToken(cfg.JWTSecret, tokenString)
 		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Please authenticate",
-			})
-			return
-		}
-
-		userIDStr, ok := claims["userId"].(string)
-		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Please authenticate",
-			})
-			return
-		}
-
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Please authenticate",
@@ -134,6 +102,33 @@ func Auth(cfg *config.Config) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// parseAccessToken verifies an access JWT (HS256 with secret) and returns its
+// claims and user id. ok is false for anything that is not a valid token.
+func parseAccessToken(secret, tokenString string) (jwt.MapClaims, uuid.UUID, bool) {
+	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return []byte(secret), nil
+	})
+	if err != nil || !token.Valid {
+		return nil, uuid.Nil, false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, uuid.Nil, false
+	}
+	userIDStr, ok := claims["userId"].(string)
+	if !ok {
+		return nil, uuid.Nil, false
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return nil, uuid.Nil, false
+	}
+	return claims, userID, true
 }
 
 func safeMethod(m string) bool {

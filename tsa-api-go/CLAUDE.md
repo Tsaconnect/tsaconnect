@@ -87,7 +87,7 @@ All routes prefixed with `/api/`:
 
 - **Response format**: `{"success": bool, "message": string, "data": object}` or `{"success": false, "errors": array}`
 - **Auth**: JWT tokens with 7-day expiry. `Authorization: Bearer <token>` header
-- **Rate limiting**: 500 requests per 15 minutes per IP on `/api/` routes (`routes.go`), with tighter per-route limits on some groups
+- **Rate limiting**: 500 requests per 15 minutes per IP on `/api/` routes (`routes.go`) — per user for a signed-in web session, since the web app reaches the API through a proxy (Netlify) and its visitors share its addresses — with tighter per-route limits on some groups
 - **Handler structure**: `WalletHandler` has its own struct with `DB`, `Config`, `BlockchainService` fields. Other handlers use `*Handlers` struct.
 - **ORM**: GORM with PostgreSQL driver
 - **Wallet tests**: Use SQLite in-memory DB (raw DDL, not AutoMigrate) to avoid PostgreSQL-specific defaults
