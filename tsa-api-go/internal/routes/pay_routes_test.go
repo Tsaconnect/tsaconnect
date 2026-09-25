@@ -276,3 +276,20 @@ func TestPayRoutes_OwnerReadLimits(t *testing.T) {
 		t.Fatalf("the 121st owner request in a minute: %d", w.Code)
 	}
 }
+
+// An owner's answers are that owner's account (keys and secrets included) and
+// are never cached — signed in or not, whatever the outcome.
+func TestPayRoutes_OwnerAnswersAreNeverCached(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID)
+	for name, bearer := range map[string]string{"signed out": "", "signed in": tok} {
+		w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant", bearer, nil)
+		if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Vary") != "Cookie, Origin" {
+			t.Errorf("%s (%d): Cache-Control %q Vary %q", name, w.Code, w.Header().Get("Cache-Control"), w.Header().Get("Vary"))
+		}
+	}
+	// The checkout routes are not the owner's: this is scoped, not global.
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/checkout/"+uuid.NewString(), "", nil); w.Header().Get("Cache-Control") == "no-store" {
+		t.Error("no-store leaked beyond the owner routes")
+	}
+}

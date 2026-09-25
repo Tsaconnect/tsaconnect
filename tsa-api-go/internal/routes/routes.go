@@ -66,9 +66,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	}
 
 	// TSA Connect web app sign-in (cookie session). Off unless WEB_APP_ORIGIN
-	// is set. Every route needs the CSRF header and the app's own origin.
+	// is set. Every route needs the CSRF header and the app's own origin, and
+	// no answer is ever cached (they set and read the session).
 	if cfg.WebAuthEnabled() {
-		web := api.Group("/auth/web", middleware.WebAuthGuard(cfg))
+		web := api.Group("/auth/web", middleware.NoStore(), middleware.WebAuthGuard(cfg))
 		// Per visitor address (NetlifyClientIP above makes that the real one),
 		// loose because an office signs in from one address; and per address
 		// and account, so one person's failures don't block a colleague. The
@@ -1288,9 +1289,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// Every guarded request (payouts, keys, webhooks, the webhook secret)
 		// re-checks the password in-handler and has its own tight limit — a
 		// separate store per route, so a password cannot be guessed through any
-		// of them and using up one never spends another.
+		// of them and using up one never spends another. No answer is ever
+		// cached: each is one owner's account, keys and secrets included.
 		owner := api.Group("/pay/merchant")
-		owner.Use(auth, middleware.RateLimiterBy(120, time.Minute, perUserRateKey))
+		owner.Use(middleware.NoStore(), auth, middleware.RateLimiterBy(120, time.Minute, perUserRateKey))
 		{
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)

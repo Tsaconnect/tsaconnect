@@ -16,3 +16,14 @@ func SecurityHeaders() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// NoStore keeps a response out of every cache, the browser's and any in
+// between: it carries a signed-in user's own data or sets their session. Vary
+// makes a cache that ignores no-store still key it per session and per origin.
+func NoStore() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Vary", "Cookie, Origin")
+		c.Next()
+	}
+}

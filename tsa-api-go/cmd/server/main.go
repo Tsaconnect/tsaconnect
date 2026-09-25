@@ -126,6 +126,18 @@ func newRouter() *gin.Engine {
 	return router
 }
 
+// netlifyProxyAlert is the boot line for a web app whose Netlify proxy the API
+// cannot verify, or "" when there is none. Without the secret every web visitor
+// shares Netlify's address for per-IP limits — worth an alert in every log sink,
+// but never a refusal to boot: the web app still works.
+func netlifyProxyAlert(cfg *config.Config) string {
+	if !cfg.WebAuthEnabled() || cfg.NetlifyProxySecret != "" {
+		return ""
+	}
+	return "[web] ALERT netlify_proxy_secret_unset=1 web_app_origin=" + cfg.WebAppOrigin +
+		": web visitors share the Netlify proxy's address for per-IP rate limits; set NETLIFY_PROXY_SECRET to the site's API_SIGNATURE_TOKEN"
+}
+
 func main() {
 	migrateFlag := flag.Bool("migrate", false,
 		"run database migrations and exit; used by the deploy between build and restart")
@@ -1620,6 +1632,9 @@ func main() {
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 
 	// Setup all routes
+	if alert := netlifyProxyAlert(cfg); alert != "" {
+		log.Print(alert)
+	}
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 
 	// Configure HTTP server

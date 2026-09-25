@@ -15,7 +15,7 @@
 # set per location. Keyed on the status too: only a file that was actually found
 # may be cached for a year — a 404 for a hashed name must not be.
 map "$status:$uri" $tsa_web_cache_control {
-  ~^[0-9]+:/api/          "";                                     # adds nothing: the API decides (its owner routes send no-store)
+  ~^[0-9]+:/api/          "";                                     # adds nothing: the API decides (/api/pay/merchant and /api/auth/web send no-store)
   ~^(200|304):/assets/    "public, max-age=31536000, immutable";  # content-hashed file names
   default                 "no-store";                             # index.html (always the current build) and every error
 }

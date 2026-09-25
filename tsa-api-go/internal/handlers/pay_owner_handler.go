@@ -157,7 +157,8 @@ type payOwnerActionAnswer struct {
 }
 
 // POST /api/pay/merchant/actions/:id/confirm — the emailed code that applies a
-// waiting guarded action. The key or secret it produces is returned once, here.
+// waiting guarded action. The key or secret it produces is returned once, here
+// (never cached: the route group sends no-store).
 func (h *PayHandler) OwnerConfirmAction(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -188,7 +189,6 @@ func (h *PayHandler) OwnerConfirmAction(c *gin.Context) {
 		v := payOwnerView(res.Merchant)
 		out.Merchant = &v
 	}
-	c.Header("Cache-Control", "no-store")
 	utils.SuccessResponse(c, http.StatusOK, "Change confirmed", out)
 }
 

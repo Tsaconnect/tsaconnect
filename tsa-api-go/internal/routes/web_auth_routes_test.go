@@ -60,6 +60,21 @@ func TestWebAuthRoutes_OnWithWebAppOriginAndGuarded(t *testing.T) {
 	}
 }
 
+// Web sign-in sets and reads the session: no answer is ever cached, refusals included.
+func TestWebAuthRoutes_AnswersAreNeverCached(t *testing.T) {
+	r := webAuthRouter(&config.Config{JWTSecret: "s", WebAppOrigin: "https://app.test"})
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodPost, "/api/auth/web/login"},
+		{http.MethodGet, "/api/auth/web/me"},
+	} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(rt.method, rt.path, strings.NewReader(`{}`)))
+		if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Vary") != "Cookie, Origin" {
+			t.Errorf("%s %s (%d): Cache-Control %q Vary %q", rt.method, rt.path, w.Code, w.Header().Get("Cache-Control"), w.Header().Get("Vary"))
+		}
+	}
+}
+
 // The web app arrives through a proxy, so many people share one address. Sign-in
 // is limited per account from that address (one person's failures don't block a
 // colleague), and code entry per pending sign-in (spending login's budget does
