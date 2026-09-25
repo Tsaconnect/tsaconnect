@@ -238,7 +238,9 @@ func TestPaycrestRejected_OnlyARefusalIsSafeToResend(t *testing.T) {
 	}{
 		{&PaycrestRequestError{Status: 400}, true},
 		{&PaycrestRequestError{Status: 422}, true},
-		{fmt.Errorf("opening: %w", &PaycrestRequestError{Status: 409}), true},
+		{fmt.Errorf("opening: %w", &PaycrestRequestError{Status: 422}), true},
+		{&PaycrestRequestError{Status: 409}, false}, // may mean the order already exists
+		{&PaycrestRequestError{Status: 401}, false},
 		{&PaycrestRequestError{Status: 500}, false},
 		{errors.New("paycrest offramp: context deadline exceeded"), false},
 	} {
@@ -276,5 +278,39 @@ func TestPaycrestSellPayout_FloorsToTheKoboAgainstTheMerchant(t *testing.T) {
 	}
 	if got := paycrestSellPayout(naira("0.5"), naira("0.6"), naira("1500")); got.Sign() != 0 {
 		t.Fatalf("a fee larger than the deposit paid ₦%s", got.FloatString(2))
+	}
+}
+
+// Paycrest's raw rate is stored after Paycrest opened the order, so it must
+// always fit its column: a refused insert would leave a live deposit address we
+// hold no row for. A long rate is cut DOWN (a stricter check, never a looser one).
+func TestStorableRawRate_AlwaysFitsAndNeverRoundsUp(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"1362.66", "1362.66"},
+		{" 1500 ", "1500"},
+		{"1362.66999999999999999999999999999", "1362.66999999"}, // cut down, not rounded up to 1362.67
+		{"1e3", ""}, {"-1500", ""}, {"NaN", ""}, {"", ""}, {"abc", ""},
+		{"123456789012345678901234567890123.5", ""}, // too big to fit even at 8 decimals
+	} {
+		got := storableRawRate(tc.in)
+		if got != tc.want {
+			t.Errorf("storableRawRate(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if len(got) > rawRateColumnLen {
+			t.Errorf("storableRawRate(%q) = %q overflows the column", tc.in, got)
+		}
+	}
+}
+
+func TestCreateSellForFiat_AnOverlongPaycrestRateIsStoredCutDownAndStillChecked(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	withRate(r, "1500")
+	r.client.offrampRate = "1500.00000000000000000000000000000001"
+	order, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, "50000.00"), false, nil)
+	if err != nil {
+		t.Fatalf("an overlong rate broke the order: %v", err)
+	}
+	if order.RawRate != "1500.00000000" {
+		t.Fatalf("raw rate stored as %q", order.RawRate)
 	}
 }

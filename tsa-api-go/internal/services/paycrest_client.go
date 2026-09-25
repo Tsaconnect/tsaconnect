@@ -144,12 +144,13 @@ func (e *PaycrestRequestError) Error() string {
 	return fmt.Sprintf("paycrest %s: HTTP %d: %s", e.Op, e.Status, e.Msg)
 }
 
-// paycrestRejected reports a request Paycrest refused outright (4xx): it saw
-// the request and created nothing, so sending a corrected one cannot duplicate
-// an order. A 5xx or a lost answer is NOT this — an order may exist.
+// paycrestRejected reports a request Paycrest refused as invalid (400, 422): it
+// read the request, found it wrong and created nothing, so a corrected one
+// cannot duplicate an order. Nothing else counts — not a 409 (which can mean
+// the thing already exists), not a 5xx or a lost answer (an order may exist).
 func paycrestRejected(err error) bool {
 	var e *PaycrestRequestError
-	return errors.As(err, &e) && e.Status >= 400 && e.Status < 500
+	return errors.As(err, &e) && (e.Status == 400 || e.Status == 422)
 }
 
 func paycrestError(op string, status int, body []byte) error {

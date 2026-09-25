@@ -352,6 +352,36 @@ func keepSurplusFeePercent(tokens *big.Rat, rawRate, base string, owed *big.Rat)
 	return stepsToFeePercent(lo, surplusFeeStepsPerPercent), lo == top && top > baseSteps
 }
 
+// rawRateColumnLen is PaycrestOrderRecord.RawRate's column size.
+const rawRateColumnLen = 32
+
+// storableRawRate is Paycrest's raw order rate as it can be stored. The string
+// comes from Paycrest, unbounded, and the row is written AFTER Paycrest opened
+// the order — a value the column refuses would leave a live deposit address we
+// hold no row for. A plain positive decimal that fits is kept as it is; a longer
+// one is cut DOWN to 8 decimals (a lower rate only makes the payout check
+// stricter, never looser); anything else — or still too long — is "", which
+// sends keepSurplusPayoutCovers back to sellPayoutCovers.
+func storableRawRate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !plainDecimal.MatchString(raw) {
+		return ""
+	}
+	if len(raw) <= rawRateColumnLen {
+		return raw
+	}
+	r, ok := new(big.Rat).SetString(raw)
+	if !ok || r.Sign() <= 0 {
+		return ""
+	}
+	scaled := new(big.Int).Quo(new(big.Int).Mul(r.Num(), big.NewInt(100_000_000)), r.Denom())
+	cut := new(big.Rat).SetFrac(scaled, big.NewInt(100_000_000)).FloatString(8)
+	if len(cut) > rawRateColumnLen {
+		return ""
+	}
+	return cut
+}
+
 // keepSurplusPayoutCovers is the payout check for a KeepSurplus order, from
 // Paycrest's own answer where it gives enough: the deposit less the fee — the
 // larger of the fee Paycrest reported and our model of it at the percent it

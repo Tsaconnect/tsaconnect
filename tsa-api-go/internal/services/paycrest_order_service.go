@@ -939,7 +939,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		ChainKey:          venue.ChainKey,
 		Network:           venue.Network,
 		Rate:              userRate("sell", order.Rate, feePercent),
-		RawRate:           strings.TrimSpace(order.Rate),
+		RawRate:           storableRawRate(order.Rate),
 		TokenAmount:       tokenAmount,
 		ProviderID:        paycrestProviderOf(order, venue),
 		SenderFee:         order.SenderFee,
