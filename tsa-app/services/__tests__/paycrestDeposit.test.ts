@@ -257,6 +257,18 @@ describe('sendPaycrestDeposit', () => {
     expect(mockSignTransaction).not.toHaveBeenCalled();
   });
 
+  it('states an L2-sized gas shortfall as a real amount, with the unit and her balance', async () => {
+    // 65,000 gas at 0.005 gwei = 0.000000325 ETH — six decimals would print "0.000000".
+    mockPrepare.mockResolvedValue({ success: true, data: { ...prepared, gasPrice: '5000000' } });
+    const err = await sendPaycrestDeposit(order, '0xfrom', 0).catch((e: Error) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('about 0.00000033 ETH');
+    expect((err as Error).message).toContain('you have 0');
+    expect((err as Error).message).toContain('on Base');
+    expect((err as Error).message).not.toContain('0.000000.');
+  });
+
   it('sends when the gas cost fits the native balance', async () => {
     await expect(sendPaycrestDeposit(order, '0xfrom', 0.01)).resolves.toBe('0xhash');
   });
@@ -430,5 +442,12 @@ describe('fmtTokenAmount', () => {
     expect(fmtTokenAmount(33.5)).toBe('33.5');
     expect(fmtTokenAmount(1234.567)).toBe('1,234.57');
     expect(fmtTokenAmount(0.0840001)).toBe('0.084');
+  });
+
+  it('keeps two significant digits where six decimals would round to zero', () => {
+    expect(fmtTokenAmount(0.000000325)).toBe('0.00000033');
+    expect(fmtTokenAmount(0.0000001)).toBe('0.0000001');
+    expect(fmtTokenAmount(0.0000005)).toBe('0.000001'); // at the boundary: six decimals already non-zero
+    expect(fmtTokenAmount(0)).toBe('0');
   });
 });

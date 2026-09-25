@@ -118,9 +118,12 @@ export const CHAIN_LABELS: Record<string, string> = {
   ethereum: 'Ethereum',
 };
 
-/** A token amount for display: two decimals from one up, six below. */
+/** A token amount for display: two decimals from one up, six below — or, for
+ *  an amount six decimals would round to zero (L2 gas), two significant digits. */
 export const fmtTokenAmount = (n: number): string =>
-  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
+  n > 0 && n < 0.0000005
+    ? n.toLocaleString(undefined, { maximumSignificantDigits: 2 })
+    : n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** The wallet's gas balance on a chain, or null when balances aren't known. */
 export function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | null): number | null {
@@ -312,8 +315,10 @@ function assertGasAffordable(
     return; // unparseable gas figures are the RPC's problem, not a reason to block
   }
   if (cost > 0 && cost > nativeBalance) {
+    const label = CHAIN_LABELS[chain] ?? chain;
     throw new Error(
-      `Not enough ${nativeSymbol} on ${chain} to pay gas — this transfer needs about ${cost.toFixed(6)}.`,
+      `Not enough ${nativeSymbol} on ${label} to pay gas — this transfer needs about ${fmtTokenAmount(cost)} ${nativeSymbol} ` +
+        `and you have ${fmtTokenAmount(nativeBalance)}. Add a little ${nativeSymbol} on ${label} and try again.`,
     );
   }
 }
