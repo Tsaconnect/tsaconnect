@@ -2,11 +2,15 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // PriceData holds current price information for a coin.
@@ -47,6 +51,20 @@ type MarketData struct {
 	LastUpdated              string  `json:"last_updated"`
 }
 
+// Candle is one OHLC bar. Timestamp is the bar's close time in ms, as CoinGecko reports it.
+type Candle struct {
+	Timestamp int64   `json:"timestamp"`
+	Open      float64 `json:"open"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+}
+
+// ErrUnknownSymbol means the symbol has no CoinGecko mapping, so there is no data to fetch.
+var ErrUnknownSymbol = errors.New("unknown symbol")
+
+const coinGeckoBaseURL = "https://api.coingecko.com/api/v3"
+
 type cacheEntry struct {
 	data      map[string]PriceData
 	expiresAt time.Time
@@ -58,6 +76,18 @@ type PriceService struct {
 	cache      sync.Map
 	httpClient *http.Client
 	cacheTTL   time.Duration
+	baseURL    string
+
+	// Chart series (history, OHLC) change slowly and every token screen asks for
+	// them, so they are cached per symbol+range to stay inside CoinGecko's free tier.
+	seriesCache  sync.Map
+	seriesTTL    time.Duration
+	seriesFlight singleflight.Group // one upstream call per key, however many requests miss at once
+}
+
+type seriesEntry struct {
+	value     any
+	expiresAt time.Time
 }
 
 // NewPriceService creates a new PriceService with default configuration.
@@ -87,6 +117,8 @@ func NewPriceService() *PriceService {
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		cacheTTL:   60 * time.Second,
+		baseURL:    coinGeckoBaseURL,
+		seriesTTL:  5 * time.Minute,
 	}
 }
 
@@ -121,8 +153,8 @@ func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error
 	}
 
 	url := fmt.Sprintf(
-		"https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true",
-		strings.Join(ids, ","),
+		"%s/simple/price?ids=%s&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true",
+		ps.baseURL, strings.Join(ids, ","),
 	)
 
 	resp, err := ps.httpClient.Get(url)
@@ -184,47 +216,150 @@ func (ps *PriceService) SeedPriceForTest(symbol string, pd PriceData) {
 	})
 }
 
-// GetHistoricalPrice fetches historical price data for a symbol over the specified number of days.
+// SetBaseURLForTest points the service at a fake CoinGecko. Test-only helper.
+func (ps *PriceService) SetBaseURLForTest(url string) {
+	ps.baseURL = url
+}
+
+// GetHistoricalPrice fetches historical price data for a symbol. days is snapped
+// up to a chart range (see SnapChartDays) so the cache has a handful of keys per
+// coin rather than 365 — the endpoint is public and each miss costs a CoinGecko call.
 func (ps *PriceService) GetHistoricalPrice(symbol string, days int) ([]PricePoint, error) {
-	upper := strings.ToUpper(symbol)
-	coinID, ok := ps.coinIDs[upper]
-	if !ok {
-		return nil, fmt.Errorf("unknown symbol: %s", symbol)
-	}
-
-	url := fmt.Sprintf(
-		"https://api.coingecko.com/api/v3/coins/%s/market_chart?vs_currency=usd&days=%d",
-		coinID, days,
-	)
-
-	resp, err := ps.httpClient.Get(url)
+	coinID, err := ps.coinID(symbol)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch historical prices: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
+	days = SnapChartDays(days)
+	key := fmt.Sprintf("history:%s:%d", coinID, days)
+	return cachedSeries(ps, key, func() ([]PricePoint, error) {
+		var raw struct {
+			Prices [][]float64 `json:"prices"`
+		}
+		url := fmt.Sprintf("%s/coins/%s/market_chart?vs_currency=usd&days=%d", ps.baseURL, coinID, days)
+		if err := ps.getJSON(url, &raw); err != nil {
+			return nil, fmt.Errorf("failed to fetch historical prices: %w", err)
+		}
+		points := make([]PricePoint, 0, len(raw.Prices))
+		for _, p := range raw.Prices {
+			if len(p) >= 2 {
+				points = append(points, PricePoint{Timestamp: int64(p[0]), Price: p[1]})
+			}
+		}
+		return points, nil
+	})
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("CoinGecko API returned status %d", resp.StatusCode)
+// GetOHLC fetches OHLC candles for a symbol. CoinGecko only serves fixed ranges,
+// so days is snapped up to the nearest one (see SnapChartDays). Bar width is set
+// by CoinGecko: 30 min up to 2 days, 4 h up to 30 days, 4 days beyond.
+func (ps *PriceService) GetOHLC(symbol string, days int) ([]Candle, error) {
+	coinID, err := ps.coinID(symbol)
+	if err != nil {
+		return nil, err
 	}
+	days = SnapChartDays(days)
+	key := fmt.Sprintf("ohlc:%s:%d", coinID, days)
+	return cachedSeries(ps, key, func() ([]Candle, error) {
+		var raw [][]float64
+		url := fmt.Sprintf("%s/coins/%s/ohlc?vs_currency=usd&days=%d", ps.baseURL, coinID, days)
+		if err := ps.getJSON(url, &raw); err != nil {
+			return nil, fmt.Errorf("failed to fetch OHLC: %w", err)
+		}
+		candles := make([]Candle, 0, len(raw))
+		for _, r := range raw {
+			if len(r) >= 5 {
+				candles = append(candles, Candle{Timestamp: int64(r[0]), Open: r[1], High: r[2], Low: r[3], Close: r[4]})
+			}
+		}
+		return candles, nil
+	})
+}
 
-	var raw struct {
-		Prices [][]float64 `json:"prices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("failed to decode historical price response: %w", err)
-	}
+// chartDayBuckets are the only `days` values CoinGecko's /ohlc endpoint accepts;
+// history uses the same set so both series share a small, bounded cache key space.
+var chartDayBuckets = []int{1, 7, 14, 30, 90, 180, 365}
 
-	points := make([]PricePoint, 0, len(raw.Prices))
-	for _, p := range raw.Prices {
-		if len(p) >= 2 {
-			points = append(points, PricePoint{
-				Timestamp: int64(p[0]),
-				Price:     p[1],
-			})
+// SnapChartDays rounds days up to the nearest chart range, capped at a year.
+func SnapChartDays(days int) int {
+	for _, b := range chartDayBuckets {
+		if days <= b {
+			return b
 		}
 	}
+	return chartDayBuckets[len(chartDayBuckets)-1]
+}
 
-	return points, nil
+// AggregateCandles merges consecutive candles so at most maxBars remain. Groups
+// are counted back from the newest bar, so only the oldest bar can be partial.
+func AggregateCandles(candles []Candle, maxBars int) []Candle {
+	n := len(candles)
+	if maxBars <= 0 || n <= maxBars {
+		return candles
+	}
+	size := (n + maxBars - 1) / maxBars
+	out := make([]Candle, 0, maxBars)
+	lead := n % size
+	if lead > 0 {
+		out = append(out, mergeCandles(candles[:lead]))
+	}
+	for lo := lead; lo < n; lo += size {
+		out = append(out, mergeCandles(candles[lo:lo+size]))
+	}
+	return out
+}
+
+func mergeCandles(group []Candle) Candle {
+	m := Candle{Timestamp: group[len(group)-1].Timestamp, Open: group[0].Open, High: group[0].High, Low: group[0].Low, Close: group[len(group)-1].Close}
+	for _, c := range group[1:] {
+		m.High = math.Max(m.High, c.High)
+		m.Low = math.Min(m.Low, c.Low)
+	}
+	return m
+}
+
+func (ps *PriceService) coinID(symbol string) (string, error) {
+	id, ok := ps.coinIDs[strings.ToUpper(symbol)]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrUnknownSymbol, symbol)
+	}
+	return id, nil
+}
+
+func (ps *PriceService) getJSON(url string, out any) error {
+	resp, err := ps.httpClient.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("CoinGecko API returned status %d", resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// cachedSeries returns the cached value for key, or fetches and caches it.
+// Concurrent misses on one key share a single fetch. Failures are not cached,
+// so a CoinGecko 429 does not stick for the whole TTL.
+func cachedSeries[T any](ps *PriceService, key string, fetch func() (T, error)) (T, error) {
+	if entry, ok := ps.seriesCache.Load(key); ok {
+		se := entry.(*seriesEntry)
+		if time.Now().Before(se.expiresAt) {
+			return se.value.(T), nil
+		}
+	}
+	v, err, _ := ps.seriesFlight.Do(key, func() (any, error) {
+		v, err := fetch()
+		if err != nil {
+			return nil, err
+		}
+		ps.seriesCache.Store(key, &seriesEntry{value: v, expiresAt: time.Now().Add(ps.seriesTTL)})
+		return v, nil
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return v.(T), nil
 }
 
 // GetMarketData fetches comprehensive market data for a symbol.
@@ -236,8 +371,8 @@ func (ps *PriceService) GetMarketData(symbol string) (*MarketData, error) {
 	}
 
 	url := fmt.Sprintf(
-		"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=%s&order=market_cap_desc&sparkline=false",
-		coinID,
+		"%s/coins/markets?vs_currency=usd&ids=%s&order=market_cap_desc&sparkline=false",
+		ps.baseURL, coinID,
 	)
 
 	resp, err := ps.httpClient.Get(url)

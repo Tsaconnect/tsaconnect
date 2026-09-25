@@ -173,10 +173,14 @@ export function formatPrice(usdAmount: number, options: FormatPriceOptions = {})
 }
 
 /**
- * Format a USD price (always shows $).
+ * Format a USD price (always shows $). `maxDecimals` (default 2) lets price
+ * displays show a stablecoin's 0.999851 instead of rounding it to 1.00.
  */
-export function formatUSD(usdAmount: number, options: { compact?: boolean; showCode?: boolean } = {}): string {
-  const { compact = false, showCode = false } = options;
+export function formatUSD(
+  usdAmount: number,
+  options: { compact?: boolean; showCode?: boolean; maxDecimals?: number } = {},
+): string {
+  const { compact = false, showCode = false, maxDecimals = 2 } = options;
 
   // Sub-cent prices round to "$0.00" at 2 decimals — use leading-zero
   // compression instead. Compact mode keeps its abbreviation contract.
@@ -190,7 +194,7 @@ export function formatUSD(usdAmount: number, options: { compact?: boolean; showC
       style: compact ? "decimal" : "currency",
       currency: compact ? undefined : "USD",
       minimumFractionDigits: compact ? 0 : 2,
-      maximumFractionDigits: compact ? 0 : 2,
+      maximumFractionDigits: compact ? 0 : Math.max(2, maxDecimals),
       notation: compact ? "compact" : "standard",
       compactDisplay: "short",
     }).format(usdAmount);

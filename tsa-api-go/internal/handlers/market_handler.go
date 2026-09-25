@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"math"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,38 +50,79 @@ func (h *Handlers) GetMarketOverview(c *gin.Context) {
 }
 
 // GetAssetPriceHistory returns price history for a symbol.
-// GET /api/market/history/:symbol — public, days/interval params, sample data.
+// GET /api/market/history/:symbol — public. `points` caps the series evenly
+// (the chart asks for this); without it the legacy `interval` sampling applies,
+// which installed app builds rely on — it returns the same point count as before.
 func (h *Handlers) GetAssetPriceHistory(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
-	days, _ := strconv.Atoi(c.DefaultQuery("days", "30"))
-	interval := c.DefaultQuery("interval", "1d")
-
-	if days < 1 {
-		days = 30
-	}
-	if days > 365 {
-		days = 365
-	}
+	days := services.SnapChartDays(clampQueryInt(c, "days", 30, 1, 365))
 
 	history, err := h.PriceService.GetHistoricalPrice(symbol, days)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch price history"})
+		respondPriceSeriesError(c, err, "Failed to fetch price history")
 		return
 	}
 
-	// Sample data based on interval
-	sampled := sampleData(history, interval)
+	data := gin.H{"symbol": symbol, "days": days}
+	if c.Query("points") != "" {
+		points := clampQueryInt(c, "points", 120, 2, 500)
+		data["points"] = points
+		data["history"] = evenlySample(history, points)
+	} else {
+		interval := c.DefaultQuery("interval", "1d")
+		data["interval"] = interval
+		data["history"] = sampleData(history, interval)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Price history retrieved successfully",
+		"data":    data,
+	})
+}
+
+// GetAssetOHLC returns OHLC candles for a symbol.
+// GET /api/market/ohlc/:symbol?days=&candles= — public. days is snapped to a
+// range CoinGecko serves; candles caps the bar count by merging neighbours.
+func (h *Handlers) GetAssetOHLC(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	days := services.SnapChartDays(clampQueryInt(c, "days", 1, 1, 365))
+	maxCandles := clampQueryInt(c, "candles", 60, 10, 200)
+
+	candles, err := h.PriceService.GetOHLC(symbol, days)
+	if err != nil {
+		respondPriceSeriesError(c, err, "Failed to fetch candles")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Candles retrieved successfully",
 		"data": gin.H{
-			"symbol":   symbol,
-			"days":     days,
-			"interval": interval,
-			"history":  sampled,
+			"symbol":  symbol,
+			"days":    days,
+			"candles": services.AggregateCandles(candles, maxCandles),
 		},
 	})
+}
+
+func respondPriceSeriesError(c *gin.Context, err error, message string) {
+	if errors.Is(err, services.ErrUnknownSymbol) {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "No price data for this asset"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": message})
+}
+
+// clampQueryInt reads an int query param. Absent, unparseable or below-lo values
+// fall back to def (so ?days=0 still means the 30-day default); above-hi values
+// are capped at hi.
+func clampQueryInt(c *gin.Context, key string, def, lo, hi int) int {
+	v, err := strconv.Atoi(c.Query(key))
+	if err != nil || v < lo {
+		return def
+	}
+	return min(v, hi)
 }
 
 // GetAssetMarketDetails returns detailed market data for a symbol.
@@ -262,14 +303,8 @@ func getAssetName(symbol string) string {
 
 // sampleData downsamples price history based on the requested interval.
 func sampleData(data []services.PricePoint, interval string) []services.PricePoint {
-	if len(data) == 0 {
-		return data
-	}
-
 	var step int
 	switch interval {
-	case "1h":
-		step = 1
 	case "4h":
 		step = 4
 	case "1d":
@@ -277,35 +312,21 @@ func sampleData(data []services.PricePoint, interval string) []services.PricePoi
 	case "1w":
 		step = 168
 	default:
-		step = 1
-	}
-
-	if step <= 1 {
 		return data
 	}
+	return evenlySample(data, max(1, len(data)/step)+1)
+}
 
-	// Estimate points per hour — if data has fewer points than hours, adjust
-	totalPoints := len(data)
-	sampleSize := int(math.Max(1, float64(totalPoints)/float64(step)))
-
-	if sampleSize >= totalPoints {
+// evenlySample picks n points spread evenly across data, always keeping the
+// first and last so a chart spans the whole requested range.
+func evenlySample(data []services.PricePoint, n int) []services.PricePoint {
+	if n <= 1 || len(data) <= n {
 		return data
 	}
-
-	result := make([]services.PricePoint, 0, sampleSize)
-	stepSize := float64(totalPoints) / float64(sampleSize)
-	for i := 0; i < sampleSize; i++ {
-		idx := int(float64(i) * stepSize)
-		if idx >= totalPoints {
-			idx = totalPoints - 1
-		}
-		result = append(result, data[idx])
+	out := make([]services.PricePoint, n)
+	last := len(data) - 1
+	for i := range out {
+		out[i] = data[i*last/(n-1)]
 	}
-
-	// Always include the last point
-	if len(result) > 0 && result[len(result)-1].Timestamp != data[totalPoints-1].Timestamp {
-		result = append(result, data[totalPoints-1])
-	}
-
-	return result
+	return out
 }

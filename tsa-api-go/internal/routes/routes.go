@@ -323,6 +323,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		marketGroup.GET("/overview", h.GetMarketOverview)
 		marketGroup.GET("/history/:symbol", h.GetAssetPriceHistory)
+		marketGroup.GET("/ohlc/:symbol", h.GetAssetOHLC)
 		marketGroup.GET("/assets/:symbol", h.GetAssetMarketDetails)
 		marketGroup.GET("/search/:query", h.SearchAssets)
 	}
