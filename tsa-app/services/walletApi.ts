@@ -61,6 +61,8 @@ interface ApiResponse<T = any> {
    * server may have acted before its reply was lost.
    */
   unanswered?: true;
+  /** HTTP status of the server's answer, where a caller needs to tell 404 from a failure. */
+  status?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -740,7 +742,7 @@ export async function getTokenPriceHistory(
     // Unwrap to the bare point array this function's signature promises, while
     // still accepting a plain array in case the shape is ever flattened.
     const points = Array.isArray(json?.data) ? json.data : json?.data?.history;
-    return { ...json, data: Array.isArray(points) ? points : [] };
+    return { ...json, status: response.status, data: Array.isArray(points) ? points : [] };
   } catch (error: any) {
     console.error('Get token price history error:', error);
     return { success: false, message: error.message || 'Failed to fetch price history' };
@@ -764,7 +766,7 @@ export async function getTokenOHLC(
     );
     const json = await response.json();
     const rows = json?.data?.candles;
-    return { ...json, data: Array.isArray(rows) ? rows : [] };
+    return { ...json, status: response.status, data: Array.isArray(rows) ? rows : [] };
   } catch (error: any) {
     console.error('Get token OHLC error:', error);
     return { success: false, message: error.message || 'Failed to fetch candles' };

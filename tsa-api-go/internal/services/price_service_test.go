@@ -201,3 +201,82 @@ func TestAggregateCandles(t *testing.T) {
 		}
 	})
 }
+
+// fakeClock lets cache-expiry tests move time without sleeping.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func TestSeries_ServesLastGoodDataWhenCoinGeckoFails(t *testing.T) {
+	var fail atomic.Bool
+	ps, hits := newTestPriceService(t, func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`[[1000,1,2,0.5,1.5],[2000,1.5,2,1,1.8]]`))
+	})
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	ps.now = clock.now
+
+	if _, err := ps.GetOHLC("ETH", 1); err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	clock.advance(10 * time.Minute) // past the 24H TTL, inside the stale window
+
+	candles, err := ps.GetOHLC("ETH", 1)
+	if err != nil || len(candles) != 2 {
+		t.Fatalf("want the last good 2 candles while CoinGecko is throttling, got %v, %v", candles, err)
+	}
+	if *hits != 2 {
+		t.Errorf("hits = %d, want 2 (expired entry must still try upstream first)", *hits)
+	}
+}
+
+func TestSeries_StaleDataHasAnAgeLimit(t *testing.T) {
+	var fail atomic.Bool
+	ps, _ := newTestPriceService(t, func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`[[1000,1,2,0.5,1.5],[2000,1.5,2,1,1.8]]`))
+	})
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	ps.now = clock.now
+
+	if _, err := ps.GetOHLC("ETH", 1); err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	clock.advance(2 * time.Hour) // a "24H" chart two hours old is no longer the last 24 hours
+
+	if _, err := ps.GetOHLC("ETH", 1); err == nil {
+		t.Fatal("want an error once the stale copy is too old to pass off as current")
+	}
+}
+
+func TestSeriesTTL_GrowsWithRange(t *testing.T) {
+	if !(seriesTTL(1) < seriesTTL(7) && seriesTTL(7) < seriesTTL(30) && seriesTTL(30) < seriesTTL(365)) {
+		t.Fatalf("TTLs must grow with the range: 1d=%v 7d=%v 30d=%v 365d=%v",
+			seriesTTL(1), seriesTTL(7), seriesTTL(30), seriesTTL(365))
+	}
+	if seriesTTL(1) > 5*time.Minute {
+		t.Errorf("24H TTL = %v; a day chart must not lag more than 5 minutes", seriesTTL(1))
+	}
+}
+
+func TestCoinIDs_WalletTokensAreMappedAndMCGPIsNot(t *testing.T) {
+	ps := NewPriceService()
+	for _, sym := range []string{"POL", "SUI", "WBTC", "WETH", "USDT", "S"} {
+		if _, err := ps.coinID(sym); err != nil {
+			t.Errorf("%s: %v", sym, err)
+		}
+	}
+	// MCGP is not listed on CoinGecko; a mapping only produces upstream 404s.
+	if _, err := ps.coinID("MCGP"); !errors.Is(err, ErrUnknownSymbol) {
+		t.Errorf("MCGP: err = %v, want ErrUnknownSymbol", err)
+	}
+}

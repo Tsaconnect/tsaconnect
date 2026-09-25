@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -81,14 +82,33 @@ type PriceService struct {
 	// Chart series (history, OHLC) change slowly and every token screen asks for
 	// them, so they are cached per symbol+range to stay inside CoinGecko's free tier.
 	seriesCache  sync.Map
-	seriesTTL    time.Duration
 	seriesFlight singleflight.Group // one upstream call per key, however many requests miss at once
+	now          func() time.Time
 }
 
 type seriesEntry struct {
 	value     any
-	expiresAt time.Time
+	fetchedAt time.Time
 }
+
+// seriesTTL is how long a chart series is served before CoinGecko is asked
+// again. Longer ranges move less per minute, so they can be cached longer.
+func seriesTTL(days int) time.Duration {
+	switch {
+	case days <= 1:
+		return 5 * time.Minute
+	case days <= 7:
+		return 15 * time.Minute
+	case days <= 30:
+		return 30 * time.Minute
+	default:
+		return time.Hour
+	}
+}
+
+// staleFactor bounds how long an expired series may stand in while CoinGecko
+// is failing (throttling, outage): 12 TTLs is an hour for 24H, a day for 1Y.
+const staleFactor = 12
 
 // NewPriceService creates a new PriceService with default configuration.
 func NewPriceService() *PriceService {
@@ -96,7 +116,6 @@ func NewPriceService() *PriceService {
 		coinIDs: map[string]string{
 			"S":     "sonic-3",
 			"tBNB":  "binancecoin",
-			"MCGP":  "maticgold-pro",
 			"USDT":  "tether",
 			"USDC":  "usd-coin",
 			"USDG":  "global-dollar",
@@ -114,11 +133,15 @@ func NewPriceService() *PriceService {
 			"AVAX":  "avalanche-2",
 			"ADA":   "cardano",
 			"XRP":   "ripple",
+			"POL":   "polygon-ecosystem-token",
+			"SUI":   "sui",
+			"WBTC":  "wrapped-bitcoin",
+			"WETH":  "weth",
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		cacheTTL:   60 * time.Second,
 		baseURL:    coinGeckoBaseURL,
-		seriesTTL:  5 * time.Minute,
+		now:        time.Now,
 	}
 }
 
@@ -231,7 +254,7 @@ func (ps *PriceService) GetHistoricalPrice(symbol string, days int) ([]PricePoin
 	}
 	days = SnapChartDays(days)
 	key := fmt.Sprintf("history:%s:%d", coinID, days)
-	return cachedSeries(ps, key, func() ([]PricePoint, error) {
+	return cachedSeries(ps, key, seriesTTL(days), func() ([]PricePoint, error) {
 		var raw struct {
 			Prices [][]float64 `json:"prices"`
 		}
@@ -259,7 +282,7 @@ func (ps *PriceService) GetOHLC(symbol string, days int) ([]Candle, error) {
 	}
 	days = SnapChartDays(days)
 	key := fmt.Sprintf("ohlc:%s:%d", coinID, days)
-	return cachedSeries(ps, key, func() ([]Candle, error) {
+	return cachedSeries(ps, key, seriesTTL(days), func() ([]Candle, error) {
 		var raw [][]float64
 		url := fmt.Sprintf("%s/coins/%s/ohlc?vs_currency=usd&days=%d", ps.baseURL, coinID, days)
 		if err := ps.getJSON(url, &raw); err != nil {
@@ -338,22 +361,29 @@ func (ps *PriceService) getJSON(url string, out any) error {
 }
 
 // cachedSeries returns the cached value for key, or fetches and caches it.
-// Concurrent misses on one key share a single fetch. Failures are not cached,
-// so a CoinGecko 429 does not stick for the whole TTL.
-func cachedSeries[T any](ps *PriceService, key string, fetch func() (T, error)) (T, error) {
+// Concurrent misses on one key share a single fetch. Failures are not cached;
+// while CoinGecko is failing, the last good value is served for up to
+// staleFactor TTLs so a throttled server still draws charts.
+func cachedSeries[T any](ps *PriceService, key string, ttl time.Duration, fetch func() (T, error)) (T, error) {
+	var stale *seriesEntry
 	if entry, ok := ps.seriesCache.Load(key); ok {
-		se := entry.(*seriesEntry)
-		if time.Now().Before(se.expiresAt) {
-			return se.value.(T), nil
+		stale = entry.(*seriesEntry)
+		if ps.now().Before(stale.fetchedAt.Add(ttl)) {
+			return stale.value.(T), nil
 		}
 	}
 	v, err, _ := ps.seriesFlight.Do(key, func() (any, error) {
 		v, err := fetch()
-		if err != nil {
-			return nil, err
+		if err == nil {
+			ps.seriesCache.Store(key, &seriesEntry{value: v, fetchedAt: ps.now()})
+			return v, nil
 		}
-		ps.seriesCache.Store(key, &seriesEntry{value: v, expiresAt: time.Now().Add(ps.seriesTTL)})
-		return v, nil
+		if stale != nil && ps.now().Before(stale.fetchedAt.Add(staleFactor*ttl)) {
+			log.Printf("[price] %s: CoinGecko failed, serving copy from %s ago: %v",
+				key, ps.now().Sub(stale.fetchedAt).Round(time.Second), err)
+			return stale.value, nil
+		}
+		return nil, err
 	})
 	if err != nil {
 		var zero T

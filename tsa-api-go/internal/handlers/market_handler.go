@@ -59,7 +59,7 @@ func (h *Handlers) GetAssetPriceHistory(c *gin.Context) {
 
 	history, err := h.PriceService.GetHistoricalPrice(symbol, days)
 	if err != nil {
-		respondPriceSeriesError(c, err, "Failed to fetch price history")
+		respondPriceSeriesError(c, err, "Price history is temporarily unavailable")
 		return
 	}
 
@@ -91,7 +91,7 @@ func (h *Handlers) GetAssetOHLC(c *gin.Context) {
 
 	candles, err := h.PriceService.GetOHLC(symbol, days)
 	if err != nil {
-		respondPriceSeriesError(c, err, "Failed to fetch candles")
+		respondPriceSeriesError(c, err, "Candles are temporarily unavailable")
 		return
 	}
 
@@ -111,7 +111,9 @@ func respondPriceSeriesError(c *gin.Context, err error, message string) {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "No price data for this asset"})
 		return
 	}
-	c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": message})
+	// Anything else is CoinGecko failing (throttling, outage) with no usable cached
+	// copy: temporary, so 503 tells the app to offer a retry rather than "no data".
+	c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": message})
 }
 
 // clampQueryInt reads an int query param. Absent, unparseable or below-lo values
