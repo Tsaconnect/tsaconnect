@@ -78,7 +78,7 @@ describe('business area', () => {
     expect(within(drawer).getByText('₦84,500.00', { selector: 'b' })).toBeInTheDocument();
     // Who paid, their own reference and what it was for — each labelled.
     expect(within(drawer).getByText('TOLUWANI ADEYEMI')).toBeInTheDocument();
-    expect(within(drawer).getByText('Verified')).toBeInTheDocument();
+    expect(within(drawer).queryByText('Verified')).not.toBeInTheDocument();
     expect(within(drawer).getByText('Your reference').nextElementSibling).toHaveTextContent('PNR-K8Q2ZL');
     expect(within(drawer).getByText('For').nextElementSibling).toHaveTextContent(payment.description);
     expect(within(drawer).getByText('payment.succeeded')).toBeInTheDocument();

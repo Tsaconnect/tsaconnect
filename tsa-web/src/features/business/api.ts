@@ -76,7 +76,7 @@ export const listPayments = (mode: Mode, p: PaymentFilter, signal?: AbortSignal)
     ...(p.limit ? { limit: String(p.limit) } : {}),
   })}`, { signal });
 
-/** Who paid: a name, and whether it is the name on a verified ID. Never contact details. */
+/** Who paid: a name (the name on their verified ID when verified). Never contact details. */
 export type Payer = { name: string; verified: boolean };
 
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>

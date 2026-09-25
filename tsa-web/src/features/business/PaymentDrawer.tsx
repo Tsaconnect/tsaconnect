@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { BadgeCheck } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { dateTime, naira } from '@/lib/format';
@@ -67,16 +66,7 @@ function PaidBy({ payer, status }: { payer: Payer | null; status: Payment['statu
   if (!payer) {
     return <span className="text-text-secondary">{status === 'pending' || status === 'expired' ? 'No one yet' : '—'}</span>;
   }
-  return (
-    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
-      <b className="font-semibold">{payer.name}</b>
-      {payer.verified && (
-        <span className="inline-flex items-center gap-1 rounded-full bg-success-bg px-2 py-0.5 text-caption font-semibold text-success-strong">
-          <BadgeCheck aria-hidden className="size-3.5" /> Verified
-        </span>
-      )}
-    </span>
-  );
+  return <b className="font-semibold">{payer.name}</b>;
 }
 
 function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Payer | null; deliveries: Delivery[] }) {
