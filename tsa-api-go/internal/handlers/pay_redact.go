@@ -37,6 +37,10 @@ func payOrderView(o *models.PaycrestOrderRecord) *models.PaycrestOrderRecord {
 	v.PayoutBankCode = ""
 	v.PayoutAccountName = ""
 	v.PayoutAccount = payMaskAccount(o.PayoutAccount)
+	// Our fee on a pay order is chosen per order to take the deposit's cushion:
+	// an internal figure, not one the payer was quoted (she sees the checkout's).
+	v.SenderFee = ""
+	v.SenderFeePercent = ""
 	return &v
 }
 
