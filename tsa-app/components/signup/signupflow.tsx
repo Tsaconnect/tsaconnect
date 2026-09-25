@@ -14,20 +14,11 @@ import { api } from '../services/api';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import { Card, Spinner, Text } from '@/components/ui';
-import { SignupData } from './signup';
+import { SignupData, createEmptySignupData } from './signup';
 
 const SignupFlow = () => {
   const { colors, spacing, radius } = useTheme();
-  const [signupData, setSignupData] = useState<SignupData>({
-    name: '',
-    username: '',
-    email: '',
-    phoneNumber: '',
-    password: '',
-    confirmPassword: '',
-    address: '',
-    referralCode: '',
-  });
+  const [signupData, setSignupData] = useState<SignupData>(createEmptySignupData);
   const [loading, setLoading] = useState(false);
 
   const updateSignupData = (data: Partial<SignupData>) => {
@@ -43,8 +34,6 @@ const SignupFlow = () => {
         email: signupData.email.trim().toLowerCase(),
         password: signupData.password,
         confirmPassword: signupData.confirmPassword,
-        phoneNumber: signupData.phoneNumber.trim(),
-        address: signupData.address.trim(),
         referralCode: signupData.referralCode?.trim().toLowerCase() || undefined,
       };
 

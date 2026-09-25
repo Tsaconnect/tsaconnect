@@ -32,8 +32,6 @@ type FieldErrors = {
   name?: string;
   username?: string;
   email?: string;
-  phoneNumber?: string;
-  address?: string;
   password?: string;
   confirmPassword?: string;
 };
@@ -98,7 +96,7 @@ const SignupScreen1: React.FC<SignupScreen1Props> = ({
     placeholder: string,
     field: keyof SignupData,
     options?: {
-      keyboardType?: 'default' | 'email-address' | 'phone-pad';
+      keyboardType?: 'default' | 'email-address';
       autoCapitalize?: 'none' | 'words';
       secureTextEntry?: boolean;
       toggleVisibility?: () => void;
@@ -167,8 +165,6 @@ const SignupScreen1: React.FC<SignupScreen1Props> = ({
       {renderInput('user', 'Full Name', 'name', { autoCapitalize: 'words' })}
       {renderInput('at', 'Username', 'username')}
       {renderInput('mail', 'Email Address', 'email', { keyboardType: 'email-address' })}
-      {renderInput('mobile', 'Phone Number (Optional)', 'phoneNumber', { keyboardType: 'phone-pad' })}
-      {renderInput('home', 'Address (Optional)', 'address')}
       {renderInput('lock', 'Password (min. 8 characters)', 'password', {
         secureTextEntry: !showPassword,
         toggleVisibility: () => setShowPassword(!showPassword),
