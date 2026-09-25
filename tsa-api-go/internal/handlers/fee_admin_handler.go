@@ -122,12 +122,8 @@ func (h *FeeAdminHandler) ListIntents(c *gin.Context) {
 		return
 	}
 	var states []models.FeeRateIntentState
-	if raw := strings.TrimSpace(c.Query("state")); raw != "" {
-		for _, s := range strings.Split(raw, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				states = append(states, models.FeeRateIntentState(s))
-			}
-		}
+	for _, s := range splitCommaList(c.Query("state")) {
+		states = append(states, models.FeeRateIntentState(s))
 	}
 	views, err := h.intents.ListViews(states...)
 	if err != nil {

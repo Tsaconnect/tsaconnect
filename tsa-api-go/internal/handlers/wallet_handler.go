@@ -555,12 +555,8 @@ func (h *Handlers) GetDiscoveredTokens(c *gin.Context) {
 
 	// Optional comma-separated chain filter; empty = query everything.
 	var chainKeys []string
-	if raw := strings.TrimSpace(c.Query("chains")); raw != "" {
-		for _, part := range strings.Split(raw, ",") {
-			if p := strings.TrimSpace(strings.ToLower(part)); p != "" {
-				chainKeys = append(chainKeys, p)
-			}
-		}
+	for _, p := range splitCommaList(c.Query("chains")) {
+		chainKeys = append(chainKeys, strings.ToLower(p))
 	}
 
 	if h.TokenDiscoveryService == nil || !h.TokenDiscoveryService.HasAnyProvider() {
@@ -956,9 +952,11 @@ func (h *Handlers) GetTransactionHistory(c *gin.Context) {
 	query := config.DB.Where("user_id = ?", user.ID)
 	countQuery := config.DB.Model(&models.WalletTransaction{}).Where("user_id = ?", user.ID)
 
-	if txType != "" {
-		query = query.Where("tx_type = ?", txType)
-		countQuery = countQuery.Where("tx_type = ?", txType)
+	// `type` may be one value or a comma list (the app's activity feed asks for
+	// its Wallet group as send,receive,approve,escrow).
+	if txTypes := splitCommaList(txType); len(txTypes) > 0 {
+		query = query.Where("tx_type IN ?", txTypes)
+		countQuery = countQuery.Where("tx_type IN ?", txTypes)
 	}
 
 	chainIDFilter := c.Query("chainId")

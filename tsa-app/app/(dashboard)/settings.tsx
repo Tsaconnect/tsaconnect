@@ -266,6 +266,12 @@ const SettingsScreen = () => {
           description: "Complete identity verification",
           onPress: () => router.push("/profile/kyc"),
         },
+        {
+          icon: "history",
+          label: "Activity",
+          description: "All your transactions in one place",
+          onPress: () => router.push("/activity"),
+        },
       ],
     },
     {

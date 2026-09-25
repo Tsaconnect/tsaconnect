@@ -1,22 +1,21 @@
 // components/activity/ActivityFeed.tsx
 //
 // Shared activity feed — wallet transactions + swaps + TP / cashback / orders /
-// services. Used full-screen (wallet history / global activity) and embedded
-// (wallet home / token detail). Restyled onto the TSA Signature design system
-// (@/theme tokens + @/components/ui primitives).
+// services / bills / Instant Transfer. Used full-screen (wallet history / global
+// activity) and embedded (wallet home / token detail), on the TSA Signature
+// design system (@/theme tokens + @/components/ui primitives).
 //
-// VISUAL/STRUCTURAL restyle only — all data fetching (`fetchActivityItems`),
-// pagination (page / hasMore / onLoadMore), filter toggling, pull-to-refresh,
-// the embedded "see all" footer, and per-item explorer-link navigation
-// (Linking.openURL) are preserved verbatim. Props interface + default export
-// are unchanged. The service still owns each item's data; its raw Ionicons icon
-// name is mapped to the registry and its tone is derived from theme tokens so
-// nothing is hardcoded and light/dark both come free.
-import React, { useState, useEffect, useCallback } from 'react';
+// Data and pagination come from `createActivityPager`, which merges the sources
+// newest first. A row opens its in-app screen when it has one (`href`), else its
+// explorer link. The service owns each item's data; its raw Ionicons icon name
+// is mapped to the registry and its tone derived from theme tokens, so light and
+// dark both come free.
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, FlatList, RefreshControl, Linking } from 'react-native';
+import { router } from 'expo-router';
 import {
-  fetchActivityItems, ALL_TYPES, TYPE_META,
-  type ActivityItem, type ActivityType,
+  createActivityPager, ALL_TYPES, TYPE_META,
+  type ActivityItem, type ActivityPager, type ActivityType,
 } from '../../services/activityService';
 import { txExplorerUrl, isNonEVMChain, type AnyChainKey } from '../../constants/chains';
 import { useTheme } from '@/theme';
@@ -28,7 +27,10 @@ import {
   PressableScale,
   Spinner,
   Text,
+  useToneColors,
 } from '@/components/ui';
+import type { StatusVisual } from '@/components/ui/statusMap';
+import { useFiatSymbol } from '@/hooks/useFiatSymbol';
 
 const PAGE_SIZE = 20;
 const EMBEDDED_SIZE = 5;
@@ -57,6 +59,8 @@ const TYPE_ICONS: Record<ActivityType, IconName> = {
   cashback: 'gift',
   order: 'cart',
   service: 'mobile',
+  bill: 'bolt',
+  it: 'bank',
 };
 
 function formatDate(iso: string): string {
@@ -79,6 +83,18 @@ function explorerUrl(item: ActivityItem): string | null {
   const chainKey =
     item.chainKey && isNonEVMChain(item.chainKey) ? (item.chainKey as AnyChainKey) : undefined;
   return txExplorerUrl(item.txHash, { chainId: item.chainId, chainKey }) ?? null;
+}
+
+/** Opens a row's in-app screen if it has one, else its explorer link. */
+export function openActivityItem(item: ActivityItem): boolean {
+  if (item.href) {
+    router.push(item.href as never);
+    return true;
+  }
+  const url = explorerUrl(item);
+  if (!url) return false;
+  Linking.openURL(url).catch(() => {});
+  return true;
 }
 
 // Map an activity status to a theme tone (color + tinted background).
@@ -104,9 +120,14 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge label={label} color={color} background={bg} size="sm" />;
 }
 
-function ActivityRow({ item }: { item: ActivityItem }) {
+function ToneBadge({ visual }: { visual: StatusVisual }) {
+  const { color, bg } = useToneColors(visual.tone);
+  return <Badge label={visual.label} color={color} background={bg} size="sm" />;
+}
+
+export function ActivityRow({ item }: { item: ActivityItem }) {
   const { colors, spacing, radius } = useTheme();
-  const url = explorerUrl(item);
+  const openable = !!item.href || !!explorerUrl(item);
   const iconName = ITEM_ICONS[item.iconName] ?? 'list';
   // Tone derived from the item's direction (credit = success), not the legacy
   // per-item hex. Falls back to the accent for neutral/outgoing entries.
@@ -116,8 +137,8 @@ function ActivityRow({ item }: { item: ActivityItem }) {
 
   return (
     <PressableScale
-      onPress={() => url && Linking.openURL(url)}
-      disabled={!url}
+      onPress={() => openActivityItem(item)}
+      disabled={!openable}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
@@ -157,7 +178,9 @@ function ActivityRow({ item }: { item: ActivityItem }) {
         <Text variant="caption" color="textMuted">
           {formatDate(item.timestamp)}
         </Text>
-        <StatusBadge status={item.status} />
+        {item.statusVisual
+          ? <ToneBadge visual={item.statusVisual} />
+          : <StatusBadge status={item.status} />}
       </View>
     </PressableScale>
   );
@@ -177,7 +200,6 @@ export default function ActivityFeed({ types = [], embedded = false, onSeeAll, s
   const { colors, spacing } = useTheme();
   const [activeTypes, setActiveTypes] = useState<ActivityType[]>(types.length > 0 ? types : []);
   const [items, setItems] = useState<ActivityItem[]>([]);
-  const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -185,24 +207,41 @@ export default function ActivityFeed({ types = [], embedded = false, onSeeAll, s
 
   const limit = embedded ? EMBEDDED_SIZE : PAGE_SIZE;
 
-  const load = useCallback(async (pg: number, refresh: boolean) => {
-    if (pg === 1) { refresh ? setRefreshing(true) : setLoading(true); }
-    else setLoadingMore(true);
+  // Read through a ref so the currency list loading does not restart the feed.
+  const symbolFor = useFiatSymbol();
+  const symbolForRef = useRef(symbolFor);
+  symbolForRef.current = symbolFor;
 
-    const fetched = await fetchActivityItems(activeTypes, pg, limit);
-    setItems(prev => pg === 1 ? fetched : [...prev, ...fetched]);
-    setHasMore(fetched.length >= limit && !embedded);
-    setPage(pg);
+  const pagerRef = useRef<ActivityPager | null>(null);
+
+  const load = useCallback(async (mode: 'initial' | 'refresh' | 'more') => {
+    let pager = pagerRef.current;
+    if (mode === 'more' && pager) {
+      setLoadingMore(true);
+    } else {
+      pager = createActivityPager(activeTypes, limit, {
+        symbolFor: (code) => symbolForRef.current(code),
+      });
+      pagerRef.current = pager;
+      mode === 'refresh' ? setRefreshing(true) : setLoading(true);
+    }
+
+    const fetched = await pager.next();
+    // A filter change or refresh started a new pager; this page belongs to the old one.
+    if (pagerRef.current !== pager) return;
+
+    setItems(prev => mode === 'more' ? [...prev, ...fetched] : fetched);
+    setHasMore(!embedded && pager.hasMore());
 
     setLoading(false);
     setRefreshing(false);
     setLoadingMore(false);
   }, [activeTypes, limit, embedded]);
 
-  useEffect(() => { load(1, false); }, [load]);
+  useEffect(() => { load('initial'); }, [load]);
 
-  const onRefresh = () => load(1, true);
-  const onLoadMore = () => { if (hasMore && !loadingMore) load(page + 1, false); };
+  const onRefresh = () => load('refresh');
+  const onLoadMore = () => { if (hasMore && !loadingMore && !loading) load('more'); };
 
   const toggleType = (t: ActivityType) => {
     setActiveTypes(prev => {
