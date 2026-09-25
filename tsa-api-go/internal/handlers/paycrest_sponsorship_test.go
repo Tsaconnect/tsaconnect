@@ -164,3 +164,49 @@ func TestPaycrestSponsorship_ServerSideRefusalLogsRedactedCause(t *testing.T) {
 		t.Fatalf("log leaked the provider key: %q", got)
 	}
 }
+
+// A relay that may already be on-chain is coded, so the app waits on the order
+// instead of offering to send the deposit again.
+func TestPaycrestSponsorship_RelayInProgressIsCoded409(t *testing.T) {
+	h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: services.ErrSponsorshipInProgress})
+	body := `{"validAfter":0,"validBefore":1790000000,"nonce":"0x` + strings.Repeat("ab", 32) +
+		`","signature":"0x` + strings.Repeat("11", 65) + `"}`
+	w, out := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	if out["code"] != "sponsorship_in_progress" {
+		t.Fatalf("code = %v, want sponsorship_in_progress; body = %s", out["code"], w.Body.String())
+	}
+}
+
+// A top-up sentinel wrapped with detail reaches the client as its own sentence
+// only, and the unconfirmed 503 is logged like every other server-side refusal.
+func TestPaycrestSponsorship_TopUpErrorsSendOnlyTheSentinelSentence(t *testing.T) {
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	cases := []struct {
+		err    error
+		status int
+	}{
+		{fmt.Errorf("%w: rpc says tx 0xdead pending at node-7", services.ErrTopUpUnconfirmed), http.StatusServiceUnavailable},
+		{fmt.Errorf("%w: user 42 had 3", services.ErrTopUpUnusedCap), http.StatusTooManyRequests},
+		{fmt.Errorf("%w: budget row 9", services.ErrTopUpDailyCap), http.StatusTooManyRequests},
+	}
+	for _, tc := range cases {
+		h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: tc.err})
+		w, out := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/gas-topup", "")
+		if w.Code != tc.status {
+			t.Fatalf("%v: status = %d, want %d", tc.err, w.Code, tc.status)
+		}
+		if msg, _ := out["message"].(string); strings.Contains(msg, "rpc says") || strings.Contains(msg, "user 42") || strings.Contains(msg, "budget row") {
+			t.Fatalf("%v: detail leaked to the client: %q", tc.err, msg)
+		}
+	}
+	if !strings.Contains(buf.String(), "gas-topup -> 503") {
+		t.Fatalf("the unconfirmed top-up was not logged: %q", buf.String())
+	}
+}
