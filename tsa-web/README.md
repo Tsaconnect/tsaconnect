@@ -43,12 +43,14 @@ The session cookies are `Secure`; Chrome and Firefox keep them on `http://localh
 To run the local web app against the **production** API instead (no local API needed):
 
 ```bash
-npm run dev:prod-api # http://localhost:5174 → https://tsa.mcgpchain.com/api
+TSA_PROD_API=yes npm run dev:prod-api   # http://localhost:5174 → https://tsa.mcgpchain.com/api
 ```
 
 `vite.prodapi.config.mjs` presents prod's `WEB_APP_ORIGIN` through the dev proxy so the
-cookie session works on localhost. It is real data: rolling keys, changing webhooks or
-payouts changes the live merchant.
+cookie session works on localhost. It is real data: a new key, a webhook or payout change
+hits the live merchant, and every page shows a red bar to say so. The prod session cookies
+sit on `localhost`, where any other local server can read them — **sign out when you're
+done** (that revokes the session). A stopgap until app.tsaconnectworld.com is live.
 
 ## Test
 
@@ -77,21 +79,34 @@ The API must be deployed and migrated first (step 2 below), whichever host serve
 
 ### Netlify (recommended — admin and landing are already there)
 
-1. **API:** step 2 below.
-2. **Netlify site:** new site from the `tsa-dev` repo, **base directory `tsa-web`**; the
-   build command and publish directory come from `netlify.toml`. `public/_redirects` proxies
-   `/api/*` to `https://tsa.mcgpchain.com/api/*`, so the browser sees one origin — the
-   SameSite=Strict session cookies and the API's Origin check both depend on that. Never
-   point the app at the API's own domain instead. `public/_headers` sets the same security
-   headers as the nginx example.
-3. **Domain:** add `app.tsaconnectworld.com` to the site and create the DNS record in
-   Cloudflare the same way `admin` is set up.
-4. **Check:** `curl -s -X POST https://app.tsaconnectworld.com/api/auth/web/login -H 'X-TSA-Web: 1'
-   -H 'Origin: https://app.tsaconnectworld.com'` answers `400` (the proxy reaches the API and the
-   origin is accepted); a `403` with `"code":"origin"` means `WEB_APP_ORIGIN` does not match.
-
-Behind the proxy the API sees Netlify's addresses, not each visitor's; the web sign-in
-limits are keyed per account, sign-in and session for that reason (`routes.go`).
+1. **API:** step 2 of the nginx section below (deploy + migrate, `WEB_APP_ORIGIN`). Also:
+   - `NETLIFY_PROXY_SECRET=<long random>` in `/srv/tsa-api/shared/env`, then restart.
+   - Install `tsa-api-go/deploy/nginx-cloudflare-realip.conf` (see that deploy README) so
+     nginx sees real client addresses behind Cloudflare.
+2. **Netlify site:** new site from the `tsa-dev` repo, **base directory `tsa-web`**; build and
+   routing come from `netlify.toml`. Add the env var **`API_SIGNATURE_TOKEN`** with the SAME
+   value as `NETLIFY_PROXY_SECRET`, **scope: Runtime** (signed proxies need it at runtime).
+   `/api/*` is proxied to `https://tsa.mcgpchain.com/api/*` so the browser sees one origin —
+   the SameSite=Strict session cookies and the API's Origin check both depend on that. Never
+   point the app at the API's own domain instead. The proxy is signed (`x-nf-sign`): the API
+   verifies it and only then counts the request as coming from the visitor Netlify names
+   (`X-Nf-Client-Connection-Ip`) instead of from Netlify — otherwise every web visitor would
+   share Netlify's address and one rate-limit budget.
+3. **Domain:** add `app.tsaconnectworld.com` to the site. In Cloudflare make the record
+   **DNS only (grey cloud)**: proxied through Cloudflare, Netlify would see Cloudflare's
+   address instead of the visitor's (and Netlify advises against it).
+4. **Checks, after DNS resolves:**
+   - Origin accepted: `curl -s -o /dev/null -w '%{http_code}' -X POST https://app.tsaconnectworld.com/api/auth/web/login
+     -H 'X-TSA-Web: 1' -H 'Origin: https://app.tsaconnectworld.com'` → `400` (a `403` with
+     `"code":"origin"` means `WEB_APP_ORIGIN` does not match).
+   - Sign in fully once in a browser: DevTools → Application → Cookies shows `tsa_at` / `tsa_rt`
+     host-only for `app.tsaconnectworld.com` (Set-Cookie passes through the proxy).
+   - Visitor address: while signing in, `sudo journalctl -u tsa-api -f` on the server shows your
+     own public IP on the `/api/auth/web/*` lines, not a Netlify one. Repeat with a forged
+     `-H 'X-Nf-Client-Connection-Ip: 1.2.3.4'` on the curl above: the log must still show your
+     real IP (Netlify overwrites the header; if it shows `1.2.3.4`, stop and report).
+   - Cloudflare → `tsa.mcgpchain.com` → Security: Bot Fight Mode / WAF must not challenge
+     Netlify's traffic (a challenge shows up as an HTML 403/503 from `/api`).
 
 ### nginx on the API server
 

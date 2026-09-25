@@ -1,4 +1,5 @@
-# Netlify. Same headers as deploy/nginx.conf.example.
+# Netlify. Keep in sync with deploy/nginx.conf.example. These apply to the app's own
+# files only; Netlify never adds them to proxied /api responses (the API sends its own).
 /*
   Strict-Transport-Security: max-age=31536000; includeSubDomains
   X-Frame-Options: DENY

@@ -3,6 +3,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { ApiError } from '@/lib/api';
 import { SessionProvider } from '@/session/session';
 import { Toaster } from '@/components/ui/toaster';
+import { ProdApiBar } from '@/components/shell/ProdApiBar';
 import { AppRoutes } from './routes';
 
 // A dropped connection, a timeout (status 0) or a 5xx may pass on retry; a 4xx
@@ -16,6 +17,7 @@ const queryClient = new QueryClient({
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <ProdApiBar />
       <BrowserRouter>
         <SessionProvider>
           <AppRoutes />
