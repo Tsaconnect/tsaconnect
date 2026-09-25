@@ -448,3 +448,20 @@ func TestEveryResponseThatCarriesARecordGoesThroughACallerView(t *testing.T) {
 		}
 	}
 }
+
+// A pay order's sender fee is chosen per order to take the deposit's cushion:
+// an internal figure the payer was never quoted, so her view carries neither
+// the percent nor the amount. The record itself is not changed.
+func TestPayOrderView_HidesOurPerOrderFee(t *testing.T) {
+	o := &models.PaycrestOrderRecord{SenderFee: "0.0082", SenderFeePercent: "1.1171", Rate: "1347.43", TokenAmount: "0.742221"}
+	v := payOrderView(o)
+	if v.SenderFee != "" || v.SenderFeePercent != "" {
+		t.Fatalf("payer view carries our fee: %q / %q%%", v.SenderFee, v.SenderFeePercent)
+	}
+	if v.Rate != "1347.43" || v.TokenAmount != "0.742221" {
+		t.Fatalf("payer view lost what she needs to pay: %+v", v)
+	}
+	if o.SenderFee != "0.0082" || o.SenderFeePercent != "1.1171" {
+		t.Fatal("payOrderView changed the record it was given")
+	}
+}

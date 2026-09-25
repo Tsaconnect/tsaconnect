@@ -224,6 +224,9 @@ func TestPayDirect_SellsExactlyTheSnapshottedNetToTheSnapshottedBank(t *testing.
 	if r.orders.sell.FiatAmount != "50000.00" || r.orders.sell.AccountNo != "0123456789" || r.orders.sell.BankCode != "058" || r.orders.converted {
 		t.Fatalf("sell = %+v converted=%v", r.orders.sell, r.orders.converted)
 	}
+	if !r.orders.sell.KeepSurplus {
+		t.Fatal("a direct TSA Pay sell must pay the merchant exactly what they invoiced and keep the cushion")
+	}
 	if got := r.get(t); got.Status != models.PayStatusProcessing || got.PaycrestOrderID == nil {
 		t.Fatalf("payment = %+v", got)
 	}

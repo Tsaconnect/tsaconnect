@@ -151,6 +151,10 @@ type PaycrestOrderRecord struct {
 	// AmountReceived, ARE base units — this field alone is not.
 	Rate        string `gorm:"size:32" json:"rate"`
 	TokenAmount string `gorm:"size:40" json:"tokenAmount"`
+	// RawRate is Paycrest's own rate on the order, as it answered it: unrounded,
+	// before our sender fee — the rate it actually pays at. Empty on rows opened
+	// before it was recorded.
+	RawRate string `gorm:"size:32" json:"-"`
 	// ProviderID is which liquidity provider took it. Stored because provider
 	// quality varies sharply — one stranded our funds and left the book the
 	// next day — and per-provider failure rates are only visible if recorded.

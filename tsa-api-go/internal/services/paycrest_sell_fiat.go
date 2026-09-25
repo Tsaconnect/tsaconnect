@@ -165,7 +165,15 @@ func (s *PaycrestOrderService) CreateSellForFiat(ctx context.Context, req Paycre
 	if err != nil {
 		return nil, err
 	}
-	if !sellPayoutCovers(row, req.FiatAmount) {
+	covers := sellPayoutCovers
+	if req.KeepSurplus && !converted {
+		covers = keepSurplusPayoutCovers
+	}
+	if !covers(row, req.FiatAmount) {
+		// Visible to ops: how often the provider's rate moves between quote and
+		// order, and by how much, is only measurable from these.
+		log.Printf("[paycrest] sell_payout_refused_total=1 order=%s ref=%s owed=%s %s deposit=%s fee_pct=%s sender_fee=%s paycrest_rate=%s keep_surplus=%v",
+			row.ID, row.Reference, req.FiatCode, req.FiatAmount, row.TokenAmount, row.SenderFeePercent, row.SenderFee, row.RawRate, req.KeepSurplus)
 		if err := s.cancelShortOrder(ctx, row, req); err != nil {
 			// Still awaiting a deposit at an address she can see. Both answers
 			// hold: the rate did move, AND an order may be open.
@@ -211,9 +219,17 @@ func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models
 // subtracted here — SellDepositFor already paid for it.
 func sellPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string) bool {
 	tokens, ok1 := new(big.Rat).SetString(strings.TrimSpace(row.TokenAmount))
-	rate, ok2 := new(big.Rat).SetString(strings.TrimSpace(row.Rate))
-	owed, ok3 := new(big.Rat).SetString(strings.TrimSpace(fiatAmount))
-	if !ok1 || !ok2 || !ok3 {
+	owed, ok2 := new(big.Rat).SetString(strings.TrimSpace(fiatAmount))
+	return ok1 && ok2 && payoutCovers(tokens, row.Rate, owed)
+}
+
+// payoutCovers is sellPayoutCovers' judgement on its parts: tokens paid out at
+// a fee-priced, cent-rounded rate cover `owed` at the worst rate and fee
+// rounding. The one test both the payout check and the per-order fee choice
+// use, so a fee chosen at the quoted rate always passes the check at it.
+func payoutCovers(tokens *big.Rat, rateNet string, owed *big.Rat) bool {
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(rateNet))
+	if !ok {
 		return false
 	}
 	worst := new(big.Rat).Sub(rate, sellRateRounding)
@@ -223,4 +239,170 @@ func sellPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string) bool {
 	}
 	payout, _ := new(big.Rat).SetString(fiatAt(paid, worst))
 	return payout.Cmp(owed) >= 0
+}
+
+// ─── KeepSurplus: the merchant is paid what they invoiced; the cushion is ours ─
+//
+// A KeepSurplus payout is judged by Paycrest's own arithmetic rather than the
+// (1 − p) rate model above: that model under-states the payout by ~p² (≈0.01%),
+// more than the whole cushion once an invoice passes ~₦20k, and would hand the
+// surplus straight back to the merchant. Every rounding is still taken against
+// the merchant, and the order is checked against Paycrest's own answer.
+
+// payMerchantMarginFlat and payMerchantMarginPerToken are what a KeepSurplus
+// payout is sized to clear above the naira owed: the drift budget. The fee is
+// chosen at the QUOTED rate and Paycrest fills at its own, so a move worse than
+// this between the two refuses the order ("the rate moved") instead of paying
+// the merchant short. Fee and payout rounding are not in it — the payout model
+// already takes them against the merchant. It grows with the order, like the
+// rate headroom, so a large order is not refused on a single kobo tick.
+var (
+	payMerchantMarginFlat     = big.NewRat(20, 100) // ₦0.20
+	payMerchantMarginPerToken = big.NewRat(1, 100)  // ₦0.01 per token
+)
+
+func payMerchantMargin(tokens *big.Rat) *big.Rat {
+	return new(big.Rat).Add(payMerchantMarginFlat, new(big.Rat).Mul(tokens, payMerchantMarginPerToken))
+}
+
+// surplusFeeStepsPerPercent is how finely a KeepSurplus fee is chosen: 0.0001%.
+// A whole basis point is too coarse — on ₦50,000 it is ₦5, more than the whole
+// cushion there, so a bps-stepped fee would round the surplus straight back to
+// the merchant. Paycrest takes the percent as a decimal string.
+const surplusFeeStepsPerPercent = 10_000
+
+// keepSurplusMaxUpliftSteps caps a KeepSurplus fee at the configured fee plus
+// 0.5%. A CreateSellForFiat deposit's cushion is a small part of that; a fee
+// that wants to climb past it means the deposit is far larger than the invoice
+// needs, and the excess is left with the merchant — and alerted — rather than
+// silently kept.
+const keepSurplusMaxUpliftSteps = 50 * surplusFeeStepsPerPercent / 100
+
+// paycrestFeeScale: Paycrest states a sender fee to 4 token decimals.
+var paycrestFeeScale = big.NewInt(10_000)
+
+// paycrestSellFee is the sender fee Paycrest takes from a sell deposit of
+// `tokens` at `pct` percent: the fee inside the deposit, tokens × p/(1 + p) —
+// the first live order's 0.0073 USDC fee on 0.742226 at 1% is exactly this —
+// rounded UP to 4 decimals, against the merchant, whichever way Paycrest rounds.
+func paycrestSellFee(tokens *big.Rat, pct string) (*big.Rat, bool) {
+	p, ok := new(big.Rat).SetString(strings.TrimSpace(pct))
+	if !ok || p.Sign() < 0 {
+		return nil, false
+	}
+	p.Quo(p, big.NewRat(100, 1))
+	fee := new(big.Rat).Quo(new(big.Rat).Mul(tokens, p), new(big.Rat).Add(big.NewRat(1, 1), p))
+	scaled := new(big.Rat).Mul(fee, new(big.Rat).SetInt(paycrestFeeScale))
+	units, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if rem.Sign() > 0 {
+		units.Add(units, big.NewInt(1))
+	}
+	return new(big.Rat).SetFrac(units, paycrestFeeScale), true
+}
+
+// paycrestSellPayout is the naira Paycrest pays for `tokens` less `fee` at its
+// raw rate, rounded DOWN to the kobo — against the merchant.
+func paycrestSellPayout(tokens, fee, rawRate *big.Rat) *big.Rat {
+	net := new(big.Rat).Sub(tokens, fee)
+	if net.Sign() <= 0 || rawRate.Sign() <= 0 {
+		return new(big.Rat)
+	}
+	payout := new(big.Rat).Mul(net, rawRate)
+	kobo := new(big.Int).Quo(new(big.Int).Mul(payout.Num(), big.NewInt(100)), payout.Denom())
+	return new(big.Rat).SetFrac(kobo, big.NewInt(100))
+}
+
+// keepSurplusFeePercent is the sender fee for a KeepSurplus order: the highest
+// 0.0001% step at which `tokens` at the quoted raw rate still pay `owed` plus
+// the margin, by Paycrest's arithmetic taken against the merchant. Never below
+// the configured fee `base`, never above base + keepSurplusMaxUpliftSteps —
+// `capped` says the cap, not the margin, stopped it. So the merchant receives
+// what they invoiced (plus the margin) and the deposit's cushion — the drift
+// tolerance, rate headroom and fee-rounding allowance it was sized with —
+// becomes ours.
+//
+// Where even `base` does not clear the margin (no cushion to spare) or the rate
+// is unreadable, `base` is returned: the order stands or falls on the payout
+// check, exactly as before.
+func keepSurplusFeePercent(tokens *big.Rat, rawRate, base string, owed *big.Rat) (fee string, capped bool) {
+	baseSteps, ok := feePercentToSteps(base, surplusFeeStepsPerPercent)
+	rate, rateOK := new(big.Rat).SetString(strings.TrimSpace(rawRate))
+	if !ok || !rateOK || rate.Sign() <= 0 {
+		return base, false
+	}
+	target := new(big.Rat).Add(owed, payMerchantMargin(tokens))
+	clears := func(steps int) bool {
+		f, ok := paycrestSellFee(tokens, stepsToFeePercent(steps, surplusFeeStepsPerPercent))
+		return ok && paycrestSellPayout(tokens, f, rate).Cmp(target) >= 0
+	}
+	if !clears(baseSteps) {
+		return base, false
+	}
+	top := min(baseSteps+keepSurplusMaxUpliftSteps, maxSenderFeePercent*surplusFeeStepsPerPercent)
+	// Payout falls as the fee rises, so the highest clearing fee is a boundary.
+	lo, hi := baseSteps, top
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if clears(mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return stepsToFeePercent(lo, surplusFeeStepsPerPercent), lo == top && top > baseSteps
+}
+
+// rawRateColumnLen is PaycrestOrderRecord.RawRate's column size.
+const rawRateColumnLen = 32
+
+// storableRawRate is Paycrest's raw order rate as it can be stored. The string
+// comes from Paycrest, unbounded, and the row is written AFTER Paycrest opened
+// the order — a value the column refuses would leave a live deposit address we
+// hold no row for. A plain positive decimal that fits is kept as it is; a longer
+// one is cut DOWN to 8 decimals (a lower rate only makes the payout check
+// stricter, never looser); anything else — or still too long — is "", which
+// sends keepSurplusPayoutCovers back to sellPayoutCovers.
+func storableRawRate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !plainDecimal.MatchString(raw) {
+		return ""
+	}
+	if len(raw) <= rawRateColumnLen {
+		return raw
+	}
+	r, ok := new(big.Rat).SetString(raw)
+	if !ok || r.Sign() <= 0 {
+		return ""
+	}
+	scaled := new(big.Int).Quo(new(big.Int).Mul(r.Num(), big.NewInt(100_000_000)), r.Denom())
+	cut := new(big.Rat).SetFrac(scaled, big.NewInt(100_000_000)).FloatString(8)
+	if len(cut) > rawRateColumnLen {
+		return ""
+	}
+	return cut
+}
+
+// keepSurplusPayoutCovers is the payout check for a KeepSurplus order, from
+// Paycrest's own answer where it gives enough: the deposit less the fee — the
+// larger of the fee Paycrest reported and our model of it at the percent it
+// charged — at the raw rate Paycrest answered with, rounded down to the kobo.
+// A row with no raw rate falls back to sellPayoutCovers.
+func keepSurplusPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string) bool {
+	tokens, ok1 := new(big.Rat).SetString(strings.TrimSpace(row.TokenAmount))
+	owed, ok2 := new(big.Rat).SetString(strings.TrimSpace(fiatAmount))
+	if !ok1 || !ok2 {
+		return false
+	}
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(row.RawRate))
+	if !ok || rate.Sign() <= 0 {
+		return sellPayoutCovers(row, fiatAmount)
+	}
+	fee, ok := paycrestSellFee(tokens, row.SenderFeePercent)
+	if !ok {
+		return sellPayoutCovers(row, fiatAmount)
+	}
+	if reported, ok := new(big.Rat).SetString(strings.TrimSpace(row.SenderFee)); ok && reported.Cmp(fee) > 0 {
+		fee = reported
+	}
+	return paycrestSellPayout(tokens, fee, rate).Cmp(owed) >= 0
 }

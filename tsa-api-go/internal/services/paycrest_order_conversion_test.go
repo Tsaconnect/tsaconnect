@@ -53,6 +53,10 @@ type fakePaycrestConversionClient struct {
 	// offrampRate is the provider's own rate on the order it answers with;
 	// empty is the book's 1500, which the F − B fee then prices at 1492.50.
 	offrampRate string
+	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
+	offrampSenderFee string
+	// offrampErrFirst fails only the FIRST CreateOfframpOrder, for a retry.
+	offrampErrFirst error
 	// offrampEntered/offrampGate pause the FIRST CreateOfframpOrder
 	// mid-request when set, so a test can act while one caller is inside
 	// Paycrest. Later calls pass straight through, so a second caller that
@@ -104,6 +108,9 @@ func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req
 	if f.offrampErr != nil {
 		return nil, f.offrampErr
 	}
+	if f.offrampErrFirst != nil && f.offrampCalls == 1 {
+		return nil, f.offrampErrFirst
+	}
 	rate := f.offrampRate
 	if rate == "" {
 		rate = "1500"
@@ -111,7 +118,7 @@ func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req
 	return &PaycrestOrder{
 		ID: "pc-sell-" + req.Reference, Status: PaycrestStatusPending,
 		Rate: rate, Amount: req.AmountToken,
-		SenderFeePercent: req.SenderFeePercent,
+		SenderFeePercent: req.SenderFeePercent, SenderFee: f.offrampSenderFee,
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution: "Fake Bank", ReceiveAddress: "0x00000000000000000000000000000000000dep05",
 		},

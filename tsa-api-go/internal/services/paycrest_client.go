@@ -132,6 +132,27 @@ func (e paycrestEnvelope) validationDetail() string {
 	return ""
 }
 
+// PaycrestRequestError is a request Paycrest answered with a non-2xx status.
+// Its text is the one every caller has always shown.
+type PaycrestRequestError struct {
+	Op     string
+	Status int
+	Msg    string
+}
+
+func (e *PaycrestRequestError) Error() string {
+	return fmt.Sprintf("paycrest %s: HTTP %d: %s", e.Op, e.Status, e.Msg)
+}
+
+// paycrestRejected reports a request Paycrest refused as invalid (400, 422): it
+// read the request, found it wrong and created nothing, so a corrected one
+// cannot duplicate an order. Nothing else counts — not a 409 (which can mean
+// the thing already exists), not a 5xx or a lost answer (an order may exist).
+func paycrestRejected(err error) bool {
+	var e *PaycrestRequestError
+	return errors.As(err, &e) && (e.Status == 400 || e.Status == 422)
+}
+
 func paycrestError(op string, status int, body []byte) error {
 	var env paycrestEnvelope
 	_ = json.Unmarshal(body, &env)
@@ -145,7 +166,7 @@ func paycrestError(op string, status int, body []byte) error {
 			msg = msg[:300]
 		}
 	}
-	return fmt.Errorf("paycrest %s: HTTP %d: %s", op, status, msg)
+	return &PaycrestRequestError{Op: op, Status: status, Msg: msg}
 }
 
 // do issues a request. authed=false is used for the public rate, markets and

@@ -123,20 +123,26 @@ func (s *PaycrestOrderService) SetTreasury(addr string) { s.treasuryAddr = strin
 // doc comment.
 func (s *PaycrestOrderService) SetTreasuryCaps(c treasuryCapsChecker) { s.treasuryCaps = c }
 
-// feePercentToBps reads a sender-fee percent ("1", "0.5") as integer bps, so
-// F − B is exact arithmetic rather than float.
-func feePercentToBps(pct string) (int, bool) {
+// feePercentToSteps reads a sender-fee percent ("1", "0.5") as a whole number
+// of 1/perPercent-percent steps, so fee arithmetic is exact rather than float.
+func feePercentToSteps(pct string, perPercent int) (int, bool) {
 	v, ok := parseSenderFeePercent(pct)
 	if !ok {
 		return 0, false
 	}
-	return int(math.Round(v * 100)), true
+	return int(math.Round(v * float64(perPercent))), true
 }
 
-// bpsToFeePercent writes integer bps back in the percent form Paycrest takes.
-func bpsToFeePercent(bps int) string {
-	return strconv.FormatFloat(float64(bps)/100, 'f', -1, 64)
+// stepsToFeePercent writes whole steps back in the percent form Paycrest takes.
+func stepsToFeePercent(steps, perPercent int) string {
+	return strconv.FormatFloat(float64(steps)/float64(perPercent), 'f', -1, 64)
 }
+
+// feePercentToBps reads a sender-fee percent as integer bps, so F − B is exact.
+func feePercentToBps(pct string) (int, bool) { return feePercentToSteps(pct, 100) }
+
+// bpsToFeePercent writes integer bps back in the percent form Paycrest takes.
+func bpsToFeePercent(bps int) string { return stepsToFeePercent(bps, 100) }
 
 // SetRoundTripBudgetBps sets B here and on the quote service, the same way
 // the constructor pushes F: one source for both, so they cannot drift.
@@ -724,6 +730,11 @@ type PaycrestSellRequest struct {
 	// payout bank is the merchant's: the order is marked with it so the
 	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
 	PayPaymentID *uuid.UUID
+	// KeepSurplus: the payout is owed EXACTLY FiatAmount (a TSA Pay merchant is
+	// paid what they invoiced), so the deposit's cushion above it is ours. The
+	// order's sender fee is raised to take it, never below the configured fee,
+	// leaving the merchant FiatAmount plus payMerchantMargin. Direct sells only.
+	KeepSurplus bool
 }
 
 // CreateSell opens an offramp and returns the address the user must send to.
@@ -852,9 +863,40 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 		// that figure, not whatever tokens × rate rounds to; CreateSellForFiat
 		// then proves the order's payout actually covers it.
 		fiatAmount = stated
+		if owed, ok := new(big.Rat).SetString(stated); ok && req.KeepSurplus && !converted {
+			return s.openKeepSurplusOfframp(ctx, req, venue, tokens, tokenAmount, fiatAmount, payoutInst, fee, owed)
+		}
 	}
 
 	return s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+}
+
+// openKeepSurplusOfframp opens a KeepSurplus order at the fee that leaves the
+// merchant exactly what they invoiced (see keepSurplusFeePercent). If Paycrest
+// refuses that fee outright (a 4xx — nothing was created) it is opened once
+// more at the configured fee, so a Paycrest that will not take a finely-stepped
+// percent costs us the cushion, not the payment. Every choice is logged by the
+// order's reference, beside any refusal CreateSellForFiat logs for it.
+func (s *PaycrestOrderService) openKeepSurplusOfframp(ctx context.Context, req PaycrestSellRequest, venue *PaycrestVenue,
+	tokens *big.Rat, tokenAmount, fiatAmount, payoutInst, base string, owed *big.Rat) (*models.PaycrestOrderRecord, error) {
+	fee, capped := keepSurplusFeePercent(tokens, venue.RawRate, base, owed)
+	if capped {
+		log.Printf("[paycrest] ALERT keep_surplus_fee_capped_total=1 owed=%s deposit=%s quoted_rate=%s fee=%s%%: the deposit is larger than the invoice needs; the excess goes to the merchant",
+			fiatAmount, tokenAmount, venue.RawRate, fee)
+	}
+	row, err := s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+	if err != nil && fee != base && paycrestRejected(err) {
+		log.Printf("[paycrest] ALARM keep_surplus_fee_rejected_total=1 fee=%s%% err=%s — reopening at the configured %s%%",
+			fee, RedactAlertText(err.Error()), base)
+		fee = base
+		row, err = s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+	}
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[paycrest] keep_surplus ref=%s owed=%s deposit=%s quoted_rate=%s fee_sent=%s%% fee_charged=%s%% base=%s%%",
+		row.Reference, fiatAmount, tokenAmount, venue.RawRate, fee, row.SenderFeePercent, base)
+	return row, nil
 }
 
 // openOfframp is the single offramp-creation path: it sends the order and
@@ -897,6 +939,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		ChainKey:          venue.ChainKey,
 		Network:           venue.Network,
 		Rate:              userRate("sell", order.Rate, feePercent),
+		RawRate:           storableRawRate(order.Rate),
 		TokenAmount:       tokenAmount,
 		ProviderID:        paycrestProviderOf(order, venue),
 		SenderFee:         order.SenderFee,
