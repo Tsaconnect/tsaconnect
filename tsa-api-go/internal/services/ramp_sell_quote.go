@@ -269,7 +269,12 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	}
 	gas := q.gasFor(ctx, in, first, target.offramp)
 	if l+gas.bps > target.budgetBps {
-		return nil, ErrSellRouteTooCostly
+		if !q.canRaiseBudget(in, target, l+gas.bps) {
+			return nil, ErrSellRouteTooCostly
+		}
+		// Sold at cost: she signs this fee-free route, the budget is exactly
+		// what it spends, and our share is Paycrest's F − B alone.
+		target.budgetBps = l + gas.bps
 	}
 
 	route := first
@@ -326,6 +331,23 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, err
 	}
 	return out, nil
+}
+
+// canRaiseBudget reports whether an ordinary sale whose round trip costs
+// roundTripBps (more than B) may still be offered at a higher fee: her
+// all-in fee — Paycrest's F − B plus the round trip — must fit the source
+// chain's cap. A delivery was given its whole fee by the caller and is never
+// raised.
+func (q *RampSellQuoter) canRaiseBudget(in SellQuoteInput, target deliveryTarget, roundTripBps int) bool {
+	if !target.offramp || in.BudgetBps != 0 {
+		return false
+	}
+	paycrestBps, ok := feePercentToBps(q.converted)
+	if !ok {
+		return false
+	}
+	chainKey, _ := q.chains.ChainNameForID(in.FromChainID)
+	return paycrestBps+roundTripBps <= q.quotes.convertedFeeMaxBps(chainKey)
 }
 
 // checkSignable refuses a route she must not sign. Every field it reads is

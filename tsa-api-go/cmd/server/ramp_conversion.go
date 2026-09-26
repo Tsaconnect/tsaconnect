@@ -174,7 +174,6 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		// quotable, not less).
 		quotes.SetTreasuryLanes(treasury)
 		quotes.SetConversionMinimums(cfg.RampConversionMinUSDByChain, cfg.RampConversionMinUSD)
-		quotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
 	}
 	if orders != nil {
 		orders.SetTreasury(addr)

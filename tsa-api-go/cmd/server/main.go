@@ -1519,6 +1519,9 @@ func main() {
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
 		if paycrestOrders != nil {
 			paycrestOrders.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
+			// The cap on a dear route's raised fee — shared by converted buys
+			// and swapped sells, which both price through paycrestQuotes.
+			paycrestQuotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
 			if !paycrestOrders.ConversionPriced() {
 				log.Printf("[paycrest] conversion unpriced: RAMP_ROUND_TRIP_BUDGET_BPS=%d must be > 0 and below PAYCREST_SENDER_FEE_PERCENT (in bps); converted buys and swapped sells stay off",
 					cfg.RampRoundTripBudgetBps)

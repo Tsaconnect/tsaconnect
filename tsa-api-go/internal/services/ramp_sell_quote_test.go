@@ -200,10 +200,23 @@ func TestRampSellQuote_ExactOutputAsksLiFiForTheToAmountOnBothPasses(t *testing.
 	}
 }
 
-func TestRampSellQuote_RefusesARouteOverTheBudget(t *testing.T) {
-	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.95)) // l = 50, g = 20 -> 70 > 50
-	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellRouteTooCostly) {
-		t.Fatalf("err = %v", err)
+// A sale dearer than B raises its own budget to exactly l + g: she signs the
+// fee-free route at cost, we take no LiFi fee, and Paycrest's F − B is still
+// ours. l = 50, g = 20 -> a 70 bps budget, 120 bps all-in.
+func TestRampSellQuote_RaisesTheBudgetForADearerRoute(t *testing.T) {
+	q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.95))
+	res, err := q.Quote(context.Background(), sellIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CostBps != 50 || res.GasBps != 20 || res.FeeBps != 0 {
+		t.Fatalf("cost/gas/fee = %d/%d/%d, want 50/20/0", res.CostBps, res.GasBps, res.FeeBps)
+	}
+	if lifi.quoteCalls() != 1 {
+		t.Fatalf("asked LiFi %d times; a route sold at cost has no fee to re-quote for", lifi.quoteCalls())
+	}
+	if want := sellRawID(t, 9.95); string(res.LiFiQuote) != want {
+		t.Fatalf("quote = %s, want the fee-free route %s", res.LiFiQuote, want)
 	}
 }
 
@@ -226,10 +239,33 @@ func TestRampSellQuote_AdmitsARouteThatSpendsExactlyTheBudget(t *testing.T) {
 	}
 }
 
-// One bps over is refused: the boundary is ≤ B, not < B + 1.
-func TestRampSellQuote_RefusesARouteOneBpsOverTheBudget(t *testing.T) {
-	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.969)) // l = 31, g = 20 -> 51 > 50
+// The all-in fee — Paycrest's F − B plus the round trip — is capped per
+// source chain. l = 31, g = 20: 50 + 51 = 101 bps, one over a 100 bps cap.
+func TestRampSellQuote_RefusesARouteOneBpsOverItsChainsCap(t *testing.T) {
+	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.969), sellRoute(t, 9.969))
+	q.quotes.SetConvertedFeeCaps(map[string]int{"bsc": 100}, 200)
 	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("err = %v", err)
+	}
+	q.quotes.SetConvertedFeeCaps(map[string]int{"bsc": 101}, 200)
+	if _, err := q.Quote(context.Background(), sellIn); err != nil {
+		t.Fatalf("a 101 bps sale under a 101 bps cap: %v", err)
+	}
+}
+
+func TestRampSellQuote_RefusesARouteOverTheDefaultCap(t *testing.T) {
+	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.80)) // l = 200, g = 20 -> 270 all-in
+	if _, err := q.Quote(context.Background(), sellIn); !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A TSA Pay delivery is priced on the fee it was given and never raised.
+func TestRampSellQuote_ADeliveryBudgetIsNeverRaised(t *testing.T) {
+	q, _ := newSellQuoterWithFakes(t, sellRoute(t, 9.95)) // 70 bps
+	in := sellIn
+	in.BudgetBps = 50
+	if _, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellRouteTooCostly) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -266,8 +302,13 @@ func TestRampSellQuote_PricesATopUpIntoTheBudget(t *testing.T) {
 	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(0), true })
 	in := sellIn
 	in.FromToken = bscUSDT
-	if _, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellRouteTooCostly) {
-		t.Fatalf("err = %v; a sponsored top-up must count against B", err)
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GasBps != 128 || !res.GasTopUp || res.FeeBps != 0 {
+		t.Fatalf("gas = %d topUp = %v fee = %d; a sponsored top-up (108) + relay (20) must count against the budget",
+			res.GasBps, res.GasTopUp, res.FeeBps)
 	}
 }
 
