@@ -9,6 +9,7 @@ import { ErrorState } from '@/components/ui/states';
 import { listPayments, type Mode, type OwnMerchant } from './api';
 import { BusinessPage } from './BusinessPage';
 import { shortAddress } from './display';
+import { paymentColumns } from './paymentColumns';
 import { NoPaymentsYet, PaymentsTable } from './PaymentsTable';
 
 // `to` empty: nothing for the merchant to do but wait, so the step is not a link.
@@ -147,7 +148,7 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
         ) : recent.data?.items.length === 0 ? (
           <NoPaymentsYet mode={mode} />
         ) : (
-          <PaymentsTable items={recent.data?.items} loading={recent.isPending} hrefFor={(p) => `/business/${mode}/payments/${p.id}`} />
+          <PaymentsTable items={recent.data?.items} loading={recent.isPending} columns={paymentColumns} hrefFor={(p) => `/business/${mode}/payments/${p.id}`} />
         )}
       </Card>
     </div>

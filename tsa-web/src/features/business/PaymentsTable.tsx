@@ -4,15 +4,15 @@ import { CreditCard } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { EmptyState } from '@/components/ui/states';
 import { TBody, TD, TH, THead, TR, Table } from '@/components/ui/table';
-import type { Mode, Payment } from './api';
-import { paymentColumns, type PaymentColumn } from './paymentColumns';
+import type { Mode } from './api';
+import type { Column } from './paymentColumns';
 
-/** Payments as rows; a row (or its link) opens the payment's detail. */
-export function PaymentsTable({ items, loading, hrefFor, columns = paymentColumns }: {
-  items: Payment[] | undefined;
+/** Payments (or reusable links) as rows; a row, or its own link, opens its detail. */
+export function PaymentsTable<T extends { id: string }>({ items, loading, hrefFor, columns }: {
+  items: T[] | undefined;
   loading: boolean;
-  hrefFor: (p: Payment) => To;
-  columns?: PaymentColumn[];
+  hrefFor: (row: T) => To;
+  columns: Column<T>[];
 }) {
   const navigate = useNavigate();
   const open = (e: MouseEvent, href: To) => {

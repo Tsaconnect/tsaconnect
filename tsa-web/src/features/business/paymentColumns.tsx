@@ -1,25 +1,27 @@
-// The columns a payments table can show. Payments and payment links share the
-// table (PaymentsTable) and differ only in these.
+// The columns a payments table can show. Payments, payment links and reusable
+// links share the table (PaymentsTable) and differ only in these.
 import type { ReactNode } from 'react';
 import { Link, type To } from 'react-router-dom';
 import { dateTime, naira, relative } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StatusPill } from '@/components/ui/status-pill';
-import type { Payment } from './api';
-import { LINK_STATUS_LABELS, statusOf, youReceive } from './display';
+import type { OpenLink, Payment } from './api';
+import { LINK_STATUS_LABELS, openAmountRule, openLinkTaking, paymentForLine, statusOf, youReceive } from './display';
 
 /**
  * One column. `cell` gets the row's detail link: one column renders it (rowLink),
  * so every row can also be opened from the keyboard.
  */
-export type PaymentColumn = {
+export type Column<T> = {
   header: string;
   right?: boolean;
   className?: string;
-  cell: (p: Payment, href: To) => ReactNode;
+  cell: (row: T, href: To) => ReactNode;
   skeleton: ReactNode;
 };
+
+type PaymentColumn = Column<Payment>;
 
 /** Text cut to one line inside a fixed width, so a long value never widens the table. */
 const clipped = (width: string, text: string | undefined, content: ReactNode = text) => (
@@ -44,13 +46,16 @@ const status: PaymentColumn = {
   skeleton: <Skeleton className="h-5 w-20 rounded-full" />,
 };
 
-const created: PaymentColumn = {
+const created: Column<{ createdAt: string }> = {
   header: 'Created',
   right: true,
   className: 'whitespace-nowrap text-caption text-text-secondary',
   cell: (p) => <time dateTime={p.createdAt} title={dateTime(p.createdAt)}>{relative(p.createdAt)}</time>,
   skeleton: <Skeleton className="ml-auto h-3 w-14" />,
 };
+
+/** Payments the owner's server didn't make say where they came from. */
+const SOURCE_TAGS: Partial<Record<Payment['source'], string>> = { link: 'Link', open: 'Reusable link' };
 
 export const paymentColumns: PaymentColumn[] = [
   {
@@ -60,10 +65,10 @@ export const paymentColumns: PaymentColumn[] = [
       <>
         <span className="flex items-center gap-2">
           {rowLink(href, p.reference)}
-          {p.source === 'link' && <Badge tone="neutral">Link</Badge>}
+          {SOURCE_TAGS[p.source] && <Badge tone="neutral">{SOURCE_TAGS[p.source]}</Badge>}
         </span>
-        {(p.customerName || p.description) && (
-          <p className="max-w-[320px] truncate text-caption text-text-secondary">{[p.customerName, p.description].filter(Boolean).join(' · ')}</p>
+        {(p.customerName || paymentForLine(p)) && (
+          <p className="max-w-[320px] truncate text-caption text-text-secondary">{[p.customerName, paymentForLine(p)].filter(Boolean).join(' · ')}</p>
         )}
       </>
     ),
@@ -105,4 +110,63 @@ export const linkColumns: PaymentColumn[] = [
     cell: closesAt,
     skeleton: <Skeleton className="ml-auto h-3 w-20" />,
   },
+];
+
+/** A reusable link: open to take payments, or paused by its owner. */
+/** "Taking payments", or "Not taking payments" with why (paused, payouts not set…). */
+export function openLinkState(l: OpenLink) {
+  const { taking, reason } = openLinkTaking(l);
+  if (taking) return <Badge tone="live">Taking payments</Badge>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+      <Badge tone="neutral">Not taking payments</Badge>
+      <span className="text-caption text-text-secondary">{reason}</span>
+    </span>
+  );
+}
+
+export const openLinkColumns: Column<OpenLink>[] = [
+  {
+    header: 'Label',
+    cell: (l, href) => clipped('max-w-[260px]', l.label, rowLink(href, l.label)),
+    skeleton: <Skeleton className="h-4 w-40" />,
+  },
+  {
+    header: 'Customer pays',
+    className: 'whitespace-nowrap text-text-secondary',
+    cell: (l) => openAmountRule(l),
+    skeleton: <Skeleton className="h-4 w-28" />,
+  },
+  {
+    header: 'Payments',
+    right: true,
+    className: 'tabular',
+    cell: (l) => l.paidCount,
+    skeleton: <Skeleton className="ml-auto h-4 w-8" />,
+  },
+  {
+    header: 'Received',
+    right: true,
+    className: 'tabular whitespace-nowrap',
+    cell: (l) => naira(l.receivedTotal),
+    skeleton: <Skeleton className="ml-auto h-4 w-20" />,
+  },
+  {
+    header: 'Status',
+    cell: (l) => openLinkState(l),
+    skeleton: <Skeleton className="h-5 w-16" />,
+  },
+  created,
+];
+
+/** The payments made through one reusable link. */
+export const openLinkPaymentColumns: Column<Payment>[] = [
+  {
+    header: 'For',
+    cell: (p, href) => clipped('max-w-[160px]', paymentForLine(p), rowLink(href, paymentForLine(p) || p.reference)),
+    skeleton: <Skeleton className="h-4 w-28" />,
+  },
+  amount,
+  status,
+  created,
 ];

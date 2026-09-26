@@ -1,23 +1,22 @@
-import { QRCodeSVG } from 'qrcode.react';
 import { MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { CopyBox } from '@/components/ui/copy-box';
-import type { Payment } from './api';
+import { QrCode } from '@/components/ui/qr-code';
 import { whatsAppUrl } from './display';
 
-/** A payment link three ways: copy it, send it on WhatsApp, or let the customer scan it. */
-export function LinkShare({ businessName, payment: p }: { businessName: string; payment: Payment }) {
+/**
+ * A link three ways: copy it, send it on WhatsApp with `message`, or let the
+ * customer scan it. For one-time and reusable payment links alike.
+ */
+export function LinkShare({ url, message, qrSize = 132 }: { url: string; message: string; qrSize?: number }) {
   return (
     <div className="grid gap-3">
-      <CopyBox label="payment link" value={p.checkoutUrl} />
+      <CopyBox label="payment link" value={url} />
       <div className="flex flex-wrap items-center gap-4">
-        {/* White behind the code whatever the theme: scanners want dark on light. */}
-        <div className="rounded-md border border-hairline bg-white p-2">
-          <QRCodeSVG value={p.checkoutUrl} size={132} marginSize={1} role="img" aria-label="QR code for the payment link" />
-        </div>
+        <QrCode value={url} size={qrSize} label="QR code for the payment link" />
         <div className="grid min-w-0 flex-1 gap-2">
           <Button asChild variant="secondary" size="sm" className="justify-self-start">
-            <a href={whatsAppUrl(businessName, p)} target="_blank" rel="noopener noreferrer">
+            <a href={whatsAppUrl(message)} target="_blank" rel="noopener noreferrer">
               <MessageCircle className="size-4" aria-hidden />Share on WhatsApp
             </a>
           </Button>

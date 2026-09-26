@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
@@ -9,12 +9,13 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Drawer } from '@/components/ui/drawer';
 import { FormError } from '@/components/ui/form-error';
+import { SectionHeading } from '@/components/ui/section-heading';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/states';
 import { StatusPill } from '@/components/ui/status-pill';
 import { toast } from '@/components/ui/toaster';
 import { cancelLink, getPayment, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
-import { LINK_STATUS_LABELS, statusOf, youReceive } from './display';
+import { LINK_STATUS_LABELS, linkMessage, paymentFor, statusOf, youReceive } from './display';
 import { LinkShare } from './LinkShare';
 import { useMerchant } from './useMerchant';
 
@@ -27,9 +28,6 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-const SectionHeading = ({ children }: { children: ReactNode }) => (
-  <h3 className="mt-6 mb-2.5 text-overline font-semibold uppercase tracking-[.06em] text-text-secondary">{children}</h3>
-);
 
 function CodePill({ d }: { d: Delivery }) {
   const [label, cls] =
@@ -115,7 +113,7 @@ function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
     <>
       <SectionHeading>Payment link</SectionHeading>
       <div className="grid gap-3">
-        <LinkShare businessName={businessName} payment={p} />
+        <LinkShare url={p.checkoutUrl} message={linkMessage(businessName, p)} />
         <Button variant="danger" size="sm" className="justify-self-start" onClick={() => { cancel.reset(); setConfirming(true); }}>Cancel link</Button>
       </div>
       <Dialog
@@ -137,6 +135,7 @@ function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
 }
 
 function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Payment; payer: Payer | null; deliveries: Delivery[]; mode: Mode; list: 'payments' | 'links' }) {
+  const forWhat = paymentFor(p);
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">
@@ -150,7 +149,13 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
         <Row label={p.status === 'succeeded' ? 'Paid by' : 'Payer'}><PaidBy payer={payer} status={p.status} /></Row>
         {p.customerName && <Row label="Requested for">{p.customerName}</Row>}
         <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
-        {p.description && <Row label="For">{p.description}</Row>}
+        {forWhat.what && <Row label="For">{forWhat.what}</Row>}
+        {forWhat.note && <Row label="Customer's note">{forWhat.note}</Row>}
+        {p.source === 'open' && p.openLinkId && (
+          <Row label="Paid through">
+            <Link to={`/business/${mode}/links/open/${p.openLinkId}`} className="font-semibold text-accent-strong hover:underline">Reusable link</Link>
+          </Row>
+        )}
         <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>
         <Row label="Customer paid">
           <span className="tabular">{naira(p.customerTotal)}</span>{' '}

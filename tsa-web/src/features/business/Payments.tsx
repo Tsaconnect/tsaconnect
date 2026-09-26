@@ -2,6 +2,7 @@ import { Outlet } from 'react-router-dom';
 import { useMode } from '@/components/shell/mode';
 import { listPayments, type PaymentStatus } from './api';
 import { BusinessPage } from './BusinessPage';
+import { paymentColumns } from './paymentColumns';
 import { PaymentList } from './PaymentList';
 import { NoPaymentsYet } from './PaymentsTable';
 
@@ -23,8 +24,10 @@ function PaymentsBody() {
   return (
     <>
       <PaymentList
-        kind="payments"
+        queryKey="payments"
+        rowPath="payments"
         noun="payments"
+        columns={paymentColumns}
         statuses={STATUSES}
         load={listPayments}
         searchPlaceholder="Reference, description or ID"

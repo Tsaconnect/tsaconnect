@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SessionProvider } from '@/session/session';
 import { Toaster } from '@/components/ui/toaster';
 import { AppRoutes } from '@/routes';
-import type { OwnMerchant, Payment } from '@/features/business/api';
+import type { OpenLink, OwnMerchant, Payment } from '@/features/business/api';
 
 /** A fixed answer, or one worked out per call (it gets the URL, query included). */
 type Route = Response | ((url: string) => Response | Promise<Response>);
@@ -79,6 +79,26 @@ export const link: Payment = {
   expiresAt: '2026-10-01T16:01:00Z',
   settlementRef: undefined,
   succeededAt: undefined,
+};
+
+/** A reusable link: one address many customers pay, each entering the amount. */
+export const openLink: OpenLink = {
+  id: '4a7b9c1d-2e3f-4a5b-8c6d-7e8f9a0b1c2d',
+  mode: 'live',
+  slug: 'sky-air-ltd-7k3q',
+  url: 'https://tsaconnectworld.com/l/sky-air-ltd-7k3q',
+  label: 'Sky Air — Ikeja ticket desk',
+  minAmount: 100_000,
+  maxAmount: 0,
+  merchantMinAmount: 100_000,
+  merchantMaxAmount: 500_000_000,
+  active: true,
+  takingPayments: true,
+  version: 3,
+  paidCount: 2,
+  paidTotal: 1_250_000,
+  receivedTotal: 1_225_000,
+  createdAt: '2026-09-20T09:00:00Z',
 };
 
 /**

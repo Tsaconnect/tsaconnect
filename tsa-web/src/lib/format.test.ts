@@ -31,5 +31,12 @@ it('parseNaira reads what a merchant types as naira, in kobo', () => {
   expect(parseNaira('5,000.5')).toBe(500_050);
   expect(parseNaira(' ₦84,500.00 ')).toBe(8_450_000);
   expect(parseNaira('0.01')).toBe(1);
+  expect(parseNaira('1,234,567.89')).toBe(123_456_789);
+  expect(parseNaira('999')).toBe(99_900);
   for (const bad of ['', '0', '0.00', '-5', '5.001', '5e3', 'abc', '1.2.3']) expect(parseNaira(bad)).toBeNull();
+});
+
+// A decimal comma, or commas anywhere but between thousands, is refused — never read as a bigger amount.
+it('parseNaira accepts commas only as thousands separators', () => {
+  for (const bad of ['5000,50', '5,00', '50,000,0', ',5000', '5000,', '1,,000', '12,3456', '5,000,50']) expect(parseNaira(bad)).toBeNull();
 });

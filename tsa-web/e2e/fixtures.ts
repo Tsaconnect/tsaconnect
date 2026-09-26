@@ -23,7 +23,8 @@ type Merchant = {
 
 type Payment = {
   id: string; reference: string; mode: 'live' | 'test'; status: string; amount: number; customerTotal: number; merchantNet: number;
-  fee: number; currency: 'NGN'; description: string; source: 'api' | 'link'; customerName?: string; cancelled?: boolean;
+  fee: number; currency: 'NGN'; description: string; source: 'api' | 'link' | 'open'; customerName?: string; cancelled?: boolean;
+  openLinkId?: string; linkLabel?: string;
   returnUrl?: string; expiresAt: string; settlementRef?: string;
   failureReason?: string; succeededAt?: string; appUrl: string; checkoutUrl: string; createdAt: string;
 };
@@ -75,7 +76,20 @@ export type MockApi = {
   lastKey?: string;
   /** Every payment, API-made and links; a test may add its own. */
   payments: Payment[];
+  /** Reusable links, newest first. */
+  openLinks: OpenLink[];
+  /** A customer pays `amount` kobo through a reusable link (what the public checkout would do). */
+  payThrough: (link: OpenLink, amount: number, note?: string) => Payment;
 };
+
+type OpenLink = {
+  id: string; mode: 'live' | 'test'; slug: string; url: string; label: string; minAmount: number; maxAmount: number;
+  active: boolean; version: number; paidCount: number; paidTotal: number; receivedTotal: number; createdAt: string;
+};
+
+// The merchant's own bounds (pay_merchant_service.go defaults), in kobo.
+const MIN_KOBO = 100_000;
+const MAX_KOBO = 500_000_000;
 
 const MERCHANT_CANCELLED = 'cancelled by the merchant';
 
@@ -92,9 +106,42 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
     calls: [],
     unhandled: [],
     payments: PAYMENTS.map((p) => ({ ...p })),
+    openLinks: [],
+    payThrough: (link, amount, note) => payThrough(link, amount, note),
   };
   // middleware/idempotency.go: a key seen before replays the answer it got (2xx only).
   const replays = new Map<string, ReturnType<typeof ok>>();
+  let slugs = 0;
+  // Business-name slug + 4 base32 characters, like the API's.
+  const newSlug = () => `sky-air-ltd-${(1000 + ++slugs * 37).toString(32).slice(-4).padStart(4, 'k')}`;
+  const openUrl = (slug: string) => `https://tsaconnectworld.com/l/${slug}`;
+  // A reusable-link payment's description is the customer's own note (often blank); linkLabel names the link.
+  function payThrough(link: OpenLink, amount: number, note = '') {
+    const n = api.payments.length;
+    const made = payment(`0e11ed00-0000-4000-8000-${String(n).padStart(12, '0')}`, `open_${String(n).padStart(12, 'q')}`, link.mode, 'succeeded', amount,
+      new Date().toISOString(), { source: 'open', openLinkId: link.id, linkLabel: link.label, description: note, succeededAt: new Date().toISOString() });
+    api.payments.unshift(made);
+    Object.assign(link, { paidCount: link.paidCount + 1, paidTotal: link.paidTotal + amount, receivedTotal: link.receivedTotal + made.merchantNet });
+    return made;
+  }
+  /** A link as the owner reads it: the merchant's bounds, and whether it takes payments now (and why not). */
+  const openView = (l: OpenLink) => {
+    const m = api.merchant;
+    const reason = m.status === 'suspended' ? 'suspended' : !m.settlementMode ? 'no_payout'
+      : l.mode === 'live' && !m.liveAllowed ? 'live_off' : !l.active ? 'paused' : undefined;
+    return { ...l, merchantMinAmount: MIN_KOBO, merchantMaxAmount: MAX_KOBO, takingPayments: !reason, ...(reason ? { notTakingReason: reason } : {}) };
+  };
+  /** Label and bounds as the API checks them; null when they pass. */
+  const openLinkRefused = (body: Record<string, unknown>) => {
+    const label = String(body.label ?? '').trim();
+    const min = Number(body.minAmount ?? 0);
+    const max = Number(body.maxAmount ?? 0);
+    if (!label || label.length > 80) return fail(422, 'Give the link a label of up to 80 characters');
+    const inBounds = (k: number) => k === 0 || (Number.isInteger(k) && k >= MIN_KOBO && k <= MAX_KOBO);
+    if (!inBounds(min) || !inBounds(max)) return fail(422, 'Enter an amount between ₦1,000.00 and ₦5,000,000.00');
+    if (min && max && min > max) return fail(422, 'The maximum must be at least the minimum');
+    return null;
+  };
   let challenged = false;
   let seq = 0;
   // Action ids are UUIDs in the API (pay_owner_actions.id): shaped the same here.
@@ -151,6 +198,51 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       const rows = api.payments.filter((p) => p.mode === mode && (!source || p.source === source) && statusMatches(p)
         && (!q || p.reference.toLowerCase().includes(q) || p.description.toLowerCase().includes(q) || p.id.startsWith(q)));
       return ok({ items: rows.slice((page - 1) * limit, page * limit), total: rows.length, page, limit }, 'Payments');
+    }
+    if (route === 'POST /api/pay/merchant/open-links') {
+      if (mode === 'live' && !m.liveAllowed) {
+        return fail(403, "Live payments aren't switched on for your business yet. Try a test link first.", 'live_not_enabled');
+      }
+      if (!m.settlementMode) return fail(409, 'Set where you want to be paid before you request a payment', 'settlement_not_set');
+      const refused = openLinkRefused(body);
+      if (refused) return refused;
+      const slug = newSlug();
+      const made: OpenLink = {
+        id: `0be11111-0000-4000-8000-${String(api.openLinks.length).padStart(12, '0')}`, mode, slug, url: openUrl(slug),
+        label: String(body.label).trim(), minAmount: Number(body.minAmount ?? 0), maxAmount: Number(body.maxAmount ?? 0),
+        active: true, version: 1, paidCount: 0, paidTotal: 0, receivedTotal: 0, createdAt: new Date().toISOString(),
+      };
+      api.openLinks.unshift(made);
+      return ok(openView(made), 'Payment link created', 201);
+    }
+    if (route === 'GET /api/pay/merchant/open-links') {
+      const page = Math.max(Number(query.get('page')) || 1, 1);
+      const limit = Math.min(Number(query.get('limit')) > 0 ? Number(query.get('limit')) : 20, 50);
+      const rows = api.openLinks.filter((l) => l.mode === mode);
+      return ok({ items: rows.slice((page - 1) * limit, page * limit).map(openView), total: rows.length, page, limit }, 'Payment links');
+    }
+    const openLink = /^\/api\/pay\/merchant\/open-links\/([^/]+)(\/replace)?$/.exec(path);
+    if (openLink) {
+      const l = api.openLinks.find((x) => x.id === openLink[1] && x.mode === mode);
+      if (!l) return fail(404, 'Link not found', 'link_not_found');
+      if (method === 'GET' && !openLink[2]) {
+        return ok({ openLink: openView(l), payments: api.payments.filter((p) => p.openLinkId === l.id).slice(0, 10) }, 'Payment link');
+      }
+      if (method === 'PUT' && !openLink[2]) {
+        if (body.expectedVersion !== l.version) return fail(409, 'This link changed since you opened it — reload and try again', 'link_stale');
+        const refused = openLinkRefused(body);
+        if (refused) return refused;
+        Object.assign(l, {
+          label: String(body.label).trim(), minAmount: Number(body.minAmount ?? 0), maxAmount: Number(body.maxAmount ?? 0),
+          active: Boolean(body.active), version: l.version + 1,
+        });
+        return ok(openView(l), 'Payment link saved');
+      }
+      if (method === 'POST' && openLink[2]) {
+        const slug = newSlug();
+        Object.assign(l, { slug, url: openUrl(slug), version: l.version + 1 });
+        return ok(openView(l), 'Payment link replaced');
+      }
     }
     if (route === 'POST /api/pay/merchant/links') {
       if (m.status === 'suspended') return fail(403, 'Your merchant account is suspended — contact support', 'merchant_suspended');
