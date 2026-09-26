@@ -646,3 +646,53 @@ func TestPayPayment_CheckoutViewCarriesTheLinkedOrderStatusForThePayerOnly(t *te
 		t.Fatalf("someone else's order leaked its status: %q", v.OrderStatus)
 	}
 }
+
+func TestPayPayment_PayerHistoryIsHerOwnLivePaymentsAsPayments(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	payer := payUser(t, s, true)
+	other := payUser(t, s, true)
+	pay := func(ref string, who *models.User) *models.PayPayment {
+		t.Helper()
+		in := payIn()
+		in.Reference = ref
+		p, _, err := s.Create(ctx, m, models.PayModeLive, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Lock(ctx, who, p.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first := pay("LIVE-1", payer)
+	second := pay("LIVE-2", payer)
+	pay("LIVE-OTHER", other)
+	released := pay("LIVE-RELEASED", payer)
+	// A released attempt moved none of her money: it is not hers to list.
+	s.db.Model(&models.PayPayment{}).Where("id = ?", released.ID).Updates(map[string]any{"payer_user_id": nil, "status": models.PayStatusPending})
+	// She paid `first` later than `second`, though the merchant raised it earlier.
+	s.db.Model(&models.PayPayment{}).Where("id = ?", first.ID).Update("locked_at", payTestNow.Add(time.Hour))
+	s.db.Model(&models.PayPayment{}).Where("id = ?", second.ID).Update("locked_at", payTestNow.Add(time.Minute))
+	// A test payment moves no money.
+	testIn := payIn()
+	testIn.Reference = "TEST-1"
+	test, _, _ := s.Create(ctx, m, models.PayModeTest, testIn)
+	s.db.Model(&models.PayPayment{}).Where("id = ?", test.ID).Update("payer_user_id", payer.ID)
+
+	got, err := s.PayerHistory(ctx, payer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != first.ID || got[1].ID != second.ID {
+		t.Fatalf("history = %+v, want [first, second] newest paid first", got)
+	}
+	h := got[0]
+	if h.MerchantName != m.BusinessName || h.CustomerTotal != first.CustomerTotalKobo || h.Currency != "NGN" ||
+		h.Status != models.PayStatusProcessing || !h.PaidAt.Equal(payTestNow.Add(time.Hour)) {
+		t.Fatalf("row = %+v", h)
+	}
+	if none, _ := s.PayerHistory(ctx, uuid.New()); len(none) != 0 {
+		t.Fatalf("a stranger's history = %+v", none)
+	}
+}

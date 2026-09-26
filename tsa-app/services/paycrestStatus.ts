@@ -38,6 +38,16 @@ export function isTerminal(status: PaycrestStatus): boolean {
   return ['settled', 'refunded', 'expired', 'unmatched', 'failed', 'cancelled'].includes(status);
 }
 
+/**
+ * Whether a problem with this order can be reported. Mirrors the server's
+ * paycrestPreMoneyStatuses (dispute_subjects.go): before any money has moved
+ * there is nothing to dispute — cancelling is the way out — so the button
+ * would only ever be refused.
+ */
+export function isDisputableOrder(status: PaycrestStatus): boolean {
+  return !isAwaitingUser(status) && status !== 'cancelled';
+}
+
 /** Whether the order is still waiting on the user to do something. */
 export function isAwaitingUser(status: PaycrestStatus): boolean {
   return status === 'awaiting_payment' || status === 'awaiting_deposit';

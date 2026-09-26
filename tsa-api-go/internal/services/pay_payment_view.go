@@ -276,3 +276,64 @@ func (s *PayPaymentService) Payer(ctx context.Context, p *models.PayPayment) (*P
 	}
 	return nil, nil
 }
+
+// PayHistoryItem is one payment in a payer's own history: who she paid, how
+// much, and where it stands. Never the payout order behind it — that is how a
+// payment moves, not something she did.
+type PayHistoryItem struct {
+	ID            uuid.UUID  `json:"id"`
+	MerchantName  string     `json:"merchantName"`
+	Description   string     `json:"description,omitempty"`
+	Status        string     `json:"status"`
+	CustomerTotal int64      `json:"customerTotal"`
+	Currency      string     `json:"currency"`
+	PaidAt        time.Time  `json:"paidAt"`
+	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
+}
+
+// payHistoryCap bounds the history in one read; the app lists it unpaged, like bills.
+const payHistoryCap = 50
+
+// PayerHistory is userID's live payments, newest first. A payment is hers
+// while she is its payer: an attempt is only released (payer cleared) once no
+// money of hers moved, so what is listed is exactly what she paid or is
+// paying. Test payments move no money and are left out. One query, merchant
+// name joined — no lookup per row.
+func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) ([]PayHistoryItem, error) {
+	type row struct {
+		ID                uuid.UUID
+		BusinessName      string
+		Description       string
+		Status            string
+		CustomerTotalKobo int64
+		Currency          string
+		LockedAt          *time.Time
+		CreatedAt         time.Time
+		SucceededAt       *time.Time
+	}
+	var rows []row
+	err := s.db.WithContext(ctx).
+		Table("pay_payments AS p").
+		Select("p.id, m.business_name, p.description, p.status, p.customer_total_kobo, p.currency, p.locked_at, p.created_at, p.succeeded_at").
+		Joins("JOIN pay_merchants AS m ON m.id = p.merchant_id").
+		Where("p.payer_user_id = ? AND p.mode = ?", userID, models.PayModeLive).
+		Order("COALESCE(p.locked_at, p.created_at) DESC").
+		Limit(payHistoryCap).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PayHistoryItem, 0, len(rows))
+	for _, r := range rows {
+		// When she paid, not when the merchant raised the payment.
+		paidAt := r.CreatedAt
+		if r.LockedAt != nil {
+			paidAt = *r.LockedAt
+		}
+		out = append(out, PayHistoryItem{
+			ID: r.ID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
+			CustomerTotal: r.CustomerTotalKobo, Currency: r.Currency, PaidAt: paidAt, SucceededAt: r.SucceededAt,
+		})
+	}
+	return out, nil
+}

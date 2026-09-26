@@ -6,10 +6,12 @@ import { getBtcAddress } from './chains/btcWallet';
 import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
 import { listITIntents } from './itApi';
 import { listOrders as listPaycrestOrders } from './paycrestApi';
+import { listMyPayments, type PayHistoryItem, type PayStatus } from './payApi';
+import { formatKobo } from '../utils/stableSellQuote';
 import { buildITActivity, fiatSymbol, type ITActivity, type SymbolFor } from '../utils/itActivity';
 import type { StatusVisual } from '../components/ui/statusMap';
 
-export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service' | 'bill' | 'it';
+export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'payment' | 'service' | 'bill' | 'it';
 
 export interface ActivityItem {
   id: string;
@@ -387,9 +389,45 @@ async function fetchITItems(symbolFor: SymbolFor): Promise<ActivityItem[]> {
   return buildITActivity(intents, orders ?? [], symbolFor).map(fromITActivity);
 }
 
+const PAYMENT_STATUS: Record<PayStatus, StatusVisual> = {
+  succeeded: { label: 'Paid', tone: 'success' },
+  processing: { label: 'Processing', tone: 'info' },
+  // A payment she is the payer of is past pending; read one defensively as under way.
+  pending: { label: 'Processing', tone: 'info' },
+  failed: { label: 'Failed', tone: 'danger' },
+  expired: { label: 'Expired', tone: 'neutral' },
+};
+
+// A TSA Pay payment, as what it is to her: money to a merchant. The payout
+// order behind it is how it moves and is left out of the ramp's list.
+function fromPayment(p: PayHistoryItem): ActivityItem {
+  return {
+    id: p.id,
+    type: 'payment',
+    subtype: p.status,
+    title: `Payment to ${p.merchantName}`,
+    subtitle: p.description || 'TSA Pay',
+    amount: formatKobo(String(p.customerTotal)),
+    positive: false,
+    status: p.status,
+    statusVisual: PAYMENT_STATUS[p.status] ?? { label: p.status, tone: 'neutral' },
+    timestamp: p.paidAt,
+    // The pay screen is the receipt: who, how much, and where it stands.
+    href: `/pay?id=${p.id}`,
+    iconName: 'storefront',
+    iconColor: '#C8961E',
+    iconBg: '#C8961E15',
+  };
+}
+
+// Capped server-side with no pagination — an unpaged source, like bills.
+async function fetchPaymentItems(): Promise<ActivityItem[]> {
+  return (await listMyPayments()).map(fromPayment);
+}
+
 // ── Public API ─────────────────────────────────────────────────
 
-export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'service', 'bill', 'it'];
+export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'payment', 'service', 'bill', 'it'];
 
 // A source either pages (fetch page N of `limit`) or returns its whole bounded
 // list in one call. Both return newest first.
@@ -414,6 +452,7 @@ function sourcesFor(types: ActivityType[], symbolFor: SymbolFor): Source[] {
   if (active.includes('tp')) sources.push(paged(fetchTPItems));
   if (active.includes('cashback')) sources.push(paged(fetchCashbackItems));
   if (active.includes('order')) sources.push(paged(fetchOrderItems));
+  if (active.includes('payment')) sources.push(whole(fetchPaymentItems));
   if (active.includes('service')) sources.push(paged(fetchServiceItems));
   if (active.includes('bill')) sources.push(whole(fetchBillItems));
   if (active.includes('it')) sources.push(whole(() => fetchITItems(symbolFor)));
@@ -501,6 +540,7 @@ export const TYPE_META: Record<ActivityType, { label: string; iconName: string; 
   tp:       { label: 'TP',       iconName: 'star-outline',        color: '#D4AF37' },
   cashback: { label: 'Cashback', iconName: 'gift-outline',        color: '#8B5CF6' },
   order:    { label: 'Orders',   iconName: 'bag-handle-outline',  color: '#3B82F6' },
+  payment:  { label: 'Payments', iconName: 'storefront-outline',  color: '#C8961E' },
   service:  { label: 'Services', iconName: 'call-outline',        color: '#0EA5E9' },
   bill:     { label: 'Bills',    iconName: 'flash-outline',       color: '#F59E0B' },
   it:       { label: 'Instant Transfer', iconName: 'business-outline', color: '#10B981' },

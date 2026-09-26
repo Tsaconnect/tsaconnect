@@ -1204,8 +1204,11 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 		limit = 25
 	}
 	var rows []models.PaycrestOrderRecord
+	// A TSA Pay payment's order is how the payment moves, not a sale of hers:
+	// listed here it read as "Sell USDC — paid to your bank" when the money
+	// went to the merchant. Her payments are listed as payments (GET /pay/history).
 	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
+		Where("user_id = ? AND pay_payment_id IS NULL", userID).
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }

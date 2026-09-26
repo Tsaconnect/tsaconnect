@@ -48,6 +48,7 @@ const ITEM_ICONS: Record<string, IconName> = {
   'gift': 'gift',
   'bag-handle': 'cart',
   'call': 'mobile',
+  'storefront': 'storefront',
   'ellipse': 'dots',
 };
 
@@ -58,6 +59,7 @@ const TYPE_ICONS: Record<ActivityType, IconName> = {
   tp: 'star',
   cashback: 'gift',
   order: 'cart',
+  payment: 'storefront',
   service: 'mobile',
   bill: 'bolt',
   it: 'bank',

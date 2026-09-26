@@ -80,11 +80,12 @@ describe('openActivityItem', () => {
   });
 
   it('falls back to the explorer link', () => {
-    const opened = openActivityItem({ ...base, txHash: '0xabc', chainId: 146 });
+    const hash = `0x${'ab'.repeat(32)}`;
+    const opened = openActivityItem({ ...base, txHash: hash, chainId: 146 });
 
     expect(opened).toBe(true);
     expect(router.push).not.toHaveBeenCalled();
-    expect(Linking.openURL).toHaveBeenCalledWith(expect.stringContaining('0xabc'));
+    expect(Linking.openURL).toHaveBeenCalledWith(expect.stringContaining(hash));
   });
 
   it('does nothing for an item with neither', () => {

@@ -16,10 +16,12 @@ import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Card, Icon, PressableScale, Spinner, Stepper, Text, type Step } from '@/components/ui';
 import AssetPicker from '@/components/assets/AssetPicker';
+import { DisputeSection } from '@/components/disputes/DisputeSection';
 import { SWAPPED_STAGE_LABELS } from '@/components/paycrest/SwappedSellForm';
 import type { PayHook } from '@/hooks/usePayLive';
 import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
+import { isDisputableOrder } from '@/services/paycrestStatus';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { depositStillToSendCopy, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
@@ -97,6 +99,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
   const pricing = !!pick && !price;
   const running = pay.stage === 'paying';
   const orderId = pay.order?.id ?? checkout.orderId;
+  const orderStatus = checkout.orderStatus ?? pay.order?.status;
   const retryable = pay.retryable !== false;
   const progress = pay.swapStage ? SWAPPED_STAGE_LABELS[pay.swapStage] : undefined;
   const receivesLine = receives?.(price?.receives);
@@ -205,12 +208,18 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
       )}
       {toSendCopy && <Text variant="caption" style={{ color: colors.textMuted }}>{toSendCopy.leave}</Text>}
 
-      {/* Not while a deposit is still to send: that screen's Cancel fails the payment for good. */}
-      {orderId && ['failed', 'waiting', 'continue'].includes(pay.stage) && (
-        <Button
-          title="Open the payment order"
-          variant="ghost"
-          onPress={() => router.push(`/wallet/paycrest/order/${orderId}` as never)}
+      {/* A stuck or failed payment is reported here, on the payment. The
+          report is filed against the order behind it — that is what support
+          chases with the provider — but she never has to open that order: it
+          is how the payment moves, not something she did. Not while a deposit
+          is still to send (Send is the way forward), and only once money has
+          moved: before that there is nothing to report. */}
+      {orderId && orderStatus && ['failed', 'waiting', 'continue'].includes(pay.stage) && (
+        <DisputeSection
+          subjectType="paycrest_order"
+          subjectId={orderId}
+          disputable={isDisputableOrder(orderStatus)}
+          prompt="Tell us what went wrong with this payment. Attach a receipt or screenshot if you have one — it is the fastest way for us to chase this up."
         />
       )}
 

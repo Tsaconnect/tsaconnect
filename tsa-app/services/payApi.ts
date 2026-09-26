@@ -55,6 +55,26 @@ const request = createApiRequest({
  *  lives in its own zero-dependency module rather than here. */
 export { isPaymentId };
 
+/** One of her own payments, as her activity lists it (GET /pay/history). */
+export type PayHistoryItem = {
+  id: string;
+  merchantName: string;
+  description?: string;
+  status: PayStatus;
+  /** Integer kobo — what she paid, fee included. */
+  customerTotal: number;
+  currency: 'NGN';
+  /** When she paid it, not when the merchant raised it. */
+  paidAt: string;
+  succeededAt?: string;
+};
+
+/** Her live payments, newest first (the server caps the list). */
+export async function listMyPayments(): Promise<PayHistoryItem[]> {
+  const data = await request<{ payments: PayHistoryItem[] }>('/history');
+  return data?.payments ?? [];
+}
+
 /** Refuses a non-UUID before it ever reaches fetch. */
 export async function getCheckout(id: string): Promise<PayCheckout> {
   if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);

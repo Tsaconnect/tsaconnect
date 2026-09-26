@@ -39,6 +39,7 @@ import {
   getOrder,
   isAwaitingUser,
   isConvertedOrder,
+  isDisputableOrder,
   isTerminal,
   statusLabel,
   formatPromisedAmount,
@@ -508,7 +509,7 @@ export default function PaycrestOrderScreen() {
         <DisputeSection
           subjectType="paycrest_order"
           subjectId={order.id}
-          disputable={!awaiting && order.status !== 'cancelled'}
+          disputable={isDisputableOrder(order.status)}
           title={unmatched ? 'Open a dispute' : 'Report a problem'}
           prompt={
             unmatched

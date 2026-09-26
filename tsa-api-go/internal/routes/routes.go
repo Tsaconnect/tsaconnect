@@ -1286,6 +1286,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			checkout.POST("/:id/crypto", middleware.Idempotency(config.DB), payStartLimit, payh.PayCrypto)
 		}
 
+		// A payer's own payments, for the app's activity feed. Her record, so
+		// never cached.
+		api.GET("/pay/history", middleware.NoStore(), auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey), payh.History)
+
 		// A merchant's own account, from the app and the web: JWT user auth.
 		// Every guarded request (payouts, keys, webhooks, the webhook secret)
 		// re-checks the password in-handler and has its own tight limit — a
