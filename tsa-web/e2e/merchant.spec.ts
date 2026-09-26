@@ -13,6 +13,8 @@ test('a merchant signs in on a new browser, rolls a test key and sets a webhook'
   await page.getByRole('button', { name: 'Verify and sign in' }).click();
   await expect(page).toHaveURL(/\/business\/live\/overview$/);
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+  // Live is switched on by TSA Connect after review: until then setup is not finished.
+  await expect(page.getByText("Under review — finish a test payment and we'll switch you on")).toBeVisible();
 
   await page.getByRole('group', { name: 'Mode' }).getByRole('link', { name: 'Test', exact: true }).click();
   await expect(page).toHaveURL(/\/business\/test\/overview$/);
@@ -81,6 +83,7 @@ test('the layout holds at phone width', async ({ page }) => {
   await page.goto('/business/live/developers');
   await expect(page.getByRole('heading', { name: 'API keys & webhooks' })).toBeVisible();
   await expect(page.getByText(`${api.merchant.liveKeyPrefix}••••••••••••`, { exact: true })).toBeVisible();
+  await expect(page.getByText(/Live payments aren't on yet/)).toBeVisible();
   expect(await overflows()).toBe(false);
 
   // The public docs too: long code lines scroll inside their block, not the page.

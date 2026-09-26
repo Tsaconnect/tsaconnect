@@ -56,6 +56,15 @@ describe('developer docs', () => {
     expect(within(hooks).getByText(/1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours and 24 hours/)).toBeInTheDocument();
   });
 
+  it('lists both live refusals in the error table', () => {
+    mount();
+    const errors = screen.getByRole('heading', { level: 2, name: 'Errors' }).closest('section')!;
+    for (const code of ['live_disabled', 'live_not_enabled']) {
+      const row = within(errors).getByText(code).closest('tr')!;
+      expect(within(row).getByText('403')).toBeInTheDocument();
+    }
+  });
+
   it('Copy puts the whole sample on the clipboard', async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);

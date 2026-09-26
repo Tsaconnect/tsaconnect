@@ -11,6 +11,7 @@ import { BusinessPage } from './BusinessPage';
 import { shortAddress } from './display';
 import { NoPaymentsYet, PaymentsTable } from './PaymentsTable';
 
+// `to` empty: nothing for the merchant to do but wait, so the step is not a link.
 type Step = { done: boolean; title: string; todo: string; hint: string; to: string };
 
 function steps(m: OwnMerchant, mode: Mode, testPaid: boolean): Step[] {
@@ -43,6 +44,13 @@ function steps(m: OwnMerchant, mode: Mode, testPaid: boolean): Step[] {
       to: biz('developers'),
     },
     { done: testPaid, title: 'Test payment made', todo: 'Make a test payment', hint: 'In test mode — no real money moves', to: '/docs' },
+    {
+      done: m.liveEnabled,
+      title: 'Live payments',
+      todo: 'Live payments',
+      hint: m.liveEnabled ? 'On — your live key takes real payments' : "Under review — finish a test payment and we'll switch you on",
+      to: '',
+    },
   ];
 }
 
@@ -56,7 +64,7 @@ function Checklist({ items }: { items: Step[] }) {
           <div className="mb-1 h-1.5 overflow-hidden rounded-full bg-surface-alt" aria-hidden>
             <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${(done / items.length) * 100}%` }} />
           </div>
-          <ol className="grid xl:grid-cols-5 xl:gap-4">
+          <ol className="grid xl:grid-cols-6 xl:gap-4">
             {items.map((s, i) => (
               <li key={s.title} className="flex items-start gap-3 border-b border-dashed border-hairline py-3 last:border-0 xl:border-0">
                 <span
@@ -74,11 +82,13 @@ function Checklist({ items }: { items: Step[] }) {
                       {s.title}
                       <span className="sr-only"> (done)</span>
                     </p>
-                  ) : (
+                  ) : s.to ? (
                     <Link to={s.to} className="group text-body-sm font-semibold text-accent-strong hover:underline">
                       {s.todo}
                       <ArrowRight className="ml-1 inline size-3.5 align-[-2px] transition-transform group-hover:translate-x-0.5" aria-hidden />
                     </Link>
+                  ) : (
+                    <p className="text-body-sm font-semibold">{s.todo}</p>
                   )}
                   <p className="line-clamp-2 text-caption break-words text-text-secondary" title={s.hint}>{s.hint}</p>
                 </div>

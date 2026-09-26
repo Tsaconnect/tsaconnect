@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { BookOpen, Copy, Lock } from 'lucide-react';
+import { BookOpen, Clock, Copy, Lock } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { copyText } from '@/lib/clipboard';
 import { Badge } from '@/components/ui/badge';
@@ -44,8 +44,12 @@ function SecretBox({ label, value }: { label: string; value: string }) {
   );
 }
 
-const Row = ({ children }: { children: ReactNode }) => (
-  <div className="flex flex-wrap items-center gap-3 border-b border-hairline px-5 py-3.5 last:border-0 sm:flex-nowrap">{children}</div>
+/** One line of a card; `after` sits under it, inside the same row. */
+const Row = ({ children, after }: { children: ReactNode; after?: ReactNode }) => (
+  <div className="border-b border-hairline px-5 py-3.5 last:border-0">
+    <div className="flex flex-wrap items-center gap-3 sm:flex-nowrap">{children}</div>
+    {after && <div className="mt-3">{after}</div>}
+  </div>
 );
 
 const Box = ({ children, muted }: { children: ReactNode; muted?: boolean }) => (
@@ -57,8 +61,11 @@ const Box = ({ children, muted }: { children: ReactNode; muted?: boolean }) => (
 function KeyRow({ merchant: m, mode, onRoll, locked }: { merchant: OwnMerchant; mode: Mode; onRoll: () => void; locked: boolean }) {
   const has = mode === 'live' ? m.hasLiveKey : m.hasTestKey;
   const prefix = mode === 'live' ? m.liveKeyPrefix : m.testKeyPrefix;
+  const notLive = mode === 'live' && !m.liveEnabled && (
+    <Note tone="info" icon={<Clock />}>Live payments aren't on yet — your live key will be refused until TSA Connect switches you on.</Note>
+  );
   return (
-    <Row>
+    <Row after={notLive}>
       <Badge tone={mode} className="w-12 justify-center">{mode === 'live' ? 'Live' : 'Test'}</Badge>
       <Box muted={!has}>{has ? `${prefix ?? ''}••••••••••••` : 'No key yet'}</Box>
       <Button size="sm" variant={mode === 'live' && has ? 'danger' : 'secondary'} onClick={onRoll} disabled={locked}>

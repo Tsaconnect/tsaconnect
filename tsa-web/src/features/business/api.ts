@@ -9,6 +9,8 @@ export type OwnMerchant = {
   id: string;
   businessName: string;
   status: 'active' | 'suspended';
+  /** A super admin has switched this merchant's live payments on. Until then a live key is refused. */
+  liveEnabled: boolean;
   version: number;
   websiteDomain?: string;
   settlementMode: 'fiat' | 'crypto' | '';

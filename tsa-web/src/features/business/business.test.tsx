@@ -47,14 +47,27 @@ describe('business area', () => {
     stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments': noPayments });
     mountAt('/business/live/overview');
     const card = (await screen.findByRole('heading', { name: 'Finish setting up' })).closest('section')!;
-    expect(within(card).getByText('3 of 5 done')).toBeInTheDocument();
+    expect(within(card).getByText('3 of 6 done')).toBeInTheDocument();
     expect(within(card).getByRole('link', { name: /add a webhook/i })).toHaveAttribute('href', '/business/live/developers');
     expect(within(card).getByRole('link', { name: /make a test payment/i })).toHaveAttribute('href', '/docs');
+    // Live is TSA Connect's step, not hers: it says so and links nowhere.
+    expect(within(card).getByText("Under review — finish a test payment and we'll switch you on")).toBeInTheDocument();
+    expect(within(card).queryByRole('link', { name: /live payments/i })).not.toBeInTheDocument();
+  });
+
+  it('the checklist stays until live payments are switched on', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok({ ...merchant, webhookUrl: 'https://api.skyair.ng/tsa/webhook' }),
+      '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 5 }),
+    });
+    mountAt('/business/live/overview');
+    const card = (await screen.findByRole('heading', { name: 'Finish setting up' })).closest('section')!;
+    expect(within(card).getByText('5 of 6 done')).toBeInTheDocument();
   });
 
   it('the checklist goes away once everything is done', async () => {
     stubFetch({
-      '/api/pay/merchant': ok({ ...merchant, webhookUrl: 'https://api.skyair.ng/tsa/webhook' }),
+      '/api/pay/merchant': ok({ ...merchant, liveEnabled: true, webhookUrl: 'https://api.skyair.ng/tsa/webhook' }),
       '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 5 }),
     });
     mountAt('/business/live/overview');

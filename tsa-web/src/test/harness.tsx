@@ -27,6 +27,7 @@ export const merchant: OwnMerchant = {
   id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20',
   businessName: 'Sky Air Ltd',
   status: 'active',
+  liveEnabled: false,
   version: 7,
   websiteDomain: 'skyair.ng',
   settlementMode: 'fiat',

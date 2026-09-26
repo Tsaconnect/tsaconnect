@@ -24,6 +24,19 @@ describe('API keys & webhooks', () => {
     expect(screen.getByText('X-TSA-Signature')).toBeInTheDocument();
   });
 
+  it('says a live key is refused until live payments are switched on', async () => {
+    stubFetch({ '/api/pay/merchant': ok(merchant) });
+    mountAt('/business/live/developers');
+    expect(await screen.findByText("Live payments aren't on yet — your live key will be refused until TSA Connect switches you on.")).toBeInTheDocument();
+  });
+
+  it('says nothing about live once it is on', async () => {
+    stubFetch({ '/api/pay/merchant': ok({ ...merchant, liveEnabled: true }) });
+    mountAt('/business/live/developers');
+    expect(await screen.findByText(/^tsapk_live_7Hq2/)).toBeInTheDocument();
+    expect(screen.queryByText(/Live payments aren't on yet/)).not.toBeInTheDocument();
+  });
+
   it('rolling a key asks for the password, then the emailed code, then shows the key once', async () => {
     const f = stubFetch({
       '/api/pay/merchant': ok(merchant),

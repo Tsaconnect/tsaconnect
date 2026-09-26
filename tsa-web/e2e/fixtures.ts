@@ -14,7 +14,7 @@ const user = { id: '0b8f2d4e-9c1a-4f3b-8e7d-6a5c4b3a2918', name: 'Ada Obi', emai
 const sentTo = 'a***@skyair.ng';
 
 type Merchant = {
-  id: string; businessName: string; status: 'active' | 'suspended'; version: number; settlementMode: 'fiat' | 'crypto' | '';
+  id: string; businessName: string; status: 'active' | 'suspended'; liveEnabled: boolean; version: number; settlementMode: 'fiat' | 'crypto' | '';
   bankCode?: string; accountNumber?: string; accountName?: string; websiteDomain?: string;
   hasLiveKey: boolean; hasTestKey: boolean; liveKeyPrefix?: string; testKeyPrefix?: string;
   webhookUrl: string; testWebhookUrl: string; returnDomains: string[];
@@ -77,7 +77,8 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
   const api: MockApi = {
     signedIn: opts.signedIn ?? false,
     merchant: {
-      id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20', businessName: 'Sky Air Ltd', status: 'active', version: 7, settlementMode: 'fiat',
+      // Approved and testing: live payments not switched on yet.
+      id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20', businessName: 'Sky Air Ltd', status: 'active', liveEnabled: false, version: 7, settlementMode: 'fiat',
       bankCode: '044', accountNumber: '******3210', accountName: 'SKY AIR LIMITED', websiteDomain: 'skyair.ng',
       hasLiveKey: true, hasTestKey: true, liveKeyPrefix: 'tsapk_live_7Hq2xP', testKeyPrefix: 'tsapk_test_Qz91mK',
       webhookUrl: '', testWebhookUrl: '', returnDomains: ['skyair.ng'],

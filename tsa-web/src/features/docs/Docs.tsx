@@ -262,7 +262,9 @@ export function Docs() {
               </li>
             </ul>
             <Note tone="info">
-              Until live payments are switched on for TSA Pay, a live key is refused with <C>403 live_disabled</C>. A test key always works.
+              Until live payments are switched on for TSA Pay, a live key is refused with <C>403 live_disabled</C>. Until we switch
+              live payments on for your business — after you have made a test payment — it is refused with <C>403 live_not_enabled</C>.
+              A test key always works.
             </Note>
           </Section>
 
@@ -275,6 +277,7 @@ export function Docs() {
                 [<C>401</C>, <C>invalid_key</C>, <>The <C>Authorization</C> header is missing or malformed, or the key is unknown or was replaced by a new one.</>],
                 [<C>403</C>, <C>merchant_suspended</C>, 'Your merchant account is suspended.'],
                 [<C>403</C>, <C>live_disabled</C>, 'A live key while live payments are not enabled.'],
+                [<C>403</C>, <C>live_not_enabled</C>, "A live key before live payments are switched on for your business. Finish testing and contact TSA Connect."],
                 [<C>404</C>, '—', 'Reading a payment this key cannot see: a wrong id, another merchant\'s, or one from the other mode.'],
                 [<C>409</C>, '—', <>The <C>reference</C> was already used with different details, or (cancel) the payment is no longer <C>pending</C>, isn't yours, or is from the other mode.</>],
                 [<C>422</C>, '—', <>A field is out of bounds (the <C>message</C> says which), or your payouts are not set up yet.</>],
