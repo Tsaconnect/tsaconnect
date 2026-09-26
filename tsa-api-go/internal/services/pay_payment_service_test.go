@@ -601,3 +601,48 @@ func TestPayPayment_OwnerListHasItsIndex(t *testing.T) {
 		t.Fatalf("index columns: %s", ddl)
 	}
 }
+
+func TestPayPayment_CheckoutViewCarriesTheLinkedOrderStatusForThePayerOnly(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	if err := s.db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	in := payIn()
+	in.Reference = "LIVE-STATUS"
+	live, _, _ := s.Create(ctx, m, models.PayModeLive, in)
+	payer := payUser(t, s, true)
+	if _, _, err := s.Lock(ctx, payer, live.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	link := func(owner uuid.UUID, status string) {
+		t.Helper()
+		orderID := uuid.New()
+		row := models.PaycrestOrderRecord{ID: orderID, UserID: owner, Direction: "sell", Status: status, Reference: "PCS-" + orderID.String()}
+		if err := s.db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Model(&models.PayPayment{}).Where("id = ?", live.ID).Update("paycrest_order_id", orderID).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if v, err := s.CheckoutView(ctx, payer, live.ID, true); err != nil || v.OrderStatus != "" {
+		t.Fatalf("no order yet: status %q, err %v", v.OrderStatus, err)
+	}
+
+	link(payer.ID, "settling")
+	if v, _ := s.CheckoutView(ctx, payer, live.ID, true); v.OrderStatus != "settling" || v.OrderID == nil {
+		t.Fatalf("payer: %+v, want the order and its status", v)
+	}
+	stranger := payUser(t, s, true)
+	if v, _ := s.CheckoutView(ctx, stranger, live.ID, true); v.OrderStatus != "" || v.OrderID != nil {
+		t.Fatalf("stranger must see neither the order nor its status: %+v", v)
+	}
+
+	// An order row that is not the payer's is never read through their payment.
+	link(stranger.ID, "settled")
+	if v, _ := s.CheckoutView(ctx, payer, live.ID, true); v.OrderStatus != "" {
+		t.Fatalf("someone else's order leaked its status: %q", v.OrderStatus)
+	}
+}

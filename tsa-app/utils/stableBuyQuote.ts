@@ -9,6 +9,7 @@
  */
 
 /** Stablecoin base units are 6 decimals on every chain Flutterwave supports. */
+import type { StepState } from '@/utils/progressSteps';
 const ASSET_DECIMALS = 6;
 
 /** Every status a stablecoin BUY intent can hold, per the backend model.
@@ -60,7 +61,7 @@ export function formatMinorAsNaira(minor: string): string {
   return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${frac}`;
 }
 
-export type HopState = 'done' | 'active' | 'pending' | 'failed';
+export type HopState = StepState;
 export interface Hop {
   label: string;
   state: HopState;

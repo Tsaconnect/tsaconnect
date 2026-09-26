@@ -12,6 +12,7 @@ import { usePayLive } from '@/hooks/usePayLive';
 import { usePayNaira } from '@/hooks/usePayNaira';
 import type { PayCheckout } from '@/services/payApi';
 import { payPickFilter } from '@/utils/payPick';
+import { payProgressSteps } from '@/utils/payProgress';
 
 export function PayNaira({
   checkout, showForm, onWaiting, onActive,
@@ -32,9 +33,20 @@ export function PayNaira({
     [checkout.settlementMode, checkout.settleChainId, checkout.settleTokenAddress],
   );
 
+  // The checkout the screen re-reads every 5 s while she waits carries the order's status: no second poll.
+  const steps = payProgressSteps({
+    stage: pay.stage,
+    swapStage: pay.swapStage,
+    swapped: !!pay.swapped,
+    hasOrder: !!(pay.order?.id ?? checkout.orderId),
+    orderStatus: checkout.orderStatus ?? pay.order?.status,
+    notice: pay.notice,
+    merchantName: checkout.merchantName,
+  });
+
   return (
     <>
-      <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={allow} />
+      <PayLivePanel checkout={checkout} pay={pay} showForm={showForm} allow={allow} steps={steps} />
       <AuthorizationModal {...pay.authorization} />
     </>
   );

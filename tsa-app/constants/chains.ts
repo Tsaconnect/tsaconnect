@@ -479,12 +479,20 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
   };
 }
 
+// A hash often comes from a provider, not from us, and lands in a URL path: one
+// shaped like "../address/0x…" would send "View on explorer" somewhere else on
+// a trusted explorer. EVM hashes are checked exactly; the other families' (hex
+// or base58) must at least be plain alphanumerics, which is all of them.
+const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+const PLAIN_TX_HASH = /^[0-9A-Za-z]{32,128}$/;
+
 // Explorer URL for a transaction on any family. EVM explorers and
 // mempool.space use `/tx/{hash}`; Tronscan uses `/#/transaction/{hash}`.
 // Resolves the chain from a non-EVM key, else an EVM chainId, else an EVM
-// key. Returns undefined when unresolvable.
+// key. Returns undefined when unresolvable, or when the hash is not one.
 export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
   if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
+    if (!PLAIN_TX_HASH.test(txHash)) return undefined;
     const chain = NONEVM_CHAINS[opts.chainKey];
     // Solana selects the cluster with a ?cluster=devnet query param appended
     // AFTER the path, not a separate host — so build it explicitly to avoid a
@@ -498,6 +506,7 @@ export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey
     const path = chain.family === 'tron' ? `/#/transaction/${txHash}` : `/tx/${txHash}`;
     return `${base}${path}`;
   }
+  if (!EVM_TX_HASH.test(txHash)) return undefined;
   const explorer =
     (typeof opts.chainId === 'number' ? getChainByChainId(opts.chainId)?.explorerUrl : undefined) ??
     (opts.chainKey ? getChainDisplay(opts.chainKey)?.explorerUrl : undefined);

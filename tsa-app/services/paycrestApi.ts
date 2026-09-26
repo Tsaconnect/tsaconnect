@@ -341,7 +341,7 @@ export async function createSell(input: CreateSellInput): Promise<PaycrestOrder>
 
 /** Fetches one order, refreshed against the provider server-side. */
 export async function getOrder(id: string): Promise<PaycrestOrder> {
-  return request<PaycrestOrder>(`/orders/${id}`);
+  return request<PaycrestOrder>(`/orders/${encodeURIComponent(id)}`);
 }
 
 export async function listOrders(limit = 25): Promise<PaycrestOrder[]> {

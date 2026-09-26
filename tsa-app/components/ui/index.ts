@@ -71,3 +71,5 @@ export { PhotoPickerTile } from './PhotoPickerTile';
 export type { PhotoPickerTileProps } from './PhotoPickerTile';
 export { HeaderBackButton, headerBackLeft } from './HeaderBackButton';
 export type { HeaderBackButtonProps } from './HeaderBackButton';
+export { Stepper } from './Stepper';
+export type { Step, StepState, StepperProps } from './Stepper';
