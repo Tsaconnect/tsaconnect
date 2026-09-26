@@ -36,3 +36,10 @@ export const WALLET_TAB = '/tokenization' satisfies Href;
  *  payment_acceptance. The form itself routes to the verify-first,
  *  pending, approved or rejected screen, so every entry point pushes this. */
 export const TSA_PAY_APPLY = '/merchants/merchant-request?type=payment_acceptance' satisfies Href;
+
+/** Where a TSA Pay merchant is paid (and her payment links start). */
+export const PAY_SETTINGS = '/merchants/pay-settings' satisfies Href;
+
+/** A TSA Pay merchant's payment links, and the form that makes one. */
+export const PAY_LINKS = '/merchants/pay-links' satisfies Href;
+export const PAY_LINK_NEW = '/merchants/pay-links/new' satisfies Href;

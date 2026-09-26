@@ -1,7 +1,8 @@
-// Single source of truth for P2P status presentation. Namespace-aware because
+// Single source of truth for P2P status presentation — and a TSA Pay payment
+// link's, as its merchant sees it. Namespace-aware because
 // `cancelled`/`resolved` mean different things across trade/ad/dispute. Pure +
 // testable; StatusPill resolves `tone` -> theme color/bg.
-export type StatusKind = 'trade' | 'ad' | 'dispute';
+export type StatusKind = 'trade' | 'ad' | 'dispute' | 'payLink';
 export type StatusTone = 'success' | 'warning' | 'danger' | 'info' | 'escrow' | 'accent' | 'neutral';
 
 export interface StatusVisual {
@@ -37,10 +38,21 @@ const DISPUTE: Record<string, StatusVisual> = {
   rejected: { label: 'Rejected', tone: 'neutral' },
 };
 
+const PAY_LINK: Record<string, StatusVisual> = {
+  pending: { label: 'Awaiting payment', tone: 'warning' },
+  processing: { label: 'Being paid', tone: 'info' },
+  succeeded: { label: 'Paid', tone: 'success' },
+  failed: { label: 'Failed', tone: 'danger' },
+  expired: { label: 'Expired', tone: 'neutral' },
+  // derived UI-only: the server keeps a cancelled link as expired (utils/payLinks payLinkStatus)
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
+};
+
 export const STATUS_MAP: Record<StatusKind, Record<string, StatusVisual>> = {
   trade: TRADE,
   ad: AD,
   dispute: DISPUTE,
+  payLink: PAY_LINK,
 };
 
 /** Resolve a status string in its namespace; unknown values fall back to a neutral pill. */

@@ -24,6 +24,8 @@ export type PayCheckout = {
   merchantNet: number;
   currency: 'NGN';
   description: string;
+  /** Who the merchant made this link for, when she named them. */
+  customerName?: string;
   expiresAt: string;
   settlementMode: 'fiat' | 'crypto';
   settleTokenSymbol?: string;

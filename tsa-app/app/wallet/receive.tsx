@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
-import QRCode from 'react-native-qrcode-svg';
+import { QrPanel, QR_BG } from '@/components/common/QrPanel';
 import {
   CHAIN_KEYS,
   NONEVM_CHAIN_KEYS,
@@ -44,11 +44,6 @@ import {
   useToast,
   type PickerItem,
 } from '@/components/ui';
-
-// QR codes must stay high-contrast dark-on-light to remain scannable regardless of
-// the active theme, so these two values are intentionally not theme-driven.
-const QR_FG = '#16201F';
-const QR_BG = '#FFFFFF';
 
 const RECEIVE_CHAINS: AnyChainKey[] = [...CHAIN_KEYS, ...NONEVM_CHAIN_KEYS];
 const QR_SIZE = 200;
@@ -181,38 +176,16 @@ const ReceiveToken = () => {
 
         {walletAddress ? (
           <Card padding="xl" style={{ alignItems: 'center' }}>
-            <View
-              style={{
-                padding: spacing.sm,
-                backgroundColor: QR_BG,
-                borderRadius: radius.lg,
-                borderWidth: 1,
-                borderColor: colors.hairline,
-              }}
-            >
-              <QRCode value={walletAddress} size={QR_SIZE} color={QR_FG} backgroundColor={QR_BG} ecl="H" />
-              {/* ecl H tolerates the logo covering the centre modules */}
-              <View
-                pointerEvents="none"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <View style={{ padding: 3, borderRadius: radius.pill, backgroundColor: QR_BG }}>
-                  {symbol ? (
-                    <TokenAvatar symbol={symbol} chainKey={selectedChain} preferRegistry size={QR_LOGO_SIZE} />
-                  ) : (
-                    chainAvatar(selectedChain, QR_LOGO_SIZE)
-                  )}
-                </View>
+            {/* ecl H tolerates the logo covering the centre modules */}
+            <QrPanel value={walletAddress} size={QR_SIZE} ecl="H">
+              <View style={{ padding: 3, borderRadius: radius.pill, backgroundColor: QR_BG }}>
+                {symbol ? (
+                  <TokenAvatar symbol={symbol} chainKey={selectedChain} preferRegistry size={QR_LOGO_SIZE} />
+                ) : (
+                  chainAvatar(selectedChain, QR_LOGO_SIZE)
+                )}
               </View>
-            </View>
+            </QrPanel>
 
             <Text variant="bodySm" color="textSecondary" align="center" style={{ marginTop: spacing.lg }}>
               Your {symbol ? <Text variant="bodySm" weight="600">{symbol} </Text> : null}address on{' '}

@@ -203,6 +203,11 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
+                  {state.checkout.description ? <SummaryRow label="For" value={state.checkout.description} /> : null}
+                  {/* A payment link names who it was made for, so she can tell it is hers. */}
+                  {state.checkout.customerName ? (
+                    <SummaryRow label="Requested for" value={state.checkout.customerName} />
+                  ) : null}
                   <SummaryRow label="Amount" value={formatKobo(String(state.checkout.amount))} />
                   {/* Only the payer's share: a merchant may absorb part or all of the fee. */}
                   {state.checkout.customerTotal > state.checkout.amount && (

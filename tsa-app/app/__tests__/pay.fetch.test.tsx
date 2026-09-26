@@ -4,7 +4,8 @@
  * The pay screen's checkout reads. The 5 s poll can overlap: a slow OLD answer
  * landing after a newer one must not put the screen back in time. And a payment
  * that has reached a terminal status has no use for its "don't pay again" hold
- * any more, so the screen lets go of it.
+ * any more, so the screen lets go of it. A payment link says what it is for and,
+ * when the merchant named one, who it was requested for.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -123,4 +124,21 @@ it('a payment still under way does not', async () => {
   await act(async () => { tree = TestRenderer.create(<PayScreen />); });
   await flush();
   expect(clearPayHold).not.toHaveBeenCalled();
+});
+
+it('a payment link says what it is for and who it was requested for', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, description: 'Two bags of rice', customerName: 'Ada Obi',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Two bags of rice');
+  expect(text()).toContain('Requested for: Ada Obi');
+});
+
+it('without a customer name there is no "Requested for"', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({ status: 'pending', payable: true, youArePaying: false }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).not.toContain('Requested for');
 });

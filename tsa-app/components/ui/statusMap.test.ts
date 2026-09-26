@@ -26,6 +26,14 @@ describe('P2P status map', () => {
     expect(Object.keys(STATUS_MAP.dispute).sort()).toEqual(['open', 'rejected', 'resolved'].sort());
   });
 
+  it('covers every payment-link status + cancelled', () => {
+    expect(Object.keys(STATUS_MAP.payLink).sort()).toEqual(
+      ['pending', 'processing', 'succeeded', 'failed', 'expired', 'cancelled'].sort(),
+    );
+    expect(getStatusVisual('payLink', 'cancelled').label).toBe('Cancelled');
+    expect(getStatusVisual('payLink', 'expired').label).toBe('Expired');
+  });
+
   it('disambiguates cross-namespace collisions (cancelled / resolved)', () => {
     expect(getStatusVisual('trade', 'released').label).toBe('Completed');
     expect(getStatusVisual('trade', 'resolved').label).toBe('Resolved');

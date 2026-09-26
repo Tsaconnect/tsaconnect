@@ -17,6 +17,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
+import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { TSA_PAY_APPLY } from '@/constants/routes';
 import {
   AccentCard,
@@ -44,6 +46,7 @@ export default function MerchantDashboard() {
   const [merchantName, setMerchantName] = useState('Merchant');
   const { formatPrice } = useCurrency();
   const { isPm, status: pmStatus, loading: pmLoading, reload: reloadPmStatus } = useIsPaymentMerchant();
+  const { load: payMerchant } = useOwnPayMerchant();
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -252,28 +255,50 @@ export default function MerchantDashboard() {
             </PressableScale>
           )}
 
-          {/* TSA Pay CTA — always visible; the merchant-request gate itself
-              routes to the form, or to the verify-first/pending/approved/rejected
-              screen, based on her verification and any existing request. */}
-          <PressableScale
-            onPress={() => router.push(TSA_PAY_APPLY)}
-            style={{ marginBottom: spacing.lg }}
-          >
-            <AccentCard padding="md" railColor={colors.accent}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="card" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Accept payments (TSA Pay)
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Let customers pay you in any token, settled to naira or crypto.
-                  </Text>
+          {/* TSA Pay — a merchant who has it gets her payment links and
+              payment settings; anyone else gets the CTA, and the
+              merchant-request gate itself routes to the form, or to the
+              verify-first/pending/approved/rejected screen, based on her
+              verification and any existing request. Nothing is drawn until
+              the read settles, so the card never swaps under her thumb. */}
+          {payMerchant.kind === 'loading' ? null : payMerchant.kind === 'ready' ? (
+            <AccentCard padding="md" railColor={colors.accent} style={{ marginBottom: spacing.lg }}>
+              <View style={{ gap: spacing.md }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="card" size={24} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      TSA Pay
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      Request a payment from a customer with a link or QR code.
+                    </Text>
+                  </View>
                 </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                <PayLinkEntry canRequest={payMerchant.merchant.status !== 'suspended'} withSettings />
               </View>
             </AccentCard>
-          </PressableScale>
+          ) : (
+            <PressableScale
+              onPress={() => router.push(TSA_PAY_APPLY)}
+              style={{ marginBottom: spacing.lg }}
+            >
+              <AccentCard padding="md" railColor={colors.accent}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="card" size={24} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      Accept payments (TSA Pay)
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      Let customers pay you in any token, settled to naira or crypto.
+                    </Text>
+                  </View>
+                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                </View>
+              </AccentCard>
+            </PressableScale>
+          )}
 
           {/* Stat tiles — three product KPIs followed by service KPIs. Each tile
               is a Card with a colored top rail keyed to its semantic meaning. */}
