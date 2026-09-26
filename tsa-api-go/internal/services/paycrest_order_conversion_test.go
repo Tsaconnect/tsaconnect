@@ -437,6 +437,33 @@ func TestCreateBuy_StoresTheRequestedAssetAndWhatSheIsOwed(t *testing.T) {
 	}
 }
 
+// A route dearer than the floor raises the user's fee, not ours: Paycrest is
+// still sent F − B, and what she is owed is restated at F − B + B′ using the
+// order's own budget B′ (l 100 + g 0 + 10 headroom = 110).
+func TestCreateBuy_ADearerRouteOwesAgainstItsOwnBudget(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.SetSenderFeePercent("1")
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	r.lifi.route.ToAmountUSD = 99.0
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if r.client.lastCreate.SenderFeePercent != "0.5" || row.MarkupBps != 110 {
+		t.Fatalf("fee sent = %q markup = %d, want 0.5 and 110", r.client.lastCreate.SenderFeePercent, row.MarkupBps)
+	}
+	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
+	if want := QuotedFromOrder(orderAmount, 160, 110).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount at 0.5%%, restated at 1.6%%)", row.QuotedAmount, want)
+	}
+}
+
 func TestCreateBuy_RefusesAnUnknownChainID(t *testing.T) {
 	r := newOrderServiceWithFakes(t)
 	r.svc.SetConversionEnabled(true)

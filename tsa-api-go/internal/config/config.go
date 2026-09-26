@@ -340,6 +340,13 @@ type Config struct {
 	// it wasn't told about.
 	RampConversionMinUSD        float64
 	RampConversionMinUSDByChain map[string]float64
+	// RampConvertedFeeMaxBps/RampConvertedFeeMaxBpsByChain cap the TOTAL fee
+	// a converted buy may charge. A route costing more than B raises its own
+	// budget, and the user's fee with it (our F − B is unchanged), up to the
+	// destination chain's cap; past it the route is not offered. ByChain
+	// holds every RampTreasuryChains entry plus solana.
+	RampConvertedFeeMaxBps        int
+	RampConvertedFeeMaxBpsByChain map[string]int
 	// RampConversionStallWindow/RampConversionLegCeiling/
 	// RampConversionMaxShortfallUSD retune ConversionOrchestrator's own code
 	// defaults (defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD)
@@ -872,6 +879,11 @@ func Load() *Config {
 			def = d
 		}
 		cfg.RampConversionMinUSDByChain[chain] = getEnvFloat64("RAMP_CONVERSION_MIN_USD_"+up, def)
+	}
+	cfg.RampConvertedFeeMaxBps = int(getEnvInt64("RAMP_CONVERTED_FEE_MAX_BPS", 200))
+	cfg.RampConvertedFeeMaxBpsByChain = map[string]int{}
+	for _, chain := range append(append([]string{}, cfg.RampTreasuryChains...), "solana") {
+		cfg.RampConvertedFeeMaxBpsByChain[chain] = int(getEnvInt64("RAMP_CONVERTED_FEE_MAX_BPS_"+strings.ToUpper(chain), int64(cfg.RampConvertedFeeMaxBps)))
 	}
 	// ConversionOrchestrator's own code defaults are 6h/24h/$50 — see
 	// defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD in

@@ -656,8 +656,14 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			row.Fault = models.FaultPlatform
 			row.FailureReason = "Paycrest reported an amount we could not read, so what the buyer is owed could not be computed. Needs manual settlement."
 		} else {
+			// Restated at the fee SHE pays on this route — F − B + B′, where
+			// B′ is the venue's own budget (B unless a dear route raised it).
 			fBps, _ := feePercentToBps(s.senderFeePercent)
-			row.QuotedAmount = QuotedFromOrder(orderAmountBaseUnits, fBps, s.roundTripBudgetBps).String()
+			budget := s.roundTripBudgetBps
+			if venue.MarkupBps > 0 {
+				budget = venue.MarkupBps
+			}
+			row.QuotedAmount = QuotedFromOrder(orderAmountBaseUnits, fBps-s.roundTripBudgetBps+budget, budget).String()
 		}
 		row.EstimatedAmount = venue.EstimatedAmount
 		row.Rate = venue.Rate // the F-priced rate she was shown, not Paycrest's F − B one

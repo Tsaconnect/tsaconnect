@@ -813,9 +813,15 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		// conversion was priced on. Over it, the attempt is freed rather than
 		// executed at a loss; the retry window is already running from attempt
 		// 1, so a route that never comes back into budget refunds on its own.
-		if l2, ok := LiFiCostBps(route); !ok || l2+TreasuryGasBps(route, treasuryERC20Gas) > o.budgetBps {
+		// The order's own budget B′ when it was priced on a raised one;
+		// otherwise (and on rows from before budgets were per order) B.
+		budget := o.budgetBps
+		if order.MarkupBps > 0 {
+			budget = order.MarkupBps
+		}
+		if l2, ok := LiFiCostBps(route); !ok || l2+TreasuryGasBps(route, treasuryERC20Gas) > budget {
 			return o.failLeg(detached(ctx), leg.ID,
-				fmt.Sprintf("round trip over the %d bps budget", o.budgetBps))
+				fmt.Sprintf("round trip over the %d bps budget", budget))
 		}
 		bridge = b
 		// The leg was reserved before the route was priced (that ordering is
