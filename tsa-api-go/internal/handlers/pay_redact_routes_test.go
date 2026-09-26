@@ -109,7 +109,7 @@ func TestPaycrestOrderRoutes_MaskAPayPaymentsOrderAndLeaveOrdinaryOrdersAlone(t 
 	}
 }
 
-func TestPaycrestOrderRoutes_TheListMasksOnlyThePayPaymentsOrders(t *testing.T) {
+func TestPaycrestOrderRoutes_TheListLeavesPayPaymentsOrdersOut(t *testing.T) {
 	h, db, _ := newPaycrestGateHandler(t)
 	user := seedHandlerUserAt(t, db, models.VerificationStatusVerified)
 	payment := uuid.New()
@@ -122,23 +122,15 @@ func TestPaycrestOrderRoutes_TheListMasksOnlyThePayPaymentsOrders(t *testing.T) 
 	var body struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Data) != 2 {
+	// A payment is listed as a payment (GET /pay/history), never as her sale.
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Data) != 1 {
 		t.Fatalf("err %v body %s", err, w.Body.String())
 	}
-	for _, row := range body.Data {
-		raw, _ := json.Marshal(row)
-		switch row["id"] {
-		case pay.ID.String():
-			assertMerchantBankHidden(t, "list (pay order)", string(raw))
-			if row["payoutAccount"] != "******6789" {
-				t.Fatalf("pay order row = %s", raw)
-			}
-		case plain.ID.String():
-			assertOrdinaryBankKept(t, "list (ordinary order)", string(raw))
-		default:
-			t.Fatalf("unexpected row %s", raw)
-		}
+	raw, _ := json.Marshal(body.Data[0])
+	if body.Data[0]["id"] != plain.ID.String() || body.Data[0]["id"] == pay.ID.String() {
+		t.Fatalf("unexpected row %s", raw)
 	}
+	assertOrdinaryBankKept(t, "list (ordinary order)", string(raw))
 }
 
 func TestSellIntentRoutes_MaskAPayIntentAndOrderAndLeaveOrdinarySalesAlone(t *testing.T) {

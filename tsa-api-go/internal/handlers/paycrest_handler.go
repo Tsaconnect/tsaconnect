@@ -76,6 +76,11 @@ func paycrestError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrConversionUnavailable):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"We can't deliver to that network right now. Try a supported network, or try again shortly.")
+	case errors.Is(err, services.ErrPaycrestPayOrderOpen):
+		// Checked before ErrPaycrestOrderOpen, which it wraps: the open order is
+		// a payment's, listed under Payments, not in her orders.
+		utils.ErrorResponse(c, http.StatusConflict,
+			"You have a payment in progress. Wait for it to finish — you can follow it under Activity › Payments.")
 	case errors.Is(err, services.ErrPaycrestOrderOpen):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"You already have an order awaiting payment. Finish it, or cancel it from your orders.")

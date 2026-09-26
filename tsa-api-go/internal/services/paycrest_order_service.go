@@ -42,6 +42,12 @@ var (
 	// second concurrent buy would leave the user staring at two provider
 	// accounts with two countdowns and no way to tell which one to pay.
 	ErrPaycrestOrderOpen = errors.New("you already have an order awaiting payment")
+	// ErrPaycrestPayOrderOpen is ErrPaycrestOrderOpen when what is open is a
+	// TSA Pay payment's order. Its own error because that order is not in her
+	// order list (it is how the payment moves), so "cancel it from your
+	// orders" would send her looking for something she cannot find. Wraps
+	// ErrPaycrestOrderOpen: every existing check for an open order still holds.
+	ErrPaycrestPayOrderOpen = fmt.Errorf("%w: a payment is in progress", ErrPaycrestOrderOpen)
 	// ErrPaycrestBankUnsupported means the user's bank exists for us but not
 	// for Paycrest. Explicit, because the alternative is a payout that
 	// silently goes nowhere.
@@ -1204,8 +1210,11 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 		limit = 25
 	}
 	var rows []models.PaycrestOrderRecord
+	// A TSA Pay payment's order is how the payment moves, not a sale of hers:
+	// listed here it read as "Sell USDC — paid to your bank" when the money
+	// went to the merchant. Her payments are listed as payments (GET /pay/history).
 	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
+		Where("user_id = ? AND pay_payment_id IS NULL", userID).
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -1235,16 +1244,23 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 		models.PaycrestStatusAwaitingPayment, models.PaycrestStatusAwaitingDeposit,
 		models.PaycrestStatusPending, models.PaycrestStatusSettling,
 	}
-	var n int64
+	// COUNT(pay_payment_id) counts only the payments' orders.
+	var n struct{ OpenCount, PayCount int64 }
 	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Select("COUNT(*) AS open_count, COUNT(pay_payment_id) AS pay_count").
 		Where("user_id = ? AND direction = ? AND status IN ?", userID, direction, open).
-		Count(&n).Error; err != nil {
+		Scan(&n).Error; err != nil {
 		return err
 	}
-	if n > 0 {
+	switch {
+	case n.OpenCount == 0:
+		return nil
+	case n.OpenCount > n.PayCount:
+		// An ordinary order of hers wins: that one she can find and cancel.
 		return ErrPaycrestOrderOpen
+	default:
+		return ErrPaycrestPayOrderOpen
 	}
-	return nil
 }
 
 // paycrestBankCode resolves the bank/institution code the app sent into

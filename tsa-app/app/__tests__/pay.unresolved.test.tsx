@@ -56,6 +56,14 @@ jest.mock('@/components/ui', () => {
   };
 });
 jest.mock('@/components/common/AuthorizationModal', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/components/disputes/DisputeSection', () => {
+  const react = jest.requireActual('react');
+  const { Text: RNText } = jest.requireActual('react-native');
+  return {
+    __esModule: true,
+    DisputeSection: (p: any) => react.createElement(RNText, null, `report:${p.subjectType}:${p.subjectId}:${p.disputable}`),
+  };
+});
 jest.mock('@/components/assets/AssetPicker', () => ({ __esModule: true, default: () => null }));
 jest.mock('@/components/paycrest/SwappedSellForm', () => ({ __esModule: true, SWAPPED_STAGE_LABELS: {} }));
 jest.mock('@/hooks/usePayTest', () => ({
@@ -148,4 +156,40 @@ it('a payer who never started is still told the link is about to expire', async 
   await flush();
   await tickPast(10_000);
   expect(text()).toContain('expires in under five minutes');
+});
+
+describe('a finished payment, opened again (from her history)', () => {
+  const done = (over: Partial<PayCheckout>) => ({ ...justOverFive(), youArePaying: false, payable: false, ...over }) as PayCheckout;
+  const open = async (c: PayCheckout) => {
+    mockHook.value = hookState();
+    jest.mocked(getCheckout).mockResolvedValue(c);
+    await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+    await flush();
+  };
+
+  it('a failed one says why, never "Paid to", and can be reported', async () => {
+    await open(done({
+      status: 'failed', orderId: 'o1', orderStatus: 'unmatched',
+      failureReason: "the deposit couldn't be matched — support is reviewing it",
+    }));
+    expect(text()).toContain('Payment failed');
+    expect(text()).toContain("The deposit couldn't be matched — support is reviewing it");
+    expect(text()).toContain('To: Sky Air');
+    expect(text()).not.toContain('Paid to');
+    expect(text()).toContain('report:paycrest_order:o1:true');
+  });
+
+  it('a paid one says Paid to, and can still be reported ("it never arrived")', async () => {
+    await open(done({ status: 'succeeded', orderId: 'o1', orderStatus: 'settled' }));
+    expect(text()).toContain('Paid to: Sky Air');
+    expect(text()).toContain('report:paycrest_order:o1:true');
+  });
+
+  it('without its order (not her payment, or a test payment) there is nothing to report', async () => {
+    await open(done({ status: 'succeeded' }));
+    expect(text()).not.toContain('report:');
+    act(() => tree.unmount());
+    await open(done({ status: 'succeeded', mode: 'test', orderId: 'o1', orderStatus: 'settled' }));
+    expect(text()).not.toContain('report:');
+  });
 });

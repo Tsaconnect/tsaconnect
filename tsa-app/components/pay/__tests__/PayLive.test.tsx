@@ -58,6 +58,16 @@ jest.mock('@/components/paycrest/SwappedSellForm', () => ({
   SWAPPED_STAGE_LABELS: { swapping: 'Swapping your coins…', waiting: 'Waiting for your swap to arrive…' },
 }));
 jest.mock('@/components/common/AuthorizationModal', () => ({ __esModule: true, default: () => null }));
+// The report flow is its own component with its own tests: here, only what it is given.
+jest.mock('@/components/disputes/DisputeSection', () => {
+  const react = jest.requireActual('react');
+  const { Text: RNText } = jest.requireActual('react-native');
+  return {
+    __esModule: true,
+    DisputeSection: (p: any) =>
+      react.createElement(RNText, { accessibilityLabel: 'report' }, `report:${p.subjectType}:${p.subjectId}:${p.disputable}`),
+  };
+});
 
 // The two payment hooks, each a tiny stateful stub the tests steer.
 const mockHooks: { naira: any; crypto: any } = { naira: null, crypto: null };
@@ -239,6 +249,7 @@ describe('a direct order whose deposit never left her wallet', () => {
     await panel(hookState({ stage: 'deposit', retryable: false, order, sendDeposit: jest.fn() }), {
       showForm: false, checkout: { ...fiat, orderId: 'o1' } as PayCheckout,
     });
+    expect(text(tree)).not.toContain('report:');
     expect(find(tree, 'button:Open the payment order')).toBeUndefined();
   });
 
@@ -248,23 +259,35 @@ describe('a direct order whose deposit never left her wallet', () => {
   });
 });
 
-describe('the payment order', () => {
-  it('a direct attempt that failed shows Open the payment order, and no Pay', async () => {
-    await panel(hookState({ stage: 'failed', error: 'Could not send', retryable: false, order: { id: 'o1' } }));
+describe('reporting a problem with the payment', () => {
+  it('a failed attempt whose money moved offers Report a problem on the payment — never the order screen', async () => {
+    await panel(hookState({ stage: 'failed', error: 'Could not send', retryable: false, order: { id: 'o1', status: 'pending' } }));
     expect(find(tree, 'button:Pay ₦50,505.06')).toBeUndefined();
-    await act(async () => { find(tree, 'button:Open the payment order').props.onPress(); });
-    expect(router.push).toHaveBeenCalledWith('/wallet/paycrest/order/o1');
-  });
-
-  it('a reopened attempt the server linked to an order offers it from the checkout alone', async () => {
-    await panel(hookState({ stage: 'waiting' }), { showForm: false, checkout: { ...fiat, orderId: 'o9' } as PayCheckout });
-    await act(async () => { find(tree, 'button:Open the payment order').props.onPress(); });
-    expect(router.push).toHaveBeenCalledWith('/wallet/paycrest/order/o9');
-  });
-
-  it('without an order it is not offered', async () => {
-    await panel(hookState({ stage: 'waiting' }), { showForm: false });
+    expect(text(tree)).toContain('report:paycrest_order:o1:true');
     expect(find(tree, 'button:Open the payment order')).toBeUndefined();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it('a reopened payment reports against the order the server linked, with its status from the checkout', async () => {
+    await panel(hookState({ stage: 'waiting' }), {
+      showForm: false, checkout: { ...fiat, orderId: 'o9', orderStatus: 'settling' } as PayCheckout,
+    });
+    expect(text(tree)).toContain('report:paycrest_order:o9:true');
+  });
+
+  it('before any money has moved there is nothing to report — the flow is told so', async () => {
+    await panel(hookState({ stage: 'waiting' }), {
+      showForm: false, checkout: { ...fiat, orderId: 'o9', orderStatus: 'awaiting_deposit' } as PayCheckout,
+    });
+    expect(text(tree)).toContain('report:paycrest_order:o9:false');
+  });
+
+  it('without an order, or its status, it is not offered', async () => {
+    await panel(hookState({ stage: 'waiting' }), { showForm: false });
+    expect(text(tree)).not.toContain('report:');
+    act(() => tree.unmount());
+    await panel(hookState({ stage: 'waiting' }), { showForm: false, checkout: { ...fiat, orderId: 'o9' } as PayCheckout });
+    expect(text(tree)).not.toContain('report:');
   });
 
   it('a linked order hides Pay: an attempt exists', async () => {

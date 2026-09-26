@@ -11,6 +11,7 @@ import { PayLivePanel } from '@/components/pay/PayLivePanel';
 import { usePayLive } from '@/hooks/usePayLive';
 import { usePayNaira } from '@/hooks/usePayNaira';
 import type { PayCheckout } from '@/services/payApi';
+import { linkedOrder } from '@/utils/payCheckout';
 import { payPickFilter } from '@/utils/payPick';
 import { payProgressSteps } from '@/utils/payProgress';
 
@@ -34,12 +35,13 @@ export function PayNaira({
   );
 
   // The checkout the screen re-reads every 5 s while she waits carries the order's status: no second poll.
+  const order = linkedOrder(pay, checkout);
   const steps = payProgressSteps({
     stage: pay.stage,
     swapStage: pay.swapStage,
     swapped: !!pay.swapped,
-    hasOrder: !!(pay.order?.id ?? checkout.orderId),
-    orderStatus: checkout.orderStatus ?? pay.order?.status,
+    hasOrder: !!order.id,
+    orderStatus: order.status,
     notice: pay.notice,
     merchantName: checkout.merchantName,
   });

@@ -25,6 +25,7 @@ type payPaymentAPI interface {
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
+	PayerHistory(ctx context.Context, userID uuid.UUID) ([]services.PayHistoryItem, error)
 	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
@@ -491,6 +492,22 @@ func (h *PayHandler) Checkout(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Checkout", v)
+}
+
+// GET /api/pay/history — the signed-in user's own payments, as payments: the
+// payout orders behind them are left out of the ramp's order list.
+func (h *PayHandler) History(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	items, err := h.payments.PayerHistory(c.Request.Context(), user.ID)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{"payments": items})
 }
 
 // GET /api/pay/public/:id — the unauthenticated status page a customer's

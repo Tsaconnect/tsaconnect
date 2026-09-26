@@ -676,7 +676,7 @@ func TestPayCheckout_TheWrongRouteSaysHowThePaymentReallySettles(t *testing.T) {
 
 // ---- A1: the payer resumes her order from the checkout view ----
 
-func TestPayCheckoutView_OrderIDIsForTheProcessingPayersEyesOnly(t *testing.T) {
+func TestPayCheckoutView_OrderIDIsForThePayersEyesOnly(t *testing.T) {
 	ctx := context.Background()
 	r := newPayCheckoutRig(t)
 	bob := payUser(t, r.pay, true)
@@ -708,12 +708,17 @@ func TestPayCheckoutView_OrderIDIsForTheProcessingPayersEyesOnly(t *testing.T) {
 	if body, _ := json.Marshal(view(r.alice)); !strings.Contains(string(body), `"orderId":"`+order.ID.String()+`"`) {
 		t.Fatalf("payer JSON = %s", body)
 	}
-	// Once the payment is over there is nothing left to resume.
+	// Once the payment is over there is nothing left to resume — but its payer
+	// keeps the order, so she can still report it ("it never arrived"): the
+	// report is filed on the order. Still hers alone.
 	if err := r.pay.Succeed(ctx, r.p.ID, order.ID.String()); err != nil {
 		t.Fatal(err)
 	}
-	if v := view(r.alice); v.OrderID != nil {
-		t.Fatalf("a finished payment still offers its order: %v", v.OrderID)
+	if v := view(r.alice); v.YouArePaying || v.OrderID == nil || *v.OrderID != order.ID {
+		t.Fatalf("a finished payment's payer: %+v, want its order and nothing to resume", v)
+	}
+	if v := view(bob); v.OrderID != nil || v.OrderStatus != "" {
+		t.Fatalf("another customer saw a finished payment's order: %+v", v)
 	}
 }
 

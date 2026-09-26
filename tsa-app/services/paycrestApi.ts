@@ -104,7 +104,7 @@ export interface PaycrestQuote {
  *  and helpers can reason about one without importing this client. Re-exported
  *  here because everything already imports them from this module. */
 export type { PaycrestStatus } from './paycrestStatus';
-export { isTerminal, isAwaitingUser } from './paycrestStatus';
+export { isTerminal, isAwaitingUser, isDisputableOrder } from './paycrestStatus';
 
 export interface PaycrestOrder {
   id: string;

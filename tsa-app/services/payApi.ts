@@ -37,6 +37,8 @@ export type PayCheckout = {
   orderId?: string;
   /** That order's status as the server last recorded it — same visibility as orderId. Moves the payer's progress steps. */
   orderStatus?: PaycrestStatus;
+  /** Why her payment failed — only to her, only once it has. */
+  failureReason?: string;
 };
 
 export class PayError extends ApiError {}
@@ -54,6 +56,29 @@ const request = createApiRequest({
  *  keeps working — see utils/paymentId.ts for the check itself and why it
  *  lives in its own zero-dependency module rather than here. */
 export { isPaymentId };
+
+/** One of her own payments, as her activity lists it (GET /pay/history). */
+export type PayHistoryItem = {
+  id: string;
+  merchantName: string;
+  description?: string;
+  /** A payment's status — or `refunded`, for a past attempt of hers whose money came back. */
+  status: PayStatus | 'refunded';
+  /** Integer kobo — what she paid, fee included. */
+  customerTotal: number;
+  currency: 'NGN';
+  /** When she paid it, not when the merchant raised it. */
+  paidAt: string;
+  succeededAt?: string;
+  /** Set on a refunded past attempt: its refund, and any report of it, are on this order. */
+  orderId?: string;
+};
+
+/** Her live payments, newest first (the server caps the list). */
+export async function listMyPayments(): Promise<PayHistoryItem[]> {
+  const data = await request<{ payments: PayHistoryItem[] }>('/history');
+  return data?.payments ?? [];
+}
 
 /** Refuses a non-UUID before it ever reaches fetch. */
 export async function getCheckout(id: string): Promise<PayCheckout> {
