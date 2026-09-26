@@ -50,6 +50,12 @@ for a in "$@"; do
   esac
 done
 
+# The doppler CLI resolves its config scope from the working directory and
+# fails ("Invalid scope: . stat .: permission denied") when it cannot read it —
+# e.g. started over ssh in /root, which tsa-deploy cannot enter. Every path
+# here is absolute, so run from / and the caller's directory never matters.
+cd /
+
 # Same journald tag as deploy.sh, so `tsactl audit` shows config changes next to
 # the deploys they happened in. Key NAMES only — never a value.
 audit() { logger -t tsa-deploy -- "${SUDO_USER:-$(id -un)}: env-sync: $*" 2>/dev/null || true; }
