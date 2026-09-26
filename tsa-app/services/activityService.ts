@@ -6,7 +6,7 @@ import { getBtcAddress } from './chains/btcWallet';
 import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
 import { listITIntents } from './itApi';
 import { listOrders as listPaycrestOrders } from './paycrestApi';
-import { listMyPayments, type PayHistoryItem, type PayStatus } from './payApi';
+import { listMyPayments, type PayHistoryItem } from './payApi';
 import { formatKobo } from '../utils/stableSellQuote';
 import { buildITActivity, fiatSymbol, type ITActivity, type SymbolFor } from '../utils/itActivity';
 import type { StatusVisual } from '../components/ui/statusMap';
@@ -389,12 +389,14 @@ async function fetchITItems(symbolFor: SymbolFor): Promise<ActivityItem[]> {
   return buildITActivity(intents, orders ?? [], symbolFor).map(fromITActivity);
 }
 
-const PAYMENT_STATUS: Record<PayStatus, StatusVisual> = {
+const PAYMENT_STATUS: Record<PayHistoryItem['status'], StatusVisual> = {
   succeeded: { label: 'Paid', tone: 'success' },
   processing: { label: 'Processing', tone: 'info' },
-  // A payment she is the payer of is past pending; read one defensively as under way.
-  pending: { label: 'Processing', tone: 'info' },
   failed: { label: 'Failed', tone: 'danger' },
+  refunded: { label: 'Refunded', tone: 'neutral' },
+  // Never listed (a payment she pays is past pending, and only a pending one
+  // expires); kept so an unexpected one still reads sensibly.
+  pending: { label: 'Processing', tone: 'info' },
   expired: { label: 'Expired', tone: 'neutral' },
 };
 
@@ -402,7 +404,8 @@ const PAYMENT_STATUS: Record<PayStatus, StatusVisual> = {
 // order behind it is how it moves and is left out of the ramp's list.
 function fromPayment(p: PayHistoryItem): ActivityItem {
   return {
-    id: p.id,
+    // A refunded attempt and the payment it was for (paid on a later try) are two rows.
+    id: p.orderId ?? p.id,
     type: 'payment',
     subtype: p.status,
     title: `Payment to ${p.merchantName}`,
@@ -412,8 +415,10 @@ function fromPayment(p: PayHistoryItem): ActivityItem {
     status: p.status,
     statusVisual: PAYMENT_STATUS[p.status] ?? { label: p.status, tone: 'neutral' },
     timestamp: p.paidAt,
-    // The pay screen is the receipt: who, how much, and where it stands.
-    href: `/pay?id=${p.id}`,
+    // The pay screen is the payment's receipt. A refunded attempt's is its
+    // order — the refund transaction and any report live there; the payment
+    // itself may since have been paid, or be payable again.
+    href: p.orderId ? `/wallet/paycrest/order/${p.orderId}` : `/pay?id=${p.id}`,
     iconName: 'storefront',
     iconColor: '#C8961E',
     iconBg: '#C8961E15',

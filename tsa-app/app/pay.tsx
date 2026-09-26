@@ -38,7 +38,12 @@ import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
+import { DisputeSection } from '@/components/disputes/DisputeSection';
+import { isDisputableOrder } from '@/services/paycrestStatus';
 import { formatKobo } from '@/utils/stableSellQuote';
+
+/** The server writes reasons for her in lower case ("support is reviewing it"); a line of its own starts with a capital. */
+const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 const DONE_LABEL: Record<PayStatus, string> = {
   succeeded: 'Payment complete',
@@ -254,12 +259,35 @@ export default function PayScreen() {
               <Text variant="title2" weight="700" align="center">
                 {DONE_LABEL[state.checkout.status]}
               </Text>
+              {state.checkout.failureReason ? (
+                <Text variant="bodySm" color="textSecondary" align="center">
+                  {sentence(state.checkout.failureReason)}
+                </Text>
+              ) : null}
               <Card style={{ width: '100%' }}>
                 <SummaryCard>
-                  <SummaryRow label="Paid to" value={state.checkout.merchantName} />
+                  {/* "Paid to" only once it was: a failed payment paid nobody. */}
+                  <SummaryRow
+                    label={state.checkout.status === 'succeeded' ? 'Paid to' : 'To'}
+                    value={state.checkout.merchantName}
+                  />
                   <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} />
                 </SummaryCard>
               </Card>
+              {/* Her payment is over, but it may still need chasing — failed with
+                  her money in it, or "the merchant says it never arrived". The
+                  report is filed on the order behind it; she never opens that
+                  order. The server sends orderId to the payer only. */}
+              {state.checkout.mode === 'live' && state.checkout.orderId && state.checkout.orderStatus && (
+                <View style={{ width: '100%' }}>
+                  <DisputeSection
+                    subjectType="paycrest_order"
+                    subjectId={state.checkout.orderId}
+                    disputable={isDisputableOrder(state.checkout.orderStatus)}
+                    prompt="Tell us what went wrong with this payment. Attach a receipt or screenshot if you have one — it is the fastest way for us to chase this up."
+                  />
+                </View>
+              )}
               {returnUrlFor(state.checkout) && (
                 <Button
                   title={`Return to ${state.checkout.merchantName}`}

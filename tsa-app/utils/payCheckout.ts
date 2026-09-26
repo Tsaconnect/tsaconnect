@@ -356,3 +356,19 @@ export function depositStillToSendCopy(
     leave: `Rather not? Leave it — none of your money is taken. Once the order closes${closes}, this payment can't be finished, so ask the store for a new payment link.`,
   };
 }
+
+/**
+ * The payment's order and its status, both of the SAME order. The attempt's
+ * own order wins for the id (it is the one this phone is moving); its status
+ * comes from the checkout the screen re-reads every 5 s when that is the same
+ * order — fresher than the attempt's snapshot — and never from another order.
+ */
+export function linkedOrder(
+  pay: { order?: Pick<PaycrestOrder, 'id' | 'status'> },
+  checkout: Pick<PayCheckout, 'orderId' | 'orderStatus'>,
+): { id?: string; status?: PaycrestOrder['status'] } {
+  const id = pay.order?.id ?? checkout.orderId;
+  if (!id) return {};
+  if (id === checkout.orderId && checkout.orderStatus) return { id, status: checkout.orderStatus };
+  return { id, status: pay.order?.id === id ? pay.order.status : undefined };
+}

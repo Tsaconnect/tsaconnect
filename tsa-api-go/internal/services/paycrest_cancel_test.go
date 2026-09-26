@@ -184,3 +184,24 @@ func TestCancel_PollerLeavesCancelledOrdersAlone(t *testing.T) {
 		t.Error("PaycrestOrderTerminal(cancelled) = false; Sync would still refresh it")
 	}
 }
+
+// A payment's open order is not in her order list, so the lock names it as a
+// payment — while still being the one-open-order lock every caller checks for.
+func TestAssertNoOpenOrder_APaymentsOrderIsNamedAsAPayment(t *testing.T) {
+	svc, db := newCancelTestService(t)
+	user := uuid.New()
+	pay := seedOrder(t, db, user, models.PaycrestDirectionSell, models.PaycrestStatusAwaitingDeposit)
+	payment := uuid.New()
+	db.Model(pay).Update("pay_payment_id", payment)
+
+	err := svc.assertNoOpenOrder(context.Background(), user, models.PaycrestDirectionSell)
+	if !errors.Is(err, ErrPaycrestPayOrderOpen) || !errors.Is(err, ErrPaycrestOrderOpen) {
+		t.Fatalf("err = %v, want the payment's lock, which is still the open-order lock", err)
+	}
+
+	// An ordinary order open alongside it is the one she can find and cancel.
+	seedOrder(t, db, user, models.PaycrestDirectionSell, models.PaycrestStatusPending)
+	if err := svc.assertNoOpenOrder(context.Background(), user, models.PaycrestDirectionSell); !errors.Is(err, ErrPaycrestOrderOpen) || errors.Is(err, ErrPaycrestPayOrderOpen) {
+		t.Fatalf("err = %v, want the ordinary open-order lock", err)
+	}
+}

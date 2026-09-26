@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,15 +58,19 @@ type PayCheckoutView struct {
 	Payable            bool      `json:"payable"`
 	NotPayableWhy      string    `json:"notPayableWhy,omitempty"`
 	YouArePaying       bool      `json:"youArePaying"`
-	// OrderID is the payout order this payment's attempt opened, so a payer who
-	// comes back to a processing payment can resume funding it. Only ever set
-	// for the payer of a processing payment: nobody else may see the order.
+	// OrderID is the payout order this payment's attempt opened: so a payer who
+	// comes back to a processing payment can resume funding it, and so one whose
+	// payment failed or needs chasing can report it (the report is filed on the
+	// order). Only ever set for the payment's payer: nobody else may see it.
 	OrderID *uuid.UUID `json:"orderId,omitempty"`
 	// OrderStatus is that order's status as the Paycrest poller last recorded
 	// it, so the payer's progress steps move on the checkout read the app
 	// already polls — not a second, Paycrest-syncing poll of the order. Same
 	// visibility as OrderID.
 	OrderStatus string `json:"orderStatus,omitempty"`
+	// FailureReason says why her payment failed — written for her ("support is
+	// reviewing it") — and only to her.
+	FailureReason string `json:"failureReason,omitempty"`
 }
 
 // PayPublicView is the unauthenticated status page a customer's browser (or
@@ -151,7 +156,11 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		NotPayableWhy:      why,
 		YouArePaying:       youArePaying,
 	}
-	if youArePaying && p.PaycrestOrderID != nil {
+	isPayer := p.PayerUserID != nil && user != nil && *p.PayerUserID == user.ID
+	if isPayer && p.Status == models.PayStatusFailed {
+		v.FailureReason = p.FailureReason
+	}
+	if isPayer && p.PaycrestOrderID != nil {
 		v.OrderID = p.PaycrestOrderID
 		// Scoped to the payer as well as the id: the order is theirs, and a
 		// failed read only leaves the steps where they were.
@@ -278,8 +287,8 @@ func (s *PayPaymentService) Payer(ctx context.Context, p *models.PayPayment) (*P
 }
 
 // PayHistoryItem is one payment in a payer's own history: who she paid, how
-// much, and where it stands. Never the payout order behind it — that is how a
-// payment moves, not something she did.
+// much, and where it stands. Never the payout order behind it as a sale of
+// hers — except to reach a refund (OrderID), which lives on that order.
 type PayHistoryItem struct {
 	ID            uuid.UUID  `json:"id"`
 	MerchantName  string     `json:"merchantName"`
@@ -289,19 +298,32 @@ type PayHistoryItem struct {
 	Currency      string     `json:"currency"`
 	PaidAt        time.Time  `json:"paidAt"`
 	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
+	// OrderID is set on a refunded past attempt: its refund transaction, and
+	// any report of it, are on that order. The payment itself may have been
+	// paid since, or be payable again, so it is not this row's receipt.
+	OrderID *uuid.UUID `json:"orderId,omitempty"`
 }
+
+// PayHistoryRefunded is the Status of a refunded past attempt. Not a payment
+// status: the payment moved on (released for another try) once it was refunded.
+const PayHistoryRefunded = "refunded"
 
 // payHistoryCap bounds the history in one read; the app lists it unpaged, like bills.
 const payHistoryCap = 50
 
-// PayerHistory is userID's live payments, newest first. A payment is hers
-// while she is its payer: an attempt is only released (payer cleared) once no
-// money of hers moved, so what is listed is exactly what she paid or is
-// paying. Test payments move no money and are left out. One query, merchant
-// name joined — no lookup per row.
+// PayerHistory is userID's live payments, newest first:
+//   - the payments she is the payer of — paying, paid, or failed for support;
+//   - her past attempts that were REFUNDED. A refund releases the payment (it
+//     clears the payer so she, or anyone, can try again), yet her money moved
+//     and came back — that must stay on her record.
+//
+// An attempt released with nothing sent (a lapsed order, a refused start) is
+// not listed: no money of hers moved. Test payments move none either. Two
+// joined queries, no lookup per row.
 func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) ([]PayHistoryItem, error) {
 	type row struct {
 		ID                uuid.UUID
+		OrderID           *uuid.UUID
 		BusinessName      string
 		Description       string
 		Status            string
@@ -311,28 +333,54 @@ func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) 
 		CreatedAt         time.Time
 		SucceededAt       *time.Time
 	}
-	var rows []row
+	// When she paid, not when the merchant raised the payment. Picked here, not
+	// by COALESCE in SQL, so the time keeps its type on every driver.
+	paidAt := func(r row) time.Time {
+		if r.LockedAt != nil {
+			return *r.LockedAt
+		}
+		return r.CreatedAt
+	}
+	var current []row
 	err := s.db.WithContext(ctx).
 		Table("pay_payments AS p").
-		Select("p.id, m.business_name, p.description, p.status, p.customer_total_kobo, p.currency, p.locked_at, p.created_at, p.succeeded_at").
+		Select("p.id, m.business_name, p.description, p.status, p.customer_total_kobo, p.currency, "+
+			"p.locked_at, p.created_at, p.succeeded_at").
 		Joins("JOIN pay_merchants AS m ON m.id = p.merchant_id").
 		Where("p.payer_user_id = ? AND p.mode = ?", userID, models.PayModeLive).
 		Order("COALESCE(p.locked_at, p.created_at) DESC").
 		Limit(payHistoryCap).
-		Scan(&rows).Error
+		Scan(&current).Error
 	if err != nil {
 		return nil, err
 	}
+	var refunded []row
+	err = s.db.WithContext(ctx).
+		Table("paycrest_order_records AS o").
+		Select("p.id, o.id AS order_id, m.business_name, p.description, ? AS status, p.customer_total_kobo, p.currency, "+
+			"o.created_at", PayHistoryRefunded).
+		Joins("JOIN pay_payments AS p ON p.id = o.pay_payment_id").
+		Joins("JOIN pay_merchants AS m ON m.id = p.merchant_id").
+		// No longer the payment's attempt: a current one is listed above, as the payment.
+		Where("o.user_id = ? AND o.status = ? AND p.mode = ? AND (p.paycrest_order_id IS NULL OR p.paycrest_order_id <> o.id)",
+			userID, models.PaycrestStatusRefunded, models.PayModeLive).
+		Order("o.created_at DESC").
+		Limit(payHistoryCap).
+		Scan(&refunded).Error
+	if err != nil {
+		return nil, err
+	}
+
+	rows := append(current, refunded...)
+	sort.SliceStable(rows, func(i, j int) bool { return paidAt(rows[i]).After(paidAt(rows[j])) })
+	if len(rows) > payHistoryCap {
+		rows = rows[:payHistoryCap]
+	}
 	out := make([]PayHistoryItem, 0, len(rows))
 	for _, r := range rows {
-		// When she paid, not when the merchant raised the payment.
-		paidAt := r.CreatedAt
-		if r.LockedAt != nil {
-			paidAt = *r.LockedAt
-		}
 		out = append(out, PayHistoryItem{
-			ID: r.ID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
-			CustomerTotal: r.CustomerTotalKobo, Currency: r.Currency, PaidAt: paidAt, SucceededAt: r.SucceededAt,
+			ID: r.ID, OrderID: r.OrderID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
+			CustomerTotal: r.CustomerTotalKobo, Currency: r.Currency, PaidAt: paidAt(r), SucceededAt: r.SucceededAt,
 		})
 	}
 	return out, nil

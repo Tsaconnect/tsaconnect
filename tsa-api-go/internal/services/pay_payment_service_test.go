@@ -650,6 +650,9 @@ func TestPayPayment_CheckoutViewCarriesTheLinkedOrderStatusForThePayerOnly(t *te
 func TestPayPayment_PayerHistoryIsHerOwnLivePaymentsAsPayments(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
+	if err := s.db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
 	payer := payUser(t, s, true)
 	other := payUser(t, s, true)
 	pay := func(ref string, who *models.User) *models.PayPayment {
@@ -694,5 +697,96 @@ func TestPayPayment_PayerHistoryIsHerOwnLivePaymentsAsPayments(t *testing.T) {
 	}
 	if none, _ := s.PayerHistory(ctx, uuid.New()); len(none) != 0 {
 		t.Fatalf("a stranger's history = %+v", none)
+	}
+}
+
+func TestPayPayment_PayerHistoryKeepsARefundedAttemptAfterItsPaymentIsReleased(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	if err := s.db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	payer := payUser(t, s, true)
+	other := payUser(t, s, true)
+	in := payIn()
+	in.Reference = "LIVE-REFUND"
+	p, _, _ := s.Create(ctx, m, models.PayModeLive, in)
+	order := func(owner uuid.UUID, status string, at time.Time) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		row := models.PaycrestOrderRecord{ID: id, UserID: owner, Direction: "sell", Status: status,
+			Reference: "PCS-" + id.String(), PayPaymentID: &p.ID, CreatedAt: at}
+		if err := s.db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	// Her first attempt was funded and refunded; the refund released the payment.
+	refunded := order(payer.ID, models.PaycrestStatusRefunded, payTestNow.Add(time.Minute))
+	// An attempt that lapsed with nothing sent, someone else's refund, and one
+	// that was never linked as a payment's order are not hers to list.
+	order(payer.ID, models.PaycrestStatusExpired, payTestNow.Add(2*time.Minute))
+	order(other.ID, models.PaycrestStatusRefunded, payTestNow.Add(3*time.Minute))
+
+	got, err := s.PayerHistory(ctx, payer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Status != PayHistoryRefunded || got[0].OrderID == nil || *got[0].OrderID != refunded ||
+		got[0].ID != p.ID || got[0].MerchantName != m.BusinessName || !got[0].PaidAt.Equal(payTestNow.Add(time.Minute)) {
+		t.Fatalf("history = %+v, want the refunded attempt, pointing at its order", got)
+	}
+
+	// She tries again on the same payment: the new attempt is the payment row,
+	// and the refund stays beside it — two rows, never merged.
+	if _, _, err := s.Lock(ctx, payer, p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	current := order(payer.ID, models.PaycrestStatusAwaitingDeposit, payTestNow.Add(time.Hour))
+	s.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(map[string]any{
+		"paycrest_order_id": current, "locked_at": payTestNow.Add(time.Hour)})
+	got, _ = s.PayerHistory(ctx, payer.ID)
+	if len(got) != 2 || got[0].OrderID != nil || got[0].Status != models.PayStatusProcessing ||
+		got[1].OrderID == nil || *got[1].OrderID != refunded {
+		t.Fatalf("history = %+v, want [the payment, the refunded attempt]", got)
+	}
+
+	// A refunded order still linked as the payment's attempt (the reconciler has
+	// not released it yet) is the payment's row, not a second one.
+	s.db.Model(&models.PaycrestOrderRecord{}).Where("id = ?", current).Update("status", models.PaycrestStatusRefunded)
+	if got, _ = s.PayerHistory(ctx, payer.ID); len(got) != 2 {
+		t.Fatalf("history = %+v, want the current attempt listed once, as the payment", got)
+	}
+}
+
+func TestPayPayment_CheckoutViewKeepsAFailedPaymentsOrderAndReasonForItsPayer(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	if err := s.db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	in := payIn()
+	in.Reference = "LIVE-FAILED"
+	live, _, _ := s.Create(ctx, m, models.PayModeLive, in)
+	payer := payUser(t, s, true)
+	if _, _, err := s.Lock(ctx, payer, live.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	orderID := uuid.New()
+	s.db.Create(&models.PaycrestOrderRecord{ID: orderID, UserID: payer.ID, Direction: "sell",
+		Status: models.PaycrestStatusUnmatched, Reference: "PCS-" + orderID.String()})
+	s.db.Model(&models.PayPayment{}).Where("id = ?", live.ID).Updates(map[string]any{
+		"paycrest_order_id": orderID, "status": models.PayStatusFailed,
+		"failure_reason": "the deposit couldn't be matched — support is reviewing it"})
+
+	// Failed is terminal: she can no longer resume it, but she must still be able to report it.
+	v, err := s.CheckoutView(ctx, payer, live.ID, true)
+	if err != nil || v.OrderID == nil || *v.OrderID != orderID || v.OrderStatus != models.PaycrestStatusUnmatched ||
+		v.FailureReason != "the deposit couldn't be matched — support is reviewing it" || v.YouArePaying {
+		t.Fatalf("payer: %+v, err %v", v, err)
+	}
+	stranger := payUser(t, s, true)
+	if v, _ := s.CheckoutView(ctx, stranger, live.ID, true); v.OrderID != nil || v.OrderStatus != "" || v.FailureReason != "" {
+		t.Fatalf("stranger must see neither the order nor why it failed: %+v", v)
 	}
 }

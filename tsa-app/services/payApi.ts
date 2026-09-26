@@ -37,6 +37,8 @@ export type PayCheckout = {
   orderId?: string;
   /** That order's status as the server last recorded it — same visibility as orderId. Moves the payer's progress steps. */
   orderStatus?: PaycrestStatus;
+  /** Why her payment failed — only to her, only once it has. */
+  failureReason?: string;
 };
 
 export class PayError extends ApiError {}
@@ -60,13 +62,16 @@ export type PayHistoryItem = {
   id: string;
   merchantName: string;
   description?: string;
-  status: PayStatus;
+  /** A payment's status — or `refunded`, for a past attempt of hers whose money came back. */
+  status: PayStatus | 'refunded';
   /** Integer kobo — what she paid, fee included. */
   customerTotal: number;
   currency: 'NGN';
   /** When she paid it, not when the merchant raised it. */
   paidAt: string;
   succeededAt?: string;
+  /** Set on a refunded past attempt: its refund, and any report of it, are on this order. */
+  orderId?: string;
 };
 
 /** Her live payments, newest first (the server caps the list). */

@@ -293,3 +293,28 @@ func TestPayRoutes_OwnerAnswersAreNeverCached(t *testing.T) {
 		t.Error("no-store leaked beyond the owner routes")
 	}
 }
+
+// Her payment history: signed in only, never cached, her payments under data.payments.
+func TestPayRoutes_PayerHistoryIsAuthedUncachedAndHers(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/history", "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no jwt: %d %s", w.Code, w.Body.String())
+	}
+	user := payRoutesUser(t, db, models.RoleUser)
+	w := payRoutesDo(r, http.MethodGet, "/api/pay/history", payRoutesToken(t, cfg.JWTSecret, user.ID), nil)
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("history: %d cache %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	var body struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Payments []map[string]any `json:"payments"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || !body.Success || body.Data.Payments == nil {
+		t.Fatalf("shape: %s (err %v)", w.Body.String(), err)
+	}
+}

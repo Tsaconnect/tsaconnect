@@ -23,7 +23,7 @@ import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
-import { depositStillToSendCopy, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
+import { depositStillToSendCopy, linkedOrder, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 type Props = {
@@ -98,8 +98,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
   const priceOk = !!price?.label && !!price.fromAmount;
   const pricing = !!pick && !price;
   const running = pay.stage === 'paying';
-  const orderId = pay.order?.id ?? checkout.orderId;
-  const orderStatus = checkout.orderStatus ?? pay.order?.status;
+  const { id: orderId, status: orderStatus } = linkedOrder(pay, checkout);
   const retryable = pay.retryable !== false;
   const progress = pay.swapStage ? SWAPPED_STAGE_LABELS[pay.swapStage] : undefined;
   const receivesLine = receives?.(price?.receives);

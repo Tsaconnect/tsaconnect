@@ -3,6 +3,7 @@ import {
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
   errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage, depositStillToSendCopy,
+  linkedOrder,
 } from '../payCheckout';
 import type { PayCheckout } from '@/services/payApi';
 
@@ -343,5 +344,21 @@ describe('depositStillToSendCopy — a direct order still waiting for her deposi
   it('falls back to the chain key and the bare token when it knows no better', () => {
     expect(depositStillToSendCopy({ ...order, chain: 'somechain', tokenAmount: undefined }, now).body)
       .toBe('USDC on somechain still needs to leave your wallet to finish this payment.');
+  });
+});
+
+describe('linkedOrder — the payment order and its status, of the same order', () => {
+  it("takes the checkout's fresher status when it is the same order", () => {
+    expect(linkedOrder({ order: { id: 'o1', status: 'awaiting_deposit' } }, { orderId: 'o1', orderStatus: 'settling' }))
+      .toEqual({ id: 'o1', status: 'settling' });
+  });
+  it("never takes another order's status", () => {
+    expect(linkedOrder({ order: { id: 'o2', status: 'awaiting_deposit' } }, { orderId: 'o1', orderStatus: 'settled' }))
+      .toEqual({ id: 'o2', status: 'awaiting_deposit' });
+  });
+  it('falls back to what it has, and is empty without an order', () => {
+    expect(linkedOrder({}, { orderId: 'o1' })).toEqual({ id: 'o1', status: undefined });
+    expect(linkedOrder({ order: { id: 'o1', status: 'pending' } }, {})).toEqual({ id: 'o1', status: 'pending' });
+    expect(linkedOrder({}, {})).toEqual({});
   });
 });

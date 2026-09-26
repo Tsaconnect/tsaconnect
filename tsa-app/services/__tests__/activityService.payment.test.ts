@@ -5,6 +5,7 @@
 // to a merchant — never as the ramp sale that moves them — and opening the
 // payment's own screen.
 jest.mock('@react-native-async-storage/async-storage', () =>
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 
 jest.mock('../payApi', () => ({
@@ -58,11 +59,24 @@ describe('activity feed: TSA Pay source', () => {
     (listMyPayments as jest.Mock).mockResolvedValue([
       { ...payment, id: 'a', status: 'processing', description: '' },
       { ...payment, id: 'b', status: 'failed' },
-      { ...payment, id: 'c', status: 'expired' },
+      { ...payment, id: 'c', status: 'refunded', orderId: 'o1' },
     ]);
     const items = await createActivityPager(['payment'], 20).next();
-    expect(items.map((i) => i.statusVisual?.label)).toEqual(['Processing', 'Failed', 'Expired']);
+    expect(items.map((i) => i.statusVisual?.label)).toEqual(['Processing', 'Failed', 'Refunded']);
     expect(items[0].subtitle).toBe('TSA Pay');
+  });
+
+  it('a refunded attempt is its own row, opening its order — where the refund is', async () => {
+    (listMyPayments as jest.Mock).mockResolvedValue([
+      { ...payment, status: 'succeeded', paidAt: '2026-09-25T16:00:00Z' },
+      { ...payment, status: 'refunded', orderId: 'o1', paidAt: '2026-09-25T15:00:00Z' },
+    ]);
+    const items = await createActivityPager(['payment'], 20).next();
+    // Same payment, two rows: the later try that paid, and the refunded one.
+    expect(items.map((i) => [i.id, i.href])).toEqual([
+      ['p1', '/pay?id=p1'],
+      ['o1', '/wallet/paycrest/order/o1'],
+    ]);
   });
 
   it('an API without the history route just lists no payments', async () => {
