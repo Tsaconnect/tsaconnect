@@ -1942,7 +1942,7 @@ export async function submitMerchantRequest(data: {
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null);
-      return { success: false, message: body?.message || `Server error (${response.status})` };
+      return { success: false, message: body?.message || `Server error (${response.status})`, code: body?.code };
     }
     return response.json();
   } catch (error: any) {
