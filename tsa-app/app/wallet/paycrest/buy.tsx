@@ -426,6 +426,8 @@ export default function PaycrestBuyScreen() {
         // Where a destination the EVM wallet cannot receive on is delivered
         // (Solana). Absent everywhere else, where the wallet IS the recipient.
         ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
+        // Holds the order to the fee she was just shown.
+        ...(isConvertedVenue(venue) && venue.markupBps ? { quotedMarkupBps: venue.markupBps } : {}),
         walletAddress: address,
         refundBankCode: refundBank.code,
         refundAccount,

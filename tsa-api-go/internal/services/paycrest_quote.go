@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"golang.org/x/sync/singleflight"
 )
@@ -185,10 +186,12 @@ type PaycrestQuoteService struct {
 	// pushes F, so the two services can never disagree on it.
 	roundTripBudgetBps int
 	// convertedFeeMaxByChain/convertedFeeMaxDefault cap the TOTAL fee a
-	// converted buy may charge once a dear route raises its budget above B.
-	// See SetConvertedFeeCaps.
+	// converted buy or swapped sell may charge once a dear route raises its
+	// budget above B. Unset (convertedFeeCapsSet false) applies
+	// defaultConvertedFeeMaxBps. See SetConvertedFeeCaps.
 	convertedFeeMaxByChain map[string]int
 	convertedFeeMaxDefault int
+	convertedFeeCapsSet    bool
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
@@ -241,9 +244,9 @@ func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
 // PaycrestOrderService.SetRoundTripBudgetBps.
 func (s *PaycrestQuoteService) SetRoundTripBudgetBps(bps int) { s.roundTripBudgetBps = bps }
 
-// defaultConvertedFeeMaxBps caps the fee a converted buy may charge (2%) on a
-// service that was never given caps, so a dear route is refused rather than
-// priced without limit.
+// defaultConvertedFeeMaxBps caps the fee a converted buy or swapped sell may
+// charge (2%) on a service that was never given caps, so a dear route is
+// refused rather than priced without limit.
 const defaultConvertedFeeMaxBps = 200
 
 // routeBudgetHeadroomBps is added on top of a route's measured cost when its
@@ -252,24 +255,30 @@ const defaultConvertedFeeMaxBps = 200
 // refuse the route it was raised for.
 const routeBudgetHeadroomBps = 10
 
-// SetConvertedFeeCaps sets the most a converted buy may charge in total, in
-// bps of the order, per destination chain; def applies to any other chain.
+// SetConvertedFeeCaps sets the most a converted buy or swapped sell may
+// charge in total, in bps of the order, per chain (a buy's destination, a
+// sell's source); def applies to any other chain. 0 turns raising off.
 func (s *PaycrestQuoteService) SetConvertedFeeCaps(byChain map[string]int, def int) {
 	s.convertedFeeMaxByChain = byChain
-	if def > 0 {
-		s.convertedFeeMaxDefault = def
-	}
+	s.convertedFeeMaxDefault = def
+	s.convertedFeeCapsSet = true
 }
 
-// convertedFeeMaxBps is the fee cap for a destination chain.
+// convertedFeeMaxBps is the fee cap for a chain. Anything outside
+// 0..MaxConvertedFeeBps reads as 0 — raising off — so a bad value can only
+// make it stricter.
 func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
-	if m, ok := s.convertedFeeMaxByChain[strings.ToLower(strings.TrimSpace(chainKey))]; ok && m > 0 {
-		return m
+	if !s.convertedFeeCapsSet {
+		return defaultConvertedFeeMaxBps
 	}
-	if s.convertedFeeMaxDefault > 0 {
-		return s.convertedFeeMaxDefault
+	limit, ok := s.convertedFeeMaxByChain[strings.ToLower(strings.TrimSpace(chainKey))]
+	if !ok {
+		limit = s.convertedFeeMaxDefault
 	}
-	return defaultConvertedFeeMaxBps
+	if limit < 0 || limit > config.MaxConvertedFeeBps {
+		return 0
+	}
+	return limit
 }
 
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
@@ -1007,8 +1016,8 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		if need := l1 + TreasuryGasBps(probe, treasuryERC20Gas) + routeBudgetHeadroomBps; need > budget {
 			budget = need
 			feeBps := s.senderFeeBps() - s.roundTripBudgetBps + budget
-			if max := s.convertedFeeMaxBps(asset.ChainKey); feeBps > max {
-				skip("route needs a %dbps fee, over the %s cap of %dbps", feeBps, asset.ChainKey, max)
+			if limit := s.convertedFeeMaxBps(asset.ChainKey); feeBps > limit {
+				skip("route needs a %dbps fee, over the %s cap of %dbps", feeBps, asset.ChainKey, limit)
 				continue
 			}
 			priced, ok := s.repricedAtFee(*src, fiatAmount, base.MarketRate, feeBps)
@@ -1017,7 +1026,10 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 				continue
 			}
 			src = &priced
-			routeAmount, _ = new(big.Int).SetString(src.TokenAmountBaseUnits, 10)
+			if routeAmount, ok = new(big.Int).SetString(src.TokenAmountBaseUnits, 10); !ok || routeAmount.Sign() <= 0 {
+				skip("repriced settlement amount %q could not be resolved", src.TokenAmountBaseUnits)
+				continue
+			}
 		}
 		bridge := new(big.Int).Mul(routeAmount, big.NewInt(10_000))
 		bridge.Quo(bridge, big.NewInt(int64(10_000-l1)))

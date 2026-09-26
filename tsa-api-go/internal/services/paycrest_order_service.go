@@ -189,6 +189,16 @@ func (s *PaycrestOrderService) ConvertedFeePercent() string { return s.senderFee
 // raw internal error surfacing as a 500.
 var ErrConversionUnavailable = errors.New("delivering to that network isn't available for this purchase right now")
 
+// ErrConversionPriceMoved refuses a converted buy whose fee rose past the one
+// she was quoted: a dear route's fee is re-priced when the order is opened,
+// and she agreed to the rate she saw, not to whatever it became since.
+var ErrConversionPriceMoved = errors.New("the price changed since your quote")
+
+// quotedFeeToleranceBps is how far a converted buy's fee may rise between the
+// quote she saw and the order before it is refused — room for LiFi's own
+// quote-to-quote jitter, not for a real price move.
+const quotedFeeToleranceBps = 10
+
 // SetCurrencyRegistry wires the server-side kill switch: CreateBuy and
 // CreateSell refuse with ErrPaycrestDisabled when the order's currency does
 // not resolve to RampProviderPaycrest. Optional — without it (nil), no gate
@@ -338,6 +348,10 @@ type PaycrestBuyRequest struct {
 	// ignored on every EVM destination. A refund still goes to WalletAddress:
 	// this names where the ASSET lands, never where money comes back to.
 	DestinationAddress string
+	// QuotedMarkupBps is the round-trip budget (the venue's markupBps) of the
+	// converted quote she accepted. The order refuses a fee risen more than
+	// quotedFeeToleranceBps past it; zero (an older app) skips the check.
+	QuotedMarkupBps int
 	// RefundAccount is where naira returns if the order fails. Defaults to the
 	// user's own bank, so a refund goes back to whoever paid.
 	RefundBankCode    string // NIBSS
@@ -551,6 +565,11 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 				ErrConversionUnavailable, requestedAssetLabel(req))
 		}
 		v := venues[0]
+		if req.QuotedMarkupBps > 0 && v.MarkupBps > req.QuotedMarkupBps+quotedFeeToleranceBps {
+			log.Printf("[paycrest] converted buy refused: fee moved from quoted markup %d to %d bps (%s)",
+				req.QuotedMarkupBps, v.MarkupBps, requestedAssetLabel(req))
+			return nil, ErrConversionPriceMoved
+		}
 		if s.treasuryCaps != nil {
 			// Phase 2 moves only stablecoins, so the venue's own TokenAmount
 			// is already close enough to USD for this early, advisory check.

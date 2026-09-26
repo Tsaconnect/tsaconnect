@@ -341,10 +341,12 @@ type Config struct {
 	RampConversionMinUSD        float64
 	RampConversionMinUSDByChain map[string]float64
 	// RampConvertedFeeMaxBps/RampConvertedFeeMaxBpsByChain cap the TOTAL fee
-	// a converted buy may charge. A route costing more than B raises its own
-	// budget, and the user's fee with it (our F − B is unchanged), up to the
-	// destination chain's cap; past it the route is not offered. ByChain
-	// holds every RampTreasuryChains entry plus solana.
+	// a converted buy or swapped sell may charge. A route costing more than B
+	// raises its own budget, and the user's fee with it (our F − B is
+	// unchanged), up to the cap of the chain involved — a buy's destination,
+	// a sell's source; past it the route is not offered. ByChain holds every
+	// chain a buy can deliver to or a sell can start from. 0 means raising is
+	// off; a value outside 1..MaxConvertedFeeBps is loaded as 0.
 	RampConvertedFeeMaxBps        int
 	RampConvertedFeeMaxBpsByChain map[string]int
 	// RampConversionStallWindow/RampConversionLegCeiling/
@@ -880,10 +882,10 @@ func Load() *Config {
 		}
 		cfg.RampConversionMinUSDByChain[chain] = getEnvFloat64("RAMP_CONVERSION_MIN_USD_"+up, def)
 	}
-	cfg.RampConvertedFeeMaxBps = int(getEnvInt64("RAMP_CONVERTED_FEE_MAX_BPS", 200))
+	cfg.RampConvertedFeeMaxBps = convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS", 200)
 	cfg.RampConvertedFeeMaxBpsByChain = map[string]int{}
-	for _, chain := range append(append([]string{}, cfg.RampTreasuryChains...), "solana") {
-		cfg.RampConvertedFeeMaxBpsByChain[chain] = int(getEnvInt64("RAMP_CONVERTED_FEE_MAX_BPS_"+strings.ToUpper(chain), int64(cfg.RampConvertedFeeMaxBps)))
+	for _, chain := range append(append([]string{}, routerChains...), "solana") {
+		cfg.RampConvertedFeeMaxBpsByChain[chain] = convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS_"+strings.ToUpper(chain), cfg.RampConvertedFeeMaxBps)
 	}
 	// ConversionOrchestrator's own code defaults are 6h/24h/$50 — see
 	// defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD in
@@ -1446,6 +1448,27 @@ func getEnvFloat64(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// MaxConvertedFeeBps bounds a converted fee cap from config: well above any
+// fee we mean to charge, low enough that a typo ("2000" for "200") is refused
+// rather than charged.
+const MaxConvertedFeeBps = 500
+
+// convertedFeeCapFromEnv reads a converted-fee cap. Unset keeps fallback; a
+// value that is not a whole number in 1..MaxConvertedFeeBps turns raising off
+// (0) rather than falling back to something more permissive than was asked.
+func convertedFeeCapFromEnv(key string, fallback int) int {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v <= 0 || v > MaxConvertedFeeBps {
+		log.Printf("[config] %s=%q is not a fee cap in 1..%d bps: raising a dear route's fee is off", key, raw, MaxConvertedFeeBps)
+		return 0
+	}
+	return v
 }
 
 func getEnvInt64(key string, fallback int64) int64 {

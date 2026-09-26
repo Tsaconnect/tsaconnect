@@ -35,8 +35,9 @@ const stableHeadroomBps = 30
 func ceilBps(x float64) int {
 	// A cost that is not a number is never cheap. int(NaN) is 0 on some
 	// platforms and int(+Inf) wraps negative on others; either would admit
-	// the route. Price it past every budget instead.
-	if math.IsNaN(x) || math.IsInf(x, 1) {
+	// the route. Price it past every budget instead. So is a finite cost too
+	// large for an int: converting it is undefined and reads as 0 on amd64.
+	if math.IsNaN(x) || x >= math.MaxInt32 {
 		return math.MaxInt32
 	}
 	v := int(math.Ceil(x - 1e-6))

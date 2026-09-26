@@ -268,17 +268,24 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, ErrSellRouteTooCostly
 	}
 	gas := q.gasFor(ctx, in, first, target.offramp)
-	if l+gas.bps > target.budgetBps {
-		if !q.canRaiseBudget(in, target, l+gas.bps) {
-			return nil, ErrSellRouteTooCostly
-		}
-		// Sold at cost: she signs this fee-free route, the budget is exactly
-		// what it spends, and our share is Paycrest's F − B alone.
-		target.budgetBps = l + gas.bps
-	}
 
 	route := first
 	fee := target.budgetBps - l - gas.bps
+	// raisedLimit > 0 marks a sale dearer than B that is still offered at a
+	// higher fee: the most LiFi's route (her swap cost plus our fee) may take
+	// on top of Paycrest's F − B share.
+	raisedLimit := 0
+	if fee < 0 {
+		limit, ok := q.raisedCostLimit(in, target)
+		// Our fee recovers the gas we pay for her sale (the Base relay and
+		// any top-up) plus headroom for the fee-carrying route's own gas, so
+		// our share stays Paycrest's F − B.
+		fee = gas.bps + routeBudgetHeadroomBps
+		if !ok || l+fee > limit {
+			return nil, ErrSellRouteTooCostly
+		}
+		raisedLimit = limit
+	}
 	if fee > 0 {
 		req.FeeBps = fee
 		route, err = q.lifi.Quote(ctx, req)
@@ -305,7 +312,13 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 			return nil, ErrSellRouteTooCostly
 		}
 		gas = q.gasFor(ctx, in, route, target.offramp)
-		if l2+gas.bps > target.budgetBps {
+		if raisedLimit > 0 {
+			// Raised: she may pay up to the cap, and our fee must still cover
+			// the gas THIS route has us pay.
+			if l2 > raisedLimit || gas.bps > fee {
+				return nil, ErrSellRouteTooCostly
+			}
+		} else if l2+gas.bps > target.budgetBps {
 			return nil, ErrSellRouteTooCostly
 		}
 	}
@@ -333,21 +346,21 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	return out, nil
 }
 
-// canRaiseBudget reports whether an ordinary sale whose round trip costs
-// roundTripBps (more than B) may still be offered at a higher fee: her
-// all-in fee — Paycrest's F − B plus the round trip — must fit the source
-// chain's cap. A delivery was given its whole fee by the caller and is never
-// raised.
-func (q *RampSellQuoter) canRaiseBudget(in SellQuoteInput, target deliveryTarget, roundTripBps int) bool {
+// raisedCostLimit is, for an ordinary sale dearer than B, the most LiFi's
+// route may take — her swap cost plus our fee — so that with Paycrest's F − B
+// her all-in fee fits the source chain's cap. ok is false when the sale may
+// not be raised: a delivery was given its whole fee by the caller.
+func (q *RampSellQuoter) raisedCostLimit(in SellQuoteInput, target deliveryTarget) (int, bool) {
 	if !target.offramp || in.BudgetBps != 0 {
-		return false
+		return 0, false
 	}
 	paycrestBps, ok := feePercentToBps(q.converted)
 	if !ok {
-		return false
+		return 0, false
 	}
 	chainKey, _ := q.chains.ChainNameForID(in.FromChainID)
-	return paycrestBps+roundTripBps <= q.quotes.convertedFeeMaxBps(chainKey)
+	limit := q.quotes.convertedFeeMaxBps(chainKey) - paycrestBps
+	return limit, limit > 0
 }
 
 // checkSignable refuses a route she must not sign. Every field it reads is

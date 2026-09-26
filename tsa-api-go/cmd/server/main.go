@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1522,6 +1523,11 @@ func main() {
 			// The cap on a dear route's raised fee — shared by converted buys
 			// and swapped sells, which both price through paycrestQuotes.
 			paycrestQuotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
+			if pct, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("PAYCREST_SENDER_FEE_PERCENT")), 64); err == nil &&
+				cfg.RampConvertedFeeMaxBps > 0 && float64(cfg.RampConvertedFeeMaxBps) < pct*100 {
+				log.Printf("[paycrest] RAMP_CONVERTED_FEE_MAX_BPS=%d is below the %s%% sender fee: no dear route will ever be offered",
+					cfg.RampConvertedFeeMaxBps, os.Getenv("PAYCREST_SENDER_FEE_PERCENT"))
+			}
 			if !paycrestOrders.ConversionPriced() {
 				log.Printf("[paycrest] conversion unpriced: RAMP_ROUND_TRIP_BUDGET_BPS=%d must be > 0 and below PAYCREST_SENDER_FEE_PERCENT (in bps); converted buys and swapped sells stay off",
 					cfg.RampRoundTripBudgetBps)

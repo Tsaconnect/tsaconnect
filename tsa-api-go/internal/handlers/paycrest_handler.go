@@ -73,6 +73,9 @@ func paycrestError(c *gin.Context, err error) {
 		// stale asset list or a hand-rolled request, not an outage.
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"We can't buy that token on that network. Pick another one.")
+	case errors.Is(err, services.ErrConversionPriceMoved):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"The price changed since your quote. Check the new rate and try again.")
 	case errors.Is(err, services.ErrConversionUnavailable):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"We can't deliver to that network right now. Try a supported network, or try again shortly.")
@@ -248,6 +251,9 @@ type paycrestBuyBody struct {
 	// on is delivered — her Solana address. Validated server-side against the
 	// chain it names; a refund still goes to the wallet, never here.
 	DestinationAddress string `json:"destinationAddress"`
+	// QuotedMarkupBps is the markupBps of the converted quote she accepted;
+	// the order is refused if its fee has since risen past it.
+	QuotedMarkupBps int `json:"quotedMarkupBps"`
 	// Refund destination — where naira returns if the order fails. The app
 	// prefills this from the user's saved payout account.
 	RefundBankCode    string `json:"refundBankCode" binding:"required"`
@@ -298,6 +304,7 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 		RequestedChainID:      body.RequestedChainID,
 		RequestedTokenAddress: strings.TrimSpace(body.RequestedTokenAddress),
 		DestinationAddress:    strings.TrimSpace(body.DestinationAddress),
+		QuotedMarkupBps:       body.QuotedMarkupBps,
 		RefundBankCode:        body.RefundBankCode,
 		RefundAccount:         body.RefundAccount,
 		RefundAccountName:     body.RefundAccountName,
