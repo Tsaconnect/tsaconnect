@@ -13,11 +13,11 @@ export function modeOf(pathname: string): Mode | null {
 
 /**
  * The same business page in the other mode (/business/live/payments →
- * /business/test/payments). A payment and a page of the list belong to one
- * mode, so the other mode opens its list at the first page, filters kept.
+ * /business/test/payments). A payment (or link) and a page of the list belong
+ * to one mode, so the other mode opens its list at the first page, filters kept.
  */
 export function withMode(pathname: string, search: string, mode: Mode): string {
-  const page = (BUSINESS.exec(pathname)?.[2] ?? '/overview').replace(/^\/payments\/.*$/, '/payments');
+  const page = (BUSINESS.exec(pathname)?.[2] ?? '/overview').replace(/^\/(payments|links)\/.*$/, '/$1');
   const params = new URLSearchParams(search);
   params.delete('page');
   const query = params.toString();

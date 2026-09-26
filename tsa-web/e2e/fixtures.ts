@@ -3,8 +3,9 @@
 // cannot use a real server (see the plan's deviation note); the full server
 // flows are covered by the Go tests. Shapes, status codes and machine codes
 // follow tsa-api-go: web_auth_handler.go (login/verify/refresh/logout/me),
-// middleware/auth.go (the uncoded 401), pay_owner_handler.go (the owner routes)
-// and pay_owner_actions.go (what a confirm applies).
+// middleware/auth.go (the uncoded 401), pay_owner_handler.go (the owner routes,
+// payment links included), pay_owner_actions.go (what a confirm applies) and
+// middleware/idempotency.go (a repeated Idempotency-Key replays its answer).
 import type { Page, Route } from '@playwright/test';
 
 export const PASSWORD = 'correct-horse';
@@ -14,7 +15,7 @@ const user = { id: '0b8f2d4e-9c1a-4f3b-8e7d-6a5c4b3a2918', name: 'Ada Obi', emai
 const sentTo = 'a***@skyair.ng';
 
 type Merchant = {
-  id: string; businessName: string; status: 'active' | 'suspended'; liveEnabled: boolean; version: number; settlementMode: 'fiat' | 'crypto' | '';
+  id: string; businessName: string; status: 'active' | 'suspended'; liveEnabled: boolean; liveAllowed: boolean; version: number; settlementMode: 'fiat' | 'crypto' | '';
   bankCode?: string; accountNumber?: string; accountName?: string; websiteDomain?: string;
   hasLiveKey: boolean; hasTestKey: boolean; liveKeyPrefix?: string; testKeyPrefix?: string;
   webhookUrl: string; testWebhookUrl: string; returnDomains: string[];
@@ -22,7 +23,8 @@ type Merchant = {
 
 type Payment = {
   id: string; reference: string; mode: 'live' | 'test'; status: string; amount: number; customerTotal: number; merchantNet: number;
-  fee: number; currency: 'NGN'; description: string; returnUrl?: string; expiresAt: string; settlementRef?: string;
+  fee: number; currency: 'NGN'; description: string; source: 'api' | 'link'; customerName?: string; cancelled?: boolean;
+  returnUrl?: string; expiresAt: string; settlementRef?: string;
   failureReason?: string; succeededAt?: string; appUrl: string; checkoutUrl: string; createdAt: string;
 };
 
@@ -35,7 +37,7 @@ function payment(id: string, reference: string, mode: 'live' | 'test', status: s
   const customerTotal = Math.ceil((amount * 10_000) / 9_900);
   return {
     id, reference, mode, status, amount, customerTotal, merchantNet: amount, fee: customerTotal - amount, currency: 'NGN',
-    description: 'LOS-ABV 12 Oct, 1 adult', expiresAt: new Date(Date.parse(createdAt) + 30 * 60_000).toISOString(),
+    description: 'LOS-ABV 12 Oct, 1 adult', source: 'api', expiresAt: new Date(Date.parse(createdAt) + 30 * 60_000).toISOString(),
     appUrl: `tsaconnect://pay?id=${id}`, checkoutUrl: `https://tsaconnectworld.com/pay/${id}`, createdAt, ...extra,
   };
 }
@@ -65,27 +67,34 @@ function newKey(mode: 'live' | 'test') {
 export type MockApi = {
   signedIn: boolean;
   merchant: Merchant;
-  /** Every API call, in order, with its JSON body. */
-  calls: { method: string; path: string; body: unknown }[];
+  /** Every API call, in order, with its JSON body (and Idempotency-Key, when sent). */
+  calls: { method: string; path: string; body: unknown; idempotencyKey?: string }[];
   /** API calls the mock had no answer for — a test should end with none. */
   unhandled: string[];
   /** The last key a confirm issued (it is shown once). */
   lastKey?: string;
+  /** Every payment, API-made and links; a test may add its own. */
+  payments: Payment[];
 };
+
+const MERCHANT_CANCELLED = 'cancelled by the merchant';
 
 export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Promise<MockApi> {
   const api: MockApi = {
     signedIn: opts.signedIn ?? false,
     merchant: {
       // Approved and testing: live payments not switched on yet.
-      id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20', businessName: 'Sky Air Ltd', status: 'active', liveEnabled: false, version: 7, settlementMode: 'fiat',
+      id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20', businessName: 'Sky Air Ltd', status: 'active', liveEnabled: false, liveAllowed: false, version: 7, settlementMode: 'fiat',
       bankCode: '044', accountNumber: '******3210', accountName: 'SKY AIR LIMITED', websiteDomain: 'skyair.ng',
       hasLiveKey: true, hasTestKey: true, liveKeyPrefix: 'tsapk_live_7Hq2xP', testKeyPrefix: 'tsapk_test_Qz91mK',
       webhookUrl: '', testWebhookUrl: '', returnDomains: ['skyair.ng'],
     },
     calls: [],
     unhandled: [],
+    payments: PAYMENTS.map((p) => ({ ...p })),
   };
+  // middleware/idempotency.go: a key seen before replays the answer it got (2xx only).
+  const replays = new Map<string, ReturnType<typeof ok>>();
   let challenged = false;
   let seq = 0;
   // Action ids are UUIDs in the API (pay_owner_actions.id): shaped the same here.
@@ -129,20 +138,57 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
     const passwordRefused = () => (body.password === PASSWORD ? null : fail(401, 'Incorrect password', 'password_incorrect'));
 
     if (route === 'GET /api/pay/merchant') return ok(m, 'Merchant');
-    if (route === 'GET /api/pay/merchant/payments') {
-      const mode = query.get('mode') ?? 'live';
-      if (mode !== 'live' && mode !== 'test') return fail(400, 'mode must be live or test');
+    const mode = query.get('mode') ?? 'live';
+    if (mode !== 'live' && mode !== 'test') return fail(400, 'mode must be live or test');
+    if (route === 'GET /api/pay/merchant/payments' || route === 'GET /api/pay/merchant/links') {
+      const source = route.endsWith('/links') ? 'link' : '';
       const status = query.get('status') ?? '';
       const q = (query.get('q') ?? '').toLowerCase();
       const page = Math.max(Number(query.get('page')) || 1, 1);
       const limit = Math.min(Number(query.get('limit')) > 0 ? Number(query.get('limit')) : 20, 50);
-      const rows = PAYMENTS.filter((p) => p.mode === mode && (!status || p.status === status)
+      // `cancelled` is an expired link its owner closed; `expired` is the rest.
+      const statusMatches = (p: Payment) => !status || (status === 'cancelled' ? Boolean(p.cancelled) : p.status === status && !p.cancelled);
+      const rows = api.payments.filter((p) => p.mode === mode && (!source || p.source === source) && statusMatches(p)
         && (!q || p.reference.toLowerCase().includes(q) || p.description.toLowerCase().includes(q) || p.id.startsWith(q)));
       return ok({ items: rows.slice((page - 1) * limit, page * limit), total: rows.length, page, limit }, 'Payments');
     }
+    if (route === 'POST /api/pay/merchant/links') {
+      if (m.status === 'suspended') return fail(403, 'Your merchant account is suspended — contact support', 'merchant_suspended');
+      if (mode === 'live' && !m.liveAllowed) {
+        return fail(403, "Live payments aren't switched on for your business yet. Try a test link first.", 'live_not_enabled');
+      }
+      if (!m.settlementMode) return fail(409, 'Set where you want to be paid before you request a payment', 'settlement_not_set');
+      const amount = Number(body.amount);
+      const description = String(body.description ?? '').trim();
+      const days = Number(body.expiresInDays ?? 0) || 7;
+      if (!Number.isInteger(amount) || amount < 100_000 || amount > 500_000_000) return fail(422, 'Enter an amount between ₦1,000.00 and ₦5,000,000.00');
+      if (!description || description.length > 255) return fail(422, "Say what the payment is for (up to 255 characters)");
+      if (![1, 3, 7].includes(days)) return fail(422, 'A link can be open for 1, 3 or 7 days');
+      let reference = String(body.reference ?? '').trim();
+      if (reference && api.payments.some((p) => p.mode === mode && p.reference === reference)) {
+        return fail(409, "You've already used this reference — use another or leave it blank", 'reference_taken');
+      }
+      reference ||= `link_${String(api.payments.length).padStart(12, 'k')}`;
+      const now = new Date();
+      const id = `c0ffee00-0000-4000-8000-${String(api.payments.length).padStart(12, '0')}`;
+      const made = payment(id, reference, mode, 'pending', amount, now.toISOString(), {
+        description, source: 'link', ...(body.customerName ? { customerName: String(body.customerName).trim() } : {}),
+        expiresAt: new Date(now.getTime() + days * 24 * 60 * 60_000).toISOString(),
+      });
+      api.payments.unshift(made);
+      return ok(made, 'Payment link created', 201);
+    }
+    const cancel = /^\/api\/pay\/merchant\/links\/([^/]+)\/cancel$/.exec(path);
+    if (method === 'POST' && cancel) {
+      const p = api.payments.find((x) => x.id === cancel[1] && x.mode === mode && x.source === 'link');
+      if (!p) return fail(404, 'Payment not found');
+      if (p.status !== 'pending') return fail(409, "This link can't be cancelled — it's already being paid, paid, or closed", 'not_cancellable');
+      Object.assign(p, { status: 'expired', failureReason: MERCHANT_CANCELLED, cancelled: true });
+      return ok(p, 'Payment link cancelled');
+    }
     const one = /^\/api\/pay\/merchant\/payments\/([^/]+)$/.exec(path);
     if (method === 'GET' && one) {
-      const p = PAYMENTS.find((x) => x.id === one[1] && x.mode === (query.get('mode') ?? 'live'));
+      const p = api.payments.find((x) => x.id === one[1] && x.mode === mode);
       if (!p) return fail(404, 'Payment not found');
       const deliveries = p.status === 'succeeded' ? [{
         id: 'b7e0c1d2-5a4f-4c3e-8d2b-9f1a6e7c3d40', event: 'payment.succeeded', attempts: 1, lastStatusCode: 200,
@@ -207,13 +253,16 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
     const url = new URL(req.url());
     const method = req.method();
     const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
-    api.calls.push({ method, path: url.pathname, body });
+    const key = req.headers()['idempotency-key'];
+    api.calls.push({ method, path: url.pathname, body, ...(key ? { idempotencyKey: key } : {}) });
     // The web app's CSRF header (webAuthGuard / middleware.Auth): every /auth/web call and every cookie write.
     if ((url.pathname.startsWith('/api/auth/web/') || method !== 'GET') && req.headers()['x-tsa-web'] !== '1') {
       await route.fulfill(fail(403, 'Missing request header', 'csrf'));
       return;
     }
-    const res = answer(method, url.pathname, url.searchParams, body);
+    const replayKey = key && `${method} ${url.pathname} ${req.postData() ?? ''} ${key}`;
+    const res = (replayKey && replays.get(replayKey)) || answer(method, url.pathname, url.searchParams, body);
+    if (replayKey && res && res.status < 300) replays.set(replayKey, res);
     if (!res) {
       api.unhandled.push(`${method} ${url.pathname}`);
       await route.fulfill(fail(404, 'Not found'));

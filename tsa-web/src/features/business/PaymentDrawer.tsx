@@ -1,16 +1,22 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { dateTime, naira } from '@/lib/format';
 import { useMode } from '@/components/shell/mode';
+import { Button } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
 import { Drawer } from '@/components/ui/drawer';
+import { FormError } from '@/components/ui/form-error';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/states';
 import { StatusPill } from '@/components/ui/status-pill';
-import { getPayment, type Delivery, type Payer, type Payment } from './api';
-import { youReceive } from './display';
+import { toast } from '@/components/ui/toaster';
+import { cancelLink, getPayment, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
+import { LINK_STATUS_LABELS, statusOf, youReceive } from './display';
+import { LinkShare } from './LinkShare';
+import { useMerchant } from './useMerchant';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -69,11 +75,72 @@ function PaidBy({ payer, status }: { payer: Payer | null; status: Payment['statu
   return <b className="font-semibold">{payer.name}</b>;
 }
 
-function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Payer | null; deliveries: Delivery[] }) {
+/** The link's own section: share it while it can be paid, and cancel it (confirmed first). */
+function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
+  const businessName = useMerchant().data?.businessName ?? '';
+  const [confirming, setConfirming] = useState(false);
+  const queryClient = useQueryClient();
+  const cancel = useMutation({
+    mutationFn: () => cancelLink(mode, p.id),
+    // The answer is the cancelled payment: shown at once, so the drawer never flashes
+    // back to waiting (with Cancel link) while it is read again.
+    onSuccess: (cancelled) => {
+      queryClient.setQueryData<PaymentDetail>(['payment', mode, p.id], (old) => old && { ...old, payment: cancelled });
+      setConfirming(false);
+      toast.success('Link cancelled');
+    },
+    // Someone started paying (or paid) first: the fresh status says what happened.
+    onError: (err) => {
+      if (!(err instanceof ApiError && err.code === 'not_cancellable')) return;
+      setConfirming(false);
+      toast.error(err.message);
+    },
+    // Cancelled or not (it may have been paid meanwhile), the lists and this payment are read again.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['payment', mode, p.id] });
+      void queryClient.invalidateQueries({ queryKey: ['links', mode] });
+      void queryClient.invalidateQueries({ queryKey: ['payments', mode] });
+    },
+  });
+
+  if (p.status !== 'pending') {
+    return (
+      <>
+        <SectionHeading>Payment link</SectionHeading>
+        <p className="font-mono text-[13px] break-all text-text-secondary">{p.checkoutUrl}</p>
+      </>
+    );
+  }
+  return (
+    <>
+      <SectionHeading>Payment link</SectionHeading>
+      <div className="grid gap-3">
+        <LinkShare businessName={businessName} payment={p} />
+        <Button variant="danger" size="sm" className="justify-self-start" onClick={() => { cancel.reset(); setConfirming(true); }}>Cancel link</Button>
+      </div>
+      <Dialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title="Cancel this link?"
+        description="The link will stop working. This can't be undone."
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setConfirming(false)}>Keep link</Button>
+            <Button variant="danger" loading={cancel.isPending} onClick={() => cancel.mutate()}>Cancel link</Button>
+          </>
+        }
+      >
+        {cancel.error ? <FormError>{cancel.error.message}</FormError> : <p className="text-body-sm">{naira(p.amount)} for {p.description}</p>}
+      </Dialog>
+    </>
+  );
+}
+
+function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Payment; payer: Payer | null; deliveries: Delivery[]; mode: Mode; list: 'payments' | 'links' }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">
-        <StatusPill status={p.status} />
+        <StatusPill status={statusOf(p)} labels={list === 'links' ? LINK_STATUS_LABELS : undefined} />
         <span className="min-w-0 truncate font-mono text-caption text-text-secondary" title={p.id}>{p.id}</span>
       </div>
       <p className="mt-2.5 text-title1 font-bold tabular">{naira(p.amount)}</p>
@@ -81,6 +148,7 @@ function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Pa
       <dl className="mt-5 grid grid-cols-[130px_minmax(0,1fr)] gap-x-4 gap-y-2.5 text-body-sm">
         {/* Only a succeeded payment was paid; before that it's whoever took it up. */}
         <Row label={p.status === 'succeeded' ? 'Paid by' : 'Payer'}><PaidBy payer={payer} status={p.status} /></Row>
+        {p.customerName && <Row label="Requested for">{p.customerName}</Row>}
         <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
         {p.description && <Row label="For">{p.description}</Row>}
         <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>
@@ -93,13 +161,21 @@ function Detail({ payment: p, payer, deliveries }: { payment: Payment; payer: Pa
         {p.succeededAt ? (
           <Row label="Succeeded">{dateTime(p.succeededAt)}</Row>
         ) : (
-          <Row label={p.status === 'expired' ? 'Expired' : 'Expires'}>{dateTime(p.expiresAt)}</Row>
+          // A cancelled link closed when its owner cancelled it, not at this time.
+          !p.cancelled && <Row label={p.status === 'expired' ? 'Expired' : 'Expires'}>{dateTime(p.expiresAt)}</Row>
         )}
-        {p.failureReason && <Row label="Why it failed"><span className="text-danger-strong">{p.failureReason}</span></Row>}
+        {p.failureReason && !p.cancelled && <Row label="Why it failed"><span className="text-danger-strong">{p.failureReason}</span></Row>}
       </dl>
 
-      <SectionHeading>Webhooks sent</SectionHeading>
-      <Deliveries items={deliveries} />
+      {p.source === 'link' && <PaymentLink payment={p} mode={mode} />}
+
+      {/* Links are often made by owners with no webhook at all: nothing sent is nothing to show. */}
+      {(p.source !== 'link' || deliveries.length > 0) && (
+        <>
+          <SectionHeading>Webhooks sent</SectionHeading>
+          <Deliveries items={deliveries} />
+        </>
+      )}
     </>
   );
 }
@@ -114,8 +190,8 @@ function DetailSkeleton() {
   );
 }
 
-/** One payment over the list; closing goes back to the list with its filters. */
-export function PaymentDrawer() {
+/** One payment over its list (payments, or payment links); closing goes back to that list with its filters. */
+export function PaymentDrawer({ list = 'payments' }: { list?: 'payments' | 'links' }) {
   const mode = useMode();
   const id = useParams().id ?? '';
   const navigate = useNavigate();
@@ -127,12 +203,12 @@ export function PaymentDrawer() {
     <Drawer
       open
       onOpenChange={(open) => {
-        if (!open) navigate({ pathname: `/business/${mode}/payments`, search }, { replace: true });
+        if (!open) navigate({ pathname: `/business/${mode}/${list}`, search }, { replace: true });
       }}
       title={q.data?.payment.reference ?? 'Payment'}
     >
       {q.data ? (
-        <Detail payment={q.data.payment} payer={q.data.payer} deliveries={q.data.deliveries} />
+        <Detail payment={q.data.payment} payer={q.data.payer} deliveries={q.data.deliveries} mode={mode} list={list} />
       ) : q.isPending ? (
         <DetailSkeleton />
       ) : notFound ? (

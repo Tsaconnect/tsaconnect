@@ -19,6 +19,8 @@ export type ApiInit = {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: unknown;
   signal?: AbortSignal;
+  /** Extra request headers (an Idempotency-Key); the JSON and CSRF headers are always sent. */
+  headers?: Record<string, string>;
   /** A 401 that survives the refresh throws without ending the session (the sign-in probe). */
   silent?: boolean;
 };
@@ -65,7 +67,7 @@ async function exchange(path: string, init: ApiInit): Promise<Reply> {
     const res = await fetch(`/api${path}`, {
       method: init.method ?? 'GET',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-TSA-Web': '1' },
+      headers: { ...init.headers, 'Content-Type': 'application/json', 'X-TSA-Web': '1' },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
       signal,
     });

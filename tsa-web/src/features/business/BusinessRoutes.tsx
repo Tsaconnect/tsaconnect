@@ -1,8 +1,8 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { withMode } from '@/components/shell/mode';
 import { Developers } from './Developers';
-import { LinksComingSoon } from './LinksComingSoon';
 import { Overview } from './Overview';
+import { PaymentLinks } from './PaymentLinks';
 import { PaymentDrawer } from './PaymentDrawer';
 import { Payments } from './Payments';
 import { Payouts } from './Payouts';
@@ -25,7 +25,9 @@ export function BusinessRoutes() {
         <Route path="payments" element={<Payments />}>
           <Route path=":id" element={<PaymentDrawer />} />
         </Route>
-        <Route path="links" element={<LinksComingSoon />} />
+        <Route path="links" element={<PaymentLinks />}>
+          <Route path=":id" element={<PaymentDrawer list="links" />} />
+        </Route>
         <Route path="payouts" element={<Payouts />} />
         <Route path="developers" element={<Developers />} />
         <Route path="*" element={<Navigate to="overview" replace />} />

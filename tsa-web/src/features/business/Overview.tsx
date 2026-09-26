@@ -122,7 +122,8 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
   const firstName = user?.name.trim().split(/\s+/)[0];
 
   return (
-    <div className="grid gap-5">
+    // One minmax(0, 1fr) column: the payments table scrolls inside its card, not the page.
+    <div className="grid grid-cols-1 gap-5">
       <div>
         <h2 className="text-title3 font-semibold">{greeting()}{firstName ? `, ${firstName}` : ''}</h2>
         <p className="text-body-sm text-text-secondary">

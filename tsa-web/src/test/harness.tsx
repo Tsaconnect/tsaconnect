@@ -54,10 +54,31 @@ export const payment: Payment = {
   fee: 85_354,
   currency: 'NGN',
   description: 'LOS–ABV 12 Oct, 1 adult',
+  source: 'api',
+  checkoutUrl: 'https://tsaconnectworld.com/pay/3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f',
   expiresAt: '2026-09-24T16:31:00Z',
   settlementRef: 'ord_8c1d42aa',
   succeededAt: '2026-09-24T16:03:00Z',
   createdAt: '2026-09-24T16:01:00Z',
+};
+
+/** A payment link the owner made, still waiting to be paid. */
+export const link: Payment = {
+  ...payment,
+  id: '8e4d2c1b-6a5f-4e3d-9c2b-7a1f0e9d8c7b',
+  reference: 'link_k3m9x2p7q4wz',
+  status: 'pending',
+  amount: 500_000,
+  customerTotal: 505_051,
+  merchantNet: 500_000,
+  fee: 5_051,
+  description: 'Balance for LOS–ABV, 12 Oct',
+  source: 'link',
+  customerName: 'Tolu Adeyemi',
+  checkoutUrl: 'https://tsaconnectworld.com/pay/8e4d2c1b-6a5f-4e3d-9c2b-7a1f0e9d8c7b',
+  expiresAt: '2026-10-01T16:01:00Z',
+  settlementRef: undefined,
+  succeededAt: undefined,
 };
 
 /**
@@ -67,7 +88,7 @@ export const payment: Payment = {
 export function stubFetch(routes: Record<string, Route>) {
   const table: Record<string, Route> = { '/api/auth/web/me': ok({ user: ada }), ...routes };
   // Typed as api() calls it (body is its JSON string), so tests can JSON.parse(init.body).
-  const f = vi.fn<(url: string, init: { method: string; body: string }) => Promise<Response>>(async (url) => {
+  const f = vi.fn<(url: string, init: { method: string; body: string; headers: Record<string, string> }) => Promise<Response>>(async (url) => {
     const route = table[new URL(url, 'http://x').pathname];
     if (route === undefined) return fail(404, 'Not found');
     return typeof route === 'function' ? route(url) : route.clone();

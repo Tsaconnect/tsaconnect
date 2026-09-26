@@ -11,6 +11,8 @@ export type OwnMerchant = {
   status: 'active' | 'suspended';
   /** A super admin has switched this merchant's live payments on. Until then a live key is refused. */
   liveEnabled: boolean;
+  /** Live payments work right now: this merchant's switch and TSA Pay's own. Older APIs don't send it. */
+  liveAllowed?: boolean;
   version: number;
   websiteDomain?: string;
   settlementMode: 'fiat' | 'crypto' | '';
@@ -32,6 +34,9 @@ export type OwnMerchant = {
 
 export type PaymentStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
 
+/** Who made the payment: the merchant's server (api) or the owner, as a payment link (link). */
+export type PaymentSource = 'api' | 'link';
+
 export type Payment = {
   id: string;
   reference: string;
@@ -43,6 +48,13 @@ export type Payment = {
   fee: number;
   currency: 'NGN';
   description: string;
+  source: PaymentSource;
+  /** Who a payment link is for, when the owner named them. */
+  customerName?: string;
+  /** Expired because the owner cancelled it, not because time ran out. */
+  cancelled?: boolean;
+  /** The page a customer pays on — what a payment link shares. */
+  checkoutUrl: string;
   expiresAt: string;
   settlementRef?: string;
   failureReason?: string;
@@ -69,20 +81,41 @@ export type PaymentFilter = { status?: string; q?: string; page?: number; limit?
 // Reads take TanStack Query's signal, so a query it drops is cancelled on the wire.
 export const getMerchant = (signal?: AbortSignal) => api<OwnMerchant>('/pay/merchant', { signal });
 
+const pageQuery = (mode: Mode, p: PaymentFilter) => new URLSearchParams({
+  mode,
+  ...(p.status ? { status: p.status } : {}),
+  ...(p.q ? { q: p.q } : {}),
+  page: String(p.page ?? 1),
+  ...(p.limit ? { limit: String(p.limit) } : {}),
+});
+
 export const listPayments = (mode: Mode, p: PaymentFilter, signal?: AbortSignal) =>
-  api<PaymentPage>(`/pay/merchant/payments?${new URLSearchParams({
-    mode,
-    ...(p.status ? { status: p.status } : {}),
-    ...(p.q ? { q: p.q } : {}),
-    page: String(p.page ?? 1),
-    ...(p.limit ? { limit: String(p.limit) } : {}),
-  })}`, { signal });
+  api<PaymentPage>(`/pay/merchant/payments?${pageQuery(mode, p)}`, { signal });
+
+/** The payment links the owner made; `status: 'cancelled'` narrows to the ones they cancelled. */
+export const listLinks = (mode: Mode, p: PaymentFilter, signal?: AbortSignal) =>
+  api<PaymentPage>(`/pay/merchant/links?${pageQuery(mode, p)}`, { signal });
+
+export type LinkDays = 1 | 3 | 7;
+
+/** A payment link: `amount` in kobo; a blank reference is made by the server. */
+export type NewLink = { amount: number; description: string; customerName: string; reference: string; expiresInDays: LinkDays };
+
+/** One Idempotency-Key per open form, so a double submit or a retry makes one link. */
+export const createLink = (mode: Mode, link: NewLink, idempotencyKey: string) =>
+  api<Payment>(`/pay/merchant/links?mode=${mode}`, { method: 'POST', body: link, headers: { 'Idempotency-Key': idempotencyKey } });
+
+export const cancelLink = (mode: Mode, id: string) =>
+  api<Payment>(`/pay/merchant/links/${encodeURIComponent(id)}/cancel?mode=${mode}`, { method: 'POST' });
 
 /** Who paid: a name (as on their ID when verified; "Deleted account" once deleted). Never contact details. */
 export type Payer = { name: string };
 
+/** One payment as its detail page reads it. */
+export type PaymentDetail = { payment: Payment; payer: Payer | null; deliveries: Delivery[] };
+
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
-  api<{ payment: Payment; payer: Payer | null; deliveries: Delivery[] }>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
+  api<PaymentDetail>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
 
 // Guarded actions: password → emailed code → confirm.
 export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret'; expiresAt: string; sentTo: string };

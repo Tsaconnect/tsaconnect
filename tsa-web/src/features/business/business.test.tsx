@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { fail, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
+import { fail, link, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
 
 const noPayments = ok({ items: [], total: 0, page: 1, limit: 20 });
 
@@ -203,9 +203,16 @@ describe('business area', () => {
     await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('page=1'))).toBe(true));
   });
 
-  it('payment links are coming soon', async () => {
-    stubFetch({ '/api/pay/merchant': ok(merchant) });
-    mountAt('/business/live/links');
-    expect(await screen.findByText('Payment links are coming soon')).toBeInTheDocument();
+  it('a payment made as a link is tagged Link, with who it was for', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [payment, link], total: 2, page: 1, limit: 20 }),
+    });
+    mountAt('/business/live/payments');
+    const linkRow = (await screen.findByText(link.reference)).closest('tr')!;
+    expect(within(linkRow).getByText('Link')).toBeInTheDocument();
+    expect(within(linkRow).getByText(`Tolu Adeyemi · ${link.description}`)).toBeInTheDocument();
+    const apiRow = screen.getByText(payment.reference).closest('tr')!;
+    expect(within(apiRow).queryByText('Link')).not.toBeInTheDocument();
   });
 });

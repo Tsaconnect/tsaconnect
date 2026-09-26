@@ -19,6 +19,14 @@ describe('api', () => {
     expect(init.body).toBe('{"a":1}');
   });
 
+  it('sends extra headers alongside, never instead of, the CSRF header', async () => {
+    fetchMock.mockResolvedValue(json(201, { success: true, data: {} }));
+    await api('/x', { method: 'POST', headers: { 'Idempotency-Key': 'k1', 'X-TSA-Web': '0' } });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['Idempotency-Key']).toBe('k1');
+    expect(init.headers['X-TSA-Web']).toBe('1');
+  });
+
   it('throws an ApiError with the server message and code', async () => {
     fetchMock.mockResolvedValue(json(422, { success: false, message: "That code isn't right", code: 'code_invalid' }));
     const err = await api('/x', { method: 'POST' }).catch((e: unknown) => e);

@@ -8,6 +8,15 @@ const day = (d: Date) => `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 /** Kobo → "₦84,500.00". */
 export const naira = (kobo: number) => `₦${NGN.format(kobo / 100)}`;
 
+/** What a merchant typed as naira ("5,000.50", "₦5000") → kobo; not a positive amount → null. */
+export function parseNaira(text: string): number | null {
+  const plain = text.replace(/[,\s₦]/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(plain)) return null;
+  const [whole, frac = ''] = plain.split('.');
+  const kobo = Number(whole) * 100 + Number(frac.padEnd(2, '0'));
+  return kobo > 0 && Number.isSafeInteger(kobo) ? kobo : null;
+}
+
 /** "24 Sep, 16:02" in the viewer's time zone. */
 export const dateTime = (iso: string) => {
   const d = new Date(iso);

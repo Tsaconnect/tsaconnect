@@ -1,19 +1,22 @@
 import type { MouseEvent } from 'react';
 import { Link, useNavigate, type To } from 'react-router-dom';
 import { CreditCard } from 'lucide-react';
-import { dateTime, naira, relative } from '@/lib/format';
-import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/cn';
 import { EmptyState } from '@/components/ui/states';
-import { StatusPill } from '@/components/ui/status-pill';
 import { TBody, TD, TH, THead, TR, Table } from '@/components/ui/table';
 import type { Mode, Payment } from './api';
-import { youReceive } from './display';
+import { paymentColumns, type PaymentColumn } from './paymentColumns';
 
-/** Payments as rows; a row (or its reference) opens the payment's detail. */
-export function PaymentsTable({ items, loading, hrefFor }: { items: Payment[] | undefined; loading: boolean; hrefFor: (p: Payment) => To }) {
+/** Payments as rows; a row (or its link) opens the payment's detail. */
+export function PaymentsTable({ items, loading, hrefFor, columns = paymentColumns }: {
+  items: Payment[] | undefined;
+  loading: boolean;
+  hrefFor: (p: Payment) => To;
+  columns?: PaymentColumn[];
+}) {
   const navigate = useNavigate();
   const open = (e: MouseEvent, href: To) => {
-    // The reference is itself a link; don't navigate twice.
+    // The row's own link navigates itself; don't navigate twice.
     if ((e.target as HTMLElement).closest('a')) return;
     navigate(href);
   };
@@ -21,38 +24,21 @@ export function PaymentsTable({ items, loading, hrefFor }: { items: Payment[] | 
     <Table>
       <THead>
         <TR>
-          <TH>Reference</TH>
-          <TH className="text-right">Amount</TH>
-          <TH className="text-right">You receive</TH>
-          <TH>Status</TH>
-          <TH className="text-right">Created</TH>
+          {columns.map((c) => <TH key={c.header} className={cn(c.right && 'text-right')}>{c.header}</TH>)}
         </TR>
       </THead>
       <TBody>
         {loading && !items
           ? Array.from({ length: 5 }, (_, i) => (
               <TR key={i}>
-                <TD><Skeleton className="h-4 w-28" /><Skeleton className="mt-1.5 h-3 w-40" /></TD>
-                <TD><Skeleton className="ml-auto h-4 w-20" /></TD>
-                <TD><Skeleton className="ml-auto h-4 w-20" /></TD>
-                <TD><Skeleton className="h-5 w-20 rounded-full" /></TD>
-                <TD><Skeleton className="ml-auto h-3 w-14" /></TD>
+                {columns.map((c) => <TD key={c.header}>{c.skeleton}</TD>)}
               </TR>
             ))
           : items?.map((p) => {
               const href = hrefFor(p);
               return (
                 <TR key={p.id} className="cursor-pointer" onClick={(e) => open(e, href)}>
-                  <TD className="max-w-[320px]">
-                    <Link to={href} className="font-semibold text-text-primary hover:underline focus-visible:underline">{p.reference}</Link>
-                    {p.description && <p className="truncate text-caption text-text-secondary">{p.description}</p>}
-                  </TD>
-                  <TD className="text-right tabular whitespace-nowrap">{naira(p.amount)}</TD>
-                  <TD className="text-right tabular whitespace-nowrap">{youReceive(p)}</TD>
-                  <TD><StatusPill status={p.status} /></TD>
-                  <TD className="text-right whitespace-nowrap text-caption text-text-secondary">
-                    <time dateTime={p.createdAt} title={dateTime(p.createdAt)}>{relative(p.createdAt)}</time>
-                  </TD>
+                  {columns.map((c) => <TD key={c.header} className={cn(c.right && 'text-right', c.className)}>{c.cell(p, href)}</TD>)}
                 </TR>
               );
             })}
