@@ -437,6 +437,75 @@ func TestCreateBuy_StoresTheRequestedAssetAndWhatSheIsOwed(t *testing.T) {
 	}
 }
 
+// A route dearer than the floor raises the user's fee, not ours: Paycrest is
+// still sent F − B, and what she is owed is restated at F − B + B′ using the
+// order's own budget B′ (l 100 + g 0 + 10 headroom = 110).
+func TestCreateBuy_ADearerRouteOwesAgainstItsOwnBudget(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.SetSenderFeePercent("1")
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	r.lifi.route.ToAmountUSD = 99.0
+	// What Paycrest really answers for ₦150,000 sent at 0.5%: the grossed-down
+	// ₦149,253.73 at 1500, so the owed amount can be held to the quote.
+	r.client.order = &PaycrestOrder{ID: "pc-conv-dear", Status: PaycrestStatusPending, Rate: "1500",
+		Amount: "99.502486", SenderFeePercent: "0.5", ProviderAccount: &PaycrestProviderAccount{
+			Institution: "Fake Bank", AccountIdentifier: "0000000000", AccountName: "Fake", AmountToTransfer: "150000"}}
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if r.client.lastCreate.SenderFeePercent != "0.5" || row.MarkupBps != 110 {
+		t.Fatalf("fee sent = %q markup = %d, want 0.5 and 110", r.client.lastCreate.SenderFeePercent, row.MarkupBps)
+	}
+	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
+	if want := QuotedFromOrder(orderAmount, 160, 110).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount at 0.5%%, restated at 1.6%%)", row.QuotedAmount, want)
+	}
+	// And what she is owed is what the quote showed her, to within rounding.
+	venues, _ := r.quotes.ConvertedVenues(context.Background(), "buy", "NGN", req.FiatAmount, []RequestedAsset{{
+		ChainID: 56, Address: evmNativeAddress, Recipient: req.WalletAddress}})
+	if len(venues) != 1 {
+		t.Fatalf("venues = %+v", venues)
+	}
+	quoted, _ := new(big.Int).SetString(venues[0].TokenAmountBaseUnits, 10)
+	owed, _ := new(big.Int).SetString(row.QuotedAmount, 10)
+	if diff := new(big.Int).Sub(quoted, owed); diff.CmpAbs(big.NewInt(5)) > 0 {
+		t.Fatalf("owed %s, quoted %s: the order must owe what the quote showed", owed, quoted)
+	}
+}
+
+// She accepted a quote at one fee; if the route has since got dearer by more
+// than the jitter tolerance, the order is refused rather than opened at a
+// rate she never saw. The route now needs B′ = 110.
+func TestCreateBuy_RefusesAConvertedFeeThatRosePastTheQuote(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	r.lifi.route.ToAmountUSD = 99.0
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	req.QuotedMarkupBps = 50
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrConversionPriceMoved) {
+		t.Fatalf("err = %v, want ErrConversionPriceMoved (quoted 50, now 110)", err)
+	}
+	if r.client.lastCreate.Token != "" {
+		t.Fatal("no Paycrest order may be opened at a price she did not accept")
+	}
+	req.QuotedMarkupBps = 100 // within 10 bps of 110
+	if _, err := r.svc.CreateBuy(context.Background(), req); err != nil {
+		t.Fatalf("a 10 bps drift is jitter, not a price move: %v", err)
+	}
+}
+
 func TestCreateBuy_RefusesAnUnknownChainID(t *testing.T) {
 	r := newOrderServiceWithFakes(t)
 	r.svc.SetConversionEnabled(true)

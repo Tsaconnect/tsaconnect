@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -437,15 +438,101 @@ func TestConvertedVenues_BuysANativeCoinByAddress(t *testing.T) {
 	}
 }
 
-func TestConvertedVenues_RefusesWhenCostPlusGasExceedsTheBudget(t *testing.T) {
+// A round trip dearer than the 50 bps floor raises this route's own budget
+// to cover it, and the fee she pays rises with it: our 0.5% never shrinks.
+// l = 100 bps, g = 11 bps, plus 10 bps headroom → B′ = 121, so the user's
+// fee is F + (B′ − B) = 100 + 71 = 171 bps and the rate 1500 × 1.0171.
+func TestConvertedVenues_RaisesTheBudgetToCoverADearerRoute(t *testing.T) {
 	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
 	r := bnbRoute(t)
-	r.ToAmountUSD, r.GasCostUSD = 99.55, 0.10 // l = 45 bps, g = 11 bps
+	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10
+	s.lifi.route = r
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress, Recipient: sponsorTestUser}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v", venues, err)
+	}
+	v := venues[0]
+	if v.MarkupBps != 121 {
+		t.Fatalf("markup = %d, want 121 (l 100 + g 11 + 10 headroom)", v.MarkupBps)
+	}
+	if v.Rate != "1525.65" || v.TokenAmountBaseUnits != "98318749" {
+		t.Fatalf("rate = %s amount = %s, want the venue repriced at a 1.71%% fee", v.Rate, v.TokenAmountBaseUnits)
+	}
+	// The treasury bridges the smaller T′: 98318749 × 10000/9900.
+	if req := s.lifi.lastRequest(); req.FromAmount != "99311867" {
+		t.Fatalf("bridge amount = %s, want 99311867", req.FromAmount)
+	}
+}
+
+// The raised fee has a ceiling per destination chain; a route that needs
+// more than that is not offered.
+func TestConvertedVenues_RefusesARouteOverItsChainsFeeCap(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	s.svc.SetConvertedFeeCaps(map[string]int{"bsc": 150}, 200)
+	r := bnbRoute(t)
+	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10 // needs a 171 bps fee
 	s.lifi.route = r
 	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
 		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
 	if len(venues) != 0 {
-		t.Fatalf("a 56 bps round trip was offered against a 50 bps budget: %+v", venues)
+		t.Fatalf("a route needing a 1.71%% fee was offered under a 1.5%% bsc cap: %+v", venues)
+	}
+}
+
+// A cap of 0 — or anything past the bound — turns raising off: a dear route
+// is refused, never priced at the 2% default.
+func TestConvertedVenues_AZeroOrUnboundedCapRaisesNothing(t *testing.T) {
+	for _, limit := range []int{0, 9_999} {
+		s := priceRig(t)
+		s.svc.SetSenderFeePercent("1")
+		s.svc.SetConvertedFeeCaps(nil, limit)
+		r := bnbRoute(t)
+		r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10
+		s.lifi.route = r
+		venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+			[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+		if len(venues) != 0 {
+			t.Fatalf("cap %d: a raised route was offered: %+v", limit, venues)
+		}
+	}
+}
+
+// A route inside B but within the headroom of it is raised too, so the
+// execution-time re-check is not run against a budget it barely fits.
+// l = 45 (99.55), g = 2 ($0.0108 on $100, rounded up) -> B′ = 45 + 2 + 10 = 57.
+func TestConvertedVenues_ARouteNearTheBudgetGetsHeadroom(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	r := bnbRoute(t)
+	r.ToAmountUSD = 99.55
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress, Recipient: sponsorTestUser}})
+	if len(venues) != 1 || venues[0].MarkupBps != 57 {
+		t.Fatalf("venues = %+v, want one at B′ = 57", venues)
+	}
+}
+
+// A cost too large for an int is never cheap: it must not read as 0 bps.
+func TestCeilBps_AHugeFiniteCostIsNeverCheap(t *testing.T) {
+	if got := ceilBps(1e301); got != math.MaxInt32 {
+		t.Fatalf("ceilBps(1e301) = %d, want MaxInt32", got)
+	}
+}
+
+func TestConvertedVenues_RefusesARouteOverTheDefaultFeeCap(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	r := bnbRoute(t)
+	r.ToAmountUSD, r.GasCostUSD = 98.0, 0.10 // l = 200, g = 11: a 271 bps fee
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if len(venues) != 0 {
+		t.Fatalf("a 2.71%% fee was offered past the 2%% default cap: %+v", venues)
 	}
 }
 

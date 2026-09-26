@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"golang.org/x/sync/singleflight"
 )
@@ -48,8 +49,8 @@ type PaycrestVenue struct {
 	// Rate is fiat per token, as quoted.
 	Rate string `json:"rate"`
 	// RawRate is the provider's own rate for this size before any sender
-	// fee, exactly as it quoted it — what Rate was priced from. Set by
-	// VenueForFee only.
+	// fee, exactly as it quoted it — what Rate was priced from. Set by Quote
+	// and VenueForFee.
 	RawRate string `json:"-"`
 	// SpreadPercent is Rate against the protocol's market reference. Positive
 	// means the user pays above mid on a buy; negative means they receive
@@ -184,6 +185,13 @@ type PaycrestQuoteService struct {
 	// PaycrestOrderService.SetRoundTripBudgetBps the same way SetSenderFeePercent
 	// pushes F, so the two services can never disagree on it.
 	roundTripBudgetBps int
+	// convertedFeeMaxByChain/convertedFeeMaxDefault cap the TOTAL fee a
+	// converted buy or swapped sell may charge once a dear route raises its
+	// budget above B. Unset (convertedFeeCapsSet false) applies
+	// defaultConvertedFeeMaxBps. See SetConvertedFeeCaps.
+	convertedFeeMaxByChain map[string]int
+	convertedFeeMaxDefault int
+	convertedFeeCapsSet    bool
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
@@ -235,6 +243,43 @@ func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
 // SetRoundTripBudgetBps sets B, pushed here by
 // PaycrestOrderService.SetRoundTripBudgetBps.
 func (s *PaycrestQuoteService) SetRoundTripBudgetBps(bps int) { s.roundTripBudgetBps = bps }
+
+// defaultConvertedFeeMaxBps caps the fee a converted buy or swapped sell may
+// charge (2%) on a service that was never given caps, so a dear route is
+// refused rather than priced without limit.
+const defaultConvertedFeeMaxBps = 200
+
+// routeBudgetHeadroomBps is added on top of a route's measured cost when its
+// budget is raised: the bridge is re-priced on a slightly different amount,
+// and again at execution, so a budget set exactly at the probe's cost would
+// refuse the route it was raised for.
+const routeBudgetHeadroomBps = 10
+
+// SetConvertedFeeCaps sets the most a converted buy or swapped sell may
+// charge in total, in bps of the order, per chain (a buy's destination, a
+// sell's source); def applies to any other chain. 0 turns raising off.
+func (s *PaycrestQuoteService) SetConvertedFeeCaps(byChain map[string]int, def int) {
+	s.convertedFeeMaxByChain = byChain
+	s.convertedFeeMaxDefault = def
+	s.convertedFeeCapsSet = true
+}
+
+// convertedFeeMaxBps is the fee cap for a chain. Anything outside
+// 0..MaxConvertedFeeBps reads as 0 — raising off — so a bad value can only
+// make it stricter.
+func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
+	if !s.convertedFeeCapsSet {
+		return defaultConvertedFeeMaxBps
+	}
+	limit, ok := s.convertedFeeMaxByChain[strings.ToLower(strings.TrimSpace(chainKey))]
+	if !ok {
+		limit = s.convertedFeeMaxDefault
+	}
+	if limit < 0 || limit > config.MaxConvertedFeeBps {
+		return 0
+	}
+	return limit
+}
 
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
 // would charge, low enough that a typo ("5" for "0.5") is refused rather than
@@ -542,6 +587,7 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 			Network:              network,
 			Token:                k.token,
 			Rate:                 rateStr,
+			RawRate:              e.Rate,
 			SpreadPercent:        (rate/mkt - 1) * 100,
 			ProviderIDs:          []string{e.ProviderID},
 			TokenAmount:          amt / rate,
@@ -961,6 +1007,30 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			skip("LiFi probe's cost is unreadable or at/above 100%%")
 			continue
 		}
+		// This route's own budget B′: at least B, raised to cover a dearer
+		// round trip (plus headroom for the re-price below and at execution).
+		// Raising it raises HER fee by the same amount — Paycrest is still
+		// sent F − B, so our share never shrinks — up to the destination
+		// chain's cap.
+		budget := s.roundTripBudgetBps
+		if need := l1 + TreasuryGasBps(probe, treasuryERC20Gas) + routeBudgetHeadroomBps; need > budget {
+			budget = need
+			feeBps := s.senderFeeBps() - s.roundTripBudgetBps + budget
+			if limit := s.convertedFeeMaxBps(asset.ChainKey); feeBps > limit {
+				skip("route needs a %dbps fee, over the %s cap of %dbps", feeBps, asset.ChainKey, limit)
+				continue
+			}
+			priced, ok := s.repricedAtFee(*src, fiatAmount, base.MarketRate, feeBps)
+			if !ok {
+				skip("settlement leg could not be repriced at a %dbps fee", feeBps)
+				continue
+			}
+			src = &priced
+			if routeAmount, ok = new(big.Int).SetString(src.TokenAmountBaseUnits, 10); !ok || routeAmount.Sign() <= 0 {
+				skip("repriced settlement amount %q could not be resolved", src.TokenAmountBaseUnits)
+				continue
+			}
+		}
 		bridge := new(big.Int).Mul(routeAmount, big.NewInt(10_000))
 		bridge.Quo(bridge, big.NewInt(int64(10_000-l1)))
 		lreq.FromAmount = bridge.String()
@@ -989,9 +1059,9 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			skip("LiFi bridge quote's own cost is unreadable")
 			continue
 		}
-		if g := TreasuryGasBps(route, treasuryERC20Gas); l+g > s.roundTripBudgetBps {
+		if g := TreasuryGasBps(route, treasuryERC20Gas); l+g > budget {
 			skip("cost %dbps + gas %dbps = %dbps exceeds the %dbps round-trip budget",
-				l, g, l+g, s.roundTripBudgetBps)
+				l, g, l+g, budget)
 			continue
 		}
 		// Offer only what execution accepts: known layout, no destination call, right chain.
@@ -1046,7 +1116,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			RequestedChainID: asset.ChainID, RequestedAddress: asset.Address, RequestedDecimals: decimals,
 			RequestedDestination: asset.Destination,
 			Rate: src.Rate, TokenAmount: src.TokenAmount, TokenAmountBaseUnits: src.TokenAmountBaseUnits,
-			MarkupBps: s.roundTripBudgetBps, CostBps: l,
+			MarkupBps: budget, CostBps: l,
 			EstimatedAmount: route.ToAmount.String(), ETASeconds: route.ETASeconds,
 		}
 		if asset.Stable {
@@ -1059,6 +1129,31 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// senderFeeBps is F, the fee every quoted rate is priced at, in bps.
+func (s *PaycrestQuoteService) senderFeeBps() int {
+	return int(math.Round(s.senderFeePercent * 100))
+}
+
+// repricedAtFee is a buy venue re-quoted at feeBps instead of F: the same
+// provider rate, the same fiat, fewer tokens.
+func (s *PaycrestQuoteService) repricedAtFee(v PaycrestVenue, fiatAmount string, marketRate float64, feeBps int) (PaycrestVenue, bool) {
+	amt, ok := parsePositiveDecimal(fiatAmount)
+	if !ok {
+		return v, false
+	}
+	rateStr, rate, err := quotedRate(models.PaycrestDirectionBuy, v.RawRate, float64(feeBps)/100)
+	if err != nil {
+		return v, false
+	}
+	v.Rate = rateStr
+	v.TokenAmount = amt / rate
+	v.TokenAmountBaseUnits = s.baseUnitsFor(v.ChainKey, v.Token, fiatAmount, rateStr)
+	if marketRate > 0 {
+		v.SpreadPercent = (rate/marketRate - 1) * 100
+	}
+	return v, v.TokenAmountBaseUnits != ""
 }
 
 // directVenueFor finds a direct (already-fillable) venue for a requested

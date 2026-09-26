@@ -2276,6 +2276,21 @@ func TestOrchestrator_ARouteWhoseGasTakesItOverTheBudgetFailsTheAttempt(t *testi
 	}
 }
 
+// An order priced on a raised budget executes against THAT budget, not the
+// global floor: the same 57 bps round trip refused above clears an order
+// whose own B′ is 121.
+func TestOrchestrator_AnOrdersOwnBudgetAdmitsItsRoute(t *testing.T) {
+	r := newConversionRig(t)
+	asNewVolatileBuy(t, r)
+	r.db.Model(r.order).Update("markup_bps", 121)
+	r.lifi.route.ToAmountUSD = 99.6
+	r.lifi.route.GasCostUSD = 0.15
+	mustAdvance(t, r)
+	if r.broadcasts() != 1 {
+		t.Fatalf("broadcasts = %d; 57 bps fits a 121 bps order budget", r.broadcasts())
+	}
+}
+
 // A short Paycrest delivery scales what she's owed, and the bridge sizes
 // from that — not from the original quote, which no longer fits R.
 func TestOrchestrator_ShortDeliveryScalesWhatSheIsOwed(t *testing.T) {

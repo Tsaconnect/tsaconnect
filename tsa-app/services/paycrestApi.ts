@@ -314,6 +314,10 @@ export interface CreateBuyInput {
    *  her Solana address. The order still carries walletAddress: that is the
    *  account's own wallet, and where a refund is reconciled against. */
   destinationAddress?: string;
+  /** A converted venue's markupBps as quoted. The server refuses the order
+   *  (409) if the route's fee has risen past it since, rather than opening
+   *  it at a rate she never saw. */
+  quotedMarkupBps?: number;
 }
 
 /** Opens an onramp. The returned order carries the provider account to pay. */
