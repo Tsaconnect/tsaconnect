@@ -4,8 +4,12 @@ import { API_BASE_URL } from '../constants/api/config';
 import { getTronAddress } from './chains/tronWallet';
 import { getBtcAddress } from './chains/btcWallet';
 import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
+import { listITIntents } from './itApi';
+import { listOrders as listPaycrestOrders } from './paycrestApi';
+import { buildITActivity, fiatSymbol, type ITActivity, type SymbolFor } from '../utils/itActivity';
+import type { StatusVisual } from '../components/ui/statusMap';
 
-export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service' | 'bill';
+export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service' | 'bill' | 'it';
 
 export interface ActivityItem {
   id: string;
@@ -16,7 +20,7 @@ export interface ActivityItem {
   amount?: string;          // formatted display amount
   amountUSD?: number;
   positive?: boolean;       // true = incoming/credit, false = outgoing/debit
-  status: string;
+  status: string;           // raw status key; display-only for items that carry statusVisual
   timestamp: string;
   txHash?: string;
   chainId?: number;         // EVM chains
@@ -24,6 +28,8 @@ export interface ActivityItem {
   iconName: string;         // Ionicons name
   iconColor: string;
   iconBg: string;
+  href?: string;            // in-app detail screen; wins over the explorer link
+  statusVisual?: StatusVisual; // pre-resolved label + tone; overrides `status` in the badge
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -326,7 +332,8 @@ async function fetchCashbackItems(page: number, limit: number): Promise<Activity
 }
 
 async function fetchOrderItems(page: number, limit: number): Promise<ActivityItem[]> {
-  const data = await get<any>(`/orders?page=${page}&limit=${limit}`);
+  // role=buyer: without it the list includes a merchant's sales as well.
+  const data = await get<any>(`/orders?page=${page}&limit=${limit}&role=buyer`);
   const orders = data?.data?.orders ?? [];
   return (Array.isArray(orders) ? orders : []).map(fromOrder);
 }
@@ -339,53 +346,153 @@ async function fetchServiceItems(page: number, limit: number): Promise<ActivityI
 }
 
 // Bills are returned newest-first and capped server-side at 50, with no
-// pagination — fetch once on the first page, like the non-EVM histories.
+// pagination — an unpaged source.
 async function fetchBillItems(): Promise<ActivityItem[]> {
   const data = await get<any>('/bills/orders');
   const orders = data?.data ?? [];
   return (Array.isArray(orders) ? orders : []).map(fromBillOrder);
 }
 
+function fromITActivity(a: ITActivity): ActivityItem {
+  return {
+    id: a.key,
+    type: 'it',
+    subtype: a.direction,
+    title: `${a.direction === 'buy' ? 'Buy' : 'Sell'} ${a.asset}`,
+    subtitle: 'Instant Transfer',
+    amount: a.amount,
+    positive: false,
+    status: a.status.label,
+    statusVisual: a.status,
+    timestamp: a.at,
+    href: a.href,
+    iconName: a.direction === 'buy' ? 'arrow-down' : 'arrow-up',
+    iconColor: '#10B981',
+    iconBg: '#10B98115',
+  };
+}
+
+// Instant Transfer spans IT intents and Paycrest orders. Neither list endpoint
+// pages (both cap at 100) — an unpaged source. Rows come from the same builder
+// as the IT screens so labels never drift apart. Cancelled intents stay in:
+// this is the record, as on the IT activity screen.
+const IT_LIST_CAP = 100;
+
+async function fetchITItems(symbolFor: SymbolFor): Promise<ActivityItem[]> {
+  const [list, orders] = await Promise.all([
+    listITIntents().catch(() => null),
+    listPaycrestOrders(IT_LIST_CAP).catch(() => null),
+  ]);
+  const intents = list?.success ? list.data?.intents ?? [] : [];
+  return buildITActivity(intents, orders ?? [], symbolFor).map(fromITActivity);
+}
+
 // ── Public API ─────────────────────────────────────────────────
 
-export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'service', 'bill'];
+export const ALL_TYPES: ActivityType[] = ['wallet', 'swap', 'tp', 'cashback', 'order', 'service', 'bill', 'it'];
 
-export async function fetchActivityItems(
-  types: ActivityType[],
-  page: number,
-  limit: number,
-): Promise<ActivityItem[]> {
+// A source either pages (fetch page N of `limit`) or returns its whole bounded
+// list in one call. Both return newest first.
+interface Source {
+  fetch: (page: number, limit: number) => Promise<ActivityItem[]>;
+  paged: boolean;
+}
+
+const WALLET_TX_TYPES = 'send,receive,approve,escrow';
+
+function sourcesFor(types: ActivityType[], symbolFor: SymbolFor): Source[] {
   const active = types.length === 0 ? ALL_TYPES : types;
-  const perSource = Math.max(limit, 20);
+  const paged = (fetch: Source['fetch']): Source => ({ fetch, paged: true });
+  const whole = (fetch: () => Promise<ActivityItem[]>): Source => ({ fetch, paged: false });
 
-  const fetchers: Promise<ActivityItem[]>[] = [];
-
+  const sources: Source[] = [];
   if (active.includes('wallet')) {
-    fetchers.push(fetchWalletItems(page, perSource, 'send,receive,approve,escrow'));
-    // Tron/BTC history is a bounded recent window (no cursor pagination), so
-    // fetch it only on the first page — re-fetching per page would duplicate.
-    if (page === 1) {
-      fetchers.push(fetchTronItems());
-      fetchers.push(fetchBtcItems());
-    }
+    sources.push(paged((p, l) => fetchWalletItems(p, l, WALLET_TX_TYPES)));
+    sources.push(whole(fetchTronItems), whole(fetchBtcItems));
   }
-  if (active.includes('swap'))   fetchers.push(fetchWalletItems(page, perSource, 'swap'));
-  if (active.includes('tp'))     fetchers.push(fetchTPItems(page, perSource));
-  if (active.includes('cashback')) fetchers.push(fetchCashbackItems(page, perSource));
-  if (active.includes('order'))  fetchers.push(fetchOrderItems(page, perSource));
-  if (active.includes('service')) fetchers.push(fetchServiceItems(page, perSource));
-  if (active.includes('bill') && page === 1) fetchers.push(fetchBillItems());
+  if (active.includes('swap')) sources.push(paged((p, l) => fetchWalletItems(p, l, 'swap')));
+  if (active.includes('tp')) sources.push(paged(fetchTPItems));
+  if (active.includes('cashback')) sources.push(paged(fetchCashbackItems));
+  if (active.includes('order')) sources.push(paged(fetchOrderItems));
+  if (active.includes('service')) sources.push(paged(fetchServiceItems));
+  if (active.includes('bill')) sources.push(whole(fetchBillItems));
+  if (active.includes('it')) sources.push(whole(() => fetchITItems(symbolFor)));
+  return sources;
+}
 
-  const results = await Promise.allSettled(fetchers);
-  const merged = results
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => (r as PromiseFulfilledResult<ActivityItem[]>).value);
+const timeOf = (item: ActivityItem) => Date.parse(item.timestamp) || 0;
 
-  // Sort by timestamp desc, then paginate
-  merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+export interface ActivityPager {
+  /** The next page, newest first. Overlapping calls are served in order. */
+  next(): Promise<ActivityItem[]>;
+  /** False once every source is exhausted and nothing is left buffered. */
+  hasMore(): boolean;
+}
 
-  const start = (page - 1) * limit;
-  return merged.slice(start, start + limit);
+/**
+ * One newest-first list over every source for `types` (empty = all).
+ *
+ * Each source keeps a buffer and its own next page; a page is built by taking
+ * the newest buffered item until it is full, refilling any source whose buffer
+ * runs dry first. Slicing a merged page by a global offset instead drops or
+ * repeats rows whenever sources interleave unevenly. A new row landing between
+ * pages shifts a paged source's offsets and would repeat a row, so emitted ids
+ * are remembered. A source that fails simply ends; the others carry on.
+ */
+export function createActivityPager(
+  types: ActivityType[],
+  pageSize: number,
+  opts: { symbolFor?: SymbolFor } = {},
+): ActivityPager {
+  const symbolFor = opts.symbolFor ?? ((code: string) => fiatSymbol(code, []));
+  const states = sourcesFor(types, symbolFor).map((source) => ({
+    source,
+    buffer: [] as ActivityItem[],
+    nextPage: 1,
+    done: false,
+  }));
+  const emitted = new Set<string>();
+
+  const refillEmpty = () =>
+    Promise.all(
+      states
+        .filter((s) => !s.done && s.buffer.length === 0)
+        .map(async (s) => {
+          const items = await s.source.fetch(s.nextPage, pageSize).catch(() => []);
+          s.nextPage += 1;
+          s.done = !s.source.paged || items.length < pageSize;
+          s.buffer.push(...[...items].sort((a, b) => timeOf(b) - timeOf(a)));
+        }),
+    );
+
+  const buildPage = async (): Promise<ActivityItem[]> => {
+    const page: ActivityItem[] = [];
+    while (page.length < pageSize) {
+      await refillEmpty();
+      let newest: (typeof states)[number] | undefined;
+      for (const s of states) {
+        if (s.buffer.length && (!newest || timeOf(s.buffer[0]) > timeOf(newest.buffer[0]))) newest = s;
+      }
+      if (!newest) break;
+      const item = newest.buffer.shift()!;
+      const key = `${item.type}-${item.id}`;
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+      page.push(item);
+    }
+    return page;
+  };
+
+  // Buffers are shared state: a second call must wait for the first.
+  let queue: Promise<unknown> = Promise.resolve();
+  return {
+    next() {
+      const page = queue.then(buildPage);
+      queue = page;
+      return page;
+    },
+    hasMore: () => states.some((s) => !s.done || s.buffer.length > 0),
+  };
 }
 
 export const TYPE_META: Record<ActivityType, { label: string; iconName: string; color: string }> = {
@@ -396,4 +503,5 @@ export const TYPE_META: Record<ActivityType, { label: string; iconName: string; 
   order:    { label: 'Orders',   iconName: 'bag-handle-outline',  color: '#3B82F6' },
   service:  { label: 'Services', iconName: 'call-outline',        color: '#0EA5E9' },
   bill:     { label: 'Bills',    iconName: 'flash-outline',       color: '#F59E0B' },
+  it:       { label: 'Instant Transfer', iconName: 'business-outline', color: '#10B981' },
 };
