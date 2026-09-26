@@ -70,7 +70,7 @@ jest.mock('@/hooks/useWalletHoldings', () => {
   ];
   // One stable object per set of holdings, as the real hook returns state.
   const state = { DEFAULT_HOLDINGS, value: { holdings: DEFAULT_HOLDINGS, loading: false } };
-  return { __esModule: true, __state: state, useWalletHoldings: () => state.value };
+  return { __esModule: true, __state: state, useWalletHoldings: () => state.value, prefetchWalletHoldings: async () => {} };
 });
 
 jest.mock('@/services/lifi', () => {

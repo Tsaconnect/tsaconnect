@@ -40,6 +40,7 @@ import {
 } from '../../services/wallet';
 import { registerWalletAddress } from '../../services/walletApi';
 import { useNetwork } from '../../hooks/useNetwork';
+import { invalidateWalletHoldings } from '@/hooks/useWalletHoldings';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -305,6 +306,8 @@ const WalletManage = () => {
         style: 'destructive',
         onPress: async () => {
           await removeWallet(wallet.address);
+          // Its balances were kept on the device for the coin picker.
+          invalidateWalletHoldings();
           // removeWallet promotes the next wallet when any remain, so a null
           // here means there genuinely is none left. Distinguish that from the
           // deliberate unlink: coercing null to '' would silently detach an

@@ -110,7 +110,7 @@ jest.mock('@/hooks/useSwappedSell', () => {
 });
 jest.mock('@/hooks/useWalletHoldings', () => {
   const state = { value: { holdings: [] as any[], loading: false } };
-  return { __esModule: true, __state: state, useWalletHoldings: () => state.value };
+  return { __esModule: true, __state: state, useWalletHoldings: () => state.value, prefetchWalletHoldings: async () => {} };
 });
 
 jest.mock('@/services/ngBanks', () => ({

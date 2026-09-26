@@ -13,6 +13,10 @@
 //
 // With `holdingsOnly` the same sections carry only what the wallet holds, and
 // search is off — the sell flow picks from her balances, not the catalogue.
+//
+// Opening fast: the majors and the resolved On TSA coins are kept on the device
+// and shown at once on the next launch, and the reads start when the screen
+// mounts the picker, not when the sheet opens.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -24,30 +28,55 @@ import {
   onlyMajorTokens, type Asset, type AssetSection, type PickerSide,
 } from '@/services/assetCatalog';
 import { useSpotListings } from '@/hooks/useSpotListings';
-import { useWalletHoldings } from '@/hooks/useWalletHoldings';
+import { prefetchWalletHoldings, useWalletHoldings } from '@/hooks/useWalletHoldings';
+import { persistedCache } from '@/services/persistedCache';
 import { resolveLiFiChainId } from '@/utils/spotChains';
 import type { SpotListing } from '@/services/spotApi';
 
-// Majors change only when LiFi's list does; one read per app session is plenty.
-let majorsCache: Promise<LiFiToken[]> | null = null;
+// The backend refreshes LiFi's list (and the prices on it) daily; the device
+// copy is re-read after half that, so a shown price is never much older.
+const STORED_TTL_MS = 12 * 60 * 60 * 1000;
+const isTokenList = (v: unknown): v is LiFiToken[] =>
+  Array.isArray(v) && v.every(t => typeof t?.address === 'string' && typeof t?.symbol === 'string');
+const storedMajors = persistedCache('asset_picker_majors_v1', STORED_TTL_MS, isTokenList);
+const storedListed = persistedCache('asset_picker_listed_v1', STORED_TTL_MS, isTokenList);
+
 const MAJORS_PAGE = 500;
+async function fetchMajorTokens(): Promise<LiFiToken[]> {
+  const tokens: LiFiToken[] = [];
+  // Page to the end rather than trust one page to hold them all (80 today).
+  for (let offset = 0, total = Infinity; offset < total && offset < MAJORS_PAGE * 5; offset += MAJORS_PAGE) {
+    const page = await getLiFiAllChainTokens({ coinKeys: [...MAJOR_COIN_KEYS], limit: MAJORS_PAGE, offset });
+    tokens.push(...page.tokens);
+    total = page.total;
+    if (page.tokens.length === 0) break;
+  }
+  // Enforced here too: an API that ignored coinKeys must not fill the section.
+  const majors = onlyMajorTokens(tokens);
+  storedMajors.write(majors);
+  return majors;
+}
+
+// One read per app session, or none while the device copy is recent. A stale
+// copy is still shown, and the next open gets the refreshed list.
+let majorsCache: Promise<LiFiToken[]> | null = null;
 function loadMajorTokens(): Promise<LiFiToken[]> {
   if (!majorsCache) {
     majorsCache = (async () => {
-      const tokens: LiFiToken[] = [];
-      // Page to the end rather than trust one page to hold them all (80 today).
-      for (let offset = 0, total = Infinity; offset < total && offset < MAJORS_PAGE * 5; offset += MAJORS_PAGE) {
-        const page = await getLiFiAllChainTokens({ coinKeys: [...MAJOR_COIN_KEYS], limit: MAJORS_PAGE, offset });
-        tokens.push(...page.tokens);
-        total = page.total;
-        if (page.tokens.length === 0) break;
+      const hit = await storedMajors.read();
+      if (!hit) return fetchMajorTokens();
+      if (!hit.fresh) {
+        fetchMajorTokens().then(fresh => { majorsCache = Promise.resolve(fresh); }).catch(() => {});
       }
-      // Enforced here too: an API that ignored coinKeys must not fill the section.
-      return onlyMajorTokens(tokens);
+      return onlyMajorTokens(hit.value);
     })().catch(err => { majorsCache = null; throw err; });
   }
   return majorsCache;
 }
+
+// The last resolved On TSA coins, shown until the listings are known.
+let lastListed: Promise<LiFiToken[]> | null = null;
+const loadLastListed = () => (lastListed ??= storedListed.read().then(hit => hit?.value ?? []));
 
 const listingTokenCache = new Map<string, Promise<LiFiToken | null>>();
 /** The LiFi token for a Spot listing's base leg: exact symbol on its chain, verified first. */
@@ -102,7 +131,7 @@ interface Options {
 }
 
 export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = false }: Options) {
-  const { listings } = useSpotListings();
+  const { listings, loading: listingsLoading, error: listingsError } = useSpotListings();
   const { holdings, loading: holdingsLoading } = useWalletHoldings(visible);
 
   const [majorTokens, setMajorTokens] = useState<LiFiToken[]>([]);
@@ -110,10 +139,13 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Runs on mount, while the sheet is still closed, and again on open, which
+  // is instant once loaded and a retry if the first read failed.
   useEffect(() => {
-    if (!visible) return;
     let cancelled = false;
     setError(null);
+    // Harmless once coins are shown: only an empty list turns it into a spinner.
+    setLoading(true);
     loadMajorTokens()
       .then(t => { if (!cancelled) setMajorTokens(t); })
       .catch(() => { if (!cancelled) setError('Could not load coins. Check your connection and try again.'); })
@@ -121,19 +153,29 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     return () => { cancelled = true; };
   }, [visible]);
 
+  useEffect(() => { prefetchWalletHoldings().catch(() => {}); }, []);
+
   // Keyed on what the listings say, not the array's identity, so a refetch
   // that returns the same listings does not re-resolve them.
   const enabledListings = listings.filter(l => l.enabled);
   const listingsKey = enabledListings.map(l => `${l.id}:${l.chain}:${l.baseSymbol}`).join('|');
+  // No listings yet because they are loading or failed is not "nothing is
+  // listed": the stored coins stand until the listings are actually known.
+  const listingsUnknown = listings.length === 0 && (!!listingsLoading || !!listingsError);
   useEffect(() => {
-    if (!visible) return;
     let cancelled = false;
-    Promise.all(enabledListings.map(loadListingToken)).then(tokens => {
-      if (!cancelled) setListedTokens(tokens.filter((t): t is LiFiToken => t !== null));
-    });
+    const resolved = listingsUnknown
+      ? loadLastListed()
+      : Promise.all(enabledListings.map(loadListingToken)).then(tokens => {
+        const listed = tokens.filter((t): t is LiFiToken => t !== null);
+        lastListed = Promise.resolve(listed);
+        storedListed.write(listed);
+        return listed;
+      });
+    resolved.then(listed => { if (!cancelled) setListedTokens(listed); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- listingsKey stands for enabledListings' content.
-  }, [visible, listingsKey]);
+  }, [listingsKey, listingsUnknown]);
 
   // Search, debounced, and only the latest answer may land.
   const [searchAssets, setSearchAssets] = useState<Asset[] | null>(null);
@@ -221,5 +263,6 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
 /** Test seam: forget module-level caches. */
 export function resetAssetCatalogCache() {
   majorsCache = null;
+  lastListed = null;
   listingTokenCache.clear();
 }
