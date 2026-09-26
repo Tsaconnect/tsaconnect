@@ -62,7 +62,9 @@ func TestPayCheckout_PublicStatusKeySetAndReturnURL(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	pendingKeys := []string{"id", "merchantName", "status", "amount", "customerTotal", "currency", "expiresAt", "appUrl"}
+	// An API payment's description is the merchant's own (a PNR here) and never
+	// reaches the public page.
+	pendingKeys := []string{"id", "merchantName", "mode", "source", "status", "amount", "customerTotal", "currency", "expiresAt", "appUrl"}
 	if len(resp.Data) != len(pendingKeys) {
 		t.Fatalf("pending key set = %v", resp.Data)
 	}
@@ -85,7 +87,11 @@ func TestPayCheckout_PublicStatusKeySetAndReturnURL(t *testing.T) {
 	if _, ok := resp.Data["returnUrl"]; !ok {
 		t.Fatalf("succeeded payment missing returnUrl: %v", resp.Data)
 	}
-	if len(resp.Data) != len(pendingKeys)+1 {
+	// When it was paid, for the receipt.
+	if resp.Data["succeededAt"] != payHandlerNow.Format(time.RFC3339) {
+		t.Fatalf("succeeded payment succeededAt = %v", resp.Data["succeededAt"])
+	}
+	if len(resp.Data) != len(pendingKeys)+2 {
 		t.Fatalf("succeeded key set = %v", resp.Data)
 	}
 

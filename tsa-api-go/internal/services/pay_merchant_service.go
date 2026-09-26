@@ -212,23 +212,9 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 		return nil, err
 	}
 
-	// The submit handler validates and trims the website, but CreateFromRequest
-	// is also the resume path for requests approved before that validation
-	// existed (or edited directly), so it trims defensively too — url.Parse
-	// errors (returns a nil *url.URL) on a whitespace-padded string, and a
-	// malformed Website must return an error, never a nil-pointer dereference
-	// on u.Hostname().
-	u, err := url.Parse(strings.TrimSpace(req.Website))
+	domain, err := payRequestDomain(req.Website)
 	if err != nil {
-		return nil, fmt.Errorf("pay merchant: invalid website %q: %w", req.Website, err)
-	}
-	domain := strings.ToLower(u.Hostname())
-	// The domain becomes the merchant's initial return-domain list, which is
-	// split on commas: a hostname like "a.com,evil.com" (which url.Parse
-	// accepts) would smuggle a second domain past the super-admin-only
-	// return-domain edit, so a malformed one is refused here too.
-	if !ValidPayDomain(domain) {
-		return nil, fmt.Errorf("%w: website %q is not a valid domain", ErrPayMerchantInvalid, req.Website)
+		return nil, err
 	}
 
 	m := &models.PayMerchant{
@@ -266,6 +252,37 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 	}
 
 	return m, nil
+}
+
+// payRequestDomain is the hostname of an application's website, which becomes
+// the merchant's website domain and first return domain. A blank website (a
+// business with no site, paid through links) is no domain — and no return
+// domain, so no return URL is accepted until the owner adds one.
+//
+// The submit handler validates and trims the website, but CreateFromRequest
+// is also the resume path for requests approved before that validation
+// existed (or edited directly), so it trims defensively too — url.Parse
+// errors (returns a nil *url.URL) on a whitespace-padded string, and a
+// malformed Website must return an error, never a nil-pointer dereference
+// on u.Hostname().
+func payRequestDomain(website string) (string, error) {
+	raw := strings.TrimSpace(website)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("pay merchant: invalid website %q: %w", website, err)
+	}
+	domain := strings.ToLower(u.Hostname())
+	// The domain becomes the merchant's initial return-domain list, which is
+	// split on commas: a hostname like "a.com,evil.com" (which url.Parse
+	// accepts) would smuggle a second domain past the super-admin-only
+	// return-domain edit, so a malformed one is refused here too.
+	if !ValidPayDomain(domain) {
+		return "", fmt.Errorf("%w: website %q is not a valid domain", ErrPayMerchantInvalid, website)
+	}
+	return domain, nil
 }
 
 // Get returns one merchant by id, or ErrPayMerchantNotFound.

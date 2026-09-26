@@ -67,6 +67,7 @@ type ownerRig struct {
 	owner    *models.User
 	m        *models.PayMerchant
 	payments *services.PayPaymentService
+	h        *PayHandler
 	events   func() []events.Event
 }
 
@@ -131,7 +132,11 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.GET("/api/pay/merchant/banks", h.OwnerBanks)
 	r.GET("/api/pay/merchant/banks/resolve", h.OwnerResolveBank)
 	r.GET("/api/pay/merchant/settlement-options", h.OwnerSettlementOptions)
-	return &ownerRig{r: r, db: db, banks: banks, mail: mail, owner: owner, m: m, payments: payments, events: seen}
+	r.POST("/api/pay/merchant/links", h.OwnerCreateLink)
+	r.GET("/api/pay/merchant/links", h.OwnerLinks)
+	r.POST("/api/pay/merchant/links/:id/cancel", h.OwnerCancelLink)
+	r.GET("/api/pay/public/:id", h.Public)
+	return &ownerRig{r: r, db: db, banks: banks, mail: mail, owner: owner, m: m, payments: payments, h: h, events: seen}
 }
 
 type ownerResponse struct {
@@ -662,8 +667,17 @@ func TestPayOwner_ViewSaysWhetherLivePaymentsAreOn(t *testing.T) {
 		t.Fatalf("before the switch: %s", res.raw)
 	}
 	o.db.Model(&models.PayMerchant{}).Where("id = ?", o.m.ID).Update("live_enabled", true)
-	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveEnabled":true`) {
-		t.Fatalf("after the switch: %s", res.raw)
+	// Switched on, but TSA Pay live is off globally: live payments don't work yet.
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveEnabled":true`) || !strings.Contains(res.raw, `"liveAllowed":false`) {
+		t.Fatalf("after the switch, global off: %s", res.raw)
+	}
+	o.h.liveEnabled = true
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveEnabled":true`) || !strings.Contains(res.raw, `"liveAllowed":true`) {
+		t.Fatalf("both on: %s", res.raw)
+	}
+	o.db.Model(&models.PayMerchant{}).Where("id = ?", o.m.ID).Update("live_enabled", false)
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveAllowed":false`) {
+		t.Fatalf("global on, merchant off: %s", res.raw)
 	}
 }
 

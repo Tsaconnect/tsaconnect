@@ -39,12 +39,16 @@ func (h *PayHandler) WithEvents(bus *events.Bus) *PayHandler {
 // four digits; the full number is no use on a screen), whether each API key
 // exists (by its public prefix — never a hash or a secret), where webhooks go and
 // customers may return to, and the version a change from this screen is made
-// against.
+// against. LiveEnabled is the merchant's own switch, which a super admin sets;
+// LiveAllowed is whether live payments actually work right now — that switch
+// AND TSA Pay live being on globally — and is what a client picks the mode of
+// a new payment link by.
 type payOwnerMerchantView struct {
 	ID             uuid.UUID `json:"id"`
 	BusinessName   string    `json:"businessName"`
 	Status         string    `json:"status"`
 	LiveEnabled    bool      `json:"liveEnabled"`
+	LiveAllowed    bool      `json:"liveAllowed"`
 	Version        int       `json:"version"`
 	SettlementMode string    `json:"settlementMode"`
 	BankCode       string    `json:"bankCode,omitempty"`
@@ -64,8 +68,9 @@ type payOwnerMerchantView struct {
 	ReturnDomains  []string  `json:"returnDomains"`
 }
 
-func payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
-	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled, Version: m.Version, SettlementMode: m.SettlementMode,
+func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
+	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled,
+		LiveAllowed: m.LiveAllowed(h.liveEnabled), Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
 		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList()}
 	if v.HasLiveKey {
@@ -100,7 +105,7 @@ func (h *PayHandler) OwnerMerchant(c *gin.Context) {
 	if !ok {
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Merchant", payOwnerView(m))
+	utils.SuccessResponse(c, http.StatusOK, "Merchant", h.payOwnerView(m))
 }
 
 // payOwnerMerchant is the signed-in user and the merchant they own. Every owner
@@ -144,7 +149,7 @@ func (h *PayHandler) OwnerUpdateSettlement(c *gin.Context) {
 		payOwnerPending(c, res.Pending)
 		return
 	}
-	view := payOwnerView(res.Merchant)
+	view := h.payOwnerView(res.Merchant)
 	utils.SuccessResponse(c, http.StatusOK, "Settlement unchanged", payOwnerSettlementAnswer{Merchant: &view})
 }
 
@@ -187,7 +192,7 @@ func (h *PayHandler) OwnerConfirmAction(c *gin.Context) {
 	out := payOwnerActionAnswer{Mode: res.Mode, Key: res.Key, SecretAction: res.SecretAction,
 		WebhookSecretLive: res.WebhookSecretLive, WebhookSecretTest: res.WebhookSecretTest}
 	if res.Merchant != nil {
-		v := payOwnerView(res.Merchant)
+		v := h.payOwnerView(res.Merchant)
 		out.Merchant = &v
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Change confirmed", out)
@@ -270,9 +275,25 @@ func payOwnerMode(c *gin.Context) (string, bool) {
 	return mode, true
 }
 
-// GET /api/pay/merchant/payments?mode&status&q&page&limit — the owner's
-// payments in one mode, newest first.
+// GET /api/pay/merchant/payments?mode&status&source&q&page&limit — the owner's
+// payments in one mode, newest first: all of them, or only those their server
+// made (source=api) or they sent as links (source=link). status=cancelled is
+// the ones they called off; status=expired only those that ran out of time.
 func (h *PayHandler) OwnerPayments(c *gin.Context) {
+	source := strings.TrimSpace(c.Query("source"))
+	switch source {
+	case "", models.PaySourceAPI, models.PaySourceLink:
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "source must be api or link")
+		return
+	}
+	h.ownerPaymentList(c, source)
+}
+
+// ownerPaymentList is the body of every owner payments listing: the owner's own
+// merchant in the mode asked, narrowed to source ("" is every source), one page
+// of at most 50.
+func (h *PayHandler) ownerPaymentList(c *gin.Context, source string) {
 	_, m, ok := h.payOwnerMerchant(c)
 	if !ok {
 		return
@@ -289,7 +310,7 @@ func (h *PayHandler) OwnerPayments(c *gin.Context) {
 	}
 	limit = min(limit, 50)
 	rows, total, err := h.payments.List(c.Request.Context(), services.PayListFilter{MerchantID: &m.ID, Mode: mode,
-		Status: strings.TrimSpace(c.Query("status")), Query: c.Query("q"), Page: page, Limit: limit})
+		Status: strings.TrimSpace(c.Query("status")), CancelledApart: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
 	if err != nil {
 		payOwnerFail(c, err)
 		return
@@ -301,28 +322,39 @@ func (h *PayHandler) OwnerPayments(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{"items": items, "total": total, "page": page, "limit": limit})
 }
 
-// GET /api/pay/merchant/payments/:id?mode — one payment and its webhook attempts.
-func (h *PayHandler) OwnerPayment(c *gin.Context) {
+// payOwnerPayment is the owner's merchant, the mode asked, and the payment :id
+// names in it. Another merchant's payment, or one in the other mode, is not
+// found. false means the response has been written.
+func (h *PayHandler) payOwnerPayment(c *gin.Context) (*models.PayMerchant, string, *models.PayPayment, bool) {
 	_, m, ok := h.payOwnerMerchant(c)
 	if !ok {
-		return
+		return nil, "", nil, false
 	}
 	mode, ok := payOwnerMode(c)
 	if !ok {
-		return
+		return nil, "", nil, false
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Payment not found")
-		return
+		return nil, "", nil, false
 	}
 	p, err := h.payments.GetForMerchant(c.Request.Context(), m.ID, mode, id)
 	if err != nil {
 		if errors.Is(err, services.ErrPayPaymentNotFound) {
 			utils.ErrorResponse(c, http.StatusNotFound, "Payment not found")
-			return
+			return nil, "", nil, false
 		}
 		payOwnerFail(c, err)
+		return nil, "", nil, false
+	}
+	return m, mode, p, true
+}
+
+// GET /api/pay/merchant/payments/:id?mode — one payment and its webhook attempts.
+func (h *PayHandler) OwnerPayment(c *gin.Context) {
+	_, _, p, ok := h.payOwnerPayment(c)
+	if !ok {
 		return
 	}
 	deliveries, err := h.payments.Deliveries(c.Request.Context(), p.ID)

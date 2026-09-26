@@ -217,6 +217,9 @@ func TestPayRoutes_OwnerSettlementIsAuthedAndTightlyLimited(t *testing.T) {
 		{http.MethodGet, "/api/pay/merchant/banks"},
 		{http.MethodGet, "/api/pay/merchant/banks/resolve"},
 		{http.MethodGet, "/api/pay/merchant/settlement-options"},
+		{http.MethodPost, "/api/pay/merchant/links"},
+		{http.MethodGet, "/api/pay/merchant/links"},
+		{http.MethodPost, "/api/pay/merchant/links/" + uuid.NewString() + "/cancel"},
 	} {
 		if w := payRoutesDo(r, rt.method, rt.path, "", map[string]any{}); w.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s without a session: %d", rt.method, rt.path, w.Code)
@@ -230,6 +233,56 @@ func TestPayRoutes_OwnerSettlementIsAuthedAndTightlyLimited(t *testing.T) {
 	}
 	if codes[5] != http.StatusTooManyRequests {
 		t.Fatalf("codes %v: the sixth change within 15 minutes must be refused", codes)
+	}
+}
+
+// A double-tapped "Request payment" makes one link: the create route replays a
+// repeated Idempotency-Key. It also has its own per-user limit.
+func TestPayRoutes_OwnerLinkCreateIsIdempotentAndLimited(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	if err := db.Exec(`CREATE TABLE request_idempotencies (key TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+		request_hash TEXT NOT NULL, response_status INTEGER NOT NULL, response_body TEXT, response_headers TEXT,
+		created_at DATETIME)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	u := payRoutesUser(t, db, models.RoleUser)
+	if err := db.Create(&models.PayMerchant{MerchantRequestID: uuid.New(), UserID: u.ID, BusinessName: "Kemi Cakes",
+		Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0123456789",
+		AccountName: "KEMI CAKES", CustomerFeeSharePercent: 100, MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000,
+		WebhookSecretVersion: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	send := func(key string) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		json.NewEncoder(&buf).Encode(map[string]any{"amount": 2_500_000, "description": "Wedding cake deposit"})
+		req := httptest.NewRequest(http.MethodPost, "/api/pay/merchant/links?mode=test", &buf)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	first, again := send("tap-1"), send("tap-1")
+	if first.Code != http.StatusCreated || again.Code != http.StatusCreated || again.Header().Get("Idempotent-Replayed") != "true" ||
+		first.Body.String() != again.Body.String() {
+		t.Fatalf("first %d, again %d %q", first.Code, again.Code, again.Header().Get("Idempotent-Replayed"))
+	}
+	var links int64
+	db.Model(&models.PayPayment{}).Where("source = ?", models.PaySourceLink).Count(&links)
+	if links != 1 {
+		t.Fatalf("a replayed key made %d links", links)
+	}
+	for i := 2; i <= 30; i++ {
+		if w := send(""); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("link %d in a minute refused", i)
+		}
+	}
+	if w := send(""); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("the 31st link in a minute: %d", w.Code)
 	}
 }
 

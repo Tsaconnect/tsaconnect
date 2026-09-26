@@ -15,17 +15,23 @@ import (
 
 // PayPaymentView is the merchant-facing read shape of a payment: amounts in
 // integer kobo, plus the app/checkout URLs a merchant's page redirects to.
+// Source says whether the merchant's server made it or the owner sent it as a
+// link; Cancelled tells a payment its merchant called off from one that ran
+// out of time (both are expired).
 type PayPaymentView struct {
 	ID            uuid.UUID  `json:"id"`
 	Reference     string     `json:"reference"`
 	Mode          string     `json:"mode"`
 	Status        string     `json:"status"`
+	Cancelled     bool       `json:"cancelled,omitempty"`
+	Source        string     `json:"source"`
 	Amount        int64      `json:"amount"`
 	CustomerTotal int64      `json:"customerTotal"`
 	MerchantNet   int64      `json:"merchantNet"`
 	Fee           int64      `json:"fee"`
 	Currency      string     `json:"currency"`
 	Description   string     `json:"description"`
+	CustomerName  string     `json:"customerName,omitempty"`
 	ReturnURL     string     `json:"returnUrl,omitempty"`
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	SettlementRef string     `json:"settlementRef,omitempty"`
@@ -49,6 +55,7 @@ type PayCheckoutView struct {
 	MerchantNet        int64     `json:"merchantNet"`
 	Currency           string    `json:"currency"`
 	Description        string    `json:"description"`
+	CustomerName       string    `json:"customerName,omitempty"`
 	ExpiresAt          time.Time `json:"expiresAt"`
 	SettlementMode     string    `json:"settlementMode"`
 	SettleTokenSymbol  string    `json:"settleTokenSymbol,omitempty"`
@@ -76,17 +83,32 @@ type PayCheckoutView struct {
 // PayPublicView is the unauthenticated status page a customer's browser (or
 // the merchant's own site, polling) can read without a session: no
 // settlement detail, and the return URL only once the payment has actually
-// succeeded.
+// succeeded. A payment link's description and customer name are shown — the
+// owner wrote them for the payer, who must see what they are being asked to pay
+// for. An API payment's are not: a merchant's server writes its own booking
+// codes and order details there, never meant for whoever holds the id.
 type PayPublicView struct {
-	ID            uuid.UUID `json:"id"`
-	MerchantName  string    `json:"merchantName"`
-	Status        string    `json:"status"`
-	Amount        int64     `json:"amount"`
-	CustomerTotal int64     `json:"customerTotal"`
-	Currency      string    `json:"currency"`
-	ExpiresAt     time.Time `json:"expiresAt"`
-	ReturnURL     string    `json:"returnUrl,omitempty"` // only once succeeded
-	AppURL        string    `json:"appUrl"`
+	ID            uuid.UUID  `json:"id"`
+	MerchantName  string     `json:"merchantName"`
+	Mode          string     `json:"mode"`
+	Source        string     `json:"source"`
+	Status        string     `json:"status"`
+	Cancelled     bool       `json:"cancelled,omitempty"`
+	Amount        int64      `json:"amount"`
+	CustomerTotal int64      `json:"customerTotal"`
+	Currency      string     `json:"currency"`
+	Description   string     `json:"description,omitempty"`  // links only
+	CustomerName  string     `json:"customerName,omitempty"` // links only
+	ExpiresAt     time.Time  `json:"expiresAt"`
+	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
+	ReturnURL     string     `json:"returnUrl,omitempty"` // only once succeeded
+	AppURL        string     `json:"appUrl"`
+}
+
+// payCancelled reports whether p ended because its merchant called it off,
+// rather than running out of time: both leave it expired.
+func payCancelled(p *models.PayPayment) bool {
+	return p.Status == models.PayStatusExpired && p.FailureReason == PayReasonMerchantCancelled
 }
 
 // View builds the merchant-facing read shape for p.
@@ -96,12 +118,15 @@ func (s *PayPaymentService) View(p *models.PayPayment) PayPaymentView {
 		Reference:     p.Reference,
 		Mode:          p.Mode,
 		Status:        p.Status,
+		Cancelled:     payCancelled(p),
+		Source:        p.Source,
 		Amount:        p.AmountKobo,
 		CustomerTotal: p.CustomerTotalKobo,
 		MerchantNet:   p.MerchantNetKobo,
 		Fee:           p.CustomerTotalKobo - p.MerchantNetKobo,
 		Currency:      p.Currency,
 		Description:   p.Description,
+		CustomerName:  p.CustomerName,
 		ReturnURL:     p.ReturnURL,
 		ExpiresAt:     p.ExpiresAt,
 		SettlementRef: p.SettlementRef,
@@ -147,6 +172,7 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		MerchantNet:        p.MerchantNetKobo,
 		Currency:           p.Currency,
 		Description:        p.Description,
+		CustomerName:       p.CustomerName,
 		ExpiresAt:          p.ExpiresAt,
 		SettlementMode:     p.SettlementMode,
 		SettleTokenSymbol:  p.SettleTokenSymbol,
@@ -226,12 +252,19 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID) (*PayP
 	v := &PayPublicView{
 		ID:            p.ID,
 		MerchantName:  m.BusinessName,
+		Mode:          p.Mode,
+		Source:        p.Source,
 		Status:        p.Status,
+		Cancelled:     payCancelled(p),
 		Amount:        p.AmountKobo,
 		CustomerTotal: p.CustomerTotalKobo,
 		Currency:      p.Currency,
 		ExpiresAt:     p.ExpiresAt,
+		SucceededAt:   p.SucceededAt,
 		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
+	}
+	if p.Source == models.PaySourceLink {
+		v.Description, v.CustomerName = p.Description, p.CustomerName
 	}
 	if p.Status == models.PayStatusSucceeded {
 		v.ReturnURL = p.ReturnURL

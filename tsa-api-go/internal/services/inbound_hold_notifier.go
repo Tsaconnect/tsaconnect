@@ -137,7 +137,7 @@ func (n *InboundHoldNotifier) NotifyHold(_ context.Context, credit *models.Inbou
 
 	n.enqueue(alertJob{
 		kind:    "held credit",
-		ref:     fmt.Sprintf("%s (%s %s)", credit.ID, credit.Currency, inboundAlertNairaText(credit.GrossKobo)),
+		ref:     fmt.Sprintf("%s (%s %s)", credit.ID, credit.Currency, koboAsNairaText(credit.GrossKobo)),
 		subject: subject, title: title, message: message,
 		ctaText: ctaText, ctaURL: ctaURL,
 	})
@@ -231,7 +231,7 @@ func (n *InboundHoldNotifier) sendOne(addr string, job alertJob) {
 // identity evidence lives one click away, where it is access-controlled and
 // where acting on it is possible.
 func (n *InboundHoldNotifier) compose(credit *models.InboundCredit) (subject, title, message string) {
-	amount := credit.Currency + " " + inboundAlertNairaText(credit.GrossKobo)
+	amount := credit.Currency + " " + koboAsNairaText(credit.GrossKobo)
 
 	subject = fmt.Sprintf("Unattributed payment held — %s", amount)
 	title = "Inbound payment needs an operator"
@@ -334,7 +334,7 @@ func (n *InboundHoldNotifier) composeGap(gap InboundGapAlert) (subject, title, m
 	if gap.GapKobo > 0 {
 		direction, meaning = "DOUBLE-COUNTED", "we recorded more than Flutterwave credited — one payment has most likely been ingested twice, which credits a user twice."
 	}
-	size := gap.Currency + " " + inboundAlertNairaText(abs64(gap.GapKobo))
+	size := gap.Currency + " " + koboAsNairaText(abs64(gap.GapKobo))
 
 	subject = fmt.Sprintf("Inbound reconciliation gap — %s %s", size, direction)
 	title = "Inbound ledger disagrees with the provider"
@@ -343,9 +343,9 @@ func (n *InboundHoldNotifier) composeGap(gap InboundGapAlert) (subject, title, m
 	fmt.Fprintf(&b, "%s: %s\n\n", direction, meaning)
 	fmt.Fprintf(&b, "Gap: %s\n", size)
 	fmt.Fprintf(&b, "Recorded by us: %s %s over %d rows\n",
-		gap.Currency, inboundAlertNairaText(gap.IngestedKobo), gap.IngestedRows)
+		gap.Currency, koboAsNairaText(gap.IngestedKobo), gap.IngestedRows)
 	fmt.Fprintf(&b, "Credited by provider: %s %s over %d rows\n",
-		gap.Currency, inboundAlertNairaText(gap.ProviderKobo), gap.ProviderRows)
+		gap.Currency, koboAsNairaText(gap.ProviderKobo), gap.ProviderRows)
 	fmt.Fprintf(&b, "Window: %s to %s UTC\n",
 		gap.From.UTC().Format("2006-01-02 15:04:05"), gap.To.UTC().Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "Consecutive ticks seeing this: %d\n\n", gap.Streak)
@@ -362,11 +362,11 @@ func abs64(v int64) int64 {
 	return v
 }
 
-// inboundAlertNairaText renders minor units as grouped major units, e.g.
+// koboAsNairaText renders minor units as grouped major units, e.g.
 // 200000 → "2,000.00". Integer arithmetic throughout: these are money figures
-// an operator compares against a bank statement, and float formatting is how a
-// kobo goes missing.
-func inboundAlertNairaText(kobo int64) string {
+// people compare against a bank statement or their own prices, and float
+// formatting is how a kobo goes missing.
+func koboAsNairaText(kobo int64) string {
 	sign := ""
 	if kobo < 0 {
 		sign = "-"

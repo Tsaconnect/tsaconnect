@@ -27,6 +27,12 @@ const (
 	PayEventSucceeded = "payment.succeeded"
 	PayEventFailed    = "payment.failed"
 	PayEventExpired   = "payment.expired"
+
+	// PaySourceAPI is a payment a merchant's own server created with its API
+	// key; PaySourceLink is a payment link the owner made by hand in the app or
+	// on the web, to send to a customer.
+	PaySourceAPI  = "api"
+	PaySourceLink = "link"
 )
 
 // PayMerchant is a business approved to accept payments through TSA Pay.
@@ -105,7 +111,9 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // PayPayment is one checkout a merchant created. Fee, split and settlement
 // target are snapshotted at creation: editing the merchant never changes a
 // payment already handed to a customer. At most one attempt (order or
-// intent) is linked at a time.
+// intent) is linked at a time. CustomerName is who a payment link was made
+// for, as the owner typed it, and is shown to whoever pays it; an API payment
+// never has one.
 type PayPayment struct {
 	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
@@ -114,6 +122,8 @@ type PayPayment struct {
 	AmountKobo              int64      `gorm:"not null" json:"amount"`
 	Currency                string     `gorm:"size:3;not null" json:"currency"`
 	Description             string     `gorm:"size:255" json:"description"`
+	Source                  string     `gorm:"size:8;not null;default:'api'" json:"source"`
+	CustomerName            string     `gorm:"size:100" json:"customerName,omitempty"`
 	ReturnURL               string     `gorm:"size:1024" json:"returnUrl,omitempty"`
 	FeeBps                  int        `gorm:"not null" json:"-"`
 	CustomerFeeSharePercent int        `gorm:"not null" json:"-"`

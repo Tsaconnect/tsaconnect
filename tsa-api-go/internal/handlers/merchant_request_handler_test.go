@@ -1203,8 +1203,8 @@ func approvePay(h *MerchantRequestHandler, admin *models.User, reqID string) *ht
 	return w
 }
 
-func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T) {
-	for _, site := range []string{"", "skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng",
+func TestSubmitMerchantRequest_PaymentAcceptanceWebsiteMustBeHTTPSWhenGiven(t *testing.T) {
+	for _, site := range []string{"skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng",
 		"https://skyair.ng,evil.example/", "https://skyair.ng;evil.example", "https://localhost", "https://203.0.113.5/", "https://[::1]/", "https://" + strings.Repeat("a", 250) + ".ng"} {
 		db := setupMerchantTestDB(t)
 		h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
@@ -1216,6 +1216,33 @@ func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T
 		h.SubmitMerchantRequest(c)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("website %q: status %d", site, w.Code)
+		}
+	}
+}
+
+// A business with no website takes payments through payment links, so it may
+// apply without one — and is approved with no website or return domain.
+func TestSubmitMerchantRequest_PaymentAcceptanceWebsiteIsOptional(t *testing.T) {
+	for _, site := range []any{"", "   ", nil} {
+		db := setupMerchantTestDB(t)
+		h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
+		in := validPayAcceptanceInput()
+		if site == nil {
+			delete(in, "website")
+		} else {
+			in["website"] = site
+		}
+		user := createMerchantTestUser(t, db, "user")
+		verifyMerchantTestUser(t, db, user)
+		w, c := newMerchantContext("POST", "/api/merchant-requests", in, user)
+		h.SubmitMerchantRequest(c)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("website %v: status %d %s", site, w.Code, w.Body.String())
+		}
+		var stored models.MerchantRequest
+		db.First(&stored, "user_id = ?", user.ID)
+		if stored.Website != "" {
+			t.Fatalf("website %v stored as %q", site, stored.Website)
 		}
 	}
 }

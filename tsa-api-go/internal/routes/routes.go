@@ -1302,6 +1302,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)
 			owner.GET("/payments/:id", payh.OwnerPayment)
+			// Payment links. A create resent with the same Idempotency-Key (a
+			// retry after a lost answer) replays the first link rather than
+			// making a second; it does not hold back a second request already in
+			// flight, so the web and app also disable Send while one is. Creates
+			// have their own limit; listing and cancelling are ordinary owner
+			// requests.
+			owner.POST("/links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateLink)
+			owner.GET("/links", payh.OwnerLinks)
+			owner.POST("/links/:id/cancel", payh.OwnerCancelLink)
 			owner.GET("/settlement-options", payh.OwnerSettlementOptions)
 			owner.GET("/banks", payh.OwnerBanks)
 			// A name enquiry calls the bank provider.

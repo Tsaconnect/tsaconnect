@@ -22,6 +22,7 @@ import (
 // without a real PayPaymentService.
 type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
+	CreateLink(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayLinkInput) (*models.PayPayment, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
@@ -29,6 +30,7 @@ type payPaymentAPI interface {
 	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
+	CancelLink(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)

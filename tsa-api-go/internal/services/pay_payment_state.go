@@ -106,13 +106,15 @@ func attemptOf(p *models.PayPayment) *payAttempt {
 }
 
 // payGuard is what a transition requires of the row it updates: its status, the
-// merchant and mode it belongs to (Cancel), and — when attempt is set — the
-// attempt it was decided from. It replaces free-form WHERE strings, so every
-// guard is spelled the same way and none can be forgotten.
+// merchant and mode it belongs to (Cancel), where it came from (CancelLink), and
+// — when attempt is set — the attempt it was decided from. It replaces
+// free-form WHERE strings, so every guard is spelled the same way and none can
+// be forgotten.
 type payGuard struct {
 	statuses   []string
 	merchantID *uuid.UUID
 	mode       string
+	source     string
 	attempt    *payAttempt
 }
 
@@ -129,6 +131,9 @@ func (g payGuard) scope(q *gorm.DB, id uuid.UUID) *gorm.DB {
 	}
 	if g.mode != "" {
 		q = q.Where("mode = ?", g.mode)
+	}
+	if g.source != "" {
+		q = q.Where("source = ?", g.source)
 	}
 	if g.attempt != nil {
 		q = attemptColumn(q, "paycrest_order_id", g.attempt.order)
@@ -247,14 +252,32 @@ func (s *PayPaymentService) fail(ctx context.Context, id uuid.UUID, at *payAttem
 		}, models.PayEventFailed)
 }
 
+// PayReasonMerchantCancelled is the failure_reason of a payment its merchant
+// cancelled. Views read it back to tell a cancelled payment from one that
+// simply ran out of time — both end expired.
+const PayReasonMerchantCancelled = "cancelled by the merchant"
+
 // Cancel moves a merchant's own pending payment straight to expired — the
 // merchant changed its mind before any customer started paying — and queues
 // the payment.expired webhook in the same transaction.
 func (s *PayPaymentService) Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error {
-	return s.transition(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode},
+	return s.cancel(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode})
+}
+
+// CancelLink is Cancel for the owner's own payment links only. A payment the
+// merchant's server created belongs to that integration — it may be the
+// checkout a customer is on right now — so only the server, with its API key,
+// calls it off.
+func (s *PayPaymentService) CancelLink(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error {
+	return s.cancel(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode,
+		source: models.PaySourceLink})
+}
+
+func (s *PayPaymentService) cancel(ctx context.Context, id uuid.UUID, g payGuard) error {
+	return s.transition(ctx, id, g,
 		map[string]any{
 			"status":         models.PayStatusExpired,
-			"failure_reason": "cancelled by the merchant",
+			"failure_reason": PayReasonMerchantCancelled,
 		}, models.PayEventExpired)
 }
 
