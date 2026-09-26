@@ -2,8 +2,9 @@
 //
 // The pure pieces of a TSA Pay payment link shared by the app's link screens
 // (app/merchants/pay-links/*): the message she shares, the status a link reads
-// as, the times and money it shows, and the amount she types.
-import type { PayLink } from '@/services/payMerchantApi';
+// as, the times and money it shows, the amount she types — and, for a reusable
+// link, its share message, amount rule and range.
+import type { OpenLink, OpenLinkNotTakingReason, OpenLinkRange, PayLink } from '@/services/payMerchantApi';
 import { formatKobo, koboFromNaira } from '@/utils/stableSellQuote';
 
 /** How long a link stays open; the server takes exactly these. */
@@ -11,12 +12,70 @@ export const LINK_OPEN_DAYS = [1, 3, 7] as const;
 export type LinkOpenDays = (typeof LINK_OPEN_DAYS)[number];
 
 /**
- * The same words the web app shares, so a customer reads one message whichever
- * she used. It quotes what the customer will be charged (fee included), not the
- * merchant's amount: the link must not ask for less than the checkout does.
+ * The one-time link's share message. It quotes what the customer will be
+ * charged (fee included), not the merchant's amount: the link must not ask for
+ * less than the checkout does.
  */
 export function payLinkShareMessage(businessName: string, link: Pick<PayLink, 'customerTotal' | 'description' | 'checkoutUrl'>): string {
   return `${businessName} is requesting ${formatKobo(String(link.customerTotal))} for ${link.description}. Pay here: ${link.checkoutUrl}`;
+}
+
+/** A reusable link's share: whom it pays, what for, and its address. */
+export const openLinkShareMessage = (businessName: string, link: Pick<OpenLink, 'label' | 'url'>): string =>
+  `Pay ${businessName} — ${link.label}: ${link.url}`;
+
+/**
+ * What a customer may pay through a reusable link, in words. A 0 bound is the
+ * merchant's own limit, shown as that limit when the link carries it.
+ */
+export function openLinkAmountRule(link: OpenLinkRange & Partial<Pick<OpenLink, 'merchantMinAmount' | 'merchantMaxAmount'>>): string {
+  const lo = link.minAmount || link.merchantMinAmount || 0;
+  const hi = link.maxAmount || link.merchantMaxAmount || 0;
+  const min = lo > 0 ? formatKobo(String(lo)) : '';
+  const max = hi > 0 ? formatKobo(String(hi)) : '';
+  if (min && max) return `Any amount from ${min} to ${max}`;
+  if (min) return `Any amount from ${min}`;
+  if (max) return `Any amount up to ${max}`;
+  return 'Any amount';
+}
+
+/** A reusable link's status key (StatusPill's openLink namespace): taking payments, paused by her, or closed for another reason. */
+export function openLinkStatus(link: Pick<OpenLink, 'active' | 'takingPayments' | 'notTakingReason'>): 'active' | 'paused' | 'not_taking' {
+  // An older server sends no takingPayments: her own switch is all there is to go on.
+  const taking = link.takingPayments ?? link.active;
+  if (taking) return 'active';
+  return !link.active || link.notTakingReason === 'paused' ? 'paused' : 'not_taking';
+}
+
+const NOT_TAKING_WHY: Record<OpenLinkNotTakingReason, string> = {
+  paused: "You paused it. A customer who opens it is told you aren't taking payments.",
+  suspended: 'Your merchant account is suspended. Contact support to take payments again.',
+  live_off: "Live payments aren't switched on for your business yet.",
+  no_payout: "Set where you're paid in Payment Settings before customers can pay.",
+  range_outside_limits: 'Your amount range no longer fits your limits — edit the link.',
+};
+
+/** Why a reusable link isn't taking payments, in her words; undefined while it is. */
+export function openLinkNotTakingWhy(link: Pick<OpenLink, 'active' | 'takingPayments' | 'notTakingReason'>): string | undefined {
+  const status = openLinkStatus(link);
+  if (status === 'active') return undefined;
+  if (status === 'paused') return NOT_TAKING_WHY.paused;
+  return link.notTakingReason ? NOT_TAKING_WHY[link.notTakingReason] : "Customers can't pay through it right now.";
+}
+
+/**
+ * What a payment through a reusable link was for: the link's name, or — when
+ * the customer wrote one — her note, marked as hers.
+ */
+export function openPaymentPurpose(p: Pick<PayLink, 'description' | 'linkLabel'>, fallbackLabel: string):
+  { title: string; note: boolean } {
+  const note = p.description.trim();
+  return note ? { title: note, note: true } : { title: p.linkLabel || fallbackLabel, note: false };
+}
+
+/** "You received ₦X from N payments" — what reached her through a reusable link. */
+export function openLinkReceived(link: Pick<OpenLink, 'receivedTotal' | 'paidCount'>): string {
+  return `You received ${formatKobo(String(link.receivedTotal ?? 0))} from ${link.paidCount} ${link.paidCount === 1 ? 'payment' : 'payments'}`;
 }
 
 /** What she gets is only worth showing while it can still come: open, being paid, or paid. */
@@ -65,6 +124,9 @@ export function payLinkCounts(links: PayLink[], now = new Date()): { awaiting: n
   return { awaiting, paidToday };
 }
 
+/** Said on an amount field whose text is not plain naira and kobo. */
+export const NAIRA_FORMAT_HINT = 'Enter naira with a point for kobo, like 5000 or 5000.50.';
+
 /**
  * What she typed in the amount field as integer kobo, or null when it is not a
  * plain positive amount: digits, then at most one point and two decimals. A
@@ -77,3 +139,24 @@ export function koboFromNairaInput(text: string): number | null {
   if (kobo === null || kobo <= BigInt(0) || kobo > BigInt(Number.MAX_SAFE_INTEGER)) return null;
   return Number(kobo);
 }
+
+/**
+ * A reusable link's lowest/highest fields as a range, or what is wrong with
+ * each. Blank is the merchant's own bound (0). The server still checks both
+ * against the merchant's limits.
+ */
+export function openLinkRangeFrom(min: string, max: string):
+  { range: OpenLinkRange } | { errors: Partial<Record<'min' | 'max', string>> } {
+  const bound = (text: string) => (text.trim() ? koboFromNairaInput(text) : 0);
+  const lo = bound(min);
+  const hi = bound(max);
+  const errors: Partial<Record<'min' | 'max', string>> = {};
+  if (lo === null) errors.min = NAIRA_FORMAT_HINT;
+  if (hi === null) errors.max = NAIRA_FORMAT_HINT;
+  if (lo && hi && lo > hi) errors.max = "The highest amount can't be less than the lowest.";
+  if (lo === null || hi === null || errors.max) return { errors };
+  return { range: { minAmount: lo, maxAmount: hi } };
+}
+
+/** Kobo back into an amount field's text ("150050" → "1500.50"); 0 is left blank. */
+export const nairaFieldText = (kobo: number): string => (kobo > 0 ? formatKobo(String(kobo)).replace(/[₦,]/g, '') : '');

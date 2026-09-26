@@ -1,9 +1,13 @@
 // app/merchants/pay-links/new.tsx
 //
-// Request payment: a TSA Pay merchant makes a payment link for an amount and
-// hands it to a customer — QR code, share sheet or copied link. Her link is
-// live once her business is switched live, a test link until then. The same
-// form, words and share message as the web app's Payment links page.
+// Request payment: a TSA Pay merchant makes a payment link and hands it to a
+// customer — QR code, share sheet or copied link. It starts with the choice of
+// link: a fixed amount for one customer (one-time), or one where the customer
+// enters the amount and any number of customers can pay (reusable — a shop's
+// counter QR). A made reusable link opens on its own screen, which is where its
+// QR and payments live. Her links are live once she can take live payments,
+// test links until then. The same form, words and share message as the web
+// app's Payment links page.
 //
 // Opened from the list (`?listMode=`), "See all payment links" goes back to it
 // rather than stacking a second list — unless the link was made in the other mode.
@@ -17,27 +21,42 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, ErrorState, Input, SegmentedControl, Spinner, SummaryCard, SummaryRow, Text,
+  Button, Card, ErrorState, Input, RadioGroup, SegmentedControl, Spinner, SummaryCard, SummaryRow, Text,
 } from '@/components/ui';
+import { NairaField } from '@/components/pay/NairaField';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import { makeIdempotencyKey } from '@/services/itApi';
 import {
-  createPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam, type CreatePayLinkInput, type PayLink,
+  createOpenLink, createPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam, type CreatePayLinkInput, type PayLink,
 } from '@/services/payMerchantApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
-import { koboFromNairaInput, LINK_OPEN_DAYS, type LinkOpenDays } from '@/utils/payLinks';
+import {
+  koboFromNairaInput, LINK_OPEN_DAYS, NAIRA_FORMAT_HINT, openLinkRangeFrom, payLinkShareMessage, type LinkOpenDays,
+} from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 const DAYS_LABEL: Record<LinkOpenDays, string> = { 1: '1 day', 3: '3 days', 7: '7 days' };
+
+type LinkKind = 'once' | 'open';
+const KINDS: { value: LinkKind; label: string; sublabel: string }[] = [
+  { value: 'once', label: 'Fixed amount', sublabel: 'For one customer' },
+  { value: 'open', label: 'Customer enters the amount', sublabel: 'Reusable — good for a shop QR' },
+];
 
 export default function NewPayLink() {
   const { colors, spacing } = useTheme();
   const { load, reload } = useOwnPayMerchant();
   const listMode = payLinkModeParam(useLocalSearchParams<{ listMode?: string }>().listMode);
 
+  const [kind, setKind] = useState<LinkKind>('once');
   const [amount, setAmount] = useState('');
+  const [label, setLabel] = useState('');
+  const [min, setMin] = useState('');
+  const [max, setMax] = useState('');
+  const [labelError, setLabelError] = useState<string | undefined>();
+  const [rangeErrors, setRangeErrors] = useState<Partial<Record<'min' | 'max', string>>>({});
   const [description, setDescription] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [reference, setReference] = useState('');
@@ -73,12 +92,49 @@ export default function NewPayLink() {
     return sentKey.current.key;
   };
 
+  /** Sends one create; a refusal is said on the form. */
+  const send = async (make: (key: (request: string) => string) => Promise<void>): Promise<void> => {
+    submitting.current = true;
+    setSaving(true);
+    setFormError(undefined);
+    setReferenceError(undefined);
+    setRefusedWhy(undefined);
+    try {
+      await make(keyFor);
+      sentKey.current = null;
+    } catch (e) {
+      const why = errorCode(e);
+      const message = errorMessage(e, 'Could not create the link. Please try again.');
+      if (why === OWNER_CODES.REFERENCE_TAKEN) setReferenceError(message);
+      else setFormError(message);
+      setRefusedWhy(why);
+    } finally {
+      submitting.current = false;
+      setSaving(false);
+    }
+  };
+
+  const createOpen = async () => {
+    const labelWhy = label.trim() ? undefined : 'Name it — customers see this, e.g. your shop and where it is.';
+    const range = openLinkRangeFrom(min, max);
+    setLabelError(labelWhy);
+    setRangeErrors('errors' in range ? range.errors : {});
+    if (labelWhy || 'errors' in range) return;
+    const input = { label: label.trim(), ...range.range };
+    await send(async (key) => {
+      const made = await createOpenLink(mode, input, key(JSON.stringify(['open', mode, input])));
+      // Its own screen is where its QR, share and payments live; back from it returns to where she came from.
+      router.replace(`/merchants/pay-links/open/${made.id}?mode=${made.mode}`);
+    });
+  };
+
   const create = async () => {
     if (submitting.current) return;
+    if (kind === 'open') { await createOpen(); return; }
     const kobo = koboFromNairaInput(amount);
     const amountWhy = kobo !== null ? undefined
       : !amount.trim() ? 'Enter the amount to request.'
-        : 'Enter naira with a point for kobo, like 5000 or 5000.50.';
+        : NAIRA_FORMAT_HINT;
     const descriptionWhy = description.trim() ? undefined : "Say what it's for — your customer sees it.";
     setAmountError(amountWhy);
     setDescriptionError(descriptionWhy);
@@ -90,25 +146,9 @@ export default function NewPayLink() {
       reference: reference.trim() || undefined,
       expiresInDays: days,
     };
-    submitting.current = true;
-    setSaving(true);
-    setFormError(undefined);
-    setReferenceError(undefined);
-    setRefusedWhy(undefined);
-    try {
-      const link = await createPayLink(mode, input, keyFor(JSON.stringify([mode, input])));
-      sentKey.current = null;
-      setCreated(link);
-    } catch (e) {
-      const why = errorCode(e);
-      const message = errorMessage(e, 'Could not create the link. Please try again.');
-      if (why === OWNER_CODES.REFERENCE_TAKEN) setReferenceError(message);
-      else setFormError(message);
-      setRefusedWhy(why);
-    } finally {
-      submitting.current = false;
-      setSaving(false);
-    }
+    await send(async (key) => {
+      setCreated(await createPayLink(mode, input, key(JSON.stringify(['once', mode, input]))));
+    });
   };
 
   const another = () => {
@@ -142,7 +182,7 @@ export default function NewPayLink() {
               {created.customerName ? <SummaryRow label="Customer" value={created.customerName} /> : null}
             </SummaryCard>
           </Card>
-          <PayLinkShare link={created} businessName={merchant.businessName} />
+          <PayLinkShare url={created.checkoutUrl} message={payLinkShareMessage(merchant.businessName, created)} />
           <Button title="Request another" variant="secondary" onPress={another} />
           <Button title="See all payment links" variant="ghost" onPress={() => seeAll(created)} />
         </ScrollView>
@@ -155,50 +195,67 @@ export default function NewPayLink() {
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }} keyboardShouldPersistTaps="handled">
         {mode === 'test' ? <TestLinkBanner /> : null}
 
-        {/* A plain field, not AmountInput: that one strips a comma, and "5000,50" must be refused, not read as 500,050. */}
-        <Input
-          label="Amount"
-          value={amount}
-          onChangeText={setAmount}
-          placeholder="0.00"
-          keyboardType="decimal-pad"
-          leftAdornment={<Text variant="bodyMed" weight="700" color="textSecondary">₦</Text>}
-          error={amountError}
-        />
-        <Input
-          label="What it's for"
-          value={description}
-          onChangeText={setDescription}
-          placeholder="e.g. 2 bags of rice"
-          maxLength={255}
-          helper="Your customer sees this."
-          error={descriptionError}
-        />
-        <Input
-          label="Customer name (optional)"
-          value={customerName}
-          onChangeText={setCustomerName}
-          placeholder="Who you're asking"
-          maxLength={100}
-        />
-        <Input
-          label="Your reference (optional)"
-          value={reference}
-          onChangeText={setReference}
-          placeholder="e.g. INV-104"
-          autoCapitalize="none"
-          autoCorrect={false}
-          helper="Leave blank and we'll make one"
-          error={referenceError}
-        />
-        <View style={{ gap: spacing.xs }}>
-          <Text variant="bodySm" weight="600" color="textSecondary">Link open for</Text>
-          <SegmentedControl<string>
-            segments={LINK_OPEN_DAYS.map((d) => ({ key: String(d), label: DAYS_LABEL[d] }))}
-            value={String(days)}
-            onChange={(k) => setDays(Number(k) as LinkOpenDays)}
-          />
-        </View>
+        <RadioGroup<LinkKind> options={KINDS} value={kind} onChange={(k) => { setKind(k); setFormError(undefined); }} />
+
+        {kind === 'open' ? (
+          <>
+            <Input
+              label="Name"
+              value={label}
+              onChangeText={setLabel}
+              placeholder="e.g. Mama Ngozi Store — Shop 12"
+              maxLength={80}
+              helper="Customers see this when they scan or open the link."
+              error={labelError}
+            />
+            <NairaField label="Lowest amount (optional)" value={min} onChangeText={setMin} error={rangeErrors.min} />
+            <NairaField
+              label="Highest amount (optional)"
+              value={max}
+              onChangeText={setMax}
+              error={rangeErrors.max}
+              helper="Leave both blank to take any amount within your TSA Pay limits."
+            />
+          </>
+        ) : (
+          <>
+            <NairaField label="Amount" value={amount} onChangeText={setAmount} error={amountError} />
+            <Input
+              label="What it's for"
+              value={description}
+              onChangeText={setDescription}
+              placeholder="e.g. 2 bags of rice"
+              maxLength={255}
+              helper="Your customer sees this."
+              error={descriptionError}
+            />
+            <Input
+              label="Customer name (optional)"
+              value={customerName}
+              onChangeText={setCustomerName}
+              placeholder="Who you're asking"
+              maxLength={100}
+            />
+            <Input
+              label="Your reference (optional)"
+              value={reference}
+              onChangeText={setReference}
+              placeholder="e.g. INV-104"
+              autoCapitalize="none"
+              autoCorrect={false}
+              helper="Leave blank and we'll make one"
+              error={referenceError}
+            />
+            <View style={{ gap: spacing.xs }}>
+              <Text variant="bodySm" weight="600" color="textSecondary">Link open for</Text>
+              <SegmentedControl<string>
+                segments={LINK_OPEN_DAYS.map((d) => ({ key: String(d), label: DAYS_LABEL[d] }))}
+                value={String(days)}
+                onChange={(k) => setDays(Number(k) as LinkOpenDays)}
+              />
+            </View>
+          </>
+        )}
 
         {formError ? <Text variant="bodySm" style={{ color: colors.danger }}>{formError}</Text> : null}
         {refusedWhy === OWNER_CODES.SETTLEMENT_NOT_SET ? (

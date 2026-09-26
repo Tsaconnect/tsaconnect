@@ -3,8 +3,9 @@
 // A TSA Pay merchant's own account, from the app: where they are paid
 // (GET /api/pay/merchant), changing it (PUT /api/pay/merchant/settlement),
 // confirming the change with the code emailed to them
-// (POST /api/pay/merchant/actions/:id/confirm), and the payment links she sends
-// customers (/api/pay/merchant/links). The payer's side of TSA Pay is
+// (POST /api/pay/merchant/actions/:id/confirm), the payment links she sends
+// customers — one-time (/api/pay/merchant/links) and reusable, where the
+// customer enters the amount (/api/pay/merchant/open-links). The payer's side of TSA Pay is
 // services/payApi.ts; the merchant's server API (/api/pay/v1, key-authenticated)
 // is never called from the app.
 import { createApiRequest } from '@/services/apiRequest';
@@ -61,6 +62,7 @@ export const OWNER_CODES = {
   SETTLEMENT_NOT_SET: 'settlement_not_set',
   REFERENCE_TAKEN: 'reference_taken',
   NOT_CANCELLABLE: 'not_cancellable',
+  LINK_NOT_FOUND: 'link_not_found',
 } as const;
 
 const request = createApiRequest({
@@ -105,15 +107,18 @@ export type PayLink = {
   reference: string;
   mode: PayLinkMode;
   status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
-  /** 'link' for one she made here; 'api' for one her own server made. */
-  source: 'api' | 'link';
+  /** 'link' for a one-time link she made; 'open' for a payment through a reusable link; 'api' for one her own server made. */
+  source: 'api' | 'link' | 'open';
   amount: number;
   customerTotal: number;
   merchantNet: number;
   fee: number;
   currency: 'NGN';
+  /** A one-time link's "what it's for"; for an open payment, only the customer's own note (often empty). */
   description: string;
   customerName?: string;
+  /** An open payment: the reusable link it was paid through. */
+  linkLabel?: string;
   /** She cancelled it: the server keeps it as expired, with this set. */
   cancelled?: boolean;
   expiresAt: string;
@@ -162,4 +167,76 @@ export async function getPayLink(mode: PayLinkMode, id: string): Promise<PayLink
 /** Stop a link that nobody has started paying. Refused (not_cancellable) once someone has. */
 export function cancelPayLink(mode: PayLinkMode, id: string): Promise<PayLink> {
   return request<PayLink>(`/links/${encodeURIComponent(id)}/cancel?mode=${mode}`, { method: 'POST' });
+}
+
+/**
+ * A reusable ("open") payment link: the customer enters the amount, and any
+ * number of customers can pay through it — a shop's counter QR. Money is
+ * integer kobo; a min or max of 0 is the merchant's own bound.
+ */
+export type OpenLink = {
+  id: string;
+  mode: PayLinkMode;
+  slug: string;
+  /** What the QR encodes and she shares. */
+  url: string;
+  /** What the payer sees, e.g. "Mama Ngozi Store — Shop 12". */
+  label: string;
+  minAmount: number;
+  maxAmount: number;
+  /** The merchant's own bounds: what a 0 min or max above stands for. */
+  merchantMinAmount: number;
+  merchantMaxAmount: number;
+  /** Her own switch: false is paused. */
+  active: boolean;
+  /** Whether a customer can pay through it right now — paused is only one reason it can't. */
+  takingPayments: boolean;
+  notTakingReason?: OpenLinkNotTakingReason;
+  /** What a change from the detail screen is made against: a stale screen is refused. */
+  version: number;
+  createdAt: string;
+  /** Payments that succeeded through it; their prices summed (paidTotal) and what she received (receivedTotal). */
+  paidCount: number;
+  paidTotal: number;
+  receivedTotal: number;
+};
+
+/** range_outside_limits: her business's limits moved, so no amount fits the link's range — she must edit it. */
+export type OpenLinkNotTakingReason = 'paused' | 'suspended' | 'live_off' | 'no_payout' | 'range_outside_limits';
+
+export type OpenLinkRange = { minAmount: number; maxAmount: number };
+export type CreateOpenLinkInput = OpenLinkRange & { label: string };
+export type OpenLinkChange = CreateOpenLinkInput & { active: boolean };
+export type OpenLinkPage = { items: OpenLink[]; total: number; page: number; limit: number };
+
+/** Make a reusable link; `idempotencyKey` as for createPayLink. */
+export function createOpenLink(mode: PayLinkMode, input: CreateOpenLinkInput, idempotencyKey: string): Promise<OpenLink> {
+  return request<OpenLink>(`/open-links?mode=${mode}`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+}
+
+/** Her reusable links in one mode, newest first, each with what has been paid through it. */
+export function listOpenLinks(mode: PayLinkMode, page = 1, limit = 50): Promise<OpenLinkPage> {
+  return request<OpenLinkPage>(`/open-links?mode=${mode}&page=${page}&limit=${limit}`);
+}
+
+/** One reusable link and the latest payments made through it. */
+export function getOpenLink(mode: PayLinkMode, id: string): Promise<{ openLink: OpenLink; payments: PayLink[] }> {
+  return request<{ openLink: OpenLink; payments: PayLink[] }>(`/open-links/${encodeURIComponent(id)}?mode=${mode}`);
+}
+
+/** Change its label, range, or pause/resume it. */
+export function updateOpenLink(mode: PayLinkMode, id: string, change: OpenLinkChange, expectedVersion: number): Promise<OpenLink> {
+  return request<OpenLink>(`/open-links/${encodeURIComponent(id)}?mode=${mode}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...change, expectedVersion }),
+  });
+}
+
+/** A new address and QR for the same link (same id); the old address stops working, and posters printed with it. */
+export function replaceOpenLink(mode: PayLinkMode, id: string): Promise<OpenLink> {
+  return request<OpenLink>(`/open-links/${encodeURIComponent(id)}/replace?mode=${mode}`, { method: 'POST' });
 }

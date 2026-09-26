@@ -13,7 +13,8 @@ jest.mock('@react-native-async-storage/async-storage', () =>
 
 import type { PayLink } from '@/services/payMerchantApi';
 import {
-  koboFromNairaInput, payLinkCounts, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
+  koboFromNairaInput, nairaFieldText, openLinkAmountRule, openLinkNotTakingWhy, openLinkRangeFrom, openLinkReceived,
+  openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkCounts, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
 } from '../payLinks';
 
 it('reads the amount field as whole kobo', () => {
@@ -71,4 +72,54 @@ it('counts links still waiting and links paid today', () => {
     l({ status: 'succeeded', succeededAt: new Date('2026-09-25T09:00:00').toISOString() }),
     l({ status: 'expired', cancelled: true }),
   ], now)).toEqual({ awaiting: 2, paidToday: 1 });
+});
+
+it('says what a reusable link takes, a 0 bound being the merchant\'s own', () => {
+  expect(openLinkAmountRule({ minAmount: 0, maxAmount: 0 })).toBe('Any amount');
+  expect(openLinkAmountRule({ minAmount: 100_000, maxAmount: 0 })).toBe('Any amount from ₦1,000.00');
+  expect(openLinkAmountRule({ minAmount: 0, maxAmount: 500_000 })).toBe('Any amount up to ₦5,000.00');
+  expect(openLinkAmountRule({ minAmount: 100_000, maxAmount: 500_000 })).toBe('Any amount from ₦1,000.00 to ₦5,000.00');
+  // With the merchant's bounds on the link, a 0 reads as that bound.
+  expect(openLinkAmountRule({ minAmount: 0, maxAmount: 500_000, merchantMinAmount: 10_000, merchantMaxAmount: 9_000_000 }))
+    .toBe('Any amount from ₦100.00 to ₦5,000.00');
+  expect(openLinkAmountRule({ minAmount: 0, maxAmount: 0, merchantMinAmount: 10_000, merchantMaxAmount: 9_000_000 }))
+    .toBe('Any amount from ₦100.00 to ₦90,000.00');
+});
+
+it('a reusable link is active, paused by her, or not taking payments for a reason she is told', () => {
+  expect(openLinkStatus({ active: true, takingPayments: true })).toBe('active');
+  expect(openLinkStatus({ active: false, takingPayments: false, notTakingReason: 'paused' })).toBe('paused');
+  expect(openLinkStatus({ active: true, takingPayments: false, notTakingReason: 'suspended' })).toBe('not_taking');
+  // An older server sends no takingPayments: her switch decides.
+  expect(openLinkStatus({ active: false } as never)).toBe('paused');
+  expect(openLinkNotTakingWhy({ active: true, takingPayments: true })).toBeUndefined();
+  expect(openLinkNotTakingWhy({ active: true, takingPayments: false, notTakingReason: 'no_payout' }))
+    .toBe("Set where you're paid in Payment Settings before customers can pay.");
+  expect(openLinkNotTakingWhy({ active: true, takingPayments: false, notTakingReason: 'range_outside_limits' }))
+    .toBe('Your amount range no longer fits your limits — edit the link.');
+  expect(openLinkReceived({ receivedTotal: 980_000, paidCount: 1 })).toBe('You received ₦9,800.00 from 1 payment');
+});
+
+it('reads a reusable link\'s range: blank is 0, bad text and a low above a high are refused', () => {
+  expect(openLinkRangeFrom('', '')).toEqual({ range: { minAmount: 0, maxAmount: 0 } });
+  expect(openLinkRangeFrom('1000', '5000.50')).toEqual({ range: { minAmount: 100_000, maxAmount: 500_050 } });
+  expect(openLinkRangeFrom('1,000', '')).toEqual({ errors: { min: expect.stringContaining('Enter naira') } });
+  expect(openLinkRangeFrom('5000', '1000')).toEqual({ errors: { max: "The highest amount can't be less than the lowest." } });
+});
+
+it('puts kobo back into an amount field, and a 0 bound as blank', () => {
+  expect(nairaFieldText(150_050)).toBe('1500.50');
+  expect(nairaFieldText(12_345_600)).toBe('123456.00');
+  expect(nairaFieldText(0)).toBe('');
+});
+
+it('shares a reusable link with the web app\'s words', () => {
+  expect(openLinkShareMessage('Sky Air', { label: 'Gate 3', url: 'https://x/pay/l/sky' }))
+    .toBe('Pay Sky Air — Gate 3: https://x/pay/l/sky');
+});
+
+it('says what an open payment was for: the link\'s name, or the customer\'s note when she wrote one', () => {
+  expect(openPaymentPurpose({ description: '', linkLabel: 'Gate 1' }, 'Shop')).toEqual({ title: 'Gate 1', note: false });
+  expect(openPaymentPurpose({ description: '  ' }, 'Shop')).toEqual({ title: 'Shop', note: false });
+  expect(openPaymentPurpose({ description: 'Two plates', linkLabel: 'Gate 1' }, 'Shop')).toEqual({ title: 'Two plates', note: true });
 });

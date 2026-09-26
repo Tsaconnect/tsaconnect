@@ -31,10 +31,10 @@ import {
   useToast,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
-import { getCheckout, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
+import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
 import { clearPayHold } from '@/services/payHold';
 import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
-import { rememberPendingPayment } from '@/utils/postAuthRoute';
+import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
@@ -93,10 +93,23 @@ export default function PayScreen() {
     }
   }, [id]);
 
-  // A payment the server has finished with needs no "don't pay again" hold on this phone.
+  // A payment the server has finished with needs no "don't pay again" hold on
+  // this phone, and nothing to come back to after sign-in or KYC.
   useEffect(() => {
-    if (checkout && TERMINAL_STATUSES.includes(checkout.status)) void clearPayHold(checkout.id);
+    if (checkout && TERMINAL_STATUSES.includes(checkout.status)) {
+      void clearPayHold(checkout.id);
+      void forgetPendingPayment(checkout.id);
+    }
   }, [checkout]);
+
+  // Signed out, she may be a new customer: signing up, verifying her email and
+  // passing KYC can take days. The public read says until when this payment is
+  // worth returning to, so it is remembered that long, not a flat half hour.
+  const [expiresAt, setExpiresAt] = useState<string | undefined>();
+  useEffect(() => {
+    if (!needsSignIn || typeof id !== 'string') return;
+    getPublicPayment(id).then((p) => setExpiresAt(p.expiresAt), () => {});
+  }, [needsSignIn, id]);
 
   // Load once auth has hydrated, signed in or not — a 401 is what shows the
   // sign-in prompt. Re-runs when the session changes.
@@ -131,9 +144,9 @@ export default function PayScreen() {
     fetchCheckout();
   }, [payTest.error, toast, fetchCheckout]);
 
-  const handleSignIn = async () => {
-    if (typeof id === 'string') await rememberPendingPayment(id);
-    router.replace('/login');
+  const leaveToAuth = async (to: '/login' | '/signup') => {
+    if (typeof id === 'string') await rememberPendingPayment(id, { expiresAt });
+    router.replace(to);
   };
 
   const handleReturnToStore = async () => {
@@ -186,7 +199,11 @@ export default function PayScreen() {
               <Text variant="title3" weight="700" align="center">
                 Sign in to pay
               </Text>
-              <Button title="Sign in" size="lg" onPress={handleSignIn} />
+              <Text variant="bodySm" color="textSecondary" align="center">
+                New to TSA Connect? Create an account — we&apos;ll bring you back to this payment.
+              </Text>
+              <Button title="Sign in" size="lg" onPress={() => void leaveToAuth('/login')} />
+              <Button title="Create an account" variant="secondary" size="lg" onPress={() => void leaveToAuth('/signup')} />
             </View>
           )}
 

@@ -56,8 +56,10 @@ jest.mock('@/hooks/usePayTest', () => ({
   __esModule: true,
   usePayTest: () => ({ request: jest.fn(), authorization: {}, submitting: false }),
 }));
-jest.mock('@/utils/postAuthRoute', () => ({ __esModule: true, rememberPendingPayment: jest.fn() }));
-jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), returnUrlFor: () => null }));
+jest.mock('@/utils/postAuthRoute', () => ({
+  __esModule: true, rememberPendingPayment: jest.fn(async () => {}), forgetPendingPayment: jest.fn(async () => {}),
+}));
+jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), getPublicPayment: jest.fn(async () => ({ expiresAt: '2026-10-03T12:00:00Z' })), returnUrlFor: () => null }));
 jest.mock('@/services/payHold', () => ({ __esModule: true, clearPayHold: jest.fn(async () => {}) }));
 jest.mock('@/components/pay/PayNaira', () => ({ __esModule: true, PayNaira: () => null }));
 jest.mock('@/components/pay/PayCrypto', () => ({ __esModule: true, PayCrypto: () => null }));

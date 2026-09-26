@@ -121,6 +121,12 @@ export default function MerchantLayout() {
                 }}
             />
             <Stack.Screen
+                name="pay-links/open/[id]"
+                options={{
+                    title: 'Reusable link',
+                }}
+            />
+            <Stack.Screen
                 name="activate-pm"
                 options={{
                     title: 'Activate Payment Merchant',

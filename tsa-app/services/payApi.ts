@@ -82,6 +82,15 @@ export async function listMyPayments(): Promise<PayHistoryItem[]> {
   return data?.payments ?? [];
 }
 
+/** What anyone — signed in or not — may read of a payment (GET /pay/public/:id). */
+export type PayPublic = { id: string; merchantName: string; status: PayStatus; expiresAt: string };
+
+/** The signed-out read: enough to know until when a payment is worth coming back to. */
+export async function getPublicPayment(id: string): Promise<PayPublic> {
+  if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
+  return request<PayPublic>(`/public/${encodeURIComponent(id)}`);
+}
+
 /** Refuses a non-UUID before it ever reaches fetch. */
 export async function getCheckout(id: string): Promise<PayCheckout> {
   if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);

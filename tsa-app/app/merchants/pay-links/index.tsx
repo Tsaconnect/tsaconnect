@@ -1,10 +1,12 @@
 // app/merchants/pay-links/index.tsx
 //
-// Payment links: every link a TSA Pay merchant has sent, newest first, in the
-// mode she is in (live once switched live, test until then). The headline is
-// what she checks through the day — links still waiting, and links paid today
-// (counted from the links loaded, and it says so once there are more). Opened
-// with `?mode=` (a link just made in the other mode), it lists that mode.
+// Payment links: both kinds of link a TSA Pay merchant has made, in the mode she
+// is in (live once she can take live payments, test until then) — her reusable
+// links first (the customer enters the amount; they stand, like a shop's QR),
+// then her one-time links, newest first. The headline is what she checks
+// through the day about one-time links — still waiting, and paid today (counted
+// from the links loaded, and it says so once there are more). Opened with
+// `?mode=` (a link just made in the other mode), it lists that mode.
 // Kept fresh while she looks (every 15 s while focused); older pages load as
 // she scrolls and stay put when the first page refreshes.
 import React, { useCallback, useMemo, useRef, useState } from 'react';
@@ -13,20 +15,25 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, EmptyState, ErrorState, getStatusVisual, PressableScale, Spinner, StatusPill, Text,
+  Badge, Button, Card, EmptyState, ErrorState, getStatusVisual, PressableScale, Spinner, StatusPill, Text,
 } from '@/components/ui';
 import { TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { useFocusPolling } from '@/hooks/useFocusPolling';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import {
-  listPayLinks, payLinkModeOf, payLinkModeParam, type PayLink, type PayLinkMode,
+  listOpenLinks, listPayLinks, payLinkModeOf, payLinkModeParam, type OpenLink, type PayLink, type PayLinkMode,
 } from '@/services/payMerchantApi';
 import { errorMessage } from '@/utils/payCheckout';
-import { formatLinkTime, payLinkCounts, payLinkStatus } from '@/utils/payLinks';
+import {
+  formatLinkTime, openLinkAmountRule, openLinkStatus, payLinkCounts, payLinkStatus,
+} from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
+// A page of each kind. Reusable links are few and stand for months: their first page is all of them in practice.
 const PAGE = 50;
 const POLL_MS = 15_000;
+
+type Row = { kind: 'open'; link: OpenLink } | { kind: 'once'; link: PayLink };
 
 /** Fresh rows win; older rows she has scrolled to are kept below them. */
 const mergeNewest = (fresh: PayLink[], shown: PayLink[]) => {
@@ -54,6 +61,7 @@ export default function PayLinks() {
 function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean }) {
   const { colors, spacing } = useTheme();
   const [links, setLinks] = useState<PayLink[] | null>(null);
+  const [openLinks, setOpenLinks] = useState<OpenLink[]>([]);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
@@ -64,18 +72,17 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
 
   const refresh = useCallback(async () => {
     const mine = ++seq.current;
-    try {
-      const page = await listPayLinks(mode, 1, PAGE);
-      if (mine !== seq.current) return;
-      setLinks((shown) => mergeNewest(page.items, shown ?? []));
-      setTotal(page.total);
-      setError(undefined);
-    } catch (e) {
-      if (mine !== seq.current) return;
-      setError(errorMessage(e, 'Could not load your payment links.'));
-    } finally {
-      setRefreshing(false);
+    // Either kind failing leaves the other kind showing.
+    const [once, open] = await Promise.allSettled([listPayLinks(mode, 1, PAGE), listOpenLinks(mode, 1, PAGE)]);
+    setRefreshing(false);
+    if (mine !== seq.current) return;
+    if (once.status === 'fulfilled') {
+      setLinks((shown) => mergeNewest(once.value.items, shown ?? []));
+      setTotal(once.value.total);
     }
+    if (open.status === 'fulfilled') setOpenLinks(open.value.items);
+    const failed = once.status === 'rejected' ? once.reason : open.status === 'rejected' ? open.reason : null;
+    setError(failed ? errorMessage(failed, 'Could not load your payment links.') : undefined);
   }, [mode]);
 
   useFocusPolling(refresh, POLL_MS);
@@ -95,6 +102,10 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
   };
 
   const counts = useMemo(() => payLinkCounts(links ?? []), [links]);
+  const rows = useMemo<Row[]>(() => [
+    ...openLinks.map((link) => ({ kind: 'open' as const, link })),
+    ...(links ?? []).map((link) => ({ kind: 'once' as const, link })),
+  ], [openLinks, links]);
 
   if (links === null) {
     if (error) return <ErrorState title="Could not load your payment links" subtitle={error} onRetry={refresh} />;
@@ -127,8 +138,8 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <FlatList
-        data={links}
-        keyExtractor={(l) => l.id}
+        data={rows}
+        keyExtractor={(r) => `${r.kind}:${r.link.id}`}
         contentContainerStyle={{ padding: spacing.lg, gap: spacing.sm }}
         ListHeaderComponent={header}
         ListEmptyComponent={
@@ -138,7 +149,7 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
         onEndReached={loadMore}
         onEndReachedThreshold={0.5}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void refresh(); }} />}
-        renderItem={({ item }) => <LinkRow link={item} />}
+        renderItem={({ item }) => (item.kind === 'open' ? <OpenLinkRow link={item.link} /> : <LinkRow link={item.link} />)}
       />
     </SafeAreaView>
   );
@@ -156,7 +167,10 @@ function LinkRow({ link }: { link: PayLink }) {
     >
       <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
         <View style={{ flex: 1, gap: spacing.xs }}>
-          <Text variant="bodyMed" weight="700" numberOfLines={1}>{link.description}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+            <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>{link.description}</Text>
+            <Badge label="One-time" size="sm" />
+          </View>
           <Text variant="caption" color="textSecondary" numberOfLines={1}>
             {`${link.customerName || 'No customer name'} · ${formatLinkTime(link.createdAt)}`}
           </Text>
@@ -164,6 +178,37 @@ function LinkRow({ link }: { link: PayLink }) {
         <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
           <Text variant="bodyMed" weight="700" numeric>{formatKobo(String(link.amount))}</Text>
           <StatusPill kind="payLink" status={status} size="sm" />
+        </View>
+      </Card>
+    </PressableScale>
+  );
+}
+
+function OpenLinkRow({ link }: { link: OpenLink }) {
+  const { spacing } = useTheme();
+  const status = openLinkStatus(link);
+  const paid = `${link.paidCount} ${link.paidCount === 1 ? 'payment' : 'payments'}`;
+  return (
+    <PressableScale
+      onPress={() => router.push(`/merchants/pay-links/open/${link.id}?mode=${link.mode}`)}
+      accessibilityRole="button"
+      accessibilityLabel={`${link.label}, reusable, ${paid}, ${getStatusVisual('openLink', status).label}`}
+      testID={`open-link-${link.id}`}
+    >
+      <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+        <View style={{ flex: 1, gap: spacing.xs }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+            <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>{link.label}</Text>
+            <Badge label="Reusable" size="sm" />
+          </View>
+          <Text variant="caption" color="textSecondary" numberOfLines={1}>
+            {`${openLinkAmountRule(link)} · ${paid}`}
+          </Text>
+        </View>
+        <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
+          {/* What reached her — the same figure as the link's screen ("You received …"). */}
+          <Text variant="bodyMed" weight="700" numeric>{formatKobo(String(link.receivedTotal ?? 0))}</Text>
+          <StatusPill kind="openLink" status={status} size="sm" />
         </View>
       </Card>
     </PressableScale>

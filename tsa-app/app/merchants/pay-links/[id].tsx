@@ -20,7 +20,9 @@ import {
   cancelPayLink, getPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam, type PayLink, type PayLinkMode,
 } from '@/services/payMerchantApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
-import { formatLinkTime, payLinkReceives, payLinkStatus, payLinkTimeRow } from '@/utils/payLinks';
+import {
+  formatLinkTime, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
+} from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
 const POLL_MS = 15_000;
@@ -124,7 +126,7 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
 
         {open ? (
           <>
-            <PayLinkShare link={link} businessName={businessName} />
+            <PayLinkShare url={link.checkoutUrl} message={payLinkShareMessage(businessName, link)} />
             <Button title="Cancel link" variant="ghost" onPress={() => { setCancelError(undefined); setConfirming(true); }} />
           </>
         ) : null}

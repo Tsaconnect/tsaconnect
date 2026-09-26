@@ -38,4 +38,12 @@ describe('routeForNotification', () => {
     expect(routeForNotification(null)).toBeNull();
     expect(routeForNotification(undefined)).toBeNull();
   });
+
+  it('routes a TSA Pay payment received through a link to Payment links, any other to Payment Settings', () => {
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'link', mode: 'test' })).toBe('/merchants/pay-links?mode=test');
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'open', mode: 'live' })).toBe('/merchants/pay-links?mode=live');
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'link' })).toBe('/merchants/pay-links');
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'api' })).toBe('/merchants/pay-settings');
+    expect(routeForNotification({ type: 'pay_payment_received' })).toBe('/merchants/pay-settings');
+  });
 });

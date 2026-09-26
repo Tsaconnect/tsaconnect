@@ -23,6 +23,7 @@ import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
+import { rememberPendingPayment } from '@/utils/postAuthRoute';
 import { depositStillToSendCopy, linkedOrder, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
 
@@ -45,6 +46,12 @@ type Pick = { token: LiFiToken; chainId: number };
 type Priced = { pick: Pick; label?: string; fromAmount?: string; receives?: string; error?: string; at: number };
 
 export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, steps }: Props) {
+  // KYC can outlast this screen (a review takes hours): remember the payment
+  // until it expires, so finishing KYC — or the next launch — brings her back.
+  const verifyThenReturn = async () => {
+    await rememberPendingPayment(checkout.id, { expiresAt: checkout.expiresAt });
+    router.push(`${KYC_ROUTE}?returnTo=pay` as never);
+  };
   const { colors, spacing } = useTheme();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pick, setPick] = useState<Pick | null>(null);
@@ -182,7 +189,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
         <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg, gap: spacing.md }}>
           <Text variant="bodySm" color="danger">{pay.error ?? 'The payment could not be completed.'}</Text>
           {pay.errorCode === KYC_VERIFICATION_REQUIRED && (
-            <Button title="Verify identity" onPress={() => router.push(KYC_ROUTE as never)} />
+            <Button title="Verify identity" onPress={() => void verifyThenReturn()} />
           )}
         </AccentCard>
       )}

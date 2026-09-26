@@ -9,7 +9,10 @@
  * total; a taken reference is said on its field; a cancelled link reads
  * Cancelled in the list; cancelling asks first and only the confirm sends it;
  * the dashboard's TSA Pay card starts links and keeps Payment settings for a
- * merchant who has TSA Pay.
+ * merchant who has TSA Pay. A reusable link (the customer enters the amount)
+ * needs a name, takes an optional range, opens on its own screen with its QR
+ * and what has been paid through it, pauses and resumes, and is replaced only
+ * after she confirms.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -58,10 +61,14 @@ jest.mock('@/components/ui', () => {
     Icon: () => null,
     Card: box,
     AccentCard: box,
-    Badge: box,
+    Badge: (props: any) => react.createElement(RNText, null, props.label),
+    RadioGroup: (props: any) => react.createElement(View, null, props.options.map((o: any) =>
+      react.createElement(RNText, { key: o.value, accessibilityLabel: `radio:${o.value}`, onPress: () => props.onChange(o.value) }, o.label))),
     Divider: () => null,
     SummaryCard: box,
-    SummaryRow: (props: any) => react.createElement(RNText, null, `${props.label}: ${props.value}`),
+    SummaryRow: (props: any) => (typeof props.value === 'string'
+      ? react.createElement(RNText, null, `${props.label}: ${props.value}`)
+      : react.createElement(View, null, react.createElement(RNText, null, `${props.label}:`), props.value)),
     getStatusVisual,
     StatusPill: (props: any) => react.createElement(RNText, null, getStatusVisual(props.kind, props.status).label),
     PressableScale: (props: any) => react.createElement(View, {
@@ -95,6 +102,11 @@ jest.mock('@/services/payMerchantApi', () => {
     listPayLinks: jest.fn(),
     getPayLink: jest.fn(),
     cancelPayLink: jest.fn(),
+    createOpenLink: jest.fn(),
+    listOpenLinks: jest.fn(),
+    getOpenLink: jest.fn(),
+    updateOpenLink: jest.fn(),
+    replaceOpenLink: jest.fn(),
   };
 });
 jest.mock('../../../components/services/api', () => ({
@@ -111,16 +123,25 @@ import { Share } from 'react-native';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router } from 'expo-router';
 import {
-  cancelPayLink, createPayLink, getOwnMerchant, getPayLink, listPayLinks, type OwnMerchant, type PayLink,
+  cancelPayLink, createOpenLink, createPayLink, getOpenLink, getOwnMerchant, getPayLink, listOpenLinks, listPayLinks,
+  replaceOpenLink, updateOpenLink, type OpenLink, type OwnMerchant, type PayLink,
 } from '@/services/payMerchantApi';
 import NewPayLink from '../pay-links/new';
 import PayLinks from '../pay-links/index';
 import PayLinkDetail from '../pay-links/[id]';
+import OpenLinkDetail from '../pay-links/open/[id]';
 import MerchantDashboard from '../dashboard/index';
 
 const merchant = {
   id: 'm1', businessName: 'Sky Air', status: 'active', liveEnabled: true, liveAllowed: false, version: 7, settlementMode: 'fiat',
 } as OwnMerchant;
+
+const openLink = (over: Partial<OpenLink> = {}): OpenLink => ({
+  id: 'o1', mode: 'test', slug: 'mama-ngozi-7k3q', url: 'https://tsaconnectworld.com/pay/l/mama-ngozi-7k3q',
+  label: 'Mama Ngozi Store — Shop 12', minAmount: 0, maxAmount: 0, merchantMinAmount: 10_000, merchantMaxAmount: 100_000_000,
+  active: true, takingPayments: true, version: 3, createdAt: '2026-09-20T12:00:00Z',
+  paidCount: 2, paidTotal: 1_000_000, receivedTotal: 980_000, ...over,
+});
 
 const link = (over: Partial<PayLink> = {}): PayLink => ({
   id: 'p1', reference: 'link_abcdefghijkl', mode: 'test', status: 'pending', source: 'link',
@@ -169,6 +190,7 @@ beforeEach(() => {
   mockKeys = 0;
   for (const k of Object.keys(mockParams) as (keyof typeof mockParams)[]) delete mockParams[k];
   jest.mocked(getOwnMerchant).mockResolvedValue(merchant);
+  jest.mocked(listOpenLinks).mockResolvedValue({ items: [], total: 0, page: 1, limit: 50 });
 });
 afterEach(() => { act(() => tree?.unmount()); jest.useRealTimers(); });
 
@@ -376,6 +398,167 @@ describe('A payment link', () => {
       expect(text(tree)).not.toMatch(/Open until|Expired:|Paid:/);
       act(() => tree.unmount());
     }
+  });
+});
+
+describe('A reusable link', () => {
+  const chooseReusable = async () => {
+    await mount(<NewPayLink />);
+    await act(async () => { byLabel(tree, 'radio:open').props.onPress(); });
+  };
+
+  it('needs a name, and a range that reads as naira with the lowest below the highest', async () => {
+    await chooseReusable();
+    await type('Lowest amount (optional)', '5000,50');
+    await press('button:Create link');
+    expect(text(tree)).toContain('error:Name it');
+    expect(text(tree)).toContain('error:Enter naira with a point for kobo');
+
+    await type('Name', 'Mama Ngozi Store');
+    await type('Lowest amount (optional)', '5000');
+    await type('Highest amount (optional)', '1000');
+    await press('button:Create link');
+    expect(text(tree)).toContain("error:The highest amount can't be less than the lowest.");
+    expect(createOpenLink).not.toHaveBeenCalled();
+  });
+
+  it('is made with its name and range, then opens on its own screen', async () => {
+    jest.mocked(createOpenLink).mockResolvedValue(openLink());
+    await chooseReusable();
+    expect(text(tree)).not.toContain('Link open for');
+    await type('Name', ' Mama Ngozi Store — Shop 12 ');
+    await type('Lowest amount (optional)', '500');
+    await press('button:Create link');
+    expect(createOpenLink).toHaveBeenCalledWith('test', {
+      label: 'Mama Ngozi Store — Shop 12', minAmount: 50_000, maxAmount: 0,
+    }, 'key-1');
+    expect(router.replace).toHaveBeenCalledWith('/merchants/pay-links/open/o1?mode=test');
+  });
+
+  it('is listed first, marked Reusable, beside one-time links', async () => {
+    jest.mocked(listOpenLinks).mockResolvedValue({
+      items: [openLink({ active: false, takingPayments: false, notTakingReason: 'paused' })], total: 1, page: 1, limit: 50,
+    });
+    jest.mocked(listPayLinks).mockResolvedValue({ items: [link()], total: 1, page: 1, limit: 50 });
+    await mount(<PayLinks />);
+    const out = text(tree);
+    expect(out.indexOf('Mama Ngozi Store')).toBeLessThan(out.indexOf('Two bags of rice'));
+    expect(out).toContain('Reusable');
+    expect(out).toContain('One-time');
+    expect(out).toContain('Any amount from ₦100.00 to ₦1,000,000.00 · 2 payments');
+    expect(out).toContain('₦9,800.00');
+    const row = byTestID(tree, 'open-link-o1');
+    expect(row.props.accessibilityLabel).toBe('Mama Ngozi Store — Shop 12, reusable, 2 payments, Paused');
+    await act(async () => { row.props.onPress(); });
+    expect(router.push).toHaveBeenCalledWith('/merchants/pay-links/open/o1?mode=test');
+  });
+
+  describe('its screen', () => {
+    beforeEach(() => { mockParams.id = 'o1'; mockParams.mode = 'test'; });
+
+    it('shows its QR, what customers pay, and what has been paid through it', async () => {
+      const share = jest.spyOn(Share, 'share').mockResolvedValue({ action: 'sharedAction' });
+      jest.mocked(getOpenLink).mockResolvedValue({
+        openLink: openLink({ minAmount: 100_000, maxAmount: 5_000_000 }),
+        payments: [
+          link({
+            id: 'p9', source: 'open', status: 'succeeded', description: '', linkLabel: 'Mama Ngozi Store — Gate 1',
+            succeededAt: '2026-09-26T10:00:00Z',
+          }),
+          link({ id: 'p8', source: 'open', status: 'succeeded', description: 'Two plates of rice', amount: 300_000 }),
+        ],
+      });
+      await mount(<OpenLinkDetail />);
+      expect(getOpenLink).toHaveBeenCalledWith('test', 'o1');
+      const out = text(tree);
+      expect(out).toContain('qr:https://tsaconnectworld.com/pay/l/mama-ngozi-7k3q');
+      expect(out).toContain('Customers pay: Any amount from ₦1,000.00 to ₦50,000.00');
+      expect(out).toContain('You received ₦9,800.00 from 2 payments');
+      expect(out).toContain('Active');
+      // No note: the link it was paid through. A note: the customer's own words, marked as hers.
+      expect(out).toContain('Mama Ngozi Store — Gate 1');
+      expect(out).toContain('Two plates of rice');
+      expect(out).toContain("Customer's note ·");
+      // A payment row shows its price, as the web Payments list does.
+      expect(out).toContain('₦5,000.00');
+      expect(out).toContain('₦3,000.00');
+      expect(out).toContain('app.tsaconnectworld.com');
+      await press('button:Share');
+      expect(share).toHaveBeenCalledWith({
+        message: 'Pay Sky Air — Mama Ngozi Store — Shop 12: https://tsaconnectworld.com/pay/l/mama-ngozi-7k3q',
+      });
+    });
+
+    it('says when it is not taking payments, and why', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({
+        openLink: openLink({ takingPayments: false, notTakingReason: 'live_off' }), payments: [],
+      });
+      await mount(<OpenLinkDetail />);
+      const out = text(tree);
+      expect(out).toContain('Not taking payments');
+      expect(out).toContain("Live payments aren't switched on for your business yet.");
+      expect(out).not.toContain('Active');
+    });
+
+    it('a range her limits no longer fit says so, and opens Edit', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({
+        openLink: openLink({ takingPayments: false, notTakingReason: 'range_outside_limits', minAmount: 200_000_000 }), payments: [],
+      });
+      await mount(<OpenLinkDetail />);
+      expect(text(tree)).toContain('Your amount range no longer fits your limits — edit the link.');
+      await press('button:Edit the link');
+      expect(byLabel(tree, 'input:Lowest amount (optional)').props.value).toBe('2000000.00');
+    });
+
+    it('pauses and resumes against the version it read', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink(), payments: [] });
+      jest.mocked(updateOpenLink).mockResolvedValue(openLink({
+        active: false, takingPayments: false, notTakingReason: 'paused', version: 4,
+      }));
+      await mount(<OpenLinkDetail />);
+      await press('button:Pause');
+      expect(updateOpenLink).toHaveBeenCalledWith('test', 'o1', {
+        label: 'Mama Ngozi Store — Shop 12', minAmount: 0, maxAmount: 0, active: false,
+      }, 3);
+      expect(text(tree)).toContain('You paused it.');
+      expect(text(tree)).toContain('Resume');
+    });
+
+    it('edits its name and range, refusing a blank name', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink(), payments: [] });
+      jest.mocked(updateOpenLink).mockResolvedValue(openLink({ label: 'Shop 14', maxAmount: 2_000_000, version: 4 }));
+      await mount(<OpenLinkDetail />);
+      await press('button:Edit');
+      await type('Name', '  ');
+      await press('button:Save');
+      expect(text(tree)).toContain('error:Name it');
+      expect(updateOpenLink).not.toHaveBeenCalled();
+
+      await type('Name', 'Shop 14');
+      await type('Highest amount (optional)', '20000');
+      await press('button:Save');
+      expect(updateOpenLink).toHaveBeenCalledWith('test', 'o1', {
+        label: 'Shop 14', minAmount: 0, maxAmount: 2_000_000, active: true,
+      }, 3);
+      expect(text(tree)).toContain('Any amount from ₦100.00 to ₦20,000.00');
+    });
+
+    it('is replaced only after she confirms the posters will stop working', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink(), payments: [] });
+      jest.mocked(replaceOpenLink).mockResolvedValue(openLink({ slug: 'mama-ngozi-9x2p', url: 'https://tsaconnectworld.com/pay/l/mama-ngozi-9x2p' }));
+      await mount(<OpenLinkDetail />);
+      await press('button:Replace link');
+      expect(replaceOpenLink).not.toHaveBeenCalled();
+      expect(text(tree)).toContain('Your printed posters will stop working. Print the new one.');
+
+      await press('button:Keep this one');
+      expect(replaceOpenLink).not.toHaveBeenCalled();
+
+      await press('button:Replace link');
+      await press('Confirm replace link');
+      expect(replaceOpenLink).toHaveBeenCalledWith('test', 'o1');
+      expect(text(tree)).toContain('qr:https://tsaconnectworld.com/pay/l/mama-ngozi-9x2p');
+    });
   });
 });
 
