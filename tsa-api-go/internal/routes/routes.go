@@ -29,7 +29,11 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler, pch *handlers.PaycrestHandler, pcw *handlers.PaycrestWebhookHandler, dh *handlers.DisputeHandler, iah *handlers.InboundAdminHandler, payh *handlers.PayHandler) {
+	// First, before any rate limit: a request through the web app's signed
+	// Netlify proxy counts as coming from its visitor, not from Netlify.
+	router.Use(middleware.NetlifyClientIP(cfg.NetlifyProxySecret))
+
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -59,6 +63,36 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		authGroup.POST("/refresh", h.RefreshToken)
 		authGroup.POST("/revoke", auth, h.RevokeToken)
 		authGroup.POST("/reactivate", h.ReactivateAccount)
+	}
+
+	// TSA Connect web app sign-in (cookie session). Off unless WEB_APP_ORIGIN
+	// is set. Every route needs the CSRF header and the app's own origin, and
+	// no answer is ever cached (they set and read the session).
+	if cfg.WebAuthEnabled() {
+		web := api.Group("/auth/web", middleware.NoStore(), middleware.WebAuthGuard(cfg))
+		// Per visitor address (NetlifyClientIP above makes that the real one),
+		// loose because an office signs in from one address; and per address
+		// and account, so one person's failures don't block a colleague. The
+		// per-account lockout is what protects each password.
+		web.POST("/login",
+			middleware.RateLimiter(300, 15*time.Minute),
+			middleware.RateLimiterBy(10, 15*time.Minute, middleware.WebLoginRateKey),
+			h.WebLogin)
+		// Per pending sign-in, under a per-address ceiling (a made-up challenge
+		// cookie gets its own bucket, so the ceiling is what bounds those).
+		// Guessing is bounded per challenge anyway (services.EmailCodeAttempts).
+		web.POST("/verify",
+			middleware.RateLimiter(60, 15*time.Minute),
+			middleware.RateLimiterBy(20, 15*time.Minute, middleware.WebChallengeRateKey),
+			h.WebVerify)
+		// Per session (every tab refreshes on its own), under a per-address
+		// ceiling for the same reason.
+		web.POST("/refresh",
+			middleware.RateLimiter(300, 15*time.Minute),
+			middleware.RateLimiterBy(60, 15*time.Minute, middleware.WebRefreshRateKey),
+			h.WebRefresh)
+		web.POST("/logout", h.WebLogout)
+		web.GET("/me", auth, h.WebMe)
 	}
 
 	// User routes
@@ -289,6 +323,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		marketGroup.GET("/overview", h.GetMarketOverview)
 		marketGroup.GET("/history/:symbol", h.GetAssetPriceHistory)
+		marketGroup.GET("/ohlc/:symbol", h.GetAssetOHLC)
 		marketGroup.GET("/assets/:symbol", h.GetAssetMarketDetails)
 		marketGroup.GET("/search/:query", h.SearchAssets)
 	}
@@ -924,6 +959,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// currency it reaches Paycrest, so leaving it open let anyone
 				// drive one upstream request per HTTP request.
 				pc.GET("/banks", pch.Banks)
+				// The converted price is behind auth AND a per-user limit:
+				// each call quotes a LiFi route for a token the caller
+				// chooses, which is a live request to a paid API. Thirty a
+				// minute is well above a user re-quoting as they type, and
+				// far below anything worth pointing at LiFi.
+				pc.GET("/converted-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), pch.ConvertedQuote)
+				// The sell side of the same round trip, and the same reasons
+				// for the same limit: one LiFi call per request, for a token
+				// the caller names. Registered only when RAMP_CONVERSION_SELL
+				// built a quoter, so a deploy that leaves the flag unset has
+				// no new route at all.
+				if pch.SellQuoteEnabled() {
+					pc.GET("/sell-swap-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), pch.SellSwapQuote)
+				}
 				// Per user, not per IP. Order creation is the most sensitive
 				// write here and the only one that spends a /v2/rates call —
 				// slow and concurrency-throttled at the provider. One order at
@@ -940,6 +989,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				pc.POST("/orders/:id/claim-payment", pch.ClaimPayment)
 				pc.POST("/orders/:id/cancel", itIdem, pch.Cancel)
 
+				// One swapped sale at a time, driven step by step by the
+				// app. Idempotency on the writes because each one is a claim:
+				// a retried create must not open a second sale, and a
+				// retried order must not open a second payout (both are also
+				// idempotent server-side — this just stops the retry
+				// reaching them). Registered only when RAMP_CONVERSION_SELL
+				// built the service.
+				if pch.SellIntentsEnabled() {
+					pc.POST("/sell-intents", itIdem, paycrestWriteLimit, pch.CreateSellIntent)
+					pc.GET("/sell-intents/open", pch.OpenSellIntent)
+					pc.POST("/sell-intents/:id/swap", itIdem, paycrestWriteLimit, pch.RecordSellIntentSwap)
+					pc.POST("/sell-intents/:id/order", itIdem, paycrestWriteLimit, pch.OpenSellIntentOrder)
+					pc.POST("/sell-intents/:id/abandon", itIdem, paycrestWriteLimit, pch.AbandonSellIntent)
+				}
+
 				// Gas sponsorship. The status route is always registered so the
 				// app can tell "off" from "old server"; the rest exist only
 				// when RAMP_GAS_SPONSORSHIP built at least one lane. No itIdem:
@@ -951,6 +1015,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 					pc.GET("/orders/:id/sponsorship", pch.SponsorshipOffer)
 					pc.POST("/orders/:id/relay-authorization", paycrestWriteLimit, pch.RelayAuthorization)
 					pc.POST("/orders/:id/gas-topup", paycrestWriteLimit, pch.GasTopUp)
+				}
+				// Source-chain gas for a sale's swap: only when BOTH
+				// RAMP_CONVERSION_SELL and RAMP_GAS_SPONSORSHIP are on. No
+				// itIdem for the same reason as the order top-up: the claim on
+				// the sale's row makes it once-per-sale server-side.
+				if pch.SellIntentGasTopUpEnabled() {
+					pc.POST("/sell-intents/:id/gas-topup", paycrestWriteLimit, pch.SellIntentGasTopUp)
 				}
 			}
 		}
@@ -1138,6 +1209,110 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superInbound.POST("/credits/:id/assign", iah.AssignCredit)
 			superInbound.POST("/credits/:id/refund", iah.MarkRefunded)
 			superInbound.POST("/credits/:id/ignore", iah.MarkIgnored)
+		}
+	}
+
+	// TSA Pay merchant administration. Enabled() is false until buildTSAPay
+	// wires a payment service (TSA_PAY_ENABLED unset, or a bad master key),
+	// so no route here is reachable even though the handler always exists —
+	// see cmd/server/tsa_pay.go.
+	//
+	// List/get/update are P2P-admin-gated like the rest of the money-adjacent
+	// consoles; changing where a merchant is paid or notified is checked
+	// in-handler (AdminUpdateMerchant) since only SOME fields on the same PUT
+	// need the stricter gate. Key rotation is unconditionally super_admin —
+	// there's no "safe" field on that endpoint.
+	if payh.Enabled() {
+		adminPay := api.Group("/admin/pay")
+		adminPay.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminPay.GET("/merchants", payh.AdminListMerchants)
+			adminPay.GET("/merchants/:id", payh.AdminGetMerchant)
+			adminPay.PUT("/merchants/:id", payh.AdminUpdateMerchant) // sensitive fields need super admin, checked in-handler
+			adminPay.POST("/merchants/:id/keys", middleware.RequireSuperAdmin(), payh.AdminIssueKeys)
+
+			// Payments + webhook-delivery console (Task 8): read-only across
+			// every merchant, plus the one write — requeueing a delivery —
+			// which only redrives an already-signed, already-stored payload
+			// and so needs no stricter gate than the rest of this group.
+			adminPay.GET("/payments", payh.AdminListPayments)
+			adminPay.GET("/payments/:id/deliveries", payh.AdminPaymentDeliveries)
+			adminPay.POST("/deliveries/:id/resend", payh.AdminResendWebhook)
+		}
+
+		// TSA Pay merchant API — its own top-level group, deliberately NOT
+		// nested under `api` (whose 500/15min limiter is shared by every
+		// unauthenticated caller behind one egress IP and would starve a
+		// merchant's integration traffic long before a real abuser). An IP
+		// limiter still runs first, before any DB work or key lookup, then
+		// auth, then a tighter per-merchant limiter. Both limiters are
+		// in-memory per process — correct while prod runs one API process.
+		payRoot := router.Group("/api/pay")
+		merchantAPI := payRoot.Group("/v1")
+		merchantAPI.Use(middleware.RateLimiter(600, time.Minute),
+			middleware.PayMerchantAuth(payh.MerchantService().Authenticate, payh.LiveEnabled()),
+			middleware.RateLimiterBy(120, time.Minute, middleware.PayMerchantRateKey))
+		{
+			merchantAPI.POST("/payments", payh.CreatePayment)
+			merchantAPI.GET("/payments/:id", payh.GetPayment)
+			merchantAPI.POST("/payments/:id/cancel", payh.CancelPayment)
+		}
+
+		// The public status page — no auth, IP rate-limited on its own route
+		// (not the merchant-key limiter above, which a customer's browser
+		// never authenticates against).
+		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
+
+		// The app's checkout screen: JWT user auth, per-user rate limit.
+		// test-outcome is idempotency-protected like every other
+		// POST-with-side-effects endpoint.
+		checkout := api.Group("/pay/checkout")
+		checkout.Use(auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey))
+		{
+			checkout.GET("/:id", payh.Checkout)
+			checkout.POST("/:id/test-outcome", middleware.Idempotency(config.DB), payh.TestOutcome)
+
+			// The naira start path. With no Paycrest order service wired these
+			// answer 503 "Live payments aren't available right now". The quote
+			// asks LiFi (a paid API), so it is limited like the other quotes;
+			// the two POSTs open a payout or a swap, so they share the ramp's
+			// write budget and are idempotency-protected.
+			payStartLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+			checkout.GET("/:id/quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayQuote)
+			checkout.POST("/:id/direct", middleware.Idempotency(config.DB), payStartLimit, payh.PayDirect)
+			checkout.POST("/:id/converted", middleware.Idempotency(config.DB), payStartLimit, payh.PayConverted)
+			// The crypto-merchant twins: the same limits, the same 503 when unwired.
+			checkout.GET("/:id/crypto-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.PayCryptoQuote)
+			checkout.POST("/:id/crypto", middleware.Idempotency(config.DB), payStartLimit, payh.PayCrypto)
+		}
+
+		// A payer's own payments, for the app's activity feed. Her record, so
+		// never cached.
+		api.GET("/pay/history", middleware.NoStore(), auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey), payh.History)
+
+		// A merchant's own account, from the app and the web: JWT user auth.
+		// Every guarded request (payouts, keys, webhooks, the webhook secret)
+		// re-checks the password in-handler and has its own tight limit — a
+		// separate store per route, so a password cannot be guessed through any
+		// of them and using up one never spends another. No answer is ever
+		// cached: each is one owner's account, keys and secrets included.
+		owner := api.Group("/pay/merchant")
+		owner.Use(middleware.NoStore(), auth, middleware.RateLimiterBy(120, time.Minute, perUserRateKey))
+		{
+			owner.GET("", payh.OwnerMerchant)
+			owner.GET("/payments", payh.OwnerPayments)
+			owner.GET("/payments/:id", payh.OwnerPayment)
+			owner.GET("/settlement-options", payh.OwnerSettlementOptions)
+			owner.GET("/banks", payh.OwnerBanks)
+			// A name enquiry calls the bank provider.
+			owner.GET("/banks/resolve", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerResolveBank)
+			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
+			owner.POST("/keys", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestKeys)
+			owner.PUT("/endpoints", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestEndpoints)
+			owner.POST("/webhook-secret", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestWebhookSecret)
+			// The emailed code for any guarded owner action; wrong codes also end
+			// the waiting action after a handful (see ConfirmOwnerAction).
+			owner.POST("/actions/:id/confirm", middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), payh.OwnerConfirmAction)
 		}
 	}
 }

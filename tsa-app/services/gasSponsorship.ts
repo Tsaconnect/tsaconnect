@@ -62,6 +62,9 @@ export function getSponsorshipOffer(orderId: string): Promise<SponsorshipOffer> 
   return paycrestRequest<SponsorshipOffer>(`/orders/${orderId}/sponsorship`);
 }
 
+/** The code on a relay's 409 when a relay for the order may already be on-chain: wait on the order, never send again. */
+export const SPONSORSHIP_IN_PROGRESS = 'sponsorship_in_progress';
+
 export function relayAuthorization(
   orderId: string,
   body: { validAfter: number; validBefore: number; nonce: string; signature: string },

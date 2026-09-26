@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,10 @@ type fakeSponsorPort struct {
 	relayOut services.AuthorizationRelayResult
 	topUpOut services.GasTopUpResult
 	err      error
+
+	intentTopUpCalls  int
+	intentTopUpIntent *models.RampSellIntent
+	intentTopUpStore  services.IntentTopUpStore
 }
 
 func (f *fakeSponsorPort) Enabled() bool                               { return f.enabled }
@@ -35,6 +40,11 @@ func (f *fakeSponsorPort) RelayAuthorization(_ context.Context, _ *models.User, 
 	return f.relayOut, f.err
 }
 func (f *fakeSponsorPort) TopUp(context.Context, *models.User, uuid.UUID) (services.GasTopUpResult, error) {
+	return f.topUpOut, f.err
+}
+func (f *fakeSponsorPort) TopUpForIntent(_ context.Context, _ *models.User, in *models.RampSellIntent, store services.IntentTopUpStore) (services.GasTopUpResult, error) {
+	f.intentTopUpCalls++
+	f.intentTopUpIntent, f.intentTopUpStore = in, store
 	return f.topUpOut, f.err
 }
 
@@ -124,5 +134,79 @@ func TestPaycrestSponsorship_DomainMismatchIs503(t *testing.T) {
 	w, _ := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// The 503 shares one generic message across five causes, and an RPC failure
+// during simulation logs nothing on its own — so the handler must log the cause,
+// without echoing a keyed provider URL.
+func TestPaycrestSponsorship_ServerSideRefusalLogsRedactedCause(t *testing.T) {
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	cause := fmt.Errorf("%w: authorizationState: Post \"https://base-mainnet.g.alchemy.com/v2/SeCrEtKeY123\": dial tcp: i/o timeout",
+		services.ErrSimulationUnavailable)
+	h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: cause})
+	body := `{"validAfter":0,"validBefore":1790000000,"nonce":"0x` + strings.Repeat("ab", 32) +
+		`","signature":"0x` + strings.Repeat("11", 65) + `"}`
+	w, _ := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "relay-authorization -> 503") || !strings.Contains(got, "authorizationState") {
+		t.Fatalf("log does not name the route and cause: %q", got)
+	}
+	if strings.Contains(got, "SeCrEtKeY123") {
+		t.Fatalf("log leaked the provider key: %q", got)
+	}
+}
+
+// A relay that may already be on-chain is coded, so the app waits on the order
+// instead of offering to send the deposit again.
+func TestPaycrestSponsorship_RelayInProgressIsCoded409(t *testing.T) {
+	h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: services.ErrSponsorshipInProgress})
+	body := `{"validAfter":0,"validBefore":1790000000,"nonce":"0x` + strings.Repeat("ab", 32) +
+		`","signature":"0x` + strings.Repeat("11", 65) + `"}`
+	w, out := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/relay-authorization", body)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	if out["code"] != "sponsorship_in_progress" {
+		t.Fatalf("code = %v, want sponsorship_in_progress; body = %s", out["code"], w.Body.String())
+	}
+}
+
+// A top-up sentinel wrapped with detail reaches the client as its own sentence
+// only, and the unconfirmed 503 is logged like every other server-side refusal.
+func TestPaycrestSponsorship_TopUpErrorsSendOnlyTheSentinelSentence(t *testing.T) {
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	cases := []struct {
+		err    error
+		status int
+	}{
+		{fmt.Errorf("%w: rpc says tx 0xdead pending at node-7", services.ErrTopUpUnconfirmed), http.StatusServiceUnavailable},
+		{fmt.Errorf("%w: user 42 had 3", services.ErrTopUpUnusedCap), http.StatusTooManyRequests},
+		{fmt.Errorf("%w: budget row 9", services.ErrTopUpDailyCap), http.StatusTooManyRequests},
+	}
+	for _, tc := range cases {
+		h := (&PaycrestHandler{}).WithSponsorship(&fakeSponsorPort{enabled: true, err: tc.err})
+		w, out := sponsorDo(t, sponsorTestRouter(h, sponsorHandlerUser), http.MethodPost, "/paycrest/orders/"+uuid.NewString()+"/gas-topup", "")
+		if w.Code != tc.status {
+			t.Fatalf("%v: status = %d, want %d", tc.err, w.Code, tc.status)
+		}
+		if msg, _ := out["message"].(string); strings.Contains(msg, "rpc says") || strings.Contains(msg, "user 42") || strings.Contains(msg, "budget row") {
+			t.Fatalf("%v: detail leaked to the client: %q", tc.err, msg)
+		}
+	}
+	if !strings.Contains(buf.String(), "gas-topup -> 503") {
+		t.Fatalf("the unconfirmed top-up was not logged: %q", buf.String())
 	}
 }

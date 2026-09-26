@@ -2,10 +2,12 @@ package services
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -119,9 +121,11 @@ func newQuoteServiceWithFakes(t *testing.T) *quoteServiceRig {
 // A route the treasury cannot pay gas for is not offered: the user would pay
 // naira into an order the treasury can only strand.
 func TestQuote_NoConvertedVenueWhenTheSettlementLaneCannotPayForGas(t *testing.T) {
-	s := newQuoteServiceWithFakes(t)
+	s := priceRig(t)
 	s.svc.treasuryLanes.(*fakeTreasuryLaneChecker).unfunded = map[string]bool{"base": true}
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), GasLimit: 1_200_000, Tool: "across"}
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_200_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 10, false)}
 	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
 	if err != nil || len(venues) != 0 {
 		t.Fatalf("venues = %+v err = %v; want none while base cannot pay for gas", venues, err)
@@ -131,8 +135,10 @@ func TestQuote_NoConvertedVenueWhenTheSettlementLaneCannotPayForGas(t *testing.T
 // The gas asked for is THIS route's own limit plus an approve, on the chain
 // the bridge actually runs from (the settlement leg), not the destination.
 func TestQuote_ConvertedVenueAsksForTheRoutesOwnGas(t *testing.T) {
-	s := newQuoteServiceWithFakes(t)
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), GasLimit: 1_200_000, Tool: "across"}
+	s := priceRig(t)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_200_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 10, false)}
 	if _, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -143,14 +149,18 @@ func TestQuote_ConvertedVenueAsksForTheRoutesOwnGas(t *testing.T) {
 }
 
 func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testing.T) {
-	s := newQuoteServiceWithFakes(t) // Paycrest quotes 100 USDC on base
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), ETASeconds: 30, Tool: "across"}
+	s := priceRig(t) // Paycrest quotes 100 USDC on base
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ETASeconds: 30, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 10, false)}
 	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
 	if err != nil || len(venues) != 1 {
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	if v.Kind != models.RouteKindConverted || v.MarkupBps != 50 || v.PromisedAmount != "99500000" {
+	// The markup IS the round-trip budget, and a stablecoin promise is T less
+	// the fixed stable headroom — neither is a function of the route's price.
+	if v.Kind != models.RouteKindConverted || v.MarkupBps != 50 || v.PromisedAmount != "99700000" {
 		t.Fatalf("venue = %+v", v)
 	}
 	if v.ViaChain != "base" || v.ViaToken != "USDC" {
@@ -168,21 +178,33 @@ func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testin
 }
 
 func TestQuote_CostlyRouteIsNotOffered(t *testing.T) {
-	s := newQuoteServiceWithFakes(t)
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_000000), ToAmountMin: big.NewInt(98_900000)} // 110 bps
+	s := priceRig(t)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_000000), ToAmountMin: big.NewInt(98_900000),
+		FromAmountUSD: 100, ToAmountUSD: 99, GasLimit: 1_000_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 59144, false)} // 100 bps of LiFi cost
 	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "linea", Token: "USDC"}})
 	if err != nil || len(venues) != 0 {
-		t.Fatalf("venues = %+v; a route over the 1%% cap must not be offered", venues)
+		t.Fatalf("venues = %+v; a route costing more than the round-trip budget must not be offered", venues)
 	}
 }
 
+// The route here is deliberately one that WOULD be offered — priced inside
+// the budget, executable, clearing its promise — so the only thing refusing
+// it is the per-chain minimum. And because that gate runs before any LiFi
+// call, the refusal is free: no paid quote is spent on an amount that could
+// never be offered anyway.
 func TestQuote_BelowMinimumOrderIsNotOffered(t *testing.T) {
-	s := newQuoteServiceWithFakes(t)
+	s := priceRig(t)
 	s.svc.SetConversionMinimums(map[string]float64{"linea": 25}, 1)
-	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(20_000000), ToAmountMin: big.NewInt(19_950000)}
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(19_990000), ToAmountMin: big.NewInt(19_950000),
+		FromAmountUSD: 20, ToAmountUSD: 19.96, GasCostUSD: 0.002, GasLimit: 1_000_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 59144, false)}
 	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "30000", []RequestedAsset{{Chain: "linea", Token: "USDC"}})
 	if len(venues) != 0 {
 		t.Fatalf("$20 on linea is under its $25 minimum: %+v", venues)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("spent %d LiFi calls on an amount under the chain's minimum", s.lifi.quoteCalls())
 	}
 }
 
@@ -207,18 +229,20 @@ func TestQuote_DirectVenueIsNeverConverted(t *testing.T) {
 // the REQUESTED token's 18dp units, not a naive copy of the 6dp settlement
 // amount less markup (which would be short by a factor of 10^12).
 func TestQuote_ConvertedVenue_SixToEighteenDecimals(t *testing.T) {
-	s := newQuoteServiceWithFakes(t) // settlement leg: 100 USDC on base, 6dp
+	s := priceRig(t) // settlement leg: 100 USDC on base, 6dp
 	s.lifi.route = &LiFiRoute{
-		ToAmount:    new(big.Int).Mul(big.NewInt(998), pow10(17)), // 99.8 * 1e18
-		ToAmountMin: new(big.Int).Mul(big.NewInt(997), pow10(17)), // 99.7 * 1e18
-		ETASeconds:  40, Tool: "across",
+		ToAmount:      new(big.Int).Mul(big.NewInt(998), pow10(17)), // 99.8 * 1e18
+		ToAmountMin:   new(big.Int).Mul(big.NewInt(997), pow10(17)), // 99.7 * 1e18
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000,
+		ETASeconds: 40, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 56, false),
 	}
 	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "bsc", Token: "USDT"}})
 	if err != nil || len(venues) != 1 {
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	wantPromise := new(big.Int).Mul(big.NewInt(995), pow10(17)).String() // 99.5 * 1e18
+	wantPromise := new(big.Int).Mul(big.NewInt(997), pow10(17)).String() // 99.7 * 1e18
 	if v.MarkupBps != 50 || v.PromisedAmount != wantPromise {
 		t.Fatalf("venue = %+v, want promisedAmount %s (18dp, not the 6dp settlement figure)", v, wantPromise)
 	}
@@ -237,22 +261,25 @@ func TestQuote_ConvertedVenue_EighteenToSixDecimals(t *testing.T) {
 	}}
 	svc := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"bsc"})
 	lifi := &fakeLiFiQuoter{route: &LiFiRoute{
-		ToAmount:    big.NewInt(99_800000),
-		ToAmountMin: big.NewInt(99_700000),
-		ETASeconds:  25, Tool: "across",
+		ToAmount:      big.NewInt(99_800000),
+		ToAmountMin:   big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000,
+		ETASeconds: 25, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 10, false),
 	}}
 	svc.SetLiFiQuoter(lifi)
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"bsc": true, "optimism": true}})
+	svc.SetRoundTripBudgetBps(50)
 
 	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
 	if err != nil || len(venues) != 1 {
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	if v.MarkupBps != 50 || v.PromisedAmount != "99500000" {
-		t.Fatalf("venue = %+v, want promisedAmount 99500000 (6dp, not the 18dp settlement figure)", v)
+	if v.MarkupBps != 50 || v.PromisedAmount != "99700000" {
+		t.Fatalf("venue = %+v, want promisedAmount 99700000 (6dp, not the 18dp settlement figure)", v)
 	}
 	if v.ViaChain != "bsc" || v.ViaToken != "USDC" || v.RequestedChain != "optimism" || v.RequestedToken != "USDT" {
 		t.Fatalf("venue must record both legs: %+v", v)
@@ -357,5 +384,396 @@ func TestQuote_RefusesEveryVenueWhenTreasuryLanesWasNeverWired(t *testing.T) {
 	}
 	if s.lifi.quoteCalls() != 0 {
 		t.Fatalf("spent a LiFi call with no treasury-lane checker wired at all")
+	}
+}
+
+// ── Part 2: converted venues priced on the round-trip budget ────────────────
+//
+// A converted venue is now offered only when the WHOLE round trip fits the
+// budget B (LiFi's own cost plus the gas the treasury pays), and only when
+// the route it was priced from is one execution would actually accept: a
+// known calldata layout, no destination call, and the destination chain the
+// user asked for. A stablecoin destination additionally carries a promise,
+// and a route whose own guaranteed minimum falls under that promise would be
+// refused on every execution attempt — so it is not offered either.
+
+func priceRig(t *testing.T) *quoteServiceRig {
+	t.Helper()
+	s := newQuoteServiceWithFakes(t)
+	s.svc.SetRoundTripBudgetBps(50)
+	return s
+}
+
+func bnbRoute(t *testing.T) *LiFiRoute {
+	t.Helper()
+	return &LiFiRoute{ToAmount: big.NewInt(220_000_000_000_000_000), ToAmountMin: big.NewInt(219_000_000_000_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasCostUSD: 0.01, GasLimit: 1_000_000, ToTokenDecimals: 18, ToTokenSymbol: "BNB",
+		Tool: "across", Data: testBridgeCalldata(t, sponsorTestUser, 56, false)}
+}
+
+func TestConvertedVenues_BuysANativeCoinByAddress(t *testing.T) {
+	s := priceRig(t)
+	s.svc.treasuryLanes.(*fakeTreasuryLaneChecker).laned = map[string]bool{"base": true} // no bsc lane needed
+	s.lifi.route = bnbRoute(t)
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress, Token: "BN8-spoof", Recipient: sponsorTestUser}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v", venues, err)
+	}
+	v := venues[0]
+	// The symbol comes from LiFi, never the client.
+	if v.RequestedChain != "bsc" || v.RequestedAddress != evmNativeAddress || v.RequestedDecimals != 18 || v.RequestedToken != "BNB" {
+		t.Fatalf("venue = %+v", v)
+	}
+	if v.PromisedAmount != "" {
+		t.Fatalf("a volatile destination has no promise at quote time: %q", v.PromisedAmount)
+	}
+	if v.CostBps != 20 || v.EstimatedAmount != bnbRoute(t).ToAmount.String() {
+		t.Fatalf("cost = %d estimate = %s", v.CostBps, v.EstimatedAmount)
+	}
+	// Second call prices what the treasury bridges: T/(1 − l) = 100000000 × 10000/9980 = 100200400.
+	req := s.lifi.lastRequest()
+	if req.ToToken != evmNativeAddress || req.ToChainID != 56 || req.FromAmount != "100200400" || req.Slippage != 0.005 {
+		t.Fatalf("LiFi request = %+v", req)
+	}
+}
+
+// A round trip dearer than the 50 bps floor raises this route's own budget
+// to cover it, and the fee she pays rises with it: our 0.5% never shrinks.
+// l = 100 bps, g = 11 bps, plus 10 bps headroom → B′ = 121, so the user's
+// fee is F + (B′ − B) = 100 + 71 = 171 bps and the rate 1500 × 1.0171.
+func TestConvertedVenues_RaisesTheBudgetToCoverADearerRoute(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	r := bnbRoute(t)
+	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10
+	s.lifi.route = r
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress, Recipient: sponsorTestUser}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v", venues, err)
+	}
+	v := venues[0]
+	if v.MarkupBps != 121 {
+		t.Fatalf("markup = %d, want 121 (l 100 + g 11 + 10 headroom)", v.MarkupBps)
+	}
+	if v.Rate != "1525.65" || v.TokenAmountBaseUnits != "98318749" {
+		t.Fatalf("rate = %s amount = %s, want the venue repriced at a 1.71%% fee", v.Rate, v.TokenAmountBaseUnits)
+	}
+	// The treasury bridges the smaller T′: 98318749 × 10000/9900.
+	if req := s.lifi.lastRequest(); req.FromAmount != "99311867" {
+		t.Fatalf("bridge amount = %s, want 99311867", req.FromAmount)
+	}
+}
+
+// The raised fee has a ceiling per destination chain; a route that needs
+// more than that is not offered.
+func TestConvertedVenues_RefusesARouteOverItsChainsFeeCap(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	s.svc.SetConvertedFeeCaps(map[string]int{"bsc": 150}, 200)
+	r := bnbRoute(t)
+	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10 // needs a 171 bps fee
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if len(venues) != 0 {
+		t.Fatalf("a route needing a 1.71%% fee was offered under a 1.5%% bsc cap: %+v", venues)
+	}
+}
+
+// A cap of 0 — or anything past the bound — turns raising off: a dear route
+// is refused, never priced at the 2% default.
+func TestConvertedVenues_AZeroOrUnboundedCapRaisesNothing(t *testing.T) {
+	for _, limit := range []int{0, 9_999} {
+		s := priceRig(t)
+		s.svc.SetSenderFeePercent("1")
+		s.svc.SetConvertedFeeCaps(nil, limit)
+		r := bnbRoute(t)
+		r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10
+		s.lifi.route = r
+		venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+			[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+		if len(venues) != 0 {
+			t.Fatalf("cap %d: a raised route was offered: %+v", limit, venues)
+		}
+	}
+}
+
+// A route inside B but within the headroom of it is raised too, so the
+// execution-time re-check is not run against a budget it barely fits.
+// l = 45 (99.55), g = 2 ($0.0108 on $100, rounded up) -> B′ = 45 + 2 + 10 = 57.
+func TestConvertedVenues_ARouteNearTheBudgetGetsHeadroom(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	r := bnbRoute(t)
+	r.ToAmountUSD = 99.55
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress, Recipient: sponsorTestUser}})
+	if len(venues) != 1 || venues[0].MarkupBps != 57 {
+		t.Fatalf("venues = %+v, want one at B′ = 57", venues)
+	}
+}
+
+// A cost too large for an int is never cheap: it must not read as 0 bps.
+func TestCeilBps_AHugeFiniteCostIsNeverCheap(t *testing.T) {
+	if got := ceilBps(1e301); got != math.MaxInt32 {
+		t.Fatalf("ceilBps(1e301) = %d, want MaxInt32", got)
+	}
+}
+
+func TestConvertedVenues_RefusesARouteOverTheDefaultFeeCap(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSenderFeePercent("1")
+	r := bnbRoute(t)
+	r.ToAmountUSD, r.GasCostUSD = 98.0, 0.10 // l = 200, g = 11: a 271 bps fee
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if len(venues) != 0 {
+		t.Fatalf("a 2.71%% fee was offered past the 2%% default cap: %+v", venues)
+	}
+}
+
+func TestConvertedVenues_RefusesARouteWithADestinationCall(t *testing.T) {
+	s := priceRig(t)
+	r := bnbRoute(t)
+	r.Data = testBridgeCalldata(t, sponsorTestUser, 56, true)
+	s.lifi.route = r
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if len(venues) != 0 {
+		t.Fatal("a route execution would refuse must not be offered")
+	}
+}
+
+func TestConvertedVenues_StableDestinationKeepsAPromise(t *testing.T) {
+	s := priceRig(t)
+	r := bnbRoute(t)
+	r.Data = testBridgeCalldata(t, sponsorTestUser, 10, false)
+	r.ToTokenDecimals = 0 // stable decimals come from config, not LiFi
+	// USDT priced 3 bps above USDC: LiFi's minimum is T/(1−l)·(1−l)·0.9997·0.999.
+	r.ToAmount, r.ToAmountMin = big.NewInt(99_970000), big.NewInt(99_870000)
+	s.lifi.route = r
+	usdtOP := testChainRegistry().TokenAddressForChainID(10, "USDT")
+	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 10, Address: usdtOP}})
+	if len(venues) != 1 || venues[0].PromisedAmount != "99700000" || venues[0].MarkupBps != 50 {
+		t.Fatalf("venues = %+v, want promise 99700000 (T less 30 bps) and markup = B", venues)
+	}
+	if req := s.lifi.lastRequest(); req.Slippage != 0.001 {
+		t.Fatalf("stable slippage = %v, want 0.001", req.Slippage)
+	}
+}
+
+// Offer only what execution accepts: a stable route whose own minimum is under
+// the promise would be refused on every attempt, so it is not offered.
+func TestConvertedVenues_RefusesAStableRouteBelowThePromise(t *testing.T) {
+	s := priceRig(t)
+	r := bnbRoute(t)
+	r.Data = testBridgeCalldata(t, sponsorTestUser, 10, false)
+	r.ToAmount, r.ToAmountMin = big.NewInt(99_600000), big.NewInt(99_500000)
+	s.lifi.route = r
+	usdtOP := testChainRegistry().TokenAddressForChainID(10, "USDT")
+	if venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 10, Address: usdtOP}}); len(venues) != 0 {
+		t.Fatalf("venues = %+v; toAmountMin under the promise must not be offered", venues)
+	}
+}
+
+// ── a Solana destination ───────────────────────────────────────────────────
+
+// A Solana route is priced to HER SOLANA ADDRESS, never to the EVM wallet the
+// rest of the request is keyed on: nothing on Solana can be delivered to a
+// 20-byte address, so quoting one would price a route that could never run.
+func TestQuote_SolanaVenueIsPricedToHerSolanaAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(1_000_000_000), ToAmountMin: big.NewInt(990_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 9, ToTokenSymbol: "SOL",
+		Tool: "near", Data: loadLiFiFixtures(t)["near_base_solana_sol"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaNativeToken,
+		Recipient: sponsorTestUser, Destination: solRecipient,
+	}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; want one Solana venue", venues, err)
+	}
+	v := venues[0]
+	if v.RequestedChain != "solana" || v.RequestedChainID != solanaLiFiChainID || v.RequestedDestination != solRecipient {
+		t.Fatalf("venue = %+v; want a solana destination carrying her address", v)
+	}
+	// A Solana stablecoin would be just as unpromisable: the treasury holds no
+	// float there, so nothing is ever promised on this chain.
+	if v.PromisedAmount != "" {
+		t.Fatalf("promised %q on a chain with no treasury lane", v.PromisedAmount)
+	}
+	if got := s.lifi.lastRequest(); got.ToAddress != solRecipient || got.ToChainID != solanaLiFiChainID {
+		t.Fatalf("quote = %+v; want it priced to her Solana address", got)
+	}
+}
+
+// Without a Solana address there is nowhere to deliver, so there is nothing to
+// offer — a quote is never priced to a recipient we had to invent.
+func TestQuote_SolanaVenueIsNotOfferedWithoutARecipient(t *testing.T) {
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(1_000_000_000), ToAmountMin: big.NewInt(990_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 9, ToTokenSymbol: "SOL",
+		Tool: "near", Data: loadLiFiFixtures(t)["near_base_solana_sol"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaNativeToken, Recipient: sponsorTestUser,
+	}})
+	if err != nil || len(venues) != 0 {
+		t.Fatalf("venues = %+v err = %v; want none without a Solana recipient", venues, err)
+	}
+	if s.lifi.quoteCalls() != 0 {
+		t.Fatalf("LiFi was called %d times for an asset that cannot be delivered", s.lifi.quoteCalls())
+	}
+}
+
+// solanaUSDCMint is the real USDC mint on Solana — the destination this whole
+// corridor exists for, and the one the polymerCCTP capture was quoted to.
+const solanaUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+// A Solana venue is only worth offering if execution would accept it. The
+// quote-time structural check (known layout, no destination call, right chain)
+// passes calldata that startBridge then refuses every time — and by then she
+// has paid naira for it, so the order can only sit through the retry window
+// and refund. So the Solana family runs the SAME check here that execution
+// runs, against the recipient the quote is priced to.
+//
+// Both cases below are real captured LiFi calldata (Task 10 fixtures):
+//
+//   - the NEAR facet carries no token-account word, so it cannot say where an
+//     SPL delivery lands; checkLiFiDeliveryTo refuses an SPL route on it.
+//   - the polymerCCTP capture pays a specific Solana address; quoting it to
+//     anyone else is a route that pays a stranger.
+func TestQuote_SolanaVenueExecutionWouldRefuseIsNotOffered(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	const someoneElse = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+	cases := []struct {
+		name        string
+		fixture     string
+		token       string
+		destination string
+	}{
+		{
+			name:    "an SPL destination on a facet with no token-account word",
+			fixture: "near_base_solana_sol", token: solanaUSDCMint, destination: solRecipient,
+		},
+		{
+			name:    "a route that pays a different Solana address",
+			fixture: "polymer_base_solana_usdc", token: solanaUSDCMint, destination: someoneElse,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := priceRig(t)
+			s.svc.SetSolanaValidator(solana.ValidateAddress)
+			s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(100_000_000), ToAmountMin: big.NewInt(99_000_000),
+				FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 6, ToTokenSymbol: "USDC",
+				Data: loadLiFiFixtures(t)[tc.fixture].Data}
+
+			venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+				ChainID: solanaLiFiChainID, Address: tc.token,
+				Recipient: sponsorTestUser, Destination: tc.destination,
+			}})
+			if err != nil || len(venues) != 0 {
+				t.Fatalf("venues = %+v err = %v; want none — execution would refuse this route", venues, err)
+			}
+		})
+	}
+}
+
+// The other half of the same rule: an SPL delivery on a facet that DOES carry
+// the token-account word, priced to the address the calldata pays, is still
+// offered. SPL-on-Solana is the corridor this feature is for; refusing it
+// would hide it behind a silent "unsupported".
+func TestQuote_SolanaSPLVenueExecutionAcceptsIsOffered(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	s := priceRig(t)
+	s.svc.SetSolanaValidator(solana.ValidateAddress)
+	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(100_000_000), ToAmountMin: big.NewInt(99_000_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000, ToTokenDecimals: 6, ToTokenSymbol: "USDC",
+		Data: loadLiFiFixtures(t)["polymer_base_solana_usdc"].Data}
+
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{
+		ChainID: solanaLiFiChainID, Address: solanaUSDCMint,
+		Recipient: sponsorTestUser, Destination: solRecipient,
+	}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; want the SPL Solana venue offered", venues, err)
+	}
+	if v := venues[0]; v.RequestedDestination != solRecipient || v.RequestedAddress != solanaUSDCMint {
+		t.Fatalf("venue = %+v; want USDC delivered to her Solana address", v)
+	}
+}
+
+// bestSourceVenue used to scan every configured chain for whichever quoted
+// cheapest and settle through THAT one — meaning the treasury needed
+// standing gas on every chain Paycrest might ever pick, and which chain that
+// was could change from one quote to the next. One chain running dry took
+// every converted buy down with it, regardless of destination, and there was
+// no way to tell from the outside which chain was actually in play. Base is
+// the one chain both buy and sell already need funded (the sell leg is
+// always Base), so it is the only chain settlement is pinned to now — other
+// chains are consulted only when Base itself has no direct listing at all.
+func rigWithTwoSettlementChains(t *testing.T) *quoteServiceRig {
+	t.Helper()
+	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
+		"base|USDC":            buy("1500"), // worse rate for her: more naira per token
+		"bnb-smart-chain|USDC": buy("1400"), // cheaper — this is the one bestSourceVenue must NOT pick
+	}}
+	svc := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base", "bsc"})
+	lifi := &fakeLiFiQuoter{}
+	svc.SetLiFiQuoter(lifi)
+	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
+	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
+	svc.SetRoundTripBudgetBps(50)
+	return &quoteServiceRig{svc: svc, pc: pc, lifi: lifi}
+}
+
+func TestConvertedVenues_PinsSettlementToBaseEvenWhenAnotherChainIsCheaper(t *testing.T) {
+	s := rigWithTwoSettlementChains(t)
+	s.lifi.route = bnbRoute(t)
+	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v", venues, err)
+	}
+	// The settlement leg the treasury actually bridges from is whatever
+	// chain the LiFi request was priced from — Base's id, not BSC's, even
+	// though BSC quoted the cheaper rate.
+	if req := s.lifi.lastRequest(); req.FromChainID != 8453 {
+		t.Fatalf("settled from chain %d, want Base (8453) even though bsc was cheaper", req.FromChainID)
+	}
+}
+
+func TestConvertedVenues_FallsBackToAnotherChainWhenBaseHasNoDirectListing(t *testing.T) {
+	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
+		"bnb-smart-chain|USDC": buy("1400"), // no "base|USDC" at all
+	}}
+	svc := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base", "bsc"})
+	lifi := &fakeLiFiQuoter{}
+	svc.SetLiFiQuoter(lifi)
+	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
+	svc.SetChainRegistry(testChainRegistry())
+	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
+	svc.SetRoundTripBudgetBps(50)
+	lifi.route = bnbRoute(t)
+
+	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
+		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; base has nothing to quote, bsc must still fill it", venues, err)
+	}
+	if req := lifi.lastRequest(); req.FromChainID != 56 {
+		t.Fatalf("settled from chain %d, want bsc (56) since base has no direct listing at all", req.FromChainID)
 	}
 }

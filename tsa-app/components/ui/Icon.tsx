@@ -22,6 +22,7 @@ const REGISTRY = {
   wallet: { set: 'ion', glyph: 'wallet' },
   swap: { set: 'mci', glyph: 'swap-horizontal' },
   copy: { set: 'ion', glyph: 'copy-outline' },
+  share: { set: 'ion', glyph: 'share-outline' },
   check: { set: 'ion', glyph: 'checkmark' },
   checkCircle: { set: 'ion', glyph: 'checkmark-circle' },
   close: { set: 'ion', glyph: 'close' },

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"math/big"
 	"strconv"
 	"testing"
 	"time"
@@ -607,4 +608,316 @@ func TestPaycrestOrderService_CreateSell_RefusesAMismatchedIdentifier(t *testing
 	if count != 0 {
 		t.Errorf("%d order rows written; the refusal must happen before an order exists", count)
 	}
+}
+
+// ─── CreateSellForFiat: a sell that pays an exact naira amount ─────────────
+
+func payoutReq(t *testing.T, r *orderConversionRig) PaycrestSellRequest {
+	t.Helper()
+	return PaycrestSellRequest{UserID: seedVerifiedUser(t, r.db), WalletAddress: orderTestUserWallet,
+		FiatCode: "NGN", FiatAmount: "50000.00", ChainKey: "base", Token: "USDC", BankCode: "044", AccountNo: "0123456789"}
+}
+
+func TestCreateSellForFiat_PaysExactNairaToTheGivenBankAtTheConvertedFee(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	dep, err := r.svc.SellDepositFor(context.Background(), "NGN", "50000.00", "base", "USDC", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.client.lastOfframp.SenderFeePercent != "0.5" || order.FiatAmount != "50000.00" ||
+		r.client.lastOfframp.Recipient.AccountIdentifier != "0123456789" || r.client.lastOfframp.AmountToken != BaseUnitsToDecimal(dep, 6) {
+		t.Fatalf("offramp %+v order %+v dep %s", r.client.lastOfframp, order, dep)
+	}
+	// Sized at the rate less a cent of headroom, for the naira owed plus the ₦1
+	// drift tolerance, plus the fee-rounding allowance: (50001 / 1492.49) +
+	// 0.0002 = 33.5019324…, rounded UP. The payout is never under the naira
+	// promised, even when Paycrest pays at a rate that only ROUNDS to 1492.50,
+	// rounds its fee against her, and the order rate drifts by up to ₦1's worth.
+	if dep.String() != "33501933" {
+		t.Fatalf("deposit = %s, want 33501933 ((50001 / 1492.49) + 0.0002, rounded up)", dep)
+	}
+}
+
+func TestCreateSellForFiat_RefusesAShortfallBeforeCallingPaycrest(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	_, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, big.NewInt(1_000000))
+	var short *SellShortfallError
+	if !errors.As(err, &short) || !errors.Is(err, ErrSellShortfall) || short.MissingBaseUnits.Sign() <= 0 || r.client.offrampCalls != 0 {
+		t.Fatalf("err %v calls %d", err, r.client.offrampCalls)
+	}
+	if short.MissingBaseUnits.String() != "32501933" {
+		t.Fatalf("missing = %s, want deposit 33501933 - cap 1000000", short.MissingBaseUnits)
+	}
+}
+
+func TestCreateSellForFiat_CancelsAnOrderWhosePayoutCameInShort(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400" // the provider's order rate is worse than the venue it was sized at
+	req := payoutReq(t, r)
+	if _, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil); !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusCancelled {
+		t.Fatalf("order status = %q: a deposit address must never be left live for a short order", row.Status)
+	}
+}
+
+// A stated naira figure is what the row records, whatever tokens × rate says:
+// 34 USDC at 1492.50 is 50745.00, and a pay order owes the merchant 50000.00.
+func TestCreateSellForToken_HonoursAStatedFiatAmount(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	req := payoutReq(t, r)
+	order, err := r.svc.CreateSellForToken(context.Background(), req, "34", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.FiatAmount != "50000.00" {
+		t.Fatalf("fiat = %q, want the stated 50000.00", order.FiatAmount)
+	}
+}
+
+// ─── I1: the payout is judged at Paycrest's UNROUNDED rate ─────────────────
+
+// paidAtProvider is what Paycrest actually pays for the deposit the last
+// offramp asked for: the tokens at the provider's own rate, unrounded, less
+// the fee it took. The stored row rate is that rate rounded to the cent, which
+// is the number a check must NOT be the only judge of.
+func paidAtProvider(t *testing.T, r *orderConversionRig, providerRate string) *big.Rat {
+	t.Helper()
+	tokens, ok1 := new(big.Rat).SetString(r.client.lastOfframp.AmountToken)
+	rate, ok2 := new(big.Rat).SetString(providerRate)
+	fee, ok3 := new(big.Rat).SetString(r.client.lastOfframp.SenderFeePercent)
+	if !ok1 || !ok2 || !ok3 {
+		t.Fatalf("unreadable offramp %+v", r.client.lastOfframp)
+	}
+	net := new(big.Rat).Sub(big.NewRat(1, 1), new(big.Rat).Quo(fee, big.NewRat(100, 1)))
+	return new(big.Rat).Mul(tokens, new(big.Rat).Mul(rate, net))
+}
+
+// 1499.995 × 0.995 = 1492.495025: the cent-rounded rate is 1492.50, half a
+// cent ABOVE what Paycrest pays. At ₦5M that is ~₦17 the merchant never sees.
+func TestCreateSellForFiat_ALargeOrderIsSizedForTheUnroundedRate(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.pc.(*stubQuoter).rates["base|USDC"] = &PaycrestRates{
+		Buy: &PaycrestQuote{Rate: "1499.995"}, Sell: &PaycrestQuote{Rate: "1499.995"}}
+	r.client.offrampRate = "1499.995"
+	req := payoutReq(t, r)
+	req.FiatAmount = "5000000.00"
+	if _, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	owed := big.NewRat(5_000_000, 1)
+	paid := paidAtProvider(t, r, "1499.995")
+	if paid.Cmp(new(big.Rat).Sub(owed, sellPayoutTolerance)) < 0 {
+		short, _ := new(big.Rat).Sub(owed, paid).Float64()
+		t.Fatalf("Paycrest would pay ₦%.2f short of the ₦5,000,000 owed: the deposit was sized at the cent-rounded rate", short)
+	}
+}
+
+// The row's rate is rounded to the cent, so the check must assume the worst
+// half-cent: 3350.083751 USDC × 1492.50 is exactly ₦5,000,000, yet the same
+// tokens at 1492.495 pay ₦16.75 less — far outside the ₦1 tolerance.
+func TestSellPayoutCovers_AssumesTheRateWasRoundedUp(t *testing.T) {
+	row := &models.PaycrestOrderRecord{TokenAmount: "3350.083751", Rate: "1492.50"}
+	if sellPayoutCovers(row, "5000000.00") {
+		t.Fatal("a payout that is ₦16.75 short at the unrounded rate passed the check")
+	}
+}
+
+// ─── I3: a short order is taken off the table even if her request dies ─────
+
+// The request is cancelled the instant the order row is written — after
+// Paycrest has an order, before the payout check runs. The cancel and the
+// removal of the fundable deposit address must not depend on that context.
+func TestCreateSellForFiat_ARateMovedOrderIsCancelledAndUnfundableEvenIfTheRequestDies(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	req := payoutReq(t, r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.db.Callback().Create().After("gorm:create").Register("test:cancel_request", func(*gorm.DB) { cancel() }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.CreateSellForFiat(ctx, req, true, nil); !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v, want ErrSellRateMoved", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusCancelled {
+		t.Fatalf("status = %q: a dead request left a short order fundable", row.Status)
+	}
+	if row.DepositAddress != "" {
+		t.Fatalf("deposit address %q still on a cancelled short order", row.DepositAddress)
+	}
+}
+
+// A pay payment's order is marked at creation, so the customer's routes can
+// mask the merchant's bank on it for good; an ordinary sale's is not.
+func TestCreateSellForFiat_RecordsThePaymentAnOrderIsAnAttemptOf(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	pid := uuid.New()
+	req := payoutReq(t, r)
+	req.PayPaymentID = &pid
+	order, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.First(&row, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.PayPaymentID == nil || *row.PayPaymentID != pid {
+		t.Fatalf("PayPaymentID = %v", row.PayPaymentID)
+	}
+	plain := payoutReq(t, r)
+	if o2, err := r.svc.CreateSell(context.Background(), plain); err != nil || o2.PayPaymentID != nil {
+		t.Fatalf("an ordinary sell is marked as a payment's: %+v %v", o2, err)
+	}
+}
+
+// ─── a sale that cannot prove nothing fundable was left behind ─────────────
+
+// failOrderWrites makes the given kind of write on paycrest_order_records fail.
+func failOrderWrites(t *testing.T, db *gorm.DB, kind string) {
+	t.Helper()
+	fail := func(tx *gorm.DB) {
+		if tx.Statement.Table == "paycrest_order_records" {
+			tx.AddError(errors.New("orders table is unwritable"))
+		}
+	}
+	var err error
+	switch kind {
+	case "update":
+		err = db.Callback().Update().Before("gorm:update").Register("test:fail_order_update", fail)
+	case "create":
+		err = db.Callback().Create().Before("gorm:create").Register("test:fail_order_create", fail)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The short order could not be cancelled, so it is still awaiting a deposit at
+// an address she can see: the caller must be told it may exist, not just that
+// the rate moved — a payment paired with it must not be handed to another payer.
+func TestCreateSellForFiat_AShortOrderThatCouldNotBeCancelledMayStillExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	req := payoutReq(t, r)
+	failOrderWrites(t, r.db, "update")
+	_, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if !errors.Is(err, ErrSellAttemptMayExist) {
+		t.Fatalf("err = %v, want ErrSellAttemptMayExist", err)
+	}
+	// The ordinary sell routes keep answering rate_moved for it.
+	if !errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v: the ordinary routes' rate_moved mapping is lost", err)
+	}
+	var row models.PaycrestOrderRecord
+	if err := r.db.Where("user_id = ?", req.UserID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.PaycrestStatusAwaitingDeposit || row.DepositAddress == "" {
+		t.Fatalf("row %+v: the test means an order left open", row)
+	}
+}
+
+func TestCreateSellForFiat_AnOrderThatCouldNotBeRecordedMayStillExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	req := payoutReq(t, r)
+	failOrderWrites(t, r.db, "create")
+	_, err := r.svc.CreateSellForFiat(context.Background(), req, true, nil)
+	if !errors.Is(err, ErrSellAttemptMayExist) || errors.Is(err, ErrSellRateMoved) {
+		t.Fatalf("err = %v, want ErrSellAttemptMayExist alone", err)
+	}
+	if r.client.offrampCalls != 1 {
+		t.Fatalf("the test means an order Paycrest opened: %d calls", r.client.offrampCalls)
+	}
+}
+
+// A cancelled short order is the ordinary refusal, and stays a plain rate-moved.
+func TestCreateSellForFiat_ACancelledShortOrderIsNotAnAttemptThatMayExist(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.client.offrampRate = "1400"
+	_, err := r.svc.CreateSellForFiat(context.Background(), payoutReq(t, r), true, nil)
+	if !errors.Is(err, ErrSellRateMoved) || errors.Is(err, ErrSellAttemptMayExist) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// ─── S3: the merchant is paid in full, at the edge ─────────────────────────
+
+// 100 USDC at 1500.00 is judged on 99.9998 USDC (the worst fee rounding) at
+// 1499.995 (the worst rate that rounds to 1500.00): ₦149,999.20. That covers
+// owing exactly ₦149,999.20 and not one kobo more — no tolerance comes out of
+// the merchant's naira.
+func TestSellPayoutCovers_TheWholeAmountOwedAtTheWorstRounding(t *testing.T) {
+	row := &models.PaycrestOrderRecord{TokenAmount: "100", Rate: "1500.00"}
+	if !sellPayoutCovers(row, "149999.20") {
+		t.Fatal("a payout that covers the amount exactly was refused")
+	}
+	if sellPayoutCovers(row, "149999.21") {
+		t.Fatal("a payout one kobo short passed")
+	}
+}
+
+// Whatever the amount, a deposit sized by SellDepositFor, opened at a rate up to
+// ₦1's worth worse than the venue it was sized at, still pays the merchant the
+// whole amount at the worst rounding.
+func TestSellDepositFor_CoversTheAmountThroughDriftAndRounding(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	for _, owed := range []string{"1500.00", "50000.00", "149999.00", "5000000.00"} {
+		dep, err := r.svc.SellDepositFor(context.Background(), "NGN", owed, "base", "USDC", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens := new(big.Rat).SetFrac(dep, pow10(6))
+		// The venue is 1492.50; drift the order rate down by ₦1 over the deposit.
+		drift := new(big.Rat).Quo(big.NewRat(1, 1), tokens)
+		rate := new(big.Rat).Sub(big.NewRat(149250, 100), drift)
+		row := &models.PaycrestOrderRecord{TokenAmount: tokens.FloatString(6), Rate: rate.FloatString(2)}
+		if !sellPayoutCovers(row, owed) {
+			t.Fatalf("owed %s: deposit %s at %s does not cover it", owed, dep, row.Rate)
+		}
+	}
+}
+
+// Optional finding from the whole-branch review: the margin between
+// sellRateHeadroom and sellRateRounding had no runtime assertion, so a later
+// change to either could silently break the merchant-never-short proof
+// SellDepositFor's doc comment derives from it. assertSellRateHeadroomSound
+// (called from init) is that assertion; prove it actually catches a
+// violation rather than only documenting one.
+func TestAssertSellRateHeadroomSound(t *testing.T) {
+	// The real package values must themselves pass — this is what init runs at boot.
+	assertSellRateHeadroomSound(sellRateHeadroom, sellRateRounding)
+
+	for name, headroom := range map[string]*big.Rat{
+		"equal to the rounding it must exceed": new(big.Rat).Set(sellRateRounding),
+		"below the rounding":                   big.NewRat(1, 1000),
+		"zero":                                 new(big.Rat),
+		"negative":                             big.NewRat(-1, 100),
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("want a panic: the merchant-never-short proof no longer holds at this margin")
+				}
+			}()
+			assertSellRateHeadroomSound(headroom, sellRateRounding)
+		})
+	}
+
+	// A margin comfortably above the rounding is fine, whatever the rounding is.
+	assertSellRateHeadroomSound(big.NewRat(1, 50), sellRateRounding)
 }

@@ -75,3 +75,19 @@ func TestGasFloatMonitor_CarriesItsMetricPrefix(t *testing.T) {
 		t.Fatalf("no treasury alert logged: %s", out)
 	}
 }
+
+func TestGasFloatMonitor_AlertsWhenKeptUSDCNeedsSweeping(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	// FloorWei/BalanceWei left nil on purpose: the kept-USDC check must run
+	// before Run's "no native reading, skip" continue.
+	reader := &fakeFloats{enabled: true, floats: []services.SponsorFloat{{Chain: "base", TokenUSD: 600}}}
+	m := NewGasFloatMonitorNamed("ramp_treasury", reader, time.Minute).WithKeptUSDCAlert(500)
+	if err := m.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ramp_treasury_kept_usdc_high_total=1 chain=base usd=600") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}

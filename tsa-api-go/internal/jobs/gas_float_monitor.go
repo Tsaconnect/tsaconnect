@@ -23,6 +23,10 @@ type GasFloatMonitor struct {
 	sponsor  sponsorFloatReader
 	interval time.Duration
 	prefix   string
+	// keptUSDCAlert is the USD threshold above which a float's kept USDC
+	// (SponsorFloat.TokenUSD) needs sweeping. Zero (the default) means off:
+	// only the treasury registration turns this on, via WithKeptUSDCAlert.
+	keptUSDCAlert float64
 }
 
 // NewGasFloatMonitor watches the gas sponsor float (metric prefix "ramp_sponsor").
@@ -40,6 +44,14 @@ func NewGasFloatMonitorNamed(prefix string, sponsor sponsorFloatReader, interval
 	return &GasFloatMonitor{sponsor: sponsor, interval: interval, prefix: prefix}
 }
 
+// WithKeptUSDCAlert turns on the kept-USDC check at the given USD threshold
+// and returns the monitor, for chaining onto the constructor. Sweeping stays
+// manual — this only alerts.
+func (w *GasFloatMonitor) WithKeptUSDCAlert(usd float64) *GasFloatMonitor {
+	w.keptUSDCAlert = usd
+	return w
+}
+
 func (w *GasFloatMonitor) Name() string            { return "gas-float-monitor" }
 func (w *GasFloatMonitor) Interval() time.Duration { return w.interval }
 
@@ -49,6 +61,12 @@ func (w *GasFloatMonitor) Run(ctx context.Context) error {
 	}
 	floats, err := w.sponsor.FloatBalances(ctx)
 	for _, f := range floats {
+		// Runs before the nil-native-reading continue below: a float that
+		// only carries a token balance (no FloorWei/BalanceWei yet read)
+		// must still get its kept-USDC check.
+		if w.keptUSDCAlert > 0 && f.TokenUSD > w.keptUSDCAlert {
+			log.Printf("[%s] ALERT %s_kept_usdc_high_total=1 chain=%s usd=%.0f", w.prefix, w.prefix, f.Chain, f.TokenUSD)
+		}
 		if f.FloorWei == nil || f.BalanceWei == nil {
 			continue
 		}

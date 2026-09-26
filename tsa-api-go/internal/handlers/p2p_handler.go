@@ -427,12 +427,11 @@ func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
 		})
 		return
 	}
-	bankCode := strings.TrimSpace(c.Query("bankCode"))
-	accountNumber := strings.TrimSpace(c.Query("accountNumber"))
-	if bankCode == "" || len(accountNumber) != 10 {
+	bankCode, accountNumber, ok := validBankLookup(c.Query("bankCode"), c.Query("accountNumber"))
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"message": "bankCode and a 10-digit accountNumber are required",
+			"message": bankLookupInvalidMessage,
 		})
 		return
 	}
@@ -706,7 +705,7 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 	// counterparty behind every ad to keep the marketplace clean of spam /
 	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
 	// stay open to all authenticated users.
-	if user.Role != models.RoleMerchant && user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Merchant account required to publish P2P ads.",

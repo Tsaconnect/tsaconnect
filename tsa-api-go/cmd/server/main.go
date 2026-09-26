@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -113,6 +114,29 @@ func isNUBAN(s string) bool {
 		}
 	}
 	return true
+}
+
+// newRouter is the engine every route hangs off. Not gin.Default: gin's Logger
+// writes the raw query string (the app's /ws/notifications?token=<JWT>) and its
+// Recovery dumps every request header, the web session Cookie included, on a
+// panic. RequestLogger is outermost so a recovered panic is still logged as its
+// 500.
+func newRouter() *gin.Engine {
+	router := gin.New()
+	router.Use(middleware.RequestLogger(), middleware.Recover())
+	return router
+}
+
+// netlifyProxyAlert is the boot line for a web app whose Netlify proxy the API
+// cannot verify, or "" when there is none. Without the secret every web visitor
+// shares Netlify's address for per-IP limits — worth an alert in every log sink,
+// but never a refusal to boot: the web app still works.
+func netlifyProxyAlert(cfg *config.Config) string {
+	if !cfg.WebAuthEnabled() || cfg.NetlifyProxySecret != "" {
+		return ""
+	}
+	return "[web] ALERT netlify_proxy_secret_unset=1 web_app_origin=" + cfg.WebAppOrigin +
+		": web visitors share the Netlify proxy's address for per-IP rate limits; set NETLIFY_PROXY_SECRET to the site's API_SIGNATURE_TOKEN"
 }
 
 func main() {
@@ -306,6 +330,8 @@ func main() {
 
 	// Initialize services
 	priceService := services.NewPriceService()
+	priceService.UseAPIKey(cfg.CoinGeckoAPIKey, cfg.CoinGeckoPro)
+	log.Printf("[price] CoinGecko access: %s", priceService.Plan())
 	blockchainService := services.NewBlockchainService(cfg)
 
 	// Initialize escrow service (sonic chain client). All Sonic-side services
@@ -509,6 +535,15 @@ func main() {
 	// Database-only, so it runs wherever the API does.
 	scheduler.Register(jobs.NewBookingRequestExpiry(
 		services.NewBookingRequestService(config.DB), time.Hour))
+
+	// Idempotency-Key cache: delete replayable responses past their 24h window.
+	// They hold whatever the endpoint answered (a sell intent's bank details
+	// among them). Database-only tidy-up, not a money path, so not alert-wired.
+	scheduler.Register(jobs.NewRequestIdempotencyPruner(config.DB, time.Hour))
+
+	// Refresh tokens: delete revoked or expired ones past a 7-day grace. Web
+	// sessions rotate hourly, so without this the table only ever grows.
+	scheduler.Register(jobs.NewRefreshTokenPruner(config.DB, 24*time.Hour), jobs.AlertOnFailureStreak())
 
 	// Bill orders: drive lost vends / deferred settles to terminal states, and
 	// watch the prepaid ClubKonnect float (alert-only).
@@ -1438,8 +1473,7 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Create router with default middleware (logger and recovery)
-	router := gin.Default()
+	router := newRouter()
 
 	// nginx is the only proxy in front of this service and it always overwrites
 	// X-Forwarded-For (see deploy/nginx-tsa-api-site.conf). Without this, Gin trusts
@@ -1452,7 +1486,6 @@ func main() {
 	// Apply global middleware
 	router.Use(middleware.CORS(cfg))
 	router.Use(middleware.SecurityHeaders())
-	router.Use(middleware.RequestLogger())
 
 	// Override health check with DB status
 	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
@@ -1469,6 +1502,15 @@ func main() {
 	// buildRampConversion actually runs) so the dispute service and handler,
 	// wired further down, can pick it up whether or not it ended up nil.
 	var conversionOrch *services.ConversionOrchestrator
+	// Likewise hoisted for TSA Pay (built after this block): a naira payment
+	// opens its payout through the same order service, sell intents and quoter
+	// the ramp sell uses. Each stays nil when its own gate is off.
+	var (
+		payOrders  *services.PaycrestOrderService
+		paySellers *services.SellIntentService
+		payQuoter  *services.RampSellQuoter
+		payRates   *services.PaycrestQuoteService
+	)
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1477,6 +1519,19 @@ func main() {
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
 		if paycrestOrders != nil {
+			paycrestOrders.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
+			// The cap on a dear route's raised fee — shared by converted buys
+			// and swapped sells, which both price through paycrestQuotes.
+			paycrestQuotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
+			if pct, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("PAYCREST_SENDER_FEE_PERCENT")), 64); err == nil &&
+				cfg.RampConvertedFeeMaxBps > 0 && float64(cfg.RampConvertedFeeMaxBps) < pct*100 {
+				log.Printf("[paycrest] RAMP_CONVERTED_FEE_MAX_BPS=%d is below the %s%% sender fee: no dear route will ever be offered",
+					cfg.RampConvertedFeeMaxBps, os.Getenv("PAYCREST_SENDER_FEE_PERCENT"))
+			}
+			if !paycrestOrders.ConversionPriced() {
+				log.Printf("[paycrest] conversion unpriced: RAMP_ROUND_TRIP_BUDGET_BPS=%d must be > 0 and below PAYCREST_SENDER_FEE_PERCENT (in bps); converted buys and swapped sells stay off",
+					cfg.RampRoundTripBudgetBps)
+			}
 			// Server-side kill switch: an operator can now stop the rail for a
 			// currency by flipping its ramp_provider column, not just change
 			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
@@ -1491,9 +1546,26 @@ func main() {
 			itHandler.SetRampLegs(paycrestQuotes)
 		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		payOrders = paycrestOrders
+		payRates = paycrestQuotes
 		if rampSponsor := buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
 			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
 			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
+		}
+		// Swapped sells: her token → LiFi → USDC on Base in HER wallet → the
+		// offramp. No treasury key is involved (nothing passes through us),
+		// so this turns on independently of converted buys — but it is still
+		// priced out of the same budget B, so an unpriced conversion leaves
+		// it off rather than quoting a sell at a loss.
+		if sellQuoter := buildRampSellQuoter(cfg, blockchainService, paycrestOrders, paycrestQuotes); sellQuoter != nil {
+			paycrestHandler = paycrestHandler.WithSellQuoter(sellQuoter)
+			payQuoter = sellQuoter
+			// The sale itself: the same quote, stored and then held to, with
+			// a Base receipt as the only authority on what landed.
+			if sellIntents := buildSellIntentService(sellQuoter, cfg, blockchainService, paycrestOrders, feeDistributionService); sellIntents != nil {
+				paycrestHandler = paycrestHandler.WithSellIntents(sellIntents)
+				paySellers = sellIntents
+			}
 		}
 		// Converted buys: Paycrest delivers into our own treasury instead of
 		// the user's wallet, then the treasury bridges it via LiFi. Dormant
@@ -1501,8 +1573,8 @@ func main() {
 		// nil-orchestrator gate itself lives in registerRampConversionWorkers
 		// (and is unit-tested there), not inlined here.
 		var treasury *services.Treasury
-		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, paycrestOrders, paycrestQuotes)
-		registerRampConversionWorkers(scheduler, treasury, conversionOrch)
+		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
+		registerRampConversionWorkers(scheduler, treasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
@@ -1523,6 +1595,30 @@ func main() {
 	} else {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
 	}
+
+	// TSA Pay — dormant by default (see buildTSAPay's own doc comment for the
+	// exact conditions). Built after the Paycrest block above: a naira payment
+	// opens its payout through that block's order service, sell intents and
+	// quoter, and settlement verification needs bankDirectory and
+	// blockchainService.
+	// mrh may have just been reassigned above (corporate PM onboarding), so
+	// PayMerchants is wired onto whichever handler instance mrh now holds.
+	// A mailer that has no credentials "sends" by skipping: TSA Pay gets one only
+	// when it can really deliver an owner's payout-change code.
+	var payCodeMailer *services.EmailService
+	if services.MailerConfigured(cfg.MailjetAPIKey, cfg.MailjetSecretKey) {
+		payCodeMailer = emailService
+	}
+	// The web app's sign-in codes use the same really-delivering mailer. A nil
+	// *EmailService must not become a non-nil interface, so assign only when set.
+	if payCodeMailer != nil {
+		h.WebCodeMailer = payCodeMailer
+	}
+	payHandler := buildTSAPay(cfg, config.DB, bankDirectory, blockchainService, scheduler, payOrders, paySellers, payQuoter, payRates, eventBus, payCodeMailer)
+	if ms := payHandler.MerchantService(); ms != nil {
+		mrh.PayMerchants = ms
+	}
+	mrh.WebAppOrigin = cfg.WebAppOrigin
 
 	// One dispute queue across every order type that cannot resolve itself.
 	// Subjects are registered per stack rather than unconditionally: a dormant
@@ -1548,7 +1644,10 @@ func main() {
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler)
+	if alert := netlifyProxyAlert(cfg); alert != "" {
+		log.Print(alert)
+	}
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

@@ -8,14 +8,17 @@
 // Rendering "send exactly X to 0x…" at that point is not merely redundant: the
 // money has left, and the screen is telling the user to send it again.
 //
-// Four states, and the difference between the middle two is only what we can
-// prove:
+// Five states, and the difference between the middle three is only what we
+// can prove:
 //
-//   address   nothing sent yet — the user still has to move the money
-//   progress  we sent it, and (usually) have the hash to show for it
-//   claimed   the user says it is sent, but this screen cannot see the hash —
-//             a restart lost it, or they sent from another wallet entirely
-//   hidden    the window closed, or the order moved past waiting on the user
+//   address      nothing sent yet — the user still has to move the money
+//   progress     we sent it, and (usually) have the hash to show for it
+//   unconfirmed  this phone may have sent it but has no hash to show (its hold
+//                is active, or the send ended with an unknown outcome) — never
+//                asked for again, and no address to send it to twice
+//   claimed      the user says it is sent, but this screen cannot see the hash —
+//                a restart lost it, or they sent from another wallet entirely
+//   hidden       the window closed, or the order moved past waiting on the user
 //
 // `claimed` keeps the address reachable behind a disclosure rather than
 // dropping it, because "I've sent it" is a button someone can press before
@@ -36,16 +39,23 @@ export interface DepositViewInput {
   sentTxHash?: string;
   /** Server-side record that the user asserted they sent it. */
   paymentClaimedAt?: string;
+  /**
+   * This phone may have sent it, with no hash to show: its hold is active
+   * (a lost answer, a kill after the broadcast, a failed claim) or the send
+   * that brought her here ended with an unknown outcome.
+   */
+  mayBeOut?: boolean;
 }
 
 export type DepositCardState =
   | { kind: 'address' }
   | { kind: 'progress'; txHash?: string }
+  | { kind: 'unconfirmed' }
   | { kind: 'claimed' }
   | { kind: 'hidden' };
 
 export function depositCardState(input: DepositViewInput): DepositCardState {
-  const { direction, status, expired, sending, sentTxHash, paymentClaimedAt } = input;
+  const { direction, status, expired, sending, sentTxHash, paymentClaimedAt, mayBeOut } = input;
 
   // The buy leg pays into a bank account; it has no deposit address at all.
   if (direction !== 'sell') return { kind: 'hidden' };
@@ -56,6 +66,9 @@ export function depositCardState(input: DepositViewInput): DepositCardState {
 
   if (sentTxHash) return { kind: 'progress', txHash: sentTxHash };
   if (sending) return { kind: 'progress' };
+  // Ahead of `claimed`: that card keeps the address one tap away, and money
+  // that may have left THIS phone must not be offered a second destination.
+  if (mayBeOut) return { kind: 'unconfirmed' };
   if (paymentClaimedAt) return { kind: 'claimed' };
 
   return { kind: 'address' };

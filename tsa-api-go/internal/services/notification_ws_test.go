@@ -164,3 +164,37 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 		})
 	}
 }
+
+// A muted user still gets every channel for a payout, key, webhook or webhook
+// secret change: muting needs only a session, so an attacker could otherwise
+// silence the one alert that shows them.
+func TestDeliveryChannels_APayoutChangeCannotBeMuted(t *testing.T) {
+	for _, kind := range []string{events.SecurityPaySettlementChanged, events.SecurityPayKeyRolled,
+		events.SecurityPayEndpointsChanged, events.SecurityPayWebhookSecret} {
+		for _, mute := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
+			if live, email := deliveryChannels(kind, mute[0], mute[1]); !live || !email {
+				t.Fatalf("%s mute %v: live=%v email=%v", kind, mute, live, email)
+			}
+		}
+	}
+	// Everything else still honours the user's settings.
+	if live, email := deliveryChannels(events.OrderShipped, true, false); live || email {
+		t.Fatalf("muted order event: live=%v email=%v", live, email)
+	}
+	if live, email := deliveryChannels(events.OrderShipped, false, true); !live || email {
+		t.Fatalf("email-muted order event: live=%v email=%v", live, email)
+	}
+}
+
+// The live switch is news to the owner, not an alarm: emailed and pushed, and
+// muted like any other informational notice.
+func TestNotificationMaps_TheLiveSwitchIsEmailedAndPushedButMutable(t *testing.T) {
+	for _, kind := range []string{events.PayLiveEnabled, events.PayLiveDisabled} {
+		if !emailEvents[kind] || !pushWorthy(kind) {
+			t.Errorf("%s: email=%v push=%v, want both", kind, emailEvents[kind], pushWorthy(kind))
+		}
+		if live, email := deliveryChannels(kind, true, false); live || email {
+			t.Errorf("%s ignored a mute", kind)
+		}
+	}
+}

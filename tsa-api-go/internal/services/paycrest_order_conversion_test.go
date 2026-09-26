@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -41,19 +42,46 @@ type fakePaycrestConversionClient struct {
 	remoteStatus string // GetOrder's Status
 	amountPaid   string // GetOrder's AmountPaid
 	getOrderErr  error
+
+	// The offramp side, for the swapped sell: how many orders were opened and
+	// what the last one asked for. A test that asserts "no Paycrest order was
+	// opened" is asserting on offrampCalls, so it has to be counted even on
+	// the paths that never reach it.
+	offrampCalls int
+	lastOfframp  PaycrestOfframpRequest
+	offrampErr   error
+	// offrampRate is the provider's own rate on the order it answers with;
+	// empty is the book's 1500, which the F − B fee then prices at 1492.50.
+	offrampRate string
+	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
+	offrampSenderFee string
+	// offrampErrFirst fails only the FIRST CreateOfframpOrder, for a retry.
+	offrampErrFirst error
+	// offrampEntered/offrampGate pause the FIRST CreateOfframpOrder
+	// mid-request when set, so a test can act while one caller is inside
+	// Paycrest. Later calls pass straight through, so a second caller that
+	// wrongly reaches Paycrest fails the test instead of deadlocking it.
+	offrampEntered chan struct{}
+	offrampGate    chan struct{}
 }
 
 // capturedOnramp is a smaller, test-only view of PaycrestOnrampRequest named
 // for what the assertion cares about (WalletAddress), not the wire field
 // (RecipientAddress) — the two are the same delivery target either way.
 type capturedOnramp struct {
-	WalletAddress string
-	Token         string
-	Network       string
+	WalletAddress    string
+	Token            string
+	Network          string
+	SenderFeePercent string
 }
 
 func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req PaycrestOnrampRequest) (*PaycrestOrder, error) {
-	f.lastCreate = capturedOnramp{WalletAddress: req.RecipientAddress, Token: req.Token, Network: req.Network}
+	f.lastCreate = capturedOnramp{
+		WalletAddress:    req.RecipientAddress,
+		Token:            req.Token,
+		Network:          req.Network,
+		SenderFeePercent: req.SenderFeePercent,
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -62,6 +90,7 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 	}
 	return &PaycrestOrder{
 		ID: "pc-conv-" + req.Reference, Status: PaycrestStatusPending, Rate: "1500", Amount: "100",
+		SenderFeePercent: req.SenderFeePercent,
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution: "Fake Bank", AccountIdentifier: "0000000000", AccountName: "Fake",
 			AmountToTransfer: req.AmountNGN,
@@ -69,8 +98,31 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 	}, nil
 }
 
-func (f *fakePaycrestConversionClient) CreateOfframpOrder(context.Context, PaycrestOfframpRequest) (*PaycrestOrder, error) {
-	panic("CreateOfframpOrder not used by the conversion buy tests")
+func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error) {
+	f.offrampCalls++
+	f.lastOfframp = req
+	if f.offrampEntered != nil && f.offrampCalls == 1 {
+		f.offrampEntered <- struct{}{}
+		<-f.offrampGate
+	}
+	if f.offrampErr != nil {
+		return nil, f.offrampErr
+	}
+	if f.offrampErrFirst != nil && f.offrampCalls == 1 {
+		return nil, f.offrampErrFirst
+	}
+	rate := f.offrampRate
+	if rate == "" {
+		rate = "1500"
+	}
+	return &PaycrestOrder{
+		ID: "pc-sell-" + req.Reference, Status: PaycrestStatusPending,
+		Rate: rate, Amount: req.AmountToken,
+		SenderFeePercent: req.SenderFeePercent, SenderFee: f.offrampSenderFee,
+		ProviderAccount: &PaycrestProviderAccount{
+			Institution: "Fake Bank", ReceiveAddress: "0x00000000000000000000000000000000000dep05",
+		},
+	}, nil
 }
 
 func (f *fakePaycrestConversionClient) GetOrder(_ context.Context, id string) (*PaycrestOrder, error) {
@@ -98,6 +150,7 @@ type orderConversionRig struct {
 	svc    *PaycrestOrderService
 	client *fakePaycrestConversionClient
 	lifi   *fakeLiFiQuoter
+	quotes *PaycrestQuoteService
 }
 
 func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
@@ -108,12 +161,19 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	}
 	createTestUsersTable(t, db)
 
+	// Both sides of base/USDC: a converted buy settles into it, and a swapped
+	// sell offramps out of it.
 	pc := &stubQuoter{market: 1500, rates: map[string]*PaycrestRates{
-		"base|USDC": buy("1500"),
+		"base|USDC": {Buy: &PaycrestQuote{Rate: "1500"}, Sell: &PaycrestQuote{Rate: "1500"}},
 	}}
 	quotes := NewPaycrestQuoteService(pc, []string{"USDC"}, []string{"base"})
 	lifi := &fakeLiFiQuoter{route: &LiFiRoute{
 		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), ETASeconds: 30, Tool: "across",
+		// Priced in USD and executable: without a cost the venue pricer
+		// cannot size the bridge, and without decodable calldata delivering
+		// on the requested chain no venue is offered at all.
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000,
+		Data: testBridgeCalldata(t, orderTestUserWallet, 10, false),
 	}}
 	quotes.SetLiFiQuoter(lifi)
 	quotes.SetTreasuryAddress("0xTreasury")
@@ -125,19 +185,50 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	if svc == nil {
 		t.Fatal("NewPaycrestOrderService returned nil")
 	}
+	// A converted order needs an explicit F to split into F − B — default it
+	// here (config's own default B=50bps against a plausible F=1%) so tests
+	// that only care about conversion routing don't each have to set it; a
+	// test that cares about the split itself overrides these directly.
+	svc.senderFeePercent = "1"
+	svc.SetRoundTripBudgetBps(50)
 	svc.dir = NewPaycrestDirectory(
 		&stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}},
 		&stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}},
 	)
 
-	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi}
+	return &orderConversionRig{t: t, db: db, svc: svc, client: client, lifi: lifi, quotes: quotes}
 }
+
+// seedVerifiedUserModel is seedVerifiedUser for the paths that need the whole
+// user, not just the id — a sell intent is opened FOR a user and delivers to
+// her own wallet.
+//
+// The wallet is overridden to orderTestUserWallet: seedVerifiedUser writes the
+// 0x…dEaD burn address, which is also what a "delivered to someone else"
+// fixture uses, and a mismatch test that accidentally names the owner's own
+// wallet proves nothing.
+func seedVerifiedUserModel(t *testing.T, db *gorm.DB) *models.User {
+	t.Helper()
+	id := seedVerifiedUser(t, db)
+	if err := db.Exec(`UPDATE users SET wallet_address = ? WHERE id = ?`, orderTestUserWallet, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	var u models.User
+	if err := db.First(&u, "id = ?", id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &u
+}
+
+// orderTestUserWallet is the buyer's own wallet: a real hex address, because
+// a converted route is now priced to the address it will deliver to.
+const orderTestUserWallet = "0x00000000000000000000000000000000000a11ce"
 
 // buyRequest fills in a valid refund destination on top of the caller's
 // fields, so each test only has to state what it is actually varying.
 func (r *orderConversionRig) buyRequest(userID uuid.UUID, chainKey, token, requestedChain, requestedToken string) PaycrestBuyRequest {
 	return PaycrestBuyRequest{
-		UserID: userID, WalletAddress: "0xUser", FiatCode: "NGN", FiatAmount: "150000",
+		UserID: userID, WalletAddress: orderTestUserWallet, FiatCode: "NGN", FiatAmount: "150000",
 		ChainKey: chainKey, Token: token,
 		RequestedChain: requestedChain, RequestedToken: requestedToken,
 		RefundBankCode: "044", RefundAccount: "0123456789", RefundAccountName: "Test User",
@@ -195,7 +286,7 @@ func TestCreateBuy_ConvertedOrderDeliversToTheTreasuryAndRecordsThePromise(t *te
 	}
 	// The user's own wallet is still recorded — it is where the money ends
 	// up, even though Paycrest itself never sees that address.
-	if row.WalletAddress != "0xUser" {
+	if row.WalletAddress != orderTestUserWallet {
 		t.Fatalf("row.WalletAddress = %s, want the user's own wallet recorded regardless of custody", row.WalletAddress)
 	}
 }
@@ -208,7 +299,7 @@ func TestCreateBuy_DirectOrderIsUnchangedWhenConversionIsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.client.lastCreate.WalletAddress != "0xUser" || row.RouteKind == models.RouteKindConverted {
+	if s.client.lastCreate.WalletAddress != orderTestUserWallet || row.RouteKind == models.RouteKindConverted {
 		t.Fatalf("a direct order must still deliver to the user: %+v", row)
 	}
 	if row.Holder != "" {
@@ -315,5 +406,195 @@ func TestSync_ConvertedBuyOnceTreasuryHoldsFundsDoesNotOverwriteStatus(t *testin
 	}
 	if out.Status != models.PaycrestStatusRefunding {
 		t.Fatalf("status = %s, want refunding untouched; Sync must not overwrite a converted order once holder != paycrest", out.Status)
+	}
+}
+
+// ── Part 2: buying an arbitrary token, and recording what she is owed ───────
+
+func TestCreateBuy_StoresTheRequestedAssetAndWhatSheIsOwed(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if row.RequestedChain != "bsc" || row.RequestedChainID != 56 || row.RequestedTokenAddress != evmNativeAddress ||
+		row.RequestedTokenDecimals != 18 || row.DestinationAddress != req.WalletAddress {
+		t.Fatalf("row = %+v", row)
+	}
+	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
+	if want := QuotedFromOrder(orderAmount, 100, 50).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount at F−B, restated at F)", row.QuotedAmount, want)
+	}
+	if row.EstimatedAmount == "" || row.PromisedAmount != "" {
+		t.Fatalf("estimate/promise = %q/%q", row.EstimatedAmount, row.PromisedAmount)
+	}
+}
+
+// A route dearer than the floor raises the user's fee, not ours: Paycrest is
+// still sent F − B, and what she is owed is restated at F − B + B′ using the
+// order's own budget B′ (l 100 + g 0 + 10 headroom = 110).
+func TestCreateBuy_ADearerRouteOwesAgainstItsOwnBudget(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.quotes.SetSenderFeePercent("1")
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	r.lifi.route.ToAmountUSD = 99.0
+	// What Paycrest really answers for ₦150,000 sent at 0.5%: the grossed-down
+	// ₦149,253.73 at 1500, so the owed amount can be held to the quote.
+	r.client.order = &PaycrestOrder{ID: "pc-conv-dear", Status: PaycrestStatusPending, Rate: "1500",
+		Amount: "99.502486", SenderFeePercent: "0.5", ProviderAccount: &PaycrestProviderAccount{
+			Institution: "Fake Bank", AccountIdentifier: "0000000000", AccountName: "Fake", AmountToTransfer: "150000"}}
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if r.client.lastCreate.SenderFeePercent != "0.5" || row.MarkupBps != 110 {
+		t.Fatalf("fee sent = %q markup = %d, want 0.5 and 110", r.client.lastCreate.SenderFeePercent, row.MarkupBps)
+	}
+	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
+	if want := QuotedFromOrder(orderAmount, 160, 110).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount at 0.5%%, restated at 1.6%%)", row.QuotedAmount, want)
+	}
+	// And what she is owed is what the quote showed her, to within rounding.
+	venues, _ := r.quotes.ConvertedVenues(context.Background(), "buy", "NGN", req.FiatAmount, []RequestedAsset{{
+		ChainID: 56, Address: evmNativeAddress, Recipient: req.WalletAddress}})
+	if len(venues) != 1 {
+		t.Fatalf("venues = %+v", venues)
+	}
+	quoted, _ := new(big.Int).SetString(venues[0].TokenAmountBaseUnits, 10)
+	owed, _ := new(big.Int).SetString(row.QuotedAmount, 10)
+	if diff := new(big.Int).Sub(quoted, owed); diff.CmpAbs(big.NewInt(5)) > 0 {
+		t.Fatalf("owed %s, quoted %s: the order must owe what the quote showed", owed, quoted)
+	}
+}
+
+// She accepted a quote at one fee; if the route has since got dearer by more
+// than the jitter tolerance, the order is refused rather than opened at a
+// rate she never saw. The route now needs B′ = 110.
+func TestCreateBuy_RefusesAConvertedFeeThatRosePastTheQuote(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
+	r.lifi.route.ToTokenDecimals = 18
+	r.lifi.route.ToAmountUSD = 99.0
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "BNB")
+	req.RequestedChainID, req.RequestedTokenAddress = 56, evmNativeAddress
+	req.QuotedMarkupBps = 50
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrConversionPriceMoved) {
+		t.Fatalf("err = %v, want ErrConversionPriceMoved (quoted 50, now 110)", err)
+	}
+	if r.client.lastCreate.Token != "" {
+		t.Fatal("no Paycrest order may be opened at a price she did not accept")
+	}
+	req.QuotedMarkupBps = 100 // within 10 bps of 110
+	if _, err := r.svc.CreateBuy(context.Background(), req); err != nil {
+		t.Fatalf("a 10 bps drift is jitter, not a price move: %v", err)
+	}
+}
+
+func TestCreateBuy_RefusesAnUnknownChainID(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	user := seedVerifiedUser(t, r.db)
+	req := r.buyRequest(user, "base", "USDC", "", "X")
+	req.RequestedChainID, req.RequestedTokenAddress = 424242, evmNativeAddress
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrBadRequestedAsset) {
+		t.Fatalf("err = %v, want ErrBadRequestedAsset", err)
+	}
+}
+
+// recovery_pending is operator-owned. It is non-terminal, so DueForSync keeps
+// selecting the row — without an explicit guard the very next poll would
+// write Paycrest's own view over a status only a human may resolve.
+func TestSync_RecoveryPendingIsNotOverwrittenByThePoller(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	row := r.seedConvertedBuy(t)
+	if err := r.db.Model(row).Update("status", models.PaycrestStatusRecoveryPending).Error; err != nil {
+		t.Fatalf("seed recovery_pending: %v", err)
+	}
+	row.Status = models.PaycrestStatusRecoveryPending
+
+	r.client.remoteStatus = "settled"
+	out, err := r.svc.Sync(context.Background(), row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != models.PaycrestStatusRecoveryPending {
+		t.Fatalf("status = %s, want recovery_pending untouched", out.Status)
+	}
+	if !out.NeedsOperator() {
+		t.Fatal("a recovery_pending order must surface to an operator")
+	}
+}
+
+// A Solana buy is opened against HER SOLANA ADDRESS. The EVM wallet stays on
+// the row — it is still the account's wallet and where a refund's naira is
+// reconciled from — but the delivery leg must pay the address the route was
+// quoted and calldata-checked against, and nothing else.
+func TestCreateBuy_SolanaOrderIsDeliveredToHerSolanaAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.quotes.SetSolanaValidator(solana.ValidateAddress)
+	r.lifi.route.Data = loadLiFiFixtures(t)["near_base_solana_sol"].Data
+	r.lifi.route.ToAmount = big.NewInt(1_000_000_000)
+	r.lifi.route.ToAmountMin = big.NewInt(990_000_000)
+	r.lifi.route.ToTokenDecimals = 9
+	r.lifi.route.ToTokenSymbol = "SOL"
+	user := seedVerifiedUser(t, r.db)
+
+	req := r.buyRequest(user, "base", "USDC", "", "SOL")
+	req.RequestedChainID, req.RequestedTokenAddress = solanaLiFiChainID, solanaNativeToken
+	req.DestinationAddress = solRecipient
+
+	row, err := r.svc.CreateBuy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if row.RequestedChain != "solana" || row.RequestedChainID != solanaLiFiChainID ||
+		row.RequestedTokenAddress != solanaNativeToken || row.RequestedTokenDecimals != 9 {
+		t.Fatalf("row = %+v", row)
+	}
+	if row.DestinationAddress != solRecipient {
+		t.Fatalf("destination = %q, want her Solana address", row.DestinationAddress)
+	}
+	if row.WalletAddress != req.WalletAddress {
+		t.Fatalf("wallet = %q; the account's EVM wallet must stay on the row", row.WalletAddress)
+	}
+	if row.PromisedAmount != "" {
+		t.Fatalf("promised %q on a chain the treasury holds no float in", row.PromisedAmount)
+	}
+}
+
+// Without a Solana address there is nowhere to deliver, so the order is
+// refused before Paycrest is ever asked to open one.
+func TestCreateBuy_SolanaWithoutADestinationIsRefused(t *testing.T) {
+	r := newOrderServiceWithFakes(t)
+	r.svc.SetConversionEnabled(true)
+	r.svc.SetTreasury("0xTreasury")
+	r.quotes.SetSolanaValidator(solana.ValidateAddress)
+	user := seedVerifiedUser(t, r.db)
+
+	req := r.buyRequest(user, "base", "USDC", "", "SOL")
+	req.RequestedChainID, req.RequestedTokenAddress = solanaLiFiChainID, solanaNativeToken
+
+	if _, err := r.svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrBadRequestedAsset) {
+		t.Fatalf("err = %v, want ErrBadRequestedAsset", err)
 	}
 }

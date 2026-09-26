@@ -8,7 +8,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -53,10 +58,12 @@ type fakeLiFiQuoterForQuote struct {
 	route *services.LiFiRoute
 	err   error
 	calls int
+	last  services.LiFiQuoteRequest
 }
 
-func (f *fakeLiFiQuoterForQuote) Quote(context.Context, services.LiFiQuoteRequest) (*services.LiFiRoute, error) {
+func (f *fakeLiFiQuoterForQuote) Quote(_ context.Context, req services.LiFiQuoteRequest) (*services.LiFiRoute, error) {
 	f.calls++
+	f.last = req
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -123,8 +130,68 @@ func newConvertibleQuoteService(t *testing.T) (*services.PaycrestQuoteService, *
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testConversionChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "optimism": true}})
+	svc.SetRoundTripBudgetBps(50)
 	return svc, lifi
 }
+
+// optimismUSDTRoute is a route the venue pricer will actually accept: priced
+// in USD (so its cost is knowable), with a gas limit, and with calldata that
+// decodes to a plain bridge onto chain 10 and no destination call.
+func optimismUSDTRoute(t *testing.T) *services.LiFiRoute {
+	t.Helper()
+	return &services.LiFiRoute{
+		ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_000_000,
+		ETASeconds: 30, Tool: "across",
+		Data: testBridgeCalldataHex(t, 10, false),
+	}
+}
+
+// testBridgeCalldataHex builds an ILiFi.BridgeData call the way
+// services.testBridgeCalldata does — rebuilt here because that helper, and
+// the ABI type it packs, are unexported to this package.
+func testBridgeCalldataHex(t *testing.T, destChainID int64, hasDestinationCall bool) string {
+	t.Helper()
+	tuple, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+		{Name: "transactionId", Type: "bytes32"},
+		{Name: "bridge", Type: "string"},
+		{Name: "integrator", Type: "string"},
+		{Name: "referrer", Type: "address"},
+		{Name: "sendingAssetId", Type: "address"},
+		{Name: "receiver", Type: "address"},
+		{Name: "minAmount", Type: "uint256"},
+		{Name: "destinationChainId", Type: "uint256"},
+		{Name: "hasSourceSwaps", Type: "bool"},
+		{Name: "hasDestinationCall", Type: "bool"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed, err := abi.Arguments{{Type: tuple}}.Pack(struct {
+		TransactionId      [32]byte
+		Bridge             string
+		Integrator         string
+		Referrer           common.Address
+		SendingAssetId     common.Address
+		Receiver           common.Address
+		MinAmount          *big.Int
+		DestinationChainId *big.Int
+		HasSourceSwaps     bool
+		HasDestinationCall bool
+	}{
+		Bridge: "across", Integrator: "tsa",
+		Receiver:           common.HexToAddress(quoteTestUserWallet),
+		MinAmount:          big.NewInt(1),
+		DestinationChainId: big.NewInt(destChainID),
+		HasDestinationCall: hasDestinationCall,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hexutil.Encode(append([]byte{0x17, 0x94, 0x95, 0x8f}, packed...))
+}
+
+const quoteTestUserWallet = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
 
 type quoteResponse struct {
 	Success bool `json:"success"`
@@ -157,12 +224,35 @@ func doQuoteRequest(t *testing.T, h *PaycrestHandler, rawQuery string) quoteResp
 	return resp
 }
 
-// A pair Paycrest cannot fill directly (optimism/USDT — the book only has
-// base/USDC) must come back as a converted venue alongside the direct one,
-// when the caller asks for it via requestedChain/requestedToken.
-func TestPaycrestHandler_Quote_ReturnsConvertedVenueForUnfillablePair(t *testing.T) {
+// doConvertedQuoteRequest calls the authenticated converted quote with a
+// signed-in user in context, the way the auth middleware leaves it.
+func doConvertedQuoteRequest(t *testing.T, h *PaycrestHandler, rawQuery string) quoteResponse {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/paycrest/converted-quote?"+rawQuery, nil)
+	c.Set("user", &models.User{ID: uuid.New(), WalletAddress: quoteTestUserWallet})
+
+	h.ConvertedQuote(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp quoteResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, w.Body.String())
+	}
+	return resp
+}
+
+// The public quote serves DIRECT venues only. Pricing a converted venue calls
+// LiFi for a client-chosen token, which must never be free to trigger — so
+// the requested-asset params are ignored here however they are sent, and the
+// converted price lives behind auth on /converted-quote.
+func TestPaycrestHandler_Quote_IsDirectVenuesOnly(t *testing.T) {
 	svc, lifi := newConvertibleQuoteService(t)
-	lifi.route = &services.LiFiRoute{ToAmount: big.NewInt(99_800000), ToAmountMin: big.NewInt(99_700000), ETASeconds: 30, Tool: "across"}
+	lifi.route = optimismUSDTRoute(t)
 	h := NewPaycrestHandler(nil, svc, nil)
 
 	resp := doQuoteRequest(t, h, "side=buy&amount=150000&currency=NGN&requestedChain=optimism&requestedToken=USDT")
@@ -170,8 +260,26 @@ func TestPaycrestHandler_Quote_ReturnsConvertedVenueForUnfillablePair(t *testing
 	if !resp.Success {
 		t.Fatalf("expected success response")
 	}
-	if len(resp.Data.Venues) != 2 {
-		t.Fatalf("want 2 venues (1 direct + 1 converted), got %d: %+v", len(resp.Data.Venues), resp.Data.Venues)
+	if len(resp.Data.Venues) != 1 || resp.Data.Venues[0].Kind != models.RouteKindDirect {
+		t.Fatalf("the public quote must serve direct venues only, got %+v", resp.Data.Venues)
+	}
+	if lifi.calls != 0 {
+		t.Errorf("the public quote spent %d LiFi calls; it must spend none", lifi.calls)
+	}
+}
+
+// The authenticated converted quote prices ONE requested asset, named by
+// chain id and token address, and appends it to the direct venues.
+func TestPaycrestHandler_ConvertedQuote_PricesTheRequestedAsset(t *testing.T) {
+	svc, lifi := newConvertibleQuoteService(t)
+	lifi.route = optimismUSDTRoute(t)
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	resp := doConvertedQuoteRequest(t, h,
+		"amount=150000&requestedChainId=10&requestedTokenAddress=0xOptUSDT000000000000000000000000000001")
+
+	if !resp.Success {
+		t.Fatalf("expected success response")
 	}
 	var converted *services.PaycrestVenue
 	for i := range resp.Data.Venues {
@@ -182,19 +290,37 @@ func TestPaycrestHandler_Quote_ReturnsConvertedVenueForUnfillablePair(t *testing
 	if converted == nil {
 		t.Fatalf("no converted venue in response: %+v", resp.Data.Venues)
 	}
-	if converted.RequestedChain != "optimism" || converted.RequestedToken != "USDT" {
-		t.Fatalf("converted venue = %+v, want requested optimism/USDT", converted)
+	if converted.RequestedChain != "optimism" || converted.RequestedChainID != 10 || converted.RequestedToken != "USDT" {
+		t.Fatalf("converted venue = %+v, want the asset resolved from chain id 10", converted)
 	}
 	if converted.ViaChain != "base" || converted.ViaToken != "USDC" {
 		t.Fatalf("converted venue must say what it settles as: %+v", converted)
 	}
 	if converted.PromisedAmount == "" {
-		t.Fatalf("converted venue must carry a promised amount: %+v", converted)
+		t.Fatalf("a stablecoin destination must carry a promised amount: %+v", converted)
 	}
 	// Best must stay the direct venue — a converted route is never preferred
 	// over one Paycrest can fill outright.
 	if resp.Data.Best == nil || resp.Data.Best.Kind == models.RouteKindConverted {
 		t.Fatalf("best must remain the direct venue, got %+v", resp.Data.Best)
+	}
+}
+
+// An unresolvable asset is not an error for the whole quote: the direct
+// venues are still the right answer, and no LiFi call is spent on it.
+func TestPaycrestHandler_ConvertedQuote_UnknownAssetStillReturnsDirectVenues(t *testing.T) {
+	svc, lifi := newConvertibleQuoteService(t)
+	lifi.route = optimismUSDTRoute(t)
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	resp := doConvertedQuoteRequest(t, h, "amount=150000&requestedChainId=424242&requestedTokenAddress="+
+		"0x0000000000000000000000000000000000000000")
+
+	if len(resp.Data.Venues) != 1 || resp.Data.Venues[0].Kind != models.RouteKindDirect {
+		t.Fatalf("want only the direct venue, got %+v", resp.Data.Venues)
+	}
+	if lifi.calls != 0 {
+		t.Errorf("spent a LiFi call on a chain id that does not resolve")
 	}
 }
 
@@ -286,5 +412,47 @@ func TestPaycrestHandler_Quote_LiFiFailure_StillReturnsDirectVenues(t *testing.T
 	}
 	if len(resp.Data.Venues) != 1 {
 		t.Fatalf("a LiFi failure must leave only the direct venue, got %+v", resp.Data.Venues)
+	}
+}
+
+// A Solana destination is delivered to an address the EVM wallet cannot be:
+// the app sends it as destinationAddress, and that — not the signed-in user's
+// wallet — is what the route must be priced to.
+func TestPaycrestHandler_ConvertedQuote_PricesSolanaToTheGivenAddress(t *testing.T) {
+	const solRecipient = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+	svc, lifi := newConvertibleQuoteService(t)
+	svc.SetSolanaValidator(solana.ValidateAddress)
+	lifi.route = optimismUSDTRoute(t) // never accepted as a Solana venue; only the REQUEST matters here
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	doConvertedQuoteRequest(t, h,
+		"amount=150000&requestedChainId=1151111081099710"+
+			"&requestedTokenAddress=11111111111111111111111111111111"+
+			"&destinationAddress="+solRecipient)
+
+	if lifi.calls == 0 {
+		t.Fatal("the Solana asset was not priced at all")
+	}
+	if lifi.last.ToAddress != solRecipient {
+		t.Fatalf("priced to %q, want her Solana address", lifi.last.ToAddress)
+	}
+}
+
+// Without a destination address there is nowhere on Solana to deliver, so
+// nothing is priced — no LiFi call is spent guessing at a recipient.
+func TestPaycrestHandler_ConvertedQuote_SolanaWithoutADestinationIsNotPriced(t *testing.T) {
+	svc, lifi := newConvertibleQuoteService(t)
+	svc.SetSolanaValidator(solana.ValidateAddress)
+	lifi.route = optimismUSDTRoute(t)
+	h := NewPaycrestHandler(nil, svc, nil)
+
+	resp := doConvertedQuoteRequest(t, h,
+		"amount=150000&requestedChainId=1151111081099710&requestedTokenAddress=11111111111111111111111111111111")
+
+	if !resp.Success {
+		t.Fatal("an unpriceable asset must not fail the whole quote")
+	}
+	if lifi.calls != 0 {
+		t.Fatalf("LiFi was called %d times for a Solana asset with no recipient", lifi.calls)
 	}
 }

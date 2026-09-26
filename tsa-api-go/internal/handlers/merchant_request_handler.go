@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -18,6 +21,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// payMerchantProvisioner is the seam ApproveMerchantRequest uses to provision
+// a TSA Pay merchant from an approved payment_acceptance request. Satisfied
+// by *services.PayMerchantService. Optional: if nil, approving a
+// payment_acceptance request returns 503 (TSA Pay dormant-by-default).
+type payMerchantProvisioner interface {
+	CreateFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PayMerchant, error)
+}
+
 type MerchantRequestHandler struct {
 	DB           *gorm.DB
 	EventBus     *events.Bus
@@ -26,6 +37,14 @@ type MerchantRequestHandler struct {
 	// before allowing a p2p_merchant upgrade submit. Optional: if nil, the
 	// active-PM guard is skipped (no ErrPMNotFound check can run).
 	PMService *services.PMService
+	// PayMerchants provisions a TSA Pay merchant from an approved
+	// payment_acceptance request. Optional: if nil, submitting or approving
+	// that type of request returns 503. Assign only a non-nil service — a
+	// typed-nil pointer here would read as wired.
+	PayMerchants payMerchantProvisioner
+	// WebAppOrigin is where an approved TSA Pay merchant sets up (cfg.WebAppOrigin);
+	// empty names the web app without a link.
+	WebAppOrigin string
 }
 
 func NewMerchantRequestHandler(db *gorm.DB, bus *events.Bus) *MerchantRequestHandler {
@@ -50,6 +69,9 @@ type submitMerchantRequestInput struct {
 	Country             string `json:"country" binding:"required"`
 	Phone               string `json:"phone" binding:"required"`
 	RegistrationNumber  string `json:"registrationNumber"`
+	// Website (business_type='payment_acceptance'): required, validated as a
+	// well-formed https URL in SubmitMerchantRequest.
+	Website string `json:"website"`
 
 	// Corporate Payment-Merchant (business_type='p2p_merchant') fields. Required
 	// and validated only for p2p_merchant submissions (see SubmitMerchantRequest).
@@ -113,11 +135,50 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			}
 			// ErrPMNotFound — no active PM, allow submission to continue.
 		}
-	} else {
-		// Non-PM path: a user who is already a merchant cannot re-apply as a
-		// general merchant (unchanged behaviour).
+	} else if input.BusinessType != models.BusinessTypePaymentAcceptance {
+		// Non-PM, non-TSA-Pay path: a user who is already a merchant cannot
+		// re-apply as a general merchant (unchanged behaviour).
 		if user.Role == models.RoleMerchant {
 			utils.ErrorResponse(c, http.StatusBadRequest, "You are already a merchant")
+			return
+		}
+	}
+	// payment_acceptance: no role guard — a marketplace merchant (or anyone
+	// else) may apply to accept payments; TSA Pay is a separate capability
+	// from the admin-console merchant role.
+
+	// A TSA Pay application would sit unprovisionable while TSA Pay is
+	// dormant, so refuse it up front rather than take the applicant's details.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance && h.PayMerchants == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay isn't available yet")
+		return
+	}
+
+	// A TSA Pay merchant takes other people's money, so only a verified identity
+	// may apply. Checked before anything else about the application. The refusal
+	// carries the same code as every money-in KYC refusal, so the app's one
+	// kyc_verification_required handler sends her to verification.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance {
+		verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, user.ID)
+		if err != nil {
+			log.Printf("SubmitMerchantRequest: KYC check failed for %s: %v", user.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check your verification")
+			return
+		}
+		if !verified {
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", kycRequiredCode)
+			return
+		}
+	}
+
+	// TSA Pay applications must supply a well-formed https website — it
+	// becomes the merchant's checkout/webhook return domain.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance {
+		raw := strings.TrimSpace(input.Website)
+		site, err := url.Parse(raw)
+		if err != nil || len(raw) > 255 || site.Scheme != "https" || site.User != nil ||
+			!services.ValidPayDomain(strings.ToLower(site.Hostname())) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Enter your website's https address")
 			return
 		}
 	}
@@ -140,22 +201,18 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	// Type-scoped duplicate-request check (Critical-1).
-	// For p2p_merchant: only a prior pending/approved PM request blocks — a stale
-	// approved general_products row from a prior merchant role must NOT block.
-	// For non-PM: unchanged unscoped check (any prior pending/approved row blocks).
+	// Type-scoped duplicate-request check (Critical-1). Every business type gets
+	// its own one-pending-or-approved-at-a-time rule: a pending/approved
+	// payment_acceptance request must not block a general_products/
+	// digital_products/service_provider submit (or vice versa), same as a stale
+	// approved general_products row must not block a p2p_merchant upgrade. Scope
+	// by business_type unconditionally rather than special-casing p2p_merchant/
+	// payment_acceptance — a cross-type block is a bug for any pair of types.
 	var existing models.MerchantRequest
-	var dupErr error
-	if input.BusinessType == models.BusinessTypeP2PMerchant {
-		dupErr = h.DB.Where("user_id = ? AND business_type = ? AND status IN ?", user.ID,
-			models.BusinessTypeP2PMerchant,
-			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
-			First(&existing).Error
-	} else {
-		dupErr = h.DB.Where("user_id = ? AND status IN ?", user.ID,
-			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
-			First(&existing).Error
-	}
+	dupErr := h.DB.Where("user_id = ? AND business_type = ? AND status IN ?", user.ID,
+		input.BusinessType,
+		[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
+		First(&existing).Error
 	if dupErr == nil {
 		if existing.Status == models.MerchantRequestStatusApproved {
 			utils.ErrorResponse(c, http.StatusBadRequest, "You already have an approved merchant request")
@@ -181,7 +238,11 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		Country:             input.Country,
 		Phone:               input.Phone,
 		RegistrationNumber:  input.RegistrationNumber,
-		Status:              models.MerchantRequestStatusPending,
+		// Trimmed, not the raw input: CreateFromRequest re-parses this value at
+		// approval time and a whitespace-padded URL must not become unparsable
+		// (or worse, silently different) between submit and approval.
+		Website: strings.TrimSpace(input.Website),
+		Status:  models.MerchantRequestStatusPending,
 
 		// Corporate PM fields (consumed at approval/provisioning time).
 		SettlementBankCode:      input.SettlementBankCode,
@@ -320,12 +381,26 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		// money path) is reserved for true admins. The route middleware
 		// (adminAuth) also admits merchant/support for generic merchant
 		// approvals, so we re-check the role here.
-		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+		if !hasAdminPrivilege(c, admin) {
 			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a payment merchant")
 			return
 		}
 		if h.PMOnboarding == nil {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
+			return
+		}
+	}
+
+	// Pre-flight gate for TSA Pay (payment_acceptance) approvals — same shape
+	// as the PM gate above: admin-only, and the provisioner must be wired up,
+	// checked before any state mutation.
+	if req.BusinessType == models.BusinessTypePaymentAcceptance {
+		if !hasAdminPrivilege(c, admin) {
+			utils.ErrorResponse(c, http.StatusForbidden, "Admin role required to approve a TSA Pay merchant")
+			return
+		}
+		if h.PayMerchants == nil {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay is not enabled")
 			return
 		}
 	}
@@ -359,15 +434,40 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	if !isPMRetry && req.Status != models.MerchantRequestStatusPending {
+	// TSA Pay retry: an already-approved payment_acceptance request either
+	// already has a provisioned pay_merchants row (re-approving it is a no-op
+	// the caller shouldn't repeat — 409) or provisioning failed/never ran
+	// after the first approval and this call resumes it.
+	isPayRetry := false
+	if req.Status == models.MerchantRequestStatusApproved &&
+		req.BusinessType == models.BusinessTypePaymentAcceptance {
+		var payRow models.PayMerchant
+		err := h.DB.Where("merchant_request_id = ?", req.ID).First(&payRow).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			isPayRetry = true
+		case err == nil:
+			utils.ErrorResponse(c, http.StatusConflict, "This request has already been approved")
+			return
+		default:
+			log.Printf("ApproveMerchantRequest: pay_merchants lookup error: %v", err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check TSA Pay merchant status")
+			return
+		}
+	}
+
+	if !isPMRetry && !isPayRetry && req.Status != models.MerchantRequestStatusPending {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Request is not in pending status")
 		return
 	}
 
 	now := time.Now()
 
-	if !isPMRetry {
-		// First approval: flip status → approved and upgrade the user's role.
+	if !isPMRetry && !isPayRetry {
+		// First approval: flip status → approved. The role upgrade to
+		// "merchant" (the admin-console marketplace role) does NOT apply to
+		// TSA Pay — accepting payments is a separate capability, not a
+		// marketplace-merchant grant.
 		txErr := h.DB.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Model(&req).Updates(map[string]interface{}{
 				"status":      models.MerchantRequestStatusApproved,
@@ -378,9 +478,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				return err
 			}
 
-			if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
-				Update("role", models.RoleMerchant).Error; err != nil {
-				return err
+			if req.BusinessType != models.BusinessTypePaymentAcceptance {
+				if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
+					Update("role", models.RoleMerchant).Error; err != nil {
+					return err
+				}
 			}
 
 			return nil
@@ -409,12 +511,24 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 	}
 
+	// TSA Pay provisioning: create the pay_merchants row from the approved
+	// request. The request stays re-approvable for retry (via isPayRetry
+	// above) if this fails. Admin-role and PayMerchants-availability are
+	// already enforced in the pre-flight gate above.
+	if req.BusinessType == models.BusinessTypePaymentAcceptance {
+		if _, err := h.PayMerchants.CreateFromRequest(c.Request.Context(), &req); err != nil {
+			log.Printf("ApproveMerchantRequest: TSA Pay provisioning failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but TSA Pay setup failed — retry the approval to resume")
+			return
+		}
+	}
+
 	if h.EventBus != nil {
 		h.EventBus.Publish(events.Event{
 			Type:    events.MerchantApproved,
 			UserID:  req.UserID,
 			Title:   "Merchant Request Approved",
-			Message: "Your merchant application has been approved. You can now list products.",
+			Message: approvalMessage(req.BusinessType, h.WebAppOrigin),
 			Data: map[string]interface{}{
 				"requestId":    req.ID,
 				"businessName": req.BusinessName,
@@ -423,6 +537,22 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
+}
+
+// approvalMessage is the notification text for an approved request. TSA Pay
+// applicants sell nothing on the marketplace, so they must not be told they
+// can list products; they set up on the web app, at webAppOrigin when known.
+func approvalMessage(businessType, webAppOrigin string) string {
+	if businessType == models.BusinessTypePaymentAcceptance {
+		where := "the TSA Connect web app"
+		if webAppOrigin != "" {
+			where = webAppOrigin
+		}
+		return "Your TSA Pay application is approved. Sign in at " + where +
+			" with your TSA Connect account to create API keys, set your webhook and payouts, and run a test payment." +
+			" Live payments are switched on after a quick review."
+	}
+	return "Your merchant application has been approved. You can now list products."
 }
 
 // RejectMerchantRequest handles POST /api/admin/merchant-requests/:id/reject.

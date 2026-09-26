@@ -48,7 +48,9 @@ jest.mock('../gasSponsorship', () => {
 });
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
-import { checkFunding, sendPaycrestDeposit, sendSponsoredPaycrestDeposit } from '../paycrestDeposit';
+import {
+  checkFunding, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
+} from '../paycrestDeposit';
 // eslint-disable-next-line import/first
 import { PaycrestError } from '../paycrestApi';
 // eslint-disable-next-line import/first
@@ -255,6 +257,18 @@ describe('sendPaycrestDeposit', () => {
     expect(mockSignTransaction).not.toHaveBeenCalled();
   });
 
+  it('states an L2-sized gas shortfall as a real amount, with the unit and her balance', async () => {
+    // 65,000 gas at 0.005 gwei = 0.000000325 ETH — six decimals would print "0.000000".
+    mockPrepare.mockResolvedValue({ success: true, data: { ...prepared, gasPrice: '5000000' } });
+    const err = await sendPaycrestDeposit(order, '0xfrom', 0).catch((e: Error) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('about 0.00000033 ETH');
+    expect((err as Error).message).toContain('you have 0');
+    expect((err as Error).message).toContain('on Base');
+    expect((err as Error).message).not.toContain('0.000000.');
+  });
+
   it('sends when the gas cost fits the native balance', async () => {
     await expect(sendPaycrestDeposit(order, '0xfrom', 0.01)).resolves.toBe('0xhash');
   });
@@ -262,6 +276,45 @@ describe('sendPaycrestDeposit', () => {
   it('sends when the native balance is unknown', async () => {
     // Balances failed to load — the same rule as checkFunding: never block.
     await expect(sendPaycrestDeposit(order, '0xfrom', null)).resolves.toBe('0xhash');
+  });
+
+  it('runs beforeBroadcast after signing and just before the broadcast — and not at all when the send is refused first', async () => {
+    const order_: string[] = [];
+    mockSignTransaction.mockImplementation(async () => { order_.push('sign'); return '0xsigned'; });
+    mockSubmit.mockImplementation(async () => { order_.push('submit'); return { success: true, data: { txHash: '0xhash' } }; });
+    const beforeBroadcast = jest.fn(async () => { order_.push('before'); });
+    await sendPaycrestDeposit(order, '0xfrom', 0.01, { beforeBroadcast });
+    expect(order_).toEqual(['sign', 'before', 'submit']);
+
+    beforeBroadcast.mockClear();
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.00001, { beforeBroadcast })).rejects.toThrow(/gas/);
+    expect(beforeBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('a beforeBroadcast that throws stops the broadcast', async () => {
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.01, {
+      beforeBroadcast: async () => { throw new Error('storage unavailable'); },
+    })).rejects.toThrow('storage unavailable');
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('a broadcast whose answer never came back is an unknown outcome, not a plain failure', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: 'Network request failed', unanswered: true });
+    await expect(sendPaycrestDeposit(order, '0xfrom', 0.01)).rejects.toBeInstanceOf(DepositOutcomeUnknownError);
+  });
+
+  it('a broadcast the server refused is a plain failure — nothing left the wallet', async () => {
+    mockSubmit.mockResolvedValue({ success: false, message: 'insufficient funds for transfer' });
+    const err = await sendPaycrestDeposit(order, '0xfrom', 0.01).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(DepositOutcomeUnknownError);
+  });
+
+  it('the sponsored send hands beforeBroadcast to the self-paid path it falls back to', async () => {
+    mockGetOffer.mockRejectedValue(new PaycrestError('off', 404));
+    const beforeBroadcast = jest.fn(async () => {});
+    await sendSponsoredPaycrestDeposit({ ...order, id: 'o1', walletAddress: '0xfrom' }, '0xfrom', 0.01, { beforeBroadcast });
+    expect(beforeBroadcast).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -304,6 +357,16 @@ describe('sendSponsoredPaycrestDeposit', () => {
     mockPrepare.mockResolvedValue({ success: true, data: prepared });
     mockSubmit.mockResolvedValue({ success: true, data: { txHash: '0xhash' } });
     mockSignTransaction.mockResolvedValue('0xsigned');
+  });
+
+  it('a relayed deposit never runs beforeBroadcast — the server holds one relay per order, so a hold would only block a safe retry', async () => {
+    mockGetOffer.mockResolvedValue(authOffer);
+    mockSignTypedData.mockResolvedValue('0x' + '00'.repeat(65));
+    mockRelay.mockResolvedValue({ txHash: '0xrelayed', alreadyUsed: false });
+    const beforeBroadcast = jest.fn(async () => {});
+    await sendSponsoredPaycrestDeposit(order, SIGNER, 0, { beforeBroadcast });
+    expect(beforeBroadcast).not.toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('signs and relays an authorization without sending from the wallet', async () => {
@@ -387,5 +450,53 @@ describe('sendSponsoredPaycrestDeposit', () => {
     const [[, first], [, second]] = mockRelay.mock.calls;
     expect(second.nonce).toBe(first.nonce);
     expect(second.signature).toBe(first.signature);
+  });
+});
+
+describe('fundingMessage', () => {
+  it('is null for a route that can be funded', () => {
+    expect(fundingMessage({ ok: true })).toBeNull();
+  });
+
+  it('says what is short, on which network, in the words of the thing being funded', () => {
+    const short = { ok: false, reason: 'short-token', token: 'USDC', chain: 'bsc', have: 1.5, need: 33.5 } as const;
+    expect(fundingMessage(short)).toBe(
+      'You have 1.5 USDC on BNB Smart Chain — this sale needs 33.5. Pick another network or top up.',
+    );
+    expect(fundingMessage(short, 'payment')).toMatch(/this payment needs 33\.5/);
+  });
+
+  it('names the gas coin when there is none', () => {
+    expect(fundingMessage({ ok: false, reason: 'no-gas', nativeSymbol: 'BNB', chain: 'bsc' })).toMatch(
+      /no BNB on BNB Smart Chain/,
+    );
+  });
+});
+
+describe('nativeBalanceFor', () => {
+  const rows = [{ chainKey: 'bsc', symbol: 'BNB', balance: '0.25' }] as unknown as WalletBalanceWithChain[];
+
+  it('reads the chain’s own coin, and 0 when the wallet holds none', () => {
+    expect(nativeBalanceFor('bsc', rows)).toBe(0.25);
+    expect(nativeBalanceFor('base', rows)).toBe(0);
+  });
+
+  it('is null when balances are not known', () => {
+    expect(nativeBalanceFor('bsc', null)).toBeNull();
+  });
+});
+
+describe('fmtTokenAmount', () => {
+  it('shows two decimals from one up, six below', () => {
+    expect(fmtTokenAmount(33.5)).toBe('33.5');
+    expect(fmtTokenAmount(1234.567)).toBe('1,234.57');
+    expect(fmtTokenAmount(0.0840001)).toBe('0.084');
+  });
+
+  it('keeps two significant digits where six decimals would round to zero', () => {
+    expect(fmtTokenAmount(0.000000325)).toBe('0.00000033');
+    expect(fmtTokenAmount(0.0000001)).toBe('0.0000001');
+    expect(fmtTokenAmount(0.0000005)).toBe('0.000001'); // at the boundary: six decimals already non-zero
+    expect(fmtTokenAmount(0)).toBe('0');
   });
 });

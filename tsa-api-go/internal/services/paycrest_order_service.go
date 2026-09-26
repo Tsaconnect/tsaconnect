@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,6 +42,12 @@ var (
 	// second concurrent buy would leave the user staring at two provider
 	// accounts with two countdowns and no way to tell which one to pay.
 	ErrPaycrestOrderOpen = errors.New("you already have an order awaiting payment")
+	// ErrPaycrestPayOrderOpen is ErrPaycrestOrderOpen when what is open is a
+	// TSA Pay payment's order. Its own error because that order is not in her
+	// order list (it is how the payment moves), so "cancel it from your
+	// orders" would send her looking for something she cannot find. Wraps
+	// ErrPaycrestOrderOpen: every existing check for an open order still holds.
+	ErrPaycrestPayOrderOpen = fmt.Errorf("%w: a payment is in progress", ErrPaycrestOrderOpen)
 	// ErrPaycrestBankUnsupported means the user's bank exists for us but not
 	// for Paycrest. Explicit, because the alternative is a payout that
 	// silently goes nowhere.
@@ -80,6 +87,10 @@ type PaycrestOrderService struct {
 	// default, which is what produced the 0.5% observed on live orders.
 	senderFeePercent string
 	senderFeeAddress string
+	// roundTripBudgetBps is B: the slice of senderFeePercent (F) that pays a
+	// converted order's round trip. Set via SetRoundTripBudgetBps, which also
+	// pushes it onto quotes so the two never disagree.
+	roundTripBudgetBps int
 
 	// ── Conversion (Phase 2, Task 9). Both dormant by default: conversionEnabled
 	// false and treasuryAddr "" together mean every buy is created exactly as
@@ -118,12 +129,75 @@ func (s *PaycrestOrderService) SetTreasury(addr string) { s.treasuryAddr = strin
 // doc comment.
 func (s *PaycrestOrderService) SetTreasuryCaps(c treasuryCapsChecker) { s.treasuryCaps = c }
 
+// feePercentToSteps reads a sender-fee percent ("1", "0.5") as a whole number
+// of 1/perPercent-percent steps, so fee arithmetic is exact rather than float.
+func feePercentToSteps(pct string, perPercent int) (int, bool) {
+	v, ok := parseSenderFeePercent(pct)
+	if !ok {
+		return 0, false
+	}
+	return int(math.Round(v * float64(perPercent))), true
+}
+
+// stepsToFeePercent writes whole steps back in the percent form Paycrest takes.
+func stepsToFeePercent(steps, perPercent int) string {
+	return strconv.FormatFloat(float64(steps)/float64(perPercent), 'f', -1, 64)
+}
+
+// feePercentToBps reads a sender-fee percent as integer bps, so F − B is exact.
+func feePercentToBps(pct string) (int, bool) { return feePercentToSteps(pct, 100) }
+
+// bpsToFeePercent writes integer bps back in the percent form Paycrest takes.
+func bpsToFeePercent(bps int) string { return stepsToFeePercent(bps, 100) }
+
+// SetRoundTripBudgetBps sets B here and on the quote service, the same way
+// the constructor pushes F: one source for both, so they cannot drift.
+func (s *PaycrestOrderService) SetRoundTripBudgetBps(bps int) {
+	s.roundTripBudgetBps = bps
+	if s.quotes != nil {
+		s.quotes.SetRoundTripBudgetBps(bps)
+	}
+}
+
+// ConversionPriced reports whether 0 < B < F: a round-trip budget exists and
+// something is still left for Paycrest's sender fee.
+func (s *PaycrestOrderService) ConversionPriced() bool {
+	f, ok := feePercentToBps(s.senderFeePercent)
+	return ok && s.roundTripBudgetBps > 0 && s.roundTripBudgetBps < f
+}
+
+// senderFeeFor is the Paycrest sender fee for one order: F on a direct
+// order, F − B on a converted one. "" when conversion is not priced.
+func (s *PaycrestOrderService) senderFeeFor(converted bool) string {
+	if !converted {
+		return s.senderFeePercent
+	}
+	if !s.ConversionPriced() {
+		return ""
+	}
+	f, _ := feePercentToBps(s.senderFeePercent)
+	return bpsToFeePercent(f - s.roundTripBudgetBps)
+}
+
+// ConvertedFeePercent is the sender fee a converted buy or swapped sell sends.
+func (s *PaycrestOrderService) ConvertedFeePercent() string { return s.senderFeeFor(true) }
+
 // ErrConversionUnavailable refuses a converted buy: the feature is off, no
 // treasury is configured (or its lanes disagree on an address), or the
 // treasury's exposure caps would refuse this order before the background
 // orchestrator even tried to run it. Always a user-facing message, never a
 // raw internal error surfacing as a 500.
 var ErrConversionUnavailable = errors.New("delivering to that network isn't available for this purchase right now")
+
+// ErrConversionPriceMoved refuses a converted buy whose fee rose past the one
+// she was quoted: a dear route's fee is re-priced when the order is opened,
+// and she agreed to the rate she saw, not to whatever it became since.
+var ErrConversionPriceMoved = errors.New("the price changed since your quote")
+
+// quotedFeeToleranceBps is how far a converted buy's fee may rise between the
+// quote she saw and the order before it is refused — room for LiFi's own
+// quote-to-quote jitter, not for a real price move.
+const quotedFeeToleranceBps = 10
 
 // SetCurrencyRegistry wires the server-side kill switch: CreateBuy and
 // CreateSell refuse with ErrPaycrestDisabled when the order's currency does
@@ -261,6 +335,23 @@ type PaycrestBuyRequest struct {
 	// older builds keep behaving exactly as before this field existed.
 	RequestedChain string
 	RequestedToken string
+	// RequestedChainID/RequestedTokenAddress are the same question asked the
+	// only way an arbitrary token can be named: a LiFi chain id and a token
+	// address. When either is set they are authoritative and the symbol pair
+	// above is ignored. Decimals are deliberately NOT accepted from the
+	// client — they decide how much of a token she gets.
+	RequestedChainID      int64
+	RequestedTokenAddress string
+	// DestinationAddress is where the requested token is delivered when the
+	// user's EVM wallet cannot receive it — her Solana address. Required for a
+	// Solana request (resolveRequestedAsset refuses one without it) and
+	// ignored on every EVM destination. A refund still goes to WalletAddress:
+	// this names where the ASSET lands, never where money comes back to.
+	DestinationAddress string
+	// QuotedMarkupBps is the round-trip budget (the venue's markupBps) of the
+	// converted quote she accepted. The order refuses a fee risen more than
+	// quotedFeeToleranceBps past it; zero (an older app) skips the check.
+	QuotedMarkupBps int
 	// RefundAccount is where naira returns if the order fails. Defaults to the
 	// user's own bank, so a refund goes back to whoever paid.
 	RefundBankCode    string // NIBSS
@@ -297,8 +388,13 @@ func grossDownForSenderFee(requested, feePercent string) (string, bool) {
 }
 
 // userRate is the rate stored on the order and shown to the user: the
-// provider's rate with the fee Paycrest charged priced in. The provider's own
-// rate stays recoverable from the row's SenderFeePercent.
+// provider's rate with the fee Paycrest charged priced in.
+//
+// On a DIRECT order the provider's own rate stays recoverable from the row's
+// SenderFeePercent. That no longer holds for a converted row: it stores the
+// F-priced rate the user was quoted, while the order itself was sent at
+// F − B, so the provider's rate there is Paycrest's own order.Rate and
+// nothing on the row reconstructs it.
 func userRate(side, providerRate, feePercent string) string {
 	pct, _ := parseSenderFeePercent(feePercent)
 	rate, _, err := quotedRate(side, providerRate, pct)
@@ -309,30 +405,69 @@ func userRate(side, providerRate, feePercent string) string {
 }
 
 // chargedFeePercent is the fee Paycrest reports on the order, falling back to
-// ours when it reports none.
+// want (the fee this order was actually sent with — F direct, F − B
+// converted) when it reports none.
 //
 // A mismatch is an operator alarm, not a rounding note: the quote priced in
-// our percent, so a different charge means the user was shown one amount and
-// paid or received another. It happens when PAYCREST_SENDER_FEE_PERCENT is
-// unset or refused — the request then omits the fee and the dashboard default
-// applies — or when the dashboard changes under a set env var.
-func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref string) string {
+// want, so a different charge means the user was shown one amount and paid or
+// received another. It happens when PAYCREST_SENDER_FEE_PERCENT is unset or
+// refused — the request then omits the fee and the dashboard default applies
+// — or when the dashboard changes under a set env var.
+func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref, want string) string {
 	reported := strings.TrimSpace(order.SenderFeePercent)
 	if reported == "" {
-		return s.senderFeePercent
+		return want
 	}
-	want, _ := parseSenderFeePercent(s.senderFeePercent)
+	wantV, _ := parseSenderFeePercent(want)
 	got, ok := parseSenderFeePercent(reported)
-	if !ok || math.Abs(got-want) > 1e-9 {
-		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s configured=%q paycrest_charged=%q — quoted amounts are off for this order",
-			ref, s.senderFeePercent, reported)
+	if !ok || math.Abs(got-wantV) > 1e-9 {
+		log.Printf("[paycrest] ALARM sender fee mismatch ref=%s sent=%q paycrest_charged=%q — quoted amounts are off for this order",
+			ref, want, reported)
 	}
 	if !ok {
 		// Never store what we could not read: the column is varchar(16), and a
 		// failed insert here strands an order that already exists upstream.
-		return s.senderFeePercent
+		return want
 	}
 	return strconv.FormatFloat(got, 'f', -1, 64)
+}
+
+// isConvertedRequest reports whether the buy converts: the requested asset
+// (by address when sent, else chain/token symbol) isn't the settlement leg.
+//
+// The address path resolves server-side and can therefore FAIL — an
+// unresolvable chain id or token is not "a direct buy", it is a request we
+// cannot honour, and saying so here is what keeps it from becoming an order.
+func (s *PaycrestOrderService) isConvertedRequest(req PaycrestBuyRequest) (bool, error) {
+	chainKey := strings.ToLower(strings.TrimSpace(req.ChainKey))
+	token := strings.ToUpper(strings.TrimSpace(req.Token))
+	if req.RequestedChainID != 0 || req.RequestedTokenAddress != "" {
+		asset, err := resolveRequestedAsset(s.quotes.chains, s.quotes.solanaValidator,
+			RequestedAsset{ChainID: req.RequestedChainID, Address: req.RequestedTokenAddress, Destination: req.DestinationAddress})
+		if err != nil {
+			return false, err
+		}
+		// A stablecoin Paycrest serves directly on that chain is a direct buy.
+		direct := asset.Stable && strings.EqualFold(asset.ChainKey, chainKey) && strings.EqualFold(asset.StableSymbol, token)
+		return !direct, nil
+	}
+	// Legacy symbol path: the handler defaults RequestedChain/Token to
+	// ChainKey/Token when the app omits them, so an unset pair (or one equal
+	// to ChainKey/Token) reads as a direct buy exactly as it always did.
+	rc, rt := strings.ToLower(strings.TrimSpace(req.RequestedChain)), strings.ToUpper(strings.TrimSpace(req.RequestedToken))
+	return (rc != "" || rt != "") && (rc != chainKey || rt != token), nil
+}
+
+// requestedAssetLabel names what the user asked for in a refusal the user
+// will read: the symbol when there is one, the address otherwise.
+func requestedAssetLabel(req PaycrestBuyRequest) string {
+	if sym := strings.ToUpper(strings.TrimSpace(req.RequestedToken)); sym != "" {
+		return sym
+	}
+	if req.RequestedTokenAddress != "" {
+		return fmt.Sprintf("%s on chain %d", req.RequestedTokenAddress, req.RequestedChainID)
+	}
+	return strings.ToUpper(strings.TrimSpace(req.Token))
 }
 
 // CreateBuy prices the chosen venue afresh, opens the order, and returns the
@@ -389,16 +524,18 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, err
 	}
 
-	// A converted buy is requested whenever the caller names a destination
-	// asset different from the one Paycrest is being asked to fill — the
-	// handler defaults RequestedChain/Token to ChainKey/Token when the app
-	// omits them, so an unset pair (or one equal to ChainKey/Token) always
-	// reads as a direct buy, exactly as before this field existed.
-	requestedChain := strings.ToLower(strings.TrimSpace(req.RequestedChain))
-	requestedToken := strings.ToUpper(strings.TrimSpace(req.RequestedToken))
-	converting := requestedChain != "" && requestedToken != "" &&
-		(requestedChain != strings.ToLower(strings.TrimSpace(req.ChainKey)) ||
-			requestedToken != strings.ToUpper(strings.TrimSpace(req.Token)))
+	converting, cerr := s.isConvertedRequest(req)
+	if cerr != nil {
+		// The requested asset could not be resolved server-side. Refused here,
+		// before an order exists: after it does, the user is paying naira for
+		// something we cannot name.
+		return nil, cerr
+	}
+
+	feeForOrder := s.senderFeeFor(converting)
+	if converting && feeForOrder == "" {
+		return nil, fmt.Errorf("%w: the round-trip budget leaves no Paycrest fee", ErrConversionUnavailable)
+	}
 
 	var venue *PaycrestVenue
 	recipient := req.WalletAddress // direct: Paycrest pays the user directly
@@ -415,16 +552,24 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		if treasuryAddr == "" {
 			return nil, ErrConversionUnavailable
 		}
-		venues, cerr := s.quotes.ConvertedVenues(ctx, "buy", fiat, req.FiatAmount,
-			[]RequestedAsset{{Chain: req.RequestedChain, Token: req.RequestedToken}})
-		if cerr != nil {
-			return nil, s.explainMissingVenue(ctx, "buy", fiat, cerr)
+		venues, verr := s.quotes.ConvertedVenues(ctx, "buy", fiat, req.FiatAmount, []RequestedAsset{{
+			Chain: req.RequestedChain, Token: req.RequestedToken,
+			ChainID: req.RequestedChainID, Address: req.RequestedTokenAddress, Recipient: req.WalletAddress,
+			Destination: req.DestinationAddress,
+		}})
+		if verr != nil {
+			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
 		}
 		if len(venues) == 0 {
-			return nil, fmt.Errorf("%w: no route can deliver %s on %s right now",
-				ErrConversionUnavailable, requestedToken, req.RequestedChain)
+			return nil, fmt.Errorf("%w: no route can deliver %s right now",
+				ErrConversionUnavailable, requestedAssetLabel(req))
 		}
 		v := venues[0]
+		if req.QuotedMarkupBps > 0 && v.MarkupBps > req.QuotedMarkupBps+quotedFeeToleranceBps {
+			log.Printf("[paycrest] converted buy refused: fee moved from quoted markup %d to %d bps (%s)",
+				req.QuotedMarkupBps, v.MarkupBps, requestedAssetLabel(req))
+			return nil, ErrConversionPriceMoved
+		}
 		if s.treasuryCaps != nil {
 			// Phase 2 moves only stablecoins, so the venue's own TokenAmount
 			// is already close enough to USD for this early, advisory check.
@@ -449,7 +594,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 
 	// Submit the grossed-down figure so the provider asks the user for exactly
 	// the amount they entered. FiatAmount on the row stays the user's number.
-	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, s.senderFeePercent)
+	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, feeForOrder)
 
 	ref := paycrestReference("PCB", req.UserID)
 	order, err := s.pc.CreateOnrampOrder(ctx, PaycrestOnrampRequest{
@@ -464,14 +609,14 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			AccountName:       req.RefundAccountName,
 		},
 		Reference:        ref,
-		SenderFeePercent: s.senderFeePercent,
+		SenderFeePercent: feeForOrder,
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	feePercent := s.chargedFeePercent(order, ref)
+	feePercent := s.chargedFeePercent(order, ref, feeForOrder)
 	row := &models.PaycrestOrderRecord{
 		UserID:           req.UserID,
 		Direction:        models.PaycrestDirectionBuy,
@@ -503,6 +648,44 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		row.RouteKind = models.RouteKindConverted
 		row.RequestedChain = venue.RequestedChain
 		row.RequestedToken = venue.RequestedToken
+		row.RequestedChainID = venue.RequestedChainID
+		row.RequestedTokenAddress = venue.RequestedAddress
+		row.RequestedTokenDecimals = venue.RequestedDecimals
+		// Where the delivery leg actually pays. Taken from the VENUE, never
+		// from the request: the venue carries the recipient the quoted route
+		// was priced and calldata-checked against, so an order can never be
+		// opened pointing somewhere the route does not pay. Empty on every EVM
+		// destination, where the user's own wallet is the recipient.
+		row.DestinationAddress = firstNonEmpty(venue.RequestedDestination, req.WalletAddress)
+		// T, what she is owed, comes from PAYCREST'S OWN delivered amount —
+		// not from the venue's quote. The order was sent at F − B, so the
+		// amount Paycrest will deliver is already B bigger than a direct
+		// order's; restating it at F is exactly what that B has to cover.
+		orderAmountBaseUnits, perr := DecimalToBaseUnits(order.Amount, tokenDecimalsFor(s.quotes.chainID(venue.ChainKey), venue.Token))
+		if perr != nil {
+			// An unreadable amount cannot be silently left empty: an empty
+			// quoted_amount reads as a LEGACY converted order (bridge
+			// everything, keep nothing back), which would hand the user the
+			// whole delivery and the company the loss — or, worse, promise
+			// something no leg can be checked against. Park it for a human
+			// instead; the order exists upstream either way.
+			log.Printf("[paycrest] ALARM paycrest converted order amount unreadable ref=%s amount=%q: %v — parked for an operator",
+				ref, order.Amount, perr)
+			row.Status = models.PaycrestStatusRecoveryPending
+			row.Fault = models.FaultPlatform
+			row.FailureReason = "Paycrest reported an amount we could not read, so what the buyer is owed could not be computed. Needs manual settlement."
+		} else {
+			// Restated at the fee SHE pays on this route — F − B + B′, where
+			// B′ is the venue's own budget (B unless a dear route raised it).
+			fBps, _ := feePercentToBps(s.senderFeePercent)
+			budget := s.roundTripBudgetBps
+			if venue.MarkupBps > 0 {
+				budget = venue.MarkupBps
+			}
+			row.QuotedAmount = QuotedFromOrder(orderAmountBaseUnits, fBps-s.roundTripBudgetBps+budget, budget).String()
+		}
+		row.EstimatedAmount = venue.EstimatedAmount
+		row.Rate = venue.Rate // the F-priced rate she was shown, not Paycrest's F − B one
 		row.MarkupBps = venue.MarkupBps
 		row.PromisedAmount = venue.PromisedAmount
 		// Paycrest holds the money until it delivers to the treasury — see
@@ -574,6 +757,15 @@ type PaycrestSellRequest struct {
 	BankCode    string
 	AccountNo   string
 	AccountName string
+	// PayPaymentID names the TSA Pay payment this sale is an attempt of, whose
+	// payout bank is the merchant's: the order is marked with it so the
+	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
+	PayPaymentID *uuid.UUID
+	// KeepSurplus: the payout is owed EXACTLY FiatAmount (a TSA Pay merchant is
+	// paid what they invoiced), so the deposit's cushion above it is ours. The
+	// order's sender fee is raised to take it, never below the configured fee,
+	// leaving the merchant FiatAmount plus payMerchantMargin. Direct sells only.
+	KeepSurplus bool
 }
 
 // CreateSell opens an offramp and returns the address the user must send to.
@@ -619,12 +811,136 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	// still the naira the user entered.
 	tokenAmount := strconv.FormatFloat(venue.TokenAmount, 'f', 6, 64)
 
+	return s.openOfframp(ctx, req, venue, tokenAmount, req.FiatAmount, payoutInst, s.senderFeePercent)
+}
+
+// CreateSellForToken opens an offramp for an EXACT token amount she already
+// holds — the swapped sell (design §5.3), where the USDC on Base is a fact on
+// chain and the naira follows from it, rather than a naira figure she typed
+// that the token amount is derived from.
+//
+// converted picks the sender fee: F − B, because the round-trip budget was
+// already spent getting her token into USDC. It shares openOfframp with
+// CreateSell rather than repeating it — one place opens an offramp and writes
+// its row, whichever direction sized it.
+func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req PaycrestSellRequest, tokenAmount string, converted bool) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		return nil, errors.New("connect a wallet before selling")
+	}
+	if req.BankCode == "" || req.AccountNo == "" {
+		return nil, errors.New("a payout bank account is required")
+	}
+	// Checked HERE, where the order is opened, not only when the sale began:
+	// a direct sell opened in between must still hold the one live sell.
+	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
+		return nil, err
+	}
+	amount, ok := parsePositiveDecimal(tokenAmount)
+	if !ok {
+		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)
+	}
+	fee := s.senderFeeFor(converted)
+	feeVal, ok := parseSenderFeePercent(fee)
+	if !ok {
+		// A converted sell with no priced F − B would be sent at Paycrest's
+		// dashboard default, which is not the fee she was quoted.
+		return nil, ErrConversionUnavailable
+	}
+
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
+	}
+	payoutInst, payoutKind, err := s.paycrestBankCode(ctx, fiat, req.BankCode)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePayoutIdentifier(payoutKind, fiat, req.AccountNo); err != nil {
+		return nil, err
+	}
+
+	// Paycrest quotes by order SIZE, so it has to be asked about roughly the
+	// right one. The mid rate only lands us in the right tier; the rate that
+	// binds is whatever the venue comes back with.
+	market, err := s.quotes.cachedMarketRate(ctx, fiat, "sell")
+	if err != nil {
+		return nil, err
+	}
+	venue, err := s.quotes.VenueForFee(ctx, "sell", fiat,
+		strconv.FormatFloat(amount*market, 'f', 2, 64), req.ChainKey, req.Token, feeVal)
+	if err != nil {
+		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+	}
+	// What she is actually owed: the tokens the chain proved, at the rate the
+	// venue just quoted. Never the other way round, and never through a
+	// float64 — fiatAt rounds it exactly the way her quote was rounded.
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(venue.Rate))
+	if _, plain := parsePositiveDecimal(venue.Rate); !ok || !plain {
+		return nil, fmt.Errorf("paycrest: unusable sell rate %q", venue.Rate)
+	}
+	tokens, ok := new(big.Rat).SetString(strings.TrimSpace(tokenAmount))
+	if !ok {
+		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)
+	}
+	fiatAmount := fiatAt(tokens, rate)
+	if stated := strings.TrimSpace(req.FiatAmount); stated != "" {
+		// A sale that owes an exact naira figure (a TSA Pay checkout) records
+		// that figure, not whatever tokens × rate rounds to; CreateSellForFiat
+		// then proves the order's payout actually covers it.
+		fiatAmount = stated
+		if owed, ok := new(big.Rat).SetString(stated); ok && req.KeepSurplus && !converted {
+			return s.openKeepSurplusOfframp(ctx, req, venue, tokens, tokenAmount, fiatAmount, payoutInst, fee, owed)
+		}
+	}
+
+	return s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+}
+
+// openKeepSurplusOfframp opens a KeepSurplus order at the fee that leaves the
+// merchant exactly what they invoiced (see keepSurplusFeePercent). If Paycrest
+// refuses that fee outright (a 4xx — nothing was created) it is opened once
+// more at the configured fee, so a Paycrest that will not take a finely-stepped
+// percent costs us the cushion, not the payment. Every choice is logged by the
+// order's reference, beside any refusal CreateSellForFiat logs for it.
+func (s *PaycrestOrderService) openKeepSurplusOfframp(ctx context.Context, req PaycrestSellRequest, venue *PaycrestVenue,
+	tokens *big.Rat, tokenAmount, fiatAmount, payoutInst, base string, owed *big.Rat) (*models.PaycrestOrderRecord, error) {
+	fee, capped := keepSurplusFeePercent(tokens, venue.RawRate, base, owed)
+	if capped {
+		log.Printf("[paycrest] ALERT keep_surplus_fee_capped_total=1 owed=%s deposit=%s quoted_rate=%s fee=%s%%: the deposit is larger than the invoice needs; the excess goes to the merchant",
+			fiatAmount, tokenAmount, venue.RawRate, fee)
+	}
+	row, err := s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+	if err != nil && fee != base && paycrestRejected(err) {
+		log.Printf("[paycrest] ALARM keep_surplus_fee_rejected_total=1 fee=%s%% err=%s — reopening at the configured %s%%",
+			fee, RedactAlertText(err.Error()), base)
+		fee = base
+		row, err = s.openOfframp(ctx, req, venue, tokenAmount, fiatAmount, payoutInst, fee)
+	}
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[paycrest] keep_surplus ref=%s owed=%s deposit=%s quoted_rate=%s fee_sent=%s%% fee_charged=%s%% base=%s%%",
+		row.Reference, fiatAmount, tokenAmount, venue.RawRate, fee, row.SenderFeePercent, base)
+	return row, nil
+}
+
+// openOfframp is the single offramp-creation path: it sends the order and
+// writes the row. Everything above it decides HOW MUCH; this decides nothing
+// about money at all, which is why both directions can share it.
+func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSellRequest, venue *PaycrestVenue,
+	tokenAmount, fiatAmount, payoutInst, senderFee string) (*models.PaycrestOrderRecord, error) {
 	ref := paycrestReference("PCS", req.UserID)
 	order, err := s.pc.CreateOfframpOrder(ctx, PaycrestOfframpRequest{
 		AmountToken: tokenAmount,
 		Token:       venue.Token,
 		Network:     venue.Network,
-		FiatCode:    fiat,
+		FiatCode:    fiatCodeOf(req),
 		Recipient: PaycrestBankAccount{
 			Institution:       payoutInst,
 			AccountIdentifier: req.AccountNo,
@@ -634,26 +950,27 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		// from — so a failed sale leaves them exactly where they started.
 		RefundAddress:    req.WalletAddress,
 		Reference:        ref,
-		SenderFeePercent: s.senderFeePercent,
+		SenderFeePercent: senderFee,
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	feePercent := s.chargedFeePercent(order, ref)
+	feePercent := s.chargedFeePercent(order, ref, senderFee)
 	row := &models.PaycrestOrderRecord{
 		UserID:            req.UserID,
 		Direction:         models.PaycrestDirectionSell,
 		Status:            models.PaycrestStatusAwaitingDeposit,
 		Reference:         ref,
 		PaycrestID:        order.ID,
-		FiatCode:          fiat,
-		FiatAmount:        req.FiatAmount,
+		FiatCode:          fiatCodeOf(req),
+		FiatAmount:        fiatAmount,
 		Token:             venue.Token,
 		ChainKey:          venue.ChainKey,
 		Network:           venue.Network,
 		Rate:              userRate("sell", order.Rate, feePercent),
+		RawRate:           storableRawRate(order.Rate),
 		TokenAmount:       tokenAmount,
 		ProviderID:        paycrestProviderOf(order, venue),
 		SenderFee:         order.SenderFee,
@@ -663,6 +980,7 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		PayoutInstitution: payoutInst,
 		PayoutAccount:     req.AccountNo,
 		PayoutAccountName: req.AccountName,
+		PayPaymentID:      req.PayPaymentID,
 	}
 	if pa := order.ProviderAccount; pa != nil {
 		row.DepositAddress = pa.ReceiveAddress
@@ -671,9 +989,21 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
 		log.Printf("[paycrest] ALARM created offramp %s (ref=%s) but could not persist it: %v",
 			order.ID, ref, err)
-		return nil, err
+		// Paycrest has an order we hold no row for: a caller that pairs the
+		// sale with something (a TSA Pay payment) must not treat it as "nothing
+		// was opened".
+		return nil, fmt.Errorf("%w: %v", ErrSellAttemptMayExist, err)
 	}
 	return row, nil
+}
+
+// fiatCodeOf is the order's currency, defaulted once.
+func fiatCodeOf(req PaycrestSellRequest) string {
+	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
+	if fiat == "" {
+		return "NGN"
+	}
+	return fiat
 }
 
 // ─── Progress ──────────────────────────────────────────────────────────────
@@ -712,7 +1042,14 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 	}
 
 	next := mapPaycrestStatus(remote, row.Direction, row.PaymentClaimedAt != nil)
-	if row.Converted() {
+	switch {
+	case row.Status == models.PaycrestStatusRecoveryPending:
+		// Operator-owned. It is deliberately NOT terminal (the orchestrator
+		// and an admin both still act on it), so DueForSync keeps selecting
+		// the row — without this, the very next poll would write Paycrest's
+		// own view over a status only a human may resolve.
+		next = ""
+	case row.Converted():
 		switch {
 		case row.Holder != models.HolderPaycrest:
 			// Custody has already moved off Paycrest (to the treasury, then
@@ -854,6 +1191,13 @@ func (s *PaycrestOrderService) Get(ctx context.Context, userID, orderID uuid.UUI
 // a second tap) landing in the same instant wins, and this call reports the
 // truth: the order is no longer cancellable.
 func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	return s.cancelOrder(ctx, userID, orderID, map[string]any{"failure_reason": "cancelled by user"})
+}
+
+// cancelOrder is Cancel's guarded write, with the columns that go in the same
+// UPDATE as the status supplied by the caller — so a cancel that must also
+// withdraw something (a short order's deposit address) cannot be half done.
+func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID uuid.UUID, alsoSet map[string]any) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
@@ -865,16 +1209,17 @@ func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.
 		return nil, ErrPaycrestNotCancellable
 	}
 
+	updates := map[string]any{"status": models.PaycrestStatusCancelled}
+	for k, v := range alsoSet {
+		updates[k] = v
+	}
 	res := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Where("id = ? AND user_id = ? AND payment_claimed_at IS NULL AND status IN ?",
 			orderID, userID, []string{
 				models.PaycrestStatusAwaitingPayment,
 				models.PaycrestStatusAwaitingDeposit,
 			}).
-		Updates(map[string]any{
-			"status":         models.PaycrestStatusCancelled,
-			"failure_reason": "cancelled by user",
-		})
+		Updates(updates)
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -890,8 +1235,11 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 		limit = 25
 	}
 	var rows []models.PaycrestOrderRecord
+	// A TSA Pay payment's order is how the payment moves, not a sale of hers:
+	// listed here it read as "Sell USDC — paid to your bank" when the money
+	// went to the merchant. Her payments are listed as payments (GET /pay/history).
 	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
+		Where("user_id = ? AND pay_payment_id IS NULL", userID).
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -921,16 +1269,23 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 		models.PaycrestStatusAwaitingPayment, models.PaycrestStatusAwaitingDeposit,
 		models.PaycrestStatusPending, models.PaycrestStatusSettling,
 	}
-	var n int64
+	// COUNT(pay_payment_id) counts only the payments' orders.
+	var n struct{ OpenCount, PayCount int64 }
 	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Select("COUNT(*) AS open_count, COUNT(pay_payment_id) AS pay_count").
 		Where("user_id = ? AND direction = ? AND status IN ?", userID, direction, open).
-		Count(&n).Error; err != nil {
+		Scan(&n).Error; err != nil {
 		return err
 	}
-	if n > 0 {
+	switch {
+	case n.OpenCount == 0:
+		return nil
+	case n.OpenCount > n.PayCount:
+		// An ordinary order of hers wins: that one she can find and cancel.
 		return ErrPaycrestOrderOpen
+	default:
+		return ErrPaycrestPayOrderOpen
 	}
-	return nil
 }
 
 // paycrestBankCode resolves the bank/institution code the app sent into

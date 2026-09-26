@@ -6,6 +6,7 @@ import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constant
 import { getNetwork } from '../hooks/useNetwork';
 import { getActiveWallet } from './wallet';
 import { toFiniteNumber } from './txFields';
+import type { Candle } from '../utils/priceChart';
 
 export interface WalletBalance {
   symbol: string;
@@ -54,6 +55,14 @@ interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
   data?: T;
+  /**
+   * Set when the server's own answer never reached us (the request threw, or
+   * a proxy sent an empty/non-JSON page). Only then is a failure ambiguous: the
+   * server may have acted before its reply was lost.
+   */
+  unanswered?: true;
+  /** HTTP status of the server's answer, where a caller needs to tell 404 from a failure. */
+  status?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -68,7 +77,7 @@ function isRecord(value: unknown): value is Record<string, any> {
 async function safeJson<T = any>(response: Response): Promise<ApiResponse<T>> {
   const text = await response.text();
   if (!text) {
-    return { success: false, message: `Empty response (HTTP ${response.status})` };
+    return { success: false, message: `Empty response (HTTP ${response.status})`, unanswered: true };
   }
   try {
     return JSON.parse(text) as ApiResponse<T>;
@@ -76,6 +85,7 @@ async function safeJson<T = any>(response: Response): Promise<ApiResponse<T>> {
     const preview = text.length > 200 ? text.slice(0, 200) + '...' : text;
     return {
       success: false,
+      unanswered: true,
       message: response.ok
         ? `Unexpected server response: ${preview}`
         : `Server error (HTTP ${response.status}): ${preview}`,
@@ -517,7 +527,7 @@ export async function submitTransaction(
     return result;
   } catch (error: any) {
     console.error('Submit transaction error:', error);
-    return { success: false, message: error.message || 'Failed to submit transaction' };
+    return { success: false, message: error.message || 'Failed to submit transaction', unanswered: true };
   }
 }
 
@@ -717,12 +727,14 @@ export interface SupportedTokenResponse {
  */
 export async function getTokenPriceHistory(
   symbol: string,
-  days: number = 7
+  days: number = 7,
+  /** Cap the series at this many evenly spaced points (server keeps both ends). */
+  maxPoints?: number
 ): Promise<ApiResponse<{ timestamp: number; price: number }[]>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(
-      `${API_BASE_URL}/market/history/${symbol}?days=${days}`,
+      `${API_BASE_URL}/market/history/${encodeURIComponent(symbol)}?days=${days}${maxPoints ? `&points=${maxPoints}` : ''}`,
       { method: 'GET', headers }
     );
     const json = await response.json();
@@ -730,10 +742,34 @@ export async function getTokenPriceHistory(
     // Unwrap to the bare point array this function's signature promises, while
     // still accepting a plain array in case the shape is ever flattened.
     const points = Array.isArray(json?.data) ? json.data : json?.data?.history;
-    return { ...json, data: Array.isArray(points) ? points : [] };
+    return { ...json, status: response.status, data: Array.isArray(points) ? points : [] };
   } catch (error: any) {
     console.error('Get token price history error:', error);
     return { success: false, message: error.message || 'Failed to fetch price history' };
+  }
+}
+
+/**
+ * Fetch OHLC candles for a token symbol. The server snaps `days` to a range
+ * CoinGecko serves and merges neighbouring bars down to at most `candles`.
+ */
+export async function getTokenOHLC(
+  symbol: string,
+  days: number,
+  candles?: number
+): Promise<ApiResponse<Candle[]>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(
+      `${API_BASE_URL}/market/ohlc/${encodeURIComponent(symbol)}?days=${days}${candles ? `&candles=${candles}` : ''}`,
+      { method: 'GET', headers }
+    );
+    const json = await response.json();
+    const rows = json?.data?.candles;
+    return { ...json, status: response.status, data: Array.isArray(rows) ? rows : [] };
+  } catch (error: any) {
+    console.error('Get token OHLC error:', error);
+    return { success: false, message: error.message || 'Failed to fetch candles' };
   }
 }
 

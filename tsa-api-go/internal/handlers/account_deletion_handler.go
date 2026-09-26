@@ -37,8 +37,11 @@ type accountDeletionNoteInput struct {
 
 // blockingCommitments reports the in-flight obligations that must be settled
 // before a user can walk away: live P2P trades (someone else's money is locked
-// in escrow against them) and live marketplace orders (goods or funds are in
-// flight). Returns a human-readable list — empty means clear to delete.
+// in escrow against them), live marketplace orders (goods or funds are in
+// flight), a sale to her bank still in progress (her bank details are
+// attached to it) and a converted purchase not yet delivered (the treasury
+// holds what it owes her). Returns a human-readable list — empty means clear
+// to delete.
 //
 // Deliberately NOT a blocker: a non-zero wallet balance. The wallet is
 // non-custodial and the user keeps their seed phrase, so deleting the account
@@ -78,6 +81,41 @@ func blockingCommitments(db *gorm.DB, userID uuid.UUID) ([]string, error) {
 	}
 	if orderCount > 0 {
 		blockers = append(blockers, fmt.Sprintf("%d open marketplace order(s)", orderCount))
+	}
+
+	var saleCount int64
+	if err := db.Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
+		Count(&saleCount).Error; err != nil {
+		return nil, err
+	}
+	if saleCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d sale to your bank still in progress", saleCount))
+	}
+
+	var purchaseCount int64
+	if err := db.Model(&models.PaycrestOrderRecord{}).
+		Where("user_id = ? AND route_kind = ? AND status NOT IN ?",
+			userID, models.RouteKindConverted, models.PaycrestTerminalStatuses()).
+		Count(&purchaseCount).Error; err != nil {
+		return nil, err
+	}
+	if purchaseCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d purchase still being delivered", purchaseCount))
+	}
+
+	// A TSA Pay payment in flight moves money either way: hers to a merchant, or
+	// a customer's to her own merchant account's bank or wallet.
+	var payCount int64
+	if err := db.Model(&models.PayPayment{}).
+		Where("status = ? AND mode = ? AND (payer_user_id = ? OR merchant_id IN (?))",
+			models.PayStatusProcessing, models.PayModeLive, userID,
+			db.Model(&models.PayMerchant{}).Select("id").Where("user_id = ?", userID)).
+		Count(&payCount).Error; err != nil {
+		return nil, err
+	}
+	if payCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d TSA Pay payment(s) still being settled", payCount))
 	}
 
 	return blockers, nil
@@ -149,9 +187,27 @@ func (h *Handlers) RequestAccountDeletion(c *gin.Context) {
 		}).Error; err != nil {
 			return err
 		}
+		// Her TSA Pay merchant account stops with her: a suspended merchant's API
+		// keys are refused and its payments can no longer be started, so no
+		// customer money is taken for an account that no longer exists. Its
+		// pending payments expire on their own clock. Reinstating the account
+		// does not reactivate the merchant — that stays a super admin's call.
+		// The version bump makes any in-flight admin edit fail rather than
+		// overwrite the suspension.
+		if err := tx.Model(&models.PayMerchant{}).
+			Where("user_id = ? AND status = ?", user.ID, models.PayMerchantActive).
+			Updates(map[string]interface{}{
+				"status":     models.PayMerchantSuspended,
+				"version":    gorm.Expr("version + 1"),
+				"updated_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := forgetTrustedBrowsers(tx, user.ID); err != nil {
+			return err
+		}
 		// Revoke all active refresh tokens so stale sessions cannot be reused upon reactivation
-		return tx.Model(&models.RefreshToken{}).Where("user_id = ? AND revoked = false", user.ID).
-			Update("revoked", true).Error
+		return revokeRefreshTokens(tx, user.ID)
 	})
 	if txErr != nil {
 		log.Printf("RequestAccountDeletion: %s: %v", user.ID, txErr)
@@ -293,7 +349,7 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Admin role required")
 		return
 	}
@@ -331,6 +387,46 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 		}
 		anonEmail := fmt.Sprintf("deleted_%s@deleted.local", req.UserID.String())
 		anonUsername := fmt.Sprintf("deleted_%s", anonCleanID)
+
+		// Her bank details on finished ramp activity. blockingCommitments kept
+		// anything open from reaching here; this closes out rows that ended
+		// before the state transitions started clearing them. Only resolved
+		// rows: an open intent is left alone (erasing its destination would
+		// break an order being opened for it), and an unmatched order keeps
+		// its payout details because an operator is still chasing it.
+		if err := tx.Model(&models.RampSellIntent{}).
+			Where("user_id = ? AND status IN ?", req.UserID,
+				[]string{models.SellIntentOrdered, models.SellIntentDelivered, models.SellIntentFailed}).
+			Updates(models.WithBankDetailsCleared(map[string]any{})).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.PaycrestOrderRecord{}).
+			Where("user_id = ? AND status IN ?", req.UserID, models.PaycrestResolvedStatuses()).
+			Updates(models.WithPayoutDetailsCleared(map[string]any{})).Error; err != nil {
+			return err
+		}
+
+		// Her merchant account's payout destinations and credentials: nothing
+		// may settle to them or authenticate with them after erasure.
+		if err := tx.Model(&models.PayMerchant{}).Where("user_id = ?", req.UserID).Updates(map[string]interface{}{
+			"status":           models.PayMerchantSuspended,
+			"settlement_mode":  "",
+			"bank_code":        "",
+			"account_number":   "",
+			"account_name":     "",
+			"wallet_address":   "",
+			"webhook_url":      "",
+			"test_webhook_url": "",
+			"live_key_hash":    nil,
+			"live_key_prefix":  "",
+			"test_key_hash":    nil,
+			"test_key_prefix":  "",
+			"version":          gorm.Expr("version + 1"),
+			"updated_at":       now,
+		}).Error; err != nil {
+			return err
+		}
+
 		return tx.Model(&models.User{}).Where("id = ?", req.UserID).Updates(map[string]interface{}{
 			"email":          anonEmail,
 			"username":       anonUsername,
@@ -366,7 +462,7 @@ func (h *Handlers) RestoreAccountDeletionRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Admin role required")
 		return
 	}

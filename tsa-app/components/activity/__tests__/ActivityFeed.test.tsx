@@ -65,6 +65,9 @@ function render(item: ActivityItem): any {
   return tree;
 }
 
+// A real-shaped EVM hash: explorer links are only built from one (txExplorerUrl).
+const TX = '0xabababababababababababababababababababababababababababababababab';
+
 describe('openActivityItem', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -72,7 +75,7 @@ describe('openActivityItem', () => {
   });
 
   it('navigates in-app when the item has a detail screen', () => {
-    const opened = openActivityItem({ ...base, type: 'it', href: '/wallet/it/intent/i1', txHash: '0xabc', chainId: 146 });
+    const opened = openActivityItem({ ...base, type: 'it', href: '/wallet/it/intent/i1', txHash: TX, chainId: 146 });
 
     expect(opened).toBe(true);
     expect(router.push).toHaveBeenCalledWith('/wallet/it/intent/i1');
@@ -80,11 +83,11 @@ describe('openActivityItem', () => {
   });
 
   it('falls back to the explorer link', () => {
-    const opened = openActivityItem({ ...base, txHash: '0xabc', chainId: 146 });
+    const opened = openActivityItem({ ...base, txHash: TX, chainId: 146 });
 
     expect(opened).toBe(true);
     expect(router.push).not.toHaveBeenCalled();
-    expect(Linking.openURL).toHaveBeenCalledWith(expect.stringContaining('0xabc'));
+    expect(Linking.openURL).toHaveBeenCalledWith(expect.stringContaining(TX));
   });
 
   it('does nothing for an item with neither', () => {

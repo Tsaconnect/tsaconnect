@@ -34,6 +34,20 @@ describe('depositCardState', () => {
     });
   });
 
+  // A lost answer, or a kill after the broadcast: this phone may have sent it
+  // and has no hash. Never an address — that would invite the second send.
+  it('shows a deposit this phone may have sent as unconfirmed, ahead of the claim', () => {
+    expect(depositCardState({ ...base, mayBeOut: true })).toEqual({ kind: 'unconfirmed' });
+    expect(depositCardState({ ...base, mayBeOut: true, paymentClaimedAt: '2026-09-17T00:00:00Z' })).toEqual({
+      kind: 'unconfirmed',
+    });
+    expect(depositCardState({ ...base, mayBeOut: true, sentTxHash: '0xabc' })).toEqual({
+      kind: 'progress',
+      txHash: '0xabc',
+    });
+    expect(depositCardState({ ...base, mayBeOut: true, expired: true })).toEqual({ kind: 'hidden' });
+  });
+
   it('prefers the hash over the claim when it has both', () => {
     expect(
       depositCardState({ ...base, sentTxHash: '0xabc', paymentClaimedAt: '2026-09-17T00:00:00Z' }),

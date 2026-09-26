@@ -68,13 +68,19 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE refresh_tokens (
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
-			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, web INTEGER NOT NULL DEFAULT 0, created_at DATETIME
 		)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
 			t.Fatalf("create table: %v", err)
 		}
+	}
+
+	// The ramp tables come from their models, so the blocker and erasure
+	// queries are tested against the real column names.
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}, &models.WebTrustedBrowser{}); err != nil {
+		t.Fatalf("migrate ramp tables: %v", err)
 	}
 
 	prev := config.DB
@@ -536,5 +542,296 @@ func TestRestoreAccountDeletionRequest_ReactivatesUser(t *testing.T) {
 	}
 	if !restored {
 		t.Error("the restored user was never notified")
+	}
+}
+
+// ---------- Ramp: sales and converted purchases in flight ----------
+
+func seedSellIntent(t *testing.T, db *gorm.DB, userID uuid.UUID, status string) *models.RampSellIntent {
+	t.Helper()
+	in := &models.RampSellIntent{UserID: userID, SourceAddress: "0xsrc", WalletAddress: "0xwallet",
+		SourceChainID: 56, SourceTokenAddress: "0xtoken", SourceAmount: "1", FiatCode: "NGN",
+		BankCode: "044", AccountNumber: "0123456789", AccountName: "ADA OBI", Status: status}
+	if err := db.Create(in).Error; err != nil {
+		t.Fatalf("seed sell intent: %v", err)
+	}
+	return in
+}
+
+func seedPaycrestOrder(t *testing.T, db *gorm.DB, userID uuid.UUID, direction, routeKind, status string) *models.PaycrestOrderRecord {
+	t.Helper()
+	o := &models.PaycrestOrderRecord{UserID: userID, Direction: direction, Status: status,
+		Reference: "ref-" + uuid.NewString(), PaycrestID: "pc-1", FiatCode: "NGN", FiatAmount: "15000",
+		Token: "USDC", ChainKey: "base", Network: "base", RouteKind: routeKind, WalletAddress: "0xwallet",
+		TxHash: "0xtx"}
+	if direction == models.PaycrestDirectionSell {
+		o.PayoutBankCode, o.PayoutInstitution = "044", "ABNGNGLA"
+		o.PayoutAccount, o.PayoutAccountName = "0123456789", "ADA OBI"
+	} else {
+		// The PROVIDER's collection account she paid into — not her data.
+		o.PayInstitution, o.PayAccountNumber, o.PayAccountName = "Opay", "9988776655", "PROVIDER LTD"
+	}
+	if err := db.Create(o).Error; err != nil {
+		t.Fatalf("seed paycrest order: %v", err)
+	}
+	return o
+}
+
+func requestDeletion(t *testing.T, user *models.User) *httptest.ResponseRecorder {
+	t.Helper()
+	w, c := newDeletionContext("POST", "/api/users/account/deletion-request",
+		map[string]string{"password": "correct-horse"}, user)
+	(&Handlers{}).RequestAccountDeletion(c)
+	return w
+}
+
+func blockersIn(t *testing.T, w *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp struct {
+		Data struct {
+			Blockers []string `json:"blockers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp.Data.Blockers
+}
+
+func TestRequestAccountDeletion_BlockedByOpenSellIntent(t *testing.T) {
+	for _, status := range models.SellIntentOpenStatuses {
+		t.Run(status, func(t *testing.T) {
+			db := setupDeletionTestDB(t)
+			user := mkDeletionUser(t, db, "seller", models.RoleUser)
+			seedSellIntent(t, db, user.ID, status)
+
+			w := requestDeletion(t, user)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("want 409, got %d — %s", w.Code, w.Body.String())
+			}
+			if b := blockersIn(t, w); len(b) != 1 || b[0] != "1 sale to your bank still in progress" {
+				t.Fatalf("blockers = %q", b)
+			}
+			var fresh models.User
+			db.First(&fresh, "id = ?", user.ID)
+			if fresh.AccountStatus != models.AccountStatusActive {
+				t.Error("account was deleted mid-sale")
+			}
+		})
+	}
+}
+
+func TestRequestAccountDeletion_BlockedByOpenConvertedOrder(t *testing.T) {
+	for _, status := range []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusConverting,
+		models.PaycrestStatusRefunding, models.PaycrestStatusRecoveryPending} {
+		t.Run(status, func(t *testing.T) {
+			db := setupDeletionTestDB(t)
+			user := mkDeletionUser(t, db, "buyer", models.RoleUser)
+			seedPaycrestOrder(t, db, user.ID, models.PaycrestDirectionBuy, models.RouteKindConverted, status)
+
+			w := requestDeletion(t, user)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("want 409, got %d — %s", w.Code, w.Body.String())
+			}
+			if b := blockersIn(t, w); len(b) != 1 || b[0] != "1 purchase still being delivered" {
+				t.Fatalf("blockers = %q", b)
+			}
+		})
+	}
+}
+
+// Finished sales and delivered purchases are history, not commitments — and
+// another user's open sale is not hers.
+func TestRequestAccountDeletion_FinishedRampActivityDoesNotBlock(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	user := mkDeletionUser(t, db, "done", models.RoleUser)
+	seedSellIntent(t, db, user.ID, models.SellIntentFailed)
+	seedSellIntent(t, db, user.ID, models.SellIntentOrdered)
+	seedSellIntent(t, db, user.ID, models.SellIntentDelivered)
+	for _, status := range models.PaycrestTerminalStatuses() {
+		seedPaycrestOrder(t, db, user.ID, models.PaycrestDirectionBuy, models.RouteKindConverted, status)
+	}
+	stranger := mkDeletionUser(t, db, "stranger", models.RoleUser)
+	seedSellIntent(t, db, stranger.ID, models.SellIntentSwapping)
+	seedPaycrestOrder(t, db, stranger.ID, models.PaycrestDirectionBuy, models.RouteKindConverted, models.PaycrestStatusConverting)
+
+	if w := requestDeletion(t, user); w.Code != http.StatusOK {
+		t.Fatalf("finished ramp activity blocked deletion: got %d — %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------- Permanent erasure: bank details ----------
+
+func completeDeletion(t *testing.T, db *gorm.DB, userID uuid.UUID) {
+	t.Helper()
+	admin := mkDeletionUser(t, db, "root-"+uuid.NewString()[:8], models.RoleAdmin)
+	req := models.AccountDeletionRequest{ID: uuid.New(), UserID: userID,
+		Status: models.AccountDeletionStatusPending, PurgeAfter: time.Now()}
+	if err := db.Create(&req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	w, c := newDeletionContext("POST", "/x", nil, admin)
+	c.Params = gin.Params{{Key: "id", Value: req.ID.String()}}
+	(&Handlers{}).CompleteAccountDeletionRequest(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("complete: %d — %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCompleteAccountDeletionRequest_ErasesFinishedBankDetails(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	victim := mkDeletionUser(t, db, "leaver", models.RoleUser)
+	failed := seedSellIntent(t, db, victim.ID, models.SellIntentFailed)
+	ordered := seedSellIntent(t, db, victim.ID, models.SellIntentOrdered)
+	delivered := seedSellIntent(t, db, victim.ID, models.SellIntentDelivered)
+	settled := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusSettled)
+	expired := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusExpired)
+	// Kept: an operator is still chasing an unmatched order, and a buy row's
+	// pay_* fields are the provider's account, not hers.
+	unmatched := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusUnmatched)
+	buy := seedPaycrestOrder(t, db, victim.ID, models.PaycrestDirectionBuy, models.RouteKindDirect, models.PaycrestStatusSettled)
+	other := mkDeletionUser(t, db, "stays", models.RoleUser)
+	othersIntent := seedSellIntent(t, db, other.ID, models.SellIntentFailed)
+	othersOrder := seedPaycrestOrder(t, db, other.ID, models.PaycrestDirectionSell, models.RouteKindDirect, models.PaycrestStatusSettled)
+
+	completeDeletion(t, db, victim.ID)
+
+	for _, id := range []uuid.UUID{failed.ID, ordered.ID, delivered.ID} {
+		var in models.RampSellIntent
+		db.First(&in, "id = ?", id)
+		if in.BankCode != "" || in.AccountNumber != "" || in.AccountName != "" {
+			t.Errorf("%s intent kept bank details: %q %q %q", in.Status, in.BankCode, in.AccountNumber, in.AccountName)
+		}
+		if in.SourceAmount != "1" || in.WalletAddress != "0xwallet" {
+			t.Errorf("%s intent lost non-bank fields: %+v", in.Status, in)
+		}
+	}
+	for _, id := range []uuid.UUID{settled.ID, expired.ID} {
+		var o models.PaycrestOrderRecord
+		db.First(&o, "id = ?", id)
+		if o.PayoutBankCode != "" || o.PayoutInstitution != "" || o.PayoutAccount != "" || o.PayoutAccountName != "" {
+			t.Errorf("%s order kept payout details: %+v", o.Status, o)
+		}
+		// The audit trail an operator reconciles by is untouched.
+		if o.Reference == "" || o.PaycrestID != "pc-1" || o.FiatAmount != "15000" || o.TxHash != "0xtx" {
+			t.Errorf("%s order lost its audit fields: %+v", o.Status, o)
+		}
+	}
+
+	var um models.PaycrestOrderRecord
+	db.First(&um, "id = ?", unmatched.ID)
+	if um.PayoutAccount != "0123456789" || um.PayoutAccountName != "ADA OBI" {
+		t.Errorf("an unmatched order under operator recovery was scrubbed: %+v", um)
+	}
+	var b models.PaycrestOrderRecord
+	db.First(&b, "id = ?", buy.ID)
+	if b.PayAccountNumber != "9988776655" || b.PayAccountName != "PROVIDER LTD" {
+		t.Errorf("the provider's collection account was scrubbed: %+v", b)
+	}
+	var oi models.RampSellIntent
+	db.First(&oi, "id = ?", othersIntent.ID)
+	var oo models.PaycrestOrderRecord
+	db.First(&oo, "id = ?", othersOrder.ID)
+	if oi.AccountNumber != "0123456789" || oo.PayoutAccount != "0123456789" {
+		t.Error("another user's bank details were scrubbed")
+	}
+}
+
+// seedPayMerchant is her TSA Pay merchant account, live and settling to a bank.
+func seedPayMerchant(t *testing.T, db *gorm.DB, userID uuid.UUID) *models.PayMerchant {
+	t.Helper()
+	live, test := "livehash-"+uuid.NewString(), "testhash-"+uuid.NewString()
+	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: userID, BusinessName: "Sky Air",
+		Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat, BankCode: "058",
+		AccountNumber: "0123456789", AccountName: "SKY AIR LTD", WalletAddress: "0xmerchant",
+		WebhookURL: "https://hooks.skyair.ng/tsa", TestWebhookURL: "https://hooks.skyair.ng/test",
+		MinAmountKobo: 100, MaxAmountKobo: 1_000_000_00, LiveKeyHash: &live, LiveKeyPrefix: "tsapk_live_ab",
+		TestKeyHash: &test, TestKeyPrefix: "tsapk_test_ab"}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed merchant: %v", err)
+	}
+	return m
+}
+
+func seedPayPayment(t *testing.T, db *gorm.DB, merchantID uuid.UUID, payer *uuid.UUID, mode, status string) {
+	t.Helper()
+	p := &models.PayPayment{MerchantID: merchantID, Mode: mode, Reference: "PNR-" + uuid.NewString()[:8],
+		AmountKobo: 5_000_000, Currency: "NGN", Status: status, PayerUserID: payer, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed payment: %v", err)
+	}
+}
+
+func TestRequestAccountDeletion_BlockedByAPayPaymentInFlight(t *testing.T) {
+	for name, seed := range map[string]func(t *testing.T, db *gorm.DB, user *models.User){
+		"a customer is paying her merchant account": func(t *testing.T, db *gorm.DB, user *models.User) {
+			m := seedPayMerchant(t, db, user.ID)
+			payer := uuid.New()
+			seedPayPayment(t, db, m.ID, &payer, models.PayModeLive, models.PayStatusProcessing)
+		},
+		"she is paying a merchant": func(t *testing.T, db *gorm.DB, user *models.User) {
+			seedPayPayment(t, db, uuid.New(), &user.ID, models.PayModeLive, models.PayStatusProcessing)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := setupDeletionTestDB(t)
+			user := mkDeletionUser(t, db, "payer", models.RoleUser)
+			seed(t, db, user)
+			w, c := newDeletionContext("POST", "/api/users/account/deletion-request",
+				map[string]string{"password": "correct-horse"}, user)
+			(&Handlers{}).RequestAccountDeletion(c)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("want 409, got %d — body %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRequestAccountDeletion_SuspendsHerMerchantAccount(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	user := mkDeletionUser(t, db, "owner", models.RoleUser)
+	m := seedPayMerchant(t, db, user.ID)
+	// Finished and test-mode payments are not money in flight.
+	seedPayPayment(t, db, m.ID, nil, models.PayModeLive, models.PayStatusSucceeded)
+	seedPayPayment(t, db, m.ID, &user.ID, models.PayModeTest, models.PayStatusProcessing)
+	others := seedPayMerchant(t, db, uuid.New())
+
+	w, c := newDeletionContext("POST", "/api/users/account/deletion-request",
+		map[string]string{"password": "correct-horse"}, user)
+	(&Handlers{}).RequestAccountDeletion(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d — body %s", w.Code, w.Body.String())
+	}
+	var got, other models.PayMerchant
+	db.First(&got, "id = ?", m.ID)
+	db.First(&other, "id = ?", others.ID)
+	if got.Status != models.PayMerchantSuspended || got.Version != m.Version+1 {
+		t.Fatalf("merchant = %+v: a deleted account's keys and payments still work", got)
+	}
+	if other.Status != models.PayMerchantActive {
+		t.Fatal("another user's merchant was suspended")
+	}
+}
+
+func TestCompleteAccountDeletionRequest_ErasesHerMerchantAccountsDestinationsAndKeys(t *testing.T) {
+	db := setupDeletionTestDB(t)
+	victim := mkDeletionUser(t, db, "leaver", models.RoleUser)
+	m := seedPayMerchant(t, db, victim.ID)
+	others := seedPayMerchant(t, db, uuid.New())
+
+	completeDeletion(t, db, victim.ID)
+
+	var got models.PayMerchant
+	db.First(&got, "id = ?", m.ID)
+	if got.Status != models.PayMerchantSuspended || got.SettlementMode != "" || got.BankCode != "" ||
+		got.AccountNumber != "" || got.AccountName != "" || got.WalletAddress != "" ||
+		got.WebhookURL != "" || got.TestWebhookURL != "" || got.LiveKeyHash != nil || got.TestKeyHash != nil ||
+		got.LiveKeyPrefix != "" || got.TestKeyPrefix != "" {
+		t.Fatalf("merchant kept a destination or credential after erasure: %+v", got)
+	}
+	var other models.PayMerchant
+	db.First(&other, "id = ?", others.ID)
+	if other.AccountNumber != "0123456789" || other.LiveKeyHash == nil {
+		t.Fatal("another user's merchant account was scrubbed")
 	}
 }

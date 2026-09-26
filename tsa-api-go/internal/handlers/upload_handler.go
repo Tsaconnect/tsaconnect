@@ -12,7 +12,6 @@ import (
 	"github.com/cloudinary/cloudinary-go/v2/api/admin"
 	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"github.com/gin-gonic/gin"
-	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // getCloudinary creates a Cloudinary client from the handler config.
@@ -349,7 +348,7 @@ func (h *Handlers) GetUploadStats(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "Admin access required"})
 		return
 	}

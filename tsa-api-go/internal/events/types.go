@@ -31,6 +31,17 @@ const (
 	SecurityFailedAttempts  = "security.failed_attempts"
 	SecurityPasswordChanged = "security.password_changed"
 	SecurityAccountLocked   = "security.account_locked"
+	// SecurityPaySettlementChanged: where a TSA Pay merchant is paid was
+	// changed from their own account. The one change a stolen login would make
+	// to redirect a merchant's money, so it is told to the owner on every
+	// channel — the change stands, but it is never silent.
+	SecurityPaySettlementChanged = "security.pay_settlement_changed"
+	// A TSA Pay merchant's API key was rolled, their webhook/return-domain
+	// settings changed, or their webhook signing secret was revealed or rolled.
+	// Like the payout change: the owner is always told.
+	SecurityPayKeyRolled        = "security.pay_key_rolled"
+	SecurityPayEndpointsChanged = "security.pay_endpoints_changed"
+	SecurityPayWebhookSecret    = "security.pay_webhook_secret"
 
 	// Account-deletion events (Apple 5.1.1(v) self-service deletion).
 	// AccountDeletionRequested fires twice per request: once for the departing
@@ -53,6 +64,10 @@ const (
 	MerchantApproved  = "merchant.approved"
 	MerchantRejected  = "merchant.rejected"
 	MerchantSuspended = "merchant.suspended"
+	// A super admin switched a TSA Pay merchant's live payments on or off.
+	// Informational: told to the owner by email and push, and mutable.
+	PayLiveEnabled  = "merchant.pay_live_enabled"
+	PayLiveDisabled = "merchant.pay_live_disabled"
 
 	// Product events
 	ProductListed   = "product.listed"

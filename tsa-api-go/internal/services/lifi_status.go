@@ -43,6 +43,22 @@ type LiFiTransferStatus struct {
 	DestChainID       int64
 	ReceivedBaseUnits *big.Int
 	ToAddress         string
+	// ReceivingToken is the token address actually delivered. A native coin
+	// leaves no ERC-20 Transfer log to read, so on that one path this is the
+	// only thing that says the recipient got the asset they asked for rather
+	// than something the bridge substituted.
+	ReceivingToken string
+	// The sending side: what left, from where. Not used by the converted-buy
+	// landing check (which only cares what arrived) — these bind a user's own
+	// swap back to the transaction that funded it.
+	SendingChainID int64
+	SendingToken   string
+	// SendingAmount is nil when LiFi omitted it or wrote something
+	// unparseable: "nothing was sent" is a claim, and there is no evidence
+	// for it here.
+	SendingAmount *big.Int
+	FromAddress   string
+	TransactionID string
 }
 
 var (
@@ -65,13 +81,31 @@ func NewLiFiStatusClient(baseURL, apiKey string) *LiFiStatusClient {
 }
 
 type lifiStatusResponse struct {
-	Status    string `json:"status"`
-	Substatus string `json:"substatus"`
+	Status        string `json:"status"`
+	Substatus     string `json:"substatus"`
+	TransactionID string `json:"transactionId"`
+	FromAddress   string `json:"fromAddress"`
+	// ToAddress is where LiFi actually reports the recipient. Observed live
+	// on 2026-09-23 across lifiIntents, mayan, relaydepository, nordstern and
+	// across: receiving.toAddress came back NULL on every one of them, and
+	// this top-level field carried the address. Reading only the nested one
+	// left every landing looking like "recipient unknown".
+	ToAddress string `json:"toAddress"`
+	Sending   struct {
+		ChainID int64  `json:"chainId"`
+		Amount  string `json:"amount"`
+		Token   struct {
+			Address string `json:"address"`
+		} `json:"token"`
+	} `json:"sending"`
 	Receiving struct {
 		TxHash    string `json:"txHash"`
 		ChainID   int64  `json:"chainId"`
 		Amount    string `json:"amount"`
 		ToAddress string `json:"toAddress"`
+		Token     struct {
+			Address string `json:"address"`
+		} `json:"token"`
 	} `json:"receiving"`
 }
 
@@ -103,15 +137,25 @@ func (c *LiFiStatusClient) Status(ctx context.Context, srcTxHash string) (*LiFiT
 	}
 
 	out := &LiFiTransferStatus{
-		Status:      parsed.Status,
-		Substatus:   parsed.Substatus,
-		DestTxHash:  parsed.Receiving.TxHash,
-		DestChainID: parsed.Receiving.ChainID,
-		ToAddress:   parsed.Receiving.ToAddress,
+		Status:         parsed.Status,
+		Substatus:      parsed.Substatus,
+		DestTxHash:     parsed.Receiving.TxHash,
+		DestChainID:    parsed.Receiving.ChainID,
+		ToAddress:      firstNonEmpty(parsed.Receiving.ToAddress, parsed.ToAddress),
+		ReceivingToken: parsed.Receiving.Token.Address,
+		SendingChainID: parsed.Sending.ChainID,
+		SendingToken:   parsed.Sending.Token.Address,
+		FromAddress:    parsed.FromAddress,
+		TransactionID:  parsed.TransactionID,
 	}
 	if parsed.Receiving.Amount != "" {
 		if v, ok := new(big.Int).SetString(parsed.Receiving.Amount, 10); ok {
 			out.ReceivedBaseUnits = v
+		}
+	}
+	if parsed.Sending.Amount != "" {
+		if v, ok := new(big.Int).SetString(parsed.Sending.Amount, 10); ok {
+			out.SendingAmount = v
 		}
 	}
 	return out, nil

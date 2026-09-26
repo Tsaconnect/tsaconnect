@@ -13,10 +13,11 @@ const (
 )
 
 const (
-	BusinessTypeGeneralProducts = "general_products"
-	BusinessTypeDigitalProducts = "digital_products"
-	BusinessTypeP2PMerchant     = "p2p_merchant"
-	BusinessTypeServiceProvider = "service_provider"
+	BusinessTypeGeneralProducts   = "general_products"
+	BusinessTypeDigitalProducts   = "digital_products"
+	BusinessTypeP2PMerchant       = "p2p_merchant"
+	BusinessTypeServiceProvider   = "service_provider"
+	BusinessTypePaymentAcceptance = "payment_acceptance"
 )
 
 var ValidBusinessTypes = []string{
@@ -24,6 +25,7 @@ var ValidBusinessTypes = []string{
 	BusinessTypeDigitalProducts,
 	BusinessTypeP2PMerchant,
 	BusinessTypeServiceProvider,
+	BusinessTypePaymentAcceptance,
 }
 
 type MerchantRequest struct {
@@ -38,6 +40,7 @@ type MerchantRequest struct {
 	Country             string     `gorm:"not null" json:"country"`
 	Phone               string     `gorm:"not null" json:"phone"`
 	RegistrationNumber  string     `json:"registrationNumber,omitempty"`
+	Website             string     `gorm:"size:255" json:"website,omitempty"`
 	Status              string     `gorm:"not null;default:'pending';index" json:"status"`
 	AdminNote           string     `json:"adminNote,omitempty"`
 	ReviewedBy          *uuid.UUID `gorm:"type:uuid" json:"reviewedBy,omitempty"`

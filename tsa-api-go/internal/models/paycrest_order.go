@@ -82,6 +82,34 @@ func PaycrestTerminalStatuses() []string {
 	return out
 }
 
+// PaycrestResolvedStatuses are the terminal statuses nobody will chase
+// again: every terminal one except unmatched, which is terminal only for the
+// automated path — an operator is still working it by hand, from the payout
+// details on the row. Account erasure scrubs the user's payout destination
+// only from these.
+func PaycrestResolvedStatuses() []string {
+	out := make([]string, 0, len(paycrestTerminalStatuses))
+	for _, st := range paycrestTerminalStatuses {
+		if st != PaycrestStatusUnmatched {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// WithPayoutDetailsCleared adds, to a column update, the blanking of the
+// user's own payout destination on a sell. Only the payout_* columns: the
+// pay_* columns on a buy are the PROVIDER's collection account, not her data,
+// and are what an operator needs to chase a deposit that never matched.
+// Blank, not NULL, matching WithBankDetailsCleared.
+func WithPayoutDetailsCleared(updates map[string]any) map[string]any {
+	updates["payout_bank_code"] = ""
+	updates["payout_institution"] = ""
+	updates["payout_account"] = ""
+	updates["payout_account_name"] = ""
+	return updates
+}
+
 // PaycrestOrderRecord is one brokered ramp order.
 type PaycrestOrderRecord struct {
 	ID     uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
@@ -123,6 +151,10 @@ type PaycrestOrderRecord struct {
 	// AmountReceived, ARE base units — this field alone is not.
 	Rate        string `gorm:"size:32" json:"rate"`
 	TokenAmount string `gorm:"size:40" json:"tokenAmount"`
+	// RawRate is Paycrest's own rate on the order, as it answered it: unrounded,
+	// before our sender fee — the rate it actually pays at. Empty on rows opened
+	// before it was recorded.
+	RawRate string `gorm:"size:32" json:"-"`
 	// ProviderID is which liquidity provider took it. Stored because provider
 	// quality varies sharply — one stranded our funds and left the book the
 	// next day — and per-provider failure rates are only visible if recorded.
@@ -137,7 +169,30 @@ type PaycrestOrderRecord struct {
 	RouteKind      string `gorm:"size:12;index" json:"routeKind,omitempty"`
 	RequestedToken string `gorm:"size:16" json:"requestedToken,omitempty"`
 	RequestedChain string `gorm:"size:24" json:"requestedChain,omitempty"`
-	MarkupBps      int    `gorm:"default:0" json:"markupBps,omitempty"`
+	// RequestedChainID/RequestedTokenAddress/RequestedTokenDecimals identify
+	// the destination asset exactly, which the symbol pair above cannot: two
+	// chains can serve a token of the same name, a symbol is not unique on one
+	// chain, and a token the config map has never heard of has no symbol here
+	// at all. Every one of them is DERIVED server-side (chain key from the
+	// chain id, decimals and symbol from LiFi or our own config) — the client
+	// sends only the chain id and the address.
+	RequestedChainID       int64  `gorm:"default:0" json:"requestedChainId,omitempty"`
+	RequestedTokenAddress  string `gorm:"size:128" json:"requestedTokenAddress,omitempty"`
+	RequestedTokenDecimals int    `json:"requestedTokenDecimals,omitempty"`
+	// DestinationAddress is where the converted asset must land. Today it is
+	// always the user's own wallet (the same value as WalletAddress), stored
+	// separately because the delivery target and the account's wallet are not
+	// the same question — a non-EVM destination will not be an EVM address.
+	DestinationAddress string `gorm:"size:128" json:"destinationAddress,omitempty"`
+	MarkupBps          int    `gorm:"default:0" json:"markupBps,omitempty"`
+	// QuotedAmount is T: what she is owed, in the SOURCE (settlement leg's)
+	// base units. Computed from Paycrest's own delivered amount, never from
+	// the venue's quote — see QuotedFromOrder.
+	QuotedAmount string `gorm:"size:80" json:"quotedAmount,omitempty"`
+	// EstimatedAmount is what the route was expected to deliver, in the
+	// DESTINATION token's base units. An estimate shown to the user, never a
+	// promise: only PromisedAmount (stablecoin destinations) binds.
+	EstimatedAmount string `gorm:"size:80" json:"estimatedAmount,omitempty"`
 	// PromisedAmount is what we guaranteed the user receives: token base units
 	// on a buy. The conversion must land at least this much.
 	PromisedAmount string `gorm:"size:64" json:"promisedAmount,omitempty"`
@@ -189,6 +244,13 @@ type PaycrestOrderRecord struct {
 	// abandoned before paying, which looks identical to Paycrest. See
 	// mapPaycrestStatus in paycrest_order_service.go for where this is read.
 	PaymentClaimedAt *time.Time `json:"paymentClaimedAt,omitempty"`
+
+	// PayPaymentID marks an order that is a TSA Pay payment's attempt: its payout
+	// bank is the MERCHANT's, so the customer's routes mask it. Set at creation
+	// and never cleared — the payment's own link to the order is dropped when it
+	// is released, which would leave a refunded attempt unrecognisable. Not part
+	// of the JSON, so no route changes shape.
+	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
 
 	// FailureReason is operator-facing text for anything the user cannot fix.
 	FailureReason string `gorm:"size:512" json:"failureReason,omitempty"`

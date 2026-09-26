@@ -5,6 +5,7 @@
 // anything that touches an amount lives here and is unit-tested.
 
 import { formatTokenAmount } from '@/services/p2p';
+import type { StepState } from '@/utils/progressSteps';
 
 export type StableAsset = 'USDC' | 'USDT';
 
@@ -145,6 +146,21 @@ export function formatKobo(kobo: string | null | undefined): string {
   return `${negative ? '-' : ''}₦${grouped}.${minor}`;
 }
 
+/**
+ * "1362.9" → "₦1,362.90": a decimal naira string (what Paycrest orders carry),
+ * rounded to the kobo, half away from zero. String maths, like formatKobo —
+ * formatKobo itself would read "1362.9" as 13629 kobo.
+ */
+export function formatNaira(naira: string | null | undefined): string {
+  const m = naira?.trim().match(/^(-?)(\d*)(?:\.(\d*))?$/);
+  if (!m || (!m[2] && !m[3])) return '—';
+  const [, sign, whole, frac = ''] = m;
+  let kobo = BigInt(`${whole || '0'}${frac.padEnd(2, '0').slice(0, 2)}`);
+  if (frac.length > 2 && frac[2] >= '5') kobo += BigInt(1);
+  // "-0.001" rounds to nothing, and nothing has no sign.
+  return formatKobo(`${kobo === BigInt(0) ? '' : sign}${kobo}`);
+}
+
 /** gross − afterSpread, as a kobo string. Both are integers on the wire. */
 export function subtractKobo(a: string | null | undefined, b: string | null | undefined): string | null {
   if (!a || !b) return null;
@@ -216,7 +232,7 @@ export function formatSendVsArrive(sentMajor: string, arriveMajor: string): stri
   return `You send ${sentMajor} · about ${arriveMajor} arrives`;
 }
 
-export type HopState = 'done' | 'active' | 'pending' | 'failed';
+export type HopState = StepState;
 export type Hop = { key: string; label: string; state: HopState };
 
 /**

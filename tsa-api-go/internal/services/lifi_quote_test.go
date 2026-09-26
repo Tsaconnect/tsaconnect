@@ -3,8 +3,13 @@ package services
 import (
 	"context"
 	"errors"
+	"io"
+	"math"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +54,188 @@ func TestLiFiQuote_NoRouteIsATypedError(t *testing.T) {
 	defer srv.Close()
 	if _, err := NewLiFiQuoteClient(srv.URL, "", "tsa").Quote(context.Background(), LiFiQuoteRequest{}); !errors.Is(err, ErrLiFiNoRoute) {
 		t.Fatalf("want ErrLiFiNoRoute, got %v", err)
+	}
+}
+
+func lifiQuoteServer(t *testing.T, check func(url.Values), body string, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if check != nil {
+			check(r.URL.Query())
+		}
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const lifiQuoteFixture = `{"tool":"across","action":{"fromToken":{"address":"0xA"},"toToken":{"address":"0x0000000000000000000000000000000000000000","decimals":18,"symbol":"BNB"}},
+ "estimate":{"toAmount":"990","toAmountMin":"989","fromAmountUSD":"100.00","toAmountUSD":"99.70","executionDuration":30,
+ "gasCosts":[{"amountUSD":"0.02"},{"amountUSD":"0.01"}]},
+ "transactionRequest":{"to":"0xB","data":"0x01","value":"0x0","gasLimit":"0x3d090"}}`
+
+func TestLiFiQuote_ParsesUSDDecimalsAndKeepsTheRawBody(t *testing.T) {
+	srv := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("fee") != "0.0025" || q.Get("slippage") != "0.005" || q.Get("allowDestinationCall") != "false" {
+			t.Errorf("fee/slippage/allowDestinationCall = %q/%q/%q", q.Get("fee"), q.Get("slippage"), q.Get("allowDestinationCall"))
+		}
+	}, lifiQuoteFixture, 200)
+	route, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{FeeBps: 25, Slippage: 0.005})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.FromAmountUSD != 100 || route.ToAmountUSD != 99.70 || math.Abs(route.GasCostUSD-0.03) > 1e-9 {
+		t.Fatalf("usd = %v/%v/%v", route.FromAmountUSD, route.ToAmountUSD, route.GasCostUSD)
+	}
+	if route.ToTokenDecimals != 18 || route.ToTokenSymbol != "BNB" || len(route.Raw) == 0 {
+		t.Fatalf("decimals = %d raw = %d bytes", route.ToTokenDecimals, len(route.Raw))
+	}
+}
+
+// strconv.ParseFloat accepts "NaN" and "Inf". A NaN cost slips past every
+// "<= 0" guard (NaN compares false with everything) and prices a route as
+// free, so a USD figure that is not a finite number makes the whole route
+// unpriceable — refused like no route at all, on buys and sells alike.
+func TestLiFiQuote_RefusesAUSDFigureThatIsNotAFiniteNumber(t *testing.T) {
+	for _, tc := range []struct{ name, from, to, gas string }{
+		{"fromAmountUSD NaN", "NaN", "99.70", "0.02"},
+		{"toAmountUSD Inf", "100.00", "Inf", "0.02"},
+		{"gas amountUSD +Infinity", "100.00", "99.70", "+Infinity"},
+		{"gas amountUSD -Inf", "100.00", "99.70", "-Inf"},
+		{"gas amountUSD nan", "100.00", "99.70", "nan"},
+		// ParseFloat returns (+Inf, ErrRange) for a value that overflows
+		// float64 — not a parse failure, so it must not be read as the
+		// unparseable-string default of 0. A gas figure this large would
+		// otherwise price the treasury's gas as free.
+		{"gas amountUSD overflows float64", "100.00", "99.70", "1e400"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.NewReplacer(`"fromAmountUSD":"100.00"`, `"fromAmountUSD":"`+tc.from+`"`,
+				`"toAmountUSD":"99.70"`, `"toAmountUSD":"`+tc.to+`"`,
+				`{"amountUSD":"0.02"}`, `{"amountUSD":"`+tc.gas+`"}`).Replace(lifiQuoteFixture)
+			srv := lifiQuoteServer(t, nil, body, 200)
+			route, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{})
+			if !errors.Is(err, ErrLiFiNoRoute) {
+				t.Fatalf("route = %+v err = %v; a route priced with a non-number must not be usable", route, err)
+			}
+		})
+	}
+}
+
+func TestLiFiQuote_DefaultsToStableSlippageAndNoFee(t *testing.T) {
+	srv := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("slippage") != "0.001" || q.Has("fee") {
+			t.Errorf("slippage = %q, fee present = %v", q.Get("slippage"), q.Has("fee"))
+		}
+	}, lifiQuoteFixture, 200)
+	if _, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiFiQuote_OrderDefaultsToFastestButIsOverridable(t *testing.T) {
+	srv := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("order") != "FASTEST" {
+			t.Errorf("order = %q, want FASTEST when Order is left unset", q.Get("order"))
+		}
+	}, lifiQuoteFixture, 200)
+	if _, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv2 := lifiQuoteServer(t, func(q url.Values) {
+		if q.Get("order") != "CHEAPEST" {
+			t.Errorf("order = %q, want CHEAPEST when Order is set explicitly", q.Get("order"))
+		}
+	}, lifiQuoteFixture, 200)
+	if _, err := NewLiFiQuoteClient(srv2.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{Order: "CHEAPEST"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiFiQuote_UnconfiguredFeeIsItsOwnError(t *testing.T) {
+	srv := lifiQuoteServer(t, nil, `{"message":"Integrator tsa-connect is not configured for collecting fees on chain 56"}`, 400)
+	_, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{FeeBps: 30})
+	if !errors.Is(err, ErrLiFiFeeUnconfigured) {
+		t.Fatalf("err = %v, want ErrLiFiFeeUnconfigured", err)
+	}
+}
+
+func TestLiFiQuote_ExactOutputUsesToAmount(t *testing.T) {
+	var path, query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query = r.URL.Path, r.URL.RawQuery
+		io.WriteString(w, lifiQuoteFixture)
+	}))
+	defer srv.Close()
+	c := NewLiFiQuoteClient(srv.URL, "", "tsa")
+	if _, err := c.Quote(context.Background(), LiFiQuoteRequest{FromChainID: 56, ToChainID: 8453, FromToken: evmNativeAddress,
+		ToToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", FromAddress: "0xa", ToAddress: "0xa", ToAmount: "50500000"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(path, "/quote/toAmount") || !strings.Contains(query, "toAmount=50500000") || strings.Contains(query, "fromAmount=") {
+		t.Fatalf("path %s query %s", path, query)
+	}
+	calls := 0
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++ }))
+	defer counting.Close()
+	if _, err := NewLiFiQuoteClient(counting.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{FromAmount: "1", ToAmount: "1"}); err == nil || calls != 0 {
+		t.Fatalf("both amounts must be refused before any HTTP call: err %v, calls %d", err, calls)
+	}
+}
+
+// What she signs is the quote's action.fromAmount, so it is what the intent
+// stores as SourceAmount for an exact-output swap.
+func TestLiFiQuote_ExposesTheRoutesFromAmount(t *testing.T) {
+	body := strings.Replace(lifiQuoteFixture, `"action":{`, `"action":{"fromAmount":"17000000000000000",`, 1)
+	srv := lifiQuoteServer(t, nil, body, 200)
+	route, err := NewLiFiQuoteClient(srv.URL, "", "").Quote(context.Background(), LiFiQuoteRequest{ToAmount: "990"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.FromAmount != "17000000000000000" {
+		t.Fatalf("FromAmount = %q", route.FromAmount)
+	}
+}
+
+func TestLiFiTokenPriceUSD_ParsesThePriceExactly(t *testing.T) {
+	var path, query, key string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query, key = r.URL.Path, r.URL.RawQuery, r.Header.Get("x-lifi-api-key")
+		io.WriteString(w, `{"priceUSD":"1.0003","decimals":18,"symbol":"USDT"}`)
+	}))
+	defer srv.Close()
+	price, dec, err := NewLiFiQuoteClient(srv.URL, "k", "tsa").TokenPriceUSD(context.Background(), 56, "0x55d398326f99059fF775485246999027B3197955")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if price.Cmp(big.NewRat(10003, 10000)) != 0 || dec != 18 {
+		t.Fatalf("price %s decimals %d — a float64 would not be exactly 10003/10000", price, dec)
+	}
+	if !strings.HasSuffix(path, "/token") || !strings.Contains(query, "chain=56") ||
+		!strings.Contains(query, "token=0x55d398326f99059fF775485246999027B3197955") || key != "k" {
+		t.Fatalf("path %s query %s key %q", path, query, key)
+	}
+}
+
+func TestLiFiTokenPriceUSD_RefusesAPriceItCannotUse(t *testing.T) {
+	for name, body := range map[string]string{
+		"zero":         `{"priceUSD":"0","decimals":18}`,
+		"negative":     `{"priceUSD":"-1","decimals":18}`,
+		"not a number": `{"priceUSD":"abc","decimals":18}`,
+		"missing":      `{"decimals":18}`,
+		"no decimals":  `{"priceUSD":"1"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := lifiQuoteServer(t, nil, body, http.StatusOK)
+			if price, _, err := NewLiFiQuoteClient(srv.URL, "", "tsa").TokenPriceUSD(context.Background(), 56, "0xA"); err == nil {
+				t.Fatalf("price %s accepted — an owed amount would be sized from it", price)
+			}
+		})
+	}
+	srv := lifiQuoteServer(t, nil, `{"message":"unknown token"}`, http.StatusNotFound)
+	if _, _, err := NewLiFiQuoteClient(srv.URL, "", "tsa").TokenPriceUSD(context.Background(), 56, "0xA"); err == nil {
+		t.Fatal("an upstream 404 must be an error")
 	}
 }

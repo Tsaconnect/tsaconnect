@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"golang.org/x/sync/singleflight"
 )
@@ -45,6 +48,10 @@ type PaycrestVenue struct {
 	Token    string `json:"token"`
 	// Rate is fiat per token, as quoted.
 	Rate string `json:"rate"`
+	// RawRate is the provider's own rate for this size before any sender
+	// fee, exactly as it quoted it — what Rate was priced from. Set by Quote
+	// and VenueForFee.
+	RawRate string `json:"-"`
 	// SpreadPercent is Rate against the protocol's market reference. Positive
 	// means the user pays above mid on a buy; negative means they receive
 	// below mid on a sell. Surfaced so the app can show a real cost.
@@ -73,12 +80,33 @@ type PaycrestVenue struct {
 	ViaToken string `json:"viaToken,omitempty"`
 	// RequestedChain/RequestedToken are what the user actually asked for —
 	// what the LiFi route delivers, and what Task 9's order must eventually
-	// pay out.
+	// pay out. Both are DERIVED: the chain key from the chain id, the symbol
+	// from LiFi's own toToken (or config, for a stablecoin) — never echoed
+	// back from the request.
 	RequestedChain string `json:"requestedChain,omitempty"`
 	RequestedToken string `json:"requestedToken,omitempty"`
-	// MarkupBps is the priced markup (ConversionMarkupBps): 0.5% while the
-	// route is cheap, rising to cover cost + 0.1%, capped at 1%.
+	// RequestedChainID/RequestedAddress/RequestedDecimals identify that asset
+	// exactly, which the symbol pair above cannot. The order carries them
+	// through so execution never has to re-guess what was bought.
+	RequestedChainID  int64  `json:"requestedChainId,omitempty"`
+	RequestedAddress  string `json:"requestedTokenAddress,omitempty"`
+	RequestedDecimals int    `json:"requestedTokenDecimals,omitempty"`
+	// RequestedDestination is where this route was actually priced to deliver,
+	// when that is not the user's EVM wallet — her Solana address. Carried on
+	// the venue rather than re-derived at order time so the order can only
+	// ever record the recipient the quoted route was checked against.
+	RequestedDestination string `json:"requestedDestination,omitempty"`
+	// EstimatedAmount is what the route is expected to deliver, in the
+	// requested token's own base units. An estimate, not a promise — a
+	// volatile destination has no PromisedAmount at all.
+	EstimatedAmount string `json:"estimatedAmount,omitempty"`
+	// MarkupBps is B, the round-trip budget: the slice of the sender fee this
+	// order keeps back to pay for its own conversion.
 	MarkupBps int `json:"markupBps,omitempty"`
+	// CostBps is what the priced route actually costs (LiFi's own cost, gas
+	// excluded), so a venue can be compared against the budget it was offered
+	// under.
+	CostBps int `json:"costBps,omitempty"`
 	// PromisedAmount is the guaranteed delivery, in the REQUESTED token's own
 	// base units (destination decimals) — never the settlement leg's. See
 	// ConvertedVenues for why: source and destination decimals differ in
@@ -153,6 +181,17 @@ type PaycrestQuoteService struct {
 	// senderFeePercent is our margin, priced into every rate we quote. Zero
 	// quotes provider rates verbatim.
 	senderFeePercent float64
+	// roundTripBudgetBps is B, pushed here by
+	// PaycrestOrderService.SetRoundTripBudgetBps the same way SetSenderFeePercent
+	// pushes F, so the two services can never disagree on it.
+	roundTripBudgetBps int
+	// convertedFeeMaxByChain/convertedFeeMaxDefault cap the TOTAL fee a
+	// converted buy or swapped sell may charge once a dear route raises its
+	// budget above B. Unset (convertedFeeCapsSet false) applies
+	// defaultConvertedFeeMaxBps. See SetConvertedFeeCaps.
+	convertedFeeMaxByChain map[string]int
+	convertedFeeMaxDefault int
+	convertedFeeCapsSet    bool
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
@@ -188,6 +227,9 @@ type PaycrestQuoteService struct {
 	// SetConversionMinimums still enforces one.
 	conversionMins       map[string]float64
 	conversionMinDefault float64
+	// solanaValidator validates a Solana mint/recipient. Nil (no Solana chain
+	// configured) refuses every Solana destination — see solanaAddressValidator.
+	solanaValidator solanaAddressValidator
 }
 
 // SetSenderFeePercent prices our sender fee into every quoted rate, so the
@@ -196,6 +238,47 @@ type PaycrestQuoteService struct {
 // unusable means no fee.
 func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
 	s.senderFeePercent, _ = parseSenderFeePercent(pct)
+}
+
+// SetRoundTripBudgetBps sets B, pushed here by
+// PaycrestOrderService.SetRoundTripBudgetBps.
+func (s *PaycrestQuoteService) SetRoundTripBudgetBps(bps int) { s.roundTripBudgetBps = bps }
+
+// defaultConvertedFeeMaxBps caps the fee a converted buy or swapped sell may
+// charge (2%) on a service that was never given caps, so a dear route is
+// refused rather than priced without limit.
+const defaultConvertedFeeMaxBps = 200
+
+// routeBudgetHeadroomBps is added on top of a route's measured cost when its
+// budget is raised: the bridge is re-priced on a slightly different amount,
+// and again at execution, so a budget set exactly at the probe's cost would
+// refuse the route it was raised for.
+const routeBudgetHeadroomBps = 10
+
+// SetConvertedFeeCaps sets the most a converted buy or swapped sell may
+// charge in total, in bps of the order, per chain (a buy's destination, a
+// sell's source); def applies to any other chain. 0 turns raising off.
+func (s *PaycrestQuoteService) SetConvertedFeeCaps(byChain map[string]int, def int) {
+	s.convertedFeeMaxByChain = byChain
+	s.convertedFeeMaxDefault = def
+	s.convertedFeeCapsSet = true
+}
+
+// convertedFeeMaxBps is the fee cap for a chain. Anything outside
+// 0..MaxConvertedFeeBps reads as 0 — raising off — so a bad value can only
+// make it stricter.
+func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
+	if !s.convertedFeeCapsSet {
+		return defaultConvertedFeeMaxBps
+	}
+	limit, ok := s.convertedFeeMaxByChain[strings.ToLower(strings.TrimSpace(chainKey))]
+	if !ok {
+		limit = s.convertedFeeMaxDefault
+	}
+	if limit < 0 || limit > config.MaxConvertedFeeBps {
+		return 0
+	}
+	return limit
 }
 
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
@@ -375,6 +458,14 @@ func (s *PaycrestQuoteService) SetTreasuryLanes(t treasuryLaneChecker) {
 	s.treasuryLanes = t
 }
 
+// SetSolanaValidator wires the Solana chain client's own address check, which
+// is what makes a Solana destination resolvable at all. Left unset, a Solana
+// request resolves to nothing and is simply not offered — the same
+// dormant-until-wired shape as a missing LiFi quoter or treasury.
+func (s *PaycrestQuoteService) SetSolanaValidator(v solanaAddressValidator) {
+	s.solanaValidator = v
+}
+
 // SetConversionMinimums installs the per-chain floor a converted buy must
 // clear before it is offered (Decision 6). def <= 0 leaves the existing
 // default in place rather than disabling the floor entirely.
@@ -496,6 +587,7 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 			Network:              network,
 			Token:                k.token,
 			Rate:                 rateStr,
+			RawRate:              e.Rate,
 			SpreadPercent:        (rate/mkt - 1) * 100,
 			ProviderIDs:          []string{e.ProviderID},
 			TokenAmount:          amt / rate,
@@ -651,6 +743,14 @@ func legsByFiat(book *PaycrestMarkets, wantToken map[string]bool, networkFor map
 // venue that has since left must fail here rather than at Paycrest with the
 // user already committed.
 func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string) (*PaycrestVenue, error) {
+	return s.VenueForFee(ctx, side, fiatCode, fiatAmount, chainKey, token, s.senderFeePercent)
+}
+
+// VenueForFee is VenueFor priced at a fee OTHER than the configured one. A
+// converted sell is sent to Paycrest at F − B, not F, so the naira estimate
+// it shows has to be the F − B one: quoting the user at F and ordering at
+// F − B would understate what she receives by the whole budget.
+func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string, feePercent float64) (*PaycrestVenue, error) {
 	res, err := s.Quote(ctx, side, fiatCode, fiatAmount)
 	if err != nil {
 		return nil, err
@@ -693,7 +793,7 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 		return nil, fmt.Errorf("%w: %s on %s has no %s side right now",
 			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey, side)
 	}
-	rateStr, rate, err := quotedRate(side, q.Rate, s.senderFeePercent)
+	rateStr, rate, err := quotedRate(side, q.Rate, feePercent)
 	if err != nil {
 		return nil, fmt.Errorf("paycrest venue: unusable rate %q", q.Rate)
 	}
@@ -701,6 +801,7 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 	// Bind to what the provider just said, not to the book.
 	bound := *venue
 	bound.Rate = rateStr
+	bound.RawRate = strings.TrimSpace(q.Rate)
 	bound.TokenAmount = amt / rate
 	bound.TokenAmountBaseUnits = s.baseUnitsFor(bound.ChainKey, bound.Token, fiatAmount, rateStr)
 	bound.SpreadPercent = (rate/res.MarketRate - 1) * 100
@@ -710,32 +811,100 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 	return &bound, nil
 }
 
+// providerRateNominalUSDC is the order size ProviderRate asks the provider
+// about. Paycrest prices by size, so it has to be roughly the size orders are
+// made at; TSA Pay's naira payouts are a few tens of dollars.
+const providerRateNominalUSDC = 100
+
+// ProviderRate is the provider's own SELL rate for USDC on Base with NO sender
+// fee, exactly as it quoted it (fiat per USDC). It is the rate a naira-route
+// order prices from, so a merchant's crypto is sized from it rather than from
+// the cached market mid, which no order is ever opened at. The fee is applied
+// (or not) by whoever opens the order; this is the figure underneath it.
+func (s *PaycrestQuoteService) ProviderRate(ctx context.Context, fiat string) (*big.Rat, error) {
+	fiat = strings.ToUpper(strings.TrimSpace(fiat))
+	market, err := s.cachedMarketRate(ctx, fiat, "sell")
+	if err != nil {
+		return nil, err
+	}
+	mid := new(big.Rat).SetFloat64(market) // nil for NaN/Inf
+	if mid == nil || mid.Sign() <= 0 {
+		return nil, fmt.Errorf("paycrest provider rate: unusable market rate %v", market)
+	}
+	nominal := new(big.Rat).Mul(mid, big.NewRat(providerRateNominalUSDC, 1)).FloatString(2)
+	venue, err := s.VenueForFee(ctx, "sell", fiat, nominal, rampSettlementChainKey, rampSettlementToken, 0)
+	if err != nil {
+		return nil, err
+	}
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(venue.Rate))
+	if !ok || rate.Sign() <= 0 {
+		return nil, fmt.Errorf("paycrest provider rate: unusable rate %q", venue.Rate)
+	}
+	return rate, nil
+}
+
 // ─── Converted venues (Phase 2, Task 8) ────────────────────────────────────
 
-// RequestedAsset is one (chain, token) pair the user asked to receive, that
-// this Paycrest book may or may not be able to fill directly.
-type RequestedAsset struct{ Chain, Token string }
+// RequestedAsset is one asset the user asked to receive, that this Paycrest
+// book may or may not be able to fill directly.
+//
+// Two ways of naming it, because both are in flight: Chain/Token are the
+// legacy symbol path (an older app build, and still how a direct venue is
+// matched), while ChainID/Address name any token the asset picker can show.
+// resolveRequestedAsset is the only reader — nothing here is trusted as
+// given, least of all Chain when ChainID is set.
+type RequestedAsset struct {
+	Chain, Token string
+	ChainID      int64
+	Address      string
+	// Recipient is the wallet the route is priced to. Empty prices to the
+	// treasury, which is what an anonymous price check gets.
+	Recipient string
+	// Destination is where the asset is delivered when the user's EVM wallet
+	// cannot receive it — her Solana address. Required for a Solana asset
+	// (nothing can be delivered to a 20-byte address there) and ignored
+	// everywhere else; validated by the chain client, never trusted as given.
+	Destination string
+}
 
 // ConvertedVenues offers routes Paycrest cannot fill directly: it delivers a
 // token it does serve to our treasury, and one LiFi route converts it to what
-// the user asked for. A venue is offered ONLY when the route's guaranteed
-// worst case (ToAmountMin) still covers what we promise the user — never on
-// its mid-price. A LiFi failure (including ErrLiFiNoRoute) just means that
-// venue is not on offer today, never an error for the whole call.
+// the user asked for. A LiFi failure (including ErrLiFiNoRoute) just means
+// that venue is not on offer today, never an error for the whole call.
+//
+// Two things decide whether a route may be offered at all, and both exist
+// because offering a route we then refuse to execute takes the user's naira
+// into an order that can only wait for a human:
+//
+//   - PRICE. The whole round trip — LiFi's own cost plus the gas the treasury
+//     pays, including one approve — must fit inside B, the round-trip budget
+//     held back out of the sender fee. There is no separate markup ladder any
+//     more: the order is sent to Paycrest at F − B, so B is exactly what is
+//     available to spend and the markup shown IS B.
+//   - EXECUTABILITY. The route is priced twice: once on T to learn LiFi's
+//     cost l, then again on T/(1 − l), which is what the treasury will really
+//     bridge. That second route is the one checked — its gas against the
+//     settlement lane, its calldata against the layouts we can decode, its
+//     destination chain against the one asked for, and (stablecoin
+//     destinations only) its own guaranteed minimum against the promise.
 //
 // PromisedAmount is stated in the REQUESTED token's base units, not the
 // settlement leg's (the binding Task 7 controller ruling): the orchestrator
 // that executes these orders rescales every comparison to destination units,
 // so a promise left in settlement-leg units would be silently wrong by a
 // factor of 10^decimalsDelta whenever the two tokens' decimals differ (BSC
-// stables are 18dp; base/polygon/optimism are 6dp in this book). This rescales
-// the settlement amount into the requested token's decimals FIRST
-// (rescaleUnits — the same helper ConversionOrchestrator uses), then prices
-// the cost/markup/promise off that rescaled anchor, so route.ToAmountMin
-// (already in destination units, straight from LiFi) is compared like for
-// like throughout.
+// stables are 18dp; base/polygon/optimism are 6dp in this book). Only a
+// stablecoin destination carries one at all — the value of a volatile token
+// moves between quote and delivery, so promising a quantity of it would be a
+// promise about a price we do not control.
 func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCode, fiatAmount string, want []RequestedAsset) ([]PaycrestVenue, error) {
-	if s == nil || s.lifi == nil || s.chains == nil || s.treasuryAddress == "" || len(want) == 0 {
+	// treasuryLanes is in the dormant-until-wired list for the same reason as
+	// the rest: every converted route needs the SETTLEMENT lane to pay its
+	// gas, so without a lane checker nothing here is offerable — and the gas
+	// check below would be a nil-interface call on a non-stable destination,
+	// which never reaches the stable-only lane gate.
+	if s == nil || s.lifi == nil || s.chains == nil || s.treasuryAddress == "" ||
+		s.treasuryLanes == nil || len(want) == 0 {
 		return nil, nil
 	}
 	// Conversion is a buy-only capability (the handler already gates on this
@@ -751,84 +920,190 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 	}
 	out := []PaycrestVenue{}
 	for _, req := range want {
-		// Decision 3: a direct route always wins; never convert what Paycrest
-		// can already deliver.
-		if directVenueFor(base.Venues, req) != nil {
-			continue
+		// Every drop below is a real, expected outcome (a route this specific
+		// request cannot use) — not an error. Logged anyway, because the
+		// generic "no route can deliver X" the client shows collapses a dozen
+		// distinct reasons into one sentence, and nothing else says which one
+		// fired. requestedAssetLabel matches what the client's own refusal
+		// names, so a support conversation and a log line talk about the same
+		// thing.
+		label := requestedAssetLabel(PaycrestBuyRequest{
+			RequestedChainID: req.ChainID, RequestedTokenAddress: req.Address, Token: req.Token,
+		})
+		skip := func(reason string, args ...any) {
+			log.Printf("[ramp-conversion] quote-skip chain=%d token=%q label=%s reason=%s",
+				req.ChainID, req.Address, label, fmt.Sprintf(reason, args...))
 		}
-		// The requested chain must have an ACTUAL treasury lane, not merely a
-		// chain-registry entry — chainID()/tokenAddress() below only prove
-		// config.Networks knows the chain, which is a WIDER set than
-		// RAMP_TREASURY_CHAINS (a missing native-floor override, no chain
-		// client, or no chain id at boot can drop a chain from the treasury's
-		// own lanes without removing it from the registry). Refused here,
-		// before anything else is spent on this request, not discovered
-		// later at o.destination() after the user has already paid and
-		// custody has already landed.
-		if s.treasuryLanes == nil || s.treasuryLanes.Lane(req.Chain) == nil {
-			continue
-		}
-		src := s.bestSourceVenue(base.Venues) // most liquid direct route we can settle from
+
+		src := s.bestSourceVenue(base.Venues) // the venue this converted buy settles from, pinned to Base
 		if src == nil {
+			skip("no direct settlement venue is currently quotable")
 			continue
 		}
 		routeAmount, ok := new(big.Int).SetString(src.TokenAmountBaseUnits, 10)
 		if !ok || routeAmount.Sign() <= 0 {
-			continue // decimals could not be resolved for the settlement leg
-		}
-		// Decision 6: the per-chain minimum, measured on the stablecoin
-		// amount, checked before spending a LiFi call on it.
-		if !MeetsMinimumOrder(req.Chain, src.TokenAmount, s.conversionMins, s.conversionMinDefault) {
+			skip("settlement leg amount %q could not be resolved", src.TokenAmountBaseUnits)
 			continue
 		}
-		// GET /api/paycrest/quote is deliberately public and unauthenticated,
-		// so an unresolvable requested chain/token must never reach LiFi —
-		// that is a live, cost-amplifying HTTP call to a paid third-party
-		// API, spendable once per request just by naming a chain that does
-		// not exist. chainID()/tokenAddress() already say "0"/"" mean
-		// "cannot price this leg" everywhere else in this file; check that
-		// BEFORE quoting, not after swallowing whatever LiFi says about it.
-		destChainID := s.chainID(req.Chain)
-		destToken := s.tokenAddress(req.Chain, req.Token)
-		if destChainID == 0 || destToken == "" {
-			continue
-		}
-		route, rerr := s.lifi.Quote(ctx, LiFiQuoteRequest{
-			FromChainID: s.chainID(src.ChainKey), ToChainID: destChainID,
-			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: destToken,
-			FromAddress: s.treasuryAddress, ToAddress: s.treasuryAddress, // pricing only
-			FromAmount: routeAmount.String(),
-		})
+		// Everything about the destination is derived here, before a paid
+		// third-party call is spent on it: an unresolvable chain id or token
+		// address must never reach LiFi, and the chain key that the checks
+		// below are keyed on comes from the chain id rather than from
+		// whatever chain name the client happened to send.
+		asset, rerr := resolveRequestedAsset(s.chains, s.solanaValidator, req)
 		if rerr != nil {
-			continue // no route today is not an error: the venue just isn't offered
+			skip("requested asset could not be resolved: %v", rerr)
+			continue
+		}
+		// Decision 3: a direct route always wins; never convert what Paycrest
+		// can already deliver. Only a stablecoin can have a direct venue —
+		// Paycrest fills nothing else — and the match is on the RESOLVED
+		// chain/symbol, since on the address path req.Chain is empty.
+		if asset.Stable && directVenueFor(base.Venues, RequestedAsset{Chain: asset.ChainKey, Token: asset.StableSymbol}) != nil {
+			// Not a refusal — the direct venue wins, on purpose. No skip log.
+			continue
+		}
+		// Decision 6: the per-chain minimum, measured on the settlement leg's
+		// stablecoin amount, checked before spending a LiFi call on it.
+		if !MeetsMinimumOrder(asset.ChainKey, src.TokenAmount, s.conversionMins, s.conversionMinDefault) {
+			skip("below the %s minimum order (settlement amount %g)", asset.ChainKey, src.TokenAmount)
+			continue
+		}
+		// Only a stablecoin destination may need a top-up, so only it needs a
+		// lane there. Everything else is delivered by the bridge alone, and
+		// the lane that has to pay for THAT is the settlement leg's, checked
+		// below against the route's own gas.
+		if asset.Stable && s.treasuryLanes.Lane(asset.ChainKey) == nil {
+			skip("no treasury lane configured for stable destination chain %s", asset.ChainKey)
+			continue
+		}
+		// A destination the wallet itself cannot receive on (Solana) names its
+		// own recipient, and resolveRequestedAsset has already validated it.
+		// It outranks req.Recipient, which is the user's EVM wallet and could
+		// only ever be a route to nowhere on that chain.
+		recipient := firstNonEmpty(asset.Destination, req.Recipient, s.treasuryAddress /* pricing only */)
+		// A stable-to-stable route should not move on price, so hold it to
+		// LiFi's tight default; anything else is a real market and needs the
+		// room a normal swap takes.
+		slippage := routeSlippage(asset.Stable)
+		lreq := LiFiQuoteRequest{
+			FromChainID: s.chainID(src.ChainKey), ToChainID: asset.ChainID,
+			FromToken: s.tokenAddress(src.ChainKey, src.Token), ToToken: asset.Address,
+			FromAddress: s.treasuryAddress, ToAddress: recipient, FromAmount: routeAmount.String(), Slippage: slippage,
+			// The treasury bridges this itself the moment the order settles —
+			// no human signs it — so the cheapest route is safe to take, and
+			// conversion_orchestrator's execution-time quote must ask for the
+			// same order or it could see a different cost than was admitted.
+			Order: "CHEAPEST",
+		}
+		// First pass on T to learn l; then price what the treasury will actually bridge.
+		probe, perr := s.lifi.Quote(ctx, lreq)
+		if perr != nil {
+			skip("LiFi probe quote failed: %v", perr)
+			continue
+		}
+		l1, ok := LiFiCostBps(probe)
+		if !ok || l1 >= 10_000 {
+			skip("LiFi probe's cost is unreadable or at/above 100%%")
+			continue
+		}
+		// This route's own budget B′: at least B, raised to cover a dearer
+		// round trip (plus headroom for the re-price below and at execution).
+		// Raising it raises HER fee by the same amount — Paycrest is still
+		// sent F − B, so our share never shrinks — up to the destination
+		// chain's cap.
+		budget := s.roundTripBudgetBps
+		if need := l1 + TreasuryGasBps(probe, treasuryERC20Gas) + routeBudgetHeadroomBps; need > budget {
+			budget = need
+			feeBps := s.senderFeeBps() - s.roundTripBudgetBps + budget
+			if limit := s.convertedFeeMaxBps(asset.ChainKey); feeBps > limit {
+				skip("route needs a %dbps fee, over the %s cap of %dbps", feeBps, asset.ChainKey, limit)
+				continue
+			}
+			priced, ok := s.repricedAtFee(*src, fiatAmount, base.MarketRate, feeBps)
+			if !ok {
+				skip("settlement leg could not be repriced at a %dbps fee", feeBps)
+				continue
+			}
+			src = &priced
+			if routeAmount, ok = new(big.Int).SetString(src.TokenAmountBaseUnits, 10); !ok || routeAmount.Sign() <= 0 {
+				skip("repriced settlement amount %q could not be resolved", src.TokenAmountBaseUnits)
+				continue
+			}
+		}
+		bridge := new(big.Int).Mul(routeAmount, big.NewInt(10_000))
+		bridge.Quo(bridge, big.NewInt(int64(10_000-l1)))
+		lreq.FromAmount = bridge.String()
+		route, qerr := s.lifi.Quote(ctx, lreq)
+		if qerr != nil {
+			skip("LiFi bridge quote failed: %v", qerr)
+			continue
 		}
 		// The bridge runs from the settlement leg's chain, so that lane must
 		// be able to pay THIS route's gas plus an approve. Selling a route
 		// the treasury cannot send takes the user's money into an order
 		// that can only wait for a refill. Same gas rules as ExecuteRoute: a
 		// missing limit costs the ceiling, one above it is never executed.
-		routeGas := route.GasLimit
-		if routeGas == 0 {
-			routeGas = maxRouteGasLimit
-		}
-		if routeGas > maxRouteGasLimit || !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
+		routeGas := routeGasUnits(route)
+		if routeGas > maxRouteGasLimit {
+			skip("route gas %d exceeds the %d ceiling", routeGas, maxRouteGasLimit)
 			continue
 		}
-		// Anchor everything in DESTINATION units before pricing: routeAmount
-		// is in the settlement leg's own decimals, route.ToAmountMin is
-		// already in the requested token's (LiFi quotes are decimals-native).
-		srcDecimals := tokenDecimalsFor(s.chainID(src.ChainKey), src.Token)
-		dstDecimals := tokenDecimalsFor(s.chainID(req.Chain), req.Token)
-		anchor := rescaleUnits(routeAmount, srcDecimals, dstDecimals)
-		markupBps, offered := ConversionMarkupBps(ConversionCostBps(anchor, route.ToAmountMin))
-		if !offered {
-			continue // Decision 5: above the 1% cap we do not quote at all
+		if !s.treasuryLanes.CanPayForGas(ctx, src.ChainKey, routeGas+treasuryERC20Gas) {
+			skip("treasury cannot currently pay %s's gas for %d units (route+approve)",
+				src.ChainKey, routeGas+treasuryERC20Gas)
+			continue
 		}
-		promised := PromisedAmount(anchor, markupBps)
-		if route.ToAmountMin.Cmp(promised) < 0 {
-			continue // the guaranteed landing cannot cover the promise
+		l, ok := LiFiCostBps(route)
+		if !ok {
+			skip("LiFi bridge quote's own cost is unreadable")
+			continue
 		}
-		out = append(out, PaycrestVenue{
+		if g := TreasuryGasBps(route, treasuryERC20Gas); l+g > budget {
+			skip("cost %dbps + gas %dbps = %dbps exceeds the %dbps round-trip budget",
+				l, g, l+g, budget)
+			continue
+		}
+		// Offer only what execution accepts: known layout, no destination call, right chain.
+		//
+		// Where the recipient is already known here, run the whole check
+		// startBridge will run rather than the structural half. A non-EVM
+		// destination names its own recipient (resolveRequestedAsset has
+		// validated it), and the structural check passes calldata that
+		// execution then refuses on EVERY attempt — a facet whose layout says
+		// nothing about where an SPL delivery lands, say. The user only finds
+		// out after paying naira: the order opens, no bridge can be sent, and
+		// it waits out the retry window to refund.
+		//
+		// The EVM family cannot be held to the same check: an anonymous price
+		// check quotes to the treasury, so there is no user recipient here to
+		// compare the calldata against.
+		if family := addressFamily(asset.ChainID); family != "evm" {
+			if err := checkLiFiDeliveryTo(route.Data, s.chainID(src.ChainKey), asset.ChainID, recipient, family, asset.Address); err != nil {
+				skip("non-EVM delivery check failed: %v", err)
+				continue
+			}
+		} else {
+			raw, derr := hexutil.Decode(route.Data)
+			if derr != nil {
+				skip("route calldata could not be decoded: %v", derr)
+				continue
+			}
+			if d, derr := decodeLiFiDelivery(raw, s.chainID(src.ChainKey)); derr != nil || d.HasDestinationCall || d.DestinationChainID != asset.ChainID {
+				skip("structural delivery check failed: decodeErr=%v hasDestinationCall=%v destChainID=%v wantChainID=%d",
+					derr, d.HasDestinationCall, d.DestinationChainID, asset.ChainID)
+				continue
+			}
+		}
+		decimals, symbol := route.ToTokenDecimals, strings.ToUpper(route.ToTokenSymbol) // from LiFi, never the client
+		if asset.Stable {
+			decimals, symbol = asset.StableDecimals, asset.StableSymbol
+		}
+		if decimals <= 0 {
+			skip("resolved decimals %d is not positive", decimals)
+			continue
+		}
+		v := PaycrestVenue{
 			Kind: models.RouteKindConverted,
 			// ChainKey/Token/Network stay the PAYCREST leg: that is what the
 			// order is created against (Task 9). ViaChain/ViaToken say so
@@ -837,13 +1112,48 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			// order would be created with an empty network.
 			ChainKey: src.ChainKey, Token: src.Token, Network: src.Network,
 			ViaChain: src.ChainKey, ViaToken: src.Token,
-			RequestedChain: req.Chain, RequestedToken: req.Token,
+			RequestedChain: asset.ChainKey, RequestedToken: symbol,
+			RequestedChainID: asset.ChainID, RequestedAddress: asset.Address, RequestedDecimals: decimals,
+			RequestedDestination: asset.Destination,
 			Rate: src.Rate, TokenAmount: src.TokenAmount, TokenAmountBaseUnits: src.TokenAmountBaseUnits,
-			MarkupBps: markupBps, PromisedAmount: promised.String(),
-			ETASeconds: route.ETASeconds,
-		})
+			MarkupBps: budget, CostBps: l,
+			EstimatedAmount: route.ToAmount.String(), ETASeconds: route.ETASeconds,
+		}
+		if asset.Stable {
+			promise := StablePromise(routeAmount, tokenDecimalsFor(s.chainID(src.ChainKey), src.Token), decimals)
+			if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promise) < 0 {
+				continue // execution would refuse it on every attempt
+			}
+			v.PromisedAmount = promise.String()
+		}
+		out = append(out, v)
 	}
 	return out, nil
+}
+
+// senderFeeBps is F, the fee every quoted rate is priced at, in bps.
+func (s *PaycrestQuoteService) senderFeeBps() int {
+	return int(math.Round(s.senderFeePercent * 100))
+}
+
+// repricedAtFee is a buy venue re-quoted at feeBps instead of F: the same
+// provider rate, the same fiat, fewer tokens.
+func (s *PaycrestQuoteService) repricedAtFee(v PaycrestVenue, fiatAmount string, marketRate float64, feeBps int) (PaycrestVenue, bool) {
+	amt, ok := parsePositiveDecimal(fiatAmount)
+	if !ok {
+		return v, false
+	}
+	rateStr, rate, err := quotedRate(models.PaycrestDirectionBuy, v.RawRate, float64(feeBps)/100)
+	if err != nil {
+		return v, false
+	}
+	v.Rate = rateStr
+	v.TokenAmount = amt / rate
+	v.TokenAmountBaseUnits = s.baseUnitsFor(v.ChainKey, v.Token, fiatAmount, rateStr)
+	if marketRate > 0 {
+		v.SpreadPercent = (rate/marketRate - 1) * 100
+	}
+	return v, v.TokenAmountBaseUnits != ""
 }
 
 // directVenueFor finds a direct (already-fillable) venue for a requested
@@ -858,15 +1168,32 @@ func directVenueFor(venues []PaycrestVenue, req RequestedAsset) *PaycrestVenue {
 	return nil
 }
 
-// bestSourceVenue picks the direct venue most likely to have depth for a
-// converted buy's settlement leg. There is no live liquidity figure at this
-// layer, so it follows the same preference this service already applies
-// everywhere else: s.tokens is USDC-before-USDT because USDC has
+// bestSourceVenue picks the direct venue a converted buy settles from.
+//
+// Pinned to rampSettlementChainKey (Base) — the same chain the sell side
+// already settles every swap to — so the treasury needs standing gas on one
+// chain, not on whichever of Paycrest's own venues happens to quote
+// cheapest this minute. Scanning every configured chain for the best rate
+// used to mean the settlement leg could silently move to a chain the
+// treasury had never been funded on, taking every converted buy down at
+// once with no link back to which chain was actually responsible. The
+// modest rate difference between Base and another chain's direct book is
+// not worth that fragility, especially once a bridge's own gas cost is
+// usually the bigger swing in what a user actually receives.
+//
+// Other chains are only consulted when Base has no direct listing for any
+// preferred token at all — s.tokens is USDC-before-USDT because USDC has
 // consistently carried deeper onramp liquidity (see the tokens field
-// comment); falling back to the cheapest/best-ranked venue (Venues[0], since
-// Quote already sorts best-first) when none of the preferred tokens are
-// present.
+// comment) — falling back to the cheapest/best-ranked venue (Venues[0],
+// since Quote already sorts best-first) when nothing on Base will do.
 func (s *PaycrestQuoteService) bestSourceVenue(venues []PaycrestVenue) *PaycrestVenue {
+	for _, want := range s.tokens {
+		for i := range venues {
+			if strings.EqualFold(venues[i].ChainKey, rampSettlementChainKey) && strings.EqualFold(venues[i].Token, want) {
+				return &venues[i]
+			}
+		}
+	}
 	for _, want := range s.tokens {
 		for i := range venues {
 			if strings.EqualFold(venues[i].Token, want) {

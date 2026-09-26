@@ -11,6 +11,10 @@ export const COMPANY = {
   productName: 'TSA Connect',
   domain: 'tsaconnectworld.com',
   website: 'https://tsaconnectworld.com',
+  /** The TSA Connect web app, where a TSA Pay merchant sets up and tests. Must
+   *  match the API's WEB_APP_ORIGIN (the origin its approval message names and
+   *  its web sign-in accepts). */
+  webApp: 'https://app.tsaconnectworld.com',
   supportEmail: 'support@tsaconnectworld.com',
   privacyEmail: 'support@tsaconnectworld.com',
   founderEmail: 'obic@tsaconnectworld.com',

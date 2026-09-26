@@ -1,10 +1,8 @@
 package handlers
 
 import (
-	"crypto/rand"
 	"fmt"
 	"log"
-	"math/big"
 	"net/http"
 	"time"
 
@@ -24,13 +22,10 @@ const (
 	otpMaxResends  = 5
 )
 
-// generateOTP creates a cryptographically random 6-digit code.
+// generateOTP creates a cryptographically random 6-digit code — the same
+// generator every emailed code uses.
 func generateOTP() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
+	return services.NewEmailCode()
 }
 
 // sendOTPEmail sends the OTP code via the email service.

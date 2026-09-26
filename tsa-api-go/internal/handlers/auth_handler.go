@@ -6,9 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -23,6 +21,7 @@ import (
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
+	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -346,164 +345,19 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
-	// Look up by email if the identifier looks like an email, otherwise by username.
-	// Falls through to the opposite lookup so both formats work even if misclassified.
-	var user models.User
-	var err error
-	lowered := strings.ToLower(identifier)
-	if isValidEmail(identifier) {
-		err = config.DB.Where("email = ?", lowered).First(&user).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
-		}
-	} else {
-		err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = config.DB.Where("email = ?", lowered).First(&user).Error
-		}
+	user, ok := h.authenticateCredentials(c, identifier, req.Password)
+	if !ok {
+		return
 	}
+	h.recordLogin(c, user)
+
+	token, rawRefresh, err := h.issueSession(user, appSession)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(req.Password))
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "Invalid credentials",
-			})
-			return
-		}
-		log.Printf("Login DB error: %v", err)
+		log.Printf("Login session error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",
 		})
-		return
-	}
-
-	// Check if account is locked
-	if user.IsLocked() {
-		c.JSON(http.StatusLocked, gin.H{
-			"success": false,
-			"message": "Account is temporarily locked. Try again later.",
-		})
-		return
-	}
-
-	// Compare password
-	if err := user.ComparePassword(req.Password); err != nil {
-		// Increment login attempts
-		attempts, lockUntil := user.IncrementLoginAttempts()
-		updates := map[string]interface{}{
-			"login_attempts": attempts,
-			"updated_at":     time.Now(),
-		}
-		if lockUntil != nil {
-			updates["lock_until"] = lockUntil
-			h.EventBus.Publish(events.Event{
-				Type:    events.SecurityAccountLocked,
-				UserID:  user.ID,
-				Title:   "Account Locked",
-				Message: "Your account has been temporarily locked due to multiple failed login attempts",
-				Data: map[string]interface{}{
-					"attempts": attempts,
-				},
-			})
-		}
-		config.DB.Model(&user).Updates(updates)
-
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Invalid credentials",
-		})
-		return
-	}
-
-	// Check account status — deleted or suspended accounts must not receive session tokens
-	if user.AccountStatus == models.AccountStatusDeleted {
-		// Check if there is a pending deletion request within the grace window
-		var delReq models.AccountDeletionRequest
-		if config.DB != nil {
-			if err := config.DB.Where("user_id = ? AND status = ? AND purge_after > ?",
-				user.ID, models.AccountDeletionStatusPending, time.Now()).
-				Order("created_at DESC").First(&delReq).Error; err == nil {
-				daysLeft := int(math.Ceil(time.Until(delReq.PurgeAfter).Hours() / 24))
-				if daysLeft < 1 {
-					daysLeft = 1
-				}
-				c.JSON(http.StatusForbidden, gin.H{
-					"success": false,
-					"message": fmt.Sprintf("Your account is scheduled for deletion on %s (%d days left). You can restore your account to continue.",
-						delReq.PurgeAfter.Format("2 January 2006"), daysLeft),
-					"code": "ACCOUNT_DELETED_GRACE_PERIOD",
-					"data": gin.H{
-						"canRestore":    true,
-						"purgeAfter":    delReq.PurgeAfter,
-						"graceDaysLeft": daysLeft,
-					},
-				})
-				return
-			}
-		}
-
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": "This account has been deleted. Please contact support if you wish to restore it.",
-			"code":    "ACCOUNT_DELETED",
-		})
-		return
-	}
-	if user.AccountStatus != models.AccountStatusActive {
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("Account is %s. Please contact support.", user.AccountStatus),
-			"code":    "ACCOUNT_NOT_ACTIVE",
-		})
-		return
-	}
-
-	// Reset login attempts on success
-	now := time.Now()
-	config.DB.Model(&user).Updates(map[string]interface{}{
-		"login_attempts": 0,
-		"last_login":     now,
-		"updated_at":     now,
-		"lock_until":     nil,
-	})
-
-	// Generate JWT token
-	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
-	if err != nil {
-		log.Printf("Token generation error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Internal server error",
-		})
-		return
-	}
-
-	if h.EventBus != nil {
-		h.EventBus.Publish(events.Event{
-			Type:    events.SecurityLoginNewDevice,
-			UserID:  user.ID,
-			Title:   "New Login",
-			Message: "A new login was detected on your account",
-			Data: map[string]interface{}{
-				"ip": c.ClientIP(),
-			},
-		})
-	}
-
-	rawRefresh, hashedRefresh, err := generateRefreshToken()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate refresh token"})
-		return
-	}
-	rt := models.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: hashedRefresh,
-		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
-	}
-	if err := config.DB.Create(&rt).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
 		return
 	}
 
@@ -528,11 +382,20 @@ func (h *Handlers) Login(c *gin.Context) {
 // generateToken creates a JWT access token with userId and email claims, 1-hour
 // expiry (refresh-token rotation extends the session; see the refresh flow).
 func generateToken(userID uuid.UUID, email, secret string) (string, error) {
+	return generateAccessToken(userID, email, secret, appSession)
+}
+
+// generateAccessToken is generateToken for either front door: a web session's
+// token also carries middleware.WebTokenClaim.
+func generateAccessToken(userID uuid.UUID, email, secret string, kind sessionKind) (string, error) {
 	claims := jwt.MapClaims{
 		"userId": userID.String(),
 		"email":  email,
 		"exp":    time.Now().Add(1 * time.Hour).Unix(),
 		"iat":    time.Now().Unix(),
+	}
+	if kind == webSession {
+		claims[middleware.WebTokenClaim] = true
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
@@ -631,38 +494,16 @@ func (h *Handlers) ReactivateAccount(c *gin.Context) {
 		return
 	}
 
-	// 1. Check if account is locked
-	if user.IsLocked() {
+	// 1-2. A locked account is refused; a wrong password counts toward the
+	// lockout (protects against brute-force).
+	switch err := checkPasswordWithLockout(config.DB, h.EventBus, &user, req.Password); {
+	case errors.Is(err, errAccountLocked):
 		c.JSON(http.StatusLocked, gin.H{
 			"success": false,
 			"message": "Account is temporarily locked. Try again later.",
 		})
 		return
-	}
-
-	// 2. Compare password and increment login attempts on failure (protects against brute-force)
-	if err := user.ComparePassword(req.Password); err != nil {
-		attempts, lockUntil := user.IncrementLoginAttempts()
-		updates := map[string]interface{}{
-			"login_attempts": attempts,
-			"updated_at":     time.Now(),
-		}
-		if lockUntil != nil {
-			updates["lock_until"] = lockUntil
-			if h.EventBus != nil {
-				h.EventBus.Publish(events.Event{
-					Type:    events.SecurityAccountLocked,
-					UserID:  user.ID,
-					Title:   "Account Locked",
-					Message: "Your account has been temporarily locked due to multiple failed login attempts",
-					Data: map[string]interface{}{
-						"attempts": attempts,
-					},
-				})
-			}
-		}
-		config.DB.Model(&user).Updates(updates)
-
+	case err != nil:
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": "Invalid credentials",

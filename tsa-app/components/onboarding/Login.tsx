@@ -14,6 +14,7 @@ import {
   isLockEnabled, isBiometricAvailable,
   authenticateWithBiometric, getBiometricType,
 } from "../../services/localAuth";
+import { goAfterAuth } from "@/utils/postAuthRoute";
 import { useTheme } from "@/theme";
 import {
   AccentCard,
@@ -74,7 +75,7 @@ export default function Login() {
             setEmailVerified(response.data.emailVerified ?? false);
           }
         } catch {}
-        router.replace("/home");
+        await goAfterAuth(router);
         return;
       }
 
@@ -128,7 +129,7 @@ export default function Login() {
         setCurrentUser(response.data);
         setEmail("");
         setPassword("");
-        router.replace("/home");
+        await goAfterAuth(router);
       } else if (response.code === "ACCOUNT_DELETED_GRACE_PERIOD") {
         const daysLeft = response.data?.graceDaysLeft;
         const daysText = daysLeft ? ` (${daysLeft} day${daysLeft === 1 ? "" : "s"} left)` : "";
@@ -150,7 +151,7 @@ export default function Login() {
                     setCurrentUser(restoreRes.data);
                     setEmail("");
                     setPassword("");
-                    router.replace("/home");
+                    await goAfterAuth(router);
                   } else {
                     setGeneralError(restoreRes.message || "Failed to restore account. Please try again.");
                   }

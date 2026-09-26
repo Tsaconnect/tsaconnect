@@ -109,12 +109,75 @@ export function checkFunding(
   return { ok: true };
 }
 
+/** Our chain keys, as a person names them. */
+export const CHAIN_LABELS: Record<string, string> = {
+  base: 'Base',
+  polygon: 'Polygon',
+  bsc: 'BNB Smart Chain',
+  arbitrum: 'Arbitrum',
+  ethereum: 'Ethereum',
+};
+
+/** A token amount for display: two decimals from one up, six below — or, for
+ *  an amount six decimals would round to zero (L2 gas), two significant digits. */
+export const fmtTokenAmount = (n: number): string =>
+  n > 0 && n < 0.0000005
+    ? n.toLocaleString(undefined, { maximumSignificantDigits: 2 })
+    : n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
+
+/** The wallet's gas balance on a chain, or null when balances aren't known. */
+export function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | null): number | null {
+  const symbol = CHAINS[chain as ChainKey]?.nativeCurrency.symbol;
+  if (!symbol || !balances) return null;
+  const row = balances.find((b) => b.chainKey === chain && b.symbol === symbol);
+  const n = Number(row?.balance ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** A funding verdict as a full sentence for a form, or null when it is fine.
+ *  `what` names the thing being funded: 'sale' on the sell screen, 'payment' on TSA Pay. */
+export function fundingMessage(check: FundingCheck, what = 'sale'): string | null {
+  if (check.ok) return null;
+  const chain = CHAIN_LABELS[check.chain] ?? check.chain;
+  if (check.reason === 'short-token') {
+    return `You have ${check.have} ${check.token} on ${chain} — this ${what} needs ${check.need}. Pick another network or top up.`;
+  }
+  if (check.reason === 'no-gas') {
+    return `You have no ${check.nativeSymbol} on ${chain} to pay the network fee. Pick another network or add some ${check.nativeSymbol}.`;
+  }
+  return `This app cannot send on ${chain} yet — choose another network, or send from an external wallet.`;
+}
+
 /** The parts of a created sell order this send needs. */
 export interface DepositOrder {
   chain: string;
   token: string;
   tokenAmount?: string;
   depositAddress?: string;
+}
+
+/**
+ * A deposit may have been broadcast, but the server's answer never arrived (a
+ * timeout, an HTML error page). Its outcome is unknown: sending again could pay
+ * twice, so a caller waits on the order rather than offering to send.
+ */
+export const DEPOSIT_OUTCOME_UNKNOWN =
+  "We couldn't confirm whether your payment was sent. It may still arrive — don't send it again yet.";
+
+export class DepositOutcomeUnknownError extends Error {
+  constructor(message = DEPOSIT_OUTCOME_UNKNOWN) {
+    super(message);
+    this.name = 'DepositOutcomeUnknownError';
+  }
+}
+
+export interface DepositSendOptions {
+  /**
+   * Runs right before each broadcast, after everything that can refuse the
+   * send without sending (gas, prepare, sign) has passed — the moment to
+   * record a "this may be out there" safeguard. A throw stops the broadcast.
+   */
+  beforeBroadcast?: () => Promise<void>;
 }
 
 /**
@@ -127,12 +190,15 @@ export interface DepositOrder {
  * Pass null when balances are unavailable and the send proceeds unguarded.
  *
  * Resolves to the broadcast hash; rejects with a message already mapped for
- * display, which screens can show verbatim.
+ * display, which screens can show verbatim — or with DepositOutcomeUnknownError
+ * when a broadcast went unanswered. Any other rejection means the server
+ * refused every broadcast it was given, so nothing left the wallet.
  */
 export async function sendPaycrestDeposit(
   order: DepositOrder,
   fromAddress: string,
   nativeBalance?: number | null,
+  opts: DepositSendOptions = {},
 ): Promise<string> {
   const chainCfg = CHAINS[order.chain as ChainKey];
   if (!chainCfg) {
@@ -145,6 +211,8 @@ export async function sendPaycrestDeposit(
 
   const { chainId, nativeCurrency } = chainCfg;
 
+  // Set by any broadcast whose answer never came back — including a retry's.
+  let unanswered = false;
   const res = await sendPreparedTransaction({
     prepare: () =>
       prepareSendTransaction(order.token, to, amount, chainId, { fromAddress }),
@@ -164,10 +232,15 @@ export async function sendPaycrestDeposit(
         fromAddress,
       );
     },
-    submit: (signed) =>
-      submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress),
+    submit: async (signed) => {
+      await opts.beforeBroadcast?.();
+      const r = await submitTransaction(signed, 'send', order.token, to, amount, chainId, fromAddress);
+      if (r.unanswered) unanswered = true;
+      return r;
+    },
   });
 
+  if (!(res.success && res.data?.txHash) && unanswered) throw new DepositOutcomeUnknownError();
   // The backend surfaces the RPC's own words here ("max fee per gas less than
   // block base fee: address 0x…, maxFeePerGas: …"). Map before it reaches a
   // screen — every caller of this function shows the message verbatim.
@@ -206,6 +279,7 @@ export async function sendSponsoredPaycrestDeposit(
   order: SponsoredDepositOrder,
   fromAddress: string,
   nativeBalance?: number | null,
+  opts: DepositSendOptions = {},
 ): Promise<string> {
   let offer: SponsorshipOffer | null = null;
   try {
@@ -248,12 +322,14 @@ export async function sendSponsoredPaycrestDeposit(
     return res.txHash ?? '';
   }
 
+  // A relay needs no beforeBroadcast: the server holds one relay per order and
+  // hands a retry the first one's hash. The two self-sent paths below do.
   if (offer?.mode === 'topup') {
     await requestGasTopUp(order.id);
-    return sendPaycrestDeposit(order, fromAddress, null);
+    return sendPaycrestDeposit(order, fromAddress, null, opts);
   }
 
-  return sendPaycrestDeposit(order, fromAddress, nativeBalance);
+  return sendPaycrestDeposit(order, fromAddress, nativeBalance, opts);
 }
 
 /**
@@ -276,8 +352,10 @@ function assertGasAffordable(
     return; // unparseable gas figures are the RPC's problem, not a reason to block
   }
   if (cost > 0 && cost > nativeBalance) {
+    const label = CHAIN_LABELS[chain] ?? chain;
     throw new Error(
-      `Not enough ${nativeSymbol} on ${chain} to pay gas — this transfer needs about ${cost.toFixed(6)}.`,
+      `Not enough ${nativeSymbol} on ${label} to pay gas — this transfer needs about ${fmtTokenAmount(cost)} ${nativeSymbol} ` +
+        `and you have ${fmtTokenAmount(nativeBalance)}. Add a little ${nativeSymbol} on ${label} and try again.`,
     );
   }
 }

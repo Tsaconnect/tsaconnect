@@ -600,7 +600,7 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 	// whole quote, which would take swapping on that chain down entirely rather
 	// than merely forgo the fee. Retry once without the fee so the user can
 	// still swap, and make the lost revenue loud rather than silent.
-	if resp.StatusCode != http.StatusOK && isIntegratorFeeUnconfigured(body) {
+	if resp.StatusCode != http.StatusOK && services.IsIntegratorFeeUnconfigured(body) {
 		log.Printf("[allswap] ALERT allswap_fee_unconfigured_total=1 integrator %q has no fee wallet for "+
 			"chain %s — quoting WITHOUT a fee (this swap earns nothing); configure it at portal.li.fi",
 			h.integratorID, params.Get("fromChain"))
@@ -629,19 +629,6 @@ func (h *SwapLiFiHandler) quoteWithoutFee(params url.Values) (status int, body [
 		return 0, nil, false
 	}
 	return resp.StatusCode, body, true
-}
-
-// isIntegratorFeeUnconfigured spots LiFi's "not configured for collecting fees
-// on chain X" rejection, which is about our portal setup rather than the route.
-func isIntegratorFeeUnconfigured(body []byte) bool {
-	var parsed struct {
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return false
-	}
-	msg := strings.ToLower(parsed.Message)
-	return strings.Contains(msg, "not configured for collecting fees")
 }
 
 // GetSwapStatus handles GET /api/swap/lifi/status?txHash=0x…
@@ -675,6 +662,11 @@ func (h *SwapLiFiHandler) GetSwapStatus(c *gin.Context) {
 	}
 
 	out := gin.H{"status": st.Status, "txHash": txHash}
+	// DONE alone is not delivery: only COMPLETED is; REFUNDED and PARTIAL
+	// are ways a swap ends short, and the app words each one differently.
+	if st.Substatus != "" {
+		out["substatus"] = st.Substatus
+	}
 	if st.DestTxHash != "" {
 		out["destTxHash"] = st.DestTxHash
 	}
@@ -1008,7 +1000,7 @@ func deterministicUUID(key string) uuid.UUID {
 //
 // This keeps its own request + parse rather than calling h.quoteClient.Quote:
 // the shared client cannot serve it. It needs (a) the conditional fee/integrator
-// params so a non-200 can be classified via isIntegratorFeeUnconfigured — a
+// params so a non-200 can be classified via services.IsIntegratorFeeUnconfigured — a
 // distinction Quote's plain error does not preserve — and (b) the handler's own
 // default slippage (0.005, matching GetQuote) rather than Quote's fixed 0.001.
 // Both are load-bearing for the FeeCollectable branch below; unifying onto
@@ -1050,7 +1042,7 @@ func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) requeryResult
 		// reach it — it is a definite answer that this swap earned nothing,
 		// because GetQuote will have re-quoted it fee-less for the same reason.
 		// Booking a rate here would record income that was never collected.
-		if isIntegratorFeeUnconfigured(body) {
+		if services.IsIntegratorFeeUnconfigured(body) {
 			return requeryResult{Reachable: true, FeeCollectable: false}
 		}
 		return requeryResult{}

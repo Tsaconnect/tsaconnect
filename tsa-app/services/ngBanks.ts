@@ -19,13 +19,16 @@
 // (7 days) and serve it instantly. The backend also caches 24h, so the
 // network call is cheap when we do miss.
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { banksApi, type NgBank } from './p2p';
+import { persistedCache } from './persistedCache';
 
 export type { NgBank } from './p2p';
 
-const CACHE_KEY = 'ng_banks_v2';
-const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const bankCache = persistedCache(
+  'ng_banks_v3',
+  7 * 24 * 60 * 60 * 1000,
+  (v): v is NgBank[] => Array.isArray(v) && v.length > 0,
+);
 
 const FALLBACK: NgBank[] = [
   { name: 'Access Bank', code: '044' },
@@ -47,37 +50,13 @@ const FALLBACK: NgBank[] = [
   { name: 'Zenith Bank', code: '057' },
 ];
 
-interface CacheEntry {
-  ts: number;
-  banks: NgBank[];
-}
-
 export async function getNigerianBanks(): Promise<NgBank[]> {
-  const cached = await readCache();
+  const cached = await bankCache.read();
   if (cached) {
-    if (Date.now() - cached.ts > CACHE_TTL_MS) {
-      refreshAndCache().catch(() => {});
-    }
-    return cached.banks;
+    if (!cached.fresh) refreshAndCache().catch(() => {});
+    return cached.value;
   }
   return await refreshAndCache();
-}
-
-async function readCache(): Promise<CacheEntry | null> {
-  try {
-    const raw = await AsyncStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed.ts === 'number' &&
-      Array.isArray(parsed.banks) &&
-      parsed.banks.length > 0
-    ) {
-      return parsed as CacheEntry;
-    }
-  } catch {}
-  return null;
 }
 
 async function refreshAndCache(): Promise<NgBank[]> {
@@ -85,12 +64,7 @@ async function refreshAndCache(): Promise<NgBank[]> {
   if (!banks || banks.length === 0) return FALLBACK;
 
   const sorted = [...banks].sort((a, b) => a.name.localeCompare(b.name));
-  try {
-    await AsyncStorage.setItem(
-      CACHE_KEY,
-      JSON.stringify({ ts: Date.now(), banks: sorted } as CacheEntry)
-    );
-  } catch {}
+  await bankCache.write(sorted);
   return sorted;
 }
 

@@ -17,7 +17,7 @@
 //   settlementBankCode, settlementAccountNumber, settlementAccountName (resolved
 //   via NUBAN name enquiry), makerWalletAddress, requestedPerTradeCapUsd,
 //   requestedDailyCapUsd.
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   TextInput,
@@ -26,17 +26,20 @@ import {
   Alert,
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Stack, router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../AuthContext/AuthContext';
-import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
+import api, { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
 import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngBanks';
 import { getMyPmStatus } from '../../services/p2p';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { COMPANY } from '@/constants/legal';
+import { KYC_ROUTE, kycRefusalFor, promptKycRefusal } from '@/utils/kycRefusal';
 import LocationPicker from '@/components/common/LocationPicker';
 import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
@@ -46,6 +49,7 @@ const BUSINESS_TYPES = [
   { label: 'Digital Products', value: 'digital_products' },
   { label: 'Payment Merchant (PM)', value: 'p2p_merchant' },
   { label: 'Service Provider', value: 'service_provider' },
+  { label: 'Accept payments (TSA Pay)', value: 'payment_acceptance' },
 ];
 
 // ─── EVM address validation ──────────────────────────────────────────────────
@@ -98,17 +102,18 @@ export function validatePmFields(fields: PmFields): PmValidationErrors {
  * values (including absent) default to `'general_products'`.
  */
 export function initBusinessType(type: string | undefined): string {
-  return type === 'p2p_merchant' ? 'p2p_merchant' : 'general_products';
+  return type === 'p2p_merchant' || type === 'payment_acceptance' ? type : 'general_products';
 }
 
 /**
  * Returns true when the business-type picker should be locked to a single
- * static "P2P Merchant" chip (no `onPress`). This happens when the form was
- * reached via a `?type=p2p_merchant` URL param — the user explicitly chose
- * the PM path, so we prevent switching away.
+ * static chip (no `onPress`). This happens when the form was reached via a
+ * `?type=p2p_merchant` or `?type=payment_acceptance` URL param — the user
+ * explicitly chose that path (a deep link, e.g. from the merchant dashboard
+ * or a "not now, something else" prompt), so we prevent switching away.
  */
 export function isPickerLocked(type: string | undefined): boolean {
-  return type === 'p2p_merchant';
+  return type === 'p2p_merchant' || type === 'payment_acceptance';
 }
 
 // ─── Existing-request gate (exported for tests) ──────────────────────────────
@@ -151,27 +156,60 @@ function hasPmProvisioningData(r: ExistingRequestLike): boolean {
 
 export type MerchantGate =
   | { screen: 'form' }
+  | { screen: 'verify' }
   | { screen: 'pending'; pm: boolean }
-  | { screen: 'approved'; pm: boolean }
+  | { screen: 'approved'; pm: boolean; payFlow: boolean }
   | { screen: 'provisioning' }
   | { screen: 'rejected' };
 
+// Business types the backend has NO "already a merchant" role guard for —
+// each may be applied for on top of whatever else the user already has
+// (PayMerchantUpgrade's own carve-out for p2p_merchant; payment_acceptance's
+// deliberate "no role guard — a marketplace merchant, or anyone else, may
+// apply" in merchant_request_handler.go). Every OTHER business type keeps the
+// original rule: in the normal flow, any existing request blocks a new one.
+const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance'];
+
+// A TSA Pay application needs a verified identity (the server refuses it with
+// the money-in code, kyc_verification_required), so an unverified applicant is sent to verification instead of
+// a form she could not submit. Only the form is replaced: a request she already
+// has keeps its own status screen. kycVerified defaults to true because only a
+// TSA Pay form ever asks.
 export function resolveMerchantGate(args: {
   existingRequest: ExistingRequestLike | null | undefined;
-  formIsPm: boolean;
+  formType: string;
+  pmActive: boolean;
+  kycVerified?: boolean;
+}): MerchantGate {
+  const gate = resolveRequestGate(args);
+  if (gate.screen === 'form' && args.formType === 'payment_acceptance' && args.kycVerified === false) {
+    return { screen: 'verify' };
+  }
+  return gate;
+}
+
+function resolveRequestGate(args: {
+  existingRequest: ExistingRequestLike | null | undefined;
+  formType: string;
   pmActive: boolean;
 }): MerchantGate {
-  const { existingRequest, formIsPm, pmActive } = args;
+  const { existingRequest, formType, pmActive } = args;
   if (!existingRequest) return { screen: 'form' };
 
   const existingType = existingRequest.businessType ?? existingRequest.business_type;
   const existingIsPm = existingType === 'p2p_merchant';
+  // TSA Pay's payment_acceptance approval deliberately never grants
+  // RoleMerchant (Task 4) — the marketplace-merchant "Go to Merchant
+  // Dashboard" success screen is wrong for it and its API calls would 403.
+  const existingIsPay = existingType === 'payment_acceptance';
 
-  // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) request must
-  // NOT short-circuit the PM application — an existing merchant may upgrade to
-  // PM. Only a prior PM request gates the PM form. In the normal flow, any
-  // existing request blocks. (Mirrors the backend's type-scoped carve-out.)
-  const blockExisting = !formIsPm || existingIsPm;
+  // Upgrade mode (?type=p2p_merchant or ?type=payment_acceptance): a prior
+  // request of a DIFFERENT type must NOT short-circuit this one — an existing
+  // merchant may add either on top of what she already has. Only a prior
+  // request of the SAME add-on type gates its own form (so re-visiting after
+  // an approval, say, still shows her that status rather than a blank form).
+  const formIsAddOn = ADD_ON_BUSINESS_TYPES.includes(formType);
+  const blockExisting = !formIsAddOn || existingType === formType;
   if (!blockExisting) return { screen: 'form' };
 
   switch (existingRequest.status) {
@@ -189,7 +227,7 @@ export function resolveMerchantGate(args: {
           ? { screen: 'provisioning' }
           : { screen: 'form' };
       }
-      return { screen: 'approved', pm: existingIsPm };
+      return { screen: 'approved', pm: existingIsPm, payFlow: existingIsPay };
     case 'rejected':
       return { screen: 'rejected' };
     default:
@@ -210,6 +248,15 @@ export default function MerchantRequestScreen() {
   // Actual Payment Merchant status (GET /p2p/pm/me) — distinct from an approved
   // PM *request*. Used to gate the "You're a Payment Merchant!" success screen.
   const [pmActive, setPmActive] = useState(false);
+  // The applicant's KYC status: AuthContext's copy, replaced by a fresh read
+  // each time the screen gains focus (she may have just verified). If the read
+  // fails, the cached copy stands. kycChecked holds the TSA Pay screen on its
+  // spinner until the first read settles, so neither the form nor the verify
+  // card flashes up first. kycRefused is the server refusing the submit for
+  // KYC, which outranks any stale copy.
+  const [kycStatus, setKycStatus] = useState<string | undefined>(currentUser?.verificationStatus);
+  const [kycChecked, setKycChecked] = useState(false);
+  const [kycRefused, setKycRefused] = useState(false);
 
   const [businessType, setBusinessType] = useState(() => initBusinessType(type));
   const [businessName, setBusinessName] = useState('');
@@ -220,6 +267,7 @@ export default function MerchantRequestScreen() {
   const [country, setCountry] = useState('');
   const [phone, setPhone] = useState(currentUser?.phoneNumber || '');
   const [registrationNumber, setRegistrationNumber] = useState('');
+  const [website, setWebsite] = useState('');
 
   // ─── PM fields ──────────────────────────────────────────────────────────────
   const [banks, setBanks] = useState<NgBank[]>([]);
@@ -247,15 +295,33 @@ export default function MerchantRequestScreen() {
   const addressRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const regNumberRef = useRef<TextInput>(null);
+  const websiteRef = useRef<TextInput>(null);
   const makerWalletRef = useRef<TextInput>(null);
   const perTradeCapRef = useRef<TextInput>(null);
   const dailyCapRef = useRef<TextInput>(null);
 
   const isPm = businessType === 'p2p_merchant';
+  const isPay = businessType === 'payment_acceptance';
 
   useEffect(() => {
     fetchExistingRequest();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!isPay) return;
+      let cancelled = false;
+      api.getKYCStatus()
+        .then((res) => {
+          if (cancelled || !res.success || !res.data) return;
+          setKycStatus(res.data.verificationStatus);
+          if (res.data.verificationStatus === 'verified') setKycRefused(false);
+        })
+        .catch(() => { /* keep the cached status; the server still gates the submit */ })
+        .finally(() => { if (!cancelled) setKycChecked(true); });
+      return () => { cancelled = true; };
+    }, [isPay]),
+  );
 
   // Load bank list when PM type is selected (lazy)
   useEffect(() => {
@@ -347,7 +413,12 @@ export default function MerchantRequestScreen() {
       setPmActive(pmStatus.isPm);
       if (res.success && res.data) {
         setExistingRequest(res.data);
-        if (res.data.status === 'approved') {
+        // TSA Pay (payment_acceptance) approvals never grant the marketplace
+        // RoleMerchant server-side (Task 4's deliberate design) — caching
+        // role='merchant' here would show the "Go to Merchant Dashboard" gate
+        // for a capability the user doesn't have, whose API calls would 403.
+        const approvedType = res.data.businessType ?? res.data.business_type;
+        if (res.data.status === 'approved' && approvedType !== 'payment_acceptance') {
           await AsyncStorage.setItem('role', 'merchant');
         }
         // Pre-fill the shared business fields from the existing request. This
@@ -369,6 +440,11 @@ export default function MerchantRequestScreen() {
   const handleSubmit = async () => {
     if (!businessName || !address || !city || !state || !country || !phone) {
       Alert.alert('Error', 'Please fill in all required fields');
+      return;
+    }
+
+    if (isPay && !website.trim().toLowerCase().startsWith('https://')) {
+      Alert.alert('Error', "Enter your website's https address");
       return;
     }
 
@@ -399,6 +475,7 @@ export default function MerchantRequestScreen() {
       country,
       phone,
       registrationNumber: registrationNumber || undefined,
+      ...(isPay ? { website: website.trim() } : {}),
       ...(isPm ? {
         settlementBankCode: settlementBank!.code,
         settlementAccountNumber,
@@ -410,6 +487,15 @@ export default function MerchantRequestScreen() {
     });
 
     setSubmitting(false);
+    const refusal = res.success ? null : kycRefusalFor(res.code, res.message);
+    if (refusal?.kind === 'verify') {
+      setKycRefused(true);
+      return;
+    }
+    if (refusal) {
+      promptKycRefusal(res.code, res.message);
+      return;
+    }
     if (res.success) {
       Alert.alert('Success', 'Your merchant application has been submitted!');
       setExistingRequest(res.data);
@@ -418,7 +504,7 @@ export default function MerchantRequestScreen() {
     }
   };
 
-  if (loading) {
+  if (loading || (isPay && !kycChecked)) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Stack.Screen options={{ title: 'Merchant Application' }} />
@@ -432,7 +518,27 @@ export default function MerchantRequestScreen() {
   // Decide which gate screen (if any) to show. resolveMerchantGate also factors
   // in the real PM-active status so an approved-but-not-yet-active PM request
   // shows a "provisioning" state rather than a false "You're a Payment Merchant!".
-  const gate = resolveMerchantGate({ existingRequest, formIsPm: isPm, pmActive });
+  const gate = resolveMerchantGate({
+    existingRequest,
+    formType: businessType,
+    pmActive,
+    kycVerified: kycStatus === 'verified' && !kycRefused,
+  });
+
+  if (gate.screen === 'verify') {
+    return (
+      <StatusScreen
+        icon="shield"
+        tone={colors.warning}
+        toneBg={colors.warningBg}
+        title="Verify your identity first"
+        body="TSA Pay is for verified businesses. Verify your identity, then come back here to apply."
+        actionTitle="Verify identity"
+        actionVariant="primary"
+        onAction={() => router.push(KYC_ROUTE as never)}
+      />
+    );
+  }
 
   if (gate.screen === 'pending') {
     return (
@@ -470,14 +576,20 @@ export default function MerchantRequestScreen() {
         icon="checkCircle"
         tone={colors.success}
         toneBg={colors.successBg}
-        title={gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
-        body={gate.pm
-          ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
-          : 'Your application has been approved. You now have access to the merchant portal.'}
-        actionTitle="Go to Merchant Dashboard"
+        title={gate.payFlow ? 'Your TSA Pay application was approved' : gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
+        body={
+          gate.payFlow
+            ? 'Your TSA Pay application has been approved. Choose where you want to be paid — a bank account in your business or verified name, or a crypto wallet.'
+            : gate.pm
+            ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
+            : 'Your application has been approved. You now have access to the merchant portal.'
+        }
+        actionTitle={gate.payFlow ? 'Payment Settings' : 'Go to Merchant Dashboard'}
         actionVariant="success"
-        onAction={() => router.push('/merchants/dashboard')}
-      />
+        onAction={() => router.push(gate.payFlow ? '/merchants/pay-settings' : '/merchants/dashboard')}
+      >
+        {gate.payFlow && <SetUpOnWebCard />}
+      </StatusScreen>
     );
   }
 
@@ -500,6 +612,7 @@ export default function MerchantRequestScreen() {
           setState('');
           setCountry('');
           setRegistrationNumber('');
+          setWebsite('');
           // Reset PM fields too
           setSettlementBank(null);
           setSettlementAccountNumber('');
@@ -535,10 +648,11 @@ export default function MerchantRequestScreen() {
             Business Type *
           </Text>
           {isPickerLocked(type) ? (
-            // Locked single-chip: entered via ?type=p2p_merchant — cannot be changed.
+            // Locked single-chip: entered via ?type=p2p_merchant or
+            // ?type=payment_acceptance — cannot be changed.
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
               <Chip
-                label="Payment Merchant (PM)"
+                label={BUSINESS_TYPES.find((bt) => bt.value === type)?.label ?? businessType}
                 selected
               />
             </View>
@@ -623,9 +737,31 @@ export default function MerchantRequestScreen() {
             value={registrationNumber}
             onChangeText={setRegistrationNumber}
             placeholder="e.g. RC-123456"
-            returnKeyType={isPm ? 'next' : 'done'}
-            onSubmitEditing={isPm ? () => makerWalletRef.current?.focus() : handleSubmit}
+            returnKeyType={isPm || isPay ? 'next' : 'done'}
+            onSubmitEditing={
+              isPay
+                ? () => websiteRef.current?.focus()
+                : isPm
+                ? () => makerWalletRef.current?.focus()
+                : handleSubmit
+            }
           />
+
+          {/* ─── TSA Pay setup (payment_acceptance only) ─────────────────── */}
+          {isPay && (
+            <Field
+              ref={websiteRef}
+              label="Website *"
+              value={website}
+              onChangeText={setWebsite}
+              placeholder="https://example.com"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="done"
+              onSubmitEditing={handleSubmit}
+            />
+          )}
 
           {/* ─── Payment Merchant setup (p2p_merchant only) ──────────────── */}
           {isPm && (
@@ -874,10 +1010,37 @@ const Field = React.forwardRef<TextInput, FieldProps>(
 );
 Field.displayName = 'Field';
 
-// Shared status panel for the pending / approved / rejected branches — keeps the
-// status registration + actions identical, only the chrome is themed.
+// An approved TSA Pay merchant sets up and tests on the web app; the app keeps
+// only where she is paid (Payment Settings, the screen's own action).
+export const SetUpOnWebCard: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <View
+      style={{
+        alignSelf: 'stretch',
+        borderRadius: radius.md,
+        borderWidth: 1,
+        borderColor: colors.border,
+        padding: spacing.lg,
+        marginBottom: spacing.xl,
+      }}
+    >
+      <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
+        Set up on the web
+      </Text>
+      <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.md }}>
+        {`Create API keys, webhooks and payouts, and see your payments, at ${COMPANY.webApp.replace(/^https:\/\//, '')}`}
+      </Text>
+      <Button title="Open" variant="secondary" onPress={() => Linking.openURL(COMPANY.webApp)} />
+    </View>
+  );
+};
+
+// Shared status panel for the verify / pending / approved / rejected branches —
+// keeps the status registration + actions identical, only the chrome is themed.
+// children render between the body and the action.
 const StatusScreen: React.FC<{
-  icon: 'clock' | 'checkCircle' | 'closeCircle';
+  icon: 'clock' | 'checkCircle' | 'closeCircle' | 'shield';
   tone: string;
   toneBg: string;
   title: string;
@@ -885,7 +1048,8 @@ const StatusScreen: React.FC<{
   actionTitle: string;
   actionVariant: 'primary' | 'secondary' | 'success';
   onAction: () => void;
-}> = ({ icon, tone, toneBg, title, body, actionTitle, actionVariant, onAction }) => {
+  children?: React.ReactNode;
+}> = ({ icon, tone, toneBg, title, body, actionTitle, actionVariant, onAction, children }) => {
   const { colors, spacing, radius } = useTheme();
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -920,6 +1084,7 @@ const StatusScreen: React.FC<{
           <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing.xl }}>
             {body}
           </Text>
+          {children}
           <Button title={actionTitle} variant={actionVariant} onPress={onAction} />
         </View>
       </View>

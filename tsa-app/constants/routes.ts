@@ -31,3 +31,8 @@ export const SERVICES_TAB = '/serviceshome' satisfies Href;
 
 /** The Wallet tab's root screen (the tab is registered as `tokenization`). */
 export const WALLET_TAB = '/tokenization' satisfies Href;
+
+/** The TSA Pay application: the merchant-request form locked to
+ *  payment_acceptance. The form itself routes to the verify-first,
+ *  pending, approved or rejected screen, so every entry point pushes this. */
+export const TSA_PAY_APPLY = '/merchants/merchant-request?type=payment_acceptance' satisfies Href;

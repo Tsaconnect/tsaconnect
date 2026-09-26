@@ -1920,6 +1920,8 @@ export async function submitMerchantRequest(data: {
   country: string;
   phone: string;
   registrationNumber?: string;
+  // Required by the backend when businessType === 'payment_acceptance'
+  website?: string;
   // Corporate PM fields — required by the backend when businessType === 'p2p_merchant'
   settlementBankCode?: string;
   settlementAccountNumber?: string;
@@ -1940,7 +1942,7 @@ export async function submitMerchantRequest(data: {
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null);
-      return { success: false, message: body?.message || `Server error (${response.status})` };
+      return { success: false, message: body?.message || `Server error (${response.status})`, code: body?.code };
     }
     return response.json();
   } catch (error: any) {

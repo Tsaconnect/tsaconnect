@@ -17,6 +17,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
 import { useTheme } from "@/theme";
+import { TSA_PAY_APPLY } from "@/constants/routes";
 import {
   AccentCard,
   Avatar,
@@ -166,6 +167,7 @@ const ProfileScreen = () => {
   const lowerLinkRows: LinkRow[] = [
     { key: "trade", icon: "trendingUp", label: "Trade & Earn", onPress: () => router.push("/trade") },
     { key: "referrals", icon: "user", label: "My Referrals", onPress: () => router.push("/referrals") },
+    { key: "tsaPay", icon: "card", label: "Accept payments with TSA Pay", onPress: () => router.push(TSA_PAY_APPLY) },
     { key: "settings", icon: "construction", label: "Settings", onPress: () => router.push("/(dashboard)/settings") },
   ];
 

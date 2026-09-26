@@ -1,6 +1,6 @@
 // Themed container — background + radius + optional elevation. Base for Card.
 import React from 'react';
-import { View, ViewProps, ViewStyle } from 'react-native';
+import { StyleSheet, View, ViewProps, ViewStyle } from 'react-native';
 import { RadiusKey, SpacingKey, useTheme } from '@/theme';
 
 export type Elevation = 'none' | 'sm' | 'md' | 'lg';
@@ -28,6 +28,27 @@ export function useElevationStyle(elevation: Elevation): ViewStyle {
   return map[elevation];
 }
 
+/**
+ * True for a colour with alpha below 1: #RGBA, #RRGGBBAA, rgb()/rgba()/hsl()/hsla()
+ * with a fourth comma-separated or slash-separated alpha, or 'transparent'.
+ * Anything else (named colours, PlatformColor objects) reads as opaque.
+ */
+export function isTranslucentColor(color: unknown): boolean {
+  if (typeof color !== 'string') return false;
+  const c = color.trim().toLowerCase();
+  if (c === 'transparent') return true;
+  const hex = /^#([0-9a-f]{4}|[0-9a-f]{8})$/.exec(c);
+  if (hex) return !hex[1].endsWith(hex[1].length === 4 ? 'f' : 'ff');
+  const fn = /^(?:rgba?|hsla?)\((.*)\)$/.exec(c);
+  if (!fn) return false;
+  const slash = fn[1].split('/');
+  const commas = fn[1].split(',');
+  const alpha = slash.length === 2 ? slash[1] : commas.length === 4 ? commas[3] : undefined;
+  if (alpha === undefined) return false;
+  const a = alpha.trim();
+  return a.endsWith('%') ? parseFloat(a) < 100 : parseFloat(a) < 1;
+}
+
 export const Surface: React.FC<SurfaceProps> = ({
   radius = 'lg',
   padding, // no default: undefined => no padding (Card supplies its own default)
@@ -39,7 +60,10 @@ export const Surface: React.FC<SurfaceProps> = ({
   ...rest
 }) => {
   const { colors, radius: r, spacing } = useTheme();
-  const elevationStyle = useElevationStyle(elevation);
+  // A shadow under a see-through fill shows through it on Android — the muddy
+  // inner layer on every tinted status card. A tinted surface stays flat.
+  const tinted = isTranslucentColor(StyleSheet.flatten(style)?.backgroundColor);
+  const elevationStyle = useElevationStyle(tinted ? 'none' : elevation);
   return (
     <View
       style={[

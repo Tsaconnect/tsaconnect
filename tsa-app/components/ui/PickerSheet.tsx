@@ -16,6 +16,8 @@ export interface PickerItem {
   label: string;
   sublabel?: string;
   icon?: IconName;
+  /** Custom left node (e.g. a logo) — takes precedence over icon. */
+  leftElement?: React.ReactNode;
   group?: string;
 }
 
@@ -116,7 +118,7 @@ export const PickerSheet: React.FC<PickerSheetProps> = ({
                   paddingVertical: spacing.md,
                 }}
               >
-                {it.icon && <Icon name={it.icon} size={20} color={colors.textSecondary} />}
+                {it.leftElement ?? (it.icon && <Icon name={it.icon} size={20} color={colors.textSecondary} />)}
                 <View style={{ flex: 1 }}>
                   <Text variant="body" weight={selected ? '600' : '400'}>
                     {it.label}

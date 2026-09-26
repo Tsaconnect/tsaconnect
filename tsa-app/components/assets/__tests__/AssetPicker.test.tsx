@@ -58,19 +58,19 @@ jest.mock('@/hooks/useSpotListings', () => {
 
 jest.mock('@/hooks/useWalletHoldings', () => {
   // 2.33 USDT on BSC, and an imported token LiFi's lists don't carry.
-  const value = {
-    holdings: [
-      { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
-      { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
-      // Native S on Sonic: not a major.
-      { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
-      // Binance-Peg ETH: from our own list, but not ETH itself, so not grouped with it.
-      { chainId: 56, address: '0xpegeth', native: false, trusted: true, symbol: 'ETH', name: 'Binance-Peg ETH', decimals: 18, balance: 0.1, usdValue: 300 },
-      // Airdropped on Sui: its metadata says "USDC", nobody vouches for it.
-      { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
-    ],
-  };
-  return { __esModule: true, useWalletHoldings: () => value };
+  const DEFAULT_HOLDINGS = [
+    { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
+    { chainId: 56, address: '0xcrepe', native: false, trusted: true, symbol: 'CREPE', name: 'Crepe', decimals: 18, balance: 5, usdValue: 3 },
+    // Native S on Sonic: not a major.
+    { chainId: 146, address: '', native: true, trusted: true, symbol: 'S', name: 'Sonic', decimals: 18, balance: 12, usdValue: 5 },
+    // Binance-Peg ETH: from our own list, but not ETH itself, so not grouped with it.
+    { chainId: 56, address: '0xpegeth', native: false, trusted: true, symbol: 'ETH', name: 'Binance-Peg ETH', decimals: 18, balance: 0.1, usdValue: 300 },
+    // Airdropped on Sui: its metadata says "USDC", nobody vouches for it.
+    { chainId: 9270000000000000, address: '0xbad1::usdc::USDC', native: false, trusted: false, symbol: 'USDC', name: 'USDC', decimals: 6, balance: 500, usdValue: 0 },
+  ];
+  // One stable object per set of holdings, as the real hook returns state.
+  const state = { DEFAULT_HOLDINGS, value: { holdings: DEFAULT_HOLDINGS, loading: false } };
+  return { __esModule: true, __state: state, useWalletHoldings: () => state.value, prefetchWalletHoldings: async () => {} };
 });
 
 jest.mock('@/services/lifi', () => {
@@ -117,7 +117,15 @@ import AssetPicker from '../AssetPicker';
 import { resetAssetCatalogCache } from '@/hooks/useAssetCatalog';
 import * as Lifi from '@/services/lifi';
 
+import * as Holdings from '@/hooks/useWalletHoldings';
+import type { Holding } from '@/services/assetCatalog';
+
 const lifiState = (Lifi as unknown as { __state: { oldApi: boolean } }).__state;
+const holdingsState = (Holdings as unknown as {
+  __state: { DEFAULT_HOLDINGS: Holding[]; value: { holdings: Holding[]; loading: boolean } };
+}).__state;
+/** What the wallet holds for one test; reset before each. */
+const setHoldings = (holdings: Holding[], loading = false) => { holdingsState.value = { holdings, loading }; };
 
 function textNodes(node: any, out: string[] = []): string[] {
   if (node == null) return out;
@@ -153,7 +161,7 @@ async function open(props: Partial<React.ComponentProps<typeof AssetPicker>> = {
 // The first render loads react-native cold, slower than jest's default budget.
 jest.setTimeout(30_000);
 
-beforeEach(() => { resetAssetCatalogCache(); lifiState.oldApi = false; });
+beforeEach(() => { resetAssetCatalogCache(); lifiState.oldApi = false; setHoldings(holdingsState.DEFAULT_HOLDINGS); });
 
 it('shows On TSA, then the majors, then other coins in the wallet', async () => {
   const { tree } = await open();
@@ -265,4 +273,58 @@ it('does not call a coin from our own list Unverified just because it may not we
   const peg = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
     && n.props.accessibilityLabel.startsWith('ETH, BNB Smart Chain') && typeof n.props.onPress === 'function')[0];
   expect(rowText(peg)).not.toContain('Unverified');
+});
+
+it('lists only what she holds in holdings mode', async () => {
+  setHoldings([
+    { chainId: 56, address: '0x0000000000000000000000000000000000000000', native: true, trusted: true, symbol: 'BNB', name: 'BNB', decimals: 18, balance: 0.1, usdValue: 60 },
+    { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 0, usdValue: 0 },
+  ]);
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  const t = text(tree);
+  expect(t).toContain('BNB');
+  expect(t).not.toContain('Tether');
+  // Searching the whole catalogue is meaningless when the list is what she holds.
+  expect(tree.root.findAll(n => n.props.accessibilityLabel === 'Search coins')).toHaveLength(0);
+});
+
+it('says something useful in holdings mode when she holds nothing', async () => {
+  setHoldings([]);
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  const t = text(tree);
+  expect(t).toMatch(/no coins in your wallet/i);
+  expect(t).not.toContain('Stablecoins & major coins');
+});
+
+it('offers only the networks she holds a coin on in holdings mode', async () => {
+  // USDT lives on Base and BSC; she holds it on BSC alone.
+  setHoldings([
+    { chainId: 56, address: '0xusdt56', native: false, trusted: true, symbol: 'USDT', name: 'Tether', decimals: 18, balance: 2.33, usdValue: 2.33 },
+  ]);
+  const { tree, onSelect } = await open({ side: 'from', holdingsOnly: true });
+  expect(text(tree)).not.toContain('2 networks');
+  await pressLabel(tree, 'USDT,');
+  expect(text(tree)).not.toContain('choose network');
+  expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'USDT', chainId: 56 }), 56);
+});
+
+it('never says she holds nothing while her balances are still loading', async () => {
+  // The majors resolve at once (a warm cache); her balances are still in flight.
+  setHoldings([], true);
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  expect(text(tree)).not.toMatch(/no coins in your wallet/i);
+
+  // Once they land empty, then she is told.
+  setHoldings([], false);
+  await act(async () => {
+    tree.update(<AssetPicker visible side="from" holdingsOnly onSelect={() => {}} onClose={() => {}} />);
+  });
+  await flush();
+  expect(text(tree)).toMatch(/no coins in your wallet/i);
+});
+
+it('does not wait on her balances outside holdings mode', async () => {
+  setHoldings([], true);
+  const { tree } = await open({ side: 'to' });
+  expect(text(tree)).toContain('Stablecoins & major coins');
 });

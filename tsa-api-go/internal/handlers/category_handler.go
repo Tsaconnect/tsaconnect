@@ -150,7 +150,7 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}
@@ -278,7 +278,7 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}
@@ -414,7 +414,7 @@ func (h *Handlers) DeleteCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}

@@ -1,4 +1,4 @@
-import { mcgpRowActions, stableRowActions } from '@/utils/rampRow';
+import { anyTokenRowActions, mcgpRowActions, stableRowActions } from '@/utils/rampRow';
 
 describe('mcgpRowActions', () => {
   it('offers both actions in NGN with a wallet', () => {
@@ -91,5 +91,37 @@ describe('stableRowActions', () => {
       sell: false,
       unavailable: 'Not available in NGN',
     });
+  });
+});
+
+const anyToken = (over: Partial<Parameters<typeof anyTokenRowActions>[0]> = {}) =>
+  anyTokenRowActions({ currency: 'NGN', hasWallet: true, swappedSellEnabled: true, ...over });
+
+describe('anyTokenRowActions', () => {
+  it('offers both actions in NGN with a wallet and swapped-sell live', () => {
+    expect(anyToken()).toEqual({ buy: true, sell: true });
+  });
+
+  // Buying delivers into her wallet the same way MCGP/stablecoins do, so the
+  // same "wallet first" rule applies.
+  it('asks for a wallet before anything else', () => {
+    const noWallet = { buy: false, sell: false, unavailable: 'Connect a wallet to trade' };
+    expect(anyToken({ hasWallet: false })).toEqual(noWallet);
+    expect(anyToken({ hasWallet: false, currency: 'UGX' })).toEqual(noWallet);
+  });
+
+  // The any-token ramp is NGN-only.
+  it('names a currency the any-token ramp does not serve', () => {
+    expect(anyToken({ currency: 'UGX' })).toEqual({
+      buy: false,
+      sell: false,
+      unavailable: 'Not available in UGX',
+    });
+  });
+
+  // RAMP_CONVERSION_SELL can be off while buy is live — Sell alone drops,
+  // Buy is unaffected. There is no equivalent buy-side flag to check yet.
+  it('offers buy alone when swapped-sell is off server-side', () => {
+    expect(anyToken({ swappedSellEnabled: false })).toEqual({ buy: true, sell: false });
   });
 });

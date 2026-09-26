@@ -207,7 +207,17 @@ type Config struct {
 	FrontendURL string
 	AdminURL    string
 	LandingURL  string
-	Port        string
+	// WebAppOrigin is the TSA Connect web app's origin (e.g.
+	// https://app.tsaconnectworld.com). Unset = the web sign-in routes are not
+	// registered.
+	WebAppOrigin string
+	// NetlifyProxySecret is the secret the web app's Netlify site signs its
+	// /api proxy requests with (x-nf-sign). Set = a request whose signature
+	// verifies is attributed to the visitor Netlify names, not to Netlify.
+	// Unset = Netlify's own address is the client, and every web visitor
+	// shares it for per-IP limits.
+	NetlifyProxySecret string
+	Port               string
 	// Env is normalised at Load() time (trim, lower-case, "prod" -> "production")
 	// so a stray space or differing case can never desync the checks below —
 	// call IsProduction() rather than comparing this field directly.
@@ -292,8 +302,13 @@ type Config struct {
 	// key with any other hot signer turns a single compromise into one that
 	// drains customer money. Asserted at boot (assertDistinctKey).
 	RampConversionBuyEnabled bool
-	RampTreasuryPrivateKey   string
-	RampTreasuryChains       []string
+	// RampRoundTripBudgetBps is B: the part of the user-facing markup F
+	// (PAYCREST_SENDER_FEE_PERCENT) that pays a conversion's round trip —
+	// LiFi's cost plus the gas we pay. Converted orders send Paycrest F − B;
+	// a route costing more than B is not offered; the unspent rest is ours.
+	RampRoundTripBudgetBps int
+	RampTreasuryPrivateKey string
+	RampTreasuryChains     []string
 	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
 	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
 	// across every converted buy the treasury has not yet settled.
@@ -325,6 +340,15 @@ type Config struct {
 	// it wasn't told about.
 	RampConversionMinUSD        float64
 	RampConversionMinUSDByChain map[string]float64
+	// RampConvertedFeeMaxBps/RampConvertedFeeMaxBpsByChain cap the TOTAL fee
+	// a converted buy or swapped sell may charge. A route costing more than B
+	// raises its own budget, and the user's fee with it (our F − B is
+	// unchanged), up to the cap of the chain involved — a buy's destination,
+	// a sell's source; past it the route is not offered. ByChain holds every
+	// chain a buy can deliver to or a sell can start from. 0 means raising is
+	// off; a value outside 1..MaxConvertedFeeBps is loaded as 0.
+	RampConvertedFeeMaxBps        int
+	RampConvertedFeeMaxBpsByChain map[string]int
 	// RampConversionStallWindow/RampConversionLegCeiling/
 	// RampConversionMaxShortfallUSD retune ConversionOrchestrator's own code
 	// defaults (defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD)
@@ -332,6 +356,30 @@ type Config struct {
 	RampConversionStallWindow     time.Duration
 	RampConversionLegCeiling      time.Duration
 	RampConversionMaxShortfallUSD float64
+	// RampTreasuryKeptUSDCAlert is the USD threshold above which the treasury
+	// float monitor alerts on a lane's kept USDC (SponsorFloat.TokenUSD): a
+	// converted buy leaves the round trip's unspent budget sitting there, and
+	// nothing sweeps it automatically. Zero disables the check.
+	RampTreasuryKeptUSDCAlert float64
+
+	// RampConversionSellEnabled is the sell half of the same round trip: she
+	// swaps her own token into USDC on Base (in her own wallet, we never hold
+	// it) and we offramp that. Independent of RAMP_CONVERSION_BUY — the sell
+	// needs no treasury key, only a LiFi integrator fee wallet — so a deploy
+	// that leaves it unset keeps behaving exactly as before.
+	RampConversionSellEnabled bool
+	// RampSellSponsoredGasUSD is the EIP-3009 relay on Base we pay to move
+	// her USDC into the offramp, in USD. It is part of g, the gas half of the
+	// round-trip budget B (design §3.2).
+	RampSellSponsoredGasUSD float64
+
+	// ── TSA Pay (merchant payments) ──
+	// Test mode is on until the licensing question is answered; live mode stays
+	// off until PM gives clearance on compliance.
+	TSAPayEnabled          bool
+	TSAPayLiveEnabled      bool
+	TSAPayWebhookMasterKey string
+	TSAPayCheckoutBaseURL  string
 
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
@@ -427,7 +475,11 @@ type Config struct {
 	DiditCallbackURL   string
 
 	// LiFi swap aggregator
-	LiFiAPIKey        string
+	LiFiAPIKey string
+	// CoinGecko key (COINGECKO_API_KEY). COINGECKO_API_PLAN=pro selects the paid
+	// host; anything else treats the key as a free Demo key. Unset = public API.
+	CoinGeckoAPIKey   string
+	CoinGeckoPro      bool
 	LiFiIntegratorID  string
 	LiFiIntegratorFee string
 	// LiFiBaseURL is always resolved (never raw/empty) via ResolveLiFiBaseURL —
@@ -683,6 +735,8 @@ func Load() *Config {
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
+		WebAppOrigin:        normalizeOrigin(getEnv("WEB_APP_ORIGIN", "")),
+		NetlifyProxySecret:  getEnv("NETLIFY_PROXY_SECRET", ""),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 normalizeEnv(getEnv("ENV", "development")),
 		AllowRawSignerKeys:  getEnvBool("ALLOW_RAW_SIGNER_KEYS", false),
@@ -749,6 +803,7 @@ func Load() *Config {
 	}
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
+	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))
 	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
 	cfg.RampTreasuryChains = nil
 	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {
@@ -789,8 +844,16 @@ func Load() *Config {
 		"avalanche": lifiDiamond, "sonic": lifiDiamond,
 		"linea": "0xde1e598b81620773454588b85d6b5d4eec32573e",
 	}
+	// Filled for every treasury chain AND every chain with a pinned default:
+	// swapped sells check her route against the same list, and a sell's
+	// source chain does not stop being checkable because RAMP_TREASURY_CHAINS
+	// was narrowed for buys. Treasury lanes still only read their own chains.
+	routerChains := append([]string{}, cfg.RampTreasuryChains...)
+	for chain := range rampTreasuryRouterDefaults {
+		routerChains = append(routerChains, chain)
+	}
 	cfg.RampTreasuryRouters = map[string][]string{}
-	for _, chain := range cfg.RampTreasuryChains {
+	for _, chain := range routerChains {
 		up := strings.ToUpper(chain)
 		raw := strings.TrimSpace(getEnv("RAMP_TREASURY_ROUTERS_"+up, rampTreasuryRouterDefaults[chain]))
 		var routers []string
@@ -819,6 +882,11 @@ func Load() *Config {
 		}
 		cfg.RampConversionMinUSDByChain[chain] = getEnvFloat64("RAMP_CONVERSION_MIN_USD_"+up, def)
 	}
+	cfg.RampConvertedFeeMaxBps = convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS", 200)
+	cfg.RampConvertedFeeMaxBpsByChain = map[string]int{}
+	for _, chain := range append(append([]string{}, routerChains...), "solana") {
+		cfg.RampConvertedFeeMaxBpsByChain[chain] = convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS_"+strings.ToUpper(chain), cfg.RampConvertedFeeMaxBps)
+	}
 	// ConversionOrchestrator's own code defaults are 6h/24h/$50 — see
 	// defaultStallWindow, defaultLegCeiling, defaultMaxShortfallUSD in
 	// internal/services/conversion_orchestrator.go. Reading them from env
@@ -826,6 +894,19 @@ func Load() *Config {
 	cfg.RampConversionStallWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_STALL_MINUTES", 360)) * time.Minute
 	cfg.RampConversionLegCeiling = time.Duration(getEnvInt64("RAMP_CONVERSION_LEG_CEILING_HOURS", 24)) * time.Hour
 	cfg.RampConversionMaxShortfallUSD = getEnvFloat64("RAMP_CONVERSION_MAX_SHORTFALL_USD", 50)
+	cfg.RampTreasuryKeptUSDCAlert = getEnvFloat64("RAMP_TREASURY_KEPT_USDC_ALERT", 500)
+	cfg.RampConversionSellEnabled = getEnvBool("RAMP_CONVERSION_SELL", false)
+	cfg.RampSellSponsoredGasUSD = getEnvFloat64("RAMP_SELL_SPONSORED_GAS_USD", 0.02)
+
+	// TSA Pay merchant-payments platform.
+	cfg.TSAPayEnabled = getEnvBool("TSA_PAY_ENABLED", false)
+	cfg.TSAPayLiveEnabled = getEnvBool("TSA_PAY_LIVE_ENABLED", false)
+	cfg.TSAPayWebhookMasterKey = strings.TrimSpace(getEnv("TSA_PAY_WEBHOOK_MASTER_KEY", ""))
+	checkoutBaseURL := strings.TrimSpace(getEnv("TSA_PAY_CHECKOUT_BASE_URL", ""))
+	if checkoutBaseURL == "" {
+		checkoutBaseURL = "https://tsaconnectworld.com/pay"
+	}
+	cfg.TSAPayCheckoutBaseURL = checkoutBaseURL
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
@@ -948,6 +1029,8 @@ func Load() *Config {
 	// when both are set we collect a percentage cut, which requires a
 	// matching registration at portal.li.fi with a fee wallet configured.
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
+	cfg.CoinGeckoAPIKey = strings.TrimSpace(os.Getenv("COINGECKO_API_KEY"))
+	cfg.CoinGeckoPro = strings.EqualFold(strings.TrimSpace(os.Getenv("COINGECKO_API_PLAN")), "pro")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
 	// LIFI_BASE_URL exists so a local rehearsal can point every LiFi client at
@@ -1367,6 +1450,27 @@ func getEnvFloat64(key string, fallback float64) float64 {
 	return fallback
 }
 
+// MaxConvertedFeeBps bounds a converted fee cap from config: well above any
+// fee we mean to charge, low enough that a typo ("2000" for "200") is refused
+// rather than charged.
+const MaxConvertedFeeBps = 500
+
+// convertedFeeCapFromEnv reads a converted-fee cap. Unset keeps fallback; a
+// value that is not a whole number in 1..MaxConvertedFeeBps turns raising off
+// (0) rather than falling back to something more permissive than was asked.
+func convertedFeeCapFromEnv(key string, fallback int) int {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v <= 0 || v > MaxConvertedFeeBps {
+		log.Printf("[config] %s=%q is not a fee cap in 1..%d bps: raising a dear route's fee is off", key, raw, MaxConvertedFeeBps)
+		return 0
+	}
+	return v
+}
+
 func getEnvInt64(key string, fallback int64) int64 {
 	if value, exists := os.LookupEnv(key); exists {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
@@ -1417,6 +1521,21 @@ func normalizeEnv(raw string) string {
 	}
 	return e
 }
+
+// normalizeOrigin turns a configured origin into the form a browser sends in
+// its Origin header: scheme and host lower-cased, no trailing slash. The
+// cookie-session origin check compares against it byte for byte.
+func normalizeOrigin(raw string) string {
+	origin := strings.TrimRight(strings.TrimSpace(raw), "/")
+	scheme, host, ok := strings.Cut(origin, "://")
+	if !ok || scheme == "" || host == "" {
+		return origin
+	}
+	return strings.ToLower(scheme) + "://" + strings.ToLower(host)
+}
+
+// WebAuthEnabled reports whether the web app's sign-in routes are on.
+func (c *Config) WebAuthEnabled() bool { return c != nil && c.WebAppOrigin != "" }
 
 // IsProduction reports whether this process is running in production. It
 // re-normalises c.Env so it is correct even for a Config built by hand (e.g.

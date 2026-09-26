@@ -207,6 +207,12 @@ func (h *Handlers) ResetPassword(c *gin.Context) {
 		}).Error; err != nil {
 			return err
 		}
+		if err := forgetTrustedBrowsers(tx, user.ID); err != nil {
+			return err
+		}
+		if err := revokeRefreshTokens(tx, user.ID); err != nil {
+			return err
+		}
 		return tx.Model(&resetRecord).Update("used", true).Error
 	})
 	if txErr != nil {

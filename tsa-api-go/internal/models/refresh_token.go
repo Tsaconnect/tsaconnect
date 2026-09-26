@@ -13,5 +13,8 @@ type RefreshToken struct {
 	ExpiresAt  time.Time `gorm:"not null"`
 	Revoked    bool      `gorm:"default:false"`
 	DeviceInfo string    `gorm:"type:varchar(255)"`
-	CreatedAt  time.Time
+	// Web: issued to a web (cookie) session. It rotates only on the web, so it
+	// can never be traded for an app token that carries staff powers.
+	Web       bool `gorm:"not null;default:false"`
+	CreatedAt time.Time
 }

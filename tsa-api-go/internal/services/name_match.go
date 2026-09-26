@@ -251,3 +251,52 @@ func intersectionSize(a, b map[string]struct{}) int {
 	}
 	return n
 }
+
+// companyNameSuffixes are legal-form words a bank may add to, drop from, or
+// spell differently in a registered business's account name ("SKY AIR LTD",
+// "Sky Air Limited", "Sky Air"). They say what kind of entity it is, never which
+// one, so they are dropped before a business name is matched. Kept out of
+// accountNameHonorifics on purpose: inbound attribution matches people, and a
+// looser person matcher is a riskier one.
+var companyNameSuffixes = map[string]struct{}{
+	"LTD": {}, "LIMITED": {}, "PLC": {}, "INC": {}, "LLC": {}, "CO": {}, "COMPANY": {},
+}
+
+// AccountNameWithin reports whether bankName, the name a bank resolved for a
+// payout account, is the same name as reference or a shorter form of it — never
+// a longer one. It is stricter than MatchAccountName on purpose: attribution
+// pairs that verdict with an exact amount and a single candidate, but here the
+// name is the only thing standing between a stolen login and a merchant's money.
+// A superset is exactly what an impostor can manufacture: "SKY AIR CARGO LTD"
+// contains every word of "SKY AIR LTD", and a registered business name costs
+// little. A subset is what banks actually print — a dropped middle name, a
+// shortened trading name — so it is allowed, with the same two-word floor: one
+// shared word proves nothing.
+func AccountNameWithin(reference, bankName string) bool {
+	ref := accountNameTokenSet(reference)
+	bank := accountNameTokenSet(bankName)
+	if len(ref) == 0 || len(bank) == 0 {
+		return false
+	}
+	shared := intersectionSize(ref, bank)
+	if shared != len(bank) {
+		return false // the bank's name carries a word the reference does not
+	}
+	return shared == len(ref) || shared >= 2
+}
+
+// BusinessAccountNameWithin is AccountNameWithin for a registered business:
+// both names are compared without their legal-form suffixes.
+func BusinessAccountNameWithin(businessName, bankName string) bool {
+	return AccountNameWithin(withoutCompanySuffixes(businessName), withoutCompanySuffixes(bankName))
+}
+
+func withoutCompanySuffixes(s string) string {
+	kept := make([]string, 0, 4)
+	for _, tok := range AccountNameTokens(s) {
+		if _, suffix := companyNameSuffixes[tok]; !suffix {
+			kept = append(kept, tok)
+		}
+	}
+	return strings.Join(kept, " ")
+}

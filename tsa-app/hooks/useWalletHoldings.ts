@@ -5,7 +5,11 @@
 // mnemonic — as flat Holding rows keyed by LiFi chain id.
 //
 // Read once per wallet and kept for a short while, so opening the picker for
-// "You pay" and then "You receive" does not reload the same balances.
+// "You pay" and then "You receive" does not reload the same balances. The last
+// read is also kept on the device: an open with nothing fresh in memory shows
+// those balances at once and swaps in the new read when it lands, instead of a
+// spinner. A screen's picker prefetches on mount, so the read is usually done
+// before the sheet opens.
 
 import { useEffect, useState } from 'react';
 import { CHAINS, NONEVM_CHAINS, type ChainKey } from '@/constants/chains';
@@ -16,9 +20,22 @@ import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { BTC_LIFI_CHAIN_ID, SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID } from '@/services/lifi';
 import { isNativeLiFiToken, type Holding } from '@/services/assetCatalog';
+import { persistedCache } from '@/services/persistedCache';
 
 const CACHE_MS = 60_000;
 let cache: { wallet: string; at: number; holdings: Holding[] } | null = null;
+let inFlight: { wallet: string; read: Promise<Holding[] | null> } | null = null;
+// Bumped by invalidateWalletHoldings, so a read that began before a trade
+// cannot put pre-trade balances back.
+let generation = 0;
+
+interface StoredHoldings { wallet: string; holdings: Holding[] }
+const stored = persistedCache(
+  'wallet_holdings_v1',
+  CACHE_MS,
+  (v): v is StoredHoldings =>
+    typeof (v as StoredHoldings)?.wallet === 'string' && Array.isArray((v as StoredHoldings).holdings),
+);
 
 const NON_EVM_CHAIN_IDS: Record<string, number> = {
   solana: SOLANA_LIFI_CHAIN_ID,
@@ -84,39 +101,85 @@ async function loadHoldings(wallet: string): Promise<Holding[] | null> {
   ].filter((h): h is Holding => h !== null);
 }
 
+const freshInMemory = (wallet: string) =>
+  cache && cache.wallet === wallet && Date.now() - cache.at < CACHE_MS ? cache.holdings : null;
+
+/** One read per wallet at a time: a prefetch and an open share it. */
+function readHoldings(wallet: string): Promise<Holding[] | null> {
+  if (inFlight?.wallet === wallet) return inFlight.read;
+  const startedIn = generation;
+  const read = loadHoldings(wallet)
+    .then(next => {
+      // A load where nothing answered is not remembered, so the next open retries.
+      if (next && startedIn === generation) {
+        cache = { wallet, at: Date.now(), holdings: next };
+        stored.write({ wallet, holdings: next });
+      }
+      return next;
+    })
+    .finally(() => { if (inFlight?.read === read) inFlight = null; });
+  inFlight = { wallet, read };
+  return read;
+}
+
+/** The last balances this device saw for `wallet`, and whether they are recent enough to skip a read. */
+async function storedHoldings(wallet: string): Promise<{ holdings: Holding[]; fresh: boolean } | null> {
+  const hit = await stored.read();
+  return hit && hit.value.wallet === wallet ? { holdings: hit.value.holdings, fresh: hit.fresh } : null;
+}
+
+/** Start reading the active wallet's balances before the picker opens. */
+export async function prefetchWalletHoldings(): Promise<void> {
+  const wallet = await getActiveWallet();
+  if (!wallet || freshInMemory(wallet)) return;
+  await readHoldings(wallet);
+}
+
 export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; loading: boolean } {
   // Starts empty, not from the cache: the cache may be another wallet's until
   // the active wallet is known below.
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [loading, setLoading] = useState(false);
+  // Until the first read settles, "no holdings" means "not read yet" — the
+  // wallet lookup itself is async, so `loading` alone starts out false.
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    const settle = (next: Holding[]) => { setHoldings(next); setSettled(true); };
     (async () => {
       const wallet = await getActiveWallet();
       if (cancelled) return;
-      if (!wallet) { setHoldings([]); return; }
-      if (cache && cache.wallet === wallet && Date.now() - cache.at < CACHE_MS) {
-        setHoldings(cache.holdings);
-        return;
+      if (!wallet) { settle([]); return; }
+      const fresh = freshInMemory(wallet);
+      if (fresh) { settle(fresh); return; }
+
+      // Something to show while the read is out: the device copy, written with every read.
+      const earlier = await storedHoldings(wallet);
+      if (cancelled) return;
+      if (earlier) {
+        settle(earlier.holdings);
+        if (earlier.fresh) return;
+      } else {
+        setLoading(true);
       }
-      setLoading(true);
-      const next = await loadHoldings(wallet);
-      // A load where nothing answered is not remembered, so the next open retries.
-      if (next) cache = { wallet, at: Date.now(), holdings: next };
-      if (!cancelled) {
-        setHoldings(next ?? []);
-        setLoading(false);
-      }
+      const next = await readHoldings(wallet);
+      if (cancelled) return;
+      if (next) settle(next);
+      else if (!earlier) settle([]);
+      setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [enabled]);
 
-  return { holdings, loading };
+  return { holdings, loading: enabled && (loading || !settled) };
 }
 
 /** Forget cached balances — after a swap, or in tests — so the next open re-reads them. */
 export function invalidateWalletHoldings() {
   cache = null;
+  inFlight = null;
+  generation += 1;
+  stored.clear();
 }

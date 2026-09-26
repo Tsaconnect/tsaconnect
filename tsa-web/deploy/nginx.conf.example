@@ -1,0 +1,100 @@
+# app.tsaconnectworld.com — the TSA Connect web app, on the same origin as the API.
+# Install to /etc/nginx/sites-available/tsa-web.conf (http context: the map below
+# must sit outside the server block) and link it into sites-enabled.
+#
+# The session cookies are host-only and SameSite=Strict, so the page and /api/ MUST
+# be one origin: never point the app at tsa.mcgpchain.com directly.
+#
+# /api/ goes to the same `tsa_api` upstream the API site already uses
+# (tsa-api-go/deploy/nginx-tsa-api-upstream.conf, 127.0.0.1:8081 today). Do not
+# hardcode a port here: a blue/green cutover rewrites only that upstream file.
+
+# Cache policy by status and path, set once at server level. nginx drops every
+# server-level add_header in a location that has an add_header of its own, so the
+# security headers would silently vanish from index.html if Cache-Control were
+# set per location. Keyed on the status too: only a file that was actually found
+# may be cached for a year — a 404 for a hashed name must not be.
+map "$status:$uri" $tsa_web_cache_control {
+  ~^[0-9]+:/api/          "";                                     # adds nothing: the API decides (/api/pay/merchant and /api/auth/web send no-store)
+  ~^(200|304):/assets/    "public, max-age=31536000, immutable";  # content-hashed file names
+  default                 "no-store";                             # index.html (always the current build) and every error
+}
+
+server {
+  listen 80;
+  listen [::]:80;
+  server_name app.tsaconnectworld.com;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  # On nginx >= 1.25.1 prefer `listen 443 ssl;` plus `http2 on;` (this form still works, with a warning).
+  listen 443 ssl http2;
+  listen [::]:443 ssl http2;
+  server_name app.tsaconnectworld.com;
+  # Issued before this file is installed: certbot certonly --nginx -d app.tsaconnectworld.com
+  ssl_certificate     /etc/letsencrypt/live/app.tsaconnectworld.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/app.tsaconnectworld.com/privkey.pem;
+
+  root /srv/tsa-web/current;   # the contents of tsa-web/dist
+  index index.html;
+
+  # Stock Ubuntu nginx.conf turns gzip on but leaves gzip_types commented out, so
+  # it compresses only text/html: name the rest (JS, CSS, SVG) for the static app.
+  # The /api/ location below disables gzip for API responses.
+  gzip on;
+  gzip_vary on;
+  gzip_types text/css application/javascript application/json image/svg+xml;
+
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Frame-Options DENY always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header Referrer-Policy strict-origin-when-cross-origin always;
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+  add_header Cache-Control $tsa_web_cache_control always;
+
+  location /api/ {
+    # API responses can carry one-time secrets (a rolled key, a webhook secret);
+    # don't compress them (BREACH). Only the static app is gzipped.
+    gzip off;
+
+    proxy_pass http://tsa_api;
+
+    # The API sends these five itself; the server-level add_header above sends them
+    # too. Drop the API's copies so each reaches the browser once.
+    proxy_hide_header Strict-Transport-Security;
+    proxy_hide_header X-Frame-Options;
+    proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header Referrer-Policy;
+    proxy_hide_header Content-Security-Policy;
+
+    # As on the API site: overwrite what the client sent, so the rate limiter and
+    # audit logs see the real peer (the API trusts only 127.0.0.1 / ::1).
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # `keepalive` in the upstream is inert without both of these.
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 60s;
+  }
+
+  # The icon is /favicon.png (linked from index.html); answer the legacy .ico probe empty
+  # rather than let the SPA fallback serve index.html as one.
+  location = /favicon.ico {
+    return 204;
+    access_log off;
+  }
+
+  location /assets/ {
+    try_files $uri =404;       # a missing hashed file is a 404, never index.html
+  }
+
+  location / {
+    try_files $uri /index.html;  # client-side routes (/business/..., /docs) load the app
+  }
+}

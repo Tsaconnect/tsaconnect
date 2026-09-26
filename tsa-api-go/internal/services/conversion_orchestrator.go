@@ -46,6 +46,13 @@ type lifiQuoter interface {
 	Quote(ctx context.Context, req LiFiQuoteRequest) (*LiFiRoute, error)
 }
 
+// solanaLanding proves what a Solana transaction actually credited an address.
+// Solana has no transfer log to read, so the proof is the destination
+// transaction's own balance changes; *solana.Client satisfies this.
+type solanaLanding interface {
+	ReceivedBy(ctx context.Context, txHash, owner, mint string) (*big.Int, error)
+}
+
 // ConversionOrchestrator drives one converted buy from "Paycrest paid our
 // treasury" to "the user holds at least what we promised" — or, failing that,
 // to a refund or to a human.
@@ -64,7 +71,11 @@ type ConversionOrchestrator struct {
 	// transfers is keyed by chain key: LogTransferVerifier wraps ONE RPC
 	// client, so a single verifier could only ever prove a delivery on its own
 	// chain and would silently never confirm anything on any other.
-	transfers   map[string]ERC20TransferVerifier
+	transfers map[string]ERC20TransferVerifier
+	// solana proves a Solana landing. Nil until the wiring finds a Solana
+	// chain client, and a nil one settles nothing: LiFi's word alone is not a
+	// delivery proof on any chain, and it is not one here either.
+	solana      solanaLanding
 	chains      *BlockchainService
 	retryWindow time.Duration
 	// maxShortfallUSD is the automatic top-up ceiling; see defaultMaxShortfallUSD.
@@ -83,8 +94,26 @@ type ConversionOrchestrator struct {
 	// legCeiling is the outer bound on ANY pending leg, liveness included.
 	// See defaultLegCeiling.
 	legCeiling time.Duration
-	now        func() time.Time
+	// budgetBps is B: the slice of the user-facing markup that pays for one
+	// converted order's round trip (LiFi's own cost plus the treasury's gas).
+	// Pushed in by the wiring via SetRoundTripBudgetBps, from the same config
+	// value the quote and order services are given, so a route can never be
+	// executed against a budget the order was not priced on.
+	budgetBps int
+	now       func() time.Time
 }
+
+// SetRoundTripBudgetBps sets B, the same way PaycrestOrderService takes it.
+// buildRampConversion only ever reaches this point once ConversionPriced()
+// has established 0 < B < F, so a zero here means nobody wired it — and a
+// zero budget refuses every non-legacy route, which is the fail-closed
+// direction.
+func (o *ConversionOrchestrator) SetRoundTripBudgetBps(bps int) { o.budgetBps = bps }
+
+// SetSolanaLanding wires the chain client that proves a Solana delivery. Left
+// unset (no Solana chain configured) a Solana landing never settles — the same
+// fail-closed shape as a missing EVM transfer verifier.
+func (o *ConversionOrchestrator) SetSolanaLanding(l solanaLanding) { o.solana = l }
 
 // NewConversionOrchestrator wires one converted-buy state machine.
 // stallWindow, legCeiling and maxShortfallUSD are the orchestrator's tunables
@@ -521,6 +550,17 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 			order.ID, expected, received, srcDecimals)
 		received = expected
 	}
+	// What she is owed is scaled to what Paycrest actually delivered, in the
+	// SAME write that records custody and the corrected token_amount. It has
+	// to be this write: after it, TokenAmount equals what landed, so the
+	// received/expected ratio no longer exists anywhere to recover it from,
+	// and a later tick sizing the bridge off the original quote would try to
+	// send more than the treasury received.
+	if q, ok := new(big.Int).SetString(order.QuotedAmount, 10); ok {
+		entitled := EntitledAmount(q, expected, received)
+		custodyUpdates["quoted_amount"] = entitled.String()
+		order.QuotedAmount = entitled.String()
+	}
 	order.Holder = models.HolderTreasury
 	if v, ok := custodyUpdates["token_amount"].(string); ok {
 		order.TokenAmount = v
@@ -543,10 +583,25 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 		// unclaimed.
 		return o.toRecovery(ctx, order, err.Error(), nil)
 	}
-	promise := PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
-	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
-		order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
-	return o.setOrder(ctx, order, map[string]any{"promised_amount": promise.String()})
+	// ONLY a stablecoin destination gets a promise here. Every other
+	// destination's floor is LiFi's own toAmountMin, which does not exist
+	// until the route is priced — startBridge writes it there, before the
+	// broadcast. Stating a promise now in a volatile token would be a
+	// guarantee against a price nobody has quoted.
+	if dst.stable {
+		var promise *big.Int
+		if q, ok := new(big.Int).SetString(order.QuotedAmount, 10); ok {
+			promise = StablePromise(q, srcDecimals, dst.decimals)
+		} else { // legacy order: no quoted amount was ever recorded
+			promise = PromisedAmount(rescaleUnits(received, srcDecimals, dst.decimals), order.MarkupBps)
+		}
+		log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s promise=%s (%ddp->%ddp)",
+			order.ID, order.TxHash, received, promise, srcDecimals, dst.decimals)
+		return o.setOrder(ctx, order, map[string]any{"promised_amount": promise.String()})
+	}
+	log.Printf("[ramp-conversion] order=%s custody=treasury tx=%s amount=%s owed=%s dest=%s on %s (non-stable: the promise is the route's own minimum)",
+		order.ID, order.TxHash, received, order.QuotedAmount, dst.symbol, dst.chainKey)
+	return nil
 }
 
 // claimedFromDelivery totals what other converted buys have already taken
@@ -624,26 +679,33 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		return o.toRecovery(ctx, order,
 			fmt.Sprintf("unreadable order amount %q: %v", order.TokenAmount, err), nil)
 	}
-	promised, ok := new(big.Int).SetString(order.PromisedAmount, 10)
-	if !ok {
-		// Defence in depth: takeCustody now parks rather than leaving this
-		// state behind (see its own decimals-read failure handling), but if
-		// anything else ever left an in-custody order with no readable
-		// promise (a lost write, a corrupted row), a bare error here would
-		// repeat on every tick forever — a leg-less order is invisible to
-		// the stall detector (afterStep returns early when len(legs)==0),
-		// so nothing else would ever surface it. Park it instead.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_promise_total=1 order=%s promise=%q", order.ID, order.PromisedAmount)
-		return o.toRecovery(ctx, order,
-			fmt.Sprintf("unreadable promise %q for order %s", order.PromisedAmount, order.ID), nil)
-	}
 	// Resolved before anything is reserved: an unroutable destination is a
 	// configuration fault that will never fix itself, and burning the whole
-	// retry window rediscovering that just delays the human.
+	// retry window rediscovering that just delays the human. It is also what
+	// decides whether there is a promise to read at all, so it comes first.
 	dst, err := o.destination(order)
 	if err != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
 		return o.toRecovery(ctx, order, err.Error(), nil)
+	}
+	// Only a stablecoin destination carries a promise at this point;
+	// takeCustody leaves every other one blank on purpose, and the route's own
+	// toAmountMin becomes the floor further down.
+	var promised *big.Int
+	if dst.stable {
+		var ok bool
+		if promised, ok = new(big.Int).SetString(order.PromisedAmount, 10); !ok {
+			// Defence in depth: takeCustody now parks rather than leaving this
+			// state behind (see its own decimals-read failure handling), but if
+			// anything else ever left an in-custody order with no readable
+			// promise (a lost write, a corrupted row), a bare error here would
+			// repeat on every tick forever — a leg-less order is invisible to
+			// the stall detector (afterStep returns early when len(legs)==0),
+			// so nothing else would ever surface it. Park it instead.
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_no_promise_total=1 order=%s promise=%q", order.ID, order.PromisedAmount)
+			return o.toRecovery(ctx, order,
+				fmt.Sprintf("unreadable promise %q for order %s", order.PromisedAmount, order.ID), nil)
+		}
 	}
 	// Caps gate NEW exposure, and this is the only path that creates any. A
 	// bare error here (the kill switch, or the per-order/per-chain cap) is
@@ -680,41 +742,136 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		return nil // another tick already claimed this attempt
 	}
 
-	route, err := o.lifi.Quote(ctx, LiFiQuoteRequest{
-		FromChainID: lane.ChainID,
-		ToChainID:   o.chainID(order.RequestedChain),
-		FromToken:   lane.tokenAddress(order.Token),
-		ToToken:     dst.token,
-		FromAddress: o.treasury.Address(),
-		ToAddress:   order.WalletAddress, // LiFi delivers straight to the user
-		FromAmount:  amount.String(),
-	})
-	if err != nil {
-		// Nothing was broadcast, so this attempt is provably dead: fail it so
-		// the next tick starts a clean attempt inside the window.
-		if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
-			return ferr
-		}
-		return err
+	// A legacy order (no quoted amount was ever recorded) bridges the FULL
+	// delivery against the promise it was written with — exactly today's
+	// behaviour, which its stored promise is sized for.
+	legacy := order.QuotedAmount == ""
+	// A volatile destination needs real slippage room; stable-to-stable does
+	// not, and quoting it loose would only widen the gap we then have to
+	// honour.
+	slippage := 0.005
+	if dst.stable {
+		slippage = 0.001
 	}
-	// Decision 5, applied at execution time: a route whose guaranteed minimum
-	// is below the promise cannot honour it, so it is not a route we may take.
-	if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promised) < 0 {
-		log.Printf("[ramp-conversion] order=%s bridge#%d rejected route: toAmountMin=%v < promise=%s",
-			order.ID, attempt, route.ToAmountMin, promised)
-		return o.failLeg(detached(ctx), leg.ID, "route guarantees less than the promised amount")
+	recipient := firstNonEmpty(order.DestinationAddress, order.WalletAddress)
+	lreq := LiFiQuoteRequest{
+		FromChainID: lane.ChainID, ToChainID: dst.chainID,
+		FromToken: lane.tokenAddress(order.Token), ToToken: dst.token,
+		FromAddress: o.treasury.Address(),
+		ToAddress:   recipient, // LiFi delivers straight to the user
+		Slippage:    slippage,
+		// Broadcast immediately by the treasury, not signed by her — must
+		// match ConvertedVenues's admission-time order or this could execute
+		// at a worse cost than what was priced and promised.
+		Order: "CHEAPEST",
+	}
+	bridge := amount // legacy: the full delivery
+	var route *LiFiRoute
+	if legacy {
+		lreq.FromAmount = bridge.String()
+		if route, err = o.lifi.Quote(ctx, lreq); err != nil {
+			// Nothing was broadcast, so this attempt is provably dead: fail it
+			// so the next tick starts a clean attempt inside the window. The
+			// error is still returned, so a LiFi outage reaches the worker's
+			// failure-streak alert rather than looking like a quiet no-op.
+			if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+				return ferr
+			}
+			return err
+		}
+	} else {
+		// She is owed T; the treasury keeps the rest. Sending T/(1 − l) means
+		// LiFi delivers about T in value, so the difference stays behind as
+		// USDC rather than being handed to the bridge. l has to be measured on
+		// a route of about the right size, hence the probe: LiFi's cost is not
+		// linear in the amount.
+		entitled, _ := new(big.Int).SetString(order.QuotedAmount, 10) // already scaled at custody
+		lreq.FromAmount = entitled.String()
+		probe, perr := o.lifi.Quote(ctx, lreq)
+		if perr != nil {
+			if ferr := o.failLeg(detached(ctx), leg.ID, perr.Error()); ferr != nil {
+				return ferr
+			}
+			return perr
+		}
+		l, ok := LiFiCostBps(probe)
+		b, fits := BridgeAmount(entitled, amount, l)
+		if !ok || !fits {
+			log.Printf("[ramp-conversion] order=%s bridge#%d route no longer fits: owed=%s received=%s lifi_bps=%d priced=%v",
+				order.ID, attempt, entitled, amount, l, ok)
+			return o.failLeg(detached(ctx), leg.ID, "the route no longer fits what was received")
+		}
+		lreq.FromAmount = b.String()
+		if route, err = o.lifi.Quote(ctx, lreq); err != nil {
+			if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+				return ferr
+			}
+			return err
+		}
+		// The whole round trip — LiFi's own cost plus the gas the treasury
+		// pays — has to fit inside B, the slice of the user-facing markup this
+		// conversion was priced on. Over it, the attempt is freed rather than
+		// executed at a loss; the retry window is already running from attempt
+		// 1, so a route that never comes back into budget refunds on its own.
+		// The order's own budget B′ when it was priced on a raised one;
+		// otherwise (and on rows from before budgets were per order) B.
+		budget := o.budgetBps
+		if order.MarkupBps > 0 {
+			budget = order.MarkupBps
+		}
+		if l2, ok := LiFiCostBps(route); !ok || l2+TreasuryGasBps(route, treasuryERC20Gas) > budget {
+			return o.failLeg(detached(ctx), leg.ID,
+				fmt.Sprintf("round trip over the %d bps budget", budget))
+		}
+		bridge = b
+		// The leg was reserved before the route was priced (that ordering is
+		// what stops two ticks broadcasting), so its amount is only correct
+		// now — and it must be correct BEFORE the broadcast, because it is
+		// what every later reader treats as what we sent.
+		if err := o.legs.SetAmount(detached(ctx), leg.ID, bridge.String()); err != nil {
+			return err
+		}
+	}
+	switch {
+	case dst.stable:
+		// Decision 5, applied at execution time: a route whose guaranteed
+		// minimum is below the promise cannot honour it, so it is not a route
+		// we may take.
+		if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promised) < 0 {
+			log.Printf("[ramp-conversion] order=%s bridge#%d rejected route: toAmountMin=%v < promise=%s",
+				order.ID, attempt, route.ToAmountMin, promised)
+			return o.failLeg(detached(ctx), leg.ID, "route guarantees less than the promised amount")
+		}
+	case route.ToAmountMin == nil:
+		// Nothing to promise against, and nothing to settle a landing with.
+		return o.failLeg(detached(ctx), leg.ID, "route quotes no guaranteed minimum")
+	default:
+		// A non-stable destination's promise IS the route's own minimum, and
+		// it is written BEFORE the broadcast: a landing that arrives with
+		// nothing on record to compare it against could never be settled, and
+		// it is never topped up afterwards.
+		if err := o.setOrder(ctx, order, map[string]any{"promised_amount": route.ToAmountMin.String()}); err != nil {
+			return err
+		}
 	}
 	// The route's `to` is allowlisted inside ExecuteRoute, but the calldata
 	// alone decides who the diamond pays. Checked here, where the order's
 	// wallet and destination are known — LiFi's status would only report a
 	// wrong landing after the treasury's funds had already left.
-	if err := checkLiFiDelivery(route.Data, lane.ChainID, o.chainID(order.RequestedChain), order.WalletAddress); err != nil {
+	//
+	// The address FAMILY decides how the receiver is read: a Solana route
+	// carries LiFi's placeholder in BridgeData.receiver and the real recipient
+	// inside the facet's own data, so checking it with the EVM decoder would
+	// compare the order's wallet against that placeholder and pass anything.
+	// The destination token goes through too — on Solana an SPL delivery lands
+	// in a token account, which only the mint can identify.
+	if err := checkLiFiDeliveryTo(route.Data, lane.ChainID, dst.chainID, recipient, dst.family(), dst.token); err != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_delivery_refused_total=1 order=%s bridge#%d tool=%s err=%v",
 			order.ID, attempt, route.Tool, err)
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
 	}
 
-	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, amount, route)
+	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, bridge, route)
 	if err != nil {
 		if broadcastAttempted {
 			// Might have landed: keep the leg pending so no second route runs.
@@ -732,8 +889,8 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, route.Tool); err != nil {
 		return err
 	}
-	log.Printf("[ramp-conversion] order=%s bridge#%d chain=%s->%s tx=%s tool=%s",
-		order.ID, attempt, lane.ChainKey, order.RequestedChain, txHash, route.Tool)
+	log.Printf("[ramp-conversion] order=%s bridge#%d chain=%s->%s token=%s sent=%s of %s tx=%s tool=%s",
+		order.ID, attempt, lane.ChainKey, dst.chainKey, dst.symbol, bridge, amount, txHash, route.Tool)
 	return nil
 }
 
@@ -801,9 +958,13 @@ func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_done_without_recipient_total=1 order=%s tx=%s", order.ID, leg.TxHash)
 		return nil
 	}
-	if !strings.EqualFold(st.ToAddress, order.WalletAddress) {
+	// The delivery target, not necessarily the account's wallet: they are the
+	// same value today, but the route was quoted and the calldata checked
+	// against DestinationAddress, so the landing is held to that same address.
+	recipient := firstNonEmpty(order.DestinationAddress, order.WalletAddress)
+	if !strings.EqualFold(st.ToAddress, recipient) {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_recipient_total=1 order=%s tx=%s reported=%s wallet=%s",
-			order.ID, leg.TxHash, st.ToAddress, order.WalletAddress)
+			order.ID, leg.TxHash, st.ToAddress, recipient)
 		return fmt.Errorf("conversion: bridge for order %s reported a landing at %s, not the user's wallet", order.ID, st.ToAddress)
 	}
 
@@ -836,7 +997,7 @@ func (o *ConversionOrchestrator) observeDone(ctx context.Context, order *models.
 // It is the single gate for "never settle on a number nobody checked", shared
 // by the bridge landing and the top-up, so neither can drift from the other.
 func (o *ConversionOrchestrator) verifyOnDestination(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, txHash, stage string) (*big.Int, error) {
-	return o.verifyTransferOnChain(ctx, order, order.RequestedChain, dst.token, txHash, stage)
+	return o.verifyTransferOnChain(ctx, order, dst.chainKey, dst.token, txHash, stage)
 }
 
 // verifyTransferOnChain reads ONE transaction on the given chain and returns
@@ -906,12 +1067,94 @@ func (o *ConversionOrchestrator) verifyLanding(ctx context.Context, order *model
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_destination_total=1 order=%s err=%v", order.ID, err)
 		return nil, o.toRecovery(ctx, order, err.Error(), nil)
 	}
-	credited, err := o.verifyOnDestination(ctx, order, dst, st.DestTxHash, "landing")
+	if dst.family() == "solana" {
+		return o.verifySolanaLanding(ctx, order, dst, st)
+	}
+	if !dst.stable && isNativeTokenAddress(dst.token) {
+		// A native coin leaves no Transfer log: LiFi's status is the signal,
+		// held to the right token here and to LiFi's own minimum in settle.
+		// Every ERC-20 — stable or not — still earns the on-chain proof below.
+		//
+		// Either spelling of "native" counts (see isNativeTokenAddress): an
+		// alias mismatch is a naming difference, not a different asset, and
+		// parking on it would strand every native buy on whichever chains
+		// answer with the spelling we did not store.
+		if !isNativeTokenAddress(st.ReceivingToken) {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_token_total=1 order=%s got=%s want=%s", order.ID, st.ReceivingToken, dst.token)
+			return nil, o.toRecovery(ctx, order, fmt.Sprintf("LiFi delivered %s, not %s", st.ReceivingToken, dst.token), map[string]any{"holder": models.HolderUser})
+		}
+		// "Native" matches the coin of EVERY chain, and this is the one
+		// landing with no on-chain proof behind it — so the chain LiFi says it
+		// landed on is all that pins which coin she actually got.
+		if st.DestChainID != dst.chainID {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_chain_total=1 order=%s got=%d want=%d", order.ID, st.DestChainID, dst.chainID)
+			return nil, o.toRecovery(ctx, order, fmt.Sprintf("LiFi delivered on chain %d, not %d", st.DestChainID, dst.chainID), map[string]any{"holder": models.HolderUser})
+		}
+		return st.ReceivedBaseUnits, nil
+	}
+	credited, err := o.verifyTransferOnChain(ctx, order, dst.chainKey, dst.token, st.DestTxHash, "landing")
 	if err != nil || credited == nil {
 		return nil, err
 	}
 	// The chain outranks LiFi. Where they disagree, what the wallet was credited
 	// is what the user has, and the shortfall logic works from that.
+	if st.ReceivedBaseUnits != nil && credited.Cmp(st.ReceivedBaseUnits) != 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_mismatch_total=1 order=%s dest_tx=%s lifi=%s chain=%s",
+			order.ID, st.DestTxHash, st.ReceivedBaseUnits, credited)
+	}
+	return credited, nil
+}
+
+// verifySolanaLanding proves a Solana delivery the only way Solana allows.
+// There is no transfer log there, so the proof is the destination
+// transaction's own balance changes: lamports at the recipient's account for
+// native SOL, the mint's own token balances for an SPL token.
+//
+// Same division of labour as every other chain — LiFi says WHICH transaction
+// to read, the chain says what the user got — and the same fail-closed
+// outcomes: anything unproven waits for the next tick (bounded by the leg
+// ceiling) rather than settling.
+func (o *ConversionOrchestrator) verifySolanaLanding(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, st *LiFiTransferStatus) (*big.Int, error) {
+	if o.solana == nil {
+		// Same reasoning as a missing EVM verifier: with nothing to ask, the
+		// alternative is settling on a number nobody checked.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_verifier_total=1 order=%s chain=%s stage=landing", order.ID, dst.chainKey)
+		return nil, nil
+	}
+	if st.DestTxHash == "" {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_no_dest_tx_total=1 order=%s stage=landing", order.ID)
+		return nil, nil
+	}
+	// Base58 is case-SENSITIVE: two Solana addresses differing only in case are
+	// two different accounts. observeDone's EqualFold is right for an EVM hex
+	// address and would be a hole here, so the recipient is re-checked exactly
+	// before the chain is asked about it.
+	recipient := firstNonEmpty(order.DestinationAddress, order.WalletAddress)
+	if st.ToAddress != recipient {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_wrong_recipient_total=1 order=%s tx=%s reported=%s want=%s",
+			order.ID, st.DestTxHash, st.ToAddress, recipient)
+		return nil, o.toRecovery(ctx, order,
+			fmt.Sprintf("LiFi reported a Solana landing at %s, not %s", st.ToAddress, recipient), nil)
+	}
+	// An empty mint means native SOL to the chain client; the order stores it
+	// as the System Program id, which is how LiFi names it.
+	mint := dst.token
+	if mint == solanaNativeToken {
+		mint = ""
+	}
+	credited, err := o.solana.ReceivedBy(ctx, st.DestTxHash, recipient, mint)
+	if err != nil {
+		// Not readable yet (or at all): look again next tick, bounded by the
+		// leg ceiling. Never settle on an answer we could not get.
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_unverified_total=1 order=%s stage=landing tx=%s err=%v",
+			order.ID, st.DestTxHash, err)
+		return nil, nil
+	}
+	if credited == nil || credited.Sign() <= 0 {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_zero_total=1 order=%s stage=landing tx=%s", order.ID, st.DestTxHash)
+		return nil, nil
+	}
+	// The chain outranks LiFi, exactly as on an EVM landing.
 	if st.ReceivedBaseUnits != nil && credited.Cmp(st.ReceivedBaseUnits) != 0 {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_landing_mismatch_total=1 order=%s dest_tx=%s lifi=%s chain=%s",
 			order.ID, st.DestTxHash, st.ReceivedBaseUnits, credited)
@@ -943,6 +1186,15 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 		return o.setOrder(ctx, order, map[string]any{
 			"status": models.PaycrestStatusSettled, "holder": models.HolderUser,
 		})
+	}
+
+	// A non-stable destination is never topped up: the promise it fell short
+	// of is LiFi's OWN guaranteed minimum, which a route that delivered less
+	// than it guaranteed has already broken, and the treasury holds no float
+	// in the token to make up the difference with. A human decides.
+	if dst, derr := o.destination(order); derr == nil && !dst.stable {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_below_lifi_min_total=1 order=%s shortfall=%s", order.ID, shortfall)
+		return o.toRecovery(ctx, order, "landed below LiFi's own minimum", map[string]any{"holder": models.HolderUser})
 	}
 
 	// A top-up already in flight may not be joined by a second one. Its amount
@@ -988,6 +1240,13 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 // No cap check: a top-up completes an order the treasury is already exposed to.
 // It creates no new exposure, and refusing it would leave the user short.
 func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, shortfall *big.Int) error {
+	// The treasury holds no float in an arbitrary token, so there is nothing
+	// to pay a gap in. settleOrTopUp already parks a short non-stable landing
+	// before it gets here; this is the same refusal stated where the money
+	// would actually move, so no future caller can reach a nil lane.
+	if !dst.stable || dst.lane == nil {
+		return o.toRecovery(ctx, order, "no top-up exists for a non-stable destination", map[string]any{"holder": models.HolderUser})
+	}
 	if err := o.treasury.requireGas(ctx, dst.lane, treasuryERC20Gas); err != nil {
 		return err
 	}
@@ -1361,34 +1620,62 @@ func (o *ConversionOrchestrator) failLeg(ctx context.Context, id uuid.UUID, reas
 	return nil
 }
 
-// conversionDestination is where the user is actually paid: the treasury lane
-// on the requested chain, the requested token's address there, and its
-// precision — the units every promise and landing is denominated in.
+// conversionDestination is where the user is actually paid: the requested
+// token's address, its precision — the units every promise and landing is
+// denominated in — and, for a STABLECOIN destination only, the treasury lane
+// that can top it up.
+//
+// lane is nil and stable is false for every other destination (a native coin,
+// a volatile ERC-20). That is not a missing field: the treasury holds no float
+// in an arbitrary token, so there is nothing to top up with and no promise to
+// top up TO — those destinations are settled against LiFi's own guaranteed
+// minimum instead. Every reader that pays money must check stable/lane before
+// dereferencing either.
 type conversionDestination struct {
 	lane     *TreasuryLane
 	token    string
 	symbol   string
 	decimals int
+	stable   bool
+	chainID  int64
+	chainKey string
 }
 
+// family is the address family the destination's recipient is written in.
+// It is derived from the chain id alone — never from the order's chain name,
+// which is client-supplied at the edges — and it decides both how a route's
+// calldata is read and how the landing is proven.
+func (d *conversionDestination) family() string { return addressFamily(d.chainID) }
+
 func (o *ConversionOrchestrator) destination(order *models.PaycrestOrderRecord) (*conversionDestination, error) {
-	lane := o.treasury.Lane(order.RequestedChain)
-	if lane == nil {
-		return nil, fmt.Errorf("conversion: no treasury lane on %s", order.RequestedChain)
-	}
+	chainID, token := order.RequestedChainID, order.RequestedTokenAddress
 	symbol := strings.ToUpper(strings.TrimSpace(order.RequestedToken))
-	token := lane.tokenAddress(symbol)
-	if token == "" {
+	if chainID == 0 || token == "" { // legacy order: symbol path
+		chainID = o.chainID(order.RequestedChain)
 		token = o.tokenAddress(order.RequestedChain, symbol)
 	}
-	if token == "" {
-		return nil, fmt.Errorf("conversion: token %s is not configured on %s", symbol, order.RequestedChain)
+	if chainID == 0 || token == "" {
+		return nil, fmt.Errorf("conversion: %s on %s is not resolvable", symbol, order.RequestedChain)
+	}
+	chainKey := order.RequestedChain
+	if stable, _, _ := isStableDestination(o.chains, chainID, token); !stable {
+		// Decimals come off the ORDER for a non-stable destination: they were
+		// resolved from LiFi at quote time (Task 6), and there is no lane here
+		// to read them from the chain with.
+		if order.RequestedTokenDecimals <= 0 {
+			return nil, fmt.Errorf("conversion: no decimals recorded for %s on %s", symbol, chainKey)
+		}
+		return &conversionDestination{token: token, symbol: symbol, decimals: order.RequestedTokenDecimals, chainID: chainID, chainKey: chainKey}, nil
+	}
+	lane := o.treasury.Lane(chainKey)
+	if lane == nil {
+		return nil, fmt.Errorf("conversion: no treasury lane on %s", chainKey)
 	}
 	decimals, err := lane.Native.GetTokenDecimals(token)
 	if err != nil {
 		return nil, fmt.Errorf("conversion: read decimals of %s on %s: %w", symbol, lane.ChainKey, err)
 	}
-	return &conversionDestination{lane: lane, token: token, symbol: symbol, decimals: decimals}, nil
+	return &conversionDestination{lane: lane, token: token, symbol: symbol, decimals: decimals, stable: true, chainID: chainID, chainKey: chainKey}, nil
 }
 
 func (o *ConversionOrchestrator) verifierFor(chainKey string) ERC20TransferVerifier {
@@ -1865,6 +2152,14 @@ func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.P
 		dst, derr := o.destination(order)
 		if derr != nil {
 			return "", "", "", derr
+		}
+		// A non-stable destination has no treasury lane to pay from and no
+		// promise worth paying to: `owed` here is a gap against LiFi's own
+		// minimum in a token the treasury does not hold. Naming a figure (or
+		// dereferencing the nil lane) would hand an operator a refund they
+		// cannot make; a human decides what to do with these.
+		if !dst.stable || dst.lane == nil {
+			return "", "", "", ErrOwedUndetermined
 		}
 		return dst.symbol, dst.lane.ChainKey, owed, nil
 	}

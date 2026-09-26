@@ -132,6 +132,16 @@ describe('networksForSide', () => {
   it('honours a screen’s own network limit', () => {
     expect(networksForSide(usdc, 'to', id => id === BSC).map(n => n.chainId)).toEqual([BSC]);
   });
+
+  it('hands the screen the token as well, so it can hide one coin on one network', () => {
+    const notUsdcOnBsc = (chainId: number, token?: LiFiToken) => !(chainId === BSC && token?.address === USDC_BSC.address);
+    expect(networksForSide(usdc, 'to', notUsdcOnBsc).map(n => n.chainId)).toEqual([BASE, ZKSYNC]);
+  });
+
+  it('a coin whose only network is hidden has nothing to offer', () => {
+    const [onlyBsc] = groupAssets([USDC_BSC]);
+    expect(networksForSide(onlyBsc, 'to', (chainId, token) => !(chainId === BSC && token?.address === USDC_BSC.address))).toEqual([]);
+  });
 });
 
 describe('buildSections', () => {

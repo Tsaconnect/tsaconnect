@@ -41,6 +41,11 @@ type SponsorFloat struct {
 	Address    string
 	BalanceWei *big.Int
 	FloorWei   *big.Int
+	// TokenUSD is the lane's USDC+USDT balance, priced at $1 each. Only the
+	// treasury populates this (RampSponsorship.FloatBalances leaves it zero):
+	// a converted buy leaves the round trip's unspent budget sitting here as
+	// USDC, which nothing sweeps automatically.
+	TokenUSD float64
 }
 
 // RampSponsorship is the one surface the HTTP layer and the float monitor
@@ -69,6 +74,22 @@ func NewRampSponsorship(orders sponsorOrderReader, store sponsorshipStore, lanes
 }
 
 func (s *RampSponsorship) Enabled() bool { return s != nil && len(s.lanes) > 0 }
+
+// SetChainRegistry lets a sell intent's top-up find its lane by chain id.
+func (s *RampSponsorship) SetChainRegistry(chains *BlockchainService) {
+	if s != nil && s.topUp != nil {
+		s.topUp.SetChainRegistry(chains)
+	}
+}
+
+// TopUpForIntent is GasTopUp.TopUpForIntent behind the same on/off switch as
+// the order paths.
+func (s *RampSponsorship) TopUpForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store IntentTopUpStore) (GasTopUpResult, error) {
+	if !s.Enabled() || s.topUp == nil {
+		return GasTopUpResult{}, ErrSponsorNotAvailable
+	}
+	return s.topUp.TopUpForIntent(ctx, user, intent, store)
+}
 
 // Routes lists what this caller would be sponsored on, so the sell screen can
 // stop warning about gas BEFORE an order exists. Top-up routes are omitted

@@ -25,6 +25,12 @@ type PaycrestHandler struct {
 	quotes  *services.PaycrestQuoteService
 	dir     *services.PaycrestDirectory
 	sponsor rampSponsorshipPort // nil unless RAMP_GAS_SPONSORSHIP is on
+	// sellQuotes prices a sell that needs a swap. Nil unless
+	// RAMP_CONVERSION_SELL is on — see paycrest_sell_swap.go.
+	sellQuotes sellQuoter
+	// sellIntents drives one such sale to its payout. Nil for the same
+	// reason — see paycrest_sell_intents.go.
+	sellIntents sellIntents
 }
 
 func NewPaycrestHandler(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, dir *services.PaycrestDirectory) *PaycrestHandler {
@@ -62,9 +68,22 @@ func paycrestError(c *gin.Context, err error) {
 		// than assuming the feature is broken.
 		utils.ErrorResponse(c, http.StatusConflict,
 			"No provider can fill that amount right now. Try a different amount or network.")
+	case errors.Is(err, services.ErrBadRequestedAsset):
+		// The client named a chain or token the server cannot resolve — a
+		// stale asset list or a hand-rolled request, not an outage.
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"We can't buy that token on that network. Pick another one.")
+	case errors.Is(err, services.ErrConversionPriceMoved):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"The price changed since your quote. Check the new rate and try again.")
 	case errors.Is(err, services.ErrConversionUnavailable):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"We can't deliver to that network right now. Try a supported network, or try again shortly.")
+	case errors.Is(err, services.ErrPaycrestPayOrderOpen):
+		// Checked before ErrPaycrestOrderOpen, which it wraps: the open order is
+		// a payment's, listed under Payments, not in her orders.
+		utils.ErrorResponse(c, http.StatusConflict,
+			"You have a payment in progress. Wait for it to finish — you can follow it under Activity › Payments.")
 	case errors.Is(err, services.ErrPaycrestOrderOpen):
 		utils.ErrorResponse(c, http.StatusConflict,
 			"You already have an order awaiting payment. Finish it, or cancel it from your orders.")
@@ -88,25 +107,17 @@ func paycrestError(c *gin.Context, err error) {
 	}
 }
 
-// GET /api/paycrest/quote?side=buy&amount=1000&currency=NGN[&requestedChain=&requestedToken=]
+// GET /api/paycrest/quote?side=buy&amount=1000&currency=NGN
 //
 // Returns only venues that can actually fill this amount right now, cheapest
 // first. The app renders this as the network picker, so a network the user can
 // see is always one the order will succeed on.
 //
-// requestedChain/requestedToken (tsa-app/services/paycrestApi.ts getQuote,
-// mirroring the POST /buy body) name the pair the user actually wants
-// delivered. When Paycrest cannot fill that pair directly, a converted venue
-// (Phase 2) is appended alongside the direct ones — see ConvertedVenues.
-// Conversion is a buy-only capability (paycrestSellBody has no requested
-// fields), so a sell quote never gains one even if the params are sent.
-//
-// This is purely additive: with no requestedChain/requestedToken, or with
-// RAMP_CONVERSION_BUY off (ConvertedVenues is then a documented no-op, since
-// SetLiFiQuoter/SetTreasuryAddress/SetChainRegistry were never called), the
-// response is byte-identical to what this handler returned before converted
-// buys existed. A LiFi failure or an unservable chain never fails the quote —
-// it just means no converted venue is on offer today.
+// DIRECT venues only. Pricing a converted venue means quoting a LiFi route
+// for a token the caller names, which is a live call to a paid third-party
+// API — it cannot hang off an endpoint that is deliberately public and
+// unauthenticated. ConvertedQuote below is the authenticated, per-user
+// rate-limited way to ask for one.
 func (h *PaycrestHandler) Quote(c *gin.Context) {
 	side := c.DefaultQuery("side", "buy")
 	amount := c.Query("amount")
@@ -120,17 +131,51 @@ func (h *PaycrestHandler) Quote(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
+	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
+}
 
-	requestedChain := strings.TrimSpace(c.Query("requestedChain"))
-	requestedToken := strings.TrimSpace(c.Query("requestedToken"))
-	if res.Side == "buy" && requestedChain != "" && requestedToken != "" {
-		converted, cerr := h.quotes.ConvertedVenues(c.Request.Context(), res.Side, res.FiatCode, res.FiatAmount,
-			[]services.RequestedAsset{{Chain: requestedChain, Token: requestedToken}})
-		if cerr == nil {
-			res.Venues = append(res.Venues, converted...)
-		}
+// ConvertedQuote is Quote plus converted venues for one requested asset. It is
+// authenticated and rate-limited per user: pricing a converted venue calls
+// LiFi for a client-chosen token, which must never be free to trigger.
+//
+// Buy-only, because conversion is (paycrestSellBody has no requested fields).
+// requestedChainId + requestedTokenAddress name the asset; the legacy
+// requestedChain/requestedToken symbol pair is still accepted for an app
+// build that has not moved over yet. Nothing the client sends is trusted:
+// the chain key, decimals and symbol are all derived server-side.
+//
+// A LiFi failure, an unresolvable asset, or a route that cannot be executed
+// never fails the quote — the direct venues are still the right answer.
+func (h *PaycrestHandler) ConvertedQuote(c *gin.Context) {
+	amount := c.Query("amount")
+	if amount == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
+		return
 	}
-
+	res, err := h.quotes.Quote(c.Request.Context(), "buy", c.DefaultQuery("currency", "NGN"), amount)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	chainID, _ := strconv.ParseInt(c.Query("requestedChainId"), 10, 64)
+	asset := services.RequestedAsset{
+		ChainID: chainID, Address: strings.TrimSpace(c.Query("requestedTokenAddress")),
+		Token: strings.TrimSpace(c.Query("requestedToken")), Chain: strings.TrimSpace(c.Query("requestedChain")),
+		// Where a non-EVM destination is delivered — her Solana address. The
+		// wallet below cannot stand in for it (nothing on Solana can be paid
+		// to a 20-byte address), and it is validated server-side by the chain
+		// client, never trusted as sent.
+		Destination: strings.TrimSpace(c.Query("destinationAddress")),
+	}
+	// Price the route to where it will really be delivered, so the quote and
+	// the execution are the same route.
+	if user := getUserFromContext(c); user != nil {
+		asset.Recipient = user.WalletAddress
+	}
+	converted, cerr := h.quotes.ConvertedVenues(c.Request.Context(), "buy", res.FiatCode, res.FiatAmount, []services.RequestedAsset{asset})
+	if cerr == nil {
+		res.Venues = append(res.Venues, converted...)
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
 }
 
@@ -196,6 +241,19 @@ type paycrestBuyBody struct {
 	// heard of a converted buy keeps getting exactly what it asks for.
 	RequestedChain string `json:"requestedChain"`
 	RequestedToken string `json:"requestedToken"`
+	// RequestedChainID/RequestedTokenAddress name any token the asset picker
+	// can show, which the symbol pair above cannot. Decimals are NOT part of
+	// this body: they decide how much of a token the buyer gets, so the
+	// server derives them from the route or from config.
+	RequestedChainID      int64  `json:"requestedChainId"`
+	RequestedTokenAddress string `json:"requestedTokenAddress"`
+	// DestinationAddress is where a destination the EVM wallet cannot receive
+	// on is delivered — her Solana address. Validated server-side against the
+	// chain it names; a refund still goes to the wallet, never here.
+	DestinationAddress string `json:"destinationAddress"`
+	// QuotedMarkupBps is the markupBps of the converted quote she accepted;
+	// the order is refused if its fee has since risen past it.
+	QuotedMarkupBps int `json:"quotedMarkupBps"`
 	// Refund destination — where naira returns if the order fails. The app
 	// prefills this from the user's saved payout account.
 	RefundBankCode    string `json:"refundBankCode" binding:"required"`
@@ -222,33 +280,40 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 	}
 	// Default to the fillable route itself, so an app build that has never
 	// heard of a converted buy (or one that simply didn't set these) still
-	// gets a plain direct order, unchanged.
-	requestedChain := body.RequestedChain
-	if requestedChain == "" {
-		requestedChain = body.Chain
-	}
-	requestedToken := body.RequestedToken
-	if requestedToken == "" {
-		requestedToken = body.Token
+	// gets a plain direct order, unchanged. Skipped entirely when the asset
+	// was named by address — defaulting the symbol pair to the settlement leg
+	// there would only mislabel an order that is already fully specified.
+	requestedChain, requestedToken := body.RequestedChain, body.RequestedToken
+	if body.RequestedChainID == 0 && strings.TrimSpace(body.RequestedTokenAddress) == "" {
+		if requestedChain == "" {
+			requestedChain = body.Chain
+		}
+		if requestedToken == "" {
+			requestedToken = body.Token
+		}
 	}
 	row, err := h.orders.CreateBuy(c.Request.Context(), services.PaycrestBuyRequest{
-		UserID:            user.ID,
-		WalletAddress:     wallet,
-		FiatCode:          body.Currency,
-		FiatAmount:        body.Amount,
-		ChainKey:          body.Chain,
-		Token:             body.Token,
-		RequestedChain:    requestedChain,
-		RequestedToken:    requestedToken,
-		RefundBankCode:    body.RefundBankCode,
-		RefundAccount:     body.RefundAccount,
-		RefundAccountName: body.RefundAccountName,
+		UserID:                user.ID,
+		WalletAddress:         wallet,
+		FiatCode:              body.Currency,
+		FiatAmount:            body.Amount,
+		ChainKey:              body.Chain,
+		Token:                 body.Token,
+		RequestedChain:        requestedChain,
+		RequestedToken:        requestedToken,
+		RequestedChainID:      body.RequestedChainID,
+		RequestedTokenAddress: strings.TrimSpace(body.RequestedTokenAddress),
+		DestinationAddress:    strings.TrimSpace(body.DestinationAddress),
+		QuotedMarkupBps:       body.QuotedMarkupBps,
+		RefundBankCode:        body.RefundBankCode,
+		RefundAccount:         body.RefundAccount,
+		RefundAccountName:     body.RefundAccountName,
 	})
 	if err != nil {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", row)
+	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", orderForCaller(row))
 }
 
 type paycrestSellBody struct {
@@ -294,7 +359,7 @@ func (h *PaycrestHandler) Sell(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your sale", row)
+	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your sale", orderForCaller(row))
 }
 
 // GET /api/paycrest/orders/:id — a single order, refreshed from the provider.
@@ -321,7 +386,7 @@ func (h *PaycrestHandler) GetOrder(c *gin.Context) {
 	if fresh, err := h.orders.Sync(c.Request.Context(), row); err == nil && fresh != nil {
 		row = fresh
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Order", row)
+	utils.SuccessResponse(c, http.StatusOK, "Order", orderForCaller(row))
 }
 
 // POST /api/paycrest/orders/:id/claim-payment — the user asserts they
@@ -349,7 +414,7 @@ func (h *PaycrestHandler) ClaimPayment(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", row)
+	utils.SuccessResponse(c, http.StatusOK, "Payment claim recorded", orderForCaller(row))
 }
 
 // POST /api/paycrest/orders/:id/cancel — the user abandons an order they have
@@ -374,7 +439,7 @@ func (h *PaycrestHandler) Cancel(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", row)
+	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", orderForCaller(row))
 }
 
 // GET /api/paycrest/orders — the user's recent orders.
@@ -390,5 +455,5 @@ func (h *PaycrestHandler) ListOrders(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Orders", rows)
+	utils.SuccessResponse(c, http.StatusOK, "Orders", ordersForCaller(rows))
 }

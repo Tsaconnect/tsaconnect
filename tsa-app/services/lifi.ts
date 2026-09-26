@@ -99,6 +99,33 @@ export interface LiFiToken {
   verificationStatus?: 'verified' | 'unverified' | string;
 }
 
+/**
+ * Find `symbol` in `tokens`, refusing the match unless `tokens` was actually
+ * fetched FOR `wantChainId`.
+ *
+ * `getLiFiTokens(chainId)` resolves asynchronously, so a caller holding the
+ * result in state can still be showing the PREVIOUS chain's list on the very
+ * render where it switches to a new chain — React doesn't apply one effect's
+ * setState until the next render, so a sibling effect in the same commit
+ * still sees the old list. A symbol like USDT/USDC/DAI recurs on almost
+ * every EVM chain, so a naive symbol-only match against that stale list can
+ * silently return a token from the WRONG chain. Per-token `chainId` can't
+ * catch this either — it isn't reliably populated by a single-chain
+ * `getLiFiTokens` response (see getLiFiAllTokens, which has to stamp it on
+ * manually). Callers must instead track which chain id the list itself was
+ * fetched for and pass it as `tokensChainId`; this refuses rather than
+ * guesses when the two disagree.
+ */
+export function findTokenBySymbolForChain(
+  tokens: LiFiToken[],
+  tokensChainId: number,
+  wantChainId: number,
+  symbol: string,
+): LiFiToken | null {
+  if (tokensChainId !== wantChainId) return null;
+  return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase()) ?? null;
+}
+
 export interface LiFiQuoteParams {
   fromChain: number;
   toChain: number;
@@ -130,6 +157,13 @@ export interface LiFiTransactionRequest {
 }
 
 export interface LiFiQuote {
+  /**
+   * What the route pulls from the source wallet, in the source token's base
+   * units (action.fromAmount). For an exact-output quote — TSA Pay — this is
+   * the figure LiFi computed, not one the payer typed. Absent when the body
+   * carries none.
+   */
+  fromAmount?: string;
   toAmount: string;
   toAmountUSD: string;
   estimatedDuration: number;
@@ -297,9 +331,19 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
   const res = await fetch(`${API_BASE_URL}/swap/lifi/quote?${qs.toString()}`, { headers });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.message || 'Failed to fetch quote');
+  return toLiFiQuote(data);
+}
 
+/**
+ * A raw LiFi quote body as the app's LiFiQuote. Shared by getLiFiQuote and by
+ * anything the server hands a LiFi quote through untouched (a sell intent), so
+ * the swap executor always sees one shape.
+ */
+export function toLiFiQuote(raw: unknown): LiFiQuote {
+  const data = (raw ?? {}) as any;
   // LiFi v1: toAmount lives in estimate, not at the top level
   return {
+    fromAmount: data.action?.fromAmount ?? data.estimate?.fromAmount ?? undefined,
     toAmount: data.estimate?.toAmount ?? data.toAmount ?? '0',
     toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,
@@ -383,6 +427,12 @@ export type SwapDeliveryStatus = 'PENDING' | 'DONE' | 'FAILED';
 
 export interface SwapDelivery {
   status: SwapDeliveryStatus;
+  /**
+   * LiFi's qualifier on a DONE: 'COMPLETED' (she got what was quoted),
+   * 'PARTIAL' (a different token landed) or 'REFUNDED' (sent back to her).
+   * DONE alone is not a statement that the recipient got the quoted token.
+   */
+  substatus?: string;
   destTxHash?: string;
   receivedAmount?: string;
 }
@@ -405,7 +455,12 @@ export async function getSwapDelivery(txHash: string): Promise<SwapDelivery> {
     const d = body?.data ?? {};
     const status: SwapDeliveryStatus =
       d.status === 'DONE' || d.status === 'FAILED' ? d.status : 'PENDING';
-    return { status, destTxHash: d.destTxHash, receivedAmount: d.receivedAmount };
+    return {
+      status,
+      ...(typeof d.substatus === 'string' && d.substatus ? { substatus: d.substatus } : {}),
+      destTxHash: d.destTxHash,
+      receivedAmount: d.receivedAmount,
+    };
   } catch {
     return { status: 'PENDING' };
   }

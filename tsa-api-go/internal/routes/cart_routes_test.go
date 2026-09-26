@@ -13,7 +13,7 @@ import (
 func TestCartRoutesTheAppCallsAreRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	SetupRoutes(r, &config.Config{}, &handlers.Handlers{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	SetupRoutes(r, &config.Config{}, &handlers.Handlers{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	registered := map[string]bool{}
 	for _, rt := range r.Routes() {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"testing"
@@ -321,5 +322,30 @@ func TestNewPaycrestOrderService_CanonicalisesAndSharesTheFee(t *testing.T) {
 	}
 	if svc.quotes.senderFeePercent != 0.5 {
 		t.Errorf("quote fee = %v, want 0.5 from the same constructor call", svc.quotes.senderFeePercent)
+	}
+}
+
+// The naira route prices a merchant's crypto from the rate an order will
+// actually be opened at. That is the provider's own sell rate — not the sender
+// fee's effect on it, and not the cached market mid.
+func TestPaycrestProviderRate_IsTheProvidersSellRateWithNoFee(t *testing.T) {
+	q := &stubQuoter{market: 1370.15, rates: map[string]*PaycrestRates{"base|USDC": sell("1360.05")}}
+	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base"})
+	s.SetSenderFeePercent("0.5")
+
+	rate, err := s.ProviderRate(context.Background(), "NGN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate.Cmp(big.NewRat(136005, 100)) != 0 {
+		t.Fatalf("rate = %s, want exactly 136005/100 (1360.05) — not the fee-inclusive 1353.25 nor the mid 1370.15", rate.FloatString(4))
+	}
+}
+
+func TestPaycrestProviderRate_NoSellVenueIsAnError(t *testing.T) {
+	q := &stubQuoter{market: 1370.15, rates: map[string]*PaycrestRates{}}
+	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base"})
+	if rate, err := s.ProviderRate(context.Background(), "NGN"); err == nil {
+		t.Fatalf("rate %s from a book with no Base USDC sell venue", rate)
 	}
 }

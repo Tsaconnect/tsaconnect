@@ -632,6 +632,37 @@ func TestTreasury_FloatBalancesMatchesSponsorFloatShape(t *testing.T) {
 	}
 }
 
+// TokenUSD sums the lane's USDC/USDT balances at $1 each — the kept float a
+// converted buy's unspent round-trip budget leaves behind, which the
+// treasury's kept-USDC alert (gas_float_monitor.go) watches.
+func TestTreasury_FloatBalancesSumsKeptUSDCAsUSD(t *testing.T) {
+	tr, lane, native, _ := newTestTreasuryWithFakes(t)
+	native.tokenBalances = map[string]*big.Int{
+		strings.ToLower(sponsorTestUSDC): big.NewInt(600_000000), // 600.000000 at 6dp
+	}
+	floats, err := tr.FloatBalances(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(floats) != 1 || floats[0].TokenUSD != 600 {
+		t.Fatalf("token usd = %+v, want 600 on lane %s", floats, lane.ChainKey)
+	}
+}
+
+// A token balance read failing must not zero out or hide the native reading
+// beside it — same carry-on stance as a bad RPC at the chain level.
+func TestTreasury_FloatBalancesTreatsBadTokenReadAsZero(t *testing.T) {
+	tr, _, native, _ := newTestTreasuryWithFakes(t)
+	native.tokenBalanceErr = errors.New("rpc down")
+	floats, err := tr.FloatBalances(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(floats) != 1 || floats[0].TokenUSD != 0 || floats[0].BalanceWei == nil {
+		t.Fatalf("floats = %+v, want native reading intact and token usd 0", floats)
+	}
+}
+
 // One chain's RPC failing must not hide another chain's reading.
 func TestTreasury_FloatBalancesCarriesOnPastOneBadRPC(t *testing.T) {
 	rigA, _ := newSponsorRig("base", "USDC")

@@ -6,6 +6,9 @@
 // network. Reused by All Swap and Buy with Naira; it loads its own data, so a
 // screen only says which side it is and what to do with the choice.
 //
+// `holdingsOnly` turns it into the sell flow's list: only coins the wallet
+// holds, only the networks it holds them on, and no search.
+//
 // Contract with the screen is unchanged from the old TokenPickerModal:
 // onSelect(token, chainId).
 
@@ -28,7 +31,12 @@ export interface AssetPickerProps {
   side: PickerSide;
   title?: string;
   /** Optional extra limit on networks, e.g. what a buy can deliver to. */
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
+  /**
+   * Offer only what the wallet holds, on the networks it holds it — the sell
+   * flow's list. Search is hidden with it: the list is what she has.
+   */
+  holdingsOnly?: boolean;
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
 }
@@ -78,13 +86,14 @@ const isUnverified = (asset: Asset, sectionId: string) =>
 
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
-export default function AssetPicker({ visible, side, title, allow, onSelect, onClose }: AssetPickerProps) {
+export default function AssetPicker({ visible, side, title, allow, holdingsOnly = false, onSelect, onClose }: AssetPickerProps) {
   const { colors, spacing, radius } = useTheme();
   const { formatPrice } = useCurrency();
   const [query, setQuery] = useState('');
   const [networkFor, setNetworkFor] = useState<Asset | null>(null);
   const lifi = useLiFiChainNames(visible);
-  const { sections, loading, searching, error } = useAssetCatalog({ visible, side, allow, query });
+  const { sections, loading, searching, error } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
+  const networksOf = (asset: Asset) => networksForSide(asset, side, allow, holdingsOnly);
 
   // Every open starts clean.
   useEffect(() => {
@@ -97,7 +106,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
   };
 
   const tapAsset = (asset: Asset) => {
-    const nets = networksForSide(asset, side, allow);
+    const nets = networksOf(asset);
     if (nets.length === 1) choose(nets[0]);
     else setNetworkFor(asset);
   };
@@ -112,7 +121,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
 
   // ── Step 2: choose network ────────────────────────────────────────────────
   if (networkFor) {
-    const nets = networksForSide(networkFor, side, allow);
+    const nets = networksOf(networkFor);
     return (
       <Sheet visible={visible} onClose={onClose} onBack={() => setNetworkFor(null)} title={`${networkFor.symbol} · choose network`} maxHeightRatio={0.9}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.sm }}>
@@ -155,20 +164,22 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
   }
 
   // ── Step 1: choose coin ───────────────────────────────────────────────────
-  const isSearch = query.trim().length >= 2;
+  const isSearch = !holdingsOnly && query.trim().length >= 2;
   return (
     <Sheet visible={visible} onClose={onClose} title={title ?? (side === 'from' ? 'You pay with' : 'You receive')} maxHeightRatio={0.9}>
-      <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.sm }}>
-        <Input
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search name or paste contract address"
-          autoCapitalize="none"
-          autoCorrect={false}
-          accessibilityLabel="Search coins"
-          leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
-        />
-      </View>
+      {holdingsOnly ? null : (
+        <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.sm }}>
+          <Input
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search name or paste contract address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            accessibilityLabel="Search coins"
+            leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+          />
+        </View>
+      )}
       <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingBottom: spacing['2xl'] }} keyboardShouldPersistTaps="handled">
         {error ? <Text variant="bodySm" color="danger" style={{ marginVertical: spacing.md }}>{error}</Text> : null}
         {(loading && !isSearch) || searching ? (
@@ -186,7 +197,7 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
               </View>
             ) : null}
             {section.assets.map(asset => {
-              const nets = networksForSide(asset, side, allow);
+              const nets = networksOf(asset);
               const sub = nets.length > 1 ? `${nets.length} networks` : chainName(nets[0].chainId, lifi);
               return (
                 <PressableScale
@@ -225,7 +236,12 @@ export default function AssetPicker({ visible, side, title, allow, onSelect, onC
             No coin matches that. Try pasting its contract address.
           </Text>
         ) : null}
-        {!isSearch && !loading ? (
+        {holdingsOnly && !loading && !error && sections.length === 0 ? (
+          <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.xl }}>
+            No coins in your wallet yet. Buy or receive some first, then come back.
+          </Text>
+        ) : null}
+        {!isSearch && !holdingsOnly && !loading ? (
           <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg }}>
             Looking for another coin? Search by name or paste its contract address.
           </Text>

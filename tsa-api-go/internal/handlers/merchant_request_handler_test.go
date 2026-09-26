@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -73,6 +75,7 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			country TEXT NOT NULL,
 			phone TEXT NOT NULL,
 			registration_number TEXT,
+			website TEXT,
 			status TEXT NOT NULL DEFAULT 'pending',
 			admin_note TEXT,
 			reviewed_by TEXT,
@@ -118,6 +121,10 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 		if err := db.Exec(s).Error; err != nil {
 			t.Fatalf("failed to create table: %v", err)
 		}
+	}
+
+	if err := db.AutoMigrate(&models.PayMerchant{}); err != nil {
+		t.Fatalf("failed to migrate pay_merchants: %v", err)
 	}
 
 	// Register a callback so that MerchantRequest gets a UUID before insert
@@ -1135,5 +1142,260 @@ func TestSubmitMerchantRequest_FailedProvisioningResubmitBlocked(t *testing.T) {
 	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user.ID).Count(&count)
 	if count != 1 {
 		t.Errorf("expected exactly 1 payment_merchants row, got %d", count)
+	}
+}
+
+// ── Task 4: TSA Pay (payment_acceptance) onboarding ──────────────────────────
+
+// fakePayProvisioner is a test double satisfying payMerchantProvisioner.
+type fakePayProvisioner struct {
+	db    *gorm.DB
+	calls int
+	err   error
+}
+
+// CreateFromRequest records a real pay_merchants row, so the retry test
+// proves the handler reads the row, not the fake's memory.
+func (f *fakePayProvisioner) CreateFromRequest(_ context.Context, req *models.MerchantRequest) (*models.PayMerchant, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	m := &models.PayMerchant{MerchantRequestID: req.ID, UserID: req.UserID, BusinessName: req.BusinessName,
+		Status: models.PayMerchantActive, MinAmountKobo: 1, MaxAmountKobo: 2, WebhookSecretVersion: 1}
+	return m, f.db.Create(m).Error
+}
+
+func validPayAcceptanceInput() map[string]interface{} {
+	in := validMerchantInput()
+	in["businessType"] = "payment_acceptance"
+	in["businessName"] = "Sky Air"
+	in["website"] = "https://skyair.ng"
+	return in
+}
+
+// verifyMerchantTestUser marks the user KYC-verified, as a TSA Pay applicant must be.
+func verifyMerchantTestUser(t *testing.T, db *gorm.DB, user *models.User) {
+	t.Helper()
+	if err := db.Exec(`UPDATE users SET verification_status = ?, verified_legal_name = 'Ada Obi' WHERE id = ?`,
+		models.VerificationStatusVerified, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func submitPay(t *testing.T, h *MerchantRequestHandler, user *models.User) string {
+	t.Helper()
+	verifyMerchantTestUser(t, h.DB, user)
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("submit: %d %s", w.Code, w.Body.String())
+	}
+	var sub map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &sub)
+	return sub["data"].(map[string]interface{})["id"].(string)
+}
+
+func approvePay(h *MerchantRequestHandler, admin *models.User, reqID string) *httptest.ResponseRecorder {
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve", map[string]interface{}{"note": "ok"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c)
+	return w
+}
+
+func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAnHTTPSWebsite(t *testing.T) {
+	for _, site := range []string{"", "skyair.ng", "http://skyair.ng", "https://", "https://user:pw@skyair.ng",
+		"https://skyair.ng,evil.example/", "https://skyair.ng;evil.example", "https://localhost", "https://203.0.113.5/", "https://[::1]/", "https://" + strings.Repeat("a", 250) + ".ng"} {
+		db := setupMerchantTestDB(t)
+		h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
+		in := validPayAcceptanceInput()
+		in["website"] = site
+		user := createMerchantTestUser(t, db, "user")
+		verifyMerchantTestUser(t, db, user)
+		w, c := newMerchantContext("POST", "/api/merchant-requests", in, user)
+		h.SubmitMerchantRequest(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("website %q: status %d", site, w.Code)
+		}
+	}
+}
+
+func TestSubmitMerchantRequest_AMarketplaceMerchantMayApplyForPaymentsOnce(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
+	u := createMerchantTestUser(t, db, "merchant")
+	submitPay(t, h, u)
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), u)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusBadRequest && w.Code != http.StatusConflict {
+		t.Fatalf("a second pending TSA Pay request: status %d", w.Code)
+	}
+}
+
+// Reverse direction of TestSubmitMerchantRequest_AMarketplaceMerchantMayApplyForPaymentsOnce
+// (whole-branch review Finding 3): the general, non-PM/non-Pay duplicate check
+// must be scoped by business_type too, or an approved payment_acceptance
+// request permanently blocks the same user from ever submitting a
+// general_products/digital_products/service_provider request — a regression
+// to the existing, live marketplace-merchant flow.
+func TestSubmitMerchantRequest_ApprovedPaymentAcceptanceDoesNotBlockGeneralProducts(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	prov := &fakePayProvisioner{db: db}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
+	user := createMerchantTestUser(t, db, "user")
+	admin := createMerchantTestUser(t, db, "admin")
+	reqID := submitPay(t, h, user)
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK {
+		t.Fatalf("approve payment_acceptance request: %d %s", w.Code, w.Body.String())
+	}
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("general_products submit after an approved payment_acceptance request: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApproveMerchantRequest_PaymentAcceptanceProvisionsWithoutARoleFlip(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	prov := &fakePayProvisioner{db: db}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
+	user := createMerchantTestUser(t, db, "user")
+	admin := createMerchantTestUser(t, db, "admin")
+	reqID := submitPay(t, h, user)
+
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK || prov.calls != 1 {
+		t.Fatalf("approve: %d calls %d: %s", w.Code, prov.calls, w.Body.String())
+	}
+	var u models.User
+	db.First(&u, "id = ?", user.ID)
+	if u.Role != "user" {
+		t.Fatalf("role = %q; TSA Pay approval must not grant the admin-console merchant role", u.Role)
+	}
+	if w := approvePay(h, admin, reqID); w.Code == http.StatusOK || prov.calls != 1 {
+		t.Fatalf("re-approving a provisioned request: %d calls %d", w.Code, prov.calls)
+	}
+}
+
+func TestApproveMerchantRequest_PaymentAcceptanceRetriesAFailedProvisioning(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	prov := &fakePayProvisioner{db: db, err: errors.New("boom")}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
+	admin := createMerchantTestUser(t, db, "admin")
+	reqID := submitPay(t, h, createMerchantTestUser(t, db, "user"))
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusInternalServerError {
+		t.Fatalf("first approve: %d", w.Code)
+	}
+	prov.err = nil
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK || prov.calls != 2 {
+		t.Fatalf("retry: %d calls %d", w.Code, prov.calls)
+	}
+}
+
+func TestApproveMerchantRequest_PaymentAcceptanceNeedsAnAdminAndTheService(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	// Submitted while TSA Pay was enabled, approved after it went dormant.
+	reqID := submitPay(t, &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}, createMerchantTestUser(t, db, "user"))
+	h := &MerchantRequestHandler{DB: db}
+	for role, want := range map[string]int{"support": http.StatusForbidden, "admin": http.StatusServiceUnavailable} {
+		if w := approvePay(h, createMerchantTestUser(t, db, role), reqID); w.Code != want {
+			t.Fatalf("%s: status %d, want %d", role, w.Code, want)
+		}
+	}
+}
+
+func TestSubmitMerchantRequest_PaymentAcceptanceRefusedWhileTSAPayIsDormant(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	user := createMerchantTestUser(t, db, "user")
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "TSA Pay isn't available yet") {
+		t.Fatalf("dormant submit: %d %s", w.Code, w.Body.String())
+	}
+	var n int64
+	db.Model(&models.MerchantRequest{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d merchant_requests rows created while TSA Pay is dormant", n)
+	}
+	// Other business types are unaffected by TSA Pay being dormant.
+	w, c = newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("general_products submit: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalMessage_TSAPayHasItsOwnWording(t *testing.T) {
+	const want = "Your TSA Pay application is approved. Sign in at https://app.tsaconnectworld.com with your TSA Connect account" +
+		" to create API keys, set your webhook and payouts, and run a test payment. Live payments are switched on after a quick review."
+	if got := approvalMessage(models.BusinessTypePaymentAcceptance, "https://app.tsaconnectworld.com"); got != want {
+		t.Fatalf("payment_acceptance message = %q", got)
+	}
+	if got := approvalMessage(models.BusinessTypePaymentAcceptance, ""); !strings.Contains(got, "Sign in at the TSA Connect web app with your TSA Connect account") {
+		t.Fatalf("payment_acceptance message with no web app origin = %q", got)
+	}
+	for _, origin := range []string{"", "https://app.tsaconnectworld.com"} {
+		if got := approvalMessage(models.BusinessTypeGeneralProducts, origin); got != "Your merchant application has been approved. You can now list products." {
+			t.Fatalf("general message = %q", got)
+		}
+	}
+}
+
+func TestApproveMerchantRequest_PaymentAcceptanceNotificationDoesNotPromiseProducts(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	bus := newTestEventBus(t)
+	msgs := make(chan string, 1)
+	bus.Subscribe(events.MerchantApproved, func(e events.Event) { msgs <- e.Message })
+	h := &MerchantRequestHandler{DB: db, EventBus: bus, PayMerchants: &fakePayProvisioner{db: db}}
+	reqID := submitPay(t, h, createMerchantTestUser(t, db, "user"))
+	if w := approvePay(h, createMerchantTestUser(t, db, "admin"), reqID); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case m := <-msgs:
+		if strings.Contains(m, "list products") || !strings.Contains(m, "TSA Pay") {
+			t.Fatalf("notification = %q", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no MerchantApproved event")
+	}
+}
+
+func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAVerifiedIdentity(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
+	user := createMerchantTestUser(t, db, "user")
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"kyc_verification_required"`) ||
+		!strings.Contains(w.Body.String(), "Verify your identity before applying for TSA Pay") {
+		t.Fatalf("unverified applicant: %d %s", w.Code, w.Body.String())
+	}
+	var n int64
+	db.Model(&models.MerchantRequest{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d merchant_requests rows created for an unverified applicant", n)
+	}
+
+	// Other business types never needed verification to apply — neither a
+	// marketplace merchant nor a Payment Merchant.
+	w, c = newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("general_products submit by an unverified user: %d %s", w.Code, w.Body.String())
+	}
+	w, c = newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("p2p_merchant submit by an unverified user: %d %s", w.Code, w.Body.String())
+	}
+
+	verifyMerchantTestUser(t, db, user)
+	w, c = newMerchantContext("POST", "/api/merchant-requests", validPayAcceptanceInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("verified applicant: %d %s", w.Code, w.Body.String())
 	}
 }

@@ -576,6 +576,9 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// IsUniqueViolation is isUniqueViolation for callers outside this package.
+func IsUniqueViolation(err error) bool { return isUniqueViolation(err) }
+
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

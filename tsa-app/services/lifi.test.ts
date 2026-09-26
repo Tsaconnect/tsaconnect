@@ -2,6 +2,7 @@ import {
   getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
   SUI_LIFI_CHAIN_ID, isSignableSourceChain, isNativeTokenAddress, chainsForLeg, sumGasCostsWei,
+  findTokenBySymbolForChain, toLiFiQuote, type LiFiToken,
 } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -190,6 +191,39 @@ describe('isNativeTokenAddress', () => {
   });
 });
 
+describe('findTokenBySymbolForChain — refusing a stale (wrong-chain) token list', () => {
+  const optimismUsdt: LiFiToken = {
+    address: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58',
+    symbol: 'USDT',
+    name: 'Tether USD',
+    decimals: 6,
+    logoURI: '',
+  };
+  const baseUsdt: LiFiToken = {
+    address: '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2',
+    symbol: 'USDT',
+    name: 'Tether USD',
+    decimals: 6,
+    logoURI: '',
+  };
+
+  it('matches by symbol when the list was fetched for the wanted chain', () => {
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 10, 'USDT')).toBe(optimismUsdt);
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 10, 'usdt')).toBe(optimismUsdt);
+  });
+
+  it('refuses the match when the list is still the PREVIOUS chain\'s — this is the bug: a stale Optimism list must never resolve a Base USDT request just because the symbol matches', () => {
+    // otherwise "use X instead" (switch to Base while Optimism's token list
+    // is still in state) would silently pin baseUsdt's chainId to
+    // optimismUsdt's address.
+    expect(findTokenBySymbolForChain([optimismUsdt], 10, 8453, 'USDT')).toBeNull();
+  });
+
+  it('returns null when the symbol just is not in the (correctly-chained) list', () => {
+    expect(findTokenBySymbolForChain([baseUsdt], 8453, 8453, 'USDC')).toBeNull();
+  });
+});
+
 describe('getLiFiTokens', () => {
   it('returns token list on success', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -261,5 +295,27 @@ describe('buildERC20ApproveCalldata', () => {
     const spender = '0x1234567890123456789012345678901234567890';
     const data = buildERC20ApproveCalldata(spender, '1000000');
     expect(data.toLowerCase()).toContain('1234567890123456789012345678901234567890');
+  });
+});
+
+describe('toLiFiQuote', () => {
+  // The sell intent returns LiFi's raw quote body; the swap executor takes the
+  // app's LiFiQuote. One mapping serves both, so they cannot drift apart.
+  it('maps a raw LiFi quote body the same way getLiFiQuote does', async () => {
+    const raw = {
+      ...MOCK_QUOTE,
+      estimate: { toAmount: '42', approvalAddress: '0xspender', gasCosts: [{ amount: '10', amountUSD: '0.01' }, { amount: '5' }] },
+      action: { fromToken: { address: '0xtoken' } },
+    };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => raw });
+    const fetched = await getLiFiQuote({ fromChain: 56, toChain: 1, fromToken: '0xabc', toToken: '0xdef', fromAmount: '1', fromAddress: '0x123' });
+    const mapped = toLiFiQuote(raw);
+    expect(mapped).toEqual(fetched);
+    expect(mapped).toMatchObject({ toAmount: '42', gasCostWei: '15', approvalAddress: '0xspender', approvalToken: '0xtoken' });
+    expect(mapped.transactionRequest.to).toBe('0xrouter');
+  });
+
+  it('tolerates a missing body rather than throwing', () => {
+    expect(toLiFiQuote(null).toAmount).toBe('0');
   });
 });

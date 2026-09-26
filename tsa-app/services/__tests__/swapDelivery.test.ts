@@ -27,6 +27,16 @@ describe('getSwapDelivery', () => {
     expect(mockFetch.mock.calls[0][0]).toContain('/swap/lifi/status?txHash=0xsrc');
   });
 
+  // DONE alone does not say she got what was quoted: LiFi qualifies it as
+  // COMPLETED, PARTIAL (a different token landed) or REFUNDED. A sale must
+  // tell those apart, so the substatus is passed through untouched.
+  it('passes through the substatus that qualifies a DONE', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { status: 'DONE', substatus: 'REFUNDED' } }) });
+    expect(await getSwapDelivery('0xsrc')).toMatchObject({ status: 'DONE', substatus: 'REFUNDED' });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { status: 'DONE' } }) });
+    expect((await getSwapDelivery('0xsrc')).substatus).toBeUndefined();
+  });
+
   it('reports a failed bridge as failed', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { status: 'FAILED' } }) });
     expect((await getSwapDelivery('0xsrc')).status).toBe('FAILED');

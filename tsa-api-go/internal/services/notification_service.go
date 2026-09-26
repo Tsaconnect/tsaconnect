@@ -14,27 +14,31 @@ import (
 
 // emailEvents defines which event types also trigger an email.
 var emailEvents = map[string]bool{
-	events.TransactionCompleted:    true,
-	events.TransactionFailed:       true,
-	events.TransactionReceived:     true,
-	events.OrderPlaced:             true,
-	events.OrderEscrowed:           true,
-	events.OrderShipped:            true,
-	events.OrderDelivered:          true,
-	events.OrderCompleted:          true,
-	events.OrderRefundRequested:    true,
-	events.OrderRefundApproved:     true,
-	events.OrderRefundRejected:     true,
-	events.OrderRefunded:           true,
-	events.OrderCancelRequested:    true,
-	events.OrderCancelApproved:     true,
-	events.OrderCancelRejected:     true,
-	events.OrderDisputed:           true,
-	events.OrderDisputeResolved:    true,
-	events.SecurityLoginNewDevice:  true,
-	events.SecurityFailedAttempts:  true,
-	events.SecurityPasswordChanged: true,
-	events.SecurityAccountLocked:   true,
+	events.TransactionCompleted:         true,
+	events.TransactionFailed:            true,
+	events.TransactionReceived:          true,
+	events.OrderPlaced:                  true,
+	events.OrderEscrowed:                true,
+	events.OrderShipped:                 true,
+	events.OrderDelivered:               true,
+	events.OrderCompleted:               true,
+	events.OrderRefundRequested:         true,
+	events.OrderRefundApproved:          true,
+	events.OrderRefundRejected:          true,
+	events.OrderRefunded:                true,
+	events.OrderCancelRequested:         true,
+	events.OrderCancelApproved:          true,
+	events.OrderCancelRejected:          true,
+	events.OrderDisputed:                true,
+	events.OrderDisputeResolved:         true,
+	events.SecurityLoginNewDevice:       true,
+	events.SecurityFailedAttempts:       true,
+	events.SecurityPasswordChanged:      true,
+	events.SecurityAccountLocked:        true,
+	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
 	// Account deletion: the departing user needs a written record of what was
 	// closed and how to come back inside the grace window, and a reinstatement
 	// they didn't ask for must be visible to them out-of-band. In-app delivery
@@ -45,6 +49,8 @@ var emailEvents = map[string]bool{
 	events.VerificationRejected:     true,
 	events.MerchantApproved:         true,
 	events.MerchantRejected:         true,
+	events.PayLiveEnabled:           true,
+	events.PayLiveDisabled:          true,
 	events.ProductApproved:          true,
 	events.ProductRejected:          true,
 	// TP reward (fee/TP overhaul SP8 §7): a level-up unlocks real claimable MCGP,
@@ -57,50 +63,77 @@ var emailEvents = map[string]bool{
 // triggered ones (p2p.ad.*, product.listed, *.submitted, transaction.pending)
 // are intentionally excluded so the tray isn't noisy.
 var pushEvents = map[string]bool{
-	events.TransactionReceived:     true,
-	events.TransactionCompleted:    true,
-	events.TransactionFailed:       true,
-	events.OrderPlaced:             true,
-	events.OrderEscrowed:           true,
-	events.OrderShipped:            true,
-	events.OrderDelivered:          true,
-	events.OrderCompleted:          true,
-	events.OrderRefundRequested:    true,
-	events.OrderRefundApproved:     true,
-	events.OrderRefundRejected:     true,
-	events.OrderRefunded:           true,
-	events.OrderCancelRequested:    true,
-	events.OrderCancelApproved:     true,
-	events.OrderCancelRejected:     true,
-	events.OrderDisputed:           true,
-	events.OrderDisputeResolved:    true,
-	events.SecurityLoginNewDevice:  true,
-	events.SecurityFailedAttempts:  true,
-	events.SecurityPasswordChanged: true,
-	events.SecurityAccountLocked:   true,
-	events.VerificationApproved:    true,
-	events.VerificationRejected:    true,
-	events.MerchantApproved:        true,
-	events.MerchantRejected:        true,
-	events.MerchantSuspended:       true,
-	events.ProductApproved:         true,
-	events.ProductRejected:         true,
-	events.P2PTradeOpened:          true,
-	events.P2PTradePaid:            true,
-	events.P2PTradeReleasing:       true,
-	events.P2PTradeReleased:        true,
-	events.P2PTradeCancelled:       true,
-	events.P2PTradeDisputed:        true,
-	events.P2PTradeResolved:        true,
-	events.P2PTradeExpired:         true,
-	"p2p.message.new":              true, // raw string in p2p_message_service.go (not a const)
-	events.P2PDepositConfirmed:     true,
-	events.P2PWithdrawConfirmed:    true,
+	events.TransactionReceived:          true,
+	events.TransactionCompleted:         true,
+	events.TransactionFailed:            true,
+	events.OrderPlaced:                  true,
+	events.OrderEscrowed:                true,
+	events.OrderShipped:                 true,
+	events.OrderDelivered:               true,
+	events.OrderCompleted:               true,
+	events.OrderRefundRequested:         true,
+	events.OrderRefundApproved:          true,
+	events.OrderRefundRejected:          true,
+	events.OrderRefunded:                true,
+	events.OrderCancelRequested:         true,
+	events.OrderCancelApproved:          true,
+	events.OrderCancelRejected:          true,
+	events.OrderDisputed:                true,
+	events.OrderDisputeResolved:         true,
+	events.SecurityLoginNewDevice:       true,
+	events.SecurityFailedAttempts:       true,
+	events.SecurityPasswordChanged:      true,
+	events.SecurityAccountLocked:        true,
+	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
+	events.VerificationApproved:         true,
+	events.VerificationRejected:         true,
+	events.MerchantApproved:             true,
+	events.MerchantRejected:             true,
+	events.MerchantSuspended:            true,
+	events.PayLiveEnabled:               true,
+	events.PayLiveDisabled:              true,
+	events.ProductApproved:              true,
+	events.ProductRejected:              true,
+	events.P2PTradeOpened:               true,
+	events.P2PTradePaid:                 true,
+	events.P2PTradeReleasing:            true,
+	events.P2PTradeReleased:             true,
+	events.P2PTradeCancelled:            true,
+	events.P2PTradeDisputed:             true,
+	events.P2PTradeResolved:             true,
+	events.P2PTradeExpired:              true,
+	"p2p.message.new":                   true, // raw string in p2p_message_service.go (not a const)
+	events.P2PDepositConfirmed:          true,
+	events.P2PWithdrawConfirmed:         true,
 	// TP reward level-up (fee/TP overhaul SP8 §7 + task #27): out-of-app Expo push
 	// so the user learns they crossed a level and have MCGP to claim. TPPrizeDue is
 	// intentionally excluded — it's an ADMIN-ops notify for manual fulfilment, not
 	// a user push.
 	events.TPLevelUp: true,
+}
+
+// unmutableEvents are delivered on every channel whatever the user's mute
+// settings: an alert a stolen session could first silence (muting needs only
+// the session) protects nothing. Kept to the changes an attacker would make to
+// take money, and would want the owner not to see.
+var unmutableEvents = map[string]bool{
+	events.SecurityPaySettlementChanged: true,
+	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayEndpointsChanged:  true,
+	events.SecurityPayWebhookSecret:     true,
+}
+
+// deliveryChannels is whether an event reaches the user live (socket and push)
+// and by email, given their mute settings. The notification row is written
+// either way.
+func deliveryChannels(eventType string, muteAll, muteEmail bool) (live, email bool) {
+	if unmutableEvents[eventType] {
+		return true, true
+	}
+	return !muteAll, !muteAll && !muteEmail
 }
 
 // pushWorthy reports whether an event type should also be delivered as a push.
@@ -157,8 +190,10 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		return
 	}
 
+	live, byEmail := deliveryChannels(event.Type, user.MuteNotifications, user.MuteEmail)
+
 	// Push via WebSocket (unless muted)
-	if !user.MuteNotifications {
+	if live {
 		wsPayload, _ := json.Marshal(map[string]interface{}{
 			"id":        notification.ID,
 			"type":      notification.Type,
@@ -176,7 +211,7 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	// Email delivery (if applicable and not muted).
-	if !user.MuteNotifications && !user.MuteEmail && user.Email != "" && ns.emailService != nil {
+	if byEmail && user.Email != "" && ns.emailService != nil {
 		switch {
 		case p2pTradeEmailEvents[event.Type]:
 			// Rich, role-aware P2P trade email (loads the trade + composes per

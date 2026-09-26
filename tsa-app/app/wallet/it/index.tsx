@@ -56,12 +56,13 @@ import {
   type ITRate,
 } from '@/services/itApi';
 import { listOrders as listPaycrestOrders, type PaycrestOrder } from '@/services/paycrestApi';
+import { getSwappedSellState } from '@/services/paycrestSellSwap';
 import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useFiatSymbol } from '@/hooks/useFiatSymbol';
 import { ngnToUsd } from '@/utils/currencyDisplay';
-import { mcgpRowActions, stableRowActions } from '@/utils/rampRow';
+import { anyTokenRowActions, mcgpRowActions, stableRowActions } from '@/utils/rampRow';
 import { buildITActivity } from '@/utils/itActivity';
 
 /** Rows on the hub. The rest are one tap away on the activity screen. */
@@ -102,6 +103,9 @@ type AssetRow = {
   onSell?: () => void;
   /** Set when the selected currency cannot trade this asset at all. */
   unavailable?: string;
+  /** A registry icon in place of TokenAvatar, for a row with no real token
+   *  symbol to look up a logo for ("Any other token"). */
+  icon?: 'search';
 };
 
 export default function ITHub() {
@@ -118,6 +122,9 @@ export default function ITHub() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
+  // Whether the server currently swaps any token before selling it — off
+  // starts safe: "Any other token" offers Sell only once this confirms true.
+  const [swappedSellEnabled, setSwappedSellEnabled] = useState(false);
 
   const load = useCallback(async () => {
     setError('');
@@ -125,18 +132,20 @@ export default function ITHub() {
     // server key and the balance call needs a wallet on this device — a hub
     // that fails wholesale because one of those is missing would be worse than
     // one showing a dash.
-    const [b, r, list, pc, balances] = await Promise.all([
+    const [b, r, list, pc, balances, sw] = await Promise.all([
       getITBalance(),
       getITRate(),
       listITIntents(),
       listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
       address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
+      getSwappedSellState().catch(() => ({ enabled: false, intent: null })),
     ]);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
     if (list.success && list.data?.intents) setIntents(list.data.intents);
     setOrders(pc);
+    setSwappedSellEnabled(sw.enabled);
 
     if (balances?.success && balances.data) {
       // Stablecoins live on several chains at once, and the user thinks in
@@ -204,6 +213,7 @@ export default function ITHub() {
         { token: 'MCGP', balance: null, balanceNote: '', rateLine: mcgpRateLine },
         { token: 'USDC', balance: null, balanceNote: '' },
         { token: 'USDT', balance: null, balanceNote: '' },
+        { token: 'Any other token', balance: null, balanceNote: '', icon: 'search' },
       ];
     }
 
@@ -248,6 +258,24 @@ export default function ITHub() {
       balanceNote: address ? 'spendable' : 'connect a wallet',
       rateLine: mcgpRateLine,
     };
+    // "Any other token" — the any-token ramp (see utils/rampRow.ts). Always
+    // reaches paycrest/buy or paycrest/sell with no asset pre-selected, so
+    // its own AssetPicker is what she searches — this row never needs to
+    // know which tokens are actually fillable before she looks.
+    const anyTokenActions = anyTokenRowActions({
+      currency: code,
+      hasWallet: !!address,
+      swappedSellEnabled,
+    });
+    const anyTokenRow: AssetRow = {
+      token: 'Any other token',
+      balance: null,
+      balanceNote: 'Search 1000s of tokens',
+      icon: 'search',
+    };
+    const anyTokenRoute = (dir: 'buy' | 'sell') =>
+      `/wallet/paycrest/${dir}?openPicker=1&currency=${code}`;
+
     return [
       mcgpActions.unavailable
         ? { ...mcgpRow, unavailable: mcgpActions.unavailable }
@@ -258,8 +286,28 @@ export default function ITHub() {
           },
       stableRow('USDC'),
       stableRow('USDT'),
+      anyTokenActions.unavailable
+        ? { ...anyTokenRow, unavailable: anyTokenActions.unavailable }
+        : {
+            ...anyTokenRow,
+            onBuy: anyTokenActions.buy ? () => router.push(anyTokenRoute('buy') as never) : undefined,
+            onSell: anyTokenActions.sell
+              ? () => router.push(anyTokenRoute('sell') as never)
+              : undefined,
+          },
     ];
-  }, [walletReady, loading, address, stable, support, legs, code, spendable, mcgpRateLine]);
+  }, [
+    walletReady,
+    loading,
+    address,
+    stable,
+    support,
+    legs,
+    code,
+    spendable,
+    mcgpRateLine,
+    swappedSellEnabled,
+  ]);
 
   const activity = useMemo(
     () => buildITActivity(intents, orders, symbolFor, { hideCancelledIntents: true }),
@@ -312,7 +360,22 @@ export default function ITHub() {
             <View key={a.token}>
               {idx > 0 ? <Divider spacing="md" inset={TOKEN_AVATAR_SIZE + spacing.md} /> : null}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <TokenAvatar symbol={a.token} size={TOKEN_AVATAR_SIZE} />
+                {a.icon ? (
+                  <View
+                    style={{
+                      width: TOKEN_AVATAR_SIZE,
+                      height: TOKEN_AVATAR_SIZE,
+                      borderRadius: TOKEN_AVATAR_SIZE / 2,
+                      backgroundColor: colors.surfaceAlt,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Icon name={a.icon} size={18} color={colors.textMuted} />
+                  </View>
+                ) : (
+                  <TokenAvatar symbol={a.token} size={TOKEN_AVATAR_SIZE} />
+                )}
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text variant="caption" weight="600" style={{ color: colors.textSecondary }}>
                     {a.token}

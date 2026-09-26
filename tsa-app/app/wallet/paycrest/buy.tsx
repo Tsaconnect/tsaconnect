@@ -70,13 +70,16 @@ import {
   selectVenue,
   describeConvertedVenue,
   formatPromisedAmount,
+  formatEstimate,
   formatEta,
   PaycrestError,
   type PayoutInstitution,
   type PaycrestOrder,
   type PaycrestQuote,
   type PaycrestVenue,
+  type RequestedAsset,
 } from '@/services/paycrestApi';
+import { formatTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 // The destination token AND chain picker — reused verbatim from the swap
 // flow rather than built again here. Its callback is already
@@ -84,7 +87,11 @@ import { promptKycRefusal } from '@/utils/kycRefusal';
 // want to receive" picker needs.
 import AssetPicker from '@/components/assets/AssetPicker';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
-import { getLiFiTokens, type LiFiToken } from '@/services/lifi';
+import { getLiFiTokens, findTokenBySymbolForChain, isSolanaLiFiChain, type LiFiToken } from '@/services/lifi';
+// Her Solana address is derived from the same seed as the EVM wallet — read
+// through the wallet service that already owns that derivation, never
+// re-derived here.
+import { getSolanaAddress } from '@/services/chains/solanaWallet';
 import { getChainByChainId, getChainDisplay, getChain, type ChainKey } from '@/constants/chains';
 
 /** Debounce on the amount field: every keystroke would otherwise fan a live
@@ -127,19 +134,32 @@ const DEFAULT_CHAIN_ID = getChain(DEFAULT_CHAIN_KEY)?.chainId ?? 8453;
  *  destination. */
 const REFUND_STORE_KEY = (currency: string) => `paycrest.refundAccount.v1.${currency}`;
 
-/** Chains a Naira buy can be quoted on: the wallet's EVM registry. */
-const isBuyableChain = (chainId: number) => getChainByChainId(chainId) !== undefined;
+/** Chains a Naira buy can be quoted on: the wallet's EVM registry, plus
+ *  Solana — LiFi delivers there and the destination transaction's own balance
+ *  changes prove the landing, so it is as settleable as any EVM chain. */
+const isBuyableChain = (chainId: number) =>
+  getChainByChainId(chainId) !== undefined || isSolanaLiFiChain(chainId);
+
+/** The chain key for a picked chain id. Solana is not in the EVM registry, so
+ *  it is named here rather than looked up — every other chain still comes from
+ *  the registry, never from a table that could drift out of date. */
+const chainKeyForPicked = (chainId: number): string | undefined =>
+  getChainByChainId(chainId)?.key ?? (isSolanaLiFiChain(chainId) ? 'solana' : undefined);
 
 export default function PaycrestBuyScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
   // The asset the user picked upstream — only a starting point for the
-  // token+chain picker below (see wantSymbol/wantChainId), never a filter:
-  // the user can change either one, and the quote says plainly when the pair
-  // they land on cannot be filled.
-  const { asset, currency: currencyParam } = useLocalSearchParams<{
+  // token+chain picker below (see `want`), never a filter: the user can
+  // change either one, and the quote says plainly when the pair they land on
+  // cannot be filled.
+  const { asset, currency: currencyParam, openPicker } = useLocalSearchParams<{
     asset?: string;
     currency?: string;
+    /** Set by the IT hub's "Any other token" row — she arrives with nothing
+     *  pre-selected, so the picker opens immediately instead of waiting for
+     *  her to notice and tap the token field herself. */
+    openPicker?: string;
   }>();
 
   // The currency this order settles in — NOT the display currency (see
@@ -176,25 +196,46 @@ export default function PaycrestBuyScreen() {
 
   // ── What the user wants to receive: token AND chain, both explicit ──────
   //
-  // This is the whole point of Task 13: the screen used to infer a chain from
-  // whatever the book could fill and only let the user pick among THOSE
-  // routes. Now the user names the destination first, and the quote either
-  // confirms it is fillable (direct or converted) or says plainly that it
-  // is not — never the other way around.
-  const [wantChainId, setWantChainId] = useState<number>(DEFAULT_CHAIN_ID);
-  const [wantSymbol, setWantSymbol] = useState<string>((asset || 'USDC').toString().toUpperCase());
+  // This is the whole point of Task 13 (and, per Task 9, keyed by chain id +
+  // address rather than chain key + symbol): the screen used to infer a
+  // chain from whatever the book could fill and only let the user pick among
+  // THOSE routes. Now the user names the destination first, and the quote
+  // either confirms it is fillable (direct or converted) or says plainly
+  // that it is not — never the other way around.
+  //
+  // `address` starts empty for the route-param default (Base has no LiFiToken
+  // to read an address off yet) and for the "use X instead" alternative —
+  // the effect below resolves it from the chain's own token list by symbol.
+  // AssetPicker.onSelect always supplies it directly, so it never needs
+  // resolving there.
+  const [want, setWant] = useState<RequestedAsset>({
+    token: (asset || 'USDC').toString().toUpperCase(),
+    chainId: DEFAULT_CHAIN_ID,
+    chain: DEFAULT_CHAIN_KEY,
+    address: '',
+  });
   // Kept only for the picker's icon/name — every lookup that matters (the
-  // quote, the order) goes through wantChainId/wantSymbol, which survive even
-  // when this hasn't resolved (e.g. the "use X instead" choice below, which
-  // has no LiFiToken object at all).
+  // quote, the order) goes through `want`, which survives even when this
+  // hasn't resolved (e.g. the "use X instead" choice below, which has no
+  // LiFiToken object at all).
   const [wantTokenMeta, setWantTokenMeta] = useState<LiFiToken | null>(null);
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
-  const [pickerTokens, setPickerTokens] = useState<LiFiToken[]>([]);
-
-  // Our chain key for wantChainId, or undefined for a chain outside the EVM
-  // registry (e.g. a non-EVM pick from the "all chains" list) — quoting has
-  // no vocabulary for that yet, so the effect below simply does not fire.
-  const wantChainKey = getChainByChainId(wantChainId)?.key;
+  useEffect(() => {
+    // Only ever opens it — never closes it back if the param disappears from
+    // a later re-render, which would fight her own use of the picker.
+    if (openPicker) setTokenPickerOpen(true);
+  }, [openPicker]);
+  // Tagged with the chain id it was actually fetched FOR — not just "the
+  // current list" — because getLiFiTokens resolves asynchronously: on the
+  // very render `want.chainId` changes, this can still hold the PREVIOUS
+  // chain's tokens, and a symbol like USDT/USDC/DAI recurs on almost every
+  // EVM chain. Every consumer below goes through findTokenBySymbolForChain,
+  // which refuses a match when this tag disagrees with what's wanted, rather
+  // than risk pinning a wrong-chain address to the new chain id.
+  const [pickerTokens, setPickerTokens] = useState<{ chainId: number; tokens: LiFiToken[] }>({
+    chainId: DEFAULT_CHAIN_ID,
+    tokens: [],
+  });
 
   // Refund destination. Paycrest requires one on every onramp, because it
   // cannot know who will pay until the transfer arrives — so this is the only
@@ -259,27 +300,56 @@ export default function PaycrestBuyScreen() {
     };
   }, [currencyCode]);
 
-  // Token list for whichever chain is currently wanted, only to resolve the
-  // wanted token's icon and decimals below (the picker loads its own coins).
+  // Token list for whichever chain is currently wanted — used both to resolve
+  // the wanted token's icon below and, when `want.address` isn't already
+  // known (the route-param default, or right after "use X instead"), its
+  // on-chain address. AssetPicker.onSelect supplies the address directly, so
+  // this never re-resolves it there.
   useEffect(() => {
     let active = true;
-    getLiFiTokens(wantChainId)
+    const chainId = want.chainId;
+    getLiFiTokens(chainId)
       .then((tokens) => {
-        if (active) setPickerTokens(tokens);
+        // Tag the list with the chain id it was fetched FOR — see
+        // pickerTokens's own doc comment for why this matters more than it
+        // looks like it should.
+        if (active) setPickerTokens({ chainId, tokens });
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [wantChainId]);
+  }, [want.chainId]);
 
-  // Resolve the wanted token's own metadata (icon, decimals) once its
-  // chain's list loads — best-effort only; wantSymbol/wantChainId already
-  // carry everything the quote and the order actually need.
+  // Resolve the wanted token's own metadata (icon) once its chain's list
+  // loads — best-effort only; `want` already carries everything the quote
+  // and the order actually need.
   useEffect(() => {
-    const match = pickerTokens.find((t) => t.symbol.toUpperCase() === wantSymbol.toUpperCase());
+    const match = findTokenBySymbolForChain(
+      pickerTokens.tokens,
+      pickerTokens.chainId,
+      want.chainId,
+      want.token,
+    );
     if (match) setWantTokenMeta(match);
-  }, [pickerTokens, wantSymbol]);
+  }, [pickerTokens, want.chainId, want.token]);
+
+  // Fill in the address once it's known — the quote effect below waits for
+  // this rather than guessing at getLiFiToken(chainId, addressOrSymbol),
+  // which takes an address, not a symbol.
+  useEffect(() => {
+    if (want.address) return;
+    const wantedChainId = want.chainId;
+    const match = findTokenBySymbolForChain(
+      pickerTokens.tokens,
+      pickerTokens.chainId,
+      wantedChainId,
+      want.token,
+    );
+    if (match) {
+      setWant((w) => (w.address || w.chainId !== wantedChainId ? w : { ...w, address: match.address }));
+    }
+  }, [pickerTokens, want.address, want.chainId, want.token]);
 
   // Re-quote on amount, currency, or a change of what the user wants to
   // receive. The requested (chain, token) is sent on every call — see
@@ -289,7 +359,10 @@ export default function PaycrestBuyScreen() {
   // handles correctly).
   useEffect(() => {
     const raw = amount.trim();
-    if (!raw || Number(raw) <= 0 || !wantChainKey) {
+    // want.address is empty until the address-resolution effect above lands
+    // (route-param default, or right after "use X instead") — wait for it
+    // rather than quoting a pair the server can't identify yet.
+    if (!raw || Number(raw) <= 0 || !want.chain || !want.address) {
       setQuote(null);
       setVenue(null);
       setQuoteError(null);
@@ -299,7 +372,7 @@ export default function PaycrestBuyScreen() {
     setQuoting(true);
     const t = setTimeout(async () => {
       try {
-        const q = await getQuote('buy', raw, currencyCode, { chain: wantChainKey, token: wantSymbol });
+        const q = await getQuote('buy', raw, currencyCode, want);
         if (seq !== quoteSeq.current) return;
         setQuote(q);
         setQuoteError(null);
@@ -310,7 +383,7 @@ export default function PaycrestBuyScreen() {
         // selectVenue is the one thing that guarantees this, and it is
         // unit-tested on its own in services/__tests__/paycrestApi.conversion.test.ts
         // — nothing here re-implements or shadows that rule.
-        setVenue(selectVenue(q.venues, wantChainKey, wantSymbol));
+        setVenue(selectVenue(q.venues, want));
       } catch (e) {
         if (seq !== quoteSeq.current) return;
         setQuote(null);
@@ -327,13 +400,13 @@ export default function PaycrestBuyScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, currencyCode, wantChainKey, wantSymbol]);
+  }, [amount, currencyCode, want]);
 
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
   const onConfirm = useCallback(async () => {
-    if (!venue || !address || !refundBank || !wantChainKey) return;
+    if (!venue || !address || !refundBank || !want.chain || !want.address) return;
     setCreating(true);
     try {
       const created = await createBuy({
@@ -341,12 +414,20 @@ export default function PaycrestBuyScreen() {
         // The settlement leg — what Paycrest itself is asked to fill.
         chain: venue.chain,
         token: venue.token,
-        // What the user actually asked for. Sent explicitly and always,
-        // whether or not this venue converts: on a direct match the two
-        // pairs are identical anyway, and the server defaults one from the
-        // other regardless — this is just never leaving it to inference.
-        requestedChain: wantChainKey,
-        requestedToken: wantSymbol,
+        // What the user actually asked for, by chain id + address — the
+        // server derives decimals itself, so that never gets sent. Sent
+        // explicitly and always, whether or not this venue converts: on a
+        // direct match the two pairs are identical anyway, and the server
+        // defaults one from the other regardless — this is just never
+        // leaving it to inference.
+        requestedChainId: want.chainId,
+        requestedTokenAddress: want.address,
+        requestedToken: want.token,
+        // Where a destination the EVM wallet cannot receive on is delivered
+        // (Solana). Absent everywhere else, where the wallet IS the recipient.
+        ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
+        // Holds the order to the fee she was just shown.
+        ...(isConvertedVenue(venue) && venue.markupBps ? { quotedMarkupBps: venue.markupBps } : {}),
         walletAddress: address,
         refundBankCode: refundBank.code,
         refundAccount,
@@ -369,19 +450,21 @@ export default function PaycrestBuyScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, amount, refundBank, refundAccount, currencyCode, wantChainKey, wantSymbol]);
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want]);
 
   // The explicit alternative offered when nothing can fill the exact pair the
   // user asked for, even with a conversion — never auto-selected, only
   // switched to on a deliberate tap (see the "Use X instead" button below).
+  // No LiFiToken is available for it, so address starts empty — the
+  // token-list effect above resolves it from the new chain's own list, the
+  // same as the route-param default.
   const pickAlternativeVenue = useCallback((v: PaycrestVenue) => {
     // v.chain is a raw string off the wire, not a type-checked ChainKey —
     // matches DEFAULT_CHAIN_ID's own guard above rather than assuming every
     // value the backend ever sends is one of the keys this build knows about.
     const chainId = getChain(v.chain as ChainKey)?.chainId;
     if (chainId == null) return;
-    setWantChainId(chainId);
-    setWantSymbol(v.token.toUpperCase());
+    setWant({ token: v.token.toUpperCase(), chainId, chain: v.chain, address: '' });
     setWantTokenMeta(null);
   }, []);
 
@@ -468,13 +551,21 @@ export default function PaycrestBuyScreen() {
                     what Paycrest itself fills, to our treasury — not what
                     lands in the user's wallet. Showing that here would be
                     exactly the silent substitution this phase exists to
-                    remove, so the guaranteed, requested-token figure is what
-                    "You receive" must show on a converted order. */}
+                    remove, so the requested-token figure is what "You
+                    receive" must show on a converted order. It is an
+                    ESTIMATE now, not a guarantee — priced against a
+                    round-trip budget, not a promised minimum. */}
                 <SummaryRow
                   label="You receive"
-                  value={`${formatPromisedAmount(order) ?? order.tokenAmount} ${order.requestedToken ?? order.token}`}
-                  hint="Guaranteed minimum — includes a conversion"
+                  value={formatEstimate(order) ?? `${order.tokenAmount} ${order.requestedToken ?? order.token}`}
+                  hint="Estimate — the final amount can differ slightly"
                 />
+                {order.promisedAmount && order.requestedTokenDecimals != null ? (
+                  <SummaryRow
+                    label="Guaranteed minimum"
+                    value={`${formatTokenAmount(order.promisedAmount, order.requestedTokenDecimals)} ${order.requestedToken ?? order.token}`}
+                  />
+                ) : null}
                 <SummaryRow label="Network" value={chainLabel(order.requestedChain)} />
                 <SummaryRow
                   label="Route"
@@ -545,7 +636,7 @@ export default function PaycrestBuyScreen() {
               whether that pair is fillable. */}
           <SelectRow
             label="You want"
-            value={wantChainKey ? `${wantSymbol} on ${chainLabel(wantChainKey)}` : `${wantSymbol} — unsupported network`}
+            value={want.chain ? `${want.token} on ${chainLabel(want.chain)}` : `${want.token} — unsupported network`}
             onPress={() => setTokenPickerOpen(true)}
             leftElement={
               wantTokenMeta ? (
@@ -566,7 +657,7 @@ export default function PaycrestBuyScreen() {
           {/* The payoff sits directly under the input, because "what do I get"
               is the question the amount field is asking. Everything else on
               this screen is secondary to it. */}
-          {!wantChainKey && amount.trim() ? (
+          {!want.chain && amount.trim() ? (
             <Card>
               <Text variant="bodySm" style={{ color: colors.textSecondary }}>
                 {`This network isn't supported for a ${currencyLabel} purchase yet — choose a different one.`}
@@ -593,7 +684,7 @@ export default function PaycrestBuyScreen() {
                   </Text>
                   <Text variant="title1" weight="700" style={{ color: colors.textPrimary }}>
                     {isConvertedVenue(venue)
-                      ? `${formatPromisedAmount(venue) ?? venue.tokenAmount} ${venue.requestedToken}`
+                      ? (formatEstimate(venue) ?? `${formatPromisedAmount(venue) ?? venue.tokenAmount} ${venue.requestedToken}`)
                       : `${venue.tokenAmount.toFixed(6)} ${venue.token}`}
                   </Text>
                   <Text variant="caption" style={{ color: colors.textMuted }}>
@@ -631,10 +722,8 @@ export default function PaycrestBuyScreen() {
                         value={`${venue.viaToken} on ${chainLabel(venue.viaChain)} → ${venue.requestedToken} on ${chainLabel(venue.requestedChain)}`}
                       />
                       <SummaryRow label="Est. time" value={formatEta(venue.etaSeconds)} />
-                      <SummaryRow
-                        label="Conversion fee"
-                        value={`${((venue.markupBps ?? 0) / 100).toFixed(2)}%`}
-                      />
+                      {/* No separate "Conversion fee" row — the markup is
+                          already inside the one rate shown above. */}
                     </>
                   )}
                 </>
@@ -645,7 +734,7 @@ export default function PaycrestBuyScreen() {
                 // never something this screen picks for them.
                 <>
                   <Text variant="bodySm" style={{ color: colors.textSecondary }}>
-                    No route can deliver {wantSymbol} on {chainLabel(wantChainKey)} right now, even
+                    No route can deliver {want.token} on {chainLabel(want.chain)} right now, even
                     with a conversion.
                   </Text>
                   {quote.best ? (
@@ -742,12 +831,50 @@ export default function PaycrestBuyScreen() {
         visible={tokenPickerOpen}
         side="to"
         title="Choose what to buy"
-        // A buy is quoted per EVM chain (wantChainKey); a chain outside the
-        // registry could never be priced, so it is not offered.
+        // A buy is quoted per chain (want.chainId): the EVM chains in the
+        // registry, plus Solana, which is delivered to her own Solana
+        // address. A chain outside both could never be priced, so it is not
+        // offered.
         allow={isBuyableChain}
-        onSelect={(token, chainId) => {
-          setWantChainId(chainId);
-          setWantSymbol(token.symbol.toUpperCase());
+        onSelect={async (token, chainId) => {
+          // token.address is the real on-chain address (native coins
+          // included) — exactly the (chainId, address) pair the server now
+          // identifies the requested asset by, so no address resolution is
+          // needed here.
+          //
+          // A Solana pick needs one more thing the EVM wallet cannot supply:
+          // WHERE it lands. Nothing on Solana can be paid to a 20-byte
+          // address, so without her Solana address there is no order to open
+          // — say so and leave the choice unchanged rather than quoting a
+          // route to a recipient that cannot exist.
+          //
+          // Deriving that address can also THROW (a locked or unreadable
+          // key store), and an onSelect that rejects is an unhandled promise
+          // rejection the user never sees — the sheet just sits there. A
+          // failure to derive and a missing address are the same thing to
+          // her, so they say the same thing.
+          let destinationAddress: string | undefined;
+          if (isSolanaLiFiChain(chainId)) {
+            try {
+              destinationAddress = (await getSolanaAddress(address ?? undefined)) ?? undefined;
+            } catch {
+              destinationAddress = undefined;
+            }
+            if (!destinationAddress) {
+              Alert.alert(
+                'Solana wallet not ready',
+                'Set up your Solana wallet first, then choose a Solana token to buy.',
+              );
+              return;
+            }
+          }
+          setWant({
+            token: token.symbol.toUpperCase(),
+            chainId,
+            address: token.address,
+            chain: chainKeyForPicked(chainId),
+            destinationAddress,
+          });
           setWantTokenMeta(token);
           setTokenPickerOpen(false);
         }}

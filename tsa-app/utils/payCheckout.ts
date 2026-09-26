@@ -1,0 +1,374 @@
+// utils/payCheckout.ts
+//
+// Pure state machine for app/pay.tsx — one function turning
+// (route param, auth, the last fetch) into exactly what the screen should
+// show. Kept separate from the screen so every branch (invalid link, signed
+// out, waiting on your own payment vs. someone else's, expiring soon,
+// terminal) is testable without rendering anything.
+import type { PayCheckout, PayStatus } from '@/services/payApi';
+import type { SellIntent } from '@/services/paycrestSellSwap';
+// From utils/paymentId.ts, not services/payApi.ts: that module's request()
+// chain pulls in walletApi.ts's top-level `import AsyncStorage from
+// '@react-native-async-storage/async-storage'`, which throws outside a
+// mocked test — and this file is a pure function that must stay importable
+// (and testable) on its own. utils/paymentId.ts has no such dependency.
+import { isPaymentId } from '@/utils/paymentId';
+import { TRANSPORT_ERROR } from '@/constants/api/config';
+import { MAINNET_CHAINS, type ChainKey } from '@/constants/chains';
+import type { PaycrestOrder } from '@/services/paycrestApi';
+
+export type PayScreenState =
+  | { kind: 'loading' }
+  | { kind: 'invalid' }
+  | { kind: 'error'; message: string }
+  | { kind: 'signin' }
+  | { kind: 'payable'; checkout: PayCheckout }
+  | { kind: 'waiting'; checkout: PayCheckout }
+  | { kind: 'done'; checkout: PayCheckout }
+  | { kind: 'blocked'; checkout: PayCheckout; why: string };
+
+export const TERMINAL_STATUSES: PayStatus[] = ['succeeded', 'failed', 'expired'];
+
+// Below this, an approve/decline (or the bank transfer behind a live payment)
+// may not finish before the checkout expires server-side — better to block
+// and send the customer back for a fresh link than let them start something
+// that can't land.
+const EXPIRY_WARNING_MS = 5 * 60 * 1000;
+
+export function payScreenState(input: {
+  id: unknown;
+  authed: boolean;
+  checkout?: PayCheckout;
+  error?: string;
+  now: number;
+  /**
+   * A payment attempt of hers is moving money right now (swapping, waiting on a
+   * payout, asking about a shortfall). The expiry warning must not tear the
+   * form down under it: a bridge swap can outlast the five minutes it warns of.
+   */
+  attemptActive?: boolean;
+}): PayScreenState {
+  const { id, authed, checkout, error, now, attemptActive } = input;
+
+  if (!isPaymentId(id)) return { kind: 'invalid' };
+  if (!authed) return { kind: 'signin' };
+
+  if (!checkout) {
+    return error ? { kind: 'error', message: error } : { kind: 'loading' };
+  }
+
+  if (TERMINAL_STATUSES.includes(checkout.status)) return { kind: 'done', checkout };
+
+  // Own attempt still settling — keep polling rather than showing Approve/
+  // Decline again, which would let the same payer fire a second attempt.
+  if (checkout.status === 'processing' && checkout.youArePaying) {
+    return { kind: 'waiting', checkout };
+  }
+
+  if (!checkout.payable) {
+    return {
+      kind: 'blocked',
+      checkout,
+      why: checkout.notPayableWhy ?? 'This payment is not currently payable.',
+    };
+  }
+
+  const msLeft = new Date(checkout.expiresAt).getTime() - now;
+  if (msLeft < EXPIRY_WARNING_MS && !attemptActive) {
+    return {
+      kind: 'blocked',
+      checkout,
+      why: 'This payment link expires in under five minutes — ask the merchant for a new one.',
+    };
+  }
+
+  return { kind: 'payable', checkout };
+}
+
+/**
+ * Integer kobo as the decimal naira string the rate endpoints take
+ * ("5000000" → "50000.00"). Whole-number string maths: a payment's amount is
+ * money and never passes through a float on its way to a quote.
+ */
+export function nairaFromKobo(kobo: number): string {
+  if (!Number.isSafeInteger(kobo) || kobo < 0) throw new RangeError(`Not a whole number of kobo: ${kobo}`);
+  return `${Math.floor(kobo / 100)}.${String(kobo % 100).padStart(2, '0')}`;
+}
+
+const SHOWN_DECIMALS = 6;
+
+/**
+ * "0.084 BNB": what the payer sends, from base units. At most six decimals, and
+ * a sliver past the last one rounds UP — an "about" figure must never
+ * understate what leaves her wallet. Empty for anything that is not a whole
+ * number of base units, rather than a wrong figure.
+ */
+export function payAmountLabel(baseUnits: string, decimals: number, symbol: string): string {
+  if (!/^\d+$/.test(baseUnits)) return '';
+  const unit = 10n ** BigInt(decimals);
+  const keep = 10n ** BigInt(Math.max(decimals - SHOWN_DECIMALS, 0));
+  const total = BigInt(baseUnits);
+  const rounded = ((total + keep - 1n) / keep) * keep;
+  const whole = rounded / unit;
+  const frac = (rounded % unit).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${whole}${frac ? `.${frac}` : ''} ${symbol}`;
+}
+
+/**
+ * What the merchant receives, from base units: cut down (never rounded up) to
+ * the cent, or to six decimals under one. Empty for a figure it cannot read.
+ */
+export function receiveAmountLabel(baseUnits: string, decimals: number, symbol: string): string {
+  if (!/^\d+$/.test(baseUnits)) return '';
+  const digits = baseUnits.padStart(decimals + 1, '0');
+  const whole = digits.slice(0, digits.length - decimals).replace(/^0+(?=\d)/, '');
+  const frac = digits.slice(digits.length - decimals);
+  if (whole !== '0') return `${whole}.${frac.padEnd(2, '0').slice(0, 2)} ${symbol}`;
+  const cut = frac.padEnd(SHOWN_DECIMALS, '0').slice(0, SHOWN_DECIMALS).replace(/0+$/, '');
+  return `0${cut ? `.${cut}` : ''} ${symbol}`;
+}
+
+/**
+ * The shortfall question, in USDC — the only unit the server measures it in.
+ * `walletTried`: she already offered her wallet's USDC and it did not cover the
+ * rest, so asking again would just repeat itself.
+ */
+export function shortfallCopy(missingUsdc: string | undefined, walletTried = false): string {
+  if (walletTried) {
+    const more = missingUsdc ? `about ${missingUsdc} USDC more is needed` : 'more USDC is needed';
+    return `Your USDC on Base isn't enough to cover the rest — ${more}. Add USDC to your wallet, then tap Use my USDC again.`;
+  }
+  const by = missingUsdc ? `about ${missingUsdc} USDC short` : 'short';
+  return `The rate moved and your swap landed ${by}. Pay the rest from the USDC in your wallet?`;
+}
+
+/**
+ * Her open sale, but only when it is the one that pays THIS payment. An
+ * unrelated open sale of hers is not this payment's attempt and must never be
+ * followed, resumed or reported on as if it were.
+ */
+export function intentForPayment(open: SellIntent | null | undefined, paymentId: string): SellIntent | null {
+  return open && open.payPaymentId === paymentId ? open : null;
+}
+
+/** How a payment settles: naira to the merchant's bank, or crypto delivered to their wallet. */
+export type SettlementMode = 'fiat' | 'crypto';
+
+/**
+ * How long the server keeps a payment reserved after an attempt that was
+ * cancelled or never reported — ONE phrase per settlement mode, and the only
+ * place a wait is written down. A naira payment is freed after about ten
+ * minutes; a crypto one is a delivery straight to the merchant, so it is kept
+ * for an hour. Every user-facing "it will free up" statement reads from here.
+ */
+export const RESERVE_WINDOW: Record<SettlementMode, string> = {
+  fiat: 'about 10 minutes',
+  crypto: 'about an hour',
+};
+
+/**
+ * For a swap the server is still following (or cannot find yet) no time is
+ * promised: it is followed until it resolves. The 24 h after which the phone
+ * lets go of its own hold is deliberately NOT said to her either.
+ */
+export const KEEP_CHECKING = "We'll keep checking";
+
+/** Continue payment found no sale of hers that pays this payment. */
+export const nothingToContinueCopy = (mode: SettlementMode): string =>
+  `We couldn't find a payment of yours to continue. If nothing is under way, the payment frees up again in ${RESERVE_WINDOW[mode]}, and you can try again.`;
+
+/** Said in place of the swapped sell's own words when a payment cannot safely be started over. */
+export const PAYMENT_STILL_GOING =
+  `Your payment isn't finished yet, but your money is safe. ${KEEP_CHECKING} — tap Continue payment to check now. Don't pay again.`;
+
+/** Crypto: the swap was sent but the server has not confirmed it. */
+export const NOT_CONFIRMED =
+  `Your payment was sent, but we couldn't confirm it with our server yet. Don't pay again. ${KEEP_CHECKING} — tap Continue payment to check now.`;
+
+/** Crypto: it is not known whether the swap was broadcast. */
+export const BROADCAST_UNCONFIRMED =
+  `We couldn't confirm your payment was sent. Don't pay again. ${KEEP_CHECKING} — tap Continue payment to check now.`;
+
+/** 409 from starting a payment: an attempt of hers already exists — follow it, never start another. */
+export const PAY_IN_PROGRESS = 'pay_in_progress';
+
+/** The server's machine code on an error, if it sent one. Keyed on, never the words beside it. */
+export function errorCode(e: unknown): string | undefined {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export const errorMessage = (e: unknown, fallback: string): string =>
+  e instanceof Error && e.message ? e.message : fallback;
+
+/** Nothing can be sent from Solana, Bitcoin or Sui for a payment yet. */
+export const unsupportedNetworkMessage = (symbol: string): string =>
+  `Paying with ${symbol} from that network isn't supported yet. Pick a coin on another network.`;
+
+
+/** 409 on every start route: the server could not prove whether an attempt exists, so it paused the payment for support. */
+export const PAY_ATTEMPT_UNCERTAIN = 'pay_attempt_uncertain';
+
+/** Said for that answer — never offers Pay or Retry: a second payment could double-pay. */
+export const PAYMENT_PAUSED =
+  "This payment is paused while we check it — please don't pay again. We'll update you shortly.";
+
+/** The route refused this token for now (fail-closed): nothing was started and the payment is still payable. */
+export const CANT_PAY_WITH_TOKEN =
+  "You can't pay this merchant with that token right now — try another token, or try again later.";
+
+/** A 422/503 from a start or price route. By status only: the words differ per route and reason. */
+export function isRouteRefused(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  return status === 422 || status === 503;
+}
+
+/** How far the fresh quote may exceed the price she was shown before we refuse to sign it. */
+export const PRICE_TOLERANCE_BPS = 200;
+/** A price older than this is looked up again (and never trusted at the Pay tap). */
+export const PRICE_STALE_MS = 30_000;
+
+/** Whether `fresh` costs more than `priced` by over the tolerance. Base units, exact. */
+export function exceedsPriced(fresh: bigint, priced: bigint, toleranceBps: number = PRICE_TOLERANCE_BPS): boolean {
+  return fresh * 10_000n > priced * BigInt(10_000 + toleranceBps);
+}
+
+/** The price moved past what she agreed to — the sentence both refusals open with. */
+function priceMovedStatement(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `The price moved while you were deciding: this would now cost about ${payAmountLabel(freshBase, decimals, symbol)}, `
+    + `not the ${payAmountLabel(pricedBase, decimals, symbol)} you were shown.`;
+}
+
+/** The refusal when the price moved past what she agreed to: nothing was sent, and what to do. */
+export function priceMovedMessage(freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `${priceMovedStatement(freshBase, pricedBase, decimals, symbol)} Nothing was sent. Check the new price and try again.`;
+}
+
+/** The payout order's amount could not be read, so it was not funded. The payment is linked to that order. */
+export const ORDER_AMOUNT_UNCHECKABLE =
+  `We couldn't check the amount of this payment, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
+
+/** The payout order opened for another network or token than she chose, so it was not funded. */
+export const ORDER_MISMATCH =
+  `The payment order didn't match what you chose, so nothing was sent. It is held for ${RESERVE_WINDOW.fiat}; after that you can try again.`;
+
+/**
+ * The price moved after the payment's attempt was already opened — a naira
+ * payout order at the higher amount, or a crypto payment's intent: nothing was
+ * sent, but the payment stays reserved for the mode's window before she can try
+ * again at the new price.
+ */
+export function heldPriceMovedCopy(mode: SettlementMode, freshBase: string, pricedBase: string, decimals: number, symbol: string): string {
+  return `${priceMovedStatement(freshBase, pricedBase, decimals, symbol)} Nothing was sent. `
+    + `This payment is held for ${RESERVE_WINDOW[mode]}; after that you can try again with the new price.`;
+}
+
+/** The naira case of heldPriceMovedCopy: the payout order was opened at the higher amount. */
+export const directPriceMovedCopy = (freshBase: string, pricedBase: string, decimals: number, symbol: string): string =>
+  heldPriceMovedCopy('fiat', freshBase, pricedBase, decimals, symbol);
+
+/**
+ * A crypto payment's swap that stopped before it was signed: nothing was sent,
+ * but its attempt was opened, so the server keeps the payment reserved for the
+ * window — never "try again" now, which would only be refused.
+ */
+export function heldNotSentCopy(mode: SettlementMode, why: string): string {
+  // The reason's own "try again" is exactly what must not be said; its "nothing was sent" is kept, not repeated.
+  const reason = why.replace(/\s*Please try again\.?\s*$/i, '').trim();
+  const said = /nothing was sent/i.test(reason);
+  return `${reason}${said ? '' : ' Nothing was sent.'} This payment is held for ${RESERVE_WINDOW[mode]}; after that you can try again.`;
+}
+
+/** Another sale or payment is being signed on this phone: nothing was started. */
+export const OTHER_SALE_RUNNING =
+  'Another sale or payment is still going through on this phone. Give it a few minutes, then try again — nothing was sent.';
+
+export type StartErrorKind = 'follow' | 'paused' | 'refused' | 'other';
+
+/**
+ * One reading of a start route's answer, for both hooks: an attempt of hers
+ * already exists (follow it), the server paused the payment, the route refused
+ * this token for now, or anything else. By code and status — never by words.
+ *
+ * No answer at all (a dropped connection, a timeout) is also followed: the
+ * server may have opened the attempt before the reply was lost, so "failed,
+ * try again" could be false. Following only reads; if nothing was started, the
+ * payment is still payable and the screen offers Pay again.
+ */
+export function classifyStartError(e: unknown): StartErrorKind {
+  const code = errorCode(e);
+  if (code === PAY_IN_PROGRESS || code === TRANSPORT_ERROR) return 'follow';
+  if (code === PAY_ATTEMPT_UNCERTAIN) return 'paused';
+  return isRouteRefused(e) ? 'refused' : 'other';
+}
+
+type Failure = { error: string; errorCode?: string; retryable: boolean };
+/** A payment the server paused: never retried, never followed. */
+export const PAUSED_FAILURE: Failure = { error: PAYMENT_PAUSED, errorCode: PAY_ATTEMPT_UNCERTAIN, retryable: false };
+/** A route that refused this token for now: nothing started, so try another. */
+export const REFUSED_FAILURE: Failure = { error: CANT_PAY_WITH_TOKEN, retryable: true };
+
+/** What a failed start looks like to the payer, per kind. `follow` is the caller's own. */
+export function startFailure(e: unknown): Failure {
+  switch (classifyStartError(e)) {
+    case 'paused':
+      return PAUSED_FAILURE;
+    case 'refused':
+      return REFUSED_FAILURE;
+    default:
+      return { error: errorMessage(e, 'Something went wrong. Please try again.'), errorCode: errorCode(e), retryable: true };
+  }
+}
+
+/** A price lookup that failed: a refusal becomes the shared copy, anything else passes through. */
+export const estimateError = (e: unknown): Error => (isRouteRefused(e) ? new Error(CANT_PAY_WITH_TOKEN) : (e as Error));
+
+/**
+ * The terminal state for a swap the server will not take a hash for: it may
+ * still be mining and reach the merchant, so she must not pay again, and only
+ * support can settle it — with the payment's reference.
+ */
+export const unconfirmedCopy = (paymentId: string): string =>
+  `We couldn't confirm this payment with our server. Your payment may still go through, so please don't pay again. `
+  + `Contact support and quote payment reference ${paymentId}.`;
+
+/** The hold on a crypto payment could not be read from this phone: held to be safe, with a way out. */
+export const HOLD_UNREADABLE =
+  "We couldn't check whether a payment of yours is already under way, so this one is on hold to be safe. Don't pay again — tap Continue payment to check again.";
+
+/**
+ * A direct order still waiting for her deposit (nothing says it left: no claim,
+ * no hold): what is left to send, and what leaving it does. Leaving takes none
+ * of her money, but it does not free the payment: a lapsed order's empty deposit
+ * address proves nothing (Paycrest sweeps them), so the server holds the payment
+ * for support and then fails it. Hence the store's new link, not "try again".
+ */
+export function depositStillToSendCopy(
+  order: Pick<PaycrestOrder, 'tokenAmount' | 'token' | 'chain' | 'validUntil'>,
+  now: number,
+): { body: string; leave: string } {
+  const chain = MAINNET_CHAINS[order.chain as ChainKey]?.name ?? order.chain;
+  const what = order.tokenAmount ? `${order.tokenAmount} ${order.token}` : order.token;
+  const minutes = order.validUntil ? Math.floor((new Date(order.validUntil).getTime() - now) / 60_000) : NaN;
+  const closes = minutes >= 1 ? ` in about ${minutes} minute${minutes === 1 ? '' : 's'}` : '';
+  return {
+    body: `${what} on ${chain} still needs to leave your wallet to finish this payment.`,
+    leave: `Rather not? Leave it — none of your money is taken. Once the order closes${closes}, this payment can't be finished, so ask the store for a new payment link.`,
+  };
+}
+
+/**
+ * The payment's order and its status, both of the SAME order. The attempt's
+ * own order wins for the id (it is the one this phone is moving); its status
+ * comes from the checkout the screen re-reads every 5 s when that is the same
+ * order — fresher than the attempt's snapshot — and never from another order.
+ */
+export function linkedOrder(
+  pay: { order?: Pick<PaycrestOrder, 'id' | 'status'> },
+  checkout: Pick<PayCheckout, 'orderId' | 'orderStatus'>,
+): { id?: string; status?: PaycrestOrder['status'] } {
+  const id = pay.order?.id ?? checkout.orderId;
+  if (!id) return {};
+  if (id === checkout.orderId && checkout.orderStatus) return { id, status: checkout.orderStatus };
+  return { id, status: pay.order?.id === id ? pay.order.status : undefined };
+}

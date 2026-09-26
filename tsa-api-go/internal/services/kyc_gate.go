@@ -85,6 +85,25 @@ func (kycLegalNameMissingError) Is(target error) bool { return target == ErrKYCV
 // call this. Refusing an exit traps value the user already holds, which is a
 // worse failure than refusing an entry.
 func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUID) error {
+	verified, legalName, err := verifiedIdentity(ctx, db, userID)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return ErrKYCVerificationRequired
+	}
+	if legalName == "" {
+		return ErrKYCLegalNameMissing
+	}
+	return nil
+}
+
+// verifiedIdentity is the one read of whether a user is KYC-verified and the
+// legal name their verification captured. The name is returned only while the
+// status is verified: a rejected or expired verification keeps the name it read
+// on the row, and that name vouches for nothing any more. A user with no row,
+// or a NULL column, is simply not verified — never an error.
+func verifiedIdentity(ctx context.Context, db *gorm.DB, userID uuid.UUID) (verified bool, legalName string, err error) {
 	var row struct {
 		VerificationStatus sql.NullString
 		VerifiedLegalName  sql.NullString
@@ -98,15 +117,22 @@ func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUI
 		Limit(1).
 		Scan(&row)
 	if res.Error != nil {
-		return res.Error
+		return false, "", res.Error
 	}
 	if res.RowsAffected == 0 || row.VerificationStatus.String != models.VerificationStatusVerified {
-		return ErrKYCVerificationRequired
+		return false, "", nil
 	}
-	if strings.TrimSpace(row.VerifiedLegalName.String) == "" {
-		return ErrKYCLegalNameMissing
-	}
-	return nil
+	return true, strings.TrimSpace(row.VerifiedLegalName.String), nil
+}
+
+// IsKYCVerified reports whether a user's identity verification has passed,
+// through the one read of it (verifiedIdentity). It asks only about the status:
+// a gate that is not about attributing a payer's money — applying for TSA Pay —
+// has no use for the legal-name clause requireVerifiedForMoneyIn adds. A missing
+// user is simply not verified.
+func IsKYCVerified(ctx context.Context, db *gorm.DB, userID uuid.UUID) (bool, error) {
+	verified, _, err := verifiedIdentity(ctx, db, userID)
+	return verified, err
 }
 
 // RequireVerifiedForMoneyIn exposes the gate to handlers that must refuse

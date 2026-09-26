@@ -16,6 +16,7 @@ import (
 
 // AdminAuth is a Gin middleware that authenticates requests using JWT Bearer
 // tokens and additionally verifies that the user has an 'admin' or 'merchant' role.
+// A web session's token is refused as no token at all, however it is sent.
 func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -44,7 +45,7 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
+		if !ok || isWebToken(claims) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Please authenticate",
@@ -126,7 +127,7 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 // AdminAuth above admits merchants and support — they need it for inventory,
 // support tickets, etc. P2P dispute resolution moves user funds and writes
 // to the audit ledger, so it needs the tighter gate. Apply this AFTER
-// AdminAuth has populated the user.
+// AdminAuth has populated the user. A web session is refused as unauthenticated.
 func RequireP2PAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		val, ok := c.Get("user")
@@ -147,6 +148,12 @@ func RequireP2PAdmin() gin.HandlerFunc {
 				return
 			}
 		}
+		if IsWebSession(c) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false, "message": "Please authenticate",
+			})
+			return
+		}
 		if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"success": false, "message": "P2P admin role required",
@@ -161,7 +168,8 @@ func RequireP2PAdmin() gin.HandlerFunc {
 // plain admin must not perform even though they can view the surrounding page —
 // e.g. IT order money-movements (reverse/settle/credit/reprice), where the
 // admin UI shows the list to any admin but restricts the action buttons.
-// Layer AFTER an auth middleware that sets the "user" context value.
+// Layer AFTER an auth middleware that sets the "user" context value. A web
+// session is refused as unauthenticated.
 func RequireSuperAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		val, ok := c.Get("user")
@@ -181,6 +189,12 @@ func RequireSuperAdmin() gin.HandlerFunc {
 				})
 				return
 			}
+		}
+		if IsWebSession(c) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false, "message": "Please authenticate",
+			})
+			return
 		}
 		if user.Role != models.RoleSuperAdmin {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{

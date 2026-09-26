@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	chainreg "github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -25,9 +28,13 @@ import (
 // to check before then) — but still well before chains/orders/quotes are
 // ever consulted, so a misconfigured key is caught even when the rest of the
 // wiring is unavailable.
-func buildRampConversion(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) (*services.Treasury, *services.ConversionOrchestrator) {
+func buildRampConversion(cfg *config.Config, chains *services.BlockchainService, reg *chainreg.Registry, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) (*services.Treasury, *services.ConversionOrchestrator) {
 	if !cfg.RampConversionBuyEnabled {
 		log.Printf("[ramp-conversion] dormant: RAMP_CONVERSION_BUY is off")
+		return nil, nil
+	}
+	if orders != nil && !orders.ConversionPriced() {
+		log.Printf("[ramp-conversion] dormant: conversion is not priced (need 0 < B < F)")
 		return nil, nil
 	}
 	if cfg.RampTreasuryPrivateKey == "" {
@@ -133,12 +140,11 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	lifiQuoteClient := services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
 	statusClient := services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey)
 
-	transfers := map[string]services.ERC20TransferVerifier{}
-	for chain := range lanes {
-		if client := chains.ClientForChain(chain); client != nil {
-			transfers[chain] = services.NewLogTransferVerifier(client.Client)
-		}
-	}
+	// Every configured EVM chain gets a verifier, not only treasury lanes: a
+	// converted buy's DESTINATION can be a chain the treasury never sources
+	// funds from directly, and that destination still needs an on-chain
+	// delivery proof.
+	transfers := rampTransferVerifiers(chains, evmChainKeys(cfg))
 
 	orchestrator := services.NewConversionOrchestrator(
 		config.DB, treasury, &services.GormRampLegStore{DB: config.DB},
@@ -146,6 +152,12 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		cfg.RampConversionRetryWindow, cfg.RampConversionStallWindow, cfg.RampConversionLegCeiling,
 		cfg.RampConversionMaxShortfallUSD, nil,
 	)
+	wireSolanaDestinations(reg, orchestrator, quotes)
+
+	// The same B the quote and order services are priced on (pushed there by
+	// SetRoundTripBudgetBps in main.go): a route is executed against exactly
+	// the budget the order was quoted on, never a second copy of the number.
+	orchestrator.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
 
 	if quotes != nil {
 		quotes.SetLiFiQuoter(lifiQuoteClient)
@@ -172,6 +184,34 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	log.Printf("[ramp-conversion] enabled treasury=%s chains=%v caps=order:$%.0f/chain:$%.0f",
 		addr, cfg.RampTreasuryChains, cfg.RampTreasuryMaxInflightUSDPerOrder, cfg.RampTreasuryMaxInflightUSDPerChain)
 	return treasury, orchestrator
+}
+
+// evmChainKeys is every EVM chain key the registry knows on mainnet, sorted:
+// the list rampTransferVerifiers is built from wherever an on-chain delivery
+// proof is needed, so no caller keeps a list of its own that could drift.
+func evmChainKeys(cfg *config.Config) []string {
+	keys := make([]string, 0, len(cfg.Networks["mainnet"].Chains))
+	for chain := range cfg.Networks["mainnet"].Chains {
+		keys = append(keys, chain)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// rampTransferVerifiers builds an ERC20TransferVerifier for every chain key
+// that has a client, skipping any that don't (e.g. a non-EVM chain, or a
+// chain whose RPC client failed to connect at boot). Called with every
+// configured EVM chain key — not only treasury lanes — so any ERC-20
+// destination a converted buy can be sent to still gets an on-chain delivery
+// proof, even one the treasury never sources funds from directly.
+func rampTransferVerifiers(chains *services.BlockchainService, keys []string) map[string]services.ERC20TransferVerifier {
+	transfers := map[string]services.ERC20TransferVerifier{}
+	for _, chain := range keys {
+		if client := chains.ClientForChain(chain); client != nil {
+			transfers[chain] = services.NewLogTransferVerifier(client.Client)
+		}
+	}
+	return transfers
 }
 
 // rampTreasuryLaneFloor validates and parses a chain's native-balance floor.
@@ -251,7 +291,11 @@ func rampTreasuryCaps(cfg *config.Config) (caps services.TreasuryCaps, ok bool) 
 // out of main() so the exact gate that keeps the flag-off path from
 // registering anything is itself unit-testable, independent of the full
 // server boot.
-func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services.Treasury, orch *services.ConversionOrchestrator) {
+//
+// keptUSDCAlert is cfg.RampTreasuryKeptUSDCAlert: only this (treasury)
+// registration of the monitor carries it — the gas sponsor lane has no
+// kept-token float to sweep.
+func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services.Treasury, orch *services.ConversionOrchestrator, keptUSDCAlert float64) {
 	if orch == nil {
 		return
 	}
@@ -259,5 +303,172 @@ func registerRampConversionWorkers(scheduler *jobs.Scheduler, treasury *services
 	// Registered a second time under its own metric prefix, alongside the
 	// gas sponsor's own float-monitor registration: same job type, two
 	// independent floats to watch.
-	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute))
+	scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_treasury", treasury, 10*time.Minute).WithKeptUSDCAlert(keptUSDCAlert))
 }
+
+// rampNonEVMNetwork is which registry network a converted buy's non-EVM
+// destination is read from. Mainnet, to match the EVM side: the treasury's
+// own chains come from cfg.Networks["mainnet"], so proving a landing against
+// a testnet client would prove it on a chain no converted buy ever runs on.
+const rampNonEVMNetwork = "mainnet"
+
+// solanaLandingProver is the one thing the converted-buy state machine needs
+// from a Solana chain client: what a transaction actually credited an address.
+// Declared here (rather than exported from services) so the wiring, not the
+// state machine, owns the type assertion against the registry's ChainClient.
+type solanaLandingProver interface {
+	ReceivedBy(ctx context.Context, txHash, owner, mint string) (*big.Int, error)
+}
+
+// wireSolanaDestinations turns Solana on as a converted-buy destination, or
+// leaves it off with a line saying why. Both halves come from the SAME client:
+// the address check that decides whether a Solana asset can be quoted at all,
+// and the balance read that proves its landing. Wiring one without the other
+// would either offer a destination nothing can prove, or refuse to quote a
+// chain we can in fact settle on.
+func wireSolanaDestinations(reg *chainreg.Registry, orch *services.ConversionOrchestrator, quotes *services.PaycrestQuoteService) {
+	if reg == nil {
+		log.Printf("[ramp-conversion] solana destinations dormant: no non-EVM chain registry")
+		return
+	}
+	client, ok := reg.ForKey(rampNonEVMNetwork, "solana")
+	if !ok {
+		log.Printf("[ramp-conversion] solana destinations dormant: no %s solana chain client", rampNonEVMNetwork)
+		return
+	}
+	land, ok := client.(solanaLandingProver)
+	if !ok {
+		// A Solana client that cannot prove a landing must not make Solana
+		// quotable either — an order it can never settle is worse than one
+		// that was never offered.
+		log.Printf("[ramp-conversion] ALERT ramp_solana_no_landing_proof_total=1 — solana destinations stay off")
+		return
+	}
+	orch.SetSolanaLanding(land)
+	if quotes != nil {
+		quotes.SetSolanaValidator(client.ValidateAddress)
+	}
+	log.Printf("[ramp-conversion] solana destinations enabled (landing proof + address validation from the %s solana client)", rampNonEVMNetwork)
+}
+
+// buildRampSellQuoter wires the sell half of the round trip (design §3.2), or
+// returns nil — dormant, route never registered — with a line saying why.
+//
+// It needs no treasury: a swapped sell runs entirely in the user's own
+// wallet, and the only money we spend is gas. What it does need is the same
+// budget B the buy is priced from, so an unpriced conversion leaves it off.
+func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) *services.RampSellQuoter {
+	if !cfg.RampConversionSellEnabled {
+		log.Printf("[ramp-sell] dormant: RAMP_CONVERSION_SELL is off")
+		return nil
+	}
+	if orders == nil || !orders.ConversionPriced() {
+		log.Printf("[ramp-sell] dormant: conversion is not priced (need 0 < B < F)")
+		return nil
+	}
+	if chains == nil || quotes == nil {
+		log.Printf("[ramp-sell] dormant: no chain registry or quote service")
+		return nil
+	}
+	q := services.NewRampSellQuoter(
+		services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
+		quotes, chains, cfg.RampRoundTripBudgetBps, orders.ConvertedFeePercent(), cfg.RampSellSponsoredGasUSD)
+	// Whether she can pay her own gas on the source chain decides whether a
+	// top-up is priced into the budget. A chain we cannot read is treated as
+	// "she has none" by the quoter, which over-prices rather than strands.
+	q.SetNativeBalanceReader(func(_ context.Context, chainID int64, addr string) (*big.Int, bool) {
+		client, _ := chains.ClientForChainID(chainID)
+		if client == nil {
+			return nil, false
+		}
+		bal, err := client.GetBalance(addr)
+		if err != nil {
+			return nil, false
+		}
+		return bal, true
+	})
+	// Where her signature may go: the same pinned, boot-validated router
+	// allowlist the treasury signs against. A chain missing from it cannot be
+	// sold from — refused at the quote, never handed over unchecked.
+	q.SetRouterAllowlist(rampSellRouters(cfg, chains))
+	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
+		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
+	return q
+}
+
+// rampSellRouters is the router allowlist per source chain id, for the sell
+// quote. It is the treasury's own list (RAMP_TREASURY_ROUTERS_<CHAIN>, LiFi's
+// pinned diamond by default) run through the treasury's own validation, so a
+// chain the treasury would refuse to route through is refused for her too.
+func rampSellRouters(cfg *config.Config, chains *services.BlockchainService) map[int64][]common.Address {
+	out := map[int64][]common.Address{}
+	for chain := range cfg.RampTreasuryRouters {
+		id, ok := chains.ChainIDForName(chain)
+		if !ok {
+			continue
+		}
+		routers, skipReason := rampTreasuryLaneRouters(cfg, chain, rampLaneTokens(chains, chain))
+		if skipReason != "" {
+			log.Printf("[ramp-sell] ALERT ramp_sell_routers_skipped_total=1 chain=%s reason=%s — no sells from it", chain, skipReason)
+			continue
+		}
+		out[id] = routers
+	}
+	return out
+}
+
+// buildSellIntentService builds the service that drives one swapped sale to
+// its payout. Nil (and no routes) whenever the sell quote itself is off, or
+// when the two things a §5.3 binding cannot be checked without are missing:
+// a Base RPC to prove the landing, and the settlement token's own address.
+//
+// The USDC address is read with the SAME call the quoter uses
+// (TokenAddressForChainID on the settlement chain id), not a chain-key
+// lookup: the binding compares what landed against this string, so a second
+// spelling of "USDC on Base" would make every honest sale unclaimable.
+func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
+	chains *services.BlockchainService, orders *services.PaycrestOrderService,
+	fees *services.FeeDistributionService) *services.SellIntentService {
+	if quoter == nil || chains == nil || orders == nil {
+		return nil
+	}
+	base := chains.ClientForChain(rampSettlementChainKey)
+	if base == nil {
+		log.Printf("[ramp-sell] sales dormant: no %s client to prove a landing on", rampSettlementChainKey)
+		return nil
+	}
+	usdc := chains.TokenAddressForChainID(rampSettlementChainID, rampSettlementToken)
+	if usdc == "" {
+		log.Printf("[ramp-sell] sales dormant: no %s address configured on chain %d",
+			rampSettlementToken, rampSettlementChainID)
+		return nil
+	}
+	svc := services.NewSellIntentService(config.DB, quoter,
+		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
+		services.NewLogTransferVerifier(base.Client), orders, usdc, time.Now)
+	if fees != nil {
+		svc.SetFeeService(fees)
+	}
+	// The same address the binding compares against, read through the same
+	// Base client: a pay intent's "use my wallet balance too" consent checks it.
+	svc.SetUSDCBalanceReader(func(_ context.Context, wallet string) (*big.Int, error) {
+		return base.GetTokenBalance(usdc, wallet)
+	})
+	// A pay checkout's crypto route delivers a token to a merchant on ANY
+	// configured chain, and only that chain's own receipt can say the merchant
+	// was credited. The same verifier map converted buys prove their deliveries
+	// with — not a second one — and the registry's mainnet id -> key resolver (a testnet id must not resolve).
+	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.MainnetChainNameForID)
+	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
+	return svc
+}
+
+// rampSettlementChainID / rampSettlementChainKey / rampSettlementToken name
+// the one leg a swapped sell lands on, mirroring the service constants
+// (design §3.2). Stated here rather than exported from services because they
+// are wiring, not behaviour.
+const (
+	rampSettlementChainID  int64 = 8453
+	rampSettlementChainKey       = "base"
+	rampSettlementToken          = "USDC"
+)

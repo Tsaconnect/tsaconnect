@@ -22,6 +22,35 @@ func ConnectDB(cfg *Config) (*gorm.DB, error) {
 	return db, nil
 }
 
+// migratePayMerchantLiveSwitch adds pay_merchants.live_enabled and, in the same
+// transaction, switches on every merchant that already holds a live key, so the
+// per-merchant live switch breaks no integration that was live before it existed.
+//
+// It runs only while the column is missing. That is what makes the backfill
+// one-time: once a super admin has switched a merchant off, no later migrate may
+// switch it back on. Adding the column here, before AutoMigrate, rather than
+// letting AutoMigrate add it keeps the column and its backfill atomic — a failed
+// backfill leaves the column absent and the next migrate retries both. A fresh
+// database has no table yet; AutoMigrate creates it with the column and there is
+// nothing to backfill.
+func migratePayMerchantLiveSwitch(db *gorm.DB) error {
+	m := db.Migrator()
+	if !m.HasTable(&models.PayMerchant{}) || m.HasColumn(&models.PayMerchant{}, "live_enabled") {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Migrator().AddColumn(&models.PayMerchant{}, "LiveEnabled"); err != nil {
+			return err
+		}
+		res := tx.Exec(`UPDATE pay_merchants SET live_enabled = true WHERE live_key_hash IS NOT NULL`)
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("[Migrate] pay_merchants.live_enabled added; %d merchant(s) holding a live key kept live", res.RowsAffected)
+		return nil
+	})
+}
+
 func AutoMigrate() error {
 	// fee_configs gained a nullable chain_id column and the unique index moved
 	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
@@ -39,6 +68,10 @@ func AutoMigrate() error {
 	// new rows, so drop it explicitly before AutoMigrate adds the 4-col one.
 	// Existing rows keep direction = NULL and resolve exactly as before.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token_chain")
+
+	if err := migratePayMerchantLiveSwitch(DB); err != nil {
+		return fmt.Errorf("pay_merchants.live_enabled: %w", err)
+	}
 
 	if err := DB.AutoMigrate(
 		// Currency registry — the sole validation authority for any currency
@@ -158,6 +191,12 @@ func AutoMigrate() error {
 		// Paycrest order. (order_id, kind, attempt) unique index is the
 		// once-per-attempt rule.
 		&models.RampLeg{},
+		// Ramp conversion (sell) — one row per sale in progress: which swap
+		// was hers, which quote it executed, whether the payout is open. The
+		// unique index on swap_tx_hash is the "one swap backs one sale" rule;
+		// the partial one-open-intent index is built below (AutoMigrate
+		// cannot express a WHERE clause).
+		&models.RampSellIntent{},
 		// IT trading agreement — append-only acceptance audit trail.
 		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
@@ -180,6 +219,15 @@ func AutoMigrate() error {
 		// and cached normalized tx history.
 		&models.WalletAddress{},
 		&models.WalletActivity{},
+		// TSA Pay (merchant payments)
+		&models.PayMerchant{},
+		&models.PayPayment{},
+		&models.PayWebhookDelivery{},
+		&models.PayAuditEvent{},
+		&models.PayOwnerAction{},
+		// TSA Connect web sign-in
+		&models.WebSigninChallenge{},
+		&models.WebTrustedBrowser{},
 	); err != nil {
 		return err
 	}
@@ -476,6 +524,35 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_pending_refund
 	    ON ramp_legs (order_id)
 	    WHERE kind = 'refund' AND status = 'pending'`)
+
+	// Ramp sell — "at most one sale in progress per user" (design §5.2). Keep
+	// the WHERE list equal to models.SellIntentOpenStatuses. The
+	// service checks it first, but the check is read-then-insert: two taps on
+	// one button both read "none open" and both insert. Only a constraint can
+	// refuse the second, and a second open intent means two swaps pointed at
+	// one payout. Partial over the open statuses only, so finishing or
+	// abandoning a sale frees her to start another. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open
+	    ON ramp_sell_intents (user_id)
+	    WHERE status IN ('swapping','swapped','ordering')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale. The one-open-sale check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
+	}
+
+	// TSA Pay — "at most one open sale per PAYMENT" (a plain index on
+	// pay_payment_id is not unique: a payment can legitimately have several
+	// sell_intent rows over its life, one per attempt, so a bare unique index
+	// would refuse a retry after the first attempt was abandoned or failed).
+	// The user-level index above already caps her to one open sale system-wide
+	// while a payment is locked to her, so this is a second line of defence,
+	// not the only one — the same posture as every other partial index here:
+	// a two-open-intents-for-one-payment bug is exactly a second swap able to
+	// pay (or be mistaken for) the same attempt. Partial over the open
+	// statuses and non-null pay_payment_id only. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open_per_payment
+	    ON ramp_sell_intents (pay_payment_id)
+	    WHERE pay_payment_id IS NOT NULL AND status IN ('swapping','swapped','ordering')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open_per_payment: %v — a TSA Pay payment most likely holds MORE THAN ONE open sale. The one-open-sale check still runs in the service; migrate again once the duplicates are resolved.", err)
+	}
 
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot

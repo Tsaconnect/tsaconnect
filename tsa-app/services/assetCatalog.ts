@@ -271,16 +271,24 @@ const preferenceRank = (chainId: number) => {
 
 /**
  * The networks this side may offer for `asset`, best first: the paying side
- * only where this device can sign, and only where `allow` agrees; held
+ * only where this device can sign, and only where `allow` agrees (it sees the
+ * network's token too, so a screen can hide one coin on one network; a search
+ * that has not found a token yet asks about the chain alone); held
  * networks first (largest balance first), then the preference order.
+ *
+ * In `holdingsOnly` mode only the networks she actually holds it on are offered
+ * — picking a coin she holds and then a network where she has nothing is not a
+ * holding.
  */
 export function networksForSide(
   asset: Asset,
   side: PickerSide,
-  allow?: (chainId: number) => boolean,
+  allow?: (chainId: number, token?: LiFiToken) => boolean,
+  holdingsOnly = false,
 ): AssetNetwork[] {
   return asset.networks
-    .filter(n => (side === 'to' || isSignableSourceChain(n.chainId)) && (!allow || allow(n.chainId)))
+    .filter(n => (side === 'to' || isSignableSourceChain(n.chainId)) && (!allow || allow(n.chainId, n.token))
+      && (!holdingsOnly || (n.balance ?? 0) > 0))
     .sort((a, b) => {
       const aHeld = (a.balance ?? 0) > 0;
       const bHeld = (b.balance ?? 0) > 0;
@@ -311,6 +319,11 @@ export interface AssetSection {
  * in MAJOR_COIN_KEYS order, then other coins the wallet holds. A coin appears
  * once, in the first section that has it. Coins with no network this side can
  * offer are left out.
+ *
+ * In `holdingsOnly` mode the list is what the wallet actually holds: a coin with
+ * no balance is left out of every section, whichever section it would sit in.
+ * Balances are already numbers here (hooks/useWalletHoldings parses the API's
+ * decimal strings once), so "positive" is a plain comparison.
  */
 export function buildSections({
   listed,
@@ -318,18 +331,22 @@ export function buildSections({
   held,
   side,
   allow,
+  holdingsOnly = false,
 }: {
   /** Coins the admin lists on Spot, with ALL their networks (grouped together with the majors). */
   listed: Asset[];
   majors: Asset[];
   held: Asset[];
   side: PickerSide;
-  allow?: (chainId: number) => boolean;
+  allow?: (chainId: number, token?: LiFiToken) => boolean;
+  /** Only coins the wallet holds a positive balance of. */
+  holdingsOnly?: boolean;
 }): AssetSection[] {
   const seen = new Set<string>();
   const usable = (list: Asset[]) =>
     list.filter(a => {
-      if (seen.has(a.key) || networksForSide(a, side, allow).length === 0) return false;
+      if (holdingsOnly && !(a.balance > 0)) return false;
+      if (seen.has(a.key) || networksForSide(a, side, allow, holdingsOnly).length === 0) return false;
       seen.add(a.key);
       return true;
     });

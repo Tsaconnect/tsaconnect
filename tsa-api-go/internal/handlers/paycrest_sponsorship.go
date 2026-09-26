@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -22,6 +23,7 @@ type rampSponsorshipPort interface {
 	Offer(ctx context.Context, user *models.User, orderID uuid.UUID) (services.SponsorshipOffer, error)
 	RelayAuthorization(ctx context.Context, user *models.User, orderID uuid.UUID, auth services.TransferAuthorization) (services.AuthorizationRelayResult, error)
 	TopUp(ctx context.Context, user *models.User, orderID uuid.UUID) (services.GasTopUpResult, error)
+	TopUpForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store services.IntentTopUpStore) (services.GasTopUpResult, error)
 }
 
 func (h *PaycrestHandler) WithSponsorship(s rampSponsorshipPort) *PaycrestHandler {
@@ -157,22 +159,42 @@ func sponsorshipError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrSponsorOrderState):
 		utils.ErrorResponse(c, http.StatusConflict, "This order is no longer waiting for your deposit.")
 	case errors.Is(err, services.ErrSponsorshipInProgress):
-		utils.ErrorResponse(c, http.StatusConflict, "Already sending. Check the order in a moment.")
+		// Coded: a relay for this order may already be on-chain, so the app must
+		// wait on the order — never offer to send it again — and it keys on this.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Already sending. Check the order in a moment.", sponsorshipInProgressCode)
 	case errors.Is(err, services.ErrAuthorizationWindow), errors.Is(err, services.ErrAuthorizationSignature):
 		utils.ErrorResponse(c, http.StatusBadRequest, "That approval has expired or could not be read. Tap send again.")
 	case errors.Is(err, services.ErrSimulationReverted):
 		utils.ErrorResponse(c, http.StatusBadRequest, "This transfer would fail on-chain. Check your balance and try again.")
+	// The sentinel's own sentence, never err.Error(): a wrapped error would carry its detail to the client.
 	case errors.Is(err, services.ErrTopUpUnusedCap):
-		utils.ErrorResponse(c, http.StatusTooManyRequests, err.Error())
+		utils.ErrorResponse(c, http.StatusTooManyRequests, services.ErrTopUpUnusedCap.Error())
+	case errors.Is(err, services.ErrTopUpDailyCap):
+		utils.ErrorResponse(c, http.StatusTooManyRequests, services.ErrTopUpDailyCap.Error())
 	case errors.Is(err, services.ErrTopUpUnconfirmed):
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, err.Error())
+		logSponsorshipFailure(c, http.StatusServiceUnavailable, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, services.ErrTopUpUnconfirmed.Error())
 	case errors.Is(err, services.ErrTopUpTooExpensive), errors.Is(err, services.ErrDailyCapExceeded),
 		errors.Is(err, services.ErrRelayerUnderfunded), errors.Is(err, services.ErrSimulationUnavailable),
 		errors.Is(err, services.ErrSponsorDomainMismatch):
+		logSponsorshipFailure(c, http.StatusServiceUnavailable, err)
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Covering the network fee is temporarily unavailable. Please try again shortly.")
 	case errors.Is(err, services.ErrTopUpFailed):
+		logSponsorshipFailure(c, http.StatusBadGateway, err)
 		utils.ErrorResponse(c, http.StatusBadGateway, "Sending gas failed. Please try again.")
 	default:
+		logSponsorshipFailure(c, http.StatusInternalServerError, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not cover the network fee right now. Please try again.")
 	}
+}
+
+// sponsorshipInProgressCode marks a 409 whose relay may already be on-chain.
+const sponsorshipInProgressCode = "sponsorship_in_progress"
+
+// logSponsorshipFailure records why the server, not the payer, refused: these
+// responses share one generic message, and several causes (an RPC error during
+// simulation among them) log nothing on their own. Redacted because RPC errors
+// can echo a keyed provider URL.
+func logSponsorshipFailure(c *gin.Context, status int, err error) {
+	log.Printf("[ramp-sponsor] %s %s -> %d: %s", c.Request.Method, c.FullPath(), status, services.RedactAlertText(err.Error()))
 }

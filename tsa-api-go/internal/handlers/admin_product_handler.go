@@ -22,19 +22,12 @@ import (
 // moderation and the merchant's own edit path on the same query, so a bug in
 // one becomes a bug in the other.
 
-// isAdminUser reports whether u may moderate listings. The routes are already
-// adminAuth-gated; this is the in-handler guard for the paths that can also be
-// reached by a non-admin (e.g. GetProductByID's owner bypass).
-func isAdminUser(u *models.User) bool {
-	return u != nil && (u.Role == models.RoleAdmin || u.Role == models.RoleSuperAdmin)
-}
-
 // requireAdmin returns the acting admin, writing the error response itself when
 // the caller is not one. The routes are already adminAuth-gated; this keeps the
 // handlers safe on their own so a route-registration slip cannot expose them.
 func requireAdmin(c *gin.Context) (*models.User, bool) {
 	admin := getUserFromContext(c)
-	if !isAdminUser(admin) {
+	if !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
 		return nil, false
 	}

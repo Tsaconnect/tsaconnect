@@ -1,11 +1,12 @@
 # AGENTS.md
 
-Three independent projects, no shared build:
+Four independent projects, no shared build:
 
 | Project | Stack | Entrypoint | Per-project doc |
 |---------|-------|-----------|-----------------|
 | `tsa-api-go/` | Go 1.24 + Gin + GORM/PostgreSQL | `cmd/server/main.go` | `tsa-api-go/CLAUDE.md` |
 | `tsa-app/` | React Native 0.81 + Expo 54 + expo-router v6 | `app/index.tsx` | `tsa-app/CLAUDE.md` |
+| `tsa-web/` | React 19 + Vite 7 + TypeScript + Tailwind 4 (web app, same origin as the API) | `src/main.tsx` | `tsa-web/README.md` |
 | `smart-contracts/` | Solidity 0.8.24 + Hardhat + OpenZeppelin (UUPS) | `contracts/` | — |
 
 ## Commands
@@ -21,6 +22,12 @@ go vet ./...                     # always after edits
 npx expo start                   # dev server (regenerates typed routes)
 npm test                         # jest --watchAll
 npm run lint                     # expo lint (ESLint)
+
+# Web (from tsa-web/)
+npm run dev                      # http://localhost:5174, proxies /api to the Go API on :5000
+npm test                         # vitest run
+npm run lint && npx tsc -b       # ESLint, types
+npm run e2e                      # Playwright against an in-browser mock API
 
 # Contracts (from smart-contracts/)
 npx hardhat compile

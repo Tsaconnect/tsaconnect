@@ -7,26 +7,28 @@ in `../CLAUDE.md`.
 
 ## Monorepo layout
 
-Three independent projects that together make up **TSA Connect**, a marketplace + multi-chain
+Four independent projects that together make up **TSA Connect**, a marketplace + multi-chain
 wallet + P2P crypto-trading platform:
 
 | Dir | Stack | Role | Deep docs |
 |-----|-------|------|-----------|
 | `tsa-api-go/` | Go 1.24 + Gin + GORM/PostgreSQL | REST + WebSocket backend, blockchain orchestration | `tsa-api-go/CLAUDE.md` |
 | `tsa-app/` | React Native 0.81 + Expo 54 + expo-router v6 | Mobile app (User / Merchant / Admin roles) | `tsa-app/CLAUDE.md` |
+| `tsa-web/` | React 19 + Vite 7 + Tailwind 4 | TSA Connect web app (Business / TSA Pay first), same origin as the API | `tsa-web/README.md` |
 | `smart-contracts/` | Solidity 0.8.24 + Hardhat + OpenZeppelin (UUPS) | Escrow contracts on Sonic / BSC | — |
 
 There is no top-level build, package manager, or workspace tooling — each project is built and
 run on its own. **Read the per-project `CLAUDE.md` for commands, file layout, and conventions
 specific to that project.** This file covers only the cross-cutting picture.
 
-## How the three projects connect
+## How the four projects connect
 
-The app calls the Go API over HTTPS/WebSocket; the Go API is the only thing that talks to the
+The app calls the Go API over HTTPS/WebSocket, and `tsa-web` calls it over HTTPS on the same
+origin (cookie session); the Go API is the only thing that talks to the
 smart contracts (RPC reads + building unsigned txs). Contracts are deployed once to Sonic/BSC;
 the API's config hardcodes the deployed proxy addresses per network.
 
-The **P2P trading feature** is the clearest example of all three working together — read
+The **P2P trading feature** is the clearest example of the app, the API and the contracts working together — read
 `docs/p2p-smoke-test.md` for the full end-to-end flow. In short:
 
 - **`P2PEscrow.sol`** is a pool-based escrow. A seller `deposit()`s once into a per-(seller,token)

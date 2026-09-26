@@ -20,6 +20,12 @@
 // carries a countdown, and starting one against a route the wallet cannot
 // cover burns that window on a sale that was never going to complete. See
 // services/paycrestDeposit.ts#checkFunding.
+//
+// Any other coin she holds on an EVM chain (design §5) is a SWAPPED sell: she
+// picks it from her holdings and SwappedSellForm takes over the amount — one
+// "~₦" estimate, one Sell tap. useSwappedSell does the rest — swap to USDC on
+// Base in her own wallet, open the payout for what landed, send it — and
+// "Finish your sale" picks up a sale that stopped part-way.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -39,6 +45,14 @@ import {
   Text,
 } from '@/components/ui';
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
+import {
+  SWAPPED_STAGE_LABELS,
+  SwappedSellForm,
+  SwappedSellStatus,
+  type SwapPick,
+} from '@/components/paycrest/SwappedSellForm';
+import AssetPicker from '@/components/assets/AssetPicker';
+import { canCancelSale, useSwappedSell } from '@/hooks/useSwappedSell';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
 import { rampCurrencyLabel, useRampCurrency } from '@/hooks/useRampCurrency';
@@ -57,8 +71,10 @@ import {
   cancelOrder,
   claimPayment,
   createSell,
+  getOrder,
   getPayoutInstitutions,
   getQuote,
+  isTerminal,
   PaycrestError,
   type PaycrestOrder,
   type PaycrestQuote,
@@ -67,10 +83,22 @@ import {
 } from '@/services/paycrestApi';
 import {
   balanceOf,
+  CHAIN_LABELS,
   checkFunding,
-  sendSponsoredPaycrestDeposit,
+  DEPOSIT_OUTCOME_UNKNOWN,
+  fmtTokenAmount,
+  fundingMessage,
+  nativeBalanceFor,
   type FundingCheck,
 } from '@/services/paycrestDeposit';
+import {
+  depositMayBeOut,
+  depositOutcomeUnknown,
+  sameDeposit,
+  sendHeldDeposit,
+  stillToSend,
+} from '@/services/depositGuard';
+import { clearHold, depositHoldKey } from '@/services/payHold';
 import {
   getSponsoredRoutes,
   getSponsorshipOffer,
@@ -82,25 +110,23 @@ import {
   normalizeWalletBalances,
   type WalletBalanceWithChain,
 } from '@/services/walletApi';
-import { CHAINS, type ChainKey } from '@/constants/chains';
+import { getSwappedSellState, type SellIntent } from '@/services/paycrestSellSwap';
+import { isBtcLiFiChain, isNonEVMLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, type LiFiToken } from '@/services/lifi';
+import { CHAINS, getChainByChainId, type ChainKey } from '@/constants/chains';
 
 const QUOTE_DEBOUNCE_MS = 450;
 /** Warn while the user can still act. An on-chain send needs gas, a signature
  *  and confirmations — more steps than a bank transfer, so warn earlier. */
 const EXPIRY_WARNING_SECONDS = 420;
 
-const CHAIN_LABELS: Record<string, string> = {
-  base: 'Base',
-  polygon: 'Polygon',
-  bsc: 'BNB Smart Chain',
-  arbitrum: 'Arbitrum',
-  ethereum: 'Ethereum',
-};
+const CHECK_FAILED = 'Could not check on your order, so nothing was sent. Please try again.';
+const OTHER_WALLET =
+  'This sale was started from a different wallet, so nothing was sent. Switch back to that wallet to send it.';
+const ORDER_CHANGED =
+  'This order changed since you opened it, so nothing was sent. Check the amount and address above before sending.';
 
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
-const fmtTokenAmount = (n: number) =>
-  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 2 : 6 });
 
 /** The trailing half of a route's sublabel — silent when the route is fine. */
 function routeNote(check: FundingCheck): string {
@@ -110,34 +136,26 @@ function routeNote(check: FundingCheck): string {
   return ' · not supported in-app';
 }
 
-/** The wallet's gas balance on a chain, or null when balances aren't known. */
-function nativeBalanceFor(chain: string, balances: WalletBalanceWithChain[] | null): number | null {
-  const symbol = CHAINS[chain as ChainKey]?.nativeCurrency.symbol;
-  if (!symbol || !balances) return null;
-  const row = balances.find((b) => b.chainKey === chain && b.symbol === symbol);
-  const n = Number(row?.balance ?? 0);
-  return Number.isFinite(n) ? n : 0;
-}
+/** Stablecoins this screen already sells directly — only consulted before
+ *  any quote has said which routes are live. */
+const DIRECT_TOKENS = new Set(['USDC', 'USDT']);
 
-/** The same verdict as a full sentence, for the form. */
-function fundingMessage(check: FundingCheck): string | null {
-  if (check.ok) return null;
-  const chain = CHAIN_LABELS[check.chain] ?? check.chain;
-  if (check.reason === 'short-token') {
-    return `You have ${check.have} ${check.token} on ${chain} — this sale needs ${check.need}. Pick another network or top up.`;
-  }
-  if (check.reason === 'no-gas') {
-    return `You have no ${check.nativeSymbol} on ${chain} to pay the network fee. Pick another network or add some ${check.nativeSymbol}.`;
-  }
-  return `This app cannot send on ${chain} yet — choose another network, or send from an external wallet.`;
+function networkName(chainId: number): string {
+  if (isSolanaLiFiChain(chainId)) return 'Solana';
+  if (isBtcLiFiChain(chainId)) return 'Bitcoin';
+  if (isSuiLiFiChain(chainId)) return 'Sui';
+  return getChainByChainId(chainId)?.name ?? 'another network';
 }
 
 export default function PaycrestSellScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
-  const { asset, currency: currencyParam } = useLocalSearchParams<{
+  const { asset, currency: currencyParam, openPicker } = useLocalSearchParams<{
     asset?: string;
     currency?: string;
+    /** Set by the IT hub's "Any other token" row — see the identical param on
+     *  the buy screen. */
+    openPicker?: string;
   }>();
 
   // The currency this order settles in — NOT the display currency. See
@@ -196,6 +214,10 @@ export default function PaycrestSellScreen() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Whether this order's deposit may already have left this phone (its hold —
+  // services/depositGuard). null until read: neither Send nor Cancel is offered
+  // on a guess.
+  const [held, setHeld] = useState<boolean | null>(null);
 
   // Every chain's balances in one request — the un-filtered endpoint already
   // fans out server-side, so annotating all five routes costs no more than
@@ -203,6 +225,27 @@ export default function PaycrestSellScreen() {
   const [balances, setBalances] = useState<WalletBalanceWithChain[] | null>(null);
 
   const quoteSeq = useRef(0);
+
+  // ── What she is selling ────────────────────────────────────────────────
+  // Nothing picked, or a stablecoin a live route takes: today's direct sale.
+  // Anything else she holds: the swapped sale.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  useEffect(() => {
+    // Visibility still passes through swappedSellOn below
+    // (visible={swappedSellOn && pickerOpen}), so this cannot show the picker
+    // before the capability check itself says the feature is live.
+    if (openPicker) setPickerOpen(true);
+  }, [openPicker]);
+  const [directPick, setDirectPick] = useState<{ chain: string; token: string } | null>(null);
+  const [swapPick, setSwapPick] = useState<SwapPick | null>(null);
+  const swapped = useSwappedSell();
+  const swappedBusy = !!SWAPPED_STAGE_LABELS[swapped.stage];
+  const [openIntent, setOpenIntent] = useState<SellIntent | null>(null);
+  // Whether this server sells any token by swapping it first. Off until the
+  // server says so: with RAMP_CONVERSION_SELL unset every non-stable pick
+  // would fail at its quote, so the screen stays the stablecoin sale it was.
+  const [swappedSellOn, setSwappedSellOn] = useState(false);
+  const [cancellingSale, setCancellingSale] = useState(false);
 
   // An offramp expires exactly like an onramp does. Sending after the window
   // closes puts crypto at a provider address for an order that no longer
@@ -265,6 +308,20 @@ export default function PaycrestSellScreen() {
     };
   }, [order?.id]);
 
+  // A deposit that may be out (a lost answer, a kill after the broadcast — the
+  // swapped sale's own send lands here too) is waited on, never offered again.
+  useEffect(() => {
+    setHeld(null);
+    if (!order?.id) return;
+    let cancelled = false;
+    depositMayBeOut(depositHoldKey(order.id), order.id).then((h) => {
+      if (!cancelled) setHeld(h);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.id]);
+
   // The server returns the list already in the right vocabulary for this
   // currency, so there is nothing to intersect. Outside Nigeria there is no
   // local list to intersect WITH. The previously selected bank is cleared on
@@ -297,10 +354,13 @@ export default function PaycrestSellScreen() {
         setQuoteError(null);
         setVenue((prev) => {
           const kept = prev && q.venues.find((v) => venueId(v) === venueId(prev));
+          const picked = directPick
+            ? q.venues.find((v) => v.chain === directPick.chain && v.token.toUpperCase() === directPick.token)
+            : undefined;
           const preferred = asset
             ? q.venues.find((v) => v.token.toUpperCase() === asset.toUpperCase())
             : undefined;
-          return kept ?? preferred ?? q.best ?? null;
+          return kept ?? picked ?? preferred ?? q.best ?? null;
         });
       } catch (e) {
         if (seq !== quoteSeq.current) return;
@@ -314,7 +374,112 @@ export default function PaycrestSellScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, asset, currencyCode]);
+  }, [amount, asset, currencyCode, directPick]);
+
+  // ── The swapped sale ───────────────────────────────────────────────────
+
+  // Her unfinished sale, if any, so "Finish your sale" can pick it up — and
+  // whether swapped sells exist at all: a 404 means the routes are not
+  // registered, so no swapped-sell UI is shown. Any other failure proves
+  // nothing either way and leaves the last answer standing.
+  const refreshOpenIntent = useCallback(() => {
+    getSwappedSellState()
+      .then(({ enabled, intent }) => {
+        setSwappedSellOn(enabled);
+        setOpenIntent(intent);
+      })
+      .catch((e) => {
+        // A server that answered at all has the routes; only 404 says it doesn't.
+        if (e instanceof PaycrestError) setSwappedSellOn(true);
+        setOpenIntent(null);
+      });
+  }, []);
+  useEffect(() => {
+    if (address) refreshOpenIntent();
+  }, [address, refreshOpenIntent]);
+
+  const onPick = useCallback(
+    (token: LiFiToken, chainId: number) => {
+      if (!address) return;
+      const chain = getChainByChainId(chainId)?.key;
+      const sym = token.symbol.toUpperCase();
+      // A route Paycrest fills directly stays today's sale. Before anything is
+      // typed there is no quote to ask, so the stablecoins it sells stand in.
+      const liveVenue = chain
+        ? quote?.venues.find((v) => v.chain === chain && v.token.toUpperCase() === sym)
+        : undefined;
+      const direct = quote?.venues.length
+        ? !!liveVenue
+        : !!chain && DIRECT_TOKENS.has(sym) && chain in CHAIN_LABELS;
+      if (chain && direct) {
+        setSwapPick(null);
+        setDirectPick({ chain, token: sym });
+        if (liveVenue) setVenue(liveVenue);
+        setPickerOpen(false);
+        return;
+      }
+      // Nothing can sell from Solana, Bitcoin or Sui yet (the server refuses
+      // them: nothing can check a route signed there). Said here, at the
+      // pick, rather than as a failed quote later.
+      if (isNonEVMLiFiChain(chainId)) {
+        Alert.alert(
+          'Not supported yet',
+          `Selling ${token.symbol} from ${networkName(chainId)} isn't supported yet. Pick a coin on another network.`,
+        );
+        return;
+      }
+      // An EVM sale is sent from her EVM wallet itself.
+      setDirectPick(null);
+      setSwapPick({ token: { ...token, chainId }, chainId, sourceAddress: address });
+      setPickerOpen(false);
+    },
+    [address, quote],
+  );
+
+  const onSellSwapped = useCallback(
+    (amount: string) => {
+      if (!swapPick || !address || !bank) return;
+      swapped.start({
+        sourceChainId: swapPick.chainId,
+        token: swapPick.token,
+        amount,
+        walletAddress: address,
+        sourceAddress: swapPick.sourceAddress,
+        bank: { code: bank.code, account: accountNo, name: accountName || undefined },
+        currency: currencyCode,
+      });
+    },
+    [swapPick, address, bank, accountNo, accountName, currencyCode, swapped],
+  );
+
+  // A sale stuck before its payout opened (a lost reply, or a swap hash that
+  // someone else recorded first) would otherwise block every new sale.
+  const confirmCancelSale = useCallback(() => {
+    if (!openIntent) return;
+    const intent = openIntent;
+    Alert.alert(
+      'Cancel this sale?',
+      'If your swap still arrives, the USDC will be in your wallet on Base and you can sell it here as USDC.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Cancel sale',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingSale(true);
+            try {
+              await swapped.cancel(intent);
+            } catch (e) {
+              Alert.alert('Could not cancel', e instanceof Error && e.message ? e.message : 'Please try again.');
+            } finally {
+              setCancellingSale(false);
+              refreshOpenIntent();
+            }
+          },
+        },
+      ],
+    );
+  }, [openIntent, swapped, refreshOpenIntent]);
 
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
@@ -402,24 +567,89 @@ export default function PaycrestSellScreen() {
     router.replace(to as never);
   }, []);
 
+  /** The order screen, where an order that must not be sent to (again) is followed.
+   *  `unconfirmed`: a send whose outcome is unknown — it says so, and offers no way to send. */
+  const showOrder = useCallback((id: string, unconfirmed = false) => {
+    router.replace(
+      (unconfirmed ? `/wallet/paycrest/order/${id}?unconfirmed=1` : `/wallet/paycrest/order/${id}`) as never,
+    );
+  }, []);
+
+  // A finished swapped sale lands on the order screen like a direct one. One
+  // that stopped after its payout opened drops into this screen's own deposit
+  // view, whose Send retries the step that failed.
+  useEffect(() => {
+    if (swapped.stage === 'done' && swapped.order) {
+      const to = swapped.depositTx
+        ? `/wallet/paycrest/order/${swapped.order.id}?sentTx=${encodeURIComponent(swapped.depositTx)}`
+        : `/wallet/paycrest/order/${swapped.order.id}`;
+      router.replace(to as never);
+      return;
+    }
+    if (swapped.stage === 'failed') {
+      if (swapped.order?.status === 'awaiting_deposit') setOrder(swapped.order);
+      refreshOpenIntent();
+    }
+  }, [swapped.stage, swapped.order, swapped.depositTx, refreshOpenIntent]);
+
+  /**
+   * Send the deposit — once. The order is read first and sent only while it
+   * still waits on a deposit nothing says left (not reported, not claimed, no
+   * hold on this phone), from the wallet that opened it, for exactly what is on
+   * screen. A self-paid send is held under the order right before it is
+   * broadcast (services/depositGuard); only a refusal the server answered lifts
+   * that, and an unanswered send is followed on the order screen, never offered
+   * again.
+   */
   const onSend = useCallback(async () => {
     if (!order || !address) return;
     setSending(true);
     setSendError(null);
+    const holdKey = depositHoldKey(order.id);
     try {
-      const txHash = await sendSponsoredPaycrestDeposit(
-        order,
-        address,
-        nativeBalanceFor(order.chain, balances),
-      );
-      goToOrder(order.id, txHash);
-    } catch (e) {
-      // Server and RPC messages here are written to be read — show them.
-      setSendError(e instanceof Error ? e.message : 'Could not send. Please try again.');
+      let fresh: PaycrestOrder;
+      try {
+        fresh = await getOrder(order.id);
+      } catch (e) {
+        setSendError(e instanceof PaycrestError ? e.message : CHECK_FAILED);
+        return;
+      }
+      if (!(await stillToSend(holdKey, fresh))) {
+        // Reported, claimed, possibly sent from here, or moved on: the order
+        // screen says which. Nothing is sent again.
+        if (isTerminal(fresh.status)) await clearHold(holdKey);
+        showOrder(fresh.id);
+        return;
+      }
+      if (fresh.walletAddress?.toLowerCase() !== address.toLowerCase()) {
+        setOrder(fresh);
+        setSendError(OTHER_WALLET);
+        return;
+      }
+      if (!sameDeposit(order, fresh)) {
+        // Shown as it is now; a further tap sends what she then sees.
+        setOrder(fresh);
+        setSendError(ORDER_CHANGED);
+        return;
+      }
+      let txHash: string;
+      try {
+        txHash = await sendHeldDeposit(fresh, address, nativeBalanceFor(fresh.chain, balances), holdKey);
+      } catch (e) {
+        if (depositOutcomeUnknown(e)) {
+          showOrder(fresh.id, true);
+          return;
+        }
+        // A refusal the server answered: nothing left the wallet. Server and
+        // RPC messages here are written to be read — show them.
+        setSendError(e instanceof Error ? e.message : 'Could not send. Please try again.');
+        return;
+      }
+      goToOrder(fresh.id, txHash);
     } finally {
       setSending(false);
     }
-  }, [order, address, balances, goToOrder]);
+  }, [order, address, balances, goToOrder, showOrder]);
 
   // Backing out here is the common case — the user got to the deposit screen
   // and changed their mind. Without this the abandoned order holds the
@@ -492,13 +722,17 @@ export default function PaycrestSellScreen() {
     !funding.ok &&
     (funding.reason === 'short-token' || funding.reason === 'no-gas');
 
-  const ready =
-    !!venue &&
-    !!address &&
-    !!bank &&
-    isValidAccountNumber(currencyCode, accountNo, destKind) &&
-    (!requiresNameCheck || !!accountName) &&
-    !fundingBlocks;
+  // Where the naira goes is chosen and checked — the same for either sale.
+  const payoutReady =
+    !!bank && isValidAccountNumber(currencyCode, accountNo, destKind) && (!requiresNameCheck || !!accountName);
+
+  const ready = !!venue && !!address && payoutReady && !fundingBlocks;
+
+  const sellingLabel = swapPick
+    ? `${swapPick.token.symbol} on ${networkName(swapPick.chainId)}`
+    : directPick
+      ? `${directPick.token} on ${CHAIN_LABELS[directPick.chain] ?? directPick.chain}`
+      : undefined;
 
   // ── Deposit instructions ────────────────────────────────────────────────
   if (order) {
@@ -584,70 +818,88 @@ export default function PaycrestSellScreen() {
             />
           )}
 
-          {/* The wallet holding the key is right here — asking the user to
-              copy an address into another app was never the shorter path. */}
-          {canSendInApp && (
-            <Button
-              title={`Send ${order.tokenAmount} ${order.token}`}
-              onPress={onSend}
-              loading={sending}
-              disabled={expired || sending}
-              fullWidth
-            />
-          )}
-
-          {canSendInApp && orderSponsored && (
-            <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
-              Network fee covered — you don&apos;t need{' '}
-              {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
-            </Text>
-          )}
-
-          {/* Kept for funds that live somewhere else — an exchange, a hardware
-              wallet, MetaMask. Collapsed rather than removed, and out of the
-              way entirely while we are sending from this device. */}
-          {(manualOpen || !canSendInApp) && !sending ? (
-            <Card>
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-                To this address
+          {/* This order's deposit may already have left this phone: nothing
+              here may send it again, show where to send it, or cancel the
+              order under it. It is followed on the order screen. */}
+          {held ? (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                Your deposit may already be on its way
               </Text>
-              {/* Full address, never truncated: a send to a mistyped address is
-                  irreversible and nothing on our side can recover it. */}
-              <CopyableField value={order.depositAddress ?? ''} />
-              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-                Send only {order.token} on {CHAIN_LABELS[order.chain] ?? order.chain}. A different
-                token, or the right token on a different network, will not reach the provider.
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                {DEPOSIT_OUTCOME_UNKNOWN}
               </Text>
-              <View style={{ marginTop: spacing.md }}>
-                <Button
-                  title="I've sent it"
-                  variant={canSendInApp ? 'secondary' : 'primary'}
-                  onPress={() => goToOrder(order.id)}
-                  disabled={expired}
-                  fullWidth
-                />
-              </View>
+              <Button title="Check on this order" onPress={() => showOrder(order.id, true)} fullWidth />
             </Card>
           ) : (
-            <Button
-              title="Send from another wallet"
-              variant="ghost"
-              onPress={() => setManualOpen(true)}
-              fullWidth
-            />
-          )}
+            <>
+              {/* The wallet holding the key is right here — asking the user to
+                  copy an address into another app was never the shorter path. */}
+              {canSendInApp && (
+                <Button
+                  title={`Send ${order.tokenAmount} ${order.token}`}
+                  onPress={onSend}
+                  loading={sending}
+                  disabled={expired || sending || held === null}
+                  fullWidth
+                />
+              )}
 
-          {/* Hidden once the user says they have sent — cancelling then would
-              claim the order is dead while their deposit is still in flight. */}
-          {!order.paymentClaimedAt && (
-            <Button
-              title="Cancel this sale"
-              variant="ghost"
-              onPress={confirmCancel}
-              loading={cancelling}
-              disabled={cancelling}
-              fullWidth
-            />
+              {canSendInApp && orderSponsored && (
+                <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+                  Network fee covered — you don&apos;t need{' '}
+                  {CHAINS[order.chain as ChainKey]?.nativeCurrency.symbol ?? 'gas'} for this sale.
+                </Text>
+              )}
+
+              {/* Kept for funds that live somewhere else — an exchange, a hardware
+                  wallet, MetaMask. Collapsed rather than removed, and out of the
+                  way entirely while we are sending from this device. */}
+              {(manualOpen || !canSendInApp) && !sending ? (
+                <Card>
+                  <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
+                    To this address
+                  </Text>
+                  {/* Full address, never truncated: a send to a mistyped address is
+                      irreversible and nothing on our side can recover it. */}
+                  <CopyableField value={order.depositAddress ?? ''} />
+                  <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+                    Send only {order.token} on {CHAIN_LABELS[order.chain] ?? order.chain}. A different
+                    token, or the right token on a different network, will not reach the provider.
+                  </Text>
+                  <View style={{ marginTop: spacing.md }}>
+                    <Button
+                      title="I've sent it"
+                      variant={canSendInApp ? 'secondary' : 'primary'}
+                      onPress={() => goToOrder(order.id)}
+                      disabled={expired}
+                      fullWidth
+                    />
+                  </View>
+                </Card>
+              ) : (
+                <Button
+                  title="Send from another wallet"
+                  variant="ghost"
+                  onPress={() => setManualOpen(true)}
+                  fullWidth
+                />
+              )}
+
+              {/* Hidden once the user says they have sent — cancelling then would
+                  claim the order is dead while their deposit is still in flight —
+                  and until the hold is known to be clear. */}
+              {!order.paymentClaimedAt && held === false && (
+                <Button
+                  title="Cancel this sale"
+                  variant="ghost"
+                  onPress={confirmCancel}
+                  loading={cancelling}
+                  disabled={cancelling}
+                  fullWidth
+                />
+              )}
+            </>
           )}
         </ScrollView>
       </SafeAreaView>
@@ -655,6 +907,55 @@ export default function PaycrestSellScreen() {
   }
 
   // ── Amount, route, payout ───────────────────────────────────────────────
+
+  // Where the naira goes — the same for either kind of sale.
+  const payoutFields = (
+    <>
+      <SelectRow
+        label="Pay into"
+        value={bank?.name}
+        placeholder="Choose a destination"
+        onPress={() => setBankOpen(true)}
+      />
+      {/* The field follows the DESTINATION, not the currency: pick MTN in
+          Uganda and this asks for a phone number, pick a bank and it asks
+          for an account number. */}
+      <Input
+        label={accountFieldLabel(destKind)}
+        value={accountNo}
+        onChangeText={(v: string) =>
+          setAccountNo(sanitizeAccountNumberInput(currencyCode, v, destKind))
+        }
+        keyboardType={
+          isDigitsOnlyAccountField(currencyCode, destKind) ? 'number-pad' : 'default'
+        }
+        placeholder={accountFieldPlaceholder(currencyCode, destKind)}
+        maxLength={accountNumberMaxLength(currencyCode, destKind)}
+      />
+      {requiresNameCheck && resolving && (
+        <Text variant="caption" style={{ color: colors.textMuted }}>
+          Checking account…
+        </Text>
+      )}
+      {requiresNameCheck && !!accountName && (
+        <Text variant="bodySm" weight="600" style={{ color: colors.success }}>
+          {accountName}
+        </Text>
+      )}
+      {requiresNameCheck &&
+        !resolving &&
+        !accountName &&
+        isValidAccountNumber(currencyCode, accountNo, destKind) &&
+        bank && (
+          <Text variant="caption" style={{ color: colors.danger }}>
+            We could not verify that account. Check the number and bank.
+          </Text>
+        )}
+    </>
+  );
+
+  const swappedStatus = <SwappedSellStatus stage={swapped.stage} error={swapped.error} />;
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <KeyboardAvoidingView
@@ -672,136 +973,164 @@ export default function PaycrestSellScreen() {
             />
           )}
 
-          <AmountInput
-            label="You receive"
-            value={amount}
-            onChangeText={setAmount}
-            symbol={symbol}
-            symbolPosition="prefix"
-            autoFocus
-            // Hidden while re-quoting: the previous route's figure belongs to
-            // the previous amount.
-            helper={
-              venue && !quoting
-                ? `≈ ${fmtTokenAmount(venue.tokenAmount)} ${venue.token}`
-                : undefined
-            }
-          />
-
-          {quoting && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-              <Spinner size="small" />
-              <Text variant="caption" style={{ color: colors.textMuted }}>
-                Checking live rates…
+          {/* A TSA Pay payment's sale belongs to its payment: finished or closed from here, it could be
+              written off under a swap still being signed there — and that swap pays the merchant. */}
+          {openIntent?.payPaymentId && !swappedBusy && (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                A payment of yours is still going through
               </Text>
-            </View>
-          )}
-
-          {quoteError && !quoting && (
-            <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
-              <Text variant="bodySm" style={{ color: colors.warning }}>
-                {quoteError}
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Open its payment link to check on it. You can start a new sale once it has finished.
               </Text>
             </Card>
           )}
 
-          {quote && quote.venues.length > 0 && (
-            <View style={{ gap: spacing.xs }}>
-              <SelectRow
-                label="You send"
-                value={venue ? venueLabel(venue) : undefined}
-                placeholder="Choose a network"
-                onPress={() => setRouteOpen(true)}
-              />
-              {/* Unknown balances show nothing rather than a misleading 0. */}
-              {venue && venueBalance !== null && (
-                <Text
-                  variant="caption"
-                  style={{
-                    color: venueBalance < venue.tokenAmount ? colors.warning : colors.textMuted,
-                    textAlign: 'right',
-                  }}
-                >
-                  Balance: {fmtTokenAmount(venueBalance)} {venue.token}
-                </Text>
-              )}
-            </View>
-          )}
-
-          <SelectRow
-            label="Pay into"
-            value={bank?.name}
-            placeholder="Choose a destination"
-            onPress={() => setBankOpen(true)}
-          />
-          {/* The field follows the DESTINATION, not the currency: pick MTN in
-              Uganda and this asks for a phone number, pick a bank and it asks
-              for an account number. */}
-          <Input
-            label={accountFieldLabel(destKind)}
-            value={accountNo}
-            onChangeText={(v: string) =>
-              setAccountNo(sanitizeAccountNumberInput(currencyCode, v, destKind))
-            }
-            keyboardType={
-              isDigitsOnlyAccountField(currencyCode, destKind) ? 'number-pad' : 'default'
-            }
-            placeholder={accountFieldPlaceholder(currencyCode, destKind)}
-            maxLength={accountNumberMaxLength(currencyCode, destKind)}
-          />
-          {requiresNameCheck && resolving && (
-            <Text variant="caption" style={{ color: colors.textMuted }}>
-              Checking account…
-            </Text>
-          )}
-          {requiresNameCheck && !!accountName && (
-            <Text variant="bodySm" weight="600" style={{ color: colors.success }}>
-              {accountName}
-            </Text>
-          )}
-          {requiresNameCheck &&
-            !resolving &&
-            !accountName &&
-            isValidAccountNumber(currencyCode, accountNo, destKind) &&
-            bank && (
-              <Text variant="caption" style={{ color: colors.danger }}>
-                We could not verify that account. Check the number and bank.
+          {openIntent && !openIntent.payPaymentId && !swappedBusy && (
+            <Card style={{ borderWidth: 1, borderColor: colors.warning, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                You have a sale that didn&apos;t finish
               </Text>
-            )}
-
-          {venue && (
-            <SummaryCard>
-              <SummaryRow
-                label="You send"
-                value={`${venue.tokenAmount.toFixed(6)} ${venue.token}`}
-              />
-              <SummaryRow label="Rate" value={`${symbol}${venue.rate} / ${venue.token}`} />
-            </SummaryCard>
-          )}
-
-          {funding && !funding.ok && (
-            <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
-              <Text variant="bodySm" style={{ color: colors.warning }}>
-                {fundingMessage(funding)}
+              <Text variant="caption" style={{ color: colors.textMuted }}>
+                Nothing is lost. Tap below and we&apos;ll carry on from where it stopped.
               </Text>
-              {fundingBlocks && (
+              <Button
+                title="Finish your sale"
+                onPress={() => swapped.resume(openIntent, address ?? undefined)}
+                fullWidth
+              />
+              {canCancelSale(openIntent) && (
                 <Button
-                  title="I'll send from another wallet"
+                  title="Cancel this sale"
                   variant="ghost"
-                  size="sm"
-                  onPress={() => setFundingOverride(true)}
+                  onPress={confirmCancelSale}
+                  loading={cancellingSale}
+                  disabled={cancellingSale}
+                  fullWidth
                 />
               )}
             </Card>
           )}
 
-          <Button
-            title="Continue"
-            onPress={onConfirm}
-            loading={creating}
-            disabled={!ready || quoting || creating}
-            fullWidth
-          />
+          {swappedSellOn && (
+            <SelectRow
+              label="What are you selling?"
+              value={sellingLabel}
+              placeholder="USDC or USDT"
+              onPress={() => setPickerOpen(true)}
+            />
+          )}
+
+          {swapPick ? (
+            <SwappedSellForm
+              pick={swapPick}
+              walletAddress={address}
+              currency={currencyCode}
+              symbol={symbol}
+              payoutReady={payoutReady}
+              busy={swappedBusy}
+              payout={payoutFields}
+              status={swappedStatus}
+              onSell={onSellSwapped}
+            />
+          ) : (
+            <>
+              <AmountInput
+                label="You receive"
+                value={amount}
+                onChangeText={setAmount}
+                symbol={symbol}
+                symbolPosition="prefix"
+                autoFocus
+                // Hidden while re-quoting: the previous route's figure belongs to
+                // the previous amount.
+                helper={
+                  venue && !quoting
+                    ? `≈ ${fmtTokenAmount(venue.tokenAmount)} ${venue.token}`
+                    : undefined
+                }
+              />
+
+              {quoting && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Spinner size="small" />
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    Checking live rates…
+                  </Text>
+                </View>
+              )}
+
+              {quoteError && !quoting && (
+                <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
+                  <Text variant="bodySm" style={{ color: colors.warning }}>
+                    {quoteError}
+                  </Text>
+                </Card>
+              )}
+
+              {quote && quote.venues.length > 0 && (
+                <View style={{ gap: spacing.xs }}>
+                  <SelectRow
+                    label="You send"
+                    value={venue ? venueLabel(venue) : undefined}
+                    placeholder="Choose a network"
+                    onPress={() => setRouteOpen(true)}
+                  />
+                  {/* Unknown balances show nothing rather than a misleading 0. */}
+                  {venue && venueBalance !== null && (
+                    <Text
+                      variant="caption"
+                      style={{
+                        color: venueBalance < venue.tokenAmount ? colors.warning : colors.textMuted,
+                        textAlign: 'right',
+                      }}
+                    >
+                      Balance: {fmtTokenAmount(venueBalance)} {venue.token}
+                    </Text>
+                  )}
+                </View>
+              )}
+
+              {payoutFields}
+
+              {venue && (
+                <SummaryCard>
+                  <SummaryRow
+                    label="You send"
+                    value={`${venue.tokenAmount.toFixed(6)} ${venue.token}`}
+                  />
+                  <SummaryRow label="Rate" value={`${symbol}${venue.rate} / ${venue.token}`} />
+                </SummaryCard>
+              )}
+
+              {funding && !funding.ok && (
+                <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
+                  <Text variant="bodySm" style={{ color: colors.warning }}>
+                    {fundingMessage(funding)}
+                  </Text>
+                  {fundingBlocks && (
+                    <Button
+                      title="I'll send from another wallet"
+                      variant="ghost"
+                      size="sm"
+                      onPress={() => setFundingOverride(true)}
+                    />
+                  )}
+                </Card>
+              )}
+
+              {/* A sale resumed from "Finish your sale" runs here, with no pick. */}
+              {swappedStatus}
+
+              <Button
+                title="Continue"
+                onPress={onConfirm}
+                loading={creating}
+                disabled={!ready || quoting || creating || swappedBusy}
+                fullWidth
+              />
+            </>
+          )}
           {walletReady && !address && (
             <Text variant="caption" style={{ color: colors.textMuted }}>
               Connect a wallet on this device first — you send the crypto yourself.
@@ -810,6 +1139,14 @@ export default function PaycrestSellScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      <AssetPicker
+        visible={swappedSellOn && pickerOpen}
+        side="from"
+        holdingsOnly
+        title="Choose what to sell"
+        onSelect={onPick}
+        onClose={() => setPickerOpen(false)}
+      />
       <PickerSheet
         visible={currencyPickerOpen}
         onClose={() => setCurrencyPickerOpen(false)}

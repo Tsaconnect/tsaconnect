@@ -145,7 +145,7 @@ func (h *Handlers) spotRequireAdmin(c *gin.Context) *models.User {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return nil
 	}
-	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+	if !hasAdminPrivilege(c, user) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return nil
 	}

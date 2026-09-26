@@ -320,3 +320,43 @@ func FuzzNameMatchAccountName(f *testing.F) {
 		}
 	})
 }
+
+func TestAccountNameWithin(t *testing.T) {
+	for _, tc := range []struct {
+		ref, bank string
+		want      bool
+	}{
+		{"Ada Chioma Obi", "OBI ADA CHIOMA", true}, // same name, any order
+		{"Ada Chioma Obi", "ADA OBI", true},        // the bank dropped a middle name
+		{"Ada Obi", "ADA CHIOMA OBI", false},       // the bank's name is LONGER: someone else can be
+		{"Ada Chioma Obi", "ADA", false},           // one word proves nothing
+		{"Ada Obi", "ADA OKAFOR", false},           // a shared first name is not a match
+		{"Ada", "ADA", true},                       // a one-word name matches only itself
+		{"", "ADA OBI", false},                     // no reference name at all
+		{"Ada Obi", "", false},                     // the bank resolved nothing
+	} {
+		if got := AccountNameWithin(tc.ref, tc.bank); got != tc.want {
+			t.Errorf("AccountNameWithin(%q, %q) = %v, want %v", tc.ref, tc.bank, got, tc.want)
+		}
+	}
+}
+
+func TestBusinessAccountNameWithin(t *testing.T) {
+	for _, tc := range []struct {
+		business, bank string
+		want           bool
+	}{
+		{"Sky Air Limited", "SKY AIR LTD", true},              // suffix spellings
+		{"Sky Air", "SKY AIR LTD", true},                      // a suffix the registration left off
+		{"SKY-AIR NIG. LTD", "Sky Air Nig Ltd", true},         // punctuation
+		{"Sky Air Nigeria Ltd", "SKY AIR", true},              // the bank printed a shorter trading name
+		{"Sky Air Ltd", "SKY AIR CARGO LTD", false},           // a longer name containing ours: an impostor
+		{"Sky Air", "SKY AIR EMEKA NWOSU ENTERPRISES", false}, // ditto
+		{"Sky Air Ltd", "SKY AIRWAYS LTD", false},             // a different name
+		{"Sky Air Limited", "LIMITED", false},                 // only a suffix
+	} {
+		if got := BusinessAccountNameWithin(tc.business, tc.bank); got != tc.want {
+			t.Errorf("BusinessAccountNameWithin(%q, %q) = %v, want %v", tc.business, tc.bank, got, tc.want)
+		}
+	}
+}

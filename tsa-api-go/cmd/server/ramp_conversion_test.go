@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -57,7 +59,7 @@ func TestBuildRampConversion_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
 	cfg.RampSponsorPrivateKey = testKeyA
 	cfg.RampConversionBuyEnabled = true
 	cfg.RampTreasuryPrivateKey = testKeyA
-	if !refusesToStart(t, func() { buildRampConversion(cfg, nil, nil, nil) }) {
+	if !refusesToStart(t, func() { buildRampConversion(cfg, nil, nil, nil, nil) }) {
 		t.Fatal("a shared treasury key must refuse to start")
 	}
 }
@@ -85,7 +87,7 @@ func TestBuildRampConversion_DormantWithoutTheFlag(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RampConversionBuyEnabled = false
 	cfg.RampTreasuryPrivateKey = testKeyB
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
+	treasury, orch := buildRampConversion(cfg, nil, nil, nil, nil)
 	if treasury != nil || orch != nil {
 		t.Fatal("off means dormant")
 	}
@@ -99,10 +101,10 @@ func TestBuildRampConversion_DormantWithoutTheFlagRegistersNoWorkers(t *testing.
 	cfg := testConfig(t)
 	cfg.RampConversionBuyEnabled = false
 	cfg.RampTreasuryPrivateKey = testKeyB
-	treasury, orch := buildRampConversion(cfg, nil, nil, nil)
+	treasury, orch := buildRampConversion(cfg, nil, nil, nil, nil)
 
 	scheduler := jobs.NewScheduler()
-	registerRampConversionWorkers(scheduler, treasury, orch)
+	registerRampConversionWorkers(scheduler, treasury, orch, 500)
 	if got := scheduler.Count(); got != 0 {
 		t.Fatalf("flag off must register zero workers, got %d", got)
 	}
@@ -110,7 +112,7 @@ func TestBuildRampConversion_DormantWithoutTheFlagRegistersNoWorkers(t *testing.
 
 func TestRegisterRampConversionWorkers_NilOrchestratorRegistersNothing(t *testing.T) {
 	scheduler := jobs.NewScheduler()
-	registerRampConversionWorkers(scheduler, nil, nil)
+	registerRampConversionWorkers(scheduler, nil, nil, 500)
 	if got := scheduler.Count(); got != 0 {
 		t.Fatalf("a nil orchestrator must register zero workers, got %d", got)
 	}
@@ -122,7 +124,7 @@ func TestRegisterRampConversionWorkers_NilOrchestratorRegistersNothing(t *testin
 //
 // This tests rampTreasuryCaps DIRECTLY rather than through
 // buildRampConversion: a version of this test that called
-// buildRampConversion(cfg, nil, nil, nil) and asserted a nil/nil return would
+// buildRampConversion(cfg, nil, nil, nil, nil) and asserted a nil/nil return would
 // be vacuous, because the pre-existing `if chains == nil` guard immediately
 // after the caps check returns that exact same (nil, nil) regardless of
 // whether the caps check ever ran. Asserting on rampTreasuryCaps' own return
@@ -224,5 +226,82 @@ func TestRampTreasuryLaneRouters_SkipsTheZeroAddress(t *testing.T) {
 	cfg.RampTreasuryRouters = map[string][]string{"bsc": {"0x0000000000000000000000000000000000000000"}}
 	if routers, reason := rampTreasuryLaneRouters(cfg, "bsc", nil); reason == "" {
 		t.Fatalf("the zero address must skip the lane, got routers=%v", routers)
+	}
+}
+
+// testChainIDs gives testBlockchainService a stable numeric chain ID per
+// chain key, distinct enough that a client mixing them up would misroute.
+var testChainIDs = map[string]int64{"base": 8453, "bsc": 56}
+
+// testBlockchainService builds a *services.BlockchainService whose clients
+// point at a throwaway httptest JSON-RPC server, one per requested chain
+// key, on the mainnet network. Dialing an httptest server does no I/O by
+// itself (ethclient.DialContext only wires the transport), so this is safe
+// to use in any test that never actually calls the RPC.
+func testBlockchainService(t *testing.T, keys ...string) *services.BlockchainService {
+	t.Helper()
+	chains := map[string]config.ChainConfig{}
+	for _, key := range keys {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		id, ok := testChainIDs[key]
+		if !ok {
+			t.Fatalf("testBlockchainService: no chain id fixture for %q", key)
+		}
+		chains[key] = config.ChainConfig{RPCURL: srv.URL, ChainID: id}
+	}
+	cfg := &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: chains},
+	}}
+	return services.NewBlockchainService(cfg)
+}
+
+// TestRampTransferVerifiers_CoverChainsWithoutALane pins the Task 4 fix: a
+// converted buy's on-chain delivery proof must be available for every
+// configured EVM chain, not only chains with a treasury lane — a lane-less
+// chain can still be a converted-buy DESTINATION even though the treasury
+// never sources funds from it directly.
+func TestRampTransferVerifiers_CoverChainsWithoutALane(t *testing.T) {
+	chains := testBlockchainService(t, "base", "bsc") // clients for both; see below
+	got := rampTransferVerifiers(chains, []string{"base", "bsc", "nowhere"})
+	if got["bsc"] == nil || got["base"] == nil {
+		t.Fatalf("verifiers = %v; every chain with a client needs one", got)
+	}
+	if _, ok := got["nowhere"]; ok {
+		t.Fatal("a chain with no client gets no verifier")
+	}
+}
+
+// Every chain the registry knows gets a verifier, by the SAME list wherever it
+// is built — a converted buy's destination and a TSA Pay delivery's both need
+// an on-chain proof, on chains the treasury may never source from.
+func TestEVMChainKeys_IsEveryConfiguredMainnetChain(t *testing.T) {
+	cfg := &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: map[string]config.ChainConfig{"base": {}, "bsc": {}, "optimism": {}}},
+		"testnet": {Chains: map[string]config.ChainConfig{"sepolia": {}}},
+	}}
+	got := evmChainKeys(cfg)
+	if strings.Join(got, ",") != "base,bsc,optimism" {
+		t.Fatalf("keys = %v, want the mainnet chains, sorted", got)
+	}
+}
+
+// The sell quote's allowlist is the treasury's own, by chain id, through the
+// treasury's own validation: a chain whose list the treasury would refuse is
+// refused for a sell too (no entry at all, which the quoter treats as "no
+// sells from here"), and a chain the registry cannot name gets nothing.
+func TestRampSellRouters_ReusesTheTreasuryAllowlistByChainID(t *testing.T) {
+	const diamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
+	cfg := testConfig(t)
+	cfg.RampTreasuryRouters = map[string][]string{
+		"bsc":     {diamond},
+		"base":    {"0x1231DEB6f5749EF6cE6943a275A1D3E7486F4Ea"}, // a typo: skipped, not trusted
+		"nowhere": {diamond},
+	}
+	got := rampSellRouters(cfg, testBlockchainService(t, "base", "bsc"))
+	if len(got) != 1 || len(got[56]) != 1 || got[56][0] != common.HexToAddress(diamond) {
+		t.Fatalf("routers = %v, want only bsc (56) with the diamond", got)
 	}
 }

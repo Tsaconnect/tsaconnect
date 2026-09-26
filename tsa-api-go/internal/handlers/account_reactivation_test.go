@@ -48,7 +48,7 @@ func setupReactivationTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE refresh_tokens (
 			id TEXT PRIMARY KEY, user_id TEXT, token_hash TEXT,
-			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, created_at DATETIME
+			expires_at DATETIME, revoked INTEGER DEFAULT 0, device_info TEXT, web INTEGER NOT NULL DEFAULT 0, created_at DATETIME
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT
@@ -65,6 +65,10 @@ func setupReactivationTestDB(t *testing.T) *gorm.DB {
 		if err := db.Exec(sql).Error; err != nil {
 			t.Fatalf("exec %q: %v", sql, err)
 		}
+	}
+	// Account deletion's blocker check and erasure read the ramp tables.
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}, &models.WebTrustedBrowser{}); err != nil {
+		t.Fatalf("migrate ramp tables: %v", err)
 	}
 
 	prev := config.DB

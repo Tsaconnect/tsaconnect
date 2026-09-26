@@ -79,6 +79,8 @@ sudo visudo -cf $D/sudoers-tsa-deploy
 sudo install -m 440 -o root -g root $D/sudoers-tsa-deploy /etc/sudoers.d/tsa-deploy
 
 sudo install -m 644 $D/nginx-tsa-api-upstream.conf /etc/nginx/conf.d/
+# Real client addresses behind Cloudflare (every per-IP rate limit depends on it).
+sudo install -m 644 $D/nginx-cloudflare-realip.conf /etc/nginx/conf.d/cloudflare-realip.conf
 # Merge nginx-tsa-api-site.conf's location block into the existing server block.
 sudo nginx -t && sudo systemctl reload nginx
 
