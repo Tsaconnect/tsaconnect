@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -278,5 +279,61 @@ func TestCoinIDs_WalletTokensAreMappedAndMCGPIsNot(t *testing.T) {
 	// MCGP is not listed on CoinGecko; a mapping only produces upstream 404s.
 	if _, err := ps.coinID("MCGP"); !errors.Is(err, ErrUnknownSymbol) {
 		t.Errorf("MCGP: err = %v, want ErrUnknownSymbol", err)
+	}
+}
+
+func TestCoinGeckoKey_SentAsHeaderOnEveryCall(t *testing.T) {
+	cases := []struct {
+		name, key, wantHeader string
+		pro                   bool
+	}{
+		{"keyless", "", "", false},
+		{"demo", "CG-demo", "x-cg-demo-api-key", false},
+		{"pro", "CG-pro", "x-cg-pro-api-key", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got http.Header
+			var mu sync.Mutex
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got = r.Header.Clone()
+				mu.Unlock()
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/simple/price"):
+					w.Write([]byte(`{"tether":{"usd":1}}`))
+				default:
+					w.Write([]byte(`[[1000,1,1,1,1],[2000,1,1,1,1]]`))
+				}
+			}))
+			t.Cleanup(srv.Close)
+			ps := NewPriceService()
+			ps.UseAPIKey(tc.key, tc.pro)
+			if tc.pro && ps.baseURL != coinGeckoProBaseURL {
+				t.Errorf("pro key must use %s, got %s", coinGeckoProBaseURL, ps.baseURL)
+			}
+			ps.SetBaseURLForTest(srv.URL)
+
+			for _, call := range []func() error{
+				func() error { _, err := ps.GetPrices([]string{"USDT"}); return err },
+				func() error { _, err := ps.GetOHLC("ETH", 1); return err },
+			} {
+				if err := call(); err != nil {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				h := got
+				mu.Unlock()
+				for _, name := range []string{"x-cg-demo-api-key", "x-cg-pro-api-key"} {
+					want := ""
+					if name == tc.wantHeader {
+						want = tc.key
+					}
+					if h.Get(name) != want {
+						t.Errorf("%s = %q, want %q", name, h.Get(name), want)
+					}
+				}
+			}
+		})
 	}
 }

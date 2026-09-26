@@ -64,7 +64,10 @@ type Candle struct {
 // ErrUnknownSymbol means the symbol has no CoinGecko mapping, so there is no data to fetch.
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
-const coinGeckoBaseURL = "https://api.coingecko.com/api/v3"
+const (
+	coinGeckoBaseURL    = "https://api.coingecko.com/api/v3"
+	coinGeckoProBaseURL = "https://pro-api.coingecko.com/api/v3"
+)
 
 type cacheEntry struct {
 	data      map[string]PriceData
@@ -78,6 +81,11 @@ type PriceService struct {
 	httpClient *http.Client
 	cacheTTL   time.Duration
 	baseURL    string
+
+	// Without a key CoinGecko's public limit is shared by the server's IP and
+	// throttles after a burst. Demo keys use the public host; Pro keys their own.
+	apiKey       string
+	apiKeyHeader string
 
 	// Chart series (history, OHLC) change slowly and every token screen asks for
 	// them, so they are cached per symbol+range to stay inside CoinGecko's free tier.
@@ -180,7 +188,7 @@ func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error
 		ps.baseURL, strings.Join(ids, ","),
 	)
 
-	resp, err := ps.httpClient.Get(url)
+	resp, err := ps.get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch prices: %w", err)
 	}
@@ -237,6 +245,45 @@ func (ps *PriceService) SeedPriceForTest(symbol string, pd PriceData) {
 		data:      map[string]PriceData{symbol: pd},
 		expiresAt: time.Now().Add(24 * time.Hour),
 	})
+}
+
+// UseAPIKey sends key on every CoinGecko call. pro selects the paid host and
+// header; otherwise the key is a free Demo key. An empty key keeps the public API.
+func (ps *PriceService) UseAPIKey(key string, pro bool) {
+	if key == "" {
+		return
+	}
+	ps.apiKey = key
+	if pro {
+		ps.baseURL = coinGeckoProBaseURL
+		ps.apiKeyHeader = "x-cg-pro-api-key"
+	} else {
+		ps.apiKeyHeader = "x-cg-demo-api-key"
+	}
+}
+
+// Plan names the CoinGecko access in use, for the boot log. Never the key itself.
+func (ps *PriceService) Plan() string {
+	switch ps.apiKeyHeader {
+	case "x-cg-pro-api-key":
+		return "pro key"
+	case "x-cg-demo-api-key":
+		return "demo key"
+	default:
+		return "keyless (public rate limit)"
+	}
+}
+
+// get performs a CoinGecko GET with the API key header, when one is set.
+func (ps *PriceService) get(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if ps.apiKey != "" {
+		req.Header.Set(ps.apiKeyHeader, ps.apiKey)
+	}
+	return ps.httpClient.Do(req)
 }
 
 // SetBaseURLForTest points the service at a fake CoinGecko. Test-only helper.
@@ -349,7 +396,7 @@ func (ps *PriceService) coinID(symbol string) (string, error) {
 }
 
 func (ps *PriceService) getJSON(url string, out any) error {
-	resp, err := ps.httpClient.Get(url)
+	resp, err := ps.get(url)
 	if err != nil {
 		return err
 	}
@@ -405,7 +452,7 @@ func (ps *PriceService) GetMarketData(symbol string) (*MarketData, error) {
 		ps.baseURL, coinID,
 	)
 
-	resp, err := ps.httpClient.Get(url)
+	resp, err := ps.get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch market data: %w", err)
 	}

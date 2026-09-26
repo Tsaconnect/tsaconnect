@@ -466,7 +466,11 @@ type Config struct {
 	DiditCallbackURL   string
 
 	// LiFi swap aggregator
-	LiFiAPIKey        string
+	LiFiAPIKey string
+	// CoinGecko key (COINGECKO_API_KEY). COINGECKO_API_PLAN=pro selects the paid
+	// host; anything else treats the key as a free Demo key. Unset = public API.
+	CoinGeckoAPIKey   string
+	CoinGeckoPro      bool
 	LiFiIntegratorID  string
 	LiFiIntegratorFee string
 	// LiFiBaseURL is always resolved (never raw/empty) via ResolveLiFiBaseURL —
@@ -1011,6 +1015,8 @@ func Load() *Config {
 	// when both are set we collect a percentage cut, which requires a
 	// matching registration at portal.li.fi with a fee wallet configured.
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
+	cfg.CoinGeckoAPIKey = strings.TrimSpace(os.Getenv("COINGECKO_API_KEY"))
+	cfg.CoinGeckoPro = strings.EqualFold(strings.TrimSpace(os.Getenv("COINGECKO_API_PLAN")), "pro")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
 	// LIFI_BASE_URL exists so a local rehearsal can point every LiFi client at
