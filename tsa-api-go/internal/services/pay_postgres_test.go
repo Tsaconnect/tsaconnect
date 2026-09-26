@@ -119,7 +119,7 @@ func TestPayMerchantUpdate_ConcurrentSameVersionHasOneWinnerOnPostgres(t *testin
 		share := 10 + i
 		go func() {
 			defer wg.Done()
-			_, err := s.merchants.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &version, CustomerFeeSharePercent: &share})
+			_, _, err := s.merchants.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &version, CustomerFeeSharePercent: &share})
 			mu.Lock()
 			defer mu.Unlock()
 			switch {

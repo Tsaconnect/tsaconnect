@@ -342,7 +342,7 @@ func TestPayPayment_ExpireDueTouchesOnlyPendingPastExpiry(t *testing.T) {
 func TestPayPayment_SuspensionExpiresPendingPayments(t *testing.T) {
 	s, m := newPayPaymentRig(t)
 	p, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
-	if n, err := s.ExpirePendingForMerchant(context.Background(), m.ID); err != nil || n != 1 {
+	if n, err := s.ExpirePendingForMerchant(context.Background(), m.ID, "", "merchant suspended"); err != nil || n != 1 {
 		t.Fatalf("n %d err %v", n, err)
 	}
 	if got, _ := s.Get(context.Background(), p.ID); got.Status != models.PayStatusExpired {
@@ -788,5 +788,70 @@ func TestPayPayment_CheckoutViewKeepsAFailedPaymentsOrderAndReasonForItsPayer(t 
 	stranger := payUser(t, s, true)
 	if v, _ := s.CheckoutView(ctx, stranger, live.ID, true); v.OrderID != nil || v.OrderStatus != "" || v.FailureReason != "" {
 		t.Fatalf("stranger must see neither the order nor why it failed: %+v", v)
+	}
+}
+
+// Switching a merchant off must also stop live payments it created while it
+// was on: the API refuses its live key, and nobody may start paying one either.
+func TestPayPayment_AMerchantSwitchedOffCannotBePaidLive(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	in := payIn()
+	in.Reference = "LIVE-OFF"
+	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
+	test, _, _ := s.Create(context.Background(), m, models.PayModeTest, payIn())
+	s.db.Model(m).Update("live_enabled", false)
+
+	payer := payUser(t, s, true)
+	if v, _ := s.CheckoutView(context.Background(), payer, live.ID, true); v.Payable {
+		t.Fatalf("a switched-off merchant's live payment reads as payable: %+v", v)
+	}
+	if _, _, err := s.Lock(context.Background(), payer, live.ID, true); !errors.Is(err, ErrPayNotPayable) {
+		t.Fatalf("live lock on a switched-off merchant: err = %v", err)
+	}
+	if _, _, err := s.Lock(context.Background(), payOwnerOf(t, s, test.ID), test.ID, true); err != nil {
+		t.Fatalf("a test payment must not need the live switch: %v", err)
+	}
+}
+
+// Switching live off expires only what can no longer be paid: pending LIVE
+// payments. Test payments keep working, and a payment a payer is already paying
+// or that has finished is never touched.
+func TestPayPayment_ExpirePendingForMerchantCanBeLimitedToLive(t *testing.T) {
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	mk := func(mode, ref, status string) *models.PayPayment {
+		in := payIn()
+		in.Reference = ref
+		p, _, err := s.Create(context.Background(), m, mode, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != models.PayStatusPending {
+			s.db.Model(p).Update("status", status)
+		}
+		return p
+	}
+	livePending := mk(models.PayModeLive, "L-PENDING", models.PayStatusPending)
+	liveProcessing := mk(models.PayModeLive, "L-PROC", models.PayStatusProcessing)
+	liveSucceeded := mk(models.PayModeLive, "L-DONE", models.PayStatusSucceeded)
+	testPending := mk(models.PayModeTest, "T-PENDING", models.PayStatusPending)
+
+	n, err := s.ExpirePendingForMerchant(context.Background(), m.ID, models.PayModeLive, "live payments switched off")
+	if err != nil || n != 1 {
+		t.Fatalf("n %d err %v", n, err)
+	}
+	for p, want := range map[*models.PayPayment]string{
+		livePending: models.PayStatusExpired, liveProcessing: models.PayStatusProcessing,
+		liveSucceeded: models.PayStatusSucceeded, testPending: models.PayStatusPending,
+	} {
+		if got, _ := s.Get(context.Background(), p.ID); got.Status != want {
+			t.Errorf("%s: status %s, want %s", p.Reference, got.Status, want)
+		}
+	}
+	if got, _ := s.Get(context.Background(), livePending.ID); got.FailureReason != "live payments switched off" {
+		t.Errorf("reason %q", got.FailureReason)
+	}
+	if ds := deliveries(t, s); len(ds) != 1 || ds[0].Event != models.PayEventExpired || ds[0].PaymentID != livePending.ID {
+		t.Fatalf("deliveries = %+v", ds)
 	}
 }

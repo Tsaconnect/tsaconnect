@@ -133,12 +133,12 @@ func TestPayMerchant_UpdateResolvesTheBankAccountName(t *testing.T) {
 	s, banks := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
 	banks.name = "SKY AIR NIGERIA"
-	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{SettlementMode: payStr("fiat"), BankCode: payStr("044"), AccountNumber: payStr("9876543210")})
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{SettlementMode: payStr("fiat"), BankCode: payStr("044"), AccountNumber: payStr("9876543210")})
 	if err != nil || got.AccountName != "SKY AIR NIGERIA" || got.BankCode != "044" {
 		t.Fatalf("err %v merchant %+v", err, got)
 	}
 	banks.err = ErrNombaAccountNotFound
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AccountNumber: payStr("1111111111")}); !errors.Is(err, ErrPayMerchantInvalid) {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AccountNumber: payStr("1111111111")}); !errors.Is(err, ErrPayMerchantInvalid) {
 		t.Fatalf("unknown account: err = %v", err)
 	}
 	stored, _ := s.Get(context.Background(), m.ID)
@@ -158,12 +158,12 @@ func TestPayMerchant_SwitchingIntoFiatAlwaysResolvesTheAccount(t *testing.T) {
 		t.Fatalf("an unresolved applicant account should leave settlement unconfigured: %v %+v", err, m)
 	}
 	banks.err = nil
-	if _, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); err != nil {
+	if _, _, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); err != nil {
 		t.Fatal(err)
 	}
 	before := banks.calls
 	banks.name = "SKY AIR NIGERIA"
-	got, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{SettlementMode: payStr("fiat")})
+	got, _, err := s.Update(ctx, payActor, m.ID, PayMerchantUpdate{SettlementMode: payStr("fiat")})
 	if err != nil || banks.calls != before+1 || got.AccountName != "SKY AIR NIGERIA" {
 		t.Fatalf("err %v resolves %d->%d merchant %+v: fiat went live on an unverified account", err, before, banks.calls, got)
 	}
@@ -173,7 +173,7 @@ func TestPayMerchant_SwitchingIntoFiatAlwaysResolvesTheAccount(t *testing.T) {
 	banks2.err = ErrNombaAccountNotFound
 	m2, _ := s2.CreateFromRequest(ctx, payRequest())
 	banks2.err, banks2.name = nil, "  "
-	if _, err := s2.Update(ctx, payActor, m2.ID, PayMerchantUpdate{SettlementMode: payStr("fiat"), BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); !errors.Is(err, ErrPayMerchantInvalid) {
+	if _, _, err := s2.Update(ctx, payActor, m2.ID, PayMerchantUpdate{SettlementMode: payStr("fiat"), BankCode: payStr("044"), AccountNumber: payStr("9876543210")}); !errors.Is(err, ErrPayMerchantInvalid) {
 		t.Fatalf("err = %v, want a refusal for a nameless account", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestPayMerchant_UpdateValidatesCryptoSettlement(t *testing.T) {
 	good := PayMerchantUpdate{SettlementMode: payStr("crypto"), ChainID: payI64(56),
 		TokenAddress: payStr("0x55d398326f99059fF775485246999027B3197955"), TokenSymbol: payStr("USDT"),
 		WalletAddress: payStr("0x52908400098527886E0F7030069857D2E4169EE7")}
-	if _, err := s.Update(context.Background(), payActor, m.ID, good); err != nil {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, good); err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*PayMerchantUpdate){
@@ -197,7 +197,7 @@ func TestPayMerchant_UpdateValidatesCryptoSettlement(t *testing.T) {
 	} {
 		u := good
 		mutate(&u)
-		if _, err := s.Update(context.Background(), payActor, m.ID, u); !errors.Is(err, ErrPayMerchantInvalid) {
+		if _, _, err := s.Update(context.Background(), payActor, m.ID, u); !errors.Is(err, ErrPayMerchantInvalid) {
 			t.Fatalf("%s: err = %v", name, err)
 		}
 	}
@@ -218,11 +218,11 @@ func TestPayMerchant_UpdateGuardsShareLimitsURLsAndStatus(t *testing.T) {
 		"bad status":      {Status: payStr("closed")},
 		"9-digit account": {AccountNumber: payStr("123456789")},
 	} {
-		if _, err := s.Update(context.Background(), payActor, m.ID, u); !errors.Is(err, ErrPayMerchantInvalid) {
+		if _, _, err := s.Update(context.Background(), payActor, m.ID, u); !errors.Is(err, ErrPayMerchantInvalid) {
 			t.Fatalf("%s: err = %v", name, err)
 		}
 	}
-	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ReturnDomains: []string{"SkyAir.ng", " pay.skyair.ng "}})
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ReturnDomains: []string{"SkyAir.ng", " pay.skyair.ng "}})
 	if err != nil || got.ReturnDomains != "skyair.ng,pay.skyair.ng" {
 		t.Fatalf("err %v domains %q", err, got.ReturnDomains)
 	}
@@ -286,11 +286,11 @@ func TestPayMerchant_UpdateRefusesAStaleExpectedVersionAndWritesNothing(t *testi
 	if m.Version != 1 {
 		t.Fatalf("a new merchant must start at version 1, got %d", m.Version)
 	}
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{BusinessName: payStr("Renamed")}); err != nil {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{BusinessName: payStr("Renamed")}); err != nil {
 		t.Fatal(err)
 	}
 	stale := 1
-	_, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(10)})
+	_, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(10)})
 	if !errors.Is(err, ErrPayMerchantStale) {
 		t.Fatalf("err = %v, want ErrPayMerchantStale", err)
 	}
@@ -299,7 +299,7 @@ func TestPayMerchant_UpdateRefusesAStaleExpectedVersionAndWritesNothing(t *testi
 		t.Fatalf("a stale update wrote something: share %d version %d", stored.CustomerFeeSharePercent, stored.Version)
 	}
 	current := 2
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &current, CustomerFeeSharePercent: payInt(10)}); err != nil {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &current, CustomerFeeSharePercent: payInt(10)}); err != nil {
 		t.Fatalf("the current version must be accepted: %v", err)
 	}
 }
@@ -307,7 +307,7 @@ func TestPayMerchant_UpdateRefusesAStaleExpectedVersionAndWritesNothing(t *testi
 func TestPayMerchant_UpdateIncrementsTheVersionAndReturnsIt(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
-	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(50)})
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(50)})
 	if err != nil || got.Version != m.Version+1 {
 		t.Fatalf("err %v version %d, want %d", err, got.Version, m.Version+1)
 	}
@@ -323,13 +323,13 @@ func TestPayMerchant_PartialUpdateLeavesOtherColumnsAlone(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
 	old := m.Version
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{Status: payStr(models.PayMerchantSuspended)}); err != nil {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{Status: payStr(models.PayMerchantSuspended)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &old, CustomerFeeSharePercent: payInt(40)}); !errors.Is(err, ErrPayMerchantStale) {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &old, CustomerFeeSharePercent: payInt(40)}); !errors.Is(err, ErrPayMerchantStale) {
 		t.Fatalf("with the old version: err = %v, want stale", err)
 	}
-	got, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(40)})
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(40)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func payAuditRows(t *testing.T, s *PayMerchantService) []models.PayAuditEvent {
 func TestPayMerchant_UpdateWritesOneAuditRowWithBeforeAndAfter(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
 		WebhookURL: payStr("https://skyair.ng/hook"), AccountNumber: payStr("9876543210"), BankCode: payStr("044")}); err != nil {
 		t.Fatal(err)
 	}
@@ -391,11 +391,11 @@ func TestPayMerchant_UpdateWritesOneAuditRowWithBeforeAndAfter(t *testing.T) {
 func TestPayMerchant_RefusedUpdatesWriteNoAuditRow(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(101)}); !errors.Is(err, ErrPayMerchantInvalid) {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{CustomerFeeSharePercent: payInt(101)}); !errors.Is(err, ErrPayMerchantInvalid) {
 		t.Fatalf("err = %v", err)
 	}
 	stale := 99
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(5)}); !errors.Is(err, ErrPayMerchantStale) {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{ExpectedVersion: &stale, CustomerFeeSharePercent: payInt(5)}); !errors.Is(err, ErrPayMerchantStale) {
 		t.Fatalf("err = %v", err)
 	}
 	if rows := payAuditRows(t, s); len(rows) != 0 {
@@ -468,12 +468,12 @@ func TestPayMerchant_AuditRowAndLogNeverHoldAWebhookURLQuery(t *testing.T) {
 
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
 		WebhookURL: payStr("https://shop.ng/hooks/tsa?token=SECRET")}); err != nil {
 		t.Fatal(err)
 	}
 	// A change that only alters the query must still be recorded.
-	if _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{
 		WebhookURL: payStr("https://shop.ng/hooks/tsa?token=OTHERSECRET")}); err != nil {
 		t.Fatal(err)
 	}
@@ -537,11 +537,11 @@ func TestPayMerchant_UpdateRefusesAChainNoDeliveryCouldBeConfirmedOn(t *testing.
 			WalletAddress: payStr("0x52908400098527886E0F7030069857D2E4169EE7")}
 	}
 	for name, chain := range map[string]int64{"bsc testnet": 97, "mainnet chain with no client": 10, "unknown": 999} {
-		if _, err := s.Update(context.Background(), payActor, m.ID, upd(chain)); !errors.Is(err, ErrPayMerchantInvalid) {
+		if _, _, err := s.Update(context.Background(), payActor, m.ID, upd(chain)); !errors.Is(err, ErrPayMerchantInvalid) {
 			t.Fatalf("%s: err = %v", name, err)
 		}
 	}
-	if _, err := s.Update(context.Background(), payActor, m.ID, upd(56)); err != nil {
+	if _, _, err := s.Update(context.Background(), payActor, m.ID, upd(56)); err != nil {
 		t.Fatalf("bsc mainnet: %v", err)
 	}
 }
@@ -774,7 +774,7 @@ func TestPayMerchant_OwnerBankChangeConfirmRefusals(t *testing.T) {
 	t.Run("an edit since the request makes it stale", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
 		res := f.request(t, bankChange("9876543210"))
-		if _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
+		if _, _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayMerchantStale) {
@@ -879,7 +879,7 @@ func TestPayMerchant_OwnerWalletCodeRefusals(t *testing.T) {
 	t.Run("an edit since the request makes it stale", func(t *testing.T) {
 		f := ownedMerchant(t, "", "")
 		res := f.requestWallet(t)
-		if _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
+		if _, _, err := f.s.Update(ctx, payActor, f.m.ID, PayMerchantUpdate{BusinessName: payStr("Sky Air Nigeria")}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := f.s.ConfirmOwnerAction(ctx, f.owner, res.Pending.ID, f.mail.code(t)); !errors.Is(err, ErrPayMerchantStale) {
@@ -1169,5 +1169,29 @@ func TestPayMerchant_ARequestThatKeepsLosingTheRaceIsBusy(t *testing.T) {
 	}
 	if f.mail.sent != 0 {
 		t.Fatal("a code was sent for an action that was never stored")
+	}
+}
+
+func TestPayMerchant_TheLiveSwitchIsSensitiveAndAudited(t *testing.T) {
+	on := true
+	if !(PayMerchantUpdate{LiveEnabled: &on}).Sensitive() {
+		t.Fatal("the live switch must need a super admin")
+	}
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	if m.LiveEnabled {
+		t.Fatal("an approval must not switch a merchant live")
+	}
+	got, before, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{LiveEnabled: &on})
+	if err != nil || !got.LiveEnabled || before.LiveEnabled || before.Version != m.Version {
+		t.Fatalf("switch on: %+v before %+v err %v", got, before, err)
+	}
+	stored, _ := s.Get(context.Background(), m.ID)
+	if !stored.LiveEnabled {
+		t.Fatal("the switch did not persist")
+	}
+	rows := payAuditRows(t, s)
+	if len(rows) != 1 || rows[0].ActorID != payActor || !strings.Contains(rows[0].Details, `"liveEnabled":{"after":true,"before":false}`) {
+		t.Fatalf("audit rows = %+v", rows)
 	}
 }

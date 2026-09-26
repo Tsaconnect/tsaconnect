@@ -64,6 +64,10 @@ const (
 	MerchantApproved  = "merchant.approved"
 	MerchantRejected  = "merchant.rejected"
 	MerchantSuspended = "merchant.suspended"
+	// A super admin switched a TSA Pay merchant's live payments on or off.
+	// Informational: told to the owner by email and push, and mutable.
+	PayLiveEnabled  = "merchant.pay_live_enabled"
+	PayLiveDisabled = "merchant.pay_live_disabled"
 
 	// Product events
 	ProductListed   = "product.listed"

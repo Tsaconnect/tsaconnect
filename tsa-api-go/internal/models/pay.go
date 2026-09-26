@@ -34,12 +34,16 @@ const (
 // Version is bumped by every settings edit and is the admin console's
 // compare-and-set token.
 type PayMerchant struct {
-	ID                      uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantRequestID       uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"merchantRequestId"`
-	UserID                  uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
-	BusinessName            string    `gorm:"size:255;not null" json:"businessName"`
-	WebsiteDomain           string    `gorm:"size:255" json:"websiteDomain"`
-	Status                  string    `gorm:"size:16;not null;index" json:"status"`
+	ID                uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantRequestID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"merchantRequestId"`
+	UserID            uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
+	BusinessName      string    `gorm:"size:255;not null" json:"businessName"`
+	WebsiteDomain     string    `gorm:"size:255" json:"websiteDomain"`
+	Status            string    `gorm:"size:16;not null;index" json:"status"`
+	// LiveEnabled is this merchant's own live switch, on top of the global
+	// TSA_PAY_LIVE_ENABLED: a live key is refused until a super admin turns it
+	// on. Only the admin merchant update can change it.
+	LiveEnabled             bool      `gorm:"not null;default:false" json:"liveEnabled"`
 	SettlementMode          string    `gorm:"size:8" json:"settlementMode"` // "" until configured
 	BankCode                string    `gorm:"size:16" json:"bankCode,omitempty"`
 	AccountNumber           string    `gorm:"size:32" json:"accountNumber,omitempty"`
@@ -80,6 +84,13 @@ func (m *PayMerchant) ReturnDomainList() []string {
 		}
 	}
 	return out
+}
+
+// LiveAllowed is the one live rule: a live key works, and a live payment can be
+// paid, only while TSA Pay live is on globally AND a super admin has switched
+// this merchant live.
+func (m *PayMerchant) LiveAllowed(global bool) bool {
+	return global && m.LiveEnabled
 }
 
 // WebhookURLFor is where events of a mode go. Test events never reach the

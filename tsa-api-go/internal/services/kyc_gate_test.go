@@ -122,6 +122,25 @@ func TestRequireVerifiedForMoneyIn(t *testing.T) {
 	}
 }
 
+func TestIsKYCVerified(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	for _, status := range unverifiedStatuses {
+		if ok, err := IsKYCVerified(ctx, s.db, seedUserAt(t, s.db, uuid.New(), status)); ok || err != nil {
+			t.Fatalf("status %q = %v %v, want not verified", status, ok, err)
+		}
+	}
+	if ok, err := IsKYCVerified(ctx, s.db, uuid.New()); ok || err != nil {
+		t.Fatalf("unknown user = %v %v, want not verified", ok, err)
+	}
+	// Status only: a verified user whose name lookup failed is still verified.
+	for _, id := range []uuid.UUID{seedVerifiedUser(t, s.db), seedVerifiedWithoutLegalName(t, s.db, "")} {
+		if ok, err := IsKYCVerified(ctx, s.db, id); !ok || err != nil {
+			t.Fatalf("verified user = %v %v", ok, err)
+		}
+	}
+}
+
 // ─── Money in #1: the MCGP buy order ────────────────────────────────────────
 
 func TestOpenBuyOrder_RefusesUnverifiedBuyer(t *testing.T) {

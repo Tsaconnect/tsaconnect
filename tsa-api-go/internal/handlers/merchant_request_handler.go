@@ -42,6 +42,9 @@ type MerchantRequestHandler struct {
 	// that type of request returns 503. Assign only a non-nil service — a
 	// typed-nil pointer here would read as wired.
 	PayMerchants payMerchantProvisioner
+	// WebAppOrigin is where an approved TSA Pay merchant sets up (cfg.WebAppOrigin);
+	// empty names the web app without a link.
+	WebAppOrigin string
 }
 
 func NewMerchantRequestHandler(db *gorm.DB, bus *events.Bus) *MerchantRequestHandler {
@@ -149,6 +152,23 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	if input.BusinessType == models.BusinessTypePaymentAcceptance && h.PayMerchants == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay isn't available yet")
 		return
+	}
+
+	// A TSA Pay merchant takes other people's money, so only a verified identity
+	// may apply. Checked before anything else about the application. The refusal
+	// carries the same code as every money-in KYC refusal, so the app's one
+	// kyc_verification_required handler sends her to verification.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance {
+		verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, user.ID)
+		if err != nil {
+			log.Printf("SubmitMerchantRequest: KYC check failed for %s: %v", user.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check your verification")
+			return
+		}
+		if !verified {
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", kycRequiredCode)
+			return
+		}
 	}
 
 	// TSA Pay applications must supply a well-formed https website — it
@@ -508,7 +528,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			Type:    events.MerchantApproved,
 			UserID:  req.UserID,
 			Title:   "Merchant Request Approved",
-			Message: approvalMessage(req.BusinessType),
+			Message: approvalMessage(req.BusinessType, h.WebAppOrigin),
 			Data: map[string]interface{}{
 				"requestId":    req.ID,
 				"businessName": req.BusinessName,
@@ -521,10 +541,16 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 
 // approvalMessage is the notification text for an approved request. TSA Pay
 // applicants sell nothing on the marketplace, so they must not be told they
-// can list products.
-func approvalMessage(businessType string) string {
+// can list products; they set up on the web app, at webAppOrigin when known.
+func approvalMessage(businessType, webAppOrigin string) string {
 	if businessType == models.BusinessTypePaymentAcceptance {
-		return "Your TSA Pay application has been approved. We'll be in touch to finish setting up your account."
+		where := "the TSA Connect web app"
+		if webAppOrigin != "" {
+			where = webAppOrigin
+		}
+		return "Your TSA Pay application is approved. Sign in at " + where +
+			" with your TSA Connect account to create API keys, set your webhook and payouts, and run a test payment." +
+			" Live payments are switched on after a quick review."
 	}
 	return "Your merchant application has been approved. You can now list products."
 }

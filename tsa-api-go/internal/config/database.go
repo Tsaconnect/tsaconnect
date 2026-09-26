@@ -22,6 +22,35 @@ func ConnectDB(cfg *Config) (*gorm.DB, error) {
 	return db, nil
 }
 
+// migratePayMerchantLiveSwitch adds pay_merchants.live_enabled and, in the same
+// transaction, switches on every merchant that already holds a live key, so the
+// per-merchant live switch breaks no integration that was live before it existed.
+//
+// It runs only while the column is missing. That is what makes the backfill
+// one-time: once a super admin has switched a merchant off, no later migrate may
+// switch it back on. Adding the column here, before AutoMigrate, rather than
+// letting AutoMigrate add it keeps the column and its backfill atomic — a failed
+// backfill leaves the column absent and the next migrate retries both. A fresh
+// database has no table yet; AutoMigrate creates it with the column and there is
+// nothing to backfill.
+func migratePayMerchantLiveSwitch(db *gorm.DB) error {
+	m := db.Migrator()
+	if !m.HasTable(&models.PayMerchant{}) || m.HasColumn(&models.PayMerchant{}, "live_enabled") {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Migrator().AddColumn(&models.PayMerchant{}, "LiveEnabled"); err != nil {
+			return err
+		}
+		res := tx.Exec(`UPDATE pay_merchants SET live_enabled = true WHERE live_key_hash IS NOT NULL`)
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("[Migrate] pay_merchants.live_enabled added; %d merchant(s) holding a live key kept live", res.RowsAffected)
+		return nil
+	})
+}
+
 func AutoMigrate() error {
 	// fee_configs gained a nullable chain_id column and the unique index moved
 	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
@@ -39,6 +68,10 @@ func AutoMigrate() error {
 	// new rows, so drop it explicitly before AutoMigrate adds the 4-col one.
 	// Existing rows keep direction = NULL and resolve exactly as before.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token_chain")
+
+	if err := migratePayMerchantLiveSwitch(DB); err != nil {
+		return fmt.Errorf("pay_merchants.live_enabled: %w", err)
+	}
 
 	if err := DB.AutoMigrate(
 		// Currency registry — the sole validation authority for any currency

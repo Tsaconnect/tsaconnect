@@ -29,11 +29,11 @@ func newPayTestDB(t *testing.T) *gorm.DB {
 }
 
 // seedPayMerchant is an active, fiat-settling merchant with the defaults an
-// approval gives, ready to take payments.
+// approval gives, switched live by a super admin: ready to take payments.
 func seedPayMerchant(t *testing.T, db *gorm.DB) *models.PayMerchant {
 	t.Helper()
 	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: uuid.New(), BusinessName: "Sky Air",
-		WebsiteDomain: "skyair.ng", Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat,
+		WebsiteDomain: "skyair.ng", Status: models.PayMerchantActive, LiveEnabled: true, SettlementMode: models.PaySettlementFiat,
 		BankCode: "058", AccountNumber: "0123456789", AccountName: "SKY AIR LTD",
 		CustomerFeeSharePercent: 100, MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000,
 		WebhookSecretVersion: 1, ReturnDomains: "skyair.ng,www.skyair.ng"}

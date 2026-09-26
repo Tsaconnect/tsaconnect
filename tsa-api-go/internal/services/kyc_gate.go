@@ -125,6 +125,16 @@ func verifiedIdentity(ctx context.Context, db *gorm.DB, userID uuid.UUID) (verif
 	return true, strings.TrimSpace(row.VerifiedLegalName.String), nil
 }
 
+// IsKYCVerified reports whether a user's identity verification has passed,
+// through the one read of it (verifiedIdentity). It asks only about the status:
+// a gate that is not about attributing a payer's money — applying for TSA Pay —
+// has no use for the legal-name clause requireVerifiedForMoneyIn adds. A missing
+// user is simply not verified.
+func IsKYCVerified(ctx context.Context, db *gorm.DB, userID uuid.UUID) (bool, error) {
+	verified, _, err := verifiedIdentity(ctx, db, userID)
+	return verified, err
+}
+
 // RequireVerifiedForMoneyIn exposes the gate to handlers that must refuse
 // BEFORE they offer the user a different next step.
 //

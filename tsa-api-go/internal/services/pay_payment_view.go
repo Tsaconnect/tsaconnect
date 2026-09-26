@@ -207,7 +207,7 @@ func (s *PayPaymentService) payability(p *models.PayPayment, m *models.PayMercha
 	if m.Status != models.PayMerchantActive {
 		return false, "This merchant can't accept payments right now"
 	}
-	if p.Mode == models.PayModeLive && !liveEnabled {
+	if p.Mode == models.PayModeLive && !m.LiveAllowed(liveEnabled) {
 		return false, "Live payments are not enabled yet"
 	}
 	return true, ""

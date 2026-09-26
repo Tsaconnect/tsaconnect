@@ -282,6 +282,7 @@ func TestPayOwner_OnlyTheSettlementCanChange(t *testing.T) {
 		"settlementMode": "fiat", "bankCode": "044", "accountNumber": "9876543210", "password": "correct-horse",
 		"businessName": "Someone Else Ltd", "status": "active", "webhookUrl": "https://evil.example/hook",
 		"returnDomains": []string{"evil.example"}, "minAmount": 1, "maxAmount": 1, "customerFeeSharePercent": 0,
+		"liveEnabled": true,
 	})
 	if ok := o.confirm(t, res); ok.status != http.StatusOK {
 		t.Fatalf("status %d body %s", ok.status, ok.raw)
@@ -293,6 +294,9 @@ func TestPayOwner_OnlyTheSettlementCanChange(t *testing.T) {
 	if got.BusinessName != o.m.BusinessName || got.WebhookURL != o.m.WebhookURL || got.ReturnDomains != o.m.ReturnDomains ||
 		got.MinAmountKobo != o.m.MinAmountKobo || got.MaxAmountKobo != o.m.MaxAmountKobo || got.CustomerFeeSharePercent != o.m.CustomerFeeSharePercent {
 		t.Fatalf("stored %+v: an owner changed more than where they are paid", got)
+	}
+	if got.LiveEnabled {
+		t.Fatal("an owner switched their own merchant live")
 	}
 }
 
@@ -649,5 +653,39 @@ func TestPayOwner_PaymentDetailNamesThePayerButNotTheirContact(t *testing.T) {
 	raw = detail()
 	if !strings.Contains(raw, `"payer":{"name":"Deleted account"}`) || strings.Contains(raw, "TOLUWANI") {
 		t.Fatalf("a deleted payer's ID name reached the merchant: %s", raw)
+	}
+}
+
+func TestPayOwner_ViewSaysWhetherLivePaymentsAreOn(t *testing.T) {
+	o := newOwnerRig(t)
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveEnabled":false`) {
+		t.Fatalf("before the switch: %s", res.raw)
+	}
+	o.db.Model(&models.PayMerchant{}).Where("id = ?", o.m.ID).Update("live_enabled", true)
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"liveEnabled":true`) {
+		t.Fatalf("after the switch: %s", res.raw)
+	}
+}
+
+// Only a super admin moves the live switch: an owner's endpoints change that
+// also carries liveEnabled applies the endpoints and leaves the switch as it was,
+// either way round.
+func TestPayOwner_AnEndpointsChangeCannotMoveTheLiveSwitch(t *testing.T) {
+	for _, was := range []bool{false, true} {
+		o := newOwnerRig(t)
+		o.db.Model(&models.PayMerchant{}).Where("id = ?", o.m.ID).Update("live_enabled", was)
+		ok := o.confirm(t, o.do(http.MethodPut, "/api/pay/merchant/endpoints", map[string]any{
+			"webhookUrl": "https://api.skyair.ng/tsa/webhook", "returnDomains": []string{"skyair.ng"},
+			"password": "correct-horse", "liveEnabled": !was}))
+		if ok.status != http.StatusOK {
+			t.Fatalf("was %v: confirm %d %s", was, ok.status, ok.raw)
+		}
+		got := o.stored(t)
+		if got.WebhookURL != "https://api.skyair.ng/tsa/webhook" {
+			t.Fatalf("was %v: the endpoints change itself did not apply: %+v", was, got)
+		}
+		if got.LiveEnabled != was {
+			t.Fatalf("was %v: an owner's endpoints change moved the live switch to %v", was, got.LiveEnabled)
+		}
 	}
 }

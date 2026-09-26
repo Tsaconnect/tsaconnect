@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
@@ -243,5 +244,107 @@ func TestPayAdmin_PaymentDeliveriesListsAndResendRequeuesAFailedOne(t *testing.T
 	}
 	if got.FailedAt != nil || got.Attempts != 0 || got.NextAttemptAt == nil {
 		t.Fatalf("after admin resend: %+v", got)
+	}
+}
+
+func TestPayAdmin_OnlyASuperAdminSwitchesAMerchantLiveAndTheOwnerIsTold(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	seen := collectEvents(bus)
+	h.WithEvents(bus)
+	m := seedHandlerMerchant(t, db)
+	url := "/admin/pay/merchants/" + m.ID.String()
+	gin.SetMode(gin.TestMode)
+	router := func(role string) *gin.Engine {
+		r := gin.New()
+		admin := &models.User{ID: uuid.New(), Role: role}
+		r.PUT("/admin/pay/merchants/:id", func(c *gin.Context) { c.Set("user", admin) }, h.AdminUpdateMerchant)
+		r.GET("/admin/pay/merchants/:id", func(c *gin.Context) { c.Set("user", admin) }, h.AdminGetMerchant)
+		return r
+	}
+	admin, super := router(models.RoleAdmin), router(models.RoleSuperAdmin)
+
+	if w := payDo(admin, "PUT", url, map[string]any{"liveEnabled": true}, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain admin switching live: %d %s", w.Code, w.Body.String())
+	}
+	w := payDo(super, "PUT", url, map[string]any{"liveEnabled": true, "expectedVersion": 1}, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"liveEnabled":true`) {
+		t.Fatalf("super admin switching live: %d %s", w.Code, w.Body.String())
+	}
+	if w := payDo(super, "GET", url, nil, nil); !strings.Contains(w.Body.String(), `"liveEnabled":true`) {
+		t.Fatalf("the admin read does not show the switch: %s", w.Body.String())
+	}
+	// Saving the value it already has changes nothing the owner needs to hear.
+	if w := payDo(super, "PUT", url, map[string]any{"liveEnabled": true}, nil); w.Code != http.StatusOK {
+		t.Fatalf("no-op: %d %s", w.Code, w.Body.String())
+	}
+	if w := payDo(super, "PUT", url, map[string]any{"liveEnabled": false}, nil); w.Code != http.StatusOK {
+		t.Fatalf("switch off: %d %s", w.Code, w.Body.String())
+	}
+
+	got := seen()
+	if len(got) != 2 {
+		t.Fatalf("events = %+v, want one per actual change", got)
+	}
+	if got[0].Type != events.PayLiveEnabled || got[0].UserID != m.UserID || got[0].Title != "Live payments are now on for Sky Air" {
+		t.Fatalf("switch-on event = %+v", got[0])
+	}
+	if got[1].Type != events.PayLiveDisabled || got[1].UserID != m.UserID ||
+		got[1].Title != "Live payments for Sky Air have been switched off — contact support" {
+		t.Fatalf("switch-off event = %+v", got[1])
+	}
+	var audits []models.PayAuditEvent
+	db.Find(&audits, "merchant_id = ?", m.ID)
+	if len(audits) != 3 {
+		t.Fatalf("audit rows = %d, want one per update", len(audits))
+	}
+}
+
+func TestPayAdmin_SwitchingLiveOffExpiresPendingLivePaymentsOnly(t *testing.T) {
+	h, payments, db := newPayHandlerAdminRig(t)
+	m := seedHandlerMerchant(t, db)
+	db.Model(m).Update("live_enabled", true)
+	m.LiveEnabled = true
+	create := func(mode, ref, status string) uuid.UUID {
+		p, _, err := payments.Create(context.Background(), m, mode, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != models.PayStatusPending {
+			db.Model(p).Update("status", status)
+		}
+		return p.ID
+	}
+	livePending := create(models.PayModeLive, "L1", models.PayStatusPending)
+	liveProcessing := create(models.PayModeLive, "L2", models.PayStatusProcessing)
+	liveSucceeded := create(models.PayModeLive, "L3", models.PayStatusSucceeded)
+	testPending := create(models.PayModeTest, "T1", models.PayStatusPending)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	super := &models.User{ID: uuid.New(), Role: models.RoleSuperAdmin}
+	r.PUT("/admin/pay/merchants/:id", func(c *gin.Context) { c.Set("user", super) }, h.AdminUpdateMerchant)
+	url := "/admin/pay/merchants/" + m.ID.String()
+
+	status := func(id uuid.UUID) string {
+		var p models.PayPayment
+		db.First(&p, "id = ?", id)
+		return p.Status
+	}
+	// Saving "on" while already on changes nothing and expires nothing.
+	if w := payDo(r, "PUT", url, map[string]any{"liveEnabled": true}, nil); w.Code != http.StatusOK || status(livePending) != models.PayStatusPending {
+		t.Fatalf("no-op: %d %s, live pending %s", w.Code, w.Body.String(), status(livePending))
+	}
+	if w := payDo(r, "PUT", url, map[string]any{"liveEnabled": false}, nil); w.Code != http.StatusOK {
+		t.Fatalf("switch off: %d %s", w.Code, w.Body.String())
+	}
+	for id, want := range map[uuid.UUID]string{
+		livePending: models.PayStatusExpired, liveProcessing: models.PayStatusProcessing,
+		liveSucceeded: models.PayStatusSucceeded, testPending: models.PayStatusPending,
+	} {
+		if got := status(id); got != want {
+			t.Errorf("payment %s: %s, want %s", id, got, want)
+		}
 	}
 }

@@ -1609,6 +1609,7 @@ func main() {
 	if ms := payHandler.MerchantService(); ms != nil {
 		mrh.PayMerchants = ms
 	}
+	mrh.WebAppOrigin = cfg.WebAppOrigin
 
 	// One dispute queue across every order type that cannot resolve itself.
 	// Subjects are registered per stack rather than unconditionally: a dormant

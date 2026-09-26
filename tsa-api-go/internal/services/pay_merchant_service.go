@@ -127,6 +127,9 @@ type PayMerchantUpdate struct {
 	WebhookURL              *string  `json:"webhookUrl"`
 	TestWebhookURL          *string  `json:"testWebhookUrl"`
 	ReturnDomains           []string `json:"returnDomains"` // nil = unchanged
+	// LiveEnabled switches the merchant's live key on or off. Admin only: no
+	// owner route builds an update carrying it.
+	LiveEnabled *bool `json:"liveEnabled"`
 	// ExpectedVersion, when set, is the merchant version the editor loaded; a
 	// different current version refuses the edit as stale.
 	ExpectedVersion *int `json:"expectedVersion"`
@@ -134,12 +137,13 @@ type PayMerchantUpdate struct {
 
 // Sensitive reports whether an update touches where money or events go —
 // settlement destination, crypto target, webhook endpoints, or the domains
-// allowed to receive a checkout redirect. Those need a super admin; a
+// allowed to receive a checkout redirect — or whether the merchant may take
+// real money at all (the live switch). Those need a super admin; a
 // business-name typo fix or a fee-share/status change does not.
 func (u PayMerchantUpdate) Sensitive() bool {
 	return u.SettlementMode != nil || u.BankCode != nil || u.AccountNumber != nil ||
 		u.ChainID != nil || u.TokenAddress != nil || u.TokenSymbol != nil || u.WalletAddress != nil ||
-		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil
+		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil || u.LiveEnabled != nil
 }
 
 // PayKeyScope selects which of a merchant's credentials IssueKeys rotates.
@@ -316,7 +320,11 @@ func (s *PayMerchantService) List(ctx context.Context, page, limit int) ([]PayMe
 // persisted unless every check passes — a refused update never partially
 // lands. Settlement changes are verified against the bank/chain the money
 // actually needs to reach before they're accepted.
-func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate) (*models.PayMerchant, error) {
+//
+// It returns the merchant as it now is and as it was immediately before this
+// edit — the exact version the compare-and-set replaced — so a caller can act on
+// what really changed without a racy read of its own.
+func (s *PayMerchantService) Update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate) (updated, before *models.PayMerchant, err error) {
 	return s.update(ctx, actor, id, in, nil)
 }
 
@@ -458,12 +466,13 @@ func (s *PayMerchantService) confirmSettlementByOwner(ctx context.Context, owner
 		return nil, err
 	}
 	inOwnName := s.ownerSettlementCheck(ctx, ownerID)
-	return s.update(ctx, ownerID, m.ID, in, func(u *models.PayMerchant) error {
+	updated, _, err := s.update(ctx, ownerID, m.ID, in, func(u *models.PayMerchant) error {
 		if u.SettlementMode == models.PaySettlementFiat && u.AccountName != p.AccountName {
 			return fmt.Errorf("%w: %w: the account no longer resolves to the name that was confirmed", ErrPayMerchantInvalid, ErrPayAccountUnverifiable)
 		}
 		return inOwnName(u)
 	})
+	return updated, err
 }
 
 // ownerSettlementCheck is the rule an owner's own payout change is held to on
@@ -614,17 +623,22 @@ func PayShortAddress(a string) string {
 
 // update is Update with an optional check on the resulting merchant, run after
 // validatePayMerchant (which resolves a bank account's name) and before
-// anything is written: a refusal from check persists nothing.
-func (s *PayMerchantService) update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate, check func(*models.PayMerchant) error) (*models.PayMerchant, error) {
+// anything is written: a refusal from check persists nothing. It returns the
+// merchant after the edit and as it was before it.
+func (s *PayMerchantService) update(ctx context.Context, actor uuid.UUID, id uuid.UUID, in PayMerchantUpdate, check func(*models.PayMerchant) error) (*models.PayMerchant, *models.PayMerchant, error) {
 	m, err := s.Get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	edit, err := s.prepare(ctx, m, in, check)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return s.commit(ctx, actor, edit, in.Sensitive())
+	updated, err := s.commit(ctx, actor, edit, in.Sensitive())
+	if err != nil {
+		return nil, nil, err
+	}
+	return updated, &edit.before, nil
 }
 
 // payEdit is a validated edit of one merchant that has not been written.
@@ -701,6 +715,10 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 		updated.TestWebhookURL = strings.TrimSpace(*in.TestWebhookURL)
 		changes["test_webhook_url"] = updated.TestWebhookURL
 	}
+	if in.LiveEnabled != nil {
+		updated.LiveEnabled = *in.LiveEnabled
+		changes["live_enabled"] = updated.LiveEnabled
+	}
 	if in.ReturnDomains != nil {
 		domains := make([]string, 0, len(in.ReturnDomains))
 		for _, d := range in.ReturnDomains {
@@ -752,8 +770,8 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 	updated.Version = before.Version + 1
 
 	if sensitive {
-		log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s fields=settlement bank=%s->%s account=%s->%s wallet=%s->%s webhookUrl=%q->%q testWebhookUrl=%q->%q returnDomains=%q->%q",
-			id, actor,
+		log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s fields=settlement liveEnabled=%t->%t bank=%s->%s account=%s->%s wallet=%s->%s webhookUrl=%q->%q testWebhookUrl=%q->%q returnDomains=%q->%q",
+			id, actor, before.LiveEnabled, updated.LiveEnabled,
 			payLast4(before.BankCode), payLast4(updated.BankCode),
 			payLast4(before.AccountNumber), payLast4(updated.AccountNumber),
 			before.WalletAddress, updated.WalletAddress,
@@ -885,6 +903,7 @@ func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]an
 	addURL("webhookUrl", before.WebhookURL, after.WebhookURL)
 	addURL("testWebhookUrl", before.TestWebhookURL, after.TestWebhookURL)
 	add("returnDomains", before.ReturnDomains, after.ReturnDomains)
+	add("liveEnabled", before.LiveEnabled, after.LiveEnabled)
 	return out
 }
 

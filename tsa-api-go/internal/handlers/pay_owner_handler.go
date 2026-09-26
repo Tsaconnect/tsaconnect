@@ -44,6 +44,7 @@ type payOwnerMerchantView struct {
 	ID             uuid.UUID `json:"id"`
 	BusinessName   string    `json:"businessName"`
 	Status         string    `json:"status"`
+	LiveEnabled    bool      `json:"liveEnabled"`
 	Version        int       `json:"version"`
 	SettlementMode string    `json:"settlementMode"`
 	BankCode       string    `json:"bankCode,omitempty"`
@@ -64,7 +65,7 @@ type payOwnerMerchantView struct {
 }
 
 func payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
-	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, Version: m.Version, SettlementMode: m.SettlementMode,
+	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled, Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
 		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList()}
 	if v.HasLiveKey {
@@ -210,6 +211,17 @@ func (h *PayHandler) announceOwnerAction(owner uuid.UUID, res *services.PayOwner
 		h.announce(owner, events.SecurityPayWebhookSecret, fmt.Sprintf("Your webhook signing secret was %sed", strings.TrimSuffix(res.SecretAction, "e")),
 			"If you didn't do this, roll the secret and contact support immediately.")
 	}
+}
+
+// announceLive tells the owner a super admin switched their live payments on or off.
+func (h *PayHandler) announceLive(m *models.PayMerchant) {
+	if m.LiveEnabled {
+		h.announce(m.UserID, events.PayLiveEnabled, fmt.Sprintf("Live payments are now on for %s", m.BusinessName),
+			"Your live API key now takes real payments.")
+		return
+	}
+	h.announce(m.UserID, events.PayLiveDisabled, fmt.Sprintf("Live payments for %s have been switched off — contact support", m.BusinessName),
+		"Your live API key is refused until live payments are switched back on. Test payments still work.")
 }
 
 func (h *PayHandler) announce(owner uuid.UUID, kind, title, message string) {

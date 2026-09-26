@@ -258,7 +258,7 @@ func (s *PayMerchantService) applyOwnerAction(ctx context.Context, ownerID uuid.
 		if err := json.Unmarshal([]byte(a.Payload), &ch); err != nil {
 			return nil, err
 		}
-		updated, err := s.update(ctx, ownerID, m.ID, endpointsUpdate(ch, a.BaseVersion), nil)
+		updated, _, err := s.update(ctx, ownerID, m.ID, endpointsUpdate(ch, a.BaseVersion), nil)
 		if err != nil {
 			return nil, err
 		}

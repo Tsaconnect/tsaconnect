@@ -29,7 +29,7 @@ type payPaymentAPI interface {
 	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
-	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID) (int, error)
+	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
@@ -185,7 +185,8 @@ func (h *PayHandler) AdminGetMerchant(c *gin.Context) {
 
 // PUT /admin/pay/merchants/:id — a plain admin may change business name,
 // status and fee share; changing where money settles or events go
-// (settlement, crypto target, webhooks, return domains) needs super_admin.
+// (settlement, crypto target, webhooks, return domains), or switching the
+// merchant's live payments on or off, needs super_admin.
 func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 	admin := getUserFromContext(c)
 	if admin == nil {
@@ -202,11 +203,10 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 		return
 	}
 	if in.Sensitive() && !hasSuperAdminPrivilege(c, admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can change where a merchant is paid or notified")
+		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can change where a merchant is paid or notified, or switch its live payments")
 		return
 	}
-
-	m, err := h.merchants.Update(c.Request.Context(), admin.ID, id, in)
+	m, before, err := h.merchants.Update(c.Request.Context(), admin.ID, id, in)
 	if err != nil {
 		payMerchantAdminFail(c, err)
 		return
@@ -216,9 +216,20 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 	// itself already landed, and a failure here still leaves the pending
 	// payments refusable at Lock time (a suspended merchant fails Lock too).
 	if in.Status != nil && *in.Status == models.PayMerchantSuspended {
-		if _, err := h.payments.ExpirePendingForMerchant(c.Request.Context(), m.ID); err != nil {
+		if _, err := h.payments.ExpirePendingForMerchant(c.Request.Context(), m.ID, "", "merchant suspended"); err != nil {
 			log.Printf("[tsa-pay] expire pending payments for suspended merchant %s: %v", m.ID, err)
 		}
+	}
+	// The live switch, only when it really flipped. Switched off, the merchant's
+	// pending live payments expire now (their webhook says so at once rather
+	// than at the timeout); Lock refuses them either way, so this is best-effort.
+	if m.LiveEnabled != before.LiveEnabled {
+		if !m.LiveEnabled {
+			if _, err := h.payments.ExpirePendingForMerchant(c.Request.Context(), m.ID, models.PayModeLive, "live payments switched off"); err != nil {
+				log.Printf("[tsa-pay] expire pending live payments for merchant %s switched off: %v", m.ID, err)
+			}
+		}
+		h.announceLive(m)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", payMerchantAdminViewFor(m))
 }

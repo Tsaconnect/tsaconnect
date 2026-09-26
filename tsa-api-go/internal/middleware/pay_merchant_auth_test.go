@@ -16,6 +16,8 @@ func TestPayMerchantAuth(t *testing.T) {
 	auth := func(_ context.Context, raw string) (*models.PayMerchant, string, error) {
 		switch raw {
 		case "tsapk_live_good":
+			return &models.PayMerchant{LiveEnabled: true}, models.PayModeLive, nil
+		case "tsapk_live_notswitched":
 			return &models.PayMerchant{}, models.PayModeLive, nil
 		case "tsapk_test_good":
 			return &models.PayMerchant{}, models.PayModeTest, nil
@@ -35,6 +37,10 @@ func TestPayMerchantAuth(t *testing.T) {
 		{"Bearer tsapk_live_suspended", "merchant_suspended", true, 403},
 		{"Bearer tsapk_live_good", "live_disabled", false, 403},
 		{"Bearer tsapk_live_good", "", true, 200},
+		// Per-merchant switch: off refuses a live key even while live is on globally;
+		// global off still answers live_disabled first; a test key needs neither.
+		{"Bearer tsapk_live_notswitched", "live_not_enabled", true, 403},
+		{"Bearer tsapk_live_notswitched", "live_disabled", false, 403},
 		{"Bearer tsapk_test_good", "", false, 200},
 	} {
 		gin.SetMode(gin.TestMode)
@@ -94,5 +100,38 @@ func TestPayMerchantAuth_AnUnavailableAuthStoreIs503NotABadKey(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"auth_unavailable"`) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPayMerchantAuth_ALiveKeyNeedsTheMerchantSwitchedLive(t *testing.T) {
+	merchant := &models.PayMerchant{}
+	auth := func(_ context.Context, raw string) (*models.PayMerchant, string, error) {
+		if raw == "tsapk_test_x" {
+			return merchant, models.PayModeTest, nil
+		}
+		return merchant, models.PayModeLive, nil
+	}
+	call := func(key string) *httptest.ResponseRecorder {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.GET("/x", PayMerchantAuth(auth, true), func(c *gin.Context) { c.Status(http.StatusOK) })
+		req := httptest.NewRequest("GET", "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	w := call("tsapk_live_x")
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"live_not_enabled"`) ||
+		!strings.Contains(w.Body.String(), "Live payments aren't switched on for this merchant yet — finish testing and contact TSA Connect") {
+		t.Fatalf("live key, merchant not switched live: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("tsapk_test_x"); w.Code != http.StatusOK {
+		t.Fatalf("test key, merchant not switched live: %d %s", w.Code, w.Body.String())
+	}
+	merchant.LiveEnabled = true
+	if w := call("tsapk_live_x"); w.Code != http.StatusOK {
+		t.Fatalf("live key, merchant switched live: %d %s", w.Code, w.Body.String())
 	}
 }

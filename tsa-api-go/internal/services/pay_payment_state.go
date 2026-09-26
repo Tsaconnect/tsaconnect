@@ -24,7 +24,7 @@ import (
 // Every OTHER caller (a fresh lock) is refused when: the payment is not
 // pending (another payer already holds it, or it finished/expired), there is
 // less than payMinTimeToStart left, the merchant is suspended, the mode is
-// live but live payments are disabled, or (live only) the payer is not
+// live but live payments are disabled (globally or for this merchant), or (live only) the payer is not
 // KYC-verified.
 func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*models.PayPayment, bool, error) {
 	p, err := s.Get(ctx, id)
@@ -52,7 +52,9 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 		return nil, false, ErrPayNotPayable
 	}
 	if p.Mode == models.PayModeLive {
-		if !liveEnabled {
+		// Both switches: a merchant switched off after a live payment was created
+		// must not be paid through it.
+		if !m.LiveAllowed(liveEnabled) {
 			return nil, false, ErrPayNotPayable
 		}
 		if err := requireVerifiedForMoneyIn(ctx, s.db, user.ID); err != nil {
@@ -256,17 +258,25 @@ func (s *PayPaymentService) Cancel(ctx context.Context, merchantID uuid.UUID, mo
 		}, models.PayEventExpired)
 }
 
-// ExpirePendingForMerchant expires every pending payment of merchantID — the
-// suspension side effect: a suspended merchant can no longer be paid, so
-// nothing should sit around pretending it still can be.
-func (s *PayPaymentService) ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID) (int, error) {
+// ExpirePendingForMerchant expires the pending payments of merchantID — the
+// side effect of a suspension (every mode) or of switching live payments off
+// (live only): a merchant that can no longer be paid that way should not leave
+// payments sitting around pretending it still can be.
+//
+// mode narrows it to one mode's payments ("" is every mode) and reason is the
+// failure_reason each one ends with. Only pending payments are touched: one a
+// payer is already paying (processing) or that has finished is left alone.
+func (s *PayPaymentService) ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error) {
 	var ids []uuid.UUID
-	if err := s.db.WithContext(ctx).Model(&models.PayPayment{}).
-		Where("merchant_id = ? AND status = ?", merchantID, models.PayStatusPending).
-		Pluck("id", &ids).Error; err != nil {
+	q := s.db.WithContext(ctx).Model(&models.PayPayment{}).
+		Where("merchant_id = ? AND status = ?", merchantID, models.PayStatusPending)
+	if mode != "" {
+		q = q.Where("mode = ?", mode)
+	}
+	if err := q.Pluck("id", &ids).Error; err != nil {
 		return 0, err
 	}
-	return s.expireEach(ctx, ids, "merchant suspended")
+	return s.expireEach(ctx, ids, reason)
 }
 
 // ExpireDue expires pending payments whose expires_at has passed, oldest

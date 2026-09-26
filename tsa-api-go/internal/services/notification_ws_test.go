@@ -185,3 +185,16 @@ func TestDeliveryChannels_APayoutChangeCannotBeMuted(t *testing.T) {
 		t.Fatalf("email-muted order event: live=%v email=%v", live, email)
 	}
 }
+
+// The live switch is news to the owner, not an alarm: emailed and pushed, and
+// muted like any other informational notice.
+func TestNotificationMaps_TheLiveSwitchIsEmailedAndPushedButMutable(t *testing.T) {
+	for _, kind := range []string{events.PayLiveEnabled, events.PayLiveDisabled} {
+		if !emailEvents[kind] || !pushWorthy(kind) {
+			t.Errorf("%s: email=%v push=%v, want both", kind, emailEvents[kind], pushWorthy(kind))
+		}
+		if live, email := deliveryChannels(kind, true, false); live || email {
+			t.Errorf("%s ignored a mute", kind)
+		}
+	}
+}

@@ -21,9 +21,10 @@ import (
 //
 // The Bearer scheme is matched case-insensitively. A malformed/missing/unknown key answers 401 invalid_key; a key belonging
 // to a suspended merchant answers 403 merchant_suspended; a live key while
-// liveEnabled is false answers 403 live_disabled (a test key is always
-// allowed regardless of liveEnabled). A failed key lookup (not a bad key)
-// answers 503 auth_unavailable.
+// liveEnabled is false answers 403 live_disabled, and a live key of a merchant
+// a super admin has not switched live (PayMerchant.LiveEnabled) answers 403
+// live_not_enabled. A test key is always allowed regardless of either switch.
+// A failed key lookup (not a bad key) answers 503 auth_unavailable.
 func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models.PayMerchant, string, error), liveEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		scheme, raw, ok := strings.Cut(c.GetHeader("Authorization"), " ")
@@ -50,6 +51,12 @@ func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models
 
 		if mode == models.PayModeLive && !liveEnabled {
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, "live payments are not enabled", "live_disabled")
+			c.Abort()
+			return
+		}
+		// Global is on here, so LiveAllowed is only the merchant's own switch.
+		if mode == models.PayModeLive && !m.LiveAllowed(liveEnabled) {
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Live payments aren't switched on for this merchant yet — finish testing and contact TSA Connect", "live_not_enabled")
 			c.Abort()
 			return
 		}
