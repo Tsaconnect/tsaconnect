@@ -42,6 +42,9 @@ jest.mock('@/components/ui', () => {
     Button: (props: any) => react.createElement(RNText, { accessibilityLabel: `button:${props.title}` }, props.title),
     ErrorState: (props: any) => react.createElement(RNText, null, props.title),
     Spinner: () => null,
+    // Each step as `label:state`, so a test can read where the stepper says things are.
+    Stepper: (props: any) =>
+      react.createElement(View, null, props.steps.map((st: any) => react.createElement(RNText, { key: st.key }, `${st.label}:${st.state}`))),
     Icon: () => null,
     PressableScale: box,
     AccentCard: box,

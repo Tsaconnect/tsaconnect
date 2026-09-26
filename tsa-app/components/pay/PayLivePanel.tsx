@@ -14,7 +14,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
-import { AccentCard, Button, Card, Icon, PressableScale, Spinner, Text } from '@/components/ui';
+import { AccentCard, Button, Card, Icon, PressableScale, Spinner, Stepper, Text, type Step } from '@/components/ui';
 import AssetPicker from '@/components/assets/AssetPicker';
 import { SWAPPED_STAGE_LABELS } from '@/components/paycrest/SwappedSellForm';
 import type { PayHook } from '@/hooks/usePayLive';
@@ -34,13 +34,15 @@ type Props = {
   /** What the merchant receives, when it is not naira — given the exact amount when the server knew it. */
   receives?: (amountLabel?: string) => string | undefined;
   note?: string;
+  /** Where a moving payment has got to. Given, it replaces the one-line progress and "Waiting for confirmation…". */
+  steps?: Step[];
 };
 
 type Pick = { token: LiFiToken; chainId: number };
 /** A price lookup for one pick: what she would pay, in words and base units, and when it was looked up. */
 type Priced = { pick: Pick; label?: string; fromAmount?: string; receives?: string; error?: string; at: number };
 
-export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }: Props) {
+export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, steps }: Props) {
   const { colors, spacing } = useTheme();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pick, setPick] = useState<Pick | null>(null);
@@ -142,7 +144,12 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
         <Text variant="bodySm" style={{ color: colors.warning }}>{price.error}</Text>
       )}
 
-      {running && (
+      {steps && (
+        <Card>
+          <Stepper steps={steps} />
+        </Card>
+      )}
+      {running && !steps && (
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <Spinner size="small" />
           <Text variant="bodySm" weight="600" style={{ flex: 1 }}>{progress ?? 'Starting your payment…'}</Text>
@@ -207,7 +214,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note }:
         />
       )}
 
-      {pay.stage === 'waiting' && (
+      {pay.stage === 'waiting' && !steps && (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <Spinner inline />
           <Text variant="bodySm" color="textSecondary">Waiting for confirmation…</Text>

@@ -33,6 +33,9 @@ jest.mock('@/components/ui', () => {
       react.createElement(View, { accessibilityLabel: `button:${props.title}`, onPress: props.onPress, disabled: !!props.disabled },
         react.createElement(RNText, null, props.title)),
     Spinner: () => null,
+    // Each step as `label:state`, so a test can read where the stepper says things are.
+    Stepper: (props: any) =>
+      react.createElement(View, null, props.steps.map((st: any) => react.createElement(RNText, { key: st.key }, `${st.label}:${st.state}`))),
     Icon: () => null,
     Card: box,
     AccentCard: box,
@@ -571,5 +574,70 @@ describe('the picker is not rebuilt every time the screen re-renders', () => {
       tree.update(<PayCrypto checkout={{ ...cryptoCheckout, settleChainId: 8453 } as PayCheckout} showForm onWaiting={jest.fn()} onActive={jest.fn()} />);
     });
     expect(new Set(mockAllows.filter(Boolean)).size).toBe(2);
+  });
+});
+
+describe('a naira payment shows where it has got to', () => {
+  const order = { id: 'o1', status: 'awaiting_deposit' };
+  const mount = async (pay: any, over: Partial<PayCheckout> = {}) => {
+    mockHooks.naira = pay;
+    await act(async () => {
+      tree = TestRenderer.create(<PayNaira checkout={{ ...fiat, ...over }} showForm={false} onWaiting={jest.fn()} onActive={jest.fn()} />);
+    });
+  };
+  const rerender = async (pay: any, over: Partial<PayCheckout> = {}) => {
+    mockHooks.naira = pay;
+    await act(async () => {
+      tree.update(<PayNaira checkout={{ ...fiat, ...over }} showForm={false} onWaiting={jest.fn()} onActive={jest.fn()} />);
+    });
+  };
+
+  it('steps replace the one-line progress while a swap runs, and the keep-open advice stays', async () => {
+    await mount(hookState({ stage: 'paying', swapStage: 'swapping', swapped: true }));
+    expect(text(tree)).toContain('Swap to USDC:active');
+    expect(text(tree)).toContain('Paying Sky Air:pending');
+    expect(text(tree)).not.toContain('Swapping your coins…');
+    expect(text(tree)).toContain('Keep the app open');
+  });
+
+  it('just after Pay, before the attempt has a shape, it says it is starting — no steps yet', async () => {
+    await mount(hookState({ stage: 'paying', swapStage: 'idle' }));
+    expect(text(tree)).toContain('Starting your payment…');
+    expect(text(tree)).not.toMatch(/:(done|active|pending)/);
+  });
+
+  it('a direct payment with its order is sending from her wallet', async () => {
+    await mount(hookState({ stage: 'paying', swapStage: 'idle', order }));
+    expect(text(tree)).toContain('Payment sent:active');
+    expect(text(tree)).not.toContain('Swap to USDC');
+  });
+
+  it("while it waits, the checkout's order status moves the steps — and 'Waiting for confirmation' gives way to them", async () => {
+    await mount(hookState({ stage: 'waiting', order }), { orderId: 'o1' });
+    expect(text(tree)).toContain('Received by the provider:active');
+    expect(text(tree)).not.toContain('Waiting for confirmation');
+    await rerender(hookState({ stage: 'waiting', order }), { orderId: 'o1', orderStatus: 'settling' });
+    expect(text(tree)).toContain('Received by the provider:done');
+    expect(text(tree)).toContain('Paying Sky Air:active');
+  });
+
+  it('a send whose outcome is unknown is checked, never shown sent — beside its notice', async () => {
+    const notice = "We couldn't confirm whether your payment was sent.";
+    await mount(hookState({ stage: 'waiting', order, notice }), { orderId: 'o1' });
+    expect(text(tree)).toContain('Payment sent:active');
+    expect(text(tree)).not.toContain('Payment sent:done');
+    expect(text(tree)).toContain(notice);
+  });
+
+  it('a wait with no order shows no steps, just the wait line', async () => {
+    await mount(hookState({ stage: 'waiting' }));
+    expect(text(tree)).not.toMatch(/:(done|active|pending)/);
+    expect(text(tree)).toContain('Waiting for confirmation');
+  });
+
+  it('an order that ended badly shows no steps, just the wait line', async () => {
+    await mount(hookState({ stage: 'waiting', order }), { orderId: 'o1', orderStatus: 'expired' });
+    expect(text(tree)).not.toMatch(/:(done|active|pending)/);
+    expect(text(tree)).toContain('Waiting for confirmation');
   });
 });

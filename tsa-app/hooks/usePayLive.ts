@@ -38,6 +38,8 @@ export type PayHook = {
   retryable?: boolean;
   canContinue?: boolean;
   swapStage?: SellStage;
+  /** This attempt swapped her token first (the naira hook's steps show the swap). */
+  swapped?: boolean;
   order?: PaycrestOrder;
   missingUsdc?: string;
   walletShort?: boolean;

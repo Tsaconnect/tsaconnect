@@ -61,6 +61,11 @@ type PayCheckoutView struct {
 	// comes back to a processing payment can resume funding it. Only ever set
 	// for the payer of a processing payment: nobody else may see the order.
 	OrderID *uuid.UUID `json:"orderId,omitempty"`
+	// OrderStatus is that order's status as the Paycrest poller last recorded
+	// it, so the payer's progress steps move on the checkout read the app
+	// already polls — not a second, Paycrest-syncing poll of the order. Same
+	// visibility as OrderID.
+	OrderStatus string `json:"orderStatus,omitempty"`
 }
 
 // PayPublicView is the unauthenticated status page a customer's browser (or
@@ -146,8 +151,16 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		NotPayableWhy:      why,
 		YouArePaying:       youArePaying,
 	}
-	if youArePaying {
+	if youArePaying && p.PaycrestOrderID != nil {
 		v.OrderID = p.PaycrestOrderID
+		// Scoped to the payer as well as the id: the order is theirs, and a
+		// failed read only leaves the steps where they were.
+		var order models.PaycrestOrderRecord
+		if err := s.db.WithContext(ctx).Select("status").
+			Where("id = ? AND user_id = ?", *p.PaycrestOrderID, user.ID).
+			Take(&order).Error; err == nil {
+			v.OrderStatus = order.Status
+		}
 	}
 	// A return URL often carries the merchant's own order token, so it is
 	// shown only once the payment has succeeded — like PublicView — not to

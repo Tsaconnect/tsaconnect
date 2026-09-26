@@ -52,6 +52,8 @@ export type UsePayNaira = {
   missingUsdc?: string;
   /** With `shortfall`: her wallet's USDC was already offered and did not cover the rest. */
   walletShort: boolean;
+  /** This attempt swapped her token first — the progress steps show the swap. */
+  swapped: boolean;
   error?: string;
   /** The server's machine code behind `error`, when it sent one (e.g. KYC). */
   errorCode?: string;

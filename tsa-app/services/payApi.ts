@@ -4,6 +4,7 @@
 // merchant's payment link. This is the user-JWT surface
 // (GET /api/pay/checkout/:id, POST /api/pay/checkout/:id/test-outcome), never
 // the merchant's key-authenticated /api/pay/v1 API.
+import type { PaycrestStatus } from '@/services/paycrestStatus';
 import { ApiError, createApiRequest } from '@/services/apiRequest';
 import { toLiFiQuote, type LiFiQuote } from '@/services/lifi';
 import type { PaycrestOrder } from '@/services/paycrestApi';
@@ -34,6 +35,8 @@ export type PayCheckout = {
   youArePaying: boolean;
   /** The Paycrest order this payment is linked to — only for the paying user, only once linked. */
   orderId?: string;
+  /** That order's status as the server last recorded it — same visibility as orderId. Moves the payer's progress steps. */
+  orderStatus?: PaycrestStatus;
 };
 
 export class PayError extends ApiError {}

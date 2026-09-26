@@ -43,6 +43,9 @@ jest.mock('@/components/ui', () => {
     Button: (props: any) =>
       react.createElement(View, { accessibilityLabel: `button:${props.title}`, onPress: props.onPress }, label(props.title)),
     Spinner: () => null,
+    // Each step as `label:state`, so a test can read where the stepper says things are.
+    Stepper: (props: any) =>
+      react.createElement(View, null, props.steps.map((st: any) => react.createElement(RNText, { key: st.key }, `${st.label}:${st.state}`))),
     Icon: () => null,
     Card: box,
     SummaryCard: box,
@@ -163,4 +166,55 @@ it('a live order keeps it', async () => {
   api.getOrder.mockResolvedValue({ ...order, status: 'pending' });
   await mount();
   expect((await readHold(HOLD))?.intentId).toBe('o1');
+});
+
+describe('progress and details', () => {
+  it('a held deposit is being confirmed, never drawn as sent', async () => {
+    await writeHold(HOLD, 'o1');
+    const tree = await mount();
+    expect(text(tree)).toContain('Crypto sent:active');
+    expect(text(tree)).toContain('Received by the provider:pending');
+  });
+
+  it('a deposit this phone sent, with its hash, is sent — the provider is next', async () => {
+    mockParams.value = { id: 'o1', sentTx: `0x${'ab'.repeat(32)}` };
+    const tree = await mount();
+    expect(text(tree)).toContain('Crypto sent:done');
+    expect(text(tree)).toContain('Received by the provider:active');
+  });
+
+  it('"You paid" only once the provider has seen the transfer — never on a buy that expired unpaid', async () => {
+    const buy = { ...order, direction: 'buy', payAmount: '50250.00' } as PaycrestOrder;
+    api.getOrder.mockResolvedValue({ ...buy, status: 'expired' });
+    let tree = await mount();
+    expect(text(tree)).not.toContain('You paid');
+    await act(async () => { mounted.splice(0).forEach((t) => t.unmount()); });
+    api.getOrder.mockResolvedValue({ ...buy, status: 'settled' });
+    tree = await mount();
+    expect(text(tree)).toContain('You paid');
+    expect(text(tree)).toContain('₦50,250.00');
+  });
+
+  it('a settled sale: naira headline, rate per token, readable times, every step done', async () => {
+    api.getOrder.mockResolvedValue({
+      ...order, status: 'settled', amount: '1000.00', rate: '1347.67',
+      settledAt: '2026-09-25T17:08:40.763369+02:00',
+    });
+    const tree = await mount();
+    const shown = text(tree);
+    expect(shown).toContain('₦1,000.00');
+    expect(shown).toContain('₦1,347.67 per USDC');
+    expect(shown).toContain('Paid to your bank:done');
+    expect(shown).not.toMatch(/:(active|pending|failed)/);
+    // Never the raw ISO string.
+    expect(shown).not.toContain('T17:08');
+    expect(shown).toContain('2026');
+  });
+
+  it('an expired order ends its steps there', async () => {
+    api.getOrder.mockResolvedValue({ ...order, status: 'expired' });
+    const tree = await mount();
+    expect(text(tree)).toContain('Expired — no deposit arrived:failed');
+    expect(text(tree)).not.toContain('Paid to your bank');
+  });
 });

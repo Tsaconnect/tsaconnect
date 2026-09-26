@@ -10,7 +10,7 @@ import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
-import { Button, Card, Divider, Icon, Input, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import { Button, Card, Divider, Icon, Input, Spinner, Stepper, SummaryCard, SummaryRow, Text } from '@/components/ui';
 import {
   getITIntent,
   reportStableDeposit,
@@ -570,35 +570,7 @@ export default function ITIntentDetail() {
               <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.sm }}>
                 Progress
               </Text>
-              <View style={{ gap: spacing.sm }}>
-                {hops.map((hop) => (
-                  <View key={hop.key} style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                    {hop.state === 'done' ? (
-                      <Icon name="checkCircle" size={20} color={colors.success} />
-                    ) : hop.state === 'failed' ? (
-                      <Icon name="closeCircle" size={20} color={colors.danger} />
-                    ) : hop.state === 'active' ? (
-                      <Spinner size="small" />
-                    ) : (
-                      <View
-                        style={{
-                          width: 18,
-                          height: 18,
-                          borderRadius: 9,
-                          borderWidth: 2,
-                          borderColor: colors.border,
-                        }}
-                      />
-                    )}
-                    <Text
-                      variant="bodySm"
-                      style={{ color: hop.state === 'pending' ? colors.textMuted : colors.textPrimary }}
-                    >
-                      {hop.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
+              <Stepper steps={hops} />
             </View>
           ) : null}
           {isBuy && isStableAsset && intent.destAddress ? (

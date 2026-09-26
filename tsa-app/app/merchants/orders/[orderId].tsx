@@ -42,6 +42,7 @@ import {
 import { signAndBroadcast } from '@/services/transaction';
 import api from '@/components/services/api';
 import { formatStatus, formatDate } from '@/constants/orderStatus';
+import { merchantOrderTimeline } from '@/utils/merchantOrderTimeline';
 import { useTheme } from '@/theme';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import {
@@ -57,6 +58,7 @@ import {
   PressableScale,
   Sheet,
   Spinner,
+  Stepper,
   Text,
 } from '@/components/ui';
 import type { StatusTone } from '@/components/ui';
@@ -77,81 +79,6 @@ const STATUS_TONE: Record<string, StatusTone> = {
   refunded: 'neutral',
   cancelled: 'neutral',
 };
-
-// Steps in the order lifecycle, in display order. Used by the timeline.
-type TimelineStep = {
-  key: string;
-  label: string;
-  timestamp?: string;
-  isCurrent?: boolean;
-  isComplete?: boolean;
-};
-
-function buildTimeline(order: Order): TimelineStep[] {
-  const isRefunded = order.status === 'refunded';
-  const isCancelled = order.status === 'cancelled';
-  const isRefundRequested = order.status === 'refund_requested';
-
-  // Refund / cancel branches replace later steps
-  if (isCancelled) {
-    return [
-      { key: 'created', label: 'Order Placed', timestamp: order.createdAt, isComplete: true },
-      { key: 'cancelled', label: 'Cancelled', timestamp: order.updatedAt, isCurrent: true, isComplete: true },
-    ];
-  }
-
-  // Services skip the "Shipped" step and read "Delivered" as "Rendered".
-  const isService = order.kind === 'service';
-
-  const steps: TimelineStep[] = [
-    { key: 'created', label: 'Order Placed', timestamp: order.createdAt, isComplete: true },
-    {
-      key: 'escrowed',
-      label: 'Payment Escrowed',
-      timestamp: order.escrowExpiresAt ? undefined : undefined, // backend doesn't store an escrow timestamp explicitly
-      isComplete: ['escrowed', 'shipped', 'delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
-    },
-    ...(isService
-      ? []
-      : [
-          {
-            key: 'shipped',
-            label: 'Shipped',
-            timestamp: order.sellerShippedAt,
-            isComplete: ['shipped', 'delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
-          } as TimelineStep,
-        ]),
-    {
-      key: 'delivered',
-      label: isService ? 'Rendered' : 'Delivered',
-      timestamp: order.sellerDeliveredAt,
-      isComplete: ['delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
-    },
-    {
-      key: 'completed',
-      label: 'Completed',
-      timestamp: order.buyerConfirmedAt,
-      isComplete: order.status === 'completed',
-    },
-  ];
-
-  if (isRefundRequested || isRefunded) {
-    steps.push({
-      key: 'refund_requested',
-      label: 'Refund Requested',
-      isComplete: true,
-    });
-    if (isRefunded) {
-      steps.push({ key: 'refunded', label: 'Refunded', timestamp: order.updatedAt, isComplete: true, isCurrent: true });
-    }
-  }
-
-  // Mark the latest non-complete step or the current status as current
-  const currentIdx = steps.findIndex((s) => s.key === order.status);
-  if (currentIdx >= 0) steps[currentIdx].isCurrent = true;
-
-  return steps;
-}
 
 function isValidHttpUrl(value: string): boolean {
   try {
@@ -486,7 +413,7 @@ const MerchantOrderDetail = () => {
   const canResolveRefund = !isDisputed && order.status === 'refund_requested';
   const canHandleCancel = !isDisputed && order.status === 'cancel_requested';
   const canRaiseDispute = !isDisputed && ['escrowed', 'shipped', 'delivered', 'cancel_requested', 'refund_requested'].includes(order.status);
-  const timeline = buildTimeline(order);
+  const timeline = merchantOrderTimeline(order, (iso) => formatDate(iso, true));
   const buyerLabel =
     order.buyer?.name?.trim() ||
     (order.buyer?.username ? `@${order.buyer.username}` : '') ||
@@ -742,51 +669,7 @@ const MerchantOrderDetail = () => {
         <Card style={{ marginBottom: spacing.md }}>
           {CARD_LABEL('TIMELINE')}
           <View style={{ marginTop: spacing.sm }}>
-            {timeline.map((step, i) => {
-              const isLast = i === timeline.length - 1;
-              const dotBg = step.isCurrent
-                ? colors.accent
-                : step.isComplete
-                  ? colors.success
-                  : colors.border;
-              const lineBg = step.isComplete ? colors.success : colors.border;
-              return (
-                <View key={step.key} style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-                  <View style={{ width: 28, alignItems: 'center' }}>
-                    <View
-                      style={{
-                        width: 16,
-                        height: 16,
-                        borderRadius: 8,
-                        backgroundColor: dotBg,
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        marginTop: 2,
-                      }}
-                    >
-                      {step.isComplete && <Icon name="check" size={10} color={colors.onAccent} />}
-                    </View>
-                    {!isLast && (
-                      <View style={{ width: 2, flex: 1, backgroundColor: lineBg, minHeight: 18, marginTop: 2 }} />
-                    )}
-                  </View>
-                  <View style={{ flex: 1, paddingBottom: spacing.md, marginLeft: spacing.sm }}>
-                    <Text
-                      variant="bodySm"
-                      weight={step.isCurrent ? '700' : '600'}
-                      color={step.isCurrent ? 'textPrimary' : 'textMuted'}
-                    >
-                      {step.label}
-                    </Text>
-                    {step.timestamp && (
-                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-                        {formatDate(step.timestamp, true)}
-                      </Text>
-                    )}
-                  </View>
-                </View>
-              );
-            })}
+            <Stepper steps={timeline} />
           </View>
         </Card>
 

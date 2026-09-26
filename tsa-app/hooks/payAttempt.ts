@@ -28,6 +28,8 @@ type Detail = {
   /** The swapped-sell pipeline's own stage, for progress copy. */
   swapStage?: SellStage;
   order?: PaycrestOrder;
+  /** This attempt swapped her token first. Set by the swap's own stages and carried to the end of the attempt — 'sending' alone cannot tell a swapped payment from a direct one — and never into the next attempt. */
+  swapped?: boolean;
 };
 
 export type PayAttempt =
@@ -79,6 +81,9 @@ export type PayAttemptEvent =
   /** The server let go of the payment. */
   | { type: 'reset' };
 
+/** Stages only the swapped pipeline reports: evidence that this attempt swapped. */
+const SWAP_STAGES: SellStage[] = ['swapping', 'waiting', 'ordering', 'shortfall', 'done'];
+const wasSwapped = (a: PayAttempt): boolean => a.kind !== 'idle' && a.kind !== 'deposit' && !!a.swapped;
 const walletTried = (a: PayAttempt): boolean => (a.kind === 'paying' || a.kind === 'shortfall') && a.walletTried;
 const isPaused = (a: PayAttempt): boolean => a.kind === 'failed' && a.paused;
 const isHeld = (a: PayAttempt): boolean => a.kind === 'failed' && a.held;
@@ -96,28 +101,36 @@ export function reducePayAttempt(a: PayAttempt, e: PayAttemptEvent): PayAttempt 
       // An attempt in flight is never begun twice.
       return a.kind === 'paying' ? a : { kind: 'paying', walletTried: false };
     case 'progress':
-      return { kind: 'paying', walletTried: walletTried(a), swapStage: e.swapStage, order: e.order };
+      return {
+        kind: 'paying', walletTried: walletTried(a), swapStage: e.swapStage, order: e.order,
+        swapped: wasSwapped(a) || SWAP_STAGES.includes(e.swapStage),
+      };
     case 'waiting':
-      return { kind: 'waiting', swapStage: e.swapStage, order: e.order, note: e.note };
+      return {
+        kind: 'waiting', swapStage: e.swapStage, order: e.order, note: e.note,
+        swapped: wasSwapped(a) || (!!e.swapStage && SWAP_STAGES.includes(e.swapStage)),
+      };
     case 'stop':
       return {
         kind: 'failed', error: e.message, retryable: e.retryable, paused: false, held: false, noContinue: !e.intent,
-        intent: e.intent, order: e.order,
+        intent: e.intent, order: e.order, swapped: wasSwapped(a),
       };
     case 'shortfall':
       return {
         kind: 'shortfall', intent: e.intent, missingUsdc: e.missingUsdc, walletTried: walletTried(a), swapStage: 'shortfall',
+        swapped: true,
       };
     case 'walletOffered':
-      return { kind: 'paying', walletTried: true, swapStage: 'ordering' };
+      return { kind: 'paying', walletTried: true, swapStage: 'ordering', swapped: true };
     case 'continue':
-      return { kind: 'continue', intent: e.intent };
+      // Only a swapped sale is ever continued.
+      return { kind: 'continue', intent: e.intent, swapped: true };
     case 'deposit':
       return { kind: 'deposit', order: e.order, error: e.error };
     case 'fail':
       return {
         kind: 'failed', error: e.error, code: e.errorCode, retryable: e.retryable, paused: !!e.paused, held: !!e.held,
-        noContinue: e.noContinue ?? !e.intent, intent: e.intent, order: e.order,
+        noContinue: e.noContinue ?? !e.intent, intent: e.intent, order: e.order, swapped: wasSwapped(a),
       };
     case 'reset':
       return canReset(a) ? { kind: 'idle' } : a;
@@ -137,10 +150,14 @@ export type PayAttemptView = {
   order?: PaycrestOrder;
   /** With `waiting`: what she should know while it waits. Not a failure. */
   notice?: string;
+  /** This attempt swapped her token first. */
+  swapped: boolean;
 };
 
 export function payAttemptView(a: PayAttempt): PayAttemptView {
-  const base = { walletShort: false, swapStage: 'idle' as SellStage, retryable: true, canContinue: false };
+  const base = {
+    walletShort: false, swapStage: 'idle' as SellStage, retryable: true, canContinue: false, swapped: wasSwapped(a),
+  };
   switch (a.kind) {
     case 'idle':
       return { stage: 'idle', ...base };

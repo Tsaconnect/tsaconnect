@@ -89,7 +89,7 @@ describe('reducePayAttempt — transitions', () => {
 describe('payAttemptView — what the payer and the screen read', () => {
   it('idle', () => {
     expect(payAttemptView(IDLE)).toEqual({
-      stage: 'idle', retryable: true, canContinue: false, walletShort: false, swapStage: 'idle',
+      stage: 'idle', retryable: true, canContinue: false, walletShort: false, swapStage: 'idle', swapped: false,
     });
   });
 
@@ -163,5 +163,38 @@ describe('canReset — the guard the async crypto reset shares with the reducer'
     [failed({ retryable: false, paused: true }), false],
   ])('%#', (a, expected) => {
     expect(canReset(a)).toBe(expected);
+  });
+});
+
+describe('swapped — whether this attempt swapped her token first', () => {
+  const run = (events: PayAttemptEvent[], from: PayAttempt = IDLE) => events.reduce(reducePayAttempt, from);
+  const swappedOf = (a: PayAttempt) => payAttemptView(a).swapped;
+
+  it("is set by the swap's own stages and carried to the end of the attempt", () => {
+    const a = run([{ type: 'begin' }, { type: 'progress', swapStage: 'swapping' }, { type: 'progress', swapStage: 'sending' }]);
+    expect(swappedOf(a)).toBe(true);
+    expect(swappedOf(reducePayAttempt(a, { type: 'waiting', order }))).toBe(true);
+    expect(swappedOf(reducePayAttempt(a, { type: 'stop', message: 'no', retryable: false }))).toBe(true);
+    expect(swappedOf(reducePayAttempt(a, { type: 'fail', error: 'no', retryable: false }))).toBe(true);
+  });
+
+  it('is not set by a direct payment — sending alone is no evidence of a swap', () => {
+    expect(swappedOf(run([{ type: 'begin' }, { type: 'progress', swapStage: 'idle', order }]))).toBe(false);
+    expect(swappedOf(run([{ type: 'begin' }, { type: 'progress', swapStage: 'sending', order }, { type: 'waiting', order }]))).toBe(false);
+  });
+
+  it('never leaks into the next attempt, even one begun straight from a failure', () => {
+    const failedSwap = run([{ type: 'begin' }, { type: 'progress', swapStage: 'swapping' }, { type: 'stop', message: 'no', retryable: true }]);
+    expect(failedSwap.kind).toBe('failed');
+    expect(swappedOf(failedSwap)).toBe(true);
+    const direct = run([{ type: 'begin' }, { type: 'progress', swapStage: 'idle', order }], failedSwap);
+    expect(swappedOf(direct)).toBe(false);
+  });
+
+  it('a shortfall, her wallet offered, and a continued sale are all swaps', () => {
+    expect(swappedOf(run([{ type: 'shortfall', missingUsdc: '1' }]))).toBe(true);
+    expect(swappedOf(run([{ type: 'shortfall' }, { type: 'walletOffered' }]))).toBe(true);
+    expect(swappedOf(run([{ type: 'continue', intent }]))).toBe(true);
+    expect(swappedOf(run([{ type: 'deposit', order }]))).toBe(false);
   });
 });

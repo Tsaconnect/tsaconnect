@@ -23,10 +23,13 @@ import {
   CopyableField,
   Icon,
   Spinner,
+  Stepper,
   SummaryCard,
   SummaryRow,
   Text,
+  type IconName,
 } from '@/components/ui';
+import type { ColorTokens } from '@/theme';
 import { useCountdown } from '@/hooks/useCountdown';
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
 import { depositCardState } from '@/utils/paycrestDepositView';
@@ -42,11 +45,16 @@ import {
   paycrestConversionHops,
   PaycrestError,
   type PaycrestOrder,
+  type PaycrestStatus,
 } from '@/services/paycrestApi';
 import { DEPOSIT_OUTCOME_UNKNOWN } from '@/services/paycrestDeposit';
 import { depositMayBeOut } from '@/services/depositGuard';
 import { clearHold, depositHoldKey } from '@/services/payHold';
-import { getChainDisplay, type ChainKey } from '@/constants/chains';
+import { getChainDisplay, txExplorerUrl, type ChainKey } from '@/constants/chains';
+import { formatDate } from '@/constants/orderStatus';
+import { paycrestOrderSteps } from '@/utils/paycrestOrderSteps';
+import { shortAddress } from '@/utils/sendForm';
+import { formatNaira } from '@/utils/stableSellQuote';
 
 /** Delivery landed in ~73s end to end in live testing, so a 5s poll shows the
  *  result within a tick or two of it actually happening without hammering. */
@@ -69,6 +77,22 @@ const chainLabel = (key?: string): string => {
   if (!key) return '—';
   return CHAIN_LABELS[key] ?? getChainDisplay(key as ChainKey)?.name ?? key;
 };
+
+const when = (iso: string) => formatDate(iso, true);
+
+/** Statuses that prove the provider received her transfer. */
+const TRANSFER_SEEN: PaycrestStatus[] = [
+  'pending', 'settling', 'settled', 'converting', 'refunding', 'refunded', 'unmatched', 'recovery_pending',
+];
+
+type Tone = { icon: IconName; color: keyof ColorTokens; bg: keyof ColorTokens };
+const TONES = {
+  done: { icon: 'checkCircle', color: 'success', bg: 'successBg' },
+  moving: { icon: 'clock', color: 'accent', bg: 'accentMuted' },
+  attention: { icon: 'warning', color: 'warning', bg: 'warningBg' },
+  ended: { icon: 'closeCircle', color: 'danger', bg: 'dangerBg' },
+  returned: { icon: 'refresh', color: 'info', bg: 'infoBg' },
+} satisfies Record<string, Tone>;
 
 export default function PaycrestOrderScreen() {
   const { colors, spacing } = useTheme();
@@ -226,33 +250,61 @@ export default function PaycrestOrderScreen() {
     paymentClaimedAt: order.paymentClaimedAt,
     mayBeOut,
   });
+  const tone = settled
+    ? TONES.done
+    : needsOperator
+      ? TONES.attention
+      : refunded || refunding
+        ? TONES.returned
+        : ['expired', 'failed', 'cancelled'].includes(order.status)
+          ? TONES.ended
+          : TONES.moving;
+  // What this order is for, as she would put it: the naira a sale pays out, or the crypto a buy delivers.
+  const headline =
+    order.direction === 'sell'
+      ? formatNaira(order.amount)
+      : converted
+        ? `${formatPromisedAmount(order) ?? order.tokenAmount ?? '—'} ${order.requestedToken ?? order.token}`
+        : `${order.tokenAmount ?? '—'} ${order.token}`;
+  const steps = converted
+    ? conversionHops
+    : paycrestOrderSteps({ order, sent: sentTx ? 'proven' : mayBeOut ? 'unconfirmed' : undefined, when });
+  const transferSeen = TRANSFER_SEEN.includes(order.status);
+  const explorerUrl = order.txHash && !converted ? txExplorerUrl(order.txHash, { chainKey: order.chain as ChainKey }) : undefined;
+
   /** The deposit is on its way, so stop asking for it in the status line too. */
   const depositUnderway = deposit.kind === 'progress' || deposit.kind === 'claimed' || deposit.kind === 'unconfirmed';
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
-        <Card
-          style={{
-            borderWidth: 1,
-            borderColor: needsOperator
-              ? colors.warning
-              : settled
-                ? colors.success
-                : colors.border,
-          }}
-        >
-          <Text
-            variant="title3"
-            weight="700"
+        <Card style={{ alignItems: 'center', gap: spacing.xs, paddingVertical: spacing.lg }}>
+          <View
             style={{
-              color: needsOperator
-                ? colors.warning
-                : settled
-                  ? colors.success
-                  : colors.textPrimary,
+              width: 56,
+              height: 56,
+              borderRadius: 28,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: colors[tone.bg],
+              marginBottom: spacing.xs,
             }}
           >
+            <Icon name={tone.icon} size={30} color={colors[tone.color]} />
+          </View>
+          <Text variant="title2" weight="700" numeric align="center">
+            {headline}
+          </Text>
+          {/* A converted buy's headline is what reaches her wallet, never
+              order.tokenAmount (the SETTLEMENT leg Paycrest filled to our
+              treasury) — and it is a floor, not a quote. A refund is labelled
+              by the status line: the money goes back to the same wallet. */}
+          {converted && !refunded && !refunding && (
+            <Text variant="caption" color="textMuted" align="center">
+              Guaranteed minimum — includes a conversion
+            </Text>
+          )}
+          <Text variant="bodyMed" weight="600" align="center" style={{ color: colors[tone.color] }}>
             {statusLabel(order)}
           </Text>
 
@@ -260,20 +312,20 @@ export default function PaycrestOrderScreen() {
               user did nothing wrong and cannot fix it themselves, so say both
               things plainly instead of showing a generic failure. */}
           {unmatched && (
-            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+            <Text variant="bodySm" align="center" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               Your transfer reached the provider but was never matched to this order. Your money is
               not lost — recovering it needs a person, and we have started that. Send us your bank
               receipt to speed it up.
             </Text>
           )}
           {recoveryPending && (
-            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+            <Text variant="bodySm" align="center" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               Your funds are stranded at the provider in a way we can&apos;t retry automatically. Nothing
               is lost — recovering it needs a person, and we have started that.
             </Text>
           )}
           {awaiting && !expired && (
-            <Text variant="bodySm" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+            <Text variant="bodySm" align="center" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
               {order.direction === 'buy'
                 ? order.paymentClaimedAt
                   ? // Same principle as the sell leg below: once she has told
@@ -289,61 +341,22 @@ export default function PaycrestOrderScreen() {
             </Text>
           )}
           {order.failureReason && !unmatched && (
-            <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
+            <Text variant="caption" align="center" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
               {order.failureReason}
             </Text>
           )}
         </Card>
 
-        {/* Converted orders route through our treasury before the user's
-            wallet ever sees anything, which a plain status line does not
-            convey — this timeline is what makes "why hasn't it arrived yet"
-            visible instead of a black box. Reuses the same Hop/HopState
-            rendering the stablecoin sell/buy progress screens already use
-            (intent/[id].tsx), not a new stepper. */}
-        {converted && (
-          <Card>
-            <Text
-              variant="bodySm"
-              weight="600"
-              style={{ color: colors.textSecondary, marginBottom: spacing.sm }}
-            >
-              Progress
-            </Text>
-            <View style={{ gap: spacing.sm }}>
-              {conversionHops.map((hop) => (
-                <View
-                  key={hop.key}
-                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}
-                >
-                  {hop.state === 'done' ? (
-                    <Icon name="checkCircle" size={20} color={colors.success} />
-                  ) : hop.state === 'failed' ? (
-                    <Icon name="closeCircle" size={20} color={colors.danger} />
-                  ) : hop.state === 'active' ? (
-                    <Spinner size="small" />
-                  ) : (
-                    <View
-                      style={{
-                        width: 18,
-                        height: 18,
-                        borderRadius: 9,
-                        borderWidth: 2,
-                        borderColor: colors.border,
-                      }}
-                    />
-                  )}
-                  <Text
-                    variant="bodySm"
-                    style={{ color: hop.state === 'pending' ? colors.textMuted : colors.textPrimary }}
-                  >
-                    {hop.label}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          </Card>
-        )}
+        {/* Where the money is, step by step — the answer to "why hasn't it
+            arrived yet". A converted order routes through our treasury, so it
+            has its own hops (paycrestConversionHops); a direct one walks
+            opened → sent → received → paying → paid. */}
+        <Card>
+          <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.md }}>
+            Progress
+          </Text>
+          <Stepper steps={steps} />
+        </Card>
 
         {/* Payment instructions stay visible while the order is still waiting
             on the user — this screen is where they land after tapping "I've
@@ -432,64 +445,59 @@ export default function PaycrestOrderScreen() {
           </Card>
         )}
 
-        <SummaryCard>
-          {/* On a buy the transfer instruction above already states what to
-              send, and it is the authoritative figure — repeating it here as
-              "You pay" was redundant at best. Before the sender fee moved into
-              the rate the two even disagreed: "you pay 800" beside "transfer
-              804.02". Only the sell direction needs this row, where the fiat
-              figure is what the user RECEIVES and appears nowhere else. */}
-          {order.direction === 'sell' ? (
-            <SummaryRow label="You receive" value={`₦${order.amount}`} />
-          ) : null}
-          {converted ? (
-            <>
-              {/* order.tokenAmount/order.token are the SETTLEMENT leg — what
-                  Paycrest itself filled, to our treasury — never what lands
-                  in the user's wallet. Showing that here would be exactly
-                  the silent substitution this phase exists to remove. A
-                  refund reads as returned rather than delivered: the money
-                  is going back to the SAME wallet, just never converted. */}
-              <SummaryRow
-                label={
-                  refunded
-                    ? 'Returned to your wallet'
-                    : refunding
-                      ? 'Returning to your wallet'
-                      : 'You receive'
-                }
-                value={`${formatPromisedAmount(order) ?? order.tokenAmount ?? '—'} ${order.requestedToken ?? order.token}`}
-                hint={refunded || refunding ? undefined : 'Guaranteed minimum — includes a conversion'}
-              />
-              <SummaryRow label="Network" value={chainLabel(order.requestedChain)} />
-              <SummaryRow label="Route" value={`via ${order.token} on ${chainLabel(order.chain)}`} />
-            </>
-          ) : (
-            <>
-              <SummaryRow
-                label={order.direction === 'buy' ? 'You receive' : 'You send'}
-                value={`${order.tokenAmount ?? '—'} ${order.token}`}
-              />
+        <Card>
+          <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.xs }}>
+            Details
+          </Text>
+          <SummaryCard>
+            {/* What she receives is the headline above. A buy's naira figure is
+                left out while the transfer instruction is up — that card states
+                it, and is the authoritative one — and shown only once the
+                provider has seen the transfer: an expired or cancelled buy was
+                never paid, and payAmount is only what she was asked for. */}
+            {order.direction === 'buy' && transferSeen && order.payAmount ? (
+              <SummaryRow label="You paid" value={formatNaira(order.payAmount)} />
+            ) : null}
+            {order.direction === 'sell' ? (
+              <SummaryRow label="You send" value={`${order.tokenAmount ?? '—'} ${order.token}`} />
+            ) : null}
+            {converted ? (
+              <>
+                <SummaryRow label="Network" value={chainLabel(order.requestedChain)} />
+                <SummaryRow label="Route" value={`via ${order.token} on ${chainLabel(order.chain)}`} />
+              </>
+            ) : (
               <SummaryRow label="Network" value={chainLabel(order.chain)} />
-            </>
-          )}
-          {order.rate ? <SummaryRow label="Rate" value={`₦${order.rate}`} /> : null}
-          {order.settledAt ? <SummaryRow label="Completed" value={order.settledAt} /> : null}
-          {/* Last, and deliberately: the reference means nothing to the user
-              until something goes wrong, at which point support asks for it. */}
-          <SummaryRow label="Reference" value={order.reference} />
-        </SummaryCard>
+            )}
+            {order.rate ? <SummaryRow label="Rate" value={`${formatNaira(order.rate)} per ${order.token}`} /> : null}
+            <SummaryRow label="Opened" value={when(order.createdAt)} />
+            {order.settledAt ? <SummaryRow label="Completed" value={when(order.settledAt)} /> : null}
+            {/* Last, and deliberately: the reference means nothing to the user
+                until something goes wrong, at which point support asks for it. */}
+            <SummaryRow label="Reference" value={order.reference} />
+          </SummaryCard>
+        </Card>
 
         {order.txHash ? (
           <Card>
-            <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
+            <Text variant="overline" color="textMuted">
               {/* Best-effort label: on a converted order in/after a refund,
                   this is the only transaction-shaped field the API exposes
                   today, so it is read as the refund's — see Task 13's report
                   for the gap (no dedicated refund-tx field on the order yet). */}
               {converted && (refunded || refunding) ? 'Refund transaction' : 'Transaction'}
             </Text>
-            <CopyableField value={order.txHash} />
+            <CopyableField value={order.txHash} display={shortAddress(order.txHash)} toastMessage="Transaction hash copied" />
+            {/* Only where the chain is certain: a converted order's hash may be on either leg. */}
+            {explorerUrl ? (
+              <Button
+                title="View on explorer"
+                variant="ghost"
+                size="sm"
+                rightIcon="arrowRight"
+                onPress={() => Linking.openURL(explorerUrl).catch(() => undefined)}
+              />
+            ) : null}
           </Card>
         ) : null}
 

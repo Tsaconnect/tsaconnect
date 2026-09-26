@@ -23,6 +23,7 @@ import {
   exceedsStablePrecision,
   estimateArrival,
   formatKobo,
+  formatNaira,
   formatSendVsArrive,
   isLikelyTxHash,
   subtractKobo,
@@ -125,6 +126,34 @@ describe('formatKobo', () => {
     expect(formatKobo(undefined)).toBe('—');
     expect(formatKobo(null)).toBe('—');
     expect(formatKobo('')).toBe('—');
+  });
+});
+
+describe('formatNaira', () => {
+  it('reads a decimal naira string, not kobo', () => {
+    // formatKobo('1362.9') would say ₦136.29 — the bug this exists to avoid.
+    expect(formatNaira('1362.9')).toBe('₦1,362.90');
+    expect(formatNaira('1000')).toBe('₦1,000.00');
+    expect(formatNaira('1000.00')).toBe('₦1,000.00');
+    expect(formatNaira('0.5')).toBe('₦0.50');
+    expect(formatNaira('.75')).toBe('₦0.75');
+    expect(formatNaira('-25')).toBe('-₦25.00');
+  });
+
+  it('rounds half-up to the kobo', () => {
+    expect(formatNaira('1347.674')).toBe('₦1,347.67');
+    expect(formatNaira('1347.675')).toBe('₦1,347.68');
+    expect(formatNaira('99.995')).toBe('₦100.00');
+    expect(formatNaira('-1.005')).toBe('-₦1.01');
+    expect(formatNaira('-0.001')).toBe('₦0.00');
+  });
+
+  it('shows a dash for a missing or malformed figure', () => {
+    expect(formatNaira(undefined)).toBe('—');
+    expect(formatNaira('')).toBe('—');
+    expect(formatNaira('.')).toBe('—');
+    expect(formatNaira('1,000')).toBe('—');
+    expect(formatNaira('NaN')).toBe('—');
   });
 });
 
