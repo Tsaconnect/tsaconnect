@@ -29,10 +29,13 @@ const (
 	PayEventExpired   = "payment.expired"
 
 	// PaySourceAPI is a payment a merchant's own server created with its API
-	// key; PaySourceLink is a payment link the owner made by hand in the app or
-	// on the web, to send to a customer.
+	// key; PaySourceLink is a one-time payment link the owner made by hand in
+	// the app or on the web, for one customer; PaySourceOpen is a payment a
+	// customer started themselves, for an amount they entered, through one of
+	// the owner's reusable open links (a shop's QR, say).
 	PaySourceAPI  = "api"
 	PaySourceLink = "link"
+	PaySourceOpen = "open"
 )
 
 // PayMerchant is a business approved to accept payments through TSA Pay.
@@ -113,7 +116,7 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // payment already handed to a customer. At most one attempt (order or
 // intent) is linked at a time. CustomerName is who a payment link was made
 // for, as the owner typed it, and is shown to whoever pays it; an API payment
-// never has one.
+// never has one. OpenLinkID is the open link an open payment was started from.
 type PayPayment struct {
 	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
@@ -124,6 +127,7 @@ type PayPayment struct {
 	Description             string     `gorm:"size:255" json:"description"`
 	Source                  string     `gorm:"size:8;not null;default:'api'" json:"source"`
 	CustomerName            string     `gorm:"size:100" json:"customerName,omitempty"`
+	OpenLinkID              *uuid.UUID `gorm:"type:uuid;index" json:"openLinkId,omitempty"`
 	ReturnURL               string     `gorm:"size:1024" json:"returnUrl,omitempty"`
 	FeeBps                  int        `gorm:"not null" json:"-"`
 	CustomerFeeSharePercent int        `gorm:"not null" json:"-"`
@@ -153,6 +157,37 @@ type PayPayment struct {
 func (p *PayPayment) BeforeCreate(tx *gorm.DB) error {
 	if p.ID == uuid.Nil {
 		p.ID = uuid.New()
+	}
+	return nil
+}
+
+// PayOpenLink is a reusable payment link: a fixed address — printed as a shop's
+// QR, or shared — through which any customer starts a payment for the amount
+// they enter, within [MinAmountKobo, MaxAmountKobo] (0 meaning the merchant's
+// own bound). A merchant may have many in each mode. Label is what the payer
+// sees ("Mama Ngozi Store — Shop 12").
+//
+// Replacing a link (a poster was copied, say) gives it a new Slug: the old
+// address stops existing, while the link — and every payment made through it —
+// stays the same row. Active is the owner's pause switch. Version is the
+// compare-and-set token an edit is made against.
+type PayOpenLink struct {
+	ID            uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID    uuid.UUID `gorm:"type:uuid;not null;index:idx_pay_open_links_merchant_mode,priority:1" json:"merchantId"`
+	Mode          string    `gorm:"size:8;not null;index:idx_pay_open_links_merchant_mode,priority:2" json:"mode"`
+	Slug          string    `gorm:"size:64;not null;uniqueIndex" json:"slug"`
+	Label         string    `gorm:"size:80;not null" json:"label"`
+	MinAmountKobo int64     `gorm:"not null;default:0" json:"minAmount"`
+	MaxAmountKobo int64     `gorm:"not null;default:0" json:"maxAmount"`
+	Active        bool      `gorm:"not null;default:true" json:"active"`
+	Version       int       `gorm:"not null;default:1" json:"version"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+func (l *PayOpenLink) BeforeCreate(tx *gorm.DB) error {
+	if l.ID == uuid.Nil {
+		l.ID = uuid.New()
 	}
 	return nil
 }

@@ -32,6 +32,8 @@ type PayPaymentView struct {
 	Currency      string     `json:"currency"`
 	Description   string     `json:"description"`
 	CustomerName  string     `json:"customerName,omitempty"`
+	OpenLinkID    *uuid.UUID `json:"openLinkId,omitempty"`
+	LinkLabel     string     `json:"linkLabel,omitempty"` // open-link payments, from Views: the link it was paid through
 	ReturnURL     string     `json:"returnUrl,omitempty"`
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	SettlementRef string     `json:"settlementRef,omitempty"`
@@ -85,8 +87,10 @@ type PayCheckoutView struct {
 // settlement detail, and the return URL only once the payment has actually
 // succeeded. A payment link's description and customer name are shown — the
 // owner wrote them for the payer, who must see what they are being asked to pay
-// for. An API payment's are not: a merchant's server writes its own booking
-// codes and order details there, never meant for whoever holds the id.
+// for — and so is an open-link payment's description (the payer's own note) and
+// the link's label. An API payment's are not: a merchant's server writes its
+// own booking codes and order details there, never meant for whoever holds the
+// id.
 type PayPublicView struct {
 	ID            uuid.UUID  `json:"id"`
 	MerchantName  string     `json:"merchantName"`
@@ -97,8 +101,10 @@ type PayPublicView struct {
 	Amount        int64      `json:"amount"`
 	CustomerTotal int64      `json:"customerTotal"`
 	Currency      string     `json:"currency"`
-	Description   string     `json:"description,omitempty"`  // links only
+	Description   string     `json:"description,omitempty"`  // links and open links only
 	CustomerName  string     `json:"customerName,omitempty"` // links only
+	LinkLabel     string     `json:"linkLabel,omitempty"`    // open links only: the link it was paid through
+	OpenLinkURL   string     `json:"openLinkUrl,omitempty"`  // open links only, while that link takes payments
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
 	ReturnURL     string     `json:"returnUrl,omitempty"` // only once succeeded
@@ -109,6 +115,35 @@ type PayPublicView struct {
 // rather than running out of time: both leave it expired.
 func payCancelled(p *models.PayPayment) bool {
 	return p.Status == models.PayStatusExpired && p.FailureReason == PayReasonMerchantCancelled
+}
+
+// Views is View for each of ps, with each open-link payment's LinkLabel filled
+// in (one query) — its description is the customer's note, often empty, so the
+// label is what says what it was for.
+func (s *PayPaymentService) Views(ctx context.Context, ps []models.PayPayment) ([]PayPaymentView, error) {
+	var ids []uuid.UUID
+	for i := range ps {
+		if ps[i].OpenLinkID != nil {
+			ids = append(ids, *ps[i].OpenLinkID)
+		}
+	}
+	labels, err := s.openLinkLabels(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]PayPaymentView, len(ps))
+	for i := range ps {
+		views[i] = s.View(&ps[i])
+		if ps[i].OpenLinkID != nil {
+			views[i].LinkLabel = labels[*ps[i].OpenLinkID]
+		}
+	}
+	return views, nil
+}
+
+// CheckoutURL is the public checkout page for payment id.
+func (s *PayPaymentService) CheckoutURL(id uuid.UUID) string {
+	return strings.TrimRight(s.checkoutBase, "/") + "/" + id.String()
 }
 
 // View builds the merchant-facing read shape for p.
@@ -127,13 +162,14 @@ func (s *PayPaymentService) View(p *models.PayPayment) PayPaymentView {
 		Currency:      p.Currency,
 		Description:   p.Description,
 		CustomerName:  p.CustomerName,
+		OpenLinkID:    p.OpenLinkID,
 		ReturnURL:     p.ReturnURL,
 		ExpiresAt:     p.ExpiresAt,
 		SettlementRef: p.SettlementRef,
 		FailureReason: p.FailureReason,
 		SucceededAt:   p.SucceededAt,
 		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
-		CheckoutURL:   strings.TrimRight(s.checkoutBase, "/") + "/" + p.ID.String(),
+		CheckoutURL:   s.CheckoutURL(p.ID),
 		CreatedAt:     p.CreatedAt,
 	}
 }
@@ -240,7 +276,9 @@ func (s *PayPaymentService) payability(p *models.PayPayment, m *models.PayMercha
 }
 
 // PublicView builds the unauthenticated status page's read shape for id.
-func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID) (*PayPublicView, error) {
+// liveEnabled is the global live switch, for whether an open link still takes
+// payments.
+func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEnabled bool) (*PayPublicView, error) {
 	p, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -263,8 +301,20 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID) (*PayP
 		SucceededAt:   p.SucceededAt,
 		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
 	}
-	if p.Source == models.PaySourceLink {
+	switch p.Source {
+	case models.PaySourceLink:
 		v.Description, v.CustomerName = p.Description, p.CustomerName
+	case models.PaySourceOpen:
+		v.Description = p.Description // the customer's own note, if any
+		if p.OpenLinkID != nil {
+			var l models.PayOpenLink
+			if err := s.db.WithContext(ctx).First(&l, "id = ?", *p.OpenLinkID).Error; err != nil {
+				return nil, err
+			}
+			v.LinkLabel = l.Label
+			// So a payer whose payment ran out can start another there.
+			v.OpenLinkURL = s.openLinkURLIfTaking(&l, m, liveEnabled)
+		}
 	}
 	if p.Status == models.PayStatusSucceeded {
 		v.ReturnURL = p.ReturnURL

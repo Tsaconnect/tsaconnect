@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -95,18 +96,18 @@ var (
 
 // PayInvalidError is a payment refused for a reason with two audiences. Error()
 // is the merchant API's wording — "invalid payment: " and Reason, exactly as
-// the API has always answered — and Owner is the sentence an owner making a
-// payment link by hand is shown instead. errors.Is(err, ErrPayPaymentInvalid)
-// holds for it.
+// the API has always answered — and Human is the sentence a person is shown
+// instead: an owner making a payment link by hand, or a customer paying
+// through an open link. errors.Is(err, ErrPayPaymentInvalid) holds for it.
 type PayInvalidError struct {
 	Reason string
-	Owner  string
+	Human  string
 }
 
 func (e *PayInvalidError) Error() string { return ErrPayPaymentInvalid.Error() + ": " + e.Reason }
 func (e *PayInvalidError) Unwrap() error { return ErrPayPaymentInvalid }
 
-func payInvalid(reason, owner string) error { return &PayInvalidError{Reason: reason, Owner: owner} }
+func payInvalid(reason, human string) error { return &PayInvalidError{Reason: reason, Human: human} }
 
 // PayPaymentService creates and reads TSA Pay merchant payments.
 type PayPaymentService struct {
@@ -115,6 +116,7 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
+	events       *events.Bus      // nil until SetEvents: no "payment received" alerts
 	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
 	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
 	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
@@ -134,6 +136,10 @@ func NewPayPaymentService(db *gorm.DB, merchants *PayMerchantService, feeBps int
 type payDepositReader interface {
 	DepositBalance(chainKey, token, address string) (*big.Int, error)
 }
+
+// SetEvents wires the bus the "payment received" alert to the merchant's owner
+// goes out on. Unset, payments succeed silently.
+func (s *PayPaymentService) SetEvents(bus *events.Bus) { s.events = bus }
 
 // SetDepositReader wires the on-chain read that proves an expired order's
 // deposit address is empty. Unset, no expired order is ever released: it waits
@@ -164,17 +170,19 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 }
 
 // payCreateOptions is what differs between a payment a merchant's server
-// creates (Create) and a payment link its owner makes by hand (CreateLink):
-// where it came from, who a link is for, and how long it may stay open.
+// creates (Create), a payment link its owner makes by hand (CreateLink) and one
+// a customer starts through an open link (CreateFromOpenLink): where it came
+// from, who a link is for, which open link, and how long it may stay open.
 type payCreateOptions struct {
 	source           string
 	customerName     string
+	openLinkID       *uuid.UUID
 	maxExpirySeconds int
 }
 
-// create is the one body both kinds of payment are made through, so a link is
-// held to exactly the merchant's own amount bounds, currency, fee split and
-// settlement snapshot an API payment is.
+// create is the one body every kind of payment is made through, so a link or an
+// open-link payment is held to exactly the merchant's own amount bounds, currency,
+// fee split and settlement snapshot an API payment is.
 func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, mode string, in CreatePayPaymentInput, opts payCreateOptions) (*models.PayPayment, bool, error) {
 	if m.SettlementMode == "" {
 		return nil, false, ErrPayMerchantNotReady
@@ -259,6 +267,7 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 		Description:             description,
 		Source:                  opts.source,
 		CustomerName:            opts.customerName,
+		OpenLinkID:              opts.openLinkID,
 		ReturnURL:               returnURL,
 		FeeBps:                  s.feeBps,
 		CustomerFeeSharePercent: m.CustomerFeeSharePercent,
@@ -302,11 +311,12 @@ func (s *PayPaymentService) createOrExisting(ctx context.Context, p *models.PayP
 
 // payReferenceReused answers a request whose (merchant, mode, reference)
 // already has a payment. For the API that is a retry when it came the same way
-// with the same body, and a conflict otherwise. A link's reference is never a
-// retry: an owner typing one they have used before made a mistake, and a
-// double-submitted form is caught by the route's Idempotency-Key instead.
+// with the same body, and a conflict otherwise. Nothing else is ever a retry:
+// an owner typing a link reference they have used before made a mistake (a
+// double-submitted form is caught by the route's Idempotency-Key instead), and
+// an open-link payment's reference is made up fresh for every customer.
 func payReferenceReused(existing *models.PayPayment, source string, amountKobo int64, currency, description, returnURL string) (*models.PayPayment, bool, error) {
-	if source == models.PaySourceLink {
+	if source != models.PaySourceAPI {
 		return nil, false, ErrPayLinkReferenceTaken
 	}
 	if existing.Source == source && paySnapshotMatches(existing, amountKobo, currency, description, returnURL) {
@@ -398,12 +408,14 @@ const PayListCancelled = "cancelled"
 type PayListFilter struct {
 	MerchantID                  *uuid.UUID
 	Mode, Status, Source, Query string
-	// CancelledApart splits expired in two, the way an owner sees it: Status
-	// PayListCancelled is the payments the merchant called off, and "expired"
-	// only those that ran out of time. Unset (the admin console, which offers
-	// no "cancelled"), "expired" is both.
-	CancelledApart bool
-	Page, Limit    int
+	// ForOwner shapes the list the way an owner reads it. Expired splits in
+	// two: Status PayListCancelled is the payments the merchant called off, and
+	// "expired" only those that ran out of time. And open-link payments nobody
+	// went on to pay are left out (payHideUntriedOpen). Unset (the admin
+	// console, which offers no "cancelled"), "expired" is both and every
+	// payment is listed.
+	ForOwner    bool
+	Page, Limit int
 }
 
 // List is one page of payments, newest first, with the total that matched.
@@ -426,15 +438,18 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		}
 		switch {
 		case f.Status == "":
-		case f.CancelledApart && f.Status == PayListCancelled:
+		case f.ForOwner && f.Status == PayListCancelled:
 			q = q.Where("status = ? AND failure_reason = ?", models.PayStatusExpired, PayReasonMerchantCancelled)
-		case f.CancelledApart && f.Status == models.PayStatusExpired:
+		case f.ForOwner && f.Status == models.PayStatusExpired:
 			q = q.Where("status = ? AND (failure_reason IS NULL OR failure_reason <> ?)", models.PayStatusExpired, PayReasonMerchantCancelled)
 		default:
 			q = q.Where("status = ?", f.Status)
 		}
 		if f.Source != "" {
 			q = q.Where("source = ?", f.Source)
+		}
+		if f.ForOwner {
+			q = payHideUntriedOpen(q)
 		}
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
 			// What she typed is matched literally: % and _ are not wildcards.

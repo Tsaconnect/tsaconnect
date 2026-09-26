@@ -13,33 +13,16 @@ import (
 // Payment links: a payment the owner makes by hand, in the app or on the web,
 // and sends to a customer — for a merchant with no website or server of its
 // own. Each is an ordinary TSA Pay payment (source "link") on the owner's own
-// merchant, paid through the same checkout as any other.
+// merchant, paid through the same checkout as any other. The reusable kind,
+// open links, is in pay_open_links_handler.go.
 
 // POST /api/pay/merchant/links?mode=live|test {amount, description,
 // customerName, reference, expiresInDays} — the owner asks a customer to pay.
 // Answers 201 with the payment; its checkoutUrl is the link to send.
 func (h *PayHandler) OwnerCreateLink(c *gin.Context) {
-	_, m, ok := h.payOwnerMerchant(c)
-	if !ok {
-		return
-	}
-	mode, ok := payOwnerMode(c)
-	if !ok {
-		return
-	}
 	var in services.CreatePayLinkInput
-	if err := c.ShouldBindJSON(&in); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if m.Status != models.PayMerchantActive {
-		payOwnerFail(c, services.ErrPayMerchantSuspended)
-		return
-	}
-	// Refused here rather than at checkout, where the customer would be the
-	// first to find out the link can't be paid.
-	if mode == models.PayModeLive && !m.LiveAllowed(h.liveEnabled) {
-		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Live payments aren't switched on for your business yet. Try a test link first.", "live_not_enabled")
+	m, mode, ok := h.payOwnerLinkWrite(c, &in, true)
+	if !ok {
 		return
 	}
 	p, err := h.payments.CreateLink(c.Request.Context(), m, mode, in)
@@ -48,6 +31,38 @@ func (h *PayHandler) OwnerCreateLink(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusCreated, "Payment link created", h.payments.View(p))
+}
+
+// payOwnerLinkWrite is the preamble of every owner write to a payment link of
+// either kind: the owner's merchant and the mode asked, the body read into req
+// (nil: no body), and a merchant that isn't suspended. A new link (isNew) in
+// live mode also needs live payments switched on — refused here rather than at
+// checkout, where the customer would be the first to find out it can't be
+// paid. false means the response has been written.
+func (h *PayHandler) payOwnerLinkWrite(c *gin.Context, req any, isNew bool) (*models.PayMerchant, string, bool) {
+	_, m, ok := h.payOwnerMerchant(c)
+	if !ok {
+		return nil, "", false
+	}
+	mode, ok := payOwnerMode(c)
+	if !ok {
+		return nil, "", false
+	}
+	if req != nil {
+		if err := c.ShouldBindJSON(req); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+			return nil, "", false
+		}
+	}
+	if m.Status != models.PayMerchantActive {
+		payOwnerFail(c, services.ErrPayMerchantSuspended)
+		return nil, "", false
+	}
+	if isNew && mode == models.PayModeLive && !m.LiveAllowed(h.liveEnabled) {
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Live payments aren't switched on for your business yet. Try a test link first.", "live_not_enabled")
+		return nil, "", false
+	}
+	return m, mode, true
 }
 
 // GET /api/pay/merchant/links?mode&status&q&page&limit — the owner's payment
@@ -89,6 +104,10 @@ func payLinkFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayTransition):
 		// Not pending, or not a link: CancelLink's guard matched nothing.
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "This link can't be cancelled — it's already being paid, paid, or closed", "not_cancellable")
+	case errors.Is(err, services.ErrPayOpenLinkNotFound):
+		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Payment link not found", "link_not_found")
+	case errors.Is(err, services.ErrPayOpenLinkStale):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "This link changed since you opened it — reload and try again", "link_stale")
 	default:
 		payOwnerFail(c, err)
 	}
@@ -99,8 +118,8 @@ func payLinkFail(c *gin.Context, err error) {
 // the fallback covers the few only an API request can reach.
 func payLinkInvalidMessage(err error) string {
 	var invalid *services.PayInvalidError
-	if errors.As(err, &invalid) && invalid.Owner != "" {
-		return invalid.Owner
+	if errors.As(err, &invalid) && invalid.Human != "" {
+		return invalid.Human
 	}
 	return "We couldn't make this link — check the details and try again"
 }

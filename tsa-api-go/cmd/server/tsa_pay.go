@@ -71,6 +71,10 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		// handed back; without it no expired order is ever released.
 		payments.SetDepositReader(chains)
 	}
+	if bus != nil {
+		// "Payment received" alerts to each merchant's owner.
+		payments.SetEvents(bus)
+	}
 	sender := services.NewPayWebhookSender(db, merchants, services.NewPayWebhookHTTPClient(), time.Now)
 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())

@@ -98,7 +98,7 @@ func TestPayLink_CreateRefusals(t *testing.T) {
 	in.AmountKobo = 1
 	_, err := s.CreateLink(context.Background(), m, models.PayModeTest, in)
 	var invalid *PayInvalidError
-	if !errors.As(err, &invalid) || invalid.Owner != "Enter an amount between ₦1,000.00 and ₦5,000,000.00" ||
+	if !errors.As(err, &invalid) || invalid.Human != "Enter an amount between ₦1,000.00 and ₦5,000,000.00" ||
 		err.Error() != "invalid payment: amount must be between 100000 and 500000000 kobo" {
 		t.Fatalf("amount refusal: %v (%+v)", err, invalid)
 	}
@@ -245,7 +245,7 @@ func TestPayLink_ViewsTellCancelledFromTimedOut(t *testing.T) {
 	}
 	for id, want := range map[uuid.UUID]bool{cancelled.ID: true, lapsed.ID: false, api.ID: true} {
 		p, _ := s.Get(ctx, id)
-		pub, err := s.PublicView(ctx, id)
+		pub, err := s.PublicView(ctx, id, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +259,7 @@ func TestPayLink_PublicAndCheckoutViewsShowWhatAndWhoFor(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
 	link, _ := s.CreateLink(ctx, m, models.PayModeTest, payLinkIn())
-	pub, err := s.PublicView(ctx, link.ID)
+	pub, err := s.PublicView(ctx, link.ID, false)
 	if err != nil || pub.Description != "Wedding cake deposit" || pub.CustomerName != "Ada Obi" || pub.Cancelled || pub.SucceededAt != nil ||
 		pub.Mode != models.PayModeTest || pub.Source != models.PaySourceLink {
 		t.Fatalf("public %+v err %v", pub, err)
@@ -267,7 +267,7 @@ func TestPayLink_PublicAndCheckoutViewsShowWhatAndWhoFor(t *testing.T) {
 	// An API payment's description is the merchant server's own (a booking
 	// code, say): never shown to whoever holds the id.
 	api, _, _ := s.Create(ctx, m, models.PayModeLive, payIn())
-	pub, err = s.PublicView(ctx, api.ID)
+	pub, err = s.PublicView(ctx, api.ID, false)
 	if err != nil || pub.Description != "" || pub.CustomerName != "" || pub.Mode != models.PayModeLive || pub.Source != models.PaySourceAPI {
 		t.Fatalf("API payment public %+v err %v", pub, err)
 	}
@@ -278,7 +278,7 @@ func TestPayLink_PublicAndCheckoutViewsShowWhatAndWhoFor(t *testing.T) {
 	if _, err := s.SimulateTestOutcome(ctx, payOwnerOf(t, s, link.ID), link.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	pub, _ = s.PublicView(ctx, link.ID)
+	pub, _ = s.PublicView(ctx, link.ID, false)
 	if pub.Status != models.PayStatusSucceeded || pub.SucceededAt == nil || !pub.SucceededAt.Equal(payTestNow) || pub.ReturnURL != "" {
 		t.Fatalf("paid link public view %+v", pub)
 	}
@@ -364,7 +364,7 @@ func TestPayLink_ListSplitsCancelledFromExpiredForOwners(t *testing.T) {
 		{models.PayStatusPending, true, []uuid.UUID{open.ID}},
 		{models.PayStatusExpired, false, []uuid.UUID{cancelled.ID, lapsed.ID}},
 	} {
-		rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, Status: c.status, CancelledApart: c.apart})
+		rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, Status: c.status, ForOwner: c.apart})
 		if err != nil || int(total) != len(c.want) {
 			t.Fatalf("%s (apart=%v): err %v total %d", c.status, c.apart, err, total)
 		}

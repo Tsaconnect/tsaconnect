@@ -225,6 +225,7 @@ func AutoMigrate() error {
 		&models.PayWebhookDelivery{},
 		&models.PayAuditEvent{},
 		&models.PayOwnerAction{},
+		&models.PayOpenLink{},
 		// TSA Connect web sign-in
 		&models.WebSigninChallenge{},
 		&models.WebTrustedBrowser{},

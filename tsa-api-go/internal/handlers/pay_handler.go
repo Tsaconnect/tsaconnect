@@ -25,12 +25,23 @@ type payPaymentAPI interface {
 	CreateLink(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayLinkInput) (*models.PayPayment, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
+	Views(ctx context.Context, ps []models.PayPayment) ([]services.PayPaymentView, error)
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
 	PayerHistory(ctx context.Context, userID uuid.UUID) ([]services.PayHistoryItem, error)
-	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
+	PublicView(ctx context.Context, id uuid.UUID, liveEnabled bool) (*services.PayPublicView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
 	CancelLink(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
+	CreateOpenLink(ctx context.Context, m *models.PayMerchant, mode string, in services.PayOpenLinkInput) (*models.PayOpenLink, error)
+	OpenLinks(ctx context.Context, merchantID uuid.UUID, mode string, page, limit int) ([]models.PayOpenLink, int64, error)
+	OpenLinkForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayOpenLink, error)
+	UpdateOpenLink(ctx context.Context, m *models.PayMerchant, mode string, id uuid.UUID, in services.PayOpenLinkUpdate) (*models.PayOpenLink, error)
+	ReplaceOpenLink(ctx context.Context, m *models.PayMerchant, mode string, id uuid.UUID) (*models.PayOpenLink, error)
+	OpenLinkViews(ctx context.Context, m *models.PayMerchant, ls []models.PayOpenLink, liveEnabled bool) ([]services.PayOpenLinkView, error)
+	OpenLinkPayments(ctx context.Context, id uuid.UUID) ([]models.PayPayment, error)
+	OpenLinkPublic(ctx context.Context, slug string, liveEnabled bool) (*services.PayOpenLinkPublicView, error)
+	CreateFromOpenLink(ctx context.Context, slug string, in services.PayOpenPaymentInput, liveEnabled bool) (*models.PayPayment, error)
+	CheckoutURL(id uuid.UUID) string
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
@@ -532,7 +543,7 @@ func (h *PayHandler) Public(c *gin.Context) {
 		return
 	}
 
-	v, err := h.payments.PublicView(c.Request.Context(), id)
+	v, err := h.payments.PublicView(c.Request.Context(), id, h.liveEnabled)
 	if err != nil {
 		payPaymentFail(c, err)
 		return

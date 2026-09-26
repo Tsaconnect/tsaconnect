@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -222,7 +223,7 @@ func (s *PayPaymentService) succeedFrom(ctx context.Context, p *models.PayPaymen
 
 func (s *PayPaymentService) succeed(ctx context.Context, id uuid.UUID, at *payAttempt, settlementRef string) error {
 	now := s.now()
-	return s.transition(ctx, id, payProcessing(at),
+	err := s.transition(ctx, id, payProcessing(at),
 		map[string]any{
 			"status":         models.PayStatusSucceeded,
 			"settlement_ref": settlementRef,
@@ -231,6 +232,59 @@ func (s *PayPaymentService) succeed(ctx context.Context, id uuid.UUID, at *payAt
 			// the earlier attempt was released.
 			"failure_reason": "",
 		}, models.PayEventSucceeded)
+	if err == nil {
+		s.announceReceived(ctx, id)
+	}
+	return err
+}
+
+// announceReceived tells the merchant's owner that payment id came in: every
+// source, live and test. Every success — Succeed, and the reconciler's settle —
+// comes through succeed, and this runs only once its guarded transition has
+// committed; a second settle of the same payment finds it no longer processing
+// and never reaches here, so each payment is announced once. The payment has
+// already succeeded, so a failed read here is logged, never returned.
+func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) {
+	if s.events == nil {
+		return
+	}
+	p, err := s.Get(ctx, id)
+	if err != nil {
+		log.Printf("[tsa-pay] payment received alert for %s: %v", id, err)
+		return
+	}
+	m, err := s.merchants.Get(ctx, p.MerchantID)
+	if err != nil {
+		log.Printf("[tsa-pay] payment received alert for %s: %v", id, err)
+		return
+	}
+	who := "A customer"
+	switch payer, err := s.Payer(ctx, p); {
+	case err != nil:
+		log.Printf("[tsa-pay] payment received alert for %s: payer: %v", id, err)
+	case payer != nil:
+		who = payer.Name
+	}
+	// What the merchant receives, which is the price unless they take part of
+	// the fee on themselves.
+	title := "₦" + koboAsNairaText(p.MerchantNetKobo) + " received"
+	// What it was for: the description, or — for an open-link payment whose
+	// customer left no note — the link's label.
+	what := p.Description
+	if what == "" && p.OpenLinkID != nil {
+		if labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID}); err == nil {
+			what = labels[*p.OpenLinkID]
+		}
+	}
+	message := who + " paid " + m.BusinessName
+	if what != "" {
+		message += " · " + what
+	}
+	if p.Mode == models.PayModeTest {
+		title = "Test: " + title // no real money moved
+	}
+	s.events.Publish(events.Event{Type: events.PayPaymentReceived, UserID: m.UserID, Title: title, Message: message,
+		Data: map[string]any{"paymentId": p.ID.String(), "merchantId": m.ID.String(), "mode": p.Mode, "source": p.Source}})
 }
 
 // Fail moves processing → failed and queues the payment.failed webhook in
@@ -503,8 +557,15 @@ func (s *PayPaymentService) transitionIn(tx *gorm.DB, id uuid.UUID, g payGuard, 
 // tx — the same transaction as the state-changing UPDATE that called it, so
 // a failure here (e.g. the deliveries table is unreachable) rolls the
 // transition back too. A merchant with no webhook URL configured for p's
-// mode is not queued at all — WebhookURLFor returns "".
+// mode is not queued at all — WebhookURLFor returns "" — and nor is an
+// open-link payment nobody started paying.
 func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, event string) error {
+	// An open-link payment nobody went on to pay is one visitor entering an
+	// amount; its merchant is not told when it lapses. (One that succeeds was
+	// always locked first.)
+	if p.Source == models.PaySourceOpen && p.LockedAt == nil {
+		return nil
+	}
 	var m models.PayMerchant
 	if err := tx.First(&m, "id = ?", p.MerchantID).Error; err != nil {
 		return err

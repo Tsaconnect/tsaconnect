@@ -277,14 +277,15 @@ func payOwnerMode(c *gin.Context) (string, bool) {
 
 // GET /api/pay/merchant/payments?mode&status&source&q&page&limit — the owner's
 // payments in one mode, newest first: all of them, or only those their server
-// made (source=api) or they sent as links (source=link). status=cancelled is
+// made (source=api), they sent as one-time links (source=link), or customers
+// started through their open links (source=open). status=cancelled is
 // the ones they called off; status=expired only those that ran out of time.
 func (h *PayHandler) OwnerPayments(c *gin.Context) {
 	source := strings.TrimSpace(c.Query("source"))
 	switch source {
-	case "", models.PaySourceAPI, models.PaySourceLink:
+	case "", models.PaySourceAPI, models.PaySourceLink, models.PaySourceOpen:
 	default:
-		utils.ErrorResponse(c, http.StatusBadRequest, "source must be api or link")
+		utils.ErrorResponse(c, http.StatusBadRequest, "source must be api, link or open")
 		return
 	}
 	h.ownerPaymentList(c, source)
@@ -302,24 +303,30 @@ func (h *PayHandler) ownerPaymentList(c *gin.Context, source string) {
 	if !ok {
 		return
 	}
-	page, _ := strconv.Atoi(c.Query("page"))
-	page = max(page, 1)
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	if limit <= 0 {
-		limit = 20
-	}
-	limit = min(limit, 50)
+	page, limit := payOwnerPage(c)
 	rows, total, err := h.payments.List(c.Request.Context(), services.PayListFilter{MerchantID: &m.ID, Mode: mode,
-		Status: strings.TrimSpace(c.Query("status")), CancelledApart: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
+		Status: strings.TrimSpace(c.Query("status")), ForOwner: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
 	if err != nil {
 		payOwnerFail(c, err)
 		return
 	}
-	items := make([]services.PayPaymentView, len(rows))
-	for i := range rows {
-		items[i] = h.payments.View(&rows[i])
+	items, err := h.payments.Views(c.Request.Context(), rows)
+	if err != nil {
+		payOwnerFail(c, err)
+		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{"items": items, "total": total, "page": page, "limit": limit})
+}
+
+// payOwnerPage reads ?page&limit for an owner listing: page from 1, limit 20 by
+// default and at most 50.
+func payOwnerPage(c *gin.Context) (page, limit int) {
+	page, _ = strconv.Atoi(c.Query("page"))
+	limit, _ = strconv.Atoi(c.Query("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+	return max(page, 1), min(limit, 50)
 }
 
 // payOwnerPayment is the owner's merchant, the mode asked, and the payment :id
@@ -372,7 +379,12 @@ func (h *PayHandler) OwnerPayment(c *gin.Context) {
 		views[i] = payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
 			LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", gin.H{"payment": h.payments.View(p), "payer": payer, "deliveries": views})
+	payment, err := h.payments.Views(c.Request.Context(), []models.PayPayment{*p})
+	if err != nil {
+		payOwnerFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", gin.H{"payment": payment[0], "payer": payer, "deliveries": views})
 }
 
 // payOwnerDeliveryView is one webhook attempt as the owner sees it: how it went,

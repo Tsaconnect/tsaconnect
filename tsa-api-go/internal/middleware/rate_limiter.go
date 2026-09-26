@@ -17,7 +17,12 @@ type rateLimitEntry struct {
 	expiresAt time.Time
 }
 
+// rateLimiterStore holds one counter per key. mu makes each request's
+// read-reset-or-increment of its entry one step, and covers the cleanup's reads
+// of the same entries: concurrent requests on one key would otherwise race on
+// the count (and on a first request, both could start the window at 1).
 type rateLimiterStore struct {
+	mu      sync.Mutex
 	entries sync.Map
 }
 
@@ -34,6 +39,7 @@ func (s *rateLimiterStore) cleanup() {
 
 	for range ticker.C {
 		now := time.Now()
+		s.mu.Lock()
 		s.entries.Range(func(key, value interface{}) bool {
 			entry := value.(*rateLimitEntry)
 			if now.After(entry.expiresAt) {
@@ -41,7 +47,25 @@ func (s *rateLimiterStore) cleanup() {
 			}
 			return true
 		})
+		s.mu.Unlock()
 	}
+}
+
+// allow counts one request for key and reports whether it is within
+// maxRequests for the current window, starting a new window when there is none
+// or the last has ended.
+func (s *rateLimiterStore) allow(key string, maxRequests int, window time.Duration, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if val, ok := s.entries.Load(key); ok {
+		entry := val.(*rateLimitEntry)
+		if !now.After(entry.expiresAt) {
+			entry.count++
+			return entry.count <= maxRequests
+		}
+	}
+	s.entries.Store(key, &rateLimitEntry{count: 1, expiresAt: now.Add(window)})
+	return true
 }
 
 // RateLimiter returns a Gin middleware that limits requests per IP address.
@@ -64,35 +88,7 @@ func RateLimiterBy(maxRequests int, window time.Duration, keyFn func(*gin.Contex
 		if key == "" {
 			key = c.ClientIP()
 		}
-		now := time.Now()
-
-		val, loaded := store.entries.Load(key)
-		if !loaded {
-			// First request for this key
-			store.entries.Store(key, &rateLimitEntry{
-				count:     1,
-				expiresAt: now.Add(window),
-			})
-			c.Next()
-			return
-		}
-
-		entry := val.(*rateLimitEntry)
-
-		// If the window has expired, reset the counter
-		if now.After(entry.expiresAt) {
-			store.entries.Store(key, &rateLimitEntry{
-				count:     1,
-				expiresAt: now.Add(window),
-			})
-			c.Next()
-			return
-		}
-
-		// Increment the counter
-		entry.count++
-
-		if entry.count > maxRequests {
+		if !store.allow(key, maxRequests, window, time.Now()) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"success": false,
 				"message": "Too many requests, please try again later.",

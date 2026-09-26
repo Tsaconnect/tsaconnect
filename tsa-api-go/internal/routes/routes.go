@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -1263,6 +1264,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// never authenticates against).
 		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
 
+		// An open link's payer page: no auth. Starting a payment makes a new
+		// one every time (no Idempotency-Key — each customer is a new payment),
+		// so it is limited three ways: 20 a minute per visitor, 300 a minute
+		// per link whoever is asking (a busy shop's QR, not a bot minting
+		// payments against one address), and 2000 a minute across every link.
+		payRoot.GET("/public/open/:slug", middleware.RateLimiter(120, time.Minute), payh.PublicOpenLink)
+		payRoot.POST("/public/open/:slug/payments", middleware.RateLimiterBy(2000, time.Minute, payOpenPaymentsRateKey),
+			middleware.RateLimiter(20, time.Minute), middleware.RateLimiterBy(300, time.Minute, payOpenLinkRateKey), payh.PublicOpenPayment)
+
 		// The app's checkout screen: JWT user auth, per-user rate limit.
 		// test-outcome is idempotency-protected like every other
 		// POST-with-side-effects endpoint.
@@ -1311,6 +1321,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.POST("/links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateLink)
 			owner.GET("/links", payh.OwnerLinks)
 			owner.POST("/links/:id/cancel", payh.OwnerCancelLink)
+			// Open links, the reusable kind: made like a one-time link, then
+			// read, edited and given a new address when a printed one leaks.
+			owner.POST("/open-links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateOpenLink)
+			owner.GET("/open-links", payh.OwnerOpenLinks)
+			owner.GET("/open-links/:id", payh.OwnerOpenLink)
+			owner.PUT("/open-links/:id", middleware.RateLimiterBy(20, time.Minute, perUserRateKey), payh.OwnerUpdateOpenLink)
+			owner.POST("/open-links/:id/replace", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerReplaceOpenLink)
 			owner.GET("/settlement-options", payh.OwnerSettlementOptions)
 			owner.GET("/banks", payh.OwnerBanks)
 			// A name enquiry calls the bank provider.
@@ -1324,6 +1341,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.POST("/actions/:id/confirm", middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), payh.OwnerConfirmAction)
 		}
 	}
+}
+
+// payOpenPaymentsRateKey is one bucket for every open-link payment start.
+func payOpenPaymentsRateKey(*gin.Context) string { return "open-payments" }
+
+// payOpenLinkRateKey keys a limiter on the open link a request names, whoever
+// sends it.
+func payOpenLinkRateKey(c *gin.Context) string {
+	return "open:" + strings.ToLower(strings.TrimSpace(c.Param("slug")))
 }
 
 // perUserRateKey keys a per-route limiter on the authenticated user, so users

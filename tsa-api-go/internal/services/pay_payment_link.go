@@ -28,7 +28,7 @@ const (
 	payLinkDefaultDays        = 7
 	payLinkMaxCustomerNameLen = 100
 	payLinkReferencePrefix    = "link_"
-	payLinkReferenceChars     = 12
+	payReferenceRandomChars   = 12
 )
 
 // payLinkDays are how long an owner may keep a link open. A link waits on a
@@ -73,7 +73,7 @@ func (s *PayPaymentService) CreateLink(ctx context.Context, m *models.PayMerchan
 	reference := strings.TrimSpace(in.Reference)
 	if reference == "" {
 		var err error
-		if reference, err = newPayLinkReference(); err != nil {
+		if reference, err = newPayReference(payLinkReferencePrefix); err != nil {
 			return nil, err
 		}
 	}
@@ -103,13 +103,23 @@ func payHasHiddenChars(s string) bool {
 	})
 }
 
-// newPayLinkReference is the reference a link gets when the owner leaves it
-// blank: "link_" and 12 random base32 characters (60 bits), lower-cased so it
-// reads easily if a customer quotes it back.
-func newPayLinkReference() (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
+// newPayReference is the reference a payment gets when nobody names one: the
+// prefix ("link_", "open_") and 12 random base32 characters (60 bits),
+// lower-cased so it reads easily if a customer quotes it back.
+func newPayReference(prefix string) (string, error) {
+	suffix, err := payRandomLower(payReferenceRandomChars)
+	if err != nil {
 		return "", err
 	}
-	return payLinkReferencePrefix + strings.ToLower(base32.StdEncoding.EncodeToString(b[:])[:payLinkReferenceChars]), nil
+	return prefix + suffix, nil
+}
+
+// payRandomLower is n random lower-case base32 characters (a-z, 2-7): 5 bits
+// each, from crypto/rand.
+func payRandomLower(n int) (string, error) {
+	b := make([]byte, (n*5+7)/8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return strings.ToLower(base32.StdEncoding.EncodeToString(b)[:n]), nil
 }
