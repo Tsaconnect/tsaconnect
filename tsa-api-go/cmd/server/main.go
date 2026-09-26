@@ -329,6 +329,8 @@ func main() {
 
 	// Initialize services
 	priceService := services.NewPriceService()
+	priceService.UseAPIKey(cfg.CoinGeckoAPIKey, cfg.CoinGeckoPro)
+	log.Printf("[price] CoinGecko access: %s", priceService.Plan())
 	blockchainService := services.NewBlockchainService(cfg)
 
 	// Initialize escrow service (sonic chain client). All Sonic-side services
