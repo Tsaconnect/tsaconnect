@@ -32,6 +32,7 @@ const productEscrowABI = `[
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"orders","outputs":[{"name":"buyer","type":"address"},{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"productAmount","type":"uint256"},{"name":"shippingAmount","type":"uint256"},{"name":"platformFee","type":"uint256"},{"name":"buyerUpline","type":"address"},{"name":"createdAt","type":"uint256"},{"name":"sellerDelivered","type":"bool"},{"name":"buyerConfirmed","type":"bool"},{"name":"refundRequested","type":"bool"},{"name":"resolved","type":"bool"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
 ]`
 
@@ -268,6 +269,34 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 		return nil, fmt.Errorf("transaction failed")
 	}
 	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
+}
+
+// OrderEscrowed reports whether the configured escrow holds an order under
+// orderId: createOrder records the buyer, so a zero buyer means nothing was
+// ever escrowed for it. Only a successful read is an answer — an RPC failure
+// is an error, never "not escrowed", because callers release stock on false.
+func (s *EscrowService) OrderEscrowed(ctx context.Context, orderId [32]byte) (bool, error) {
+	if s.caller == nil {
+		return false, fmt.Errorf("blockchain client not available")
+	}
+	data, err := parsedEscrowABI.Pack("orders", orderId)
+	if err != nil {
+		return false, fmt.Errorf("pack orders: %w", err)
+	}
+	escrow := common.HexToAddress(s.escrowAddress)
+	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
+	if err != nil {
+		return false, fmt.Errorf("orders call: %w", err)
+	}
+	vals, err := parsedEscrowABI.Unpack("orders", out)
+	if err != nil || len(vals) == 0 {
+		return false, fmt.Errorf("decode orders: %v", err)
+	}
+	buyer, ok := vals[0].(common.Address)
+	if !ok {
+		return false, fmt.Errorf("decode orders: unexpected buyer type %T", vals[0])
+	}
+	return buyer != (common.Address{}), nil
 }
 
 func findOrderCreated(logs []*types.Log, escrowAddr common.Address, expectedOrderID [32]byte) (*EscrowCreated, error) {

@@ -2576,24 +2576,17 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
 			return
 		}
-		if err := tx.Model(&order).Updates(map[string]interface{}{
-			"status":     models.OrderStatusCancelled,
-			"updated_at": time.Now(),
-		}).Error; err != nil {
+		cancelled, err := services.CancelUnpaidOrder(tx, &order)
+		if err != nil {
 			tx.Rollback()
+			log.Printf("CancelOrder error for order %s: %v", order.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
 			return
 		}
-		// Services hold no inventory, so there is nothing to restore.
-		if order.Kind != models.OrderKindService {
-			if err := tx.Model(&models.Product{}).
-				Where("id = ?", order.ProductID).
-				UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-				tx.Rollback()
-				log.Printf("CancelOrder stock restore error for order %s: %v", order.ID, err)
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-				return
-			}
+		if !cancelled {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusConflict, "This order is no longer awaiting payment")
+			return
 		}
 		if err := tx.Commit().Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
