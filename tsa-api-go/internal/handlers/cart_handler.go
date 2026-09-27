@@ -166,7 +166,9 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		return
 	}
 
-	if product.Stock < body.Quantity {
+	// Services hold no inventory; checkout ignores their stock, and so does the cart.
+	isService := product.Type == models.ProductTypeService
+	if !isService && product.Stock < body.Quantity {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Only %d items available in stock", product.Stock))
 		return
 	}
@@ -209,9 +211,8 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 	}
 
 	// Checkout refuses a cart holding more than the stock, so a repeat add is
-	// checked against the merged quantity. Services skip stock, as at checkout.
-	if existingIndex >= 0 && product.Type != models.ProductTypeService &&
-		items[existingIndex].Quantity+body.Quantity > product.Stock {
+	// checked against the merged quantity.
+	if existingIndex >= 0 && !isService && items[existingIndex].Quantity+body.Quantity > product.Stock {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
 			"Only %d items available in stock (you already have %d in your cart)",
 			product.Stock, items[existingIndex].Quantity))

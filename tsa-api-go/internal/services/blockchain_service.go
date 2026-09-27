@@ -134,6 +134,21 @@ func (bs *BlockchainService) DepositBalance(chainKey, token, address string) (*b
 	return depositBalanceFrom(client, chainKey, token, addr, address)
 }
 
+// TokenBalance is the balance of a configured token, named by symbol, at an
+// address on a mainnet chain, named by key. The token address comes from our
+// own config, so unlike DepositBalance it is trusted without a code check.
+func (bs *BlockchainService) TokenBalance(chainKey, token, address string) (*big.Int, error) {
+	client := bs.ClientForChain(chainKey)
+	if client == nil {
+		return nil, fmt.Errorf("no client for chain %q", chainKey)
+	}
+	addr := bs.TokenAddress(chainKey, token)
+	if addr == "" {
+		return nil, fmt.Errorf("no %s address on chain %q", token, chainKey)
+	}
+	return client.GetTokenBalance(addr, address)
+}
+
 // tokenBalanceReader is the slice of an EVM client a deposit read needs.
 // *blockchain.EVMClient fills it.
 type tokenBalanceReader interface {

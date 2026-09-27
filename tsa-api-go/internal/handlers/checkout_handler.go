@@ -65,7 +65,7 @@ func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *
 // walletBalanceReader is the balance read a checkout needs. *BlockchainService
 // fills it.
 type walletBalanceReader interface {
-	DepositBalance(chainKey, token, address string) (*big.Int, error)
+	TokenBalance(chainKey, token, address string) (*big.Int, error)
 }
 
 // walletBalance reads the pay-token balance of the wallet the escrow will
@@ -76,7 +76,7 @@ func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
 	if ch.walletBalances == nil || wallet == "" {
 		return nil
 	}
-	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
+	balance, err := ch.walletBalances.TokenBalance("sonic", token, wallet)
 	if err != nil {
 		log.Printf("[checkout] balance read for %s %s failed (%v); not pre-checking", wallet, token, err)
 		return nil
@@ -1860,13 +1860,19 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	// A cancelled order still goes on to verification: if its escrow is proven
-	// on-chain, the buyer's money is held and the order is restored (see
-	// services.MarkOrderEscrowed). Without proof it is refused below.
-	if order.Status != models.OrderStatusCancelled &&
+	// A never-escrowed product order cancelled before its payment was confirmed
+	// still goes on to verification: if its escrow is proven on-chain, the
+	// buyer's money is held and the order is restored (services.MarkOrderEscrowed).
+	if !services.RevivableOnEscrow(&order) &&
 		!isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
 		return
+	}
+
+	// Reporting a payment is payment activity: keep the unpaid-order expiry off
+	// an order whose escrow tx may still be confirming.
+	if err := services.TouchUnpaidOrder(config.DB, order.ID); err != nil {
+		log.Printf("[checkout] touch order %s failed: %v", order.ID, err)
 	}
 
 	// Verify approve tx
@@ -1913,8 +1919,10 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	// Guarded on the status: the unpaid-order expiry or a buyer cancel may
 	// have run while the receipts were being verified.
+	var mark services.EscrowMark
 	if err := config.DB.Transaction(func(tx *gorm.DB) error {
-		_, err := services.MarkOrderEscrowed(tx, &order, updates)
+		var err error
+		mark, err = services.MarkOrderEscrowed(tx, &order, updates)
 		return err
 	}); errors.Is(err, services.ErrOrderNotPayable) {
 		utils.ErrorResponse(c, http.StatusConflict, "This order was already updated — refresh your orders")
@@ -1938,7 +1946,12 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 	})
 	sellerTitle := "Payment Received — Ship Order"
 	sellerMsg := fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8])
-	if order.Kind == models.OrderKindService {
+	if mark.Oversold {
+		// The order expired unpaid, its unit sold again, and then this payment
+		// landed. Cancelling it refunds the buyer from the escrow.
+		sellerTitle = "Paid Order Out of Stock — Cancel to Refund"
+		sellerMsg = fmt.Sprintf("Payment for order #%s arrived after the order had expired and its stock was sold again. If you cannot fulfil it, cancel the order to refund the buyer.", order.ID.String()[:8])
+	} else if order.Kind == models.OrderKindService {
 		sellerTitle = "Payment Received — Provide Service"
 		sellerMsg = fmt.Sprintf("Payment for service order #%s has been escrowed. Provide the service, then mark it rendered.", order.ID.String()[:8])
 	}
@@ -3110,10 +3123,8 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 	}
 	// Restore stock if the buyer was refunded (item never reached them or is being returned).
 	// Services hold no inventory, so there is nothing to restore.
-	if body.RefundBuyer && order.Kind != models.OrderKindService {
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+	if body.RefundBuyer {
+		if err := services.RestoreOrderStock(tx, &order); err != nil {
 			tx.Rollback()
 			log.Printf("SubmitAdminResolve stock restore error for order %s: %v", order.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
@@ -3533,16 +3544,11 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
-	// Services hold no inventory, so there is nothing to restore.
-	if order.Kind != models.OrderKindService {
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-			tx.Rollback()
-			log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-			return
-		}
+	if err := services.RestoreOrderStock(tx, &order); err != nil {
+		tx.Rollback()
+		log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+		return
 	}
 	if err := tx.Commit().Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")

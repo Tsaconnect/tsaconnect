@@ -225,28 +225,78 @@ func TestMarkOrderEscrowed_PendingOrderBecomesEscrowed(t *testing.T) {
 	product := writeProduct(t, db, 0)
 	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, time.Minute, time.Minute)
 
-	revived, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1}, escrowedUpdates())
-	if err != nil || revived || orderStatus(t, db, id) != models.OrderStatusEscrowed || productStock(t, db, product) != 0 {
-		t.Fatalf("pending → escrowed with stock untouched: revived=%v err=%v status=%s stock=%d",
-			revived, err, orderStatus(t, db, id), productStock(t, db, product))
+	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1}, escrowedUpdates())
+	if err != nil || mark.Revived || orderStatus(t, db, id) != models.OrderStatusEscrowed || productStock(t, db, product) != 0 {
+		t.Fatalf("pending → escrowed with stock untouched: mark=%+v err=%v status=%s stock=%d",
+			mark, err, orderStatus(t, db, id), productStock(t, db, product))
 	}
 }
 
-// The expiry (or a buyer cancel) may beat a slow submit-escrow. The buyer's
-// money is in escrow either way, so a proven payment restores the order and
+// The expiry may beat a slow submit-escrow. The buyer's money is in escrow
+// either way, so a proven payment restores a never-escrowed product order and
 // takes its stock back.
-func TestMarkOrderEscrowed_ProvenPaymentRestoresACancelledOrder(t *testing.T) {
+func TestMarkOrderEscrowed_ProvenPaymentRestoresAnExpiredOrder(t *testing.T) {
 	db := setupUnpaidOrderDB(t)
 	product := writeProduct(t, db, 1) // the cancel returned the unit
 	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
 
-	revived, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct}, escrowedUpdates())
-	if err != nil || !revived {
-		t.Fatalf("expected the cancelled order restored, got revived=%v err=%v", revived, err)
+	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct}, escrowedUpdates())
+	if err != nil || mark != (EscrowMark{Revived: true}) {
+		t.Fatalf("expected the cancelled order restored with its stock, got %+v, %v", mark, err)
 	}
 	if orderStatus(t, db, id) != models.OrderStatusEscrowed || productStock(t, db, product) != 0 {
 		t.Fatalf("restored order must be escrowed and hold its unit: status=%s stock=%d",
 			orderStatus(t, db, id), productStock(t, db, product))
+	}
+}
+
+func TestMarkOrderEscrowed_FlagsARestoredOrderWhoseStockWasResold(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0) // the returned unit sold again
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
+
+	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct}, escrowedUpdates())
+	if err != nil || mark != (EscrowMark{Revived: true, Oversold: true}) {
+		t.Fatalf("expected a restored, oversold order, got %+v, %v", mark, err)
+	}
+	if productStock(t, db, product) != 0 {
+		t.Fatal("stock must not go negative")
+	}
+}
+
+// An order escrowed before and then cancelled may have refunded the buyer
+// on-chain; its original receipt still verifies. Replaying it must not mark
+// the order paid again.
+func TestMarkOrderEscrowed_RefusesToReviveAnOrderThatWasEscrowedBefore(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 1)
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
+	db.Exec(`UPDATE orders SET escrow_tx_hash = '0xoriginal' WHERE id = ?`, id)
+	order := &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct,
+		Status: models.OrderStatusCancelled, EscrowTxHash: "0xoriginal"}
+
+	if RevivableOnEscrow(order) {
+		t.Fatal("a previously escrowed order must not be revivable")
+	}
+	if _, err := MarkOrderEscrowed(db, order, escrowedUpdates()); !errors.Is(err, ErrOrderNotPayable) {
+		t.Fatalf("expected ErrOrderNotPayable, got %v", err)
+	}
+	if orderStatus(t, db, id) != models.OrderStatusCancelled || productStock(t, db, product) != 1 {
+		t.Fatal("a refunded order must stay cancelled with its stock untouched")
+	}
+}
+
+func TestMarkOrderEscrowed_RefusesToReviveAServiceOrder(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	service := writeProduct(t, db, 5)
+	id := writeOrder(t, db, service, models.OrderKindService, models.OrderStatusCancelled, time.Hour, time.Minute)
+	order := &models.Order{ID: id, ProductID: service, Quantity: 1, Kind: models.OrderKindService, Status: models.OrderStatusCancelled}
+
+	if RevivableOnEscrow(order) {
+		t.Fatal("a service order's slot may be gone; it must not be revivable")
+	}
+	if _, err := MarkOrderEscrowed(db, order, escrowedUpdates()); !errors.Is(err, ErrOrderNotPayable) {
+		t.Fatalf("expected ErrOrderNotPayable, got %v", err)
 	}
 }
 
@@ -261,6 +311,34 @@ func TestMarkOrderEscrowed_RefusesAnOrderPastPayment(t *testing.T) {
 	if orderStatus(t, db, id) != models.OrderStatusShipped {
 		t.Fatal("a shipped order must not be moved back to escrowed")
 	}
+}
+
+// A buyer who starts paying after the sweep picked the order (and while it
+// read the escrow) keeps it: the idle condition is part of the cancel itself.
+func TestExpireUnpaidOrders_SparesAnOrderPaidForDuringTheSweep(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+
+	escrow := touchingEscrow{db: db, id: id}
+	n, err := NewUnpaidOrderExpiryService(db, escrow, nil).ExpireUnpaidOrders(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("expected nothing expired, got %d, %v", n, err)
+	}
+	if orderStatus(t, db, id) != models.OrderStatusPendingPayment || productStock(t, db, product) != 0 {
+		t.Fatal("an order being paid for must not be cancelled")
+	}
+}
+
+// touchingEscrow reports "not escrowed" after the buyer's prepare-approve
+// touched the order — i.e. mid-sweep.
+type touchingEscrow struct {
+	db *gorm.DB
+	id uuid.UUID
+}
+
+func (e touchingEscrow) OrderEscrowed(context.Context, [32]byte) (bool, error) {
+	return false, TouchUnpaidOrder(e.db, e.id)
 }
 
 // ordersChain answers the escrow's orders(bytes32) getter.

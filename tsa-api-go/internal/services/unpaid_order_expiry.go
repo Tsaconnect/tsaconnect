@@ -43,76 +43,115 @@ func TouchUnpaidOrder(db *gorm.DB, id uuid.UUID) error {
 		Update("updated_at", time.Now()).Error
 }
 
+// RestoreOrderStock returns an order's units to its listing, inside tx.
+// Services hold no inventory, so there is nothing to restore.
+func RestoreOrderStock(tx *gorm.DB, order *models.Order) error {
+	if order.Kind == models.OrderKindService {
+		return nil
+	}
+	if err := tx.Model(&models.Product{}).
+		Where("id = ?", order.ProductID).
+		UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+		return fmt.Errorf("restore stock: %w", err)
+	}
+	return nil
+}
+
 // CancelUnpaidOrder cancels an order that is still awaiting payment and
 // returns its reserved stock, inside tx. It reports false, changing nothing,
 // when the order has left pending_payment — a payment that landed first wins.
 func CancelUnpaidOrder(tx *gorm.DB, order *models.Order) (bool, error) {
-	res := tx.Model(&models.Order{}).
-		Where("id = ? AND status = ?", order.ID, models.OrderStatusPendingPayment).
-		Updates(map[string]interface{}{
-			"status":     models.OrderStatusCancelled,
-			"updated_at": time.Now(),
-		})
+	return cancelPending(tx, order, nil)
+}
+
+// cancelPending is CancelUnpaidOrder, optionally also requiring no payment
+// activity since idleBefore — checked in the same UPDATE, so a buyer who
+// starts paying after the sweep picked the order still keeps it.
+func cancelPending(tx *gorm.DB, order *models.Order, idleBefore *time.Time) (bool, error) {
+	q := tx.Model(&models.Order{}).
+		Where("id = ? AND status = ?", order.ID, models.OrderStatusPendingPayment)
+	if idleBefore != nil {
+		q = q.Where("updated_at < ?", *idleBefore)
+	}
+	res := q.Updates(map[string]interface{}{
+		"status":     models.OrderStatusCancelled,
+		"updated_at": time.Now(),
+	})
 	if res.Error != nil {
 		return false, res.Error
 	}
 	if res.RowsAffected == 0 {
 		return false, nil
 	}
-	// Services hold no inventory, so there is nothing to restore.
-	if order.Kind != models.OrderKindService {
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-			return false, fmt.Errorf("restore stock: %w", err)
-		}
+	if err := RestoreOrderStock(tx, order); err != nil {
+		return false, err
 	}
 	return true, nil
 }
 
 // ErrOrderNotPayable means the order is in a state a payment cannot apply to
-// (already escrowed, shipped, refunded...).
-var ErrOrderNotPayable = errors.New("order is neither awaiting payment nor cancelled")
+// (already escrowed, shipped, refunded, or a cancel that cannot be undone).
+var ErrOrderNotPayable = errors.New("order cannot take this payment")
+
+// RevivableOnEscrow reports whether a cancelled order may be restored by a
+// verified escrow: only a product order that was never escrowed. An order
+// escrowed before carries its escrow hash — its cancel may have refunded the
+// buyer on-chain, and its original receipt would still verify. A service
+// order is excluded: its booking slot may have gone to someone else.
+func RevivableOnEscrow(order *models.Order) bool {
+	return order.Status == models.OrderStatusCancelled &&
+		order.Kind != models.OrderKindService &&
+		order.EscrowTxHash == ""
+}
+
+// EscrowMark is what MarkOrderEscrowed did beyond the plain transition.
+type EscrowMark struct {
+	// Revived: the order had been cancelled and was restored.
+	Revived bool
+	// Oversold: restored, but its units had already been sold again. The
+	// seller must cancel it, which refunds the buyer from the escrow.
+	Oversold bool
+}
 
 // MarkOrderEscrowed applies updates (which set status escrowed) to an order
 // whose escrow has been verified on-chain, inside tx. The chain is the truth:
-// an order cancelled before its payment was confirmed is restored and takes
-// its stock back, because the buyer's money is in escrow either way. It
-// reports whether the order had been cancelled, and errors when it is in any
-// other state.
-func MarkOrderEscrowed(tx *gorm.DB, order *models.Order, updates map[string]interface{}) (revived bool, err error) {
+// a never-escrowed product order cancelled before its payment was confirmed
+// (RevivableOnEscrow) is restored and takes its stock back, because the
+// buyer's money is in escrow either way. Any other state is ErrOrderNotPayable.
+func MarkOrderEscrowed(tx *gorm.DB, order *models.Order, updates map[string]interface{}) (EscrowMark, error) {
 	res := tx.Model(&models.Order{}).
 		Where("id = ? AND status = ?", order.ID, models.OrderStatusPendingPayment).
 		Updates(updates)
 	if res.Error != nil {
-		return false, res.Error
+		return EscrowMark{}, res.Error
 	}
 	if res.RowsAffected == 1 {
-		return false, nil
+		return EscrowMark{}, nil
 	}
 
 	res = tx.Model(&models.Order{}).
-		Where("id = ? AND status = ?", order.ID, models.OrderStatusCancelled).
+		Where("id = ? AND status = ? AND kind <> ? AND (escrow_tx_hash IS NULL OR escrow_tx_hash = '')",
+			order.ID, models.OrderStatusCancelled, models.OrderKindService).
 		Updates(updates)
 	if res.Error != nil {
-		return false, res.Error
+		return EscrowMark{}, res.Error
 	}
 	if res.RowsAffected == 0 {
-		return false, ErrOrderNotPayable
+		return EscrowMark{}, ErrOrderNotPayable
 	}
+	mark := EscrowMark{Revived: true}
 	log.Printf("[orders] ALERT escrowed_after_cancel=1 order=%s: payment verified for a cancelled order; restored", order.ID)
-	if order.Kind != models.OrderKindService {
-		taken := tx.Model(&models.Product{}).
-			Where("id = ? AND stock >= ?", order.ProductID, order.Quantity).
-			UpdateColumn("stock", gorm.Expr("stock - ?", order.Quantity))
-		if taken.Error != nil {
-			return true, fmt.Errorf("retake stock: %w", taken.Error)
-		}
-		if taken.RowsAffected == 0 {
-			log.Printf("[orders] ALERT oversold=1 order=%s product=%s: paid order restored but its stock was already sold", order.ID, order.ProductID)
-		}
+	taken := tx.Model(&models.Product{}).
+		Where("id = ? AND stock >= ?", order.ProductID, order.Quantity).
+		UpdateColumn("stock", gorm.Expr("stock - ?", order.Quantity))
+	if taken.Error != nil {
+		return mark, fmt.Errorf("retake stock: %w", taken.Error)
 	}
-	return true, nil
+	if taken.RowsAffected == 0 {
+		mark.Oversold = true
+		log.Printf("[orders] ALERT oversold=1 order=%s product=%s: paid order restored but its stock was already sold", order.ID, order.ProductID)
+	}
+	return mark, nil
 }
 
 // UnpaidOrderExpiryService releases stock held by orders nobody paid for.
@@ -164,7 +203,7 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 				return expired, err
 			}
 			order := &page[i]
-			cancelled, err := s.expire(ctx, order)
+			cancelled, err := s.expire(ctx, order, cutoff)
 			if err != nil {
 				readErr = err
 				continue
@@ -181,7 +220,7 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 }
 
 // expire cancels one stale order when the escrow proves it unpaid.
-func (s *UnpaidOrderExpiryService) expire(ctx context.Context, order *models.Order) (bool, error) {
+func (s *UnpaidOrderExpiryService) expire(ctx context.Context, order *models.Order, cutoff time.Time) (bool, error) {
 	escrowed, err := s.escrow.OrderEscrowed(ctx, GenerateOrderID(order.ID))
 	if err != nil {
 		return false, fmt.Errorf("escrow read for order %s: %w", order.ID, err)
@@ -193,7 +232,7 @@ func (s *UnpaidOrderExpiryService) expire(ctx context.Context, order *models.Ord
 	var cancelled bool
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
-		cancelled, err = CancelUnpaidOrder(tx, order)
+		cancelled, err = cancelPending(tx, order, &cutoff)
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("cancel order %s: %w", order.ID, err)

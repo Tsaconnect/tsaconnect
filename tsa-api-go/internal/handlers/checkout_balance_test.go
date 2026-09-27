@@ -20,7 +20,7 @@ type fakeWalletBalances struct {
 	err     error
 }
 
-func (f fakeWalletBalances) DepositBalance(_, _, _ string) (*big.Int, error) {
+func (f fakeWalletBalances) TokenBalance(_, _, _ string) (*big.Int, error) {
 	return f.balance, f.err
 }
 
