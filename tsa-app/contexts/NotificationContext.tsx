@@ -72,12 +72,14 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   }, []);
 
   const connect = useCallback(async () => {
-    const token = await AsyncStorage.getItem('token');
+    // Raw JWT, URL-encoded: anything that isn't a valid URL (a "Bearer " prefix's
+    // space) makes Android's native WebSocket throw and takes the app down.
+    const token = (await AsyncStorage.getItem('token'))?.replace(/^Bearer /, '');
     if (!token) return;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`${wsUrl}/ws/notifications?token=${token}`);
+    const ws = new WebSocket(`${wsUrl}/ws/notifications?token=${encodeURIComponent(token)}`);
 
     ws.onopen = () => {
       setConnected(true);

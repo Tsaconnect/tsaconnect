@@ -55,11 +55,13 @@ beforeEach(async () => {
 });
 
 describe('session storage', () => {
-  it('stores the raw token and the legacy Bearer key, whatever format it arrives in', async () => {
+  it('stores the raw token under both keys, whatever format it arrives in', async () => {
     await setSession('Bearer abc');
     expect(getAccessToken()).toBe('abc');
     expect(await AsyncStorage.getItem('authToken')).toBe('abc');
-    expect(await AsyncStorage.getItem('token')).toBe('Bearer abc');
+    // Raw, never "Bearer …": the notifications WebSocket URL is built from this key,
+    // and a space in it crashes Android's native WebSocket (prod crash 2026-09-28).
+    expect(await AsyncStorage.getItem('token')).toBe('abc');
   });
 
   it('loads a token stored under the legacy key at cold start', async () => {
