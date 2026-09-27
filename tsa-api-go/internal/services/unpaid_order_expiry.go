@@ -196,10 +196,11 @@ func NewUnpaidOrderExpiryService(db *gorm.DB, escrow escrowOrderReader, tokens t
 	return &UnpaidOrderExpiryService{db: db, escrow: escrow, tokens: tokens, bus: bus, ttl: UnpaidOrderTTL}
 }
 
-// staleOrder is a pending order with the seller wallet its escrow must pay.
+// staleOrder is a pending order with the wallets its escrow must be between.
 type staleOrder struct {
 	models.Order
 	SellerWallet string
+	BuyerWallet  string
 }
 
 // ExpireUnpaidOrders visits every product order with no payment activity for
@@ -219,8 +220,9 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 		var page []staleOrder
 		if err := s.db.WithContext(ctx).
 			Table("orders").
-			Select("orders.*, users.wallet_address AS seller_wallet").
-			Joins("LEFT JOIN users ON users.id = orders.seller_id").
+			Select("orders.*, sellers.wallet_address AS seller_wallet, buyers.wallet_address AS buyer_wallet").
+			Joins("LEFT JOIN users AS sellers ON sellers.id = orders.seller_id").
+			Joins("LEFT JOIN users AS buyers ON buyers.id = orders.buyer_id").
 			Where("orders.status = ? AND orders.kind <> ? AND orders.created_at >= ? AND orders.updated_at < ? AND orders.id > ?",
 				models.OrderStatusPendingPayment, models.OrderKindService, unpaidOrderExpiryFrom, cutoff, after).
 			Order("orders.id").
@@ -276,9 +278,10 @@ func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cu
 
 // reconcilePaid marks escrowed a pending order the escrow holds — paid, but
 // never reported. The orderId is derivable from the order's UUID, so anyone
-// could escrow under it: the record is trusted only when it pays this order's
-// seller, in its token, the amounts it was priced at. Anything else is left
-// pending and alerted.
+// could escrow under it: the record is trusted only when it is unresolved (the
+// money is still held) and is this order's buyer paying its seller, in its
+// token, the amounts it was priced at. Anything else is left pending and
+// alerted.
 func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOrder, onChain *OnChainOrder) error {
 	product, okP := new(big.Int).SetString(o.ProductAmount, 10)
 	shipping, okS := new(big.Int).SetString(o.ShippingAmount, 10)
@@ -286,7 +289,8 @@ func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOr
 	if s.tokens != nil {
 		tokenAddr = s.tokens.TokenAddress("sonic", o.Token)
 	}
-	if !okP || !okS || tokenAddr == "" || o.SellerWallet == "" ||
+	if !okP || !okS || tokenAddr == "" || o.SellerWallet == "" || o.BuyerWallet == "" || onChain.Resolved ||
+		!strings.EqualFold(onChain.Buyer.Hex(), common.HexToAddress(o.BuyerWallet).Hex()) ||
 		!strings.EqualFold(onChain.Seller.Hex(), common.HexToAddress(o.SellerWallet).Hex()) ||
 		!strings.EqualFold(onChain.Token.Hex(), common.HexToAddress(tokenAddr).Hex()) ||
 		onChain.ProductAmount.Cmp(product) != 0 || onChain.ShippingAmount.Cmp(shipping) != 0 {

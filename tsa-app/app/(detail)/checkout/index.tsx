@@ -311,10 +311,14 @@ const CheckoutScreen = () => {
   const orderProgress = useRef<Record<string, EscrowProgress>>({});
   // Orders the server says can no longer be paid (cancelled or expired).
   const [unpayable, setUnpayable] = useState<string[]>([]);
+  // The same list, readable inside a payment run that started before it grew.
+  const unpayableRef = useRef<string[]>([]);
+  unpayableRef.current = unpayable;
   // One payment run at a time: a double tap on "Try again" must not sign twice.
   const paying = useRef(false);
 
-  // Pays each order not skipped through the shared escrow sequence.
+  // Pays each order not skipped through the shared escrow sequence. The run
+  // succeeds only when every order ends up paid.
   const payOrders = async (list: Order[], skip: string[]) => {
     if (paying.current) return;
     paying.current = true;
@@ -334,10 +338,16 @@ const CheckoutScreen = () => {
             (orderProgress.current[order.id] ??= {}),
           );
         } catch (e) {
-          if (e instanceof OrderNotPayableError) setUnpayable((prev) => [...prev, order.id]);
+          if (e instanceof OrderNotPayableError) {
+            unpayableRef.current = [...unpayableRef.current, order.id];
+            setUnpayable(unpayableRef.current);
+          }
           throw e;
         }
         setCompletedOrders((prev) => [...prev, order.id]);
+      }
+      if (unpayableRef.current.length > 0) {
+        throw new Error('Some orders could no longer be paid — they were cancelled. Nothing was charged for them.');
       }
 
       setSigningPhase('done');

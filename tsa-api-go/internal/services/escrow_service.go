@@ -276,6 +276,8 @@ type OnChainOrder struct {
 	Buyer, Seller, Token                       common.Address
 	ProductAmount, ShippingAmount, PlatformFee *big.Int
 	CreatedAt                                  time.Time
+	// Resolved: the escrow has paid it out (refund or release); it holds nothing.
+	Resolved bool
 }
 
 // EscrowedOrder reads the configured escrow's record of orderId, or nil when
@@ -296,7 +298,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 		return nil, fmt.Errorf("orders call: %w", err)
 	}
 	vals, err := parsedEscrowABI.Unpack("orders", out)
-	if err != nil || len(vals) < 8 {
+	if err != nil || len(vals) < 12 {
 		return nil, fmt.Errorf("decode orders: %v (%d values)", err, len(vals))
 	}
 	buyer, ok1 := vals[0].(common.Address)
@@ -306,7 +308,8 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 	shipping, ok5 := vals[4].(*big.Int)
 	fee, ok6 := vals[5].(*big.Int)
 	created, ok7 := vals[7].(*big.Int)
-	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7) {
+	resolved, ok8 := vals[11].(bool)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8) {
 		return nil, fmt.Errorf("decode orders: unexpected value types")
 	}
 	if buyer == (common.Address{}) {
@@ -316,6 +319,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 		Buyer: buyer, Seller: seller, Token: token,
 		ProductAmount: product, ShippingAmount: shipping, PlatformFee: fee,
 		CreatedAt: time.Unix(created.Int64(), 0),
+		Resolved:  resolved,
 	}, nil
 }
 

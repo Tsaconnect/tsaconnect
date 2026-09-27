@@ -85,19 +85,30 @@ func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
 	return balance
 }
 
+// balanceReadBudget bounds how long a checkout waits on the balance read; past
+// it the balance is unknown, which never blocks.
+const balanceReadBudget = 3 * time.Second
+
 // ratesAndBalance resolves the pricing rates and, alongside them, the buyer's
 // balance of token — both chain reads, neither needing the other, and both
-// done before a DB transaction opens.
+// done before a DB transaction opens. A slow balance read is abandoned, never
+// waited on past balanceReadBudget or a failed pricing read.
 func (ch *CheckoutHandler) ratesAndBalance(ctx context.Context, token, wallet string) (pricingRates, *big.Int, *cartPricingError) {
-	var balance *big.Int
-	read := make(chan struct{})
-	go func() {
-		defer close(read)
-		balance = ch.walletBalance(wallet, strings.ToUpper(token))
-	}()
+	read := make(chan *big.Int, 1)
+	go func() { read <- ch.walletBalance(wallet, strings.ToUpper(token)) }()
 	rates, perr := ch.resolvePricingRates(ctx, token)
-	<-read
-	return rates, balance, perr
+	if perr != nil {
+		return rates, nil, perr
+	}
+	select {
+	case balance := <-read:
+		return rates, balance, nil
+	case <-time.After(balanceReadBudget):
+		log.Printf("[checkout] balance read for %s %s exceeded %s; not pre-checking", wallet, token, balanceReadBudget)
+		return rates, nil, nil
+	case <-ctx.Done():
+		return rates, nil, nil
+	}
 }
 
 // refuseShortfall answers 400 insufficient_balance, rolling tx back, when a
@@ -1929,12 +1940,13 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		if _, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID)); err == nil {
 			log.Printf("[checkout] ALERT paid_after_cancel=1 order=%s escrow_tx=%s: payment reached escrow after the order was cancelled", order.ID, req.EscrowTxHash)
 			utils.ErrorResponseWithCode(c, http.StatusConflict,
-				"Your payment reached escrow after this order was cancelled. Contact support to have it refunded.", "paid_after_cancel")
+				"Your payment reached escrow after this order was cancelled. Contact support to have it refunded.", "order_not_payable")
 			return
 		}
 	}
 	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status), "order_not_payable")
 		return
 	}
 

@@ -115,7 +115,10 @@ export class OrderNotPayableError extends Error {
   }
 }
 
-const STILL_CONFIRMING = 'Your payment was sent and is still confirming on Sonic. Wait a minute, then tap Try again.';
+// Deliberately not "try again": outside the cart checkout, trying again places
+// a new order and would pay twice.
+const STILL_CONFIRMING =
+  'Your payment was sent and is still confirming on Sonic. Check your orders in a minute before paying again.';
 
 /**
  * Signs and sends an escrow-flow tx. When its confirmation is not seen the
@@ -199,7 +202,7 @@ export async function escrowOrder(
   onPhase?.('submitting');
   const submitResult = await submitEscrow(order.id, approve.hash, escrow.hash);
   if (!submitResult.success) {
-    throw new Error(submitResult.message || 'Failed to submit escrow');
+    throw refused(submitResult, 'Failed to submit escrow');
   }
 
   onPhase?.('done');

@@ -113,3 +113,13 @@ test('a reused approval is dropped when the escrow step then fails', async () =>
   await expect(escrowOrder(order, undefined, progress)).rejects.toThrow('Failed to prepare escrow');
   expect(progress.approve).toBeUndefined(); // the next try signs a fresh approve
 });
+
+test('a submit the server refuses for good (order cancelled) ends the retry too', async () => {
+  (signAndBroadcast as jest.Mock).mockResolvedValueOnce('0xapprove').mockResolvedValueOnce('0xescrow-tx');
+  (submitEscrow as jest.Mock).mockResolvedValueOnce({
+    success: false,
+    code: 'order_not_payable',
+    message: 'Your payment reached escrow after this order was cancelled. Contact support to have it refunded.',
+  });
+  await expect(escrowOrder(order)).rejects.toBeInstanceOf(OrderNotPayableError);
+});

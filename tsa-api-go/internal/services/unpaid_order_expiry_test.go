@@ -58,14 +58,15 @@ func writeProduct(t *testing.T, db *gorm.DB, stock int) uuid.UUID {
 // whose wallet is testSellerWallet.
 func writeOrder(t *testing.T, db *gorm.DB, productID uuid.UUID, kind, status string, placed, active time.Duration) uuid.UUID {
 	t.Helper()
-	id, seller := uuid.New(), uuid.New()
-	if err := db.Exec(`INSERT INTO users (id, wallet_address) VALUES (?, ?)`, seller, testSellerWallet).Error; err != nil {
-		t.Fatalf("insert seller: %v", err)
+	id, seller, buyer := uuid.New(), uuid.New(), uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, wallet_address) VALUES (?, ?), (?, ?)`,
+		seller, testSellerWallet, buyer, testBuyerWallet).Error; err != nil {
+		t.Fatalf("insert users: %v", err)
 	}
 	if err := db.Exec(`INSERT INTO orders (id, buyer_id, seller_id, product_id, quantity, kind, token, status,
 		product_amount, shipping_amount, platform_fee, total_amount, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 1, ?, 'USDC', ?, '78400', '0', '1600', '80000', ?, ?)`,
-		id, uuid.New(), seller, productID, kind, status, time.Now().Add(-placed), time.Now().Add(-active)).Error; err != nil {
+		id, buyer, seller, productID, kind, status, time.Now().Add(-placed), time.Now().Add(-active)).Error; err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
 	return id
@@ -227,9 +228,11 @@ func TestExpireUnpaidOrders_RecordsAPaymentTheAppNeverReported(t *testing.T) {
 // priced amounts, is neither trusted as payment nor cancelled over.
 func TestExpireUnpaidOrders_LeavesAMismatchedEscrowRecordAlone(t *testing.T) {
 	cases := map[string]func(*OnChainOrder){
-		"another seller":  func(o *OnChainOrder) { o.Seller = common.HexToAddress(testBuyerWallet) },
-		"another token":   func(o *OnChainOrder) { o.Token = common.HexToAddress(testFeeManager) },
-		"a smaller price": func(o *OnChainOrder) { o.ProductAmount = big.NewInt(1) },
+		"another seller":   func(o *OnChainOrder) { o.Seller = common.HexToAddress(testBuyerWallet) },
+		"another buyer":    func(o *OnChainOrder) { o.Buyer = common.HexToAddress(testSellerWallet) },
+		"already paid out": func(o *OnChainOrder) { o.Resolved = true },
+		"another token":    func(o *OnChainOrder) { o.Token = common.HexToAddress(testFeeManager) },
+		"a smaller price":  func(o *OnChainOrder) { o.ProductAmount = big.NewInt(1) },
 	}
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -385,7 +388,7 @@ func (c ordersChain) CallContract(_ context.Context, _ ethereum.CallMsg, _ *big.
 	}
 	return parsedEscrowABI.Methods["orders"].Outputs.Pack(
 		o.Buyer, o.Seller, o.Token, nz(o.ProductAmount), nz(o.ShippingAmount), nz(o.PlatformFee),
-		common.Address{}, big.NewInt(o.CreatedAt.Unix()), false, false, false, false)
+		common.Address{}, big.NewInt(o.CreatedAt.Unix()), false, false, false, o.Resolved)
 }
 
 func TestEscrowedOrder_ReadsTheRecord(t *testing.T) {
@@ -397,7 +400,7 @@ func TestEscrowedOrder_ReadsTheRecord(t *testing.T) {
 		t.Fatalf("escrowed order: %v, %v", got, err)
 	}
 	if got.Seller != want.Seller || got.Token != want.Token || got.ProductAmount.Cmp(want.ProductAmount) != 0 ||
-		got.PlatformFee.Cmp(want.PlatformFee) != 0 || got.CreatedAt.Unix() != want.CreatedAt.Unix() {
+		got.PlatformFee.Cmp(want.PlatformFee) != 0 || got.CreatedAt.Unix() != want.CreatedAt.Unix() || got.Resolved {
 		t.Fatalf("record read wrong: %+v", got)
 	}
 
