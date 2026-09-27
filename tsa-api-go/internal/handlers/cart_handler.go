@@ -208,6 +208,16 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		}
 	}
 
+	// Checkout refuses a cart holding more than the stock, so a repeat add is
+	// checked against the merged quantity. Services skip stock, as at checkout.
+	if existingIndex >= 0 && product.Type != models.ProductTypeService &&
+		items[existingIndex].Quantity+body.Quantity > product.Stock {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
+			"Only %d items available in stock (you already have %d in your cart)",
+			product.Stock, items[existingIndex].Quantity))
+		return
+	}
+
 	now := time.Now()
 	if existingIndex >= 0 {
 		items[existingIndex].Quantity += body.Quantity
