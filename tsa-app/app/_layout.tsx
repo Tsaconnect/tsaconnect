@@ -4,7 +4,11 @@ import React, { useEffect } from "react";
 import { Stack } from "expo-router";
 import * as Updates from "expo-updates";
 import * as SplashScreen from "expo-splash-screen";
-import { AppProvider } from "../AuthContext/AuthContext";
+import axios from "axios";
+import { AppProvider, useAuth } from "../AuthContext/AuthContext";
+import { apiClient } from "../constants/api/apiClient";
+import { PROTECTED_ROUTES, PUBLIC_ROUTES } from "@/constants/routeAccess";
+import { installSessionTransport } from "@/services/sessionTransport";
 import { TokenProvider } from "../hooks/useTokens";
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { CurrencyProvider } from '../contexts/CurrencyContext';
@@ -21,8 +25,17 @@ function PushRegistrar() {
   return null;
 }
 
+// Every request to our API — raw fetch, the shared axios instance, bare axios —
+// carries, refreshes and expires the session through one place. Installed at
+// module load so it is in place before any screen's first request.
+installSessionTransport([axios, apiClient]);
+
 // Hold the native splash until the Inter family is ready (design-system fonts).
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// Declared by hand below (their header options are read by
+// __tests__/route-back-affordance.test.ts); every other protected route is mapped.
+const HEADERED_LEAF_SCREENS: readonly string[] = ["activity", "orderdetail", "add-category"];
 
 // The root Stack, split out so it can read the theme — useDefaultScreenOptions()
 // calls useTheme(), which only resolves inside <ThemeProvider>.
@@ -35,12 +48,24 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 // second header underneath it.
 function AppStack() {
   const headerOptions = useDefaultScreenOptions();
+  const { isAuthenticated, isHydrated } = useAuth();
+  // Until the stored session has been read, protected screens stay reachable so
+  // a cold-start deep link isn't bounced to index before we know who is signed
+  // in; once hydrated, a signed-out user sees nothing but PUBLIC_ROUTES.
+  const mayShowProtected = isAuthenticated || !isHydrated;
   return (
     <Stack screenOptions={{ ...headerOptions, headerShown: false }}>
-      <Stack.Screen name="index" options={{ headerShown: false }} />
-      <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
-      <Stack.Screen name="orderdetail" options={{ headerShown: true, title: 'Order Detail' }} />
-      <Stack.Screen name="add-category" options={{ headerShown: true, title: 'Add Category' }} />
+      {PUBLIC_ROUTES.map((name) => (
+        <Stack.Screen key={name} name={name} />
+      ))}
+      <Stack.Protected guard={mayShowProtected}>
+        <Stack.Screen name="activity" options={{ headerShown: true, title: "Activity" }} />
+        <Stack.Screen name="orderdetail" options={{ headerShown: true, title: "Order Detail" }} />
+        <Stack.Screen name="add-category" options={{ headerShown: true, title: "Add Category" }} />
+        {PROTECTED_ROUTES.filter((name) => !HEADERED_LEAF_SCREENS.includes(name)).map((name) => (
+          <Stack.Screen key={name} name={name} />
+        ))}
+      </Stack.Protected>
     </Stack>
   );
 }

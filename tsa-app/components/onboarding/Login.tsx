@@ -38,7 +38,7 @@ export default function Login() {
   const [generalError, setGeneralError] = useState("");
   const [showBiometric, setShowBiometric] = useState(false);
   const [bioType, setBioType] = useState("Fingerprint");
-  const { setAuthenticated, setEmailVerified, setCurrentUser, setToken: setAuthToken } = useAuth();
+  const { signIn } = useAuth();
 
   // Check if user can use biometric or PIN login via stored refresh token
   useEffect(() => {
@@ -66,15 +66,7 @@ export default function Login() {
     try {
       const refreshResult = await api.refreshSession();
       if (refreshResult.success && refreshResult.data) {
-        setAuthenticated(true);
-        setAuthToken(refreshResult.data.accessToken);
-        try {
-          const response = await api.getProfile();
-          if (response.success && response.data) {
-            setCurrentUser(response.data);
-            setEmailVerified(response.data.emailVerified ?? false);
-          }
-        } catch {}
+        await signIn(refreshResult.data.accessToken);
         await goAfterAuth(router);
         return;
       }
@@ -122,11 +114,7 @@ export default function Login() {
     try {
       const response = await api.login(email.trim(), password.trim());
       if (response.success && response.data) {
-        // Sync AuthContext with login data
-        setAuthenticated(true);
-        setAuthToken(response.data.token);
-        setEmailVerified(response.data.emailVerified ?? false);
-        setCurrentUser(response.data);
+        await signIn(response.data.accessToken || response.data.token);
         setEmail("");
         setPassword("");
         await goAfterAuth(router);
@@ -145,10 +133,7 @@ export default function Login() {
                 try {
                   const restoreRes = await api.reactivateAccount(email.trim(), password.trim());
                   if (restoreRes.success && restoreRes.data) {
-                    setAuthenticated(true);
-                    setAuthToken(restoreRes.data.token);
-                    setEmailVerified(restoreRes.data.emailVerified ?? false);
-                    setCurrentUser(restoreRes.data);
+                    await signIn(restoreRes.data.accessToken || restoreRes.data.token);
                     setEmail("");
                     setPassword("");
                     await goAfterAuth(router);

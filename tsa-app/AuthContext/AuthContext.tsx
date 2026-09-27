@@ -15,8 +15,15 @@ import {
 import { apiClient } from "../constants/api/apiClient";
 import { cartService } from "../components/services/cart";
 import api from "../components/services/api";
-import { router } from "expo-router";
 import * as FileSystem from 'expo-file-system';
+import {
+  bearer,
+  clearSession,
+  endSession,
+  loadStoredSession,
+  setSession,
+  subscribeSession,
+} from "../services/session";
 
 interface AppContextType {
   category: string;
@@ -53,6 +60,8 @@ interface AppContextType {
   emailVerified: boolean;
   setEmailVerified: React.Dispatch<React.SetStateAction<boolean>>;
   isHydrated: boolean;
+  /** Makes a freshly issued access token the session and marks the user signed in. */
+  signIn: (accessToken: string, profile?: any) => Promise<void>;
 }
 
 const defaultContextValue: AppContextType = {
@@ -83,6 +92,7 @@ const defaultContextValue: AppContextType = {
   emailVerified: false,
   setEmailVerified: () => {},
   isHydrated: false,
+  signIn: async () => {},
 };
 
 export const AppContext = createContext<AppContextType>(defaultContextValue);
@@ -132,19 +142,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     try {
       const response = await executeJwtAuthentication(username, password);
       if (response.status === 200) {
-        const jwtToken = "Bearer " + response.data.tokens.access.token;
-        await AsyncStorage.setItem("token", jwtToken);
-        await AsyncStorage.setItem("authToken", jwtToken);
-        setToken(jwtToken);
-        setCurrentUser(response.data.user);
-        setEmailVerified(response.data.user?.emailVerified ?? false);
+        await signIn(response.data.tokens.access.token, response.data.user);
         setUsername(username);
-        setAuthenticated(true);
-        apiClient.interceptors.request.use((config: any) => {
-          config.headers.Authorization = jwtToken;
-          config.headers["Content-Type"] = "multipart/form-data";
-          return config;
-        });
         return { success: true, error: false, message: "success" };
       } else {
         setLoading(false);
@@ -319,25 +318,10 @@ async function signup(payload: SignupPayload) {
     const response = await register(formData);
     
     if (response.status === 201) {
-      const jwtToken = "Bearer " + response.data.tokens.access.token;
-      
-      // Save token and authentication state
-      await AsyncStorage.setItem('token', jwtToken);
-      await AsyncStorage.setItem('authToken', jwtToken);
+      const jwtToken = bearer(response.data.tokens.access.token);
+      await setSession(jwtToken);
       setToken(jwtToken);
       setAuthenticated(true);
-      
-      // Configure API client interceptor
-      apiClient.interceptors.request.use((config: any) => {
-        config.headers.Authorization = jwtToken;
-        // Don't set Content-Type here - let axios set it for multipart
-        if (config.data instanceof FormData) {
-          config.headers['Content-Type'] = 'multipart/form-data';
-        } else {
-          config.headers['Content-Type'] = 'application/json';
-        }
-        return config;
-      });
       
       // Save user data to AsyncStorage
       const userData = {
@@ -409,87 +393,63 @@ const register = async (formData: FormData) => {
     },
   });
 };
-  async function logOut() {
+  /**
+   * `profile` is the user's profile when the caller already has it; sign-in
+   * responses only carry token fields, so without one it is fetched in the
+   * background — sign-in doesn't wait on it.
+   */
+  async function signIn(accessToken: string, profile?: any) {
+    await setSession(accessToken);
+    setToken(bearer(accessToken));
+    setAuthenticated(true);
+    const applyProfile = (user: any) => {
+      setCurrentUser(user);
+      setEmailVerified(user?.emailVerified ?? false);
+    };
+    if (profile) applyProfile(profile);
+    else getCurrentUser().then((r) => applyProfile(r.data?.data ?? r.data)).catch(() => {});
+  }
+
+  // Drops the in-memory session. The root layout's route guard does the
+  // navigating: once isAuthenticated is false every protected screen leaves
+  // the history and the entry route sends the user to /login.
+  function resetAuthState() {
     setToken("");
     setAuthenticated(false);
     setUsername("");
     setCurrentUser(null);
-    apiClient.interceptors.request.use((config:any) => {
-      config.headers.Authorization = "";
-      return config;
-    });
+    setEmailVerified(false);
     api.clearToken();
-    await AsyncStorage.removeItem("token");
-    await AsyncStorage.removeItem("authToken");
-    //@ts-ignore
-    router.push("/login");
   }
 
+  /** Signs out but keeps the refresh token, so the login screen can offer biometric sign-in. */
+  async function logOut() {
+    resetAuthState();
+    await clearSession({ forgetRefreshToken: false });
+  }
+
+  /** Signs out of this device: revokes the refresh token server-side and forgets it. */
   async function logOutFull() {
-    try {
-      // Ensure we have a valid access token before revoking
-      if (!token) {
-        await api.refreshSession();
-      }
-      await api.revokeSession();
-    } catch {}
-    const { clearRefreshToken } = await import('../services/localAuth');
-    await clearRefreshToken();
-    await logOut();
+    resetAuthState();
+    await endSession();
   }
 
   async function hydrateAuth() {
     try {
-      // Check both storage keys — api.ts uses "authToken", legacy uses "token"
-      const storedToken = await AsyncStorage.getItem("authToken") || await AsyncStorage.getItem("token");
-      if (storedToken) {
-        setToken(storedToken);
-        setAuthenticated(true);
-        // Sync both keys
-        await AsyncStorage.setItem("authToken", storedToken);
-        await AsyncStorage.setItem("token", storedToken);
-        // Set up axios interceptor
-        apiClient.interceptors.request.use((config: any) => {
-          config.headers.Authorization = storedToken;
-          return config;
-        });
-        // Fetch user profile
-        try {
-          const response = await getCurrentUser();
-          const userData = response.data?.data ?? response.data;
-          setCurrentUser(userData);
-          setEmailVerified(userData?.emailVerified ?? false);
-        } catch (err: any) {
-          // Access token expired — try silent refresh
-          const refreshResult = await api.refreshSession();
-          if (refreshResult.success && refreshResult.data) {
-            const newToken = refreshResult.data.accessToken;
-            setToken(newToken);
-            setAuthenticated(true);
-            await AsyncStorage.setItem("authToken", newToken);
-            await AsyncStorage.setItem("token", newToken);
-            apiClient.interceptors.request.use((config: any) => {
-              config.headers.Authorization = "Bearer " + newToken;
-              return config;
-            });
-            try {
-              const response = await getCurrentUser();
-              const userData = response.data?.data ?? response.data;
-              setCurrentUser(userData);
-              setEmailVerified(userData?.emailVerified ?? false);
-            } catch {
-              setAuthenticated(false);
-              setToken("");
-              await AsyncStorage.removeItem("token");
-              await AsyncStorage.removeItem("authToken");
-            }
-          } else {
-            setAuthenticated(false);
-            setToken("");
-            await AsyncStorage.removeItem("token");
-            await AsyncStorage.removeItem("authToken");
-          }
-        }
+      const storedToken = await loadStoredSession();
+      if (!storedToken) return;
+      setToken(bearer(storedToken));
+      setAuthenticated(true);
+      try {
+        // An expired access token is refreshed underneath this call; a refused
+        // refresh expires the session, which the subscription below handles.
+        const response = await getCurrentUser();
+        const userData = response.data?.data ?? response.data;
+        setCurrentUser(userData);
+        setEmailVerified(userData?.emailVerified ?? false);
+      } catch {
+        // Offline or a server fault: stay signed in on the stored session
+        // rather than signing the user out for a network blip.
       }
     } catch (err) {
       console.error("Error hydrating auth:", err);
@@ -497,6 +457,15 @@ const register = async (formData: FormData) => {
       setIsHydrated(true);
     }
   }
+
+  useEffect(
+    () =>
+      subscribeSession((event) => {
+        if (event.type === "expired") resetAuthState();
+        else setToken(bearer(event.accessToken));
+      }),
+    []
+  );
 
   useEffect(() => {
     hydrateAuth();
@@ -532,6 +501,7 @@ const register = async (formData: FormData) => {
         emailVerified,
         setEmailVerified,
         isHydrated,
+        signIn,
       }}
     >
       {children}

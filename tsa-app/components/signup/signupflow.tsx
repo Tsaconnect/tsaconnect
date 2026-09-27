@@ -9,7 +9,7 @@ import React, { useState } from 'react';
 import { Alert, View } from 'react-native';
 import { router } from 'expo-router';
 import SignupScreen1 from '@/components/signup/SignupScreen1';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '@/AuthContext/AuthContext';
 import { api } from '../services/api';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
@@ -17,6 +17,7 @@ import { Card, Spinner, Text } from '@/components/ui';
 import { SignupData, createEmptySignupData } from './signup';
 
 const SignupFlow = () => {
+  const { signIn } = useAuth();
   const { colors, spacing, radius } = useTheme();
   const [signupData, setSignupData] = useState<SignupData>(createEmptySignupData);
   const [loading, setLoading] = useState(false);
@@ -41,14 +42,9 @@ const SignupFlow = () => {
       const result = await api.signup(signupPayload);
 
       if (result.success) {
+        // api.signup stored the tokens; this makes the new account the signed-in session.
         //@ts-ignore
-        const token = result.data.token;
-        //@ts-ignore
-        const userId = result.data.userId;
-
-        await AsyncStorage.setItem('authToken', token);
-        await AsyncStorage.setItem('userId', userId);
-        api.setToken(token);
+        await signIn(result.data.accessToken || result.data.token);
 
         router.replace({
           pathname: '/verify',
