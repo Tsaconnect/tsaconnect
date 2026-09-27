@@ -8,7 +8,7 @@
 // (POST /orders/quote), which is priced by the same code that creates the
 // orders — so the total a buyer confirms is the total the wallet is asked to
 // approve. The escrow sign/broadcast/submit sequence itself is unchanged.
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -283,6 +283,7 @@ const CheckoutScreen = () => {
     setSigningError(null);
     setCompletedOrders([]);
 
+    let newOrders: Order[];
     try {
       const createResult = await createOrders(
         selectedToken,
@@ -308,45 +309,63 @@ const CheckoutScreen = () => {
       if (!createResult.success || !createResult.data?.orders) {
         throw new Error(createResult.message || 'Failed to create orders');
       }
+      newOrders = createResult.data.orders;
+    } catch (err: any) {
+      console.error('Checkout create-orders error:', err);
+      setSigningError(err.message || 'Something went wrong');
+      return;
+    }
 
-      const newOrders = createResult.data.orders;
-      setOrders(newOrders);
-      setCurrentOrderIndex(0);
+    orderProgress.current = {};
+    setOrders(newOrders);
+    setCurrentOrderIndex(0);
+    await payOrders(newOrders, []);
+  };
 
-      for (let i = 0; i < newOrders.length; i++) {
+  // What each created order has already done on-chain, so a retry resumes
+  // where it stopped: an approve that went through is not signed (and paid
+  // gas for) again, and an escrow already sent is only reported, never re-sent.
+  const orderProgress = useRef<Record<string, { approveTxHash?: string; escrowTxHash?: string }>>({});
+
+  // Pays each order not yet escrowed: approve, escrow, then report both.
+  const payOrders = async (list: Order[], alreadyPaid: string[]) => {
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const order = list[i];
+        if (alreadyPaid.includes(order.id)) continue;
         setCurrentOrderIndex(i);
-        const order = newOrders[i];
+        const progress = (orderProgress.current[order.id] ??= {});
 
-        // Step A: Prepare & broadcast approve tx
-        setSigningPhase('approving_token');
-        const approveResult = await prepareApprove(order.id);
-        if (!approveResult.success || !approveResult.data) {
-          throw new Error(approveResult.message || 'Failed to prepare approval');
+        if (!progress.approveTxHash) {
+          setSigningPhase('approving_token');
+          const approveResult = await prepareApprove(order.id);
+          if (!approveResult.success || !approveResult.data) {
+            throw new Error(approveResult.message || 'Failed to prepare approval');
+          }
+          try {
+            progress.approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
+          } catch (e: any) {
+            throw new Error(friendlyTxError(e));
+          }
         }
 
-        let approveTxHash: string;
-        try {
-          approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
-        } catch (e: any) {
-          throw new Error(friendlyTxError(e));
-        }
-
-        // Step B: Prepare escrow tx (after approve is on-chain, so gas estimation works)
-        setSigningPhase('creating_escrow');
-        const escrowResult = await prepareEscrow(order.id);
-        if (!escrowResult.success || !escrowResult.data) {
-          throw new Error(escrowResult.message || 'Failed to prepare escrow');
-        }
-
-        let escrowTxHash: string;
-        try {
-          escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
-        } catch (e: any) {
-          throw new Error(friendlyTxError(e));
+        // The escrow tx is prepared after the approve is on-chain, so its gas
+        // estimation sees the allowance.
+        if (!progress.escrowTxHash) {
+          setSigningPhase('creating_escrow');
+          const escrowResult = await prepareEscrow(order.id);
+          if (!escrowResult.success || !escrowResult.data) {
+            throw new Error(escrowResult.message || 'Failed to prepare escrow');
+          }
+          try {
+            progress.escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
+          } catch (e: any) {
+            throw new Error(friendlyTxError(e));
+          }
         }
 
         setSigningPhase('submitting');
-        const submitResult = await submitEscrow(order.id, approveTxHash, escrowTxHash);
+        const submitResult = await submitEscrow(order.id, progress.approveTxHash, progress.escrowTxHash);
         if (!submitResult.success) {
           throw new Error(submitResult.message || 'Failed to submit escrow');
         }
@@ -363,6 +382,11 @@ const CheckoutScreen = () => {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');
     }
+  };
+
+  const retryPayment = () => {
+    setSigningError(null);
+    payOrders(orders, completedOrders);
   };
 
   // ===== HEADER =====
@@ -479,6 +503,7 @@ const CheckoutScreen = () => {
           error={signingError}
           completedCount={completedOrders.length}
           onViewOrders={() => router.replace('/(dashboard)/orderlist')}
+          onRetry={orders.length > completedOrders.length ? retryPayment : undefined}
           onBackToCheckout={() => {
             setStep('review');
             setSigningError(null);

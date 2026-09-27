@@ -29,6 +29,11 @@ export interface PaymentProgressProps {
   completedCount: number;
   onBackToCheckout: () => void;
   onViewOrders: () => void;
+  /**
+   * Resumes paying the orders already created. Set once orders exist: their
+   * cart is gone, so going back to checkout would find nothing to pay for.
+   */
+  onRetry?: () => void;
 }
 
 /** Index of the active step: 0 = create orders, then two steps per order. */
@@ -56,6 +61,7 @@ export const PaymentProgress = ({
   completedCount,
   onBackToCheckout,
   onViewOrders,
+  onRetry,
 }: PaymentProgressProps) => {
   const { colors, spacing, radius } = useTheme();
   const many = orders.length > 1;
@@ -123,13 +129,14 @@ export const PaymentProgress = ({
             {error}
           </Text>
           {completedCount > 0 ? (
-            <>
-              <Text variant="caption" color="textSecondary">
-                {completedCount} of {orders.length} orders are paid and held in escrow. The others were not paid; you
-                can see them all in Orders.
-              </Text>
-              <Button title="View orders" onPress={onViewOrders} />
-            </>
+            <Text variant="caption" color="textSecondary">
+              {completedCount} of {orders.length} orders are paid and held in escrow. The others were not paid; you
+              can see them all in Orders.
+            </Text>
+          ) : null}
+          {onRetry ? <Button title="Try again" onPress={onRetry} /> : null}
+          {onRetry || completedCount > 0 ? (
+            <Button title="View orders" variant={onRetry ? 'secondary' : 'primary'} onPress={onViewOrders} />
           ) : (
             <Button title="Back to checkout" onPress={onBackToCheckout} />
           )}
