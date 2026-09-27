@@ -68,3 +68,7 @@ test('a failure before any order exists sends the buyer back to checkout', () =>
 test('once some orders are paid and none can be resumed, the buyer is sent to their orders', () => {
   expect(titlesFor({ completedCount: 1 })).toEqual(['View orders']);
 });
+
+test('once orders exist and none can be resumed, the buyer is sent to their orders, not back to an empty cart', () => {
+  expect(titlesFor({ ordersCreated: true })).toEqual(['View orders']);
+});

@@ -11,9 +11,9 @@
 //     → prepareEscrow  → sign+broadcast
 //     → submitEscrow
 //
-// This mirrors the multi-order loop in app/(…)/checkout/index.tsx exactly (same
-// prepare/sign/submit contract, same friendly error mapping) but for the single
-// service order the buyer just configured. Money math is untouched — the server
+// escrowOrder is the one approve → escrow → submit sequence: the cart checkout
+// (app/(detail)/checkout) runs it per order, with the progress that lets a
+// retry resume where a failed payment stopped. Money math is untouched — the server
 // recomputes every price from menuSelections / bookingSlots / serviceTiers; the
 // amounts the pickers show are indicative only.
 import {
@@ -22,8 +22,10 @@ import {
   prepareEscrow,
   submitEscrow,
   type Order,
+  type UnsignedTx,
 } from './orderApi';
-import { signAndBroadcast } from './transaction';
+import { signAndBroadcast, TxNotConfirmedError } from './transaction';
+import { getProvider } from './wallet';
 
 export interface ServiceCheckoutParams {
   token: string;
@@ -39,7 +41,7 @@ export interface ServiceCheckoutParams {
   answers?: Record<string, any>;
 }
 
-/** Human-friendly signing/broadcast error copy (mirrors the checkout screen). */
+/** Human-friendly signing/broadcast error copy. */
 export function friendlyTxError(err: any): string {
   const msg = err?.message || err?.toString() || '';
   if (msg.includes('INSUFFICIENT_FUNDS') || msg.includes('insufficient funds'))
@@ -92,39 +94,110 @@ export async function runServiceCheckout(
   return escrowOrder(order, onPhase);
 }
 
+/** A sent escrow-flow tx: confirmed, or recorded when its confirmation was not seen. */
+export type SentTx = { hash: string; confirmed: boolean };
+
 /**
- * Fund an already-created service order through escrow (approve → escrow →
- * submit). Split out of runServiceCheckout so the booking-request pay flow —
- * where the server creates the order at the pay step — can reuse the exact same
- * signing/broadcast/submit sequence.
+ * What an order's payment has already done on-chain. Pass the same object to
+ * every escrowOrder attempt for that order, so a retry resumes where the last
+ * one stopped instead of signing (and paying gas for) it all again.
  */
-export async function escrowOrder(order: Order, onPhase?: (phase: ServiceCheckoutPhase) => void): Promise<Order> {
-  onPhase?.('approving_token');
-  const approveResult = await prepareApprove(order.id);
-  if (!approveResult.success || !approveResult.data) {
-    throw new Error(approveResult.message || 'Failed to prepare approval');
+export interface EscrowProgress {
+  approve?: SentTx;
+  escrow?: SentTx;
+}
+
+/** The order is no longer awaiting payment (cancelled, expired or paid): a retry cannot help. */
+export class OrderNotPayableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OrderNotPayableError';
   }
-  let approveTxHash: string;
+}
+
+const STILL_CONFIRMING = 'Your payment was sent and is still confirming on Sonic. Wait a minute, then tap Try again.';
+
+/**
+ * Signs and sends an escrow-flow tx. When its confirmation is not seen the
+ * hash still goes to onUnconfirmed — the tx may yet be mined, so a retry must
+ * settle it rather than send another.
+ */
+export async function sendTx(tx: UnsignedTx, onUnconfirmed: (sent: SentTx) => void): Promise<SentTx> {
   try {
-    approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
+    return { hash: await signAndBroadcast(tx, 'sonic'), confirmed: true };
   } catch (e: any) {
+    if (e instanceof TxNotConfirmedError) {
+      onUnconfirmed({ hash: e.txHash, confirmed: false });
+      throw new Error(STILL_CONFIRMING);
+    }
     throw new Error(friendlyTxError(e));
+  }
+}
+
+/**
+ * Settles an unconfirmed tx against the chain: confirmed once mined, dropped
+ * (undefined, so it is sent afresh) when it reverted or the network no longer
+ * knows it, and an error while it is still in flight.
+ */
+export async function settleSent(sent: SentTx | undefined): Promise<SentTx | undefined> {
+  if (!sent || sent.confirmed) return sent;
+  const provider = getProvider('sonic');
+  const receipt = await provider.getTransactionReceipt(sent.hash);
+  if (receipt) return receipt.status === 1 ? { hash: sent.hash, confirmed: true } : undefined;
+  if (await provider.getTransaction(sent.hash)) throw new Error(STILL_CONFIRMING);
+  return undefined;
+}
+
+function refused(res: { message?: string; code?: string }, fallback: string): Error {
+  const message = res.message || fallback;
+  return res.code === 'order_not_payable' ? new OrderNotPayableError(message) : new Error(message);
+}
+
+/**
+ * Fund an already-created order through escrow (approve → escrow → submit).
+ * Shared by the service flows and the cart checkout. progress carries what
+ * earlier attempts already did (see EscrowProgress).
+ */
+export async function escrowOrder(
+  order: Order,
+  onPhase?: (phase: ServiceCheckoutPhase) => void,
+  progress: EscrowProgress = {},
+): Promise<Order> {
+  progress.approve = await settleSent(progress.approve);
+  progress.escrow = await settleSent(progress.escrow);
+  const reusedApprove = !!progress.approve;
+
+  let approve = progress.approve;
+  if (!approve) {
+    onPhase?.('approving_token');
+    const approveResult = await prepareApprove(order.id);
+    if (!approveResult.success || !approveResult.data) {
+      throw refused(approveResult, 'Failed to prepare approval');
+    }
+    approve = progress.approve = await sendTx(approveResult.data.approveTx, (sent) => {
+      progress.approve = sent;
+    });
   }
 
-  onPhase?.('creating_escrow');
-  const escrowResult = await prepareEscrow(order.id);
-  if (!escrowResult.success || !escrowResult.data) {
-    throw new Error(escrowResult.message || 'Failed to prepare escrow');
-  }
-  let escrowTxHash: string;
-  try {
-    escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
-  } catch (e: any) {
-    throw new Error(friendlyTxError(e));
+  // The escrow tx is prepared after the approve is on-chain, so its gas
+  // estimation sees the allowance.
+  let escrow = progress.escrow;
+  if (!escrow) {
+    onPhase?.('creating_escrow');
+    const escrowResult = await prepareEscrow(order.id);
+    if (!escrowResult.success || !escrowResult.data) {
+      // An approval reused from an earlier attempt may no longer cover the
+      // escrow (spent, or replaced by another approve): sign a fresh one next time.
+      if (reusedApprove) progress.approve = undefined;
+      throw refused(escrowResult, 'Failed to prepare escrow');
+    }
+    escrow = progress.escrow = await sendTx(escrowResult.data.createOrderTx, (sent) => {
+      progress.escrow = sent;
+    });
   }
 
   onPhase?.('submitting');
-  const submitResult = await submitEscrow(order.id, approveTxHash, escrowTxHash);
+  const submitResult = await submitEscrow(order.id, approve.hash, escrow.hash);
   if (!submitResult.success) {
     throw new Error(submitResult.message || 'Failed to submit escrow');
   }

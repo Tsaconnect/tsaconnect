@@ -11,7 +11,7 @@ jest.mock('../wallet', () => ({
   broadcastTransaction: jest.fn(async () => ({ hash: '0xsent', wait: () => new Promise(() => {}) })),
 }));
 
-import { signAndBroadcast, TxConfirmationTimeoutError } from '../transaction';
+import { signAndBroadcast, TxNotConfirmedError } from '../transaction';
 
 test('a confirmation timeout reports the hash of the tx that was sent', async () => {
   jest.useFakeTimers();
@@ -20,10 +20,22 @@ test('a confirmation timeout reports the hash of the tx that was sent', async ()
     const outcome = sent.catch((e) => e);
     await jest.advanceTimersByTimeAsync(90_000);
     const err = await outcome;
-    expect(err).toBeInstanceOf(TxConfirmationTimeoutError);
+    expect(err).toBeInstanceOf(TxNotConfirmedError);
     expect(err.txHash).toBe('0xsent');
     expect(err.message).toBe('Transaction confirmation timed out');
   } finally {
     jest.useRealTimers();
   }
+});
+
+test('an RPC failure while waiting keeps the hash; a revert does not', async () => {
+  const { broadcastTransaction } = jest.requireMock('../wallet');
+  broadcastTransaction.mockResolvedValueOnce({ hash: '0xsent', wait: async () => { throw new Error('network error'); } });
+  const lost = await signAndBroadcast({ to: '0xescrow' } as any, 'sonic').catch((e) => e);
+  expect(lost).toBeInstanceOf(TxNotConfirmedError);
+  expect(lost.txHash).toBe('0xsent');
+
+  const revert = Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' });
+  broadcastTransaction.mockResolvedValueOnce({ hash: '0xsent', wait: async () => { throw revert; } });
+  await expect(signAndBroadcast({ to: '0xescrow' } as any, 'sonic')).rejects.toBe(revert);
 });

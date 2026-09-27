@@ -30,9 +30,11 @@ export interface PaymentProgressProps {
   onBackToCheckout: () => void;
   onViewOrders: () => void;
   /**
-   * Resumes paying the orders already created. Set once orders exist: their
-   * cart is gone, so going back to checkout would find nothing to pay for.
+   * Whether orders were created. Their cart is then gone, so going back to
+   * checkout would find nothing to pay for: the way out is Orders.
    */
+  ordersCreated?: boolean;
+  /** Resumes paying the created orders that can still be paid. */
   onRetry?: () => void;
 }
 
@@ -61,6 +63,7 @@ export const PaymentProgress = ({
   completedCount,
   onBackToCheckout,
   onViewOrders,
+  ordersCreated,
   onRetry,
 }: PaymentProgressProps) => {
   const { colors, spacing, radius } = useTheme();
@@ -135,7 +138,7 @@ export const PaymentProgress = ({
             </Text>
           ) : null}
           {onRetry ? <Button title="Try again" onPress={onRetry} /> : null}
-          {onRetry || completedCount > 0 ? (
+          {ordersCreated || onRetry || completedCount > 0 ? (
             <Button title="View orders" variant={onRetry ? 'secondary' : 'primary'} onPress={onViewOrders} />
           ) : (
             <Button title="Back to checkout" onPress={onBackToCheckout} />

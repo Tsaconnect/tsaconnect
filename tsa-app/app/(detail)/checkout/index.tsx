@@ -18,13 +18,10 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
   createOrders,
-  prepareApprove,
-  prepareEscrow,
-  submitEscrow,
   Order,
   type CartQuote,
 } from '@/services/orderApi';
-import { sendTx, settleSent, type SentTx } from '@/services/checkoutTx';
+import { escrowOrder, OrderNotPayableError, type EscrowProgress } from '@/services/serviceCheckout';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
@@ -303,68 +300,43 @@ const CheckoutScreen = () => {
     }
 
     orderProgress.current = {};
+    setUnpayable([]);
     setOrders(newOrders);
     setCurrentOrderIndex(0);
     await payOrders(newOrders, []);
   };
 
-  // What each created order has already done on-chain, so a retry resumes
-  // where it stopped: an approve that went through is not signed (and paid
-  // gas for) again, and an escrow already sent is only reported, never re-sent.
-  const orderProgress = useRef<Record<string, { approve?: SentTx; escrow?: SentTx }>>({});
+  // What each created order's payment has already done on-chain, so a retry
+  // resumes where it stopped (see EscrowProgress).
+  const orderProgress = useRef<Record<string, EscrowProgress>>({});
+  // Orders the server says can no longer be paid (cancelled or expired).
+  const [unpayable, setUnpayable] = useState<string[]>([]);
   // One payment run at a time: a double tap on "Try again" must not sign twice.
   const paying = useRef(false);
 
-  // Pays each order not yet escrowed: approve, escrow, then report both.
-  const payOrders = async (list: Order[], alreadyPaid: string[]) => {
+  // Pays each order not skipped through the shared escrow sequence.
+  const payOrders = async (list: Order[], skip: string[]) => {
     if (paying.current) return;
     paying.current = true;
     try {
       for (let i = 0; i < list.length; i++) {
         const order = list[i];
-        if (alreadyPaid.includes(order.id)) continue;
+        if (skip.includes(order.id)) continue;
         setCurrentOrderIndex(i);
-        const progress = (orderProgress.current[order.id] ??= {});
-        progress.approve = await settleSent(progress.approve);
-        progress.escrow = await settleSent(progress.escrow);
-        const reusedApprove = !!progress.approve;
-
-        let approve = progress.approve;
-        if (!approve) {
-          setSigningPhase('approving_token');
-          const approveResult = await prepareApprove(order.id);
-          if (!approveResult.success || !approveResult.data) {
-            throw new Error(approveResult.message || 'Failed to prepare approval');
-          }
-          approve = progress.approve = await sendTx(approveResult.data.approveTx, (sent) => {
-            progress.approve = sent;
-          });
+        try {
+          await escrowOrder(
+            order,
+            (phase) => {
+              if (phase === 'approving_token' || phase === 'creating_escrow' || phase === 'submitting') {
+                setSigningPhase(phase);
+              }
+            },
+            (orderProgress.current[order.id] ??= {}),
+          );
+        } catch (e) {
+          if (e instanceof OrderNotPayableError) setUnpayable((prev) => [...prev, order.id]);
+          throw e;
         }
-
-        // The escrow tx is prepared after the approve is on-chain, so its gas
-        // estimation sees the allowance.
-        let escrow = progress.escrow;
-        if (!escrow) {
-          setSigningPhase('creating_escrow');
-          const escrowResult = await prepareEscrow(order.id);
-          if (!escrowResult.success || !escrowResult.data) {
-            // An approval reused from an earlier try may no longer cover the
-            // escrow (spent, or replaced by another approve): sign a fresh one
-            // next time.
-            if (reusedApprove) progress.approve = undefined;
-            throw new Error(escrowResult.message || 'Failed to prepare escrow');
-          }
-          escrow = progress.escrow = await sendTx(escrowResult.data.createOrderTx, (sent) => {
-            progress.escrow = sent;
-          });
-        }
-
-        setSigningPhase('submitting');
-        const submitResult = await submitEscrow(order.id, approve.hash, escrow.hash);
-        if (!submitResult.success) {
-          throw new Error(submitResult.message || 'Failed to submit escrow');
-        }
-
         setCompletedOrders((prev) => [...prev, order.id]);
       }
 
@@ -384,7 +356,7 @@ const CheckoutScreen = () => {
   const retryPayment = () => {
     if (paying.current) return;
     setSigningError(null);
-    payOrders(orders, completedOrders);
+    payOrders(orders, [...completedOrders, ...unpayable]);
   };
 
   // ===== HEADER =====
@@ -501,13 +473,15 @@ const CheckoutScreen = () => {
           error={signingError}
           completedCount={completedOrders.length}
           onViewOrders={() => router.replace('/(dashboard)/orderlist')}
-          onRetry={orders.length > completedOrders.length ? retryPayment : undefined}
+          ordersCreated={orders.length > 0}
+          onRetry={orders.length > completedOrders.length + unpayable.length ? retryPayment : undefined}
           onBackToCheckout={() => {
             setStep('review');
             setSigningError(null);
             setSigningPhase('idle');
             setOrders([]);
             setCompletedOrders([]);
+            setUnpayable([]);
             loadCart();
           }}
         />
