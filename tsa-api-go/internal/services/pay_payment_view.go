@@ -50,6 +50,7 @@ type PayCheckoutView struct {
 	ID                 uuid.UUID `json:"id"`
 	MerchantName       string    `json:"merchantName"`
 	Mode               string    `json:"mode"`
+	Source             string    `json:"source"` // api, link or open: an open payment's description is the payer's own note
 	Status             string    `json:"status"`
 	Amount             int64     `json:"amount"`
 	CustomerTotal      int64     `json:"customerTotal"`
@@ -58,6 +59,7 @@ type PayCheckoutView struct {
 	Currency           string    `json:"currency"`
 	Description        string    `json:"description"`
 	CustomerName       string    `json:"customerName,omitempty"`
+	LinkLabel          string    `json:"linkLabel,omitempty"` // open-link payments: the link paid through (the note, the description, is often empty)
 	ExpiresAt          time.Time `json:"expiresAt"`
 	SettlementMode     string    `json:"settlementMode"`
 	SettleTokenSymbol  string    `json:"settleTokenSymbol,omitempty"`
@@ -146,7 +148,10 @@ func (s *PayPaymentService) CheckoutURL(id uuid.UUID) string {
 	return strings.TrimRight(s.checkoutBase, "/") + "/" + id.String()
 }
 
-// View builds the merchant-facing read shape for p.
+// View builds the merchant-facing read shape for p from the row alone, so it
+// leaves LinkLabel empty: that needs the open link. Views fills it in for a
+// page of payments with one query; a caller already holding the link sets it
+// itself. The webhook payload is a View.
 func (s *PayPaymentService) View(p *models.PayPayment) PayPaymentView {
 	return PayPaymentView{
 		ID:            p.ID,
@@ -201,6 +206,7 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		ID:                 p.ID,
 		MerchantName:       m.BusinessName,
 		Mode:               p.Mode,
+		Source:             p.Source,
 		Status:             p.Status,
 		Amount:             p.AmountKobo,
 		CustomerTotal:      p.CustomerTotalKobo,
@@ -217,6 +223,13 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		Payable:            payable,
 		NotPayableWhy:      why,
 		YouArePaying:       youArePaying,
+	}
+	if p.OpenLinkID != nil {
+		labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID})
+		if err != nil {
+			return nil, err
+		}
+		v.LinkLabel = labels[*p.OpenLinkID]
 	}
 	isPayer := p.PayerUserID != nil && user != nil && *p.PayerUserID == user.ID
 	if isPayer && p.Status == models.PayStatusFailed {
@@ -313,7 +326,7 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEn
 			}
 			v.LinkLabel = l.Label
 			// So a payer whose payment ran out can start another there.
-			v.OpenLinkURL = s.openLinkURLIfTaking(&l, m, liveEnabled)
+			v.OpenLinkURL = s.openLinkURLIfTaking(p, &l, m, liveEnabled)
 		}
 	}
 	if p.Status == models.PayStatusSucceeded {

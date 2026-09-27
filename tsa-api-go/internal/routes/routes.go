@@ -1264,14 +1264,24 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// never authenticates against).
 		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
 
-		// An open link's payer page: no auth. Starting a payment makes a new
-		// one every time (no Idempotency-Key — each customer is a new payment),
-		// so it is limited three ways: 20 a minute per visitor, 300 a minute
-		// per link whoever is asking (a busy shop's QR, not a bot minting
-		// payments against one address), and 2000 a minute across every link.
-		payRoot.GET("/public/open/:slug", middleware.RateLimiter(120, time.Minute), payh.PublicOpenLink)
-		payRoot.POST("/public/open/:slug/payments", middleware.RateLimiterBy(2000, time.Minute, payOpenPaymentsRateKey),
-			middleware.RateLimiter(20, time.Minute), middleware.RateLimiterBy(300, time.Minute, payOpenLinkRateKey), payh.PublicOpenPayment)
+		// An open link's payer page: no auth. A :slug no link could have is
+		// answered not found before anything keyed on it or any lookup.
+		//
+		// Starting a payment makes a new one every time (no Idempotency-Key —
+		// each customer is a new payment), so it is limited three ways,
+		// narrowest first: 20 a minute per visitor, then 300 a minute per link
+		// whoever is asking (a busy shop's QR, not a bot minting payments
+		// against one address), then 2000 a minute across every link. Narrowest
+		// first because a limiter counts every request it sees: a visitor past
+		// their own 20 must be stopped before spending anyone else's budget. 20
+		// per visitor, not less: behind carrier-grade NAT a whole market can
+		// share one address.
+		if payh.OpenLinksEnabled() {
+			payRoot.GET("/public/open/:slug", middleware.RateLimiter(120, time.Minute), handlers.PayOpenLinkSlugGuard, payh.PublicOpenLink)
+			payRoot.POST("/public/open/:slug/payments", middleware.RateLimiter(20, time.Minute), handlers.PayOpenLinkSlugGuard,
+				middleware.RateLimiterBy(300, time.Minute, payOpenLinkRateKey),
+				middleware.RateLimiterBy(2000, time.Minute, payOpenPaymentsRateKey), payh.PublicOpenPayment)
+		}
 
 		// The app's checkout screen: JWT user auth, per-user rate limit.
 		// test-outcome is idempotency-protected like every other
@@ -1321,13 +1331,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.POST("/links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateLink)
 			owner.GET("/links", payh.OwnerLinks)
 			owner.POST("/links/:id/cancel", payh.OwnerCancelLink)
-			// Open links, the reusable kind: made like a one-time link, then
-			// read, edited and given a new address when a printed one leaks.
-			owner.POST("/open-links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateOpenLink)
-			owner.GET("/open-links", payh.OwnerOpenLinks)
-			owner.GET("/open-links/:id", payh.OwnerOpenLink)
-			owner.PUT("/open-links/:id", middleware.RateLimiterBy(20, time.Minute, perUserRateKey), payh.OwnerUpdateOpenLink)
-			owner.POST("/open-links/:id/replace", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerReplaceOpenLink)
+			if payh.OpenLinksEnabled() {
+				// Open links, the reusable kind: made like a one-time link, then
+				// read, edited and given a new address when a printed one leaks.
+				owner.POST("/open-links", middleware.Idempotency(config.DB), middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerCreateOpenLink)
+				owner.GET("/open-links", payh.OwnerOpenLinks)
+				owner.GET("/open-links/:id", payh.OwnerOpenLink)
+				owner.PUT("/open-links/:id", middleware.RateLimiterBy(20, time.Minute, perUserRateKey), payh.OwnerUpdateOpenLink)
+				owner.POST("/open-links/:id/replace", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerReplaceOpenLink)
+			}
 			owner.GET("/settlement-options", payh.OwnerSettlementOptions)
 			owner.GET("/banks", payh.OwnerBanks)
 			// A name enquiry calls the bank provider.

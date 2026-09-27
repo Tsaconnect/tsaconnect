@@ -178,7 +178,7 @@ func TestPayCheckout_TestOutcomeKeySetMatchesCheckoutView(t *testing.T) {
 	}
 
 	wantKeys := []string{
-		"id", "merchantName", "mode", "status", "amount", "customerTotal", "fee",
+		"id", "merchantName", "mode", "source", "status", "amount", "customerTotal", "fee",
 		"merchantNet", "currency", "description", "expiresAt", "settlementMode",
 		"returnUrl", "payable", "notPayableWhy", "youArePaying",
 	}

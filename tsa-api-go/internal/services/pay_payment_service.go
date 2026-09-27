@@ -172,11 +172,13 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 // payCreateOptions is what differs between a payment a merchant's server
 // creates (Create), a payment link its owner makes by hand (CreateLink) and one
 // a customer starts through an open link (CreateFromOpenLink): where it came
-// from, who a link is for, which open link, and how long it may stay open.
+// from, who a link is for, which open link (and at which of its addresses),
+// and how long it may stay open.
 type payCreateOptions struct {
 	source           string
 	customerName     string
 	openLinkID       *uuid.UUID
+	openLinkSlug     string
 	maxExpirySeconds int
 }
 
@@ -222,7 +224,8 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 	if currency != "NGN" {
 		return nil, false, fmt.Errorf("%w: currency must be NGN", ErrPayPaymentInvalid)
 	}
-	if l := len(reference); l < 1 || l > payMaxReferenceLen {
+	// Counted in characters, as the varchar(128) column counts them.
+	if l := utf8.RuneCountInString(reference); l < 1 || l > payMaxReferenceLen {
 		return nil, false, payInvalid(fmt.Sprintf("reference must be 1-%d characters", payMaxReferenceLen),
 			fmt.Sprintf("Your reference must be at most %d characters", payMaxReferenceLen))
 	}
@@ -268,6 +271,7 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 		Source:                  opts.source,
 		CustomerName:            opts.customerName,
 		OpenLinkID:              opts.openLinkID,
+		OpenLinkSlug:            opts.openLinkSlug,
 		ReturnURL:               returnURL,
 		FeeBps:                  s.feeBps,
 		CustomerFeeSharePercent: m.CustomerFeeSharePercent,
@@ -396,26 +400,22 @@ func validatePayReturnURL(raw string, allowed []string) error {
 	return fmt.Errorf("return url host %q is not an allowed return domain", host)
 }
 
-// PayListCancelled is the owner lists' Status for the payments their merchant
-// called off. It is not a payment status: those payments are expired, with
-// PayReasonMerchantCancelled as the reason.
+// PayListCancelled is the list Status for payments their merchant called off.
+// It is not a stored status: those payments are expired, with
+// PayReasonMerchantCancelled as the reason — and Status "expired" lists only
+// the ones that ran out of time.
 const PayListCancelled = "cancelled"
 
 // PayListFilter selects payments. MerchantID nil means every merchant;
-// Mode/Status/Source "" mean every mode/status/source. Query matches the
-// reference, description or customer name (case-insensitive substring) or an
-// id prefix.
+// Mode/Status/Source "" mean every mode/status/source; Status may also be
+// PayListCancelled. Query matches the reference, description or customer name
+// (case-insensitive substring) or an id prefix. HideUntriedOpen leaves out
+// untried open-link payments (PayPayment.Untried) — scan noise to an owner.
 type PayListFilter struct {
 	MerchantID                  *uuid.UUID
 	Mode, Status, Source, Query string
-	// ForOwner shapes the list the way an owner reads it. Expired splits in
-	// two: Status PayListCancelled is the payments the merchant called off, and
-	// "expired" only those that ran out of time. And open-link payments nobody
-	// went on to pay are left out (payHideUntriedOpen). Unset (the admin
-	// console, which offers no "cancelled"), "expired" is both and every
-	// payment is listed.
-	ForOwner    bool
-	Page, Limit int
+	HideUntriedOpen             bool
+	Page, Limit                 int
 }
 
 // List is one page of payments, newest first, with the total that matched.
@@ -436,11 +436,11 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		if f.Mode != "" {
 			q = q.Where("mode = ?", f.Mode)
 		}
-		switch {
-		case f.Status == "":
-		case f.ForOwner && f.Status == PayListCancelled:
+		switch f.Status {
+		case "":
+		case PayListCancelled:
 			q = q.Where("status = ? AND failure_reason = ?", models.PayStatusExpired, PayReasonMerchantCancelled)
-		case f.ForOwner && f.Status == models.PayStatusExpired:
+		case models.PayStatusExpired:
 			q = q.Where("status = ? AND (failure_reason IS NULL OR failure_reason <> ?)", models.PayStatusExpired, PayReasonMerchantCancelled)
 		default:
 			q = q.Where("status = ?", f.Status)
@@ -448,7 +448,7 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		if f.Source != "" {
 			q = q.Where("source = ?", f.Source)
 		}
-		if f.ForOwner {
+		if f.HideUntriedOpen {
 			q = payHideUntriedOpen(q)
 		}
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {

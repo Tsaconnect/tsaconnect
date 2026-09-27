@@ -21,7 +21,7 @@ import (
 // Answers 201 with the payment; its checkoutUrl is the link to send.
 func (h *PayHandler) OwnerCreateLink(c *gin.Context) {
 	var in services.CreatePayLinkInput
-	m, mode, ok := h.payOwnerLinkWrite(c, &in, true)
+	m, mode, ok := h.payOwnerLinkCreate(c, &in)
 	if !ok {
 		return
 	}
@@ -33,13 +33,11 @@ func (h *PayHandler) OwnerCreateLink(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Payment link created", h.payments.View(p))
 }
 
-// payOwnerLinkWrite is the preamble of every owner write to a payment link of
+// payOwnerLinkEdit is the preamble of every owner change to a payment link of
 // either kind: the owner's merchant and the mode asked, the body read into req
-// (nil: no body), and a merchant that isn't suspended. A new link (isNew) in
-// live mode also needs live payments switched on — refused here rather than at
-// checkout, where the customer would be the first to find out it can't be
-// paid. false means the response has been written.
-func (h *PayHandler) payOwnerLinkWrite(c *gin.Context, req any, isNew bool) (*models.PayMerchant, string, bool) {
+// (nil: no body), and a merchant that isn't suspended. false means the response
+// has been written.
+func (h *PayHandler) payOwnerLinkEdit(c *gin.Context, req any) (*models.PayMerchant, string, bool) {
 	_, m, ok := h.payOwnerMerchant(c)
 	if !ok {
 		return nil, "", false
@@ -58,7 +56,18 @@ func (h *PayHandler) payOwnerLinkWrite(c *gin.Context, req any, isNew bool) (*mo
 		payOwnerFail(c, services.ErrPayMerchantSuspended)
 		return nil, "", false
 	}
-	if isNew && mode == models.PayModeLive && !m.LiveAllowed(h.liveEnabled) {
+	return m, mode, true
+}
+
+// payOwnerLinkCreate is payOwnerLinkEdit for a new link, which in live mode
+// also needs live payments switched on — refused here rather than at checkout,
+// where the customer would be the first to find out it can't be paid.
+func (h *PayHandler) payOwnerLinkCreate(c *gin.Context, req any) (*models.PayMerchant, string, bool) {
+	m, mode, ok := h.payOwnerLinkEdit(c, req)
+	if !ok {
+		return nil, "", false
+	}
+	if mode == models.PayModeLive && !m.LiveAllowed(h.liveEnabled) {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Live payments aren't switched on for your business yet. Try a test link first.", "live_not_enabled")
 		return nil, "", false
 	}

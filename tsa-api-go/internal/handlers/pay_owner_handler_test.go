@@ -80,7 +80,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayAuditEvent{}, &models.PayOwnerAction{},
-		&models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayOpenLink{}); err != nil {
+		&models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayOpenLink{}, &models.PayRetiredSlug{}); err != nil {
 		t.Fatal(err)
 	}
 	// The columns the owner routes read and the lockout writes.
@@ -110,7 +110,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	bus := events.NewBus()
 	seen := collectEvents(bus)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://x", now)
-	h := NewPayHandler(merchants, payments, nil, false).WithEvents(bus)
+	h := NewPayHandler(merchants, payments, nil, false).WithEvents(bus).WithOpenLinks(payments)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

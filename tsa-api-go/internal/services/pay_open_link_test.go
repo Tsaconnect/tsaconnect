@@ -20,6 +20,13 @@ func openLinkIn() PayOpenLinkInput {
 	return PayOpenLinkInput{Label: "  Sky Air — Counter 3 "}
 }
 
+// fullUpdate is an edit that sends every field, as a form saving the whole
+// link does.
+func fullUpdate(in PayOpenLinkInput, active *bool, version *int) PayOpenLinkUpdate {
+	return PayOpenLinkUpdate{Label: &in.Label, MinAmountKobo: &in.MinAmountKobo, MaxAmountKobo: &in.MaxAmountKobo,
+		Active: active, ExpectedVersion: version}
+}
+
 func mustOpenLink(t *testing.T, s *PayPaymentService, m *models.PayMerchant, mode string, in PayOpenLinkInput) *models.PayOpenLink {
 	t.Helper()
 	l, err := s.CreateOpenLink(context.Background(), m, mode, in)
@@ -32,7 +39,7 @@ func mustOpenLink(t *testing.T, s *PayPaymentService, m *models.PayMerchant, mod
 func TestPayOpenLink_CreateMakesAReadableSlugAndAddress(t *testing.T) {
 	s, m := newPayPaymentRig(t)
 	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
-	if !regexp.MustCompile(`^sky-air-[a-z2-7]{4}$`).MatchString(l.Slug) || l.Label != "Sky Air — Counter 3" || !l.Active ||
+	if !regexp.MustCompile(`^sky-air-[a-z2-7]{8}$`).MatchString(l.Slug) || l.Label != "Sky Air — Counter 3" || !l.Active ||
 		l.Version != 1 || l.Mode != models.PayModeTest || l.MerchantID != m.ID {
 		t.Fatalf("link = %+v", l)
 	}
@@ -96,7 +103,7 @@ func TestPayOpenLink_UpdateIsAgainstTheVersionRead(t *testing.T) {
 	s, m := newPayPaymentRig(t)
 	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
 	v1 := 1
-	up := PayOpenLinkUpdate{PayOpenLinkInput: PayOpenLinkInput{Label: "Counter 4", MinAmountKobo: 200_000}, ExpectedVersion: &v1}
+	up := fullUpdate(PayOpenLinkInput{Label: "Counter 4", MinAmountKobo: 200_000}, nil, &v1)
 	got, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, up)
 	if err != nil || got.Label != "Counter 4" || got.MinAmountKobo != 200_000 || got.Version != 2 || !got.Active {
 		t.Fatalf("update %+v err %v", got, err)
@@ -105,11 +112,11 @@ func TestPayOpenLink_UpdateIsAgainstTheVersionRead(t *testing.T) {
 		t.Fatalf("a stale version: %v", err)
 	}
 	v2, off := 2, false
-	up = PayOpenLinkUpdate{PayOpenLinkInput: PayOpenLinkInput{Label: "Counter 4"}, Active: &off, ExpectedVersion: &v2}
+	up = fullUpdate(PayOpenLinkInput{Label: "Counter 4"}, &off, &v2)
 	if got, err = s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, up); err != nil || got.Active || got.MinAmountKobo != 0 {
 		t.Fatalf("pause %+v err %v", got, err)
 	}
-	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{PayOpenLinkInput: openLinkIn()}); !errors.Is(err, ErrPayPaymentInvalid) {
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, fullUpdate(openLinkIn(), nil, nil)); !errors.Is(err, ErrPayPaymentInvalid) {
 		t.Fatalf("no expectedVersion: %v", err)
 	}
 	other := seedPayMerchant(t, s.db)
@@ -134,7 +141,7 @@ func TestPayOpenLink_ReplaceRetiresTheOldAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	next, err := s.ReplaceOpenLink(ctx, m, models.PayModeTest, l.ID)
-	if err != nil || next.ID != l.ID || next.Slug == l.Slug || !regexp.MustCompile(`^sky-air-[a-z2-7]{4}$`).MatchString(next.Slug) ||
+	if err != nil || next.ID != l.ID || next.Slug == l.Slug || !regexp.MustCompile(`^sky-air-[a-z2-7]{8}$`).MatchString(next.Slug) ||
 		next.Label != "Shop 12" || next.MinAmountKobo != 200_000 || next.MaxAmountKobo != 900_000 || !next.Active || next.Version != 2 {
 		t.Fatalf("next %+v err %v", next, err)
 	}
@@ -153,7 +160,7 @@ func TestPayOpenLink_ReplaceRetiresTheOldAddress(t *testing.T) {
 		t.Fatalf("the link's payments across the replace: %v", through)
 	}
 	v := 1
-	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{PayOpenLinkInput: openLinkIn(), ExpectedVersion: &v}); !errors.Is(err, ErrPayOpenLinkStale) {
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, fullUpdate(openLinkIn(), nil, &v)); !errors.Is(err, ErrPayOpenLinkStale) {
 		t.Fatalf("an edit made before the replace: %v", err)
 	}
 	if _, err := s.ReplaceOpenLink(ctx, seedPayMerchant(t, s.db), models.PayModeTest, l.ID); !errors.Is(err, ErrPayOpenLinkNotFound) {
@@ -226,7 +233,7 @@ func TestPayOpenLink_PublicShowsTheEffectiveRangeAndWhetherItIsOpen(t *testing.T
 	}
 	off := false
 	v := 1
-	s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{PayOpenLinkInput: PayOpenLinkInput{Label: "Shop 12"}, Active: &off, ExpectedVersion: &v})
+	s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, fullUpdate(PayOpenLinkInput{Label: "Shop 12"}, &off, &v))
 	if pub, _ := s.OpenLinkPublic(ctx, l.Slug, false); pub.Active {
 		t.Fatal("a paused link reads open")
 	}
@@ -395,7 +402,7 @@ func TestPayReceived_EachPaymentIsAnnouncedOnceToItsOwner(t *testing.T) {
 		messageStart string
 	}{
 		{test.ID, models.PayModeTest, "Test: ₦50,000.00 received", ""},
-		{live.ID, models.PayModeLive, "₦50,000.00 received", "Ada Okafor paid Sky Air"},
+		{live.ID, models.PayModeLive, "₦50,000.00 received", "Ada O. paid Sky Air"},
 	} {
 		e := got[i]
 		if e.Type != events.PayPaymentReceived || e.UserID != m.UserID || e.Title != want.title ||
@@ -451,7 +458,8 @@ func TestPayReceived_IsDeliveredLikeOtherInformationalAlerts(t *testing.T) {
 }
 
 // Every visitor who enters an amount makes a payment; the owner sees only the
-// ones someone went on to pay, and is sent no webhook for the rest.
+// ones someone went on to pay, and is sent no webhook for the rest. Once tried,
+// a payment stays tried — released and lapsed, it is still the owner's to see.
 func TestPayOpenLink_UntriedPaymentsAreScanNoise(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
@@ -463,34 +471,82 @@ func TestPayOpenLink_UntriedPaymentsAreScanNoise(t *testing.T) {
 		t.Fatal(err)
 	}
 	api, _, _ := s.Create(ctx, m, models.PayModeTest, payIn())
-
-	rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, ForOwner: true})
-	if err != nil || total != 2 {
-		t.Fatalf("owner list total %d err %v", total, err)
-	}
-	for _, r := range rows {
-		if r.ID == untried.ID {
-			t.Fatal("an untried open payment was listed to the owner")
+	owner := func() []uuid.UUID {
+		rows, _, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, HideUntriedOpen: true})
+		if err != nil {
+			t.Fatal(err)
 		}
+		ids := make([]uuid.UUID, len(rows))
+		for i := range rows {
+			ids[i] = rows[i].ID
+		}
+		return ids
+	}
+	if ids := owner(); len(ids) != 2 || slices.Contains(ids, untried.ID) {
+		t.Fatalf("owner list %v: the untried open payment was listed, or another left out", ids)
 	}
 	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest}); total != 3 {
 		t.Fatalf("the admin list still sees every payment: %d", total)
 	}
 
-	// Both lapse; only the payment someone started owes its merchant a webhook.
-	s.Release(ctx, tried.ID, "x")
-	s.db.Model(&models.PayPayment{}).Where("id = ?", tried.ID).Update("locked_at", payTestNow)
+	// The payer gives up: released, then everything lapses.
+	if err := s.Release(ctx, tried.ID, "the payer went back"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, tried.ID); got.LockedAt != nil || got.AttemptedAt == nil || got.Untried() {
+		t.Fatalf("after release: locked %v attempted %v", got.LockedAt, got.AttemptedAt)
+	}
 	s.now = func() time.Time { return payTestNow.Add(time.Hour) }
 	if n, err := s.ExpireDue(ctx, 10); err != nil || n != 3 {
 		t.Fatalf("expired %d err %v", n, err)
 	}
-	for _, d := range deliveries(t, s) {
-		if d.PaymentID == untried.ID {
-			t.Fatal("a webhook was queued for an untried open payment")
+	for _, id := range []uuid.UUID{untried.ID, tried.ID, api.ID} {
+		if p, _ := s.Get(ctx, id); p.Status != models.PayStatusExpired {
+			t.Fatalf("%s: %s", id, p.Status)
 		}
 	}
-	if n := len(deliveries(t, s)); n != 2 {
-		t.Fatalf("deliveries %d: the tried open payment and the API payment (%s)", n, api.ID)
+	ds := deliveries(t, s)
+	if len(ds) != 2 || ds[0].PaymentID == untried.ID || ds[1].PaymentID == untried.ID {
+		t.Fatalf("deliveries %+v: the tried open payment and the API payment only", ds)
+	}
+	if ids := owner(); len(ids) != 2 || !slices.Contains(ids, tried.ID) {
+		t.Fatalf("owner list after expiry %v: a tried payment stays listed", ids)
+	}
+}
+
+// Untried open payments lapse in one statement ahead of the per-payment sweep,
+// owe no webhook, and never touch a payment someone is paying.
+func TestPayOpenLink_UntriedPaymentsExpireInBulk(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	withWebhooks(t, s, m)
+	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	for i := 0; i < 5; i++ {
+		if _, err := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paying, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	s.Lock(ctx, payUser(t, s, false), paying.ID, false)
+	young, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	s.db.Model(young).Update("expires_at", payTestNow.Add(2*time.Hour))
+
+	s.now = func() time.Time { return payTestNow.Add(time.Hour) }
+	if n, err := s.expireUntried(ctx); err != nil || n != 5 {
+		t.Fatalf("bulk expired %d err %v", n, err)
+	}
+	if n, _ := s.expireUntried(ctx); n != 0 {
+		t.Fatalf("a second pass expired %d", n)
+	}
+	var expired int64
+	s.db.Model(&models.PayPayment{}).Where("status = ? AND failure_reason = ?", models.PayStatusExpired, "expired").Count(&expired)
+	if expired != 5 || len(deliveries(t, s)) != 0 {
+		t.Fatalf("expired %d, deliveries %d", expired, len(deliveries(t, s)))
+	}
+	for _, id := range []uuid.UUID{paying.ID, young.ID} {
+		if p, _ := s.Get(ctx, id); p.Status == models.PayStatusExpired {
+			t.Fatalf("%s expired", id)
+		}
 	}
 }
 
@@ -524,8 +580,7 @@ func TestPayOpenLink_OwnerViewSaysWhyItIsNotTakingPayments(t *testing.T) {
 		t.Fatalf("live, both on: %q", got)
 	}
 	off, v := false, 1
-	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, test.ID, PayOpenLinkUpdate{
-		PayOpenLinkInput: PayOpenLinkInput{Label: "Shop", MinAmountKobo: 2_000_000}, Active: &off, ExpectedVersion: &v}); err != nil {
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, test.ID, fullUpdate(PayOpenLinkInput{Label: "Shop", MinAmountKobo: 2_000_000}, &off, &v)); err != nil {
 		t.Fatal(err)
 	}
 	if got := reason(test, false); got != PayOpenLinkPaused {
@@ -564,12 +619,12 @@ func TestPayOpenLink_ARangeTheMerchantsLimitsNoLongerFit(t *testing.T) {
 	}
 	off, v := false, 1
 	same := PayOpenLinkInput{Label: "Big orders, paused", MinAmountKobo: 2_000_000}
-	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{PayOpenLinkInput: same, Active: &off, ExpectedVersion: &v}); err != nil {
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, fullUpdate(same, &off, &v)); err != nil {
 		t.Fatalf("pausing and renaming with the range unchanged: %v", err)
 	}
 	v = 2
 	moved := PayOpenLinkInput{Label: "Big orders", MinAmountKobo: 3_000_000}
-	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{PayOpenLinkInput: moved, ExpectedVersion: &v}); !errors.Is(err, ErrPayPaymentInvalid) {
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, fullUpdate(moved, nil, &v)); !errors.Is(err, ErrPayPaymentInvalid) {
 		t.Fatalf("a changed range is still checked: %v", err)
 	}
 }
@@ -647,5 +702,200 @@ func TestPayReceived_AnOpenPaymentWithNoNoteIsNamedByItsLink(t *testing.T) {
 	got := seen()
 	if len(got) != 1 || !strings.HasSuffix(got[0].Message, " paid Sky Air · Shop 12") || got[0].Data["source"] != models.PaySourceOpen {
 		t.Fatalf("events %+v", got)
+	}
+}
+
+// A replaced address is retired for good: no link — not even the one it was
+// taken from — is ever handed it again.
+func TestPayOpenLink_ARetiredSlugIsNeverReused(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	suffixes := []string{"aaaaaaaa", "bbbbbbbb", "aaaaaaaa", "bbbbbbbb", "cccccccc"}
+	prev := payOpenLinkSlugSuffix
+	payOpenLinkSlugSuffix = func() (string, error) { v := suffixes[0]; suffixes = suffixes[1:]; return v, nil }
+	t.Cleanup(func() { payOpenLinkSlugSuffix = prev })
+
+	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn()) // sky-air-aaaaaaaa
+	next, err := s.ReplaceOpenLink(ctx, m, models.PayModeTest, l.ID)
+	if err != nil || next.Slug != "sky-air-bbbbbbbb" {
+		t.Fatalf("replace: %+v %v", next, err)
+	}
+	var retired models.PayRetiredSlug
+	if err := s.db.First(&retired, "slug = ?", "sky-air-aaaaaaaa").Error; err != nil || retired.OpenLinkID != l.ID {
+		t.Fatalf("retired %+v err %v", retired, err)
+	}
+	// The next new link draws the retired slug, then the live one, then a free one.
+	other := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	if other.Slug != "sky-air-cccccccc" {
+		t.Fatalf("new link got %q", other.Slug)
+	}
+	if _, err := s.OpenLinkPublic(ctx, "sky-air-aaaaaaaa", false); !errors.Is(err, ErrPayOpenLinkNotFound) {
+		t.Fatalf("the retired address: %v", err)
+	}
+}
+
+// A payment started at an address that has since been replaced never points
+// its payer to the new one; a payment at the current address does.
+func TestPayOpenLink_AnOldPaymentGetsNoNewAddress(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	old, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	if old.OpenLinkSlug != l.Slug {
+		t.Fatalf("slug stamped %q", old.OpenLinkSlug)
+	}
+	next, err := s.ReplaceOpenLink(ctx, m, models.PayModeTest, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pub, _ := s.PublicView(ctx, old.ID, false); pub.OpenLinkURL != "" || pub.LinkLabel != l.Label {
+		t.Fatalf("old payment's public view %+v", pub)
+	}
+	fresh, _ := s.CreateFromOpenLink(ctx, next.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	if pub, _ := s.PublicView(ctx, fresh.ID, false); pub.OpenLinkURL != "https://tsaconnectworld.com/pay/l/"+next.Slug {
+		t.Fatalf("new payment's public view %+v", pub)
+	}
+}
+
+func TestPayOpenLink_ValidSlug(t *testing.T) {
+	for slug, want := range map[string]bool{
+		"sky-air-ab2c3d4e": true, "SKY-AIR-AB2C3D4E": true, "pay-a": true, "a": true,
+		"": false, "-sky": false, "sky-": false, "sky--air": false, "sky_air": false, "sky air": false,
+		"sky%00air": false, "sky\x00air": false, "sky\xffair": false, "ṡky": false, strings.Repeat("a", 65): false,
+	} {
+		if got := ValidPayOpenLinkSlug(slug); got != want {
+			t.Errorf("%q: %v, want %v", slug, got, want)
+		}
+	}
+}
+
+// An edit carries only what changed: whatever it leaves out stays as it was.
+func TestPayOpenLink_AnEditLeavesOutWhatItDoesNotChange(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	l := mustOpenLink(t, s, m, models.PayModeTest, PayOpenLinkInput{Label: "Shop 12", MinAmountKobo: 200_000, MaxAmountKobo: 900_000})
+	off, v := false, 1
+	got, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{Active: &off, ExpectedVersion: &v})
+	if err != nil || got.Label != "Shop 12" || got.MinAmountKobo != 200_000 || got.MaxAmountKobo != 900_000 || got.Active {
+		t.Fatalf("pause only: %+v %v", got, err)
+	}
+	v, hi := 2, int64(800_000)
+	got, err = s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{MaxAmountKobo: &hi, ExpectedVersion: &v})
+	if err != nil || got.Label != "Shop 12" || got.MinAmountKobo != 200_000 || got.MaxAmountKobo != 800_000 || got.Active {
+		t.Fatalf("max only: %+v %v", got, err)
+	}
+	v, lo := 3, int64(850_000)
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{MinAmountKobo: &lo, ExpectedVersion: &v}); !errors.Is(err, ErrPayPaymentInvalid) {
+		t.Fatalf("a min past the stored max is still checked against it: %v", err)
+	}
+	blank := " "
+	if _, err := s.UpdateOpenLink(ctx, m, models.PayModeTest, l.ID, PayOpenLinkUpdate{Label: &blank, ExpectedVersion: &v}); !errors.Is(err, ErrPayPaymentInvalid) {
+		t.Fatalf("a blank label: %v", err)
+	}
+}
+
+// The payment-received alert quotes a customer's note as theirs, with any link
+// in it removed, and names the payer by first name and last initial.
+func TestPayReceived_TheCustomersNoteIsQuotedAndDefanged(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus()
+	seen := collectPayAlerts(bus)
+	s.SetEvents(bus)
+	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	p, err := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000,
+		Note: "rice — see https://evil.example/login and www.evil.example/x please"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payer := payUser(t, s, true) // Ada Okafor, verified
+	if _, _, err := s.Lock(ctx, payer, p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Succeed(ctx, p.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	got := seen()
+	want := "Ada O. paid Sky Air · Customer's note: “rice — see [link removed] and [link removed] please”"
+	if len(got) != 1 || got[0].Message != want {
+		t.Fatalf("events %+v\nwant %q", got, want)
+	}
+}
+
+func TestPayReceived_ADeletedPayerIsACustomer(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus()
+	seen := collectPayAlerts(bus)
+	s.SetEvents(bus)
+	p, _, _ := s.Create(ctx, m, models.PayModeTest, payIn())
+	payer := payUser(t, s, true)
+	s.db.Exec(`UPDATE users SET account_status = ? WHERE id = ?`, models.AccountStatusDeleted, payer.ID)
+	s.Lock(ctx, payer, p.ID, false)
+	s.Succeed(ctx, p.ID, "test")
+	if got := seen(); len(got) != 1 || !strings.HasPrefix(got[0].Message, "A customer paid Sky Air") {
+		t.Fatalf("events %+v", got)
+	}
+}
+
+func TestPayShortName(t *testing.T) {
+	for name, want := range map[string]string{"Ada Okafor": "Ada O.", "Ada Ngozi Okafor": "Ada O.", "Ada": "Ada", " Émile  Zola ": "Émile Z."} {
+		if got := payShortName(name); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// The merchant API cancels only what the merchant's server created.
+func TestPayPayment_TheMerchantAPICancelsOnlyItsOwnPayments(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	link, _ := s.CreateLink(ctx, m, models.PayModeTest, payLinkIn())
+	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	open, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	api, _, _ := s.Create(ctx, m, models.PayModeTest, payIn())
+	for name, id := range map[string]uuid.UUID{"an owner's link": link.ID, "a customer's open payment": open.ID} {
+		if err := s.Cancel(ctx, m.ID, models.PayModeTest, id); !errors.Is(err, ErrPayTransition) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if err := s.Cancel(ctx, m.ID, models.PayModeTest, api.ID); err != nil {
+		t.Fatalf("its own: %v", err)
+	}
+}
+
+func TestPayCheckoutView_NamesTheSourceAndTheLink(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	l := mustOpenLink(t, s, m, models.PayModeTest, PayOpenLinkInput{Label: "Shop 12"})
+	p, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
+	v, err := s.CheckoutView(ctx, payUser(t, s, false), p.ID, false)
+	if err != nil || v.Source != models.PaySourceOpen || v.LinkLabel != "Shop 12" || v.Description != "" {
+		t.Fatalf("checkout %+v err %v", v, err)
+	}
+	api, _, _ := s.Create(ctx, m, models.PayModeTest, payIn())
+	if v, _ := s.CheckoutView(ctx, payUser(t, s, false), api.ID, false); v.Source != models.PaySourceAPI || v.LinkLabel != "" {
+		t.Fatalf("api checkout %+v", v)
+	}
+}
+
+// Reads through an open link are served by indexes.
+func TestPayOpenLink_PaymentsHaveTheirIndexes(t *testing.T) {
+	db := newPayTestDB(t)
+	for _, name := range []string{"idx_pay_payments_open_link_created", "idx_pay_payments_open_link_paid"} {
+		if !db.Migrator().HasIndex(&models.PayPayment{}, name) {
+			t.Fatalf("pay_payments has no %s", name)
+		}
+	}
+	var ddl string
+	db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_pay_payments_open_link_paid'`).Scan(&ddl)
+	if !strings.Contains(ddl, "WHERE status = 'succeeded'") {
+		t.Fatalf("paid index: %s", ddl)
 	}
 }

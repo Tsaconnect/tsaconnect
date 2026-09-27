@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -70,36 +71,49 @@ func (s *PayPaymentService) CreateLink(ctx context.Context, m *models.PayMerchan
 	if !slices.Contains(payLinkDays, days) {
 		return nil, payInvalid("expiresInDays must be 1, 3 or 7", "A link can stay open for 1, 3 or 7 days")
 	}
-	reference := strings.TrimSpace(in.Reference)
-	if reference == "" {
+	var p *models.PayPayment
+	create := func(reference string) error {
 		var err error
-		if reference, err = newPayReference(payLinkReferencePrefix); err != nil {
-			return nil, err
-		}
+		p, _, err = s.create(ctx, m, mode, CreatePayPaymentInput{
+			AmountKobo:       in.AmountKobo,
+			Currency:         "NGN",
+			Reference:        reference,
+			Description:      description,
+			ExpiresInSeconds: days * 24 * 60 * 60,
+		}, payCreateOptions{source: models.PaySourceLink, customerName: customerName, maxExpirySeconds: payLinkDefaultDays * 24 * 60 * 60})
+		return err
 	}
-
-	p, _, err := s.create(ctx, m, mode, CreatePayPaymentInput{
-		AmountKobo:       in.AmountKobo,
-		Currency:         "NGN",
-		Reference:        reference,
-		Description:      description,
-		ExpiresInSeconds: days * 24 * 60 * 60,
-	}, payCreateOptions{source: models.PaySourceLink, customerName: customerName, maxExpirySeconds: payLinkDefaultDays * 24 * 60 * 60})
+	if reference := strings.TrimSpace(in.Reference); reference != "" {
+		if payHasHiddenChars(reference) {
+			return nil, payInvalid("reference must not contain control or format characters", "Your reference can't contain hidden or control characters")
+		}
+		return p, create(reference) // theirs: a taken one is theirs to change
+	}
+	// One we make up that happens to be taken is drawn again.
+	err := payTryFresh(func() (string, error) { return newPayReference(payLinkReferencePrefix) }, create, payReferenceTaken)
 	return p, err
 }
+
+// payReferenceTaken is payTryFresh's collision test for a made-up reference.
+func payReferenceTaken(err error) bool { return errors.Is(err, ErrPayLinkReferenceTaken) }
 
 // payZeroWidthJoiner is the one format character allowed: it is what holds a
 // combined emoji (👨‍👩‍👧) together, and it cannot reorder or hide text on its own.
 const payZeroWidthJoiner = '\u200d'
 
-// payHasHiddenChars reports whether s holds a control character (Cc) or an
-// invisible format character (Cf) other than the zero-width joiner. Both are
-// text the payer is shown: a right-to-left override or a zero-width space can
-// make what they read differ from what the owner typed, and a NUL cannot be
-// stored at all.
+// payInvisibleLetters are characters outside Cc and Cf that still render as
+// nothing — the line and paragraph separators, the Hangul fillers and the
+// combining grapheme joiner — and so can hide or pad text the same way.
+var payInvisibleLetters = []rune{'\u2028', '\u2029', '\u3164', '\u115f', '\u1160', '\uffa0', '\u034f'}
+
+// payHasHiddenChars reports whether s holds a control character (Cc), an
+// invisible format character (Cf) other than the zero-width joiner, or one of
+// payInvisibleLetters. All are text someone else is shown: a right-to-left
+// override or a blank filler can make what they read differ from what was
+// typed, and a NUL cannot be stored at all.
 func payHasHiddenChars(s string) bool {
 	return strings.ContainsFunc(s, func(r rune) bool {
-		return r != payZeroWidthJoiner && unicode.In(r, unicode.Cc, unicode.Cf)
+		return r != payZeroWidthJoiner && (unicode.In(r, unicode.Cc, unicode.Cf) || slices.Contains(payInvisibleLetters, r))
 	})
 }
 

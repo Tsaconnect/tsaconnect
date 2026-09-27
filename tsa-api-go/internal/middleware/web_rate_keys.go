@@ -38,7 +38,7 @@ func WebLoginRateKey(c *gin.Context) string {
 	if email == "" {
 		return ""
 	}
-	return "web-login:" + c.ClientIP() + "|" + email
+	return "web-login:" + ClientKey(c) + "|" + email
 }
 
 // WebChallengeRateKey counts code entries per pending sign-in.

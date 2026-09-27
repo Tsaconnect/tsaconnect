@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -234,5 +235,41 @@ func TestPayOpenLinks_PublicReadAndPay(t *testing.T) {
 	w = payDo(o.r, http.MethodGet, "/api/pay/public/open/"+l.Slug, nil, nil)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"active":false`) {
 		t.Fatalf("suspended public read: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// An edit sends only what changed: resuming a link leaves its name and range.
+func TestPayOpenLinks_AnEditSendsOnlyWhatChanged(t *testing.T) {
+	o := newOwnerRig(t)
+	l := o.newOpenLink(t, map[string]any{"label": "Shop 12", "minAmount": 200_000})
+	res := o.openLink(http.MethodPut, "/api/pay/merchant/open-links/"+l.ID.String()+"?mode=test", map[string]any{"active": false, "expectedVersion": 1})
+	if res.status != http.StatusOK || res.Link.Label != "Shop 12" || res.Link.MinAmount != 200_000 || res.Link.Active {
+		t.Fatalf("pause: %d %s", res.status, res.raw)
+	}
+}
+
+// The merchant API cancels only what the merchant's server created: not an
+// owner's link, nor a customer's open-link payment.
+func TestPayOpenLinks_TheMerchantAPICannotCancelThem(t *testing.T) {
+	o := newOwnerRig(t)
+	l := o.newOpenLink(t, map[string]any{"label": "Shop 12"})
+	w := payDo(o.r, http.MethodPost, "/api/pay/public/open/"+l.Slug+"/payments", map[string]any{"amount": 450_000}, nil)
+	var started struct {
+		Data struct {
+			ID uuid.UUID `json:"id"`
+		} `json:"data"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &started)
+	link := o.link(http.MethodPost, "/api/pay/merchant/links?mode=test", linkBody())
+
+	r := gin.New()
+	r.POST("/pay/v1/payments/:id/cancel", func(c *gin.Context) {
+		c.Set("payMerchant", o.m)
+		c.Set("payMode", models.PayModeTest)
+	}, o.h.CancelPayment)
+	for name, id := range map[string]uuid.UUID{"open payment": started.Data.ID, "link": link.Data.ID} {
+		if w := payDo(r, http.MethodPost, "/pay/v1/payments/"+id.String()+"/cancel", nil, nil); w.Code != http.StatusConflict {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
 	}
 }

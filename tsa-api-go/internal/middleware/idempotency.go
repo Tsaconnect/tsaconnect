@@ -84,8 +84,10 @@ func Idempotency(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Compute request fingerprint over (method + path + body) so that
-		// reusing a key with a different payload is rejected.
+		// Compute request fingerprint over (method + path and query + body) so
+		// that reusing a key for a different request is rejected — the query
+		// included, since ?mode=live and ?mode=test are different requests with
+		// the same body.
 		body, err := readAndRestoreBody(c)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
@@ -94,7 +96,13 @@ func Idempotency(db *gorm.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		requestHash := fingerprint(c.Request.Method, c.Request.URL.Path, body)
+		target := c.Request.URL.Path
+		if q := c.Request.URL.RawQuery; q != "" {
+			// Only when there is one, so a query-less request hashes as it
+			// always has and a retry across a deploy still replays.
+			target += "?" + q
+		}
+		requestHash := fingerprint(c.Request.Method, target, body)
 
 		var existing models.RequestIdempotency
 		err = db.Where("key = ?", key).First(&existing).Error

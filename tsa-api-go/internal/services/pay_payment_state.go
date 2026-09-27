@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -69,6 +72,9 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 			"status":        models.PayStatusProcessing,
 			"payer_user_id": user.ID,
 			"locked_at":     &now,
+			// Set once, on the first lock ever, and never cleared by a release:
+			// a payment someone tried stays tried (PayPayment.Untried).
+			"attempted_at": gorm.Expr("COALESCE(attempted_at, ?)", now),
 			// A released payment keeps the reason it was released for; a new
 			// attempt must not carry it into whatever it ends as.
 			"failure_reason": "",
@@ -242,8 +248,9 @@ func (s *PayPaymentService) succeed(ctx context.Context, id uuid.UUID, at *payAt
 // source, live and test. Every success — Succeed, and the reconciler's settle —
 // comes through succeed, and this runs only once its guarded transition has
 // committed; a second settle of the same payment finds it no longer processing
-// and never reaches here, so each payment is announced once. The payment has
-// already succeeded, so a failed read here is logged, never returned.
+// and never reaches here. So each payment is announced at most once: the bus
+// drops an event when its buffer is full, and nothing retries it. The payment
+// has already succeeded, so a failed read here is logged, never returned.
 func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) {
 	if s.events == nil {
 		return
@@ -258,33 +265,57 @@ func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) 
 		log.Printf("[tsa-pay] payment received alert for %s: %v", id, err)
 		return
 	}
+	// The payer by first name and last initial: this text goes out by push and
+	// email, and the merchant sees the full name in the dashboard.
 	who := "A customer"
 	switch payer, err := s.Payer(ctx, p); {
 	case err != nil:
 		log.Printf("[tsa-pay] payment received alert for %s: payer: %v", id, err)
-	case payer != nil:
-		who = payer.Name
+	case payer != nil && payer.Name != payerDeletedName:
+		who = payShortName(payer.Name)
 	}
 	// What the merchant receives, which is the price unless they take part of
 	// the fee on themselves.
 	title := "₦" + koboAsNairaText(p.MerchantNetKobo) + " received"
-	// What it was for: the description, or — for an open-link payment whose
-	// customer left no note — the link's label.
-	what := p.Description
-	if what == "" && p.OpenLinkID != nil {
-		if labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID}); err == nil {
-			what = labels[*p.OpenLinkID]
-		}
-	}
 	message := who + " paid " + m.BusinessName
-	if what != "" {
-		message += " · " + what
+	switch {
+	case p.Source == models.PaySourceOpen && p.Description != "":
+		// Words a customer typed, marked as theirs, with any link in them made
+		// harmless: this goes out by push and email under our name.
+		message += " · Customer's note: “" + payWithoutLinks(p.Description) + "”"
+	case p.Description != "":
+		message += " · " + p.Description // the merchant's own
+	case p.OpenLinkID != nil:
+		// An open-link payment with no note: the link says what it was for.
+		if labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID}); err == nil && labels[*p.OpenLinkID] != "" {
+			message += " · " + labels[*p.OpenLinkID]
+		}
 	}
 	if p.Mode == models.PayModeTest {
 		title = "Test: " + title // no real money moved
 	}
 	s.events.Publish(events.Event{Type: events.PayPaymentReceived, UserID: m.UserID, Title: title, Message: message,
 		Data: map[string]any{"paymentId": p.ID.String(), "merchantId": m.ID.String(), "mode": p.Mode, "source": p.Source}})
+}
+
+// payShortName is a name as first name and last initial — "Ada Okafor" is
+// "Ada O." — or the one word it is.
+func payShortName(name string) string {
+	parts := strings.Fields(name)
+	if len(parts) < 2 {
+		return strings.TrimSpace(name)
+	}
+	last, _ := utf8.DecodeRuneInString(parts[len(parts)-1])
+	return parts[0] + " " + string(last) + "."
+}
+
+// payLinkInText is an http(s) address or a bare www. one.
+var payLinkInText = regexp.MustCompile(`(?i)\b(?:https?://|www\.)\S+`)
+
+// payWithoutLinks is s with every web address in it replaced, so text a
+// customer typed can't carry a link into a push or an email.
+func payWithoutLinks(s string) string {
+	return payLinkInText.ReplaceAllString(s, "[link removed]")
 }
 
 // Fail moves processing → failed and queues the payment.failed webhook in
@@ -313,9 +344,13 @@ const PayReasonMerchantCancelled = "cancelled by the merchant"
 
 // Cancel moves a merchant's own pending payment straight to expired — the
 // merchant changed its mind before any customer started paying — and queues
-// the payment.expired webhook in the same transaction.
+// the payment.expired webhook in the same transaction. It is the merchant
+// API's, so it reaches only payments the merchant's server created: a link the
+// owner sent, or a payment a customer started at an open link, is not the
+// server's to call off.
 func (s *PayPaymentService) Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error {
-	return s.cancel(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode})
+	return s.cancel(ctx, id, payGuard{statuses: []string{models.PayStatusPending}, merchantID: &merchantID, mode: mode,
+		source: models.PaySourceAPI})
 }
 
 // CancelLink is Cancel for the owner's own payment links only. A payment the
@@ -356,20 +391,54 @@ func (s *PayPaymentService) ExpirePendingForMerchant(ctx context.Context, mercha
 	return s.expireEach(ctx, ids, reason)
 }
 
-// ExpireDue expires pending payments whose expires_at has passed, oldest
-// first, up to limit — the periodic expiry sweep's unit of work. Selecting
-// ids then expiring each through its own guarded transition (rather than an
-// UPDATE ... LIMIT) is what keeps this portable across SQLite and Postgres.
+// payUntriedExpireBatch is how many untried open-link payments one sweep
+// expires in its single UPDATE.
+const payUntriedExpireBatch = 1000
+
+// ExpireDue expires pending payments whose expires_at has passed — the
+// periodic expiry sweep's unit of work — and returns how many it expired.
+//
+// Untried open-link payments go first, in bulk (expireUntried): there can be
+// many, and they owe no webhook. The rest, oldest first up to limit, each go
+// through their own guarded transition and queue their webhook. Selecting ids
+// then expiring each (rather than an UPDATE ... LIMIT) is what keeps this
+// portable across SQLite and Postgres.
 func (s *PayPaymentService) ExpireDue(ctx context.Context, limit int) (int, error) {
+	bulk, err := s.expireUntried(ctx)
+	if err != nil {
+		return bulk, err
+	}
 	var ids []uuid.UUID
 	if err := s.db.WithContext(ctx).Model(&models.PayPayment{}).
 		Where("status = ? AND expires_at < ?", models.PayStatusPending, s.now()).
+		Where("NOT ("+models.PayUntriedOpenSQL+")").
 		Order("expires_at").
 		Limit(limit).
 		Pluck("id", &ids).Error; err != nil {
-		return 0, err
+		return bulk, err
 	}
-	return s.expireEach(ctx, ids, "expired")
+	n, err := s.expireEach(ctx, ids, "expired")
+	return bulk + n, err
+}
+
+// expireUntried expires, in one UPDATE, up to payUntriedExpireBatch untried
+// open-link payments past their expiry. The outer WHERE repeats the pending
+// and untried conditions, so a payment locked between the subquery and the
+// update is left to its payer. Nothing is queued: an untried payment owes its
+// merchant no webhook (enqueueWebhook).
+//
+// The rows are kept. Deleting untried payments after some retention period
+// would bound the table, but deleting payment rows at all is the owner's
+// decision to make, not this sweep's.
+func (s *PayPaymentService) expireUntried(ctx context.Context) (int, error) {
+	now := s.now()
+	due := s.db.Model(&models.PayPayment{}).Select("id").
+		Where("status = ? AND expires_at < ? AND "+models.PayUntriedOpenSQL, models.PayStatusPending, now).
+		Limit(payUntriedExpireBatch)
+	res := s.db.WithContext(ctx).Model(&models.PayPayment{}).
+		Where("id IN (?) AND status = ? AND "+models.PayUntriedOpenSQL, due, models.PayStatusPending).
+		Updates(map[string]any{"status": models.PayStatusExpired, "failure_reason": "expired", "updated_at": now})
+	return int(res.RowsAffected), res.Error
 }
 
 // expireEach transitions each id pending → expired through its own guarded
@@ -560,10 +629,9 @@ func (s *PayPaymentService) transitionIn(tx *gorm.DB, id uuid.UUID, g payGuard, 
 // mode is not queued at all — WebhookURLFor returns "" — and nor is an
 // open-link payment nobody started paying.
 func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, event string) error {
-	// An open-link payment nobody went on to pay is one visitor entering an
-	// amount; its merchant is not told when it lapses. (One that succeeds was
-	// always locked first.)
-	if p.Source == models.PaySourceOpen && p.LockedAt == nil {
+	// An untried open-link payment is one visitor entering an amount; its
+	// merchant is not told when it lapses. (One that succeeds was always tried.)
+	if p.Untried() {
 		return nil
 	}
 	var m models.PayMerchant

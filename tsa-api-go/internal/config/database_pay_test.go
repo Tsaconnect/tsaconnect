@@ -14,7 +14,7 @@ func TestAutoMigrate_IncludesTSAPayModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range []string{"&models.PayMerchant{}", "&models.PayPayment{}", "&models.PayWebhookDelivery{}", "&models.PayAuditEvent{}", "&models.PayOwnerAction{}", "&models.PayOpenLink{}", "&models.WebSigninChallenge{}", "&models.WebTrustedBrowser{}"} {
+	for _, m := range []string{"&models.PayMerchant{}", "&models.PayPayment{}", "&models.PayWebhookDelivery{}", "&models.PayAuditEvent{}", "&models.PayOwnerAction{}", "&models.PayOpenLink{}", "&models.PayRetiredSlug{}", "&models.WebSigninChallenge{}", "&models.WebTrustedBrowser{}"} {
 		if !strings.Contains(string(src), m) {
 			t.Fatalf("AutoMigrate is missing %s", m)
 		}

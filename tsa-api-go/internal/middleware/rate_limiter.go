@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -17,17 +18,17 @@ type rateLimitEntry struct {
 	expiresAt time.Time
 }
 
-// rateLimiterStore holds one counter per key. mu makes each request's
-// read-reset-or-increment of its entry one step, and covers the cleanup's reads
-// of the same entries: concurrent requests on one key would otherwise race on
-// the count (and on a first request, both could start the window at 1).
+// rateLimiterStore holds one counter per key. mu guards the map and every
+// entry in it, so each request's read-reset-or-increment of its entry is one
+// step: concurrent requests on one key would otherwise race on the count (and,
+// on a first request, both could start the window at 1).
 type rateLimiterStore struct {
 	mu      sync.Mutex
-	entries sync.Map
+	entries map[string]*rateLimitEntry
 }
 
 func newRateLimiterStore() *rateLimiterStore {
-	store := &rateLimiterStore{}
+	store := &rateLimiterStore{entries: map[string]*rateLimitEntry{}}
 	go store.cleanup()
 	return store
 }
@@ -40,13 +41,11 @@ func (s *rateLimiterStore) cleanup() {
 	for range ticker.C {
 		now := time.Now()
 		s.mu.Lock()
-		s.entries.Range(func(key, value interface{}) bool {
-			entry := value.(*rateLimitEntry)
+		for key, entry := range s.entries {
 			if now.After(entry.expiresAt) {
-				s.entries.Delete(key)
+				delete(s.entries, key)
 			}
-			return true
-		})
+		}
 		s.mu.Unlock()
 	}
 }
@@ -57,14 +56,11 @@ func (s *rateLimiterStore) cleanup() {
 func (s *rateLimiterStore) allow(key string, maxRequests int, window time.Duration, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if val, ok := s.entries.Load(key); ok {
-		entry := val.(*rateLimitEntry)
-		if !now.After(entry.expiresAt) {
-			entry.count++
-			return entry.count <= maxRequests
-		}
+	if entry, ok := s.entries[key]; ok && !now.After(entry.expiresAt) {
+		entry.count++
+		return entry.count <= maxRequests
 	}
-	s.entries.Store(key, &rateLimitEntry{count: 1, expiresAt: now.Add(window)})
+	s.entries[key] = &rateLimitEntry{count: 1, expiresAt: now.Add(window)}
 	return true
 }
 
@@ -72,7 +68,20 @@ func (s *rateLimiterStore) allow(key string, maxRequests int, window time.Durati
 // It allows up to maxRequests requests per the specified window duration.
 // Default recommendation: 100 requests per 15 minutes.
 func RateLimiter(maxRequests int, window time.Duration) gin.HandlerFunc {
-	return RateLimiterBy(maxRequests, window, func(c *gin.Context) string { return c.ClientIP() })
+	return RateLimiterBy(maxRequests, window, ClientKey)
+}
+
+// ClientKey is the client's address as a rate-limit key: an IPv4 address as it
+// is, an IPv6 one as its /64. One IPv6 host is usually handed a whole /64 and
+// can pick any address in it, so keying on the full address would give it
+// billions of fresh budgets. Every per-address limit keys on this.
+func ClientKey(c *gin.Context) string {
+	raw := c.ClientIP()
+	ip := net.ParseIP(raw)
+	if ip == nil || ip.To4() != nil {
+		return raw
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // RateLimiterBy is RateLimiter with a caller-supplied bucket key. Use it to
@@ -86,7 +95,7 @@ func RateLimiterBy(maxRequests int, window time.Duration, keyFn func(*gin.Contex
 	return func(c *gin.Context) {
 		key := keyFn(c)
 		if key == "" {
-			key = c.ClientIP()
+			key = ClientKey(c)
 		}
 		if !store.allow(key, maxRequests, window, time.Now()) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{

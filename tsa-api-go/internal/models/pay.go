@@ -116,7 +116,10 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // payment already handed to a customer. At most one attempt (order or
 // intent) is linked at a time. CustomerName is who a payment link was made
 // for, as the owner typed it, and is shown to whoever pays it; an API payment
-// never has one. OpenLinkID is the open link an open payment was started from.
+// never has one. OpenLinkID is the open link an open payment was started from,
+// and OpenLinkSlug the address it was started at (a replaced link has a new
+// one). AttemptedAt is when a payer first locked it: unlike LockedAt it is
+// never cleared, so a payment someone tried and gave up on stays tried.
 type PayPayment struct {
 	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
@@ -127,7 +130,8 @@ type PayPayment struct {
 	Description             string     `gorm:"size:255" json:"description"`
 	Source                  string     `gorm:"size:8;not null;default:'api'" json:"source"`
 	CustomerName            string     `gorm:"size:100" json:"customerName,omitempty"`
-	OpenLinkID              *uuid.UUID `gorm:"type:uuid;index" json:"openLinkId,omitempty"`
+	OpenLinkID              *uuid.UUID `gorm:"type:uuid;index:idx_pay_payments_open_link_created,priority:1;index:idx_pay_payments_open_link_paid,where:status = 'succeeded'" json:"openLinkId,omitempty"`
+	OpenLinkSlug            string     `gorm:"size:64" json:"-"`
 	ReturnURL               string     `gorm:"size:1024" json:"returnUrl,omitempty"`
 	FeeBps                  int        `gorm:"not null" json:"-"`
 	CustomerFeeSharePercent int        `gorm:"not null" json:"-"`
@@ -145,13 +149,27 @@ type PayPayment struct {
 	Status                  string     `gorm:"size:16;not null;index" json:"status"`
 	PayerUserID             *uuid.UUID `gorm:"type:uuid;index" json:"-"`
 	LockedAt                *time.Time `json:"-"`
+	AttemptedAt             *time.Time `json:"-"`
 	SellIntentID            *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"-"`
 	PaycrestOrderID         *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"-"`
 	SettlementRef           string     `gorm:"size:128" json:"settlementRef,omitempty"`
 	FailureReason           string     `gorm:"size:255" json:"failureReason,omitempty"`
 	SucceededAt             *time.Time `json:"succeededAt,omitempty"`
-	CreatedAt               time.Time  `gorm:"index:idx_pay_payments_merchant_mode_created,priority:3" json:"createdAt"`
+	CreatedAt               time.Time  `gorm:"index:idx_pay_payments_merchant_mode_created,priority:3;index:idx_pay_payments_open_link_created,priority:2" json:"createdAt"`
 	UpdatedAt               time.Time  `json:"updatedAt"`
+}
+
+// PayUntriedOpenSQL is Untried as a WHERE condition on pay_payments. Keep the
+// two in step: they are the one definition of an untried payment.
+const PayUntriedOpenSQL = "source = '" + PaySourceOpen + "' AND attempted_at IS NULL"
+
+// Untried reports whether p is an open-link payment nobody has ever started
+// paying. Each visitor who enters an amount at an open link makes one, so an
+// untried one is a scan, not a payment its merchant needs to see or be told
+// about. (Payments of every other source are never "untried": someone chose to
+// create each one.)
+func (p *PayPayment) Untried() bool {
+	return p.Source == PaySourceOpen && p.AttemptedAt == nil
 }
 
 func (p *PayPayment) BeforeCreate(tx *gorm.DB) error {
@@ -190,6 +208,15 @@ func (l *PayOpenLink) BeforeCreate(tx *gorm.DB) error {
 		l.ID = uuid.New()
 	}
 	return nil
+}
+
+// PayRetiredSlug is an open-link address that was replaced. Kept so no new
+// link is ever handed an address that was once printed for another: a poster
+// that still hangs somewhere must never start paying someone else.
+type PayRetiredSlug struct {
+	Slug       string    `gorm:"size:64;primaryKey" json:"slug"`
+	OpenLinkID uuid.UUID `gorm:"type:uuid;not null;index" json:"openLinkId"`
+	RetiredAt  time.Time `gorm:"not null" json:"retiredAt"`
 }
 
 // PayWebhookDelivery is one event owed to a merchant. The row's ID is the

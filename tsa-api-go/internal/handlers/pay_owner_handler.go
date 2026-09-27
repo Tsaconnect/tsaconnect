@@ -305,7 +305,7 @@ func (h *PayHandler) ownerPaymentList(c *gin.Context, source string) {
 	}
 	page, limit := payOwnerPage(c)
 	rows, total, err := h.payments.List(c.Request.Context(), services.PayListFilter{MerchantID: &m.ID, Mode: mode,
-		Status: strings.TrimSpace(c.Query("status")), ForOwner: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
+		Status: strings.TrimSpace(c.Query("status")), HideUntriedOpen: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
 	if err != nil {
 		payOwnerFail(c, err)
 		return

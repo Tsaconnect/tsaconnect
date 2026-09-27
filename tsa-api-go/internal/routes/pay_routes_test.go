@@ -71,7 +71,7 @@ func newPayRoutesRig(t *testing.T) (*gin.Engine, *config.Config, *gorm.DB, *hand
 	if err := db.Exec(payRoutesUsersDDL).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}, &models.PayOpenLink{}); err != nil {
+	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}, &models.PayOpenLink{}, &models.PayRetiredSlug{}); err != nil {
 		t.Fatal(err)
 	}
 	config.DB = db
@@ -79,7 +79,7 @@ func newPayRoutesRig(t *testing.T) (*gin.Engine, *config.Config, *gorm.DB, *hand
 	now := func() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC) }
 	merchants := services.NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now)
-	payh := handlers.NewPayHandler(merchants, payments, nil, false)
+	payh := handlers.NewPayHandler(merchants, payments, nil, false).WithOpenLinks(payments)
 
 	cfg := &config.Config{JWTSecret: "pay-routes-test-secret"}
 	gin.SetMode(gin.TestMode)
@@ -390,39 +390,48 @@ func payOpenPaymentFrom(r *gin.Engine, slug, ip string) int {
 }
 
 // Starting a payment through an open link needs no session, so it is limited
-// three ways: 20 a minute per visitor, 300 a minute per link whoever is asking,
-// and 2000 a minute across every link.
+// three ways, narrowest first: 20 a minute per visitor, 300 a minute per link,
+// 2000 a minute across every link. A request one limiter refuses never reaches
+// the next, so no visitor can spend another's budget.
 func TestPayRoutes_OpenLinkPaymentsArePublicAndLimited(t *testing.T) {
 	r, _, _, _ := newPayRoutesRig(t)
 	ip := func(i int) string { return fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255) }
-	for i := 1; i <= 20; i++ {
-		if code := payOpenPaymentFrom(r, "shop-a", "203.0.113.1"); code != http.StatusNotFound {
+	for i := 1; i <= 25; i++ {
+		code := payOpenPaymentFrom(r, "shop-a", "203.0.113.1")
+		if (i <= 20 && code != http.StatusNotFound) || (i > 20 && code != http.StatusTooManyRequests) {
 			t.Fatalf("request %d from one visitor: %d", i, code)
 		}
 	}
-	if code := payOpenPaymentFrom(r, "shop-a", "203.0.113.1"); code != http.StatusTooManyRequests {
-		t.Fatalf("the 21st from one visitor in a minute: %d", code)
-	}
-	for i := 1; i <= 300; i++ {
-		if code := payOpenPaymentFrom(r, "shop-b", ip(i)); code == http.StatusTooManyRequests {
-			t.Fatalf("request %d to one link refused", i)
+	for i := 1; i <= 301; i++ {
+		code := payOpenPaymentFrom(r, "shop-b", ip(i))
+		if (i <= 300 && code == http.StatusTooManyRequests) || (i > 300 && code != http.StatusTooManyRequests) {
+			t.Fatalf("request %d to one link: %d", i, code)
 		}
 	}
-	if code := payOpenPaymentFrom(r, "shop-b", ip(1000)); code != http.StatusTooManyRequests {
-		t.Fatalf("the 301st to one link in a minute: %d", code)
-	}
-	// The route-wide ceiling counts every request, refused ones included: 322
-	// so far. Spread the rest over links and visitors.
-	for i := 323; i <= 2000; i++ {
-		if code := payOpenPaymentFrom(r, fmt.Sprintf("shop-%d", i), ip(2000+i)); code == http.StatusTooManyRequests {
-			t.Fatalf("request %d across links refused", i)
+	// 320 have reached the route-wide limiter — not the 5 the visitor's own
+	// limit refused, nor the one the link's refused — so 1680 more fit.
+	for i := 1; i <= 1680; i++ {
+		if code := payOpenPaymentFrom(r, fmt.Sprintf("shop-%d", i), ip(10_000+i)); code == http.StatusTooManyRequests {
+			t.Fatalf("request %d across links refused: a refused request spent the shared budget", i)
 		}
 	}
-	if code := payOpenPaymentFrom(r, "shop-last", ip(9999)); code != http.StatusTooManyRequests {
+	if code := payOpenPaymentFrom(r, "shop-last", ip(99_999)); code != http.StatusTooManyRequests {
 		t.Fatalf("the 2001st across every link in a minute: %d", code)
 	}
-	if w := payRoutesDo(r, http.MethodGet, "/api/pay/public/open/shop-a", "", nil); w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "link_not_found") {
-		t.Fatalf("public read: %d %s", w.Code, w.Body.String())
+}
+
+// A slug no link could have — a NUL, a stray byte — is not found, answered
+// before any lookup (which would otherwise fail in the database).
+func TestPayRoutes_AnImpossibleSlugIsNotFound(t *testing.T) {
+	r, _, _, _ := newPayRoutesRig(t)
+	for _, slug := range []string{"%00", "%FF", "shop%00a", "bad_slug", "-shop", strings.Repeat("a", 65)} {
+		if code := payOpenPaymentFrom(r, slug, "203.0.113.7"); code != http.StatusNotFound {
+			t.Fatalf("POST %q: %d", slug, code)
+		}
+		w := payRoutesDo(r, http.MethodGet, "/api/pay/public/open/"+slug, "", nil)
+		if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), `"code":"link_not_found"`) {
+			t.Fatalf("GET %q: %d %s", slug, w.Code, w.Body.String())
+		}
 	}
 }
 

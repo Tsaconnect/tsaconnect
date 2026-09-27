@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,7 +25,8 @@ const (
 	payOpenLinkMaxLabelLen = 80
 	payOpenLinkMaxNoteLen  = 140
 	payOpenLinkSlugBaseLen = 40
-	payOpenLinkSlugChars   = 4
+	payOpenLinkSlugChars   = 8 // 40 random bits: a slug is not guessable
+	payOpenLinkMaxSlugLen  = 64
 	payOpenReferencePrefix = "open_"
 	payOpenLinkRecentLimit = 20
 	payFreshAttempts       = 5 // payTryFresh's tries
@@ -50,13 +52,15 @@ type PayOpenLinkInput struct {
 	MaxAmountKobo int64  `json:"maxAmount"`
 }
 
-// PayOpenLinkUpdate is an owner's edit of an open link: the label and range
-// replace what is there; Active is left as it is when omitted. ExpectedVersion
-// is the version the owner was looking at, and is required.
+// PayOpenLinkUpdate is an owner's edit of an open link: every field it carries
+// replaces what is there, and every field it omits is left as it is.
+// ExpectedVersion is the version the owner was looking at, and is required.
 type PayOpenLinkUpdate struct {
-	PayOpenLinkInput
-	Active          *bool `json:"active"`
-	ExpectedVersion *int  `json:"expectedVersion"`
+	Label           *string `json:"label"`
+	MinAmountKobo   *int64  `json:"minAmount"`
+	MaxAmountKobo   *int64  `json:"maxAmount"`
+	Active          *bool   `json:"active"`
+	ExpectedVersion *int    `json:"expectedVersion"`
 }
 
 // Why an open link isn't taking payments (PayOpenLinkView.NotTakingReason).
@@ -131,7 +135,7 @@ func (s *PayPaymentService) CreateOpenLink(ctx context.Context, m *models.PayMer
 	}
 	l := &models.PayOpenLink{MerchantID: m.ID, Mode: mode, Label: label, MinAmountKobo: in.MinAmountKobo,
 		MaxAmountKobo: in.MaxAmountKobo, Active: true, Version: 1}
-	err = payWithFreshSlug(m, func(slug string) error {
+	err = s.withFreshSlug(ctx, m, func(slug string) error {
 		l.Slug = slug
 		return s.db.WithContext(ctx).Create(l).Error
 	})
@@ -141,13 +145,41 @@ func (s *PayPaymentService) CreateOpenLink(ctx context.Context, m *models.PayMer
 	return l, nil
 }
 
-// payWithFreshSlug calls write with a new slug from m's business name until one
-// isn't already taken (the unique index says so).
-func payWithFreshSlug(m *models.PayMerchant, write func(slug string) error) error {
+// payOpenLinkSlugSuffix is a slug's random half. A variable only so a test can
+// make it collide.
+var payOpenLinkSlugSuffix = func() (string, error) { return payRandomLower(payOpenLinkSlugChars) }
+
+// errPaySlugRetired is a new slug that was once another link's address.
+var errPaySlugRetired = errors.New("slug was retired")
+
+// withFreshSlug calls write with a new slug from m's business name until one is
+// neither live (the unique index refuses it) nor retired (PayRetiredSlug).
+func (s *PayPaymentService) withFreshSlug(ctx context.Context, m *models.PayMerchant, write func(slug string) error) error {
 	return payTryFresh(func() (string, error) {
-		suffix, err := payRandomLower(payOpenLinkSlugChars)
+		suffix, err := payOpenLinkSlugSuffix()
 		return payOpenLinkSlugBase(m.BusinessName) + "-" + suffix, err
-	}, write, isUniqueViolation)
+	}, func(slug string) error {
+		var retired int64
+		if err := s.db.WithContext(ctx).Model(&models.PayRetiredSlug{}).Where("slug = ?", slug).Count(&retired).Error; err != nil {
+			return err
+		}
+		if retired > 0 {
+			return errPaySlugRetired
+		}
+		return write(slug)
+	}, func(err error) bool { return isUniqueViolation(err) || errors.Is(err, errPaySlugRetired) })
+}
+
+// payOpenLinkSlugFormat is every slug a link can have: lower-case letters and
+// digits in dash-separated runs.
+var payOpenLinkSlugFormat = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// ValidPayOpenLinkSlug reports whether slug (lower-cased) could be an open
+// link's address at all — so a request for anything else is answered not found
+// without a lookup (a NUL or stray byte would otherwise reach the database).
+func ValidPayOpenLinkSlug(slug string) bool {
+	slug = strings.ToLower(slug)
+	return len(slug) <= payOpenLinkMaxSlugLen && payOpenLinkSlugFormat.MatchString(slug)
 }
 
 // payTryFresh calls try with a fresh random value from next until one doesn't
@@ -265,13 +297,17 @@ func (s *PayPaymentService) OpenLinkForMerchant(ctx context.Context, merchantID 
 // OpenLinks is one page of merchant m's open links in mode, newest first, with
 // the total. The caller bounds page and limit.
 func (s *PayPaymentService) OpenLinks(ctx context.Context, merchantID uuid.UUID, mode string, page, limit int) ([]models.PayOpenLink, int64, error) {
-	q := s.db.WithContext(ctx).Model(&models.PayOpenLink{}).Where("merchant_id = ? AND mode = ?", merchantID, mode)
+	// A fresh query for each statement, as List does: a gorm chain reused
+	// after Count carries its state into the Find.
+	mine := func() *gorm.DB {
+		return s.db.WithContext(ctx).Model(&models.PayOpenLink{}).Where("merchant_id = ? AND mode = ?", merchantID, mode)
+	}
 	var total int64
-	if err := q.Count(&total).Error; err != nil {
+	if err := mine().Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var ls []models.PayOpenLink
-	err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&ls).Error
+	err := mine().Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Find(&ls).Error
 	return ls, total, err
 }
 
@@ -285,19 +321,29 @@ func (s *PayPaymentService) UpdateOpenLink(ctx context.Context, m *models.PayMer
 	if err != nil {
 		return nil, err
 	}
-	label, err := payOpenLinkLabel(in.Label)
-	if err != nil {
-		return nil, err
+	fields := map[string]any{"version": gorm.Expr("version + 1")}
+	if in.Label != nil {
+		label, err := payOpenLinkLabel(*in.Label)
+		if err != nil {
+			return nil, err
+		}
+		fields["label"] = label
+	}
+	lo, hi := cur.MinAmountKobo, cur.MaxAmountKobo
+	if in.MinAmountKobo != nil {
+		lo = *in.MinAmountKobo
+	}
+	if in.MaxAmountKobo != nil {
+		hi = *in.MaxAmountKobo
 	}
 	// The range is checked only when it changes: pausing or renaming a link
 	// must still work after the merchant's own limits have moved past it.
-	if in.MinAmountKobo != cur.MinAmountKobo || in.MaxAmountKobo != cur.MaxAmountKobo {
-		if err := payOpenLinkRange(m, in.MinAmountKobo, in.MaxAmountKobo); err != nil {
+	if lo != cur.MinAmountKobo || hi != cur.MaxAmountKobo {
+		if err := payOpenLinkRange(m, lo, hi); err != nil {
 			return nil, err
 		}
+		fields["min_amount_kobo"], fields["max_amount_kobo"] = lo, hi
 	}
-	fields := map[string]any{"label": label, "min_amount_kobo": in.MinAmountKobo, "max_amount_kobo": in.MaxAmountKobo,
-		"version": gorm.Expr("version + 1")}
 	if in.Active != nil {
 		fields["active"] = *in.Active
 	}
@@ -314,22 +360,30 @@ func (s *PayPaymentService) UpdateOpenLink(ctx context.Context, m *models.PayMer
 }
 
 // ReplaceOpenLink gives one of m's open links a new address — a printed QR was
-// copied, say. The old slug stops existing at once; the link keeps its label,
-// range, pause state and every payment made through it. Guarded on the version
-// read, so a replace racing an edit (or another replace) is ErrPayOpenLinkStale
+// copied, say. The old slug stops existing at once and is retired for good
+// (PayRetiredSlug), in the same transaction; the link keeps its label, range,
+// pause state and every payment made through it. Guarded on the version read,
+// so a replace racing an edit (or another replace) is ErrPayOpenLinkStale
 // rather than silently winning.
 func (s *PayPaymentService) ReplaceOpenLink(ctx context.Context, m *models.PayMerchant, mode string, id uuid.UUID) (*models.PayOpenLink, error) {
 	cur, err := s.OpenLinkForMerchant(ctx, m.ID, mode, id)
 	if err != nil {
 		return nil, err
 	}
-	err = payWithFreshSlug(m, func(slug string) error {
-		res := s.db.WithContext(ctx).Model(&models.PayOpenLink{}).Where("id = ? AND version = ?", cur.ID, cur.Version).
-			Updates(map[string]any{"slug": slug, "version": gorm.Expr("version + 1")})
-		if res.Error == nil && res.RowsAffected == 0 {
-			return ErrPayOpenLinkStale
-		}
-		return res.Error
+	// Each try is its own transaction: on Postgres a slug collision aborts the
+	// transaction it happens in, so a retry can't share it.
+	err = s.withFreshSlug(ctx, m, func(slug string) error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&models.PayOpenLink{}).Where("id = ? AND version = ?", cur.ID, cur.Version).
+				Updates(map[string]any{"slug": slug, "version": gorm.Expr("version + 1")})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return ErrPayOpenLinkStale
+			}
+			return tx.Create(&models.PayRetiredSlug{Slug: cur.Slug, OpenLinkID: cur.ID, RetiredAt: s.now()}).Error
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -384,11 +438,10 @@ func (s *PayPaymentService) OpenLinkPayments(ctx context.Context, id uuid.UUID) 
 	return ps, err
 }
 
-// payHideUntriedOpen leaves out open-link payments nobody went on to pay: each
-// visitor who enters an amount makes one, so the ones never locked for paying
-// (locked_at unset) are scan noise, not payments an owner needs to see.
+// payHideUntriedOpen leaves out untried open-link payments
+// (PayPayment.Untried): scan noise, not payments an owner needs to see.
 func payHideUntriedOpen(q *gorm.DB) *gorm.DB {
-	return q.Where("source <> ? OR locked_at IS NOT NULL", models.PaySourceOpen)
+	return q.Where("NOT (" + models.PayUntriedOpenSQL + ")")
 }
 
 // openLinkURL is the address a customer opens: the public checkout's /l/ page.
@@ -461,9 +514,9 @@ func (s *PayPaymentService) CreateFromOpenLink(ctx context.Context, slug string,
 	err = payTryFresh(func() (string, error) { return newPayReference(payOpenReferencePrefix) }, func(reference string) error {
 		var err error
 		p, _, err = s.create(ctx, m, l.Mode, CreatePayPaymentInput{AmountKobo: in.AmountKobo, Currency: "NGN", Reference: reference,
-			Description: note}, payCreateOptions{source: models.PaySourceOpen, openLinkID: &l.ID, maxExpirySeconds: payMaxExpirySeconds})
+			Description: note}, payCreateOptions{source: models.PaySourceOpen, openLinkID: &l.ID, openLinkSlug: l.Slug, maxExpirySeconds: payMaxExpirySeconds})
 		return err
-	}, func(err error) bool { return errors.Is(err, ErrPayLinkReferenceTaken) })
+	}, payReferenceTaken)
 	return p, err
 }
 
@@ -483,10 +536,12 @@ func (s *PayPaymentService) openLinkLabels(ctx context.Context, ids []uuid.UUID)
 	return labels, nil
 }
 
-// openLinkURLIfTaking is l's address while it takes payments, else "" — what
-// the payer's expired page offers as "Start a new payment".
-func (s *PayPaymentService) openLinkURLIfTaking(l *models.PayOpenLink, m *models.PayMerchant, liveEnabled bool) string {
-	if payOpenLinkNotTaking(l, m, liveEnabled) != "" {
+// openLinkURLIfTaking is the address payment p was started at, while it is
+// still open link l's address and l takes payments, else "" — what the payer's
+// expired page offers as "Start a new payment". A link replaced since (a poster
+// was copied) sends nobody from an old payment to its new address.
+func (s *PayPaymentService) openLinkURLIfTaking(p *models.PayPayment, l *models.PayOpenLink, m *models.PayMerchant, liveEnabled bool) string {
+	if p.OpenLinkSlug != l.Slug || payOpenLinkNotTaking(l, m, liveEnabled) != "" {
 		return ""
 	}
 	return s.openLinkURL(l.Slug)

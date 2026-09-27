@@ -76,16 +76,20 @@ func TestPayLink_CreateRefusals(t *testing.T) {
 		"a reference too long":   func(in *CreatePayLinkInput) { in.Reference = strings.Repeat("r", 129) },
 		// Text the payer reads must be what it looks like: no control or
 		// invisible format characters in either field.
-		"RTL override in the description": func(in *CreatePayLinkInput) { in.Description = "Cake \u202egnidde" },
-		"zero-width in the description":   func(in *CreatePayLinkInput) { in.Description = "Ca\u200bke" },
-		"NUL in the description":          func(in *CreatePayLinkInput) { in.Description = "Cake\x00" },
-		"tab in the description":          func(in *CreatePayLinkInput) { in.Description = "Cake\tdeposit" },
-		"zero-width space in the name":    func(in *CreatePayLinkInput) { in.CustomerName = "Ada\u200bObi" },
-		"word joiner in the name":         func(in *CreatePayLinkInput) { in.CustomerName = "Ada\u2060Obi" },
-		"BOM in the description":          func(in *CreatePayLinkInput) { in.Description = "\ufeffCake" },
-		"LTR mark in the description":     func(in *CreatePayLinkInput) { in.Description = "Cake\u200e" },
-		"RTL isolate in the name":         func(in *CreatePayLinkInput) { in.CustomerName = "\u2067Ada" },
-		"RTL override in the name":        func(in *CreatePayLinkInput) { in.CustomerName = "\u202eAda" },
+		"RTL override in the description":     func(in *CreatePayLinkInput) { in.Description = "Cake \u202egnidde" },
+		"zero-width in the description":       func(in *CreatePayLinkInput) { in.Description = "Ca\u200bke" },
+		"NUL in the description":              func(in *CreatePayLinkInput) { in.Description = "Cake\x00" },
+		"tab in the description":              func(in *CreatePayLinkInput) { in.Description = "Cake\tdeposit" },
+		"zero-width space in the name":        func(in *CreatePayLinkInput) { in.CustomerName = "Ada\u200bObi" },
+		"Hangul filler in the name":           func(in *CreatePayLinkInput) { in.CustomerName = "Ada\u3164" },
+		"line separator in the description":   func(in *CreatePayLinkInput) { in.Description = "Cake\u2028deposit" },
+		"grapheme joiner in the description":  func(in *CreatePayLinkInput) { in.Description = "Ca\u034fke" },
+		"a hidden character in the reference": func(in *CreatePayLinkInput) { in.Reference = "INV\u202e1" },
+		"word joiner in the name":             func(in *CreatePayLinkInput) { in.CustomerName = "Ada\u2060Obi" },
+		"BOM in the description":              func(in *CreatePayLinkInput) { in.Description = "\ufeffCake" },
+		"LTR mark in the description":         func(in *CreatePayLinkInput) { in.Description = "Cake\u200e" },
+		"RTL isolate in the name":             func(in *CreatePayLinkInput) { in.CustomerName = "\u2067Ada" },
+		"RTL override in the name":            func(in *CreatePayLinkInput) { in.CustomerName = "\u202eAda" },
 	} {
 		in := payLinkIn()
 		mutate(&in)
@@ -336,10 +340,9 @@ func TestPayLink_ListFiltersBySource(t *testing.T) {
 	}
 }
 
-// An owner's lists split expired in two: the links they called off
-// (status=cancelled) and those that ran out (status=expired). The admin
-// console's "expired" stays both.
-func TestPayLink_ListSplitsCancelledFromExpiredForOwners(t *testing.T) {
+// Every list splits expired in two: payments their merchant called off
+// (status=cancelled) and those that ran out of time (status=expired).
+func TestPayLink_ListSplitsCancelledFromExpired(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
 	cancelled, _ := s.CreateLink(ctx, m, models.PayModeTest, payLinkIn())
@@ -354,25 +357,25 @@ func TestPayLink_ListSplitsCancelledFromExpiredForOwners(t *testing.T) {
 	if _, err := s.ExpireDue(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
-		status string
-		apart  bool
-		want   []uuid.UUID
-	}{
-		{PayListCancelled, true, []uuid.UUID{cancelled.ID}},
-		{models.PayStatusExpired, true, []uuid.UUID{lapsed.ID}},
-		{models.PayStatusPending, true, []uuid.UUID{open.ID}},
-		{models.PayStatusExpired, false, []uuid.UUID{cancelled.ID, lapsed.ID}},
+	for status, want := range map[string][]uuid.UUID{
+		PayListCancelled:        {cancelled.ID},
+		models.PayStatusExpired: {lapsed.ID},
+		models.PayStatusPending: {open.ID},
+		"":                      {cancelled.ID, lapsed.ID, open.ID},
 	} {
-		rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, Status: c.status, ForOwner: c.apart})
-		if err != nil || int(total) != len(c.want) {
-			t.Fatalf("%s (apart=%v): err %v total %d", c.status, c.apart, err, total)
+		rows, total, err := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeTest, Status: status})
+		if err != nil || int(total) != len(want) {
+			t.Fatalf("%q: err %v total %d", status, err, total)
 		}
 		for _, r := range rows {
-			if !slices.Contains(c.want, r.ID) {
-				t.Fatalf("%s (apart=%v) listed %s", c.status, c.apart, r.ID)
+			if !slices.Contains(want, r.ID) {
+				t.Fatalf("%q listed %s", status, r.ID)
 			}
 		}
+	}
+	// The admin console's list is the same list.
+	if _, total, _ := s.AdminList(ctx, &m.ID, models.PayModeTest, models.PayStatusExpired, 1, 20); total != 1 {
+		t.Fatalf("admin expired: %d", total)
 	}
 }
 

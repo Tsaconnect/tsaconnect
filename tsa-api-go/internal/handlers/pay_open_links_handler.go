@@ -21,11 +21,11 @@ import (
 // answers 201 with the open link.
 func (h *PayHandler) OwnerCreateOpenLink(c *gin.Context) {
 	var in services.PayOpenLinkInput
-	m, mode, ok := h.payOwnerLinkWrite(c, &in, true)
+	m, mode, ok := h.payOwnerLinkCreate(c, &in)
 	if !ok {
 		return
 	}
-	l, err := h.payments.CreateOpenLink(c.Request.Context(), m, mode, in)
+	l, err := h.openLinks.CreateOpenLink(c.Request.Context(), m, mode, in)
 	if err != nil {
 		payLinkFail(c, err)
 		return
@@ -46,12 +46,12 @@ func (h *PayHandler) OwnerOpenLinks(c *gin.Context) {
 		return
 	}
 	page, limit := payOwnerPage(c)
-	ls, total, err := h.payments.OpenLinks(c.Request.Context(), m.ID, mode, page, limit)
+	ls, total, err := h.openLinks.OpenLinks(c.Request.Context(), m.ID, mode, page, limit)
 	if err != nil {
 		payOwnerFail(c, err)
 		return
 	}
-	views, err := h.payments.OpenLinkViews(c.Request.Context(), m, ls, h.liveEnabled)
+	views, err := h.openLinks.OpenLinkViews(c.Request.Context(), m, ls, h.liveEnabled)
 	if err != nil {
 		payOwnerFail(c, err)
 		return
@@ -70,24 +70,26 @@ func (h *PayHandler) OwnerOpenLink(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ps, err := h.payments.OpenLinkPayments(c.Request.Context(), l.ID)
+	ps, err := h.openLinks.OpenLinkPayments(c.Request.Context(), l.ID)
 	if err != nil {
 		payOwnerFail(c, err)
 		return
 	}
-	payments, err := h.payments.Views(c.Request.Context(), ps)
-	if err != nil {
-		payOwnerFail(c, err)
-		return
+	// Their link is this one: its label is already here.
+	payments := make([]services.PayPaymentView, len(ps))
+	for i := range ps {
+		payments[i] = h.payments.View(&ps[i])
+		payments[i].LinkLabel = l.Label
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment link", gin.H{"openLink": view, "payments": payments})
 }
 
-// PUT /api/pay/merchant/open-links/:id?mode {label, minAmount, maxAmount,
-// active?, expectedVersion} — answers the open link.
+// PUT /api/pay/merchant/open-links/:id?mode {label?, minAmount?, maxAmount?,
+// active?, expectedVersion} — each field sent replaces the link's, each left
+// out stays as it is. Answers the open link.
 func (h *PayHandler) OwnerUpdateOpenLink(c *gin.Context) {
 	var in services.PayOpenLinkUpdate
-	m, mode, ok := h.payOwnerLinkWrite(c, &in, false)
+	m, mode, ok := h.payOwnerLinkEdit(c, &in)
 	if !ok {
 		return
 	}
@@ -95,7 +97,7 @@ func (h *PayHandler) OwnerUpdateOpenLink(c *gin.Context) {
 	if !ok {
 		return
 	}
-	l, err := h.payments.UpdateOpenLink(c.Request.Context(), m, mode, id, in)
+	l, err := h.openLinks.UpdateOpenLink(c.Request.Context(), m, mode, id, in)
 	if err != nil {
 		payLinkFail(c, err)
 		return
@@ -107,7 +109,7 @@ func (h *PayHandler) OwnerUpdateOpenLink(c *gin.Context) {
 // link (a printed QR was copied, say); the old one stops existing. Answers the
 // open link: the same id, a new slug and url.
 func (h *PayHandler) OwnerReplaceOpenLink(c *gin.Context) {
-	m, mode, ok := h.payOwnerLinkWrite(c, nil, false)
+	m, mode, ok := h.payOwnerLinkEdit(c, nil)
 	if !ok {
 		return
 	}
@@ -115,7 +117,7 @@ func (h *PayHandler) OwnerReplaceOpenLink(c *gin.Context) {
 	if !ok {
 		return
 	}
-	l, err := h.payments.ReplaceOpenLink(c.Request.Context(), m, mode, id)
+	l, err := h.openLinks.ReplaceOpenLink(c.Request.Context(), m, mode, id)
 	if err != nil {
 		payLinkFail(c, err)
 		return
@@ -139,7 +141,7 @@ func (h *PayHandler) payOwnerOpenLink(c *gin.Context) (*models.PayMerchant, *mod
 	if !ok {
 		return nil, nil, false
 	}
-	l, err := h.payments.OpenLinkForMerchant(c.Request.Context(), m.ID, mode, id)
+	l, err := h.openLinks.OpenLinkForMerchant(c.Request.Context(), m.ID, mode, id)
 	if err != nil {
 		payLinkFail(c, err)
 		return nil, nil, false
@@ -160,7 +162,7 @@ func payOpenLinkID(c *gin.Context) (uuid.UUID, bool) {
 // openLinkView is l as its owner reads it. false means the response has been
 // written.
 func (h *PayHandler) openLinkView(c *gin.Context, m *models.PayMerchant, l *models.PayOpenLink) (*services.PayOpenLinkView, bool) {
-	views, err := h.payments.OpenLinkViews(c.Request.Context(), m, []models.PayOpenLink{*l}, h.liveEnabled)
+	views, err := h.openLinks.OpenLinkViews(c.Request.Context(), m, []models.PayOpenLink{*l}, h.liveEnabled)
 	if err != nil {
 		payOwnerFail(c, err)
 		return nil, false
@@ -174,10 +176,20 @@ func (h *PayHandler) answerOpenLink(c *gin.Context, status int, message string, 
 	}
 }
 
+// PayOpenLinkSlugGuard answers not found for a :slug no open link could have —
+// before any limiter keyed on the slug, and before any lookup, so a stray byte
+// in the address never reaches the database.
+func PayOpenLinkSlugGuard(c *gin.Context) {
+	if !services.ValidPayOpenLinkSlug(c.Param("slug")) {
+		payOpenPaymentFail(c, services.ErrPayOpenLinkNotFound)
+		c.Abort()
+	}
+}
+
 // GET /api/pay/public/open/:slug — what the payer's page shows before they
 // enter an amount. No session.
 func (h *PayHandler) PublicOpenLink(c *gin.Context) {
-	v, err := h.payments.OpenLinkPublic(c.Request.Context(), c.Param("slug"), h.liveEnabled)
+	v, err := h.openLinks.OpenLinkPublic(c.Request.Context(), c.Param("slug"), h.liveEnabled)
 	if err != nil {
 		payOpenPaymentFail(c, err)
 		return
@@ -202,7 +214,7 @@ func (h *PayHandler) PublicOpenPayment(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	p, err := h.payments.CreateFromOpenLink(c.Request.Context(), c.Param("slug"), in, h.liveEnabled)
+	p, err := h.openLinks.CreateFromOpenLink(c.Request.Context(), c.Param("slug"), in, h.liveEnabled)
 	if err != nil {
 		payOpenPaymentFail(c, err)
 		return
@@ -222,7 +234,9 @@ func payOpenPaymentFail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, services.ErrPayOpenLinkNotFound):
 		utils.ErrorResponseWithCode(c, http.StatusNotFound, "This payment link doesn't exist", "link_not_found")
-	case errors.Is(err, services.ErrPayOpenLinkClosed):
+	case errors.Is(err, services.ErrPayOpenLinkClosed), errors.Is(err, services.ErrPayMerchantNotReady):
+		// Not ready can't normally get this far (a link with no payout set is
+		// closed), but if it does it is the same thing to the payer.
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "This link isn't taking payments right now", "link_closed")
 	case errors.Is(err, services.ErrPayPaymentInvalid):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, payLinkInvalidMessage(err))

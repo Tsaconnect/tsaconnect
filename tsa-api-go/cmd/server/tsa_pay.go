@@ -80,7 +80,7 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
-	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus)
+	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus).WithOpenLinks(payments)
 	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}
