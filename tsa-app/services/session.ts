@@ -1,8 +1,8 @@
 // services/session.ts
 //
 // The one owner of the signed-in session's access token. Before this, the
-// token lived in five places at once — AsyncStorage under two keys (one raw,
-// one "Bearer "-prefixed), the api.ts singleton, AuthContext state, and a stack
+// token lived in five places at once — AsyncStorage under two keys (each
+// sometimes raw, sometimes "Bearer "-prefixed), the api.ts singleton, AuthContext state, and a stack
 // of axios interceptors that were added on every sign-in and never removed —
 // and nothing refreshed it after cold start. An expired access token surfaced
 // on whichever screen asked first, as a "Please authenticate" alert over a
@@ -29,8 +29,12 @@ import { clearRefreshToken, getRefreshToken, storeRefreshToken } from '@/service
 
 /** api.ts and walletApi read this key (raw token; a "Bearer " prefix is tolerated). */
 const ACCESS_TOKEN_KEY = 'authToken';
-/** Older screens read this key and send it as the Authorization header verbatim. */
-const LEGACY_BEARER_KEY = 'token';
+/**
+ * Older readers of this key expect the raw token: NotificationContext puts it
+ * straight into the notifications WebSocket URL, where a "Bearer " prefix (a
+ * space) makes Android's native WebSocket throw and crash the app.
+ */
+const LEGACY_TOKEN_KEY = 'token';
 /** Account details written at sign-in; kept across a plain sign-out for biometric sign-in back. */
 const ACCOUNT_KEYS = ['userId', 'role', 'userData'];
 
@@ -100,14 +104,14 @@ async function storeTokens(token: string, refreshToken?: string) {
   accessToken = stripBearer(token);
   await AsyncStorage.multiSet([
     [ACCESS_TOKEN_KEY, accessToken],
-    [LEGACY_BEARER_KEY, bearer(accessToken)],
+    [LEGACY_TOKEN_KEY, accessToken],
   ]);
 }
 
 /** Reads the stored access token into memory at cold start. Tolerates either key and either format. */
 export async function loadStoredSession(): Promise<string | null> {
   const stored =
-    (await AsyncStorage.getItem(ACCESS_TOKEN_KEY)) ?? (await AsyncStorage.getItem(LEGACY_BEARER_KEY));
+    (await AsyncStorage.getItem(ACCESS_TOKEN_KEY)) ?? (await AsyncStorage.getItem(LEGACY_TOKEN_KEY));
   if (!stored) return null;
   await setSession(stored);
   return accessToken;
@@ -131,7 +135,7 @@ export async function setSession(token: string, refreshToken?: string): Promise<
 export async function clearSession(opts: { forgetRefreshToken: boolean }): Promise<void> {
   generation += 1;
   accessToken = null;
-  const keys = [ACCESS_TOKEN_KEY, LEGACY_BEARER_KEY];
+  const keys = [ACCESS_TOKEN_KEY, LEGACY_TOKEN_KEY];
   if (opts.forgetRefreshToken) keys.push(...ACCOUNT_KEYS);
   await AsyncStorage.multiRemove(keys);
   if (opts.forgetRefreshToken) await clearRefreshToken();
