@@ -34,6 +34,8 @@ type CheckoutHandler struct {
 	// interfaces so tests can stand in for the chain; nil means unavailable.
 	otcService mcgpPricer
 	feeRates   escrowRateReader
+	// walletBalances reads the buyer's pay-token balance on Sonic mainnet.
+	walletBalances walletBalanceReader
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -54,7 +56,36 @@ func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *
 	if es != nil {
 		ch.feeRates = es
 	}
+	if bs != nil {
+		ch.walletBalances = bs
+	}
 	return ch
+}
+
+// walletBalanceReader is the balance read a checkout needs. *BlockchainService
+// fills it.
+type walletBalanceReader interface {
+	DepositBalance(chainKey, token, address string) (*big.Int, error)
+}
+
+// walletShortfall returns a buyer-facing refusal when the wallet the escrow
+// will pull from holds less than total of token, and "" otherwise. An
+// unreadable balance is not a refusal: the chain still decides at escrow time.
+func (ch *CheckoutHandler) walletShortfall(wallet, token string, total *big.Int) string {
+	if ch.walletBalances == nil || wallet == "" {
+		return ""
+	}
+	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
+	if err != nil {
+		log.Printf("[checkout] balance read for %s %s failed (%v); not pre-checking", wallet, token, err)
+		return ""
+	}
+	if balance.Cmp(total) >= 0 {
+		return ""
+	}
+	decimals := tokenDecimals(token)
+	return fmt.Sprintf("Not enough %s in your wallet. This order needs %s %s and your wallet holds %s %s.",
+		token, formatTokenBalance(total, decimals), token, formatTokenBalance(balance, decimals), token)
 }
 
 // mcgpPricer is the OTC read that prices MCGP in USD.
@@ -1069,13 +1100,21 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	// The buyer confirmed a quoted total; if anything re-priced since (MCGP
 	// rate, fee rate, stock, shipping), stop before any order exists rather
 	// than have the wallet sign an amount they never saw.
-	if req.ExpectedTotal != "" {
-		if total := cartTotal(lines, rates.gasFee); total.String() != req.ExpectedTotal {
-			tx.Rollback()
-			utils.ErrorResponseWithCode(c, http.StatusConflict,
-				"The total changed since you confirmed it. Review the new amount before paying.", "price_changed")
-			return
-		}
+	total := cartTotal(lines, rates.gasFee)
+	if req.ExpectedTotal != "" && total.String() != req.ExpectedTotal {
+		tx.Rollback()
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"The total changed since you confirmed it. Review the new amount before paying.", "price_changed")
+		return
+	}
+
+	// The escrow pulls the whole total from the buyer's wallet and reverts on
+	// a shortfall. Refuse here, before any order takes stock — otherwise the
+	// buyer finds out only after signing, and paying gas for, an approve.
+	if short := ch.walletShortfall(user.WalletAddress, token, total); short != "" {
+		tx.Rollback()
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, short, "insufficient_balance")
+		return
 	}
 
 	// Determine buyer upline
