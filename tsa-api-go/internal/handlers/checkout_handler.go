@@ -68,19 +68,26 @@ type walletBalanceReader interface {
 	DepositBalance(chainKey, token, address string) (*big.Int, error)
 }
 
-// walletShortfall returns a buyer-facing refusal when the wallet the escrow
-// will pull from holds less than total of token, and "" otherwise. An
-// unreadable balance is not a refusal: the chain still decides at escrow time.
-func (ch *CheckoutHandler) walletShortfall(wallet, token string, total *big.Int) string {
+// walletBalance reads the pay-token balance of the wallet the escrow will
+// pull from, or nil when it cannot be read — an unknown balance never blocks a
+// checkout, the chain still decides at escrow time. Callers read it before
+// opening a DB transaction, so the RPC never holds a pooled connection.
+func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
 	if ch.walletBalances == nil || wallet == "" {
-		return ""
+		return nil
 	}
 	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
 	if err != nil {
 		log.Printf("[checkout] balance read for %s %s failed (%v); not pre-checking", wallet, token, err)
-		return ""
+		return nil
 	}
-	if balance.Cmp(total) >= 0 {
+	return balance
+}
+
+// shortfallMessage is the buyer-facing refusal when a known balance is below
+// total, and "" otherwise.
+func shortfallMessage(token string, total, balance *big.Int) string {
+	if balance == nil || balance.Cmp(total) >= 0 {
 		return ""
 	}
 	decimals := tokenDecimals(token)
@@ -1077,6 +1084,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
 	}
+	balance := ch.walletBalance(user.WalletAddress, token)
 
 	// Wrap everything in a DB transaction
 	tx := config.DB.Begin()
@@ -1111,7 +1119,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	// The escrow pulls the whole total from the buyer's wallet and reverts on
 	// a shortfall. Refuse here, before any order takes stock — otherwise the
 	// buyer finds out only after signing, and paying gas for, an approve.
-	if short := ch.walletShortfall(user.WalletAddress, token, total); short != "" {
+	if short := shortfallMessage(token, total, balance); short != "" {
 		tx.Rollback()
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, short, "insufficient_balance")
 		return
@@ -1677,6 +1685,14 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 		return nil, nil, nil, "", false
 	}
 
+	// The buyer is paying now: restart the unpaid-order clock, so the expiry
+	// cannot cancel an order whose escrow tx is about to be sent or mined.
+	if err := services.TouchUnpaidOrder(config.DB, order.ID); err != nil {
+		log.Printf("[checkout] touch order %s failed: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare payment")
+		return nil, nil, nil, "", false
+	}
+
 	return &order, user, &seller, tokenAddr, true
 }
 
@@ -1844,7 +1860,11 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
+	// A cancelled order still goes on to verification: if its escrow is proven
+	// on-chain, the buyer's money is held and the order is restored (see
+	// services.MarkOrderEscrowed). Without proof it is refused below.
+	if order.Status != models.OrderStatusCancelled &&
+		!isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
 		return
 	}
@@ -1891,7 +1911,16 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		"escrow_expires_at":       escrowExpires,
 	}
 
-	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+	// Guarded on the status: the unpaid-order expiry or a buyer cancel may
+	// have run while the receipts were being verified.
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
+		_, err := services.MarkOrderEscrowed(tx, &order, updates)
+		return err
+	}); errors.Is(err, services.ErrOrderNotPayable) {
+		utils.ErrorResponse(c, http.StatusConflict, "This order was already updated — refresh your orders")
+		return
+	} else if err != nil {
+		log.Printf("[checkout] mark order %s escrowed failed: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}

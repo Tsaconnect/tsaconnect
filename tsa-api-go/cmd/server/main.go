@@ -536,13 +536,13 @@ func main() {
 	scheduler.Register(jobs.NewBookingRequestExpiry(
 		services.NewBookingRequestService(config.DB), time.Hour))
 
-	// Marketplace orders: cancel the ones nobody paid for within the hour and
-	// return their stock, which placing the order took. Only where the escrow
-	// can be read — an order is never cancelled without proof the escrow holds
-	// nothing for it.
+	// Marketplace orders: cancel the ones with no payment activity for an hour
+	// and return their stock, which placing the order took. Only where the
+	// escrow can be read — an order is never cancelled without proof the
+	// escrow holds nothing for it.
 	if sonicClient != nil {
 		scheduler.Register(jobs.NewUnpaidOrderExpiry(
-			services.NewUnpaidOrderExpiryService(config.DB, escrowService), 10*time.Minute),
+			services.NewUnpaidOrderExpiryService(config.DB, escrowService, eventBus), 10*time.Minute),
 			jobs.AlertOnFailureStreak())
 	}
 
