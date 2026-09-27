@@ -536,6 +536,16 @@ func main() {
 	scheduler.Register(jobs.NewBookingRequestExpiry(
 		services.NewBookingRequestService(config.DB), time.Hour))
 
+	// Marketplace orders with no payment activity for an hour are settled
+	// against the escrow: cancelled with their stock returned when it holds
+	// nothing for them, marked escrowed when it holds a matching payment the
+	// app never reported. Only where the escrow can be read.
+	if sonicClient != nil {
+		scheduler.Register(jobs.NewUnpaidOrderExpiry(
+			services.NewUnpaidOrderExpiryService(config.DB, escrowService, blockchainService, eventBus), 10*time.Minute),
+			jobs.AlertOnFailureStreak())
+	}
+
 	// Idempotency-Key cache: delete replayable responses past their 24h window.
 	// They hold whatever the endpoint answered (a sell intent's bank details
 	// among them). Database-only tidy-up, not a money path, so not alert-wired.

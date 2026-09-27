@@ -5,6 +5,21 @@ import type { UnsignedTx } from './orderApi';
 const TX_TIMEOUT_MS = 90_000;
 
 /**
+ * The transaction was broadcast but its confirmation could not be seen — the
+ * wait timed out, or the RPC failed while polling. It may still be mined, so
+ * the hash is kept: a caller that retries must settle this tx, not send
+ * another. A tx that reverted is not this error.
+ */
+export class TxNotConfirmedError extends Error {
+  readonly txHash: string;
+  constructor(txHash: string, message = 'Transaction confirmation timed out') {
+    super(message);
+    this.name = 'TxNotConfirmedError';
+    this.txHash = txHash;
+  }
+}
+
+/**
  * Sign a transaction locally and broadcast it on-chain.
  * @param chainKey - Which chain to broadcast on (e.g. 'sonic', 'bsc')
  */
@@ -29,12 +44,20 @@ export async function signAndBroadcast(
   // Routes through fallback RPCs if the primary is unreachable.
   const txResponse = await broadcastTransaction(chainKey, signed);
 
-  const receipt = await Promise.race([
-    txResponse.wait(),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Transaction confirmation timed out')), TX_TIMEOUT_MS)
-    ),
-  ]);
+  let receipt;
+  try {
+    receipt = await Promise.race([
+      txResponse.wait(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new TxNotConfirmedError(txResponse.hash)), TX_TIMEOUT_MS)
+      ),
+    ]);
+  } catch (e: any) {
+    // ethers reports a mined-and-reverted tx as CALL_EXCEPTION: that one is
+    // settled, and its reason is what the caller should show.
+    if (e instanceof TxNotConfirmedError || e?.code === 'CALL_EXCEPTION') throw e;
+    throw new TxNotConfirmedError(txResponse.hash, e?.message || 'Transaction not confirmed');
+  }
 
   if (!receipt) throw new Error('No receipt returned');
   return receipt.hash;

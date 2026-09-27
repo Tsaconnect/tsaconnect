@@ -32,6 +32,7 @@ const productEscrowABI = `[
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"orders","outputs":[{"name":"buyer","type":"address"},{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"productAmount","type":"uint256"},{"name":"shippingAmount","type":"uint256"},{"name":"platformFee","type":"uint256"},{"name":"buyerUpline","type":"address"},{"name":"createdAt","type":"uint256"},{"name":"sellerDelivered","type":"bool"},{"name":"buyerConfirmed","type":"bool"},{"name":"refundRequested","type":"bool"},{"name":"resolved","type":"bool"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
 ]`
 
@@ -268,6 +269,58 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 		return nil, fmt.Errorf("transaction failed")
 	}
 	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
+}
+
+// OnChainOrder is an order as the escrow's orders(id) getter records it.
+type OnChainOrder struct {
+	Buyer, Seller, Token                       common.Address
+	ProductAmount, ShippingAmount, PlatformFee *big.Int
+	CreatedAt                                  time.Time
+	// Resolved: the escrow has paid it out (refund or release); it holds nothing.
+	Resolved bool
+}
+
+// EscrowedOrder reads the configured escrow's record of orderId, or nil when
+// it holds none (createOrder records the buyer, so a zero buyer means nothing
+// was ever escrowed). Only a successful read is an answer — an RPC failure is
+// an error, never "not escrowed", because callers release stock on nil.
+func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*OnChainOrder, error) {
+	if s.caller == nil {
+		return nil, fmt.Errorf("blockchain client not available")
+	}
+	data, err := parsedEscrowABI.Pack("orders", orderId)
+	if err != nil {
+		return nil, fmt.Errorf("pack orders: %w", err)
+	}
+	escrow := common.HexToAddress(s.escrowAddress)
+	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("orders call: %w", err)
+	}
+	vals, err := parsedEscrowABI.Unpack("orders", out)
+	if err != nil || len(vals) < 12 {
+		return nil, fmt.Errorf("decode orders: %v (%d values)", err, len(vals))
+	}
+	buyer, ok1 := vals[0].(common.Address)
+	seller, ok2 := vals[1].(common.Address)
+	token, ok3 := vals[2].(common.Address)
+	product, ok4 := vals[3].(*big.Int)
+	shipping, ok5 := vals[4].(*big.Int)
+	fee, ok6 := vals[5].(*big.Int)
+	created, ok7 := vals[7].(*big.Int)
+	resolved, ok8 := vals[11].(bool)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8) {
+		return nil, fmt.Errorf("decode orders: unexpected value types")
+	}
+	if buyer == (common.Address{}) {
+		return nil, nil
+	}
+	return &OnChainOrder{
+		Buyer: buyer, Seller: seller, Token: token,
+		ProductAmount: product, ShippingAmount: shipping, PlatformFee: fee,
+		CreatedAt: time.Unix(created.Int64(), 0),
+		Resolved:  resolved,
+	}, nil
 }
 
 func findOrderCreated(logs []*types.Log, escrowAddr common.Address, expectedOrderID [32]byte) (*EscrowCreated, error) {

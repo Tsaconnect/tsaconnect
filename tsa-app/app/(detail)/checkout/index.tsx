@@ -8,7 +8,7 @@
 // (POST /orders/quote), which is priced by the same code that creates the
 // orders — so the total a buyer confirms is the total the wallet is asked to
 // approve. The escrow sign/broadcast/submit sequence itself is unchanged.
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,13 +18,10 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
   createOrders,
-  prepareApprove,
-  prepareEscrow,
-  submitEscrow,
   Order,
   type CartQuote,
 } from '@/services/orderApi';
-import { signAndBroadcast } from '@/services/transaction';
+import { escrowOrder, OrderNotPayableError, type EscrowProgress } from '@/services/serviceCheckout';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
@@ -55,20 +52,6 @@ import {
 type CheckoutStep = 'review' | 'signing' | 'success';
 
 const SUPPORTED_TOKENS = ['USDC', 'USDT', 'MCGP'] as const;
-
-/** Parse blockchain/signing errors into user-friendly messages. */
-function friendlyTxError(err: any): string {
-  const msg = err?.message || err?.toString() || '';
-  if (msg.includes('INSUFFICIENT_FUNDS') || msg.includes('insufficient funds'))
-    return 'Not enough S (Sonic) in your wallet to cover gas fees. Please top up your wallet with S and try again.';
-  if (msg.includes('user rejected') || msg.includes('User denied') || msg.includes('ACTION_REJECTED'))
-    return 'Transaction was cancelled.';
-  if (msg.includes('nonce'))
-    return 'Transaction conflict — please wait a moment and try again.';
-  if (msg.includes('UNPREDICTABLE_GAS_LIMIT') || msg.includes('execution reverted'))
-    return 'Transaction would fail on-chain. Please check your token balance and try again.';
-  return msg;
-}
 
 // Brand-identity colors for each stablecoin/token (used only to tint the token
 // icon chip so the selector reads as the real coin). These are token identity,
@@ -283,6 +266,7 @@ const CheckoutScreen = () => {
     setSigningError(null);
     setCompletedOrders([]);
 
+    let newOrders: Order[];
     try {
       const createResult = await createOrders(
         selectedToken,
@@ -308,50 +292,62 @@ const CheckoutScreen = () => {
       if (!createResult.success || !createResult.data?.orders) {
         throw new Error(createResult.message || 'Failed to create orders');
       }
+      newOrders = createResult.data.orders;
+    } catch (err: any) {
+      console.error('Checkout create-orders error:', err);
+      setSigningError(err.message || 'Something went wrong');
+      return;
+    }
 
-      const newOrders = createResult.data.orders;
-      setOrders(newOrders);
-      setCurrentOrderIndex(0);
+    orderProgress.current = {};
+    setUnpayable([]);
+    setOrders(newOrders);
+    setCurrentOrderIndex(0);
+    await payOrders(newOrders, []);
+  };
 
-      for (let i = 0; i < newOrders.length; i++) {
+  // What each created order's payment has already done on-chain, so a retry
+  // resumes where it stopped (see EscrowProgress).
+  const orderProgress = useRef<Record<string, EscrowProgress>>({});
+  // Orders the server says can no longer be paid (cancelled or expired).
+  const [unpayable, setUnpayable] = useState<string[]>([]);
+  // The same list, readable inside a payment run that started before it grew.
+  const unpayableRef = useRef<string[]>([]);
+  unpayableRef.current = unpayable;
+  // One payment run at a time: a double tap on "Try again" must not sign twice.
+  const paying = useRef(false);
+
+  // Pays each order not skipped through the shared escrow sequence. The run
+  // succeeds only when every order ends up paid.
+  const payOrders = async (list: Order[], skip: string[]) => {
+    if (paying.current) return;
+    paying.current = true;
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const order = list[i];
+        if (skip.includes(order.id)) continue;
         setCurrentOrderIndex(i);
-        const order = newOrders[i];
-
-        // Step A: Prepare & broadcast approve tx
-        setSigningPhase('approving_token');
-        const approveResult = await prepareApprove(order.id);
-        if (!approveResult.success || !approveResult.data) {
-          throw new Error(approveResult.message || 'Failed to prepare approval');
-        }
-
-        let approveTxHash: string;
         try {
-          approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
-        } catch (e: any) {
-          throw new Error(friendlyTxError(e));
+          await escrowOrder(
+            order,
+            (phase) => {
+              if (phase === 'approving_token' || phase === 'creating_escrow' || phase === 'submitting') {
+                setSigningPhase(phase);
+              }
+            },
+            (orderProgress.current[order.id] ??= {}),
+          );
+        } catch (e) {
+          if (e instanceof OrderNotPayableError) {
+            unpayableRef.current = [...unpayableRef.current, order.id];
+            setUnpayable(unpayableRef.current);
+          }
+          throw e;
         }
-
-        // Step B: Prepare escrow tx (after approve is on-chain, so gas estimation works)
-        setSigningPhase('creating_escrow');
-        const escrowResult = await prepareEscrow(order.id);
-        if (!escrowResult.success || !escrowResult.data) {
-          throw new Error(escrowResult.message || 'Failed to prepare escrow');
-        }
-
-        let escrowTxHash: string;
-        try {
-          escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
-        } catch (e: any) {
-          throw new Error(friendlyTxError(e));
-        }
-
-        setSigningPhase('submitting');
-        const submitResult = await submitEscrow(order.id, approveTxHash, escrowTxHash);
-        if (!submitResult.success) {
-          throw new Error(submitResult.message || 'Failed to submit escrow');
-        }
-
         setCompletedOrders((prev) => [...prev, order.id]);
+      }
+      if (unpayableRef.current.length > 0) {
+        throw new Error('Some orders could no longer be paid — they were cancelled. Nothing was charged for them.');
       }
 
       setSigningPhase('done');
@@ -362,7 +358,15 @@ const CheckoutScreen = () => {
     } catch (err: any) {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');
+    } finally {
+      paying.current = false;
     }
+  };
+
+  const retryPayment = () => {
+    if (paying.current) return;
+    setSigningError(null);
+    payOrders(orders, [...completedOrders, ...unpayable]);
   };
 
   // ===== HEADER =====
@@ -479,12 +483,15 @@ const CheckoutScreen = () => {
           error={signingError}
           completedCount={completedOrders.length}
           onViewOrders={() => router.replace('/(dashboard)/orderlist')}
+          ordersCreated={orders.length > 0}
+          onRetry={orders.length > completedOrders.length + unpayable.length ? retryPayment : undefined}
           onBackToCheckout={() => {
             setStep('review');
             setSigningError(null);
             setSigningPhase('idle');
             setOrders([]);
             setCompletedOrders([]);
+            setUnpayable([]);
             loadCart();
           }}
         />

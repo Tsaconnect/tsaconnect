@@ -440,7 +440,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 		return
 	}
 
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), r.Token)
+	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), r.Token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
@@ -479,6 +479,9 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	if errMsg != "" {
 		tx.Rollback()
 		utils.ErrorResponse(c, status, errMsg)
+		return
+	}
+	if refuseShortfall(c, tx, strings.ToUpper(r.Token), orderPull(order, rates.gasFee), balance) {
 		return
 	}
 

@@ -34,6 +34,8 @@ type CheckoutHandler struct {
 	// interfaces so tests can stand in for the chain; nil means unavailable.
 	otcService mcgpPricer
 	feeRates   escrowRateReader
+	// walletBalances reads the buyer's pay-token balance on Sonic mainnet.
+	walletBalances walletBalanceReader
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -54,7 +56,84 @@ func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *
 	if es != nil {
 		ch.feeRates = es
 	}
+	if bs != nil {
+		ch.walletBalances = bs
+	}
 	return ch
+}
+
+// walletBalanceReader is the balance read a checkout needs. *BlockchainService
+// fills it; its code check keeps a mis-set token address reading as unknown
+// rather than as a zero balance that would refuse every checkout.
+type walletBalanceReader interface {
+	DepositBalance(chainKey, token, address string) (*big.Int, error)
+}
+
+// walletBalance reads the pay-token balance of the wallet the escrow will
+// pull from, or nil when it cannot be read — an unknown balance never blocks a
+// checkout, the chain still decides at escrow time. Callers read it before
+// opening a DB transaction, so the RPC never holds a pooled connection.
+func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
+	if ch.walletBalances == nil || wallet == "" {
+		return nil
+	}
+	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
+	if err != nil {
+		log.Printf("[checkout] balance read for %s %s failed (%v); not pre-checking", wallet, token, err)
+		return nil
+	}
+	return balance
+}
+
+// balanceReadBudget bounds how long a checkout waits on the balance read; past
+// it the balance is unknown, which never blocks.
+const balanceReadBudget = 3 * time.Second
+
+// ratesAndBalance resolves the pricing rates and, alongside them, the buyer's
+// balance of token — both chain reads, neither needing the other, and both
+// done before a DB transaction opens. A slow balance read is abandoned, never
+// waited on past balanceReadBudget or a failed pricing read.
+func (ch *CheckoutHandler) ratesAndBalance(ctx context.Context, token, wallet string) (pricingRates, *big.Int, *cartPricingError) {
+	read := make(chan *big.Int, 1)
+	go func() { read <- ch.walletBalance(wallet, strings.ToUpper(token)) }()
+	rates, perr := ch.resolvePricingRates(ctx, token)
+	if perr != nil {
+		return rates, nil, perr
+	}
+	select {
+	case balance := <-read:
+		return rates, balance, nil
+	case <-time.After(balanceReadBudget):
+		log.Printf("[checkout] balance read for %s %s exceeded %s; not pre-checking", wallet, token, balanceReadBudget)
+		return rates, nil, nil
+	case <-ctx.Done():
+		return rates, nil, nil
+	}
+}
+
+// refuseShortfall answers 400 insufficient_balance, rolling tx back, when a
+// known balance cannot cover total: the escrow pulls the whole total and
+// reverts on a shortfall, which the buyer would otherwise meet only after
+// signing, and paying gas for, an approve.
+func refuseShortfall(c *gin.Context, tx *gorm.DB, token string, total, balance *big.Int) bool {
+	short := shortfallMessage(token, total, balance)
+	if short == "" {
+		return false
+	}
+	tx.Rollback()
+	utils.ErrorResponseWithCode(c, http.StatusBadRequest, short, "insufficient_balance")
+	return true
+}
+
+// shortfallMessage is the buyer-facing refusal when a known balance is below
+// total, and "" otherwise.
+func shortfallMessage(token string, total, balance *big.Int) string {
+	if balance == nil || balance.Cmp(total) >= 0 {
+		return ""
+	}
+	decimals := tokenDecimals(token)
+	return fmt.Sprintf("Not enough %s in your wallet. This order needs %s %s and your wallet holds %s %s.",
+		token, formatTokenBalance(total, decimals), token, formatTokenBalance(balance, decimals), token)
 }
 
 // mcgpPricer is the OTC read that prices MCGP in USD.
@@ -1022,6 +1101,16 @@ func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 	return &cartCheckout{user: user, req: req, token: token, cart: cart, items: items, delivery: delivery}, true
 }
 
+// orderPull is what the escrow pulls from the buyer's wallet for one order:
+// its TotalAmount plus the escrow's gas fee.
+func orderPull(order *models.Order, gasFee *big.Int) *big.Int {
+	total, _ := new(big.Int).SetString(order.TotalAmount, 10)
+	if total == nil {
+		total = new(big.Int)
+	}
+	return total.Add(total, gasFee)
+}
+
 // cartTotal is everything the buyer's wallet pays for lines: each order's
 // TotalAmount plus the escrow's gas fee per order.
 func cartTotal(lines []pricedCartLine, gasFee *big.Int) *big.Int {
@@ -1041,7 +1130,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	user, req, token, cart, items := in.user, in.req, in.token, in.cart, in.items
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
 
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
@@ -1069,13 +1158,17 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	// The buyer confirmed a quoted total; if anything re-priced since (MCGP
 	// rate, fee rate, stock, shipping), stop before any order exists rather
 	// than have the wallet sign an amount they never saw.
-	if req.ExpectedTotal != "" {
-		if total := cartTotal(lines, rates.gasFee); total.String() != req.ExpectedTotal {
-			tx.Rollback()
-			utils.ErrorResponseWithCode(c, http.StatusConflict,
-				"The total changed since you confirmed it. Review the new amount before paying.", "price_changed")
-			return
-		}
+	total := cartTotal(lines, rates.gasFee)
+	if req.ExpectedTotal != "" && total.String() != req.ExpectedTotal {
+		tx.Rollback()
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"The total changed since you confirmed it. Review the new amount before paying.", "price_changed")
+		return
+	}
+
+	// Refused before any order takes stock.
+	if refuseShortfall(c, tx, token, total, balance) {
+		return
 	}
 
 	// Determine buyer upline
@@ -1381,7 +1474,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		buyerCountry = user.Country
 	}
 
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
@@ -1444,6 +1537,9 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	if errMsg != "" {
 		tx.Rollback()
 		utils.ErrorResponse(c, status, errMsg)
+		return
+	}
+	if refuseShortfall(c, tx, token, orderPull(order, rates.gasFee), balance) {
 		return
 	}
 	if err := tx.Commit().Error; err != nil {
@@ -1613,7 +1709,9 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 	}
 
 	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status))
+		// Coded so the app stops offering a retry that can never succeed.
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status), "order_not_payable")
 		return nil, nil, nil, "", false
 	}
 
@@ -1635,6 +1733,14 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 	tokenAddr := ch.BlockchainService.TokenAddress("sonic", order.Token)
 	if tokenAddr == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured", order.Token))
+		return nil, nil, nil, "", false
+	}
+
+	// The buyer is paying now: restart the unpaid-order clock, so the expiry
+	// cannot cancel an order whose escrow tx is about to be sent or mined.
+	if err := services.TouchUnpaidOrder(config.DB, order.ID); err != nil {
+		log.Printf("[checkout] touch order %s failed: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare payment")
 		return nil, nil, nil, "", false
 	}
 
@@ -1703,8 +1809,7 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 
 	// The escrow pulls product + shipping + platformFee + its gas fee, so the
 	// approve covers exactly that, with the gas read from the escrow itself.
-	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
-	approveAmount := new(big.Int).Add(totalAmount, rates.gasFee)
+	approveAmount := orderPull(order, rates.gasFee)
 
 	client := ch.BlockchainService.ClientForChain("sonic")
 	if client == nil {
@@ -1805,9 +1910,50 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
+	switch {
+	case order.Status == models.OrderStatusEscrowed:
+		// Already recorded — by an earlier submit whose response was lost, or
+		// by the unpaid-order sweep. A retry proving the same escrow succeeds.
+		created, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID))
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Cannot submit escrow: order is in escrowed status")
+			return
+		}
+		if order.EscrowTxHash == "" {
+			if err := config.DB.Model(&models.Order{}).
+				Where("id = ? AND (escrow_tx_hash IS NULL OR escrow_tx_hash = '')", order.ID).
+				Updates(map[string]interface{}{"approve_tx_hash": req.ApproveTxHash, "escrow_tx_hash": req.EscrowTxHash}).Error; err != nil {
+				log.Printf("[checkout] record tx hashes for order %s failed: %v", order.ID, err)
+			}
+		}
+		expires := time.Now().Add(services.EscrowWindow)
+		if order.EscrowExpiresAt != nil {
+			expires = *order.EscrowExpiresAt
+		}
+		respondEscrowSubmitted(c, order.ID, created.OrderID, expires)
 		return
+
+	case order.Status == models.OrderStatusCancelled && order.EscrowTxHash == "":
+		// A payment that reached escrow after the order was cancelled is not
+		// revived — its stock may be resold, and the cancel may be the
+		// seller's. It is surfaced so the buyer is refunded.
+		if _, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID)); err == nil {
+			log.Printf("[checkout] ALERT paid_after_cancel=1 order=%s escrow_tx=%s: payment reached escrow after the order was cancelled", order.ID, req.EscrowTxHash)
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"Your payment reached escrow after this order was cancelled. Contact support to have it refunded.", "order_not_payable")
+			return
+		}
+	}
+	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status), "order_not_payable")
+		return
+	}
+
+	// Reporting a payment is payment activity: keep the unpaid-order expiry off
+	// an order whose escrow tx may still be confirming.
+	if err := services.TouchUnpaidOrder(config.DB, order.ID); err != nil {
+		log.Printf("[checkout] touch order %s failed: %v", order.ID, err)
 	}
 
 	// Verify approve tx
@@ -1834,64 +1980,34 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	escrowExpires := time.Now().Add(30 * 24 * time.Hour)
-	updates := map[string]interface{}{
-		"status":            models.OrderStatusEscrowed,
-		"approve_tx_hash":   req.ApproveTxHash,
-		"escrow_tx_hash":    req.EscrowTxHash,
-		"contract_order_id": fmt.Sprintf("0x%x", created.OrderID),
-		// Store what the escrow actually recorded, so fee settlement and every
-		// later screen read the amounts it holds, not the ones we asked for.
-		"product_amount":  created.ProductAmount.String(),
-		"shipping_amount": created.ShippingAmount.String(),
-		"platform_fee":    created.PlatformFee.String(),
-		"total_amount": new(big.Int).Add(
-			new(big.Int).Add(created.ProductAmount, created.ShippingAmount), created.PlatformFee,
-		).String(),
-		"escrow_contract_address": ch.EscrowService.CurrentEscrowAddress(),
-		"escrow_expires_at":       escrowExpires,
-	}
-
-	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+	expires := time.Now().Add(services.EscrowWindow)
+	updates := services.EscrowedOrderUpdates(created.OrderID, created.ProductAmount, created.ShippingAmount,
+		created.PlatformFee, ch.EscrowService.CurrentEscrowAddress(), expires)
+	updates["approve_tx_hash"] = req.ApproveTxHash
+	updates["escrow_tx_hash"] = req.EscrowTxHash
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
+		return services.MarkOrderEscrowed(tx, order.ID, updates)
+	}); errors.Is(err, services.ErrOrderNotPayable) {
+		// Recorded or cancelled while the receipts were being verified; a retry
+		// lands in the matching branch above.
+		utils.ErrorResponse(c, http.StatusConflict, "This order changed while your payment was being confirmed. Tap Try again.")
+		return
+	} else if err != nil {
+		log.Printf("[checkout] mark order %s escrowed failed: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
 
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderEscrowed,
-		UserID:  user.ID,
-		Title:   "Order Escrowed",
-		Message: fmt.Sprintf("Your payment for order %s has been escrowed", order.ID),
-		Data: map[string]interface{}{
-			"orderId":         order.ID.String(),
-			"status":          models.OrderStatusEscrowed,
-			"escrowExpiresAt": escrowExpires,
-		},
-	})
-	sellerTitle := "Payment Received — Ship Order"
-	sellerMsg := fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8])
-	if order.Kind == models.OrderKindService {
-		sellerTitle = "Payment Received — Provide Service"
-		sellerMsg = fmt.Sprintf("Payment for service order #%s has been escrowed. Provide the service, then mark it rendered.", order.ID.String()[:8])
-	}
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderEscrowed,
-		UserID:  order.SellerID,
-		Title:   sellerTitle,
-		Message: sellerMsg,
-		Data: map[string]interface{}{
-			"orderId":         order.ID.String(),
-			"status":          models.OrderStatusEscrowed,
-			"escrowExpiresAt": escrowExpires,
-			"role":            "seller",
-		},
-	})
+	services.NotifyOrderEscrowed(ch.EventBus, &order, expires)
+	respondEscrowSubmitted(c, order.ID, created.OrderID, expires)
+}
 
+func respondEscrowSubmitted(c *gin.Context, orderID uuid.UUID, contractOrderID [32]byte, expires time.Time) {
 	utils.SuccessResponse(c, http.StatusOK, "Escrow submitted successfully", gin.H{
-		"orderId":         order.ID,
+		"orderId":         orderID,
 		"status":          models.OrderStatusEscrowed,
-		"contractOrderId": fmt.Sprintf("0x%x", created.OrderID),
-		"escrowExpiresAt": escrowExpires,
+		"contractOrderId": fmt.Sprintf("0x%x", contractOrderID),
+		"escrowExpiresAt": expires,
 	})
 }
 
@@ -2537,24 +2653,17 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
 			return
 		}
-		if err := tx.Model(&order).Updates(map[string]interface{}{
-			"status":     models.OrderStatusCancelled,
-			"updated_at": time.Now(),
-		}).Error; err != nil {
+		cancelled, err := services.CancelUnpaidOrder(tx, &order)
+		if err != nil {
 			tx.Rollback()
+			log.Printf("CancelOrder error for order %s: %v", order.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
 			return
 		}
-		// Services hold no inventory, so there is nothing to restore.
-		if order.Kind != models.OrderKindService {
-			if err := tx.Model(&models.Product{}).
-				Where("id = ?", order.ProductID).
-				UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-				tx.Rollback()
-				log.Printf("CancelOrder stock restore error for order %s: %v", order.ID, err)
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-				return
-			}
+		if !cancelled {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusConflict, "This order is no longer awaiting payment")
+			return
 		}
 		if err := tx.Commit().Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
@@ -3049,10 +3158,8 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 	}
 	// Restore stock if the buyer was refunded (item never reached them or is being returned).
 	// Services hold no inventory, so there is nothing to restore.
-	if body.RefundBuyer && order.Kind != models.OrderKindService {
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+	if body.RefundBuyer {
+		if err := services.RestoreOrderStock(tx, &order); err != nil {
 			tx.Rollback()
 			log.Printf("SubmitAdminResolve stock restore error for order %s: %v", order.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
@@ -3472,16 +3579,11 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
-	// Services hold no inventory, so there is nothing to restore.
-	if order.Kind != models.OrderKindService {
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-			tx.Rollback()
-			log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-			return
-		}
+	if err := services.RestoreOrderStock(tx, &order); err != nil {
+		tx.Rollback()
+		log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+		return
 	}
 	if err := tx.Commit().Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
