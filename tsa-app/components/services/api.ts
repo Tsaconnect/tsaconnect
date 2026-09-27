@@ -2,6 +2,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { API_BASE_URL } from '../../constants/api/config';
+import { getAccessToken, refreshSession as refreshSessionShared, setSession } from '../../services/session';
 
 export interface ApiResponse<T = any> {
   success: boolean;
@@ -292,8 +293,10 @@ class APIService {
       'Content-Type': contentType,
     };
 
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    // The session owns the token; the session transport sets it on the request anyway.
+    const token = getAccessToken() ?? this.token;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
     }
 
     return headers;
@@ -415,11 +418,9 @@ class APIService {
       });
 
       const result = await this.handleResponse<SignupResponse>(response);
-      console.log('Signup response:', result);
       if (result.success && result.data?.token) {
         this.setToken(result.data.token);
-        // Store token in AsyncStorage for persistence
-        await AsyncStorage.setItem('authToken', result.data.token);
+        await setSession(result.data.token);
         await AsyncStorage.setItem('userId', result.data.userId);
         if (result.data.refreshToken) {
           const { storeRefreshToken } = await import('../../services/localAuth');
@@ -451,7 +452,7 @@ class APIService {
       if (result.success && result.data) {
         const accessToken = result.data.accessToken || result.data.token;
         this.setToken(accessToken);
-        await AsyncStorage.setItem('authToken', accessToken);
+        await setSession(accessToken);
         await AsyncStorage.setItem('userId', result.data.userId);
         await AsyncStorage.setItem('role', result.data.role);
         if (result.data.refreshToken) {
@@ -483,7 +484,7 @@ class APIService {
       if (result.success && result.data) {
         const accessToken = result.data.accessToken || result.data.token;
         this.setToken(accessToken);
-        await AsyncStorage.setItem('authToken', accessToken);
+        await setSession(accessToken);
         await AsyncStorage.setItem('userId', result.data.userId);
         await AsyncStorage.setItem('role', result.data.role);
         if (result.data.refreshToken) {
@@ -806,45 +807,17 @@ class APIService {
     }
   }
 
-  async refreshSession(): Promise<ApiResponse<{ accessToken: string; refreshToken: string }>> {
-    try {
-      const { getRefreshToken, storeRefreshToken } = await import('../../services/localAuth');
-      const refreshToken = await getRefreshToken();
-      if (!refreshToken) {
-        return { success: false, message: 'No refresh token available' };
-      }
-      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken }),
-      });
-      const result = await this.handleResponse<{ accessToken: string; refreshToken: string }>(response);
-      if (result.success && result.data) {
-        this.setToken(result.data.accessToken);
-        await AsyncStorage.setItem('authToken', result.data.accessToken);
-        await storeRefreshToken(result.data.refreshToken);
-      }
-      return result;
-    } catch (error: any) {
-      return { success: false, message: error.message || 'Failed to refresh session' };
+  /** Kept for callers of the old shape; the single-flight refresh lives in services/session. */
+  async refreshSession(): Promise<ApiResponse<{ accessToken: string }>> {
+    const outcome = await refreshSessionShared();
+    if (outcome.kind === 'refreshed') {
+      this.setToken(outcome.accessToken);
+      return { success: true, data: { accessToken: outcome.accessToken } };
     }
-  }
-
-  async revokeSession(): Promise<ApiResponse<any>> {
-    try {
-      const { getRefreshToken, clearRefreshToken } = await import('../../services/localAuth');
-      const refreshToken = await getRefreshToken();
-      const response = await fetch(`${API_BASE_URL}/auth/revoke`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({ refreshToken: refreshToken || '' }),
-      });
-      const result = await this.handleResponse<any>(response);
-      await clearRefreshToken();
-      return result;
-    } catch (error: any) {
-      return { success: false, message: error.message || 'Failed to revoke session' };
-    }
+    return {
+      success: false,
+      message: outcome.kind === 'rejected' ? 'Session expired' : 'Could not reach the server',
+    };
   }
 
   // Clear authentication data

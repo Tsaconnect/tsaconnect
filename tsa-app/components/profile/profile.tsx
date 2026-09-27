@@ -16,6 +16,7 @@ import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
+import { useAuth } from "@/AuthContext/AuthContext";
 import { useTheme } from "@/theme";
 import { TSA_PAY_APPLY } from "@/constants/routes";
 import {
@@ -34,6 +35,7 @@ import {
 
 const ProfileScreen = () => {
   const { colors, spacing, radius } = useTheme();
+  const { logOut } = useAuth();
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
@@ -135,10 +137,10 @@ const ProfileScreen = () => {
   };
 
   // Handle logout
+  // The route guard takes a signed-out user to /login.
   const handleLogout = async () => {
     try {
-      await api.clearAuth();
-      router.replace("/login");
+      await logOut();
     } catch (error) {
       console.error("Logout error:", error);
       Alert.alert("Error", "Failed to logout");

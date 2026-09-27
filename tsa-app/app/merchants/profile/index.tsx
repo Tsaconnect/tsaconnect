@@ -10,6 +10,7 @@
 // Alert/console messaging, the auth gate (redirect to /login), and every
 // navigation route are preserved verbatim.
 import api from '@/components/services/api';
+import { useAuth } from '@/AuthContext/AuthContext';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, View } from 'react-native';
@@ -28,6 +29,7 @@ import {
 
 const MerchantProfileScreen = () => {
     const { colors, spacing, radius } = useTheme();
+    const { logOut } = useAuth();
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [token, setToken] = useState<string | null>(null);
@@ -119,10 +121,10 @@ const MerchantProfileScreen = () => {
     };
 
     // Handle logout
+    // The route guard takes a signed-out user to /login.
     const handleLogout = async () => {
         try {
-            await api.clearAuth();
-            router.replace("/login");
+            await logOut();
         } catch (error) {
             console.error("Logout error:", error);
             Alert.alert("Error", "Failed to logout");
