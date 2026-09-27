@@ -5,6 +5,18 @@ import type { UnsignedTx } from './orderApi';
 const TX_TIMEOUT_MS = 90_000;
 
 /**
+ * The transaction was broadcast but not confirmed in time. It may still be
+ * mined, so the hash is kept: a caller that retries must report this tx, not
+ * send another.
+ */
+export class TxConfirmationTimeoutError extends Error {
+  constructor(public readonly txHash: string) {
+    super('Transaction confirmation timed out');
+    this.name = 'TxConfirmationTimeoutError';
+  }
+}
+
+/**
  * Sign a transaction locally and broadcast it on-chain.
  * @param chainKey - Which chain to broadcast on (e.g. 'sonic', 'bsc')
  */
@@ -32,7 +44,7 @@ export async function signAndBroadcast(
   const receipt = await Promise.race([
     txResponse.wait(),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Transaction confirmation timed out')), TX_TIMEOUT_MS)
+      setTimeout(() => reject(new TxConfirmationTimeoutError(txResponse.hash)), TX_TIMEOUT_MS)
     ),
   ]);
 

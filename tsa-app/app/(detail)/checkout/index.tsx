@@ -23,8 +23,9 @@ import {
   submitEscrow,
   Order,
   type CartQuote,
+  type UnsignedTx,
 } from '@/services/orderApi';
-import { signAndBroadcast } from '@/services/transaction';
+import { signAndBroadcast, TxConfirmationTimeoutError } from '@/services/transaction';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
@@ -68,6 +69,23 @@ function friendlyTxError(err: any): string {
   if (msg.includes('UNPREDICTABLE_GAS_LIMIT') || msg.includes('execution reverted'))
     return 'Transaction would fail on-chain. Please check your token balance and try again.';
   return msg;
+}
+
+/**
+ * Signs and sends a checkout tx, handing its hash to record. A confirmation
+ * timeout still records the hash — the tx may yet be mined, so a retry must
+ * report it rather than send another.
+ */
+async function sendTx(tx: UnsignedTx, record: (hash: string) => void): Promise<void> {
+  try {
+    record(await signAndBroadcast(tx, 'sonic'));
+  } catch (e: any) {
+    if (e instanceof TxConfirmationTimeoutError) {
+      record(e.txHash);
+      throw new Error('Your payment was sent and is still confirming on Sonic. Wait a minute, then tap Try again.');
+    }
+    throw new Error(friendlyTxError(e));
+  }
 }
 
 // Brand-identity colors for each stablecoin/token (used only to tint the token
@@ -325,16 +343,23 @@ const CheckoutScreen = () => {
   // What each created order has already done on-chain, so a retry resumes
   // where it stopped: an approve that went through is not signed (and paid
   // gas for) again, and an escrow already sent is only reported, never re-sent.
-  const orderProgress = useRef<Record<string, { approveTxHash?: string; escrowTxHash?: string }>>({});
+  const orderProgress = useRef<
+    Record<string, { approveTxHash?: string; approveConfirmed?: boolean; escrowTxHash?: string }>
+  >({});
+  // One payment run at a time: a double tap on "Try again" must not sign twice.
+  const paying = useRef(false);
 
   // Pays each order not yet escrowed: approve, escrow, then report both.
   const payOrders = async (list: Order[], alreadyPaid: string[]) => {
+    if (paying.current) return;
+    paying.current = true;
     try {
       for (let i = 0; i < list.length; i++) {
         const order = list[i];
         if (alreadyPaid.includes(order.id)) continue;
         setCurrentOrderIndex(i);
         const progress = (orderProgress.current[order.id] ??= {});
+        const reusedApprove = !!progress.approveTxHash;
 
         if (!progress.approveTxHash) {
           setSigningPhase('approving_token');
@@ -342,11 +367,10 @@ const CheckoutScreen = () => {
           if (!approveResult.success || !approveResult.data) {
             throw new Error(approveResult.message || 'Failed to prepare approval');
           }
-          try {
-            progress.approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
-          } catch (e: any) {
-            throw new Error(friendlyTxError(e));
-          }
+          await sendTx(approveResult.data.approveTx, (hash) => {
+            progress.approveTxHash = hash;
+          });
+          progress.approveConfirmed = true;
         }
 
         // The escrow tx is prepared after the approve is on-chain, so its gas
@@ -355,17 +379,26 @@ const CheckoutScreen = () => {
           setSigningPhase('creating_escrow');
           const escrowResult = await prepareEscrow(order.id);
           if (!escrowResult.success || !escrowResult.data) {
+            // A confirmed approval reused from an earlier try may no longer
+            // cover the escrow (spent, or replaced by another approve): sign a
+            // fresh one next time. A still-confirming one is kept.
+            if (reusedApprove && progress.approveConfirmed) {
+              progress.approveTxHash = undefined;
+              progress.approveConfirmed = undefined;
+            }
             throw new Error(escrowResult.message || 'Failed to prepare escrow');
           }
-          try {
-            progress.escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
-          } catch (e: any) {
-            throw new Error(friendlyTxError(e));
-          }
+          await sendTx(escrowResult.data.createOrderTx, (hash) => {
+            progress.escrowTxHash = hash;
+          });
         }
 
+        const { approveTxHash, escrowTxHash } = progress;
+        if (!approveTxHash || !escrowTxHash) {
+          throw new Error('Payment is incomplete. Tap Try again.');
+        }
         setSigningPhase('submitting');
-        const submitResult = await submitEscrow(order.id, progress.approveTxHash, progress.escrowTxHash);
+        const submitResult = await submitEscrow(order.id, approveTxHash, escrowTxHash);
         if (!submitResult.success) {
           throw new Error(submitResult.message || 'Failed to submit escrow');
         }
@@ -381,10 +414,13 @@ const CheckoutScreen = () => {
     } catch (err: any) {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');
+    } finally {
+      paying.current = false;
     }
   };
 
   const retryPayment = () => {
+    if (paying.current) return;
     setSigningError(null);
     payOrders(orders, completedOrders);
   };
