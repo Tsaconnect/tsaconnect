@@ -12,12 +12,14 @@ export const isLiveOff = (m: OwnMerchant, mode: Mode) => mode === 'live' && !(m.
 type AmountRange = Pick<OpenLink, 'minAmount' | 'maxAmount' | 'merchantMinAmount' | 'merchantMaxAmount'>;
 
 /**
- * What a customer may pay through a reusable link, always as a range: a limit
- * left at 0 is the business's own ("From ₦1,000.00 to ₦5,000,000.00").
+ * What a customer may pay through a reusable link, as the server works it out
+ * (payOpenLinkBounds): the link's own range narrowed by the business's limits as
+ * they are now, a limit of 0 being the business's own — "From ₦1,000.00 to ₦5,000,000.00".
  */
 export function openAmountRule(l: AmountRange): string {
-  const min = l.minAmount || l.merchantMinAmount;
-  const max = l.maxAmount || l.merchantMaxAmount;
+  const min = Math.max(l.minAmount, l.merchantMinAmount);
+  // An older API sends no business limits (0): then only the link's own maximum is known.
+  const max = l.merchantMaxAmount ? Math.min(l.maxAmount || l.merchantMaxAmount, l.merchantMaxAmount) : l.maxAmount;
   if (min && max) return `From ${naira(min)} to ${naira(max)}`;
   if (min) return `From ${naira(min)}`;
   return max ? `Up to ${naira(max)}` : 'Any amount';

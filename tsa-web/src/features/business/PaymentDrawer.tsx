@@ -17,6 +17,7 @@ import { toast } from '@/components/ui/toaster';
 import { cancelLink, getPayment, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
 import { LINK_STATUS_LABELS, linkMessage, paymentFor, statusOf, youReceive } from './display';
 import { LinkShare } from './LinkShare';
+import { queryKeys } from './queryKeys';
 import { useMerchant } from './useMerchant';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -27,7 +28,6 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
     </>
   );
 }
-
 
 function CodePill({ d }: { d: Delivery }) {
   const [label, cls] =
@@ -83,7 +83,7 @@ function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
     // The answer is the cancelled payment: shown at once, so the drawer never flashes
     // back to waiting (with Cancel link) while it is read again.
     onSuccess: (cancelled) => {
-      queryClient.setQueryData<PaymentDetail>(['payment', mode, p.id], (old) => old && { ...old, payment: cancelled });
+      queryClient.setQueryData<PaymentDetail>(queryKeys.payment(mode, p.id), (old) => old && { ...old, payment: cancelled });
       setConfirming(false);
       toast.success('Link cancelled');
     },
@@ -95,9 +95,9 @@ function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
     },
     // Cancelled or not (it may have been paid meanwhile), the lists and this payment are read again.
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ['payment', mode, p.id] });
-      void queryClient.invalidateQueries({ queryKey: ['links', mode] });
-      void queryClient.invalidateQueries({ queryKey: ['payments', mode] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.payment(mode, p.id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.list('links', mode) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.list('payments', mode) });
     },
   });
 
@@ -153,11 +153,18 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
         {forWhat.note && <Row label="Customer's note">{forWhat.note}</Row>}
         {p.source === 'open' && p.openLinkId && (
           <Row label="Paid through">
-            <Link to={`/business/${mode}/links/open/${p.openLinkId}`} className="font-semibold text-accent-strong hover:underline">Reusable link</Link>
+            <Link to={`/business/${mode}/links/open/${p.openLinkId}?type=reusable`} className="font-semibold text-accent-strong hover:underline">
+              {p.linkLabel || 'Reusable link'}
+            </Link>
           </Row>
         )}
-        <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>
-        <Row label="Customer paid">
+        {/* While it waits to be paid, what it will pay — as the link's Created dialog says. */}
+        {p.status === 'pending' ? (
+          <Row label="You'll receive"><b className="tabular">{naira(p.merchantNet)}</b></Row>
+        ) : (
+          <Row label="You receive"><b className="tabular">{youReceive(p)}</b></Row>
+        )}
+        <Row label={p.status === 'succeeded' ? 'Customer paid' : 'Customer pays'}>
           <span className="tabular">{naira(p.customerTotal)}</span>{' '}
           <span className="text-text-secondary">(incl. {naira(p.fee)} fee)</span>
         </Row>
@@ -201,7 +208,7 @@ export function PaymentDrawer({ list = 'payments' }: { list?: 'payments' | 'link
   const id = useParams().id ?? '';
   const navigate = useNavigate();
   const { search } = useLocation();
-  const q = useQuery({ queryKey: ['payment', mode, id], queryFn: ({ signal }) => getPayment(mode, id, signal) });
+  const q = useQuery({ queryKey: queryKeys.payment(mode, id), queryFn: ({ signal }) => getPayment(mode, id, signal) });
   const notFound = q.error instanceof ApiError && q.error.status === 404;
 
   return (

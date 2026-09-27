@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Drawer } from '@/components/ui/drawer';
 import { FormError } from '@/components/ui/form-error';
+import { inlineLink } from '@/components/ui/inline-link';
 import { Note } from '@/components/ui/note';
 import { SectionHeading } from '@/components/ui/section-heading';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -20,12 +21,15 @@ import {
 } from './api';
 import { openAmountRule, openLinkMessage, openLinkTaking } from './display';
 import { LinkShare } from './LinkShare';
-import { openLinkPaymentColumns, openLinkState } from './paymentColumns';
+import { TestModeLink } from './LiveOffNote';
+import { OpenLinkState } from './OpenLinkState';
+import { openLinkPaymentColumns } from './paymentColumns';
 import { PaymentsTable } from './PaymentsTable';
 import { OpenLinkFields } from './OpenLinkFields';
 import { checkOpenLink, openLinkDraft, toOpenLink, type OpenLinkDraft, type OpenLinkErrors } from './openLinkForm';
 import { useMerchant } from './useMerchant';
-import { openLinkKey, useOpenLink } from './useOpenLink';
+import { queryKeys } from './queryKeys';
+import { useOpenLink } from './useOpenLink';
 
 /** The links list's query showing reusable links, its other filters kept (arriving from the poster, there are none). */
 function reusableList(search: string) {
@@ -78,8 +82,8 @@ function Detail({ detail: { openLink: l, payments }, mode }: { detail: OpenLinkD
 
   // What changed is shown at once; the list's counts and states are read again.
   const saved = (next: OpenLink) => {
-    queryClient.setQueryData<OpenLinkDetail>(openLinkKey(mode, next.id), (old) => ({ openLink: next, payments: old?.payments ?? payments }));
-    void queryClient.invalidateQueries({ queryKey: ['open-links', mode] });
+    queryClient.setQueryData<OpenLinkDetail>(queryKeys.openLink(mode, next.id), (old) => ({ openLink: next, payments: old?.payments ?? payments }));
+    void queryClient.invalidateQueries({ queryKey: queryKeys.list('open-links', mode) });
   };
   const pause = useMutation({
     mutationFn: (active: boolean) => updateOpenLink(mode, l.id, { ...openLinkChange(l), active }),
@@ -90,14 +94,14 @@ function Detail({ detail: { openLink: l, payments }, mode }: { detail: OpenLinkD
     onError: (err) => {
       toast.error(err.message);
       // Changed somewhere else first: read it again before the next try.
-      if (err instanceof ApiError && err.status === 409) void queryClient.invalidateQueries({ queryKey: openLinkKey(mode, l.id) });
+      if (err instanceof ApiError && err.status === 409) void queryClient.invalidateQueries({ queryKey: queryKeys.openLink(mode, l.id) });
     },
   });
 
   return (
     <>
       <div className="flex flex-wrap items-center gap-2.5">
-        {openLinkState(l)}
+        <OpenLinkState link={l} />
         <span className="text-body-sm text-text-secondary">{openAmountRule(l)}</span>
       </div>
       <p className="mt-2.5 text-body-sm text-text-secondary">
@@ -108,10 +112,10 @@ function Detail({ detail: { openLink: l, payments }, mode }: { detail: OpenLinkD
       {!taking.taking && (
         <Note tone="warning" icon={<Pause />} className="mt-4">
           {taking.reason}. Customers who open this link are told it isn't taking payments.
-          {l.notTakingReason === 'no_payout' && <> <Link to={`/business/${mode}/payouts`} className="font-semibold underline underline-offset-2">Set up payouts</Link></>}
-          {l.notTakingReason === 'live_off' && <> <Link to="/business/test/links?type=reusable" className="font-semibold underline underline-offset-2">Switch to test mode</Link></>}
+          {l.notTakingReason === 'no_payout' && <> <Link to={`/business/${mode}/payouts`} className={inlineLink}>Set up payouts</Link></>}
+          {l.notTakingReason === 'live_off' && <> <TestModeLink reusable /></>}
           {l.notTakingReason === 'range_outside_limits' && !locked && (
-            <> <button type="button" onClick={() => setEditing(true)} className="font-semibold underline underline-offset-2">Edit the link</button></>
+            <> <button type="button" onClick={() => setEditing(true)} className={inlineLink}>Edit the link</button></>
           )}
         </Note>
       )}
@@ -167,7 +171,7 @@ function EditDialog({ link: l, mode, onClose, onSaved }: { link: OpenLink; mode:
       toast.success('Link saved');
     },
     onError: (err) => {
-      if (err instanceof ApiError && err.status === 409) void queryClient.invalidateQueries({ queryKey: openLinkKey(mode, l.id) });
+      if (err instanceof ApiError && err.status === 409) void queryClient.invalidateQueries({ queryKey: queryKeys.openLink(mode, l.id) });
     },
   });
   const submit = (e: FormEvent) => {
@@ -181,6 +185,7 @@ function EditDialog({ link: l, mode, onClose, onSaved }: { link: OpenLink; mode:
       open
       onOpenChange={(o) => !o && onClose()}
       title="Edit link"
+      focusFirstField
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>

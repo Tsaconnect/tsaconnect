@@ -68,8 +68,11 @@ function LinksBody({ merchant: m, onRequest }: { merchant: OwnMerchant; onReques
       {locked && <SuspendedNote>request a payment</SuspendedNote>}
       <Segmented legend="Type of link" name="type" value={reusable ? 'reusable' : ''} options={TYPES} onChange={showType} className="justify-self-start" />
       {reusable ? (
+        // Keyed by type: the two lists never share a query, so one type's rows can't
+        // show (through the other's columns) while the other loads.
         <PaymentList
-          queryKey="open-links"
+          key="open-links"
+          kind="open-links"
           rowPath="links/open"
           noun="reusable links"
           load={listOpenLinks}
@@ -85,13 +88,14 @@ function LinksBody({ merchant: m, onRequest }: { merchant: OwnMerchant; onReques
         />
       ) : (
         <PaymentList
-          queryKey="links"
+          key="links"
+          kind="links"
           rowPath="links"
           noun="payment links"
           statuses={STATUSES}
           load={listLinks}
           columns={linkColumns}
-          searchPlaceholder="What for, reference or ID"
+          searchPlaceholder="What for, customer, reference or ID"
           empty={
             <EmptyState
               icon={<Link2 className="size-5" aria-hidden />}

@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useId, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { FlaskConical, Printer } from 'lucide-react';
@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Field } from '@/components/ui/field';
 import { FormError } from '@/components/ui/form-error';
+import { inlineLink } from '@/components/ui/inline-link';
 import { Input } from '@/components/ui/input';
 import { Note } from '@/components/ui/note';
 import { Segmented } from '@/components/ui/segmented';
@@ -18,9 +19,11 @@ import {
 } from './api';
 import { isLiveOff, linkMessage, openAmountRule, openLinkMessage } from './display';
 import { LinkShare } from './LinkShare';
-import { LiveOffNote } from './LiveOffNote';
+import { LiveOffNote, TestModeLink } from './LiveOffNote';
 import { OpenLinkFields } from './OpenLinkFields';
 import { AMOUNT_HINT, checkOpenLink, emptyOpenLinkDraft, toOpenLink, type OpenLinkDraft, type OpenLinkErrors } from './openLinkForm';
+import { queryKeys, type ListKind } from './queryKeys';
+import { useIdempotencyKey } from './useIdempotencyKey';
 
 const DAYS = [
   { value: '1', label: '1 day' },
@@ -37,25 +40,51 @@ const KINDS: readonly { value: LinkKind; label: ReactNode }[] = [
   { value: 'open', label: <><span className="block">Customer enters the amount</span><span className="block font-normal">Reusable, good for a shop QR</span></> },
 ];
 
-type Draft = OpenLinkDraft & {
-  kind: LinkKind;
-  amount: string; description: string; customerName: string; reference: string; days: (typeof DAYS)[number]['value'];
-};
-type Errors = OpenLinkErrors & Partial<Record<'amount' | 'description' | 'reference', string>>;
+type OnceDraft = { amount: string; description: string; customerName: string; reference: string; days: (typeof DAYS)[number]['value'] };
+type OnceErrors = Partial<Record<'amount' | 'description' | 'reference', string>>;
 
-function check(d: Draft): Errors {
-  if (d.kind === 'open') return checkOpenLink(d);
-  const errors: Errors = {};
+function checkOnce(d: OnceDraft): OnceErrors {
+  const errors: OnceErrors = {};
   if (parseNaira(d.amount) === null) errors.amount = AMOUNT_HINT;
   if (!d.description.trim()) errors.description = 'Say what the payment is for — your customer sees this.';
   return errors;
 }
 
-type Request = { kind: 'once'; link: NewLink } | { kind: 'open'; link: NewOpenLink };
-type Made = { kind: 'once'; payment: Payment } | { kind: 'open'; openLink: OpenLink };
+/** A form's fields as state, with a setter per field typed to that field. */
+function useDraft<D extends object>(initial: D) {
+  const [draft, setDraft] = useState(initial);
+  const set = <K extends keyof D>(field: K) => (value: D[K]) => setDraft((d) => ({ ...d, [field]: value }));
+  return { draft, set };
+}
+
+/** What one type of link contributes to the dialog. */
+type Flow = { title: string; body: ReactNode; footer: ReactNode };
+type FlowProps = { mode: Mode; merchant: OwnMerchant; close: () => void; picker: ReactNode };
 
 /**
- * "Request payment": a form for a payment link, then the link to share. Mounted
+ * A create request for one type of link: its Idempotency-Key follows the body;
+ * the lists it lands in are refreshed.
+ */
+function useCreate<Body, Made>(send: (body: Body, key: string) => Promise<Made>, lists: ListKind[], mode: Mode) {
+  const queryClient = useQueryClient();
+  const idem = useIdempotencyKey();
+  const refresh = () => lists.forEach((kind) => void queryClient.invalidateQueries({ queryKey: queryKeys.list(kind, mode) }));
+  return useMutation({
+    mutationFn: (body: Body) => send(body, idem.keyFor(body)),
+    onSuccess: refresh,
+    onError: (err) => {
+      // The key was already used for another body: start a new one, and let the
+      // list behind show whether the first try made a link after all.
+      if (isKeyConflict(err)) {
+        idem.forget();
+        refresh();
+      }
+    },
+  });
+}
+
+/**
+ * "Request payment": the choice of link, its form, then the link to share. Mounted
  * fresh on every open and on a mode change (Back, say): the API's Idempotency-Key
  * ignores ?mode, so a live key reused in test would replay the live link.
  */
@@ -67,133 +96,154 @@ export function RequestPaymentDialog({ open, onOpenChange, merchant, kind = 'onc
   kind?: LinkKind;
 }) {
   const mode = useMode();
-  return open ? <Flow key={mode} onOpenChange={onOpenChange} merchant={merchant} kind={kind} /> : null;
+  return open ? <Shell key={mode} onOpenChange={onOpenChange} merchant={merchant} initialKind={kind} /> : null;
 }
 
-function Flow({ onOpenChange, merchant, kind }: { onOpenChange: (open: boolean) => void; merchant: OwnMerchant; kind: LinkKind }) {
+function Shell({ onOpenChange, merchant, initialKind }: { onOpenChange: (open: boolean) => void; merchant: OwnMerchant; initialKind: LinkKind }) {
   const mode = useMode();
-  const queryClient = useQueryClient();
-  const formId = useId();
-  // One Idempotency-Key per request body: sending the same form again (a reply
-  // lost on the way) replays the link already made; any edit is a new request, so
-  // it never meets the API's refusal of a key reused with a different body.
-  const sent = useRef<{ body: string; key: string } | null>(null);
-  const keyFor = (req: Request) => {
-    const body = JSON.stringify(req);
-    if (sent.current?.body !== body) sent.current = { body, key: crypto.randomUUID() };
-    return sent.current.key;
-  };
-  const [draft, setDraft] = useState<Draft>({
-    ...emptyOpenLinkDraft, kind, amount: '', description: '', customerName: '', reference: '', days: '7',
-  });
-  const [errors, setErrors] = useState<Errors>({});
+  const [kind, setKind] = useState(initialKind);
   const close = () => onOpenChange(false);
-
-  const listKey = (k: LinkKind) => [k === 'open' ? 'open-links' : 'links', mode];
-  const create = useMutation({
-    mutationFn: async (req: Request): Promise<Made> =>
-      req.kind === 'open'
-        ? { kind: 'open', openLink: await createOpenLink(mode, req.link, keyFor(req)) }
-        : { kind: 'once', payment: await createLink(mode, req.link, keyFor(req)) },
-    onSuccess: (made) => {
-      void queryClient.invalidateQueries({ queryKey: listKey(made.kind) });
-      if (made.kind === 'once') void queryClient.invalidateQueries({ queryKey: ['payments', mode] });
-    },
-    onError: (err, req) => {
-      if (err instanceof ApiError && err.code === 'reference_taken') setErrors({ reference: err.message });
-      // The key was already used for something else: start a new one, and let the
-      // list behind show whether the first try made a link after all.
-      if (isKeyConflict(err)) {
-        sent.current = null;
-        void queryClient.invalidateQueries({ queryKey: listKey(req.kind) });
-      }
-    },
-  });
-
-  const set = (field: keyof Draft) => (value: string) => setDraft((d) => ({ ...d, [field]: value }));
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    const found = check(draft);
-    setErrors(found);
-    if (Object.keys(found).length || create.isPending) return;
-    if (draft.kind === 'open') {
-      create.mutate({ kind: 'open', link: toOpenLink(draft) });
-      return;
-    }
-    create.mutate({
-      kind: 'once',
-      link: {
-        amount: parseNaira(draft.amount)!,
-        description: draft.description.trim(),
-        customerName: draft.customerName.trim(),
-        reference: draft.reference.trim(),
-        expiresInDays: Number(draft.days) as LinkDays,
-      },
-    });
+  const picker = <Segmented legend="Type of link" name="kind" value={kind} options={KINDS} onChange={setKind} />;
+  // Both types keep their state, so switching back finds what was typed.
+  const flows: Record<LinkKind, Flow> = {
+    once: useOnceFlow({ mode, merchant, close, picker }),
+    open: useOpenFlow({ mode, merchant, close, picker }),
   };
-
-  const made = create.data;
   // Live is switched off for this business: say so before the form, not after it.
-  const liveOff = isLiveOff(merchant, mode);
-  const refusal = create.error && !(create.error instanceof ApiError && create.error.code === 'reference_taken') ? create.error : null;
-  const footer = made?.kind === 'open' ? (
-    <>
-      <Button asChild variant="secondary">
-        <Link to={`/business/${mode}/links/open/${made.openLink.id}/poster`}><Printer className="size-4" aria-hidden />Print poster</Link>
-      </Button>
-      <Button onClick={close}>Done</Button>
-    </>
-  ) : made ? (
-    <Button onClick={close}>Done</Button>
-  ) : liveOff ? (
-    <Button variant="secondary" onClick={close}>Cancel</Button>
-  ) : (
-    <>
-      <Button variant="secondary" onClick={close}>Cancel</Button>
-      <Button type="submit" form={formId} loading={create.isPending}>Create link</Button>
-    </>
-  );
-
+  const flow: Flow = isLiveOff(merchant, mode)
+    ? {
+        title: 'Request payment',
+        body: <LiveOffNote doInstead="make a test link" reusable={kind === 'open'} onLeave={close} />,
+        footer: <Button variant="secondary" onClick={close}>Cancel</Button>,
+      }
+    : flows[kind];
   return (
-    <Dialog
-      open
-      onOpenChange={onOpenChange}
-      title={made?.kind === 'open' ? 'Your reusable link is ready' : made ? 'Your payment link is ready' : 'Request payment'}
-      footer={footer}
-    >
-      {made?.kind === 'open' ? (
-        <OpenCreated link={made.openLink} businessName={merchant.businessName} />
-      ) : made ? (
-        <Created payment={made.payment} businessName={merchant.businessName} />
-      ) : liveOff ? (
-        <LiveOffNote page="links" doInstead="make a test link" onLeave={close} />
-      ) : (
-        <form id={formId} onSubmit={submit} noValidate className="grid gap-4">
-          {mode === 'test' && <Note tone="gold" icon={<FlaskConical />}>This is a test link — no real money moves.</Note>}
-          {refusal && <Refusal error={refusal} mode={mode} onLeave={close} />}
-          <Segmented legend="Type of link" name="kind" value={draft.kind} options={KINDS} onChange={set('kind')} />
-          {draft.kind === 'open' ? (
-            <OpenLinkFields draft={draft} errors={errors} set={set} />
-          ) : (
-            <OnceFields draft={draft} errors={errors} set={set} />
-          )}
-        </form>
-      )}
+    <Dialog open onOpenChange={onOpenChange} title={flow.title} footer={flow.footer} focusFirstField>
+      {flow.body}
     </Dialog>
   );
 }
 
-function OnceFields({ draft, errors, set }: { draft: Draft; errors: Errors; set: (field: keyof Draft) => (value: string) => void }) {
+/** The top of either form: the test-mode reminder and the API's refusal, if any. */
+function FormTop({ mode, error, reusable, close }: { mode: Mode; error: Error | null; reusable: boolean; close: () => void }) {
+  return (
+    <>
+      {mode === 'test' && <Note tone="gold" icon={<FlaskConical />}>This is a test link — no real money moves.</Note>}
+      {error && <Refusal error={error} mode={mode} reusable={reusable} onLeave={close} />}
+    </>
+  );
+}
+
+const cancelAndSubmit = (close: () => void, formId: string, busy: boolean, label: string) => (
+  <>
+    <Button variant="secondary" onClick={close}>Cancel</Button>
+    <Button type="submit" form={formId} loading={busy}>{label}</Button>
+  </>
+);
+
+/** A fixed amount for one customer: a payment link. */
+function useOnceFlow({ mode, merchant, close, picker }: FlowProps): Flow {
+  const formId = useId();
+  const { draft, set } = useDraft<OnceDraft>({ amount: '', description: '', customerName: '', reference: '', days: '7' });
+  const [errors, setErrors] = useState<OnceErrors>({});
+  const create = useCreate((link: NewLink, key) => createLink(mode, link, key), ['links', 'payments'], mode);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const found = checkOnce(draft);
+    setErrors(found);
+    if (Object.keys(found).length || create.isPending) return;
+    create.mutate({
+      amount: parseNaira(draft.amount)!,
+      description: draft.description.trim(),
+      customerName: draft.customerName.trim(),
+      reference: draft.reference.trim(),
+      expiresInDays: Number(draft.days) as LinkDays,
+    }, {
+      onError: (err) => {
+        if (err instanceof ApiError && err.code === 'reference_taken') setErrors({ reference: err.message });
+      },
+    });
+  };
+
+  if (create.data) {
+    return {
+      title: 'Your payment link is ready',
+      body: <Created payment={create.data} businessName={merchant.businessName} />,
+      footer: <Button onClick={close}>Done</Button>,
+    };
+  }
+  // A reference already used is said on its own field, not above the form.
+  const refusal = create.error instanceof ApiError && create.error.code === 'reference_taken' ? null : create.error;
+  return {
+    title: 'Request payment',
+    body: (
+      <form id={formId} onSubmit={submit} noValidate className="grid gap-4">
+        <FormTop mode={mode} error={refusal} reusable={false} close={close} />
+        {picker}
+        <OnceFields draft={draft} errors={errors} set={set} />
+      </form>
+    ),
+    footer: cancelAndSubmit(close, formId, create.isPending, 'Create link'),
+  };
+}
+
+/** One link many customers pay, each entering the amount: a reusable link. */
+function useOpenFlow({ mode, merchant, close, picker }: FlowProps): Flow {
+  const formId = useId();
+  const { draft, set } = useDraft<OpenLinkDraft>(emptyOpenLinkDraft);
+  const [errors, setErrors] = useState<OpenLinkErrors>({});
+  const create = useCreate((link: NewOpenLink, key) => createOpenLink(mode, link, key), ['open-links'], mode);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const found = checkOpenLink(draft);
+    setErrors(found);
+    if (Object.keys(found).length || create.isPending) return;
+    create.mutate(toOpenLink(draft));
+  };
+
+  if (create.data) {
+    return {
+      title: 'Your reusable link is ready',
+      body: <OpenCreated link={create.data} businessName={merchant.businessName} />,
+      footer: (
+        <>
+          <Button asChild variant="secondary">
+            <Link to={`/business/${mode}/links/open/${create.data.id}/poster`}><Printer className="size-4" aria-hidden />Print poster</Link>
+          </Button>
+          <Button onClick={close}>Done</Button>
+        </>
+      ),
+    };
+  }
+  return {
+    title: 'Request payment',
+    body: (
+      <form id={formId} onSubmit={submit} noValidate className="grid gap-4">
+        <FormTop mode={mode} error={create.error} reusable close={close} />
+        {picker}
+        <OpenLinkFields draft={draft} errors={errors} set={set} />
+      </form>
+    ),
+    footer: cancelAndSubmit(close, formId, create.isPending, 'Create link'),
+  };
+}
+
+function OnceFields({ draft, errors, set }: {
+  draft: OnceDraft;
+  errors: OnceErrors;
+  set: <K extends keyof OnceDraft>(field: K) => (value: OnceDraft[K]) => void;
+}) {
   return (
     <>
       <Field label="Amount (₦)" error={errors.amount}>
-        <Input inputMode="decimal" placeholder="5,000" value={draft.amount} onChange={(e) => set('amount')(e.target.value)} autoFocus />
+        <Input inputMode="decimal" placeholder="5,000" value={draft.amount} onChange={(e) => set('amount')(e.target.value)} />
       </Field>
       <Field label="What it's for" hint="Your customer sees this when they pay." error={errors.description}>
         <Input maxLength={255} placeholder="Balance for LOS–ABV, 12 Oct" value={draft.description} onChange={(e) => set('description')(e.target.value)} />
       </Field>
-      <Field label="Customer name (optional)" hint="Your customer sees who the payment is for.">
+      <Field label="Customer name (optional)" hint="Anyone with the link can see this name.">
         <Input maxLength={100} autoComplete="off" value={draft.customerName} onChange={(e) => set('customerName')(e.target.value)} />
       </Field>
       <Field label="Your reference (optional)" hint="Leave blank and we'll make one." error={errors.reference}>
@@ -207,19 +257,23 @@ function OnceFields({ draft, errors, set }: { draft: Draft; errors: Errors; set:
   );
 }
 
-/** The Idempotency middleware's refusal: an uncoded 409 (a coded one is the handler's own). */
+/**
+ * The Idempotency middleware's refusal of a key reused with another body: an
+ * uncoded 409 (a coded one is the handler's own). useIdempotencyKey already gives
+ * each body its own key, so this is defence in depth — a key that somehow met a
+ * different body still ends in a fresh key and a clear message, never a dead end.
+ */
 const isKeyConflict = (err: unknown) => err instanceof ApiError && err.status === 409 && !err.code;
 
 /** Why the API refused, with the way forward when there is one. */
-function Refusal({ error, mode, onLeave }: { error: Error; mode: Mode; onLeave: () => void }) {
+function Refusal({ error, mode, reusable, onLeave }: { error: Error; mode: Mode; reusable: boolean; onLeave: () => void }) {
   const code = error instanceof ApiError ? error.code : undefined;
-  const link = 'font-semibold underline underline-offset-2';
   return (
     <FormError>
       <p>
         {isKeyConflict(error) ? 'This link may already have been made — check your payment links.' : error.message}
-        {code === 'live_not_enabled' && <> <Link to="/business/test/links" onClick={onLeave} className={link}>Switch to test mode</Link></>}
-        {code === 'settlement_not_set' && <> <Link to={`/business/${mode}/payouts`} onClick={onLeave} className={link}>Set up payouts</Link></>}
+        {code === 'live_not_enabled' && <> <TestModeLink reusable={reusable} onClick={onLeave} /></>}
+        {code === 'settlement_not_set' && <> <Link to={`/business/${mode}/payouts`} onClick={onLeave} className={inlineLink}>Set up payouts</Link></>}
       </p>
     </FormError>
   );

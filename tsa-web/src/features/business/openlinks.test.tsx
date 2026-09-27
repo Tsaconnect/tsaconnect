@@ -88,6 +88,62 @@ describe('reusable payment links', () => {
     expect(within(ready).getByRole('link', { name: /print poster/i })).toHaveAttribute('href', `/business/live/links/open/${made.id}/poster`);
   });
 
+  // Review: one list's rows must never show through the other's columns while it loads.
+  it('switching to Reusable never shows the one-time links while the reusable ones load', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/links': ok({ items: [{ ...payment, id: 'l1', reference: 'link_abc', source: 'link', description: 'Balance for LOS–ABV' }], total: 1, page: 1, limit: 20 }),
+      '/api/pay/merchant/open-links': () => new Promise<Response>(() => undefined), // still loading
+    });
+    mountAt('/business/live/links');
+    expect(await screen.findByRole('link', { name: 'Balance for LOS–ABV' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: 'Reusable' }));
+    expect(await screen.findByRole('columnheader', { name: 'Label' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Balance for LOS–ABV' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    expect(screen.queryByText('link_abc')).not.toBeInTheDocument();
+  });
+
+  it('choosing the type keeps focus on the choice; the first field is focused only when the form opens', async () => {
+    stubFetch({ '/api/pay/merchant': ok(live), '/api/pay/merchant/links': noLinks });
+    mountAt('/business/live/links');
+    await userEvent.click((await screen.findAllByRole('button', { name: /request payment/i }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Request payment' });
+    await waitFor(() => expect(within(dialog).getByLabelText('Amount (₦)')).toHaveFocus());
+    const reusable = within(dialog).getByRole('radio', { name: /customer enters the amount/i });
+    await userEvent.click(reusable);
+    expect(within(dialog).getByLabelText('Label')).toBeInTheDocument();
+    expect(reusable).toHaveFocus();
+    // Switching back finds what was typed.
+    await userEvent.type(within(dialog).getByLabelText('Label'), 'Shop 12');
+    await userEvent.click(within(dialog).getByRole('radio', { name: /fixed amount/i }));
+    await userEvent.click(within(dialog).getByRole('radio', { name: /customer enters the amount/i }));
+    expect(within(dialog).getByLabelText('Label')).toHaveValue('Shop 12');
+  });
+
+  it('a live refusal while making a reusable link points to the reusable links in test mode', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/open-links': (url) => (url.includes('page') ? noLinks
+        : fail(403, "Live payments aren't switched on for your business yet. Try a test link first.", 'live_not_enabled')),
+    });
+    mountAt('/business/live/links?type=reusable');
+    await userEvent.click((await screen.findAllByRole('button', { name: /request payment/i }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Request payment' });
+    await userEvent.type(within(dialog).getByLabelText('Label'), 'Shop 12');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Create link' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent("Live payments aren't switched on");
+    expect(within(dialog).getByRole('link', { name: 'Switch to test mode' })).toHaveAttribute('href', '/business/test/links?type=reusable');
+  });
+
+  it('with live off, the Reusable form says so up front and points to the reusable links in test mode', async () => {
+    stubFetch({ '/api/pay/merchant': ok({ ...merchant, liveAllowed: false }), '/api/pay/merchant/open-links': noLinks });
+    mountAt('/business/live/links?type=reusable');
+    await userEvent.click((await screen.findAllByRole('button', { name: /request payment/i }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Request payment' });
+    expect(within(dialog).getByRole('link', { name: 'Switch to test mode' })).toHaveAttribute('href', '/business/test/links?type=reusable');
+  });
+
   it('the form starts with the choice of link, and switching it swaps the fields', async () => {
     stubFetch({ '/api/pay/merchant': ok(live), '/api/pay/merchant/links': noLinks });
     mountAt('/business/live/links');
@@ -249,7 +305,8 @@ describe('reusable payment links', () => {
     expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Print' }));
     expect(print).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('link', { name: /back to the link/i })).toHaveAttribute('href', `/business/test/links/open/${openLink.id}`);
+    // Back lands on the link's drawer over the Reusable list.
+    expect(screen.getByRole('link', { name: /back to the link/i })).toHaveAttribute('href', `/business/test/links/open/${openLink.id}?type=reusable`);
   });
 
   it('a live poster says nothing about test mode', async () => {
@@ -264,7 +321,6 @@ describe('reusable payment links', () => {
       '/api/pay/merchant': ok(live),
       '/api/pay/merchant/payments': ok({ items: [paidThrough, withNote], total: 2, page: 1, limit: 20 }),
       [`/api/pay/merchant/payments/${paidThrough.id}`]: ok({ payment: paidThrough, payer: { name: 'ADA OBI' }, deliveries: [] }),
-      [`/api/pay/merchant/payments/${withNote.id}`]: ok({ payment: withNote, payer: { name: 'ADA OBI' }, deliveries: [] }),
     });
     mountAt('/business/live/payments');
     const row = (await screen.findByRole('link', { name: paidThrough.reference })).closest('tr')!;
@@ -275,15 +331,23 @@ describe('reusable payment links', () => {
     expect(within(noted).getByText(`${openLink.label} · Note: Two bags, flight TS204`)).toBeInTheDocument();
 
     await userEvent.click(within(row).getByRole('link', { name: paidThrough.reference }));
-    let drawer = await screen.findByRole('dialog', { name: paidThrough.reference });
-    await waitFor(() => expect(within(drawer).getByText('Paid through').nextElementSibling).toHaveTextContent('Reusable link'));
+    const drawer = await screen.findByRole('dialog', { name: paidThrough.reference });
+    // Paid through names the link, and opens it over the Reusable list.
+    await waitFor(() => expect(within(drawer).getByText('Paid through').nextElementSibling).toHaveTextContent(openLink.label));
     expect(within(drawer).getByText('For').nextElementSibling).toHaveTextContent(openLink.label);
     expect(within(drawer).queryByText("Customer's note")).not.toBeInTheDocument();
-    expect(within(drawer).getByRole('link', { name: 'Reusable link' })).toHaveAttribute('href', `/business/live/links/open/${openLink.id}`);
-    await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }));
+    expect(within(within(drawer).getByText('Paid through').nextElementSibling as HTMLElement).getByRole('link'))
+      .toHaveAttribute('href', `/business/live/links/open/${openLink.id}?type=reusable`);
+  });
 
-    await userEvent.click(await screen.findByRole('link', { name: withNote.reference }));
-    drawer = await screen.findByRole('dialog', { name: withNote.reference });
+  it("a customer's note on a reusable-link payment is shown as their note, under what it was for", async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/payments': noLinks,
+      [`/api/pay/merchant/payments/${withNote.id}`]: ok({ payment: withNote, payer: { name: 'ADA OBI' }, deliveries: [] }),
+    });
+    mountAt(`/business/live/payments/${withNote.id}`);
+    const drawer = await screen.findByRole('dialog', { name: withNote.reference });
     await waitFor(() => expect(within(drawer).getByText("Customer's note").nextElementSibling).toHaveTextContent('Two bags, flight TS204'));
     expect(within(drawer).getByText('For').nextElementSibling).toHaveTextContent(openLink.label);
   });

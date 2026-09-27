@@ -65,6 +65,8 @@ describe('payment links', () => {
     mountAt('/business/live/links');
     await openRequest();
     const dialog = await fillForm({ customer: 'Tolu Adeyemi' });
+    // The name is shown on the link, so the form says who can see it.
+    expect(within(dialog).getByLabelText('Customer name (optional)')).toHaveAccessibleDescription('Anyone with the link can see this name.');
     // 7 days unless she picks otherwise.
     expect(within(dialog).getByRole('radio', { name: '7 days' })).toBeChecked();
     await user.click(within(dialog).getByRole('radio', { name: '3 days' }));

@@ -175,6 +175,27 @@ describe('business area', () => {
     await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('mode=test') && String(u).includes('status=pending'))).toBe(true));
   });
 
+  it('Payments filters cancelled links apart from expired ones', async () => {
+    const f = stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments': noPayments });
+    mountAt('/business/live/payments');
+    await userEvent.click(await screen.findByRole('radio', { name: 'Cancelled' }));
+    await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('status=cancelled'))).toBe(true));
+  });
+
+  it('a payment not yet paid says what the customer pays and what you\'ll receive', async () => {
+    const waiting = { ...payment, id: 'p9', status: 'pending' as const, succeededAt: undefined, settlementRef: undefined };
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [waiting], total: 1, page: 1, limit: 20 }),
+      '/api/pay/merchant/payments/p9': ok({ payment: waiting, payer: null, deliveries: [] }),
+    });
+    mountAt('/business/live/payments/p9');
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText('Customer pays')).toBeInTheDocument();
+    expect(within(drawer).queryByText('Customer paid')).not.toBeInTheDocument();
+    expect(within(drawer).getByText("You'll receive").nextElementSibling).toHaveTextContent('₦84,500.00');
+  });
+
   it('an empty test mode points to the docs', async () => {
     stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments': noPayments });
     mountAt('/business/test/payments');

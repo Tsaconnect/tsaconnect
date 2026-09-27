@@ -10,6 +10,7 @@ import { listPayments, type Mode, type OwnMerchant } from './api';
 import { BusinessPage } from './BusinessPage';
 import { shortAddress } from './display';
 import { paymentColumns } from './paymentColumns';
+import { queryKeys } from './queryKeys';
 import { NoPaymentsYet, PaymentsTable } from './PaymentsTable';
 
 // `to` empty: nothing for the merchant to do but wait, so the step is not a link.
@@ -111,11 +112,11 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
   const mode = useMode();
   const { user } = useSession();
   const testPaid = useQuery({
-    queryKey: ['payments', 'test', { status: 'succeeded', page: 1, limit: 1 }],
+    queryKey: queryKeys.list('payments', 'test', { status: 'succeeded', page: 1, limit: 1 }),
     queryFn: ({ signal }) => listPayments('test', { status: 'succeeded', limit: 1 }, signal),
   });
   const recent = useQuery({
-    queryKey: ['payments', mode, { page: 1, limit: 5 }],
+    queryKey: queryKeys.list('payments', mode, { page: 1, limit: 5 }),
     queryFn: ({ signal }) => listPayments(mode, { limit: 5 }, signal),
   });
   // Wait for the test-payment answer so the card doesn't flash in and out.

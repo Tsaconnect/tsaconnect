@@ -26,6 +26,8 @@ export function OpenLinkPoster() {
   const detail = useOpenLink(mode, id);
   const link = detail.data?.openLink;
   const failed = merchant.error ?? detail.error;
+  const taking = link && openLinkTaking(link);
+  const notTaking = taking && !taking.taking ? taking.reason : undefined;
 
   let body;
   if (merchant.data && link) body = <Sheet merchant={merchant.data} link={link} mode={mode} />;
@@ -45,16 +47,16 @@ export function OpenLinkPoster() {
       <style>{PAGE}</style>
       <div className="flex flex-wrap items-center gap-3 border-b border-hairline bg-surface px-4 py-3 sm:px-7 print:hidden">
         <Button asChild variant="ghost" size="sm">
-          <Link to={`/business/${mode}/links/open/${id}`}><ChevronLeft className="size-4" aria-hidden />Back to the link</Link>
+          <Link to={`/business/${mode}/links/open/${id}?type=reusable`}><ChevronLeft className="size-4" aria-hidden />Back to the link</Link>
         </Button>
         <h1 className="min-w-0 flex-1 truncate text-title3 font-semibold">Poster</h1>
         <Button size="sm" onClick={() => window.print()} disabled={!link}>
           <Printer className="size-4" aria-hidden />Print
         </Button>
       </div>
-      {link && !openLinkTaking(link).taking && (
+      {notTaking && (
         <Note tone="warning" icon={<Pause />} className="mx-4 mt-4 print:hidden sm:mx-auto sm:max-w-[210mm]">
-          {openLinkTaking(link).reason}. Customers who scan this poster are told it isn't taking payments.
+          {notTaking}. Customers who scan this poster are told it isn't taking payments.
         </Note>
       )}
       <div className="overflow-x-auto px-4 py-6 print:overflow-visible print:p-0">{body}</div>

@@ -7,7 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StatusPill } from '@/components/ui/status-pill';
 import type { OpenLink, Payment } from './api';
-import { LINK_STATUS_LABELS, openAmountRule, openLinkTaking, paymentForLine, statusOf, youReceive } from './display';
+import { LINK_STATUS_LABELS, openAmountRule, paymentForLine, statusOf, youReceive } from './display';
+import { OpenLinkState } from './OpenLinkState';
 
 /**
  * One column. `cell` gets the row's detail link: one column renders it (rowLink),
@@ -54,6 +55,9 @@ const created: Column<{ createdAt: string }> = {
   skeleton: <Skeleton className="ml-auto h-3 w-14" />,
 };
 
+/** Under a payment's reference: who it was for and what for. */
+const secondLine = (p: Payment) => [p.customerName, paymentForLine(p)].filter(Boolean).join(' · ');
+
 /** Payments the owner's server didn't make say where they came from. */
 const SOURCE_TAGS: Partial<Record<Payment['source'], string>> = { link: 'Link', open: 'Reusable link' };
 
@@ -61,17 +65,19 @@ export const paymentColumns: PaymentColumn[] = [
   {
     header: 'Reference',
     className: 'max-w-[320px]',
-    cell: (p, href) => (
-      <>
-        <span className="flex items-center gap-2">
-          {rowLink(href, p.reference)}
-          {SOURCE_TAGS[p.source] && <Badge tone="neutral">{SOURCE_TAGS[p.source]}</Badge>}
-        </span>
-        {(p.customerName || paymentForLine(p)) && (
-          <p className="max-w-[320px] truncate text-caption text-text-secondary">{[p.customerName, paymentForLine(p)].filter(Boolean).join(' · ')}</p>
-        )}
-      </>
-    ),
+    cell: (p, href) => {
+      const tag = SOURCE_TAGS[p.source];
+      const line = secondLine(p);
+      return (
+        <>
+          <span className="flex items-center gap-2">
+            {rowLink(href, p.reference)}
+            {tag && <Badge tone="neutral">{tag}</Badge>}
+          </span>
+          {line && <p className="max-w-[320px] truncate text-caption text-text-secondary">{line}</p>}
+        </>
+      );
+    },
     skeleton: <><Skeleton className="h-4 w-28" /><Skeleton className="mt-1.5 h-3 w-40" /></>,
   },
   amount,
@@ -113,18 +119,6 @@ export const linkColumns: PaymentColumn[] = [
 ];
 
 /** A reusable link: open to take payments, or paused by its owner. */
-/** "Taking payments", or "Not taking payments" with why (paused, payouts not set…). */
-export function openLinkState(l: OpenLink) {
-  const { taking, reason } = openLinkTaking(l);
-  if (taking) return <Badge tone="live">Taking payments</Badge>;
-  return (
-    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
-      <Badge tone="neutral">Not taking payments</Badge>
-      <span className="text-caption text-text-secondary">{reason}</span>
-    </span>
-  );
-}
-
 export const openLinkColumns: Column<OpenLink>[] = [
   {
     header: 'Label',
@@ -153,7 +147,7 @@ export const openLinkColumns: Column<OpenLink>[] = [
   },
   {
     header: 'Status',
-    cell: (l) => openLinkState(l),
+    cell: (l) => <OpenLinkState link={l} />,
     skeleton: <Skeleton className="h-5 w-16" />,
   },
   created,
@@ -163,7 +157,10 @@ export const openLinkColumns: Column<OpenLink>[] = [
 export const openLinkPaymentColumns: Column<Payment>[] = [
   {
     header: 'For',
-    cell: (p, href) => clipped('max-w-[160px]', paymentForLine(p), rowLink(href, paymentForLine(p) || p.reference)),
+    cell: (p, href) => {
+      const line = paymentForLine(p);
+      return clipped('max-w-[160px]', line, rowLink(href, line || p.reference));
+    },
     skeleton: <Skeleton className="h-4 w-28" />,
   },
   amount,

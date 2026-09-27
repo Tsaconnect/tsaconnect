@@ -10,15 +10,16 @@ import { Segmented } from '@/components/ui/segmented';
 import { EmptyState, ErrorState } from '@/components/ui/states';
 import type { Mode, Page, PaymentFilter } from './api';
 import type { Column } from './paymentColumns';
+import { queryKeys, type ListKind } from './queryKeys';
 import { PaymentsTable } from './PaymentsTable';
 
 /**
  * A filterable, paged list — payments, one-time payment links, reusable links.
- * `queryKey` names its queries; rows open under /business/:mode/<rowPath>/:id.
+ * `kind` names its queries (queryKeys.list); rows open under /business/:mode/<rowPath>/:id.
  * Without `statuses` or `searchPlaceholder` there is no status filter or search.
  */
 export type PaymentListProps<T> = {
-  queryKey: string;
+  kind: ListKind;
   rowPath: string;
   /** The word in messages: "payments", "payment links". */
   noun: string;
@@ -32,19 +33,21 @@ export type PaymentListProps<T> = {
 
 // Filters live in the URL, so the detail drawer, the mode switch and the back
 // button all keep them.
-export function PaymentList<T extends { id: string }>({ queryKey, rowPath, noun, statuses = [], load, searchPlaceholder, empty, columns }: PaymentListProps<T>) {
+export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, statuses = [], load, searchPlaceholder, empty, columns }: PaymentListProps<T>) {
   const mode = useMode();
   const [params, setParams] = useSearchParams();
   const status = statuses.find((s) => s.value === params.get('status'))?.value ?? '';
-  const q = params.get('q') ?? '';
+  // A list without a search box never sends one (a q left in the URL by another list).
+  const q = searchPlaceholder ? params.get('q') ?? '' : '';
   const page = Math.max(1, Math.floor(Number(params.get('page'))) || 1);
 
   const list = useQuery({
-    queryKey: [queryKey, mode, { status, q, page }],
+    queryKey: queryKeys.list(kind, mode, { status, q, page }),
     queryFn: ({ signal }) => load(mode, { status, q, page }, signal),
-    // Keep the rows on screen while the next page or filter loads — but never
-    // across a mode switch: live rows must not show under the Test banner.
-    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === mode ? prev : undefined),
+    // Keep the rows on screen while the next page or filter of the SAME list
+    // loads — never another list's rows (they'd read through the wrong columns),
+    // and never across a mode switch (live rows under the Test banner).
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[0] === kind && prevQuery.queryKey[1] === mode ? prev : undefined),
   });
 
   const update = (next: Record<string, string>) => {

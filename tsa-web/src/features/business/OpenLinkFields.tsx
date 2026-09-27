@@ -11,7 +11,7 @@ export function OpenLinkFields({ draft, errors, set }: {
   return (
     <>
       <Field label="Label" hint="What your customers see, e.g. Mama Ngozi Store — Shop 12. It's on the poster." error={errors.label}>
-        <Input maxLength={80} autoComplete="off" value={draft.label} onChange={(e) => set('label')(e.target.value)} autoFocus />
+        <Input maxLength={80} autoComplete="off" value={draft.label} onChange={(e) => set('label')(e.target.value)} />
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Minimum (₦, optional)" hint="Blank: your account's limit." error={errors.min}>
