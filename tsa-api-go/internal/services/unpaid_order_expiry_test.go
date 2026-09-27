@@ -16,6 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	testSellerWallet = "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96"
+	testBuyerWallet  = "0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce"
+)
+
 func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -25,8 +30,12 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 	// Raw DDL, not AutoMigrate: the models carry Postgres-only defaults.
 	for _, ddl := range []string{
 		`CREATE TABLE orders (id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, product_id TEXT,
-			quantity INTEGER, kind TEXT, status TEXT, escrow_tx_hash TEXT, created_at DATETIME, updated_at DATETIME)`,
+			quantity INTEGER, kind TEXT, token TEXT, status TEXT,
+			product_amount TEXT, shipping_amount TEXT, platform_fee TEXT, total_amount TEXT,
+			contract_order_id TEXT, escrow_contract_address TEXT, escrow_expires_at DATETIME,
+			approve_tx_hash TEXT, escrow_tx_hash TEXT, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE products (id TEXT PRIMARY KEY, stock INTEGER, deleted_at DATETIME)`,
+		`CREATE TABLE users (id TEXT PRIMARY KEY, wallet_address TEXT)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("create table: %v", err)
@@ -44,14 +53,19 @@ func writeProduct(t *testing.T, db *gorm.DB, stock int) uuid.UUID {
 	return id
 }
 
-// writeOrder stores an order placed `placed` ago whose last payment activity
-// was `active` ago.
+// writeOrder stores a 1-unit USDC order (0.0784 product, no shipping) placed
+// `placed` ago whose last payment activity was `active` ago, sold by a seller
+// whose wallet is testSellerWallet.
 func writeOrder(t *testing.T, db *gorm.DB, productID uuid.UUID, kind, status string, placed, active time.Duration) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if err := db.Exec(`INSERT INTO orders (id, buyer_id, seller_id, product_id, quantity, kind, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-		id, uuid.New(), uuid.New(), productID, kind, status, time.Now().Add(-placed), time.Now().Add(-active)).Error; err != nil {
+	id, seller := uuid.New(), uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, wallet_address) VALUES (?, ?)`, seller, testSellerWallet).Error; err != nil {
+		t.Fatalf("insert seller: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO orders (id, buyer_id, seller_id, product_id, quantity, kind, token, status,
+		product_amount, shipping_amount, platform_fee, total_amount, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, 'USDC', ?, '78400', '0', '1600', '80000', ?, ?)`,
+		id, uuid.New(), seller, productID, kind, status, time.Now().Add(-placed), time.Now().Add(-active)).Error; err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
 	return id
@@ -71,17 +85,44 @@ func productStock(t *testing.T, db *gorm.DB, id uuid.UUID) int {
 	return stock
 }
 
-// fakeOrderEscrow answers OrderEscrowed from a set of escrowed order ids.
-type fakeOrderEscrow struct {
-	escrowed map[[32]byte]bool
-	fail     bool
+// paidFor is the escrow's record of a payment matching writeOrder's order.
+func paidFor() *OnChainOrder {
+	return &OnChainOrder{
+		Buyer:         common.HexToAddress(testBuyerWallet),
+		Seller:        common.HexToAddress(testSellerWallet),
+		Token:         common.HexToAddress(testUSDC),
+		ProductAmount: big.NewInt(78400), ShippingAmount: big.NewInt(0), PlatformFee: big.NewInt(1600),
+		CreatedAt: time.Now().Add(-90 * time.Minute),
+	}
 }
 
-func (f *fakeOrderEscrow) OrderEscrowed(_ context.Context, id [32]byte) (bool, error) {
+// fakeOrderEscrow answers EscrowedOrder from the orders it holds.
+type fakeOrderEscrow struct {
+	held map[[32]byte]*OnChainOrder
+	fail bool
+}
+
+func (f *fakeOrderEscrow) EscrowedOrder(_ context.Context, id [32]byte) (*OnChainOrder, error) {
 	if f.fail {
-		return false, errors.New("rpc down")
+		return nil, errors.New("rpc down")
 	}
-	return f.escrowed[id], nil
+	return f.held[id], nil
+}
+
+func (f *fakeOrderEscrow) CurrentEscrowAddress() string { return testEscrow }
+
+// fakeTokens resolves USDC on Sonic.
+type fakeTokens struct{}
+
+func (fakeTokens) TokenAddress(chain, symbol string) string {
+	if chain == "sonic" && symbol == "USDC" {
+		return testUSDC
+	}
+	return ""
+}
+
+func newSweep(db *gorm.DB, escrow escrowOrderReader, bus *events.Bus) *UnpaidOrderExpiryService {
+	return NewUnpaidOrderExpiryService(db, escrow, fakeTokens{}, bus)
 }
 
 func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *testing.T) {
@@ -92,7 +133,6 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	beforeLaunch := time.Since(unpaidOrderExpiryFrom) + 24*time.Hour
 
 	abandoned := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, h2, h2)
-	paidUnconfirmed := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, h2, h2)
 	justPlaced := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, m10, m10)
 	retriedNow := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, h2, m10)
 	historical := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, beforeLaunch, beforeLaunch)
@@ -104,8 +144,7 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	notified := make(chan uuid.UUID, 4)
 	bus.Subscribe(events.OrderRefunded, func(e events.Event) { notified <- e.UserID })
 
-	escrow := &fakeOrderEscrow{escrowed: map[[32]byte]bool{GenerateOrderID(paidUnconfirmed): true}}
-	n, err := NewUnpaidOrderExpiryService(db, escrow, bus).ExpireUnpaidOrders(context.Background())
+	n, err := newSweep(db, &fakeOrderEscrow{}, bus).ExpireUnpaidOrders(context.Background())
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}
@@ -114,13 +153,12 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	}
 
 	want := map[uuid.UUID]string{
-		abandoned:       models.OrderStatusCancelled,
-		paidUnconfirmed: models.OrderStatusPendingPayment, // the escrow holds the buyer's money
-		justPlaced:      models.OrderStatusPendingPayment,
-		retriedNow:      models.OrderStatusPendingPayment, // the buyer is paying right now
-		historical:      models.OrderStatusPendingPayment, // placed before the sweep shipped
-		paid:            models.OrderStatusEscrowed,
-		serviceOrder:    models.OrderStatusPendingPayment, // services hold no stock
+		abandoned:    models.OrderStatusCancelled,
+		justPlaced:   models.OrderStatusPendingPayment,
+		retriedNow:   models.OrderStatusPendingPayment, // the buyer is paying right now
+		historical:   models.OrderStatusPendingPayment, // placed before the sweep shipped
+		paid:         models.OrderStatusEscrowed,
+		serviceOrder: models.OrderStatusPendingPayment, // services hold no stock
 	}
 	for id, status := range want {
 		if got := orderStatus(t, db, id); got != status {
@@ -147,7 +185,72 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	}
 }
 
-// An order the escrow holds is skipped every tick; it must not stop the
+// A payment the escrow holds but the app never reported (closed mid-flow, or
+// a lost tx hash) is recorded, and the seller told — never left pending.
+func TestExpireUnpaidOrders_RecordsAPaymentTheAppNeverReported(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+
+	bus := events.NewBus()
+	defer bus.Stop()
+	escrowed := make(chan events.Event, 4)
+	bus.Subscribe(events.OrderEscrowed, func(e events.Event) { escrowed <- e })
+
+	escrow := &fakeOrderEscrow{held: map[[32]byte]*OnChainOrder{GenerateOrderID(id): paidFor()}}
+	n, err := newSweep(db, escrow, bus).ExpireUnpaidOrders(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("expected nothing cancelled, got %d, %v", n, err)
+	}
+	var row struct {
+		Status, EscrowContractAddress, PlatformFee, TotalAmount string
+	}
+	db.Raw(`SELECT status, escrow_contract_address, platform_fee, total_amount FROM orders WHERE id = ?`, id).Scan(&row)
+	if row.Status != models.OrderStatusEscrowed || row.EscrowContractAddress != testEscrow ||
+		row.PlatformFee != "1600" || row.TotalAmount != "80000" {
+		t.Fatalf("paid order must be recorded as the escrow holds it: %+v", row)
+	}
+	if productStock(t, db, product) != 0 {
+		t.Fatal("a paid order keeps its unit")
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-escrowed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("buyer and seller must be told the payment is held")
+		}
+	}
+}
+
+// The escrow's orderId derives from the order's UUID, so anyone can escrow
+// under it. A record that does not pay this order's seller, in its token, the
+// priced amounts, is neither trusted as payment nor cancelled over.
+func TestExpireUnpaidOrders_LeavesAMismatchedEscrowRecordAlone(t *testing.T) {
+	cases := map[string]func(*OnChainOrder){
+		"another seller":  func(o *OnChainOrder) { o.Seller = common.HexToAddress(testBuyerWallet) },
+		"another token":   func(o *OnChainOrder) { o.Token = common.HexToAddress(testFeeManager) },
+		"a smaller price": func(o *OnChainOrder) { o.ProductAmount = big.NewInt(1) },
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := setupUnpaidOrderDB(t)
+			product := writeProduct(t, db, 0)
+			id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+			record := paidFor()
+			tamper(record)
+
+			escrow := &fakeOrderEscrow{held: map[[32]byte]*OnChainOrder{GenerateOrderID(id): record}}
+			if _, err := newSweep(db, escrow, nil).ExpireUnpaidOrders(context.Background()); err != nil {
+				t.Fatalf("expire: %v", err)
+			}
+			if orderStatus(t, db, id) != models.OrderStatusPendingPayment || productStock(t, db, product) != 0 {
+				t.Fatal("a mismatched record must leave the order pending, stock held")
+			}
+		})
+	}
+}
+
+// An order the sweep cannot settle is skipped every tick; it must not stop the
 // sweep reaching abandoned orders behind it.
 func TestExpireUnpaidOrders_PagesPastOrdersItSkips(t *testing.T) {
 	defer func(n int) { unpaidOrderBatch = n }(unpaidOrderBatch)
@@ -155,15 +258,17 @@ func TestExpireUnpaidOrders_PagesPastOrdersItSkips(t *testing.T) {
 
 	db := setupUnpaidOrderDB(t)
 	product := writeProduct(t, db, 0)
-	escrow := &fakeOrderEscrow{escrowed: map[[32]byte]bool{}}
+	mismatched := paidFor()
+	mismatched.ProductAmount = big.NewInt(1)
+	escrow := &fakeOrderEscrow{held: map[[32]byte]*OnChainOrder{}}
 	for i := 0; i < 5; i++ {
 		id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
 		if i%2 == 0 {
-			escrow.escrowed[GenerateOrderID(id)] = true
+			escrow.held[GenerateOrderID(id)] = mismatched
 		}
 	}
 
-	n, err := NewUnpaidOrderExpiryService(db, escrow, nil).ExpireUnpaidOrders(context.Background())
+	n, err := newSweep(db, escrow, nil).ExpireUnpaidOrders(context.Background())
 	if err != nil || n != 2 {
 		t.Fatalf("expected the 2 unescrowed orders expired across pages, got %d, %v", n, err)
 	}
@@ -174,7 +279,7 @@ func TestExpireUnpaidOrders_UnreadableEscrowCancelsNothing(t *testing.T) {
 	product := writeProduct(t, db, 0)
 	order := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
 
-	n, err := NewUnpaidOrderExpiryService(db, &fakeOrderEscrow{fail: true}, nil).ExpireUnpaidOrders(context.Background())
+	n, err := newSweep(db, &fakeOrderEscrow{fail: true}, nil).ExpireUnpaidOrders(context.Background())
 	if err == nil {
 		t.Fatal("expected the failed escrow read to be reported")
 	}
@@ -183,6 +288,35 @@ func TestExpireUnpaidOrders_UnreadableEscrowCancelsNothing(t *testing.T) {
 			n, orderStatus(t, db, order), productStock(t, db, product))
 	}
 }
+
+// A buyer who starts paying after the sweep picked the order (and while it
+// read the escrow) keeps it: the idle condition is part of the cancel itself.
+func TestExpireUnpaidOrders_SparesAnOrderPaidForDuringTheSweep(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+
+	n, err := newSweep(db, touchingEscrow{db: db, id: id}, nil).ExpireUnpaidOrders(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("expected nothing expired, got %d, %v", n, err)
+	}
+	if orderStatus(t, db, id) != models.OrderStatusPendingPayment || productStock(t, db, product) != 0 {
+		t.Fatal("an order being paid for must not be cancelled")
+	}
+}
+
+// touchingEscrow holds nothing, and the buyer's prepare-approve touches the
+// order while it is being read — i.e. mid-sweep.
+type touchingEscrow struct {
+	db *gorm.DB
+	id uuid.UUID
+}
+
+func (e touchingEscrow) EscrowedOrder(context.Context, [32]byte) (*OnChainOrder, error) {
+	return nil, TouchUnpaidOrder(e.db, e.id)
+}
+
+func (touchingEscrow) CurrentEscrowAddress() string { return testEscrow }
 
 func TestCancelUnpaidOrder_LeavesAPaidOrderAlone(t *testing.T) {
 	db := setupUnpaidOrderDB(t)
@@ -216,151 +350,62 @@ func TestTouchUnpaidOrder_RestartsTheClockOnlyWhileUnpaid(t *testing.T) {
 	}
 }
 
-func escrowedUpdates() map[string]interface{} {
-	return map[string]interface{}{"status": models.OrderStatusEscrowed, "escrow_tx_hash": "0xabc"}
-}
-
-func TestMarkOrderEscrowed_PendingOrderBecomesEscrowed(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	product := writeProduct(t, db, 0)
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, time.Minute, time.Minute)
-
-	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1}, escrowedUpdates())
-	if err != nil || mark.Revived || orderStatus(t, db, id) != models.OrderStatusEscrowed || productStock(t, db, product) != 0 {
-		t.Fatalf("pending → escrowed with stock untouched: mark=%+v err=%v status=%s stock=%d",
-			mark, err, orderStatus(t, db, id), productStock(t, db, product))
-	}
-}
-
-// The expiry may beat a slow submit-escrow. The buyer's money is in escrow
-// either way, so a proven payment restores a never-escrowed product order and
-// takes its stock back.
-func TestMarkOrderEscrowed_ProvenPaymentRestoresAnExpiredOrder(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	product := writeProduct(t, db, 1) // the cancel returned the unit
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
-
-	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct}, escrowedUpdates())
-	if err != nil || mark != (EscrowMark{Revived: true}) {
-		t.Fatalf("expected the cancelled order restored with its stock, got %+v, %v", mark, err)
-	}
-	if orderStatus(t, db, id) != models.OrderStatusEscrowed || productStock(t, db, product) != 0 {
-		t.Fatalf("restored order must be escrowed and hold its unit: status=%s stock=%d",
-			orderStatus(t, db, id), productStock(t, db, product))
-	}
-}
-
-func TestMarkOrderEscrowed_FlagsARestoredOrderWhoseStockWasResold(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	product := writeProduct(t, db, 0) // the returned unit sold again
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
-
-	mark, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct}, escrowedUpdates())
-	if err != nil || mark != (EscrowMark{Revived: true, Oversold: true}) {
-		t.Fatalf("expected a restored, oversold order, got %+v, %v", mark, err)
-	}
-	if productStock(t, db, product) != 0 {
-		t.Fatal("stock must not go negative")
-	}
-}
-
-// An order escrowed before and then cancelled may have refunded the buyer
-// on-chain; its original receipt still verifies. Replaying it must not mark
-// the order paid again.
-func TestMarkOrderEscrowed_RefusesToReviveAnOrderThatWasEscrowedBefore(t *testing.T) {
+func TestMarkOrderEscrowed_OnlyAnOrderAwaitingPayment(t *testing.T) {
 	db := setupUnpaidOrderDB(t)
 	product := writeProduct(t, db, 1)
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
-	db.Exec(`UPDATE orders SET escrow_tx_hash = '0xoriginal' WHERE id = ?`, id)
-	order := &models.Order{ID: id, ProductID: product, Quantity: 1, Kind: models.OrderKindProduct,
-		Status: models.OrderStatusCancelled, EscrowTxHash: "0xoriginal"}
-
-	if RevivableOnEscrow(order) {
-		t.Fatal("a previously escrowed order must not be revivable")
+	pending := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, time.Minute, time.Minute)
+	cancelled := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusCancelled, time.Hour, time.Minute)
+	updates := func() map[string]interface{} {
+		return EscrowedOrderUpdates(GenerateOrderID(uuid.New()), big.NewInt(78400), big.NewInt(0), big.NewInt(1600), testEscrow, time.Now())
 	}
-	if _, err := MarkOrderEscrowed(db, order, escrowedUpdates()); !errors.Is(err, ErrOrderNotPayable) {
+
+	if err := MarkOrderEscrowed(db, pending, updates()); err != nil || orderStatus(t, db, pending) != models.OrderStatusEscrowed {
+		t.Fatalf("pending → escrowed: %v, %s", err, orderStatus(t, db, pending))
+	}
+	// A cancelled order is never revived: its unit may be resold, and the
+	// cancel may have been the seller's.
+	if err := MarkOrderEscrowed(db, cancelled, updates()); !errors.Is(err, ErrOrderNotPayable) {
 		t.Fatalf("expected ErrOrderNotPayable, got %v", err)
 	}
-	if orderStatus(t, db, id) != models.OrderStatusCancelled || productStock(t, db, product) != 1 {
-		t.Fatal("a refunded order must stay cancelled with its stock untouched")
+	if orderStatus(t, db, cancelled) != models.OrderStatusCancelled || productStock(t, db, product) != 1 {
+		t.Fatal("a cancelled order must stay cancelled, its stock untouched")
 	}
-}
-
-func TestMarkOrderEscrowed_RefusesToReviveAServiceOrder(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	service := writeProduct(t, db, 5)
-	id := writeOrder(t, db, service, models.OrderKindService, models.OrderStatusCancelled, time.Hour, time.Minute)
-	order := &models.Order{ID: id, ProductID: service, Quantity: 1, Kind: models.OrderKindService, Status: models.OrderStatusCancelled}
-
-	if RevivableOnEscrow(order) {
-		t.Fatal("a service order's slot may be gone; it must not be revivable")
-	}
-	if _, err := MarkOrderEscrowed(db, order, escrowedUpdates()); !errors.Is(err, ErrOrderNotPayable) {
-		t.Fatalf("expected ErrOrderNotPayable, got %v", err)
-	}
-}
-
-func TestMarkOrderEscrowed_RefusesAnOrderPastPayment(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	product := writeProduct(t, db, 0)
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusShipped, time.Hour, time.Minute)
-
-	if _, err := MarkOrderEscrowed(db, &models.Order{ID: id, ProductID: product, Quantity: 1}, escrowedUpdates()); !errors.Is(err, ErrOrderNotPayable) {
-		t.Fatalf("expected ErrOrderNotPayable, got %v", err)
-	}
-	if orderStatus(t, db, id) != models.OrderStatusShipped {
-		t.Fatal("a shipped order must not be moved back to escrowed")
-	}
-}
-
-// A buyer who starts paying after the sweep picked the order (and while it
-// read the escrow) keeps it: the idle condition is part of the cancel itself.
-func TestExpireUnpaidOrders_SparesAnOrderPaidForDuringTheSweep(t *testing.T) {
-	db := setupUnpaidOrderDB(t)
-	product := writeProduct(t, db, 0)
-	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
-
-	escrow := touchingEscrow{db: db, id: id}
-	n, err := NewUnpaidOrderExpiryService(db, escrow, nil).ExpireUnpaidOrders(context.Background())
-	if err != nil || n != 0 {
-		t.Fatalf("expected nothing expired, got %d, %v", n, err)
-	}
-	if orderStatus(t, db, id) != models.OrderStatusPendingPayment || productStock(t, db, product) != 0 {
-		t.Fatal("an order being paid for must not be cancelled")
-	}
-}
-
-// touchingEscrow reports "not escrowed" after the buyer's prepare-approve
-// touched the order — i.e. mid-sweep.
-type touchingEscrow struct {
-	db *gorm.DB
-	id uuid.UUID
-}
-
-func (e touchingEscrow) OrderEscrowed(context.Context, [32]byte) (bool, error) {
-	return false, TouchUnpaidOrder(e.db, e.id)
 }
 
 // ordersChain answers the escrow's orders(bytes32) getter.
-type ordersChain struct{ buyer common.Address }
+type ordersChain struct{ order OnChainOrder }
 
 func (c ordersChain) CallContract(_ context.Context, _ ethereum.CallMsg, _ *big.Int) ([]byte, error) {
-	z := common.Address{}
+	o := c.order
+	nz := func(v *big.Int) *big.Int {
+		if v == nil {
+			return big.NewInt(0)
+		}
+		return v
+	}
 	return parsedEscrowABI.Methods["orders"].Outputs.Pack(
-		c.buyer, z, z, big.NewInt(0), big.NewInt(0), big.NewInt(0), z, big.NewInt(0), false, false, false, false)
+		o.Buyer, o.Seller, o.Token, nz(o.ProductAmount), nz(o.ShippingAmount), nz(o.PlatformFee),
+		common.Address{}, big.NewInt(o.CreatedAt.Unix()), false, false, false, false)
 }
 
-func TestOrderEscrowed_ReadsTheBuyer(t *testing.T) {
+func TestEscrowedOrder_ReadsTheRecord(t *testing.T) {
 	id := GenerateOrderID(uuid.New())
-	held := &EscrowService{escrowAddress: testEscrow, caller: ordersChain{buyer: common.HexToAddress("0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce")}}
-	if ok, err := held.OrderEscrowed(context.Background(), id); err != nil || !ok {
-		t.Fatalf("escrowed order: got %v, %v", ok, err)
+	want := paidFor()
+	held := &EscrowService{escrowAddress: testEscrow, caller: ordersChain{order: *want}}
+	got, err := held.EscrowedOrder(context.Background(), id)
+	if err != nil || got == nil {
+		t.Fatalf("escrowed order: %v, %v", got, err)
 	}
-	empty := &EscrowService{escrowAddress: testEscrow, caller: ordersChain{}}
-	if ok, err := empty.OrderEscrowed(context.Background(), id); err != nil || ok {
-		t.Fatalf("unknown order: got %v, %v", ok, err)
+	if got.Seller != want.Seller || got.Token != want.Token || got.ProductAmount.Cmp(want.ProductAmount) != 0 ||
+		got.PlatformFee.Cmp(want.PlatformFee) != 0 || got.CreatedAt.Unix() != want.CreatedAt.Unix() {
+		t.Fatalf("record read wrong: %+v", got)
 	}
-	if _, err := (&EscrowService{escrowAddress: testEscrow}).OrderEscrowed(context.Background(), id); err == nil {
+
+	empty := &EscrowService{escrowAddress: testEscrow, caller: ordersChain{order: OnChainOrder{CreatedAt: time.Unix(0, 0)}}}
+	if got, err := empty.EscrowedOrder(context.Background(), id); err != nil || got != nil {
+		t.Fatalf("unknown order: got %v, %v", got, err)
+	}
+	if _, err := (&EscrowService{escrowAddress: testEscrow}).EscrowedOrder(context.Background(), id); err == nil {
 		t.Fatal("no client must be an error, never \"not escrowed\"")
 	}
 }

@@ -20,7 +20,7 @@ type fakeWalletBalances struct {
 	err     error
 }
 
-func (f fakeWalletBalances) TokenBalance(_, _, _ string) (*big.Int, error) {
+func (f fakeWalletBalances) DepositBalance(_, _, _ string) (*big.Int, error) {
 	return f.balance, f.err
 }
 
@@ -82,5 +82,32 @@ func TestCreateOrderFromCart_UnreadableBalanceDoesNotBlock(t *testing.T) {
 	code, body, _, _ := checkoutOneItem(t, fakeWalletBalances{err: errors.New("rpc down")})
 	if code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", code, body)
+	}
+}
+
+// The single-service "Pay now" path pulls from the wallet the same way, and a
+// booking would also reserve its slot: a short wallet is refused before either.
+func TestCreateServiceOrder_RefusesAWalletThatCannotPay(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	ch.walletBalances = fakeWalletBalances{balance: big.NewInt(20000)} // 0.02 USDC
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, buyer, "0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := createTypedServiceCategory(t, db, models.ServiceTypeOrder)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 0)
+	item := addMenuItem(t, db, svc.ID, "Combo", 15, true)
+
+	w := postServiceOrder(t, ch, buyer, map[string]interface{}{
+		"productId":      svc.ID.String(),
+		"menuSelections": []map[string]interface{}{{"itemId": item.ID.String(), "quantity": 1}},
+	})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"insufficient_balance"`) {
+		t.Fatalf("expected 400 insufficient_balance, got %d: %s", w.Code, w.Body.String())
+	}
+	var orders int64
+	config.DB.Model(&models.Order{}).Where("buyer_id = ?", buyer.ID).Count(&orders)
+	if orders != 0 {
+		t.Fatalf("a refused order must not be created, got %d", orders)
 	}
 }

@@ -296,7 +296,8 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 		return
 	}
 
-	if body.Quantity > product.Stock {
+	// Services hold no inventory, as in AddToCart and at checkout.
+	if product.Type != models.ProductTypeService && body.Quantity > product.Stock {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Only %d items available in stock", product.Stock))
 		return
 	}

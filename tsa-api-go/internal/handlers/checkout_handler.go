@@ -63,9 +63,10 @@ func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *
 }
 
 // walletBalanceReader is the balance read a checkout needs. *BlockchainService
-// fills it.
+// fills it; its code check keeps a mis-set token address reading as unknown
+// rather than as a zero balance that would refuse every checkout.
 type walletBalanceReader interface {
-	TokenBalance(chainKey, token, address string) (*big.Int, error)
+	DepositBalance(chainKey, token, address string) (*big.Int, error)
 }
 
 // walletBalance reads the pay-token balance of the wallet the escrow will
@@ -76,12 +77,41 @@ func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
 	if ch.walletBalances == nil || wallet == "" {
 		return nil
 	}
-	balance, err := ch.walletBalances.TokenBalance("sonic", token, wallet)
+	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
 	if err != nil {
 		log.Printf("[checkout] balance read for %s %s failed (%v); not pre-checking", wallet, token, err)
 		return nil
 	}
 	return balance
+}
+
+// ratesAndBalance resolves the pricing rates and, alongside them, the buyer's
+// balance of token — both chain reads, neither needing the other, and both
+// done before a DB transaction opens.
+func (ch *CheckoutHandler) ratesAndBalance(ctx context.Context, token, wallet string) (pricingRates, *big.Int, *cartPricingError) {
+	var balance *big.Int
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		balance = ch.walletBalance(wallet, strings.ToUpper(token))
+	}()
+	rates, perr := ch.resolvePricingRates(ctx, token)
+	<-read
+	return rates, balance, perr
+}
+
+// refuseShortfall answers 400 insufficient_balance, rolling tx back, when a
+// known balance cannot cover total: the escrow pulls the whole total and
+// reverts on a shortfall, which the buyer would otherwise meet only after
+// signing, and paying gas for, an approve.
+func refuseShortfall(c *gin.Context, tx *gorm.DB, token string, total, balance *big.Int) bool {
+	short := shortfallMessage(token, total, balance)
+	if short == "" {
+		return false
+	}
+	tx.Rollback()
+	utils.ErrorResponseWithCode(c, http.StatusBadRequest, short, "insufficient_balance")
+	return true
 }
 
 // shortfallMessage is the buyer-facing refusal when a known balance is below
@@ -1060,6 +1090,16 @@ func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 	return &cartCheckout{user: user, req: req, token: token, cart: cart, items: items, delivery: delivery}, true
 }
 
+// orderPull is what the escrow pulls from the buyer's wallet for one order:
+// its TotalAmount plus the escrow's gas fee.
+func orderPull(order *models.Order, gasFee *big.Int) *big.Int {
+	total, _ := new(big.Int).SetString(order.TotalAmount, 10)
+	if total == nil {
+		total = new(big.Int)
+	}
+	return total.Add(total, gasFee)
+}
+
 // cartTotal is everything the buyer's wallet pays for lines: each order's
 // TotalAmount plus the escrow's gas fee per order.
 func cartTotal(lines []pricedCartLine, gasFee *big.Int) *big.Int {
@@ -1079,12 +1119,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	user, req, token, cart, items := in.user, in.req, in.token, in.cart, in.items
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
 
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
 	}
-	balance := ch.walletBalance(user.WalletAddress, token)
 
 	// Wrap everything in a DB transaction
 	tx := config.DB.Begin()
@@ -1116,12 +1155,8 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		return
 	}
 
-	// The escrow pulls the whole total from the buyer's wallet and reverts on
-	// a shortfall. Refuse here, before any order takes stock — otherwise the
-	// buyer finds out only after signing, and paying gas for, an approve.
-	if short := shortfallMessage(token, total, balance); short != "" {
-		tx.Rollback()
-		utils.ErrorResponseWithCode(c, http.StatusBadRequest, short, "insufficient_balance")
+	// Refused before any order takes stock.
+	if refuseShortfall(c, tx, token, total, balance) {
 		return
 	}
 
@@ -1428,7 +1463,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		buyerCountry = user.Country
 	}
 
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
+	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return
@@ -1491,6 +1526,9 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	if errMsg != "" {
 		tx.Rollback()
 		utils.ErrorResponse(c, status, errMsg)
+		return
+	}
+	if refuseShortfall(c, tx, token, orderPull(order, rates.gasFee), balance) {
 		return
 	}
 	if err := tx.Commit().Error; err != nil {
@@ -1660,7 +1698,9 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 	}
 
 	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status))
+		// Coded so the app stops offering a retry that can never succeed.
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status), "order_not_payable")
 		return nil, nil, nil, "", false
 	}
 
@@ -1758,8 +1798,7 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 
 	// The escrow pulls product + shipping + platformFee + its gas fee, so the
 	// approve covers exactly that, with the gas read from the escrow itself.
-	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
-	approveAmount := new(big.Int).Add(totalAmount, rates.gasFee)
+	approveAmount := orderPull(order, rates.gasFee)
 
 	client := ch.BlockchainService.ClientForChain("sonic")
 	if client == nil {
@@ -1860,11 +1899,41 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	// A never-escrowed product order cancelled before its payment was confirmed
-	// still goes on to verification: if its escrow is proven on-chain, the
-	// buyer's money is held and the order is restored (services.MarkOrderEscrowed).
-	if !services.RevivableOnEscrow(&order) &&
-		!isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
+	switch {
+	case order.Status == models.OrderStatusEscrowed:
+		// Already recorded — by an earlier submit whose response was lost, or
+		// by the unpaid-order sweep. A retry proving the same escrow succeeds.
+		created, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID))
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Cannot submit escrow: order is in escrowed status")
+			return
+		}
+		if order.EscrowTxHash == "" {
+			if err := config.DB.Model(&models.Order{}).
+				Where("id = ? AND (escrow_tx_hash IS NULL OR escrow_tx_hash = '')", order.ID).
+				Updates(map[string]interface{}{"approve_tx_hash": req.ApproveTxHash, "escrow_tx_hash": req.EscrowTxHash}).Error; err != nil {
+				log.Printf("[checkout] record tx hashes for order %s failed: %v", order.ID, err)
+			}
+		}
+		expires := time.Now().Add(services.EscrowWindow)
+		if order.EscrowExpiresAt != nil {
+			expires = *order.EscrowExpiresAt
+		}
+		respondEscrowSubmitted(c, order.ID, created.OrderID, expires)
+		return
+
+	case order.Status == models.OrderStatusCancelled && order.EscrowTxHash == "":
+		// A payment that reached escrow after the order was cancelled is not
+		// revived — its stock may be resold, and the cancel may be the
+		// seller's. It is surfaced so the buyer is refunded.
+		if _, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID)); err == nil {
+			log.Printf("[checkout] ALERT paid_after_cancel=1 order=%s escrow_tx=%s: payment reached escrow after the order was cancelled", order.ID, req.EscrowTxHash)
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"Your payment reached escrow after this order was cancelled. Contact support to have it refunded.", "paid_after_cancel")
+			return
+		}
+	}
+	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
 		return
 	}
@@ -1899,33 +1968,17 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	escrowExpires := time.Now().Add(30 * 24 * time.Hour)
-	updates := map[string]interface{}{
-		"status":            models.OrderStatusEscrowed,
-		"approve_tx_hash":   req.ApproveTxHash,
-		"escrow_tx_hash":    req.EscrowTxHash,
-		"contract_order_id": fmt.Sprintf("0x%x", created.OrderID),
-		// Store what the escrow actually recorded, so fee settlement and every
-		// later screen read the amounts it holds, not the ones we asked for.
-		"product_amount":  created.ProductAmount.String(),
-		"shipping_amount": created.ShippingAmount.String(),
-		"platform_fee":    created.PlatformFee.String(),
-		"total_amount": new(big.Int).Add(
-			new(big.Int).Add(created.ProductAmount, created.ShippingAmount), created.PlatformFee,
-		).String(),
-		"escrow_contract_address": ch.EscrowService.CurrentEscrowAddress(),
-		"escrow_expires_at":       escrowExpires,
-	}
-
-	// Guarded on the status: the unpaid-order expiry or a buyer cancel may
-	// have run while the receipts were being verified.
-	var mark services.EscrowMark
+	expires := time.Now().Add(services.EscrowWindow)
+	updates := services.EscrowedOrderUpdates(created.OrderID, created.ProductAmount, created.ShippingAmount,
+		created.PlatformFee, ch.EscrowService.CurrentEscrowAddress(), expires)
+	updates["approve_tx_hash"] = req.ApproveTxHash
+	updates["escrow_tx_hash"] = req.EscrowTxHash
 	if err := config.DB.Transaction(func(tx *gorm.DB) error {
-		var err error
-		mark, err = services.MarkOrderEscrowed(tx, &order, updates)
-		return err
+		return services.MarkOrderEscrowed(tx, order.ID, updates)
 	}); errors.Is(err, services.ErrOrderNotPayable) {
-		utils.ErrorResponse(c, http.StatusConflict, "This order was already updated — refresh your orders")
+		// Recorded or cancelled while the receipts were being verified; a retry
+		// lands in the matching branch above.
+		utils.ErrorResponse(c, http.StatusConflict, "This order changed while your payment was being confirmed. Tap Try again.")
 		return
 	} else if err != nil {
 		log.Printf("[checkout] mark order %s escrowed failed: %v", order.ID, err)
@@ -1933,46 +1986,16 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderEscrowed,
-		UserID:  user.ID,
-		Title:   "Order Escrowed",
-		Message: fmt.Sprintf("Your payment for order %s has been escrowed", order.ID),
-		Data: map[string]interface{}{
-			"orderId":         order.ID.String(),
-			"status":          models.OrderStatusEscrowed,
-			"escrowExpiresAt": escrowExpires,
-		},
-	})
-	sellerTitle := "Payment Received — Ship Order"
-	sellerMsg := fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8])
-	if mark.Oversold {
-		// The order expired unpaid, its unit sold again, and then this payment
-		// landed. Cancelling it refunds the buyer from the escrow.
-		sellerTitle = "Paid Order Out of Stock — Cancel to Refund"
-		sellerMsg = fmt.Sprintf("Payment for order #%s arrived after the order had expired and its stock was sold again. If you cannot fulfil it, cancel the order to refund the buyer.", order.ID.String()[:8])
-	} else if order.Kind == models.OrderKindService {
-		sellerTitle = "Payment Received — Provide Service"
-		sellerMsg = fmt.Sprintf("Payment for service order #%s has been escrowed. Provide the service, then mark it rendered.", order.ID.String()[:8])
-	}
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderEscrowed,
-		UserID:  order.SellerID,
-		Title:   sellerTitle,
-		Message: sellerMsg,
-		Data: map[string]interface{}{
-			"orderId":         order.ID.String(),
-			"status":          models.OrderStatusEscrowed,
-			"escrowExpiresAt": escrowExpires,
-			"role":            "seller",
-		},
-	})
+	services.NotifyOrderEscrowed(ch.EventBus, &order, expires)
+	respondEscrowSubmitted(c, order.ID, created.OrderID, expires)
+}
 
+func respondEscrowSubmitted(c *gin.Context, orderID uuid.UUID, contractOrderID [32]byte, expires time.Time) {
 	utils.SuccessResponse(c, http.StatusOK, "Escrow submitted successfully", gin.H{
-		"orderId":         order.ID,
+		"orderId":         orderID,
 		"status":          models.OrderStatusEscrowed,
-		"contractOrderId": fmt.Sprintf("0x%x", created.OrderID),
-		"escrowExpiresAt": escrowExpires,
+		"contractOrderId": fmt.Sprintf("0x%x", contractOrderID),
+		"escrowExpiresAt": expires,
 	})
 }
 

@@ -536,13 +536,13 @@ func main() {
 	scheduler.Register(jobs.NewBookingRequestExpiry(
 		services.NewBookingRequestService(config.DB), time.Hour))
 
-	// Marketplace orders: cancel the ones with no payment activity for an hour
-	// and return their stock, which placing the order took. Only where the
-	// escrow can be read — an order is never cancelled without proof the
-	// escrow holds nothing for it.
+	// Marketplace orders with no payment activity for an hour are settled
+	// against the escrow: cancelled with their stock returned when it holds
+	// nothing for them, marked escrowed when it holds a matching payment the
+	// app never reported. Only where the escrow can be read.
 	if sonicClient != nil {
 		scheduler.Register(jobs.NewUnpaidOrderExpiry(
-			services.NewUnpaidOrderExpiryService(config.DB, escrowService, eventBus), 10*time.Minute),
+			services.NewUnpaidOrderExpiryService(config.DB, escrowService, blockchainService, eventBus), 10*time.Minute),
 			jobs.AlertOnFailureStreak())
 	}
 

@@ -271,32 +271,52 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
 }
 
-// OrderEscrowed reports whether the configured escrow holds an order under
-// orderId: createOrder records the buyer, so a zero buyer means nothing was
-// ever escrowed for it. Only a successful read is an answer — an RPC failure
-// is an error, never "not escrowed", because callers release stock on false.
-func (s *EscrowService) OrderEscrowed(ctx context.Context, orderId [32]byte) (bool, error) {
+// OnChainOrder is an order as the escrow's orders(id) getter records it.
+type OnChainOrder struct {
+	Buyer, Seller, Token                       common.Address
+	ProductAmount, ShippingAmount, PlatformFee *big.Int
+	CreatedAt                                  time.Time
+}
+
+// EscrowedOrder reads the configured escrow's record of orderId, or nil when
+// it holds none (createOrder records the buyer, so a zero buyer means nothing
+// was ever escrowed). Only a successful read is an answer — an RPC failure is
+// an error, never "not escrowed", because callers release stock on nil.
+func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*OnChainOrder, error) {
 	if s.caller == nil {
-		return false, fmt.Errorf("blockchain client not available")
+		return nil, fmt.Errorf("blockchain client not available")
 	}
 	data, err := parsedEscrowABI.Pack("orders", orderId)
 	if err != nil {
-		return false, fmt.Errorf("pack orders: %w", err)
+		return nil, fmt.Errorf("pack orders: %w", err)
 	}
 	escrow := common.HexToAddress(s.escrowAddress)
 	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
 	if err != nil {
-		return false, fmt.Errorf("orders call: %w", err)
+		return nil, fmt.Errorf("orders call: %w", err)
 	}
 	vals, err := parsedEscrowABI.Unpack("orders", out)
-	if err != nil || len(vals) == 0 {
-		return false, fmt.Errorf("decode orders: %v", err)
+	if err != nil || len(vals) < 8 {
+		return nil, fmt.Errorf("decode orders: %v (%d values)", err, len(vals))
 	}
-	buyer, ok := vals[0].(common.Address)
-	if !ok {
-		return false, fmt.Errorf("decode orders: unexpected buyer type %T", vals[0])
+	buyer, ok1 := vals[0].(common.Address)
+	seller, ok2 := vals[1].(common.Address)
+	token, ok3 := vals[2].(common.Address)
+	product, ok4 := vals[3].(*big.Int)
+	shipping, ok5 := vals[4].(*big.Int)
+	fee, ok6 := vals[5].(*big.Int)
+	created, ok7 := vals[7].(*big.Int)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7) {
+		return nil, fmt.Errorf("decode orders: unexpected value types")
 	}
-	return buyer != (common.Address{}), nil
+	if buyer == (common.Address{}) {
+		return nil, nil
+	}
+	return &OnChainOrder{
+		Buyer: buyer, Seller: seller, Token: token,
+		ProductAmount: product, ShippingAmount: shipping, PlatformFee: fee,
+		CreatedAt: time.Unix(created.Int64(), 0),
+	}, nil
 }
 
 func findOrderCreated(logs []*types.Log, escrowAddr common.Address, expectedOrderID [32]byte) (*EscrowCreated, error) {
