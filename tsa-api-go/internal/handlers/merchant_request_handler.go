@@ -69,8 +69,9 @@ type submitMerchantRequestInput struct {
 	Country             string `json:"country" binding:"required"`
 	Phone               string `json:"phone" binding:"required"`
 	RegistrationNumber  string `json:"registrationNumber"`
-	// Website (business_type='payment_acceptance'): required, validated as a
-	// well-formed https URL in SubmitMerchantRequest.
+	// Website (business_type='payment_acceptance'): optional — a business with
+	// no site takes payments through payment links — but when given, validated
+	// as a well-formed https URL in SubmitMerchantRequest.
 	Website string `json:"website"`
 
 	// Corporate Payment-Merchant (business_type='p2p_merchant') fields. Required
@@ -171,10 +172,10 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	// TSA Pay applications must supply a well-formed https website — it
-	// becomes the merchant's checkout/webhook return domain.
-	if input.BusinessType == models.BusinessTypePaymentAcceptance {
-		raw := strings.TrimSpace(input.Website)
+	// A TSA Pay application's website is optional: a business with none sends
+	// payment links instead. One that is given must be a well-formed https
+	// address — it becomes the merchant's checkout return domain.
+	if raw := strings.TrimSpace(input.Website); input.BusinessType == models.BusinessTypePaymentAcceptance && raw != "" {
 		site, err := url.Parse(raw)
 		if err != nil || len(raw) > 255 || site.Scheme != "https" || site.User != nil ||
 			!services.ValidPayDomain(strings.ToLower(site.Hostname())) {

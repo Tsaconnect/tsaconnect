@@ -8,6 +8,19 @@ const day = (d: Date) => `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 /** Kobo → "₦84,500.00". */
 export const naira = (kobo: number) => `₦${NGN.format(kobo / 100)}`;
 
+// Plain digits, or commas only as thousands separators ("5,000", not "5000,50" —
+// a decimal comma must be refused, never read as ₦500,050).
+const NAIRA = /^(\d+|\d{1,3}(,\d{3})+)(\.\d{1,2})?$/;
+
+/** What a merchant typed as naira ("5,000.50", "₦5000") → kobo; not a positive amount → null. */
+export function parseNaira(text: string): number | null {
+  const typed = text.replace(/[\s₦]/g, '');
+  if (!NAIRA.test(typed)) return null;
+  const [whole, frac = ''] = typed.replace(/,/g, '').split('.');
+  const kobo = Number(whole) * 100 + Number(frac.padEnd(2, '0'));
+  return kobo > 0 && Number.isSafeInteger(kobo) ? kobo : null;
+}
+
 /** "24 Sep, 16:02" in the viewer's time zone. */
 export const dateTime = (iso: string) => {
   const d = new Date(iso);

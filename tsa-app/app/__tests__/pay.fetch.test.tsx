@@ -4,7 +4,8 @@
  * The pay screen's checkout reads. The 5 s poll can overlap: a slow OLD answer
  * landing after a newer one must not put the screen back in time. And a payment
  * that has reached a terminal status has no use for its "don't pay again" hold
- * any more, so the screen lets go of it.
+ * any more, so the screen lets go of it. A payment link says what it is for and,
+ * when the merchant named one, who it was requested for.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -55,8 +56,10 @@ jest.mock('@/hooks/usePayTest', () => ({
   __esModule: true,
   usePayTest: () => ({ request: jest.fn(), authorization: {}, submitting: false }),
 }));
-jest.mock('@/utils/postAuthRoute', () => ({ __esModule: true, rememberPendingPayment: jest.fn() }));
-jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), returnUrlFor: () => null }));
+jest.mock('@/utils/postAuthRoute', () => ({
+  __esModule: true, rememberPendingPayment: jest.fn(async () => {}), forgetPendingPayment: jest.fn(async () => {}),
+}));
+jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), getPublicPayment: jest.fn(async () => ({ expiresAt: '2026-10-03T12:00:00Z' })), returnUrlFor: () => null }));
 jest.mock('@/services/payHold', () => ({ __esModule: true, clearPayHold: jest.fn(async () => {}) }));
 jest.mock('@/components/pay/PayNaira', () => ({ __esModule: true, PayNaira: () => null }));
 jest.mock('@/components/pay/PayCrypto', () => ({ __esModule: true, PayCrypto: () => null }));
@@ -123,4 +126,43 @@ it('a payment still under way does not', async () => {
   await act(async () => { tree = TestRenderer.create(<PayScreen />); });
   await flush();
   expect(clearPayHold).not.toHaveBeenCalled();
+});
+
+it('a payment link says what it is for and who it was requested for', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, description: 'Two bags of rice', customerName: 'Ada Obi',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Two bags of rice');
+  expect(text()).toContain('Requested for: Ada Obi');
+});
+
+it('without a customer name there is no "Requested for"', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({ status: 'pending', payable: true, youArePaying: false }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).not.toContain('Requested for');
+});
+
+it('through a reusable link, what it is for is the link\'s name, and the description is the payer\'s note', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, source: 'open', linkLabel: 'Mama Ngozi Store — Shop 12',
+    description: 'Two plates of rice',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Mama Ngozi Store — Shop 12');
+  expect(text()).toContain("Customer's note: Two plates of rice");
+  expect(text()).not.toContain('For: Two plates of rice');
+});
+
+it('a reusable-link payment with no note shows only what it is for', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, source: 'open', linkLabel: 'Shop 12', description: '',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Shop 12');
+  expect(text()).not.toContain("Customer's note");
 });

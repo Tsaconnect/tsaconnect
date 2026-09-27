@@ -31,10 +31,10 @@ import {
   useToast,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
-import { getCheckout, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
+import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
 import { clearPayHold } from '@/services/payHold';
 import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
-import { rememberPendingPayment } from '@/utils/postAuthRoute';
+import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
@@ -44,6 +44,22 @@ import { formatKobo } from '@/utils/stableSellQuote';
 
 /** The server writes reasons for her in lower case ("support is reviewing it"); a line of its own starts with a capital. */
 const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+/** How long a tap on Sign in / Create an account waits for the payment's expiry. */
+const EXPIRY_WAIT_MS = 2000;
+
+/** The payment's expiry from the public read, or undefined if it doesn't answer in time. */
+async function publicExpiry(id: string): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXPIRY_WAIT_MS);
+  try {
+    return (await getPublicPayment(id, controller.signal)).expiresAt;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const DONE_LABEL: Record<PayStatus, string> = {
   succeeded: 'Payment complete',
@@ -93,10 +109,23 @@ export default function PayScreen() {
     }
   }, [id]);
 
-  // A payment the server has finished with needs no "don't pay again" hold on this phone.
+  // A payment the server has finished with needs no "don't pay again" hold on
+  // this phone, and nothing to come back to after sign-in or KYC.
   useEffect(() => {
-    if (checkout && TERMINAL_STATUSES.includes(checkout.status)) void clearPayHold(checkout.id);
+    if (checkout && TERMINAL_STATUSES.includes(checkout.status)) {
+      void clearPayHold(checkout.id);
+      void forgetPendingPayment(checkout.id);
+    }
   }, [checkout]);
+
+  // Signed out, she may be a new customer: signing up, verifying her email and
+  // passing KYC can take days. The public read says until when this payment is
+  // worth returning to, so it is remembered that long, not a flat half hour.
+  const [expiresAt, setExpiresAt] = useState<string | undefined>();
+  useEffect(() => {
+    if (!needsSignIn || typeof id !== 'string') return;
+    getPublicPayment(id).then((p) => setExpiresAt(p.expiresAt), () => {});
+  }, [needsSignIn, id]);
 
   // Load once auth has hydrated, signed in or not — a 401 is what shows the
   // sign-in prompt. Re-runs when the session changes.
@@ -131,9 +160,13 @@ export default function PayScreen() {
     fetchCheckout();
   }, [payTest.error, toast, fetchCheckout]);
 
-  const handleSignIn = async () => {
-    if (typeof id === 'string') await rememberPendingPayment(id);
-    router.replace('/login');
+  const leaveToAuth = async (to: '/login' | '/signup') => {
+    if (typeof id === 'string') {
+      // Tapped before the public read landed: give it a moment rather than fall back to half an hour.
+      const until = expiresAt ?? (await publicExpiry(id));
+      await rememberPendingPayment(id, { expiresAt: until });
+    }
+    router.replace(to);
   };
 
   const handleReturnToStore = async () => {
@@ -186,7 +219,11 @@ export default function PayScreen() {
               <Text variant="title3" weight="700" align="center">
                 Sign in to pay
               </Text>
-              <Button title="Sign in" size="lg" onPress={handleSignIn} />
+              <Text variant="bodySm" color="textSecondary" align="center">
+                New to TSA Connect? Create an account — we&apos;ll bring you back to this payment.
+              </Text>
+              <Button title="Sign in" size="lg" onPress={() => void leaveToAuth('/login')} />
+              <Button title="Create an account" variant="secondary" size="lg" onPress={() => void leaveToAuth('/signup')} />
             </View>
           )}
 
@@ -203,6 +240,22 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
+                  {/* Through a reusable link, what it's for is the link's name; the
+                      description is only the payer's own note, and is labelled as that. */}
+                  {state.checkout.source === 'open' ? (
+                    <>
+                      {state.checkout.linkLabel ? <SummaryRow label="For" value={state.checkout.linkLabel} /> : null}
+                      {state.checkout.description ? (
+                        <SummaryRow label="Customer's note" value={state.checkout.description} />
+                      ) : null}
+                    </>
+                  ) : state.checkout.description ? (
+                    <SummaryRow label="For" value={state.checkout.description} />
+                  ) : null}
+                  {/* A payment link names who it was made for, so she can tell it is hers. */}
+                  {state.checkout.customerName ? (
+                    <SummaryRow label="Requested for" value={state.checkout.customerName} />
+                  ) : null}
                   <SummaryRow label="Amount" value={formatKobo(String(state.checkout.amount))} />
                   {/* Only the payer's share: a merchant may absorb part or all of the fee. */}
                   {state.checkout.customerTotal > state.checkout.amount && (

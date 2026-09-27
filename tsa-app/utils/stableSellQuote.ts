@@ -152,13 +152,24 @@ export function formatKobo(kobo: string | null | undefined): string {
  * formatKobo itself would read "1362.9" as 13629 kobo.
  */
 export function formatNaira(naira: string | null | undefined): string {
+  const kobo = koboFromNaira(naira);
+  if (kobo === null) return '—';
+  // "-0.001" rounds to nothing, and nothing has no sign.
+  return formatKobo(String(kobo));
+}
+
+/**
+ * "1362.9" → 136290n: a decimal naira string as integer kobo, rounded to the
+ * kobo half away from zero, or null when it is not a number. String maths, so
+ * a large amount never passes through a float.
+ */
+export function koboFromNaira(naira: string | null | undefined): bigint | null {
   const m = naira?.trim().match(/^(-?)(\d*)(?:\.(\d*))?$/);
-  if (!m || (!m[2] && !m[3])) return '—';
+  if (!m || (!m[2] && !m[3])) return null;
   const [, sign, whole, frac = ''] = m;
   let kobo = BigInt(`${whole || '0'}${frac.padEnd(2, '0').slice(0, 2)}`);
   if (frac.length > 2 && frac[2] >= '5') kobo += BigInt(1);
-  // "-0.001" rounds to nothing, and nothing has no sign.
-  return formatKobo(`${kobo === BigInt(0) ? '' : sign}${kobo}`);
+  return sign ? -kobo : kobo;
 }
 
 /** gross − afterSpread, as a kobo string. Both are integers on the wire. */

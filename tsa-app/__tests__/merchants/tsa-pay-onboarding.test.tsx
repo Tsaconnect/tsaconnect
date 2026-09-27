@@ -78,6 +78,12 @@ jest.mock('../../components/services/api', () => ({
 }));
 const mockAuth: { currentUser: any } = { currentUser: { verificationStatus: 'pending', phoneNumber: '+2348000000000' } };
 jest.mock('../../AuthContext/AuthContext', () => ({ __esModule: true, useAuth: () => mockAuth }));
+jest.mock('@/services/payMerchantApi', () => ({
+  __esModule: true,
+  ...jest.requireActual('@/services/payMerchantApi'),
+  // Nobody here has TSA Pay yet: the dashboard shows the application card.
+  getOwnMerchant: jest.fn(async () => { throw Object.assign(new Error('none'), { status: 404, code: 'no_merchant' }); }),
+}));
 jest.mock('../../services/ngBanks', () => ({ __esModule: true, getNigerianBanks: jest.fn(async () => []), resolveAccountName: jest.fn() }));
 jest.mock('../../services/p2p', () => ({ __esModule: true, getMyPmStatus: jest.fn(async () => ({ isPm: false })) }));
 jest.mock('@/hooks/useKeyboardHeight', () => ({ __esModule: true, useKeyboardHeight: () => 0 }));
@@ -225,6 +231,43 @@ describe('verify first', () => {
     await flush();
     expect(submitMerchantRequest).toHaveBeenCalled();
     expect(text(tree)).toContain('Verify your identity first');
+  });
+});
+
+describe('website', () => {
+  /** A verified applicant's form, filled in except for the website. */
+  async function filledForm() {
+    mockAuth.currentUser = { verificationStatus: 'verified', phoneNumber: '+2348000000000' };
+    jest.mocked(api.getKYCStatus).mockResolvedValue({ success: true, data: { verificationStatus: 'verified' } } as any);
+    jest.mocked(submitMerchantRequest).mockResolvedValue({ success: true, data: { status: 'pending' } } as any);
+    const tree = await mount(<MerchantRequestScreen />);
+    const input = (placeholder: string) =>
+      tree.root.findAll((n) => n.props.placeholder === placeholder && n.props.onChangeText)[0];
+    await act(async () => {
+      input('e.g. Business Name').props.onChangeText('Kemi Cakes');
+      input('Street address').props.onChangeText('4 Allen Ave');
+      byLabel(tree, 'location').props.onPress();
+    });
+    return { tree, website: (v: string) => act(async () => { input('https://example.com').props.onChangeText(v); }) };
+  }
+  const submit = (tree: ReactTestRenderer) =>
+    act(async () => { byLabel(tree, 'button:Submit Application').props.onPress(); });
+
+  it('is optional: a business with no website can apply', async () => {
+    const { tree } = await filledForm();
+    expect(text(tree)).toContain('Website (optional)');
+    await submit(tree);
+    await flush();
+    expect(Alert.alert).not.toHaveBeenCalledWith('Error', expect.anything());
+    expect(submitMerchantRequest).toHaveBeenCalledWith(expect.objectContaining({ businessType: 'payment_acceptance', website: '' }));
+  });
+
+  it('one that is given must still be an https address', async () => {
+    const { tree, website } = await filledForm();
+    await website('kemicakes.ng');
+    await submit(tree);
+    expect(Alert.alert).toHaveBeenCalledWith('Error', "Enter your website's https address");
+    expect(submitMerchantRequest).not.toHaveBeenCalled();
   });
 });
 

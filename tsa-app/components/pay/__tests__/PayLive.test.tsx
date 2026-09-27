@@ -74,6 +74,8 @@ const mockHooks: { naira: any; crypto: any } = { naira: null, crypto: null };
 jest.mock('@/hooks/usePayNaira', () => ({ __esModule: true, usePayNaira: () => mockHooks.naira }));
 jest.mock('@/hooks/usePayCrypto', () => ({ __esModule: true, usePayCrypto: () => mockHooks.crypto }));
 
+jest.mock('@/utils/postAuthRoute', () => ({ __esModule: true, rememberPendingPayment: jest.fn(async () => {}) }));
+
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router } from 'expo-router';
@@ -81,6 +83,7 @@ import type { PayCheckout } from '@/services/payApi';
 import { PayLivePanel } from '../PayLivePanel';
 import { PayNaira } from '../PayNaira';
 import { PayCrypto } from '../PayCrypto';
+import { rememberPendingPayment } from '@/utils/postAuthRoute';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
 const fiat = {
@@ -157,10 +160,20 @@ describe('the panel, by state', () => {
     expect(text(tree)).toContain('The swap did not go through');
   });
 
-  it('a KYC refusal offers Verify identity', async () => {
+  it('a payer with no wallet on this phone (just signed up) is sent to set one up, not shown a picker that cannot price', async () => {
+    await panel(hookState({ walletUnavailable: true, walletAddress: undefined }));
+    expect(text(tree)).toContain('Set up a wallet to pay');
+    expect(text(tree)).not.toContain('Choose a token');
+    expect(text(tree)).not.toMatch(/Pay ₦/);
+    await act(async () => { find(tree, 'button:Set up a wallet').props.onPress(); });
+    expect(router.push).toHaveBeenCalledWith('/wallet/manage');
+  });
+
+  it('a KYC refusal offers Verify identity, remembering the payment so KYC can bring her back', async () => {
     await panel(hookState({ stage: 'failed', error: 'Verify first', errorCode: 'kyc_verification_required' }));
-    await act(async () => { find(tree, 'button:Verify identity').props.onPress(); });
-    expect(router.push).toHaveBeenCalledWith('/profile/kyc');
+    await act(async () => { await find(tree, 'button:Verify identity').props.onPress(); });
+    expect(rememberPendingPayment).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({}));
+    expect(router.push).toHaveBeenCalledWith('/profile/kyc?returnTo=pay');
   });
 
   it('a payment under way offers Continue payment, and the form stays hidden', async () => {

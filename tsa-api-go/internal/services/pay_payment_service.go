@@ -10,10 +10,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -69,6 +71,9 @@ var (
 	// (merchant, mode, reference) with a different amount/currency/
 	// description/return URL than the one just requested.
 	ErrPayReferenceConflict = errors.New("a payment with this reference already exists with different details")
+	// ErrPayLinkReferenceTaken means an owner's payment link named a
+	// reference this merchant already used in that mode.
+	ErrPayLinkReferenceTaken = errors.New("this reference is already used")
 	// ErrPayMerchantNotReady is returned when the merchant has no
 	// settlement destination configured yet.
 	ErrPayMerchantNotReady = errors.New("this merchant can't take payments yet — settlement isn't configured")
@@ -89,6 +94,21 @@ var (
 	ErrPayTransition = errors.New("payment is not in a state that allows this")
 )
 
+// PayInvalidError is a payment refused for a reason with two audiences. Error()
+// is the merchant API's wording — "invalid payment: " and Reason, exactly as
+// the API has always answered — and Human is the sentence a person is shown
+// instead: an owner making a payment link by hand, or a customer paying
+// through an open link. errors.Is(err, ErrPayPaymentInvalid) holds for it.
+type PayInvalidError struct {
+	Reason string
+	Human  string
+}
+
+func (e *PayInvalidError) Error() string { return ErrPayPaymentInvalid.Error() + ": " + e.Reason }
+func (e *PayInvalidError) Unwrap() error { return ErrPayPaymentInvalid }
+
+func payInvalid(reason, human string) error { return &PayInvalidError{Reason: reason, Human: human} }
+
 // PayPaymentService creates and reads TSA Pay merchant payments.
 type PayPaymentService struct {
 	db           *gorm.DB
@@ -96,6 +116,7 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
+	events       *events.Bus      // nil until SetEvents: no "payment received" alerts
 	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
 	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
 	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
@@ -115,6 +136,10 @@ func NewPayPaymentService(db *gorm.DB, merchants *PayMerchantService, feeBps int
 type payDepositReader interface {
 	DepositBalance(chainKey, token, address string) (*big.Int, error)
 }
+
+// SetEvents wires the bus the "payment received" alert to the merchant's owner
+// goes out on. Unset, payments succeed silently.
+func (s *PayPaymentService) SetEvents(bus *events.Bus) { s.events = bus }
 
 // SetDepositReader wires the on-chain read that proves an expired order's
 // deposit address is empty. Unset, no expired order is ever released: it waits
@@ -141,6 +166,26 @@ func (s *PayPaymentService) IntentsWired() bool { return s.intents != nil }
 // ErrPayReferenceConflict. expiresIn does not participate in that
 // comparison — it only sizes a freshly created payment's ExpiresAt.
 func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, mode string, in CreatePayPaymentInput) (*models.PayPayment, bool, error) {
+	return s.create(ctx, m, mode, in, payCreateOptions{source: models.PaySourceAPI, maxExpirySeconds: payMaxExpirySeconds})
+}
+
+// payCreateOptions is what differs between a payment a merchant's server
+// creates (Create), a payment link its owner makes by hand (CreateLink) and one
+// a customer starts through an open link (CreateFromOpenLink): where it came
+// from, who a link is for, which open link (and at which of its addresses),
+// and how long it may stay open.
+type payCreateOptions struct {
+	source           string
+	customerName     string
+	openLinkID       *uuid.UUID
+	openLinkSlug     string
+	maxExpirySeconds int
+}
+
+// create is the one body every kind of payment is made through, so a link or an
+// open-link payment is held to exactly the merchant's own amount bounds, currency,
+// fee split and settlement snapshot an API payment is.
+func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, mode string, in CreatePayPaymentInput, opts payCreateOptions) (*models.PayPayment, bool, error) {
 	if m.SettlementMode == "" {
 		return nil, false, ErrPayMerchantNotReady
 	}
@@ -159,15 +204,17 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 	reference := strings.TrimSpace(in.Reference)
 	description := strings.TrimSpace(in.Description)
 	returnURL := strings.TrimSpace(in.ReturnURL)
+	// Postgres cannot store a NUL, so no payment has one in its reference: the
+	// lookup below would fail on it (22021) rather than find nothing.
+	if strings.ContainsRune(reference, 0) {
+		return nil, false, payInvalid("reference must not contain a NUL character", "Your reference can't contain hidden or control characters")
+	}
 
 	var existing models.PayPayment
 	err := s.db.WithContext(ctx).Where("merchant_id = ? AND mode = ? AND reference = ?", m.ID, mode, reference).First(&existing).Error
 	switch {
 	case err == nil:
-		if paySnapshotMatches(&existing, in.AmountKobo, currency, description, returnURL) {
-			return &existing, false, nil
-		}
-		return nil, false, ErrPayReferenceConflict
+		return payReferenceReused(&existing, opts.source, in.AmountKobo, currency, description, returnURL)
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, false, err
 	}
@@ -177,14 +224,22 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 	if currency != "NGN" {
 		return nil, false, fmt.Errorf("%w: currency must be NGN", ErrPayPaymentInvalid)
 	}
-	if l := len(reference); l < 1 || l > payMaxReferenceLen {
-		return nil, false, fmt.Errorf("%w: reference must be 1-%d characters", ErrPayPaymentInvalid, payMaxReferenceLen)
+	// Counted in characters, as the varchar(128) column counts them.
+	if l := utf8.RuneCountInString(reference); l < 1 || l > payMaxReferenceLen {
+		return nil, false, payInvalid(fmt.Sprintf("reference must be 1-%d characters", payMaxReferenceLen),
+			fmt.Sprintf("Your reference must be at most %d characters", payMaxReferenceLen))
 	}
 	if in.AmountKobo < m.MinAmountKobo || in.AmountKobo > m.MaxAmountKobo {
-		return nil, false, fmt.Errorf("%w: amount must be between %d and %d kobo", ErrPayPaymentInvalid, m.MinAmountKobo, m.MaxAmountKobo)
+		return nil, false, payInvalid(fmt.Sprintf("amount must be between %d and %d kobo", m.MinAmountKobo, m.MaxAmountKobo),
+			fmt.Sprintf("Enter an amount between ₦%s and ₦%s", koboAsNairaText(m.MinAmountKobo), koboAsNairaText(m.MaxAmountKobo)))
 	}
-	if len(description) > payMaxDescriptionLen {
-		return nil, false, fmt.Errorf("%w: description must be at most %d characters", ErrPayPaymentInvalid, payMaxDescriptionLen)
+	// Counted in characters, as the varchar(255) column counts them.
+	if utf8.RuneCountInString(description) > payMaxDescriptionLen {
+		return nil, false, payInvalid(fmt.Sprintf("description must be at most %d characters", payMaxDescriptionLen),
+			fmt.Sprintf("What it's for must be at most %d characters", payMaxDescriptionLen))
+	}
+	if strings.ContainsRune(description, 0) {
+		return nil, false, payInvalid("description must not contain a NUL character", "What it's for can't contain hidden or control characters")
 	}
 	if returnURL != "" {
 		if err := validatePayReturnURL(returnURL, m.ReturnDomainList()); err != nil {
@@ -196,8 +251,8 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 	switch {
 	case expiresIn == 0:
 		expiresIn = payDefaultExpirySeconds
-	case expiresIn < payMinExpirySeconds || expiresIn > payMaxExpirySeconds:
-		return nil, false, fmt.Errorf("%w: expiresIn must be %d-%d seconds", ErrPayPaymentInvalid, payMinExpirySeconds, payMaxExpirySeconds)
+	case expiresIn < payMinExpirySeconds || expiresIn > opts.maxExpirySeconds:
+		return nil, false, fmt.Errorf("%w: expiresIn must be %d-%d seconds", ErrPayPaymentInvalid, payMinExpirySeconds, opts.maxExpirySeconds)
 	}
 
 	split, err := PayAmounts(in.AmountKobo, s.feeBps, m.CustomerFeeSharePercent)
@@ -213,6 +268,10 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 		AmountKobo:              in.AmountKobo,
 		Currency:                currency,
 		Description:             description,
+		Source:                  opts.source,
+		CustomerName:            opts.customerName,
+		OpenLinkID:              opts.openLinkID,
+		OpenLinkSlug:            opts.openLinkSlug,
 		ReturnURL:               returnURL,
 		FeeBps:                  s.feeBps,
 		CustomerFeeSharePercent: m.CustomerFeeSharePercent,
@@ -234,10 +293,10 @@ func (s *PayPaymentService) Create(ctx context.Context, m *models.PayMerchant, m
 }
 
 // createOrExisting inserts p outside any transaction. If another request won
-// an insert-race for the same (merchant, mode, reference) between Create's
+// an insert-race for the same (merchant, mode, reference) between create's
 // pre-check and this insert, the unique index refuses the row; we re-read
-// the winner and apply the same idempotency comparison Create's pre-check
-// does, rather than surfacing an error for a request that in fact succeeded.
+// the winner and give the same answer create's pre-check would have, rather
+// than surfacing an error for a request that in fact succeeded.
 func (s *PayPaymentService) createOrExisting(ctx context.Context, p *models.PayPayment, in CreatePayPaymentInput) (*models.PayPayment, bool, error) {
 	if err := s.db.WithContext(ctx).Create(p).Error; err != nil {
 		if !isUniqueViolation(err) {
@@ -249,12 +308,25 @@ func (s *PayPaymentService) createOrExisting(ctx context.Context, p *models.PayP
 			First(&existing).Error; reErr != nil {
 			return nil, false, reErr
 		}
-		if paySnapshotMatches(&existing, p.AmountKobo, p.Currency, p.Description, p.ReturnURL) {
-			return &existing, false, nil
-		}
-		return nil, false, ErrPayReferenceConflict
+		return payReferenceReused(&existing, p.Source, p.AmountKobo, p.Currency, p.Description, p.ReturnURL)
 	}
 	return p, true, nil
+}
+
+// payReferenceReused answers a request whose (merchant, mode, reference)
+// already has a payment. For the API that is a retry when it came the same way
+// with the same body, and a conflict otherwise. Nothing else is ever a retry:
+// an owner typing a link reference they have used before made a mistake (a
+// double-submitted form is caught by the route's Idempotency-Key instead), and
+// an open-link payment's reference is made up fresh for every customer.
+func payReferenceReused(existing *models.PayPayment, source string, amountKobo int64, currency, description, returnURL string) (*models.PayPayment, bool, error) {
+	if source != models.PaySourceAPI {
+		return nil, false, ErrPayLinkReferenceTaken
+	}
+	if existing.Source == source && paySnapshotMatches(existing, amountKobo, currency, description, returnURL) {
+		return existing, false, nil
+	}
+	return nil, false, ErrPayReferenceConflict
 }
 
 // paySnapshotMatches reports whether an existing payment was created from
@@ -328,13 +400,22 @@ func validatePayReturnURL(raw string, allowed []string) error {
 	return fmt.Errorf("return url host %q is not an allowed return domain", host)
 }
 
+// PayListCancelled is the list Status for payments their merchant called off.
+// It is not a stored status: those payments are expired, with
+// PayReasonMerchantCancelled as the reason — and Status "expired" lists only
+// the ones that ran out of time.
+const PayListCancelled = "cancelled"
+
 // PayListFilter selects payments. MerchantID nil means every merchant;
-// Mode/Status "" mean every mode/status. Query matches the reference or
-// description (case-insensitive substring) or an id prefix.
+// Mode/Status/Source "" mean every mode/status/source; Status may also be
+// PayListCancelled. Query matches the reference, description or customer name
+// (case-insensitive substring) or an id prefix. HideUntriedOpen leaves out
+// untried open-link payments (PayPayment.Untried) — scan noise to an owner.
 type PayListFilter struct {
-	MerchantID          *uuid.UUID
-	Mode, Status, Query string
-	Page, Limit         int
+	MerchantID                  *uuid.UUID
+	Mode, Status, Source, Query string
+	HideUntriedOpen             bool
+	Page, Limit                 int
 }
 
 // List is one page of payments, newest first, with the total that matched.
@@ -355,8 +436,20 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		if f.Mode != "" {
 			q = q.Where("mode = ?", f.Mode)
 		}
-		if f.Status != "" {
+		switch f.Status {
+		case "":
+		case PayListCancelled:
+			q = q.Where("status = ? AND failure_reason = ?", models.PayStatusExpired, PayReasonMerchantCancelled)
+		case models.PayStatusExpired:
+			q = q.Where("status = ? AND (failure_reason IS NULL OR failure_reason <> ?)", models.PayStatusExpired, PayReasonMerchantCancelled)
+		default:
 			q = q.Where("status = ?", f.Status)
+		}
+		if f.Source != "" {
+			q = q.Where("source = ?", f.Source)
+		}
+		if f.HideUntriedOpen {
+			q = payHideUntriedOpen(q)
 		}
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
 			// What she typed is matched literally: % and _ are not wildcards.
@@ -364,6 +457,7 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 			// One group, so the ORs never widen the merchant/mode/status filter.
 			q = q.Where(s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(description) LIKE ? ESCAPE '\'`, "%"+esc+"%").
+				Or(`LOWER(customer_name) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%"))
 		}
 		return q

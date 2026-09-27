@@ -7,7 +7,7 @@
 // app's one unlock path). The server only accepts a bank account in the
 // business's or the owner's verified name, and applies any change — bank or
 // wallet — only once she enters the code it emails her. She is told of every
-// change by email and push.
+// change by email and push. Her payment links start here too (PayLinkEntry).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,26 +19,25 @@ import {
   Button, Card, ErrorState, Input, PickerSheet, SegmentedControl, SelectRow, Spinner, Text, useToast,
 } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
+import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { usePayAuthorization } from '@/hooks/usePayAuthorization';
+import { loadOwnMerchant, type OwnMerchantLoad } from '@/hooks/useOwnPayMerchant';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import type { LiFiToken } from '@/services/lifi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import {
-  confirmOwnerAction, getOwnMerchant, OWNER_CODES, updateSettlement,
+  confirmOwnerAction, OWNER_CODES, updateSettlement,
   type OwnMerchant, type PendingConfirmation, type SettlementChange, type SettlementMode,
 } from '@/services/payMerchantApi';
+import { errorCode, errorMessage } from '@/utils/payCheckout';
 import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
 
-type Load = { kind: 'loading' } | { kind: 'none' } | { kind: 'error'; message: string } | { kind: 'ready'; merchant: OwnMerchant };
-
-const errorOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
-const codeOf = (e: unknown) => (e as { code?: string } | null)?.code;
 
 export default function PaySettings() {
   const { colors, spacing } = useTheme();
   const toast = useToast();
   const { address } = useSignableWallet();
-  const [load, setLoad] = useState<Load>({ kind: 'loading' });
+  const [load, setLoad] = useState<OwnMerchantLoad>({ kind: 'loading' });
   const [mode, setMode] = useState<SettlementMode>('fiat');
 
   const [banks, setBanks] = useState<NgBank[]>([]);
@@ -64,20 +63,14 @@ export default function PaySettings() {
   const walletFilled = useRef(false);
 
   const refresh = useCallback(async () => {
-    try {
-      const merchant = await getOwnMerchant();
-      setLoad({ kind: 'ready', merchant });
-      if (merchant.settlementMode) setMode(merchant.settlementMode);
-      if (!walletFilled.current && merchant.walletAddress) {
-        walletFilled.current = true;
-        setWallet(merchant.walletAddress);
-      }
-    } catch (e) {
-      // Only the server saying "no merchant" means she has none; any other 404
-      // is the feature being off, not an invitation to apply again.
-      setLoad(codeOf(e) === OWNER_CODES.NO_MERCHANT
-        ? { kind: 'none' }
-        : { kind: 'error', message: errorOf(e, 'Could not load your payment settings.') });
+    const next = await loadOwnMerchant();
+    setLoad(next);
+    if (next.kind !== 'ready') return;
+    const { merchant } = next;
+    if (merchant.settlementMode) setMode(merchant.settlementMode);
+    if (!walletFilled.current && merchant.walletAddress) {
+      walletFilled.current = true;
+      setWallet(merchant.walletAddress);
     }
   }, []);
 
@@ -134,10 +127,10 @@ export default function PaySettings() {
       if (answer.confirmation) setPending(answer.confirmation);
       else if (answer.merchant) applied(answer.merchant);
     } catch (e) {
-      const why = codeOf(e);
+      const why = errorCode(e);
       setFormError(why === OWNER_CODES.NAME_MISMATCH && resolvedName
-        ? `${errorOf(e, '')} The bank says this account belongs to ${resolvedName}.`
-        : errorOf(e, 'Could not save your payment settings.'));
+        ? `${errorMessage(e, '')} The bank says this account belongs to ${resolvedName}.`
+        : errorMessage(e, 'Could not save your payment settings.'));
       if (why === OWNER_CODES.STALE) void refresh();
     } finally {
       submitting.current = false;
@@ -155,8 +148,8 @@ export default function PaySettings() {
       const answer = await confirmOwnerAction(pending.id, code);
       if (answer.merchant) applied(answer.merchant);
     } catch (e) {
-      const why = codeOf(e);
-      setFormError(errorOf(e, 'Could not confirm the change.'));
+      const why = errorCode(e);
+      setFormError(errorMessage(e, 'Could not confirm the change.'));
       // Expired, used up, or overtaken by another edit: this code is done.
       if (why === OWNER_CODES.NO_PENDING || why === OWNER_CODES.STALE) { setPending(null); setCode(''); }
       if (why === OWNER_CODES.STALE) void refresh();
@@ -200,6 +193,16 @@ export default function PaySettings() {
           <Text variant="caption" color="textMuted">{merchant.businessName} is paid to</Text>
           <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
         </Card>
+
+        {pending ? null : (
+          <Card style={{ gap: spacing.sm }}>
+            <Text variant="bodyMed" weight="700">Get paid with a link</Text>
+            <Text variant="bodySm" color="textSecondary">
+              Send a customer a link or QR code for an amount — no website needed.
+            </Text>
+            <PayLinkEntry canRequest={!suspended} />
+          </Card>
+        )}
 
         {pending ? (
           <Card style={{ gap: spacing.sm }}>

@@ -28,6 +28,7 @@ describe('app shell', () => {
     mount('/business/test/payments');
     const nav = await screen.findByRole('navigation', { name: 'Main' });
     expect(within(nav).getByRole('link', { name: 'Overview' })).toHaveAttribute('href', '/business/test/overview');
+    expect(within(nav).getByRole('link', { name: 'Payment links' })).toHaveAttribute('href', '/business/test/links');
     expect(within(nav).getByRole('link', { name: 'Payouts' })).toHaveAttribute('href', '/business/test/payouts');
     expect(within(nav).getByRole('link', { name: 'API keys & webhooks' })).toHaveAttribute('href', '/business/test/developers');
     expect(within(nav).getByRole('link', { name: 'Docs' })).toHaveAttribute('href', '/docs');
@@ -47,6 +48,12 @@ describe('app shell', () => {
     mount('/business/test/payments/3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f?status=failed&page=3&q=abv');
     const modes = await screen.findByRole('group', { name: 'Mode' });
     expect(within(modes).getByRole('link', { name: 'Live' })).toHaveAttribute('href', '/business/live/payments?status=failed&q=abv');
+  });
+
+  it('switching mode from a payment link goes to the other mode\'s links', async () => {
+    mount('/business/live/links/8e4d2c1b-6a5f-4e3d-9c2b-7a1f0e9d8c7b?status=pending');
+    const modes = await screen.findByRole('group', { name: 'Mode' });
+    expect(within(modes).getByRole('link', { name: 'Test' })).toHaveAttribute('href', '/business/test/links?status=pending');
   });
 
   it('live mode has no test banner', async () => {

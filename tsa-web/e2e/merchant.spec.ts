@@ -79,6 +79,12 @@ test('the layout holds at phone width', async ({ page }) => {
   const overflows = () => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   expect(await overflows()).toBe(false);
 
+  // The overview's recent payments scroll inside their card too.
+  await page.goto('/business/live/overview');
+  await expect(page.getByRole('heading', { name: 'Recent payments' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'PNR-K8Q2ZL' })).toBeVisible();
+  expect(await overflows()).toBe(false);
+
   // Keys and webhooks: long key prefixes and URLs truncate inside their boxes.
   await page.goto('/business/live/developers');
   await expect(page.getByRole('heading', { name: 'API keys & webhooks' })).toBeVisible();

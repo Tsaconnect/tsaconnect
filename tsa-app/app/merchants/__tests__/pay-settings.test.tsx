@@ -4,7 +4,8 @@
  * A TSA Pay merchant changing where they are paid. What this pins: nothing is
  * sent without PIN/biometric AND the account password; the change sent is the
  * one she filled in; a bank account or a wallet applies only with the emailed
- * code; a refused name says whose account the bank thinks it is.
+ * code; a refused name says whose account the bank thinks it is. Her payment
+ * links start here too, and a suspended merchant can read them but not request.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -15,8 +16,20 @@ jest.mock('react-native-safe-area-context', () => {
 });
 jest.mock('@/theme', () => ({
   __esModule: true,
-  useTheme: () => ({ colors: new Proxy({}, { get: () => '#000000' }), spacing: new Proxy({}, { get: () => 8 }) }),
+  useTheme: () => ({
+    colors: new Proxy({}, { get: () => '#000000' }),
+    spacing: new Proxy({}, { get: () => 8 }),
+    radius: new Proxy({}, { get: () => 8 }),
+  }),
 }));
+jest.mock('expo-router', () => {
+  const react = jest.requireActual('react');
+  return {
+    __esModule: true,
+    router: { push: jest.fn() },
+    useFocusEffect: (cb: () => void | (() => void)) => react.useEffect(cb, [cb]),
+  };
+});
 const mockToast = { success: jest.fn(), error: jest.fn() };
 jest.mock('@/components/ui', () => {
   const react = jest.requireActual('react');
@@ -29,6 +42,8 @@ jest.mock('@/components/ui', () => {
     ErrorState: (props: any) => react.createElement(RNText, null, props.title),
     Spinner: () => null,
     Card: box,
+    Icon: () => null,
+    PressableScale: (props: any) => react.createElement(View, { accessibilityLabel: props.accessibilityLabel, onPress: props.onPress }, props.children),
     Input: (props: any) => react.createElement(TextInput, { accessibilityLabel: `input:${props.label}`, value: props.value, onChangeText: props.onChangeText }),
     SelectRow: (props: any) => react.createElement(RNText, { accessibilityLabel: `select:${props.label}`, onPress: props.onPress }, props.value ?? props.placeholder),
     SegmentedControl: (props: any) => react.createElement(View, null, props.segments.map((s: any) =>
@@ -66,11 +81,12 @@ jest.mock('@/services/payMerchantApi', () => ({
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
+import { router } from 'expo-router';
 import { confirmOwnerAction, getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
 import PaySettings from '../pay-settings';
 
 const merchant = {
-  id: 'm1', businessName: 'Sky Air', status: 'active', version: 7, settlementMode: 'fiat',
+  id: 'm1', businessName: 'Sky Air', status: 'active', liveEnabled: false, version: 7, settlementMode: 'fiat',
   bankCode: '044', accountNumber: '******6789', accountName: 'SKY AIR LTD',
 } as OwnMerchant;
 
@@ -207,4 +223,19 @@ it('a refused name says whose account the bank thinks it is', async () => {
   await act(async () => { mockAuthorization.props.onAuthorized(); });
   await flush();
   expect(text(tree)).toContain('The bank says this account belongs to EMEKA NWOSU.');
+});
+
+it('starts her payment links: Request payment and the Payment links row', async () => {
+  const tree = await mount();
+  await act(async () => { byLabel(tree, 'button:Request payment').props.onPress(); });
+  expect(router.push).toHaveBeenCalledWith('/merchants/pay-links/new');
+  await act(async () => { byLabel(tree, 'Payment links').props.onPress(); });
+  expect(router.push).toHaveBeenCalledWith('/merchants/pay-links');
+});
+
+it('a suspended merchant can read her links but not request a payment', async () => {
+  jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, status: 'suspended' });
+  const tree = await mount();
+  expect(() => byLabel(tree, 'button:Request payment')).toThrow();
+  expect(byLabel(tree, 'Payment links')).toBeTruthy();
 });

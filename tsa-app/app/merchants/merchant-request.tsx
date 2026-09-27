@@ -443,7 +443,9 @@ export default function MerchantRequestScreen() {
       return;
     }
 
-    if (isPay && !website.trim().toLowerCase().startsWith('https://')) {
+    // A website is optional — a business without one takes payments through
+    // payment links — but one that is given must be an https address.
+    if (isPay && website.trim() && !website.trim().toLowerCase().startsWith('https://')) {
       Alert.alert('Error', "Enter your website's https address");
       return;
     }
@@ -751,7 +753,7 @@ export default function MerchantRequestScreen() {
           {isPay && (
             <Field
               ref={websiteRef}
-              label="Website *"
+              label="Website (optional)"
               value={website}
               onChangeText={setWebsite}
               placeholder="https://example.com"

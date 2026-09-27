@@ -23,7 +23,14 @@ export type PayCheckout = {
   fee: number;
   merchantNet: number;
   currency: 'NGN';
+  /** A one-time link's "what it's for"; through a reusable link, only the payer's own note (often empty). */
   description: string;
+  /** Who the merchant made this link for, when she named them. */
+  customerName?: string;
+  /** How the payment was made: through a one-time link, a reusable ("open") link, or the merchant's own server. */
+  source?: 'api' | 'link' | 'open';
+  /** Through a reusable link: that link's name — what the payment is for. */
+  linkLabel?: string;
   expiresAt: string;
   settlementMode: 'fiat' | 'crypto';
   settleTokenSymbol?: string;
@@ -78,6 +85,15 @@ export type PayHistoryItem = {
 export async function listMyPayments(): Promise<PayHistoryItem[]> {
   const data = await request<{ payments: PayHistoryItem[] }>('/history');
   return data?.payments ?? [];
+}
+
+/** What anyone — signed in or not — may read of a payment (GET /pay/public/:id). */
+export type PayPublic = { id: string; merchantName: string; status: PayStatus; expiresAt: string };
+
+/** The signed-out read: enough to know until when a payment is worth coming back to. */
+export async function getPublicPayment(id: string, signal?: AbortSignal): Promise<PayPublic> {
+  if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
+  return request<PayPublic>(`/public/${encodeURIComponent(id)}`, { signal });
 }
 
 /** Refuses a non-UUID before it ever reaches fetch. */

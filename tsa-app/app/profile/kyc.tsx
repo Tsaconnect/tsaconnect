@@ -2,17 +2,20 @@
 //
 // KYC identity-verification flow (Didit hosted session in a WebView).
 // Status check → create session → camera permission → Didit WebView →
-// callback/completion detection → poll status.
+// callback/completion detection → poll status. Verified, a customer who was
+// sent here from a pay link (a remembered pending payment) is offered the way
+// straight back to it, through goAfterAuth.
 import React, { useState, useCallback } from "react";
 import { View, ActivityIndicator, Alert, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { Camera } from "expo-camera";
 import { WebView } from "react-native-webview";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { Text, Button, Icon, ScreenHeader } from "@/components/ui";
+import { goAfterAuth, hasPendingPayment } from "@/utils/postAuthRoute";
 
 type KYCState =
   | "not_started"
@@ -28,6 +31,15 @@ export default function KYCScreen() {
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
   const [sessionUrl, setSessionUrl] = useState<string | null>(null);
+  // A payment she was on her way to make when KYC stopped her. Sent here from
+  // that payment's screen (?returnTo=pay), it is still underneath: go back to
+  // it. Otherwise (a later launch, the Didit callback) open it afresh.
+  const [paymentWaiting, setPaymentWaiting] = useState(false);
+  const { returnTo } = useLocalSearchParams<{ returnTo?: string }>();
+  const continueToPayment = () => {
+    if (returnTo === "pay" && router.canGoBack()) router.back();
+    else void goAfterAuth(router);
+  };
 
   const checkStatus = useCallback(async () => {
     try {
@@ -35,6 +47,7 @@ export default function KYCScreen() {
       if (response.success && response.data) {
         const { verificationStatus, actionRequired } = response.data;
         if (verificationStatus === "verified") {
+          setPaymentWaiting(await hasPendingPayment());
           setState("verified");
         } else if (verificationStatus === "rejected") {
           setState("rejected");
@@ -226,7 +239,14 @@ export default function KYCScreen() {
           title="Identity Verified"
           subtitle="Your identity has been successfully verified."
         >
-          <Button title="Go Back" onPress={() => router.back()} fullWidth />
+          {paymentWaiting ? (
+            <View style={{ width: "100%", gap: spacing.md }}>
+              <Button title="Continue to payment" onPress={continueToPayment} fullWidth />
+              <Button title="Go Back" variant="ghost" onPress={() => router.back()} fullWidth />
+            </View>
+          ) : (
+            <Button title="Go Back" onPress={() => router.back()} fullWidth />
+          )}
         </StatusPanel>
       </SafeAreaView>
     );

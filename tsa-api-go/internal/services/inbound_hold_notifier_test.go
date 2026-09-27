@@ -467,7 +467,7 @@ func TestInboundGapAlertDormantWhenUnconfigured(t *testing.T) {
 	}
 }
 
-func TestInboundAlertNairaText(t *testing.T) {
+func TestKoboAsNairaText(t *testing.T) {
 	tests := map[int64]string{
 		0:            "0.00",
 		1:            "0.01",
@@ -479,8 +479,8 @@ func TestInboundAlertNairaText(t *testing.T) {
 		-250050:      "-2,500.50",
 	}
 	for kobo, want := range tests {
-		if got := inboundAlertNairaText(kobo); got != want {
-			t.Errorf("inboundAlertNairaText(%d) = %q, want %q", kobo, got, want)
+		if got := koboAsNairaText(kobo); got != want {
+			t.Errorf("koboAsNairaText(%d) = %q, want %q", kobo, got, want)
 		}
 	}
 }

@@ -90,6 +90,21 @@ func TestPayMerchant_CreateFromRequestTrimsAWhitespacePaddedWebsite(t *testing.T
 	}
 }
 
+// A business with no website is approved with no website or return domain: it
+// is paid through links, and no return URL is accepted until it adds a domain.
+func TestPayMerchant_CreateFromRequestWithNoWebsite(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	req := payRequest()
+	req.Website = "  "
+	m, err := s.CreateFromRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if m.WebsiteDomain != "" || m.ReturnDomains != "" || len(m.ReturnDomainList()) != 0 || m.SettlementMode != models.PaySettlementFiat {
+		t.Fatalf("merchant = %+v", m)
+	}
+}
+
 func TestPayMerchant_CreateFromRequestIsIdempotent(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	req := payRequest()

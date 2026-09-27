@@ -1,9 +1,82 @@
 // Business values in the words merchants read.
 import { naira } from '@/lib/format';
-import type { Bank, OwnMerchant, Payment, SettlementOption } from './api';
+import type { PayStatus } from '@/components/ui/status-pill';
+import type { Bank, Mode, NotTakingReason, OpenLink, OwnMerchant, Payment, SettlementOption } from './api';
 
 /** What the merchant receives is only real once the money is on its way. */
 export const youReceive = (p: Payment) => (p.status === 'succeeded' || p.status === 'processing' ? naira(p.merchantNet) : '—');
+
+/** Live payments are off for this business right now (an older API only sends the merchant's own switch). */
+export const isLiveOff = (m: OwnMerchant, mode: Mode) => mode === 'live' && !(m.liveAllowed ?? m.liveEnabled);
+
+type AmountRange = Pick<OpenLink, 'minAmount' | 'maxAmount' | 'merchantMinAmount' | 'merchantMaxAmount'>;
+
+/**
+ * What a customer may pay through a reusable link, as the server works it out
+ * (payOpenLinkBounds): the link's own range narrowed by the business's limits as
+ * they are now, a limit of 0 being the business's own — "From ₦1,000.00 to ₦5,000,000.00".
+ */
+export function openAmountRule(l: AmountRange): string {
+  const min = Math.max(l.minAmount, l.merchantMinAmount);
+  // An older API sends no business limits (0): then only the link's own maximum is known.
+  const max = l.merchantMaxAmount ? Math.min(l.maxAmount || l.merchantMaxAmount, l.merchantMaxAmount) : l.maxAmount;
+  if (min && max) return `From ${naira(min)} to ${naira(max)}`;
+  if (min) return `From ${naira(min)}`;
+  return max ? `Up to ${naira(max)}` : 'Any amount';
+}
+
+const NOT_TAKING: Record<NotTakingReason, string> = {
+  paused: 'Paused',
+  suspended: 'Your account is suspended',
+  live_off: "Live payments aren't on",
+  no_payout: 'Set your payout account',
+  range_outside_limits: 'Your amount range no longer fits your limits — edit the link',
+};
+
+/** Whether a customer can pay a reusable link now, and the reason in the owner's words when not. */
+export function openLinkTaking(l: OpenLink): { taking: boolean; reason?: string } {
+  const taking = l.takingPayments ?? l.active;
+  if (taking) return { taking };
+  return { taking, reason: l.notTakingReason ? NOT_TAKING[l.notTakingReason] : NOT_TAKING.paused };
+}
+
+/** What a shared reusable link says — the same words as the app: "Pay Mama Ngozi Store — Shop 12: https://…". */
+export const openLinkMessage = (businessName: string, l: OpenLink) => `Pay ${businessName} — ${l.label}: ${l.url}`;
+
+/** "https://tsaconnectworld.com/l/mama-ngozi-7k3q" → "tsaconnectworld.com/l/mama-ngozi-7k3q", for print. */
+export const shortUrl = (url: string) => url.replace(/^https?:\/\//, '');
+
+/** A payment link's states in the words of the links page's filters. */
+export const LINK_STATUS_LABELS = { pending: 'Awaiting payment', succeeded: 'Paid' } as const;
+
+/**
+ * What a payment was for, and the customer's note. A reusable-link payment is for
+ * its link (linkLabel); anything the customer typed there is their note, never
+ * the owner's description.
+ */
+export function paymentFor(p: Payment): { what: string; note?: string } {
+  if (p.source !== 'open') return { what: p.description };
+  return { what: p.linkLabel ?? '', note: p.description || undefined };
+}
+
+/** One line for a table: "Sky Air — Ikeja desk · Note: two bags". */
+export function paymentForLine(p: Payment): string {
+  const { what, note } = paymentFor(p);
+  return [what, note && `Note: ${note}`].filter(Boolean).join(' · ');
+}
+
+/** The status pill's state: a link its owner cancelled reads Cancelled, not Expired. */
+export const statusOf = (p: Payment): PayStatus => (p.cancelled ? 'cancelled' : p.status);
+
+/**
+ * What a shared payment link says: "Sky Air Ltd is requesting ₦5,050.51 for … Pay here: …" —
+ * the total the customer is charged, fee included, so the message matches the checkout.
+ */
+export const linkMessage = (businessName: string, p: Payment) =>
+  `${businessName} is requesting ${naira(p.customerTotal)} for ${p.description}. Pay here: ${p.checkoutUrl}`;
+
+/** WhatsApp's share page with the message filled in; the sender picks the chat. */
+export const whatsAppUrl = (message: string) => `https://wa.me/?text=${encodeURIComponent(message)}`;
 
 const CHAINS: Record<string, string> = {
   base: 'Base', bsc: 'BNB Chain', ethereum: 'Ethereum', polygon: 'Polygon', arbitrum: 'Arbitrum',

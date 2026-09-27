@@ -4,7 +4,6 @@ import { BookOpen, CreditCard, KeyRound, Landmark, LayoutGrid, Link2, LogOut, Us
 import { useSession } from '@/session/context';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/cn';
-import { Badge } from '@/components/ui/badge';
 import { SegmentedNav } from '@/components/ui/segmented';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Brand } from './Brand';
@@ -91,10 +90,7 @@ export function Sidebar({ section, mode, merchant, onNavigate }: {
           <>
             <Item to={biz('overview')} icon={LayoutGrid} onNavigate={onNavigate}>Overview</Item>
             <Item to={biz('payments')} icon={CreditCard} onNavigate={onNavigate}>Payments</Item>
-            <Item to={biz('links')} icon={Link2} onNavigate={onNavigate}>
-              Payment links
-              <Badge tone="neutral" className="ml-auto bg-slate-line text-text-muted">Soon</Badge>
-            </Item>
+            <Item to={biz('links')} icon={Link2} onNavigate={onNavigate}>Payment links</Item>
             <Heading>Business</Heading>
             <Item to={biz('payouts')} icon={Landmark} onNavigate={onNavigate}>Payouts</Item>
             <Heading>Developers</Heading>

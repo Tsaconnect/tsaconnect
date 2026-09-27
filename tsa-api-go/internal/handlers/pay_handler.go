@@ -22,18 +22,38 @@ import (
 // without a real PayPaymentService.
 type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
+	CreateLink(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayLinkInput) (*models.PayPayment, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
+	Views(ctx context.Context, ps []models.PayPayment) ([]services.PayPaymentView, error)
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
 	PayerHistory(ctx context.Context, userID uuid.UUID) ([]services.PayHistoryItem, error)
-	PublicView(ctx context.Context, id uuid.UUID) (*services.PayPublicView, error)
+	PublicView(ctx context.Context, id uuid.UUID, liveEnabled bool) (*services.PayPublicView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
+	CancelLink(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
+	CheckoutURL(id uuid.UUID) string
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 	Payer(ctx context.Context, p *models.PayPayment) (*services.PayPayerView, error)
+}
+
+// payOpenLinkAPI is the slice of *services.PayPaymentService the open-link
+// routes need — kept apart from payPaymentAPI so a handler (or a test) that
+// never serves open links needn't provide them. Nil leaves those routes
+// unmounted (see OpenLinksEnabled).
+type payOpenLinkAPI interface {
+	CreateOpenLink(ctx context.Context, m *models.PayMerchant, mode string, in services.PayOpenLinkInput) (*models.PayOpenLink, error)
+	OpenLinks(ctx context.Context, merchantID uuid.UUID, mode string, page, limit int) ([]models.PayOpenLink, int64, error)
+	OpenLinkForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayOpenLink, error)
+	UpdateOpenLink(ctx context.Context, m *models.PayMerchant, mode string, id uuid.UUID, in services.PayOpenLinkUpdate) (*models.PayOpenLink, error)
+	ReplaceOpenLink(ctx context.Context, m *models.PayMerchant, mode string, id uuid.UUID) (*models.PayOpenLink, error)
+	OpenLinkViews(ctx context.Context, m *models.PayMerchant, ls []models.PayOpenLink, liveEnabled bool) ([]services.PayOpenLinkView, error)
+	OpenLinkPayments(ctx context.Context, id uuid.UUID) ([]models.PayPayment, error)
+	OpenLinkPublic(ctx context.Context, slug string, liveEnabled bool) (*services.PayOpenLinkPublicView, error)
+	CreateFromOpenLink(ctx context.Context, slug string, in services.PayOpenPaymentInput, liveEnabled bool) (*models.PayPayment, error)
 }
 
 // payWebhookAPI is the narrow slice of *services.PayWebhookSender the admin
@@ -69,6 +89,7 @@ type payCheckoutStarter interface {
 type PayHandler struct {
 	merchants   *services.PayMerchantService
 	payments    payPaymentAPI
+	openLinks   payOpenLinkAPI
 	webhooks    payWebhookAPI
 	checkout    payCheckoutStarter
 	events      *events.Bus
@@ -86,6 +107,19 @@ func NewPayHandler(merchants *services.PayMerchantService, payments payPaymentAP
 func (h *PayHandler) WithCheckout(c payCheckoutStarter) *PayHandler {
 	h.checkout = c
 	return h
+}
+
+// WithOpenLinks turns the open-link routes on. Callers pass a real service or
+// nothing at all — never a typed-nil pointer, which would read as wired.
+func (h *PayHandler) WithOpenLinks(ol payOpenLinkAPI) *PayHandler {
+	h.openLinks = ol
+	return h
+}
+
+// OpenLinksEnabled reports whether the open-link routes can be served.
+// Nil-safe, like Enabled.
+func (h *PayHandler) OpenLinksEnabled() bool {
+	return h.Enabled() && h.openLinks != nil
 }
 
 // Enabled reports whether TSA Pay has enough wired up to serve a request.
@@ -530,7 +564,7 @@ func (h *PayHandler) Public(c *gin.Context) {
 		return
 	}
 
-	v, err := h.payments.PublicView(c.Request.Context(), id)
+	v, err := h.payments.PublicView(c.Request.Context(), id, h.liveEnabled)
 	if err != nil {
 		payPaymentFail(c, err)
 		return

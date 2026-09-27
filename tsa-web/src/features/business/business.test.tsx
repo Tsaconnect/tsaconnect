@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { fail, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
+import { fail, link, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
 
 const noPayments = ok({ items: [], total: 0, page: 1, limit: 20 });
 
@@ -175,6 +175,27 @@ describe('business area', () => {
     await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('mode=test') && String(u).includes('status=pending'))).toBe(true));
   });
 
+  it('Payments filters cancelled links apart from expired ones', async () => {
+    const f = stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments': noPayments });
+    mountAt('/business/live/payments');
+    await userEvent.click(await screen.findByRole('radio', { name: 'Cancelled' }));
+    await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('status=cancelled'))).toBe(true));
+  });
+
+  it('a payment not yet paid says what the customer pays and what you\'ll receive', async () => {
+    const waiting = { ...payment, id: 'p9', status: 'pending' as const, succeededAt: undefined, settlementRef: undefined };
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [waiting], total: 1, page: 1, limit: 20 }),
+      '/api/pay/merchant/payments/p9': ok({ payment: waiting, payer: null, deliveries: [] }),
+    });
+    mountAt('/business/live/payments/p9');
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText('Customer pays')).toBeInTheDocument();
+    expect(within(drawer).queryByText('Customer paid')).not.toBeInTheDocument();
+    expect(within(drawer).getByText("You'll receive").nextElementSibling).toHaveTextContent('₦84,500.00');
+  });
+
   it('an empty test mode points to the docs', async () => {
     stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments': noPayments });
     mountAt('/business/test/payments');
@@ -203,9 +224,16 @@ describe('business area', () => {
     await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).includes('page=1'))).toBe(true));
   });
 
-  it('payment links are coming soon', async () => {
-    stubFetch({ '/api/pay/merchant': ok(merchant) });
-    mountAt('/business/live/links');
-    expect(await screen.findByText('Payment links are coming soon')).toBeInTheDocument();
+  it('a payment made as a link is tagged Link, with who it was for', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [payment, link], total: 2, page: 1, limit: 20 }),
+    });
+    mountAt('/business/live/payments');
+    const linkRow = (await screen.findByText(link.reference)).closest('tr')!;
+    expect(within(linkRow).getByText('Link')).toBeInTheDocument();
+    expect(within(linkRow).getByText(`Tolu Adeyemi · ${link.description}`)).toBeInTheDocument();
+    const apiRow = screen.getByText(payment.reference).closest('tr')!;
+    expect(within(apiRow).queryByText('Link')).not.toBeInTheDocument();
   });
 });

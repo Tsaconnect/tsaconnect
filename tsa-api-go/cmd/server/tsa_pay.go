@@ -71,12 +71,16 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		// handed back; without it no expired order is ever released.
 		payments.SetDepositReader(chains)
 	}
+	if bus != nil {
+		// "Payment received" alerts to each merchant's owner.
+		payments.SetEvents(bus)
+	}
 	sender := services.NewPayWebhookSender(db, merchants, services.NewPayWebhookHTTPClient(), time.Now)
 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
-	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus)
+	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus).WithOpenLinks(payments)
 	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}

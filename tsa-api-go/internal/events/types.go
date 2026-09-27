@@ -68,6 +68,12 @@ const (
 	// Informational: told to the owner by email and push, and mutable.
 	PayLiveEnabled  = "merchant.pay_live_enabled"
 	PayLiveDisabled = "merchant.pay_live_disabled"
+	// PayPaymentReceived: a TSA Pay payment to the merchant succeeded — from
+	// their API, a payment link or an open link, live or test. Told to the owner
+	// once per payment, in the app, by push and by email; informational, so it
+	// respects their mute settings. Data carries paymentId, merchantId, mode and
+	// source.
+	PayPaymentReceived = "pay_payment_received"
 
 	// Product events
 	ProductListed   = "product.listed"

@@ -9,6 +9,8 @@ import { ErrorState } from '@/components/ui/states';
 import { listPayments, type Mode, type OwnMerchant } from './api';
 import { BusinessPage } from './BusinessPage';
 import { shortAddress } from './display';
+import { paymentColumns } from './paymentColumns';
+import { queryKeys } from './queryKeys';
 import { NoPaymentsYet, PaymentsTable } from './PaymentsTable';
 
 // `to` empty: nothing for the merchant to do but wait, so the step is not a link.
@@ -110,11 +112,11 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
   const mode = useMode();
   const { user } = useSession();
   const testPaid = useQuery({
-    queryKey: ['payments', 'test', { status: 'succeeded', page: 1, limit: 1 }],
+    queryKey: queryKeys.list('payments', 'test', { status: 'succeeded', page: 1, limit: 1 }),
     queryFn: ({ signal }) => listPayments('test', { status: 'succeeded', limit: 1 }, signal),
   });
   const recent = useQuery({
-    queryKey: ['payments', mode, { page: 1, limit: 5 }],
+    queryKey: queryKeys.list('payments', mode, { page: 1, limit: 5 }),
     queryFn: ({ signal }) => listPayments(mode, { limit: 5 }, signal),
   });
   // Wait for the test-payment answer so the card doesn't flash in and out.
@@ -122,7 +124,8 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
   const firstName = user?.name.trim().split(/\s+/)[0];
 
   return (
-    <div className="grid gap-5">
+    // One minmax(0, 1fr) column: the payments table scrolls inside its card, not the page.
+    <div className="grid grid-cols-1 gap-5">
       <div>
         <h2 className="text-title3 font-semibold">{greeting()}{firstName ? `, ${firstName}` : ''}</h2>
         <p className="text-body-sm text-text-secondary">
@@ -146,7 +149,7 @@ function OverviewBody({ merchant }: { merchant: OwnMerchant }) {
         ) : recent.data?.items.length === 0 ? (
           <NoPaymentsYet mode={mode} />
         ) : (
-          <PaymentsTable items={recent.data?.items} loading={recent.isPending} hrefFor={(p) => `/business/${mode}/payments/${p.id}`} />
+          <PaymentsTable items={recent.data?.items} loading={recent.isPending} columns={paymentColumns} hrefFor={(p) => `/business/${mode}/payments/${p.id}`} />
         )}
       </Card>
     </div>

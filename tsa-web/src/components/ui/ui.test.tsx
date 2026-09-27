@@ -23,13 +23,14 @@ it('the primary button is the gold fill with dark slate text', () => {
 });
 
 it('status pills use the words merchants read', () => {
-  render(<>{(['pending', 'processing', 'succeeded', 'failed', 'expired'] as const).map((s) => <StatusPill key={s} status={s} />)}</>);
-  for (const label of ['Waiting', 'Processing', 'Succeeded', 'Failed', 'Expired']) expect(screen.getByText(label)).toBeInTheDocument();
+  render(<>{(['pending', 'processing', 'succeeded', 'failed', 'expired', 'cancelled'] as const).map((s) => <StatusPill key={s} status={s} />)}</>);
+  for (const label of ['Waiting', 'Processing', 'Succeeded', 'Failed', 'Expired', 'Cancelled']) expect(screen.getByText(label)).toBeInTheDocument();
   // AA text on the 12% tints: the darker web-only shades, never the tint hue itself.
   expect(screen.getByText('Waiting')).toHaveClass('text-warning-strong');
   expect(screen.getByText('Processing')).toHaveClass('text-info-strong');
   expect(screen.getByText('Succeeded')).toHaveClass('text-success-strong');
   expect(screen.getByText('Failed')).toHaveClass('text-danger-strong');
+  expect(screen.getByText('Cancelled')).toHaveClass('text-text-secondary');
 });
 
 it('badges render their tone', () => {

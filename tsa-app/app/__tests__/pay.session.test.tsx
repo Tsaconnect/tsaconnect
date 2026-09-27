@@ -6,7 +6,9 @@
  *   - flag says signed out, server serves the checkout -> the payment shows;
  *   - flag says signed in, server answers 401 -> "Sign in to pay", not an error;
  *   - any other failure is still an error with a retry.
- * Also pins the summary as Amount / Fee / Total.
+ * Also pins the summary as Amount / Fee / Total, and that a signed-out payer —
+ * maybe a new customer — can sign in or create an account, and either way the
+ * payment is remembered until it expires, not a flat half hour.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -38,7 +40,7 @@ jest.mock('@/components/ui', () => {
   return {
     __esModule: true,
     Text: (props: any) => react.createElement(RNText, null, props.children),
-    Button: (props: any) => react.createElement(RNText, null, props.title),
+    Button: (props: any) => react.createElement(RNText, { accessibilityLabel: `button:${props.title}`, onPress: props.onPress }, props.title),
     ErrorState: (props: any) => react.createElement(RNText, null, props.title),
     Spinner: () => null,
     Icon: () => null,
@@ -55,10 +57,17 @@ jest.mock('@/hooks/usePayTest', () => ({
   __esModule: true,
   usePayTest: () => ({ request: jest.fn(), authorization: {}, submitting: false }),
 }));
-jest.mock('@/utils/postAuthRoute', () => ({ __esModule: true, rememberPendingPayment: jest.fn() }));
+// The real rememberPendingPayment behind a spy: a storage failure inside it must not stop the navigation.
+jest.mock('@/utils/postAuthRoute', () => ({
+  __esModule: true,
+  rememberPendingPayment: jest.fn((...args: unknown[]) =>
+    (jest.requireActual('@/utils/postAuthRoute') as any).rememberPendingPayment(...args)),
+  forgetPendingPayment: jest.fn(async () => {}),
+}));
 jest.mock('@/services/payApi', () => ({
   __esModule: true,
   getCheckout: jest.fn(),
+  getPublicPayment: jest.fn(async () => ({ expiresAt: '2026-10-03T12:00:00Z' })),
   returnUrlFor: () => null,
 }));
 jest.mock('@/components/pay/PayNaira', () => ({ __esModule: true, PayNaira: () => null }));
@@ -66,7 +75,10 @@ jest.mock('@/components/pay/PayCrypto', () => ({ __esModule: true, PayCrypto: ()
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
-import { getCheckout, type PayCheckout } from '@/services/payApi';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { router } from 'expo-router';
+import { getCheckout, getPublicPayment, type PayCheckout } from '@/services/payApi';
+import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
 import PayScreen from '../pay';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
@@ -133,4 +145,49 @@ it('omits the Fee row when the merchant absorbs the whole fee', async () => {
   await mount();
   expect(text()).not.toContain('Fee:');
   expect(text()).toContain('Total: ₦1,000.00');
+});
+
+it.each([['Sign in', '/login'], ['Create an account', '/signup']] as const)(
+  'signed out, "%s" remembers the payment until it expires, then goes to %s',
+  async (title, to) => {
+    jest.mocked(getCheckout).mockRejectedValue(httpError(401, 'Please authenticate'));
+    await mount();
+    const button = tree.root.findAll((n) => n.props.accessibilityLabel === `button:${title}`)[0];
+    await act(async () => { await button.props.onPress(); });
+    expect(rememberPendingPayment).toHaveBeenCalledWith(ID, { expiresAt: '2026-10-03T12:00:00Z' });
+    expect(router.replace).toHaveBeenCalledWith(to);
+  },
+);
+
+it('a finished payment is forgotten: nothing to come back to after sign-in or KYC', async () => {
+  jest.mocked(getCheckout).mockResolvedValue({ ...testCheckout(), status: 'succeeded' } as PayCheckout);
+  await mount();
+  expect(forgetPendingPayment).toHaveBeenCalledWith(ID);
+});
+
+it('storage refusing to remember the payment still lets her go and sign in', async () => {
+  jest.mocked(router.replace).mockClear();
+  const setItem = jest.spyOn(AsyncStorage, 'setItem');
+  jest.mocked(getCheckout).mockRejectedValue(httpError(401, 'Please authenticate'));
+  setItem.mockRejectedValueOnce(new Error('storage full'));
+  await mount();
+  const button = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Sign in')[0];
+  await act(async () => { await button.props.onPress(); });
+  expect(setItem).toHaveBeenCalled();
+  expect(router.replace).toHaveBeenCalledWith('/login');
+});
+
+it('tapped before the public read lands, it waits for the expiry instead of guessing', async () => {
+  jest.mocked(getCheckout).mockRejectedValue(httpError(401, 'Please authenticate'));
+  let answer!: (p: unknown) => void;
+  jest.mocked(getPublicPayment)
+    .mockReturnValueOnce(new Promise(() => {}) as never) // the screen's own read never lands
+    .mockReturnValueOnce(new Promise((r) => { answer = r; }) as never);
+  jest.mocked(rememberPendingPayment).mockClear();
+  await mount();
+  const button = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Create an account')[0];
+  let pressed!: Promise<void>;
+  act(() => { pressed = button.props.onPress(); });
+  await act(async () => { answer({ expiresAt: '2026-10-04T09:00:00Z' }); await pressed; });
+  expect(rememberPendingPayment).toHaveBeenCalledWith(ID, { expiresAt: '2026-10-04T09:00:00Z' });
 });

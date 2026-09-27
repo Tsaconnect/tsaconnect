@@ -1,11 +1,11 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { BookOpen, Clock, Copy, Lock } from 'lucide-react';
+import { BookOpen, Clock, Lock } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { copyText } from '@/lib/clipboard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
+import { CopyBox } from '@/components/ui/copy-box';
 import { Dialog } from '@/components/ui/dialog';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -31,18 +31,6 @@ type Shown =
 type Draft = { webhookUrl: string; testWebhookUrl: string; returnDomains: string };
 
 const modeName = (m: Mode) => (m === 'live' ? 'live' : 'test');
-
-/** A secret shown once, in a box that selects whole on click, with Copy. */
-function SecretBox({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <code className="min-w-0 flex-1 rounded-sm border border-hairline bg-background px-3 py-2.5 font-mono text-[12.5px] break-all select-all">{value}</code>
-      <Button size="sm" onClick={() => copyText(value)} aria-label={`Copy ${label}`}>
-        <Copy className="size-3.5" aria-hidden />Copy
-      </Button>
-    </div>
-  );
-}
 
 /** One line of a card; `after` sits under it, inside the same row. */
 const Row = ({ children, after }: { children: ReactNode; after?: ReactNode }) => (
@@ -264,7 +252,7 @@ function ResultDialog({ shown, onClose }: { shown: Shown | null; onClose: () => 
     return (
       <Dialog open dismissible={false} onOpenChange={(o) => !o && onClose()} title={`Your new ${modeName(shown.mode)} key`} footer={footer}>
         <div className="grid gap-3">
-          <SecretBox label="key" value={shown.key} />
+          <CopyBox label="key" value={shown.key} />
           <Note tone="gold">This is the only time you'll see this key. Copy it now.</Note>
         </div>
       </Dialog>
@@ -275,11 +263,11 @@ function ResultDialog({ shown, onClose }: { shown: Shown | null; onClose: () => 
       <div className="grid gap-4">
         <div className="grid gap-1.5">
           <p className="text-[13px] font-semibold text-text-secondary">Live</p>
-          <SecretBox label="live secret" value={shown.live} />
+          <CopyBox label="live secret" value={shown.live} />
         </div>
         <div className="grid gap-1.5">
           <p className="text-[13px] font-semibold text-text-secondary">Test</p>
-          <SecretBox label="test secret" value={shown.test} />
+          <CopyBox label="test secret" value={shown.test} />
         </div>
         <Note tone="gold">
           {shown.action === 'roll'

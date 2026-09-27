@@ -390,3 +390,31 @@ func TestIdempotency_PreservesResponseBodyExactly(t *testing.T) {
 		t.Fatalf("stored body missing result: %s", string(row.ResponseBody))
 	}
 }
+
+// ?mode=live and ?mode=test with the same body are different requests: a key
+// used for one is refused for the other, never replayed as it.
+func TestIdempotency_SameKeyDifferentQuery_Returns409(t *testing.T) {
+	db := setupIdempotencyDB(t)
+	var n atomic.Int32
+	r := makeRouter(db, models.User{ID: uuid.New()}, &n)
+	send := func(target string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(`{"a":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "k-query")
+		r.ServeHTTP(w, req)
+		return w
+	}
+	if w := send("/do?mode=test"); w.Code != http.StatusOK {
+		t.Fatalf("first: %d", w.Code)
+	}
+	if w := send("/do?mode=test"); w.Code != http.StatusOK || w.Header().Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("the same query again must replay: %d", w.Code)
+	}
+	if w := send("/do?mode=live"); w.Code != http.StatusConflict {
+		t.Fatalf("another query under the same key: %d", w.Code)
+	}
+	if n.Load() != 1 {
+		t.Fatalf("handler ran %d times", n.Load())
+	}
+}
