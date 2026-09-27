@@ -11,11 +11,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, ErrorState, Sheet, Spinner, StatusPill, SummaryCard, SummaryRow, Text, useToast,
+  Button, Card, ErrorState, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
 } from '@/components/ui';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { useFocusPolling } from '@/hooks/useFocusPolling';
-import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { OwnPayMerchantGate, ScreenSpinner } from '@/components/pay/OwnPayMerchantGate';
 import {
   cancelPayLink, getPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam, type PayLink, type PayLinkMode,
 } from '@/services/payMerchantApi';
@@ -29,19 +29,18 @@ const POLL_MS = 15_000;
 
 export default function PayLinkDetail() {
   const { id, mode: modeParam } = useLocalSearchParams<{ id: string; mode?: string }>();
-  const { load, reload } = useOwnPayMerchant();
-  if (load.kind === 'loading') {
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
-  }
-  if (load.kind === 'error') {
-    return <ErrorState title="Could not load your TSA Pay account" subtitle={load.message} onRetry={reload} />;
-  }
-  if (load.kind === 'none') {
-    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
-  }
-  // The list opens a link in its own mode; opened cold, a link is in the mode she is in.
-  const mode: PayLinkMode = payLinkModeParam(modeParam) ?? payLinkModeOf(load.merchant);
-  return <LinkDetail id={String(id)} mode={mode} businessName={load.merchant.businessName} />;
+  return (
+    <OwnPayMerchantGate>
+      {(merchant) => (
+        // The list opens a link in its own mode; opened cold, a link is in the mode she is in.
+        <LinkDetail
+          id={String(id)}
+          mode={payLinkModeParam(modeParam) ?? payLinkModeOf(merchant)}
+          businessName={merchant.businessName}
+        />
+      )}
+    </OwnPayMerchantGate>
+  );
 }
 
 function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode; businessName: string }) {
@@ -55,11 +54,18 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
   // A double tap on Cancel link must send one cancel.
   const submitting = useRef(false);
 
+  // Only the latest read counts: a poll that set off before a cancel landed
+  // must not put the link back to Awaiting payment.
+  const seq = useRef(0);
   const refresh = useCallback(async () => {
+    const mine = ++seq.current;
     try {
-      setLink(await getPayLink(mode, id));
+      const got = await getPayLink(mode, id);
+      if (mine !== seq.current) return;
+      setLink(got);
       setError(undefined);
     } catch (e) {
+      if (mine !== seq.current) return;
       setError(errorMessage(e, 'Could not load this payment link.'));
     }
   }, [id, mode]);
@@ -74,7 +80,9 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
     setCancelling(true);
     setCancelError(undefined);
     try {
-      setLink(await cancelPayLink(mode, id));
+      const cancelled = await cancelPayLink(mode, id);
+      seq.current += 1;
+      setLink(cancelled);
       setConfirming(false);
       toast.success('Link cancelled');
     } catch (e) {
@@ -96,7 +104,7 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
 
   if (link === null) {
     if (error) return <ErrorState title="Could not load this payment link" subtitle={error} onRetry={refresh} />;
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
+    return <ScreenSpinner />;
   }
   const open = link.status === 'pending' && !link.cancelled;
   const timeRow = payLinkTimeRow(link);

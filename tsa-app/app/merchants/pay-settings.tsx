@@ -29,10 +29,9 @@ import {
   confirmOwnerAction, OWNER_CODES, updateSettlement,
   type OwnMerchant, type PendingConfirmation, type SettlementChange, type SettlementMode,
 } from '@/services/payMerchantApi';
+import { errorCode, errorMessage } from '@/utils/payCheckout';
 import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
 
-const errorOf = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
-const codeOf = (e: unknown) => (e as { code?: string } | null)?.code;
 
 export default function PaySettings() {
   const { colors, spacing } = useTheme();
@@ -128,10 +127,10 @@ export default function PaySettings() {
       if (answer.confirmation) setPending(answer.confirmation);
       else if (answer.merchant) applied(answer.merchant);
     } catch (e) {
-      const why = codeOf(e);
+      const why = errorCode(e);
       setFormError(why === OWNER_CODES.NAME_MISMATCH && resolvedName
-        ? `${errorOf(e, '')} The bank says this account belongs to ${resolvedName}.`
-        : errorOf(e, 'Could not save your payment settings.'));
+        ? `${errorMessage(e, '')} The bank says this account belongs to ${resolvedName}.`
+        : errorMessage(e, 'Could not save your payment settings.'));
       if (why === OWNER_CODES.STALE) void refresh();
     } finally {
       submitting.current = false;
@@ -149,8 +148,8 @@ export default function PaySettings() {
       const answer = await confirmOwnerAction(pending.id, code);
       if (answer.merchant) applied(answer.merchant);
     } catch (e) {
-      const why = codeOf(e);
-      setFormError(errorOf(e, 'Could not confirm the change.'));
+      const why = errorCode(e);
+      setFormError(errorMessage(e, 'Could not confirm the change.'));
       // Expired, used up, or overtaken by another edit: this code is done.
       if (why === OWNER_CODES.NO_PENDING || why === OWNER_CODES.STALE) { setPending(null); setCode(''); }
       if (why === OWNER_CODES.STALE) void refresh();

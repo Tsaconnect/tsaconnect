@@ -25,12 +25,17 @@ export const openLinkShareMessage = (businessName: string, link: Pick<OpenLink, 
   `Pay ${businessName} — ${link.label}: ${link.url}`;
 
 /**
- * What a customer may pay through a reusable link, in words. A 0 bound is the
- * merchant's own limit, shown as that limit when the link carries it.
+ * What a customer may pay through a reusable link, in words — the effective
+ * range, worked out as the server does: the link's own range narrowed by the
+ * merchant's limits (a 0 bound on the link being the merchant's own).
  */
-export function openLinkAmountRule(link: OpenLinkRange & Partial<Pick<OpenLink, 'merchantMinAmount' | 'merchantMaxAmount'>>): string {
-  const lo = link.minAmount || link.merchantMinAmount || 0;
-  const hi = link.maxAmount || link.merchantMaxAmount || 0;
+export function openLinkAmountRule(
+  link: Pick<OpenLink, 'minAmount' | 'maxAmount' | 'merchantMinAmount' | 'merchantMaxAmount'>,
+): string {
+  const lo = Math.max(link.minAmount, link.merchantMinAmount);
+  const hi = link.merchantMaxAmount > 0
+    ? Math.min(link.maxAmount || link.merchantMaxAmount, link.merchantMaxAmount)
+    : link.maxAmount;
   const min = lo > 0 ? formatKobo(String(lo)) : '';
   const max = hi > 0 ? formatKobo(String(hi)) : '';
   if (min && max) return `Any amount from ${min} to ${max}`;
@@ -41,9 +46,7 @@ export function openLinkAmountRule(link: OpenLinkRange & Partial<Pick<OpenLink, 
 
 /** A reusable link's status key (StatusPill's openLink namespace): taking payments, paused by her, or closed for another reason. */
 export function openLinkStatus(link: Pick<OpenLink, 'active' | 'takingPayments' | 'notTakingReason'>): 'active' | 'paused' | 'not_taking' {
-  // An older server sends no takingPayments: her own switch is all there is to go on.
-  const taking = link.takingPayments ?? link.active;
-  if (taking) return 'active';
+  if (link.takingPayments) return 'active';
   return !link.active || link.notTakingReason === 'paused' ? 'paused' : 'not_taking';
 }
 
@@ -75,7 +78,7 @@ export function openPaymentPurpose(p: Pick<PayLink, 'description' | 'linkLabel'>
 
 /** "You received ₦X from N payments" — what reached her through a reusable link. */
 export function openLinkReceived(link: Pick<OpenLink, 'receivedTotal' | 'paidCount'>): string {
-  return `You received ${formatKobo(String(link.receivedTotal ?? 0))} from ${link.paidCount} ${link.paidCount === 1 ? 'payment' : 'payments'}`;
+  return `You received ${formatKobo(String(link.receivedTotal))} from ${link.paidCount} ${link.paidCount === 1 ? 'payment' : 'payments'}`;
 }
 
 /** What she gets is only worth showing while it can still come: open, being paid, or paid. */
@@ -140,6 +143,12 @@ export function koboFromNairaInput(text: string): number | null {
   return Number(kobo);
 }
 
+/** What is wrong with an amount field's text, or undefined when it is a positive amount. */
+export function nairaInputError(text: string): string | undefined {
+  if (koboFromNairaInput(text) !== null) return undefined;
+  return /^\d+(\.\d{1,2})?$/.test(text.trim()) ? 'Enter an amount more than ₦0.' : NAIRA_FORMAT_HINT;
+}
+
 /**
  * A reusable link's lowest/highest fields as a range, or what is wrong with
  * each. Blank is the merchant's own bound (0). The server still checks both
@@ -151,8 +160,8 @@ export function openLinkRangeFrom(min: string, max: string):
   const lo = bound(min);
   const hi = bound(max);
   const errors: Partial<Record<'min' | 'max', string>> = {};
-  if (lo === null) errors.min = NAIRA_FORMAT_HINT;
-  if (hi === null) errors.max = NAIRA_FORMAT_HINT;
+  if (lo === null) errors.min = nairaInputError(min);
+  if (hi === null) errors.max = nairaInputError(max);
   if (lo && hi && lo > hi) errors.max = "The highest amount can't be less than the lowest.";
   if (lo === null || hi === null || errors.max) return { errors };
   return { range: { minAmount: lo, maxAmount: hi } };

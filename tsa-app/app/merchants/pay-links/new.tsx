@@ -21,19 +21,20 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, ErrorState, Input, RadioGroup, SegmentedControl, Spinner, SummaryCard, SummaryRow, Text,
+  Button, Card, Input, RadioGroup, SegmentedControl, SummaryCard, SummaryRow, Text,
 } from '@/components/ui';
 import { NairaField } from '@/components/pay/NairaField';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
-import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { OwnPayMerchantGate } from '@/components/pay/OwnPayMerchantGate';
 import { makeIdempotencyKey } from '@/services/itApi';
 import {
-  createOpenLink, createPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam, type CreatePayLinkInput, type PayLink,
+  createOpenLink, createPayLink, OWNER_CODES, payLinkModeOf, payLinkModeParam,
+  type CreatePayLinkInput, type OwnMerchant, type PayLink, type PayLinkMode,
 } from '@/services/payMerchantApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
 import {
-  koboFromNairaInput, LINK_OPEN_DAYS, NAIRA_FORMAT_HINT, openLinkRangeFrom, payLinkShareMessage, type LinkOpenDays,
+  koboFromNairaInput, LINK_OPEN_DAYS, nairaInputError, openLinkRangeFrom, payLinkShareMessage, type LinkOpenDays,
 } from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
@@ -46,9 +47,16 @@ const KINDS: { value: LinkKind; label: string; sublabel: string }[] = [
 ];
 
 export default function NewPayLink() {
-  const { colors, spacing } = useTheme();
-  const { load, reload } = useOwnPayMerchant();
   const listMode = payLinkModeParam(useLocalSearchParams<{ listMode?: string }>().listMode);
+  return (
+    <OwnPayMerchantGate>
+      {(merchant) => <NewLinkForm merchant={merchant} listMode={listMode} />}
+    </OwnPayMerchantGate>
+  );
+}
+
+function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?: PayLinkMode }) {
+  const { colors, spacing } = useTheme();
 
   const [kind, setKind] = useState<LinkKind>('once');
   const [amount, setAmount] = useState('');
@@ -75,16 +83,6 @@ export default function NewPayLink() {
   const submitting = useRef(false);
   const sentKey = useRef<{ request: string; key: string } | null>(null);
 
-  if (load.kind === 'loading') {
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
-  }
-  if (load.kind === 'error') {
-    return <ErrorState title="Could not load your TSA Pay account" subtitle={load.message} onRetry={reload} />;
-  }
-  if (load.kind === 'none') {
-    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
-  }
-  const { merchant } = load;
   const mode = testInstead ? 'test' : payLinkModeOf(merchant);
 
   const keyFor = (request: string) => {
@@ -93,14 +91,14 @@ export default function NewPayLink() {
   };
 
   /** Sends one create; a refusal is said on the form. */
-  const send = async (make: (key: (request: string) => string) => Promise<void>): Promise<void> => {
+  const send = async (make: () => Promise<void>): Promise<void> => {
     submitting.current = true;
     setSaving(true);
     setFormError(undefined);
     setReferenceError(undefined);
     setRefusedWhy(undefined);
     try {
-      await make(keyFor);
+      await make();
       sentKey.current = null;
     } catch (e) {
       const why = errorCode(e);
@@ -121,8 +119,9 @@ export default function NewPayLink() {
     setRangeErrors('errors' in range ? range.errors : {});
     if (labelWhy || 'errors' in range) return;
     const input = { label: label.trim(), ...range.range };
-    await send(async (key) => {
-      const made = await createOpenLink(mode, input, key(JSON.stringify(['open', mode, input])));
+    const key = keyFor(JSON.stringify(['open', mode, input]));
+    await send(async () => {
+      const made = await createOpenLink(mode, input, key);
       // Its own screen is where its QR, share and payments live; back from it returns to where she came from.
       router.replace(`/merchants/pay-links/open/${made.id}?mode=${made.mode}`);
     });
@@ -132,9 +131,7 @@ export default function NewPayLink() {
     if (submitting.current) return;
     if (kind === 'open') { await createOpen(); return; }
     const kobo = koboFromNairaInput(amount);
-    const amountWhy = kobo !== null ? undefined
-      : !amount.trim() ? 'Enter the amount to request.'
-        : NAIRA_FORMAT_HINT;
+    const amountWhy = amount.trim() ? nairaInputError(amount) : 'Enter the amount to request.';
     const descriptionWhy = description.trim() ? undefined : "Say what it's for — your customer sees it.";
     setAmountError(amountWhy);
     setDescriptionError(descriptionWhy);
@@ -146,8 +143,9 @@ export default function NewPayLink() {
       reference: reference.trim() || undefined,
       expiresInDays: days,
     };
-    await send(async (key) => {
-      setCreated(await createPayLink(mode, input, key(JSON.stringify(['once', mode, input]))));
+    const key = keyFor(JSON.stringify(['once', mode, input]));
+    await send(async () => {
+      setCreated(await createPayLink(mode, input, key));
     });
   };
 
@@ -235,6 +233,7 @@ export default function NewPayLink() {
               onChangeText={setCustomerName}
               placeholder="Who you're asking"
               maxLength={100}
+              helper="Anyone with the link can see this name."
             />
             <Input
               label="Your reference (optional)"

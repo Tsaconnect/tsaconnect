@@ -48,7 +48,8 @@ jest.mock('@/components/ui', () => {
   const box = (props: any) => react.createElement(View, null, props.children);
   const input = (props: any) => react.createElement(View, null,
     react.createElement(TextInput, { accessibilityLabel: `input:${props.label}`, value: props.value, onChangeText: props.onChangeText }),
-    props.error ? react.createElement(RNText, null, `error:${props.error}`) : null);
+    props.error ? react.createElement(RNText, null, `error:${props.error}`) : null,
+    props.helper ? react.createElement(RNText, null, `helper:${props.helper}`) : null);
   return {
     __esModule: true,
     Text: (props: any) => react.createElement(RNText, null, props.children),
@@ -149,6 +150,10 @@ const link = (over: Partial<PayLink> = {}): PayLink => ({
   description: 'Two bags of rice', customerName: 'Ada Obi', expiresAt: '2026-10-03T12:00:00Z',
   checkoutUrl: 'https://tsaconnectworld.com/pay?id=p1', createdAt: '2026-09-26T12:00:00Z', ...over,
 });
+
+// The first mount pulls in every screen's module graph; on a busy machine that
+// alone can pass jest's 5 s default, and a timed-out act() then fails the rest.
+jest.setTimeout(30_000);
 
 const flush = () => act(async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); });
 const byLabel = (tree: ReactTestRenderer, label: string) => {
@@ -252,6 +257,16 @@ describe('Request payment', () => {
     expect(createPayLink).not.toHaveBeenCalled();
   });
 
+  it('a zero amount asks for more than ₦0; the customer name warns it is visible to anyone with the link', async () => {
+    await mount(<NewPayLink />);
+    expect(text(tree)).toContain('helper:Anyone with the link can see this name.');
+    await type('Amount', '0');
+    await type("What it's for", 'Rice');
+    await press('button:Create link');
+    expect(text(tree)).toContain('error:Enter an amount more than ₦0.');
+    expect(createPayLink).not.toHaveBeenCalled();
+  });
+
   it.each(['5000,50', '5,000', '12.345', '1e3'])('refuses %s rather than guessing the amount', async (typed) => {
     await mount(<NewPayLink />);
     await type('Amount', typed);
@@ -325,6 +340,22 @@ describe('Payment links', () => {
     expect(router.push).toHaveBeenCalledWith('/merchants/pay-links/c?mode=test');
   });
 
+  it('loads one older page at a time, however often the end of the list is reached', async () => {
+    jest.mocked(listPayLinks)
+      .mockResolvedValueOnce({ items: [link({ id: 'a' })], total: 3, page: 1, limit: 50 })
+      .mockResolvedValue({ items: [link({ id: 'b' })], total: 3, page: 2, limit: 50 });
+    await mount(<PayLinks />);
+    const list = tree.root.findAll((n) => typeof n.props.onEndReached === 'function')[0];
+    await act(async () => { list.props.onEndReached(); list.props.onEndReached(); });
+    await flush();
+    const pagesAsked = jest.mocked(listPayLinks).mock.calls.map((c) => c[1]);
+    expect(pagesAsked).toEqual([1, 2]);
+    // The next reach asks for page 3, not a page skipped or asked twice.
+    await act(async () => { list.props.onEndReached(); });
+    await flush();
+    expect(jest.mocked(listPayLinks).mock.calls.map((c) => c[1])).toEqual([1, 2, 3]);
+  });
+
   it('keeps itself fresh every 15 s', async () => {
     jest.mocked(listPayLinks).mockResolvedValue({ items: [], total: 0, page: 1, limit: 50 });
     await mount(<PayLinks />);
@@ -355,6 +386,23 @@ describe('A payment link', () => {
     expect(text(tree)).toContain('Cancelled');
     // A cancelled link is not shared again.
     expect(text(tree)).not.toContain('qr:');
+  });
+
+  it('a poll that set off before the cancel landed cannot put the link back', async () => {
+    let slow!: (l: PayLink) => void;
+    jest.mocked(getPayLink)
+      .mockResolvedValueOnce(link())
+      .mockReturnValueOnce(new Promise((r) => { slow = r; }));
+    jest.mocked(cancelPayLink).mockResolvedValue(link({ status: 'expired', cancelled: true }));
+    await mount(<PayLinkDetail />);
+    await act(async () => { jest.advanceTimersByTime(15_000); }); // the poll sets off and hangs
+    await press('button:Cancel link');
+    await press('Confirm cancel link');
+    expect(text(tree)).toContain('Cancelled');
+    await act(async () => { slow(link()); }); // the old answer lands
+    await flush();
+    expect(text(tree)).toContain('Cancelled');
+    expect(text(tree)).not.toContain('Awaiting payment');
   });
 
   it('keeping the link sends nothing', async () => {
@@ -508,6 +556,15 @@ describe('A reusable link', () => {
       expect(text(tree)).toContain('Your amount range no longer fits your limits — edit the link.');
       await press('button:Edit the link');
       expect(byLabel(tree, 'input:Lowest amount (optional)').props.value).toBe('2000000.00');
+    });
+
+    it('keeps itself fresh every 15 s while she looks: a counter QR is paid all day', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink(), payments: [] });
+      await mount(<OpenLinkDetail />);
+      expect(getOpenLink).toHaveBeenCalledTimes(1);
+      await act(async () => { jest.advanceTimersByTime(15_000); });
+      await flush();
+      expect(getOpenLink).toHaveBeenCalledTimes(2);
     });
 
     it('pauses and resumes against the version it read', async () => {

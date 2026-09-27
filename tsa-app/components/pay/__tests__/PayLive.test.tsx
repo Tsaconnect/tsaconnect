@@ -160,6 +160,15 @@ describe('the panel, by state', () => {
     expect(text(tree)).toContain('The swap did not go through');
   });
 
+  it('a payer with no wallet on this phone (just signed up) is sent to set one up, not shown a picker that cannot price', async () => {
+    await panel(hookState({ walletUnavailable: true, walletAddress: undefined }));
+    expect(text(tree)).toContain('Set up a wallet to pay');
+    expect(text(tree)).not.toContain('Choose a token');
+    expect(text(tree)).not.toMatch(/Pay ₦/);
+    await act(async () => { find(tree, 'button:Set up a wallet').props.onPress(); });
+    expect(router.push).toHaveBeenCalledWith('/wallet/manage');
+  });
+
   it('a KYC refusal offers Verify identity, remembering the payment so KYC can bring her back', async () => {
     await panel(hookState({ stage: 'failed', error: 'Verify first', errorCode: 'kyc_verification_required' }));
     await act(async () => { await find(tree, 'button:Verify identity').props.onPress(); });

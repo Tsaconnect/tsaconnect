@@ -24,8 +24,12 @@ import type { PayCheckout } from '@/services/payApi';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
+
 import { depositStillToSendCopy, linkedOrder, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
+
+/** Where a phone with no wallet gets one (create or import); back returns here. */
+const WALLET_SETUP = '/wallet/manage';
 
 type Props = {
   checkout: PayCheckout;
@@ -46,12 +50,6 @@ type Pick = { token: LiFiToken; chainId: number };
 type Priced = { pick: Pick; label?: string; fromAmount?: string; receives?: string; error?: string; at: number };
 
 export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, steps }: Props) {
-  // KYC can outlast this screen (a review takes hours): remember the payment
-  // until it expires, so finishing KYC — or the next launch — brings her back.
-  const verifyThenReturn = async () => {
-    await rememberPendingPayment(checkout.id, { expiresAt: checkout.expiresAt });
-    router.push(`${KYC_ROUTE}?returnTo=pay` as never);
-  };
   const { colors, spacing } = useTheme();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pick, setPick] = useState<Pick | null>(null);
@@ -93,6 +91,13 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pay.stage]);
 
+  // KYC can outlast this screen (a review takes hours): remember the payment
+  // until it expires, so finishing KYC — or the next launch — brings her back.
+  const verifyThenReturn = async () => {
+    await rememberPendingPayment(checkout.id, { expiresAt: checkout.expiresAt });
+    router.push(`${KYC_ROUTE}?returnTo=pay` as never);
+  };
+
   const onPay = () => {
     if (!pick || !price?.label || !price.fromAmount) return;
     // A stale figure is not paid: look it up, show what it is now, and let her confirm that.
@@ -112,7 +117,11 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
 
   // Pay is offered only when starting over is safe: not while an attempt is
   // asking for her, waiting on the server, or may be under way ("don't pay again").
-  const showPay = showForm && retryable && !orderId && !['shortfall', 'waiting', 'continue'].includes(pay.stage);
+  // A new customer — just signed up — has no wallet on this phone yet, and she
+  // pays from one: point her at setting one up rather than a picker that can't price.
+  const needsWallet = showForm && !!pay.walletUnavailable;
+  const formReady = showForm && !needsWallet;
+  const showPay = formReady && retryable && !orderId && !['shortfall', 'waiting', 'continue'].includes(pay.stage);
   const showContinue = !!pay.continuePayment && (pay.stage === 'continue' || (pay.stage === 'failed' && !!pay.canContinue));
   // Re-read on every render: the screen re-renders every 5 s, which keeps "minutes left" current.
   const toSend = pay.stage === 'deposit' && pay.order ? pay.order : undefined;
@@ -120,11 +129,22 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
 
   return (
     <>
-      {showForm && receivesLine && (
+      {needsWallet && (
+        <AccentCard railColor={colors.info} padding="md">
+          <View style={{ gap: spacing.md }}>
+            <Text variant="bodySm" weight="700">Set up a wallet to pay</Text>
+            <Text variant="bodySm">
+              You pay from a wallet on this phone. Create one — it takes a minute — then come back to this payment.
+            </Text>
+            <Button title="Set up a wallet" onPress={() => router.push(WALLET_SETUP as never)} />
+          </View>
+        </AccentCard>
+      )}
+      {formReady && receivesLine && (
         <Text variant="bodySm" style={{ color: colors.textSecondary }}>{receivesLine}</Text>
       )}
 
-      {showForm && (
+      {formReady && (
         <PressableScale onPress={() => setPickerOpen(true)} disabled={running || pay.stage === 'waiting'}>
           <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
@@ -135,21 +155,21 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
           </Card>
         </PressableScale>
       )}
-      {showForm && note && <Text variant="caption" style={{ color: colors.textMuted }}>{note}</Text>}
+      {formReady && note && <Text variant="caption" style={{ color: colors.textMuted }}>{note}</Text>}
 
-      {showForm && pricing && (
+      {formReady && pricing && (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
           <Spinner size="small" />
           <Text variant="caption" style={{ color: colors.textMuted }}>Checking the price…</Text>
         </View>
       )}
-      {showForm && priceOk ? <Text variant="body">{`You'll pay about ${price?.label}`}</Text> : null}
-      {showForm && price && !priceOk && !price.error && (
+      {formReady && priceOk ? <Text variant="body">{`You'll pay about ${price?.label}`}</Text> : null}
+      {formReady && price && !priceOk && !price.error && (
         <Text variant="bodySm" style={{ color: colors.warning }}>
           {"We couldn't work out the price for this token. Pick another."}
         </Text>
       )}
-      {showForm && price?.error && (
+      {formReady && price?.error && (
         <Text variant="bodySm" style={{ color: colors.warning }}>{price.error}</Text>
       )}
 

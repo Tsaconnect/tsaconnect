@@ -52,7 +52,8 @@ const SignupFlow = () => {
 
         router.replace({
           pathname: '/verify',
-          params: { email: signupData.email.trim().toLowerCase() },
+          // from=signup: finishing the email code returns a new customer to a pay link she came from.
+          params: { email: signupData.email.trim().toLowerCase(), from: 'signup' },
         });
       } else {
         const errorMessage = result.message || 'Please check your information';

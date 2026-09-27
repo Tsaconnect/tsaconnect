@@ -89,3 +89,16 @@ it('forgets only the payment that is over', async () => {
   await forgetPendingPayment(ID);
   expect(await hasPendingPayment(T0)).toBe(false);
 });
+
+it('never throws when storage refuses to save: whatever navigates next still does', async () => {
+  jest.spyOn(AsyncStorage, 'setItem').mockRejectedValueOnce(new Error('storage full'));
+  await expect(rememberPendingPayment(ID, { now: T0 })).resolves.toBeUndefined();
+  expect(await postAuthRoute(T0)).toBe('/home');
+});
+
+it('touches nothing when nothing is stored', async () => {
+  const remove = jest.spyOn(AsyncStorage, 'removeItem');
+  remove.mockClear();
+  expect(await postAuthRoute(T0)).toBe('/home');
+  expect(remove).not.toHaveBeenCalled();
+});

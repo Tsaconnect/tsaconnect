@@ -3,7 +3,8 @@
 /**
  * A new customer who tapped a pay link signs up, verifies her email and may
  * have to pass KYC before she can pay. What this pins: finishing signup (the
- * email code, or skipping it) and finishing KYC hand off through goAfterAuth —
+ * email code, or skipping it — only on the signup path, never from Profile)
+ * and finishing KYC hand off through goAfterAuth —
  * the one post-auth mechanism — so a remembered payment brings her back to it;
  * KYC offers "Continue to payment" only when one is waiting, and goes back to
  * the pay screen underneath when it was opened from there.
@@ -23,7 +24,7 @@ jest.mock('@/theme', () => ({
     radius: new Proxy({}, { get: () => 8 }),
   }),
 }));
-const mockParams: { returnTo?: string } = {};
+const mockParams: { returnTo?: string; from?: string; email?: string } = {};
 jest.mock('expo-router', () => ({
   __esModule: true,
   router: { replace: jest.fn(), push: jest.fn(), back: jest.fn(), canGoBack: jest.fn(() => true) },
@@ -76,7 +77,7 @@ import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import Verify from '@/components/onboarding/Verify';
+import VerifyScreen from '@/app/verify';
 import KYCScreen from '@/app/profile/kyc';
 import { rememberPendingPayment } from '@/utils/postAuthRoute';
 
@@ -100,13 +101,16 @@ beforeEach(async () => {
   jest.clearAllMocks();
   await AsyncStorage.clear();
   delete mockParams.returnTo;
+  delete mockParams.from;
 });
 afterEach(() => { act(() => tree?.unmount()); });
 
 describe('finishing signup', () => {
+  beforeEach(() => { mockParams.from = 'signup'; });
+
   it('verifying the email returns her to the payment she came from', async () => {
     await rememberPendingPayment(ID, { expiresAt: inADay() });
-    await mount(<Verify email="ada@x.ng" />);
+    await mount(<VerifyScreen />);
     await act(async () => { byLabel('otp').props.onChangeText('123456'); });
     await act(async () => { byLabel('button:Verify').props.onPress(); });
     await flush();
@@ -115,7 +119,7 @@ describe('finishing signup', () => {
 
   it('skipping the email code does too; with nothing waiting, both land home', async () => {
     await rememberPendingPayment(ID, { expiresAt: inADay() });
-    await mount(<Verify email="ada@x.ng" />);
+    await mount(<VerifyScreen />);
     await act(async () => { byLabel('Skip verification for now').props.onPress(); });
     await flush();
     expect(router.replace).toHaveBeenCalledWith(`/pay?id=${ID}`);
@@ -124,6 +128,18 @@ describe('finishing signup', () => {
     await act(async () => { byLabel('Skip verification for now').props.onPress(); });
     await flush();
     expect(router.replace).toHaveBeenCalledWith('/home');
+  });
+});
+
+describe('verifying the email from Profile', () => {
+  it('never jumps to a remembered payment', async () => {
+    await rememberPendingPayment(ID, { expiresAt: inADay() });
+    await mount(<VerifyScreen />);
+    await act(async () => { byLabel('otp').props.onChangeText('123456'); });
+    await act(async () => { byLabel('button:Verify').props.onPress(); });
+    await flush();
+    expect(router.replace).toHaveBeenCalledWith('/home');
+    expect(router.replace).not.toHaveBeenCalledWith(`/pay?id=${ID}`);
   });
 });
 

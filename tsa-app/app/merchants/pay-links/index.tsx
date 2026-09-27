@@ -19,7 +19,7 @@ import {
 } from '@/components/ui';
 import { TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { useFocusPolling } from '@/hooks/useFocusPolling';
-import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { OwnPayMerchantGate, ScreenSpinner } from '@/components/pay/OwnPayMerchantGate';
 import {
   listOpenLinks, listPayLinks, payLinkModeOf, payLinkModeParam, type OpenLink, type PayLink, type PayLinkMode,
 } from '@/services/payMerchantApi';
@@ -42,20 +42,16 @@ const mergeNewest = (fresh: PayLink[], shown: PayLink[]) => {
 };
 
 export default function PayLinks() {
-  const { load, reload } = useOwnPayMerchant();
   const modeParam = payLinkModeParam(useLocalSearchParams<{ mode?: string }>().mode);
-  if (load.kind === 'loading') {
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
-  }
-  if (load.kind === 'error') {
-    return <ErrorState title="Could not load your TSA Pay account" subtitle={load.message} onRetry={reload} />;
-  }
-  if (load.kind === 'none') {
-    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
-  }
-  const mode = modeParam ?? payLinkModeOf(load.merchant);
-  // A new mode is a different list: nothing of the old one may stay on screen.
-  return <LinkList key={mode} mode={mode} canRequest={load.merchant.status !== 'suspended'} />;
+  return (
+    <OwnPayMerchantGate>
+      {(merchant) => {
+        const mode = modeParam ?? payLinkModeOf(merchant);
+        // A new mode is a different list: nothing of the old one may stay on screen.
+        return <LinkList key={mode} mode={mode} canRequest={merchant.status !== 'suspended'} />;
+      }}
+    </OwnPayMerchantGate>
+  );
 }
 
 function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean }) {
@@ -87,16 +83,22 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
 
   useFocusPolling(refresh, POLL_MS);
 
+  // onEndReached fires more than once per scroll: one page in flight at a time,
+  // and a page counts as loaded only once it has arrived.
+  const moreInFlight = useRef(false);
   const loadMore = async () => {
-    if (loadingMore || !links || links.length >= total) return;
+    if (moreInFlight.current || !links || links.length >= total) return;
+    moreInFlight.current = true;
     setLoadingMore(true);
+    const next = pages.current + 1;
     try {
-      const page = await listPayLinks(mode, pages.current + 1, PAGE);
-      pages.current += 1;
+      const page = await listPayLinks(mode, next, PAGE);
+      pages.current = next;
       setLinks((shown) => mergeNewest(shown ?? [], page.items));
     } catch {
       // The next scroll tries again; the rows she has stay.
     } finally {
+      moreInFlight.current = false;
       setLoadingMore(false);
     }
   };
@@ -109,7 +111,7 @@ function LinkList({ mode, canRequest }: { mode: PayLinkMode; canRequest: boolean
 
   if (links === null) {
     if (error) return <ErrorState title="Could not load your payment links" subtitle={error} onRetry={refresh} />;
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
+    return <ScreenSpinner />;
   }
 
   const header = (
@@ -207,7 +209,7 @@ function OpenLinkRow({ link }: { link: OpenLink }) {
         </View>
         <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
           {/* What reached her — the same figure as the link's screen ("You received …"). */}
-          <Text variant="bodyMed" weight="700" numeric>{formatKobo(String(link.receivedTotal ?? 0))}</Text>
+          <Text variant="bodyMed" weight="700" numeric>{formatKobo(String(link.receivedTotal))}</Text>
           <StatusPill kind="openLink" status={status} size="sm" />
         </View>
       </Card>

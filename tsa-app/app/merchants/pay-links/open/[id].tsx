@@ -6,20 +6,21 @@
 // she has received through it and the latest payments, edits its name and
 // range, pauses and resumes it, and replaces it: a new address and QR for the
 // same link, and the old address — with every poster printed from it — stops
-// working, so that asks first. Posters are printed from
-// the web dashboard.
+// working, so that asks first. Posters are printed from the web dashboard.
+// Refreshed every 15 s while she looks.
 import React, { useCallback, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  AccentCard, Button, Card, ErrorState, Input, Sheet, Spinner, StatusPill, SummaryCard, SummaryRow, Text, useToast,
+  AccentCard, Button, Card, ErrorState, Input, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
 } from '@/components/ui';
 import { NairaField } from '@/components/pay/NairaField';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { COMPANY } from '@/constants/legal';
-import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { useFocusPolling } from '@/hooks/useFocusPolling';
+import { OwnPayMerchantGate, ScreenSpinner } from '@/components/pay/OwnPayMerchantGate';
 import {
   getOpenLink, payLinkModeOf, payLinkModeParam, replaceOpenLink, updateOpenLink,
   type OpenLink, type OpenLinkChange, type PayLink, type PayLinkMode,
@@ -32,6 +33,7 @@ import {
 import { formatKobo } from '@/utils/stableSellQuote';
 
 const QR_SIZE = 240;
+const POLL_MS = 15_000;
 const WEB_DASHBOARD = COMPANY.webApp.replace(/^https:\/\//, '');
 
 /** The link as it stands, as a change: what Pause/Resume sends with only `active` moved. */
@@ -43,25 +45,18 @@ type EditForm = { label: string; min: string; max: string };
 
 export default function OpenLinkDetail() {
   const { id, mode: modeParam } = useLocalSearchParams<{ id: string; mode?: string }>();
-  const { load, reload } = useOwnPayMerchant();
-  if (load.kind === 'loading') {
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
-  }
-  if (load.kind === 'error') {
-    return <ErrorState title="Could not load your TSA Pay account" subtitle={load.message} onRetry={reload} />;
-  }
-  if (load.kind === 'none') {
-    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
-  }
-  // The list opens a link in its own mode; opened cold, a link is in the mode she is in.
-  const mode = payLinkModeParam(modeParam) ?? payLinkModeOf(load.merchant);
   return (
-    <LinkDetail
-      id={String(id)}
-      mode={mode}
-      businessName={load.merchant.businessName}
-      suspended={load.merchant.status === 'suspended'}
-    />
+    <OwnPayMerchantGate>
+      {(merchant) => (
+        // The list opens a link in its own mode; opened cold, a link is in the mode she is in.
+        <LinkDetail
+          id={String(id)}
+          mode={payLinkModeParam(modeParam) ?? payLinkModeOf(merchant)}
+          businessName={merchant.businessName}
+          suspended={merchant.status === 'suspended'}
+        />
+      )}
+    </OwnPayMerchantGate>
   );
 }
 
@@ -82,17 +77,24 @@ function LinkDetail({ id, mode, businessName, suspended }: {
   // A double tap must send one change.
   const submitting = useRef(false);
 
+  // Only the latest read counts: a poll that set off before a change landed
+  // must not put the link back as it was.
+  const seq = useRef(0);
   const refresh = useCallback(async () => {
+    const mine = ++seq.current;
     try {
       const got = await getOpenLink(mode, id);
+      if (mine !== seq.current) return;
       setLink(got.openLink);
       setPayments(got.payments ?? []);
       setError(undefined);
     } catch (e) {
+      if (mine !== seq.current) return;
       setError(errorMessage(e, 'Could not load this payment link.'));
     }
   }, [id, mode]);
-  useFocusEffect(useCallback(() => { void refresh(); }, [refresh]));
+  // Payments arrive while she watches (a counter QR is paid all day).
+  useFocusPolling(refresh, POLL_MS);
 
   /** Runs one change against the server; true when it landed. */
   const run = async (send: () => Promise<OpenLink>, onError: (message: string) => void): Promise<boolean> => {
@@ -100,7 +102,9 @@ function LinkDetail({ id, mode, businessName, suspended }: {
     submitting.current = true;
     setSaving(true);
     try {
-      setLink(await send());
+      const next = await send();
+      seq.current += 1;
+      setLink(next);
       return true;
     } catch (e) {
       onError(errorMessage(e, 'Could not save this payment link. Please try again.'));
@@ -115,7 +119,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
 
   if (link === null) {
     if (error) return <ErrorState title="Could not load this payment link" subtitle={error} onRetry={refresh} />;
-    return <SafeAreaView style={{ flex: 1, justifyContent: 'center' }} edges={['bottom']}><Spinner /></SafeAreaView>;
+    return <ScreenSpinner />;
   }
 
   const setActive = async (active: boolean) => {

@@ -9,7 +9,7 @@
 // have to pass KYC before she can pay live — which can take days. So the
 // payment is remembered until the payment itself expires (capped at 7 days),
 // and replayed from every completion point: sign-in, cold start and unlock,
-// finishing signup (components/onboarding/Verify) and finishing KYC
+// finishing signup (app/verify, reached with ?from=signup) and finishing KYC
 // (app/profile/kyc). A replay consumes it; the pay screen remembers it again
 // when she is sent off to verify her identity, and forgets it once the
 // payment is over.
@@ -36,6 +36,10 @@ type Pending = { id: string; savedAt: number; until?: number };
  * Remembers a payment to return to after sign-in, signup or KYC — until
  * `expiresAt` (the payment's own expiry, capped at 7 days), or 30 minutes when
  * that isn't known. Silently does nothing for anything that isn't a real payment id.
+ *
+ * Never throws: it runs just before navigating (Sign in, Create an account,
+ * Verify identity), and a storage failure must cost only the return trip, never
+ * the navigation itself.
  */
 export async function rememberPendingPayment(
   id: string,
@@ -46,13 +50,18 @@ export async function rememberPendingPayment(
   const expires = opts.expiresAt ? Date.parse(opts.expiresAt) : NaN;
   const until = Number.isFinite(expires) ? Math.min(expires, now + MAX_TTL_MS) : now + DEFAULT_TTL_MS;
   const pending: Pending = { id, savedAt: now, until };
-  await AsyncStorage.setItem(PENDING_PAY_KEY, JSON.stringify(pending));
+  try {
+    await AsyncStorage.setItem(PENDING_PAY_KEY, JSON.stringify(pending));
+  } catch {
+    // Storage unavailable: she goes on without the way back.
+  }
 }
 
-/** The remembered payment id while it is still worth returning to, or null. Never throws. */
-async function readPending(now: number): Promise<string | null> {
-  const raw = await AsyncStorage.getItem(PENDING_PAY_KEY);
-  if (!raw) return null;
+/**
+ * The payment id in a stored record while it is still worth returning to, or
+ * null. Throws on a record that isn't JSON — every caller catches that.
+ */
+function pendingIdFrom(raw: string, now: number): string | null {
   const pending: unknown = JSON.parse(raw);
   if (!pending || typeof pending !== 'object') return null;
   const { id, savedAt, until } = pending as Partial<Pending>;
@@ -65,7 +74,8 @@ async function readPending(now: number): Promise<string | null> {
 /** Whether a payment is waiting for her — without consuming it (KYC's "Continue to payment"). */
 export async function hasPendingPayment(now: number = Date.now()): Promise<boolean> {
   try {
-    return (await readPending(now)) !== null;
+    const raw = await AsyncStorage.getItem(PENDING_PAY_KEY);
+    return raw !== null && pendingIdFrom(raw, now) !== null;
   } catch {
     return false;
   }
@@ -92,7 +102,11 @@ export async function forgetPendingPayment(id: string): Promise<void> {
  */
 export async function postAuthRoute(now: number = Date.now()): Promise<string> {
   try {
-    const id = await readPending(now).finally(() => AsyncStorage.removeItem(PENDING_PAY_KEY).catch(() => {}));
+    const raw = await AsyncStorage.getItem(PENDING_PAY_KEY);
+    if (!raw) return '/home';
+    // Consumed before it is read: a mangled record is gone too, not replayed forever.
+    await AsyncStorage.removeItem(PENDING_PAY_KEY).catch(() => {});
+    const id = pendingIdFrom(raw, now);
     return id ? `/pay?id=${id}` : '/home';
   } catch {
     return '/home';

@@ -6,10 +6,8 @@
 //
 // AUTH screen: the verify API call (api.verifyOtp), resend (api.resendOtp),
 // setEmailVerified, the cooldown timer, and all navigation (router.back /
-// onSkip / onSuccess) are preserved verbatim — this is a visual/structural
-// restyle only. The end of signup (no onSuccess/onSkip: app/verify.tsx) hands
-// off through goAfterAuth, so a new customer who came from a pay link lands
-// back on it instead of home. The OtpInput from react-native-otp-entry is
+// router.replace('/home') / onSkip / onSuccess) are preserved verbatim — this is
+// a visual/structural restyle only. The OtpInput from react-native-otp-entry is
 // reused unchanged; only its theme is re-tokenized.
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, ScrollView } from 'react-native';
@@ -17,7 +15,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { OtpInput } from 'react-native-otp-entry';
 import { router } from 'expo-router';
 import { goBack } from '@/utils/back';
-import { goAfterAuth } from '@/utils/postAuthRoute';
 import api from '../services/api';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { useTheme } from '@/theme';
@@ -71,7 +68,7 @@ const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
         if (onSuccess) {
           onSuccess();
         } else {
-          await goAfterAuth(router);
+          router.replace('/home');
         }
       } else {
         setError(result.message || 'Invalid code. Please try again.');
@@ -109,7 +106,7 @@ const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
     if (onSkip) {
       onSkip();
     } else {
-      void goAfterAuth(router);
+      router.replace('/home');
     }
   }, [onSkip]);
 

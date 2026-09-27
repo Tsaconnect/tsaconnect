@@ -144,3 +144,25 @@ it('without a customer name there is no "Requested for"', async () => {
   await flush();
   expect(text()).not.toContain('Requested for');
 });
+
+it('through a reusable link, what it is for is the link\'s name, and the description is the payer\'s note', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, source: 'open', linkLabel: 'Mama Ngozi Store — Shop 12',
+    description: 'Two plates of rice',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Mama Ngozi Store — Shop 12');
+  expect(text()).toContain("Customer's note: Two plates of rice");
+  expect(text()).not.toContain('For: Two plates of rice');
+});
+
+it('a reusable-link payment with no note shows only what it is for', async () => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({
+    status: 'pending', payable: true, youArePaying: false, source: 'open', linkLabel: 'Shop 12', description: '',
+  }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).toContain('For: Shop 12');
+  expect(text()).not.toContain("Customer's note");
+});

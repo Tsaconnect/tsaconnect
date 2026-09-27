@@ -7,9 +7,12 @@
 // SECURITY: all auth logic is preserved verbatim — the biometric/PIN gating,
 // PIN attempt counting (3-strikes lockout), verifyPin/authenticateWithBiometric
 // calls, and the onAuthorized/onCancel callbacks (and props/exports) are
-// unchanged. Visual/structural restyle only.
+// unchanged. Visual/structural restyle only. With neither a PIN nor biometrics
+// (a customer who has just signed up to pay a link), it offers to set up a PIN
+// — pin-setup goes back to where she was once it is done.
 import React, { useEffect, useState } from 'react';
 import { View } from 'react-native';
+import { router } from 'expo-router';
 import {
   authenticateWithBiometric,
   getBiometricType,
@@ -170,8 +173,10 @@ export default function AuthorizationModal({
       {!bioAvailable && !pinAvailable && (
         <EmptyState
           icon="shield"
-          title="Authorization unavailable"
-          subtitle="Set up app PIN or biometrics in Settings before sending funds."
+          title="Set up a PIN first"
+          subtitle="You approve payments with an app PIN or biometrics. Set a PIN now, then come back and approve."
+          actionLabel="Set up PIN"
+          onAction={() => { onCancel(); router.push('/pin-setup'); }}
         />
       )}
     </View>

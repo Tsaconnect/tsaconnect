@@ -39,8 +39,13 @@ describe('routeForNotification', () => {
     expect(routeForNotification(undefined)).toBeNull();
   });
 
-  it('routes a TSA Pay payment received through a link to Payment links, any other to Payment Settings', () => {
-    expect(routeForNotification({ type: 'pay_payment_received', source: 'link', mode: 'test' })).toBe('/merchants/pay-links?mode=test');
+  it('routes a TSA Pay payment received: a one-time link to its detail, a reusable one to Payment links, any other to Payment Settings', () => {
+    const PID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'link', mode: 'test', paymentId: PID }))
+      .toBe(`/merchants/pay-links/${PID}?mode=test`);
+    // Not a payment id: never built into a route.
+    expect(routeForNotification({ type: 'pay_payment_received', source: 'link', mode: 'test', paymentId: '../wallet/send' }))
+      .toBe('/merchants/pay-links?mode=test');
     expect(routeForNotification({ type: 'pay_payment_received', source: 'open', mode: 'live' })).toBe('/merchants/pay-links?mode=live');
     expect(routeForNotification({ type: 'pay_payment_received', source: 'link' })).toBe('/merchants/pay-links');
     expect(routeForNotification({ type: 'pay_payment_received', source: 'api' })).toBe('/merchants/pay-settings');

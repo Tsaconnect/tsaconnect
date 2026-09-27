@@ -6,6 +6,7 @@
 // Non-P2P deep-links (orders/wallet) are a follow-on once those routes are
 // disambiguated (the app currently has two `orderdetail` routes).
 import { PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
+import { isPaymentId } from '@/utils/paymentId';
 
 export interface NotificationData {
   type?: string;
@@ -28,13 +29,18 @@ export function routeForNotification(data: NotificationData | null | undefined):
   if (type === 'p2p.withdraw.confirmed') {
     return '/p2p/pool';
   }
-  // A TSA Pay merchant was paid. A payment through one of her links (one-time or
-  // reusable) is followed on Payment links, in the payment's own mode (a test
-  // payment is on the test list); one her own server made (API) has no screen
-  // in the app, so she lands on her TSA Pay home, Payment Settings.
+  // A TSA Pay merchant was paid, in the payment's own mode (a test payment is
+  // on the test list). A one-time link opens that link — the payment is the
+  // link; a reusable link's payment opens Payment links; one her own server
+  // made (API) has no screen in the app, so she lands on Payment Settings. The
+  // id is only ever used as a payment id: anything else falls back to the list.
   if (type === 'pay_payment_received') {
     if (data.source !== 'link' && data.source !== 'open') return PAY_SETTINGS;
-    return data.mode === 'live' || data.mode === 'test' ? `${PAY_LINKS}?mode=${data.mode}` : PAY_LINKS;
+    const mode = data.mode === 'live' || data.mode === 'test' ? data.mode : undefined;
+    if (data.source === 'link' && mode && isPaymentId(data.paymentId)) {
+      return `${PAY_LINKS}/${data.paymentId}?mode=${mode}`;
+    }
+    return mode ? `${PAY_LINKS}?mode=${mode}` : PAY_LINKS;
   }
   return null;
 }

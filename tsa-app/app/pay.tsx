@@ -45,6 +45,22 @@ import { formatKobo } from '@/utils/stableSellQuote';
 /** The server writes reasons for her in lower case ("support is reviewing it"); a line of its own starts with a capital. */
 const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
+/** How long a tap on Sign in / Create an account waits for the payment's expiry. */
+const EXPIRY_WAIT_MS = 2000;
+
+/** The payment's expiry from the public read, or undefined if it doesn't answer in time. */
+async function publicExpiry(id: string): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXPIRY_WAIT_MS);
+  try {
+    return (await getPublicPayment(id, controller.signal)).expiresAt;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const DONE_LABEL: Record<PayStatus, string> = {
   succeeded: 'Payment complete',
   failed: 'Payment failed',
@@ -145,7 +161,11 @@ export default function PayScreen() {
   }, [payTest.error, toast, fetchCheckout]);
 
   const leaveToAuth = async (to: '/login' | '/signup') => {
-    if (typeof id === 'string') await rememberPendingPayment(id, { expiresAt });
+    if (typeof id === 'string') {
+      // Tapped before the public read landed: give it a moment rather than fall back to half an hour.
+      const until = expiresAt ?? (await publicExpiry(id));
+      await rememberPendingPayment(id, { expiresAt: until });
+    }
     router.replace(to);
   };
 
@@ -220,7 +240,18 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
-                  {state.checkout.description ? <SummaryRow label="For" value={state.checkout.description} /> : null}
+                  {/* Through a reusable link, what it's for is the link's name; the
+                      description is only the payer's own note, and is labelled as that. */}
+                  {state.checkout.source === 'open' ? (
+                    <>
+                      {state.checkout.linkLabel ? <SummaryRow label="For" value={state.checkout.linkLabel} /> : null}
+                      {state.checkout.description ? (
+                        <SummaryRow label="Customer's note" value={state.checkout.description} />
+                      ) : null}
+                    </>
+                  ) : state.checkout.description ? (
+                    <SummaryRow label="For" value={state.checkout.description} />
+                  ) : null}
                   {/* A payment link names who it was made for, so she can tell it is hers. */}
                   {state.checkout.customerName ? (
                     <SummaryRow label="Requested for" value={state.checkout.customerName} />
