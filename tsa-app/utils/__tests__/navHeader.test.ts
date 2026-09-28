@@ -1,4 +1,4 @@
-import { isAtTabRoot, showDrawerHeader, type NestedNavState } from '../navHeader';
+import { isAtTabRoot, isHomeTab, showDrawerHeader, type NestedNavState } from '../navHeader';
 
 // Shapes mirror what React Navigation hands an options callback for the
 // drawer's "(tabs)" route: tab navigator state, whose focused route carries the
@@ -83,5 +83,21 @@ describe('push-only tabs', () => {
       routes: [{ name: 'notifications' }, { name: '(home)', state: { index: 0, routes: [{}] } }],
     };
     expect(showDrawerHeader(state)).toBe(true);
+  });
+});
+
+describe('isHomeTab', () => {
+  it('is Home before the tabs have rendered, since Home is the first tab', () => {
+    expect(isHomeTab(undefined)).toBe(true);
+  });
+
+  it('reads the FOCUSED tab by name', () => {
+    const tabs = (index: number): NestedNavState => ({ index, routes: [{ name: '(home)' }, { name: '(marketplace)' }] });
+    expect(isHomeTab(tabs(0))).toBe(true);
+    expect(isHomeTab(tabs(1))).toBe(false);
+  });
+
+  it('is not Home for a state it cannot read', () => {
+    expect(isHomeTab({ index: 3, routes: [] })).toBe(false);
   });
 });

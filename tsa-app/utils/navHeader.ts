@@ -41,7 +41,7 @@ export const PUSH_ONLY_TABS = ['notifications'];
  */
 export function isAtTabRoot(state?: NestedNavState): boolean {
   if (!state) return true;
-  const focusedTab = state.routes?.[state.index ?? 0];
+  const focusedTab = focusedTabOf(state);
   // A push-only tab is never a root, however empty its state looks.
   if (focusedTab?.name && PUSH_ONLY_TABS.includes(focusedTab.name)) return false;
   const tabStack = focusedTab?.state;
@@ -52,4 +52,22 @@ export function isAtTabRoot(state?: NestedNavState): boolean {
 /** The drawer header shows only on tab roots; pushed screens bring their own. */
 export function showDrawerHeader(state?: NestedNavState): boolean {
   return isAtTabRoot(state);
+}
+
+/** The Home tab's route name — the first tab, so the one an unrendered navigator is on. */
+export const HOME_TAB_ROUTE = '(home)';
+
+/**
+ * True when the focused tab is Home: its header carries the cart, which the
+ * marketplace draws on its own page. Undefined state means the tabs have not
+ * rendered yet, which only happens on the first tab, Home.
+ */
+export function isHomeTab(state?: NestedNavState): boolean {
+  if (!state) return true;
+  return focusedTabOf(state)?.name === HOME_TAB_ROUTE;
+}
+
+/** The tab route in focus; a missing index means the first. */
+function focusedTabOf(state: NestedNavState) {
+  return state.routes?.[state.index ?? 0];
 }

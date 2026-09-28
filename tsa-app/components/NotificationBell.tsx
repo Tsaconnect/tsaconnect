@@ -25,13 +25,15 @@ const NotificationBell: React.FC = () => {
   return (
     <PressableScale
       onPress={() => router.push('/notifications')}
+      // 40 wide to leave the header title room beside the cart; the slop keeps a 48 target.
+      hitSlop={4}
       accessibilityRole="button"
       accessibilityLabel={
         unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'
       }
       style={{
-        width: 44,
-        height: 44,
+        width: 40,
+        height: 40,
         alignItems: 'center',
         justifyContent: 'center',
         borderRadius: radius.pill,

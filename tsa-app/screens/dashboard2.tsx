@@ -9,12 +9,9 @@
 // fetch below survives only to feed BalanceCard's portfolio total.
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import CartIconBadge from '@/components/common/CartIconBadge';
-import CurrencySelector from '@/components/currency/CurrencySelector';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -172,7 +169,7 @@ const Dashboard: React.FC = () => {
   // ── Skeleton loading ──
   if (isLoading && !isRefreshing) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <View style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
           <Skeleton height={180} radius="lg" />
           <View style={{ marginTop: spacing.lg }}>
@@ -182,12 +179,13 @@ const Dashboard: React.FC = () => {
             <SkeletonGroup shape="adCard" count={2} />
           </View>
         </ScrollView>
-      </SafeAreaView>
+      </View>
     );
   }
 
+  // No top safe-area inset: the drawer header above already clears the status bar.
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         showsVerticalScrollIndicator={false}
@@ -195,32 +193,6 @@ const Dashboard: React.FC = () => {
           <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />
         }
       >
-        {/* Header with cart */}
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: spacing.lg,
-          }}
-        >
-          <Text variant="title1" weight="700">
-            TSA Connect
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-            <CurrencySelector variant="header" />
-            <PressableScale
-              onPress={() => router.push('/activity' as never)}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="Activity"
-            >
-              <Icon name="clock" size={24} color={colors.accent} />
-            </PressableScale>
-            <CartIconBadge color={colors.accent} size={24} />
-          </View>
-        </View>
-
         <BackupBanner />
 
         {/* Error banner */}
@@ -315,7 +287,7 @@ const Dashboard: React.FC = () => {
           onRetry={reloadListings}
         />
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 };
 

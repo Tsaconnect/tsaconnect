@@ -30,7 +30,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import NotificationBell from "../../components/NotificationBell";
 import { useTheme, fontFamily } from "@/theme";
 import { Avatar, Divider, Text } from "@/components/ui";
-import { showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
+import { isHomeTab, showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
+import CartIconBadge from "@/components/common/CartIconBadge";
 
 interface UserProfile {
   _id: string;
@@ -295,6 +296,10 @@ const Layout = () => {
             ({ navigation, route }) => ({
               headerRight: () => (
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {/* Home only: the marketplace draws its own cart on the page. */}
+                {isHomeTab((route as { state?: NestedNavState }).state) && (
+                  <CartIconBadge color={colors.textPrimary} size={24} />
+                )}
                 <NotificationBell />
                 <Pressable
                   onPress={handleAvatarPress}
@@ -310,7 +315,7 @@ const Layout = () => {
                         backgroundColor: colors.surfaceAlt,
                         justifyContent: 'center',
                         alignItems: 'center',
-                        marginRight: spacing.md,
+                        marginRight: spacing.sm,
                       }}
                     >
                       <Text variant="bodyMed" weight="700" color="accent">
@@ -319,12 +324,12 @@ const Layout = () => {
                     </View>
                   ) : currentUser && currentUser.profilePicture ? (
                     // User has profile picture
-                    <View style={{ marginRight: spacing.md }}>
+                    <View style={{ marginRight: spacing.sm }}>
                       <Avatar uri={currentUser.profilePicture} size={36} />
                     </View>
                   ) : currentUser && currentUser.name ? (
                     // User has name but no profile picture
-                    <View style={{ marginRight: spacing.md }}>
+                    <View style={{ marginRight: spacing.sm }}>
                       <Avatar name={currentUser.name} size={36} />
                     </View>
                   ) : (
@@ -337,7 +342,7 @@ const Layout = () => {
                           router.push("/profile");
                         }
                       }}
-                      style={{ marginRight: spacing.md }}
+                      style={{ marginRight: spacing.sm }}
                     >
                       <Avatar name="?" size={36} />
                     </Pressable>
@@ -355,6 +360,9 @@ const Layout = () => {
               headerTitle: "TSA Connect",
               title: "Dashboard",
               headerTitleAlign: "center",
+              // The default 16px either side of the centred title, plus Home's
+              // cart · bell · avatar, overlaps "TSA Connect" on a 360dp phone.
+              headerTitleContainerStyle: { marginHorizontal: spacing.xs },
               headerTitleStyle: {
                 fontSize: type.title3.fontSize,
                 fontFamily: fontFamily['600'],
