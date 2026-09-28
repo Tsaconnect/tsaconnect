@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Button } from './button';
 import { StatusPill } from './status-pill';
 import { Field } from './field';
@@ -10,11 +10,19 @@ import { Dialog } from './dialog';
 import { Drawer } from './drawer';
 import { EmptyState, ErrorState } from './states';
 
-it('a loading button is disabled and says so to screen readers', () => {
-  render(<Button loading>Save</Button>);
+it('a loading button ignores clicks and says so to screen readers, but keeps the focus', async () => {
+  const click = vi.fn();
+  const submit = vi.fn((e: FormEvent) => e.preventDefault());
+  render(<form onSubmit={submit}><Button type="submit" loading onClick={click}>Save</Button></form>);
   const b = screen.getByRole('button', { name: /save/i });
-  expect(b).toBeDisabled();
   expect(b).toHaveAttribute('aria-busy', 'true');
+  expect(b).toHaveAttribute('aria-disabled', 'true');
+  // Not disabled: a browser moves the focus off a focused button that becomes disabled.
+  expect(b).not.toBeDisabled();
+  await userEvent.click(b);
+  expect(b).toHaveFocus();
+  expect(click).not.toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
 });
 
 it('the primary button is the gold fill with dark slate text', () => {

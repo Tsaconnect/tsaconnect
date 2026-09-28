@@ -10,6 +10,7 @@ import { ErrorState } from '@/components/ui/states';
 import type { Mode, OpenLink, OwnMerchant } from './api';
 import { openAmountRule, openLinkTaking, shortUrl } from './display';
 import { NoMerchant } from './NoMerchant';
+import { printColorVars, SCAN_TO_PAY, testNotice } from './scanToPay';
 import { isNoMerchant, useMerchant } from './useMerchant';
 import { useOpenLink } from './useOpenLink';
 
@@ -69,22 +70,23 @@ function Sheet({ merchant: m, link: l, mode }: { merchant: OwnMerchant; link: Op
   return (
     <article
       aria-label="Poster"
-      className="mx-auto flex min-h-[297mm] w-[210mm] flex-col items-center overflow-hidden bg-white px-[18mm] py-[20mm] text-center text-[#16201F] shadow-[var(--shadow-lg)] [break-inside:avoid] [print-color-adjust:exact] print:h-[296mm] print:min-h-0 print:shadow-none"
+      style={printColorVars}
+      className="mx-auto flex min-h-[297mm] w-[210mm] flex-col items-center overflow-hidden bg-white px-[18mm] py-[20mm] text-center text-[color:var(--print-ink)] shadow-[var(--shadow-lg)] [break-inside:avoid] [print-color-adjust:exact] print:h-[296mm] print:min-h-0 print:shadow-none"
     >
       <div className="flex items-center gap-3 text-[22px] font-bold tracking-[-0.01em]">
         <BrandMark className="size-11 rounded-md" />
         TSA Connect
       </div>
       <h2 className="mt-[16mm] text-[40px] leading-[1.15] font-bold break-words">{m.businessName}</h2>
-      <p className="mt-3 text-[22px] break-words text-[#3D4A49]">{l.label}</p>
-      <QrCode value={l.url} size={360} label="QR code for the payment link" className="mt-[12mm] w-[100mm] border-2 border-[#16201F] p-3" />
-      <p className="mt-[10mm] text-[30px] font-bold">Scan to pay with TSA Connect</p>
+      <p className="mt-3 text-[22px] break-words text-[color:var(--print-muted)]">{l.label}</p>
+      <QrCode value={l.url} size={360} label="QR code for the payment link" className="mt-[12mm] w-[100mm] border-2 border-[color:var(--print-ink)] p-3" />
+      <p className="mt-[10mm] text-[30px] font-bold">{SCAN_TO_PAY}</p>
       {/* The customer types the amount, inside this range. */}
-      <p className="mt-3 text-[19px] text-[#3D4A49]">{rule}</p>
-      <p className="mt-3 font-mono text-[17px] break-all text-[#3D4A49]">{shortUrl(l.url)}</p>
+      <p className="mt-3 text-[19px] text-[color:var(--print-muted)]">{rule}</p>
+      <p className="mt-3 font-mono text-[17px] break-all text-[color:var(--print-muted)]">{shortUrl(l.url)}</p>
       {mode === 'test' && (
-        <p className="mt-auto rounded-md border-2 border-dashed border-[#6B4E0E] px-5 py-2.5 text-[18px] font-semibold text-[#6B4E0E]">
-          Test poster — no real money moves
+        <p className="mt-auto rounded-md border-2 border-dashed border-[color:var(--print-test)] px-5 py-2.5 text-[18px] font-semibold text-[color:var(--print-test)]">
+          {testNotice('poster')}
         </p>
       )}
     </article>
