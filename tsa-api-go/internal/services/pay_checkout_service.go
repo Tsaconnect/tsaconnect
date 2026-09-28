@@ -20,9 +20,12 @@ type payOrders interface {
 	SellDepositFor(ctx context.Context, fiatCode, fiatAmount, chainKey, token string, converted bool) (*big.Int, error)
 }
 
-// payQuoter prices a converted payment's swap. *RampSellQuoter fills it.
+// payQuoter prices a converted payment's swap, and refuses a token no
+// payment may be made with (wallet MCGP) before anything is locked.
+// *RampSellQuoter fills it.
 type payQuoter interface {
 	Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error)
+	RefuseSource(chainID int64, token string) error
 }
 
 // payRateBufferBps is added on top of the deposit a converted payment's swap
@@ -130,11 +133,24 @@ type PayQuote struct {
 	USDCTarget string `json:"usdcTarget"`
 }
 
+// refuseSource is the quoter's refusal of a token no payment may be made
+// with. It runs before a payment is locked, so a refused token never takes
+// anyone's payment; with no quoter wired, the intent's own quote refuses it.
+func (s *PayCheckoutService) refuseSource(in PayConvertedInput) error {
+	if s.quoter == nil {
+		return nil
+	}
+	return s.quoter.RefuseSource(in.SourceChainID, strings.TrimSpace(in.SourceToken))
+}
+
 // Quote prices paying with one token. It locks nothing and creates nothing:
 // the payment stays free for whoever starts it.
 func (s *PayCheckoutService) Quote(ctx context.Context, user *models.User, id uuid.UUID, in PayConvertedInput) (*PayQuote, error) {
 	if s.quoter == nil {
 		return nil, ErrSellUnavailable
+	}
+	if err := s.refuseSource(in); err != nil {
+		return nil, err
 	}
 	v, err := s.quotable(ctx, user, id, models.PaySettlementFiat)
 	if err != nil {
@@ -224,6 +240,9 @@ func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, i
 func (s *PayCheckoutService) PayConverted(ctx context.Context, user *models.User, id uuid.UUID, in PayConvertedInput) (*models.RampSellIntent, *SellSwapQuote, error) {
 	if s.intents == nil {
 		return nil, nil, ErrSellUnavailable
+	}
+	if err := s.refuseSource(in); err != nil {
+		return nil, nil, err
 	}
 	p, err := s.begin(ctx, user, id, models.PaySettlementFiat)
 	if err != nil {
@@ -386,6 +405,9 @@ func (s *PayCheckoutService) CryptoQuote(ctx context.Context, user *models.User,
 	if s.quoter == nil || !s.cryptoReady() {
 		return nil, ErrSellUnavailable
 	}
+	if err := s.refuseSource(in); err != nil {
+		return nil, err
+	}
 	if _, err := s.quotable(ctx, user, id, models.PaySettlementCrypto); err != nil {
 		return nil, err
 	}
@@ -427,6 +449,9 @@ func (s *PayCheckoutService) CryptoQuote(ctx context.Context, user *models.User,
 func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, id uuid.UUID, in PayConvertedInput) (*models.RampSellIntent, *SellSwapQuote, error) {
 	if !s.cryptoReady() {
 		return nil, nil, ErrSellUnavailable
+	}
+	if err := s.refuseSource(in); err != nil {
+		return nil, nil, err
 	}
 	p, err := s.begin(ctx, user, id, models.PaySettlementCrypto)
 	if err != nil {

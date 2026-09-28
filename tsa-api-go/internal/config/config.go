@@ -145,6 +145,30 @@ type NetworkConfig struct {
 	TokenAddresses map[string]string // "chain:symbol" → contract address
 }
 
+// IsWalletMCGP reports whether token on the chain with chainID is the plain
+// ERC-20 MCGP a user holds in her own wallet (the configured "<chain>:MCGP"
+// address, on any network). Owner decision 2026-09-28: that MCGP is never used
+// to pay or sold for naira — only Spendable MCGP (the entitlement balance) is.
+// It may still be seen, sent and swapped. Matched by address, never by symbol,
+// so a look-alike token called "MCGP" is not mistaken for it.
+func (c *Config) IsWalletMCGP(chainID int64, token string) bool {
+	token = strings.TrimSpace(token)
+	if c == nil || chainID <= 0 || token == "" {
+		return false
+	}
+	for _, network := range c.Networks {
+		for name, chain := range network.Chains {
+			if chain.ChainID != chainID {
+				continue
+			}
+			if addr := strings.TrimSpace(network.TokenAddresses[name+":MCGP"]); addr != "" && strings.EqualFold(addr, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NonEVMChainConfig configures one non-EVM chain (Tron/BTC/Solana). Populated
 // only when its RPC/indexer env is present, so absent chains stay dormant.
 type NonEVMChainConfig struct {

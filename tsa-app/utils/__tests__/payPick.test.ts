@@ -10,6 +10,8 @@ import { SOLANA_LIFI_CHAIN_ID, type LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 
 const USDT_BSC = '0x55d398326f99059fF775485246999027B3197955';
+const MCGP_SONIC = '0x517600323e5E2938207fA2e2e915B9D80e5B2b21';
+const USDT_SONIC = '0x6047828dc181963ba44974801ff68e538da5eaf9';
 const fiat = { settlementMode: 'fiat' } as PayCheckout;
 const crypto = { settlementMode: 'crypto', settleChainId: 56, settleTokenAddress: USDT_BSC } as PayCheckout;
 const tok = (address: string) => ({ address, symbol: 'X', decimals: 18 }) as LiFiToken;
@@ -34,4 +36,14 @@ it('asked about a chain alone (a search still looking for tokens) it keeps the c
 
 it('never hides anything for a naira merchant', () => {
   expect(payPickFilter(fiat)(56, tok(USDT_BSC))).toBe(true);
+});
+
+it('never offers wallet MCGP, for either kind of merchant — but keeps Sonic’s other coins', () => {
+  for (const checkout of [fiat, crypto]) {
+    const allow = payPickFilter(checkout);
+    expect(allow(146, tok(MCGP_SONIC))).toBe(false);
+    expect(allow(146, tok(MCGP_SONIC.toLowerCase()))).toBe(false);
+    expect(allow(146, tok(USDT_SONIC))).toBe(true);
+    expect(allow(146, tok('0x0000000000000000000000000000000000000000'))).toBe(true); // S
+  }
 });

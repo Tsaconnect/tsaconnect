@@ -91,6 +91,8 @@ func sellSwapError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrSellSourceUnsupported):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity,
 			"Selling from this network isn't supported yet — pick a coin on another network")
+	case errors.Is(err, services.ErrSellWalletMCGP):
+		utils.ErrorResponse(c, http.StatusUnprocessableEntity, services.ErrSellWalletMCGP.Error())
 	case errors.Is(err, services.ErrSellBadSourceAddress):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrLiFiNoRoute):

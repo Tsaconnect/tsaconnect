@@ -144,6 +144,12 @@ func (f *fakePayQuoter) Quote(_ context.Context, in SellQuoteInput) (*SellSwapQu
 	return &SellSwapQuote{Route: &LiFiRoute{FromAmount: "17000000000000000", ToAmountUSD: f.toUSD}}, nil
 }
 
+// RefuseSource is the real quoter's gate over a registry that knows Sonic's
+// wallet MCGP: the pricing is faked, the refusal is not.
+func (f *fakePayQuoter) RefuseSource(chainID int64, token string) error {
+	return (&RampSellQuoter{chains: walletMCGPRegistry()}).RefuseSource(chainID, token)
+}
+
 // fakeDeposits answers the balance of an expired order's deposit address.
 type fakeDeposits struct {
 	bal   *big.Int

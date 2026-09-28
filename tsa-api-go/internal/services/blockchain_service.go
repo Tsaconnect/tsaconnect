@@ -211,6 +211,12 @@ func (bs *BlockchainService) TokenAddressForNetwork(network, chain, symbol strin
 	return ""
 }
 
+// IsWalletMCGP reports whether token on chainID is the plain wallet MCGP —
+// see config.(*Config).IsWalletMCGP.
+func (bs *BlockchainService) IsWalletMCGP(chainID int64, token string) bool {
+	return bs != nil && bs.cfg.IsWalletMCGP(chainID, token)
+}
+
 // TokenAddress returns the contract address for a token on mainnet (backward compat).
 func (bs *BlockchainService) TokenAddress(chain, symbol string) string {
 	return bs.TokenAddressForNetwork("mainnet", chain, symbol)

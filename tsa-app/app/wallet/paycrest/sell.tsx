@@ -25,7 +25,9 @@
 // picks it from her holdings and SwappedSellForm takes over the amount — one
 // "~₦" estimate, one Sell tap. useSwappedSell does the rest — swap to USDC on
 // Base in her own wallet, open the payout for what landed, send it — and
-// "Finish your sale" picks up a sale that stopped part-way.
+// "Finish your sale" picks up a sale that stopped part-way. Wallet MCGP is
+// never offered (utils/walletMcgp.ts): only Spendable MCGP sells, from the
+// MCGP row.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -52,6 +54,7 @@ import {
   type SwapPick,
 } from '@/components/paycrest/SwappedSellForm';
 import AssetPicker from '@/components/assets/AssetPicker';
+import { notWalletMcgp } from '@/utils/walletMcgp';
 import { canCancelSale, useSwappedSell } from '@/hooks/useSwappedSell';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
@@ -1144,6 +1147,8 @@ export default function PaycrestSellScreen() {
         side="from"
         holdingsOnly
         title="Choose what to sell"
+        allow={notWalletMcgp}
+        note="MCGP in your wallet can't be sold for naira. Spendable MCGP sells from the MCGP row."
         onSelect={onPick}
         onClose={() => setPickerOpen(false)}
       />
