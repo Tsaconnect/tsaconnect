@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"golang.org/x/sync/errgroup"
 )
 
 // MCGPSwapService is the backend adapter for McgpEntitlementSwap ("Swap
@@ -254,6 +255,11 @@ func (s *MCGPSwapService) PrepareApprove(from, token string, amount *big.Int) ([
 // ────────────────────────────── reads (eth_call) ──────────────────────────
 
 func (s *MCGPSwapService) callUint(method string, args ...interface{}) (*big.Int, error) {
+	return s.callUintCtx(context.Background(), method, args...)
+}
+
+// callUintCtx is callUint bounded by ctx as well as the per-call timeout.
+func (s *MCGPSwapService) callUintCtx(ctx context.Context, method string, args ...interface{}) (*big.Int, error) {
 	if s.client == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
@@ -262,7 +268,7 @@ func (s *MCGPSwapService) callUint(method string, args ...interface{}) (*big.Int
 		return nil, err
 	}
 	addr := common.HexToAddress(s.address)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
 	if err != nil {
@@ -483,6 +489,8 @@ type WindowHeadroom struct {
 	// it is left (the whole cap once the window has certainly rolled over).
 	WindowCap       *big.Int
 	WindowRemaining *big.Int
+	// Window is the rolling window's length in seconds.
+	Window *big.Int
 	// MaxPerTx is the per-call cap (debit headroom only; credits read it from
 	// SpendableLimits).
 	MaxPerTx *big.Int
@@ -510,30 +518,52 @@ func windowRemaining(now time.Time, start, window, capAmt, used *big.Int) *big.I
 	}
 }
 
-func (s *MCGPSwapService) readUints(names ...string) ([]*big.Int, error) {
+// readUints reads each named uint getter concurrently: callers run these
+// inside OperatorSequence, where every sequential round trip is time the
+// operator signing lock (shared with bills and IT) is held.
+func (s *MCGPSwapService) readUints(ctx context.Context, names ...string) ([]*big.Int, error) {
 	out := make([]*big.Int, len(names))
+	g, gctx := errgroup.WithContext(ctx)
 	for i, n := range names {
-		v, err := s.callUint(n)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = v
+		g.Go(func() error {
+			v, err := s.callUintCtx(gctx, n)
+			out[i] = v
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// headroom reads paused alongside the named window getters, concurrently.
+func (s *MCGPSwapService) headroom(ctx context.Context, names ...string) (bool, []*big.Int, error) {
+	var paused bool
+	var vals []*big.Int
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() (err error) {
+		paused, err = s.callBool(gctx, "paused")
+		return err
+	})
+	g.Go(func() (err error) {
+		vals, err = s.readUints(gctx, names...)
+		return err
+	})
+	if err := g.Wait(); err != nil {
+		return false, nil, err
+	}
+	return paused, vals, nil
 }
 
 // CreditHeadroom reads pause state and the creditPremium rolling window.
 func (s *MCGPSwapService) CreditHeadroom(ctx context.Context) (WindowHeadroom, error) {
 	var out WindowHeadroom
-	paused, err := s.callBool(ctx, "paused")
+	paused, v, err := s.headroom(ctx, "creditWindowCap", "creditedInWindow", "windowStart", "creditWindow")
 	if err != nil {
 		return out, err
 	}
-	v, err := s.readUints("creditWindowCap", "creditedInWindow", "windowStart", "creditWindow")
-	if err != nil {
-		return out, err
-	}
-	out.Paused, out.WindowCap = paused, v[0]
+	out.Paused, out.WindowCap, out.Window = paused, v[0], v[3]
 	out.WindowRemaining = windowRemaining(time.Now(), v[2], v[3], v[0], v[1])
 	return out, nil
 }
@@ -543,15 +573,11 @@ func (s *MCGPSwapService) CreditHeadroom(ctx context.Context) (WindowHeadroom, e
 // (reverse, then re-debit a share) must check the re-debit fits first.
 func (s *MCGPSwapService) DebitHeadroom(ctx context.Context) (WindowHeadroom, error) {
 	var out WindowHeadroom
-	paused, err := s.callBool(ctx, "paused")
+	paused, v, err := s.headroom(ctx, "debitWindowCap", "debitedInWindow", "debitWindowStart", "debitWindow", "maxDebitPerTx")
 	if err != nil {
 		return out, err
 	}
-	v, err := s.readUints("debitWindowCap", "debitedInWindow", "debitWindowStart", "debitWindow", "maxDebitPerTx")
-	if err != nil {
-		return out, err
-	}
-	out.Paused, out.WindowCap, out.MaxPerTx = paused, v[0], v[4]
+	out.Paused, out.WindowCap, out.Window, out.MaxPerTx = paused, v[0], v[3], v[4]
 	out.WindowRemaining = windowRemaining(time.Now(), v[2], v[3], v[0], v[1])
 	return out, nil
 }
@@ -626,19 +652,12 @@ type SpendableLimits struct {
 }
 
 // SpendableLimits reads the per-transaction operator caps.
-func (s *MCGPSwapService) SpendableLimits(_ context.Context) (SpendableLimits, error) {
-	var out SpendableLimits
-	var err error
-	if out.MaxDebitPerTx, err = s.callUint("maxDebitPerTx"); err != nil {
-		return out, err
+func (s *MCGPSwapService) SpendableLimits(ctx context.Context) (SpendableLimits, error) {
+	v, err := s.readUints(ctx, "maxDebitPerTx", "maxCreditPerTx", "minCredit")
+	if err != nil {
+		return SpendableLimits{}, err
 	}
-	if out.MaxCreditPerTx, err = s.callUint("maxCreditPerTx"); err != nil {
-		return out, err
-	}
-	if out.MinCredit, err = s.callUint("minCredit"); err != nil {
-		return out, err
-	}
-	return out, nil
+	return SpendableLimits{MaxDebitPerTx: v[0], MaxCreditPerTx: v[1], MinCredit: v[2]}, nil
 }
 
 // OperatorCreditPremium credits spend-only premium after an NGN payment settles.

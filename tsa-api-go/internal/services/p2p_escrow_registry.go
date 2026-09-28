@@ -219,6 +219,13 @@ func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
 // able to finish; only new activity is refused. An unconfigured chain is NOT
 // "delisted": callers fail on it through their own chain resolution, with the
 // error they always returned.
+//
+// The delist is OFF-CHAIN only: the API stops preparing new MCGP activity,
+// but the escrow contract still accepts MCGP from anyone who calls it
+// directly (deposit, and openTrade against a voucher a seller already
+// signed) until the owner calls setTokenAcceptance(MCGP, false) on each
+// P2PEscrow proxy. That call is the real switch; it does not block the exit
+// paths (release, cancel, withdraw), so existing positions still finish.
 func (r *P2PEscrowRegistry) AssetDelisted(chainID int64, symbol string) bool {
 	if r == nil || r.byChain == nil {
 		return false

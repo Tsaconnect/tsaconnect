@@ -4,7 +4,9 @@
 // control: "My requests" (buyer) shows the buyer's submitted requests + a
 // Pay button once approved; "Incoming" (seller) shows requests for the
 // merchant's services with Approve / Decline actions. Pay converts the request
-// into an escrowed order via the standard escrow flow.
+// into an escrowed order via the standard escrow flow — or, for an MCGP
+// request, a Spendable MCGP hold, which moves without a wallet signature and so
+// is authorized with the app's PIN/biometric prompt first, as at cart checkout.
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
@@ -13,6 +15,7 @@ import {
   listBookingRequests,
   approveBookingRequest,
   rejectBookingRequest,
+  type BookingRequest,
   type BookingRequestRow,
   type BookingRequestStatus,
 } from '@/services/bookingRequestApi';
@@ -20,6 +23,7 @@ import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
 import { LocalAmountInput, PricingCurrencySelect } from '@/components/products/MerchantPricingFields';
+import AuthorizationModal from '@/components/common/AuthorizationModal';
 
 type Tab = 'buyer' | 'seller';
 
@@ -43,6 +47,8 @@ export default function BookingRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // An MCGP request waiting for the buyer to authorize its Spendable MCGP hold.
+  const [authorizeFor, setAuthorizeFor] = useState<BookingRequest | null>(null);
   // Sellers quote in their own currency; the quote is sent in USD.
   const pricing = useMerchantPricing();
   const { formatPrice } = useCurrency();
@@ -97,16 +103,25 @@ export default function BookingRequestsScreen() {
       load();
     });
 
-  const handlePay = (id: string) =>
-    withBusy(id, async () => {
+  const isMcgp = (request: BookingRequest) => request.token?.toUpperCase() === 'MCGP';
+
+  const runPay = (request: BookingRequest) =>
+    withBusy(request.id, async () => {
       try {
-        await payBookingRequestAndEscrow(id);
-        toast.show('Booking paid & funded via escrow', 'success');
+        await payBookingRequestAndEscrow(request.id);
+        toast.show(isMcgp(request) ? 'Booking paid from your Spendable MCGP' : 'Booking paid & funded via escrow', 'success');
         load();
       } catch (e: any) {
         toast.show(e.message || 'Payment failed', 'error');
       }
     });
+
+  // Spendable MCGP moves with no wallet signature, so the buyer authorizes it
+  // first; stablecoins are signed in the wallet and go straight through.
+  const handlePay = (request: BookingRequest) => {
+    if (isMcgp(request)) setAuthorizeFor(request);
+    else runPay(request);
+  };
 
   const Segment = ({ value, label }: { value: Tab; label: string }) => {
     const active = tab === value;
@@ -192,7 +207,7 @@ export default function BookingRequestsScreen() {
                       <Button
                         title="Pay & confirm"
                         leftIcon="shield"
-                        onPress={() => handlePay(request.id)}
+                        onPress={() => handlePay(request)}
                         loading={busyId === request.id}
                         disabled={busyId === request.id}
                       />
@@ -230,6 +245,21 @@ export default function BookingRequestsScreen() {
           )}
         </ScrollView>
       )}
+      <AuthorizationModal
+        visible={authorizeFor != null}
+        title="Authorize payment"
+        description={
+          authorizeFor
+            ? `Pay ${authorizeFor.quotedAmountUsd != null ? formatPrice(authorizeFor.quotedAmountUsd) + ' ' : ''}for this booking from your Spendable MCGP. It is held until you confirm the service.`
+            : undefined
+        }
+        onAuthorized={() => {
+          const request = authorizeFor;
+          setAuthorizeFor(null);
+          if (request) runPay(request);
+        }}
+        onCancel={() => setAuthorizeFor(null)}
+      />
     </View>
   );
 }

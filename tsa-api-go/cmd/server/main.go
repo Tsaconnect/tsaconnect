@@ -635,6 +635,14 @@ func main() {
 	// "unavailable" and stablecoin checkout is unaffected.
 	if mcgpSwapService.HasOperator() {
 		orderMcgp := services.NewOrderSpendablePaymentService(config.DB, mcgpSwapService, eventBus)
+		orderMcgp.SetAbuseLimits(services.OrderMcgpAbuseLimits{
+			MaxOpenHolds:     cfg.OrderMcgpMaxOpenHolds,
+			MaxRefundsPerDay: cfg.OrderMcgpMaxRefundsPerDay,
+			WindowSharePct:   cfg.OrderMcgpWindowSharePct,
+		})
+		lim := orderMcgp.AbuseLimits()
+		log.Printf("[config] MCGP checkout bounds: open holds/buyer=%d refunds/buyer/24h=%d window share=%d%%",
+			lim.MaxOpenHolds, lim.MaxRefundsPerDay, lim.WindowSharePct)
 		if escrowService != nil {
 			// An order an older app paid through the escrow but never reported
 			// must not be charged a second time from Spendable MCGP.
@@ -1705,6 +1713,11 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: router,
+		// Only the header read is bounded: WebSockets and long chain-backed
+		// requests rule out a blanket Read/WriteTimeout, so slow handlers
+		// bound their own work (e.g. the OTC position budget).
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Start scheduler (no-op if no workers registered yet — future steps add them).

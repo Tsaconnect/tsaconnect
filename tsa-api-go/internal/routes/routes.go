@@ -443,17 +443,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// MCGP orders: paid from, and released out of, Spendable MCGP (the
 		// entitlement contract's operator debit) instead of the escrow.
 		orderGroup.POST("/:id/pay-spendable", middleware.RateLimiterBy(20, time.Minute, perUserRateKey), ch.PaySpendable)
-		orderGroup.POST("/:id/confirm-receipt", ch.ConfirmReceipt)
+		// The endpoints that resolve a Spendable MCGP hold (release or refund)
+		// each send operator transactions under the signing lock bills and IT
+		// share, at no cost to the caller. One per-user budget across all four.
+		orderResolveLimit := middleware.RateLimiterBy(20, time.Minute, perUserRateKey)
+		orderGroup.POST("/:id/confirm-receipt", orderResolveLimit, ch.ConfirmReceipt)
 		orderGroup.POST("/:id/ship", ch.MarkShipped)
 		orderGroup.POST("/:id/deliver", ch.MarkDelivered)
 		orderGroup.POST("/:id/approve-refund", ch.ApproveRefund)
 		orderGroup.POST("/:id/reject-refund", ch.RejectRefund)
 		orderGroup.POST("/:id/prepare-confirm", ch.PrepareConfirm)
 		orderGroup.POST("/:id/submit-confirm", ch.SubmitConfirm)
-		orderGroup.POST("/:id/request-refund", ch.RequestRefund)
-		orderGroup.POST("/:id/cancel", ch.CancelOrder)
+		orderGroup.POST("/:id/request-refund", orderResolveLimit, ch.RequestRefund)
+		orderGroup.POST("/:id/cancel", orderResolveLimit, ch.CancelOrder)
 		orderGroup.POST("/:id/request-cancel", ch.RequestCancelOrder)
-		orderGroup.POST("/:id/approve-cancel", ch.ApproveCancelOrder)
+		orderGroup.POST("/:id/approve-cancel", orderResolveLimit, ch.ApproveCancelOrder)
 		orderGroup.POST("/:id/submit-cancel", ch.SubmitCancelOrder)
 		orderGroup.POST("/:id/reject-cancel", ch.RejectCancelOrder)
 		orderGroup.POST("/:id/dispute", ch.RaiseDispute)

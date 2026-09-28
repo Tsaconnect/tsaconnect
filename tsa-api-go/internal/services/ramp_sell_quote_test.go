@@ -142,7 +142,7 @@ func sellRawID(t *testing.T, toUSD float64) string {
 // bscUSDT is the registry's BSC USDT: an EVM token that is NOT the chain's
 // gas coin (so a sell from it may need a top-up) and IS a configured stable
 // (so the pair it makes with Base USDC is a stable one).
-const bscUSDT = "0xBscUSDT000000000000000000000000000001"
+const bscUSDT = "0xB5c05D7000000000000000000000000000000001"
 
 // sellTestAddress has to be a real hex address: the source address is
 // validated for the chain's family before anything is quoted.

@@ -37,7 +37,7 @@ import {
   getOtcSettings, getOtcPosition, type OtcSettings, type OtcPosition, type WalletBalance,
 } from '@/services/walletApi';
 import {
-  otcSellBlocker, otcSellableDecimal, otcSellableDisplay, hasOtcSellable,
+  otcSellBlocker, otcSellableDecimal, otcSellableDisplay, hasOtcSellable, otcPositionFor,
   OTC_SELLABLE_LABEL, OTC_NOTHING_TO_SELL, OTC_POSITION_UNAVAILABLE,
 } from '@/utils/otcSell';
 import { useTheme } from '@/theme';
@@ -250,10 +250,15 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
     } finally { setLoadingBal(false); }
   }, [signer]);
 
+  // Only the newest read may land: a slow answer to an older request (a focus
+  // refresh, or the wallet before the device switched) must not overwrite it.
+  const positionSeq = useRef(0);
   const loadPosition = useCallback(async () => {
-    if (!signer) { setOtcPosition(null); return; }
+    const seq = ++positionSeq.current;
+    if (!signer) { setOtcPosition(null); setPositionFailed(false); return; }
     setPositionFailed(false);
     const r = await getOtcPosition(signer);
+    if (seq !== positionSeq.current) return;
     if (r.success && r.data) {
       setOtcPosition(r.data);
     } else {
@@ -283,7 +288,9 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
 
   // Sell side: the OTC-sellable figure replaces the wallet balance everywhere
   // the form reads one (label, Max, limit check).
-  const sellableWei = otcPosition?.sellable ?? null;
+  // A position is only ever the signing wallet's: anything else reads as loading.
+  const position = otcPositionFor(otcPosition, signer);
+  const sellableWei = position?.sellable ?? null;
   const sellable = direction === 'sell' ? hasOtcSellable(sellableWei) : null;
   const sellUnavailable = direction === 'sell' && sellable !== true;
 
@@ -687,7 +694,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
                   disabled={!sellable}
                 >
                   <Text variant="caption" weight="500" color="accent">
-                    {OTC_SELLABLE_LABEL}: {otcPosition ? otcSellableDisplay(sellableWei) : positionFailed ? '—' : '…'}
+                    {OTC_SELLABLE_LABEL}: {position ? otcSellableDisplay(sellableWei) : positionFailed ? '—' : '…'}
                   </Text>
                 </PressableScale>
               ) : (

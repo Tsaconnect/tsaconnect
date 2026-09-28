@@ -103,6 +103,13 @@ func (h *SwapHandler) readOTCPosition(ctx context.Context, wallet string, maxAge
 // desk. The wallet is the SIGNING wallet, since that is where the tokens leave
 // from. Anything it cannot verify is refused too. It writes the error response
 // and returns false when the sell must stop.
+//
+// Both this cap and SellEnabled are APP-LEVEL guards: they only stop the app
+// preparing the transaction. OtcMarketplace.sell is permissionless, so a
+// wallet calling the contract directly is bound by neither. The real switch
+// is on-chain and owner-only: pause() (which also stops buys), switching the
+// active sell phase (setActiveSellPhase / updatePhasePrice), or withdrawing
+// the desk's USDC. An incident that needs selling stopped needs the owner.
 func (h *SwapHandler) enforceOTCSellCap(c *gin.Context, wallet string, mcgpAmount *big.Int) bool {
 	settings, err := loadOrSeedOTCSettings(h.db)
 	if err != nil {

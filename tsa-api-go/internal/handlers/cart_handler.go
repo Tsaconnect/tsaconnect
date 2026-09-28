@@ -165,6 +165,11 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Product is not available for purchase")
 		return
 	}
+	// Checkout refuses it too; saying so here spares a cart that can't be paid.
+	if product.UserID == user.ID {
+		utils.ErrorResponse(c, http.StatusBadRequest, "You can't buy your own listing")
+		return
+	}
 
 	// Services hold no inventory; checkout ignores their stock, and so does the cart.
 	isService := product.Type == models.ProductTypeService

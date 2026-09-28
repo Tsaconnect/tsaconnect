@@ -75,3 +75,15 @@ export function otcSellBlocker(amount: string, sellableWei: string | null | unde
   }
   return null;
 }
+
+/**
+ * The position read for `signer`, or null when it belongs to another wallet.
+ * A read for the previous signer (the device wallet switched mid-request)
+ * must never set the sell limit of the current one.
+ */
+export function otcPositionFor<T extends { walletAddress: string }>(
+  position: T | null | undefined, signer: string | null | undefined,
+): T | null {
+  if (!position || !signer) return null;
+  return position.walletAddress.toLowerCase() === signer.toLowerCase() ? position : null;
+}

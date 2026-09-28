@@ -82,6 +82,10 @@ type OrderMcgpPayment struct {
 	// DecidedAt is when the release or refund was claimed; stuck alerts
 	// measure from it.
 	DecidedAt *time.Time `json:"decidedAt,omitempty"`
+	// DebitedAt is when the latest debit attempt was sent. Checkout's share
+	// of the contract's debit window is measured from it (rows written before
+	// the column existed fall back to CreatedAt).
+	DebitedAt *time.Time `gorm:"index" json:"debitedAt,omitempty"`
 
 	FailureReason string `gorm:"type:varchar(256)" json:"failureReason,omitempty"`
 

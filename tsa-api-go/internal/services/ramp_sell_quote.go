@@ -242,6 +242,13 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if family := addressFamily(in.FromChainID); family != "evm" {
 		return nil, fmt.Errorf("%w (%s)", ErrSellSourceUnsupported, family)
 	}
+	// The token must be a 0x contract address. RefuseSource matches the
+	// configured MCGP address; a spelling it does not recognise (no 0x, a
+	// symbol LiFi might resolve itself) must not reach LiFi and come back as
+	// MCGP. checkSignable re-checks the route's own action.fromToken.
+	if !isHexTokenAddress(in.FromToken) {
+		return nil, fmt.Errorf("%w: token %q is not a 0x token address", ErrSellBadSourceAddress, in.FromToken)
+	}
 	if err := validateAddressForChain(in.FromChainID, in.FromAddress, nil); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
 	}
@@ -346,6 +353,9 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	// gone. The route is LiFi's answer, not ours, so it is checked before it
 	// is handed over — see checkSignable.
 	if err := q.checkSignable(route, in, usdc); err != nil {
+		if errors.Is(err, ErrSellWalletMCGP) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
 	}
 
@@ -417,6 +427,14 @@ func (q *RampSellQuoter) checkSignable(route *LiFiRoute, in SellQuoteInput, usdc
 	}
 	if signed.ChainID != in.FromChainID {
 		return fmt.Errorf("%w: route is for chain %d, not %d", ErrTreasuryInvalidRoute, signed.ChainID, in.FromChainID)
+	}
+	// What the route actually spends, not only what she asked to sell: a
+	// route that resolves to wallet MCGP is refused like a request for it.
+	if signed.ApprovalToken != "" {
+		if err := q.RefuseSource(in.FromChainID, signed.ApprovalToken); err != nil {
+			log.Printf("[ramp-sell] ALERT ramp_sell_route_wallet_mcgp_total=1 chain=%d asked=%s tool=%s", in.FromChainID, in.FromToken, route.Tool)
+			return err
+		}
 	}
 	if signed.DestChainID != target.chainID {
 		return fmt.Errorf("%w: route's action delivers on chain %d, not %d", ErrTreasuryInvalidRoute, signed.DestChainID, target.chainID)
@@ -637,4 +655,11 @@ func usdcRat(v *big.Int) *big.Rat {
 		return new(big.Rat)
 	}
 	return new(big.Rat).SetFrac(v, pow10(6))
+}
+
+// isHexTokenAddress is a 0x-prefixed 20-byte hex address. common.IsHexAddress
+// alone also accepts the bare 40 hex digits.
+func isHexTokenAddress(token string) bool {
+	t := strings.TrimSpace(token)
+	return len(t) > 2 && (t[:2] == "0x" || t[:2] == "0X") && common.IsHexAddress(t)
 }

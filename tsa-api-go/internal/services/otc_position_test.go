@@ -38,6 +38,12 @@ type fakeOTCChain struct {
 	balances   map[common.Address]*big.Int
 	failBal    error
 	queryAddrs []common.Address
+	// failFrom fails any query starting at or after this block (0 = off);
+	// failNext fails the next N queries; hang blocks until the call's
+	// context ends, like an RPC that never answers.
+	failFrom uint64
+	failNext int
+	hang     bool
 }
 
 func (f *fakeOTCChain) BlockNumber(context.Context) (uint64, error) {
@@ -47,13 +53,24 @@ func (f *fakeOTCChain) BlockNumber(context.Context) (uint64, error) {
 	return f.head, nil
 }
 
-func (f *fakeOTCChain) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+func (f *fakeOTCChain) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	f.logCalls++
 	f.queryAddrs = q.Addresses
+	if f.hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.failLogs != nil {
 		return nil, f.failLogs
 	}
+	if f.failNext > 0 {
+		f.failNext--
+		return nil, errors.New("transient: upstream timeout")
+	}
 	from, to := q.FromBlock.Uint64(), q.ToBlock.Uint64()
+	if f.failFrom > 0 && from >= f.failFrom {
+		return nil, errors.New("getLogs failed")
+	}
 	if f.rangeCap > 0 && to-from+1 > f.rangeCap {
 		return nil, fmt.Errorf("block range too large (max %d)", f.rangeCap)
 	}

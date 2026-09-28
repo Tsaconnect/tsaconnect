@@ -307,6 +307,20 @@ it('with the wallet-MCGP filter, hides only the real MCGP contract and shows the
   expect(t).toContain(note);
 });
 
+// The note explains a coin she holds that is missing; with no wallet MCGP (or
+// only a look-alike) nothing is missing, so it would only confuse.
+it('with the wallet-MCGP filter, shows no note when she holds no wallet MCGP', async () => {
+  setHoldings([
+    ...holdingsState.DEFAULT_HOLDINGS,
+    { chainId: 146, address: '0x000000000000000000000000000000000000bEEF', native: false, trusted: false, symbol: 'MCGP', name: 'Look-alike', decimals: 18, balance: 1, usdValue: 0 },
+  ]);
+  const note = "MCGP in your wallet can't be sold for naira.";
+  const { tree } = await open({ side: 'from', holdingsOnly: true, allow: notWalletMcgp, note });
+  const t = text(tree);
+  expect(t).toContain('Look-alike');
+  expect(t).not.toContain(note);
+});
+
 it('says something useful in holdings mode when she holds nothing', async () => {
   setHoldings([]);
   const { tree } = await open({ side: 'from', holdingsOnly: true });

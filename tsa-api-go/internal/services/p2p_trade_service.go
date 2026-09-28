@@ -3830,7 +3830,10 @@ func (s *P2PTradeService) delistedAdsClause() (string, []any) {
 		for _, a := range c.Assets {
 			listed = append(listed, strings.ToUpper(a))
 		}
-		parts = append(parts, "NOT (chain_id = ? AND UPPER(token) NOT IN ?)")
+		// Compared as stored, not through UPPER(): every write path stores the
+		// symbol upper-cased (CreateSellAd/CreateBuyAd), and a function on the
+		// column would keep the token index from being used.
+		parts = append(parts, "NOT (chain_id = ? AND token NOT IN ?)")
 		args = append(args, c.ChainID, listed)
 	}
 	return strings.Join(parts, " AND "), args
