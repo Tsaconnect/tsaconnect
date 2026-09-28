@@ -58,6 +58,10 @@ var (
 	// ErrChainUnavailable: a transient RPC/transport failure while preparing the
 	// tx (nonce / gas-price lookup) — retryable → 503.
 	ErrChainUnavailable = errors.New("p2p: blockchain temporarily unavailable, please retry")
+	// ErrAssetNotTradeable: the token has been taken out of P2P on this chain
+	// (see P2PEscrowRegistry.AssetAllowed), so no new ad, pool deposit or trade
+	// may be started in it. Positions that already exist still settle.
+	ErrAssetNotTradeable = errors.New("p2p: this asset is no longer available for new P2P activity")
 )
 
 // isChainRevert reports whether a prepare error is an on-chain revert (vs a
@@ -399,6 +403,16 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		return
 	}
 
+	// The fee is valued by treating one token as $1, which only holds for the
+	// USD stablecoins. Anything else — MCGP trades still settling after MCGP
+	// left P2P — earns no cashback/TP rather than a guessed price: MCGP trades
+	// near $0.02, so $1/token over-credited ~50x, and a live price read here
+	// (OTC contract RPC or the admin IT rate) would put a mis-read or stale
+	// rate straight into claimable rewards for an asset P2P no longer offers.
+	if !IsStableAsset(trade.Token) {
+		return
+	}
+
 	// Resolve the escrow for the trade's chain (fail-loud — never Sonic fallback).
 	esc, _, _, err := s.resolve(trade.ChainID)
 	if err != nil || esc == nil {
@@ -450,8 +464,9 @@ func onChainTradeFee(t *OnChainP2PTrade) *big.Int {
 }
 
 // baseUnitsToUSD converts an on-chain token amount (base units) to a USD float,
-// treating the settlement token as a ~$1 stablecoin (the P2P settlement tokens
-// are USDT/USDC). Mirrors handlers.weiToUSDFloat. amount/10^decimals.
+// treating the settlement token as a ~$1 stablecoin. Only meaningful for
+// USDT/USDC — callers valuing rewards must check IsStableAsset first (see
+// accrueP2PReleaseFee). Mirrors handlers.weiToUSDFloat. amount/10^decimals.
 func baseUnitsToUSD(amount *big.Int, decimals int) float64 {
 	if amount == nil || amount.Sign() <= 0 {
 		return 0
@@ -632,7 +647,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return nil, fmt.Errorf("%w: chain %d not available for P2P", ErrInvalidParams, chainID)
 	}
 	if !s.escrows.AssetAllowed(chainID, params.Token) {
-		return nil, fmt.Errorf("%w: %s is not tradeable on chain %d", ErrInvalidParams, params.Token, chainID)
+		return nil, fmt.Errorf("%w: %w: %s is not tradeable on chain %d", ErrInvalidParams, ErrAssetNotTradeable, params.Token, chainID)
 	}
 
 	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(params.Token))
@@ -816,7 +831,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		return nil, fmt.Errorf("%w: chain %d not available for P2P", ErrInvalidParams, chainID)
 	}
 	if !s.escrows.AssetAllowed(chainID, params.Token) {
-		return nil, fmt.Errorf("%w: %s is not tradeable on chain %d", ErrInvalidParams, params.Token, chainID)
+		return nil, fmt.Errorf("%w: %w: %s is not tradeable on chain %d", ErrInvalidParams, ErrAssetNotTradeable, params.Token, chainID)
 	}
 
 	// Validate the token is supported so OpenTrade can resolve it to an
@@ -911,6 +926,10 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	}
 	if ad.Status != models.P2PAdStatusPending {
 		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
+	}
+	// An ad drafted before its asset was delisted must not go live after.
+	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+		return nil, err
 	}
 
 	voucher, err := s.adVoucher(&ad, sellerAddress)
@@ -1145,15 +1164,18 @@ func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid
 
 func (s *P2PTradeService) PauseAd(ctx context.Context, adID, sellerID uuid.UUID) error {
 	return s.flipAdStatus(ctx, adID, sellerID, models.P2PAdStatusActive, models.P2PAdStatusPaused,
-		models.P2PAuditAdPaused, events.P2PAdPaused)
+		models.P2PAuditAdPaused, events.P2PAdPaused, nil)
 }
 
+// ResumeAd puts a paused ad back on the market, so it counts as new activity:
+// an ad whose asset has since been delisted stays paused.
 func (s *P2PTradeService) ResumeAd(ctx context.Context, adID, sellerID uuid.UUID) error {
 	return s.flipAdStatus(ctx, adID, sellerID, models.P2PAdStatusPaused, models.P2PAdStatusActive,
-		models.P2PAuditAdResumed, events.P2PAdResumed)
+		models.P2PAuditAdResumed, events.P2PAdResumed,
+		func(ad *models.P2PAd) error { return s.requireOpenable(ad.ChainID, ad.Token) })
 }
 
-func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.UUID, from, to, action, event string) error {
+func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.UUID, from, to, action, event string, guard func(*models.P2PAd) error) error {
 	var ad models.P2PAd
 	if err := s.db.WithContext(ctx).First(&ad, "id = ?", adID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1163,6 +1185,11 @@ func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.
 	}
 	if ad.SellerID != sellerID {
 		return ErrForbidden
+	}
+	if guard != nil {
+		if err := guard(&ad); err != nil {
+			return err
+		}
 	}
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
 		Where("id = ? AND status = ?", adID, from).
@@ -1193,6 +1220,12 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	}
 	if ad.SellerID == buyerID {
 		return nil, nil, ErrSelfTrade
+	}
+	// An ad that was live before its asset was delisted can't take new trades
+	// (browse hides it, but a stale screen or deep link can still reach here).
+	// Before the buy-ad branch so the JIT-deposit path is covered too.
+	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+		return nil, nil, err
 	}
 
 	// Buy-ad → JIT-funded path. The "buyer" param here is the OPENER (the user
@@ -3246,6 +3279,11 @@ type AdFilter struct {
 	// PM filters by automated PaymentMerchant ads: true = only PM ads (pm_id set),
 	// false = only normal ads (pm_id null), nil = both.
 	PM *bool
+	// ExcludeDelisted hides ads in an asset taken out of P2P on its chain. Set
+	// it for marketplace browse (anything a counterparty could open a trade
+	// from); leave it off for the owner's own list, where they must still see
+	// such an ad to cancel it and withdraw the pool behind it.
+	ExcludeDelisted bool
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -3284,6 +3322,11 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 			q = q.Where("pm_id IS NOT NULL")
 		} else {
 			q = q.Where("pm_id IS NULL")
+		}
+	}
+	if f.ExcludeDelisted {
+		if clause, args := s.delistedAdsClause(); clause != "" {
+			q = q.Where(clause, args...)
 		}
 	}
 	limit := f.Limit
@@ -3329,7 +3372,7 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 
 	cands, err := s.ListAds(ctx, AdFilter{
 		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency,
-		Status: models.P2PAdStatusActive, Limit: 100,
+		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true,
 	})
 	if err != nil {
 		return nil, err
@@ -3743,6 +3786,56 @@ func (s *P2PTradeService) resolveTokenAddress(chainID int64, symbol string) (str
 	return "", fmt.Errorf("%w: %s", ErrUnsupportedToken, symbol)
 }
 
+// requireOpenable refuses NEW P2P activity (publishing or resuming an ad,
+// approving/depositing into the pool, opening a trade) in an asset that has
+// been delisted on a P2P-enabled chain. token is a symbol or, since
+// resolveTokenAddress accepts one, a raw token address — an address is
+// allowed only when it resolves from a still-listed symbol, so passing
+// MCGP's address instead of "MCGP" doesn't slip past the gate.
+//
+// Exit paths (markPaid, release, cancel, dispute, admin resolve, withdraw,
+// confirming a deposit already on-chain) must never call this.
+func (s *P2PTradeService) requireOpenable(chainID int64, token string) error {
+	if !s.escrows.AssetDelisted(chainID, token) {
+		return nil
+	}
+	if common.IsHexAddress(token) {
+		for _, c := range s.escrows.Chains() {
+			if c.ChainID != chainID {
+				continue
+			}
+			for _, sym := range c.Assets {
+				if addr, err := s.resolveTokenAddress(chainID, sym); err == nil && strings.EqualFold(addr, token) {
+					return nil
+				}
+			}
+		}
+	}
+	return fmt.Errorf("%w: %s on chain %d", ErrAssetNotTradeable, strings.ToUpper(token), chainID)
+}
+
+// delistedAdsClause is the marketplace-browse filter that hides ads in an
+// asset delisted on its (still P2P-enabled) chain: for every chain with a
+// curated allow-list, keep only rows whose token is on it. Chains without a
+// list, and chains not configured at all, are left as they were. Returns ""
+// when nothing is curated.
+func (s *P2PTradeService) delistedAdsClause() (string, []any) {
+	var parts []string
+	var args []any
+	for _, c := range s.escrows.Chains() {
+		if len(c.Assets) == 0 {
+			continue
+		}
+		listed := make([]string, 0, len(c.Assets))
+		for _, a := range c.Assets {
+			listed = append(listed, strings.ToUpper(a))
+		}
+		parts = append(parts, "NOT (chain_id = ? AND UPPER(token) NOT IN ?)")
+		args = append(args, c.ChainID, listed)
+	}
+	return strings.Join(parts, " AND "), args
+}
+
 // ─── Deposit / withdraw ─────────────────────────────────────────────────────
 
 // PrepareApprove builds the unsigned ERC-20 approve tx so the seller can
@@ -3766,6 +3859,11 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	}
 	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
+		return nil, err
+	}
+	// Approve exists only to fund a deposit or a JIT trade open — both new
+	// activity. No exit path (release, cancel, withdraw) needs an allowance.
+	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
 		return nil, err
 	}
 	return escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
@@ -3817,6 +3915,12 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	}
 	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
+		return nil, err
+	}
+	// New money into the pool. ConfirmDeposit is deliberately NOT gated: a
+	// deposit already broadcast has moved the funds, and refusing to record it
+	// would only hide them. Withdraw is never gated.
+	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
 		return nil, err
 	}
 	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{

@@ -185,9 +185,14 @@ func (r *P2PEscrowRegistry) SystemWallets() []FeeSinkStatus {
 	return out
 }
 
-// AssetAllowed reports whether symbol may be traded on chainID per the
-// per-chain curation. An empty allow-list means "allow all" (used by the
-// test/ops map constructor). An unconfigured chain returns false.
+// AssetAllowed reports whether symbol may be used for NEW P2P activity on
+// chainID (creating/publishing an ad, depositing into the pool, opening a
+// trade) per the per-chain curation. An empty allow-list means "allow all"
+// (used by the test/ops map constructor). An unconfigured chain returns false.
+//
+// It must never gate an exit path. Removing an asset from the list stops new
+// activity in it; ads, pool balances and trades that already exist in that
+// asset still release, cancel, dispute, resolve and withdraw.
 func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
 	if r == nil || r.byChain == nil {
 		return false
@@ -206,6 +211,22 @@ func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
 		}
 	}
 	return false
+}
+
+// AssetDelisted reports whether chainID is P2P-enabled but its curated
+// allow-list excludes symbol — i.e. the asset was taken out of P2P while the
+// chain itself still works. Existing positions in a delisted asset must be
+// able to finish; only new activity is refused. An unconfigured chain is NOT
+// "delisted": callers fail on it through their own chain resolution, with the
+// error they always returned.
+func (r *P2PEscrowRegistry) AssetDelisted(chainID int64, symbol string) bool {
+	if r == nil || r.byChain == nil {
+		return false
+	}
+	if _, ok := r.byChain[chainID]; !ok {
+		return false
+	}
+	return !r.AssetAllowed(chainID, symbol)
 }
 
 // NewP2PEscrowRegistry builds the per-chain escrow registry from cfg.P2PChains,

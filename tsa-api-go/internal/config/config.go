@@ -980,9 +980,12 @@ func Load() *Config {
 			ChainKey:      "sonic",
 			EscrowAddress: cfg.P2PEscrowAddress,
 			EIP712Version: cfg.P2PEscrowEIP712Version,
-			// Transition: Sonic serves all three today. At BSC launch, narrow this
-			// to []string{"MCGP"} (stablecoin P2P moves to BSC) — spec §4.5.
-			Assets: []string{"USDT", "USDC", "MCGP"},
+			// Assets gates NEW P2P activity only (ads, pool deposits, trade
+			// opens). MCGP was removed 2026-09-28 by owner decision: wallet MCGP
+			// must not be usable in P2P. Existing MCGP ads, pool balances and
+			// in-flight trades still settle and withdraw — those exit paths
+			// never consult this list.
+			Assets: []string{"USDT", "USDC"},
 		},
 	}
 

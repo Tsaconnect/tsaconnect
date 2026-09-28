@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -978,6 +979,8 @@ func TestMapServiceError_StatusCodes(t *testing.T) {
 		{"InvalidTransition", services.ErrInvalidTransition, http.StatusConflict},
 		{"AdHasOpenTrades", services.ErrAdHasOpenTrades, http.StatusConflict},
 		{"DisputeAlreadyOpen", services.ErrDisputeAlreadyOpen, http.StatusConflict},
+		{"AssetNotTradeable (open on a delisted ad)", services.ErrAssetNotTradeable, http.StatusConflict},
+		{"AssetNotTradeable on create stays 400", fmt.Errorf("%w: %w: MCGP", services.ErrInvalidParams, services.ErrAssetNotTradeable), http.StatusBadRequest},
 		{"RateStale", services.ErrRateStale, http.StatusServiceUnavailable},
 		{"Phase2Migration", services.ErrPhase2Migration, http.StatusGone},
 		{"unmapped defaults to 500", errors.New("untyped internal failure"), http.StatusInternalServerError},

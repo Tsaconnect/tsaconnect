@@ -177,7 +177,10 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrAdHasOpenTrades),
 		errors.Is(err, services.ErrDisputeAlreadyOpen),
 		errors.Is(err, services.ErrActiveTradeExists),
-		errors.Is(err, services.ErrSellerPoolInsufficient):
+		errors.Is(err, services.ErrSellerPoolInsufficient),
+		// The asset was delisted from P2P after this ad/pool existed. Creating
+		// an ad in it also carries ErrInvalidParams and maps to 400 above.
+		errors.Is(err, services.ErrAssetNotTradeable):
 		// 409: well-formed but conflicts with current state — incl. a maker
 		// whose pool can no longer back the trade (buyer should pick another ad).
 		status = http.StatusConflict
@@ -1005,6 +1008,9 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 		Status:       c.Query("status"),
 		Limit:        limit,
 		Offset:       offset,
+		// Marketplace browse: nobody may open a trade on an ad in a delisted
+		// asset, so don't offer one. The owner sees theirs via ListMyAds.
+		ExcludeDelisted: true,
 	}
 	if seller := c.Query("sellerId"); seller != "" {
 		if sid, err := uuid.Parse(seller); err == nil {
@@ -1757,7 +1763,7 @@ func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive})
+	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive, ExcludeDelisted: true})
 	if err != nil {
 		ads = nil // non-fatal
 	}

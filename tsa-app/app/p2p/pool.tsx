@@ -74,6 +74,9 @@ import {
   Text,
 } from '@/components/ui';
 
+// MCGP stays here on purpose even though it is no longer a P2P asset: this
+// screen is reclaim-only, and sellers must still be able to withdraw MCGP they
+// deposited before it was delisted. New MCGP deposits are refused by the API.
 const TOKENS = ['USDT', 'USDC', 'MCGP'] as const;
 type Token = typeof TOKENS[number];
 
