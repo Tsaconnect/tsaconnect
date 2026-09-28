@@ -1,7 +1,9 @@
 // components/dashboard/BalanceCard.tsx
 //
-// Total-portfolio hero with the value-hide toggle and the four quick actions
-// (Buy / Services / Trade / Wallet). Migrated onto the TSA Signature design
+// Total-portfolio hero with the display-currency picker, activity history, the
+// value-hide toggle and the four quick actions (Buy / Services / Trade / Wallet).
+// The currency and history controls live here, not in a page header, because
+// they are about this balance. Migrated onto the TSA Signature design
 // system — the dual-price reads, the visibility toggle, and every quick-action
 // route are preserved verbatim; only presentation moved to @/theme tokens.
 import React from 'react';
@@ -10,6 +12,7 @@ import { router } from 'expo-router';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { Card, Divider, Icon, IconButton, PressableScale, Text } from '@/components/ui';
+import CurrencySelector from '@/components/currency/CurrencySelector';
 import type { IconName } from '@/components/ui';
 
 const EYE: IconName = 'eye';
@@ -56,13 +59,23 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
         <Text variant="caption" color="textSecondary">
           Total Portfolio
         </Text>
-        <IconButton
-          icon={isValuesHidden ? EYE_OFF : EYE}
-          size={20}
-          color={colors.textMuted}
-          onPress={onToggleVisibility}
-          accessibilityLabel={isValuesHidden ? 'Show balances' : 'Hide balances'}
-        />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <CurrencySelector variant="header" />
+          <IconButton
+            icon="clock"
+            size={20}
+            color={colors.accent}
+            onPress={() => router.push('/activity' as never)}
+            accessibilityLabel="Activity"
+          />
+          <IconButton
+            icon={isValuesHidden ? EYE_OFF : EYE}
+            size={20}
+            color={colors.textMuted}
+            onPress={onToggleVisibility}
+            accessibilityLabel={isValuesHidden ? 'Show balances' : 'Hide balances'}
+          />
+        </View>
       </View>
 
       <Text variant="display" weight="700" numeric>
