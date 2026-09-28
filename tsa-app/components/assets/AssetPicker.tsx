@@ -37,6 +37,8 @@ export interface AssetPickerProps {
    * flow's list. Search is hidden with it: the list is what she has.
    */
   holdingsOnly?: boolean;
+  /** A line under the coin list, e.g. why a coin she holds is not offered. */
+  note?: string;
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
 }
@@ -86,7 +88,7 @@ const isUnverified = (asset: Asset, sectionId: string) =>
 
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
-export default function AssetPicker({ visible, side, title, allow, holdingsOnly = false, onSelect, onClose }: AssetPickerProps) {
+export default function AssetPicker({ visible, side, title, allow, holdingsOnly = false, note, onSelect, onClose }: AssetPickerProps) {
   const { colors, spacing, radius } = useTheme();
   const { formatPrice } = useCurrency();
   const [query, setQuery] = useState('');
@@ -239,6 +241,11 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
         {holdingsOnly && !loading && !error && sections.length === 0 ? (
           <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.xl }}>
             No coins in your wallet yet. Buy or receive some first, then come back.
+          </Text>
+        ) : null}
+        {note && !loading ? (
+          <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg }}>
+            {note}
           </Text>
         ) : null}
         {!isSearch && !holdingsOnly && !loading ? (

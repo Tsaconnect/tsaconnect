@@ -58,6 +58,22 @@ var ErrSellBadSourceAddress = errors.New("that isn't a valid address on that net
 // refused rather than handed over unread.
 var ErrSellSourceUnsupported = errors.New("selling from this network isn't supported yet")
 
+// ErrSellWalletMCGP: the source is the plain MCGP in her own wallet, which is
+// never used to pay or sold for naira (owner decision 2026-09-28). Only
+// Spendable MCGP is, through the MCGP sell flow. She can still send it or swap
+// it in All Swap, so the message says so.
+var ErrSellWalletMCGP = errors.New("MCGP in your wallet can't be used to pay or be sold for naira — only Spendable MCGP can. You can still send it or swap it in All Swap")
+
+// RefuseSource is ErrSellWalletMCGP when the source token is wallet MCGP. It
+// is the one gate every sale and every TSA Pay payment passes: Quote runs it
+// first, and the pay starter runs it before it locks a payment.
+func (q *RampSellQuoter) RefuseSource(chainID int64, token string) error {
+	if q != nil && q.chains.IsWalletMCGP(chainID, token) {
+		return ErrSellWalletMCGP
+	}
+	return nil
+}
+
 // SellSwapQuote is one priced sell. Route is the executable quote the app
 // signs; LiFiQuote is the same answer verbatim, which is what actually
 // crosses the wire — the app's own swap signer already speaks it.
@@ -219,6 +235,9 @@ func (q *RampSellQuoter) SetRouterAllowlist(routers map[int64][]common.Address) 
 func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
 	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 || in.BudgetBps < 0 {
 		return nil, ErrSellUnavailable
+	}
+	if err := q.RefuseSource(in.FromChainID, in.FromToken); err != nil {
+		return nil, err
 	}
 	if family := addressFamily(in.FromChainID); family != "evm" {
 		return nil, fmt.Errorf("%w (%s)", ErrSellSourceUnsupported, family)

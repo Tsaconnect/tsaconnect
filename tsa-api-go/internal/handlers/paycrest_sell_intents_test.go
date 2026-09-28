@@ -142,6 +142,23 @@ func TestCreateSellIntent_SellsToTheReconciledWallet(t *testing.T) {
 	}
 }
 
+// Wallet MCGP is refused with the service's own words — what she CAN still do
+// with it — not as a generic "can't be sold right now".
+func TestCreateSellIntent_WalletMCGPIsRefusedWithItsOwnMessage(t *testing.T) {
+	db := newCallerWalletTestDB(t)
+	user := &models.User{ID: uuid.New(), Username: "seller", WalletAddress: sellSwapUserWallet,
+		AccountStatus: models.AccountStatusActive}
+	insertTestUser(t, db, user)
+	h := (&PaycrestHandler{}).WithSellIntents(&stubSellIntents{err: services.ErrSellWalletMCGP})
+
+	w := postSellIntent(t, h, user, sellIntentBody())
+	var got map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if w.Code != http.StatusUnprocessableEntity || got["message"] != services.ErrSellWalletMCGP.Error() {
+		t.Fatalf("code = %d, body %s", w.Code, w.Body.String())
+	}
+}
+
 // The app asks for a source-chain top-up exactly when the server priced one,
 // so the Create answer has to carry that verdict — both ways.
 func TestCreateSellIntent_SaysWhetherAGasTopUpWasPriced(t *testing.T) {

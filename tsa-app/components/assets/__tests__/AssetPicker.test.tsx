@@ -114,6 +114,7 @@ jest.mock('@/services/lifi', () => {
 import React from 'react';
 import TestRenderer, { act, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import AssetPicker from '../AssetPicker';
+import { notWalletMcgp } from '@/utils/walletMcgp';
 import { resetAssetCatalogCache } from '@/hooks/useAssetCatalog';
 import * as Lifi from '@/services/lifi';
 
@@ -286,6 +287,24 @@ it('lists only what she holds in holdings mode', async () => {
   expect(t).not.toContain('Tether');
   // Searching the whole catalogue is meaningless when the list is what she holds.
   expect(tree.root.findAll(n => n.props.accessibilityLabel === 'Search coins')).toHaveLength(0);
+});
+
+// The naira sell picker (and TSA Pay's) never offers the plain MCGP in her
+// wallet — only Spendable MCGP sells. A token merely called MCGP at another
+// address is a different coin and stays; the note says where MCGP sells instead.
+it('with the wallet-MCGP filter, hides only the real MCGP contract and shows the note', async () => {
+  setHoldings([
+    ...holdingsState.DEFAULT_HOLDINGS,
+    { chainId: 146, address: '0x517600323e5E2938207fA2e2e915B9D80e5B2b21', native: false, trusted: true, symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, balance: 40, usdValue: 20 },
+    { chainId: 146, address: '0x000000000000000000000000000000000000bEEF', native: false, trusted: false, symbol: 'MCGP', name: 'Look-alike', decimals: 18, balance: 1, usdValue: 0 },
+  ]);
+  const note = "MCGP in your wallet can't be sold for naira.";
+  const { tree } = await open({ side: 'from', holdingsOnly: true, allow: notWalletMcgp, note });
+  const t = text(tree);
+  expect(t).not.toContain('MCG Protocol');
+  expect(t).toContain('Look-alike');
+  expect(t).toMatch(/2\.33\s+USDT/);
+  expect(t).toContain(note);
 });
 
 it('says something useful in holdings mode when she holds nothing', async () => {

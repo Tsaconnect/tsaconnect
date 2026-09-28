@@ -198,6 +198,7 @@ func TestPayStart_ErrorsMapToTheirStatusesAndCodes(t *testing.T) {
 		{services.ErrPayWrongRoute, http.StatusUnprocessableEntity, ""},
 		{services.ErrPaySameToken, http.StatusUnprocessableEntity, ""},
 		{services.ErrSellRouteTooCostly, http.StatusUnprocessableEntity, ""},
+		{services.ErrSellWalletMCGP, http.StatusUnprocessableEntity, ""},
 		{services.ErrSellBadSourceAddress, http.StatusBadRequest, ""},
 		{services.ErrSellUnavailable, http.StatusServiceUnavailable, ""},
 		{services.ErrPayPaymentNotFound, http.StatusNotFound, ""},
