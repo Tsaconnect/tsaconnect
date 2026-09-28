@@ -148,9 +148,8 @@ func (h *PayHandler) LiveEnabled() bool {
 // payMerchantAdminView is the JSON shape an admin read of a merchant gets:
 // the service's PayMerchantView (parsed return domains + key-presence
 // booleans) with BOTH key prefixes hidden. A prefix is a truncated but real
-// piece of the issued key, so IssueKeys' one-time response is the only
-// place either is ever returned — see
-// TestPayAdmin_IssueKeysShowsThemOnceAndNeverInReads.
+// piece of the issued key, so an admin never sees either — only the owner's
+// one-time key response carries a key at all.
 //
 // A json:"-" tag here would NOT shadow the embedded model's own
 // liveKeyPrefix/testKeyPrefix fields: encoding/json drops a "-"-tagged
@@ -268,12 +267,17 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", payMerchantAdminViewFor(m))
 }
 
-type payIssueKeysRequest struct {
-	Scope string `json:"scope"`
+type payRevokeKeysRequest struct {
+	Scope  string `json:"scope"`
+	Reason string `json:"reason"`
 }
 
-// POST /admin/pay/merchants/:id/keys {"scope": "all"|"live"|"test"|"webhook"}
-func (h *PayHandler) AdminIssueKeys(c *gin.Context) {
+// POST /admin/pay/merchants/:id/revoke-keys {"scope": "live"|"test"|"webhook", "reason"}
+//
+// Revoke only: an admin can switch a merchant's credential off but never
+// receives a new one — the owner creates it on the web app. The owner is told
+// on every channel, with the reason.
+func (h *PayHandler) AdminRevokeKeys(c *gin.Context) {
 	admin := getUserFromContext(c)
 	if admin == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
@@ -283,25 +287,31 @@ func (h *PayHandler) AdminIssueKeys(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req payIssueKeysRequest
+	// The route requires a super admin too; this keeps the handler safe if it
+	// is ever mounted without that middleware.
+	if !hasSuperAdminPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can revoke a merchant's credentials")
+		return
+	}
+	var req payRevokeKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 	scope := services.PayKeyScope(strings.TrimSpace(req.Scope))
-	switch scope {
-	case services.PayKeysAll, services.PayKeysLive, services.PayKeysTest, services.PayKeysWebhook:
-	default:
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid key scope")
-		return
-	}
-
-	keys, err := h.merchants.IssueKeys(c.Request.Context(), admin.ID, id, scope)
+	// Normalised once, so the owner is told exactly the reason that is audited.
+	reason, err := services.PayRevokeReason(req.Reason)
 	if err != nil {
 		payMerchantAdminFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Keys issued", keys)
+	m, err := h.merchants.RevokeKeys(c.Request.Context(), admin.ID, id, scope, reason)
+	if err != nil {
+		payMerchantAdminFail(c, err)
+		return
+	}
+	h.announceRevoke(m, scope, reason)
+	utils.SuccessResponse(c, http.StatusOK, "Revoked", payMerchantAdminViewFor(m))
 }
 
 // payAdminPaymentView is one row of the admin payments listing: the same

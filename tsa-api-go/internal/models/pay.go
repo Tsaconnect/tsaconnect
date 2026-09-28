@@ -247,14 +247,16 @@ func (d *PayWebhookDelivery) BeforeCreate(tx *gorm.DB) error {
 
 // PayAuditAction names what a PayAuditEvent row records. Go has no closed
 // enum, so this does not stop a stray string literal at some future call
-// site — but it gives the two the codebase writes today one place to be
-// spelled correctly from, rather than retyped (and possibly mistyped) at
-// each writeAudit call.
+// site — but it gives the ones the codebase writes one place to be spelled
+// correctly from, rather than retyped (and possibly mistyped) at each
+// writeAudit call.
 type PayAuditAction string
 
 const (
 	PayAuditActionMerchantUpdate PayAuditAction = "merchant.update"
 	PayAuditActionMerchantKeys   PayAuditAction = "merchant.keys"
+	// An admin switched a credential off; the owner creates its replacement.
+	PayAuditActionMerchantKeysRevoked PayAuditAction = "merchant.keys_revoked"
 )
 
 // PayAuditEvent is the durable record of a settlement/credential change to a

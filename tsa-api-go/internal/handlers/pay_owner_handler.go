@@ -229,6 +229,22 @@ func (h *PayHandler) announceLive(m *models.PayMerchant) {
 		"Your live API key is refused until live payments are switched back on. Test payments still work.")
 }
 
+// announceRevoke tells the owner which credential an admin switched off, why,
+// and what to do next — a suspended merchant cannot make a replacement, so it
+// is sent to support instead.
+func (h *PayHandler) announceRevoke(m *models.PayMerchant, scope services.PayKeyScope, reason string) {
+	title := fmt.Sprintf("Your %s API key was revoked by TSA Connect", scope)
+	next := fmt.Sprintf("It no longer works — create a new %s key under Developers on the TSA Connect web app.", scope)
+	if scope == services.PayKeysWebhook {
+		title = "Your webhook signing secret was revoked by TSA Connect"
+		next = "Webhooks are now signed with a new secret — see it under Developers on the TSA Connect web app and update your server."
+	}
+	if m.Status == models.PayMerchantSuspended {
+		next = "Your TSA Pay account is suspended — contact support to restore it."
+	}
+	h.announce(m.UserID, events.SecurityPayKeysRevoked, title, next+" Reason: "+reason)
+}
+
 func (h *PayHandler) announce(owner uuid.UUID, kind, title, message string) {
 	if h.events == nil {
 		return

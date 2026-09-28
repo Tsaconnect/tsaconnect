@@ -1210,3 +1210,122 @@ func TestPayMerchant_TheLiveSwitchIsSensitiveAndAudited(t *testing.T) {
 		t.Fatalf("audit rows = %+v", rows)
 	}
 }
+
+func TestPayMerchant_RevokeKeysSwitchesOffOneCredentialAndMintsNothing(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	ctx := context.Background()
+	m, _ := s.CreateFromRequest(ctx, payRequest())
+	keys, _ := s.IssueKeys(ctx, payActor, m.ID, PayKeysAll)
+
+	revoked, err := s.RevokeKeys(ctx, payActor, m.ID, PayKeysLive, "  leaked in a\n public   repo  ")
+	if err != nil || revoked.LiveKeyHash != nil || revoked.LiveKeyPrefix != "" {
+		t.Fatalf("revoke live: %+v %v", revoked, err)
+	}
+	if _, _, err := s.Authenticate(ctx, keys.LiveKey); !errors.Is(err, ErrPayKeyInvalid) {
+		t.Fatalf("the revoked live key still works: %v", err)
+	}
+	if _, mode, err := s.Authenticate(ctx, keys.TestKey); err != nil || mode != models.PayModeTest {
+		t.Fatalf("revoking live must leave the test key alone: %v", err)
+	}
+
+	if _, err := s.RevokeKeys(ctx, payActor, m.ID, PayKeysTest, "merchant asked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Authenticate(ctx, keys.TestKey); !errors.Is(err, ErrPayKeyInvalid) {
+		t.Fatal("the revoked test key still works")
+	}
+
+	wh, err := s.RevokeKeys(ctx, payActor, m.ID, PayKeysWebhook, "secret posted in chat")
+	if err != nil || s.WebhookSecret(wh, models.PayModeLive) == keys.WebhookSecretLive || s.WebhookSecret(wh, models.PayModeTest) == keys.WebhookSecretTest {
+		t.Fatalf("webhook revoke must re-key both secrets: %v", err)
+	}
+
+	rows := payAuditRows(t, s)
+	last := rows[len(rows)-1]
+	if last.Action != models.PayAuditActionMerchantKeysRevoked || last.ActorID != payActor ||
+		!strings.Contains(last.Details, `"scope":"webhook"`) || !strings.Contains(last.Details, `"reason":"secret posted in chat"`) {
+		t.Fatalf("audit row = %+v", last)
+	}
+	var liveRow *models.PayAuditEvent
+	for i := range rows {
+		if rows[i].Action == models.PayAuditActionMerchantKeysRevoked && strings.Contains(rows[i].Details, `"scope":"live"`) {
+			liveRow = &rows[i]
+		}
+	}
+	if liveRow == nil || !strings.Contains(liveRow.Details, `"reason":"leaked in a public repo"`) {
+		t.Fatalf("the reason must be stored trimmed: %+v", rows)
+	}
+}
+
+func TestPayMerchant_RevokeKeysNeverKillsACredentialItDidNotRead(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	ctx := context.Background()
+	m, err := s.CreateFromRequest(ctx, payRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IssueKeys(ctx, payActor, m.ID, PayKeysAll); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := s.Get(ctx, m.ID)
+
+	// The owner rolls their live key, and another admin re-keys the webhook
+	// secrets, after this admin read the merchant.
+	fresh, err := s.IssueKeys(ctx, payActor, m.ID, PayKeysLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RevokeKeys(ctx, payActor, m.ID, PayKeysWebhook, "first admin"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(payAuditRows(t, s))
+
+	for _, scope := range []PayKeyScope{PayKeysLive, PayKeysWebhook} {
+		if _, err := s.revoke(ctx, payActor, stale, scope, "stale read"); !errors.Is(err, ErrPayMerchantStale) {
+			t.Fatalf("%s from a stale read: err = %v, want ErrPayMerchantStale", scope, err)
+		}
+	}
+	if _, mode, err := s.Authenticate(ctx, fresh.LiveKey); err != nil || mode != models.PayModeLive {
+		t.Fatalf("the owner's new live key was revoked by a stale read: %v", err)
+	}
+	stored, _ := s.Get(ctx, m.ID)
+	if stored.WebhookSecretVersion != stale.WebhookSecretVersion+1 {
+		t.Fatalf("webhook version = %d, want one bump", stored.WebhookSecretVersion)
+	}
+	if after := len(payAuditRows(t, s)); after != before {
+		t.Fatalf("a refused revoke wrote %d audit rows", after-before)
+	}
+}
+
+func TestPayMerchant_RevokeKeysRefusesBadInput(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	ctx := context.Background()
+	m, _ := s.CreateFromRequest(ctx, payRequest())
+	s.IssueKeys(ctx, payActor, m.ID, PayKeysTest)
+
+	for name, tc := range map[string]struct {
+		scope  PayKeyScope
+		reason string
+	}{
+		"no reason":          {PayKeysTest, "   "},
+		"reason too long":    {PayKeysTest, strings.Repeat("x", 281)},
+		"all is not revoked": {PayKeysAll, "leaked"},
+		"unknown scope":      {"everything", "leaked"},
+		"no live key yet":    {PayKeysLive, "leaked"},
+		"a link":             {PayKeysTest, "make a new key at https://tsa-help.support/keys"},
+		"a bare domain":      {PayKeysTest, "make a new key at tsa-help.support"},
+		"www":                {PayKeysTest, "see www.example"},
+		"bidi override":      {PayKeysTest, "leaked \u202egnp.exe"},
+		"zero-width space":   {PayKeysTest, "leaked\u200b"},
+	} {
+		if _, err := s.RevokeKeys(ctx, payActor, m.ID, tc.scope, tc.reason); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Fatalf("%s: err = %v, want ErrPayMerchantInvalid", name, err)
+		}
+	}
+	if _, err := s.RevokeKeys(ctx, payActor, uuid.New(), PayKeysTest, "leaked"); !errors.Is(err, ErrPayMerchantNotFound) {
+		t.Fatalf("unknown merchant: err = %v", err)
+	}
+	if rows := payAuditRows(t, s); len(rows) != 1 {
+		t.Fatalf("a refused revoke must write no audit row: %+v", rows)
+	}
+}

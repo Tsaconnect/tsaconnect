@@ -170,7 +170,7 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 // silence the one alert that shows them.
 func TestDeliveryChannels_APayoutChangeCannotBeMuted(t *testing.T) {
 	for _, kind := range []string{events.SecurityPaySettlementChanged, events.SecurityPayKeyRolled,
-		events.SecurityPayEndpointsChanged, events.SecurityPayWebhookSecret} {
+		events.SecurityPayEndpointsChanged, events.SecurityPayWebhookSecret, events.SecurityPayKeysRevoked} {
 		for _, mute := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
 			if live, email := deliveryChannels(kind, mute[0], mute[1]); !live || !email {
 				t.Fatalf("%s mute %v: live=%v email=%v", kind, mute, live, email)
