@@ -887,6 +887,38 @@ export async function prepareSwap(
   }
 }
 
+// ── OTC sellable position ──
+// What a wallet may sell back on the OTC desk: the MCGP it bought there, net
+// of what it sold, capped at what it still holds. Amounts are MCGP wei. The
+// API enforces the same figure on prepareSwap('sell'), so this is display.
+export interface OtcPosition {
+  walletAddress: string;
+  bought: string;
+  sold: string;
+  netPurchased: string;
+  walletBalance: string;
+  sellable: string;
+  sellableFormatted: string;
+  decimals: number;
+  asOfBlock: number;
+}
+
+/**
+ * Get the OTC sell position for the device wallet. Not cached here (the API
+ * keeps its own short cache) and deliberately NOT fail-open: a failure is
+ * returned as such so the sell form can refuse rather than guess.
+ */
+export async function getOtcPosition(walletAddress: string): Promise<ApiResponse<OtcPosition>> {
+  try {
+    const headers = await getAuthHeaders();
+    const qp = new URLSearchParams({ walletAddress });
+    const response = await fetch(`${API_BASE_URL}/otc/position?${qp.toString()}`, { method: 'GET', headers });
+    return await safeJson<OtcPosition>(response);
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to load OTC position' };
+  }
+}
+
 // ── OTC listing controls (admin-set) ──
 // Per-direction kill-switches + listing metadata for the OTC tab.
 export interface OtcSettings {
