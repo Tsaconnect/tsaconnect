@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -41,18 +40,9 @@ var (
 	ErrBillPayInsufficient = errors.New("not enough spendable MCGP for this bill")
 )
 
-// billPaySwap is the slice of *MCGPSwapService this service needs, declared on
-// the consumer side so the orchestration is testable without a chain.
-type billPaySwap interface {
-	OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error)
-	OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error)
-	OperatorReverseDebit(ctx context.Context, debitRef [32]byte) (string, error)
-	VerifyOperatorEvent(eventName, txHash string, user common.Address, ref [32]byte) (*big.Int, error)
-	PremiumBalance(user string) (*big.Int, error)
-	DebitFromBought(debitRef [32]byte) (*big.Int, error)
-	DebitRecord(ctx context.Context, debitRef [32]byte) (DebitRecord, error)
-	HasOperator() bool
-}
+// billPaySwap is the swap surface a bill payment needs — the shared operator
+// debit surface (spendable_debit.go).
+type billPaySwap = spendableDebitSwap
 
 // billDebitAbandonAfter is how long a `debiting` payment with no on-chain debit
 // is given to mine before it is marked failed. A debit that lands later is
@@ -80,10 +70,7 @@ func (s *BillPaymentService) IsEnabled() bool {
 // the second reverts instead of debiting twice. A per-attempt ref would make the
 // on-chain guard useless, which is the same defect the peer-pay path had.
 func billDebitRef(orderID uuid.UUID) [32]byte {
-	h := crypto.Keccak256Hash([]byte("mcgp-bill:" + orderID.String()))
-	var out [32]byte
-	copy(out[:], h.Bytes())
-	return out
+	return spendableRef("mcgp-bill:", orderID)
 }
 
 // DebitInput is one bill's payment leg.
@@ -311,14 +298,13 @@ func (s *BillPaymentService) ResolveDebiting(ctx context.Context, orderID uuid.U
 	if err != nil {
 		return pay.Status, false, fmt.Errorf("bill payment: read debit: %w", err)
 	}
-	switch rec.State {
-	case DebitStatePending:
-		if !billDebitMatches(rec, pay) {
-			alertf("bill-mismatch:"+orderID.String(),
-				"[bills] ALERT bill_debit_mismatch order=%s on-chain user=%s amount=%s payment wallet=%s amount=%s",
-				orderID, rec.User.Hex(), rec.Amount, pay.WalletAddress, pay.McgpAmount)
-			return pay.Status, false, nil
-		}
+	switch classifyDebiting(rec, pay.WalletAddress, pay.McgpAmount, time.Since(pay.UpdatedAt), billDebitAbandonAfter) {
+	case debitingMismatch:
+		alertf("bill-mismatch:"+orderID.String(),
+			"[bills] ALERT bill_debit_mismatch order=%s on-chain user=%s amount=%s payment wallet=%s amount=%s",
+			orderID, rec.User.Hex(), rec.Amount, pay.WalletAddress, pay.McgpAmount)
+		return pay.Status, false, nil
+	case debitingLanded:
 		updates := map[string]any{"status": models.BillPayStatusDebited, "failure_reason": ""}
 		if fromBought, ferr := s.swap.DebitFromBought(ref); ferr == nil {
 			updates["from_bought"] = fromBought.String()
@@ -329,10 +315,9 @@ func (s *BillPaymentService) ResolveDebiting(ctx context.Context, orderID uuid.U
 		}
 		log.Printf("[bills] payment order=%s debit confirmed on-chain → debited", orderID)
 		return models.BillPayStatusDebited, true, nil
-	case DebitStateNone:
-		if time.Since(pay.UpdatedAt) < billDebitAbandonAfter {
-			return pay.Status, false, nil // a broadcast may still mine
-		}
+	case debitingWait:
+		return pay.Status, false, nil // a broadcast may still mine
+	case debitingAbandon:
 		reason := truncateReason("debit never landed on-chain (was: " + pay.FailureReason + ")")
 		moved, err := s.transition(ctx, pay.ID, models.BillPayStatusDebiting,
 			map[string]any{"status": models.BillPayStatusFailed, "failure_reason": reason})
@@ -421,9 +406,7 @@ func (s *BillPaymentService) AdoptLateDebit(ctx context.Context, orderID uuid.UU
 }
 
 func billDebitMatches(rec DebitRecord, pay *models.BillPayment) bool {
-	amount, ok := new(big.Int).SetString(strings.TrimSpace(pay.McgpAmount), 10)
-	return ok && rec.Amount != nil && rec.Amount.Cmp(amount) == 0 &&
-		rec.User == common.HexToAddress(pay.WalletAddress)
+	return debitRecordMatches(rec, pay.WalletAddress, pay.McgpAmount)
 }
 
 func (s *BillPaymentService) paymentForOrder(ctx context.Context, orderID uuid.UUID) (*models.BillPayment, error) {

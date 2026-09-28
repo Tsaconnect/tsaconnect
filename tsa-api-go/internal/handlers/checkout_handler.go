@@ -36,6 +36,9 @@ type CheckoutHandler struct {
 	feeRates   escrowRateReader
 	// walletBalances reads the buyer's pay-token balance on Sonic mainnet.
 	walletBalances walletBalanceReader
+	// spendable pays MCGP orders from Spendable MCGP (checkout_spendable.go);
+	// nil leaves MCGP checkout unavailable.
+	spendable orderSpendablePayer
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -74,7 +77,27 @@ type walletBalanceReader interface {
 // checkout, the chain still decides at escrow time. Callers read it before
 // opening a DB transaction, so the RPC never holds a pooled connection.
 func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
-	if ch.walletBalances == nil || wallet == "" {
+	if wallet == "" {
+		return nil
+	}
+	// MCGP is paid from Spendable MCGP, never from the wallet's ERC-20 MCGP,
+	// so that is the balance a shortfall is measured against.
+	if token == "MCGP" {
+		if !ch.spendableEnabled() {
+			return nil
+		}
+		// Warm the cached operator caps here, off the DB transaction, so the
+		// per-order cap check made inside it (refuseSpendableLimit) never
+		// waits on an RPC while holding a pooled connection.
+		_ = ch.spendable.CheckLimits(context.Background(), nil)
+		balance, err := ch.spendable.Balance(wallet)
+		if err != nil {
+			log.Printf("[checkout] spendable MCGP balance read for %s failed (%v); not pre-checking", wallet, err)
+			return nil
+		}
+		return balance
+	}
+	if ch.walletBalances == nil {
 		return nil
 	}
 	balance, err := ch.walletBalances.DepositBalance("sonic", token, wallet)
@@ -132,6 +155,10 @@ func shortfallMessage(token string, total, balance *big.Int) string {
 		return ""
 	}
 	decimals := tokenDecimals(token)
+	if token == "MCGP" {
+		return fmt.Sprintf("Not enough Spendable MCGP. This order needs %s MCGP and your Spendable MCGP balance is %s MCGP.",
+			formatTokenBalance(total, decimals), formatTokenBalance(balance, decimals))
+	}
 	return fmt.Sprintf("Not enough %s in your wallet. This order needs %s %s and your wallet holds %s %s.",
 		token, formatTokenBalance(total, decimals), token, formatTokenBalance(balance, decimals), token)
 }
@@ -1129,6 +1156,9 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	}
 	user, req, token, cart, items := in.user, in.req, in.token, in.cart, in.items
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
+	if ch.refuseMcgpUnavailable(c, token) {
+		return
+	}
 
 	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), token, user.WalletAddress)
 	if perr != nil {
@@ -1169,6 +1199,12 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	// Refused before any order takes stock.
 	if refuseShortfall(c, tx, token, total, balance) {
 		return
+	}
+	// Each order is one Spendable MCGP debit, so each must fit the caps.
+	for _, line := range lines {
+		if ch.refuseSpendableLimit(c, tx, token, line.orderTotal()) {
+			return
+		}
 	}
 
 	// Determine buyer upline
@@ -1351,6 +1387,9 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 		return
 	}
 	user, req, token, items := in.user, in.req, in.token, in.items
+	if ch.refuseMcgpUnavailable(c, token) {
+		return
+	}
 
 	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
 	if perr != nil {
@@ -1457,6 +1496,9 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
 		return
 	}
+	if ch.refuseMcgpUnavailable(c, token) {
+		return
+	}
 	productID, err := uuid.Parse(req.ProductID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
@@ -1540,6 +1582,9 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		return
 	}
 	if refuseShortfall(c, tx, token, orderPull(order, rates.gasFee), balance) {
+		return
+	}
+	if ch.refuseSpendableLimit(c, tx, token, orderPull(order, rates.gasFee)) {
 		return
 	}
 	if err := tx.Commit().Error; err != nil {
@@ -1705,6 +1750,12 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 
 	if order.BuyerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can prepare escrow")
+		return nil, nil, nil, "", false
+	}
+
+	// MCGP is paid from Spendable MCGP (pay-spendable), never by depositing
+	// wallet MCGP into the escrow.
+	if refuseLegacyMcgpFunding(c, &order) {
 		return nil, nil, nil, "", false
 	}
 
@@ -1907,6 +1958,17 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	if order.BuyerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can submit escrow")
+		return
+	}
+	// An order claimed by a Spendable MCGP payment must never also be marked
+	// paid by an escrow deposit. If one did reach the escrow (an old app racing
+	// the claim), it is a second payment for the order: page a human.
+	if order.IsSpendableMCGP() && req.EscrowTxHash != "" && ch.EscrowService != nil {
+		if _, err := ch.EscrowService.VerifyEscrowCreated(req.EscrowTxHash, services.GenerateOrderID(order.ID)); err == nil {
+			log.Printf("[checkout] ALERT order_mcgp_double_funded=1 order=%s escrow_tx=%s — escrow deposit for an order paid from Spendable MCGP; refund the escrow", order.ID, req.EscrowTxHash)
+		}
+	}
+	if refuseSpendableOnChainStep(c, &order, "Its payment is confirmed automatically.") {
 		return
 	}
 
@@ -2357,6 +2419,10 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 		return
 	}
 
+	if refuseSpendableOnChainStep(c, &order, "Update the app and confirm it again.") {
+		return
+	}
+
 	if order.DisputedAt != nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
@@ -2421,6 +2487,10 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
+	if refuseSpendableOnChainStep(c, &order, "Update the app and confirm it again.") {
+		return
+	}
+
 	if order.DisputedAt != nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
@@ -2459,46 +2529,7 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
-	if order.TPDistributedAt == nil {
-		// v1 (legacy) settles on the BUNDLED system fee (2% merchant + $0.10 gas).
-		// v2 carves the two apart: the 2% MERCHANT platform fee carries the
-		// product_merchant split (cashback + TP); the buyer's stablecoin gas is a
-		// SEPARATE 100%-system fee that must NOT generate TP/cashback. We feed the
-		// merchant fee here; the gas component is intentionally not settled into the
-		// engine (it would only ever credit system, producing no recipients).
-		// A service order's fee is split under service_other's reward table.
-		// order.PlatformFee holds what the escrow actually collected — the
-		// product_merchant rate, the only one the contract applies
-		// (splitSellerFee) — so the USD amount is read the same way for both.
-		feeFeature := models.FeatureProductMerchant
-		if order.Kind == models.OrderKindService {
-			feeFeature = models.FeatureServiceOther
-		}
-		feeUSD := orderMerchantFeeUSD(&order)
-		// Fee settlement: the realized merchant fee is handed to the engine
-		// (async, idempotent on checkout/order.ID). tp_distributed_at is stamped as
-		// a secondary site-level guard, but it is NOT the authoritative record of
-		// distribution: the FeeDistribution guard row (keyed checkout/order.ID) is,
-		// and the completed-order status transition already prevents re-entry here.
-		// The enqueue retries + alerts on permanent failure
-		// (fee_v2_settle_failed_total), so a stamped-but-undistributed window
-		// requires all retries to fail — surfaced loudly rather than silent.
-		if err := settleFeeEarnings(ch.FeeService, services.FeeEvent{
-			Feature:    feeFeature,
-			Token:      order.Token,
-			FeeUSD:     feeUSD,
-			UserID:     order.BuyerID,
-			SourceType: "checkout",
-			SourceID:   order.ID,
-		}); err != nil {
-			log.Printf("TP distribution failed for order %s: %v", order.ID, err)
-		} else {
-			if err := config.DB.Model(&order).Update("tp_distributed_at", now).Error; err != nil {
-				log.Printf("Failed to mark TP distributed for order %s: %v", order.ID, err)
-			}
-		}
-
-	}
+	ch.settleCompletedOrderFees(&order, now)
 
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderCompleted,
@@ -2555,6 +2586,26 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 
 	switch order.Status {
 	case models.OrderStatusEscrowed:
+		if order.IsSpendableMCGP() {
+			// Before delivery the escrow refunds instantly; so does the hold.
+			if _, err := ch.refundSpendableOrder(c.Request.Context(), &order,
+				map[string]interface{}{"status": models.OrderStatusRefunded}, false, true); err != nil {
+				respondSpendableErr(c, order.ID, err)
+				return
+			}
+			ch.EventBus.Publish(events.Event{
+				Type:    events.OrderRefunded,
+				UserID:  order.SellerID,
+				Title:   "Order Refunded",
+				Message: fmt.Sprintf("The buyer refunded order #%s before it was delivered.", order.ID.String()[:8]),
+				Data:    map[string]interface{}{"orderId": order.ID.String(), "status": models.OrderStatusRefunded},
+			})
+			utils.SuccessResponse(c, http.StatusOK, "Refunded to your Spendable MCGP", gin.H{
+				"orderId": order.ID,
+				"status":  models.OrderStatusRefunded,
+			})
+			return
+		}
 		// Before delivery — prepare unsigned requestRefund tx
 		contractOrderID := services.GenerateOrderID(order.ID)
 		refundTxBytes, err := ch.EscrowService.PrepareRequestRefund(contractOrderID, user.WalletAddress, ch.orderEscrowContract(&order))
@@ -2697,6 +2748,29 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			},
 		})
 
+		utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+			"orderId": order.ID,
+			"status":  models.OrderStatusCancelled,
+		})
+		return
+	}
+
+	if order.IsSpendableMCGP() {
+		// The seller cancels a paid order: the hold goes back to the buyer.
+		if _, err := ch.refundSpendableOrder(c.Request.Context(), &order,
+			map[string]interface{}{"status": models.OrderStatusCancelled}, false, true); err != nil {
+			respondSpendableErr(c, order.ID, err)
+			return
+		}
+		for _, uid := range []uuid.UUID{order.BuyerID, order.SellerID} {
+			ch.EventBus.Publish(events.Event{
+				Type:    events.OrderRefunded,
+				UserID:  uid,
+				Title:   "Order Cancelled",
+				Message: fmt.Sprintf("Order #%s was cancelled by the seller. The MCGP is returned to the buyer's Spendable balance.", order.ID.String()[:8]),
+				Data:    map[string]interface{}{"orderId": order.ID.String(), "status": models.OrderStatusCancelled, "cancelledBy": "seller"},
+			})
+		}
 		utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
 			"orderId": order.ID,
 			"status":  models.OrderStatusCancelled,
@@ -3020,6 +3094,11 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 		return
 	}
 
+	if order.IsSpendableMCGP() {
+		ch.adminResolveSpendable(c, user, &order, req.RefundBuyer)
+		return
+	}
+
 	// Orders that predate on-chain escrow have nothing for the escrow contract
 	// to resolve. Pending_payment disputes (if any sneak in) would fail here.
 	if order.ContractOrderID == "" {
@@ -3107,6 +3186,10 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 		return
 	}
 
+	if refuseSpendableOnChainStep(c, &order, "Resolve it with /resolve, which moves the funds directly.") {
+		return
+	}
+
 	allowedStatus := order.Status == models.OrderStatusRefundRequested ||
 		order.Status == models.OrderStatusCancelRequested
 	isDisputed := order.DisputedAt != nil
@@ -3171,35 +3254,7 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 		return
 	}
 
-	shortID := order.ID.String()[:8]
-	outcome := "released to seller"
-	if body.RefundBuyer {
-		outcome = "refunded to buyer"
-	}
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderDisputeResolved,
-		UserID:  order.BuyerID,
-		Title:   "Dispute Resolved",
-		Message: fmt.Sprintf("Admin resolved order #%s — funds %s.", shortID, outcome),
-		Data: map[string]interface{}{
-			"orderId":     order.ID.String(),
-			"status":      finalStatus,
-			"refundBuyer": body.RefundBuyer,
-			"txHash":      body.TxHash,
-		},
-	})
-	ch.EventBus.Publish(events.Event{
-		Type:    events.OrderDisputeResolved,
-		UserID:  order.SellerID,
-		Title:   "Dispute Resolved",
-		Message: fmt.Sprintf("Admin resolved order #%s — funds %s.", shortID, outcome),
-		Data: map[string]interface{}{
-			"orderId":     order.ID.String(),
-			"status":      finalStatus,
-			"refundBuyer": body.RefundBuyer,
-			"txHash":      body.TxHash,
-		},
-	})
+	ch.notifyOrderResolved(&order, finalStatus, body.RefundBuyer, body.TxHash)
 
 	// Ensure admin action is attributed (currently unused but useful for audit logs).
 	_ = user
@@ -3483,6 +3538,23 @@ func (ch *CheckoutHandler) ApproveCancelOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot approve cancel: order is in %s status", order.Status))
 		return
 	}
+	if order.IsSpendableMCGP() {
+		// No cancel tx to sign: approving returns the hold to the buyer now.
+		if _, err := ch.refundSpendableOrder(c.Request.Context(), &order, map[string]interface{}{
+			"status":                   models.OrderStatusCancelled,
+			"merchant_approved_cancel": true,
+		}, false, true); err != nil {
+			respondSpendableErr(c, order.ID, err)
+			return
+		}
+		ch.publishCancelApproved(&order, "")
+		utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+			"orderId":   order.ID,
+			"status":    models.OrderStatusCancelled,
+			"cancelled": true,
+		})
+		return
+	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -3542,6 +3614,9 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can submit the cancel tx")
 		return
 	}
+	if refuseSpendableOnChainStep(c, &order, "Approving the cancel request refunds it.") {
+		return
+	}
 	if order.DisputedAt != nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
@@ -3590,6 +3665,17 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		return
 	}
 
+	ch.publishCancelApproved(&order, body.TxHash)
+
+	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+		"orderId": order.ID,
+		"status":  models.OrderStatusCancelled,
+	})
+}
+
+// publishCancelApproved tells both parties an approved cancel returned the
+// buyer's funds. txHash is empty for a Spendable MCGP order.
+func (ch *CheckoutHandler) publishCancelApproved(order *models.Order, txHash string) {
 	shortID := order.ID.String()[:8]
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderCancelApproved,
@@ -3599,7 +3685,7 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		Data: map[string]interface{}{
 			"orderId": order.ID.String(),
 			"status":  models.OrderStatusCancelled,
-			"txHash":  body.TxHash,
+			"txHash":  txHash,
 		},
 	})
 	ch.EventBus.Publish(events.Event{
@@ -3611,11 +3697,6 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 			"orderId": order.ID.String(),
 			"status":  models.OrderStatusCancelled,
 		},
-	})
-
-	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
-		"orderId": order.ID,
-		"status":  models.OrderStatusCancelled,
 	})
 }
 

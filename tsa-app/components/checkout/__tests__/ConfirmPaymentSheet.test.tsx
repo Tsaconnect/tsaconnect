@@ -110,3 +110,50 @@ describe('activeStepIndex', () => {
     expect(activeStepIndex('done', 1, 2)).toBe(5);
   });
 });
+
+describe('Spendable MCGP', () => {
+  // 40 MCGP, one order; MCGP carries no gas fee.
+  const total = '40000000000000000000';
+  const mcgpQuote = {
+    ...quote,
+    token: 'MCGP',
+    decimals: 18,
+    usdPerToken: 0.25,
+    lines: [{ ...quote.lines[0], productAmount: total, gasFee: '0', total }],
+    totals: { productAmount: total, shippingAmount: '0', platformFee: '0', gasFee: '0', total },
+  };
+  const mcgpButton = (tokenBalance: number | null, gasBalance: number | null) => {
+    buttons.length = 0;
+    let r!: ReactTestRenderer;
+    act(() => {
+      r = TestRenderer.create(
+        <ConfirmPaymentSheet
+          visible
+          onClose={() => {}}
+          onConfirm={() => {}}
+          quote={mcgpQuote}
+          shippingLabel="Shipping"
+          walletAddress="0x7a3f000000000000000000000000000000c91e"
+          tokenBalance={tokenBalance}
+          gasBalance={gasBalance}
+        />,
+      );
+    });
+    act(() => r.unmount());
+    return buttons.find((b) => String(b.title).startsWith('Confirm & pay'));
+  };
+
+  it('needs no S for gas — the platform sends the payment', () => {
+    expect(mcgpButton(100, 0).disabled).toBe(false);
+  });
+
+  it('blocks when Spendable MCGP is known to be short', () => {
+    expect(mcgpButton(10, 1).disabled).toBe(true);
+  });
+
+  it('counts one hold step per order instead of approve + lock', () => {
+    expect(activeStepIndex('paying_spendable', 0, 2, 1)).toBe(1);
+    expect(activeStepIndex('paying_spendable', 1, 2, 1)).toBe(2);
+    expect(activeStepIndex('done', 1, 2, 1)).toBe(3);
+  });
+});

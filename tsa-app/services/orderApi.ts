@@ -51,6 +51,13 @@ export interface Order {
   shippingRecipientName?: string;
   shippingPhone?: string;
   shippingStreet?: string;
+  /**
+   * How the order is funded: absent/"" is the escrow contract (the wallet
+   * approved and deposited the token); "spendable_mcgp" is a hold on the
+   * buyer's Spendable MCGP, released or returned by the backend — there is no
+   * transaction for the app to sign on such an order.
+   */
+  paymentSource?: '' | 'spendable_mcgp';
   status: string;
   buyerConfirmedAt?: string;
   sellerShippedAt?: string;
@@ -342,6 +349,49 @@ export async function submitEscrow(
   }
 }
 
+/** Whether an order is paid from Spendable MCGP rather than the escrow contract. */
+export const isSpendableOrder = (order: Pick<Order, 'paymentSource'> | null | undefined) =>
+  order?.paymentSource === 'spendable_mcgp';
+
+/**
+ * Pay an MCGP order from the buyer's Spendable MCGP. Nothing is signed: the
+ * backend holds the MCGP until the order resolves, so callers must put the
+ * app's authorization prompt in front of this. Safe to retry — the hold is
+ * keyed by the order.
+ */
+export async function paySpendable(
+  orderId: string
+): Promise<ApiResponse<{ orderId: string; status: string; paymentSource: string; escrowExpiresAt?: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/pay-spendable`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Pay spendable error:', error);
+    return { success: false, message: error.message || 'Failed to pay with Spendable MCGP' };
+  }
+}
+
+/** Confirm a Spendable MCGP order: the backend releases the hold to the seller. */
+export async function confirmReceipt(
+  orderId: string
+): Promise<ApiResponse<{ orderId: string; status: string; buyerConfirmedAt: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/confirm-receipt`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Confirm receipt error:', error);
+    return { success: false, message: error.message || 'Failed to confirm receipt' };
+  }
+}
+
 export async function prepareConfirm(
   orderId: string
 ): Promise<ApiResponse<{ confirmTx: UnsignedTx }>> {
@@ -516,7 +566,11 @@ export async function requestCancelOrder(
 // Seller approves the buyer's cancel request; returns an unsigned on-chain cancel tx.
 export async function approveCancelOrder(
   orderId: string
-): Promise<ApiResponse<{ cancelTx: UnsignedTx; orderId: string }>> {
+): Promise<
+  // An escrow order returns a cancelTx for the seller to sign; a Spendable MCGP
+  // order is refunded by the call itself and returns cancelled: true.
+  ApiResponse<{ cancelTx?: UnsignedTx; orderId: string; status?: string; cancelled?: boolean }>
+> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders/${orderId}/approve-cancel`, {

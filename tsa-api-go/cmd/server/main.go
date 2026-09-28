@@ -630,6 +630,22 @@ func main() {
 	h.ChainRegistry = chainRegistry
 	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
+	// MCGP checkout pays from Spendable MCGP through the operator debit path
+	// (the same signer bills use). Without the operator MCGP checkout answers
+	// "unavailable" and stablecoin checkout is unaffected.
+	if mcgpSwapService.HasOperator() {
+		orderMcgp := services.NewOrderSpendablePaymentService(config.DB, mcgpSwapService, eventBus)
+		if escrowService != nil {
+			// An order an older app paid through the escrow but never reported
+			// must not be charged a second time from Spendable MCGP.
+			orderMcgp.SetEscrowReader(escrowService)
+		}
+		ch.SetSpendablePayments(orderMcgp)
+		scheduler.Register(jobs.NewOrderMcgpReconciler(orderMcgp, time.Minute), jobs.AlertOnFailureStreak())
+		log.Printf("[config] MCGP checkout pays from Spendable MCGP; operator=%s", mcgpSwapService.OperatorAddress())
+	} else {
+		log.Printf("[config] MCGP checkout unavailable: no MCGP operator signer")
+	}
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 
 	// Wire the fee/TP engine (SP3) into the fiat/on-chain fee-settled handlers.

@@ -56,6 +56,12 @@ type Order struct {
 	EscrowExpiresAt        *time.Time `json:"escrowExpiresAt,omitempty"`
 	TPDistributedAt        *time.Time `json:"tpDistributedAt,omitempty"`
 	Notes                  string     `json:"notes,omitempty"`
+	// PaymentSource is how the order is funded. Empty is the ProductEscrow
+	// contract (the buyer's wallet approved and deposited the token); every
+	// order placed before Spendable MCGP checkout reads empty and keeps its
+	// on-chain lifecycle. OrderPaymentSpendableMCGP is an operator debit of the
+	// buyer's Spendable MCGP (see OrderMcgpPayment), set when that debit starts.
+	PaymentSource string `gorm:"type:varchar(24);not null;default:''" json:"paymentSource,omitempty"`
 	// MenuSelections records the ordered items for an Order-type service order as
 	// a JSON array of OrderMenuSelection. Kept in a dedicated column (NOT Notes,
 	// which ship/refund handlers overwrite) so the merchant can fulfil the order.
@@ -164,6 +170,13 @@ const (
 	OrderStatusRefunded        = "refunded"
 	OrderStatusCancelled       = "cancelled"
 )
+
+// OrderPaymentSpendableMCGP marks an order paid from the buyer's Spendable
+// MCGP (the entitlement contract's premium balance) instead of ProductEscrow.
+const OrderPaymentSpendableMCGP = "spendable_mcgp"
+
+// IsSpendableMCGP reports whether the order is funded by a Spendable MCGP hold.
+func (o *Order) IsSpendableMCGP() bool { return o.PaymentSource == OrderPaymentSpendableMCGP }
 
 // Order kind constants for Order.Kind.
 const (

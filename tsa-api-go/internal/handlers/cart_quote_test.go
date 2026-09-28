@@ -275,6 +275,7 @@ func TestQuoteCart_MCGP(t *testing.T) {
 	buyer := seedQuoteCart(t)
 	ch := setupCheckoutHandler(t)
 	ch.otcService = fakeMCGPPrice{usd6: 250000} // $0.25 per MCGP
+	ch.spendable = &fakeSpendablePayer{}        // MCGP checkout needs the Spendable MCGP path wired
 
 	w, quote := callOrderHandler(t, ch.QuoteCart, buyer, withToken("MCGP", nil))
 	if w.Code != http.StatusOK {

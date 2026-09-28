@@ -13,11 +13,14 @@
 //
 // escrowOrder is the one approve → escrow → submit sequence: the cart checkout
 // (app/(detail)/checkout) runs it per order, with the progress that lets a
-// retry resume where a failed payment stopped. Money math is untouched — the server
+// retry resume where a failed payment stopped. An MCGP order is never paid
+// that way: MCGP is paid from Spendable MCGP (the entitlement balance), which
+// the backend holds with one call and no signature — payOrder picks the path. Money math is untouched — the server
 // recomputes every price from menuSelections / bookingSlots / serviceTiers; the
 // amounts the pickers show are indicative only.
 import {
   createServiceOrder,
+  paySpendable,
   prepareApprove,
   prepareEscrow,
   submitEscrow,
@@ -59,6 +62,7 @@ export type ServiceCheckoutPhase =
   | 'approving_token'
   | 'creating_escrow'
   | 'submitting'
+  | 'paying_spendable'
   | 'done';
 
 /**
@@ -91,7 +95,7 @@ export async function runServiceCheckout(
 
   // A single service product yields a single order.
   const order = createResult.data.orders[0];
-  return escrowOrder(order, onPhase);
+  return payOrder(order, onPhase);
 }
 
 /** A sent escrow-flow tx: confirmed, or recorded when its confirmation was not seen. */
@@ -209,9 +213,51 @@ export async function escrowOrder(
   return submitResult.data || order;
 }
 
+/** An order the server says is still confirming its Spendable MCGP hold. */
+export class PaymentPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PaymentPendingError';
+  }
+}
+
 /**
- * Pay an approved booking request: the server creates the escrowed order, then
- * the buyer funds it through the standard escrow flow.
+ * Pay an MCGP order from the buyer's Spendable MCGP: one backend call, no
+ * wallet signature, no gas. The caller must have put the app's authorization
+ * prompt in front of it. Retrying is safe — the hold is keyed by the order.
+ */
+export async function paySpendableOrder(
+  order: Order,
+  onPhase?: (phase: ServiceCheckoutPhase) => void,
+): Promise<Order> {
+  onPhase?.('paying_spendable');
+  const res = await paySpendable(order.id);
+  if (!res.success) {
+    if (res.code === 'payment_pending') {
+      throw new PaymentPendingError(res.message || 'Your Spendable MCGP payment is still being confirmed.');
+    }
+    throw refused(res, 'Failed to pay with Spendable MCGP');
+  }
+  onPhase?.('done');
+  return { ...order, status: res.data?.status ?? 'escrowed', paymentSource: 'spendable_mcgp' };
+}
+
+/**
+ * Fund a created order the way its token is paid: MCGP from Spendable MCGP,
+ * stablecoins through the escrow contract.
+ */
+export function payOrder(
+  order: Order,
+  onPhase?: (phase: ServiceCheckoutPhase) => void,
+  progress: EscrowProgress = {},
+): Promise<Order> {
+  if (order.token?.toUpperCase() === 'MCGP') return paySpendableOrder(order, onPhase);
+  return escrowOrder(order, onPhase, progress);
+}
+
+/**
+ * Pay an approved booking request: the server creates the order, then the
+ * buyer funds it (payOrder).
  */
 export async function payBookingRequestAndEscrow(
   reqId: string,
@@ -223,5 +269,5 @@ export async function payBookingRequestAndEscrow(
   if (!payResult.success || !payResult.data?.orders?.length) {
     throw new Error(payResult.message || 'Failed to start payment');
   }
-  return escrowOrder(payResult.data.orders[0], onPhase);
+  return payOrder(payResult.data.orders[0], onPhase);
 }

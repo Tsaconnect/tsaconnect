@@ -163,9 +163,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			selected_attributes TEXT,
 			purchase_note TEXT,
 			service_answers TEXT,
+			payment_source TEXT DEFAULT '',
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
+		orderMcgpPaymentsDDL,
 		`CREATE TABLE IF NOT EXISTS delivery_addresses (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,

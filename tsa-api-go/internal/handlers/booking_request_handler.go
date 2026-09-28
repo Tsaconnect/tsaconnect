@@ -66,6 +66,11 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
 		return
 	}
+	// An MCGP booking is paid from Spendable MCGP; don't take a request the
+	// buyer could not pay.
+	if ch.refuseMcgpUnavailable(c, token) {
+		return
+	}
 
 	var product models.Product
 	if err := config.DB.First(&product, "id = ?", serviceID).Error; err != nil {
@@ -424,7 +429,8 @@ func (ch *CheckoutHandler) CancelBookingRequest(c *gin.Context) {
 
 // PayBookingRequest handles POST /api/services/requests/:reqId/pay (buyer) — for
 // an approved request, creates the escrowed service order (converting the
-// request) and returns it so the app can run the approve/escrow/submit flow.
+// request) and returns it so the app can run the approve/escrow/submit flow —
+// or, for an MCGP booking, pay it from Spendable MCGP (pay-spendable).
 func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -440,6 +446,9 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 		return
 	}
 
+	if ch.refuseMcgpUnavailable(c, strings.ToUpper(r.Token)) {
+		return
+	}
 	rates, balance, perr := ch.ratesAndBalance(c.Request.Context(), r.Token, user.WalletAddress)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
@@ -482,6 +491,9 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 		return
 	}
 	if refuseShortfall(c, tx, strings.ToUpper(r.Token), orderPull(order, rates.gasFee), balance) {
+		return
+	}
+	if ch.refuseSpendableLimit(c, tx, strings.ToUpper(r.Token), orderPull(order, rates.gasFee)) {
 		return
 	}
 

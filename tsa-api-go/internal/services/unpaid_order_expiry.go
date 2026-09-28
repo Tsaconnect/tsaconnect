@@ -85,8 +85,14 @@ func CancelUnpaidOrder(tx *gorm.DB, order *models.Order) (bool, error) {
 // activity since idleBefore — checked in the same UPDATE, so a buyer who
 // starts paying after the sweep picked the order still keeps it.
 func cancelPending(tx *gorm.DB, order *models.Order, idleBefore *time.Time) (bool, error) {
+	// A Spendable MCGP debit in flight may still land: cancelling under it
+	// would take a payment for an order that no longer exists. The payment
+	// reconciler resolves it first (a failed debit leaves the order
+	// cancellable; one that lands after a cancel is returned).
 	q := tx.Model(&models.Order{}).
-		Where("id = ? AND status = ?", order.ID, models.OrderStatusPendingPayment)
+		Where("id = ? AND status = ?", order.ID, models.OrderStatusPendingPayment).
+		Where("NOT EXISTS (SELECT 1 FROM order_mcgp_payments p WHERE p.order_id = orders.id AND p.status IN ?)",
+			[]string{models.OrderMcgpDebiting, models.OrderMcgpHeld})
 	if idleBefore != nil {
 		q = q.Where("updated_at < ?", *idleBefore)
 	}
@@ -253,12 +259,17 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 // settle reconciles one stale order with the escrow, reporting whether it was
 // cancelled.
 func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cutoff time.Time) (bool, error) {
-	onChain, err := s.escrow.EscrowedOrder(ctx, GenerateOrderID(o.ID))
-	if err != nil {
-		return false, fmt.Errorf("escrow read for order %s: %w", o.ID, err)
-	}
-	if onChain != nil {
-		return false, s.reconcilePaid(ctx, o, onChain)
+	// A Spendable MCGP order is never funded through the escrow, so there is
+	// nothing there to reconcile — and an escrow record under its id is not a
+	// payment we accept for it.
+	if !o.IsSpendableMCGP() {
+		onChain, err := s.escrow.EscrowedOrder(ctx, GenerateOrderID(o.ID))
+		if err != nil {
+			return false, fmt.Errorf("escrow read for order %s: %w", o.ID, err)
+		}
+		if onChain != nil {
+			return false, s.reconcilePaid(ctx, o, onChain)
+		}
 	}
 
 	var cancelled bool

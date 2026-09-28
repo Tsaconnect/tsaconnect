@@ -171,6 +171,9 @@ func AutoMigrate() error {
 		&models.BillOrder{},
 		// User complaints about bill orders, reviewed by admins. One per order.
 		&models.BillReport{},
+		// Marketplace orders paid from Spendable MCGP — the operator-debit hold
+		// that replaces ProductEscrow for MCGP. Keyed by order ID.
+		&models.OrderMcgpPayment{},
 		&models.Dispute{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
