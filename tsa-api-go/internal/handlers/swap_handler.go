@@ -1,32 +1,138 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
+
+// otcPositionReader is what the handler needs from services.OTCPositionService.
+type otcPositionReader interface {
+	Position(ctx context.Context, wallet string, maxAge time.Duration) (*services.OTCPosition, error)
+}
+
+// otcPositionDisplayMaxAge is how stale the index may be when only SHOWING a
+// position. Enforcing a sell always refreshes.
+const otcPositionDisplayMaxAge = 10 * time.Second
+
+// mcgpDecimals is MCGP's ERC-20 decimals, for messages.
+const mcgpDecimals = 18
 
 // SwapHandler handles OTC swap price queries and transaction preparation.
 type SwapHandler struct {
 	cfg               *config.Config
 	otcService        *services.OTCService
 	blockchainService *services.BlockchainService
+	// db holds the OTC settings row whose SellEnabled is the server-side kill
+	// switch; positions caps a sell at the wallet's own OTC purchases. Either
+	// missing refuses every sell — the cap fails closed.
+	db        *gorm.DB
+	positions otcPositionReader
 }
 
-// NewSwapHandler creates a new SwapHandler.
-func NewSwapHandler(cfg *config.Config, otcService *services.OTCService, blockchainService *services.BlockchainService) *SwapHandler {
-	return &SwapHandler{
+// NewSwapHandler creates a new SwapHandler. positions may be nil (the OTC
+// desk unconfigured), which refuses every sell.
+func NewSwapHandler(cfg *config.Config, otcService *services.OTCService, blockchainService *services.BlockchainService, db *gorm.DB, positions *services.OTCPositionService) *SwapHandler {
+	h := &SwapHandler{
 		cfg:               cfg,
 		otcService:        otcService,
 		blockchainService: blockchainService,
+		db:                db,
 	}
+	// Assigned only when set: a nil pointer in the interface would not
+	// compare equal to nil below.
+	if positions != nil {
+		h.positions = positions
+	}
+	return h
+}
+
+// GetOTCPosition handles GET /api/otc/position?walletAddress=0x… (auth): what
+// the caller's device wallet may sell back on the OTC desk — the MCGP it
+// bought there, net of what it sold, capped at what it still holds. Amounts
+// are MCGP wei strings.
+func (h *SwapHandler) GetOTCPosition(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	wallet, ok := callerWallet(c, user, c.Query("walletAddress"))
+	if !ok {
+		return
+	}
+	pos, err := h.readOTCPosition(c.Request.Context(), wallet, otcPositionDisplayMaxAge)
+	if err != nil {
+		log.Printf("[otc-position] read failed wallet=%s: %v", wallet, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "We couldn't check your OTC purchases right now. Please try again in a moment.")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OTC position", gin.H{
+		"walletAddress":     pos.Wallet,
+		"bought":            pos.Bought.String(),
+		"sold":              pos.Sold.String(),
+		"netPurchased":      pos.NetPurchased.String(),
+		"walletBalance":     pos.WalletBalance.String(),
+		"sellable":          pos.Sellable.String(),
+		"sellableFormatted": formatTokenBalance(pos.Sellable, mcgpDecimals),
+		"decimals":          mcgpDecimals,
+		"asOfBlock":         pos.AsOfBlock,
+	})
+}
+
+func (h *SwapHandler) readOTCPosition(ctx context.Context, wallet string, maxAge time.Duration) (*services.OTCPosition, error) {
+	if h.positions == nil {
+		return nil, services.ErrOTCPositionUnavailable
+	}
+	return h.positions.Position(ctx, wallet, maxAge)
+}
+
+// enforceOTCSellCap refuses a sell the owner's rule does not allow: the admin
+// has paused selling, or the amount is more than the wallet bought on the
+// desk. The wallet is the SIGNING wallet, since that is where the tokens leave
+// from. Anything it cannot verify is refused too. It writes the error response
+// and returns false when the sell must stop.
+func (h *SwapHandler) enforceOTCSellCap(c *gin.Context, wallet string, mcgpAmount *big.Int) bool {
+	settings, err := loadOrSeedOTCSettings(h.db)
+	if err != nil {
+		log.Printf("[otc-sell] settings unreadable: %v", err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "OTC selling is unavailable right now. Please try again in a moment.")
+		return false
+	}
+	if !settings.SellEnabled {
+		utils.ErrorResponse(c, http.StatusForbidden, "Selling is closed on the OTC marketplace.")
+		return false
+	}
+
+	pos, err := h.readOTCPosition(c.Request.Context(), wallet, 0)
+	if err != nil {
+		log.Printf("[otc-sell] position unreadable wallet=%s: %v", wallet, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "We couldn't confirm how much MCGP you bought on the OTC desk. Please try again in a moment.")
+		return false
+	}
+	if mcgpAmount.Cmp(pos.Sellable) > 0 {
+		if pos.Sellable.Sign() == 0 {
+			utils.ErrorResponse(c, http.StatusUnprocessableEntity,
+				"This wallet has no MCGP bought on the OTC desk to sell. Only MCGP purchased on the OTC desk can be sold back here.")
+		} else {
+			utils.ErrorResponse(c, http.StatusUnprocessableEntity,
+				"You can sell up to "+formatTokenBalance(pos.Sellable, mcgpDecimals)+
+					" MCGP from this wallet. Only MCGP purchased on the OTC desk can be sold back here.")
+		}
+		return false
+	}
+	return true
 }
 
 // GetSwapPrice handles GET /api/swap/price
@@ -187,8 +293,12 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		}
 	}
 
+	if req.Direction == "sell" && !h.enforceOTCSellCap(c, userWallet, mcgpAmount) {
+		return
+	}
+
 	// OTC contract is on Sonic mainnet
-	network := "mainnet"
+	network := services.OTCNetwork
 	otcAddress := h.cfg.OTCMarketplaceAddress
 	sonicClient := h.blockchainService.ClientForChain("sonic")
 

@@ -17,6 +17,11 @@
 // trusting the list: the route is addressable, so a deep link can reach the
 // form directly. A paused direction dims Review and explains itself in the
 // same sheet the list uses.
+//
+// SELL is capped at what this wallet bought on the OTC desk (owner rule
+// 2026-09-28 — wallet MCGP is otherwise not usable in the app). The form shows
+// and limits to that figure (/api/otc/position), never the wallet balance, and
+// refuses when it cannot be read; the API enforces the same cap on prepare.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, TextInput, ScrollView, KeyboardAvoidingView, Platform, FlatList,
@@ -29,8 +34,12 @@ import { signTransaction, withRpcFallback } from '@/services/wallet';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
-  getOtcSettings, type OtcSettings, type WalletBalance,
+  getOtcSettings, getOtcPosition, type OtcSettings, type OtcPosition, type WalletBalance,
 } from '@/services/walletApi';
+import {
+  otcSellBlocker, otcSellableDecimal, otcSellableDisplay, hasOtcSellable,
+  OTC_SELLABLE_LABEL, OTC_NOTHING_TO_SELL, OTC_POSITION_UNAVAILABLE,
+} from '@/utils/otcSell';
 import { useTheme } from '@/theme';
 import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
@@ -184,6 +193,10 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loadingBal, setLoadingBal] = useState(true);
+  // What this wallet may sell back: its own OTC purchases. null while
+  // loading; positionFailed when it could not be read (the form then refuses).
+  const [otcPosition, setOtcPosition] = useState<OtcPosition | null>(null);
+  const [positionFailed, setPositionFailed] = useState(false);
   // Balances are only ever read for the wallet this device holds a key for.
   // Falling back to the account's registered address would render MCGP the
   // user cannot sign for — the screen that made us look custodial.
@@ -237,8 +250,26 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
     } finally { setLoadingBal(false); }
   }, [signer]);
 
+  const loadPosition = useCallback(async () => {
+    if (!signer) { setOtcPosition(null); return; }
+    setPositionFailed(false);
+    const r = await getOtcPosition(signer);
+    if (r.success && r.data) {
+      setOtcPosition(r.data);
+    } else {
+      setOtcPosition(null);
+      setPositionFailed(true);
+    }
+  }, [signer]);
+
   // Refresh balances every time the screen gains focus
   useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
+
+  // The sell cap only matters on the sell side; re-read it on focus so a buy
+  // or sell made elsewhere is reflected.
+  useFocusEffect(useCallback(() => {
+    if (direction === 'sell') loadPosition();
+  }, [direction, loadPosition]));
 
   // Refresh the admin OTC controls on focus (getOtcSettings caches briefly and
   // fails OPEN, so a backend hiccup never locks the desk).
@@ -249,6 +280,12 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   }, []));
 
   const bal = (sym: string) => balances.find(b => b.symbol === sym)?.balance || '0';
+
+  // Sell side: the OTC-sellable figure replaces the wallet balance everywhere
+  // the form reads one (label, Max, limit check).
+  const sellableWei = otcPosition?.sellable ?? null;
+  const sellable = direction === 'sell' ? hasOtcSellable(sellableWei) : null;
+  const sellUnavailable = direction === 'sell' && sellable !== true;
 
   const fetchPrice = useCallback((dir: 'buy' | 'sell', input: string, fromDec: number) => {
     if (timer.current) clearTimeout(timer.current);
@@ -311,8 +348,13 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const toTokenOptions = [...new Set(SWAP_PAIRS.map(p => p.to))].map(s => TOKENS[s]);
 
   const validate = (): string | null => {
-    if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) return 'Enter a valid amount.';
-    if (Number(amount) > Number(bal(fromSymbol))) return `Insufficient ${fromSymbol} balance.`;
+    if (direction === 'sell') {
+      const blocked = otcSellBlocker(amount, sellableWei);
+      if (blocked) return blocked;
+    } else {
+      if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) return 'Enter a valid amount.';
+      if (Number(amount) > Number(bal(fromSymbol))) return `Insufficient ${fromSymbol} balance.`;
+    }
     if (!quote) return 'Waiting for price...';
     return null;
   };
@@ -442,6 +484,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
       const swapHash = res.success ? res.data?.txHash : undefined;
       if (swapHash) {
         setTxHash(swapHash); setScreen('success'); loadBalances();
+        if (direction === 'sell') loadPosition();
       } else {
         console.error('[swap] swap rejected by backend', res);
         throw new Error(mapSubmitError(res.message, SWAP_COPY));
@@ -638,9 +681,20 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
           <Card padding="lg">
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
               <Text variant="overline" color="textMuted">YOU PAY</Text>
-              <PressableScale onPress={() => setAmount(bal(fromSymbol))}>
-                <Text variant="caption" weight="500" color="accent">Balance: {bal(fromSymbol)}</Text>
-              </PressableScale>
+              {direction === 'sell' ? (
+                <PressableScale
+                  onPress={() => { if (sellable) { setAmount(otcSellableDecimal(sellableWei)); setError(''); } }}
+                  disabled={!sellable}
+                >
+                  <Text variant="caption" weight="500" color="accent">
+                    {OTC_SELLABLE_LABEL}: {otcPosition ? otcSellableDisplay(sellableWei) : positionFailed ? '—' : '…'}
+                  </Text>
+                </PressableScale>
+              ) : (
+                <PressableScale onPress={() => setAmount(bal(fromSymbol))}>
+                  <Text variant="caption" weight="500" color="accent">Balance: {bal(fromSymbol)}</Text>
+                </PressableScale>
+              )}
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
               <TokenSelector
@@ -713,6 +767,35 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
             </View>
           </Card>
 
+          {/* Sell side with nothing sellable (or unknown): say why up front
+              rather than letting the user type into a form that cannot go
+              through. */}
+          {direction === 'sell' && (sellable === false || positionFailed) ? (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: spacing.xs,
+                backgroundColor: colors.surfaceAlt,
+                borderRadius: radius.sm,
+                padding: spacing.md,
+                marginTop: spacing.md,
+              }}
+            >
+              <Icon name="info" size={16} color={colors.textMuted} />
+              <View style={{ flex: 1, gap: spacing.xs }}>
+                <Text variant="caption" color="textSecondary">
+                  {positionFailed ? OTC_POSITION_UNAVAILABLE : OTC_NOTHING_TO_SELL}
+                </Text>
+                {positionFailed ? (
+                  <PressableScale onPress={loadPosition}>
+                    <Text variant="caption" weight="600" color="accent">Try again</Text>
+                  </PressableScale>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
+
           {/* Info bar */}
           {priceErr ? (
             <View
@@ -777,7 +860,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
             title={preparing ? 'Calculating fees…' : 'Review Swap'}
             onPress={onReviewPress}
             loading={preparing}
-            disabled={!directionPaused && (!amount || priceLoading || preparing || !!priceErr)}
+            disabled={!directionPaused && (!amount || priceLoading || preparing || !!priceErr || sellUnavailable)}
             style={{ marginTop: spacing.xl, ...(directionPaused ? { opacity: 0.4 } : null) }}
           />
         </ScrollView>

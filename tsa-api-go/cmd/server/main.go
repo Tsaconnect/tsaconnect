@@ -480,6 +480,27 @@ func main() {
 	// Initialize OTC service
 	otcService := services.NewOTCService(sonicClient, cfg)
 
+	// OTC sell cap — a wallet may sell back only what it bought on the desk,
+	// rebuilt from the contract's Bought/Sold logs. Left nil when the desk or
+	// the chain is not configured, which refuses every OTC sell.
+	var otcPositions *services.OTCPositionService
+	otcMCGP := blockchainService.TokenAddressForNetwork(services.OTCNetwork, "sonic", "MCGP")
+	if sonicClient != nil && cfg.OTCMarketplaceAddress != "" && otcMCGP != "" {
+		otcPositions = services.NewOTCPositionService(sonicClient.Client, sonicClient,
+			cfg.OTCMarketplaceAddress, otcMCGP, cfg.OTCMarketplaceDeployBlock, cfg.OTCLogMaxBlockRange)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			if err := otcPositions.Warm(ctx); err != nil {
+				log.Printf("[otc-position] warm-up failed (sells retry on demand): %v", err)
+				return
+			}
+			log.Printf("[otc-position] index warmed from block %d", cfg.OTCMarketplaceDeployBlock)
+		}()
+	} else {
+		log.Printf("[otc-position] OTC sell cap unconfigured — every OTC sell will be refused")
+	}
+
 	// Utility bills — ClubKonnect vend paid with spendable MCGP via the operator
 	// debit path. Needs BOTH the vendor credentials and the MCGP operator signer
 	// (set in the IT block above); missing either keeps /api/bills dormant.
@@ -629,7 +650,7 @@ func main() {
 	h.EligibilityService = rewardEligibilityService
 	// PMOnboarding is wired below after nombaClient is initialised; pass nil for now.
 	mrh := handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, nil)
-	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
+	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService, config.DB, otcPositions)
 	// OTC listing controls — PM buy/sell kill-switches + listing metadata for
 	// the app's Easyswap "OTC" tab (DB-only; no on-chain interaction).
 	osh := handlers.NewOTCSettingsHandler(config.DB)

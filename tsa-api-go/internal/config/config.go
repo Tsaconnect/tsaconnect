@@ -249,6 +249,15 @@ type Config struct {
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
 
+	// OTCMarketplaceDeployBlock is where the OTC sell cap starts reading the
+	// desk's Bought/Sold logs. 0 = scan from genesis (correct, just slower);
+	// the known mainnet desk defaults to its creation block.
+	OTCMarketplaceDeployBlock uint64
+	// OTCLogMaxBlockRange is the first eth_getLogs span tried; 0 = the whole
+	// remaining range. The scanner halves on any error, so an RPC with a
+	// range cap still works — this only saves the probing round trips.
+	OTCLogMaxBlockRange uint64
+
 	// MCGPSwapBAddress is the deployed McgpEntitlementSwap ("Swap Contract B")
 	// proxy/contract — the entitlement-ledger swap that mints spendable premium
 	// MCGP (buyPremium) and redeems legacy holders at the legacy price. UNSET =
@@ -761,6 +770,9 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xAb3574501d41940cD860Ecbfc535BFa6D9e13Ff3"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
+	cfg.OTCMarketplaceDeployBlock = uint64(max(getEnvInt64("OTC_MARKETPLACE_DEPLOY_BLOCK",
+		int64(knownOTCDeployBlock(cfg.OTCMarketplaceAddress))), 0))
+	cfg.OTCLogMaxBlockRange = uint64(max(getEnvInt64("OTC_LOG_MAX_BLOCK_RANGE", 0), 0))
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
 	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
 	// Gasless relaying — dormant unless both of the first two are set.
@@ -1469,6 +1481,17 @@ func convertedFeeCapFromEnv(key string, fallback int) int {
 		return 0
 	}
 	return v
+}
+
+// knownOTCDeployBlock is the creation block of a known OtcMarketplace
+// deployment, or 0 (scan from genesis) for any other address.
+func knownOTCDeployBlock(address string) uint64 {
+	// Sonic mainnet desk; creation block found by bisecting eth_getCode on
+	// 2026-09-28 (empty at 60909789, code at 60909790).
+	if strings.EqualFold(strings.TrimSpace(address), "0xfEF5d571D47d21A9cd9c6aF423116557Bbb5BF8b") {
+		return 60909790
+	}
+	return 0
 }
 
 func getEnvInt64(key string, fallback int64) int64 {

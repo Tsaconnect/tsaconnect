@@ -15,7 +15,8 @@ import (
 // OTCSettingsHandler serves the OTC listing controls — the PM's per-direction
 // kill-switches (buy/sell) plus listing metadata (logo, asset class, category)
 // for the app's Easyswap "OTC" tab. The app reads GET /api/otc/settings and
-// fails OPEN if unreachable; the admin dashboard writes via
+// fails OPEN if unreachable (the server still refuses a paused sell — see
+// SwapHandler.PrepareSwap); the admin dashboard writes via
 // PUT /api/admin/otc/settings.
 type OTCSettingsHandler struct {
 	DB *gorm.DB
@@ -29,8 +30,17 @@ func NewOTCSettingsHandler(db *gorm.DB) *OTCSettingsHandler {
 // loadOrSeed returns the singleton settings row, creating it with defaults
 // (both directions enabled, category "direct") on first read.
 func (h *OTCSettingsHandler) loadOrSeed() (*models.OTCSettings, error) {
+	return loadOrSeedOTCSettings(h.DB)
+}
+
+// loadOrSeedOTCSettings is loadOrSeed for callers outside this handler — the
+// swap handler reads SellEnabled as the server-side kill switch.
+func loadOrSeedOTCSettings(db *gorm.DB) (*models.OTCSettings, error) {
+	if db == nil {
+		return nil, errors.New("no database")
+	}
 	var row models.OTCSettings
-	err := h.DB.Order("created_at ASC").First(&row).Error
+	err := db.Order("created_at ASC").First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// All-defaults seed — see the OTCSettings doc: flags must not be
 		// created false via struct fields, and here they are true anyway.
@@ -39,7 +49,7 @@ func (h *OTCSettingsHandler) loadOrSeed() (*models.OTCSettings, error) {
 			SellEnabled: true,
 			Category:    models.OTCCategoryDirect,
 		}
-		if err := h.DB.Create(&row).Error; err != nil {
+		if err := db.Create(&row).Error; err != nil {
 			return nil, err
 		}
 		return &row, nil

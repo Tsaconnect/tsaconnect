@@ -22,8 +22,11 @@ func ValidOTCCategory(c string) bool {
 // behind the app's Easyswap "OTC" tab. It is a SINGLETON: the read path
 // get-or-creates the one row and the admin PUT updates it in place.
 //
-//   - BuyEnabled / SellEnabled are app-side kill-switches per direction — they
-//     gate the UI only (the contract's own pause() remains the on-chain stop).
+//   - BuyEnabled / SellEnabled are app-side kill-switches per direction. Buy
+//     gates the UI only; Sell is also enforced by POST /api/swap/prepare,
+//     which refuses to build a sell while it is false. Neither stops a
+//     transaction built elsewhere — the contract's own pause() is the
+//     on-chain stop.
 //   - LogoURL / AssetClass / Category are listing metadata (e.g. "RWA",
 //     Direct vs Presale placement).
 //

@@ -24,8 +24,14 @@ const otcMarketplaceABI = `[
 	{"inputs":[{"name":"mcgpAmount","type":"uint256"}],"name":"calculateSellPrice","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"activeBuyPhaseIndex","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"activeSellPhaseIndex","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-	{"inputs":[],"name":"getBalances","outputs":[{"name":"mcgpBalance","type":"uint256"},{"name":"usdcBalance","type":"uint256"}],"stateMutability":"view","type":"function"}
+	{"inputs":[],"name":"getBalances","outputs":[{"name":"mcgpBalance","type":"uint256"},{"name":"usdcBalance","type":"uint256"}],"stateMutability":"view","type":"function"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"mcgpAmount","type":"uint256"},{"indexed":false,"name":"usdcAmount","type":"uint256"},{"indexed":true,"name":"phaseIndex","type":"uint256"}],"name":"Bought","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"mcgpAmount","type":"uint256"},{"indexed":false,"name":"usdcAmount","type":"uint256"},{"indexed":true,"name":"phaseIndex","type":"uint256"}],"name":"Sold","type":"event"}
 ]`
+
+// OTCNetwork is the network the OTC desk's token addresses are resolved on.
+// The desk exists only on Sonic mainnet, whatever SONIC_NETWORK says.
+const OTCNetwork = "mainnet"
 
 var parsedOTCABI abi.ABI
 
@@ -37,6 +43,8 @@ func init() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to parse OtcMarketplace ABI: %v", err))
 	}
+	otcBoughtTopic = parsedOTCABI.Events["Bought"].ID
+	otcSoldTopic = parsedOTCABI.Events["Sold"].ID
 }
 
 // OTCService prepares unsigned transactions and reads state for the OtcMarketplace contract.

@@ -521,6 +521,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			swapGroup.GET("/price", swh.GetSwapPrice)
 			swapGroup.POST("/prepare", auth, swh.PrepareSwap)
 		}
+		// What the caller's wallet may sell back: its own OTC purchases.
+		api.GET("/otc/position", auth, swh.GetOTCPosition)
 	}
 
 	// OTC listing controls — PM kill-switches per direction + listing metadata
