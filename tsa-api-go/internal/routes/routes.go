@@ -1230,7 +1230,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.GET("/merchants", payh.AdminListMerchants)
 			adminPay.GET("/merchants/:id", payh.AdminGetMerchant)
 			adminPay.PUT("/merchants/:id", payh.AdminUpdateMerchant) // sensitive fields need super admin, checked in-handler
-			adminPay.POST("/merchants/:id/keys", middleware.RequireSuperAdmin(), payh.AdminIssueKeys)
+			// Per merchant: a revoke breaks the merchant's integration and sends them an
+			// unmutable alert, so a burst of them is refused rather than repeated.
+			adminPay.POST("/merchants/:id/revoke-keys", middleware.RequireSuperAdmin(),
+				middleware.RateLimiterBy(6, time.Hour, func(c *gin.Context) string { return "pay-revoke:" + c.Param("id") }),
+				payh.AdminRevokeKeys)
 
 			// Payments + webhook-delivery console (Task 8): read-only across
 			// every merchant, plus the one write — requeueing a delivery —

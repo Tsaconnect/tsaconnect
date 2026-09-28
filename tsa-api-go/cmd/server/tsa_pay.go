@@ -64,6 +64,8 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		// secret) wait on a code emailed to them; with no working mailer those
 		// changes are refused rather than left waiting.
 		merchants.SetMailer(mailer)
+	} else {
+		log.Printf("[tsa-pay] WARNING: no mailer — merchant owners cannot create or replace API keys, change webhooks or payouts")
 	}
 	payments := services.NewPayPaymentService(db, merchants, feeBps, cfg.TSAPayCheckoutBaseURL, time.Now)
 	if chains != nil {

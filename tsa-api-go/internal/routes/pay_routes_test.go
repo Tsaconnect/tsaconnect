@@ -175,6 +175,21 @@ func TestPayRoutes_AuthAndKeyGatesAreWired(t *testing.T) {
 	if w := payRoutesDo(r, "POST", "/api/pay/v1/payments", keys.TestKey, body); w.Code != http.StatusCreated {
 		t.Fatalf("a real test key create: %d %s", w.Code, w.Body.String())
 	}
+
+	// Revoking a merchant's credential is super admin only.
+	revoke := "/api/admin/pay/merchants/" + m.ID.String() + "/revoke-keys"
+	revokeBody := map[string]any{"scope": "test", "reason": "leaked"}
+	adminTok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleAdmin).ID)
+	if w := payRoutesDo(r, "POST", revoke, adminTok, revokeBody); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain admin revoking: %d %s", w.Code, w.Body.String())
+	}
+	superTok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleSuperAdmin).ID)
+	if w := payRoutesDo(r, "POST", revoke, superTok, revokeBody); w.Code != http.StatusOK {
+		t.Fatalf("a super admin revoking: %d %s", w.Code, w.Body.String())
+	}
+	if w := payRoutesDo(r, "POST", "/api/pay/v1/payments", keys.TestKey, body); w.Code != http.StatusUnauthorized {
+		t.Fatalf("the revoked test key still creates payments: %d %s", w.Code, w.Body.String())
+	}
 }
 
 // The naira start routes sit behind the app's JWT and, with no order service

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,28 +74,69 @@ func seedHandlerMerchant(t *testing.T, db *gorm.DB) *models.PayMerchant {
 	return m
 }
 
-func TestPayAdmin_IssueKeysShowsThemOnceAndNeverInReads(t *testing.T) {
+func TestPayAdmin_RevokeKeysReturnsNoSecretAndTellsTheOwner(t *testing.T) {
 	h, db := newPayHandlerRig(t)
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	seen := collectEvents(bus)
+	h.WithEvents(bus)
 	m := seedHandlerMerchant(t, db)
+	keys, err := h.MerchantService().IssueKeys(context.Background(), m.UserID, m.ID, services.PayKeysAll)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	admin := &models.User{ID: uuid.New(), Role: models.RoleSuperAdmin}
 	g := r.Group("/admin/pay", func(c *gin.Context) { c.Set("user", admin) })
-	g.GET("/merchants/:id", h.AdminGetMerchant)
-	g.POST("/merchants/:id/keys", h.AdminIssueKeys)
+	g.POST("/merchants/:id/revoke-keys", h.AdminRevokeKeys)
+	url := "/admin/pay/merchants/" + m.ID.String() + "/revoke-keys"
 
-	w := payDo(r, "POST", "/admin/pay/merchants/"+m.ID.String()+"/keys", map[string]string{"scope": "all"}, nil)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "tsapk_live_") || !strings.Contains(w.Body.String(), "whsec_") {
-		t.Fatalf("issue: %d %s", w.Code, w.Body.String())
+	w := payDo(r, "POST", url, map[string]string{"scope": "live", "reason": "Key pasted in a public repo"}, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"hasLiveKey":false`) || !strings.Contains(w.Body.String(), `"hasTestKey":true`) {
+		t.Fatalf("revoke live: %d %s", w.Code, w.Body.String())
 	}
-	w = payDo(r, "GET", "/admin/pay/merchants/"+m.ID.String(), nil, nil)
-	for _, leak := range []string{"tsapk_live_", "tsapk_test_", "whsec_", "KeyHash", "key_hash"} {
+	if w := payDo(r, "POST", url, map[string]string{"scope": "webhook", "reason": "Secret shared in chat"}, nil); w.Code != http.StatusOK {
+		t.Fatalf("revoke webhook: %d %s", w.Code, w.Body.String())
+	}
+	for _, leak := range []string{"tsapk_live_", "tsapk_test_", "whsec_", "KeyHash", "key_hash", "KeyPrefix"} {
 		if strings.Contains(w.Body.String(), leak) {
-			t.Fatalf("a read leaked %q: %s", leak, w.Body.String())
+			t.Fatalf("a revoke leaked %q: %s", leak, w.Body.String())
 		}
 	}
-	if w := payDo(r, "POST", "/admin/pay/merchants/"+m.ID.String()+"/keys", map[string]string{"scope": "everything"}, nil); w.Code != http.StatusBadRequest {
-		t.Fatalf("unknown scope: %d", w.Code)
+	if _, _, err := h.MerchantService().Authenticate(context.Background(), keys.LiveKey); !errors.Is(err, services.ErrPayKeyInvalid) {
+		t.Fatalf("the revoked live key still works: %v", err)
+	}
+
+	plain := gin.New()
+	plainAdmin := &models.User{ID: uuid.New(), Role: models.RoleAdmin}
+	plain.POST("/admin/pay/merchants/:id/revoke-keys", func(c *gin.Context) { c.Set("user", plainAdmin) }, h.AdminRevokeKeys)
+	if w := payDo(plain, "POST", url, map[string]string{"scope": "test", "reason": "x"}, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain admin revoking: %d %s", w.Code, w.Body.String())
+	}
+
+	for name, body := range map[string]map[string]string{
+		"all":       {"scope": "all", "reason": "x"},
+		"a link":    {"scope": "test", "reason": "new key at https://evil.example"},
+		"no reason": {"scope": "test", "reason": " "},
+		"gone":      {"scope": "live", "reason": "again"},
+	} {
+		if w := payDo(r, "POST", url, body, nil); w.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	got := seen()
+	if len(got) != 2 {
+		t.Fatalf("events = %+v, want one per revoke", got)
+	}
+	if got[0].Type != events.SecurityPayKeysRevoked || got[0].UserID != m.UserID ||
+		got[0].Title != "Your live API key was revoked by TSA Connect" || !strings.Contains(got[0].Message, "Key pasted in a public repo") {
+		t.Fatalf("live revoke event = %+v", got[0])
+	}
+	if got[1].Type != events.SecurityPayKeysRevoked || got[1].Title != "Your webhook signing secret was revoked by TSA Connect" ||
+		!strings.Contains(got[1].Message, "Secret shared in chat") {
+		t.Fatalf("webhook revoke event = %+v", got[1])
 	}
 }
 
@@ -346,5 +388,33 @@ func TestPayAdmin_SwitchingLiveOffExpiresPendingLivePaymentsOnly(t *testing.T) {
 		if got := status(id); got != want {
 			t.Errorf("payment %s: %s, want %s", id, got, want)
 		}
+	}
+}
+
+// A suspended merchant cannot create a key, so the revoke notice sends them to
+// support rather than to the Developers page.
+func TestPayAdmin_RevokeNoticeSendsASuspendedMerchantToSupport(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	seen := collectEvents(bus)
+	h.WithEvents(bus)
+	m := seedHandlerMerchant(t, db)
+	if _, err := h.MerchantService().IssueKeys(context.Background(), m.UserID, m.ID, services.PayKeysTest); err != nil {
+		t.Fatal(err)
+	}
+	db.Model(&models.PayMerchant{}).Where("id = ?", m.ID).Update("status", models.PayMerchantSuspended)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	admin := &models.User{ID: uuid.New(), Role: models.RoleSuperAdmin}
+	r.POST("/admin/pay/merchants/:id/revoke-keys", func(c *gin.Context) { c.Set("user", admin) }, h.AdminRevokeKeys)
+
+	if w := payDo(r, "POST", "/admin/pay/merchants/"+m.ID.String()+"/revoke-keys", map[string]string{"scope": "test", "reason": "fraud review"}, nil); w.Code != http.StatusOK {
+		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
+	}
+	got := seen()
+	if len(got) != 1 || !strings.Contains(got[0].Message, "contact support") || strings.Contains(got[0].Message, "Developers") ||
+		!strings.Contains(got[0].Message, "Reason: fraud review") {
+		t.Fatalf("events = %+v", got)
 	}
 }

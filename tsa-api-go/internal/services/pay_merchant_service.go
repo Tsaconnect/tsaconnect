@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -146,11 +148,12 @@ func (u PayMerchantUpdate) Sensitive() bool {
 		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil || u.LiveEnabled != nil
 }
 
-// PayKeyScope selects which of a merchant's credentials IssueKeys rotates.
+// PayKeyScope selects which of a merchant's credentials IssueKeys rotates or
+// RevokeKeys switches off (RevokeKeys refuses PayKeysAll).
 type PayKeyScope string
 
 const (
-	PayKeysAll     PayKeyScope = "all" // first issue: live + test keys + both webhook secrets
+	PayKeysAll     PayKeyScope = "all" // live + test keys + both webhook secrets at once; only tests seed with it
 	PayKeysLive    PayKeyScope = "live"
 	PayKeysTest    PayKeyScope = "test"
 	PayKeysWebhook PayKeyScope = "webhook" // bumps the version: both webhook secrets change
@@ -1024,6 +1027,105 @@ func (s *PayMerchantService) IssueKeys(ctx context.Context, actor uuid.UUID, id 
 
 	log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s keys scope=%s", id, actor, scope)
 	return out, nil
+}
+
+// payRevokeReasonMax bounds the reason an admin gives for a revoke: it is
+// stored in the audit row and sent to the owner by email and push.
+const payRevokeReasonMax = 280
+
+// payRevokeLinkRe spots a link or web address. The revoke notice reaches the
+// owner as a trusted, unmutable TSA Connect email right after telling them to
+// make a new key — a place a rogue admin could plant a phishing link.
+var payRevokeLinkRe = regexp.MustCompile(`(?i)://|\bwww\.|\b[a-z0-9-]{2,}\.[a-z]{2,}\b`)
+
+// PayRevokeReason normalises an admin's revoke reason to one line and refuses
+// one the owner should not be shown: empty, too long, carrying invisible or
+// direction-changing characters, or a link.
+func PayRevokeReason(raw string) (string, error) {
+	reason := strings.Join(strings.Fields(raw), " ")
+	switch {
+	case reason == "":
+		return "", fmt.Errorf("%w: give a reason — the merchant is told it", ErrPayMerchantInvalid)
+	case utf8.RuneCountInString(reason) > payRevokeReasonMax:
+		return "", fmt.Errorf("%w: keep the reason to %d characters", ErrPayMerchantInvalid, payRevokeReasonMax)
+	case strings.IndexFunc(reason, func(r rune) bool { return unicode.IsControl(r) || unicode.In(r, unicode.Cf) }) >= 0:
+		return "", fmt.Errorf("%w: the reason has hidden characters — retype it", ErrPayMerchantInvalid)
+	case payRevokeLinkRe.MatchString(reason):
+		return "", fmt.Errorf("%w: leave links and web addresses out of the reason — the merchant is emailed it", ErrPayMerchantInvalid)
+	}
+	return reason, nil
+}
+
+// RevokeKeys switches off one of a merchant's credentials — the live or test
+// API key, or both webhook signing secrets — without minting a replacement,
+// so no admin ever holds a working merchant secret. The owner creates a new
+// key, or reveals the re-keyed webhook secret, on the web app, behind their
+// password and an emailed code. reason is required and audited.
+//
+// Like IssueKeys it leaves the merchant's version alone: bumping it would
+// stale every pending owner settlement/endpoints change and the admin's own
+// open edit form. A pending owner key roll is left to run too — confirming it
+// mints the replacement the revoke notice asks for.
+func (s *PayMerchantService) RevokeKeys(ctx context.Context, actor, id uuid.UUID, scope PayKeyScope, reason string) (*models.PayMerchant, error) {
+	reason, err := PayRevokeReason(reason)
+	if err != nil {
+		return nil, err
+	}
+	m, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.revoke(ctx, actor, m, scope, reason)
+}
+
+// revoke applies RevokeKeys to the credential as m read it, and only to that
+// one: a key the owner rolled, or secrets another admin re-keyed, since the
+// read makes it ErrPayMerchantStale — so a revoke never kills a replacement
+// it was not about, nor tells the owner twice about one action.
+func (s *PayMerchantService) revoke(ctx context.Context, actor uuid.UUID, m *models.PayMerchant, scope PayKeyScope, reason string) (*models.PayMerchant, error) {
+	out := *m
+	var guard string
+	var guardValue any
+	var updates map[string]interface{}
+	switch scope {
+	case PayKeysLive:
+		if m.LiveKeyHash == nil {
+			return nil, fmt.Errorf("%w: this merchant has no live key to revoke", ErrPayMerchantInvalid)
+		}
+		guard, guardValue = "live_key_hash = ?", *m.LiveKeyHash
+		updates = map[string]interface{}{"live_key_hash": nil, "live_key_prefix": ""}
+		out.LiveKeyHash, out.LiveKeyPrefix = nil, ""
+	case PayKeysTest:
+		if m.TestKeyHash == nil {
+			return nil, fmt.Errorf("%w: this merchant has no test key to revoke", ErrPayMerchantInvalid)
+		}
+		guard, guardValue = "test_key_hash = ?", *m.TestKeyHash
+		updates = map[string]interface{}{"test_key_hash": nil, "test_key_prefix": ""}
+		out.TestKeyHash, out.TestKeyPrefix = nil, ""
+	case PayKeysWebhook:
+		// The secrets are derived from this version, so bumping it is the revoke.
+		guard, guardValue = "webhook_secret_version = ?", m.WebhookSecretVersion
+		updates = map[string]interface{}{"webhook_secret_version": m.WebhookSecretVersion + 1}
+		out.WebhookSecretVersion++
+	default:
+		return nil, fmt.Errorf("%w: revoke the live key, the test key or the webhook secrets", ErrPayMerchantInvalid)
+	}
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.PayMerchant{}).Where("id = ?", m.ID).Where(guard, guardValue).Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrPayMerchantStale
+		}
+		return s.writeAudit(tx, m.ID, actor, models.PayAuditActionMerchantKeysRevoked, map[string]any{"scope": scope, "reason": reason})
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s keys revoked scope=%s", m.ID, actor, scope)
+	return &out, nil
 }
 
 // Authenticate resolves the raw API key a merchant integration sent to the

@@ -37,6 +37,7 @@ var emailEvents = map[string]bool{
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
 	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
 	events.SecurityPayWebhookSecret:     true,
 	// Account deletion: the departing user needs a written record of what was
@@ -87,6 +88,7 @@ var pushEvents = map[string]bool{
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
 	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
 	events.SecurityPayWebhookSecret:     true,
 	events.VerificationApproved:         true,
@@ -124,6 +126,7 @@ var pushEvents = map[string]bool{
 var unmutableEvents = map[string]bool{
 	events.SecurityPaySettlementChanged: true,
 	events.SecurityPayKeyRolled:         true,
+	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
 	events.SecurityPayWebhookSecret:     true,
 }
