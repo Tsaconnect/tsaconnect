@@ -75,6 +75,14 @@ export const statusOf = (p: Payment): PayStatus => (p.cancelled ? 'cancelled' : 
 export const linkMessage = (businessName: string, p: Payment) =>
   `${businessName} is requesting ${naira(p.customerTotal)} for ${p.description}. Pay here: ${p.checkoutUrl}`;
 
+/** The QR card for a one-time link: the total the customer pays, and what for. */
+export const linkCard = (businessName: string, p: Payment) =>
+  ({ businessName, headline: naira(p.customerTotal), detail: p.description, test: p.mode === 'test' });
+
+/** The QR card for a reusable link: its label, and the amounts it takes. */
+export const openLinkCard = (businessName: string, l: OpenLink) =>
+  ({ businessName, headline: l.label, detail: openAmountRule(l), test: l.mode === 'test' });
+
 /** WhatsApp's share page with the message filled in; the sender picks the chat. */
 export const whatsAppUrl = (message: string) => `https://wa.me/?text=${encodeURIComponent(message)}`;
 

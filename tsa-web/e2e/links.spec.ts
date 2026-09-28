@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { mockApi } from './fixtures';
 
 async function requestPayment(page: Page, fields: { amount: string; description: string; customer?: string }) {
@@ -42,6 +43,14 @@ test('an owner requests a payment, shares the link and cancels it', async ({ pag
   expect(share.origin + share.pathname).toBe('https://wa.me/');
   expect(share.searchParams.get('text')).toBe(`Sky Air Ltd is requesting ₦5,050.51 for Balance for LOS-ABV, 12 Oct. Pay here: ${made.checkoutUrl}`);
   await expect(ready.getByRole('img', { name: 'QR code for the payment link' })).toBeVisible();
+
+  // The QR card, drawn in a real browser: a 1080×1350 PNG named for the business.
+  const [saved] = await Promise.all([page.waitForEvent('download'), ready.getByRole('button', { name: 'Download QR' }).click()]);
+  expect(saved.suggestedFilename()).toBe('pay-sky-air-ltd.png');
+  const png = await readFile((await saved.path())!);
+  expect(png.subarray(1, 4).toString()).toBe('PNG');
+  expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1080, 1350]);
+  if (process.env.SAVE_QR_CARD) await saved.saveAs(process.env.SAVE_QR_CARD);
 
   // One create, with an Idempotency-Key, in the mode on screen (live was never tried).
   const creates = api.calls.filter((c) => c.method === 'POST' && c.path === '/api/pay/merchant/links');
