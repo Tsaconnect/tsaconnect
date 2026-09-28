@@ -44,8 +44,9 @@ import {
 } from '@/components/ui';
 
 // Fallback token list — used when the /p2p/chains endpoint is unreachable so
-// the marketplace still works in degraded mode.
-const FALLBACK_TOKENS = ['USDT', 'USDC', 'MCGP'];
+// the marketplace still works in degraded mode. No MCGP: it is no longer a P2P
+// asset, and the API hides MCGP ads from browse.
+const FALLBACK_TOKENS = ['USDT', 'USDC'];
 
 // Sonic chain IDs (mainnet + testnet) — used for the Sonic-first sort order.
 const SONIC_CHAIN_IDS = new Set([146, 14601]);

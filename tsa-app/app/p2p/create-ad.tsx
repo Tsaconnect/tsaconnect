@@ -67,11 +67,12 @@ import {
 } from '@/components/ui';
 
 // Static fallback token list — used when the backend's /p2p/chains endpoint
-// is unreachable so the screen never crashes with an empty token set.
+// is unreachable so the screen never crashes with an empty token set. MCGP is
+// deliberately absent: wallet MCGP may not be used in P2P (owner decision
+// 2026-09-28), and the API refuses new MCGP ads.
 const FALLBACK_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
   { symbol: 'USDC', decimals: 6 },
-  { symbol: 'MCGP', decimals: 18 },
 ];
 
 type TokenEntry = { symbol: string; decimals: number };
@@ -1191,7 +1192,7 @@ const CreateAdScreen: React.FC = () => {
               <Icon name="info" size={16} color={colors.info} />
               <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
                 A 1% platform fee is charged to you (the merchant) only when a trade completes —
-                on USDT, USDC and MCGP alike. It is split instantly into the system fee, cashback
+                on USDT and USDC alike. It is split instantly into the system fee, cashback
                 to the buyer and their direct upline, and Trade Points.
               </Text>
             </View>
