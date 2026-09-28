@@ -17,7 +17,7 @@ import {
   createLink, createOpenLink,
   type LinkDays, type Mode, type NewLink, type NewOpenLink, type OpenLink, type OwnMerchant, type Payment,
 } from './api';
-import { isLiveOff, linkMessage, openAmountRule, openLinkMessage } from './display';
+import { isLiveOff, linkCard, linkMessage, openAmountRule, openLinkCard, openLinkMessage } from './display';
 import { LinkShare } from './LinkShare';
 import { LiveOffNote, TestModeLink } from './LiveOffNote';
 import { OpenLinkFields } from './OpenLinkFields';
@@ -297,7 +297,7 @@ function Created({ payment: p, businessName }: { payment: Payment; businessName:
           <dd className="font-semibold tabular">{naira(p.merchantNet)}</dd>
         </dl>
       </div>
-      <LinkShare url={p.checkoutUrl} message={linkMessage(businessName, p)} />
+      <LinkShare url={p.checkoutUrl} message={linkMessage(businessName, p)} card={linkCard(businessName, p)} />
     </div>
   );
 }
@@ -309,7 +309,7 @@ function OpenCreated({ link: l, businessName }: { link: OpenLink; businessName: 
         <p className="text-title3 font-semibold">{l.label}</p>
         <p className="text-body-sm text-text-secondary">{openAmountRule(l)} · each customer enters what they pay</p>
       </div>
-      <LinkShare url={l.url} message={openLinkMessage(businessName, l)} />
+      <LinkShare url={l.url} message={openLinkMessage(businessName, l)} card={openLinkCard(businessName, l)} />
     </div>
   );
 }

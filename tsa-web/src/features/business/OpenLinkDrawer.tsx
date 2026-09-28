@@ -19,7 +19,7 @@ import {
   openLinkChange, replaceOpenLink, updateOpenLink,
   type Mode, type OpenLink, type OpenLinkDetail, type Payment,
 } from './api';
-import { openAmountRule, openLinkMessage, openLinkTaking } from './display';
+import { openAmountRule, openLinkCard, openLinkMessage, openLinkTaking } from './display';
 import { LinkShare } from './LinkShare';
 import { TestModeLink } from './LiveOffNote';
 import { OpenLinkState } from './OpenLinkState';
@@ -121,7 +121,7 @@ function Detail({ detail: { openLink: l, payments }, mode }: { detail: OpenLinkD
       )}
 
       <SectionHeading>Share</SectionHeading>
-      <LinkShare url={l.url} message={openLinkMessage(merchant?.businessName ?? '', l)} qrSize={148} />
+      <LinkShare url={l.url} message={openLinkMessage(merchant?.businessName ?? '', l)} card={openLinkCard(merchant?.businessName ?? '', l)} qrSize={148} />
 
       <div className="mt-4 flex flex-wrap gap-2">
         <Button asChild size="sm" variant="secondary">

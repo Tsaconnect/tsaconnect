@@ -15,7 +15,7 @@ import { ErrorState } from '@/components/ui/states';
 import { StatusPill } from '@/components/ui/status-pill';
 import { toast } from '@/components/ui/toaster';
 import { cancelLink, getPayment, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
-import { LINK_STATUS_LABELS, linkMessage, paymentFor, statusOf, youReceive } from './display';
+import { LINK_STATUS_LABELS, linkCard, linkMessage, paymentFor, statusOf, youReceive } from './display';
 import { LinkShare } from './LinkShare';
 import { queryKeys } from './queryKeys';
 import { useMerchant } from './useMerchant';
@@ -113,7 +113,7 @@ function PaymentLink({ payment: p, mode }: { payment: Payment; mode: Mode }) {
     <>
       <SectionHeading>Payment link</SectionHeading>
       <div className="grid gap-3">
-        <LinkShare url={p.checkoutUrl} message={linkMessage(businessName, p)} />
+        <LinkShare url={p.checkoutUrl} message={linkMessage(businessName, p)} card={linkCard(businessName, p)} />
         <Button variant="danger" size="sm" className="justify-self-start" onClick={() => { cancel.reset(); setConfirming(true); }}>Cancel link</Button>
       </div>
       <Dialog
