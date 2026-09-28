@@ -2,6 +2,7 @@
 // API calls to the Go backend for escrow order operations
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
+import { withWalletProof } from './walletApi';
 
 // --- Types ---
 
@@ -357,22 +358,25 @@ export const isSpendableOrder = (order: Pick<Order, 'paymentSource'> | null | un
  * Pay an MCGP order from the buyer's Spendable MCGP. Nothing is signed: the
  * backend holds the MCGP until the order resolves, so callers must put the
  * app's authorization prompt in front of this. Safe to retry — the hold is
- * keyed by the order.
+ * keyed by the order. The operator only debits a wallet the account proved it
+ * owns, so a WALLET_PROOF_REQUIRED refusal proves the active wallet and retries.
  */
 export async function paySpendable(
   orderId: string
 ): Promise<ApiResponse<{ orderId: string; status: string; paymentSource: string; escrowExpiresAt?: string }>> {
-  try {
-    const headers = await getAuthHeaders();
-    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/pay-spendable`, {
-      method: 'POST',
-      headers,
-    });
-    return await handleResponse(response);
-  } catch (error: any) {
-    console.error('Pay spendable error:', error);
-    return { success: false, message: error.message || 'Failed to pay with Spendable MCGP' };
-  }
+  return withWalletProof(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${API_BASE_URL}/orders/${orderId}/pay-spendable`, {
+        method: 'POST',
+        headers,
+      });
+      return await handleResponse<{ orderId: string; status: string; paymentSource: string; escrowExpiresAt?: string }>(response);
+    } catch (error: any) {
+      console.error('Pay spendable error:', error);
+      return { success: false, message: error.message || 'Failed to pay with Spendable MCGP' };
+    }
+  });
 }
 
 /** Confirm a Spendable MCGP order: the backend releases the hold to the seller. */

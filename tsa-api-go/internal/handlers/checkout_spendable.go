@@ -230,8 +230,9 @@ func (ch *CheckoutHandler) PaySpendable(c *gin.Context) {
 			fmt.Sprintf("Cannot pay: order is in %s status", order.Status), "order_not_payable")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	// The operator debits this wallet with no signature from the user.
+	buyerWallet, ok := requireProvenWallet(c, user)
+	if !ok {
 		return
 	}
 	// The hold is only ever released by crediting the seller: never take the
@@ -252,7 +253,7 @@ func (ch *CheckoutHandler) PaySpendable(c *gin.Context) {
 	if _, err := ch.spendable.Fund(c.Request.Context(), services.OrderMcgpFundInput{
 		OrderID:     order.ID,
 		BuyerID:     user.ID,
-		BuyerWallet: user.WalletAddress,
+		BuyerWallet: buyerWallet,
 		Amount:      amount,
 	}); err != nil {
 		spendableFail(c, err)

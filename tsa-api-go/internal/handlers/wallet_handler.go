@@ -36,8 +36,14 @@ var ethAddressRegex = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 // that simply forgot the field would silently detach the account from its
 // wallet. `binding:"required"` cannot express this: it rejects "" as well as
 // absent, which is what made the unlink path unreachable before.
+//
+// WalletNonce + WalletSignature are the signed POST /wallet/challenge that
+// proves the caller owns WalletAddress (see wallet_proof.go). Required for any
+// change of wallet except back to one this account already proved.
 type registerWalletRequest struct {
-	WalletAddress *string `json:"walletAddress"`
+	WalletAddress   *string `json:"walletAddress"`
+	WalletNonce     string  `json:"walletNonce"`
+	WalletSignature string  `json:"walletSignature"`
 }
 
 // prepareTxRequest is the request body for PrepareSendTransaction.
@@ -217,7 +223,10 @@ func erc20SendDecimals(override *int, readOnChain func() (int, error)) (int, err
 }
 
 // RegisterWalletAddress handles POST /api/wallet/register.
-// Associates a blockchain wallet address with the authenticated user.
+// Associates a blockchain wallet address with the authenticated user. Linking a
+// different wallet needs proof of ownership (walletNonce + walletSignature from
+// POST /wallet/challenge) unless this account proved that wallet before; see
+// wallet_proof.go. An explicit empty address unlinks.
 func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -260,35 +269,39 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		return
 	}
 
-	// Check if user already has a wallet address set.
-	if user.WalletAddress != "" {
-		// If the new address is the same, no-op.
-		if user.WalletAddress == walletAddress {
-			utils.SuccessResponse(c, http.StatusOK, "Wallet address already registered", gin.H{
-				"walletAddress": user.WalletAddress,
-			})
-			return
-		}
-		// Allow update to a different address; log the change for audit.
-		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, walletAddress)
+	proof := walletProof{
+		Nonce:     strings.TrimSpace(req.WalletNonce),
+		Signature: strings.TrimSpace(req.WalletSignature),
+	}
+	if !proof.present() {
+		proof = walletProofFromHeaders(c)
 	}
 
-	// Check if the address is already taken by another active user.
-	var existingUser models.User
-	if err := config.DB.Where("wallet_address = ? AND account_status != ? AND id != ?",
-		walletAddress, models.AccountStatusDeleted, user.ID).First(&existingUser).Error; err == nil {
-		utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
+	// Same wallet (any letter case): nothing is re-pointed, so no proof is
+	// needed. A proof sent anyway is recorded — it is how a wallet linked
+	// before proofs existed becomes one the operator may debit.
+	if strings.EqualFold(user.WalletAddress, walletAddress) {
+		proven, err := walletProven(config.DB, user.ID, walletAddress)
+		if err != nil {
+			respondWalletLinkError(c, user, err)
+			return
+		}
+		if !proven && proof.present() {
+			if err := claimWalletTx(config.DB, user, walletAddress, proof); err != nil {
+				respondWalletLinkError(c, user, err)
+				return
+			}
+			proven = true
+		}
+		utils.SuccessResponse(c, http.StatusOK, "Wallet address already registered", gin.H{
+			"walletAddress": user.WalletAddress,
+			"walletProven":  proven,
+		})
 		return
 	}
 
-	// Release any stale reference to this address on previously deleted accounts.
-	_ = config.DB.Model(&models.User{}).
-		Where("wallet_address = ? AND account_status = ?", walletAddress, models.AccountStatusDeleted).
-		Update("wallet_address", "").Error
-
-	// Update user's wallet address.
-	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", walletAddress).Error; err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to register wallet address")
+	if err := claimWalletTx(config.DB, user, walletAddress, proof); err != nil {
+		respondWalletLinkError(c, user, err)
 		return
 	}
 
@@ -309,9 +322,9 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		}
 	}
 
-	user.WalletAddress = walletAddress
 	utils.SuccessResponse(c, http.StatusOK, "Wallet address registered successfully", gin.H{
 		"walletAddress": user.WalletAddress,
+		"walletProven":  true,
 	})
 }
 

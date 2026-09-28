@@ -52,7 +52,8 @@ internal/
     upload_handler.go          # File upload handlers
     wallet_handler.go          # Multi-chain wallet: register, balances, send, history
     wallet_handler_test.go     # Wallet handler unit tests (SQLite in-memory)
-    common.go                  # getUserFromContext + callerWallet (device/account wallet reconciliation)
+    common.go                  # getUserFromContext + callerWallet/requireOwnWallet (device/account wallet reconciliation)
+    wallet_proof.go            # wallet-ownership challenge, proof check, requireProvenWallet
   services/
     price_service.go           # CoinGecko API with 60s cache
     blockchain_service.go      # Multi-chain BlockchainService registry
@@ -93,9 +94,25 @@ All routes prefixed with `/api/`:
 - **Wallet tests**: Use SQLite in-memory DB (raw DDL, not AutoMigrate) to avoid PostgreSQL-specific defaults
 - **Balances are never stored**: crypto balances come from the chain on every request and
   entitlement balances from the swap contract. Endpoints that display one take the caller's
-  device wallet address and reconcile it against `users.wallet_address` via `callerWallet`
-  (409 on mismatch) — never silently substitute the registered address, which makes a device
-  with no key look as though the platform is custodying the user's assets.
+  device wallet address and reconcile it against `users.wallet_address` — never silently
+  substitute the registered address, which makes a device with no key look as though the
+  platform is custodying the user's assets.
+- **A wallet is linked only with proof of ownership** (`handlers/wallet_proof.go`). The operator
+  spends Spendable MCGP from `users.wallet_address` with no user signature, so re-pointing it
+  needs a signed `POST /api/wallet/challenge` (EIP-191) sent to `/wallet/register` or in the
+  `X-Wallet-Proof-*` headers; a wallet the account proved before needs none. Reads use
+  `requireOwnWallet` (never links; 403 on mismatch), writes use `callerWallet` (links only with
+  proof; 403 `WALLET_PROOF_REQUIRED`), and every operator debit (IT sell, bills,
+  pay-spendable) goes through `requireProvenWallet`. A valid proof evicts holders of the same
+  wallet that never proved it (pre-fix links; `AUDIT wallet_link_evicted=1` log line); a
+  proven holder is never evicted (409). Addresses are stored checksummed and unique
+  case-insensitively (`config/wallet_address_index.go`, built CONCURRENTLY on Postgres; case
+  duplicates it cannot resolve are logged `ALERT wallet_address_case_duplicates`). The signed
+  message is a fixed template the app parses line for line — change both sides together.
+  `deploy/one-off/2026-09-28-wallet-link-inflight-debits.sql` lists operator debits in flight
+  from unproven or shared wallets (read-only).
+- **PostgreSQL-backed tests** use `testutil.TempPostgres` (throwaway schema; skip without
+  `DATABASE_URL`).
 - **Destructive DDL**: never in `AutoMigrate` (enforced by `TestAutoMigrateHasNoDestructiveDDL`).
   It goes in `deploy/one-off/`, run deliberately by an operator after the release is live.
 

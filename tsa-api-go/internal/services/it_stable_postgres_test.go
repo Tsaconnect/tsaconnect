@@ -4,18 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"net/url"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	"github.com/ojimcy/tsa-api-go/internal/testutil"
 )
 
 // Every other test in this package runs on SQLite, and SQLite's type affinity
@@ -38,51 +32,7 @@ import (
 // test creates is dropped with the schema.
 func newStablePostgresService(t *testing.T) *ITService {
 	t.Helper()
-
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		// Fall back to the service's own .env so a local run picks it up the
-		// same way the server does. Values are never read or logged here —
-		// only handed to the driver.
-		_ = godotenv.Load(filepath.Join("..", "..", ".env"))
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping the PostgreSQL-backed test")
-	}
-
-	schema := "it_stable_test_" + uuid.New().String()[:8]
-	scoped, err := dsnWithSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("scope dsn to a temp schema: %v", err)
-	}
-
-	admin, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Skipf("cannot reach PostgreSQL: %v", err)
-	}
-	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
-		t.Fatalf("create temp schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE").Error
-		if sqlDB, dErr := admin.DB(); dErr == nil {
-			_ = sqlDB.Close()
-		}
-	})
-
-	db, err := gorm.Open(postgres.Open(scoped), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatalf("open temp schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if sqlDB, dErr := db.DB(); dErr == nil {
-			_ = sqlDB.Close()
-		}
-	})
-	if err := db.AutoMigrate(&models.ITIntent{}, &models.FiatVirtualAccount{}); err != nil {
-		t.Fatalf("migrate it_intents: %v", err)
-	}
+	db := testutil.TempPostgres(t, "it_stable_test_", &models.ITIntent{}, &models.FiatVirtualAccount{})
 
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	s.SetStableSpreadBps(155)
@@ -92,20 +42,6 @@ func newStablePostgresService(t *testing.T) *ITService {
 	// write path, not the refusal.
 	s.SetStableVerifier(nil, nil, map[string]string{"USDC": testToken, "USDT": testToken})
 	return s
-}
-
-// dsnWithSchema pins a connection to one schema via libpq's search_path option,
-// handling both the URL and the key=value DSN forms.
-func dsnWithSchema(dsn, schema string) (string, error) {
-	u, err := url.Parse(dsn)
-	if err != nil || u.Scheme == "" {
-		// key=value form ("host=... dbname=..."); options append positionally.
-		return dsn + " search_path=" + schema, nil
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	return u.String(), nil
 }
 
 func TestCreateStableSellIntent_InsertsOnPostgres(t *testing.T) {

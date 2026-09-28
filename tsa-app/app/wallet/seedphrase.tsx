@@ -196,7 +196,7 @@ const SeedPhrase = () => {
       // the user cannot spend and a prepare they cannot sign. Registering first
       // means a failure leaves no half-state: nothing was written, and pressing
       // create again is a clean retry.
-      const registered = await registerWalletAddress(wallet.address);
+      const registered = await registerWalletAddress(wallet.address, wallet.privateKey);
       if (!registered.success) {
         throw new Error(
           registered.message || 'Could not link this wallet to your account. Please try again.',
@@ -237,7 +237,7 @@ const SeedPhrase = () => {
       // Register first — see handleCreateNewWallet. This is also where a wallet
       // already claimed by another account is caught, instead of the user
       // reaching a balance screen that answers for someone else's address.
-      const registered = await registerWalletAddress(walletInfo.address);
+      const registered = await registerWalletAddress(walletInfo.address, walletInfo.privateKey);
       if (!registered.success) {
         throw new Error(
           registered.message || 'Could not link this wallet to your account. Please try again.',

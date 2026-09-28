@@ -36,6 +36,7 @@ func newCallerWalletTestDB(t *testing.T) *gorm.DB {
 	)`).Error; err != nil {
 		t.Fatalf("create users table: %v", err)
 	}
+	ensureWalletLinkChallenges(t, db)
 	prev := config.DB
 	config.DB = db
 	t.Cleanup(func() { config.DB = prev })
@@ -80,7 +81,7 @@ func responseCode(t *testing.T, w *httptest.ResponseRecorder) string {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-func TestCallerWallet_ActiveWalletUsedWhenUserWalletEmpty(t *testing.T) {
+func TestCallerWallet_FirstWalletLinksWithProof(t *testing.T) {
 	db := newCallerWalletTestDB(t)
 	user := models.User{
 		ID:            uuid.New(),
@@ -89,31 +90,28 @@ func TestCallerWallet_ActiveWalletUsedWhenUserWalletEmpty(t *testing.T) {
 		AccountStatus: models.AccountStatusActive,
 	}
 	insertTestUser(t, db, &user)
+	active := newTestWallet(t)
 
-	c, w := testGinContext()
-	activeWallet := "0x1111111111111111111111111111111111111111"
+	if _, ok, w := callerWalletWithProof(&user, active.Address, walletProof{}); ok || w.Code != http.StatusForbidden {
+		t.Fatalf("an unproven first link must be 403, got ok=%v code=%d", ok, w.Code)
+	}
 
-	wallet, ok := callerWallet(c, &user, activeWallet)
+	wallet, ok, w := callerWalletWithProof(&user, active.Address, signedProof(t, db, user.ID, active))
 	if !ok {
 		t.Fatalf("expected callerWallet to succeed, got error code %d body %s", w.Code, w.Body.String())
 	}
-	if wallet != activeWallet {
-		t.Fatalf("expected resolved wallet %q, got %q", activeWallet, wallet)
+	if wallet != active.Address || user.WalletAddress != active.Address {
+		t.Fatalf("resolved %q, in-memory %q, want %q", wallet, user.WalletAddress, active.Address)
 	}
-	if user.WalletAddress != activeWallet {
-		t.Fatalf("expected in-memory user.WalletAddress to be updated, got %q", user.WalletAddress)
-	}
-
-	// Verify database was synced.
-	if stored := storedUserWallet(t, db, user.ID); stored != activeWallet {
-		t.Fatalf("expected db wallet_address to be %q, got %q", activeWallet, stored)
+	if stored := storedUserWallet(t, db, user.ID); stored != active.Address {
+		t.Fatalf("expected db wallet_address to be %q, got %q", active.Address, stored)
 	}
 }
 
-func TestCallerWallet_ActiveWalletSwitched(t *testing.T) {
+func TestCallerWallet_ActiveWalletSwitchedWithProof(t *testing.T) {
 	db := newCallerWalletTestDB(t)
 	oldWallet := "0x1111111111111111111111111111111111111111"
-	newWallet := "0x2222222222222222222222222222222222222222"
+	next := newTestWallet(t)
 	user := models.User{
 		ID:            uuid.New(),
 		Username:      "switching_user",
@@ -122,17 +120,15 @@ func TestCallerWallet_ActiveWalletSwitched(t *testing.T) {
 	}
 	insertTestUser(t, db, &user)
 
-	c, w := testGinContext()
-	wallet, ok := callerWallet(c, &user, newWallet)
+	wallet, ok, w := callerWalletWithProof(&user, next.Address, signedProof(t, db, user.ID, next))
 	if !ok {
 		t.Fatalf("expected switch to succeed, got %d %s", w.Code, w.Body.String())
 	}
-	if wallet != newWallet {
-		t.Fatalf("expected resolved wallet %q, got %q", newWallet, wallet)
+	if wallet != next.Address {
+		t.Fatalf("expected resolved wallet %q, got %q", next.Address, wallet)
 	}
-
-	if stored := storedUserWallet(t, db, user.ID); stored != newWallet {
-		t.Fatalf("expected db wallet updated to %q, got %q", newWallet, stored)
+	if stored := storedUserWallet(t, db, user.ID); stored != next.Address {
+		t.Fatalf("expected db wallet updated to %q, got %q", next.Address, stored)
 	}
 }
 
@@ -201,7 +197,8 @@ func TestCallerWallet_MalformedClaimedFails(t *testing.T) {
 
 func TestCallerWallet_ClaimedConflictWithOtherActiveUserFails(t *testing.T) {
 	db := newCallerWalletTestDB(t)
-	claimedAddr := "0x3333333333333333333333333333333333333333"
+	claimed := newTestWallet(t)
+	claimedAddr := claimed.Address
 
 	otherUser := models.User{
 		ID:            uuid.New(),
@@ -210,6 +207,7 @@ func TestCallerWallet_ClaimedConflictWithOtherActiveUserFails(t *testing.T) {
 		AccountStatus: models.AccountStatusActive,
 	}
 	insertTestUser(t, db, &otherUser)
+	mustRecordWalletProof(t, db, otherUser.ID, claimedAddr) // a proven holder keeps its wallet
 
 	currentUser := models.User{
 		ID:            uuid.New(),
@@ -219,8 +217,8 @@ func TestCallerWallet_ClaimedConflictWithOtherActiveUserFails(t *testing.T) {
 	}
 	insertTestUser(t, db, &currentUser)
 
-	c, w := testGinContext()
-	_, ok := callerWallet(c, &currentUser, claimedAddr)
+	// Proven (the key holder has two accounts) — still one account per wallet.
+	_, ok, w := callerWalletWithProof(&currentUser, claimedAddr, signedProof(t, db, currentUser.ID, claimed))
 	if ok {
 		t.Fatalf("expected conflict failure")
 	}
@@ -231,7 +229,8 @@ func TestCallerWallet_ClaimedConflictWithOtherActiveUserFails(t *testing.T) {
 
 func TestCallerWallet_ClaimedPreviouslyHeldByDeletedAccountSucceeds(t *testing.T) {
 	db := newCallerWalletTestDB(t)
-	claimedAddr := "0x4444444444444444444444444444444444444444"
+	claimed := newTestWallet(t)
+	claimedAddr := claimed.Address
 
 	deletedUser := models.User{
 		ID:            uuid.New(),
@@ -249,8 +248,7 @@ func TestCallerWallet_ClaimedPreviouslyHeldByDeletedAccountSucceeds(t *testing.T
 	}
 	insertTestUser(t, db, &currentUser)
 
-	c, w := testGinContext()
-	wallet, ok := callerWallet(c, &currentUser, claimedAddr)
+	wallet, ok, w := callerWalletWithProof(&currentUser, claimedAddr, signedProof(t, db, currentUser.ID, claimed))
 	if !ok {
 		t.Fatalf("expected success claiming address from deleted user, got %d %s", w.Code, w.Body.String())
 	}
@@ -297,8 +295,14 @@ func TestCallerWallet_ConcurrentClaimOnlyOneWins(t *testing.T) {
 	)`).Error; err != nil {
 		t.Fatalf("create users table: %v", err)
 	}
+	if err := db.Exec(`DROP TABLE IF EXISTS wallet_link_challenges`).Error; err != nil {
+		t.Fatalf("drop wallet_link_challenges: %v", err)
+	}
+	ensureWalletLinkChallenges(t, db)
 
-	sharedAddr := "0x5555555555555555555555555555555555555555"
+	// One key holder with two accounts: both claims carry a valid proof, and
+	// the second is refused as a conflict.
+	shared := newTestWallet(t)
 
 	userA := models.User{ID: uuid.New(), Username: "user_a", WalletAddress: "", AccountStatus: models.AccountStatusActive}
 	userB := models.User{ID: uuid.New(), Username: "user_b", WalletAddress: "", AccountStatus: models.AccountStatusActive}
@@ -309,6 +313,7 @@ func TestCallerWallet_ConcurrentClaimOnlyOneWins(t *testing.T) {
 			t.Fatalf("insert user: %v", err)
 		}
 	}
+	proofs := []walletProof{signedProof(t, db, userA.ID, shared), signedProof(t, db, userB.ID, shared)}
 
 	prev := config.DB
 	config.DB = db
@@ -325,8 +330,7 @@ func TestCallerWallet_ConcurrentClaimOnlyOneWins(t *testing.T) {
 	for i, u := range []*models.User{&userA, &userB} {
 		go func(idx int, user *models.User) {
 			defer wg.Done()
-			c, w := testGinContext()
-			_, ok := callerWallet(c, user, sharedAddr)
+			_, ok, w := callerWalletWithProof(user, shared.Address, proofs[idx])
 			results[idx] = result{ok: ok, code: w.Code}
 		}(i, u)
 	}
@@ -346,4 +350,3 @@ func TestCallerWallet_ConcurrentClaimOnlyOneWins(t *testing.T) {
 			successes, conflicts, results)
 	}
 }
-

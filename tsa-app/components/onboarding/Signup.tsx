@@ -108,7 +108,7 @@ const Signup = () => {
           }
           const wallet = await generateWallet();
           await addWallet(wallet, 'Wallet 1');
-          await registerWalletAddress(wallet.address);
+          await registerWalletAddress(wallet.address, wallet.privateKey);
         } catch (walletErr) {
           console.warn('Auto wallet generation failed, user can set up later:', walletErr);
           setLoading(false);

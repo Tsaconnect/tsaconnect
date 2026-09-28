@@ -98,6 +98,7 @@ func newSpendableRig(t *testing.T) *spendableRig {
 	ch.spendable = payer
 	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	setUserWallet(t, db, buyer, "0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce")
+	mustRecordWalletProof(t, db, buyer.ID, buyer.WalletAddress) // the operator only debits a proven wallet
 	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
 	setUserWallet(t, db, seller, "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96")
 	return &spendableRig{db: db, ch: ch, payer: payer, buyer: buyer, seller: seller,

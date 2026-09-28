@@ -62,14 +62,26 @@ func newITTestHandler(t *testing.T) (*ITHandler, *gorm.DB) {
 	})
 	swap.SetOperatorSigner(fakeITReleaseSigner{})
 	it := services.NewITService(db, swap, stubITFx{})
+	// The proof-of-ownership gate reads config.DB.
+	ensureWalletLinkChallenges(t, db)
+	prev := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = prev })
 	return NewITHandler(db, it, nil), db
 }
 
 func doITSell(h *ITHandler, user *models.User, body map[string]any) *httptest.ResponseRecorder {
 	// These tests exercise Sell's input/catalog validation, which sits behind
-	// the trading-agreement gate. Satisfy the gate so the logic under test is
-	// reached; the gate's own blocking behaviour is covered separately below.
+	// the trading-agreement and wallet-proof gates. Satisfy both so the logic
+	// under test is reached; the gates' own blocking behaviour is covered
+	// separately.
 	_ = h.it.AcceptITAgreement(context.Background(), user.ID, "", "")
+	_ = recordWalletProof(h.db, user.ID, user.WalletAddress)
+	return doITSellAs(h, user, body)
+}
+
+// doITSellAs posts a sell with no gate pre-satisfied.
+func doITSellAs(h *ITHandler, user *models.User, body map[string]any) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -87,6 +99,7 @@ func TestIT_AgreementGate_BlocksTrade(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, db := newITTestHandler(t)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
+	mustRecordWalletProof(t, db, user.ID, user.WalletAddress)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

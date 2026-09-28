@@ -61,7 +61,7 @@ func (h *PaycrestHandler) SellSwapQuote(c *gin.Context) {
 	// to have a sale delivered to it. fromAddress is different — it is where
 	// the swap is SENT from, which may be a Solana address, and the quoter
 	// validates it for that chain's family.
-	wallet, ok := callerWallet(c, user, c.Query("walletAddress"))
+	wallet, ok := requireOwnWallet(c, user, c.Query("walletAddress"))
 	if !ok {
 		return
 	}

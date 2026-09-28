@@ -1345,11 +1345,19 @@ const WalletScreen: React.FC = () => {
     if (address === activeAddress) return;
     setIsLoading(true);
     try {
+      // Link first: the account must never point at a wallet other than the
+      // one this device is using, and linking needs this wallet's key.
+      const registered = await registerWalletAddress(address);
+      if (!registered.success) {
+        Alert.alert('Could not switch wallet', registered.message || 'Please try again.');
+        setIsLoading(false);
+        return;
+      }
       await setActiveWallet(address);
-      await registerWalletAddress(address);
       await fetchBalances();
     } catch (err) {
       console.error('Switch wallet error:', err);
+      setIsLoading(false);
     }
   }, [activeAddress, fetchBalances]);
 

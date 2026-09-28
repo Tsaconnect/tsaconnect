@@ -5,7 +5,7 @@
 // credit/debit; the app just creates intents and polls status.
 
 import { API_BASE_URL } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
+import { getAuthHeaders, withWalletProof } from '@/services/walletApi';
 import { getActiveWallet } from './wallet';
 
 export interface ITRate {
@@ -178,7 +178,8 @@ export interface ITBuyResult {
 // open one — see utils/itBuyOrder.openBuyOrderOf.
 export const itBuy = async (ngnKobo: string, walletAddress?: string) => {
   const resolvedWallet = walletAddress || (await getActiveWallet()) || undefined;
-  return req<ITBuyResult>('POST', '/it/buy', { ngnKobo, walletAddress: resolvedWallet });
+  // A device wallet other than the linked one is only accepted once proven.
+  return withWalletProof(() => req<ITBuyResult>('POST', '/it/buy', { ngnKobo, walletAddress: resolvedWallet }));
 };
 
 /** Abandon an unpaid buy order (MCGP or stablecoin). Refused with
@@ -339,7 +340,8 @@ export interface ITSellOptions {
 // NGN-bank call.
 export const itSell = async (mcgpAmount: string, opts: ITSellOptions = {}) => {
   const walletAddress = opts.walletAddress || (await getActiveWallet()) || undefined;
-  return req<{ intent: ITIntent }>('POST', '/it/sell', { mcgpAmount, ...opts, walletAddress });
+  // The operator debits the account's wallet, so it must be one the account proved.
+  return withWalletProof(() => req<{ intent: ITIntent }>('POST', '/it/sell', { mcgpAmount, ...opts, walletAddress }));
 };
 
 // ──────────────────────────── stablecoin sell (brokered) ──────────────────

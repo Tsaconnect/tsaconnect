@@ -8,7 +8,7 @@
 // mcgpAmount is 18dp base units and rateKobo is kobo per 1 MCGP.
 
 import { API_BASE_URL } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
+import { getAuthHeaders, withWalletProof } from '@/services/walletApi';
 
 export type BillCategory = 'airtime' | 'data' | 'electricity' | 'cabletv' | 'betting' | 'epin';
 
@@ -75,7 +75,7 @@ export interface BillQuoteInput {
   ngnAmount?: number; // user-priced categories; plan-priced are server-priced
 }
 
-export type ApiResult<T> = { success: boolean; data?: T; message?: string };
+export type ApiResult<T> = { success: boolean; data?: T; message?: string; code?: string };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
   try {
@@ -92,7 +92,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<Api
       /* empty */
     }
     if (json?.success) return { success: true, data: json.data as T };
-    return { success: false, message: json?.message || `Request failed (${res.status})` };
+    return { success: false, message: json?.message || `Request failed (${res.status})`, code: json?.code };
   } catch (e: any) {
     return { success: false, message: e?.message || 'Network error' };
   }
@@ -116,8 +116,9 @@ export const validateCustomer = (input: { category: BillCategory; provider: stri
 export const quoteBill = (input: BillQuoteInput) => req<BillQuote>('POST', '/bills/quote', input);
 
 // Pay a quoted order with spendable MCGP (operator-signed server-side) and vend.
+// The operator only debits a wallet the account proved it owns.
 export const payBillOrder = (orderId: string) =>
-  req<BillOrder>('POST', `/bills/orders/${orderId}/pay`);
+  withWalletProof(() => req<BillOrder>('POST', `/bills/orders/${orderId}/pay`));
 
 export const getBillOrder = (id: string) => req<BillOrder>('GET', `/bills/orders/${id}`);
 

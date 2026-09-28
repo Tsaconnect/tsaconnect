@@ -287,16 +287,38 @@ export async function signTypedData(
    */
   expectedAddress?: string,
 ): Promise<string> {
-  const addr = expectedAddress || (await getActiveWallet()) || undefined;
-  const privateKey = await getPrivateKey(addr);
-  if (!privateKey) {
+  const wallet = await loadSigner(expectedAddress || (await getActiveWallet()) || undefined);
+  const cleaned: Record<string, ethers.TypedDataField[]> = {};
+  for (const k of Object.keys(types)) {
+    if (k !== 'EIP712Domain') cleaned[k] = types[k];
+  }
+  return wallet.signTypedData(domain, cleaned, message);
+}
+
+/**
+ * Sign a plain-text message (EIP-191 personal_sign) with `address`'s key.
+ *
+ * Used to prove wallet ownership to the API before a wallet is linked to the
+ * account. `privateKey` is for a wallet that is not in SecureStore yet — the
+ * create/import flows link the wallet BEFORE storing it, so a failed link
+ * leaves nothing half-written.
+ */
+export async function signMessage(message: string, address: string, privateKey?: string): Promise<string> {
+  const wallet = await loadSigner(address, privateKey);
+  return wallet.signMessage(message);
+}
+
+/** The signer for `addr`, refusing a stored key that derives to another address. */
+async function loadSigner(addr: string | undefined, privateKey?: string): Promise<ethers.Wallet> {
+  const key = privateKey || (await getPrivateKey(addr));
+  if (!key) {
     throw new Error(
       addr
         ? `No private key stored for wallet ${addr}.`
         : 'No private key found. Please set up your wallet first.',
     );
   }
-  const wallet = new ethers.Wallet(privateKey);
+  const wallet = new ethers.Wallet(key);
   // Defensive: SecureStore can hold a mismatched (address, key) pair if a
   // legacy migration or stale storage corrupted the wallet list. Catch it
   // here instead of letting the backend reject the signature with the
@@ -308,11 +330,7 @@ export async function signTypedData(
         `The wallet list is corrupt; remove and re-import this wallet from its seed phrase.`,
     );
   }
-  const cleaned: Record<string, ethers.TypedDataField[]> = {};
-  for (const k of Object.keys(types)) {
-    if (k !== 'EIP712Domain') cleaned[k] = types[k];
-  }
-  return wallet.signTypedData(domain, cleaned, message);
+  return wallet;
 }
 
 /**

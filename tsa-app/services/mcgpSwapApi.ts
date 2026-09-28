@@ -10,7 +10,7 @@
 
 import { ethers } from 'ethers';
 import { API_BASE_URL } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
+import { getAuthHeaders, withWalletProof } from '@/services/walletApi';
 import { getSignableWallet } from '@/services/wallet';
 import { boughtBase } from '@/services/mcgpValuation';
 
@@ -64,7 +64,7 @@ export interface McgpLedgerEntry {
   createdAt: string;
 }
 
-export type ApiResult<T> = { success: boolean; data?: T; message?: string };
+export type ApiResult<T> = { success: boolean; data?: T; message?: string; code?: string };
 
 export type SwapDirection =
   | 'buy_premium'
@@ -88,7 +88,7 @@ async function getJson<T>(path: string): Promise<ApiResult<T>> {
     const res = await fetch(`${API_BASE_URL}${path}`, { method: 'GET', headers });
     const body = await safeJson(res);
     if (body?.success) return { success: true, data: body.data as T };
-    return { success: false, message: body?.message || `Request failed (${res.status})` };
+    return { success: false, message: body?.message || `Request failed (${res.status})`, code: body?.code };
   } catch (e: any) {
     return { success: false, message: e?.message || 'Network error' };
   }
@@ -105,7 +105,7 @@ async function postJson<T>(path: string, body: unknown): Promise<ApiResult<T>> {
     });
     const json = await safeJson(res);
     if (json?.success) return { success: true, data: json.data as T };
-    return { success: false, message: json?.message || `Request failed (${res.status})` };
+    return { success: false, message: json?.message || `Request failed (${res.status})`, code: json?.code };
   } catch (e: any) {
     return { success: false, message: e?.message || 'Network error' };
   }
@@ -123,7 +123,7 @@ async function postRawTx(path: string, body: unknown): Promise<ApiResult<McgpUns
     });
     const json = await safeJson(res);
     if (json && json.success === false) {
-      return { success: false, message: json.message || `Request failed (${res.status})` };
+      return { success: false, message: json.message || `Request failed (${res.status})`, code: json.code };
     }
     if (json && typeof json.to === 'string' && typeof json.data === 'string') {
       return { success: true, data: json as McgpUnsignedTx };
@@ -140,7 +140,7 @@ async function postRawTx(path: string, body: unknown): Promise<ApiResult<McgpUns
  * The premium MCGP balance for the wallet this device holds a key for.
  *
  * The address is sent explicitly so the backend can reconcile it against the
- * account's registered wallet and answer 409 when they differ, rather than
+ * account's registered wallet and refuse (403) when they differ, rather than
  * silently returning the registered wallet's entitlement — a number the caller
  * would render as spendable but could never sign for.
  */
@@ -149,7 +149,7 @@ export const getMcgpBalance = async (): Promise<ApiResult<McgpBalance>> => {
   if (!address) {
     return { success: false, message: NO_LOCAL_WALLET };
   }
-  return getJson<McgpBalance>(`/mcgp/balance?address=${encodeURIComponent(address)}`);
+  return withWalletProof(() => getJson<McgpBalance>(`/mcgp/balance?address=${encodeURIComponent(address)}`));
 };
 
 export const getMcgpQuote = (kind: QuoteKind, amount: string) =>
@@ -196,24 +196,30 @@ export const getMcgpLedger = () =>
 // refuse to build a tx for an address we hold no key for. Without it the
 // mismatch only surfaces at broadcast, as a nonce/sender error that names
 // neither wallet.
+//
+// A fromAddress other than the account's linked wallet is refused with
+// WALLET_PROOF_REQUIRED until this device proves it owns it; withWalletProof
+// proves and links the active wallet, then asks again.
 export const prepareMcgpApprove = (token: 'usdc', amount: string, fromAddress: string) =>
-  postJson<{ currentAllowance: string; tx: McgpUnsignedTx }>('/mcgp/approve/prepare', {
-    token,
-    amount,
-    fromAddress,
-  });
+  withWalletProof(() =>
+    postJson<{ currentAllowance: string; tx: McgpUnsignedTx }>('/mcgp/approve/prepare', {
+      token,
+      amount,
+      fromAddress,
+    }),
+  );
 
 export const prepareMcgpBuy = (mcgpAmount: string, maxUsdc: string, fromAddress: string) =>
-  postRawTx('/mcgp/buy/prepare', { mcgpAmount, maxUsdc, fromAddress });
+  withWalletProof(() => postRawTx('/mcgp/buy/prepare', { mcgpAmount, maxUsdc, fromAddress }));
 
 export const prepareMcgpSell = (mcgpAmount: string, minUsdc: string, fromAddress: string) =>
-  postRawTx('/mcgp/sell/prepare', { mcgpAmount, minUsdc, fromAddress });
+  withWalletProof(() => postRawTx('/mcgp/sell/prepare', { mcgpAmount, minUsdc, fromAddress }));
 
 export const prepareMcgpWithdraw = (mcgpAmount: string, fromAddress: string) =>
-  postRawTx('/mcgp/withdraw/prepare', { mcgpAmount, fromAddress });
+  withWalletProof(() => postRawTx('/mcgp/withdraw/prepare', { mcgpAmount, fromAddress }));
 
 export const prepareMcgpPay = (username: string, mcgpAmount: string, fromAddress: string) =>
-  postJson<McgpPreparePay>('/mcgp/pay/prepare', { username, mcgpAmount, fromAddress });
+  withWalletProof(() => postJson<McgpPreparePay>('/mcgp/pay/prepare', { username, mcgpAmount, fromAddress }));
 
 // ────────────────────────────── confirms ──────────────────────────────────
 export const confirmMcgpSwap = (txHash: string, direction: SwapDirection) =>

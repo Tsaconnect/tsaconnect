@@ -52,6 +52,7 @@ func newRegisterRig(t *testing.T, registered string) (*gin.Engine, *models.User,
 	)`).Error; err != nil {
 		t.Fatalf("create wallets: %v", err)
 	}
+	ensureWalletLinkChallenges(t, db)
 
 	user := &models.User{ID: uuid.New(), Username: "holder", Name: "Holder", WalletAddress: registered}
 	if err := db.Exec(`INSERT INTO users (id, username, name, wallet_address) VALUES (?,?,?,?)`,
@@ -141,12 +142,22 @@ func TestRegisterWallet_MalformedAddressIsRejected(t *testing.T) {
 
 func TestRegisterWallet_ValidAddressIsStored(t *testing.T) {
 	r, user, db := newRegisterRig(t, "")
+	wallet := newTestWallet(t)
 
-	body, _ := json.Marshal(map[string]string{"walletAddress": registeredWallet})
-	if code := postRegister(t, r, string(body)); code != http.StatusOK {
-		t.Fatalf("a valid address must register, got %d", code)
+	// Without proof of ownership, nothing is linked.
+	body, _ := json.Marshal(map[string]string{"walletAddress": wallet.Address})
+	if code := postRegister(t, r, string(body)); code != http.StatusForbidden {
+		t.Fatalf("an unproven address must be refused (403), got %d", code)
 	}
-	if got := storedWallet(t, db, user.ID); got != registeredWallet {
+
+	proof := signedProof(t, db, user.ID, wallet)
+	body, _ = json.Marshal(map[string]string{
+		"walletAddress": wallet.Address, "walletNonce": proof.Nonce, "walletSignature": proof.Signature,
+	})
+	if code := postRegister(t, r, string(body)); code != http.StatusOK {
+		t.Fatalf("a proven address must register, got %d", code)
+	}
+	if got := storedWallet(t, db, user.ID); got != wallet.Address {
 		t.Fatalf("expected the address to be stored, got %q", got)
 	}
 }
@@ -156,19 +167,23 @@ func TestRegisterWallet_ValidAddressIsStored(t *testing.T) {
 // non-custodial address.
 func TestRegisterWallet_AddressFromDeletedAccountCanBeClaimedByNewUser(t *testing.T) {
 	r, user, db := newRegisterRig(t, "")
+	wallet := newTestWallet(t)
 
-	// Insert an old deleted user who still had registeredWallet
+	// An old deleted user who still holds the wallet, in another letter case.
 	deletedUserID := uuid.New()
 	if err := db.Exec(`INSERT INTO users (id, username, name, wallet_address, account_status) VALUES (?,?,?,?,?)`,
-		deletedUserID.String(), "old_user", "Old User", registeredWallet, models.AccountStatusDeleted).Error; err != nil {
+		deletedUserID.String(), "old_user", "Old User", strings.ToLower(wallet.Address), models.AccountStatusDeleted).Error; err != nil {
 		t.Fatalf("seed deleted user: %v", err)
 	}
 
-	body, _ := json.Marshal(map[string]string{"walletAddress": registeredWallet})
+	proof := signedProof(t, db, user.ID, wallet)
+	body, _ := json.Marshal(map[string]string{
+		"walletAddress": wallet.Address, "walletNonce": proof.Nonce, "walletSignature": proof.Signature,
+	})
 	if code := postRegister(t, r, string(body)); code != http.StatusOK {
 		t.Fatalf("registering address from a deleted account must succeed (200), got %d", code)
 	}
-	if got := storedWallet(t, db, user.ID); got != registeredWallet {
+	if got := storedWallet(t, db, user.ID); got != wallet.Address {
 		t.Fatalf("expected active user to now hold the address, got %q", got)
 	}
 	// The deleted user's reference should be released
@@ -176,4 +191,3 @@ func TestRegisterWallet_AddressFromDeletedAccountCanBeClaimedByNewUser(t *testin
 		t.Fatalf("expected deleted user's wallet_address to be cleared, got %q", got)
 	}
 }
-

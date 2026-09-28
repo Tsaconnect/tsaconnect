@@ -388,7 +388,7 @@ func (h *ITHandler) GetBalance(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	wallet, ok := callerWallet(c, user, c.Query("address"))
+	wallet, ok := requireOwnWallet(c, user, c.Query("address"))
 	if !ok {
 		return
 	}
@@ -766,6 +766,10 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	}
 	wallet, ok := callerWallet(c, user, req.WalletAddress)
 	if !ok {
+		return
+	}
+	// The operator debits this wallet with no signature from the user.
+	if _, ok := requireProvenWallet(c, user); !ok {
 		return
 	}
 	if !h.requireITAgreement(c, user.ID) {
