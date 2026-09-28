@@ -89,7 +89,7 @@ func (ch *CheckoutHandler) walletBalance(wallet, token string) *big.Int {
 		// Warm the cached operator caps here, off the DB transaction, so the
 		// per-order cap check made inside it (refuseSpendableLimit) never
 		// waits on an RPC while holding a pooled connection.
-		_ = ch.spendable.CheckLimits(context.Background(), nil)
+		ch.spendable.WarmLimits(context.Background())
 		balance, err := ch.spendable.Balance(wallet)
 		if err != nil {
 			log.Printf("[checkout] spendable MCGP balance read for %s failed (%v); not pre-checking", wallet, err)
@@ -970,6 +970,11 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 			if err := tx.First(&product, "id = ?", item.Product).Error; err != nil {
 				return nil, &cartPricingError{http.StatusBadRequest, fmt.Sprintf("Product %s not found", item.Product)}
 			}
+			// Every pay token: an order with yourself moves no value but still
+			// costs escrow/operator transactions and can farm fee rewards.
+			if product.UserID == user.ID {
+				return nil, &cartPricingError{http.StatusBadRequest, fmt.Sprintf("You can't buy your own listing (%s). Remove it from your cart.", product.Name)}
+			}
 
 			// Re-checked at order time, not just at add-to-cart: the listing or its
 			// seller can be suspended while it sits in someone's cart, and that
@@ -1542,6 +1547,11 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	if product.Type != models.ProductTypeService {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusBadRequest, "Not a service listing")
+		return
+	}
+	if product.UserID == user.ID {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "You can't book or pay for your own service")
 		return
 	}
 	var seller models.User

@@ -282,6 +282,17 @@ type Config struct {
 	// range cap still works — this only saves the probing round trips.
 	OTCLogMaxBlockRange uint64
 
+	// Spendable MCGP checkout abuse bounds (services.OrderMcgpAbuseLimits).
+	// A value <= 0 (or a share outside 1..100) keeps the built-in default.
+	// OrderMcgpMaxOpenHolds: unfinished Spendable payments one buyer may hold.
+	// OrderMcgpMaxRefundsPerDay: refunds/cancels in 24h after which the buyer
+	// cannot start another Spendable payment. OrderMcgpWindowSharePct: the part
+	// of the contract's debit and credit windows checkout may use; the rest is
+	// kept for bills and IT.
+	OrderMcgpMaxOpenHolds     int
+	OrderMcgpMaxRefundsPerDay int
+	OrderMcgpWindowSharePct   int
+
 	// MCGPSwapBAddress is the deployed McgpEntitlementSwap ("Swap Contract B")
 	// proxy/contract — the entitlement-ledger swap that mints spendable premium
 	// MCGP (buyPremium) and redeems legacy holders at the legacy price. UNSET =
@@ -797,6 +808,9 @@ func Load() *Config {
 	cfg.OTCMarketplaceDeployBlock = uint64(max(getEnvInt64("OTC_MARKETPLACE_DEPLOY_BLOCK",
 		int64(knownOTCDeployBlock(cfg.OTCMarketplaceAddress))), 0))
 	cfg.OTCLogMaxBlockRange = uint64(max(getEnvInt64("OTC_LOG_MAX_BLOCK_RANGE", 0), 0))
+	cfg.OrderMcgpMaxOpenHolds = int(getEnvInt64("ORDER_MCGP_MAX_OPEN_HOLDS", 3))
+	cfg.OrderMcgpMaxRefundsPerDay = int(getEnvInt64("ORDER_MCGP_MAX_REFUNDS_PER_DAY", 5))
+	cfg.OrderMcgpWindowSharePct = int(getEnvInt64("ORDER_MCGP_WINDOW_SHARE_PCT", 30))
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
 	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
 	// Gasless relaying — dormant unless both of the first two are set.

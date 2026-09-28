@@ -248,6 +248,14 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     return buildSections({ listed, majors, held, side, allow, holdingsOnly });
   }, [query, searchAssets, listedTokens, majorTokens, holdings, side, allow, holdingsOnly]);
 
+  // Whether `allow` keeps back a coin the wallet actually holds: the only case
+  // in which a picker's "why isn't X here" note says anything.
+  const hidesHeld = useMemo(
+    () => !!allow && holdings.some(h => h.balance > 0
+      && assetFromHolding(h).networks.every(n => !allow(n.chainId, n.token))),
+    [holdings, allow],
+  );
+
   const isSearch = !holdingsOnly && query.trim().length >= 2;
   // In holdings mode the list IS her balances: until they have loaded, an empty
   // list would read as "you hold nothing", so it counts as loading.
@@ -257,6 +265,7 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     loading: catalogLoading || (holdingsOnly && holdingsLoading),
     searching,
     error: isSearch ? searchError : error,
+    hidesHeld,
   };
 }
 

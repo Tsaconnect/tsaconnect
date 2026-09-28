@@ -24,7 +24,7 @@ const orderMcgpPaymentsDDL = `CREATE TABLE IF NOT EXISTS order_mcgp_payments (
 	debit_tx_hash TEXT, resolve_tx_hash TEXT, release_reason TEXT,
 	seller_wallet TEXT, seller_amount TEXT, seller_credit_tx_hash TEXT,
 	buyer_amount TEXT, collect_tx_hash TEXT, collect_settle_tx_hash TEXT,
-	decided_at DATETIME, failure_reason TEXT,
+	decided_at DATETIME, debited_at DATETIME, failure_reason TEXT,
 	created_at DATETIME, updated_at DATETIME)`
 
 // ── contract double ─────────────────────────────────────────────────────
@@ -45,7 +45,9 @@ type fakeEntitlement struct {
 	fromBought map[[32]byte]*big.Int
 	creditRefs map[[32]byte]bool
 
-	limits SpendableLimits
+	limits      SpendableLimits
+	limitsErr   error // SpendableLimits fails (an unreadable RPC)
+	limitsReads int
 
 	// failure injection
 	debitSendErr  error // returned instead of executing (nothing happens)
@@ -154,6 +156,10 @@ func (f *fakeEntitlement) PremiumBalance(user string) (*big.Int, error) {
 	return f.premium(user), nil
 }
 func (f *fakeEntitlement) SpendableLimits(context.Context) (SpendableLimits, error) {
+	f.limitsReads++
+	if f.limitsErr != nil {
+		return SpendableLimits{}, f.limitsErr
+	}
 	return f.limits, nil
 }
 func (f *fakeEntitlement) DebitRecord(_ context.Context, ref [32]byte) (DebitRecord, error) {

@@ -37,7 +37,8 @@ import (
 type orderSpendablePayer interface {
 	IsEnabled() bool
 	Balance(wallet string) (*big.Int, error)
-	CheckLimits(ctx context.Context, amount *big.Int) error
+	WarmLimits(ctx context.Context)
+	CheckCachedLimits(amount *big.Int) error
 	Fund(ctx context.Context, in services.OrderMcgpFundInput) (*models.OrderMcgpPayment, error)
 	Release(ctx context.Context, orderID uuid.UUID, plan services.OrderMcgpReleasePlan, applyOrder func(tx *gorm.DB) error) (*models.OrderMcgpPayment, error)
 	Refund(ctx context.Context, orderID uuid.UUID, applyOrder func(tx *gorm.DB) error) (*models.OrderMcgpPayment, error)
@@ -70,12 +71,13 @@ func (ch *CheckoutHandler) refuseMcgpUnavailable(c *gin.Context, token string) b
 
 // refuseSpendableLimit answers 400 (rolling tx back) when one order's MCGP
 // total is outside what a single operator debit and credit can carry, before
-// the order takes stock.
+// the order takes stock. It runs inside the order's DB transaction, so it only
+// reads the caps cached by walletBalance's WarmLimits — never the chain.
 func (ch *CheckoutHandler) refuseSpendableLimit(c *gin.Context, tx *gorm.DB, token string, amount *big.Int) bool {
 	if token != "MCGP" || !ch.spendableEnabled() {
 		return false
 	}
-	err := ch.spendable.CheckLimits(c.Request.Context(), amount)
+	err := ch.spendable.CheckCachedLimits(amount)
 	if err == nil {
 		return false
 	}
@@ -157,6 +159,15 @@ func spendableFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrOrderMcgpEscrowUnknown):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable,
 			"We could not confirm this order has not already been paid. Try again in a minute.", "escrow_unknown")
+	case errors.Is(err, services.ErrOrderMcgpOwnOrder):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"You can't buy your own listing.", "own_listing")
+	case errors.Is(err, services.ErrOrderMcgpTooManyOpen):
+		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
+			"You already have several orders paid with Spendable MCGP that are not finished yet. Complete or cancel one of them first, or pay with USDC or USDT.", "spendable_open_limit")
+	case errors.Is(err, services.ErrOrderMcgpTooManyRefunds):
+		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
+			"You've had several Spendable MCGP orders refunded or cancelled in the last 24 hours, so paying with Spendable MCGP is paused for now. Try again tomorrow, or pay with USDC or USDT.", "spendable_refund_limit")
 	case errors.Is(err, services.ErrOrderMcgpDisabled):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, mcgpCheckoutUnavailable, "mcgp_unavailable")
 	case errors.Is(err, services.ErrOrderMcgpBadState), errors.Is(err, services.ErrOrderMcgpNotFound):
@@ -215,6 +226,10 @@ func (ch *CheckoutHandler) PaySpendable(c *gin.Context) {
 	}
 	if order.BuyerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can pay this order")
+		return
+	}
+	if order.SellerID == user.ID {
+		spendableFail(c, services.ErrOrderMcgpOwnOrder)
 		return
 	}
 	if order.Token != "MCGP" {

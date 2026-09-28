@@ -156,3 +156,39 @@ func TestPay_WalletMCGPIsRefusedBeforeAnythingIsLockedOrPriced(t *testing.T) {
 		}
 	})
 }
+
+// L1: the token must be spelled as a 0x address. A bare-hex (or symbol)
+// spelling of MCGP would slip past RefuseSource's address match and could be
+// resolved by LiFi itself, so it never reaches LiFi.
+func TestRampSellQuote_RefusesATokenThatIsNotA0xAddress(t *testing.T) {
+	q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.98), sellRoute(t, 9.97))
+	q.chains = walletMCGPRegistry()
+	q.SetRouterAllowlist(map[int64][]common.Address{146: {common.HexToAddress(sellTestDiamond)}})
+	in := sellIn
+	in.FromChainID = 146
+	for _, tok := range []string{strings.TrimPrefix(sonicMCGP, "0x"), "MCGP", "", "0x1234"} {
+		in.FromToken = tok
+		if _, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellBadSourceAddress) && !errors.Is(err, ErrSellWalletMCGP) {
+			t.Fatalf("%q: err = %v, want a refusal", tok, err)
+		}
+	}
+	if lifi.quoteCalls() != 0 {
+		t.Fatalf("LiFi was asked %d times for a token that is not an address", lifi.quoteCalls())
+	}
+}
+
+// L1: what the route actually spends is checked too. A route for USDT whose
+// action.fromToken turns out to be wallet MCGP is refused before she signs.
+func TestRampSellQuote_RefusesARouteThatSpendsWalletMCGP(t *testing.T) {
+	r1, r2 := sellRoute(t, 9.98), sellRoute(t, 9.97)
+	r1.ApprovalToken, r2.ApprovalToken = sonicMCGP, sonicMCGP
+	q, _ := newSellQuoterWithFakes(t, r1, r2)
+	q.chains = walletMCGPRegistry()
+	q.SetRouterAllowlist(map[int64][]common.Address{146: {common.HexToAddress(sellTestDiamond)}})
+	in := sellIn
+	in.FromChainID = 146
+	in.FromToken = sonicUSDT
+	if res, err := q.Quote(context.Background(), in); !errors.Is(err, ErrSellWalletMCGP) {
+		t.Fatalf("res = %+v err = %v, want ErrSellWalletMCGP", res, err)
+	}
+}

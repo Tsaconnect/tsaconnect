@@ -3,7 +3,7 @@
 // The OTC sell form's limit: only MCGP the wallet bought on the OTC desk can
 // be sold back, and the form must agree with the API that enforces it.
 import {
-  otcSellBlocker, otcSellableDecimal, otcSellableDisplay, hasOtcSellable,
+  otcSellBlocker, otcSellableDecimal, otcSellableDisplay, hasOtcSellable, otcPositionFor,
   OTC_NOTHING_TO_SELL, OTC_POSITION_UNAVAILABLE,
 } from '../otcSell';
 
@@ -71,5 +71,22 @@ describe('Max and display', () => {
     expect(hasOtcSellable(wei(1))).toBe(true);
     expect(hasOtcSellable('0')).toBe(false);
     expect(hasOtcSellable(null)).toBeNull();
+  });
+});
+
+describe('otcPositionFor', () => {
+  const pos = { walletAddress: '0xAbC0000000000000000000000000000000000001', sellable: '1' };
+
+  it('keeps a position read for the signing wallet, whatever the case', () => {
+    expect(otcPositionFor(pos, '0xabc0000000000000000000000000000000000001')).toBe(pos);
+  });
+
+  it('drops a position read for another wallet (a stale answer after a switch)', () => {
+    expect(otcPositionFor(pos, '0xdef0000000000000000000000000000000000002')).toBeNull();
+  });
+
+  it('is null with no position or no signer', () => {
+    expect(otcPositionFor(null, '0xabc')).toBeNull();
+    expect(otcPositionFor(pos, '')).toBeNull();
   });
 });

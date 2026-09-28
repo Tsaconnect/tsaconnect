@@ -37,7 +37,10 @@ export interface AssetPickerProps {
    * flow's list. Search is hidden with it: the list is what she has.
    */
   holdingsOnly?: boolean;
-  /** A line under the coin list, e.g. why a coin she holds is not offered. */
+  /**
+   * A line under the coin list, e.g. why a coin she holds is not offered. With
+   * `allow`, shown only when `allow` actually keeps back a coin she holds.
+   */
   note?: string;
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
@@ -94,7 +97,8 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
   const [query, setQuery] = useState('');
   const [networkFor, setNetworkFor] = useState<Asset | null>(null);
   const lifi = useLiFiChainNames(visible);
-  const { sections, loading, searching, error } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
+  const { sections, loading, searching, error, hidesHeld } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
+  const showNote = !!note && !loading && (!allow || hidesHeld);
   const networksOf = (asset: Asset) => networksForSide(asset, side, allow, holdingsOnly);
 
   // Every open starts clean.
@@ -243,7 +247,7 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
             No coins in your wallet yet. Buy or receive some first, then come back.
           </Text>
         ) : null}
-        {note && !loading ? (
+        {showNote ? (
           <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg }}>
             {note}
           </Text>

@@ -42,6 +42,24 @@ const (
 	// otcLogMinChunk is the smallest span the scanner halves down to before
 	// it gives up and reports the RPC as unreadable.
 	otcLogMinChunk uint64 = 128
+	// otcLogRegrowAfter successful chunks in a row double a halved span again
+	// (up to the configured maximum), so one transient refusal does not slow
+	// every later catch-up for the life of the process.
+	otcLogRegrowAfter = 8
+)
+
+// Time bounds (vars so tests can shorten them).
+var (
+	// otcPositionBudget bounds one Position call — waiting for the index lock
+	// plus any refresh — so an OTC request answers "unavailable" instead of
+	// hanging behind a slow RPC or the boot warm-up.
+	otcPositionBudget = 15 * time.Second
+	// otcRPCCallTimeout bounds a single eth_blockNumber / eth_getLogs call; a
+	// timed-out getLogs is treated like any refusal and the span halves.
+	otcRPCCallTimeout = 10 * time.Second
+	// otcWarmSlice bounds one warm-up pass. Warm releases the lock between
+	// passes so requests can interleave with a long catch-up.
+	otcWarmSlice = 30 * time.Second
 )
 
 // OTCPosition is what one wallet may sell back on the OTC desk. Amounts are
@@ -125,10 +143,15 @@ type OTCPositionService struct {
 	lock chan struct{}
 
 	// Guarded by lock.
-	chunk       uint64 // current eth_getLogs span; 0 = unbounded
-	next        uint64 // first block not yet committed
-	committed   map[common.Address]*otcTotals
-	tail        map[common.Address]*otcTotals // provisional: blocks >= next
+	chunk     uint64 // current eth_getLogs span; 0 = unbounded
+	maxChunk  uint64 // configured span; regrowth stops here (0 = none)
+	chunkRuns int    // successful chunks since the span last changed
+	next      uint64 // first block not yet committed
+	committed map[common.Address]*otcTotals
+	// tail holds provisional logs for blocks [next, head]. It is only valid
+	// while refreshedAt is set: a refresh that fails part-way clears both,
+	// because committed may have advanced into blocks tail still counts.
+	tail        map[common.Address]*otcTotals
 	head        uint64
 	refreshedAt time.Time
 }
@@ -144,6 +167,7 @@ func NewOTCPositionService(logs OTCLogSource, balances OTCTokenBalanceReader, co
 		now:       time.Now,
 		lock:      make(chan struct{}, 1),
 		chunk:     maxBlockRange,
+		maxChunk:  maxBlockRange,
 		next:      deployBlock,
 		committed: map[common.Address]*otcTotals{},
 		tail:      map[common.Address]*otcTotals{},
@@ -154,16 +178,28 @@ func (s *OTCPositionService) configured() bool {
 	return s != nil && s.logs != nil && s.balances != nil && s.mcgpToken != "" && s.contract != (common.Address{})
 }
 
-// Warm runs the catch-up scan ahead of the first request.
+// Warm runs the catch-up scan ahead of the first request. It works in
+// slices of otcWarmSlice, releasing the lock between them so a request can
+// get in, and keeps going while each slice commits progress. Committed
+// progress survives a failed slice, so the next one (or a request) resumes.
 func (s *OTCPositionService) Warm(ctx context.Context) error {
 	if !s.configured() {
 		return fmt.Errorf("%w: not configured", ErrOTCPositionUnavailable)
 	}
-	if err := s.acquire(ctx); err != nil {
-		return err
+	for {
+		if err := s.acquire(ctx); err != nil {
+			return err
+		}
+		before := s.next
+		sliceCtx, cancel := context.WithTimeout(ctx, otcWarmSlice)
+		err := s.refresh(sliceCtx)
+		cancel()
+		progressed := s.next > before
+		s.release()
+		if err == nil || ctx.Err() != nil || !progressed {
+			return err
+		}
 	}
-	defer s.release()
-	return s.refresh(ctx)
 }
 
 // Position returns what wallet may sell back on the desk. The index is
@@ -179,6 +215,8 @@ func (s *OTCPositionService) Position(ctx context.Context, wallet string, maxAge
 	}
 	addr := common.HexToAddress(wallet)
 
+	ctx, cancel := context.WithTimeout(ctx, otcPositionBudget)
+	defer cancel()
 	if err := s.acquire(ctx); err != nil {
 		return nil, err
 	}
@@ -226,16 +264,37 @@ func (s *OTCPositionService) acquire(ctx context.Context) error {
 func (s *OTCPositionService) release() { <-s.lock }
 
 // refresh brings the index up to the chain head. Caller holds lock.
-func (s *OTCPositionService) refresh(ctx context.Context) error {
-	head, err := s.logs.BlockNumber(ctx)
+//
+// Committed progress is kept even when a later step fails (each chunk is
+// applied whole), but the provisional tail is not: it covered blocks from the
+// OLD next, which committed may now include, so reading committed+tail would
+// count those logs twice. On any error the tail and refreshedAt are cleared,
+// so nothing is read until a refresh rebuilds the tail from the new next.
+func (s *OTCPositionService) refresh(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			s.tail = map[common.Address]*otcTotals{}
+			s.refreshedAt = time.Time{}
+		}
+	}()
+
+	callCtx, cancel := context.WithTimeout(ctx, otcRPCCallTimeout)
+	head, err := s.logs.BlockNumber(callCtx)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("%w: block number: %v", ErrOTCPositionUnavailable, err)
 	}
-	if !s.refreshedAt.IsZero() && head <= s.head {
-		// Nothing new — or a lagging node reporting an older head. Never step
-		// backwards: that would drop provisional logs already counted.
+	if head <= s.head && !s.refreshedAt.IsZero() {
+		// Nothing new, or a lagging node reporting an older head, and the
+		// tail is intact. Never step backwards: that would drop provisional
+		// logs already counted.
 		s.refreshedAt = s.now()
 		return nil
+	}
+	if head < s.head {
+		// The tail must be rebuilt, and this node has not reached blocks
+		// already seen: rebuilding to its head would drop their logs.
+		return fmt.Errorf("%w: RPC head %d is behind the indexed head %d", ErrOTCPositionUnavailable, head, s.head)
 	}
 
 	var safe uint64
@@ -268,26 +327,29 @@ func (s *OTCPositionService) refresh(ctx context.Context) error {
 }
 
 // scan reads [from, to] in chunks, halving the span whenever the RPC refuses
-// one (range caps, result-count caps and timeouts all look alike from here).
-// apply runs once per successful chunk, after the whole chunk has decoded.
+// one (range caps, result-count caps and timeouts all look alike from here)
+// and doubling it again after a run of successes. apply runs once per
+// successful chunk, after the whole chunk has decoded.
 func (s *OTCPositionService) scan(ctx context.Context, from, to uint64, apply func([]otcDelta, uint64)) error {
 	for from <= to {
 		end := to
 		if s.chunk > 0 && to-from+1 > s.chunk {
 			end = from + s.chunk - 1
 		}
-		logs, err := s.logs.FilterLogs(ctx, ethereum.FilterQuery{
+		callCtx, cancel := context.WithTimeout(ctx, otcRPCCallTimeout)
+		logs, err := s.logs.FilterLogs(callCtx, ethereum.FilterQuery{
 			FromBlock: new(big.Int).SetUint64(from),
 			ToBlock:   new(big.Int).SetUint64(end),
 			Addresses: []common.Address{s.contract},
 			Topics:    [][]common.Hash{{otcBoughtTopic, otcSoldTopic}},
 		})
+		cancel()
 		if err != nil {
 			span := end - from + 1
 			if ctx.Err() != nil || span <= otcLogMinChunk {
 				return fmt.Errorf("%w: eth_getLogs %d-%d: %v", ErrOTCPositionUnavailable, from, end, err)
 			}
-			s.chunk = span / 2
+			s.chunk, s.chunkRuns = span/2, 0
 			continue
 		}
 		deltas, err := s.decode(logs)
@@ -296,8 +358,25 @@ func (s *OTCPositionService) scan(ctx context.Context, from, to uint64, apply fu
 		}
 		apply(deltas, end)
 		from = end + 1
+		s.regrowChunk()
 	}
 	return nil
+}
+
+// regrowChunk doubles a halved span after otcLogRegrowAfter full-size chunks
+// in a row, never past the configured maximum.
+func (s *OTCPositionService) regrowChunk() {
+	if s.chunk == 0 || (s.maxChunk != 0 && s.chunk >= s.maxChunk) {
+		return
+	}
+	s.chunkRuns++
+	if s.chunkRuns < otcLogRegrowAfter {
+		return
+	}
+	s.chunk, s.chunkRuns = s.chunk*2, 0
+	if s.maxChunk != 0 && s.chunk > s.maxChunk {
+		s.chunk = s.maxChunk
+	}
 }
 
 // Event topics, set by otc_service.go's init once the ABI is parsed (a

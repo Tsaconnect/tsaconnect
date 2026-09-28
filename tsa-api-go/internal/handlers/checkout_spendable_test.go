@@ -27,7 +27,7 @@ const orderMcgpPaymentsDDL = `CREATE TABLE IF NOT EXISTS order_mcgp_payments (
 	debit_tx_hash TEXT, resolve_tx_hash TEXT, release_reason TEXT,
 	seller_wallet TEXT, seller_amount TEXT, seller_credit_tx_hash TEXT,
 	buyer_amount TEXT, collect_tx_hash TEXT, collect_settle_tx_hash TEXT,
-	decided_at DATETIME, failure_reason TEXT,
+	decided_at DATETIME, debited_at DATETIME, failure_reason TEXT,
 	created_at DATETIME, updated_at DATETIME)`
 
 // fakeSpendablePayer stands in for OrderSpendablePaymentService: it records
@@ -40,15 +40,17 @@ type fakeSpendablePayer struct {
 	// decided makes Release/Refund answer as for a payment another request
 	// already decided.
 	decided bool
+	warmed  int
 
 	funded   []services.OrderMcgpFundInput
 	released []services.OrderMcgpReleasePlan
 	refunded []uuid.UUID
 }
 
-func (f *fakeSpendablePayer) IsEnabled() bool                             { return true }
-func (f *fakeSpendablePayer) Balance(string) (*big.Int, error)            { return f.balance, nil }
-func (f *fakeSpendablePayer) CheckLimits(context.Context, *big.Int) error { return f.limitErr }
+func (f *fakeSpendablePayer) IsEnabled() bool                  { return true }
+func (f *fakeSpendablePayer) Balance(string) (*big.Int, error) { return f.balance, nil }
+func (f *fakeSpendablePayer) WarmLimits(context.Context)       { f.warmed++ }
+func (f *fakeSpendablePayer) CheckCachedLimits(*big.Int) error { return f.limitErr }
 func (f *fakeSpendablePayer) Fund(_ context.Context, in services.OrderMcgpFundInput) (*models.OrderMcgpPayment, error) {
 	if f.fundErr != nil {
 		return nil, f.fundErr
