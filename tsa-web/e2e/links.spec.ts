@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { PRINT_COLORS } from '../src/features/business/scanToPay';
 import { mockApi } from './fixtures';
+import { decodePng, fraction } from './png';
 
 async function requestPayment(page: Page, fields: { amount: string; description: string; customer?: string }) {
   await page.getByRole('button', { name: 'Request payment' }).first().click();
@@ -44,13 +46,32 @@ test('an owner requests a payment, shares the link and cancels it', async ({ pag
   expect(share.searchParams.get('text')).toBe(`Sky Air Ltd is requesting ₦5,050.51 for Balance for LOS-ABV, 12 Oct. Pay here: ${made.checkoutUrl}`);
   await expect(ready.getByRole('img', { name: 'QR code for the payment link' })).toBeVisible();
 
-  // The QR card, drawn in a real browser: a 1080×1350 PNG named for the business.
-  const [saved] = await Promise.all([page.waitForEvent('download'), ready.getByRole('button', { name: 'Download QR' }).click()]);
-  expect(saved.suggestedFilename()).toBe('pay-sky-air-ltd.png');
-  const png = await readFile((await saved.path())!);
-  expect(png.subarray(1, 4).toString()).toBe('PNG');
-  expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1080, 1350]);
-  if (process.env.SAVE_QR_CARD) await saved.saveAs(process.env.SAVE_QR_CARD);
+  // The QR card, drawn in a real browser: a 1080×1350 PNG named for the business. The
+  // button is busy while the card is drawn, and keeps the focus through it.
+  const download = ready.getByRole('button', { name: 'Download QR' });
+  await download.evaluate((button) => {
+    new MutationObserver(() => { if (button.getAttribute('aria-busy')) button.dataset.wasBusy = 'yes'; })
+      .observe(button, { attributes: true, attributeFilter: ['aria-busy'] });
+  });
+  const [saved] = await Promise.all([
+    page.waitForEvent('download'),
+    download.evaluate((button: HTMLElement) => { button.focus(); button.click(); }), // the drawing starts with the tap
+  ]);
+  await expect(download).not.toHaveAttribute('aria-busy');
+  await expect(download).toHaveAttribute('data-was-busy', 'yes');
+  await expect(download).toBeFocused();
+  expect(saved.suggestedFilename()).toBe('pay-sky-air-ltd-test.png');
+  const card = decodePng(await readFile((await saved.path())!));
+  expect([card.width, card.height]).toEqual([1080, 1350]);
+  const dark = ([r, g, b]: number[]) => r < 80 && g < 80 && b < 80;
+  const near = (hex: string) => ([r, g, b]: number[]) =>
+    [r, g, b].every((c, i) => Math.abs(c - parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16)) < 24);
+  expect(fraction(card, { x: 0, y: 0, w: 1080, h: 50 }, dark)).toBe(1); // the ink header band
+  const qr = fraction(card, { x: 440, y: 670, w: 200, h: 200 }, dark); // the middle of the code
+  expect(qr).toBeGreaterThan(0.25);
+  expect(qr).toBeLessThan(0.75);
+  expect(fraction(card, { x: 20, y: 500, w: 160, h: 500 }, dark)).toBe(0); // white beside it
+  expect(fraction(card, { x: 0, y: 1240, w: 1080, h: 60 }, near(PRINT_COLORS.test))).toBeGreaterThan(0.005); // the test banner
 
   // One create, with an Idempotency-Key, in the mode on screen (live was never tried).
   const creates = api.calls.filter((c) => c.method === 'POST' && c.path === '/api/pay/merchant/links');
@@ -142,6 +163,10 @@ test('an owner makes a reusable link for the shop counter, prints its poster, pa
   await expect(poster.getByText('Scan to pay with TSA Connect')).toBeVisible();
   await expect(poster.getByText(link.url.replace('https://', ''), { exact: true })).toBeVisible();
   await expect(poster.getByText('Test poster — no real money moves')).toBeVisible();
+  // Its fixed print colours, shared with the QR card.
+  await expect(poster.getByText('Sky Air — Ikeja ticket desk')).toHaveCSS('color', 'rgb(61, 74, 73)');
+  await expect(poster.getByText('Test poster — no real money moves')).toHaveCSS('border-top-color', 'rgb(107, 78, 14)');
+  await expect(poster.getByRole('img', { name: 'QR code for the payment link' }).locator('..')).toHaveCSS('border-top-color', 'rgb(22, 32, 31)');
   await page.evaluate(() => {
     const w = window as unknown as { printed: number };
     w.printed = 0;
