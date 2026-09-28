@@ -215,6 +215,7 @@ func TestBillHandlerPayRequiresWallet(t *testing.T) {
 func TestBillHandlerPayThreadsWallet(t *testing.T) {
 	svc := &fakeBillSvc{order: models.BillOrder{ID: uuid.New(), Status: models.BillStatusDelivered}}
 	user := billTestUser()
+	withProvenWalletDB(t, user.ID, user.WalletAddress)
 	r := billTestRouter(svc, user)
 	w, _ := billDo(t, r, http.MethodPost, "/bills/orders/"+uuid.NewString()+"/pay", nil)
 	if w.Code != http.StatusOK || svc.payWallet != user.WalletAddress {

@@ -7,18 +7,14 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"gorm.io/driver/postgres"
+	"github.com/ojimcy/tsa-api-go/internal/testutil"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // The MCGP legs of the same defect it_stable_postgres_test.go was written for.
@@ -40,52 +36,7 @@ import (
 // developer's real it_intents table. Everything is dropped with the schema.
 func newITPostgresDB(t *testing.T, dst ...any) *gorm.DB {
 	t.Helper()
-
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		// Same fallback as the stablecoin harness: read the service's own .env
-		// so a local run picks it up the way the server does. The value is
-		// never read or logged here, only handed to the driver.
-		_ = godotenv.Load(filepath.Join("..", "..", ".env"))
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping the PostgreSQL-backed test")
-	}
-
-	schema := "it_mcgp_test_" + uuid.New().String()[:8]
-	scoped, err := dsnWithSchema(dsn, schema)
-	if err != nil {
-		t.Fatalf("scope dsn to a temp schema: %v", err)
-	}
-
-	admin, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Skipf("cannot reach PostgreSQL: %v", err)
-	}
-	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
-		t.Fatalf("create temp schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE").Error
-		if sqlDB, dErr := admin.DB(); dErr == nil {
-			_ = sqlDB.Close()
-		}
-	})
-
-	db, err := gorm.Open(postgres.Open(scoped), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatalf("open temp schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if sqlDB, dErr := db.DB(); dErr == nil {
-			_ = sqlDB.Close()
-		}
-	})
-	if err := db.AutoMigrate(dst...); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
+	return testutil.TempPostgres(t, "it_mcgp_test_", dst...)
 }
 
 // newITPostgresService mirrors newITTestService (the SQLite fixture) on

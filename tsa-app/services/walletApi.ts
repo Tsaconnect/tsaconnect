@@ -4,8 +4,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
 import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
-import { getActiveWallet } from './wallet';
+import { getActiveWallet, signMessage } from './wallet';
 import { toFiniteNumber } from './txFields';
+import {
+  jwtUserId,
+  proveWalletOwnership,
+  retryAfterWalletProof,
+  type WalletChallenge,
+  type WalletProofFields,
+} from './walletProof';
 import type { Candle } from '../utils/priceChart';
 
 export interface WalletBalance {
@@ -63,6 +70,8 @@ interface ApiResponse<T = any> {
   unanswered?: true;
   /** HTTP status of the server's answer, where a caller needs to tell 404 from a failure. */
   status?: number;
+  /** The server's machine code on a refusal (e.g. WALLET_PROOF_REQUIRED). */
+  code?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -322,22 +331,78 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
-/**
- * Register wallet address with backend after wallet creation/import
- */
-export async function registerWalletAddress(address: string): Promise<ApiResponse> {
+/** POST /wallet/challenge — what to sign to prove this account owns `address`. */
+export async function fetchWalletChallenge(address: string): Promise<ApiResponse<WalletChallenge>> {
   try {
     const headers = await getAuthHeaders();
-    const response = await fetch(`${API_BASE_URL}/wallet/register`, {
+    const response = await fetch(`${API_BASE_URL}/wallet/challenge`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ walletAddress: address }),
     });
-    return await response.json();
+    return { ...(await safeJson<WalletChallenge>(response)), status: response.status };
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Could not verify this wallet', unanswered: true };
+  }
+}
+
+/**
+ * Link `address` to the account (after creating, importing or switching to
+ * it), proving ownership with a signature from its key. Pass `privateKey` for
+ * a wallet not yet in SecureStore. An empty address unlinks.
+ *
+ * Resolves `{success: false}` rather than throwing — including with
+ * `code: WALLET_KEY_UNAVAILABLE` when this device cannot sign for the wallet.
+ */
+export async function registerWalletAddress(address: string, privateKey?: string): Promise<ApiResponse> {
+  try {
+    let proof: WalletProofFields | undefined;
+    if (address !== '') {
+      const outcome = await proveWalletOwnership(address, {
+        fetchChallenge: fetchWalletChallenge,
+        sign: (message, signer) => signMessage(message, signer, privateKey),
+        accountId: signedInUserId,
+      });
+      if (!outcome.ok) return { success: false, code: outcome.code, message: outcome.message };
+      proof = outcome.proof;
+    }
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/wallet/register`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ walletAddress: address, ...proof }),
+    });
+    return await safeJson(response);
   } catch (error: any) {
     console.error('Register wallet address error:', error);
     return { success: false, message: error.message || 'Failed to register wallet' };
   }
+}
+
+/**
+ * The account the API acts for: the `userId` claim of the token every request
+ * carries, falling back to the id stored at sign-in.
+ */
+async function signedInUserId(): Promise<string | null> {
+  return jwtUserId(await AsyncStorage.getItem('authToken')) ?? (await AsyncStorage.getItem('userId'));
+}
+
+/** Prove and link the device's active wallet — the fix for WALLET_PROOF_REQUIRED. */
+export async function linkActiveWallet(): Promise<ApiResponse> {
+  const active = await getActiveWallet();
+  if (!active) return { success: false, message: 'Set up a wallet first.' };
+  return registerWalletAddress(active);
+}
+
+/**
+ * Run an API call that needs the account's wallet proven (the operator debits
+ * it, or it would re-link the account); on WALLET_PROOF_REQUIRED prove the
+ * active wallet and retry once.
+ */
+export function withWalletProof<R extends { success: boolean; code?: string; message?: string }>(
+  call: () => Promise<R>,
+): Promise<R> {
+  return retryAfterWalletProof(call, linkActiveWallet);
 }
 
 /**
@@ -909,14 +974,18 @@ export interface OtcPosition {
  * returned as such so the sell form can refuse rather than guess.
  */
 export async function getOtcPosition(walletAddress: string): Promise<ApiResponse<OtcPosition>> {
-  try {
-    const headers = await getAuthHeaders();
-    const qp = new URLSearchParams({ walletAddress });
-    const response = await fetch(`${API_BASE_URL}/otc/position?${qp.toString()}`, { method: 'GET', headers });
-    return await safeJson<OtcPosition>(response);
-  } catch (error: any) {
-    return { success: false, message: error.message || 'Failed to load OTC position' };
-  }
+  // The API answers only for the account's linked wallet; a device on another
+  // wallet proves and links it, then asks again.
+  return withWalletProof(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const qp = new URLSearchParams({ walletAddress });
+      const response = await fetch(`${API_BASE_URL}/otc/position?${qp.toString()}`, { method: 'GET', headers });
+      return await safeJson<OtcPosition>(response);
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Failed to load OTC position' };
+    }
+  });
 }
 
 // ── OTC listing controls (admin-set) ──

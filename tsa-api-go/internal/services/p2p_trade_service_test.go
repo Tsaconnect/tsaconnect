@@ -1167,7 +1167,7 @@ func TestRecoverEIP712Signer_RejectsHighS(t *testing.T) {
 	sig := signVoucherForTest(t, hash, key)
 
 	// Sanity: canonical sig recovers correctly.
-	got, err := recoverEIP712Signer(hash, sig)
+	got, err := RecoverSigner(hash, sig)
 	if err != nil {
 		t.Fatalf("canonical recovery failed: %v", err)
 	}
@@ -1190,7 +1190,7 @@ func TestRecoverEIP712Signer_RejectsHighS(t *testing.T) {
 	} else {
 		bad[64] = 27
 	}
-	_, err = recoverEIP712Signer(hash, bad)
+	_, err = RecoverSigner(hash, bad)
 	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
 		t.Fatalf("expected high-S rejection, got %v", err)
 	}
@@ -1204,7 +1204,7 @@ func TestRecoverEIP712Signer_VNormalisation(t *testing.T) {
 	// Sig was bumped to 27/28 by signVoucherForTest. Flip back to 0/1 to
 	// confirm normalisation still recovers the same address.
 	sig[64] -= 27
-	got, err := recoverEIP712Signer(hash, sig)
+	got, err := RecoverSigner(hash, sig)
 	if err != nil {
 		t.Fatalf("v=0/1 normalisation: %v", err)
 	}
@@ -1215,7 +1215,7 @@ func TestRecoverEIP712Signer_VNormalisation(t *testing.T) {
 
 func TestRecoverEIP712Signer_RejectsBadLength(t *testing.T) {
 	var hash [32]byte
-	if _, err := recoverEIP712Signer(hash, []byte{0x01, 0x02}); err == nil {
+	if _, err := RecoverSigner(hash, []byte{0x01, 0x02}); err == nil {
 		t.Fatal("expected error on 2-byte sig")
 	}
 }

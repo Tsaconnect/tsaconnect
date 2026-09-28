@@ -153,7 +153,7 @@ const WalletManage = () => {
     setError('');
     try {
       const wallet = await generateWallet();
-      const registered = await registerWalletAddress(wallet.address);
+      const registered = await registerWalletAddress(wallet.address, wallet.privateKey);
       if (!registered.success) {
         throw new Error(
           registered.message || 'Could not link this wallet to your account. Please try again.',
@@ -273,7 +273,7 @@ const WalletManage = () => {
     setError('');
     try {
       const walletInfo = await importWalletFromMnemonic(phrase);
-      const registered = await registerWalletAddress(walletInfo.address);
+      const registered = await registerWalletAddress(walletInfo.address, walletInfo.privateKey);
       if (!registered.success) {
         throw new Error(
           registered.message || 'Could not link this wallet to your account. Please try again.',

@@ -13,7 +13,8 @@
 // callers get `unavailableMessage` instead of a generic "try again" that
 // would send the user retrying forever against a feature that is off.
 import { API_BASE_URL, REQUEST_TIMEOUT_MS, TRANSPORT_ERROR } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
+import { getAuthHeaders, linkActiveWallet } from '@/services/walletApi';
+import { WALLET_PROOF_REQUIRED } from '@/services/walletProof';
 import { makeIdempotencyKey } from '@/services/itApi';
 
 export class ApiError extends Error {
@@ -37,7 +38,11 @@ export function createApiRequest(opts: {
   /** Builds the thrown error. Defaults to a plain ApiError. */
   makeError?: (message: string, status: number, code?: string, body?: unknown) => Error;
 }): <T>(path: string, init?: RequestInit) => Promise<T> {
-  return async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return function request<T>(path: string, init?: RequestInit): Promise<T> {
+    return attempt<T>(path, init, false);
+  };
+
+  async function attempt<T>(path: string, init: RequestInit | undefined, afterWalletProof: boolean): Promise<T> {
     const headers = await getAuthHeaders();
     if (init?.method === 'POST') {
       (headers as Record<string, string>)['Idempotency-Key'] = makeIdempotencyKey();
@@ -64,10 +69,20 @@ export function createApiRequest(opts: {
       throw fail(opts.networkMessage, res.status);
     }
     if (!res.ok || body?.success === false) {
+      // The account's linked wallet is not the one this device uses (or was
+      // never proven): prove and link the active wallet, then ask once more.
+      // The API refuses before acting, so the retry cannot double anything.
+      if (body?.code === WALLET_PROOF_REQUIRED && !afterWalletProof) {
+        const linked = await linkActiveWallet();
+        if (!linked.success) {
+          throw fail(linked.message || body.message, res.status, linked.code ?? WALLET_PROOF_REQUIRED, body);
+        }
+        return attempt<T>(path, init, true);
+      }
       const fallback =
         res.status === 404 || res.status === 503 ? opts.unavailableMessage : opts.networkMessage;
       throw fail(body?.message ?? fallback, res.status, body?.code, body);
     }
     return body?.data as T;
-  };
+  }
 }

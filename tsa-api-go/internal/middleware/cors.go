@@ -31,7 +31,8 @@ func CORS(cfg *config.Config) gin.HandlerFunc {
 		}
 		c.Header("Access-Control-Allow-Credentials", "true")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
+		// X-Wallet-Proof-*: the signed wallet-ownership proof callerWallet reads.
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Wallet-Proof-Nonce, X-Wallet-Proof-Signature")
 		c.Header("Access-Control-Expose-Headers", "Content-Length")
 		c.Header("Access-Control-Max-Age", "3600")
 

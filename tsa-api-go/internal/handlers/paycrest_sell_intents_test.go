@@ -137,7 +137,8 @@ func TestCreateSellIntent_SellsToTheReconciledWallet(t *testing.T) {
 
 	body := sellIntentBody()
 	body["walletAddress"] = sellSwapOtherWallet
-	if w := postSellIntent(t, h, user, body); w.Code != http.StatusConflict {
+	// Refused before anything else: this account never proved it owns that wallet.
+	if w := postSellIntent(t, h, user, body); w.Code != http.StatusForbidden {
 		t.Fatalf("claiming another account's wallet: code = %d", w.Code)
 	}
 }

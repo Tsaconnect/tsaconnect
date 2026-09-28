@@ -146,16 +146,17 @@ func (h *BillHandler) Pay(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
-		return
-	}
 	orderID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
 		return
 	}
-	order, err := h.bills.Pay(c.Request.Context(), user.ID, user.WalletAddress, orderID)
+	// The operator debits this wallet with no signature from the user.
+	wallet, ok := requireProvenWallet(c, user)
+	if !ok {
+		return
+	}
+	order, err := h.bills.Pay(c.Request.Context(), user.ID, wallet, orderID)
 	if err != nil {
 		billFail(c, err)
 		return

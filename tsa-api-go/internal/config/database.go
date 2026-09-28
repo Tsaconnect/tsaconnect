@@ -233,6 +233,8 @@ func AutoMigrate() error {
 		// TSA Connect web sign-in
 		&models.WebSigninChallenge{},
 		&models.WebTrustedBrowser{},
+		// Proof of wallet ownership before a wallet is linked to an account
+		&models.WalletLinkChallenge{},
 	); err != nil {
 		return err
 	}
@@ -342,12 +344,11 @@ func AutoMigrate() error {
 	// maintaining them; leftover tables are inert until an operator runs that
 	// script.
 
-	// Replace the default unique index on wallet_address with a partial
-	// unique index that only enforces uniqueness for non-empty values.
-	// This allows multiple users to have an empty wallet_address (before
-	// they register a wallet).
-	DB.Exec("DROP INDEX IF EXISTS idx_users_wallet_address")
-	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wallet_address ON users (wallet_address) WHERE wallet_address != ''")
+	// One wallet per account, compared case-insensitively (an address in a
+	// different case is the same wallet). Never fatal — production may hold
+	// case-variant duplicates, which are alerted and must be resolved by hand;
+	// see migrateWalletAddressUniqueness.
+	migrateWalletAddressUniqueness(DB)
 
 	// Same move for phone_number: signup no longer requires it, so multiple users
 	// can legitimately have an empty phone number. The plain UNIQUE GORM built

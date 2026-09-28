@@ -61,14 +61,15 @@ func NewSwapHandler(cfg *config.Config, otcService *services.OTCService, blockch
 // GetOTCPosition handles GET /api/otc/position?walletAddress=0x… (auth): what
 // the caller's device wallet may sell back on the OTC desk — the MCGP it
 // bought there, net of what it sold, capped at what it still holds. Amounts
-// are MCGP wei strings.
+// are MCGP wei strings. Read-only: walletAddress must be the account's own
+// stored wallet; a GET never links a wallet.
 func (h *SwapHandler) GetOTCPosition(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	wallet, ok := callerWallet(c, user, c.Query("walletAddress"))
+	wallet, ok := requireOwnWallet(c, user, c.Query("walletAddress"))
 	if !ok {
 		return
 	}

@@ -59,7 +59,7 @@ func TestSellSwapQuote_UsesTheReconciledWalletAndMapsTooCostly(t *testing.T) {
 		AccountStatus: models.AccountStatusActive}
 	insertTestUser(t, db, user)
 	// Another active account already holds the address the next request will
-	// claim, which is what makes callerWallet refuse it.
+	// name as the receiver.
 	insertTestUser(t, db, &models.User{ID: uuid.New(), Username: "someone_else",
 		WalletAddress: sellSwapOtherWallet, AccountStatus: models.AccountStatusActive})
 
@@ -79,8 +79,10 @@ func TestSellSwapQuote_UsesTheReconciledWalletAndMapsTooCostly(t *testing.T) {
 	q = "fromChainId=56&fromToken=0x0000000000000000000000000000000000000000&fromAmount=1&fromAddress=" +
 		sellSwapUserWallet + "&walletAddress=" + sellSwapOtherWallet
 	w = doSellSwapQuote(t, h, user, q)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("a mismatched walletAddress must be refused by callerWallet (409), got %d", w.Code)
+	// A quote is a GET: it never re-points the account, so any wallet other
+	// than the account's own is refused.
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a mismatched walletAddress must be refused by requireOwnWallet (403), got %d", w.Code)
 	}
 }
 

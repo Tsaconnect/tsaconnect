@@ -105,7 +105,7 @@ func (h *MCGPSwapHandler) GetBalance(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	wallet, ok := callerWallet(c, user, c.Query("address"))
+	wallet, ok := requireOwnWallet(c, user, c.Query("address"))
 	if !ok {
 		return
 	}
@@ -741,12 +741,14 @@ func (h *MCGPSwapHandler) ConfirmPay(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Verification failed: "+err.Error())
 		return
 	}
-	// Bind the recipient to the user owning the on-chain `to` address.
-	var recipient models.User
-	if err := h.db.Where("LOWER(wallet_address) = LOWER(?)", ev.To.Hex()).First(&recipient).Error; err != nil {
+	// Bind the recipient to the account whose wallet the chain says was paid.
+	// That is the candidate itself: re-resolving by address could pick another
+	// account holding the same address in different case.
+	if !strings.EqualFold(ev.To.Hex(), candidate.WalletAddress) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "On-chain recipient is not a known user")
 		return
 	}
+	recipient := candidate
 
 	out := &models.MCGPSwapLedgerEntry{
 		UserID:             user.ID,

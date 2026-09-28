@@ -124,6 +124,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 			t.Fatalf("failed to create table: %v", err)
 		}
 	}
+	ensureWalletLinkChallenges(t, db)
 
 	config.DB = db
 	return db
@@ -171,8 +172,12 @@ func TestRegisterWalletAddress_Valid(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Set("user", user)
 
+	wallet := newTestWallet(t)
+	proof := signedProof(t, db, user.ID, wallet)
 	body, _ := json.Marshal(map[string]interface{}{
-		"walletAddress": "0x0000000000000000000000000000000000000001",
+		"walletAddress":   wallet.Address,
+		"walletNonce":     proof.Nonce,
+		"walletSignature": proof.Signature,
 	})
 	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -211,14 +216,17 @@ func TestRegisterWalletAddress_Duplicate(t *testing.T) {
 	db := setupTestDB(t)
 	h := setupTestHandlers(t)
 
-	addr := "0x0000000000000000000000000000000000000001"
+	wallet := newTestWallet(t)
 
 	// Create first user and assign the address.
 	otherUser := createTestUser(t, db)
-	setUserWallet(t, db, otherUser, addr)
+	setUserWallet(t, db, otherUser, wallet.Address)
+	mustRecordWalletProof(t, db, otherUser.ID, wallet.Address)
 
-	// Create second user and try to register the same address.
+	// Create second user and try to register the same address — proven, and
+	// in another letter case, and still refused: one account per wallet.
 	user := createTestUser(t, db)
+	proof := signedProof(t, db, user.ID, wallet)
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -226,7 +234,9 @@ func TestRegisterWalletAddress_Duplicate(t *testing.T) {
 	c.Set("user", user)
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"walletAddress": addr,
+		"walletAddress":   strings.ToLower(wallet.Address),
+		"walletNonce":     proof.Nonce,
+		"walletSignature": proof.Signature,
 	})
 	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")

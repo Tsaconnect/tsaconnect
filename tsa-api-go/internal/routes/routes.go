@@ -495,6 +495,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	walletGroup.Use(auth)
 	{
 		walletGroup.GET("/supported-tokens", h.GetSupportedTokens)
+		// Per-IP and service-wide ceilings on top of the per-account cap on open
+		// challenges inside the handler: each challenge is a DB row.
+		walletGroup.POST("/challenge",
+			middleware.RateLimiter(30, time.Minute),
+			middleware.RateLimiterBy(600, time.Minute, func(*gin.Context) string { return "wallet-challenge" }),
+			h.IssueWalletChallenge)
 		walletGroup.POST("/register", h.RegisterWalletAddress)
 		walletGroup.GET("/balances", h.GetWalletBalances)
 		walletGroup.GET("/discovered-tokens", h.GetDiscoveredTokens)
