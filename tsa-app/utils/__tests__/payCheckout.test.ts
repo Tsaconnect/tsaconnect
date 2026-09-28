@@ -30,6 +30,11 @@ it('blocks with the server reason when not payable', () => {
   const s = payScreenState({ id: ID, authed: true, checkout: { ...base, status: 'processing', payable: false, notPayableWhy: 'Someone else is completing this payment' }, now });
   expect(s).toEqual(expect.objectContaining({ kind: 'blocked', why: 'Someone else is completing this payment' }));
 });
+it('carries the server code for a block she can clear herself', () => {
+  const s = payScreenState({ id: ID, authed: true, checkout: { ...base, mode: 'live', payable: false,
+    notPayableWhy: 'Verify your identity to pay this', notPayableCode: 'kyc_verification_required' }, now });
+  expect(s).toEqual(expect.objectContaining({ kind: 'blocked', code: 'kyc_verification_required' }));
+});
 it('waits while its own payment is processing, and finishes on a terminal status', () => {
   expect(payScreenState({ id: ID, authed: true, checkout: { ...base, status: 'processing', payable: false, youArePaying: true }, now }).kind).toBe('waiting');
   for (const status of ['succeeded', 'failed', 'expired'] as const) {

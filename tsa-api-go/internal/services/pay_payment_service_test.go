@@ -468,11 +468,20 @@ func TestPayPayment_CheckoutViewSaysWhenALivePayerIsNotVerified(t *testing.T) {
 	in.Reference = "LIVE-KYC"
 	live, _, _ := s.Create(context.Background(), m, models.PayModeLive, in)
 	v, err := s.CheckoutView(context.Background(), payUser(t, s, false), live.ID, true)
-	if err != nil || v.Payable || v.NotPayableWhy != "Verify your identity to pay this" {
+	if err != nil || v.Payable || v.NotPayableWhy != "Verify your identity to pay this" || v.NotPayableCode != KYCVerificationRequiredCode {
 		t.Fatalf("unverified: %+v err %v", v, err)
 	}
+	// Verified with no legal name: Lock would refuse, so say so here — and that
+	// only support can fix it, not another verification.
+	nameless := payUser(t, s, true)
+	if err := s.db.Exec(`UPDATE users SET verified_legal_name = '' WHERE id = ?`, nameless.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.CheckoutView(context.Background(), nameless, live.ID, true); v.Payable || v.NotPayableCode != KYCLegalNameMissingCode {
+		t.Fatalf("verified without a legal name: %+v", v)
+	}
 	v, _ = s.CheckoutView(context.Background(), payUser(t, s, true), live.ID, true)
-	if !v.Payable {
+	if !v.Payable || v.NotPayableCode != "" {
 		t.Fatalf("verified payer must be payable: %+v", v)
 	}
 	// Test mode never needs KYC; an anonymous viewer is not asked either.

@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -68,7 +67,10 @@ type PayCheckoutView struct {
 	ReturnURL          string    `json:"returnUrl,omitempty"`
 	Payable            bool      `json:"payable"`
 	NotPayableWhy      string    `json:"notPayableWhy,omitempty"`
-	YouArePaying       bool      `json:"youArePaying"`
+	// NotPayableCode is set when the payer can fix the block themselves: one
+	// of the KYC refusal codes, so the app can offer the next step.
+	NotPayableCode string `json:"notPayableCode,omitempty"`
+	YouArePaying   bool   `json:"youArePaying"`
 	// OrderID is the payout order this payment's attempt opened: so a payer who
 	// comes back to a processing payment can resume funding it, and so one whose
 	// payment failed or needs chasing can report it (the report is filed on the
@@ -194,11 +196,16 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 
 	youArePaying := p.Status == models.PayStatusProcessing && p.PayerUserID != nil && user != nil && *p.PayerUserID == user.ID
 	payable, why := s.payability(p, m, liveEnabled, youArePaying)
+	var whyCode string
 	if payable && !youArePaying && p.Mode == models.PayModeLive && user != nil {
 		// Say so up front rather than let the payer tap Pay and be refused.
 		// Any other lookup error leaves payable as computed; Lock enforces it.
-		if err := requireVerifiedForMoneyIn(ctx, s.db, user.ID); errors.Is(err, ErrKYCVerificationRequired) {
+		whyCode = KYCRefusalCode(requireVerifiedForMoneyIn(ctx, s.db, user.ID))
+		switch whyCode {
+		case KYCVerificationRequiredCode:
 			payable, why = false, "Verify your identity to pay this"
+		case KYCLegalNameMissingCode:
+			payable, why = false, "We couldn't confirm the legal name on your verified identity. Contact support to pay this."
 		}
 	}
 
@@ -222,6 +229,7 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		SettleChainID:      p.SettleChainID,
 		Payable:            payable,
 		NotPayableWhy:      why,
+		NotPayableCode:     whyCode,
 		YouArePaying:       youArePaying,
 	}
 	if p.OpenLinkID != nil {

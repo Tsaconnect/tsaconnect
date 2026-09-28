@@ -50,7 +50,7 @@ func paycrestError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrKYCVerificationRequired):
 		// Buy only (money in). The machine code is what the app routes on:
 		// verify now, or contact support for a verified user with no legal name.
-		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), services.KYCRefusalCode(err))
 	case errors.Is(err, services.ErrPaycrestDisabled):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable")

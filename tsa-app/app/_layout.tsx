@@ -37,6 +37,13 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 // __tests__/route-back-affordance.test.ts); every other protected route is mapped.
 const HEADERED_LEAF_SCREENS: readonly string[] = ["activity", "orderdetail", "add-category"];
 
+// Public screens with the shared header, declared here rather than switched on
+// from inside the screen: a header turned on after the screen has mounted (by
+// the screen's own options, which pay.tsx only sets once auth has hydrated) is
+// laid out on Android without the status-bar inset, so its title and back
+// chevron sit under the clock.
+const HEADERED_PUBLIC_SCREENS: readonly string[] = ["pay", "delete-account"];
+
 // The root Stack, split out so it can read the theme — useDefaultScreenOptions()
 // calls useTheme(), which only resolves inside <ThemeProvider>.
 //
@@ -55,7 +62,9 @@ function AppStack() {
   const mayShowProtected = isAuthenticated || !isHydrated;
   return (
     <Stack screenOptions={{ ...headerOptions, headerShown: false }}>
-      {PUBLIC_ROUTES.map((name) => (
+      <Stack.Screen name="pay" options={{ headerShown: true, title: "Pay" }} />
+      <Stack.Screen name="delete-account" options={{ headerShown: true, title: "Delete Account" }} />
+      {PUBLIC_ROUTES.filter((name) => !HEADERED_PUBLIC_SCREENS.includes(name)).map((name) => (
         <Stack.Screen key={name} name={name} />
       ))}
       <Stack.Protected guard={mayShowProtected}>

@@ -39,6 +39,8 @@ export type PayCheckout = {
   returnUrl?: string;
   payable: boolean;
   notPayableWhy?: string;
+  /** Set when she can clear the block herself — a KYC refusal code (utils/kycRefusal.ts). Branch on this, never the words. */
+  notPayableCode?: string;
   youArePaying: boolean;
   /** The Paycrest order this payment is linked to — only for the paying user, only once linked. */
   orderId?: string;

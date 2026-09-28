@@ -13,7 +13,7 @@ jest.mock('@react-native-async-storage/async-storage', () =>
 jest.mock('expo-router', () => ({
   __esModule: true,
   Stack: { Screen: () => null },
-  router: { replace: jest.fn() },
+  router: { replace: jest.fn(), push: jest.fn() },
   useLocalSearchParams: () => ({ id: '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f' }),
 }));
 jest.mock('react-native-safe-area-context', () => {
@@ -39,7 +39,7 @@ jest.mock('@/components/ui', () => {
   return {
     __esModule: true,
     Text: (props: any) => react.createElement(RNText, null, props.children),
-    Button: (props: any) => react.createElement(RNText, null, props.title),
+    Button: (props: any) => react.createElement(RNText, { onPress: props.onPress }, props.title),
     ErrorState: (props: any) => react.createElement(RNText, null, props.title),
     Spinner: () => null,
     Icon: () => null,
@@ -59,6 +59,7 @@ jest.mock('@/hooks/usePayTest', () => ({
 jest.mock('@/utils/postAuthRoute', () => ({
   __esModule: true, rememberPendingPayment: jest.fn(async () => {}), forgetPendingPayment: jest.fn(async () => {}),
 }));
+jest.mock('@/utils/verifyThenReturn', () => ({ __esModule: true, verifyThenReturnToPayment: jest.fn(async () => {}) }));
 jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), getPublicPayment: jest.fn(async () => ({ expiresAt: '2026-10-03T12:00:00Z' })), returnUrlFor: () => null }));
 jest.mock('@/services/payHold', () => ({ __esModule: true, clearPayHold: jest.fn(async () => {}) }));
 jest.mock('@/components/pay/PayNaira', () => ({ __esModule: true, PayNaira: () => null }));
@@ -68,6 +69,7 @@ import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { getCheckout, type PayCheckout } from '@/services/payApi';
 import { clearPayHold } from '@/services/payHold';
+import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
 import PayScreen from '../pay';
 
 const ID = '3f2c1a9e-8b7d-4c6e-9f10-1a2b3c4d5e6f';
@@ -165,4 +167,40 @@ it('a reusable-link payment with no note shows only what it is for', async () =>
   await flush();
   expect(text()).toContain('For: Shop 12');
   expect(text()).not.toContain("Customer's note");
+});
+
+describe('a payment she cannot pay yet', () => {
+  const blocked = (over: Partial<PayCheckout>) => checkoutWith({ status: 'pending', payable: false, youArePaying: false, ...over });
+
+  it('asks an unverified payer to verify, and sends her there with the way back', async () => {
+    jest.mocked(getCheckout).mockResolvedValue(blocked({
+      notPayableWhy: 'Verify your identity to pay this', notPayableCode: 'kyc_verification_required',
+    }));
+    await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+    await flush();
+    expect(text()).toContain('Verify your identity to pay');
+    expect(text()).toContain('bring you back to this payment');
+    await act(async () => { tree.root.findAllByProps({ children: 'Verify identity' })[0].props.onPress(); });
+    expect(verifyThenReturnToPayment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: ID }));
+  });
+
+  it('points a verified payer with no legal name at support, not at verification', async () => {
+    jest.mocked(getCheckout).mockResolvedValue(blocked({
+      notPayableWhy: "We couldn't confirm the legal name on your verified identity. Contact support to pay this.",
+      notPayableCode: 'kyc_legal_name_missing',
+    }));
+    await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+    await flush();
+    expect(text()).toContain('Contact support to pay');
+    expect(text()).toContain('Email support');
+    expect(text()).not.toContain('Verify identity');
+  });
+
+  it('shows any other reason as it is, with nothing to tap', async () => {
+    jest.mocked(getCheckout).mockResolvedValue(blocked({ status: 'processing', notPayableWhy: 'Someone else is completing this payment' }));
+    await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+    await flush();
+    expect(text()).toContain('Someone else is completing this payment');
+    expect(text()).not.toContain('Verify identity');
+  });
 });

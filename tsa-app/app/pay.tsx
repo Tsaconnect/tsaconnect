@@ -35,9 +35,12 @@ import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type Pay
 import { clearPayHold } from '@/services/payHold';
 import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
 import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
+import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
+import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
+import { PayBlockedNotice } from '@/components/pay/PayBlockedNotice';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { formatKobo } from '@/utils/stableSellQuote';
@@ -195,7 +198,6 @@ export default function PayScreen() {
       <Stack.Screen
         options={{
           ...headerOptions,
-          headerShown: true,
           title: checkout?.merchantName ? `Pay ${checkout.merchantName}` : 'Pay',
         }}
       />
@@ -268,13 +270,7 @@ export default function PayScreen() {
                 </SummaryCard>
               </Card>
 
-              {state.kind === 'blocked' && (
-                <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg }}>
-                  <Text variant="bodySm" color="danger">
-                    {state.why}
-                  </Text>
-                </AccentCard>
-              )}
+              {state.kind === 'blocked' && <PayBlockedNotice why={state.why} code={state.code} />}
 
               {/* Live payments: the panel says what their attempt is waiting on — or that it still needs her. */}
               {state.kind === 'waiting' && state.checkout.mode === 'test' && (
@@ -351,6 +347,16 @@ export default function PayScreen() {
             </View>
           )}
         </ScrollView>
+
+        {state.kind === 'blocked' && state.code === KYC_VERIFICATION_REQUIRED && (
+          <BottomActionBar>
+            <Button
+              title="Verify identity"
+              size="lg"
+              onPress={() => void verifyThenReturnToPayment(router, state.checkout)}
+            />
+          </BottomActionBar>
+        )}
 
         {state.kind === 'payable' && state.checkout.mode === 'test' && (
           <BottomActionBar>

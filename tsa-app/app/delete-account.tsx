@@ -65,7 +65,7 @@ export default function DeleteAccountScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: true, title: 'Delete Account' }} />
+      <Stack.Screen options={{ title: 'Delete Account' }} />
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
