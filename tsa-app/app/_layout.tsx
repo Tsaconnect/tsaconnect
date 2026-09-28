@@ -33,16 +33,16 @@ installSessionTransport([axios, apiClient]);
 // Hold the native splash until the Inter family is ready (design-system fonts).
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
-// Declared by hand below (their header options are read by
-// __tests__/route-back-affordance.test.ts); every other protected route is mapped.
-const HEADERED_LEAF_SCREENS: readonly string[] = ["activity", "orderdetail", "add-category"];
-
-// Public screens with the shared header, declared here rather than switched on
-// from inside the screen: a header turned on after the screen has mounted (by
-// the screen's own options, which pay.tsx only sets once auth has hydrated) is
-// laid out on Android without the status-bar inset, so its title and back
-// chevron sit under the clock.
-const HEADERED_PUBLIC_SCREENS: readonly string[] = ["pay", "delete-account"];
+// Screens with the shared header are declared by hand below, in the section
+// their access list puts them in (their header options are read by
+// __tests__/route-back-affordance.test.ts); every other route is mapped. The
+// header is declared here rather than switched on from inside the screen: a
+// header turned on after the screen has mounted (as pay.tsx did once auth had
+// hydrated) is laid out on Android without the status-bar inset, so its title
+// and back chevron sit under the clock. app/__tests__/routeAccess.test.ts keeps
+// these lists and the hand-declared screens in step.
+const HEADERED_LEAF_SCREENS: readonly string[] = ["activity", "orderdetail", "add-category", "delete-account"];
+const HEADERED_PUBLIC_SCREENS: readonly string[] = ["pay"];
 
 // The root Stack, split out so it can read the theme — useDefaultScreenOptions()
 // calls useTheme(), which only resolves inside <ThemeProvider>.
@@ -63,7 +63,6 @@ function AppStack() {
   return (
     <Stack screenOptions={{ ...headerOptions, headerShown: false }}>
       <Stack.Screen name="pay" options={{ headerShown: true, title: "Pay" }} />
-      <Stack.Screen name="delete-account" options={{ headerShown: true, title: "Delete Account" }} />
       {PUBLIC_ROUTES.filter((name) => !HEADERED_PUBLIC_SCREENS.includes(name)).map((name) => (
         <Stack.Screen key={name} name={name} />
       ))}
@@ -71,6 +70,7 @@ function AppStack() {
         <Stack.Screen name="activity" options={{ headerShown: true, title: "Activity" }} />
         <Stack.Screen name="orderdetail" options={{ headerShown: true, title: "Order Detail" }} />
         <Stack.Screen name="add-category" options={{ headerShown: true, title: "Add Category" }} />
+        <Stack.Screen name="delete-account" options={{ headerShown: true, title: "Delete Account" }} />
         {PROTECTED_ROUTES.filter((name) => !HEADERED_LEAF_SCREENS.includes(name)).map((name) => (
           <Stack.Screen key={name} name={name} />
         ))}

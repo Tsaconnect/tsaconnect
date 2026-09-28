@@ -48,3 +48,28 @@ describe('root route access', () => {
     expect(PUBLIC_ROUTES).toContain('login');
   });
 });
+
+// app/_layout.tsx declares a few screens by hand (to give them a header) and
+// maps the rest of each list. A hand-declared screen in the wrong section, or
+// one the mapped list still includes, crashes the root stack at launch
+// ("Screen names must be unique") — and a protected screen declared in the
+// public section would be reachable signed out.
+describe('app/_layout.tsx', () => {
+  const src = fs.readFileSync(path.join(APP_DIR, '_layout.tsx'), 'utf8');
+  const [publicPart, protectedPart] = src.split('<Stack.Protected');
+  const declared = (part: string) => [...part.matchAll(/<Stack\.Screen\s+name="([^"]+)"/g)].map((m) => m[1]);
+  const handList = (name: string): string[] =>
+    JSON.parse(src.match(new RegExp(`const ${name}[^=]*=\\s*(\\[[^\\]]*\\])`))![1]);
+
+  it('hand-declares public screens only from PUBLIC_ROUTES, and leaves them out of the mapped list', () => {
+    const hand = declared(publicPart);
+    for (const name of hand) expect(PUBLIC_ROUTES as readonly string[]).toContain(name);
+    expect([...hand].sort()).toEqual([...handList('HEADERED_PUBLIC_SCREENS')].sort());
+  });
+
+  it('hand-declares protected screens only from PROTECTED_ROUTES, and leaves them out of the mapped list', () => {
+    const hand = declared(protectedPart);
+    for (const name of hand) expect(PROTECTED_ROUTES as readonly string[]).toContain(name);
+    expect([...hand].sort()).toEqual([...handList('HEADERED_LEAF_SCREENS')].sort());
+  });
+});
