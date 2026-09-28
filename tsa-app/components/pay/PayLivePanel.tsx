@@ -22,8 +22,8 @@ import type { PayHook } from '@/hooks/usePayLive';
 import type { LiFiToken } from '@/services/lifi';
 import type { PayCheckout } from '@/services/payApi';
 import { isDisputableOrder } from '@/services/paycrestStatus';
-import { KYC_ROUTE, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
-import { rememberPendingPayment } from '@/utils/postAuthRoute';
+import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
+import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
 
 import { depositStillToSendCopy, linkedOrder, PRICE_STALE_MS, shortfallCopy } from '@/utils/payCheckout';
 import { formatKobo } from '@/utils/stableSellQuote';
@@ -90,13 +90,6 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
     // only the flip to failed re-prices.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pay.stage]);
-
-  // KYC can outlast this screen (a review takes hours): remember the payment
-  // until it expires, so finishing KYC — or the next launch — brings her back.
-  const verifyThenReturn = async () => {
-    await rememberPendingPayment(checkout.id, { expiresAt: checkout.expiresAt });
-    router.push(`${KYC_ROUTE}?returnTo=pay` as never);
-  };
 
   const onPay = () => {
     if (!pick || !price?.label || !price.fromAmount) return;
@@ -209,7 +202,7 @@ export function PayLivePanel({ checkout, pay, showForm, allow, receives, note, s
         <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg, gap: spacing.md }}>
           <Text variant="bodySm" color="danger">{pay.error ?? 'The payment could not be completed.'}</Text>
           {pay.errorCode === KYC_VERIFICATION_REQUIRED && (
-            <Button title="Verify identity" onPress={() => void verifyThenReturn()} />
+            <Button title="Verify identity" onPress={() => void verifyThenReturnToPayment(router, checkout)} />
           )}
         </AccentCard>
       )}

@@ -98,6 +98,29 @@ func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUI
 	return nil
 }
 
+// The machine codes every money-in refusal carries, on every gated path. The
+// app routes KYCVerificationRequiredCode to the verification flow and shows
+// KYCLegalNameMissingCode as a contact-support message, so a second spelling
+// of either would silently lose an entry point on the client.
+const (
+	KYCVerificationRequiredCode = "kyc_verification_required"
+	KYCLegalNameMissingCode     = "kyc_legal_name_missing"
+)
+
+// KYCRefusalCode names the money-in refusal err carries, or "" when it is not
+// one. The name-missing case is checked first because it also matches the
+// general sentinel.
+func KYCRefusalCode(err error) string {
+	switch {
+	case errors.Is(err, ErrKYCLegalNameMissing):
+		return KYCLegalNameMissingCode
+	case errors.Is(err, ErrKYCVerificationRequired):
+		return KYCVerificationRequiredCode
+	default:
+		return ""
+	}
+}
+
 // verifiedIdentity is the one read of whether a user is KYC-verified and the
 // legal name their verification captured. The name is returned only while the
 // status is verified: a rejected or expired verification keeps the name it read

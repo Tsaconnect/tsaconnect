@@ -580,7 +580,7 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 		case errors.Is(err, services.ErrITVAWalletRequired):
 			utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
 		case errors.Is(err, services.ErrKYCVerificationRequired):
-			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), kycRefusalCode(err))
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), services.KYCRefusalCode(err))
 		case errors.Is(err, services.ErrITKYCRequired):
 			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
 		default:
@@ -691,7 +691,7 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		// properly: a blanket 400 gives the app no code to route on and leaves
 		// the user on a payment screen with nowhere to go, which is the whole
 		// failure the machine code exists to prevent.
-		if code := kycRefusalCode(err); code != "" {
+		if code := services.KYCRefusalCode(err); code != "" {
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), code)
 			return
 		}
@@ -1570,29 +1570,6 @@ func (h *ITHandler) GetStuckStableBuys(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Stuck buys", gin.H{"stuck": rows, "thresholdMinutes": minutes})
 }
 
-// The machine codes every money-in refusal carries, on every gated path. The
-// app routes kycRequiredCode to the verification flow and shows
-// kycLegalNameMissingCode as a contact-support message, so a second spelling
-// of either would silently lose an entry point on the client.
-const (
-	kycRequiredCode         = "kyc_verification_required"
-	kycLegalNameMissingCode = "kyc_legal_name_missing"
-)
-
-// kycRefusalCode names the money-in refusal err carries, or "" when it is not
-// one. The name-missing case is checked first because it also matches the
-// general sentinel.
-func kycRefusalCode(err error) string {
-	switch {
-	case errors.Is(err, services.ErrKYCLegalNameMissing):
-		return kycLegalNameMissingCode
-	case errors.Is(err, services.ErrKYCVerificationRequired):
-		return kycRequiredCode
-	default:
-		return ""
-	}
-}
-
 // stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
 // is a 400; a missing provider or unconfigured deposit address is a 503,
 // because the request was fine and the platform was not.
@@ -1702,7 +1679,7 @@ func stableCodeFor(err error) string {
 	case errors.Is(err, services.ErrStableDeliveryExhausted):
 		return "stable_delivery_exhausted"
 	case errors.Is(err, services.ErrKYCVerificationRequired):
-		return kycRefusalCode(err)
+		return services.KYCRefusalCode(err)
 	default:
 		return ""
 	}
@@ -1737,7 +1714,7 @@ func (h *ITHandler) requireVerifiedForMoneyIn(c *gin.Context, userID uuid.UUID) 
 	if err == nil {
 		return true
 	}
-	if code := kycRefusalCode(err); code != "" {
+	if code := services.KYCRefusalCode(err); code != "" {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), code)
 		return false
 	}

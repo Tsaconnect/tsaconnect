@@ -167,7 +167,7 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			return
 		}
 		if !verified {
-			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", kycRequiredCode)
+			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", services.KYCVerificationRequiredCode)
 			return
 		}
 	}

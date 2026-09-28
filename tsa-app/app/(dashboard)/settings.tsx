@@ -6,13 +6,13 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
-  Linking,
 } from "react-native";
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import Constants from "expo-constants";
 import * as Updates from "expo-updates";
 import { COMPANY } from "@/constants/legal";
+import { emailSupport } from "@/utils/contactSupport";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "../../AuthContext/AuthContext";
 import CurrencySelector from "../../components/currency/CurrencySelector";
@@ -281,11 +281,7 @@ const SettingsScreen = () => {
           icon: "help-outline",
           label: "Contact Support",
           description: `Email ${COMPANY.supportEmail}`,
-          onPress: () => {
-            Linking.openURL(`mailto:${COMPANY.supportEmail}`).catch(() =>
-              Alert.alert("Support", `Email us at ${COMPANY.supportEmail}`)
-            );
-          },
+          onPress: () => emailSupport(),
         },
         {
           icon: "info-outline",

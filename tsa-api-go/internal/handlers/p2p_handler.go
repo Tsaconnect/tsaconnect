@@ -200,7 +200,7 @@ func mapServiceError(c *gin.Context, err error) bool {
 	body := gin.H{"success": false, "message": err.Error()}
 	// The KYC refusal is the one error here the app routes on rather than just
 	// displaying, so it carries the same machine code as the IT legs.
-	if code := kycRefusalCode(err); code != "" {
+	if code := services.KYCRefusalCode(err); code != "" {
 		body["code"] = code
 	}
 	c.AbortWithStatusJSON(status, body)

@@ -25,7 +25,7 @@ export type PayScreenState =
   | { kind: 'payable'; checkout: PayCheckout }
   | { kind: 'waiting'; checkout: PayCheckout }
   | { kind: 'done'; checkout: PayCheckout }
-  | { kind: 'blocked'; checkout: PayCheckout; why: string };
+  | { kind: 'blocked'; checkout: PayCheckout; why: string; code?: string };
 
 export const TERMINAL_STATUSES: PayStatus[] = ['succeeded', 'failed', 'expired'];
 
@@ -70,6 +70,7 @@ export function payScreenState(input: {
       kind: 'blocked',
       checkout,
       why: checkout.notPayableWhy ?? 'This payment is not currently payable.',
+      code: checkout.notPayableCode,
     };
   }
 
