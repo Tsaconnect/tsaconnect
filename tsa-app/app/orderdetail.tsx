@@ -26,6 +26,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import {
   getOrderById,
+  confirmReceipt,
+  isSpendableOrder,
   prepareConfirm,
   submitConfirm,
   requestRefund,
@@ -118,6 +120,15 @@ const OrderDetailScreen = () => {
             if (!order) return;
             setActionLoading(true);
             try {
+              if (isSpendableOrder(order)) {
+                // Paid from Spendable MCGP: nothing to sign — the backend
+                // releases the hold to the seller.
+                const res = await confirmReceipt(order.id);
+                if (!res.success) throw new Error(res.message || 'Failed to confirm receipt');
+                Alert.alert('Success', 'Confirmed! The payment is being released to the seller.');
+                fetchOrder();
+                return;
+              }
               const prepResult = await prepareConfirm(order.id);
               if (!prepResult.success || !prepResult.data) {
                 throw new Error(prepResult.message || 'Failed to prepare confirm');
@@ -147,7 +158,9 @@ const OrderDetailScreen = () => {
     Alert.alert(
       'Request Refund',
       order?.status === 'escrowed'
-        ? 'This will initiate an on-chain refund request.'
+        ? isSpendableOrder(order)
+          ? 'This refunds the order now. The MCGP goes back to your Spendable balance.'
+          : 'This will initiate an on-chain refund request.'
         : 'This will send your refund request for admin review.',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -170,6 +183,8 @@ const OrderDetailScreen = () => {
                   'Refund Requested',
                   `On-chain refund request submitted.\nTx: ${txHash.slice(0, 16)}...`,
                 );
+              } else if (result.data?.status === 'refunded') {
+                Alert.alert('Refunded', 'The MCGP is back in your Spendable balance.');
               } else {
                 Alert.alert('Success', 'Refund request submitted for review.');
               }

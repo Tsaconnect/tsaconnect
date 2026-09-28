@@ -8,6 +8,11 @@
 // (POST /orders/quote), which is priced by the same code that creates the
 // orders — so the total a buyer confirms is the total the wallet is asked to
 // approve. The escrow sign/broadcast/submit sequence itself is unchanged.
+//
+// MCGP is the exception: it is paid from Spendable MCGP (the entitlement
+// balance), never from MCGP in the wallet. Its balance, shortfall and payment
+// all go through that path — the backend holds the MCGP with no signature and
+// no gas, so the buyer authorizes it with the app's PIN/biometric prompt.
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
@@ -21,7 +26,8 @@ import {
   Order,
   type CartQuote,
 } from '@/services/orderApi';
-import { escrowOrder, OrderNotPayableError, type EscrowProgress } from '@/services/serviceCheckout';
+import { payOrder, OrderNotPayableError, type EscrowProgress } from '@/services/serviceCheckout';
+import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
@@ -88,6 +94,9 @@ const CheckoutScreen = () => {
   const [repriced, setRepriced] = useState(false);
   const [hasWallet, setHasWallet] = useState<boolean | null>(null);
   const [addressSheetOpen, setAddressSheetOpen] = useState(false);
+  // What runs once the buyer authorizes a Spendable MCGP payment (a first
+  // attempt or a retry); null while no prompt is open.
+  const [authorizeAction, setAuthorizeAction] = useState<(() => void) | null>(null);
   const {
     addresses,
     selected: deliveryAddress,
@@ -256,7 +265,19 @@ const CheckoutScreen = () => {
     setConfirmOpen(true);
   };
 
-  // --- Step 2 → 3: the escrow checkout flow ---
+  // --- Step 2 → 3 ---
+  // Spendable MCGP moves without a wallet signature, so the app's own
+  // authorization prompt stands in for it (as for bills and transfers).
+  const confirmPayment = () => {
+    if (!isMCGP) {
+      payNow();
+      return;
+    }
+    setConfirmOpen(false);
+    setAuthorizeAction(() => payNow);
+  };
+
+  // --- the checkout flow: create orders, then pay each ---
   const payNow = async () => {
     if (!quote || !location) return;
     setConfirmOpen(false);
@@ -317,8 +338,8 @@ const CheckoutScreen = () => {
   // One payment run at a time: a double tap on "Try again" must not sign twice.
   const paying = useRef(false);
 
-  // Pays each order not skipped through the shared escrow sequence. The run
-  // succeeds only when every order ends up paid.
+  // Pays each order not skipped — escrow for stablecoins, a Spendable MCGP
+  // hold for MCGP (payOrder). The run succeeds only when every order ends up paid.
   const payOrders = async (list: Order[], skip: string[]) => {
     if (paying.current) return;
     paying.current = true;
@@ -328,10 +349,15 @@ const CheckoutScreen = () => {
         if (skip.includes(order.id)) continue;
         setCurrentOrderIndex(i);
         try {
-          await escrowOrder(
+          await payOrder(
             order,
             (phase) => {
-              if (phase === 'approving_token' || phase === 'creating_escrow' || phase === 'submitting') {
+              if (
+                phase === 'approving_token' ||
+                phase === 'creating_escrow' ||
+                phase === 'submitting' ||
+                phase === 'paying_spendable'
+              ) {
                 setSigningPhase(phase);
               }
             },
@@ -365,9 +391,33 @@ const CheckoutScreen = () => {
 
   const retryPayment = () => {
     if (paying.current) return;
-    setSigningError(null);
-    payOrders(orders, [...completedOrders, ...unpayable]);
+    const resume = () => {
+      setSigningError(null);
+      payOrders(orders, [...completedOrders, ...unpayable]);
+    };
+    // A retry moves Spendable MCGP too, so it is authorized again.
+    if (paidQuote?.token === 'MCGP') setAuthorizeAction(() => resume);
+    else resume();
   };
+
+  const authQuote = paidQuote ?? quote;
+  const authorizeGate = (
+    <AuthorizationModal
+      visible={authorizeAction != null}
+      title="Authorize payment"
+      description={
+        authQuote
+          ? `Pay ${(paidQuote ? paidFmt : fmt).token(authQuote.totals.total)} from your Spendable MCGP. It is held until you confirm delivery.`
+          : undefined
+      }
+      onAuthorized={() => {
+        const run = authorizeAction;
+        setAuthorizeAction(null);
+        run?.();
+      }}
+      onCancel={() => setAuthorizeAction(null)}
+    />
+  );
 
   // ===== HEADER =====
   const Header = ({ title = 'Checkout', showBack = true }: { title?: string; showBack?: boolean }) => (
@@ -495,6 +545,7 @@ const CheckoutScreen = () => {
             loadCart();
           }}
         />
+        {authorizeGate}
       </SafeAreaView>
     );
   }
@@ -653,7 +704,7 @@ const CheckoutScreen = () => {
                   onPress={() => setSelectedToken(tk)}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
-                  accessibilityLabel={`Pay with ${tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
+                  accessibilityLabel={`Pay with ${tk === 'MCGP' ? 'Spendable MCGP' : tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
                   style={{
                     flex: 1,
                     alignItems: 'center',
@@ -682,7 +733,7 @@ const CheckoutScreen = () => {
                     {tk}
                   </Text>
                   <Text variant="caption" color="textMuted" numeric>
-                    {bal != null ? `Bal ${formatBalance(bal)}` : '—'}
+                    {bal != null ? `${tk === 'MCGP' ? 'Spendable' : 'Bal'} ${formatBalance(bal)}` : '—'}
                   </Text>
                 </PressableScale>
               );
@@ -690,11 +741,13 @@ const CheckoutScreen = () => {
           </View>
           {shortOnToken ? (
             <Notice tone="danger" icon="info">
-              {`Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
+              {isMCGP
+                ? `Not enough Spendable MCGP. You need ${fmt.token(quote!.totals.total)}; your Spendable MCGP balance is ${formatBalance(tokenBalance!)} MCGP. MCGP in your wallet can't pay.`
+                : `Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
             </Notice>
           ) : isMCGP ? (
             <Notice tone="success" icon="star">
-              MCGP: no network or platform fee
+              Paid from your Spendable MCGP: no gas, no platform fee
             </Notice>
           ) : feeConfig?.buyerCashbackPercent ? (
             <Notice tone="success" icon="star">
@@ -772,7 +825,7 @@ const CheckoutScreen = () => {
         <ConfirmPaymentSheet
           visible={confirmOpen}
           onClose={() => setConfirmOpen(false)}
-          onConfirm={payNow}
+          onConfirm={confirmPayment}
           quote={quote}
           shippingLabel={feeRowLabel}
           walletAddress={walletAddress}
@@ -780,6 +833,7 @@ const CheckoutScreen = () => {
           gasBalance={balances.S}
         />
       ) : null}
+      {authorizeGate}
     </SafeAreaView>
   );
 };

@@ -1,6 +1,7 @@
 // Checkout signing progress as named steps: create the orders, then for each
-// order approve the token and lock it in escrow. A multi-order cart shows where
-// it is instead of one spinner line that looks stuck.
+// order approve the token and lock it in escrow — or, for MCGP, one step per
+// order that holds it from Spendable MCGP (nothing to sign). A multi-order cart
+// shows where it is instead of one spinner line that looks stuck.
 import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
@@ -12,6 +13,7 @@ export type PaymentPhase =
   | 'approving_token'
   | 'creating_escrow'
   | 'submitting'
+  | 'paying_spendable'
   | 'done';
 
 interface Step {
@@ -38,19 +40,28 @@ export interface PaymentProgressProps {
   onRetry?: () => void;
 }
 
-/** Index of the active step: 0 = create orders, then two steps per order. */
-export function activeStepIndex(phase: PaymentPhase, orderIndex: number, orderCount: number): number {
+/**
+ * Index of the active step: 0 = create orders, then stepsPerOrder steps per
+ * order (two for escrow — approve, lock; one for Spendable MCGP — hold).
+ */
+export function activeStepIndex(
+  phase: PaymentPhase,
+  orderIndex: number,
+  orderCount: number,
+  stepsPerOrder = 2,
+): number {
   switch (phase) {
     case 'creating_orders':
     case 'idle':
       return 0;
     case 'approving_token':
-      return 1 + orderIndex * 2;
+    case 'paying_spendable':
+      return 1 + orderIndex * stepsPerOrder;
     case 'creating_escrow':
     case 'submitting':
-      return 2 + orderIndex * 2;
+      return stepsPerOrder + orderIndex * stepsPerOrder;
     case 'done':
-      return 1 + orderCount * 2;
+      return 1 + orderCount * stepsPerOrder;
   }
 }
 
@@ -68,14 +79,27 @@ export const PaymentProgress = ({
 }: PaymentProgressProps) => {
   const { colors, spacing, radius } = useTheme();
   const many = orders.length > 1;
+  const spendable = token === 'MCGP';
   const steps: Step[] = [
     { title: 'Create orders', detail: 'Reserving stock at the quoted price' },
-    ...orders.flatMap((o, i) => [
-      { title: `Allow ${token}`, detail: many ? `Order ${i + 1} · ${o.name}` : o.name },
-      { title: `Lock ${o.amount} in escrow`, detail: many ? `Order ${i + 1} · confirming on Sonic` : 'Confirming on Sonic' },
-    ]),
+    ...orders.flatMap((o, i) =>
+      spendable
+        ? [
+            {
+              title: `Hold ${o.amount} from Spendable MCGP`,
+              detail: many ? `Order ${i + 1} · ${o.name}` : o.name,
+            },
+          ]
+        : [
+            { title: `Allow ${token}`, detail: many ? `Order ${i + 1} · ${o.name}` : o.name },
+            {
+              title: `Lock ${o.amount} in escrow`,
+              detail: many ? `Order ${i + 1} · confirming on Sonic` : 'Confirming on Sonic',
+            },
+          ],
+    ),
   ];
-  const active = activeStepIndex(phase, currentOrderIndex, orders.length);
+  const active = activeStepIndex(phase, currentOrderIndex, orders.length, spendable ? 1 : 2);
 
   return (
     <View style={{ flex: 1, padding: spacing.lg, gap: spacing.lg }}>
@@ -146,7 +170,9 @@ export const PaymentProgress = ({
         </View>
       ) : (
         <Text variant="caption" color="textSecondary" align="center">
-          Keep the app open. Approve each request when your wallet asks.
+          {spendable
+            ? 'Keep the app open while your Spendable MCGP is held for each order.'
+            : 'Keep the app open. Approve each request when your wallet asks.'}
         </Text>
       )}
     </View>

@@ -440,6 +440,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderGroup.POST("/:id/prepare-approve", ch.PrepareApprove)
 		orderGroup.POST("/:id/prepare-escrow", ch.PrepareEscrow)
 		orderGroup.POST("/:id/submit-escrow", ch.SubmitEscrow)
+		// MCGP orders: paid from, and released out of, Spendable MCGP (the
+		// entitlement contract's operator debit) instead of the escrow.
+		orderGroup.POST("/:id/pay-spendable", middleware.RateLimiterBy(20, time.Minute, perUserRateKey), ch.PaySpendable)
+		orderGroup.POST("/:id/confirm-receipt", ch.ConfirmReceipt)
 		orderGroup.POST("/:id/ship", ch.MarkShipped)
 		orderGroup.POST("/:id/deliver", ch.MarkDelivered)
 		orderGroup.POST("/:id/approve-refund", ch.ApproveRefund)

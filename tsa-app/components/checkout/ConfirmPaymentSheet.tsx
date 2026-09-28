@@ -1,6 +1,9 @@
 // Last stop before the wallet signs: the exact amount in the pay token, what it
 // is made of, where it comes from and goes, and the signatures to expect.
 // Everything shown comes from the backend quote the orders are created from.
+// MCGP is paid from Spendable MCGP (the entitlement balance, not wallet MCGP):
+// nothing is signed and no gas is needed — the app's authorization prompt
+// follows this sheet instead.
 import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
@@ -17,9 +20,9 @@ export interface ConfirmPaymentSheetProps {
   quote: CartQuote;
   shippingLabel: string;
   walletAddress: string | null;
-  /** Pay-token balance in token units; null when unknown. */
+  /** Pay-token balance in token units (Spendable MCGP for MCGP); null when unknown. */
   tokenBalance: number | null;
-  /** S balance for network gas; null when unknown. */
+  /** S balance for network gas; null when unknown. Not needed for MCGP. */
   gasBalance: number | null;
 }
 
@@ -41,9 +44,12 @@ export const ConfirmPaymentSheet = ({
   const { totals, lines, token } = quote;
 
   const totalUnits = quoteUnits(totals.total, quote.decimals);
+  const spendable = token === 'MCGP';
+  const balanceName = spendable ? 'Spendable MCGP' : token;
   const short = tokenBalance != null && tokenBalance < totalUnits;
-  // Only a balance known to be zero blocks; an unreadable one lets the chain decide.
-  const noGas = gasBalance === 0;
+  // Only a balance known to be zero blocks; an unreadable one lets the chain
+  // decide. A Spendable MCGP payment is sent by the platform, so it needs none.
+  const noGas = !spendable && gasBalance === 0;
   const rateLine =
     token === 'MCGP'
       ? `1 MCGP = $${quote.usdPerToken.toFixed(4)} · OTC buy rate`
@@ -52,7 +58,7 @@ export const ConfirmPaymentSheet = ({
         : `$1 = ${formatPrice(1)} · for reference only`;
 
   const warning = short
-    ? `Not enough ${token}. You need ${fmt.token(totals.total)}.`
+    ? `Not enough ${balanceName}. You need ${fmt.token(totals.total)}.`
     : noGas
       ? 'Your wallet has no S for network gas. Add a little S on Sonic, then try again.'
       : null;
@@ -116,12 +122,14 @@ export const ConfirmPaymentSheet = ({
         </Card>
 
         <Card padding="md" style={{ gap: spacing.xs }}>
-          {walletAddress ? (
+          {spendable ? (
+            <Row label="Pay from" value="Spendable MCGP" />
+          ) : walletAddress ? (
             <Row label="From wallet" value={shortAddress(walletAddress)} />
           ) : null}
           {tokenBalance != null ? (
             <Row
-              label={`${token} balance after`}
+              label={`${balanceName} balance after`}
               value={short ? '—' : `${(tokenBalance - totalUnits).toLocaleString('en-US', { maximumFractionDigits: token === 'MCGP' ? 4 : 2 })} ${token}`}
             />
           ) : null}
@@ -131,22 +139,35 @@ export const ConfirmPaymentSheet = ({
         <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
           <Icon name="verified" size={18} color={colors.success} />
           <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-            Held in escrow. The seller is paid only after you confirm delivery. If it doesn&apos;t arrive, open a
-            dispute and the escrow refunds you.
+            {spendable
+              ? 'Held from your Spendable MCGP. The seller is paid only after you confirm delivery. If it doesn’t arrive, open a dispute and the MCGP comes back to your Spendable balance.'
+              : 'Held in escrow. The seller is paid only after you confirm delivery. If it doesn’t arrive, open a dispute and the escrow refunds you.'}
           </Text>
         </View>
 
-        <View style={{ gap: spacing.xs }}>
-          <Text variant="overline" color="textMuted">
-            Your wallet will ask you to sign
-          </Text>
-          {lines.map((line, i) => (
-            <View key={`sig-${line.productId}-${i}`} style={{ gap: spacing.xs }}>
-              <SignStep n={i * 2 + 1} text={`Allow ${token} for ${line.name}`} radius={radius.pill} />
-              <SignStep n={i * 2 + 2} text={`Lock ${fmt.token(line.total)} in escrow`} radius={radius.pill} />
-            </View>
-          ))}
-        </View>
+        {spendable ? (
+          <View style={{ gap: spacing.xs }}>
+            <Text variant="overline" color="textMuted">
+              No wallet signature or gas
+            </Text>
+            <Text variant="caption" color="textSecondary">
+              Next you authorize this payment with your PIN or biometrics. Only Spendable MCGP can pay — MCGP in
+              your wallet is not used.
+            </Text>
+          </View>
+        ) : (
+          <View style={{ gap: spacing.xs }}>
+            <Text variant="overline" color="textMuted">
+              Your wallet will ask you to sign
+            </Text>
+            {lines.map((line, i) => (
+              <View key={`sig-${line.productId}-${i}`} style={{ gap: spacing.xs }}>
+                <SignStep n={i * 2 + 1} text={`Allow ${token} for ${line.name}`} radius={radius.pill} />
+                <SignStep n={i * 2 + 2} text={`Lock ${fmt.token(line.total)} in escrow`} radius={radius.pill} />
+              </View>
+            ))}
+          </View>
+        )}
 
         {warning ? (
           <View style={{ backgroundColor: colors.dangerBg ?? colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm }}>

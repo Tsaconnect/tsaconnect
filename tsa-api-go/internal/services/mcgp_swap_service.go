@@ -416,13 +416,144 @@ func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte
 	// with another caller's — see signMu.
 	s.signMu.Lock()
 	defer s.signMu.Unlock()
+	return s.operatorBroadcastLocked(ctx, callData)
+}
 
+// operatorBroadcastLocked is operatorBroadcast for a caller already holding
+// signMu (OperatorSequence).
+func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData []byte) (string, error) {
+	if s.operator == nil {
+		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
+	}
 	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 	if err != nil {
 		// Nonce, gas price and gas estimate are all reads: nothing was sent.
 		return "", notBroadcast(err)
 	}
 	return s.operator.SignAndBroadcast(ctx, unsigned)
+}
+
+// OperatorOps are the operator transactions a sequence may send.
+type OperatorOps interface {
+	OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error)
+	OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error)
+	OperatorReverseDebit(ctx context.Context, debitRef [32]byte) (string, error)
+	OperatorCreditPremium(ctx context.Context, user string, amount *big.Int, ref [32]byte) (string, error)
+}
+
+// OperatorSequence runs fn holding the operator signing lock, so the
+// transactions fn sends (and the receipts it waits for) are not interleaved
+// with any other operator transaction — an IT credit cannot land between a
+// settle and the credit that depends on the MCGP it freed. Only operator-key
+// transactions are excluded; an owner-key call (withdraw of excess) is not.
+// fn must send through ops, never through the service, or it deadlocks.
+func (s *MCGPSwapService) OperatorSequence(ctx context.Context, fn func(ops OperatorOps) error) error {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	return fn(lockedOperatorOps{s})
+}
+
+type lockedOperatorOps struct{ s *MCGPSwapService }
+
+func (o lockedOperatorOps) send(ctx context.Context, method string, args ...interface{}) (string, error) {
+	data, err := o.s.pack(method, args...)
+	if err != nil {
+		return "", notBroadcast(err)
+	}
+	return o.s.operatorBroadcastLocked(ctx, data)
+}
+
+func (o lockedOperatorOps) OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error) {
+	return o.send(ctx, "debitSpendable", common.HexToAddress(user), amount, maxFromBought, debitRef)
+}
+func (o lockedOperatorOps) OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error) {
+	return o.send(ctx, "settleDebit", debitRef)
+}
+func (o lockedOperatorOps) OperatorReverseDebit(ctx context.Context, debitRef [32]byte) (string, error) {
+	return o.send(ctx, "reverseDebit", debitRef)
+}
+func (o lockedOperatorOps) OperatorCreditPremium(ctx context.Context, user string, amount *big.Int, ref [32]byte) (string, error) {
+	return o.send(ctx, "creditPremium", common.HexToAddress(user), amount, ref)
+}
+
+// WindowHeadroom is what one operator credit or debit may still move right now.
+type WindowHeadroom struct {
+	Paused bool
+	// WindowCap is the rolling window's ceiling; WindowRemaining how much of
+	// it is left (the whole cap once the window has certainly rolled over).
+	WindowCap       *big.Int
+	WindowRemaining *big.Int
+	// MaxPerTx is the per-call cap (debit headroom only; credits read it from
+	// SpendableLimits).
+	MaxPerTx *big.Int
+}
+
+// windowRollMargin is how far past the on-chain roll-over the local clock
+// must be before the window is treated as reset. Local time tracks Sonic
+// block time closely but can run ahead; without the margin a clock a few
+// seconds fast would read a full window as empty.
+const windowRollMargin = 30 * time.Second
+
+// windowRemaining is cap - used, or the whole cap once now is past
+// start + window + windowRollMargin. It errs toward "not rolled", i.e.
+// toward refusing rather than toward a transaction that reverts.
+func windowRemaining(now time.Time, start, window, capAmt, used *big.Int) *big.Int {
+	rollAt := new(big.Int).Add(start, window)
+	rollAt.Add(rollAt, big.NewInt(int64(windowRollMargin/time.Second)))
+	switch {
+	case big.NewInt(now.Unix()).Cmp(rollAt) >= 0:
+		return new(big.Int).Set(capAmt)
+	case capAmt.Cmp(used) > 0:
+		return new(big.Int).Sub(capAmt, used)
+	default:
+		return new(big.Int)
+	}
+}
+
+func (s *MCGPSwapService) readUints(names ...string) ([]*big.Int, error) {
+	out := make([]*big.Int, len(names))
+	for i, n := range names {
+		v, err := s.callUint(n)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// CreditHeadroom reads pause state and the creditPremium rolling window.
+func (s *MCGPSwapService) CreditHeadroom(ctx context.Context) (WindowHeadroom, error) {
+	var out WindowHeadroom
+	paused, err := s.callBool(ctx, "paused")
+	if err != nil {
+		return out, err
+	}
+	v, err := s.readUints("creditWindowCap", "creditedInWindow", "windowStart", "creditWindow")
+	if err != nil {
+		return out, err
+	}
+	out.Paused, out.WindowCap = paused, v[0]
+	out.WindowRemaining = windowRemaining(time.Now(), v[2], v[3], v[0], v[1])
+	return out, nil
+}
+
+// DebitHeadroom reads pause state, the per-call debit cap and the debit
+// rolling window. reverseDebit does not give window usage back, so a split
+// (reverse, then re-debit a share) must check the re-debit fits first.
+func (s *MCGPSwapService) DebitHeadroom(ctx context.Context) (WindowHeadroom, error) {
+	var out WindowHeadroom
+	paused, err := s.callBool(ctx, "paused")
+	if err != nil {
+		return out, err
+	}
+	v, err := s.readUints("debitWindowCap", "debitedInWindow", "debitWindowStart", "debitWindow", "maxDebitPerTx")
+	if err != nil {
+		return out, err
+	}
+	out.Paused, out.WindowCap, out.MaxPerTx = paused, v[0], v[4]
+	out.WindowRemaining = windowRemaining(time.Now(), v[2], v[3], v[0], v[1])
+	return out, nil
 }
 
 // ErrTxNotBroadcast marks an operator-transaction error raised BEFORE the
@@ -478,6 +609,36 @@ func (s *MCGPSwapService) DebitRecord(ctx context.Context, debitRef [32]byte) (D
 		return DebitRecord{}, fmt.Errorf("debits returned unknown state %d", state)
 	}
 	return DebitRecord{User: user, Amount: amount, State: DebitState(state)}, nil
+}
+
+// UsedCreditRef reports whether a creditPremium ref has already been consumed
+// on-chain. It is the read-before-act check that lets a credit whose broadcast
+// or verification was lost be retried without ever crediting twice.
+func (s *MCGPSwapService) UsedCreditRef(ctx context.Context, ref [32]byte) (bool, error) {
+	return s.callBool(ctx, "usedCreditRef", ref)
+}
+
+// SpendableLimits are the operator caps that bound one debit and one credit.
+type SpendableLimits struct {
+	MaxDebitPerTx  *big.Int
+	MaxCreditPerTx *big.Int
+	MinCredit      *big.Int
+}
+
+// SpendableLimits reads the per-transaction operator caps.
+func (s *MCGPSwapService) SpendableLimits(_ context.Context) (SpendableLimits, error) {
+	var out SpendableLimits
+	var err error
+	if out.MaxDebitPerTx, err = s.callUint("maxDebitPerTx"); err != nil {
+		return out, err
+	}
+	if out.MaxCreditPerTx, err = s.callUint("maxCreditPerTx"); err != nil {
+		return out, err
+	}
+	if out.MinCredit, err = s.callUint("minCredit"); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 // OperatorCreditPremium credits spend-only premium after an NGN payment settles.
