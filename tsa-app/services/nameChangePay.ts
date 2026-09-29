@@ -18,8 +18,11 @@
 // took it only to send it back (paid short, or too late) keeps it on this
 // phone, the reference for that refund. A hash the server answered for with
 // "never" — refuted (payment_mismatch), or no change it could be for
-// (no_open_change, bad_state) — is kept too, as a support case: asking again
-// would only get the same answer, and spend the route's rate limit doing it.
+// (no_open_change) — is kept too, as a support case: asking again would only
+// get the same answer, and spend the route's rate limit doing it. bad_state is
+// not "never" — the server says payment_mismatch when it means that — so a
+// hash answered with it stays held and is confirmed again: a late payment the
+// server can still take is never abandoned on a passing state.
 import { CHAINS, getChainByChainId, type ChainKey } from '@/constants/chains';
 import { depositOutcomeUnknown } from '@/services/depositGuard';
 import {
@@ -158,11 +161,14 @@ export async function payNameChangeInStablecoin(
 export const TX_NOT_RECORDED =
   'Your payment was sent, but this phone couldn’t save its transaction. Keep this hash — support may ask for it:';
 
-/** Answers that mean the server will never take `txHash` for this change: a support case, not something to ask again. */
+/**
+ * Answers that mean the server will never take `txHash` for this change: a
+ * support case, not something to ask again. Only these — any other refusal
+ * (bad_state included) keeps the hash held and confirmed again.
+ */
 const TERMINAL_CODES: Record<string, (changeId: string) => string> = {
   [NAME_CHANGE_CODES.PAYMENT_MISMATCH]: refutedKey,
   [NAME_CHANGE_CODES.NO_OPEN_CHANGE]: unmatchedKey,
-  [NAME_CHANGE_CODES.BAD_STATE]: unmatchedKey,
 };
 
 /**
@@ -198,7 +204,7 @@ export type PaymentPending =
   | { kind: 'unknown' }
   /** The server said this transaction can never pay the change: a support case. */
   | { kind: 'refuted'; txHash: string }
-  /** The server had no change this transaction could pay (none open, or not in a state to take it): a support case. */
+  /** The server had no change this transaction could pay (none open): a support case. */
   | { kind: 'unmatched'; txHash: string }
   | null;
 

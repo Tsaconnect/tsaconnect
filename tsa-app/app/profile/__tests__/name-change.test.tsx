@@ -528,7 +528,7 @@ describe('paying the fee', () => {
     }
   });
 
-  it('an answer of "no change it can pay" (no_open_change / bad_state) is terminal: a support case, polling stops', async () => {
+  it('an answer of "no change it can pay" (no_open_change) is terminal: a support case, polling stops', async () => {
     jest.mocked(paymentPending).mockResolvedValue({ kind: 'unmatched', txHash: HASH });
     const tree = await mount(withChange(stableChange('paying')));
     expect(text(tree)).toContain('This payment couldn’t be used');

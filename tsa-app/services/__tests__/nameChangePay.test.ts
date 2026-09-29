@@ -137,18 +137,29 @@ describe('sending the fee', () => {
     await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'refuted', txHash: HASH });
   });
 
-  it.each([
-    ['no_open_change', 404],
-    ['bad_state', 409],
-  ])('%s — no change the hash can pay — is a support case too, never asked again', async (code, status) => {
+  it('no_open_change — no change the hash can pay — is a support case too, never asked again', async () => {
     mockConfirm.mockRejectedValueOnce(coded('Not on-chain yet', 'payment_pending_chain'));
     await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).resolves.toBeNull();
-    mockConfirm.mockRejectedValueOnce(coded('no change', code, status));
+    mockConfirm.mockRejectedValueOnce(coded('no change', 'no_open_change', 404));
     await expect(confirmRecordedPayment('nc1')).rejects.toThrow('no change');
     await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'unmatched', txHash: HASH });
     // Nothing left to confirm with: the hash is support's now.
     await expect(confirmRecordedPayment('nc1')).rejects.toThrow('No payment from this phone');
     expect(mockConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('bad_state is not "never": the hash stays held and is confirmed again, so a late payment is still taken', async () => {
+    mockConfirm.mockRejectedValueOnce(coded('Not on-chain yet', 'payment_pending_chain'));
+    await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).resolves.toBeNull();
+    mockConfirm.mockRejectedValueOnce(coded('this name change can\'t do that now', 'bad_state', 409));
+    await expect(confirmRecordedPayment('nc1')).rejects.toThrow('can\'t do that now');
+    await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'sent', txHash: HASH });
+    // Asked again, the server takes it (late: recorded and refunding).
+    mockConfirm.mockResolvedValueOnce({ id: 'nc1', status: 'cancelled', feeStatus: 'refund_sending' });
+    await expect(confirmRecordedPayment('nc1')).resolves.toMatchObject({ status: 'cancelled' });
+    expect(mockConfirm).toHaveBeenCalledTimes(3);
+    expect(mockConfirm).toHaveBeenLastCalledWith(HASH);
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
   it('a hash this phone could not save keeps the send hold and is shown to her — unless the server used the payment', async () => {
