@@ -91,6 +91,29 @@ func (s *RampSponsorship) TopUpForIntent(ctx context.Context, user *models.User,
 	return s.topUp.TopUpForIntent(ctx, user, intent, store)
 }
 
+// TopUpDestForIntent is GasTopUp.TopUpDestForIntent behind the same switch.
+// Off, it is ErrDestGasUnavailable: a delivered checkout's caller says what to
+// do rather than failing obscurely.
+func (s *RampSponsorship) TopUpDestForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store DestTopUpStore) (GasTopUpResult, error) {
+	if !s.Enabled() || s.topUp == nil {
+		return GasTopUpResult{}, ErrDestGasUnavailable
+	}
+	return s.topUp.TopUpDestForIntent(ctx, user, intent, store)
+}
+
+// CanSponsorChain reports a live sponsor lane on chainID (see GasTopUp).
+func (s *RampSponsorship) CanSponsorChain(chainID int64) bool {
+	return s.Enabled() && s.topUp != nil && s.topUp.CanSponsorChain(chainID)
+}
+
+// CheckTopUp is GasTopUp.CheckTopUp behind the same switch.
+func (s *RampSponsorship) CheckTopUp(ctx context.Context, chainID int64, amount *big.Int) error {
+	if !s.Enabled() || s.topUp == nil {
+		return ErrSponsorNotAvailable
+	}
+	return s.topUp.CheckTopUp(ctx, chainID, amount)
+}
+
 // Routes lists what this caller would be sponsored on, so the sell screen can
 // stop warning about gas BEFORE an order exists. Top-up routes are omitted
 // for unverified users: they would be refused at send time.

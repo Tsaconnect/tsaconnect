@@ -6,7 +6,7 @@ import { ethers } from 'ethers';
 import { toFiniteNumber } from './txFields';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CHAINS, type ChainKey, type ChainConfig } from '../constants/chains';
+import { CHAINS, getChainsForNetwork, type ChainKey, type ChainConfig, type NetworkType } from '../constants/chains';
 import { MIN_SWAP_RESERVE_WEI, swapGasReserve } from './gasReserve';
 // Circular with solanaWallet (it reads getMnemonic) — safe because both sides
 // only call the other inside function bodies, never during module evaluation.
@@ -442,9 +442,9 @@ export function formatTokenBalance(rawBalance: string, decimals: number): number
  * Returns null when every configured RPC fails — callers should treat null
  * as "balance unknown" and degrade gracefully (do NOT hard-block the user).
  */
-export async function nativeBalance(chainKey: ChainKey, address: string): Promise<bigint | null> {
+export async function nativeBalance(chainKey: ChainKey, address: string, network?: NetworkType): Promise<bigint | null> {
   try {
-    return await withRpcFallback(chainKey, (provider) => provider.getBalance(address));
+    return await withRpcFallback(chainKey, (provider) => provider.getBalance(address), network);
   } catch (err) {
     console.warn('[wallet] nativeBalance read failed, degrading gracefully:', err);
     return null;
@@ -533,13 +533,14 @@ export async function ensureGas(
 export async function withRpcFallback<T>(
   chainKey: ChainKey,
   fn: (provider: ethers.JsonRpcProvider) => Promise<T>,
+  network?: NetworkType,
 ): Promise<T> {
-  const chain = CHAINS[chainKey];
+  const chain = chainConfigFor(chainKey, network);
   const urls = [chain.rpcUrl, ...(chain.fallbackRpcUrls ?? [])];
   let lastErr: any;
   for (const url of urls) {
     try {
-      const provider = getProvider(chainKey, url);
+      const provider = getProvider(chainKey, url, network);
       return await fn(provider);
     } catch (err: any) {
       lastErr = err;
@@ -645,7 +646,25 @@ export function clearProviderCache() {
 }
 
 /**
- * Get a JSON-RPC provider for a given chain.
+ * A chain's config on `network`, or on the app's active network (the testnet
+ * toggle) when none is named. Flows that move real money on a fixed network —
+ * marketplace checkout, its escrow and the swap that funds it all run on
+ * MAINNET whatever the toggle says — name it, so a tester on testnet never
+ * signs against a testnet RPC for a mainnet transaction. The active map
+ * (CHAINS) is never mutated for this.
+ */
+export function chainConfigFor(chainKey: ChainKey, network?: NetworkType): ChainConfig {
+  return network ? getChainsForNetwork(network)[chainKey] : CHAINS[chainKey];
+}
+
+/** A provider for `chainKey` on MAINNET, whatever the app's network toggle says. */
+export function getMainnetProvider(chainKey: ChainKey): ethers.JsonRpcProvider {
+  return getProvider(chainKey, undefined, 'mainnet');
+}
+
+/**
+ * Get a JSON-RPC provider for a given chain (on `network` when named, else the
+ * active one — see chainConfigFor).
  * Providers are cached so repeated calls return the same instance.
  *
  * `staticNetwork` tells ethers the chain identity is known and to skip the
@@ -653,20 +672,21 @@ export function clearProviderCache() {
  * land in a "JsonRpcProvider failed to detect network" retry loop that never
  * succeeds and silently hangs every broadcast/wait call.
  */
-export function getProvider(chainKey: ChainKey, rpcUrl?: string): ethers.JsonRpcProvider {
-  const chain: ChainConfig = CHAINS[chainKey];
+export function getProvider(chainKey: ChainKey, rpcUrl?: string, network?: NetworkType): ethers.JsonRpcProvider {
+  const chain: ChainConfig = chainConfigFor(chainKey, network);
   const url = rpcUrl ?? chain.rpcUrl;
-  // Per-URL cache so fallbacks each get their own provider instance.
-  const cacheKey = `${chainKey}::${url}`;
+  // Per-URL (and chain id) cache so fallbacks each get their own provider
+  // instance, and a mainnet provider is never handed out for testnet or back.
+  const cacheKey = `${chainKey}::${chain.chainId}::${url}`;
   const cached = providerCache.get(cacheKey as ChainKey);
   if (cached) return cached;
 
-  const network = ethers.Network.from({
+  const ethersNetwork = ethers.Network.from({
     chainId: chain.chainId,
     name: chain.name,
   });
-  const provider = new ethers.JsonRpcProvider(url, network, {
-    staticNetwork: network,
+  const provider = new ethers.JsonRpcProvider(url, ethersNetwork, {
+    staticNetwork: ethersNetwork,
   });
 
   providerCache.set(cacheKey as ChainKey, provider);
@@ -686,15 +706,16 @@ export function getProvider(chainKey: ChainKey, rpcUrl?: string): ethers.JsonRpc
 export async function broadcastTransaction(
   chainKey: ChainKey,
   signedTx: string,
+  network?: NetworkType,
 ): Promise<ethers.TransactionResponse> {
-  const chain = CHAINS[chainKey];
+  const chain = chainConfigFor(chainKey, network);
   const urls = [chain.rpcUrl, ...(chain.fallbackRpcUrls ?? [])];
   let lastErr: any;
 
   for (const url of urls) {
     try {
       console.log(`[wallet] broadcasting via ${url}`);
-      const provider = getProvider(chainKey, url);
+      const provider = getProvider(chainKey, url, network);
       return await provider.broadcastTransaction(signedTx);
     } catch (err: any) {
       lastErr = err;
@@ -722,8 +743,8 @@ export async function broadcastTransaction(
  * Fetch the next usable nonce for an address on a given chain.
  * Uses 'pending' so it accounts for unconfirmed txs already in the mempool.
  */
-export async function fetchPendingNonce(address: string, chainKey: ChainKey): Promise<number> {
-  return await getProvider(chainKey).getTransactionCount(address, 'pending');
+export async function fetchPendingNonce(address: string, chainKey: ChainKey, network?: NetworkType): Promise<number> {
+  return await getProvider(chainKey, undefined, network).getTransactionCount(address, 'pending');
 }
 
 /**

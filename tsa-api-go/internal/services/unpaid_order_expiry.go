@@ -60,6 +60,15 @@ func TouchUnpaidOrder(db *gorm.DB, id uuid.UUID) error {
 		Update("updated_at", time.Now()).Error
 }
 
+// TouchUnpaidGroup is TouchUnpaidOrder for every order of one buyer's checkout
+// group still awaiting payment, in one UPDATE (a funding swap in flight pays
+// the whole group).
+func TouchUnpaidGroup(db *gorm.DB, groupID, buyerID uuid.UUID) error {
+	return db.Model(&models.Order{}).
+		Where("checkout_group_id = ? AND buyer_id = ? AND status = ?", groupID, buyerID, models.OrderStatusPendingPayment).
+		Update("updated_at", time.Now()).Error
+}
+
 // RestoreOrderStock returns an order's units to its listing, inside tx.
 // Services hold no inventory, so there is nothing to restore.
 func RestoreOrderStock(tx *gorm.DB, order *models.Order) error {

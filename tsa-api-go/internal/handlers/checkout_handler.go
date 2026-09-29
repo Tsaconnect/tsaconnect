@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
@@ -39,6 +40,9 @@ type CheckoutHandler struct {
 	// spendable pays MCGP orders from Spendable MCGP (checkout_spendable.go);
 	// nil leaves MCGP checkout unavailable.
 	spendable orderSpendablePayer
+	// funding pays a checkout with any token the buyer holds, swapped into the
+	// order token in her own wallet first (checkout_funding.go); nil leaves it off.
+	funding marketplaceFunding
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -863,6 +867,13 @@ type createOrderRequest struct {
 	// location replaces BuyerCity/State/Country for pricing, and its recipient,
 	// phone and street are snapshotted onto each order for the seller.
 	DeliveryAddressID *uuid.UUID `json:"deliveryAddressId"`
+	// FundWithSwap: the buyer will pay this checkout with another token,
+	// swapped into this one in her own wallet first (checkout_funding.go), so
+	// her balance of it is expected to be short now. The shortfall refusal is
+	// skipped — the funding is then sized from these very orders — and nothing
+	// else changes: the escrow still pulls from her wallet and still reverts
+	// on a short balance.
+	FundWithSwap bool `json:"fundWithSwap"`
 }
 
 type menuLineRequest struct {
@@ -1093,7 +1104,9 @@ func loadCartCheckout(c *gin.Context) (*cartCheckout, bool) {
 		return nil, false
 	}
 	var req createOrderRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// Bound with the body kept, so a route that also reads its own fields from
+	// the same body (the funding cart quote) can bind it again.
+	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return nil, false
 	}
@@ -1171,6 +1184,21 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		return
 	}
 
+	// A checkout funded by swap takes stock with no funds behind it yet, so it
+	// is earned: her proven wallet (the one the swap is paid from and into),
+	// and no other funded checkout of hers in progress (re-checked under a lock
+	// inside the transaction below).
+	fundBySwap := req.FundWithSwap && token != "MCGP" && ch.FundingEnabled()
+	if fundBySwap {
+		if _, ok := requireProvenWallet(c, user); !ok {
+			return
+		}
+		if err := ch.funding.CanStartCheckout(c.Request.Context(), user.ID); err != nil {
+			fundingError(c, err)
+			return
+		}
+	}
+
 	// Wrap everything in a DB transaction
 	tx := config.DB.Begin()
 	if tx.Error != nil {
@@ -1201,9 +1229,32 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		return
 	}
 
-	// Refused before any order takes stock.
-	if refuseShortfall(c, tx, token, total, balance) {
+	// Refused before any order takes stock — unless the buyer is funding the
+	// checkout by swap, which sizes itself from these orders once they exist.
+	if !fundBySwap && refuseShortfall(c, tx, token, total, balance) {
 		return
+	}
+	if fundBySwap {
+		// At most one funded checkout awaiting payment per buyer: the check
+		// above was read-then-act, so it is repeated under her user row's lock.
+		if err := lockUserRow(tx, user.ID); err != nil {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+			return
+		}
+		var pending int64
+		if err := tx.Model(&models.Order{}).
+			Where("buyer_id = ? AND fund_with_swap = ? AND status = ?", user.ID, true, models.OrderStatusPendingPayment).
+			Count(&pending).Error; err != nil {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+			return
+		}
+		if pending > 0 {
+			tx.Rollback()
+			fundingError(c, services.ErrFundingInProgress)
+			return
+		}
 	}
 	// Each order is one Spendable MCGP debit, so each must fit the caps.
 	for _, line := range lines {
@@ -1221,6 +1272,9 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		}
 	}
 
+	// One id for every order this checkout creates: a checkout funded by swap
+	// is paid as one group (services/marketplace_funding.go).
+	groupID := uuid.New()
 	var orders []models.Order
 	for _, line := range lines {
 		if !line.isService {
@@ -1260,6 +1314,8 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			ShippingCountry: buyerCountry,
 			BuyerUpline:     buyerUpline,
 			Status:          models.OrderStatusPendingPayment,
+			CheckoutGroupID: &groupID,
+			FundWithSwap:    fundBySwap,
 			CreatedAt:       time.Now(),
 			UpdatedAt:       time.Now(),
 		}
@@ -1351,8 +1407,37 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	}
 
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
-		"orders": orders,
+		"orders":          orders,
+		"checkoutGroupId": groupID,
 	})
+}
+
+// priceActiveCart prices the loaded cart exactly as order creation will — the
+// one read QuoteCart and the funding cart quote share — writing the error
+// response and returning false when it cannot.
+func (ch *CheckoutHandler) priceActiveCart(c *gin.Context, in *cartCheckout) ([]pricedCartLine, pricingRates, bool) {
+	if ch.refuseMcgpUnavailable(c, in.token) {
+		return nil, pricingRates{}, false
+	}
+	rates, perr := ch.resolvePricingRates(c.Request.Context(), in.token)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return nil, pricingRates{}, false
+	}
+	// Pricing reads inside a transaction that is always rolled back, so service
+	// pricing sees the same consistent view it gets at order creation.
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return nil, pricingRates{}, false
+	}
+	defer tx.Rollback()
+	lines, perr := ch.priceCartItems(tx, in.user, in.items, in.req, rates)
+	if perr != nil {
+		utils.ErrorResponse(c, perr.status, perr.msg)
+		return nil, pricingRates{}, false
+	}
+	return lines, rates, true
 }
 
 // cartQuoteLine is one order-to-be as the buyer will pay it, in the token's
@@ -1391,29 +1476,9 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 	if !ok {
 		return
 	}
-	user, req, token, items := in.user, in.req, in.token, in.items
-	if ch.refuseMcgpUnavailable(c, token) {
-		return
-	}
-
-	rates, perr := ch.resolvePricingRates(c.Request.Context(), token)
-	if perr != nil {
-		utils.ErrorResponse(c, perr.status, perr.msg)
-		return
-	}
-
-	// Pricing reads inside a transaction that is always rolled back, so service
-	// pricing sees the same consistent view it gets at order creation.
-	tx := config.DB.Begin()
-	if tx.Error != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
-		return
-	}
-	defer tx.Rollback()
-
-	lines, perr := ch.priceCartItems(tx, user, items, req, rates)
-	if perr != nil {
-		utils.ErrorResponse(c, perr.status, perr.msg)
+	token := in.token
+	lines, rates, ok := ch.priceActiveCart(c, in)
+	if !ok {
 		return
 	}
 

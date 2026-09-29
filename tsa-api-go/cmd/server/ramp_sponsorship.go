@@ -87,6 +87,72 @@ func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecd
 	}
 }
 
+// newIntentSponsorship builds a RampSponsorship. Without Paycrest orders it
+// serves intent top-ups only (the marketplace funding's), and the Paycrest
+// order routes are never registered, so the order reader is never called.
+// Branching rather than passing `orders` through: a nil *PaycrestOrderService
+// in the sponsorOrderReader interface is a NON-nil interface holding a nil
+// pointer, and any order path reaching it would panic instead of refusing.
+func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[string]*services.SponsorLane, unusedCap int) *services.RampSponsorship {
+	store := &services.GormSponsorshipStore{DB: config.DB}
+	if orders != nil {
+		return services.NewRampSponsorship(orders, store, lanes, unusedCap, 30*time.Second, nil)
+	}
+	return services.NewRampSponsorship(nil, store, lanes, unusedCap, 30*time.Second, nil)
+}
+
+// buildMarketplaceSonicGas builds the marketplace funding's own Sonic gas lane
+// (MARKETPLACE_SONIC_GAS), or nil with a line saying why. It is a separate
+// sponsorship holding ONLY the Sonic lane, so enabling it can never give a
+// sale or a TSA Pay intent from Sonic a source-chain top-up. It signs with the
+// ramp sponsor key under its own guard, floor and ceiling.
+func buildMarketplaceSonicGas(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
+	if !cfg.MarketplaceSonicGasEnabled {
+		log.Printf("[marketplace-funding] sonic gas dormant: MARKETPLACE_SONIC_GAS is off — a buyer with no S is refused before signing")
+		return nil
+	}
+	if cfg.RampSponsorPrivateKey == "" || chains == nil {
+		log.Printf("[marketplace-funding] sonic gas dormant: RAMP_SPONSOR_PRIVATE_KEY not set")
+		return nil
+	}
+	if !rawSignerKeyAllowed(cfg) {
+		log.Printf("[marketplace-funding] sonic gas dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production")
+		return nil
+	}
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
+	if err != nil {
+		log.Printf("[marketplace-funding] sonic gas dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		return nil
+	}
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
+		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
+		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
+	}); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+		return nil
+	}
+	floor := bigFromDecimal(cfg.MarketplaceSonicGasFloorWei)
+	topUpMax := bigFromDecimal(cfg.MarketplaceSonicGasTopUpMaxWei)
+	budget := bigFromDecimal(cfg.RampSponsorDailyGasBudget)
+	if floor == nil || topUpMax == nil || budget == nil {
+		log.Printf("[marketplace-funding] ALERT marketplace_sonic_gas_skipped_total=1 reason=invalid MARKETPLACE_SONIC_GAS_FLOOR_WEI / _TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
+		return nil
+	}
+	lane := buildSponsorLane(chains, "sonic", key, "marketplace_sonic_gas", services.SponsorLimits{
+		DailyGasBudget: budget, BalanceFloor: floor,
+	}, topUpMax)
+	if lane == nil {
+		log.Printf("[marketplace-funding] sonic gas dormant: no sonic mainnet client")
+		return nil
+	}
+	sponsor := newIntentSponsorship(nil, map[string]*services.SponsorLane{"sonic": lane}, cfg.RampSponsorTopUpUnusedDailyCap)
+	sponsor.SetChainRegistry(chains)
+	log.Printf("[marketplace-funding] sonic gas lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
+	return sponsor
+}
+
 // rampSponsorLaneLimits validates a chain's eligibility for a sponsor lane and
 // returns its parsed limits. A lane MUST NOT be built with a nil BalanceFloor,
 // DailyGasBudget or TopUpMaxWei: nil means "no limit" downstream (unbounded
@@ -126,8 +192,8 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		log.Printf("[ramp-sponsor] dormant: RAMP_GAS_SPONSORSHIP is off")
 		return nil
 	}
-	if cfg.RampSponsorPrivateKey == "" || orders == nil || chains == nil {
-		log.Printf("[ramp-sponsor] dormant: RAMP_SPONSOR_PRIVATE_KEY not set or Paycrest orders unavailable")
+	if cfg.RampSponsorPrivateKey == "" || chains == nil {
+		log.Printf("[ramp-sponsor] dormant: RAMP_SPONSOR_PRIVATE_KEY not set")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
@@ -173,8 +239,7 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		return nil
 	}
 	// 30s receipt wait keeps the top-up request under the nginx 60s proxy timeout.
-	sponsor := services.NewRampSponsorship(orders, &services.GormSponsorshipStore{DB: config.DB}, lanes,
-		cfg.RampSponsorTopUpUnusedDailyCap, 30*time.Second, nil)
+	sponsor := newIntentSponsorship(orders, lanes, cfg.RampSponsorTopUpUnusedDailyCap)
 	// A sell intent names its source chain by id; lanes are keyed by name.
 	sponsor.SetChainRegistry(chains)
 	log.Printf("[ramp-sponsor] enabled sponsor=%s chains=%v", sponsorAddr.Hex(), cfg.RampSponsorChains)

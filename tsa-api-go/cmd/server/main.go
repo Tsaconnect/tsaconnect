@@ -1568,6 +1568,10 @@ func main() {
 		paySellers *services.SellIntentService
 		payQuoter  *services.RampSellQuoter
 		payRates   *services.PaycrestQuoteService
+		// The gas sponsor is hoisted too: the marketplace's checkout funding
+		// (built after this block) sends Sonic gas through it with or without
+		// Paycrest.
+		rampSponsor *services.RampSponsorship
 	)
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
@@ -1606,9 +1610,13 @@ func main() {
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
 		payOrders = paycrestOrders
 		payRates = paycrestQuotes
-		if rampSponsor := buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
-			paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
-			scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
+		// Order sponsorship needs the order service; without it the sponsor is
+		// built after this block, for intents only.
+		if paycrestOrders != nil {
+			if rampSponsor = buildRampSponsorship(cfg, blockchainService, paycrestOrders); rampSponsor != nil {
+				paycrestHandler = paycrestHandler.WithSponsorship(rampSponsor)
+				scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
+			}
 		}
 		// Swapped sells: her token → LiFi → USDC on Base in HER wallet → the
 		// offramp. No treasury key is involved (nothing passes through us),
@@ -1651,6 +1659,32 @@ func main() {
 		}
 	} else {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
+	}
+
+	// Marketplace checkout funding — "pay with another token". Reuses the ramp's
+	// quoter, sell intents and gas sponsor when the Paycrest block built them,
+	// and builds delivery-only ones of its own when it did not: a checkout
+	// funded by swap has no Paycrest leg at all.
+	// The source-chain top-ups a funding may need come from the ramp's own
+	// sponsor lanes (built for intents only when Paycrest is off). The Sonic
+	// top-up is the funding's own lane (MARKETPLACE_SONIC_GAS), never a ramp
+	// lane, so turning it on changes nothing for sells; its float is watched
+	// only when it exists.
+	var sonicGas *services.RampSponsorship
+	if cfg.MarketplaceFundingEnabled {
+		if rampSponsor == nil {
+			if rampSponsor = buildRampSponsorship(cfg, blockchainService, nil); rampSponsor != nil {
+				scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
+			}
+		}
+		if sonicGas = buildMarketplaceSonicGas(cfg, blockchainService); sonicGas != nil {
+			scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicGas, 10*time.Minute))
+		}
+	}
+	if funding := buildMarketplaceFunding(cfg, blockchainService, payQuoter, paySellers, rampSponsor, sonicGas, feeDistributionService); funding != nil {
+		funding.SetOrderPulls(ch)
+		ch.WithFunding(funding)
+		scheduler.Register(jobs.NewMarketplaceFundingReconciler(funding, time.Minute), jobs.AlertOnFailureStreak())
 	}
 
 	// TSA Pay — dormant by default (see buildTSAPay's own doc comment for the

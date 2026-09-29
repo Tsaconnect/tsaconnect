@@ -354,3 +354,30 @@ describe('executeLiFiSwap — the swap hash before the broadcast', () => {
     expect(onSigned).not.toHaveBeenCalled();
   });
 });
+
+// A marketplace checkout's funding swap is a MAINNET transaction whatever the
+// app's testnet toggle says: its nonce and its approval wait must be read on
+// mainnet RPCs, never the active (testnet) map.
+describe('executeLiFiSwap — network pin', () => {
+  const { setActiveNetwork } = jest.requireActual('../../constants/chains');
+  afterEach(() => setActiveNetwork('mainnet'));
+
+  it('reads the nonce and waits on the named network, even with the testnet toggle on', async () => {
+    setActiveNetwork('testnet');
+    mockSubmitTransaction
+      .mockResolvedValueOnce({ success: true, data: { txHash: '0xapprovehash' } })
+      .mockResolvedValueOnce({ success: true, data: { txHash: '0xswaphash' } });
+    await executeLiFiSwap(params({
+      quote: quote({ approvalAddress: '0xspender', approvalToken: '0xtoken' }),
+      network: 'mainnet',
+    }));
+    expect(mockFetchPendingNonce).toHaveBeenCalledWith(WALLET, 'bsc', 'mainnet');
+    expect(mockWithRpcFallback.mock.calls[0][0]).toBe('bsc');
+    expect(mockWithRpcFallback.mock.calls[0][2]).toBe('mainnet');
+  });
+
+  it('keeps the active network when none is named', async () => {
+    await executeLiFiSwap(params());
+    expect(mockFetchPendingNonce).toHaveBeenCalledWith(WALLET, 'bsc', undefined);
+  });
+});

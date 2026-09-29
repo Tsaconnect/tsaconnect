@@ -204,6 +204,29 @@ Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
   bearer/JWT, credentials as `key=value` AND JSON `"key": "value"`, Flutterwave `FLWSECK-` keys,
   64-hex, DB constraint values, emails; 500-byte cap) first.
 
+Marketplace checkout "pay with another token" (`services/marketplace_funding.go`, routes
+`/api/orders/funding/*`, `marketplace-funding-reconciler` job):
+- One LiFi swap lands the order token (Sonic USDC/USDT) in the BUYER's own wallet on Sonic,
+  then the unchanged escrow pays each order from it — ProductEscrowV2 records `msg.sender` as
+  the buyer, so the funds cannot go anywhere else. It reuses the TSA Pay delivery machinery
+  (`RampSellQuoter` in Delivery + `PassThrough` mode, `SellIntentService` intents with
+  `purpose='marketplace'` + `reference_id` = the orders' `checkout_group_id`, the Sonic
+  `ConfirmDelivery` proof) and builds delivery-only copies when Paycrest is off.
+- Pass-through pricing: no TSA fee; the only integrator fee is the gas we sponsor (source-chain
+  top-up, S on Sonic for the escrow txs), and routes over `MARKETPLACE_FUNDING_BUDGET_BPS` (200 =
+  2% of the order total) are refused. `MARKETPLACE_FUNDING` (default OFF) turns it on;
+  `MARKETPLACE_ESCROW_GAS_PER_ORDER` sizes the S top-up. The Sonic top-up is the funding's OWN
+  lane (`MARKETPLACE_SONIC_GAS`, default off, ramp sponsor key, own floor/ceiling/guard) — never
+  a `RAMP_SPONSOR_CHAINS` lane, so enabling it changes nothing for sells or TSA Pay. Every
+  refusal it could meet (KYC, ceiling, float, budget, daily cap) is asked at quote time, before
+  she signs; without the lane a buyer with no S is refused up front.
+- Stock held with no funds is earned: `fundWithSwap` orders need the proven wallet and at most
+  one such checkout per buyer; the orders are kept alive only once LiFi sees her swap (10 min
+  grace after she reports a hash), never past the intent's creation + 2h; an unseen hash is
+  closed after 1h.
+- Re-check LiFi's Sonic destinations with `scripts/lifi-sonic-checkout-probe.sh` (read-only)
+  when a source starts failing: a toToken other than the configured address is refused.
+
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
 - `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID

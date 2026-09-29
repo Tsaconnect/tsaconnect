@@ -542,10 +542,33 @@ func AutoMigrate() error {
 	// refuse the second, and a second open intent means two swaps pointed at
 	// one payout. Partial over the open statuses only, so finishing or
 	// abandoning a sale frees her to start another. Idempotent.
-	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open
-	    ON ramp_sell_intents (user_id)
+	//
+	// Per user AND purpose since marketplace checkouts are funded through the
+	// same intents (purpose 'marketplace'): a sale and a checkout being funded
+	// are different slots, and each still holds at most one. Every row written
+	// before the purpose column reads '' — the old index's exact meaning — so
+	// the old index is dropped only once this one is built, and a failed build
+	// leaves the old one in place.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open_per_purpose
+	    ON ramp_sell_intents (user_id, purpose)
 	    WHERE status IN ('swapping','swapped','ordering')`).Error; err != nil {
-		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale. The one-open-sale check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open_per_purpose: %v — ramp_sell_intents most likely holds a user with MORE THAN ONE open sale (or checkout funding). The one-open check still runs in the service, but a double tap can open a second until the duplicates are failed and migrate is re-run.", err)
+		if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open
+		    ON ramp_sell_intents (user_id)
+		    WHERE status IN ('swapping','swapped','ordering')`).Error; err != nil {
+			log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open either: %v", err)
+		}
+	} else {
+		DB.Exec(`DROP INDEX IF EXISTS uq_ramp_sell_intents_one_open`)
+	}
+
+	// Marketplace checkout funding — at most one open funding swap per checkout
+	// group, the same second line of defence the per-payment index is for TSA
+	// Pay. Partial over non-null reference_id and the open statuses. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_sell_intents_one_open_per_reference
+	    ON ramp_sell_intents (reference_id)
+	    WHERE reference_id IS NOT NULL AND status IN ('swapping','swapped','ordering')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open_per_reference: %v — a checkout group most likely holds MORE THAN ONE open funding swap. The one-open check still runs in the service; migrate again once the duplicates are failed.", err)
 	}
 
 	// TSA Pay — "at most one open sale per PAYMENT" (a plain index on

@@ -208,7 +208,11 @@ export async function createOrders(
   // deliveryAddressId picks a saved address; the server prices from its
   // location and snapshots the recipient, phone and street onto each order.
   deliveryAddressId?: string,
-): Promise<ApiResponse<{ orders: Order[] }>> {
+  // fundWithSwap: the buyer pays with another token, swapped into this one in
+  // her own wallet first (services/checkoutFundingRun), so her balance of it
+  // is expected to be short now — the server skips its shortfall refusal.
+  fundWithSwap?: boolean,
+): Promise<ApiResponse<{ orders: Order[]; checkoutGroupId?: string }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders`, {
@@ -224,6 +228,7 @@ export async function createOrders(
         bookingSlots,
         expectedTotal,
         deliveryAddressId,
+        ...(fundWithSwap ? { fundWithSwap: true } : {}),
       }),
     });
     return await handleResponse(response);

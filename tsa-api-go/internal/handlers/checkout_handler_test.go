@@ -164,6 +164,8 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			purchase_note TEXT,
 			service_answers TEXT,
 			payment_source TEXT DEFAULT '',
+			checkout_group_id TEXT,
+			fund_with_swap BOOLEAN NOT NULL DEFAULT 0,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,

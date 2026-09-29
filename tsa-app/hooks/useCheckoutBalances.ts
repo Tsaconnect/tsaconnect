@@ -5,12 +5,19 @@
 // premiumBalance), the same number useMcgpBalances shows — never from ERC-20
 // MCGP sitting in the wallet. A null balance means "unknown" — callers must
 // not block payment on it, only warn when a balance is known to be short.
+//
+// Always Sonic MAINNET (chain 146), whatever the app's testnet toggle says: the
+// marketplace escrow is on mainnet, so a testnet balance here would show money
+// that cannot pay (and hide money that can).
 import { useCallback, useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { getMcgpBalance } from '@/services/mcgpSwapApi';
-import { getNetwork } from '@/hooks/useNetwork';
 import { getSignableWallet } from '@/services/wallet';
+import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
+
+/** Sonic mainnet: where the marketplace escrow lives. */
+export const CHECKOUT_CHAIN_ID = 146;
 
 export type CheckoutBalanceSymbol = 'USDC' | 'USDT' | 'MCGP' | 'S';
 export type CheckoutBalances = Record<CheckoutBalanceSymbol, number | null>;
@@ -40,8 +47,10 @@ export function useCheckoutBalances() {
       setBalances(UNKNOWN);
       return;
     }
-    const sonicChainId = getNetwork() === 'testnet' ? 14601 : 146;
-    const [res, spendable] = await Promise.all([getWalletBalances(sonicChainId, wallet), readSpendableMcgp()]);
+    const [res, spendable] = await Promise.all([
+      getWalletBalances(CHECKOUT_CHAIN_ID, wallet, MARKETPLACE_NETWORK),
+      readSpendableMcgp(),
+    ]);
     const next = { ...UNKNOWN, MCGP: spendable };
     if (res.success && res.data) {
       const flat = normalizeWalletBalances(res.data, 'sonic').filter((b) => b.chainKey === 'sonic');

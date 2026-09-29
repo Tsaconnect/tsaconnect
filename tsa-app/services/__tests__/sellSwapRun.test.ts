@@ -215,3 +215,20 @@ describe('a payment with no priced amount is not signed — it fails closed', ()
     expect(exec).toHaveBeenCalled();
   });
 });
+
+// A marketplace checkout's funding drives the same step through its own routes
+// (/orders/funding), and signs on MAINNET whatever the app's toggle says.
+describe('an intent that is not a sale', () => {
+  it('closes and tops up through the routes it names, and signs on the network it names', async () => {
+    const closeIntent = jest.fn(async () => {});
+    const requestGasTopUp = jest.fn(async () => ({}));
+    exec.mockRejectedValueOnce(new Error('refused at the node'));
+    await expect(executeSellSwap({ ...base, gasTopUp: true, token: { ...bnb, address: '0x55d398326f99059fF775485246999027B3197955' },
+      quote: { fromAmount: '1000' } as LiFiQuote, closeIntent, requestGasTopUp, network: 'mainnet' })).rejects.toThrow();
+    expect(requestGasTopUp).toHaveBeenCalledWith('i1');
+    expect(closeIntent).toHaveBeenCalledWith('i1');
+    expect(abandon).not.toHaveBeenCalled();
+    expect(SellSwap.requestSellIntentGasTopUp).not.toHaveBeenCalled();
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ network: 'mainnet' }));
+  });
+});

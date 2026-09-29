@@ -41,6 +41,15 @@ const (
 // not here: a customer whose payment was delivered is free to sell again.
 var SellIntentOpenStatuses = []string{SellIntentSwapping, SellIntentSwapped, SellIntentOrdering}
 
+// SellIntentPurposeMarketplace marks an intent that funds a marketplace
+// checkout: her token is swapped into the order token in HER OWN wallet on
+// Sonic, and the escrow is then paid from it exactly as a stablecoin checkout
+// is. The empty purpose is every intent before it — a sale or a TSA Pay
+// payment — and keeps their one-open-sale slot to themselves (the one-open
+// index is per user AND purpose), so a checkout being funded never blocks a
+// sale, nor a sale a checkout.
+const SellIntentPurposeMarketplace = "marketplace"
+
 type RampSellIntent struct {
 	ID     uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
@@ -62,6 +71,12 @@ type RampSellIntent struct {
 	// TSA Pay checkout. PayoutFiat is the exact naira the recipient is owed.
 	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"payPaymentId,omitempty"`
 	PayoutFiat   string     `gorm:"size:32" json:"payoutFiat,omitempty"`
+	// Purpose names what the intent is FOR when that is not a sale or a TSA Pay
+	// payment (SellIntentPurposeMarketplace); ReferenceID is what it serves under
+	// that purpose — a marketplace checkout group. Generic on purpose: a delivery
+	// needs something to answer for, and PayPaymentID is TSA Pay's own.
+	Purpose     string     `gorm:"size:16;not null;default:''" json:"purpose,omitempty"`
+	ReferenceID *uuid.UUID `gorm:"type:uuid;index" json:"referenceId,omitempty"`
 	// DestChainID, DestTokenAddress, DestAddress and DestAmount mark a sale that
 	// DELIVERS a token to someone else's wallet instead of opening an offramp:
 	// TSA Pay's crypto route. DestAmount is the least the recipient must be
@@ -92,11 +107,38 @@ type RampSellIntent struct {
 	// admitted this sale on. False means none was paid for, so none may be
 	// sent — whatever QuotedTopUpWei says. Kept apart from QuotedTopUpWei
 	// because "" there already means "budgeted, but the route quoted no wei".
-	TopUpBudgeted bool    `gorm:"not null;default:false" json:"-"`
-	QuotedFromUSD float64 `json:"-"` // the quote's fromAmountUSD, the basis our fee is booked on
-	BankCode      string  `gorm:"size:16;not null" json:"bankCode"`
-	AccountNumber string  `gorm:"size:32;not null" json:"accountNumber"`
-	AccountName   string  `gorm:"size:128" json:"accountName,omitempty"`
+	TopUpBudgeted bool `gorm:"not null;default:false" json:"-"`
+	// GasRecoveryBps is the LiFi integrator fee a PASS-THROUGH intent (a
+	// marketplace checkout) carries: exactly the gas we sponsor for it, never a
+	// margin. FeeBps stays 0 on those — nothing here is our revenue, so nothing
+	// is booked as a fee.
+	GasRecoveryBps int `gorm:"not null;default:0" json:"-"`
+	// DestTopUpBudgeted / DestGasNeedWei are the DESTINATION-chain gas a
+	// marketplace intent's quote priced in: after delivery she needs the chain's
+	// coin to approve and escrow each order, and DestGasNeedWei is what her
+	// wallet must hold for that (only the shortfall is ever sent). DestToppedUpAt
+	// is the once-per-intent claim; DestTopUpTxHash / DestTopUpWei what was sent.
+	DestTopUpBudgeted bool   `gorm:"not null;default:false" json:"destGasTopUp,omitempty"`
+	DestGasNeedWei    string `gorm:"size:80" json:"-"`
+	// DestTopUpMaxWei is the shortfall the quote PRICED (need minus what she
+	// held then): the most a destination top-up for this intent ever sends,
+	// whatever her balance reads later.
+	DestTopUpMaxWei string `gorm:"size:80" json:"-"`
+	// SwapRecordedAt is when her swap's hash was reported; SwapSeenAt when LiFi
+	// first knew that hash as a transfer from her address (PENDING or DONE). A
+	// marketplace funding keeps its orders alive only once the swap is seen — a
+	// well-formed hash nobody broadcast must not hold stock. NextCheckAt paces
+	// the funding reconciler (backed off by the intent's age).
+	SwapRecordedAt  *time.Time `json:"-"`
+	SwapSeenAt      *time.Time `json:"-"`
+	NextCheckAt     *time.Time `gorm:"index" json:"-"`
+	DestToppedUpAt  *time.Time `json:"-"`
+	DestTopUpTxHash string     `gorm:"size:128" json:"-"`
+	DestTopUpWei    string     `gorm:"size:80" json:"-"`
+	QuotedFromUSD   float64    `json:"-"` // the quote's fromAmountUSD, the basis our fee is booked on
+	BankCode        string     `gorm:"size:16;not null" json:"bankCode"`
+	AccountNumber   string     `gorm:"size:32;not null" json:"accountNumber"`
+	AccountName     string     `gorm:"size:128" json:"accountName,omitempty"`
 	// SwapTxHash is a POINTER so the unique index ignores intents that have
 	// no swap yet: one on-chain swap can back exactly one sale, and a hash
 	// already claimed elsewhere must not open a second payout.
@@ -158,6 +200,9 @@ func (i *RampSellIntent) Open() bool {
 // IsDelivery reports a sale that hands a token to someone else's wallet
 // (TSA Pay's crypto route) instead of opening an offramp.
 func (i *RampSellIntent) IsDelivery() bool { return i.DestAddress != "" }
+
+// IsMarketplace reports an intent that funds a marketplace checkout.
+func (i *RampSellIntent) IsMarketplace() bool { return i.Purpose == SellIntentPurposeMarketplace }
 
 // IsNairaPay reports a sale that pays an exact naira amount to someone else's
 // bank (TSA Pay's naira route).

@@ -171,7 +171,7 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 	// intent (a repeat is a no-op), so every path that finds the sale delivered
 	// books it: that is what heals a crash between the write and the booking.
 	if in.Status == models.SellIntentDelivered {
-		s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
+		s.bookFee(&in, in.UserID, deliveryFeeSourceType(&in))
 		return st.DestTxHash, nil
 	}
 	destTx := strings.ToLower(st.DestTxHash)
@@ -205,7 +205,7 @@ func (s *SellIntentService) ConfirmDelivery(ctx context.Context, id uuid.UUID) (
 			return "", ErrSellIntentState
 		}
 	}
-	s.bookFee(&in, in.UserID, tsaPayFeeSourceType)
+	s.bookFee(&in, in.UserID, deliveryFeeSourceType(&in))
 	return st.DestTxHash, nil
 }
 

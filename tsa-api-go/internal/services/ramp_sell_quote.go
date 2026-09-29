@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 
@@ -129,6 +130,17 @@ type SellQuoteInput struct {
 	// Delivery marks the sale as a delivery whatever its target looks like, so
 	// it is never priced as an offramp (see targetFor).
 	Delivery bool
+	// PassThrough prices a delivery at cost: we keep no margin. Admission is
+	// still l + g <= BudgetBps, but the unspent rest of the budget is NOT
+	// charged as our integrator fee — the only fee on the route is g itself
+	// (gas we pay on her behalf), and none at all when we pay none. A
+	// marketplace checkout's funding swap (owner decision 2026-09-29).
+	PassThrough bool
+	// DestGasUSD is gas we will pay on the DESTINATION chain once the route has
+	// delivered — a marketplace checkout's top-up of the coin its escrow txs
+	// need — priced by the caller, who knows how much the wallet lacks. It is
+	// part of g, so it counts against the budget like any gas we sponsor.
+	DestGasUSD float64
 }
 
 // deliveryTarget is where a quoted route must deliver, and what it may spend.
@@ -233,7 +245,12 @@ func (q *RampSellQuoter) SetNativeBalanceReader(f nativeBalanceReader) { q.nativ
 func (q *RampSellQuoter) SetRouterAllowlist(routers map[int64][]common.Address) { q.routers = routers }
 
 func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwapQuote, error) {
-	if q == nil || q.lifi == nil || q.quotes == nil || q.chains == nil || q.budgetBps <= 0 || in.BudgetBps < 0 {
+	if q == nil || q.lifi == nil || q.chains == nil || in.BudgetBps < 0 || in.DestGasUSD < 0 || math.IsNaN(in.DestGasUSD) {
+		return nil, ErrSellUnavailable
+	}
+	// Pass-through is a delivery's pricing only: an offramp's fee is F - B by
+	// design and has no at-cost form.
+	if in.PassThrough && (!in.Delivery || in.BudgetBps <= 0) {
 		return nil, ErrSellUnavailable
 	}
 	if err := q.RefuseSource(in.FromChainID, in.FromToken); err != nil {
@@ -253,14 +270,17 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, fmt.Errorf("%w: %v", ErrSellBadSourceAddress, err)
 	}
 	usdc := q.chains.TokenAddressForChainID(rampSettlementChainID, rampSettlementToken)
-	if usdc == "" {
-		return nil, ErrSellUnavailable
-	}
 	// The receiver is her EVM wallet on Base, whoever the sender is — or, for
 	// a delivery, the named recipient on the named chain. An address that is
 	// not one on that chain (or on a chain nothing can decode a receiver for)
 	// never reaches LiFi.
 	target := q.targetFor(in, usdc)
+	// Only an offramp needs Paycrest's quote service and the quoter's own B; a
+	// delivery names its token and is given its whole budget by the caller, so a
+	// quoter wired without Paycrest (the marketplace's) still prices one.
+	if target.token == "" || target.budgetBps <= 0 || (target.offramp && (q.quotes == nil || q.budgetBps <= 0)) {
+		return nil, ErrSellUnavailable
+	}
 	if err := validateAddressForChain(target.chainID, target.address, nil); err != nil {
 		return nil, fmt.Errorf("%w: receiving wallet: %v", ErrSellBadSourceAddress, err)
 	}
@@ -294,6 +314,9 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, ErrSellRouteTooCostly
 	}
 	gas := q.gasFor(ctx, in, first, target.offramp)
+	if in.PassThrough {
+		return q.passThrough(ctx, req, in, usdc, target, first, l, gas)
+	}
 
 	route := first
 	fee := target.budgetBps - l - gas.bps
@@ -349,6 +372,11 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		}
 	}
 
+	return q.finish(ctx, route, in, usdc, target, l, gas, fee)
+}
+
+// finish checks the chosen route is one she may sign and builds the quote.
+func (q *RampSellQuoter) finish(ctx context.Context, route *LiFiRoute, in SellQuoteInput, usdc string, target deliveryTarget, l int, gas sellGas, fee int) (*SellSwapQuote, error) {
 	// She signs this route with her own key, and after that her tokens are
 	// gone. The route is LiFi's answer, not ours, so it is checked before it
 	// is handed over — see checkSignable.
@@ -373,6 +401,48 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, err
 	}
 	return out, nil
+}
+
+// passThrough prices a delivery at cost (in.PassThrough). first is the fee-free
+// route and l, gas its cost and gas. She pays LiFi's cost plus the gas we pay
+// for her, and nothing else: the integrator fee is exactly g — recovering gas,
+// never a margin — and absent when g is 0. Admission is l + g <= the budget;
+// the unspent rest of the budget is simply not charged.
+//
+// When g > 0 the fee-carrying route is asked for and admitted on its own
+// figures: its cost already includes our fee, so l2 alone is what she pays. A
+// route whose gas re-prices above the fee is still offered (her price is what
+// the budget caps) and the few bps we under-recover are logged.
+func (q *RampSellQuoter) passThrough(ctx context.Context, req LiFiQuoteRequest, in SellQuoteInput, usdc string, target deliveryTarget, first *LiFiRoute, l int, gas sellGas) (*SellSwapQuote, error) {
+	if l+gas.bps > target.budgetBps {
+		return nil, ErrSellRouteTooCostly
+	}
+	if gas.bps == 0 {
+		return q.finish(ctx, first, in, usdc, target, l, gas, 0)
+	}
+	fee := gas.bps
+	req.FeeBps = fee
+	route, err := q.lifi.Quote(ctx, req)
+	if err != nil {
+		if errors.Is(err, ErrLiFiFeeUnconfigured) {
+			// The gas we would pay for her could not be recovered on this chain.
+			return nil, fmt.Errorf("%w: %v", ErrSellUnavailable, err)
+		}
+		return nil, err
+	}
+	if route == nil {
+		return nil, ErrSellUnavailable
+	}
+	l2, ok := LiFiCostBps(route)
+	if !ok || l2 > target.budgetBps {
+		return nil, ErrSellRouteTooCostly
+	}
+	gas2 := q.gasFor(ctx, in, route, target.offramp)
+	if gas2.bps > fee {
+		log.Printf("[ramp-sell] pass-through gas under-recovered by %d bps chain=%d tool=%s", gas2.bps-fee, in.FromChainID, route.Tool)
+	}
+	// CostBps reports LiFi's own cost, without the gas recovery inside l2.
+	return q.finish(ctx, route, in, usdc, target, max(l2-fee, 0), gas2, fee)
 }
 
 // raisedCostLimit is, for an ordinary sale dearer than B, the most LiFi's
@@ -564,9 +634,9 @@ type sellGas struct {
 // source-chain top-up when she holds the token but not the coin that pays for
 // moving it.
 func (q *RampSellQuoter) gasFor(ctx context.Context, in SellQuoteInput, route *LiFiRoute, offramp bool) sellGas {
-	var usd float64
+	usd := in.DestGasUSD
 	if offramp {
-		usd = q.sponsoredGasUSD
+		usd += q.sponsoredGasUSD
 	}
 	var g sellGas
 	if q.needsTopUp(ctx, in, route) {

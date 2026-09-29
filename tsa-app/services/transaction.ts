@@ -1,5 +1,5 @@
 import { signTransaction, broadcastTransaction } from './wallet';
-import { type ChainKey } from '../constants/chains';
+import { type ChainKey, type NetworkType } from '../constants/chains';
 import type { UnsignedTx } from './orderApi';
 
 const TX_TIMEOUT_MS = 90_000;
@@ -22,10 +22,13 @@ export class TxNotConfirmedError extends Error {
 /**
  * Sign a transaction locally and broadcast it on-chain.
  * @param chainKey - Which chain to broadcast on (e.g. 'sonic', 'bsc')
+ * @param network - Broadcast on this network's RPCs whatever the app's toggle
+ *   says (marketplace escrow is always 'mainnet'); unset, the active network.
  */
 export async function signAndBroadcast(
   unsignedTx: UnsignedTx,
-  chainKey: ChainKey = 'sonic'
+  chainKey: ChainKey = 'sonic',
+  network?: NetworkType,
 ): Promise<string> {
   const txReq: Record<string, any> = {
     type: 0, // legacy transaction format
@@ -42,7 +45,7 @@ export async function signAndBroadcast(
 
   const signed = await signTransaction(txReq);
   // Routes through fallback RPCs if the primary is unreachable.
-  const txResponse = await broadcastTransaction(chainKey, signed);
+  const txResponse = await broadcastTransaction(chainKey, signed, network);
 
   let receipt;
   try {
