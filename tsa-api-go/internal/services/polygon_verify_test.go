@@ -152,3 +152,27 @@ func TestClassifyTransfer(t *testing.T) {
 		}
 	}
 }
+
+// A mined, successful transaction with no matching Transfer says so as its own
+// error — still ErrTransferNotFound to every caller that waits on that, and
+// still unproven (not refuted) to ClassifyTransfer: only a caller that knows
+// the receipt is deep enough may treat it as final.
+func TestVerifyTransferFrom_MinedWithoutAMatchIsNoMatch(t *testing.T) {
+	r := &stubLogReader{receipt: &types.Receipt{
+		Status: types.ReceiptStatusSuccessful,
+		Logs:   []*types.Log{transferLog(testToken, testOther, testFWAddr, big.NewInt(1_000_000))},
+	}}
+	payer := "0x2222222222222222222222222222222222222222"
+	got, err := NewLogTransferVerifier(r).VerifyTransferFrom(context.Background(), "0x1", testToken, payer, testFWAddr)
+	if !errors.Is(err, ErrTransferNoMatch) || !errors.Is(err, ErrTransferNotFound) || got != nil {
+		t.Fatalf("got %v err %v", got, err)
+	}
+	if ClassifyTransfer(got, err) != TransferUnproven {
+		t.Fatal("no match must stay unproven for callers that don't know the depth")
+	}
+	// Not mined: plain not-found, not "no match".
+	_, err = NewLogTransferVerifier(&stubLogReader{}).VerifyTransferFrom(context.Background(), "0x1", testToken, payer, testFWAddr)
+	if !errors.Is(err, ErrTransferNotFound) || errors.Is(err, ErrTransferNoMatch) {
+		t.Fatalf("unmined: err = %v", err)
+	}
+}

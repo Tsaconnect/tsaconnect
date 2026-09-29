@@ -563,6 +563,8 @@ func payMerchantAdminFail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, services.ErrPayMerchantNotFound):
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
+	case businessNameRefusal(err) != "":
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, businessNameRefusal(err), services.BusinessNameInvalidCode)
 	case errors.Is(err, services.ErrPayMerchantInvalid):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, services.ErrPayMerchantStale):

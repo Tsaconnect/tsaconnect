@@ -513,6 +513,16 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 	if h.handleNameChangeWebhook(c, payload) {
 		return
 	}
+	// A superseded name-change session is no longer any change's current one,
+	// but it is still a re-verification — never first-time KYC's to approve.
+	if isChange, err := h.NameChanges.IsNameChangeSession(c.Request.Context(), payload.SessionID); err != nil {
+		log.Printf("[KYC] name-change session lookup failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to look up session"})
+		return
+	} else if isChange {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event for a past name-change session"})
+		return
+	}
 
 	var user models.User
 	query := config.DB

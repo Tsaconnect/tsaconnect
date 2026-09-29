@@ -418,3 +418,48 @@ func TestIdempotency_SameKeyDifferentQuery_Returns409(t *testing.T) {
 		t.Fatalf("handler ran %d times", n.Load())
 	}
 }
+
+// A body carrying a password must not be stored as its plain sha256 — that is
+// an offline guessing oracle for the password. The route leaves the field out
+// of the fingerprint and still replays a retry, and still refuses the key for
+// a request that differs in anything else.
+func TestIdempotency_IgnoredFieldIsNotFingerprinted(t *testing.T) {
+	db := setupIdempotencyDB(t)
+	var n atomic.Int32
+	user := models.User{ID: uuid.New()}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/do", func(c *gin.Context) { c.Set("user", user); c.Next() },
+		Idempotency(db, IdempotencyIgnoringFields("password")),
+		func(c *gin.Context) {
+			n.Add(1)
+			c.JSON(http.StatusCreated, gin.H{"n": n.Load()})
+		})
+	send := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/do", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", "k-pw")
+		r.ServeHTTP(w, req)
+		return w
+	}
+	raw := `{"payMethod":"stablecoin","password":"hunter2-Secret!"}`
+	if w := send(raw); w.Code != http.StatusCreated {
+		t.Fatalf("first: %d", w.Code)
+	}
+	var row models.RequestIdempotency
+	if err := db.Where("key = ?", "k-pw").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.RequestHash == fingerprint(http.MethodPost, "/do", []byte(raw)) {
+		t.Fatal("the stored fingerprint is the sha256 of the raw body, password included")
+	}
+	if row.RequestHash != fingerprint(http.MethodPost, "/do", []byte(`{"payMethod":"stablecoin"}`)) {
+		t.Fatalf("fingerprint %s is not of the body without the password", row.RequestHash)
+	}
+	if w := send(raw); w.Code != http.StatusCreated || w.Header().Get("Idempotent-Replayed") != "true" || n.Load() != 1 {
+		t.Fatalf("retry: %d replayed=%q calls=%d", w.Code, w.Header().Get("Idempotent-Replayed"), n.Load())
+	}
+	if w := send(`{"payMethod":"mcgp_spendable","password":"hunter2-Secret!"}`); w.Code != http.StatusConflict {
+		t.Fatalf("a different request under the same key: %d", w.Code)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -30,7 +31,31 @@ var (
 	ErrPayBusinessNameChangeDecided = errors.New("this business name change has already been decided")
 	// ErrPayBusinessNameSelfReview: an admin may not decide their own merchant's rename.
 	ErrPayBusinessNameSelfReview = errors.New("you can't review a rename of your own business")
+	// ErrPayBusinessNameInvalid is matched (errors.Is) by every refusal of a
+	// business name, so a route can give it its own machine code
+	// (business_name_invalid) and clients stop parsing the text. Each refusal
+	// is also an ErrPayMerchantInvalid, as before.
+	ErrPayBusinessNameInvalid = errors.New("invalid business name")
 )
+
+// BusinessNameInvalidCode is the machine code every route answers a refused
+// business name with.
+const BusinessNameInvalidCode = "business_name_invalid"
+
+// BusinessNameError is a business name refused, and why — Reason is written
+// for the owner. It reads (Error) as it always has, "invalid merchant
+// settings: <reason>".
+type BusinessNameError struct{ Reason string }
+
+func (e *BusinessNameError) Error() string { return ErrPayMerchantInvalid.Error() + ": " + e.Reason }
+
+func (e *BusinessNameError) Unwrap() []error {
+	return []error{ErrPayMerchantInvalid, ErrPayBusinessNameInvalid}
+}
+
+func businessNameInvalid(format string, args ...any) error {
+	return &BusinessNameError{Reason: fmt.Sprintf(format, args...)}
+}
 
 // Business names an owner may choose: long enough to mean something, short
 // enough for a receipt line.
@@ -43,10 +68,12 @@ const (
 // the platform's own names and the words an impersonator would lead with.
 var DefaultReservedBusinessNames = []string{"TSA Connect", "TSAConnect", "TSA Pay", "TSAPay", "support", "refund"}
 
-// SetReservedBusinessNames replaces the words an owner's business name may not
-// contain (compared case-insensitively, ignoring spacing).
+// SetReservedBusinessNames adds words an owner's business name may not contain
+// (compared as foldBusinessName reads them) to the built-in ones. It adds and
+// never replaces: a deploy that lists one more word must not quietly let
+// "TSA Pay" back in.
 func (s *PayMerchantService) SetReservedBusinessNames(words []string) {
-	s.reserved = nil
+	s.reserved = append([]string{}, DefaultReservedBusinessNames...)
 	for _, w := range words {
 		if w = strings.TrimSpace(w); w != "" {
 			s.reserved = append(s.reserved, w)
@@ -71,11 +98,14 @@ func (s *PayMerchantService) NormalizeBusinessName(name string) (string, error) 
 
 func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) {
 	if payHasHiddenChars(name) {
-		return "", fmt.Errorf("%w: a business name can't contain hidden or control characters", ErrPayMerchantInvalid)
+		return "", businessNameInvalid("a business name can't contain hidden or control characters")
 	}
 	name = strings.Join(strings.Fields(name), " ")
 	if n := utf8.RuneCountInString(name); n < payBusinessNameMinRunes || n > payBusinessNameMaxRunes {
-		return "", fmt.Errorf("%w: a business name must be %d to %d characters", ErrPayMerchantInvalid, payBusinessNameMinRunes, payBusinessNameMaxRunes)
+		return "", businessNameInvalid("a business name must be %d to %d characters", payBusinessNameMinRunes, payBusinessNameMaxRunes)
+	}
+	if mixedScripts(name) {
+		return "", businessNameInvalid("a business name can't mix letters from different alphabets")
 	}
 	reserved := s.reserved
 	if reserved == nil {
@@ -84,10 +114,57 @@ func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) 
 	folded := foldBusinessName(name)
 	for _, w := range reserved {
 		if f := foldBusinessName(w); f != "" && strings.Contains(folded, f) {
-			return "", fmt.Errorf("%w: a business name can't contain %q", ErrPayMerchantInvalid, w)
+			return "", businessNameInvalid("a business name can't contain %q", w)
 		}
 	}
 	return name, nil
+}
+
+// businessNameScriptSets are the scripts one name may mix (Unicode's "highly
+// restrictive" profile, UTS #39): Latin with the scripts East Asian names are
+// written in together. Any other mix — Latin with Cyrillic, Greek, Armenian,
+// Cherokee, Lisu… — is how a lookalike of a Latin name is spelled ("TSA
+// Cօnnect" with an Armenian o, "ꓢupport" with a Lisu S) and no lookalike table
+// can list every such letter, so it is refused outright. A name wholly in one
+// script is fine.
+var businessNameScriptSets = [][]string{
+	{"Latin", "Han", "Hiragana", "Katakana"},
+	{"Latin", "Han", "Bopomofo"},
+	{"Latin", "Han", "Hangul"},
+}
+
+// mixedScripts reports whether name's letters come from scripts no one name
+// should combine. Common and Inherited characters (digits, punctuation,
+// combining marks, styled letters) belong to every script.
+func mixedScripts(name string) bool {
+	used := map[string]bool{}
+	for _, r := range name {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		for script, table := range unicode.Scripts {
+			if script != "Common" && script != "Inherited" && unicode.Is(table, r) {
+				used[script] = true
+				break
+			}
+		}
+	}
+	if len(used) <= 1 {
+		return false
+	}
+	for _, set := range businessNameScriptSets {
+		all := true
+		for script := range used {
+			if !slices.Contains(set, script) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return false
+		}
+	}
+	return true
 }
 
 // businessNameLookalikes maps characters that pass for Latin letters — the
@@ -104,11 +181,18 @@ var businessNameLookalikes = map[rune]rune{
 	'τ': 't', 'υ': 'u', 'χ': 'x', 'ω': 'w', 'ς': 's', 'σ': 'o',
 	// Digits, symbols and letters that read as another
 	'0': 'o', '1': 'l', 'i': 'l', '|': 'l', '!': 'l', '3': 'e', '5': 's', '$': 's', '@': 'a', '4': 'a', '7': 't',
+	// Latin small capitals and letter variants: Latin script, so the
+	// mixed-script rule passes them, and NFKD leaves them as they are
+	// ("ᴛsa pay", "TꜱA Pay").
+	'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜰ': 'f', 'ɢ': 'g', 'ʜ': 'h', 'ɪ': 'l', 'ᴊ': 'j',
+	'ᴋ': 'k', 'ʟ': 'l', 'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p', 'ꞯ': 'q', 'ʀ': 'r', 'ꜱ': 's', 'ᴛ': 't',
+	'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'ʏ': 'y', 'ᴢ': 'z', 'ɑ': 'a', 'ɡ': 'g', 'ı': 'l', 'ɩ': 'l',
 }
 
 // foldBusinessName reduces a name to the letters a reader sees, for the
-// reserved-word check: compatibility-decomposed (NFKD: full-width and styled
-// letters become plain ones, accents come off), lower-cased, lookalikes mapped
+// reserved-word check: compatibility-decomposed (NFKD: full-width, styled and
+// superscript/modifier letters become plain ones, accents come off),
+// lower-cased, lookalikes (small capitals among them) mapped
 // to the Latin letter they imitate, and everything that is not a letter or
 // digit dropped — so "T.S.A-Pay", "Ｔｓａ Ｐａｙ", "Tѕа Pay" (Cyrillic) and
 // "TSA P@y" all read as "tsapay".
@@ -277,6 +361,12 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 	status := models.PayNameChangeRejected
 	if approve {
 		status = models.PayNameChangeApproved
+		// The rule may have tightened (reserved words, script mixing) since
+		// the request was filed: an approval puts the name in front of
+		// customers now, so it is held to the rule as it stands now.
+		if _, err := s.normalizeBusinessName(change.NewName); err != nil {
+			return nil, nil, err
+		}
 	}
 	note = truncateRunes(strings.TrimSpace(note), 512)
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

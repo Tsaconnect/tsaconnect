@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -63,11 +64,17 @@ func (f *fakeSwapPrice) PremiumBalance(user string) (*big.Int, error) {
 }
 
 // fakeStableRail is the treasury: one USDC option on base, what the chain says
-// about the named transaction, and a refund answer per call.
+// about each named transaction, and a refund answer per call. Like the real
+// verifier it credits only Transfer logs from the wallet asked about to the
+// address asked about: anything else mined is "no match".
 type fakeStableRail struct {
-	payment   *StablePayment
-	verifyErr error
-	lastFrom  string
+	payment *StablePayment // any transaction not in byHash
+	byHash  map[string]fakeChainTx
+	// creditFrom is whose tokens payment's Transfer logs move (default: its
+	// signer) — set apart to model a transferFrom by an approved contract.
+	creditFrom string
+	verifyErr  error
+	lastFrom   string
 
 	refundHash      string
 	refundAttempted bool
@@ -77,12 +84,31 @@ type fakeStableRail struct {
 	refundedTo      string
 
 	// txUnknown: the chain has never heard of the named transaction;
-	// txLookupErr: it cannot be asked.
+	// txLookupErr: it cannot be asked; pendingFrom: transactions the chain
+	// knows but has not mined, by signer.
 	txUnknown   bool
 	txLookupErr error
+	pendingFrom map[string]string
+}
+
+// fakeChainTx is one mined transaction: what it proves, and whose tokens it
+// moved to whom (defaults: its signer, to the treasury).
+type fakeChainTx struct {
+	pay      *StablePayment
+	from, to string
 }
 
 const nameChangeTreasury = "0x000000000000000000000000000000000000fEE5"
+
+func (f *fakeStableRail) mined(hash string) (fakeChainTx, bool) {
+	if tx, ok := f.byHash[hash]; ok {
+		return tx, true
+	}
+	if f.payment == nil {
+		return fakeChainTx{}, false
+	}
+	return fakeChainTx{pay: f.payment, from: f.creditFrom}, true
+}
 
 func (f *fakeStableRail) Available() bool { return true }
 func (f *fakeStableRail) To() string      { return nameChangeTreasury }
@@ -92,24 +118,40 @@ func (f *fakeStableRail) Options(context.Context) []StableFeeOption {
 func (f *fakeStableRail) PrepareTransfer(string, string, string, *big.Int) ([]byte, error) {
 	return []byte(`{"to":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","data":"0xa9059cbb"}`), nil
 }
-func (f *fakeStableRail) VerifyPayment(_ context.Context, _, _, _, from, to string) (*StablePayment, error) {
+func (f *fakeStableRail) VerifyPayment(_ context.Context, _, hash, _, from, to string) (*StablePayment, error) {
 	f.lastFrom = from
-	if to != nameChangeTreasury {
-		return nil, ErrTransferNotFound
-	}
 	if f.verifyErr != nil {
 		return nil, f.verifyErr
 	}
-	if f.payment == nil {
+	tx, ok := f.mined(hash)
+	if !ok {
 		return nil, ErrTransferNotFound
 	}
-	return f.payment, nil
-}
-func (f *fakeStableRail) TransactionKnown(context.Context, string, string) (bool, error) {
-	if f.txLookupErr != nil {
-		return false, f.txLookupErr
+	logFrom, logTo := tx.from, tx.to
+	if logFrom == "" {
+		logFrom = tx.pay.Sender
 	}
-	return !f.txUnknown, nil
+	if logTo == "" {
+		logTo = nameChangeTreasury
+	}
+	if !strings.EqualFold(logFrom, from) || !strings.EqualFold(logTo, to) {
+		nothing := *tx.pay
+		nothing.Credited = new(big.Int)
+		return &nothing, fmt.Errorf("%w: tx=%s", ErrTransferNoMatch, hash)
+	}
+	return tx.pay, nil
+}
+func (f *fakeStableRail) TransactionKnown(_ context.Context, _, hash string) (bool, string, error) {
+	if f.txLookupErr != nil {
+		return false, "", f.txLookupErr
+	}
+	if sender, ok := f.pendingFrom[hash]; ok {
+		return true, sender, nil
+	}
+	if tx, ok := f.mined(hash); ok {
+		return true, tx.pay.Sender, nil
+	}
+	return !f.txUnknown, "", nil
 }
 func (f *fakeStableRail) Refund(_ context.Context, _, _, to string, amount *big.Int, _ float64) (string, bool, error) {
 	f.refunds++
@@ -167,9 +209,15 @@ func newNameChangeRig(t *testing.T, cfg NameChangeConfig) *nameChangeRig {
 
 func (r *nameChangeRig) seedUser(t *testing.T, status, legal string) uuid.UUID {
 	t.Helper()
+	return r.seedUserWallet(t, status, legal, r.wallet)
+}
+
+// seedUserWallet is seedUser with a wallet of its own.
+func (r *nameChangeRig) seedUserWallet(t *testing.T, status, legal, wallet string) uuid.UUID {
+	t.Helper()
 	id := uuid.New()
 	if err := r.db.Exec(`INSERT INTO users (id, name, username, email, wallet_address, verification_status, verified_legal_name, didit_session_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, "Ada Obi", "ada_"+id.String()[:6], id.String()[:6]+"@x.ng", r.wallet, status, legal,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, "Ada Obi", "ada_"+id.String()[:6], id.String()[:6]+"@x.ng", wallet, status, legal,
 		"sess-first-kyc", r.now.AddDate(-1, 0, 0)).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +616,8 @@ func TestNameChange_StablecoinFeeIsHeldToSenderTimeDepthAndAmount(t *testing.T) 
 	if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); !errors.Is(err, ErrNameChangePaymentOnChain) {
 		t.Fatalf("shallow: err = %v", err)
 	}
-	// Signed by another wallet: refused, and the hash forgotten so another can be named.
+	// Signed by another wallet: refused, and the hash forgotten so another can
+	// be named — and remembered, so naming it again is answered at once.
 	p = r.provenPayment(1_000_000)
 	p.Sender = "0x1111111111111111111111111111111111111111"
 	r.rail.payment = p
@@ -578,16 +627,34 @@ func TestNameChange_StablecoinFeeIsHeldToSenderTimeDepthAndAmount(t *testing.T) 
 	if ch := r.change(t, out.Change.ID); ch.PayRef != nil {
 		t.Fatal("a refuted transaction must be cleared")
 	}
+	r.rail.payment = r.provenPayment(1_000_000)
+	if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); !errors.Is(err, ErrNameChangePaymentMismatch) ||
+		!strings.Contains(err.Error(), "already checked") {
+		t.Fatalf("a refuted hash named again: err = %v", err)
+	}
+	// Moved out of the proven wallet by a contract it approved, not sent by
+	// it: refused.
+	moved := "0x" + strings.Repeat("a1", 32)
+	p = r.provenPayment(1_000_000)
+	p.Sender = "0x1111111111111111111111111111111111111111"
+	r.rail.payment, r.rail.creditFrom = p, r.wallet
+	if _, err := r.svc.ConfirmPayment(ctx, r.user, moved); !errors.Is(err, ErrNameChangePaymentMismatch) ||
+		!strings.Contains(err.Error(), "other than the one proven") {
+		t.Fatalf("a transferFrom by another signer: err = %v", err)
+	}
+	r.rail.creditFrom = ""
 	// Made before the change was opened: refused.
+	early := "0x" + strings.Repeat("a2", 32)
 	p = r.provenPayment(1_000_000)
 	p.BlockTime = r.now.Add(-time.Hour)
 	r.rail.payment = p
-	if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); !errors.Is(err, ErrNameChangePaymentMismatch) {
+	if _, err := r.svc.ConfirmPayment(ctx, r.user, early); !errors.Is(err, ErrNameChangePaymentMismatch) {
 		t.Fatalf("an old transfer: err = %v", err)
 	}
 	// Proven.
+	good := "0x" + strings.Repeat("a3", 32)
 	r.rail.payment = r.provenPayment(1_000_000)
-	view, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx)
+	view, err := r.svc.ConfirmPayment(ctx, r.user, good)
 	if err != nil || view.Status != models.NameChangeStatusPaid || view.FeeStatus != models.NameChangeFeeReceived {
 		t.Fatalf("view %+v err %v", view, err)
 	}
@@ -599,7 +666,7 @@ func TestNameChange_StablecoinFeeIsHeldToSenderTimeDepthAndAmount(t *testing.T) 
 	if _, err := r.svc.Create(ctx, other, r.stableRequest(t, other)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.svc.ConfirmPayment(ctx, other, nameChangeTx); !errors.Is(err, ErrNameChangePaymentMismatch) {
+	if _, err := r.svc.ConfirmPayment(ctx, other, good); !errors.Is(err, ErrNameChangePaymentMismatch) {
 		t.Fatalf("a reused transaction: err = %v", err)
 	}
 	// Cancelled before verification: refunded to the proven wallet.
@@ -717,8 +784,11 @@ func TestNameChange_StablecoinRefundRetriesOnlyWhatNeverLeft(t *testing.T) {
 	if _, err := u.svc.AdminRecordRefundOutcome(ctx, uuid.New(), view.ID, NameChangeRefundOutcome{Sent: true}); !errors.Is(err, ErrNameChangeInvalid) {
 		t.Fatalf("a sent refund needs its tx: err = %v", err)
 	}
-	av, err := u.svc.AdminRecordRefundOutcome(ctx, uuid.New(), view.ID, NameChangeRefundOutcome{Sent: true, TxHash: nameChangeTx, Note: "seen on basescan"})
-	if err != nil || av.FeeStatus != models.NameChangeFeeRefunded || av.FeeTxHash != nameChangeTx {
+	refundTx := "0x" + strings.Repeat("ef", 32)
+	u.rail.byHash = map[string]fakeChainTx{refundTx: {pay: &StablePayment{Credited: big.NewInt(1_000_000), Sender: nameChangeTreasury,
+		BlockTime: u.now, Confirmations: 2}, from: nameChangeTreasury, to: u.wallet}}
+	av, err := u.svc.AdminRecordRefundOutcome(ctx, uuid.New(), view.ID, NameChangeRefundOutcome{Sent: true, TxHash: refundTx, Note: "seen on basescan"})
+	if err != nil || av.FeeStatus != models.NameChangeFeeRefunded || av.FeeTxHash != refundTx {
 		t.Fatalf("view %+v err %v", av, err)
 	}
 }
@@ -738,6 +808,8 @@ func TestNameChange_WeakEvidenceIsHeldForAnAdmin(t *testing.T) {
 		"the original session gone":  {func(r *nameChangeRig, d *NameChangeDecision) { d.Original = nil }, "original KYC session could not be read"},
 		"no face match":              {func(r *nameChangeRig, d *NameChangeDecision) { d.New.FaceMatches = nil }, "no face match"},
 		"another country's document": {func(r *nameChangeRig, d *NameChangeDecision) { d.New.IssuingCountry = "GHA" }, "different country"},
+		"no document country":        {func(r *nameChangeRig, d *NameChangeDecision) { d.New.IssuingCountry = "" }, "issuing country is missing"},
+		"no original country":        {func(r *nameChangeRig, d *NameChangeDecision) { d.Original.IssuingCountry = " " }, "issuing country is missing"},
 		// A partial step from the current name that is no longer close to
 		// the ORIGINAL KYC name: the chaining the second comparison stops.
 		"a chained partial step": {func(r *nameChangeRig, d *NameChangeDecision) {
@@ -1032,8 +1104,17 @@ func TestNameChange_AdminClearsAnUnprovenPayment(t *testing.T) {
 	if _, err := r.svc.AdminClearUnprovenPayment(ctx, r.user, out.Change.ID, "mine"); !errors.Is(err, ErrNameChangeSelfReview) {
 		t.Fatalf("own change: err = %v", err)
 	}
+	// The chain still knows it (pending): it may yet pay, so it stays.
+	if _, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "looks stuck"); !errors.Is(err, ErrNameChangePaymentLive) {
+		t.Fatalf("a transaction the chain knows: err = %v", err)
+	}
+	r.rail.txLookupErr = errors.New("rpc down")
+	if _, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "looks stuck"); !errors.Is(err, ErrNameChangeChainUnreadable) {
+		t.Fatalf("an unreadable chain: err = %v", err)
+	}
+	r.rail.txLookupErr, r.rail.txUnknown = nil, true
 	view, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "replaced by a zero-value tx on basescan")
-	if err != nil || view.Status != models.NameChangeStatusCancelled || view.PayRef != "" ||
+	if err != nil || view.Status != models.NameChangeStatusCancelled || view.PayRef != "" || view.ClearedPayRef != nameChangeTx ||
 		!strings.Contains(view.ReviewNote, "basescan") || !strings.Contains(view.ReviewNote, admin.String()) {
 		t.Fatalf("view %+v err %v", view, err)
 	}
@@ -1049,6 +1130,37 @@ func TestNameChange_AdminClearsAnUnprovenPayment(t *testing.T) {
 	}
 	if _, err := paid.svc.AdminClearUnprovenPayment(ctx, admin, pout.Change.ID, "wrong"); !errors.Is(err, ErrNameChangeBadState) {
 		t.Fatalf("a proven payment is never cleared: err = %v", err)
+	}
+
+	// Proven on-chain but not yet recorded, or mined with money in it and
+	// only short of its confirmations: never cleared.
+	for name, p := range map[string]*StablePayment{
+		"proven, not yet recorded": {Credited: big.NewInt(1_000_000), Confirmations: 10},
+		"mined, not deep enough":   {Credited: big.NewInt(1_000_000), Confirmations: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := newNameChangeRig(t, NameChangeConfig{MinConfirmations: 3})
+			xout := x.namedPendingPayment(t)
+			p.Sender, p.BlockTime = x.wallet, x.now.Add(time.Minute)
+			x.rail.payment = p
+			if _, err := x.svc.AdminClearUnprovenPayment(ctx, admin, xout.Change.ID, "wrong"); !errors.Is(err, ErrNameChangePaymentLive) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+	// Refuted (mined from another wallet, deep): cleared, and not watched —
+	// it can never pay.
+	ref := newNameChangeRig(t, NameChangeConfig{})
+	rout := ref.namedPendingPayment(t)
+	other := ref.provenPayment(1_000_000)
+	other.Sender = "0x1111111111111111111111111111111111111111"
+	ref.rail.payment = other
+	rv, err := ref.svc.AdminClearUnprovenPayment(ctx, admin, rout.Change.ID, "paid from someone else's wallet")
+	if err != nil || rv.PayRef != "" || rv.ClearedPayRef != "" {
+		t.Fatalf("view %+v err %v", rv, err)
+	}
+	if ch := ref.change(t, rout.Change.ID); len(ch.RefutedPayRefs) != 1 || ch.RefutedPayRefs[0] != nameChangeTx {
+		t.Fatalf("refuted %v", ch.RefutedPayRefs)
 	}
 }
 

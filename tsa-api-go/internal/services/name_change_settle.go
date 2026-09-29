@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // What happens to a finished change's fee: kept once verification was
@@ -29,6 +30,12 @@ const (
 	// minimum refund, or past the refund allowance — kept whole (no excess
 	// refund either) and left to support.
 	nameChangeFeeKeepAll = "keep_all"
+	// nameChangeFeeReturnOps is money returned because OUR side closed the
+	// change: a payment we stopped waiting for (dropped as unknown to the
+	// chain, or cleared by an admin) that landed after all. The user did
+	// nothing to cause it, so it goes back whole — not held to the minimum
+	// refund, and not counted toward their refund allowance.
+	nameChangeFeeReturnOps = "return_ops"
 )
 
 // feeKept says what a finished change does with its fee. decided is false
@@ -37,7 +44,7 @@ func feeKept(ch *models.UserNameChange) (keep, decided bool) {
 	switch ch.FeeDecision {
 	case nameChangeFeeKeep, nameChangeFeeKeepAll:
 		return true, true
-	case nameChangeFeeReturn, nameChangeFeeBounce:
+	case nameChangeFeeReturn, nameChangeFeeBounce, nameChangeFeeReturnOps:
 		return false, true
 	}
 	switch ch.Status {
@@ -56,19 +63,29 @@ func feeKept(ch *models.UserNameChange) (keep, decided bool) {
 // back — in any RefundWindow. It stops a cancel-and-reopen loop, or a string of
 // deliberately short payments, from spending treasury and operator gas at will.
 func (s *NameChangeService) refundLimit(ctx context.Context, userID uuid.UUID) (*time.Time, error) {
-	now := s.now()
+	window := s.cfg.RefundWindow
+	_, next, err := s.rollingLimit(ctx, s.db.WithContext(ctx).Where("user_id = ? AND fee_decision IN ? AND pay_method <> ?",
+		userID, []string{nameChangeFeeReturn, nameChangeFeeBounce}, models.NameChangePayFree),
+		s.now().Add(-window), s.cfg.MaxRefundedCancels, func(t time.Time) time.Time { return t.Add(window) })
+	return next, err
+}
+
+// rollingLimit counts the changes q matches that completed after since, and —
+// when that is max or more — when the next one fits: once the oldest of the
+// last max ages out of the window (reopen maps a completion to that moment).
+// The one rule both the yearly change limit and the refund allowance follow.
+func (s *NameChangeService) rollingLimit(ctx context.Context, q *gorm.DB, since time.Time, max int, reopen func(time.Time) time.Time) (int, *time.Time, error) {
 	var rows []models.UserNameChange
-	if err := s.db.WithContext(ctx).Select("completed_at").
-		Where("user_id = ? AND fee_decision IN ? AND pay_method <> ? AND completed_at > ?",
-			userID, []string{nameChangeFeeReturn, nameChangeFeeBounce}, models.NameChangePayFree, now.Add(-s.cfg.RefundWindow)).
+	if err := q.WithContext(ctx).Select("completed_at").Where("completed_at > ?", since).
 		Order("completed_at asc").Find(&rows).Error; err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	if len(rows) < s.cfg.MaxRefundedCancels {
-		return nil, nil
+	used := len(rows)
+	if used < max {
+		return used, nil, nil
 	}
-	next := rows[len(rows)-s.cfg.MaxRefundedCancels].CompletedAt.Add(s.cfg.RefundWindow)
-	return &next, nil
+	next := reopen(*rows[used-max].CompletedAt)
+	return used, &next, nil
 }
 
 // resolveFee settles, reverses or refunds a finished change's fee. Every step
@@ -109,13 +126,15 @@ func (s *NameChangeService) resolveFee(ctx context.Context, ch *models.UserNameC
 		switch {
 		case excess == nil:
 		case excess.Cmp(s.minRefund(ch)) < 0:
-			log.Printf("[name-change] change=%s overpaid by %s base units of %s on %s, below the minimum refund; kept — for support",
+			log.Printf("[name-change] name_change_excess_kept_total=1 change=%s overpaid by %s base units of %s on %s, below the minimum refund; kept — for support",
 				ch.ID, excess, ch.PayToken, ch.PayChain)
 		default:
 			s.refund(ctx, ch, excess)
 			return
 		}
-		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeReceived}, models.NameChangeFeeSettled, "")
+		// From refund_failed too: an excess refund that failed to send and is
+		// now under the minimum (the minimum was raised meanwhile) is kept.
+		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeReceived, models.NameChangeFeeRefundFailed}, models.NameChangeFeeSettled, "")
 	}
 }
 

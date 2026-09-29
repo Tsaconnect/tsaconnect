@@ -67,11 +67,24 @@ func NewBillPaymentService(db *gorm.DB, swap billPaySwap) *BillPaymentService {
 	return &BillPaymentService{db: db, swap: swap, purpose: models.BillPayPurposeBill}
 }
 
+// billPayRefDomains is the on-chain ref namespace of every purpose other than
+// bills (which keep the ref they have always had). Written out, not derived
+// from the purpose string: renaming a purpose — a database value — must never
+// silently move where its debits live on-chain, and a purpose with no domain
+// here has no refs at all.
+var billPayRefDomains = map[string]string{
+	models.BillPayPurposeNameChange: "mcgp-name_change:",
+}
+
 // ForPurpose is this service for another kind of MCGP payment: same swap, same
-// table, its own rows and its own on-chain refs.
+// table, its own rows and its own on-chain refs. A purpose with no ref domain
+// is a programming error, caught at wiring time.
 func (s *BillPaymentService) ForPurpose(purpose string) *BillPaymentService {
 	if s == nil {
 		return nil
+	}
+	if _, ok := billPayRefDomains[purpose]; !ok && purpose != models.BillPayPurposeBill {
+		panic("bill payment: no on-chain ref domain for purpose " + purpose)
 	}
 	return &BillPaymentService{db: s.db, swap: s.swap, purpose: purpose}
 }
@@ -88,7 +101,7 @@ func (s *BillPaymentService) debitRef(orderID uuid.UUID) [32]byte {
 	if s.purpose == models.BillPayPurposeBill {
 		return billDebitRef(orderID)
 	}
-	return spendableRef("mcgp-"+s.purpose+":", orderID)
+	return spendableRef(billPayRefDomains[s.purpose], orderID)
 }
 
 // DebitRef is the on-chain ref of the payment for orderID, as a hex string —

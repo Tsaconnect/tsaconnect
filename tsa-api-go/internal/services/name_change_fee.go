@@ -85,15 +85,18 @@ type stableFeeRail interface {
 	PrepareTransfer(chain, tokenAddress, from string, amount *big.Int) ([]byte, error)
 	// VerifyPayment is what the transaction moved of the token from `from` to
 	// `to`, and the facts about the transaction a fee is held to — errors as
-	// ERC20SourcedTransferVerifier reports them.
+	// ERC20SourcedTransferVerifier reports them. On ErrTransferNoMatch (mined,
+	// nothing matched) it still returns the payment, with nothing credited, so
+	// the caller can tell how deep the transaction is.
 	VerifyPayment(ctx context.Context, chain, txHash, tokenAddress, from, to string) (*StablePayment, error)
 	// Refund sends a fee back. Same uncertain-broadcast contract as
 	// Treasury.TransferToken: attempted with an error means the money may have left.
 	Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (txHash string, attempted bool, err error)
 	// TransactionKnown reports whether the chain knows txHash at all, mined or
-	// pending. (false, nil) only on a definite "no such transaction" — a read
-	// that fails is an error, never "unknown".
-	TransactionKnown(ctx context.Context, chain, txHash string) (bool, error)
+	// pending, and who signed it (empty when that cannot be recovered).
+	// known=false with a nil error only on a definite "no such transaction" —
+	// a read that fails is an error, never "unknown".
+	TransactionKnown(ctx context.Context, chain, txHash string) (known bool, sender string, err error)
 }
 
 // StablePayment is what one fee transaction proved.
@@ -227,9 +230,9 @@ func (r *TreasuryFeeRail) VerifyPayment(ctx context.Context, chain, txHash, toke
 	if !ok || reader == nil {
 		return nil, fmt.Errorf("%w: no verifier for %s", ErrTransferNotFound, chain)
 	}
-	credited, err := v.VerifyTransferFrom(ctx, txHash, tokenAddress, from, to)
-	if err != nil {
-		return nil, err
+	credited, verr := v.VerifyTransferFrom(ctx, txHash, tokenAddress, from, to)
+	if verr != nil && !errors.Is(verr, ErrTransferNoMatch) {
+		return nil, verr
 	}
 	hash := common.HexToHash(txHash)
 	tx, _, err := reader.TransactionByHash(ctx, hash)
@@ -256,7 +259,12 @@ func (r *TreasuryFeeRail) VerifyPayment(ctx context.Context, chain, txHash, toke
 	if n := receipt.BlockNumber.Uint64(); head >= n {
 		depth = head - n + 1
 	}
-	return &StablePayment{Credited: credited, Sender: sender.Hex(), BlockTime: time.Unix(int64(header.Time), 0).UTC(), Confirmations: depth}, nil
+	p := &StablePayment{Credited: credited, Sender: sender.Hex(), BlockTime: time.Unix(int64(header.Time), 0).UTC(), Confirmations: depth}
+	if verr != nil {
+		p.Credited = new(big.Int)
+		return p, verr
+	}
+	return p, nil
 }
 
 func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (string, bool, error) {
@@ -273,17 +281,27 @@ func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, a
 	return r.treasury.TransferToken(ctx, lane, token, to, amount)
 }
 
-func (r *TreasuryFeeRail) TransactionKnown(ctx context.Context, chain, txHash string) (bool, error) {
+func (r *TreasuryFeeRail) TransactionKnown(ctx context.Context, chain, txHash string) (bool, string, error) {
 	reader := r.readers[strings.ToLower(strings.TrimSpace(chain))]
 	if reader == nil {
-		return false, fmt.Errorf("no transaction reader for %s", chain)
+		return false, "", fmt.Errorf("no transaction reader for %s", chain)
 	}
-	_, _, err := reader.TransactionByHash(ctx, common.HexToHash(txHash))
+	tx, _, err := reader.TransactionByHash(ctx, common.HexToHash(txHash))
 	switch {
-	case err == nil:
-		return true, nil
 	case errors.Is(err, ethereum.NotFound):
-		return false, nil
+		return false, "", nil
+	case err != nil:
+		return false, "", err
 	}
-	return false, err
+	// The signer is readable while the transaction is still pending — which is
+	// what lets a hash named by someone other than its sender be told apart
+	// before it mines.
+	if tx == nil {
+		return true, "", nil
+	}
+	sender, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
+	if err != nil {
+		return true, "", nil
+	}
+	return true, sender.Hex(), nil
 }

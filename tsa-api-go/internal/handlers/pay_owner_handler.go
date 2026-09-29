@@ -642,6 +642,8 @@ func payOwnerFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayAccountUnverifiable):
 		log.Printf("[tsa-pay] owner account lookup failed: %v", err)
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "We couldn't verify that account. Check the bank and account number and try again.", "account_unverifiable")
+	case businessNameRefusal(err) != "":
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, businessNameRefusal(err), services.BusinessNameInvalidCode)
 	case errors.Is(err, services.ErrPayMerchantInvalid):
 		utils.ErrorResponse(c, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, services.ErrPayMerchantStale):

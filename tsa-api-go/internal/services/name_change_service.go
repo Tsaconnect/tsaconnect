@@ -55,6 +55,12 @@ var (
 	ErrNameChangeCancelNotAllowed  = errors.New("a name change can only be cancelled before verification starts")
 	ErrNameChangeSelfReview        = errors.New("you can't review your own name change")
 	ErrNameChangeBadState          = errors.New("this name change can't do that now")
+	// Admin refusals on the money bookkeeping: each is what the chain showed.
+	ErrNameChangePaymentLive       = errors.New("the chain still shows this payment — it has paid or may yet pay, so it can't be cleared")
+	ErrNameChangeChainUnreadable   = errors.New("the chain couldn't be read — try again in a minute")
+	ErrNameChangeRefundMayHaveLeft = errors.New("the chain knows this refund's transaction, so it may have left — record it as sent once it is mined")
+	ErrNameChangeRefundUnproven    = errors.New("that transaction isn't a mined refund of this fee from the treasury to the paying wallet")
+	ErrNameChangeAccountUnverified = errors.New("the account is no longer verified, so its name can't be changed")
 )
 
 // NameChangeLimitError: the user has completed as many changes as a year allows
@@ -67,7 +73,10 @@ type NameChangeLimitError struct {
 func (e *NameChangeLimitError) Error() string {
 	day := e.NextAllowedAt.UTC().Format("2006-01-02")
 	if e.Cancel {
-		return fmt.Sprintf("you've already cancelled a name change recently — you can cancel for a refund again from %s, or verify now", day)
+		// The allowance is used by any returned fee — a cancel, or a payment
+		// that could not be used and was sent back — so the message names
+		// neither.
+		return fmt.Sprintf("you've already had a name-change fee returned recently — you can cancel for a refund again from %s, or verify now", day)
 	}
 	return fmt.Sprintf("you can change your name again from %s", day)
 }
@@ -337,6 +346,24 @@ func (s *NameChangeService) FindBySession(ctx context.Context, sessionID string)
 	return &ch, nil
 }
 
+// IsNameChangeSession reports whether sessionID was ever bought for a name
+// change — current or superseded. First-time KYC must never act on one: its
+// approval would write the new document's name straight onto the account,
+// skipping every same-person check. Only a definite answer is false.
+func (s *NameChangeService) IsNameChangeSession(ctx context.Context, sessionID string) (bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if s == nil || sessionID == "" {
+		return false, nil
+	}
+	// didit_session_ids is a JSON array of strings; matching its text for the
+	// quoted id works the same on PostgreSQL (jsonb) and SQLite (tests).
+	pattern := `%"` + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(sessionID) + `"%`
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
+		Where(`didit_session_id = ? OR CAST(didit_session_ids AS TEXT) LIKE ? ESCAPE '\'`, sessionID, pattern).Count(&n).Error
+	return n > 0, err
+}
+
 // NameSetByChange reports whether the user's current verified name came from a
 // name change. First-time KYC's events for the ORIGINAL session (a redelivered
 // approval, a reviewer's data edit) must then leave the name alone: that
@@ -358,21 +385,8 @@ func (s *NameChangeService) NameSetByChange(ctx context.Context, userID uuid.UUI
 // limit reports whether the user has used up the year's changes, and when the
 // next one becomes possible. A "year" is the 12 months before now, rolling.
 func (s *NameChangeService) limit(ctx context.Context, userID uuid.UUID) (used int, next *time.Time, err error) {
-	now := s.now()
-	var done []models.UserNameChange
-	if err := s.db.WithContext(ctx).Select("completed_at").
-		Where("user_id = ? AND status = ? AND completed_at > ?", userID, models.NameChangeStatusApproved, now.AddDate(-1, 0, 0)).
-		Order("completed_at asc").Find(&done).Error; err != nil {
-		return 0, nil, err
-	}
-	used = len(done)
-	if used < s.cfg.MaxPerYear {
-		return used, nil, nil
-	}
-	// The oldest change still inside the window has to age out before another
-	// fits; with more than the limit on record, enough of them do.
-	at := done[used-s.cfg.MaxPerYear].CompletedAt.AddDate(1, 0, 0)
-	return used, &at, nil
+	return s.rollingLimit(ctx, s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.NameChangeStatusApproved),
+		s.now().AddDate(-1, 0, 0), s.cfg.MaxPerYear, func(t time.Time) time.Time { return t.AddDate(1, 0, 0) })
 }
 
 // Blockers lists the money still moving under the user's current identity:

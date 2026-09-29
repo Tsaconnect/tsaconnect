@@ -208,3 +208,65 @@ func TestPayMerchant_BusinessNameRuleAtOnboardingAndAdminRename(t *testing.T) {
 		t.Fatalf("err %v merchant %+v", err, got)
 	}
 }
+
+// L2: a Latin name spelled partly in another alphabet is refused outright —
+// no lookalike table can list every letter that passes for a Latin one — and
+// small capitals are folded like the letters they are. East Asian names that
+// mix scripts as a matter of course, and names wholly in one script, pass.
+func TestNormalizeBusinessName_MixedScriptsAndSmallCapitals(t *testing.T) {
+	s := &PayMerchantService{}
+	for _, bad := range []string{
+		"TSA Cօnnect", // Armenian օ
+		"ᴛsa pay",     // small capital ᴛ
+		"TꜱA Pay",     // small capital ꜱ
+		"ᏚᎪ Pay",      // Cherokee Ꮪ Ꭺ
+		"ꓢupport",     // Lisu ꓢ
+		"Sky Αir",     // Greek Α in an ordinary name
+	} {
+		_, err := s.NormalizeBusinessName(bad)
+		if !errors.Is(err, ErrPayBusinessNameInvalid) || !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Errorf("%q: err = %v (folded %q)", bad, err, foldBusinessName(bad))
+		}
+	}
+	for _, fine := range []string{"Ткань Лагос", "東京 Sushi Bar", "すし Tokyo", "서울 BBQ", "Café Lagos", "Obaino4Christ Ventures"} {
+		if got, err := s.NormalizeBusinessName(fine); err != nil || got != fine {
+			t.Errorf("%q refused: %v", fine, err)
+		}
+	}
+	// The message reads as it always has; the reason is there on its own.
+	_, err := s.NormalizeBusinessName("TSA Pay")
+	var bn *BusinessNameError
+	if !errors.As(err, &bn) || bn.Reason == "" || err.Error() != ErrPayMerchantInvalid.Error()+": "+bn.Reason {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Configured reserved words add to the built-in ones; they never replace them.
+func TestSetReservedBusinessNames_AddsToTheDefaults(t *testing.T) {
+	s := &PayMerchantService{}
+	s.SetReservedBusinessNames([]string{"Kite"})
+	for _, bad := range []string{"Kite Air", "TSA Pay Travel", "Refund Desk"} {
+		if _, err := s.NormalizeBusinessName(bad); !errors.Is(err, ErrPayBusinessNameInvalid) {
+			t.Errorf("%q: err = %v", bad, err)
+		}
+	}
+}
+
+// An approval is held to the rule as it stands when the admin approves: a
+// name that was fine when requested and is not any more stays unapproved.
+func TestPayMerchant_ApprovalRechecksTheName(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	f.requestRename(t, "Kite Travel")
+	rows := f.nameChanges(t)
+	f.s.SetReservedBusinessNames([]string{"Kite"})
+	if _, _, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, true, ""); !errors.Is(err, ErrPayBusinessNameInvalid) {
+		t.Fatalf("approving a name the rule now refuses: err = %v", err)
+	}
+	if rows = f.nameChanges(t); rows[0].Status != models.PayNameChangePending || f.stored(t).BusinessName != "Sky Air" {
+		t.Fatalf("a refused approval changed something: %+v %+v", rows[0], f.stored(t))
+	}
+	if change, _, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, false, "reserved now"); err != nil || change.Status != models.PayNameChangeRejected {
+		t.Fatalf("it can still be rejected: %+v %v", change, err)
+	}
+}

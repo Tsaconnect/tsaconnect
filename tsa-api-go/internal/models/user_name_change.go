@@ -90,6 +90,16 @@ type UserNameChange struct {
 	// lands after the change closed is still found and refunded. Unique, so
 	// one transfer can never pay for two changes.
 	PayRef *string `gorm:"type:varchar(66);uniqueIndex" json:"-"`
+	// ClearedPayRef is a named transaction this change stopped waiting for
+	// without knowing it will never pay — dropped as unknown to the chain, or
+	// cleared by an admin — and PayRefClearedAt when. Our side gave up on it,
+	// not the user, so it is still watched for the late-payment window and,
+	// should it land, sent back whole.
+	ClearedPayRef   *string    `gorm:"type:varchar(66);index" json:"-"`
+	PayRefClearedAt *time.Time `json:"-"`
+	// RefutedPayRefs are transactions this change will never take again (they
+	// can never pay it), so a phone that keeps confirming one is told so.
+	RefutedPayRefs datatypes.JSONSlice[string] `gorm:"type:jsonb" json:"-"`
 	// PayCredited is what the stablecoin transfer actually credited (base
 	// units) — what a refund returns, which is not always the quote.
 	PayCredited string `gorm:"type:varchar(78)" json:"-"`

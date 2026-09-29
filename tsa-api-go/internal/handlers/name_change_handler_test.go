@@ -398,8 +398,8 @@ func (oneStableRail) VerifyPayment(context.Context, string, string, string, stri
 func (oneStableRail) Refund(context.Context, string, string, string, *big.Int, float64) (string, bool, error) {
 	return "", false, fmt.Errorf("no refunds in tests")
 }
-func (oneStableRail) TransactionKnown(context.Context, string, string) (bool, error) {
-	return true, nil
+func (oneStableRail) TransactionKnown(context.Context, string, string) (bool, string, error) {
+	return true, "", nil
 }
 
 func paidNameChanges(db *gorm.DB) *services.NameChangeService {

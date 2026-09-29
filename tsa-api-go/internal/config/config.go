@@ -504,8 +504,8 @@ type Config struct {
 	NameChangeMinRefundUSD string
 
 	// TSAPayReservedBusinessNames are words no owner's business name may
-	// contain (TSA_PAY_RESERVED_BUSINESS_NAMES, comma-separated; unset keeps
-	// the built-in list).
+	// contain (TSA_PAY_RESERVED_BUSINESS_NAMES, comma-separated), added to
+	// the built-in list — never replacing it.
 	TSAPayReservedBusinessNames []string
 
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/

@@ -235,7 +235,14 @@ func (s *NameChangeService) ApplyDecision(ctx context.Context, changeID uuid.UUI
 		reasons = append(reasons, "money in flight: "+b.Code)
 	}
 	if len(reasons) == 0 {
-		return s.apply(ctx, ch, []string{models.NameChangeStatusVerifying}, name, nil, "", evidence)
+		applied, err := s.apply(ctx, ch, []string{models.NameChangeStatusVerifying}, name, nil, "", evidence)
+		if !errors.Is(err, errNameChangeAccountUnverified) {
+			return applied, err
+		}
+		// The account lost its verification while the session ran (an admin
+		// revoked it, a later KYC event rejected it): a name read off a new
+		// document is not put on an account in that state without a human.
+		reasons = append(reasons, "the account is no longer verified")
 	}
 	evidence["status"] = models.NameChangeStatusHeldForReview
 	evidence["new_verified_name"] = name
@@ -292,7 +299,12 @@ func (s *NameChangeService) assess(ch *models.UserNameChange, name string, d Nam
 
 	newCountry, oldCountry := strings.ToUpper(strings.TrimSpace(d.New.IssuingCountry)), strings.ToUpper(strings.TrimSpace(orig.IssuingCountry))
 	ev["new_document_country"], ev["original_document_country"] = newCountry, oldCountry
-	if newCountry != "" && oldCountry != "" {
+	switch {
+	case newCountry == "" || oldCountry == "":
+		// An unread country is no evidence of the same one: like a missing
+		// date of birth, it leaves the decision to an admin.
+		reasons = append(reasons, "a document's issuing country is missing")
+	default:
 		ev["document_country_match"] = newCountry == oldCountry
 		if newCountry != oldCountry {
 			reasons = append(reasons, "the document was issued by a different country")
@@ -365,6 +377,10 @@ func (s *NameChangeService) decline(ctx context.Context, ch *models.UserNameChan
 	return ch, nil
 }
 
+// errNameChangeAccountUnverified: apply found the account no longer verified,
+// and changed nothing.
+var errNameChangeAccountUnverified = errors.New("name change: account no longer verified")
+
 // apply puts the new document name on the account — verified name and display
 // name together, from the one document that was checked — and closes the
 // change as approved. from is the status the change must still be in; extra
@@ -391,9 +407,16 @@ func (s *NameChangeService) apply(ctx context.Context, ch *models.UserNameChange
 		// keeps the session that read the new name, and first-time KYC's
 		// events keep describing the session they always did (and may no
 		// longer touch the name — see NameSetByChange).
-		if err := tx.Table("users").Where("id = ?", ch.UserID).Updates(map[string]any{
-			"name": name, "verified_legal_name": name, "verified_legal_name_at": &now, "updated_at": now}).Error; err != nil {
-			return err
+		// Only onto an account that is still verified: the new name is a
+		// VERIFIED name, and an account that lost its verification while the
+		// change ran must not get one back this way.
+		res = tx.Table("users").Where("id = ? AND verification_status = ?", ch.UserID, models.VerificationStatusVerified).
+			Updates(map[string]any{"name": name, "verified_legal_name": name, "verified_legal_name_at": &now, "updated_at": now})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return errNameChangeAccountUnverified
 		}
 		source := "didit"
 		if reviewer != nil {

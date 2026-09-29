@@ -105,13 +105,17 @@ type createNameChangeRequest struct {
 	Password string `json:"password"`
 }
 
-// POST /api/users/me/name-change {payMethod, chain?, token?, password} — open a
-// change and start paying for it. The account password is asked again (counted
-// toward the lockout): a change takes a fee and ends with a new name on the
-// account. A paid fee comes from the account's linked wallet, which must be one
-// the account has proven it owns (requireProvenWallet: 403
+// POST /api/users/me/name-change?walletAddress= {payMethod, chain?, token?,
+// password} — open a change and start paying for it. The account password is
+// asked again (counted toward the lockout): a change takes a fee and ends with a
+// new name on the account. A paid fee comes from the account's linked wallet,
+// which must be one the account has proven it owns (requireProvenWallet: 403
 // WALLET_PROOF_REQUIRED otherwise — the app proves it through the wallet-link
-// flow and retries). Idempotency-Key: a retried create replays the first answer.
+// flow and retries). walletAddress (the device's) holds that to the wallet that
+// will actually sign: one other than the linked wallet is linked only with a
+// proof (callerWallet), never paid from blind. Idempotency-Key: a retried
+// create replays the first answer (the password is left out of what the key is
+// matched on — see routes).
 func (h *Handlers) CreateNameChange(c *gin.Context) {
 	user, svc, ok := h.nameChangeStarter(c)
 	if !ok {
@@ -126,6 +130,11 @@ func (h *Handlers) CreateNameChange(c *gin.Context) {
 		return
 	}
 	if !svc.FeeIsFree() {
+		if device := strings.TrimSpace(c.Query("walletAddress")); device != "" {
+			if _, ok := callerWallet(c, user, device); !ok {
+				return
+			}
+		}
 		// The fee is held on (MCGP) or accepted from and refunded to (stablecoin)
 		// this wallet with no further signature from the user.
 		wallet, ok := requireProvenWallet(c, user)
@@ -335,14 +344,21 @@ func (h *Handlers) readNameChangeIdentities(c *gin.Context, ch *models.UserNameC
 	return true
 }
 
-// GET /api/admin/name-changes?status=&userId=&page=&limit= — the review queue
-// and every user's name history.
+// GET /api/admin/name-changes?status=&feeStatus=&userId=&page=&limit= — the
+// review queue and every user's name history. feeStatus is a comma-separated
+// list (e.g. refund_sending,refund_uncertain,refund_failed): the changes whose
+// money needs a look.
 func (h *Handlers) AdminListNameChanges(c *gin.Context) {
 	svc := h.nameChangeService(c)
 	if svc == nil {
 		return
 	}
 	f := services.NameChangeFilter{Status: strings.TrimSpace(c.Query("status"))}
+	for _, fs := range strings.Split(c.Query("feeStatus"), ",") {
+		if fs = strings.TrimSpace(fs); fs != "" {
+			f.FeeStatuses = append(f.FeeStatuses, fs)
+		}
+	}
 	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
 		id, err := uuid.Parse(raw)
 		if err != nil {
@@ -397,8 +413,11 @@ func (h *Handlers) adminReviewNameChange(c *gin.Context, approve bool) {
 
 // POST /api/admin/name-changes/:id/refund-outcome {sent, txHash?, note} —
 // super admin: record what the chain shows for a refund whose broadcast ended
-// uncertain. sent:true records it refunded with its transaction; sent:false
-// returns it to refund_failed, which the sweep retries.
+// uncertain. Checked against the chain: sent:true must be a mined treasury
+// transfer of the refund to the paying wallet (422 refund_unproven); sent:false
+// is refused while the chain knows the refund transaction (409
+// refund_may_have_left), and returns it to refund_failed, which the sweep
+// retries. Never on the admin's own change.
 func (h *Handlers) AdminRecordNameChangeRefund(c *gin.Context) {
 	admin, svc, id, ok := h.nameChangeAdmin(c)
 	if !ok {
@@ -423,8 +442,10 @@ func (h *Handlers) AdminRecordNameChangeRefund(c *gin.Context) {
 }
 
 // POST /api/admin/name-changes/:id/clear-payment {reason} — super admin: forget
-// a stablecoin change's named transaction that has been checked on-chain and
-// will never pay it, closing the change unpaid if it is still paying. Audited.
+// a stablecoin change's named transaction, closing the change unpaid if it is
+// still paying. The chain is read first: a payment that is proven, mined with
+// money in it, or known to the chain is refused (409 payment_may_land). An
+// unknown one is still watched for a week and sent back if it lands. Audited.
 func (h *Handlers) AdminClearNameChangePayment(c *gin.Context) {
 	admin, svc, id, ok := h.nameChangeAdmin(c)
 	if !ok {
@@ -522,6 +543,16 @@ func nameChangeFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), "self_review")
 	case errors.Is(err, services.ErrNameChangeBadState):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "bad_state")
+	case errors.Is(err, services.ErrNameChangePaymentLive):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "payment_may_land")
+	case errors.Is(err, services.ErrNameChangeRefundMayHaveLeft):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "refund_may_have_left")
+	case errors.Is(err, services.ErrNameChangeRefundUnproven):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "refund_unproven")
+	case errors.Is(err, services.ErrNameChangeChainUnreadable):
+		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, err.Error(), "chain_unreadable")
+	case errors.Is(err, services.ErrNameChangeAccountUnverified):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "account_not_verified")
 	default:
 		log.Printf("[name-change] request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")

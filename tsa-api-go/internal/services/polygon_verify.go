@@ -18,6 +18,12 @@ var (
 	ErrTransferNotFound       = errors.New("verify: no matching ERC-20 transfer in that transaction")
 	ErrTransferReverted       = errors.New("verify: transaction reverted")
 	ErrTransferWrongRecipient = errors.New("verify: transfer did not credit the expected address")
+	// ErrTransferNoMatch: the transaction is mined and succeeded, but none of
+	// its Transfer logs moved the token to the recipient (from the sender, when
+	// one was asked for). It wraps ErrTransferNotFound, so every caller that
+	// waits on "not found" still does; one that knows how deep the receipt is
+	// may treat a deep enough one as final.
+	ErrTransferNoMatch = fmt.Errorf("%w (mined, nothing matched)", ErrTransferNotFound)
 )
 
 // ethLogReader is the slice of an Ethereum client this verifier needs.
@@ -110,7 +116,7 @@ func (v *LogTransferVerifier) sumTransfers(ctx context.Context, txHash, token, f
 		found = true
 	}
 	if !found {
-		return nil, fmt.Errorf("%w: token=%s to=%s tx=%s", ErrTransferNotFound, token, to, txHash)
+		return nil, fmt.Errorf("%w: token=%s to=%s tx=%s", ErrTransferNoMatch, token, to, txHash)
 	}
 	return total, nil
 }

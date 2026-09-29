@@ -127,7 +127,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// confirm is polled while a transfer mines, so it gets its own looser one.
 		nameChangeLimit := middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey)
 		userGroup.GET("/me/name-change", h.GetNameChange)
-		userGroup.POST("/me/name-change", nameChangeLimit, middleware.Idempotency(config.DB), h.CreateNameChange)
+		userGroup.POST("/me/name-change", nameChangeLimit,
+			middleware.Idempotency(config.DB, middleware.IdempotencyIgnoringFields("password")), h.CreateNameChange)
 		userGroup.POST("/me/name-change/confirm-payment", middleware.RateLimiterBy(60, 15*time.Minute, perUserRateKey), h.ConfirmNameChangePayment)
 		userGroup.POST("/me/name-change/start-verification", nameChangeLimit, h.StartNameChangeVerification)
 		userGroup.POST("/me/name-change/cancel", nameChangeLimit, h.CancelNameChange)
