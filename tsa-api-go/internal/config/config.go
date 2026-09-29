@@ -335,6 +335,32 @@ type Config struct {
 	RampSponsorBalanceFloorWei     map[string]string // chain -> wei; sponsoring stops below this
 	RampSponsorTopUpMaxWei         map[string]string // chain -> wei; largest single top-up
 
+	// Marketplace checkout funding — "pay with another token" (owner decision
+	// 2026-09-29). The buyer's token is swapped through LiFi into the order
+	// token in HER OWN wallet on Sonic, then the unchanged escrow is paid from
+	// it. On by default (MARKETPLACE_FUNDING=false turns it off); it needs no
+	// credential beyond LiFi, which works anonymously.
+	//
+	// MarketplaceFundingBudgetBps is the most the round trip may cost her —
+	// LiFi's cost plus the gas we pay for her — as bps of the ORDER TOTAL. We
+	// keep no margin: whatever the route costs under it is all she pays.
+	// MarketplaceEscrowGasPerOrder is the gas one order's approve + createOrder
+	// takes on Sonic, what the destination top-up is sized from (x2 buffer).
+	//
+	// Off by default (flag-off-first, like gas sponsorship and converted buys).
+	MarketplaceFundingEnabled    bool
+	MarketplaceFundingBudgetBps  int
+	MarketplaceEscrowGasPerOrder uint64
+	// MarketplaceSonicGas* is the funding's OWN Sonic gas lane: S sent to a
+	// buyer whose funds landed but who holds none to sign the escrow txs. It is
+	// deliberately NOT a RAMP_SPONSOR_CHAINS lane — that would also give sells
+	// and TSA Pay intents from Sonic a source-chain top-up. It signs with the
+	// ramp sponsor key (RAMP_SPONSOR_PRIVATE_KEY) under its own guard, floor and
+	// ceiling. Off by default; off, a buyer with no S is refused before signing.
+	MarketplaceSonicGasEnabled     bool
+	MarketplaceSonicGasFloorWei    string
+	MarketplaceSonicGasTopUpMaxWei string
+
 	// Ramp treasury / converted buys — Paycrest delivers into our own
 	// treasury instead of the user's wallet, and the treasury bridges it to
 	// the requested chain/token via LiFi. Dormant unless RAMP_CONVERSION_BUY
@@ -851,6 +877,16 @@ func Load() *Config {
 		cfg.RampSponsorBalanceFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_BALANCE_FLOOR_WEI_"+up, rampFloorDefaults[chain]))
 		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
 	}
+
+	cfg.MarketplaceFundingEnabled = getEnvBool("MARKETPLACE_FUNDING", false)
+	cfg.MarketplaceSonicGasEnabled = getEnvBool("MARKETPLACE_SONIC_GAS", false)
+	// ~400k gas per order (approve + createOrder) x2 buffer at ~55 gwei is
+	// ~0.045 S an order: sponsoring stops below the floor (the float monitor
+	// alerts at twice it), and the ceiling covers a ~10-order cart.
+	cfg.MarketplaceSonicGasFloorWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_FLOOR_WEI", "5000000000000000000"))       // 5 S
+	cfg.MarketplaceSonicGasTopUpMaxWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI", "500000000000000000")) // 0.5 S
+	cfg.MarketplaceFundingBudgetBps = int(getEnvInt64("MARKETPLACE_FUNDING_BUDGET_BPS", 200))
+	cfg.MarketplaceEscrowGasPerOrder = uint64(max(getEnvInt64("MARKETPLACE_ESCROW_GAS_PER_ORDER", 400_000), 0))
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
 	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))

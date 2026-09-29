@@ -238,6 +238,9 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 		// request already topped this sale up.
 		claim: func() error {
 			ok, err := store.MarkToppedUp(ctx, intent.ID, now)
+			if errors.Is(err, ErrTopUpDailyCap) {
+				return ErrTopUpDailyCap // the atomic cap: another of her top-ups won the last slot
+			}
 			if err != nil {
 				return fmt.Errorf("sponsor: claim intent top-up: %w", err)
 			}
@@ -269,6 +272,158 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 			}
 		},
 	})
+}
+
+// DestTopUpStore is the destination side of a marketplace intent's top-up: its
+// own daily cap, the once-per-intent claim on dest_topped_up_at and the record
+// of what was sent. *SellIntentService fills it.
+type DestTopUpStore interface {
+	CountDestToppedUpSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error)
+	MarkDestToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error)
+	ClearDestToppedUp(ctx context.Context, id uuid.UUID) error
+	RecordDestTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error
+}
+
+// ErrDestGasUnavailable: a delivered checkout needs the destination chain's
+// coin to pay its sellers, and we cannot send it right now (no lane, a kill
+// switch, the float under its floor, a cap). Her tokens are already in her
+// wallet either way, so this fails closed with a sentence rather than
+// stranding anything: she can add the coin herself and pay as usual.
+var ErrDestGasUnavailable = errors.New("we can't cover the network fee on Sonic right now — your funds are in your wallet; add a little S to pay the seller, or try again later")
+
+// TopUpDestForIntent sends her the DESTINATION chain's coin a delivered
+// marketplace funding intent budgeted: the approve + escrow of each order
+// are hers to sign, and the swap landed her order token but none of the coin
+// that pays for them. Same gates as the source-chain top-up — KYC, her own
+// wallet, only what the quote priced in, once per intent (the claim on
+// dest_topped_up_at), a daily cap — and the same send (sendTopUp: only the
+// shortfall against DestGasNeedWei, skipped when she already holds it, the
+// lane's ceiling, float floor and daily gas budget). A refusal of ours comes
+// back as ErrDestGasUnavailable so the caller says plainly what to do.
+func (g *GasTopUp) TopUpDestForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store DestTopUpStore) (GasTopUpResult, error) {
+	if err := requireTopUpUser(user); err != nil {
+		return GasTopUpResult{}, err
+	}
+	if intent == nil || intent.UserID != user.ID {
+		return GasTopUpResult{}, ErrSellIntentNotFound
+	}
+	// Only once the funds have landed: before, there is nothing to escrow yet.
+	if !intent.IsMarketplace() || intent.Status != models.SellIntentDelivered {
+		return GasTopUpResult{}, ErrSellIntentState
+	}
+	// Her own reconciled wallet, which the delivery paid — never another address.
+	if !common.IsHexAddress(strings.TrimSpace(intent.DestAddress)) || !sameAddress(intent.DestAddress, user.WalletAddress) {
+		return GasTopUpResult{}, ErrSponsorWallet
+	}
+	if !intent.DestTopUpBudgeted {
+		return GasTopUpResult{}, fmt.Errorf("%w: this checkout's quote budgeted no gas on Sonic", ErrSponsorNotAvailable)
+	}
+	need, ok := new(big.Int).SetString(strings.TrimSpace(intent.DestGasNeedWei), 10)
+	if !ok || need.Sign() <= 0 {
+		log.Printf("[ramp-sponsor] ALERT ramp_dest_topup_bad_quote_total=1 intent=%s need=%q", intent.ID, intent.DestGasNeedWei)
+		return GasTopUpResult{}, ErrSponsorNotAvailable
+	}
+	// Never more than the shortfall the quote priced: the budget was spent on
+	// that figure, so a balance she has spent down since is not ours to refill.
+	priced, ok := new(big.Int).SetString(strings.TrimSpace(intent.DestTopUpMaxWei), 10)
+	if !ok || priced.Sign() <= 0 {
+		log.Printf("[ramp-sponsor] ALERT ramp_dest_topup_bad_quote_total=1 intent=%s priced=%q", intent.ID, intent.DestTopUpMaxWei)
+		return GasTopUpResult{}, ErrSponsorNotAvailable
+	}
+	lane := g.intentLane(intent.DestChainID)
+	if lane == nil {
+		return GasTopUpResult{}, ErrDestGasUnavailable
+	}
+	now := g.now()
+	claimed := false
+	res, err := g.sendTopUp(ctx, topUpSend{
+		lane: lane, wallet: intent.DestAddress, need: need, maxSend: priced, ref: "dest-intent=" + intent.ID.String(),
+		admit: func() error {
+			y, m, d := now.UTC().Date()
+			today, err := store.CountDestToppedUpSince(ctx, user.ID, time.Date(y, m, d, 0, 0, 0, 0, time.UTC))
+			if err != nil {
+				return fmt.Errorf("sponsor: count today's destination top-ups: %w", err)
+			}
+			if today >= intentTopUpDailyCap {
+				return ErrTopUpDailyCap
+			}
+			return nil
+		},
+		claim: func() error {
+			ok, err := store.MarkDestToppedUp(ctx, intent.ID, now)
+			if errors.Is(err, ErrTopUpDailyCap) {
+				return ErrTopUpDailyCap
+			}
+			if err != nil {
+				return fmt.Errorf("sponsor: claim destination top-up: %w", err)
+			}
+			if !ok {
+				// Already topped up once for this checkout (or it is no longer
+				// delivered): a second send is never made.
+				return ErrSponsorshipInProgress
+			}
+			claimed = true
+			return nil
+		},
+		release: func() {
+			if !claimed {
+				return
+			}
+			clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := store.ClearDestToppedUp(clearCtx, intent.ID); err != nil {
+				log.Printf("[ramp-sponsor] ALERT ramp_dest_topup_clear_failed_total=1 intent=%s err=%v", intent.ID, err)
+			}
+		},
+		record: func(txHash, amountWei string) {
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := store.RecordDestTopUp(recordCtx, intent.ID, txHash, amountWei); err != nil {
+				log.Printf("[ramp-sponsor] ALERT ramp_dest_topup_record_failed_total=1 intent=%s tx=%s wei=%s err=%v",
+					intent.ID, txHash, amountWei, err)
+			}
+		},
+	})
+	switch {
+	case err == nil:
+		return res, nil
+	case errors.Is(err, ErrRelayerUnderfunded), errors.Is(err, ErrDailyCapExceeded), errors.Is(err, ErrTopUpTooExpensive),
+		errors.Is(err, ErrTopUpDailyCap):
+		log.Printf("[ramp-sponsor] ALERT ramp_dest_topup_refused_total=1 intent=%s chain=%s err=%v", intent.ID, lane.ChainKey, err)
+		return res, fmt.Errorf("%w (%w)", ErrDestGasUnavailable, err)
+	}
+	return res, err
+}
+
+// CanSponsorChain reports a live sponsor lane on chainID — whether a top-up
+// there could be sent at all. The float is checked at send time.
+func (g *GasTopUp) CanSponsorChain(chainID int64) bool { return g.intentLane(chainID) != nil }
+
+// CheckTopUp is sendTopUp's lane-side refusals, asked BEFORE anything is
+// signed so a quote that would later be refused its gas is refused up front:
+// a live lane on chainID, `amount` within its per-top-up ceiling, the sponsor's
+// float above its floor, and room left in its daily gas budget. It sends and
+// reserves nothing, so it can pass and the send still be refused later (the
+// float spent meanwhile) — the send re-checks everything.
+func (g *GasTopUp) CheckTopUp(ctx context.Context, chainID int64, amount *big.Int) error {
+	lane := g.intentLane(chainID)
+	if lane == nil {
+		return ErrSponsorNotAvailable
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	if lane.TopUpMaxWei != nil && amount.Cmp(lane.TopUpMaxWei) > 0 {
+		return ErrTopUpTooExpensive
+	}
+	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
+	if err != nil {
+		return fmt.Errorf("sponsor: read sponsor balance: %w", err)
+	}
+	if err := lane.Guard.CheckFloor(bal); err != nil {
+		return err
+	}
+	return lane.Guard.CanReserveGas(topUpGasUnits)
 }
 
 // intentLane is the live sponsor lane on a sell intent's source chain, or nil.
@@ -342,7 +497,10 @@ type topUpSend struct {
 	lane   *SponsorLane
 	wallet string
 	need   *big.Int // what the wallet must hold; only the shortfall is sent
-	ref    string   // "order=<id>" / "intent=<id>", for logs
+	// maxSend, when set, caps the shortfall sent (the destination top-up's
+	// priced figure). Nil: the shortfall, up to the lane's ceiling.
+	maxSend *big.Int
+	ref     string // "order=<id>" / "intent=<id>", for logs
 	// admit runs the path's own caps once gas would really be sent.
 	admit func() error
 	// claim takes the path's once-per-sale slot, if the path claims late
@@ -375,6 +533,9 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 		return GasTopUpResult{Skipped: true}, nil
 	}
 	amount := new(big.Int).Sub(s.need, have)
+	if s.maxSend != nil && amount.Cmp(s.maxSend) > 0 {
+		amount.Set(s.maxSend)
+	}
 	if lane.TopUpMaxWei != nil && amount.Cmp(lane.TopUpMaxWei) > 0 {
 		release()
 		log.Printf("[ramp-sponsor] ALERT ramp_topup_too_expensive_total=1 chain=%s %s amount=%s max=%s", lane.ChainKey, s.ref, amount, lane.TopUpMaxWei)

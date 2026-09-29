@@ -11,7 +11,7 @@
 // failure; resolves with the source-chain tx hash on success.
 
 import { ethers } from 'ethers';
-import { getChainByChainId } from '@/constants/chains';
+import { getChainByChainId, getChainsForNetwork, type ChainKey, type NetworkType } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
 import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
 import {
@@ -68,6 +68,21 @@ export interface ExecuteLiFiSwapParams {
    * leaves a hash to follow.
    */
   onSigned?: (txHash: string) => Promise<void> | void;
+  /**
+   * EVM only: sign and read nonces on this network's RPCs whatever the app's
+   * testnet toggle says. A marketplace checkout's funding swap is always
+   * 'mainnet'; unset keeps the active network, as every other swap does.
+   */
+  network?: NetworkType;
+}
+
+/** The chain key for an EVM chain id — on `network` when named, else the active/any map. */
+function evmChainKey(chainId: number, network?: NetworkType): ChainKey | undefined {
+  if (network) {
+    const hit = Object.entries(getChainsForNetwork(network)).find(([, c]) => c.chainId === chainId);
+    return hit ? (hit[0] as ChainKey) : undefined;
+  }
+  return getChainByChainId(chainId)?.key;
 }
 
 export async function executeLiFiSwap({
@@ -81,6 +96,7 @@ export async function executeLiFiSwap({
   feeFeature = 'allswap',
   onStage,
   onSigned,
+  network,
 }: ExecuteLiFiSwapParams): Promise<string> {
   if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
     return executeLiFiSolanaSwap({
@@ -121,13 +137,12 @@ export async function executeLiFiSwap({
   if (evmChainId === undefined || !evmTo || evmValue === undefined || !evmGasLimit) {
     throw new Error('Unsupported chain in route');
   }
-  const chainKeyResult = getChainByChainId(evmChainId);
-  if (!chainKeyResult) throw new Error('Unsupported chain in route');
-  const chainKey = chainKeyResult.key;
+  const chainKey = evmChainKey(evmChainId, network);
+  if (!chainKey) throw new Error('Unsupported chain in route');
 
   let nonce;
   try {
-    nonce = await fetchPendingNonce(walletAddress, chainKey);
+    nonce = await fetchPendingNonce(walletAddress, chainKey, network);
   } catch (e) {
     console.error('[swap] fetchPendingNonce failed', { chainKey, e });
     throw new Error('Could not reach the network. Check your connection and try again.');
@@ -187,7 +202,7 @@ export async function executeLiFiSwap({
     try {
       receipt = await withRpcFallback(chainKey, (p) =>
         p.waitForTransaction(approveHash, 1, 90_000),
-      );
+      network);
     } catch (e) {
       console.error('[swap] waitForTransaction failed', { chainKey, approveHash, e });
       throw new Error(`Lost connection while waiting for the approval (tx ${approveHash}). Refresh the quote and try again.`);
@@ -204,7 +219,7 @@ export async function executeLiFiSwap({
     // optimistically incrementing — guards against the user submitting
     // an unrelated tx from another wallet UI during the ~3-6s wait.
     try {
-      nonce = await fetchPendingNonce(walletAddress, chainKey);
+      nonce = await fetchPendingNonce(walletAddress, chainKey, network);
     } catch (e) {
       console.error('[swap] fetchPendingNonce after approve failed; falling back to +1', { chainKey, e });
       nonce += 1;

@@ -413,12 +413,14 @@ export function withWalletProof<R extends { success: boolean; code?: string; mes
  */
 export async function getWalletBalances(
   chainId?: number,
-  address?: string
+  address?: string,
+  /** Read this network whatever the app's toggle says (checkout: always mainnet). */
+  network?: 'mainnet' | 'testnet',
 ): Promise<ApiResponse<WalletBalance[]>> {
   try {
     const headers = await getAuthHeaders();
     const resolvedAddress = address || (await getActiveWallet()) || undefined;
-    const qp = new URLSearchParams({ network: getNetwork() });
+    const qp = new URLSearchParams({ network: network ?? getNetwork() });
     if (chainId) qp.append('chainId', String(chainId));
     if (resolvedAddress) qp.append('address', resolvedAddress);
     const params = `?${qp.toString()}`;

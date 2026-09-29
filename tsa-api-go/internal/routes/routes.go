@@ -461,6 +461,27 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderGroup.POST("/:id/submit-cancel", ch.SubmitCancelOrder)
 		orderGroup.POST("/:id/reject-cancel", ch.RejectCancelOrder)
 		orderGroup.POST("/:id/dispute", ch.RaiseDispute)
+
+		// Pay a checkout with any token the buyer holds: swapped through LiFi
+		// into the order token in HER wallet on Sonic, then the escrow above is
+		// paid from it as usual. Per-user limited like the sell-intent and pay
+		// writes; the writes are idempotent server-side (one open funding per
+		// user and group, one hash per intent, one top-up claim per intent).
+		if ch.FundingEnabled() {
+			fundingWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+			fundingReadLimit := middleware.RateLimiterBy(60, time.Minute, perUserRateKey)
+			fundingQuoteLimit := middleware.RateLimiterBy(30, time.Minute, perUserRateKey)
+			orderGroup.POST("/funding/cart-quote", fundingQuoteLimit, ch.FundingCartQuote)
+			orderGroup.POST("/funding/quote", fundingQuoteLimit, ch.FundingQuote)
+			orderGroup.POST("/funding/intents", fundingWriteLimit, ch.StartFunding)
+			orderGroup.GET("/funding/intents/open", fundingReadLimit, ch.OpenFunding)
+			orderGroup.GET("/funding/intents/:id", fundingReadLimit, ch.GetFunding)
+			orderGroup.POST("/funding/intents/:id/swap", fundingWriteLimit, ch.RecordFundingSwap)
+			orderGroup.POST("/funding/intents/:id/confirm", fundingReadLimit, ch.ConfirmFunding)
+			orderGroup.POST("/funding/intents/:id/abandon", fundingWriteLimit, ch.AbandonFunding)
+			orderGroup.POST("/funding/intents/:id/gas-topup", fundingWriteLimit, ch.FundingSourceGas)
+			orderGroup.POST("/funding/intents/:id/sonic-gas", fundingWriteLimit, ch.FundingSonicGas)
+		}
 	}
 
 	// Admin order routes

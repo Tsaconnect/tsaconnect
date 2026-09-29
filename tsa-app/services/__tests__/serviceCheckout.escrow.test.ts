@@ -72,6 +72,14 @@ describe('settleSent', () => {
   });
 });
 
+// The escrow lives on Sonic MAINNET: every escrow tx is broadcast there
+// whatever the app's testnet toggle says.
+test('escrow txs are broadcast on Sonic mainnet, never the active network', async () => {
+  (signAndBroadcast as jest.Mock).mockResolvedValueOnce('0xok');
+  await sendTx({ to: '0xescrow' } as any, jest.fn());
+  expect(signAndBroadcast).toHaveBeenCalledWith({ to: '0xescrow' }, 'sonic', 'mainnet');
+});
+
 test('an unconfirmed tx is recorded before the send fails', async () => {
   (signAndBroadcast as jest.Mock).mockRejectedValueOnce(new TxNotConfirmedError('0xsent'));
   const onUnconfirmed = jest.fn();

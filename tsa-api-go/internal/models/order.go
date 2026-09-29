@@ -62,6 +62,17 @@ type Order struct {
 	// on-chain lifecycle. OrderPaymentSpendableMCGP is an operator debit of the
 	// buyer's Spendable MCGP (see OrderMcgpPayment), set when that debit starts.
 	PaymentSource string `gorm:"type:varchar(24);not null;default:''" json:"paymentSource,omitempty"`
+	// CheckoutGroupID is shared by the orders one cart checkout created. A
+	// checkout funded by swapping another token pays the group's total in one
+	// swap (services/marketplace_funding.go), so the server sizes that swap from
+	// these orders — never from a client's amount. Nil on older orders and on
+	// single service orders.
+	CheckoutGroupID *uuid.UUID `gorm:"type:uuid;index" json:"checkoutGroupId,omitempty"`
+	// FundWithSwap marks orders created to be paid by a funding swap: their
+	// buyer was short of the order token, so they hold stock with no funds
+	// behind them yet. A buyer may have at most one such checkout awaiting
+	// payment (CheckoutHandler.CreateOrderFromCart).
+	FundWithSwap bool `gorm:"not null;default:false" json:"fundWithSwap,omitempty"`
 	// MenuSelections records the ordered items for an Order-type service order as
 	// a JSON array of OrderMenuSelection. Kept in a dedicated column (NOT Notes,
 	// which ship/refund handlers overwrite) so the merchant can fulfil the order.

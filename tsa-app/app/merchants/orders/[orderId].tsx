@@ -40,6 +40,7 @@ import {
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
+import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import api from '@/components/services/api';
 import { formatStatus, formatDate } from '@/constants/orderStatus';
 import { merchantOrderTimeline } from '@/utils/merchantOrderTimeline';
@@ -309,7 +310,7 @@ const MerchantOrderDetail = () => {
       // A Spendable MCGP order has no escrow tx: approving already refunded it.
       if (!prep.data?.cancelled) {
         if (!prep.data?.cancelTx) throw new Error('Failed to prepare cancel transaction');
-        const txHash = await signAndBroadcast(prep.data.cancelTx, 'sonic');
+        const txHash = await signAndBroadcast(prep.data.cancelTx, 'sonic', MARKETPLACE_NETWORK);
         const submit = await submitCancelOrder(order.id, txHash);
         if (!submit.success) {
           throw new Error(submit.message || 'Failed to submit cancel');

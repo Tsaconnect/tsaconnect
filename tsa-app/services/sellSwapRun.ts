@@ -13,10 +13,13 @@
 
 import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getChainByChainId } from '@/constants/chains';
+import { getChainByChainId, type NetworkType } from '@/constants/chains';
 import { executeLiFiSwap, SwapBroadcastUnconfirmedError } from '@/services/lifiFlow';
 import { isNativeTokenAddress, isNonEVMLiFiChain, type LiFiQuote, type LiFiToken } from '@/services/lifi';
-import { abandonSellIntent, requestSellIntentGasTopUp } from '@/services/paycrestSellSwap';
+import {
+  abandonSellIntent as abandonSaleIntent,
+  requestSellIntentGasTopUp as requestSaleGasTopUp,
+} from '@/services/paycrestSellSwap';
 import { clearPayHold, writePayHold } from '@/services/payHold';
 import { exceedsPriced, priceMovedMessage } from '@/utils/payCheckout';
 
@@ -96,6 +99,14 @@ export type SellSwapRun = {
   pricedFromAmount?: string;
   /** TSA Pay: the payment this swap pays. Its "don't pay again" hold is persisted beside the hash. */
   paymentId?: string;
+  /**
+   * The intent's own routes, when it is not a sale's (a marketplace checkout's
+   * funding lives under /orders/funding). Unset: the sell-intent routes.
+   */
+  closeIntent?: (intentId: string) => Promise<void>;
+  requestGasTopUp?: (intentId: string) => Promise<unknown>;
+  /** Sign on this network whatever the toggle says (a checkout's funding: 'mainnet'). */
+  network?: NetworkType;
 };
 
 /**
@@ -171,6 +182,8 @@ function spendAmount({ amount, quote, token }: SellSwapRun): string | undefined 
  */
 export async function executeSellSwap(run: SellSwapRun): Promise<string> {
   const { intentId, quote, token, sourceChainId, sourceAddress } = run;
+  const abandonSellIntent = run.closeIntent ?? abandonSaleIntent;
+  const requestSellIntentGasTopUp = run.requestGasTopUp ?? requestSaleGasTopUp;
 
   try {
     checkAgainstPrice(run);
@@ -211,6 +224,7 @@ export async function executeSellSwap(run: SellSwapRun): Promise<string> {
       fromChainId: sourceChainId,
       // Our fee is inside the quote the server built; nothing is booked at submit.
       feeFeature: 'none',
+      network: run.network,
       // On the phone BEFORE the broadcast: a reply lost after the server
       // sent it must still leave a hash for resume to follow.
       onSigned: async (signed) => {
@@ -240,8 +254,10 @@ export async function executeSellSwap(run: SellSwapRun): Promise<string> {
     if (run.paymentId) await clearPayHold(run.paymentId);
     await abandonSellIntent(intentId).catch((err) => console.warn('[sell] abandon failed', err));
     if (topUpFailed && chain) {
+      // A sale sells; a payment or a checkout's funding only sends.
+      const nothing = run.paymentId || run.closeIntent ? 'Nothing was sent.' : 'Nothing was sold.';
       throw new Error(
-        `You need a little ${chain.nativeCurrency.symbol} on ${chain.name} to pay the network fee, and we couldn't cover it right now. Nothing was sold.`,
+        `You need a little ${chain.nativeCurrency.symbol} on ${chain.name} to pay the network fee, and we couldn't cover it right now. ${nothing}`,
       );
     }
     throw e;

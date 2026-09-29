@@ -101,6 +101,23 @@ type CreateSellIntentInput struct {
 	// from; when set, a delivery is refused unless the route's own value for
 	// what it delivers agrees (deliveryValueBand).
 	ExpectedToUSD float64
+	// Purpose and ReferenceID mark a delivery that answers to something other
+	// than a TSA Pay payment (models.RampSellIntent.Purpose): a marketplace
+	// checkout funds its group of orders this way. A delivery needs one of
+	// PayPaymentID or ReferenceID — something it is FOR.
+	Purpose     string
+	ReferenceID *uuid.UUID
+	// PassThrough prices the route at cost (SellQuoteInput.PassThrough); the
+	// fee it carries is stored as gas recovery, never as our fee.
+	PassThrough bool
+	// DestGasUSD / DestGasNeedWei are a destination-chain gas top-up the
+	// caller priced: DestGasUSD goes into the quote's g, DestGasNeedWei (what
+	// her wallet must hold there) is stored for the top-up to send against.
+	DestGasUSD     float64
+	DestGasNeedWei string
+	// DestTopUpMaxWei is the shortfall that top-up was priced at: the most it
+	// may ever send (models.RampSellIntent.DestTopUpMaxWei).
+	DestTopUpMaxWei string
 }
 
 // delivery reports a request for a sale that hands a token to someone else's
@@ -112,7 +129,9 @@ type SellIntentService struct {
 	quoter sellQuoter
 	status lifiStatusReader
 	// base proves on Base itself what landed. LiFi's status finds the
-	// destination transaction; only the receipt says how much it moved.
+	// destination transaction; only the receipt says how much it moved. Only an
+	// offramp reads it: nil (with orders) leaves the service delivery-only —
+	// the shape the marketplace's funding runs in when Paycrest is off.
 	base   ERC20TransferVerifier
 	orders *PaycrestOrderService
 	// usdc is the settlement token's address on Base — config's, never the
@@ -162,15 +181,29 @@ func (s *SellIntentService) SetDestVerifiers(v map[string]ERC20TransferVerifier,
 
 // rampSellFeeSourceType namespaces sell-intent fee distributions in the
 // ledger, alongside "allswap", "it_intent", "p2p_release". A delivery sale's
-// own is tsaPayFeeSourceType.
+// own is tsaPayFeeSourceType, a marketplace checkout's marketplaceFeeSourceType.
 const (
-	rampSellFeeSourceType = "ramp_sell"
-	tsaPayFeeSourceType   = "tsa_pay"
+	rampSellFeeSourceType    = "ramp_sell"
+	tsaPayFeeSourceType      = "tsa_pay"
+	marketplaceFeeSourceType = "marketplace"
 )
 
+// deliveryFeeSourceType is the ledger source a delivery's fee is booked under.
+func deliveryFeeSourceType(in *models.RampSellIntent) string {
+	if in.IsMarketplace() {
+		return marketplaceFeeSourceType
+	}
+	return tsaPayFeeSourceType
+}
+
+// ready: every step of a delivery can run. An offramp also needs offrampReady.
 func (s *SellIntentService) ready() bool {
-	return s != nil && s.db != nil && s.quoter != nil && s.status != nil &&
-		s.base != nil && s.orders != nil && s.usdc != ""
+	return s != nil && s.db != nil && s.quoter != nil && s.status != nil
+}
+
+// offrampReady: the Paycrest leg and the Base landing proof are wired.
+func (s *SellIntentService) offrampReady() bool {
+	return s.ready() && s.base != nil && s.orders != nil && s.usdc != ""
 }
 
 // ─── Create ────────────────────────────────────────────────────────────────
@@ -188,7 +221,8 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 	if err != nil {
 		return nil, nil, err
 	}
-	open, err := s.Open(ctx, user.ID)
+	purpose := strings.TrimSpace(in.Purpose)
+	open, err := s.OpenFor(ctx, user.ID, purpose)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,6 +247,9 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 			return nil, nil, fmt.Errorf("%w: no way to prove a delivery on chain %d", ErrSellUnavailable, in.DestChainID)
 		}
 	} else {
+		if !s.offrampReady() {
+			return nil, nil, ErrSellUnavailable
+		}
 		if err := s.orders.requirePaycrestEnabled(fiat); err != nil {
 			return nil, nil, err
 		}
@@ -242,6 +279,7 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		FromAddress: in.SourceAddress, WalletAddress: user.WalletAddress, FiatCode: fiat,
 		ToChainID: in.DestChainID, ToToken: strings.TrimSpace(in.DestTokenAddress),
 		ToAddress: strings.TrimSpace(in.DestAddress), BudgetBps: in.BudgetBps, Delivery: delivery,
+		PassThrough: in.PassThrough, DestGasUSD: in.DestGasUSD,
 	}
 	sourceAmount := strings.TrimSpace(in.SourceAmount)
 	exactOutput := asked != nil
@@ -280,6 +318,12 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		}
 	}
 
+	feeBps, gasRecoveryBps := q.FeeBps, 0
+	if in.PassThrough {
+		// At cost: what the route carries recovers gas we pay, and is not ours.
+		feeBps, gasRecoveryBps = 0, q.FeeBps
+	}
+	destNeed := strings.TrimSpace(in.DestGasNeedWei)
 	row := &models.RampSellIntent{
 		UserID:             user.ID,
 		SourceAddress:      strings.TrimSpace(in.SourceAddress),
@@ -289,6 +333,12 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		SourceAmount:       sourceAmount,
 		PayPaymentID:       in.PayPaymentID,
 		PayoutFiat:         payoutFiat,
+		Purpose:            purpose,
+		ReferenceID:        in.ReferenceID,
+		GasRecoveryBps:     gasRecoveryBps,
+		DestTopUpBudgeted:  destNeed != "" && in.DestGasUSD > 0,
+		DestGasNeedWei:     destNeed,
+		DestTopUpMaxWei:    strings.TrimSpace(in.DestTopUpMaxWei),
 		DestChainID:        in.DestChainID,
 		DestTokenAddress:   strings.TrimSpace(in.DestTokenAddress),
 		DestAddress:        strings.TrimSpace(in.DestAddress),
@@ -296,7 +346,7 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		QuotedUSDC:         q.USDCAmount,
 		QuotedFiat:         q.FiatEstimate,
 		FiatCode:           fiat,
-		FeeBps:             q.FeeBps,
+		FeeBps:             feeBps,
 		LiFiTransactionID:  q.Route.TransactionID,
 		QuotedGasLimit:     q.Route.GasLimit,
 		// Stored as the quote priced them, never re-derived from the route:
@@ -323,20 +373,25 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 // exactOutputAsked validates the pay-checkout fields as a set and returns the exact
 // output asked of the swap (nil for an ordinary sale). A naira pay sale needs
 // PayoutFiat, ToAmount and PayPaymentID together; a delivery sale (DestAddress
-// set) pays no naira, so it needs ToAmount and PayPaymentID and must carry no
-// PayoutFiat. Partial sets are refused: a PayoutFiat without a PayPaymentID
-// would take the pay path in OpenOrder but escape the Abandon guard, and a
-// ToAmount alone would change the quote and nothing else.
+// set) pays no naira, so it needs ToAmount and what it is for — a PayPaymentID,
+// or a Purpose with its ReferenceID — and must carry no PayoutFiat. Partial
+// sets are refused: a PayoutFiat without a PayPaymentID would take the pay path
+// in OpenOrder but escape the Abandon guard, and a ToAmount alone would change
+// the quote and nothing else. A Purpose is a delivery's alone.
 func exactOutputAsked(in CreateSellIntentInput) (*big.Int, error) {
 	fiat, toAmount := strings.TrimSpace(in.PayoutFiat), strings.TrimSpace(in.ToAmount)
 	delivery := in.delivery()
-	if fiat == "" && toAmount == "" && in.PayPaymentID == nil && !delivery {
+	purpose := strings.TrimSpace(in.Purpose)
+	if fiat == "" && toAmount == "" && in.PayPaymentID == nil && in.ReferenceID == nil && purpose == "" && !delivery {
 		return nil, nil
 	}
+	referenced := purpose != "" && in.ReferenceID != nil && in.PayPaymentID == nil
 	switch {
 	case delivery && fiat != "":
 		return nil, fmt.Errorf("%w: a delivery sale pays no naira", ErrSellIntentState)
-	case toAmount == "" || in.PayPaymentID == nil || (!delivery && fiat == ""):
+	case (purpose != "" || in.ReferenceID != nil) && (!delivery || !referenced):
+		return nil, fmt.Errorf("%w: a purpose is a delivery's, with its reference and no payment", ErrSellIntentState)
+	case toAmount == "" || (in.PayPaymentID == nil && !referenced) || (!delivery && fiat == ""):
 		return nil, fmt.Errorf("%w: a pay sale needs its payment, its amount to deliver and, for naira, its payout together", ErrSellIntentState)
 	}
 	asked, ok := new(big.Int).SetString(toAmount, 10)
@@ -409,7 +464,7 @@ func (s *SellIntentService) RecordSwap(ctx context.Context, userID, id uuid.UUID
 	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ? AND user_id = ? AND status = ? AND swap_tx_hash IS NULL",
 			id, userID, models.SellIntentSwapping).
-		Updates(map[string]any{"swap_tx_hash": hash, "status": models.SellIntentSwapped, "updated_at": s.now()})
+		Updates(map[string]any{"swap_tx_hash": hash, "status": models.SellIntentSwapped, "swap_recorded_at": s.now(), "updated_at": s.now()})
 	if res.Error != nil {
 		if isUniqueViolation(res.Error) {
 			// That hash already backs a sale — this one's or someone else's.
@@ -443,7 +498,7 @@ func (s *SellIntentService) RecordSwap(ctx context.Context, userID, id uuid.UUID
 // consents with useWalletBalance, at her whole Base USDC balance. A cap the
 // deposit exceeds is a SellShortfallError. An ordinary sale ignores the flag.
 func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id uuid.UUID, useWalletBalance bool) (*models.PaycrestOrderRecord, error) {
-	if !s.ready() || user == nil {
+	if !s.offrampReady() || user == nil {
 		return nil, ErrSellUnavailable
 	}
 	in, err := s.load(ctx, user.ID, id)
@@ -797,12 +852,14 @@ func (s *SellIntentService) bookFee(in *models.RampSellIntent, userID uuid.UUID,
 //
 // A pay intent whose swap was sent cannot be abandoned by her: the swap may
 // still deliver, and a freed payment could then be paid twice. Only the
-// reconciler's AbandonForPay ends one of those.
+// reconciler's AbandonForPay ends one of those. A marketplace funding swap is
+// held the same way: once sent, only its reconciler (AbandonForReference) ends
+// it, so she is never told to pay again while it may still land.
 func (s *SellIntentService) Abandon(ctx context.Context, userID, id uuid.UUID) error {
 	if !s.ready() {
 		return ErrSellUnavailable
 	}
-	return s.failOpenSale(ctx, "id = ? AND user_id = ? AND (pay_payment_id IS NULL OR swap_tx_hash IS NULL)", id, userID)
+	return s.failOpenSale(ctx, "id = ? AND user_id = ? AND ((pay_payment_id IS NULL AND reference_id IS NULL) OR swap_tx_hash IS NULL)", id, userID)
 }
 
 // AbandonForPay is the reconciler's path: it moves a pay intent that will
@@ -823,6 +880,19 @@ func (s *SellIntentService) AbandonForPay(ctx context.Context, id uuid.UUID, swa
 		return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL AND swap_tx_hash IS NULL", id)
 	}
 	return s.failOpenSale(ctx, "id = ? AND pay_payment_id IS NOT NULL AND swap_tx_hash = ?", id, *swapTxHash)
+}
+
+// AbandonForReference is the marketplace reconciler's AbandonForPay: it ends a
+// funding intent that will never deliver, guarded on the swap the caller read
+// (nil = none), so a swap reported since is never written off under it.
+func (s *SellIntentService) AbandonForReference(ctx context.Context, id uuid.UUID, swapTxHash *string) error {
+	if !s.ready() {
+		return ErrSellUnavailable
+	}
+	if swapTxHash == nil {
+		return s.failOpenSale(ctx, "id = ? AND reference_id IS NOT NULL AND swap_tx_hash IS NULL", id)
+	}
+	return s.failOpenSale(ctx, "id = ? AND reference_id IS NOT NULL AND swap_tx_hash = ?", id, *swapTxHash)
 }
 
 // failOpenSale fails the sale matched by cond, only while it is swapping or
@@ -861,16 +931,23 @@ func (s *SellIntentService) SwapStatus(ctx context.Context, id uuid.UUID) (*LiFi
 	return s.status.Status(ctx, *in.SwapTxHash)
 }
 
-// Open is the user's sale in progress, or nil. Newest first, because the
-// partial unique index makes a second one impossible in production and a
-// deterministic answer is still wanted if one ever exists.
+// Open is the user's sale in progress, or nil — a sale or TSA Pay payment,
+// never a marketplace checkout's funding (OpenFor names a purpose). Newest
+// first, because the partial unique index makes a second one impossible in
+// production and a deterministic answer is still wanted if one ever exists.
 func (s *SellIntentService) Open(ctx context.Context, userID uuid.UUID) (*models.RampSellIntent, error) {
+	return s.OpenFor(ctx, userID, "")
+}
+
+// OpenFor is the user's open intent of one purpose ("" = a sale or a TSA Pay
+// payment), or nil: the one-open rule is per purpose.
+func (s *SellIntentService) OpenFor(ctx context.Context, userID uuid.UUID, purpose string) (*models.RampSellIntent, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrSellUnavailable
 	}
 	var in models.RampSellIntent
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
+		Where("user_id = ? AND purpose = ? AND status IN ?", userID, purpose, models.SellIntentOpenStatuses).
 		Order("created_at DESC").First(&in).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -897,7 +974,7 @@ func (s *SellIntentService) Resumable(ctx context.Context, userID uuid.UUID) (*m
 		Where("user_id = ? AND status = ?", userID, models.PaycrestStatusAwaitingDeposit)
 	var in models.RampSellIntent
 	err = s.db.WithContext(ctx).
-		Where("user_id = ? AND status = ? AND paycrest_order_id IN (?)", userID, models.SellIntentOrdered, waiting).
+		Where("user_id = ? AND purpose = '' AND status = ? AND paycrest_order_id IN (?)", userID, models.SellIntentOrdered, waiting).
 		Order("created_at DESC").First(&in).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -919,7 +996,11 @@ func (s *SellIntentService) Get(ctx context.Context, userID, id uuid.UUID) (*mod
 // ─── Gas top-up bookkeeping (GasTopUp.TopUpForIntent's IntentTopUpStore) ────
 
 // CountToppedUpSince is how many of her sales were topped up at or after
-// since, used or not — the daily cap.
+// since, used or not — the daily cap. One budget across every purpose: a
+// sale's, a TSA Pay payment's and a marketplace funding's source-chain top-ups
+// all come from the same sponsor lanes, and farming is per person, not per
+// feature. (A marketplace funding's DESTINATION top-up — S on Sonic — is its
+// own lane and has its own cap: CountDestToppedUpSince.)
 func (s *SellIntentService) CountToppedUpSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
 	var n int64
 	err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
@@ -928,13 +1009,23 @@ func (s *SellIntentService) CountToppedUpSince(ctx context.Context, userID uuid.
 	return n, err
 }
 
-// CountUnusedSince is how many topped-up sales of hers ended without a swap
-// since `since` — gas we paid for that nothing used, the farming signal.
+// CountUnusedSince is how many topped-up intents of hers failed since `since`
+// with nothing to show for the gas we paid — the farming signal:
+//   - no swap hash at all (every purpose), or
+//   - a marketplace funding whose hash LiFi never saw from her (swap_seen_at is
+//     tracked only there): a well-formed hash nobody broadcast must not make
+//     sponsored gas look used.
+//
+// A swap LiFi did see that then failed or was refunded is an honest attempt
+// that went wrong outside her control, and never counts: this budget is shared
+// by sales, TSA Pay and marketplace funding, and two unlucky refunds must not
+// throttle a real user's next top-up.
 func (s *SellIntentService) CountUnusedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
 	var n int64
 	err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("user_id = ? AND status = ? AND swap_tx_hash IS NULL AND topped_up_at IS NOT NULL AND updated_at >= ?",
+		Where("user_id = ? AND status = ? AND topped_up_at IS NOT NULL AND updated_at >= ?",
 			userID, models.SellIntentFailed, since).
+		Where("swap_tx_hash IS NULL OR (purpose = ? AND swap_seen_at IS NULL)", models.SellIntentPurposeMarketplace).
 		Count(&n).Error
 	return n, err
 }
@@ -943,14 +1034,60 @@ func (s *SellIntentService) CountUnusedSince(ctx context.Context, userID uuid.UU
 // topped_up_at, so two concurrent requests cannot both send gas for one sale.
 // Eligibility is re-checked on the row itself: the caller's copy may be stale,
 // and a sale swapped or abandoned since it was loaded must not win the claim.
+//
+// The UTC-day cap (intentTopUpDailyCap) is enforced HERE, in the same
+// transaction as the claim, under a lock on her user row — the way the
+// wallet-proof challenge cap is: GasTopUp's own count is an early refusal, but
+// two concurrent top-ups for two of her sales could both pass it. Past the cap
+// this answers ErrTopUpDailyCap and claims nothing.
 func (s *SellIntentService) MarkToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
-	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ? AND topped_up_at IS NULL AND status = ? AND swap_tx_hash IS NULL", id, models.SellIntentSwapping).
-		Update("topped_up_at", at)
-	if res.Error != nil {
-		return false, res.Error
+	return s.claimTopUp(ctx, id, at, "topped_up_at",
+		"id = ? AND topped_up_at IS NULL AND status = ? AND swap_tx_hash IS NULL", id, models.SellIntentSwapping)
+}
+
+// claimTopUp is the capped once-per-intent claim both top-up kinds share: lock
+// the owner's user row, count the column's claims since the start of `at`'s
+// UTC day, refuse at the cap, else set the column on the row cond matches.
+func (s *SellIntentService) claimTopUp(ctx context.Context, id uuid.UUID, at time.Time, column, cond string, args ...any) (bool, error) {
+	won := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var owner struct{ UserID uuid.UUID }
+		if err := tx.Model(&models.RampSellIntent{}).Select("user_id").Where("id = ?", id).Take(&owner).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := lockUserForUpdate(tx, owner.UserID); err != nil {
+			return err
+		}
+		y, m, d := at.UTC().Date()
+		var today int64
+		if err := tx.Model(&models.RampSellIntent{}).
+			Where("user_id = ? AND "+column+" IS NOT NULL AND "+column+" >= ?", owner.UserID, time.Date(y, m, d, 0, 0, 0, 0, time.UTC)).
+			Count(&today).Error; err != nil {
+			return err
+		}
+		if today >= intentTopUpDailyCap {
+			return ErrTopUpDailyCap
+		}
+		res := tx.Model(&models.RampSellIntent{}).Where(cond, args...).Update(column, at)
+		if res.Error != nil {
+			return res.Error
+		}
+		won = res.RowsAffected == 1
+		return nil
+	})
+	return won, err
+}
+
+// lockUserForUpdate serialises per-user claims on Postgres (SQLite, the test
+// rig, serialises writes anyway and has no FOR UPDATE).
+func lockUserForUpdate(tx *gorm.DB, userID uuid.UUID) error {
+	if tx.Dialector.Name() != "postgres" {
+		return nil
 	}
-	return res.RowsAffected == 1, nil
+	return tx.Exec("SELECT id FROM users WHERE id = ? FOR UPDATE", userID).Error
 }
 
 // ClearToppedUp gives the claim back, for a top-up that provably never left.
@@ -965,6 +1102,42 @@ func (s *SellIntentService) RecordTopUp(ctx context.Context, id uuid.UUID, txHas
 	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
 		Where("id = ?", id).
 		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei}).Error
+}
+
+// ─── Destination gas top-up bookkeeping (GasTopUp.TopUpDestForIntent) ──────
+
+// CountDestToppedUpSince is how many of her intents had destination gas sent
+// at or after since — the destination top-up's own daily cap.
+func (s *SellIntentService) CountDestToppedUpSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND dest_topped_up_at IS NOT NULL AND dest_topped_up_at >= ?", userID, since).
+		Count(&n).Error
+	return n, err
+}
+
+// MarkDestToppedUp is the once-per-intent claim on destination gas: true iff
+// this caller set dest_topped_up_at. Re-checked on the row: only a delivered
+// intent whose quote budgeted the top-up can win it.
+// Like MarkToppedUp, the destination top-up's own UTC-day cap is enforced in
+// the claim's transaction (ErrTopUpDailyCap past it).
+func (s *SellIntentService) MarkDestToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
+	return s.claimTopUp(ctx, id, at, "dest_topped_up_at",
+		"id = ? AND dest_topped_up_at IS NULL AND dest_top_up_budgeted = ? AND status = ?", id, true, models.SellIntentDelivered)
+}
+
+// ClearDestToppedUp gives the claim back, for a top-up that provably never left.
+func (s *SellIntentService) ClearDestToppedUp(ctx context.Context, id uuid.UUID) error {
+	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ?", id).
+		Update("dest_topped_up_at", nil).Error
+}
+
+// RecordDestTopUp writes down the destination top-up actually sent.
+func (s *SellIntentService) RecordDestTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
+	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"dest_top_up_tx_hash": txHash, "dest_top_up_wei": amountWei}).Error
 }
 
 // load reads one intent BY ID AND OWNER. Never by id alone: every step of a

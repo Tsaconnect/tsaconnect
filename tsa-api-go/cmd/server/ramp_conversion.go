@@ -373,6 +373,15 @@ func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService,
 	q := services.NewRampSellQuoter(
 		services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
 		quotes, chains, cfg.RampRoundTripBudgetBps, orders.ConvertedFeePercent(), cfg.RampSellSponsoredGasUSD)
+	configureRampQuoter(q, cfg, chains)
+	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
+		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
+	return q
+}
+
+// configureRampQuoter wires what every quoter of a route she signs needs,
+// whoever it prices for (a sale, TSA Pay, a marketplace checkout's funding).
+func configureRampQuoter(q *services.RampSellQuoter, cfg *config.Config, chains *services.BlockchainService) {
 	// Whether she can pay her own gas on the source chain decides whether a
 	// top-up is priced into the budget. A chain we cannot read is treated as
 	// "she has none" by the quoter, which over-prices rather than strands.
@@ -391,9 +400,6 @@ func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService,
 	// allowlist the treasury signs against. A chain missing from it cannot be
 	// sold from — refused at the quote, never handed over unchecked.
 	q.SetRouterAllowlist(rampSellRouters(cfg, chains))
-	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
-		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
-	return q
 }
 
 // rampSellRouters is the router allowlist per source chain id, for the sell
@@ -446,21 +452,27 @@ func buildSellIntentService(quoter *services.RampSellQuoter, cfg *config.Config,
 	svc := services.NewSellIntentService(config.DB, quoter,
 		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
 		services.NewLogTransferVerifier(base.Client), orders, usdc, time.Now)
-	if fees != nil {
-		svc.SetFeeService(fees)
-	}
+	wireDeliveryIntents(svc, cfg, chains, fees)
 	// The same address the binding compares against, read through the same
 	// Base client: a pay intent's "use my wallet balance too" consent checks it.
 	svc.SetUSDCBalanceReader(func(_ context.Context, wallet string) (*big.Int, error) {
 		return base.GetTokenBalance(usdc, wallet)
 	})
-	// A pay checkout's crypto route delivers a token to a merchant on ANY
-	// configured chain, and only that chain's own receipt can say the merchant
-	// was credited. The same verifier map converted buys prove their deliveries
-	// with — not a second one — and the registry's mainnet id -> key resolver (a testnet id must not resolve).
-	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.MainnetChainNameForID)
 	log.Printf("[ramp-sell] sales enabled (settling %s on chain %d)", rampSettlementToken, rampSettlementChainID)
 	return svc
+}
+
+// wireDeliveryIntents wires what a DELIVERY intent needs, whatever service it
+// is (the ramp's own, or the marketplace's delivery-only one): the fee engine,
+// and the on-chain proof of a landing on ANY configured chain — only that
+// chain's own receipt can say the recipient was credited. The same verifier map
+// converted buys prove their deliveries with — not a second one — and the
+// registry's mainnet id -> key resolver (a testnet id must not resolve).
+func wireDeliveryIntents(svc *services.SellIntentService, cfg *config.Config, chains *services.BlockchainService, fees *services.FeeDistributionService) {
+	if fees != nil {
+		svc.SetFeeService(fees)
+	}
+	svc.SetDestVerifiers(rampTransferVerifiers(chains, evmChainKeys(cfg)), chains.MainnetChainNameForID)
 }
 
 // rampSettlementChainID / rampSettlementChainKey / rampSettlementToken name

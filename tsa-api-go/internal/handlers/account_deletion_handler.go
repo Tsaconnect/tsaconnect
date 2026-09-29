@@ -83,14 +83,22 @@ func blockingCommitments(db *gorm.DB, userID uuid.UUID) ([]string, error) {
 		blockers = append(blockers, fmt.Sprintf("%d open marketplace order(s)", orderCount))
 	}
 
-	var saleCount int64
+	var saleCount, fundingCount int64
 	if err := db.Model(&models.RampSellIntent{}).
-		Where("user_id = ? AND status IN ?", userID, models.SellIntentOpenStatuses).
+		Where("user_id = ? AND purpose <> ? AND status IN ?", userID, models.SellIntentPurposeMarketplace, models.SellIntentOpenStatuses).
 		Count(&saleCount).Error; err != nil {
 		return nil, err
 	}
 	if saleCount > 0 {
 		blockers = append(blockers, fmt.Sprintf("%d sale to your bank still in progress", saleCount))
+	}
+	if err := db.Model(&models.RampSellIntent{}).
+		Where("user_id = ? AND purpose = ? AND status IN ?", userID, models.SellIntentPurposeMarketplace, models.SellIntentOpenStatuses).
+		Count(&fundingCount).Error; err != nil {
+		return nil, err
+	}
+	if fundingCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d checkout payment (a swap into your wallet) still in progress", fundingCount))
 	}
 
 	var purchaseCount int64

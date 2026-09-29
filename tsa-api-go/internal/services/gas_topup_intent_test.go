@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -483,11 +484,12 @@ func TestSellIntentTopUpStore(t *testing.T) {
 	// Unused: failed, never swapped, topped up, recently.
 	hash := testSwapHash2
 	earlier := now.Add(-2 * time.Hour)
-	seed := func(status string, swap *string, toppedUp *time.Time, updated time.Time) {
+	seedAs := func(purpose string, seen *time.Time, status string, swap *string, toppedUp *time.Time, updated time.Time) {
 		t.Helper()
 		row := &models.RampSellIntent{UserID: r.user.ID, SourceAddress: r.user.WalletAddress, WalletAddress: r.user.WalletAddress,
 			SourceChainID: 8453, SourceTokenAddress: sponsorTestUSDC, SourceAmount: "1", FiatCode: "NGN",
-			BankCode: "044", AccountNumber: "0123456789", Status: status, SwapTxHash: swap, ToppedUpAt: toppedUp}
+			BankCode: "044", AccountNumber: "0123456789", Status: status, SwapTxHash: swap, ToppedUpAt: toppedUp,
+			Purpose: purpose, SwapSeenAt: seen}
 		if err := db.Create(row).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -495,16 +497,24 @@ func TestSellIntentTopUpStore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed(models.SellIntentFailed, nil, &earlier, earlier)                // unused
-	seed(models.SellIntentFailed, &hash, &earlier, earlier)              // swapped, then failed: used
+	seed := func(status string, swap *string, toppedUp *time.Time, updated time.Time) {
+		t.Helper()
+		seedAs("", nil, status, swap, toppedUp, updated)
+	}
+	hash3, hash4 := testSwapHash2[:len(testSwapHash2)-1]+"3", testSwapHash2[:len(testSwapHash2)-1]+"4"
+	mkt := models.SellIntentPurposeMarketplace
+	seed(models.SellIntentFailed, nil, &earlier, earlier)                // unused: gas taken, nothing ever sent
+	seed(models.SellIntentFailed, &hash, &earlier, earlier)              // a sale that swapped, then failed: an honest attempt, not unused
 	seed(models.SellIntentFailed, nil, nil, earlier)                     // never topped up
 	seed(models.SellIntentFailed, nil, &earlier, now.Add(-30*time.Hour)) // too long ago
-	if n, err := r.svc.CountUnusedSince(ctx, r.user.ID, now.Add(-24*time.Hour)); err != nil || n != 1 {
-		t.Fatalf("unused = %d %v, want 1", n, err)
+	seedAs(mkt, nil, models.SellIntentFailed, &hash3, &earlier, earlier)      // a funding hash LiFi never saw: unused
+	seedAs(mkt, &earlier, models.SellIntentFailed, &hash4, &earlier, earlier) // a funding swap LiFi saw, then refunded: not unused
+	if n, err := r.svc.CountUnusedSince(ctx, r.user.ID, now.Add(-24*time.Hour)); err != nil || n != 2 {
+		t.Fatalf("unused = %d %v, want 2 (the hashless sale + the never-seen funding)", n, err)
 	}
 	// The open, topped-up sale is not unused: it is not decided yet.
-	if n, _ := r.svc.CountToppedUpSince(ctx, r.user.ID, now.Add(-3*time.Hour)); n != 4 {
-		t.Fatalf("topped up since = %d, want 4 (open + three seeded)", n)
+	if n, _ := r.svc.CountToppedUpSince(ctx, r.user.ID, now.Add(-3*time.Hour)); n != 6 {
+		t.Fatalf("topped up since = %d, want 6 (open + five seeded)", n)
 	}
 
 	// Get reads by id AND owner.
@@ -661,4 +671,61 @@ func TestSellSeam_TheTopUpSentIsTheOneTheQuoteAdmitted(t *testing.T) {
 			t.Fatalf("quote %v, row %v/%q, sent %v; nothing was budgeted", q.GasTopUp, in.TopUpBudgeted, in.QuotedTopUpWei, rig.native.sentWei)
 		}
 	})
+}
+
+// The UTC-day cap is enforced inside the claim's own transaction: of any
+// number of claims racing for her last slots, no more than the cap win — the
+// early count in GasTopUp alone would let two concurrent top-ups both pass.
+func TestSellIntentTopUpStore_DailyCapIsAtomic(t *testing.T) {
+	r := newSellIntentRig(t)
+	ctx := context.Background()
+	now := sponsorTestNow
+	// One connection: every SQLite :memory: connection is its own empty
+	// database. SQLite then serialises the racing transactions, as the user-row
+	// lock does on Postgres.
+	if sqlDB, err := r.svc.db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+	var ids []uuid.UUID
+	for i := 0; i < intentTopUpDailyCap+3; i++ {
+		row := &models.RampSellIntent{UserID: r.user.ID, SourceAddress: r.user.WalletAddress, WalletAddress: r.user.WalletAddress,
+			SourceChainID: 8453, SourceTokenAddress: sponsorTestUSDC, SourceAmount: "1", FiatCode: "NGN",
+			BankCode: "044", AccountNumber: "0123456789", Status: models.SellIntentSwapping}
+		if err := r.svc.db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, row.ID)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	won, capped := 0, 0
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id uuid.UUID) {
+			defer wg.Done()
+			ok, err := r.svc.MarkToppedUp(ctx, id, now)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case errors.Is(err, ErrTopUpDailyCap):
+				capped++
+			case err != nil:
+				t.Errorf("claim: %v", err)
+			case ok:
+				won++
+			}
+		}(id)
+	}
+	wg.Wait()
+	if won != intentTopUpDailyCap || capped != 3 {
+		t.Fatalf("won %d, capped %d; want %d won and the rest refused", won, capped, intentTopUpDailyCap)
+	}
+	// A new UTC day is a new cap.
+	var unclaimed models.RampSellIntent
+	if err := r.svc.db.Where("user_id = ? AND topped_up_at IS NULL", r.user.ID).First(&unclaimed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := r.svc.MarkToppedUp(ctx, unclaimed.ID, now.Add(24*time.Hour)); err != nil || !ok {
+		t.Fatalf("next day: %v %v", ok, err)
+	}
 }

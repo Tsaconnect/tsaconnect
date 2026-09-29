@@ -152,6 +152,19 @@ func (g *SponsorGuard) ReleaseUser(res SponsorReservation) {
 	}
 }
 
+// CanReserveGas reports whether ReserveGas(units) would pass right now,
+// reserving nothing — a quote's pre-check. ReserveGas remains the gate.
+func (g *SponsorGuard) CanReserveGas(units uint64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rollDayLocked()
+	projected := new(big.Int).Add(g.spentGas, new(big.Int).SetUint64(units))
+	if g.limits.DailyGasBudget != nil && projected.Cmp(g.limits.DailyGasBudget) > 0 {
+		return ErrDailyCapExceeded
+	}
+	return nil
+}
+
 // ReserveGas checks AND reserves in one critical section; check-then-act
 // overran a 5-request budget 2x under 50 goroutines.
 func (g *SponsorGuard) ReserveGas(units uint64) (SponsorReservation, error) {

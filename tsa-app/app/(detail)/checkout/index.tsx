@@ -13,6 +13,14 @@
 // balance), never from MCGP in the wallet. Its balance, shortfall and payment
 // all go through that path — the backend holds the MCGP with no signature and
 // no gas, so the buyer authorizes it with the app's PIN/biometric prompt.
+//
+// "Pay with another token": any token she holds on an EVM chain is swapped
+// through LiFi into USDC/USDT in HER OWN wallet on Sonic, and the same escrow
+// flow then pays each order from there (services/checkoutFundingRun). That run
+// is app-wide and persisted, so it survives leaving the screen or a restart.
+//
+// Everything here is Sonic MAINNET whatever the app's testnet toggle says: the
+// escrow lives there, so balances, signing and the funding swap are pinned to it.
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
@@ -41,6 +49,12 @@ import { PaymentProgress, type PaymentPhase } from '@/components/checkout/Paymen
 import { QuoteBreakdown } from '@/components/checkout/QuoteBreakdown';
 import { useTheme } from '@/theme';
 import { MARKETPLACE_TAB } from '@/constants/routes';
+import AssetPicker from '@/components/assets/AssetPicker';
+import { FundingConfirmSheet, FundingForm, FundingProgressView } from '@/components/checkout/PayWithToken';
+import { useCheckoutFundingRun, useFundingPrice, type FundingPick } from '@/hooks/useCheckoutFunding';
+import { canForgetRun } from '@/services/checkoutFundingRun';
+import { fundingPickerAllow } from '@/utils/fundingPicker';
+import { useNetwork } from '@/hooks/useNetwork';
 import {
   BottomActionBar,
   Button,
@@ -106,6 +120,13 @@ const CheckoutScreen = () => {
     reload: reloadAddresses,
   } = useDeliveryAddresses();
   const { currency, rate } = useCurrency();
+  const { network } = useNetwork();
+  // Pay from the wallet's own USDC/USDT/Spendable MCGP, or swap another token in first.
+  const [payMode, setPayMode] = useState<'wallet' | 'swap'>('wallet');
+  const [fundingPick, setFundingPick] = useState<FundingPick | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [fundingConfirmOpen, setFundingConfirmOpen] = useState(false);
+  const { state: funding, runner: fundingRunner } = useCheckoutFundingRun();
 
   const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
 
@@ -237,6 +258,60 @@ const CheckoutScreen = () => {
     }
   }, [repriced, quote, quoteLoading]);
 
+  // A run this phone left (a kill mid-bridge, or she left the screen) is picked
+  // up on opening checkout: it signs nothing new, only follows what was sent.
+  useEffect(() => {
+    void fundingRunner.resume();
+  }, [fundingRunner]);
+
+  // Not offered on the testnet toggle: the picker lists the active network's
+  // holdings, and a checkout's funding is always a mainnet swap.
+  const swapMode = payMode === 'swap' && !isMCGP && network !== 'testnet';
+  // The cart quote's own fields, so the server prices the very cart the orders
+  // will be created from (useFundingPrice keys on its content, not identity).
+  const fundingCart =
+    location && !isMCGP
+      ? {
+          token: selectedToken,
+          buyerCity: location.city,
+          buyerState: location.state,
+          buyerCountry: location.country,
+          serviceTiers,
+          deliveryAddressId: deliveryAddress?.id,
+        }
+      : null;
+  const {
+    price: fundingPrice,
+    pricing: fundingPricing,
+    stale: fundingStale,
+    reprice: repriceFunding,
+  } = useFundingPrice({
+    pick: swapMode ? fundingPick : null,
+    wallet: walletAddress,
+    cart: fundingCart,
+    live: swapMode && step === 'review' && funding.stage === 'idle',
+  });
+  // "Pay again" for a checkout whose orders exist but whose swap was never
+  // sent: priced from the orders themselves, with the token she picked then.
+  const retryRecord =
+    funding.stage === 'failed' && funding.outcome === 'retry' && funding.record && !funding.record.intentId && !funding.record.swapHash
+      ? funding.record
+      : null;
+  const retryPick = useMemo(
+    () => (retryRecord ? { token: retryRecord.token, chainId: retryRecord.chainId } : null),
+    // Same run, same pick: only a different group re-prices.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [retryRecord?.groupId],
+  );
+  const { price: retryPrice, stale: retryStale, reprice: repriceRetry } = useFundingPrice({
+    pick: retryPick,
+    wallet: retryRecord?.wallet ?? null,
+    groupId: retryRecord?.groupId ?? null,
+    live: !!retryRecord,
+  });
+  const [retryConfirmOpen, setRetryConfirmOpen] = useState(false);
+  const fundingAllow = useMemo(() => fundingPickerAllow(selectedToken), [selectedToken]);
+
   const tokenBalance = balances[selectedToken as 'USDC' | 'USDT' | 'MCGP'];
   const totalUnits = quote ? quoteUnits(quote.totals.total, quote.decimals) : null;
   const shortOnToken = tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
@@ -261,8 +336,78 @@ const CheckoutScreen = () => {
       return;
     }
     if (!quote) return;
+    if (swapMode) {
+      if (!fundingPick) {
+        setPickerOpen(true);
+        return;
+      }
+      if (!fundingPrice?.quote) return;
+      if (fundingStale) void repriceFunding();
+      setFundingConfirmOpen(true);
+      return;
+    }
     refreshBalances();
     setConfirmOpen(true);
+  };
+
+  // --- Pay with another token: swap into the order token, then escrow each order ---
+  const payWithFunding = () => {
+    const priced = fundingPrice?.quote;
+    if (!fundingPick || !priced || !quote || !location || !walletAddress) return;
+    // A stale figure is not paid: look it up, show what it is now, and let her confirm that.
+    if (fundingStale) {
+      void repriceFunding();
+      return;
+    }
+    setFundingConfirmOpen(false);
+    setPaidQuote(quote);
+    void fundingRunner.pay({
+      token: fundingPick.token,
+      chainId: fundingPick.chainId,
+      wallet: walletAddress,
+      pricedFromAmount: priced.fromAmount,
+      createOrders: async () => {
+        const res = await createOrders(
+          selectedToken,
+          location.city,
+          location.state,
+          location.country,
+          serviceTiers,
+          undefined,
+          undefined,
+          quote.totals.total,
+          deliveryAddress?.id,
+          true,
+        );
+        if (res.code === 'price_changed') {
+          setRepriced(true);
+          throw new Error('The total changed since you confirmed it. Review the new amount before paying.');
+        }
+        if (!res.success || !res.data?.orders?.length || !res.data.checkoutGroupId) {
+          throw new Error(res.message || 'Failed to create orders');
+        }
+        cartService.notifyChange();
+        return { orders: res.data.orders, groupId: res.data.checkoutGroupId };
+      },
+    });
+  };
+
+  const payAgain = () => {
+    if (!retryPrice?.quote) {
+      void repriceRetry();
+      return;
+    }
+    setRetryConfirmOpen(true);
+  };
+
+  const confirmPayAgain = () => {
+    if (!retryPrice?.quote) return;
+    if (retryStale) {
+      void repriceRetry();
+      return;
+    }
+    setRetryConfirmOpen(false);
+    void fundingRunner.retry(retryPrice.quote.fromAmount);
   };
 
   // --- Step 2 → 3 ---
@@ -445,6 +590,53 @@ const CheckoutScreen = () => {
     </View>
   );
 
+  // ===== PAYING WITH ANOTHER TOKEN (a run in progress, or how it ended) =====
+  if (funding.stage !== 'idle') {
+    const rec = funding.record;
+    const orderNames = (rec?.orders ?? []).map((o, i) => {
+      const line = paidQuote?.lines.find((l) => l.productId === o.productId);
+      return line?.name ?? `order #${o.id.slice(0, 8)}`;
+    });
+    // Forget the run only when nothing is in flight (done, ended, or nothing
+    // sent); otherwise just go — the record and hash stay, and checkout
+    // follows the run again when she comes back.
+    const leave = (to: () => void) => {
+      if (canForgetRun(funding)) void fundingRunner.discard().finally(to);
+      else to();
+    };
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <Header title="Paying" showBack={funding.stage === 'failed' || funding.stage === 'done' || funding.stage === 'bridging'} />
+        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+          <FundingProgressView
+            state={funding}
+            sourceSymbol={rec?.token.symbol ?? fundingPick?.token.symbol ?? 'your token'}
+            orderToken={rec?.orders[0]?.token ?? selectedToken}
+            orderNames={orderNames}
+            onContinue={() => void fundingRunner.resume()}
+            onPayAgain={payAgain}
+            onViewOrders={() => leave(() => router.replace('/(dashboard)/orderlist'))}
+            onDone={() => leave(() => {
+              setPaidQuote(null);
+              setStep('review');
+              loadCart();
+            })}
+          />
+        </ScrollView>
+        {retryRecord && retryPrice?.quote ? (
+          <FundingConfirmSheet
+            visible={retryConfirmOpen}
+            onClose={() => setRetryConfirmOpen(false)}
+            onConfirm={confirmPayAgain}
+            quote={retryPrice.quote}
+            pick={{ token: retryRecord.token, chainId: retryRecord.chainId }}
+            stale={retryStale}
+          />
+        ) : null}
+      </SafeAreaView>
+    );
+  }
+
   // ===== LOADING =====
   if (loading) {
     return (
@@ -551,7 +743,9 @@ const CheckoutScreen = () => {
   }
 
   // ===== REVIEW (MAIN CHECKOUT) =====
-  const payDisabled = !quote || quoteLoading || shortOnToken;
+  const payDisabled = swapMode
+    ? !quote || quoteLoading || !fundingPick || !fundingPrice?.quote
+    : !quote || quoteLoading || shortOnToken;
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <Header />
@@ -693,7 +887,12 @@ const CheckoutScreen = () => {
               Pay with
             </Text>
           </View>
-          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+          {network === 'testnet' ? (
+            <Notice tone="danger" icon="info">
+              {"Marketplace payments use real funds on Sonic mainnet — testnet tokens can't pay."}
+            </Notice>
+          ) : null}
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: network === 'testnet' ? spacing.sm : 0 }}>
             {SUPPORTED_TOKENS.map((tk) => {
               const meta = TOKEN_META[tk];
               const active = selectedToken === tk;
@@ -701,7 +900,10 @@ const CheckoutScreen = () => {
               return (
                 <PressableScale
                   key={tk}
-                  onPress={() => setSelectedToken(tk)}
+                  onPress={() => {
+                    setSelectedToken(tk);
+                    if (tk === 'MCGP') setPayMode('wallet');
+                  }}
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
                   accessibilityLabel={`Pay with ${tk === 'MCGP' ? 'Spendable MCGP' : tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
@@ -739,7 +941,35 @@ const CheckoutScreen = () => {
               );
             })}
           </View>
-          {shortOnToken ? (
+          {!isMCGP && network !== 'testnet' ? (
+            swapMode ? (
+              <>
+                <FundingForm
+                  pick={fundingPick}
+                  onPick={() => setPickerOpen(true)}
+                  quote={fundingPrice?.quote}
+                  pricing={fundingPricing}
+                  error={fundingPrice?.error}
+                />
+                <PressableScale onPress={() => setPayMode('wallet')} style={{ paddingVertical: spacing.sm }}>
+                  <Text variant="bodySm" weight="600" color="accent">{`Pay with ${selectedToken} in my wallet instead`}</Text>
+                </PressableScale>
+              </>
+            ) : (
+              <PressableScale
+                onPress={() => {
+                  setPayMode('swap');
+                  if (!fundingPick) setPickerOpen(true);
+                }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingTop: spacing.md }}
+                accessibilityRole="button"
+              >
+                <Icon name="swap" size={16} color={colors.accent} />
+                <Text variant="bodySm" weight="600" color="accent">Pay with another token</Text>
+              </PressableScale>
+            )
+          ) : null}
+          {swapMode ? null : shortOnToken ? (
             <Notice tone="danger" icon="info">
               {isMCGP
                 ? `Not enough Spendable MCGP. You need ${fmt.token(quote!.totals.total)}; your Spendable MCGP balance is ${formatBalance(tokenBalance!)} MCGP. MCGP in your wallet can't pay.`
@@ -821,6 +1051,29 @@ const CheckoutScreen = () => {
         }}
       />
 
+      <AssetPicker
+        visible={pickerOpen}
+        side="from"
+        holdingsOnly
+        title="Pay with"
+        allow={fundingAllow}
+        note="Tokens on EVM networks you hold. MCGP in your wallet can't pay."
+        onSelect={(token, chainId) => {
+          setFundingPick({ token: { ...token, chainId }, chainId });
+          setPickerOpen(false);
+        }}
+        onClose={() => setPickerOpen(false)}
+      />
+      {swapMode && fundingPick && fundingPrice?.quote ? (
+        <FundingConfirmSheet
+          visible={fundingConfirmOpen}
+          onClose={() => setFundingConfirmOpen(false)}
+          onConfirm={payWithFunding}
+          quote={fundingPrice.quote}
+          pick={fundingPick}
+          stale={fundingStale}
+        />
+      ) : null}
       {quote ? (
         <ConfirmPaymentSheet
           visible={confirmOpen}

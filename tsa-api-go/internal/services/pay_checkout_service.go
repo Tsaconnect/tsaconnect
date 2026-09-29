@@ -343,14 +343,22 @@ func payCryptoAmounts(kobo int64, dec int, price, rate *big.Rat) (owed, toAmount
 	den.Mul(den, big.NewRat(100, 1))
 	q := num.Quo(num, den)
 	owed = new(big.Int).Div(q.Num(), q.Denom())
+	return owed, padForSlippage(owed)
+}
 
+// padForSlippage is what an exact-output swap must be ASKED to deliver so its
+// floor still covers owed: ceil(owed x 10000 / (10000 - payCryptoSlippageBps)).
+// LiFi's toAmountMin is at least toAmount x (1 - slippage), so the padded ask
+// keeps the floor at or above owed. Shared by every delivery sized this way (a
+// TSA Pay crypto payment, a marketplace checkout's funding swap).
+func padForSlippage(owed *big.Int) *big.Int {
 	pad := new(big.Int).Mul(owed, big.NewInt(10_000))
 	d := big.NewInt(10_000 - payCryptoSlippageBps)
 	toAmount, rem := new(big.Int).DivMod(pad, d, new(big.Int))
 	if rem.Sign() != 0 {
 		toAmount.Add(toAmount, big.NewInt(1))
 	}
-	return owed, toAmount
+	return toAmount
 }
 
 // cryptoTarget prices p's merchant net in the merchant's token. A price or

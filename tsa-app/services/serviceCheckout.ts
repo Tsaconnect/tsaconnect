@@ -29,6 +29,15 @@ import {
 } from './orderApi';
 import { signAndBroadcast, TxNotConfirmedError } from './transaction';
 import { getProvider } from './wallet';
+import type { NetworkType } from '../constants/chains';
+
+/**
+ * The marketplace escrow lives on Sonic MAINNET (the API builds every escrow tx
+ * against it), so every escrow tx is broadcast and settled there whatever the
+ * app's testnet toggle says — signing a mainnet tx through a testnet RPC is how
+ * a tester's checkout failed while showing testnet balances.
+ */
+export const MARKETPLACE_NETWORK: NetworkType = 'mainnet';
 
 export interface ServiceCheckoutParams {
   token: string;
@@ -131,7 +140,7 @@ const STILL_CONFIRMING =
  */
 export async function sendTx(tx: UnsignedTx, onUnconfirmed: (sent: SentTx) => void): Promise<SentTx> {
   try {
-    return { hash: await signAndBroadcast(tx, 'sonic'), confirmed: true };
+    return { hash: await signAndBroadcast(tx, 'sonic', MARKETPLACE_NETWORK), confirmed: true };
   } catch (e: any) {
     if (e instanceof TxNotConfirmedError) {
       onUnconfirmed({ hash: e.txHash, confirmed: false });
@@ -148,7 +157,7 @@ export async function sendTx(tx: UnsignedTx, onUnconfirmed: (sent: SentTx) => vo
  */
 export async function settleSent(sent: SentTx | undefined): Promise<SentTx | undefined> {
   if (!sent || sent.confirmed) return sent;
-  const provider = getProvider('sonic');
+  const provider = getProvider('sonic', undefined, MARKETPLACE_NETWORK);
   const receipt = await provider.getTransactionReceipt(sent.hash);
   if (receipt) return receipt.status === 1 ? { hash: sent.hash, confirmed: true } : undefined;
   if (await provider.getTransaction(sent.hash)) throw new Error(STILL_CONFIRMING);

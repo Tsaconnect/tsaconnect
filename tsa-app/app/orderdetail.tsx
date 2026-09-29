@@ -38,6 +38,7 @@ import {
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
+import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import { formatStatus, formatDate } from '@/constants/orderStatus';
 import { useTheme } from '@/theme';
 import {
@@ -134,7 +135,7 @@ const OrderDetailScreen = () => {
                 throw new Error(prepResult.message || 'Failed to prepare confirm');
               }
 
-              const txHash = await signAndBroadcast(prepResult.data.confirmTx, 'sonic');
+              const txHash = await signAndBroadcast(prepResult.data.confirmTx, 'sonic', MARKETPLACE_NETWORK);
 
               const submitResult = await submitConfirm(order.id, txHash);
               if (!submitResult.success) {
@@ -178,7 +179,7 @@ const OrderDetailScreen = () => {
 
               // If escrowed, we get a refundTx to sign and broadcast
               if (order.status === 'escrowed' && result.data?.refundTx) {
-                const txHash = await signAndBroadcast(result.data.refundTx, 'sonic');
+                const txHash = await signAndBroadcast(result.data.refundTx, 'sonic', MARKETPLACE_NETWORK);
                 Alert.alert(
                   'Refund Requested',
                   `On-chain refund request submitted.\nTx: ${txHash.slice(0, 16)}...`,
