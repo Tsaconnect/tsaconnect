@@ -5,7 +5,7 @@
 // limits), what must finish first (money in flight), how she pays the fee —
 // spendable MCGP (debited by the server, nothing to send) or USDT/USDC from her
 // wallet through the app's one coin picker — and her account password. The
-// screen owns what happens next (PIN/biometric, the wallet proof, the payment).
+// screen owns what happens next (PIN/biometric, the payment).
 import React, { useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
@@ -24,7 +24,7 @@ const baseUnits = (s: string | undefined): bigint | null => (s && /^\d+$/.test(s
 /** How she chose to pay. */
 export type NameChangePayment =
   | { payMethod: 'free' }
-  | { payMethod: 'mcgp_spendable'; chain: string }
+  | { payMethod: 'mcgp_spendable' }
   | { payMethod: 'stablecoin'; option: StablecoinOption };
 
 /** The same payment choice, as a key: a different choice is a different request. */
@@ -37,7 +37,7 @@ export function NameChangePayForm({
   overview: NameChangeOverview;
   busy: boolean;
   error?: string;
-  /** The wallet this phone can sign for: a paid fee is proven and paid from it. */
+  /** The wallet this phone can sign for: the account's linked wallet, a paid fee comes from it. */
   walletAddress: string | null;
   password: string;
   onChangePassword: (v: string) => void;
@@ -51,8 +51,8 @@ export function NameChangePayForm({
   const fee = parseFeeUsd(quote?.feeUsd);
   const free = fee === 0;
 
-  // Her spendable MCGP, read by the server for this phone's wallet (the one
-  // that proves itself and is debited), compared in exact base units.
+  // Her spendable MCGP, read by the server for this phone's wallet (the
+  // account's linked one, which is debited), compared in exact base units.
   const mcgpNeed = baseUnits(mcgp?.amountBaseUnits);
   const mcgpHave = baseUnits(mcgp?.balanceBaseUnits);
   const mcgpShort = mcgpNeed != null && mcgpHave != null && mcgpHave < mcgpNeed;
@@ -82,7 +82,7 @@ export function NameChangePayForm({
 
   const pay = () => {
     if (free) onPay({ payMethod: 'free' });
-    else if (chosen === 'mcgp_spendable' && mcgp) onPay({ payMethod: 'mcgp_spendable', chain: mcgp.chain });
+    else if (chosen === 'mcgp_spendable' && mcgp) onPay({ payMethod: 'mcgp_spendable' });
     else if (chosen === 'stablecoin' && option) onPay({ payMethod: 'stablecoin', option });
   };
 

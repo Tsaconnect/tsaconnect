@@ -2,9 +2,10 @@
 //
 // Paying a name change's fee from this phone's wallet.
 //
-// Every paid change starts with the wallet proving it is hers (proveWallet):
-// she signs the server's challenge with the SAME device wallet that is then
-// sent as walletAddress, debited (MCGP) or sends the transfer (stablecoin).
+// The fee comes from the wallet linked to her account, which the account has
+// proven it owns (the wallet-link proof, services/walletProof.ts — the server
+// asks for it, and createApiRequest runs it, when it is missing). A stablecoin
+// fee is sent from this phone only when this phone holds that wallet.
 //
 // A stablecoin fee is the wallet's ordinary token transfer (sendPaycrestDeposit
 // — the prepare/sign/submit every deposit to an address uses), built for the
@@ -22,10 +23,9 @@ import {
   checkFunding, fundingMessage, nativeBalanceFor, sendPaycrestDeposit,
 } from '@/services/paycrestDeposit';
 import { clearHold, holdActive, readHold, writeHold } from '@/services/payHold';
-import { signMessage } from '@/services/wallet';
 import { readWalletBalances } from '@/services/walletApi';
 import {
-  NAME_CHANGE_CODES, confirmNameChangePayment, getWalletProof,
+  NAME_CHANGE_CODES, confirmNameChangePayment,
   type NameChange, type StablecoinOption, type StablecoinTransfer,
 } from '@/services/nameChangeApi';
 import { errorCode } from '@/utils/payCheckout';
@@ -54,17 +54,6 @@ export function optionFor(
     || (token.address ? sameAddress(o.tokenAddress, token.address) : o.token.toUpperCase() === token.symbol?.toUpperCase())));
 }
 
-/** The signed proof that `wallet` is hers, for a fee paid on `chain`. */
-export async function proveWallet(wallet: string, chain: string): Promise<{ walletAddress: string; nonce: string; signature: string }> {
-  const proof = await getWalletProof(wallet, chain);
-  // The challenge names the wallet and chain it proves: never sign one for another.
-  if (!sameAddress(proof.wallet, wallet) || proof.chain.toLowerCase() !== chain.toLowerCase()) {
-    throw new Error('The wallet check did not match this wallet, so nothing was signed. Please try again.');
-  }
-  const signature = await signMessage(proof.message, wallet);
-  return { walletAddress: wallet, nonce: proof.nonce, signature };
-}
-
 /** Whether her wallet can pay `option`, as a sentence for the form — null when it can (or can't be known). */
 export async function stablecoinShortfall(option: StablecoinOption, wallet: string): Promise<string | null> {
   const chain = getChainByChainId(option.chainId)?.key ?? option.chain;
@@ -88,7 +77,7 @@ export const PAYMENT_CHANGED =
   'The payment the server asked for is not the one you were shown, so nothing was sent. Go back and try again.';
 
 export const otherWalletMessage = (from: string) =>
-  `This fee must be paid from the wallet that was checked for it (${from.slice(0, 6)}…${from.slice(-4)}). Switch to that wallet on this phone to pay.`;
+  `This fee must be paid from the wallet linked to your account (${from.slice(0, 6)}…${from.slice(-4)}). Switch to that wallet on this phone to pay.`;
 
 /**
  * The transfer is what she agreed to: the token contract, network, decimals

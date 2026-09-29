@@ -22,6 +22,8 @@ export type OwnMerchant = {
   /** A rename she asked for, waiting for an admin since pendingSince; businessName stays in use until then. */
   pendingBusinessName?: string;
   pendingSince?: string;
+  /** She may ask for a rename now (the feature is on). Absent (an older API) reads as off. */
+  businessNameChangeEnabled?: boolean;
   status: 'active' | 'suspended';
   /** A super admin has switched her live (her own switch only). */
   liveEnabled: boolean;

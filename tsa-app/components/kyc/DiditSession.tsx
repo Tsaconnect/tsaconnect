@@ -8,7 +8,8 @@
 // as — the webhook, not the redirect, is the source of truth.
 //
 // The WebView is granted the camera, so it may only ever show Didit: a page on
-// any other origin is never loaded in it (DIDIT_HOSTS, https only). On iOS the
+// any other origin is never loaded in it, as the page or in a frame of it
+// (DIDIT_HOSTS, https only). On iOS the
 // camera is granted without asking only to the host of the page on screen
 // (anything else prompts). react-native-webview 13.15 has no JS permission
 // hook on Android — its native client grants the camera to whatever page is
@@ -40,13 +41,35 @@ export async function requestCameraPermission(): Promise<boolean> {
 /** The domain Didit's hosted flow is served from (verify.didit.me and its siblings). */
 const DIDIT_HOSTS = ['didit.me'];
 
-/** An https page on a Didit host — the only pages the session WebView shows. */
-export function isDiditOrigin(url: string): boolean {
-  const m = /^https:\/\/([^/?#:]+)(?::\d+)?(?:[/?#]|$)/i.exec(url.trim());
-  if (!m) return false;
-  const host = m[1].toLowerCase();
+/** The authority of an https URL, read strictly: a plain host name and an optional port, nothing else. */
+const STRICT_HTTPS_HOST = /^https:\/\/([a-z0-9.-]+)(?::\d{1,5})?(?:[/?#]|$)/i;
+
+/**
+ * An https page on a Didit host — the only pages the session WebView shows.
+ *
+ * Parsed with URL, and held to agreeing with a strict reading of the
+ * authority: React Native's own URL is a set of regexes that does not validate
+ * (it reads "https://evil.com#@verify.didit.me" as Didit's), while a browser
+ * reads a backslash as a slash ("https://evil.com\@verify.didit.me" is
+ * evil.com). So a backslash, whitespace, a user name or password, or any
+ * disagreement between the two readings is refused.
+ */
+export function isDiditOrigin(raw: string): boolean {
+  if (/[\\\s]/.test(raw)) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const strict = STRICT_HTTPS_HOST.exec(raw);
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || url.username || url.password || !strict || strict[1].toLowerCase() !== host) return false;
   return DIDIT_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
 }
+
+/** A frame's own blank document (about:blank, about:srcdoc) — no origin of its own to load. */
+const isBlankFrame = (url: string) => url === 'about:blank' || url === 'about:srcdoc';
 
 /**
  * Didit hands back — to our tsaconnect://kyc/callback deep link (a name change
@@ -79,6 +102,15 @@ export function shouldLoadInDidit(url: string, onFinished: () => void): boolean 
   return isDiditOrigin(url) || url === 'about:blank';
 }
 
+/**
+ * Whether a frame inside the session page may load `url`: Didit's own pages
+ * and blank frames only. A frame shares the page's camera grant, so the page's
+ * allowlist holds for its frames too; a frame never finishes the flow.
+ */
+export function shouldLoadInDiditFrame(url: string): boolean {
+  return isDiditOrigin(url) || isBlankFrame(url);
+}
+
 /** The hosted session, full screen. `onFinished` runs once, when Didit hands back. */
 export function DiditWebView({ url, onFinished }: { url: string; onFinished: () => void }) {
   const { colors } = useTheme();
@@ -101,7 +133,8 @@ export function DiditWebView({ url, onFinished }: { url: string; onFinished: () 
       <WebView
         source={{ uri: url }}
         originWhitelist={['https://*', 'tsaconnect://*']}
-        onShouldStartLoadWithRequest={(req) => (req.isTopFrame === false ? true : shouldLoadInDidit(req.url, finish))}
+        onShouldStartLoadWithRequest={(req) =>
+          (req.isTopFrame === false ? shouldLoadInDiditFrame(req.url) : shouldLoadInDidit(req.url, finish))}
         // A redirect some platforms report only here.
         onNavigationStateChange={(nav: { url: string }) => { if (isDiditFinished(nav.url)) finish(); }}
         javaScriptEnabled

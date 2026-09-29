@@ -1,8 +1,8 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
 /**
  * How a name change reads: a refusal is the server's words except where the
- * phone must say it (a wallet another account holds; the limits, dated from the
- * refusal's data), and what comes back on a cancel names the proven wallet.
+ * phone must say it (the limits, dated from the refusal's data), and what comes
+ * back on a cancel names the proven wallet.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -13,9 +13,7 @@ import { NameChangeError } from '@/services/nameChangeApi';
 import { fmtUsd, nameChangeErrorMessage, refundMessage } from '../nameChange';
 
 describe('nameChangeErrorMessage', () => {
-  it('a wallet another account holds reads as that, not a bare 409', () => {
-    expect(nameChangeErrorMessage(new ApiError('Wallet address already in use by another account', 409), 'x'))
-      .toMatch(/linked to another TSA Connect account/);
+  it('a refusal reads as the server\'s own words', () => {
     expect(nameChangeErrorMessage(new ApiError('Open', 409, 'change_open'), 'x')).toBe('Open');
   });
 

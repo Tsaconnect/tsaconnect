@@ -90,7 +90,6 @@ jest.mock('@/services/wallet', () => ({ __esModule: true, getSignableWallet: jes
 jest.mock('@/services/nameChangeApi', () => ({
   ...jest.requireActual('@/services/nameChangeApi'),
   getNameChange: jest.fn(),
-  getWalletProof: jest.fn(),
   startNameChange: jest.fn(),
   startNameChangeVerification: jest.fn(),
   cancelNameChange: jest.fn(),
@@ -110,7 +109,7 @@ import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { TRANSPORT_ERROR } from '@/constants/api/config';
 import { ApiError } from '@/services/apiRequest';
 import {
-  NameChangeError, cancelNameChange, getNameChange, getWalletProof, startNameChange, startNameChangeVerification,
+  NameChangeError, cancelNameChange, getNameChange, startNameChange, startNameChangeVerification,
   type NameChange, type NameChangeOverview, type NameChangeQuote, type NameChangeStatus, type StablecoinOption,
   type StablecoinTransfer,
 } from '@/services/nameChangeApi';
@@ -195,11 +194,6 @@ beforeEach(() => {
   mockDidit.props = null;
   mockPolling.args = [];
   jest.mocked(getSignableWallet).mockResolvedValue(WALLET);
-  jest.mocked(getWalletProof).mockImplementation(async (wallet, chain) => ({
-    message: `TSA Connect name change\nWallet: ${wallet}\nChain: ${chain}\nNonce: n-${chain}`, nonce: `n-${chain}`,
-    wallet, chain, expiresAt: '2026-09-28T12:15:00Z',
-  }));
-  jest.mocked(signMessage).mockResolvedValue('0xsig');
   jest.mocked(paymentPending).mockResolvedValue(null);
   jest.mocked(stablecoinShortfall).mockResolvedValue(null);
 });
@@ -292,7 +286,7 @@ describe('before a change', () => {
 });
 
 describe('paying the fee', () => {
-  it('spendable MCGP: after password + PIN, the device wallet signs the challenge for sonic, and the server debits it', async () => {
+  it('spendable MCGP: after password + PIN the server debits the account\'s proven wallet — this phone signs nothing', async () => {
     const tree = await mount(overview());
     await typePassword(tree);
     await press(tree, 'button:Pay $1.00');
@@ -303,16 +297,13 @@ describe('paying the fee', () => {
     jest.mocked(startNameChange).mockResolvedValue({ change: changeOf('paid') });
     jest.mocked(getNameChange).mockResolvedValue(withChange(changeOf('paid')));
     await authorize();
-    expect(getWalletProof).toHaveBeenCalledWith(WALLET, 'sonic');
-    expect(signMessage).toHaveBeenCalledWith(`TSA Connect name change\nWallet: ${WALLET}\nChain: sonic\nNonce: n-sonic`, WALLET);
-    expect(startNameChange).toHaveBeenCalledWith({
-      payMethod: 'mcgp_spendable', walletAddress: WALLET, nonce: 'n-sonic', signature: '0xsig', password: 'correct-horse',
-    }, expect.any(String));
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'mcgp_spendable', password: 'correct-horse' }, expect.any(String));
     expect(payNameChangeInStablecoin).not.toHaveBeenCalled();
     expect(text(tree)).toContain('button:Verify your identity');
   });
 
-  it('a zero fee: only the password — no wallet proof', async () => {
+  it('a zero fee: only the password', async () => {
     const tree = await mount(overview({ quote: { feeUsd: '0.00', methods: [] } }));
     expect(text(tree)).toContain('There is no fee for this change.');
     await typePassword(tree);
@@ -320,10 +311,9 @@ describe('paying the fee', () => {
     await press(tree, 'button:Continue');
     await authorize();
     expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'free', password: 'correct-horse' }, expect.any(String));
-    expect(getWalletProof).not.toHaveBeenCalled();
   });
 
-  it('a stablecoin: the coin she picks, proven on its chain, the transfer the server returns, sent from her wallet', async () => {
+  it('a stablecoin: the coin she picks, the transfer the server returns, sent from her wallet', async () => {
     const tree = await mount(overview());
     await press(tree, 'radio:USDT or USDC');
     await press(tree, 'select:Pay with');
@@ -342,15 +332,14 @@ describe('paying the fee', () => {
     await authorize();
 
     expect(stablecoinShortfall).toHaveBeenCalledWith(usdc, WALLET);
-    expect(getWalletProof).toHaveBeenCalledWith(WALLET, 'base');
     expect(startNameChange).toHaveBeenCalledWith({
-      payMethod: 'stablecoin', chain: 'base', token: 'USDC', walletAddress: WALLET, nonce: 'n-base', signature: '0xsig', password: 'correct-horse',
+      payMethod: 'stablecoin', chain: 'base', token: 'USDC', password: 'correct-horse',
     }, expect.any(String));
     expect(payNameChangeInStablecoin).toHaveBeenCalledWith('nc1', transfer, usdc, WALLET);
     expect(text(tree)).toContain('button:Verify your identity');
   });
 
-  it('a lost answer is retried as the same request (same key, same signed body); another choice is a new request', async () => {
+  it('a lost answer is retried as the same request (same key, same body); another choice is a new request', async () => {
     const tree = await mount(overview());
     await typePassword(tree);
     jest.mocked(startNameChange).mockRejectedValue(new ApiError('Could not reach the server.', 0, TRANSPORT_ERROR));
@@ -360,23 +349,22 @@ describe('paying the fee', () => {
     await authorize();
     const [first, second] = jest.mocked(startNameChange).mock.calls;
     expect(second).toEqual(first);
-    expect(getWalletProof).toHaveBeenCalledTimes(1);
 
-    // Switching to a stablecoin is a different request: a new key and a new proof.
+    // Switching to a stablecoin is a different request: a new key.
     await press(tree, 'radio:USDT or USDC');
     await pickUsdc(tree);
     await press(tree, 'button:Pay $1.00');
     await authorize();
     const third = jest.mocked(startNameChange).mock.calls[2];
     expect(third[1]).not.toBe(first[1]);
-    expect(third[0]).toMatchObject({ payMethod: 'stablecoin', nonce: 'n-base' });
+    expect(third[0]).toMatchObject({ payMethod: 'stablecoin', chain: 'base', token: 'USDC' });
   });
 
   it.each([
-    ['wallet_proof_invalid', 422, 'we couldn\'t confirm that wallet is yours — sign the message again'],
+    ['WALLET_KEY_UNAVAILABLE', 403, 'This wallet\'s key isn\'t on this device, so it can\'t be linked to your account.'],
     ['password_incorrect', 401, 'Incorrect password'],
     ['account_locked', 423, 'Your account is temporarily locked. Try again later.'],
-  ])('an answered %s refusal is shown, and the next try is a fresh request with a fresh proof', async (code, status, words) => {
+  ])('an answered %s refusal is shown, and the next try is a fresh request', async (code, status, words) => {
     const tree = await mount(overview());
     await typePassword(tree);
     jest.mocked(startNameChange).mockRejectedValueOnce(new NameChangeError(words, status, code));
@@ -389,19 +377,9 @@ describe('paying the fee', () => {
     await authorize();
     const [first, second] = jest.mocked(startNameChange).mock.calls;
     expect(second[1]).not.toBe(first[1]);
-    expect(getWalletProof).toHaveBeenCalledTimes(2);
   });
 
-  it('a wallet another account holds (409, no code) says so plainly', async () => {
-    const tree = await mount(overview());
-    await typePassword(tree);
-    jest.mocked(startNameChange).mockRejectedValue(new NameChangeError('Wallet address already in use by another account', 409));
-    await press(tree, 'button:Pay $1.00');
-    await authorize();
-    expect(text(tree)).toContain('This wallet is linked to another TSA Connect account.');
-  });
-
-  it('no wallet on this phone: nothing is proven or created', async () => {
+  it('no wallet on this phone: nothing is created', async () => {
     jest.mocked(getSignableWallet).mockResolvedValue(null);
     const tree = await mount(overview());
     expect(text(tree)).toContain('Import your wallet on this phone');
@@ -416,7 +394,6 @@ describe('paying the fee', () => {
     await press(tree, 'button:Pay $1.00');
     await authorize();
     expect(startNameChange).not.toHaveBeenCalled();
-    expect(getWalletProof).not.toHaveBeenCalled();
     expect(text(tree)).toContain('this payment needs 1.');
   });
 
@@ -446,7 +423,7 @@ describe('paying the fee', () => {
 
     jest.mocked(getSignableWallet).mockResolvedValue(OTHER);
     tree = await mount(withChange(stableChange('paying')));
-    expect(text(tree)).toContain('must be paid from the wallet that was checked for it (0x19E7…ff2A)');
+    expect(text(tree)).toContain('must be paid from the wallet linked to your account (0x19E7…ff2A)');
     expect(has(tree, 'button:Pay now')).toBe(false);
   });
 

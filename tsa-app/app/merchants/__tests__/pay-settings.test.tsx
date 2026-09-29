@@ -90,7 +90,7 @@ import PaySettings from '../pay-settings';
 
 const merchant = {
   id: 'm1', businessName: 'Sky Air', status: 'active', liveEnabled: false, version: 7, settlementMode: 'fiat',
-  bankCode: '044', accountNumber: '******6789', accountName: 'SKY AIR LTD',
+  bankCode: '044', accountNumber: '******6789', accountName: 'SKY AIR LTD', businessNameChangeEnabled: true,
 } as OwnMerchant;
 
 const flush = () => act(async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); });
@@ -335,6 +335,16 @@ describe('business name', () => {
     await act(async () => { mockAuthorization.props.onAuthorized(); });
     await flush();
     expect(text(tree)).toContain('a business name can\'t contain \\"TSA Pay\\"');
+  });
+
+  it('with renames switched off (or an API that does not say), the name shows and there is no way to ask', async () => {
+    for (const off of [{ businessNameChangeEnabled: false }, { businessNameChangeEnabled: undefined }]) {
+      jest.mocked(getOwnMerchant).mockResolvedValue({ ...waiting, ...off });
+      const tree = await mount();
+      expect(text(tree)).toContain('"Sky Air"');
+      expect(text(tree)).toContain('waiting for approval');
+      expect(() => byLabel(tree, 'button:Change business name')).toThrow();
+    }
   });
 
   it('a suspended merchant cannot rename', async () => {

@@ -1,8 +1,8 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
 /**
- * The name-change client: each call goes to its route (the overview and the
- * wallet proof carry the device wallet), a start carries the screen's own
- * Idempotency-Key with the signed proof and the password, confirm and cancel
+ * The name-change client: each call goes to its route (the overview carries
+ * the device wallet), a start carries the screen's own Idempotency-Key with
+ * the payment choice and the password — no wallet, no signature — confirm and cancel
  * answer { change } and are unwrapped, start-verification answers the whole
  * session, and a refusal keeps what it carries (the blockers, the next date).
  */
@@ -11,9 +11,10 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 
 import { API_BASE_URL } from '@/constants/api/config';
+import * as walletApi from '../walletApi';
 import {
-  NameChangeError, canCancelNameChange, cancelNameChange, confirmNameChangePayment, getNameChange, getWalletProof,
-  isWalletConflict, parseFeeUsd, startNameChange, startNameChangeVerification,
+  NameChangeError, canCancelNameChange, cancelNameChange, confirmNameChangePayment, getNameChange,
+  parseFeeUsd, startNameChange, startNameChangeVerification,
 } from '../nameChangeApi';
 
 const BASE = `${API_BASE_URL}/users/me/name-change`;
@@ -22,22 +23,17 @@ const ok = (data: unknown) => ({ ok: true, status: 200, json: async () => ({ suc
 const refused = (status: number, body: unknown) => ({ ok: false, status, json: async () => body });
 const call = (i = 0) => (global.fetch as jest.Mock).mock.calls[i] as [string, RequestInit & { headers: Record<string, string> }];
 const change = { id: 'nc1', status: 'paid' };
-const mcgpPay = { payMethod: 'mcgp_spendable' as const, walletAddress: WALLET, nonce: 'n1', signature: '0xsig', password: 'pw' };
+const mcgpPay = { payMethod: 'mcgp_spendable' as const, password: 'pw' };
 
 beforeEach(() => { (global as any).fetch = jest.fn(async () => ok({ change })); });
 
-it('reads the overview and the wallet proof for the device wallet', async () => {
+it('reads the overview for the device wallet', async () => {
   (global.fetch as jest.Mock).mockResolvedValueOnce(ok({ enabled: true, change: null, quote: null }));
   await getNameChange(WALLET);
   expect(call(0)[0]).toBe(`${BASE}?walletAddress=${WALLET}`);
   (global.fetch as jest.Mock).mockResolvedValueOnce(ok({ enabled: true }));
   await getNameChange(null);
   expect(call(1)[0]).toBe(BASE);
-
-  const proof = { message: 'TSA Connect name change', nonce: 'n1', wallet: WALLET, chain: 'sonic', expiresAt: '2026-09-28T12:15:00Z' };
-  (global.fetch as jest.Mock).mockResolvedValueOnce(ok(proof));
-  await expect(getWalletProof(WALLET, 'sonic')).resolves.toEqual(proof);
-  expect(call(2)[0]).toBe(`${BASE}/wallet-proof?walletAddress=${WALLET}&chain=sonic`);
 });
 
 it('confirm and cancel answer { change } — unwrapped; start-verification answers the whole session', async () => {
@@ -55,15 +51,15 @@ it('confirm and cancel answer { change } — unwrapped; start-verification answe
   expect(call(2)[1].method).toBe('POST');
 });
 
-it('a start carries the screen\'s key, the signed proof and the password; a free change only the password', async () => {
+it('a start carries the screen\'s key, the choice and the password; a free change only the password', async () => {
   const transfer = { chain: 'base', chainId: 8453, token: 'USDC', tokenAddress: '0xU', from: WALLET, to: '0xT', amount: '1.00', amountBaseUnits: '1000000', decimals: 6 };
   (global.fetch as jest.Mock).mockResolvedValueOnce(ok({ change: { ...change, status: 'paying' }, transfer }));
-  await expect(startNameChange({ ...mcgpPay, payMethod: 'stablecoin', chain: 'base', token: 'USDC' }, 'pay-key'))
+  await expect(startNameChange({ payMethod: 'stablecoin', chain: 'base', token: 'USDC', password: 'pw' }, 'pay-key'))
     .resolves.toEqual({ change: { ...change, status: 'paying' }, transfer });
   expect(call(0)[0]).toBe(BASE);
   expect(call(0)[1].headers['Idempotency-Key']).toBe('pay-key');
   expect(JSON.parse(String(call(0)[1].body))).toEqual({
-    payMethod: 'stablecoin', chain: 'base', token: 'USDC', walletAddress: WALLET, nonce: 'n1', signature: '0xsig', password: 'pw',
+    payMethod: 'stablecoin', chain: 'base', token: 'USDC', password: 'pw',
   });
 
   await startNameChange({ payMethod: 'free', password: 'pw' }, 'k2');
@@ -88,11 +84,23 @@ it('a refusal keeps its code, blockers and next allowed date', async () => {
   expect(l.nextAllowedAt).toBe('2026-10-20T09:00:00Z');
 });
 
-it('a wallet another account holds is the bare 409 — a coded 409 is not', async () => {
-  (global.fetch as jest.Mock).mockResolvedValueOnce(refused(409, { success: false, message: 'Wallet address already in use by another account' }));
-  expect(isWalletConflict(await startNameChange(mcgpPay, 'k').catch((x) => x))).toBe(true);
-  (global.fetch as jest.Mock).mockResolvedValueOnce(refused(409, { success: false, code: 'change_open', message: 'open' }));
-  expect(isWalletConflict(await startNameChange(mcgpPay, 'k').catch((x) => x))).toBe(false);
+it('an unproven wallet is proven through the wallet-link flow, then the start is asked once more — same key and body', async () => {
+  const link = jest.spyOn(walletApi, 'linkActiveWallet').mockResolvedValueOnce({ success: true });
+  (global.fetch as jest.Mock)
+    .mockResolvedValueOnce(refused(403, { success: false, code: 'WALLET_PROOF_REQUIRED', message: 'Confirm you own this wallet' }))
+    .mockResolvedValueOnce(ok({ change }));
+  await expect(startNameChange(mcgpPay, 'pay-key')).resolves.toEqual({ change });
+  expect(link).toHaveBeenCalledTimes(1);
+  expect(call(1)[1].headers['Idempotency-Key']).toBe('pay-key');
+  expect(call(1)[1].body).toBe(call(0)[1].body);
+
+  // A wallet that can't be proven (no key on this phone): the linking error, and nothing asked again.
+  link.mockResolvedValueOnce({ success: false, code: 'WALLET_KEY_UNAVAILABLE', message: 'This wallet\'s key isn\'t on this device' });
+  (global.fetch as jest.Mock).mockResolvedValueOnce(refused(403, { success: false, code: 'WALLET_PROOF_REQUIRED', message: 'x' }));
+  const e = await startNameChange(mcgpPay, 'k2').catch((x) => x);
+  expect(e.code).toBe('WALLET_KEY_UNAVAILABLE');
+  expect((global.fetch as jest.Mock).mock.calls).toHaveLength(3);
+  link.mockRestore();
 });
 
 it('she may cancel only before her first attempt — never an MCGP debit still settling', () => {

@@ -5,8 +5,9 @@
 // from, and the document's name becomes her name — at once when it clearly is
 // the same person's name, after a review when it isn't. She stays verified the
 // whole time. Explainer and payment (NameChangePayForm) → password + PIN/
-// biometric → the paying wallet proves it is hers → pay → "Verify your
-// identity" (the same Didit session as first-time KYC) → the outcome. The name
+// biometric → pay (from the account's proven wallet; one never proven is
+// proven through the wallet-link flow, by createApiRequest, first) → "Verify
+// your identity" (the same Didit session as first-time KYC) → the outcome. The name
 // change notifications, and Didit's `?flow=name_change` callback, open here.
 //
 // A stablecoin fee is sent from this phone and confirmed by hash
@@ -36,7 +37,7 @@ import {
 } from '@/services/nameChangeApi';
 import {
   confirmRecordedPayment, forgetNameChangePayment, otherWalletMessage,
-  payNameChangeInStablecoin, paymentPending, proveWallet, shownFromChange, stablecoinShortfall,
+  payNameChangeInStablecoin, paymentPending, shownFromChange, stablecoinShortfall,
   type PaymentPending,
 } from '@/services/nameChangePay';
 import { DEPOSIT_OUTCOME_UNKNOWN } from '@/services/paycrestDeposit';
@@ -98,8 +99,8 @@ export default function NameChangeScreen() {
   // She chose to start again after a change that ended.
   const [startOver, setStartOver] = useState(false);
   // One request per payment choice (method, coin, wallet): a retry after a
-  // lost answer resends it exactly — same key, same signed body — and a
-  // different choice is a new request with a new key.
+  // lost answer resends it exactly — same key, same body — and a different
+  // choice is a new request with a new key.
   const attempt = useRef<{ choice: string; key: string; body?: NameChangePay } | null>(null);
   const acting = useRef(false);
 
@@ -163,7 +164,7 @@ export default function NameChangeScreen() {
     }
   };
 
-  /** This phone's wallet, re-read for the action: proven, sent as walletAddress and paid from — the same one. */
+  /** This phone's wallet, re-read for the action: the account's linked wallet, and the one a stablecoin fee is sent from. */
   const deviceWallet = async () => {
     const w = await getSignableWallet().catch(() => null);
     if (!w) throw new Error('Import your wallet on this phone: the fee is paid from it.');
@@ -180,15 +181,11 @@ export default function NameChangeScreen() {
     if (attempt.current?.choice !== choice) attempt.current = { choice, key: makeIdempotencyKey() };
     const current = attempt.current;
     if (!current.body) {
-      if (!payer || payment.payMethod === 'free') {
-        current.body = { payMethod: 'free', password };
-      } else {
-        // Signed by the very wallet that is then debited or sends the transfer.
-        const proof = await proveWallet(payer, payment.payMethod === 'stablecoin' ? payment.option.chain : payment.chain);
-        current.body = payment.payMethod === 'stablecoin'
-          ? { payMethod: 'stablecoin', chain: payment.option.chain, token: payment.option.token, ...proof, password }
-          : { payMethod: 'mcgp_spendable', ...proof, password };
-      }
+      current.body = !payer || payment.payMethod === 'free'
+        ? { payMethod: 'free', password }
+        : payment.payMethod === 'stablecoin'
+          ? { payMethod: 'stablecoin', chain: payment.option.chain, token: payment.option.token, password }
+          : { payMethod: 'mcgp_spendable', password };
     }
     let started;
     try {

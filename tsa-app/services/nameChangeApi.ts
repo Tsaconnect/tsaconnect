@@ -6,9 +6,13 @@
 // docs/specs/2026-09-28-name-change-rekyc.md. An unverified user edits her
 // name on the profile form instead (PUT /users/profile).
 //
-// A paid change starts with her proving the paying wallet is hers: she signs
-// the server's challenge (walletProof) with it, and that wallet is then the
-// only one the fee is taken from — and the only one a refund can go to.
+// A paid fee comes from the wallet linked to her account, which the account
+// must have proven it owns — the same wallet-link proof every operator debit
+// needs (services/walletProof.ts). If it never was, the server answers
+// WALLET_PROOF_REQUIRED and createApiRequest proves and links this phone's
+// wallet, then asks once more: there is no second signing path here. That
+// wallet is the only one the fee is taken from, and the only one a refund can
+// go to.
 import { ApiError, createApiRequest } from '@/services/apiRequest';
 
 export type NameChangeStatus =
@@ -39,7 +43,7 @@ export type StablecoinTransfer = {
   chainId: number;
   token: string;
   tokenAddress: string;
-  /** The proven wallet: the only one the fee is accepted from. */
+  /** The account's proven wallet: the only one the fee is accepted from. */
   from: string;
   /** The treasury. */
   to: string;
@@ -59,7 +63,7 @@ export type NameChange = {
   payAmount: string;
   payAmountBaseUnits: string;
   payDecimals: number;
-  /** The proven wallet the fee comes from (and any refund goes to). */
+  /** The account's proven wallet the fee comes from (and any refund goes to). */
   payFrom?: string;
   feeStatus: NameChangeFeeStatus;
   /** Verification sessions started so far. */
@@ -94,7 +98,7 @@ export type StablecoinOption = {
 export type McgpMethodQuote = {
   method: 'mcgp_spendable';
   available: boolean;
-  /** Where spendable MCGP lives: 'sonic'. The wallet proof is for this chain. */
+  /** Where spendable MCGP lives: 'sonic'. */
   chain: string;
   token: 'MCGP';
   amount?: string;
@@ -126,23 +130,16 @@ export type NameChangeOverview = {
   quote: NameChangeQuote | null;
 };
 
-/** The challenge the paying wallet signs (personal_sign). */
-export type WalletProof = { message: string; nonce: string; wallet: string; chain: string; expiresAt: string };
-
 export type NameChangeStart = { change: NameChange; transfer?: StablecoinTransfer };
 
-/** How she pays, with the signed proof for the paying wallet. A free change needs only her password. */
+/**
+ * How she pays, and her account password. The fee comes from the account's
+ * proven wallet — named by the server, never by this body.
+ */
 export type NameChangePay =
   | { payMethod: 'free'; password: string }
-  | {
-      payMethod: 'mcgp_spendable' | 'stablecoin';
-      chain?: string;
-      token?: string;
-      walletAddress: string;
-      nonce: string;
-      signature: string;
-      password: string;
-    };
+  | { payMethod: 'mcgp_spendable'; password: string }
+  | { payMethod: 'stablecoin'; chain: string; token: string; password: string };
 
 /** Machine codes the name-change routes answer with — keyed on, never the words beside them. */
 export const NAME_CHANGE_CODES = {
@@ -155,7 +152,6 @@ export const NAME_CHANGE_CODES = {
   LIMIT: 'name_change_limit',
   CANCEL_LIMIT: 'cancel_limit',
   MONEY_IN_FLIGHT: 'money_in_flight',
-  WALLET_PROOF_INVALID: 'wallet_proof_invalid',
   PASSWORD_INCORRECT: 'password_incorrect',
   ACCOUNT_LOCKED: 'account_locked',
   METHOD_UNAVAILABLE: 'method_unavailable',
@@ -191,13 +187,6 @@ export class NameChangeError extends ApiError {
   }
 }
 
-/** Another TSA Connect account holds the wallet (the server's wallet claim answers 409 with no code). */
-export const isWalletConflict = (e: unknown): boolean =>
-  e instanceof ApiError && e.status === 409 && !e.code;
-
-export const WALLET_CONFLICT =
-  'This wallet is linked to another TSA Connect account. Switch to your own wallet on this phone to pay.';
-
 const request = createApiRequest({
   prefix: '/users/me/name-change',
   unavailableMessage: 'Name changes are not available right now. Please try again later.',
@@ -208,19 +197,20 @@ const request = createApiRequest({
 const walletQuery = (wallet: string | null | undefined) =>
   wallet ? `?walletAddress=${encodeURIComponent(wallet)}` : '';
 
-/** The overview; `wallet` (this phone's) adds its spendable MCGP balance to the quote. */
+/**
+ * The overview; `wallet` (this phone's) adds its spendable MCGP balance to the
+ * quote. The server reads only the account's own wallet: this phone's, when it
+ * isn't the linked one, is proven and linked first (WALLET_PROOF_REQUIRED).
+ */
 export function getNameChange(wallet?: string | null): Promise<NameChangeOverview> {
   return request<NameChangeOverview>(walletQuery(wallet));
 }
 
-/** The message `wallet` signs to prove it is hers, for a fee paid on `chain` ('sonic' for MCGP). */
-export function getWalletProof(wallet: string, chain: string): Promise<WalletProof> {
-  return request<WalletProof>(`/wallet-proof?walletAddress=${encodeURIComponent(wallet)}&chain=${encodeURIComponent(chain)}`);
-}
-
 /**
  * Open a change and start paying. Spendable MCGP is debited by the server
- * (nothing to sign); a stablecoin answers with the transfer to make.
+ * (nothing to sign); a stablecoin answers with the transfer to make. An
+ * account whose wallet was never proven is sent through the wallet-link proof
+ * first (by createApiRequest), then this is asked once more.
  * `idempotencyKey` is held by the screen across retries of the same payment.
  */
 export function startNameChange(pay: NameChangePay, idempotencyKey: string): Promise<NameChangeStart> {

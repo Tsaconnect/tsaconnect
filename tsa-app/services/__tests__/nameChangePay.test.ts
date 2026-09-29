@@ -1,7 +1,8 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
 /**
- * Paying a name change's fee from this phone. What this pins: the wallet proof
- * is signed by the same wallet it names; only the transfer she was shown is
+ * Paying a name change's fee from this phone. What this pins: nothing is
+ * signed here but the transfer (the account's wallet is proven through the
+ * wallet-link flow); only the transfer she was shown is
  * sent (from her proven wallet, that contract, network, decimals and exact base
  * units), built for that contract and held before the broadcast; a payment the
  * chain hasn't caught up with is "sent, confirming" and confirmed again with the
@@ -20,14 +21,10 @@ jest.mock('../paycrestDeposit', () => ({
 }));
 const mockBalances = jest.fn();
 jest.mock('../walletApi', () => ({ __esModule: true, readWalletBalances: (...a: any[]) => mockBalances(...a) }));
-const mockSignMessage = jest.fn();
-jest.mock('../wallet', () => ({ __esModule: true, signMessage: (...a: any[]) => mockSignMessage(...a) }));
 const mockConfirm = jest.fn();
-const mockProof = jest.fn();
 jest.mock('../nameChangeApi', () => ({
   ...jest.requireActual('../nameChangeApi'),
   confirmNameChangePayment: (...a: any[]) => mockConfirm(...a),
-  getWalletProof: (...a: any[]) => mockProof(...a),
 }));
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -35,7 +32,7 @@ import { DepositOutcomeUnknownError } from '../paycrestDeposit';
 import type { NameChange, StablecoinOption, StablecoinTransfer } from '../nameChangeApi';
 import {
   PAYMENT_CHANGED, confirmRecordedPayment, nameChangeChainKey, optionFor,
-  payNameChangeInStablecoin, paymentPending, proveWallet, shownFromChange, stablecoinShortfall,
+  otherWalletMessage, payNameChangeInStablecoin, paymentPending, shownFromChange, stablecoinShortfall,
 } from '../nameChangePay';
 
 const WALLET = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A';
@@ -66,21 +63,11 @@ beforeEach(async () => {
   mockConfirm.mockResolvedValue(paid);
 });
 
-describe('the wallet proof', () => {
-  it('signs the challenge with the very wallet it names, for the chain asked', async () => {
-    mockProof.mockResolvedValue({ message: 'TSA Connect name change\nWallet: x', nonce: 'n1', wallet: WALLET.toLowerCase(), chain: 'sonic', expiresAt: '' });
-    mockSignMessage.mockResolvedValue('0xsig');
-    await expect(proveWallet(WALLET, 'sonic')).resolves.toEqual({ walletAddress: WALLET, nonce: 'n1', signature: '0xsig' });
-    expect(mockProof).toHaveBeenCalledWith(WALLET, 'sonic');
-    expect(mockSignMessage).toHaveBeenCalledWith('TSA Connect name change\nWallet: x', WALLET);
-  });
-
-  it('never signs a challenge for another wallet or chain', async () => {
-    mockProof.mockResolvedValue({ message: 'm', nonce: 'n', wallet: TREASURY, chain: 'sonic', expiresAt: '' });
-    await expect(proveWallet(WALLET, 'sonic')).rejects.toThrow('did not match');
-    mockProof.mockResolvedValue({ message: 'm', nonce: 'n', wallet: WALLET, chain: 'bsc', expiresAt: '' });
-    await expect(proveWallet(WALLET, 'base')).rejects.toThrow('did not match');
-    expect(mockSignMessage).not.toHaveBeenCalled();
+describe('the paying wallet', () => {
+  it('sends nothing from a wallet that is not the one the server named', async () => {
+    const other = '0x1111111111111111111111111111111111111111';
+    await expect(payNameChangeInStablecoin('nc1', transfer, shown, other)).rejects.toThrow(otherWalletMessage(WALLET));
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
 

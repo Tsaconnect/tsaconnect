@@ -222,6 +222,8 @@ export default function PaySettings() {
   }
   const { merchant } = load;
   const suspended = merchant.status === 'suspended';
+  // A rename can be asked for only while the feature is on (the server says so).
+  const canRename = !suspended && merchant.businessNameChangeEnabled === true;
   const codeFor = pending?.kind === 'business_name'
     ? 'send your new business name for approval'
     : `confirm the new ${mode === 'fiat' ? 'bank account' : 'wallet'}`;
@@ -246,10 +248,10 @@ export default function PaySettings() {
           <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
         </Card>
 
-        {pending || renaming ? null : (
+        {pending || (renaming && canRename) ? null : (
           <BusinessNameCard
             merchant={merchant}
-            canRename={!suspended}
+            canRename={canRename}
             onRename={() => { setRenaming(true); setPassword(''); setFormError(undefined); }}
           />
         )}
@@ -286,7 +288,7 @@ export default function PaySettings() {
           <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
             <Text variant="bodySm">Your merchant account is suspended. Contact support to change where you are paid.</Text>
           </Card>
-        ) : renaming ? (
+        ) : renaming && canRename ? (
           <BusinessNameForm
             merchant={merchant}
             name={newName}

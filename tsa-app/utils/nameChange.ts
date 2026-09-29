@@ -4,9 +4,7 @@
 // explainer/payment form and the status views.
 import { CHAIN_LABELS, fmtTokenAmount } from '@/services/paycrestDeposit';
 import { nameChangeChainKey } from '@/services/nameChangePay';
-import {
-  NAME_CHANGE_CODES, NameChangeError, WALLET_CONFLICT, isWalletConflict, parseFeeUsd, type NameChange,
-} from '@/services/nameChangeApi';
+import { NAME_CHANGE_CODES, NameChangeError, parseFeeUsd, type NameChange } from '@/services/nameChangeApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
 
 /** A chain the server named ('base', or an id), as a person names it. */
@@ -40,12 +38,10 @@ export function refundMessage(c: Pick<NameChange, 'payMethod' | 'payAmount' | 'p
 }
 
 /**
- * A refusal as a sentence: the server's words, except where this phone must
- * say it — a wallet another account holds (a bare 409), and the limits, whose
+ * A refusal as a sentence: the server's words, except for the limits, whose
  * date is read from the refusal's data rather than from its words.
  */
 export function nameChangeErrorMessage(e: unknown, fallback: string): string {
-  if (isWalletConflict(e)) return WALLET_CONFLICT;
   const next = e instanceof NameChangeError && e.nextAllowedAt ? fmtDate(e.nextAllowedAt) : '';
   switch (next && errorCode(e)) {
     case NAME_CHANGE_CODES.CANCEL_LIMIT:
