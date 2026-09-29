@@ -8,7 +8,7 @@ import { Field } from '@/components/ui/field';
 import { FormError } from '@/components/ui/form-error';
 import { Input, PasswordInput } from '@/components/ui/input';
 import { Note } from '@/components/ui/note';
-import { confirmAction, type ActionResult, type Pending } from './api';
+import { confirmAction, type ActionResult, type GuardedAnswer, type Pending } from './api';
 import { MERCHANT_KEY } from './useMerchant';
 import { useGuardedSubmit } from './useGuardedSubmit';
 
@@ -19,8 +19,11 @@ type Props = {
   warning?: string;
   confirmLabel: string;
   danger?: boolean;
-  /** Checks the password and emails the code; answers where it went. */
-  request: (password: string) => Promise<{ confirmation: Pending }>;
+  /**
+   * Checks the password and emails the code; answers where it went. An answer with
+   * no code means nothing needed confirming: it finishes like a confirm.
+   */
+  request: (password: string) => Promise<GuardedAnswer>;
   onDone: (result: ActionResult) => void;
   /** Already requested (a payout change's 202): open at the code step. */
   initialPending?: Pending;
@@ -67,6 +70,14 @@ function Flow({ onOpenChange, title, warning, confirmLabel, danger, request, onD
   const passwordRef = useRef<HTMLInputElement>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
+  // A result that carries the merchant is used as-is (no second read); a key or
+  // secret changes the merchant's version and key prefixes, so read it again.
+  const finish = (result: ActionResult) => {
+    if (result.merchant) queryClient.setQueryData(MERCHANT_KEY, result.merchant);
+    else void queryClient.invalidateQueries({ queryKey: MERCHANT_KEY });
+    onDone(result);
+  };
+
   const sendCode = (e: FormEvent) => {
     e.preventDefault();
     if (!password) {
@@ -76,6 +87,7 @@ function Flow({ onOpenChange, title, warning, confirmLabel, danger, request, onD
     void run(async (pw) => {
       try {
         const res = await request(pw);
+        if (!res.confirmation) return finish({ merchant: res.merchant });
         setPending(res.confirmation);
         setCode('');
       } catch (err) {
@@ -96,12 +108,7 @@ function Flow({ onOpenChange, title, warning, confirmLabel, danger, request, onD
     }
     void run(async () => {
       try {
-        const result = await confirmAction(pending.id, code);
-        // A confirm that returns the merchant is used as-is (no second read); a key or
-        // secret changes the merchant's version and key prefixes, so read it again.
-        if (result.merchant) queryClient.setQueryData(MERCHANT_KEY, result.merchant);
-        else void queryClient.invalidateQueries({ queryKey: MERCHANT_KEY });
-        onDone(result);
+        finish(await confirmAction(pending.id, code));
       } catch (err) {
         const p = problemOf(err);
         setProblem(p);

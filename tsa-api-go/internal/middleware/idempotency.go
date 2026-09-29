@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -59,7 +60,11 @@ func (w *idempotencyWriter) WriteString(s string) (int, error) {
 // Successful 2xx responses are cached. 4xx/5xx are NOT cached — the client
 // can retry the same key after fixing the underlying problem. Rows are pruned
 // after models.RequestIdempotencyRetention by jobs.RequestIdempotencyPruner.
-func Idempotency(db *gorm.DB) gin.HandlerFunc {
+func Idempotency(db *gorm.DB, opts ...IdempotencyOption) gin.HandlerFunc {
+	var cfg idempotencyConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return func(c *gin.Context) {
 		key := c.GetHeader(idempotencyKeyHeader)
 		if key == "" {
@@ -102,7 +107,7 @@ func Idempotency(db *gorm.DB) gin.HandlerFunc {
 			// always has and a retry across a deploy still replays.
 			target += "?" + q
 		}
-		requestHash := fingerprint(c.Request.Method, target, body)
+		requestHash := fingerprint(c.Request.Method, target, cfg.fingerprintBody(body))
 
 		var existing models.RequestIdempotency
 		err = db.Where("key = ?", key).First(&existing).Error
@@ -204,6 +209,52 @@ func Idempotency(db *gorm.DB) gin.HandlerFunc {
 			log.Printf("[idempotency] key=%s persist failed: %v (will not replay)", key, err)
 		}
 	}
+}
+
+// IdempotencyOption adjusts one route's Idempotency.
+type IdempotencyOption func(*idempotencyConfig)
+
+type idempotencyConfig struct {
+	ignoreFields []string
+}
+
+// IdempotencyIgnoringFields leaves the named top-level JSON fields out of the
+// request fingerprint. The fingerprint is stored for as long as the key is
+// kept, and an unsalted hash of a body carrying a password is an offline
+// guessing oracle for it — so a route whose body carries a secret leaves the
+// secret out. A retry is still matched on everything else, and still replays
+// only an answer the first request (which passed its own checks) earned.
+func IdempotencyIgnoringFields(fields ...string) IdempotencyOption {
+	return func(c *idempotencyConfig) { c.ignoreFields = append(c.ignoreFields, fields...) }
+}
+
+// fingerprintBody is the body as the fingerprint sees it: with the ignored
+// fields removed (and the rest re-encoded, keys sorted) when it is a JSON
+// object. A body that is not one is hashed as sent — the handler refuses it,
+// and nothing is ever replayed for a refusal.
+func (c idempotencyConfig) fingerprintBody(body []byte) []byte {
+	if len(c.ignoreFields) == 0 {
+		return body
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return body
+	}
+	// Case-insensitively, as encoding/json binds keys to the handler's fields:
+	// "Password" reaches the handler as the password just as "password" does.
+	for key := range fields {
+		for _, f := range c.ignoreFields {
+			if strings.EqualFold(key, f) {
+				delete(fields, key)
+				break
+			}
+		}
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func fingerprint(method, path string, body []byte) string {

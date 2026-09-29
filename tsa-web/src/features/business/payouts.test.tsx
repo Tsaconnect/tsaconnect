@@ -210,6 +210,36 @@ describe('payouts', () => {
     expect(saves[1]).toMatchObject({ settlementMode: 'crypto', walletAddress: wallet, password: 'correct-horse' });
   });
 
+  // GuardedActionDialog's other finish: a request answered 200 with the merchant (nothing left to
+  // confirm — here the change had already been applied) closes the dialog like a confirm, with
+  // that merchant used as-is rather than read again.
+  it('a password re-sent for an expired change that answers with the merchant finishes without a code', async () => {
+    let settlementCalls = 0;
+    const f = stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/settlement-options': usdcOnBase,
+      '/api/pay/merchant/settlement': () => (++settlementCalls === 1 ? settlementPending('s1') : ok({ merchant: cryptoMerchant })),
+      '/api/pay/merchant/actions/s1/confirm': fail(410, 'This change has expired or had too many wrong codes — start again', 'no_pending_change'),
+    });
+    mountAt('/business/live/payouts');
+    await chooseWallet();
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm your payout wallet' });
+    await userEvent.type(within(dialog).getByLabelText('Code from your email'), '482913');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    await within(dialog).findByRole('alert');
+    const merchantReads = () => f.mock.calls.filter(([u]) => u === '/api/pay/merchant').length;
+    const readsBefore = merchantReads();
+
+    await userEvent.type(within(dialog).getByLabelText('Password'), 'correct-horse');
+    await userEvent.click(within(dialog).getByRole('button', { name: /send code/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(settlementCalls).toBe(2);
+    expect(f.mock.calls.some(([u]) => u === '/api/pay/merchant/actions/s2/confirm')).toBe(false);
+    expect((await screen.findAllByText('Payment settings saved'))[0]).toBeInTheDocument();
+    expect(screen.getByText(/USDC on Base to 0x5290…9EE7/)).toBeInTheDocument();
+    expect(merchantReads()).toBe(readsBefore);
+  });
+
   it('a suspended merchant cannot change where they are paid', async () => {
     stubFetch({ '/api/pay/merchant': ok({ ...merchant, status: 'suspended' }), '/api/pay/merchant/banks': banks });
     mountAt('/business/live/payouts');

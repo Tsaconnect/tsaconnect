@@ -3568,13 +3568,7 @@ func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]mode
 func (s *P2PTradeService) countActiveTradesForOpener(tx *gorm.DB, adID uuid.UUID, openerCol string, openerID uuid.UUID) (int64, error) {
 	var n int64
 	err := tx.Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND "+openerCol+" = ? AND status IN ?", adID, openerID,
-			[]string{
-				models.P2PTradeStatusPendingPayment,
-				models.P2PTradeStatusPaid,
-				models.P2PTradeStatusReleasing,
-				models.P2PTradeStatusDisputed,
-			}).
+		Where("ad_id = ? AND "+openerCol+" = ? AND status IN ?", adID, openerID, models.P2PTradeLiveStatuses).
 		Count(&n).Error
 	return n, err
 }

@@ -47,8 +47,7 @@ jest.mock('@/services/paycrestDeposit', () => ({
 }));
 jest.mock('@/services/walletApi', () => ({
   __esModule: true,
-  getWalletBalances: jest.fn(),
-  normalizeWalletBalances: jest.fn((d: unknown) => d),
+  readWalletBalances: jest.fn(),
 }));
 jest.mock('@/services/gasSponsorship', () => ({
   __esModule: true,
@@ -91,7 +90,7 @@ const m = {
   getOpenSellIntent: jest.mocked(SellSwap.getOpenSellIntent),
   checkFunding: jest.mocked(Deposit.checkFunding),
   send: jest.mocked(Deposit.sendSponsoredPaycrestDeposit),
-  getWalletBalances: jest.mocked(WalletApi.getWalletBalances),
+  readWalletBalances: jest.mocked(WalletApi.readWalletBalances),
   getSponsoredRoutes: jest.mocked(Sponsorship.getSponsoredRoutes),
   useSwappedSell: jest.mocked(Swapped.useSwappedSell),
 };
@@ -186,7 +185,7 @@ beforeEach(async () => {
     return { ...swapped };
   }) as any);
   m.getQuote.mockResolvedValue(quoteWith([venue]));
-  m.getWalletBalances.mockResolvedValue({ success: true, data: [] } as any);
+  m.readWalletBalances.mockResolvedValue([]);
   m.getSponsoredRoutes.mockResolvedValue([]);
   m.checkFunding.mockReturnValue({ ok: true });
   m.payDirect.mockResolvedValue(order);

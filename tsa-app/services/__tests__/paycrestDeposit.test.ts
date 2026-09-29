@@ -49,8 +49,10 @@ jest.mock('../gasSponsorship', () => {
 
 // eslint-disable-next-line import/first -- jest.mock factories must hoist above this import.
 import {
-  checkFunding, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
+  assertPreparedTransfer, checkFunding, DepositOutcomeUnknownError, fmtTokenAmount, fundingMessage, nativeBalanceFor, sendPaycrestDeposit, sendSponsoredPaycrestDeposit,
 } from '../paycrestDeposit';
+// eslint-disable-next-line import/first
+import { ethers } from 'ethers';
 // eslint-disable-next-line import/first
 import { PaycrestError } from '../paycrestApi';
 // eslint-disable-next-line import/first
@@ -498,5 +500,53 @@ describe('fmtTokenAmount', () => {
     expect(fmtTokenAmount(0.0000001)).toBe('0.0000001');
     expect(fmtTokenAmount(0.0000005)).toBe('0.000001'); // at the boundary: six decimals already non-zero
     expect(fmtTokenAmount(0)).toBe('0');
+  });
+});
+
+// An exact transfer — a name-change fee — names its token contract and base
+// units: the prepared tx must be precisely that ERC-20 transfer before it is signed.
+describe('an exact transfer', () => {
+  const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const TREASURY = '0x52908400098527886E0F7030069857D2E4169EE7';
+  const erc20 = new ethers.Interface(['function transfer(address to, uint256 amount)']);
+  const transferTx = (to = TREASURY, amount = 1_000_000n, over: Record<string, unknown> = {}) => ({
+    to: USDC, data: erc20.encodeFunctionData('transfer', [to, amount]), value: '0', chainId: 8453, ...over,
+  });
+  const expected = { tokenAddress: USDC, to: TREASURY, amountBaseUnits: '1000000', chainId: 8453 };
+
+  it('accepts exactly that transfer', () => {
+    expect(() => assertPreparedTransfer(transferTx(), expected)).not.toThrow();
+    expect(() => assertPreparedTransfer(transferTx(TREASURY.toLowerCase(), 1_000_000n, { to: USDC.toLowerCase() }), expected)).not.toThrow();
+  });
+
+  it.each([
+    ['another amount', transferTx(TREASURY, 999_999n)],
+    ['another recipient', transferTx('0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A')],
+    ['another token contract', transferTx(TREASURY, 1_000_000n, { to: TREASURY })],
+    ['another chain', transferTx(TREASURY, 1_000_000n, { chainId: 56 })],
+    ['native value riding along', transferTx(TREASURY, 1_000_000n, { value: '1' })],
+    ['not a transfer at all', { to: USDC, data: '0x095ea7b3', value: '0', chainId: 8453 }],
+  ])('refuses %s', (_why, tx) => {
+    expect(() => assertPreparedTransfer(tx, expected)).toThrow('not the one you were shown');
+  });
+
+  it('sendPaycrestDeposit prepares for that contract and signs nothing that differs', async () => {
+    mockPrepare.mockReset();
+    mockSignTransaction.mockReset();
+    mockSubmit.mockReset();
+    const order = {
+      chain: 'base', token: 'USDC', tokenAmount: '1.00', depositAddress: TREASURY,
+      tokenAddress: USDC, amountBaseUnits: '1000000', decimals: 6,
+    };
+    mockPrepare.mockResolvedValue({ success: true, data: { ...transferTx(TREASURY, 2_000_000n), gasLimit: '65000', gasPrice: '1000000000', nonce: 1 } });
+    await expect(sendPaycrestDeposit(order, '0xfrom')).rejects.toThrow('not the one you were shown');
+    expect(mockPrepare).toHaveBeenCalledWith('USDC', TREASURY, '1.00', 8453, { fromAddress: '0xfrom', tokenAddress: USDC, decimals: 6 });
+    expect(mockSignTransaction).not.toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
+
+    mockPrepare.mockResolvedValue({ success: true, data: { ...transferTx(), gasLimit: '65000', gasPrice: '1000000000', nonce: 1 } });
+    mockSignTransaction.mockResolvedValue('0xsigned');
+    mockSubmit.mockResolvedValue({ success: true, data: { txHash: '0xhash' } });
+    await expect(sendPaycrestDeposit(order, '0xfrom')).resolves.toBe('0xhash');
   });
 });

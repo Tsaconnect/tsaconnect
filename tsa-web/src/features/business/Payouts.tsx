@@ -14,9 +14,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toaster';
 import {
   listBanks, listSettlementOptions, resolveAccount, updateSettlement,
-  type Bank, type OwnMerchant, type Pending, type SettlementChange, type SettlementOption,
+  type Bank, type GuardedAnswer, type OwnMerchant, type Pending, type SettlementChange, type SettlementOption,
 } from './api';
 import { BusinessPage } from './BusinessPage';
+import { BusinessName } from './BusinessName';
 import { bankDestination, bankName, cryptoDestination, optionLabel, optionValue } from './display';
 import { GuardedActionDialog } from './GuardedActionDialog';
 import { SuspendedNote } from './SuspendedNote';
@@ -47,7 +48,7 @@ function useSettled<T>(value: T, ms: number): T {
   return settled;
 }
 
-type Saved = (change: SettlementChange, result: { merchant?: OwnMerchant; confirmation?: Pending }) => void;
+type Saved = (change: SettlementChange, result: GuardedAnswer) => void;
 
 /** The refusal to show; a stale merchant is read again on the way, so a retry is against the fresh one. */
 function messageRefreshingIfStale(err: unknown, queryClient: QueryClient): string {
@@ -283,6 +284,8 @@ function PayoutsBody({ merchant: m }: { merchant: OwnMerchant }) {
         </Card>
       )}
 
+      <BusinessName merchant={m} />
+
       {waiting && (
         <GuardedActionDialog
           open
@@ -290,11 +293,8 @@ function PayoutsBody({ merchant: m }: { merchant: OwnMerchant }) {
           title={waiting.change.settlementMode === 'fiat' ? 'Confirm your payout bank account' : 'Confirm your payout wallet'}
           confirmLabel="Confirm"
           initialPending={waiting.pending}
-          request={async (password) => {
-            const r = await updateSettlement(waiting.change, password, m.version);
-            if (!r.confirmation) throw new Error('This change was applied without a code. Reload to see it.');
-            return { confirmation: r.confirmation };
-          }}
+          // An answer without a code (the change already applied) closes the dialog like a confirm.
+          request={(password) => updateSettlement(waiting.change, password, m.version)}
           onDone={() => {
             setWaiting(null);
             finished();

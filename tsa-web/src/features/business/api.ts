@@ -7,7 +7,14 @@ export type { Mode };
 
 export type OwnMerchant = {
   id: string;
+  /** The name customers see and payout accounts are matched to. */
   businessName: string;
+  /** A rename the owner asked for, waiting for TSA Connect's approval; businessName stays in use until then. */
+  pendingBusinessName?: string;
+  /** When that rename was asked for. */
+  pendingSince?: string;
+  /** The owner may ask for a rename now (the feature is on). Absent (an older API) reads as off. */
+  businessNameChangeEnabled?: boolean;
   status: 'active' | 'suspended';
   /** A super admin has switched this merchant's live payments on. Until then a live key is refused. */
   liveEnabled: boolean;
@@ -126,7 +133,10 @@ export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
   api<PaymentDetail>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
 
 // Guarded actions: password → emailed code → confirm.
-export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret'; expiresAt: string; sentTo: string };
+export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret' | 'business_name'; expiresAt: string; sentTo: string };
+/** A guarded request's answer: a code to confirm, or — when nothing needs confirming — the merchant as it is. */
+export type GuardedAnswer = { confirmation?: Pending; merchant?: OwnMerchant };
+
 export type ActionResult = {
   merchant?: OwnMerchant;
   mode?: Mode;
@@ -146,6 +156,14 @@ export const requestEndpoints = (b: { webhookUrl: string; testWebhookUrl: string
 export const requestWebhookSecret = (action: 'reveal' | 'roll', password: string) =>
   api<{ confirmation: Pending }>('/pay/merchant/webhook-secret', { method: 'POST', body: { action, password } });
 
+/**
+ * Asks for the business to be renamed: the emailed code files the request, and the name
+ * changes only when TSA Connect approves it. Asking for the current name needs no code:
+ * it answers the merchant (withdrawing any rename still waiting).
+ */
+export const requestBusinessName = (name: string, password: string, expectedVersion: number) =>
+  api<GuardedAnswer>('/pay/merchant/business-name', { method: 'PUT', body: { name, password, expectedVersion } });
+
 export const confirmAction = (id: string, code: string) =>
   api<ActionResult>(`/pay/merchant/actions/${encodeURIComponent(id)}/confirm`, { method: 'POST', body: { code } });
 
@@ -156,7 +174,7 @@ export type SettlementChange =
 
 /** A bank account or a crypto wallet waits for the emailed code (confirmation); saving where you're already paid changes nothing (merchant). */
 export const updateSettlement = (change: SettlementChange, password: string, expectedVersion: number) =>
-  api<{ merchant?: OwnMerchant; confirmation?: Pending }>('/pay/merchant/settlement', {
+  api<GuardedAnswer>('/pay/merchant/settlement', {
     method: 'PUT',
     body: { ...change, password, expectedVersion },
   });

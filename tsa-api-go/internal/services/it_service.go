@@ -1106,11 +1106,7 @@ const maxFailureReason = 256
 const mintedRefPrefix = "IT-"
 
 func truncateReason(reason string) string {
-	if len(reason) <= maxFailureReason {
-		return reason
-	}
-	// Cut on a rune boundary so the stored value stays valid UTF-8.
-	return strings.ToValidUTF8(reason[:maxFailureReason], "")
+	return truncateRunes(reason, maxFailureReason)
 }
 
 // minorLabel renders a currency's symbol for a user-facing minimum, falling back

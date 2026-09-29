@@ -80,7 +80,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayAuditEvent{}, &models.PayOwnerAction{},
-		&models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayOpenLink{}, &models.PayRetiredSlug{}); err != nil {
+		&models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayOpenLink{}, &models.PayRetiredSlug{}, &models.PayMerchantNameChange{}); err != nil {
 		t.Fatal(err)
 	}
 	// The columns the owner routes read and the lockout writes.
@@ -128,6 +128,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.GET("/api/pay/merchant/payments/:id", h.OwnerPayment)
 	r.POST("/api/pay/merchant/keys", h.OwnerRequestKeys)
 	r.PUT("/api/pay/merchant/endpoints", h.OwnerRequestEndpoints)
+	r.PUT("/api/pay/merchant/business-name", h.OwnerRequestBusinessName)
 	r.POST("/api/pay/merchant/webhook-secret", h.OwnerRequestWebhookSecret)
 	r.GET("/api/pay/merchant/banks", h.OwnerBanks)
 	r.GET("/api/pay/merchant/banks/resolve", h.OwnerResolveBank)

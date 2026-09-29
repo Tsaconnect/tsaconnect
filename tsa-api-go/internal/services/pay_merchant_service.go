@@ -139,11 +139,13 @@ type PayMerchantUpdate struct {
 
 // Sensitive reports whether an update touches where money or events go —
 // settlement destination, crypto target, webhook endpoints, or the domains
-// allowed to receive a checkout redirect — or whether the merchant may take
-// real money at all (the live switch). Those need a super admin; a
-// business-name typo fix or a fee-share/status change does not.
+// allowed to receive a checkout redirect — whether the merchant may take real
+// money at all (the live switch), or the business name (what customers are
+// shown, and what a payout account may be named). Those need a super admin; a
+// fee-share or status change does not. An owner's own rename goes through the
+// review queue instead.
 func (u PayMerchantUpdate) Sensitive() bool {
-	return u.SettlementMode != nil || u.BankCode != nil || u.AccountNumber != nil ||
+	return u.BusinessName != nil || u.SettlementMode != nil || u.BankCode != nil || u.AccountNumber != nil ||
 		u.ChainID != nil || u.TokenAddress != nil || u.TokenSymbol != nil || u.WalletAddress != nil ||
 		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil || u.LiveEnabled != nil
 }
@@ -185,8 +187,11 @@ type PayMerchantService struct {
 	banks  BankDirectory    // nil → settlement can't be verified, so it stays unset
 	chains payChainRegistry // nil → crypto settlement refused
 	mailer CodeMailer       // nil → owners cannot confirm a guarded action
-	master []byte
-	now    func() time.Time
+	// reserved are words an owner's business name may not contain (nil =
+	// DefaultReservedBusinessNames).
+	reserved []string
+	master   []byte
+	now      func() time.Time
 }
 
 // NewPayMerchantService constructs a PayMerchantService. banks and chains may
@@ -219,11 +224,17 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 	if err != nil {
 		return nil, err
 	}
+	// Checked at submit and approval too; this is the resume path for requests
+	// made before business names were held to the rule.
+	name, err := s.normalizeBusinessName(req.BusinessName)
+	if err != nil {
+		return nil, err
+	}
 
 	m := &models.PayMerchant{
 		MerchantRequestID:       req.ID,
 		UserID:                  req.UserID,
-		BusinessName:            req.BusinessName,
+		BusinessName:            name,
 		WebsiteDomain:           domain,
 		ReturnDomains:           domain,
 		Status:                  models.PayMerchantActive,
@@ -680,7 +691,12 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 	changes := map[string]interface{}{}
 
 	if in.BusinessName != nil {
-		updated.BusinessName = strings.TrimSpace(*in.BusinessName)
+		// A super admin's rename is held to the same rule as an owner's.
+		name, err := s.normalizeBusinessName(*in.BusinessName)
+		if err != nil {
+			return nil, err
+		}
+		updated.BusinessName = name
 		changes["business_name"] = updated.BusinessName
 	}
 	if in.Status != nil {
@@ -781,6 +797,13 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 		}
 		if !won {
 			return ErrPayMerchantStale
+		}
+		// An admin renaming the merchant directly answers any rename the
+		// owner still has waiting.
+		if before.BusinessName != updated.BusinessName {
+			if err := supersedePendingBusinessNames(tx, id, "superseded by an admin edit of the business name"); err != nil {
+				return err
+			}
 		}
 		return s.writeAudit(tx, id, actor, models.PayAuditActionMerchantUpdate, payAuditChanges(&before, &updated))
 	})

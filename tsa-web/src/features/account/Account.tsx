@@ -24,6 +24,7 @@ function Verification({ status }: { status: string }) {
 export function Account() {
   const { user, signOut } = useSession();
   const row = 'grid gap-0.5 py-3 sm:grid-cols-[160px_1fr] sm:gap-4';
+  const verified = user?.verificationStatus === 'verified';
   return (
     <AppShell section="personal" title="Account">
       <section aria-label="Your account" className="max-w-2xl">
@@ -32,7 +33,13 @@ export function Account() {
           <dl className="divide-y divide-[var(--hairline)] px-5 text-body-sm">
             <div className={row}>
               <dt className="text-text-secondary">Name</dt>
-              <dd className="font-medium">{user ? user.name : <Skeleton className="h-4 w-32" />}</dd>
+              <dd>
+                {user ? <p className="font-medium">{user.name}</p> : <Skeleton className="h-4 w-32" />}
+                {/* A verified name is the one on the ID: changing it means verifying again, which only the app does for now. */}
+                {verified && (
+                  <p className="mt-0.5 text-caption text-text-secondary">To change your name, use the TSA Connect app — you'll verify your identity again.</p>
+                )}
+              </dd>
             </div>
             <div className={row}>
               <dt className="text-text-secondary">Email</dt>
@@ -44,7 +51,7 @@ export function Account() {
             </div>
           </dl>
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-hairline bg-background px-5 py-3.5">
-            <p className="text-caption text-text-secondary">Change your name or password in the TSA Connect app.</p>
+            <p className="text-caption text-text-secondary">{verified ? 'Change your password' : 'Change your name or password'} in the TSA Connect app.</p>
             <Button variant="secondary" size="sm" onClick={() => void signOut()}>
               <LogOut className="size-4" aria-hidden />
               Sign out

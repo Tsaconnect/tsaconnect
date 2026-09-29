@@ -137,9 +137,9 @@ func (s *GormRampLegStore) Fail(ctx context.Context, id uuid.UUID, reason string
 	return nil
 }
 
-// truncateRunes trims s to at most n runes so a byte-based cut never splits a
-// multi-byte UTF-8 rune (the `error` column has a fixed byte budget, but the
-// stored text must stay valid UTF-8).
+// truncateRunes trims s to at most n runes, so a cut never splits a multi-byte
+// UTF-8 rune (Postgres sizes varchar in characters and rejects invalid UTF-8).
+// The one truncation every stored reason, note and payload goes through.
 func truncateRunes(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s

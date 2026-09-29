@@ -7,6 +7,7 @@
 // needed at two different moments — the funding check gates the amount screen
 // (before an order and its countdown exist), the send runs on the deposit
 // screen — and because neither is testable inside a 500-line component.
+import { ethers } from 'ethers';
 import { CHAINS, type ChainKey } from '@/constants/chains';
 import {
   buildTransferAuthorization,
@@ -154,6 +155,36 @@ export interface DepositOrder {
   token: string;
   tokenAmount?: string;
   depositAddress?: string;
+  /**
+   * The exact token and base-units amount, when the caller knows them: the
+   * prepared transfer is then built for that contract and checked, before it
+   * is signed, to move exactly that amount of it to depositAddress.
+   */
+  tokenAddress?: string;
+  amountBaseUnits?: string;
+  decimals?: number;
+}
+
+const ERC20_TRANSFER = new ethers.Interface(['function transfer(address to, uint256 amount)']);
+
+/**
+ * Throw unless `tx` is an ERC-20 transfer of exactly `amountBaseUnits` of
+ * `tokenAddress` to `to` on `chainId`, carrying no native value.
+ */
+export function assertPreparedTransfer(
+  tx: { to: string; data: string; value?: string; chainId: number | string },
+  expected: { tokenAddress: string; to: string; amountBaseUnits: string; chainId: number },
+): void {
+  const wrong = () => new Error('The prepared payment is not the one you were shown, so nothing was sent. Please try again.');
+  if (tx.to?.toLowerCase() !== expected.tokenAddress.toLowerCase() || Number(tx.chainId) !== expected.chainId) throw wrong();
+  if (tx.value && BigInt(tx.value) !== 0n) throw wrong();
+  let args: ethers.Result;
+  try {
+    args = ERC20_TRANSFER.decodeFunctionData('transfer', tx.data);
+  } catch {
+    throw wrong();
+  }
+  if (String(args[0]).toLowerCase() !== expected.to.toLowerCase() || BigInt(args[1]) !== BigInt(expected.amountBaseUnits)) throw wrong();
 }
 
 /**
@@ -215,8 +246,13 @@ export async function sendPaycrestDeposit(
   let unanswered = false;
   const res = await sendPreparedTransaction({
     prepare: () =>
-      prepareSendTransaction(order.token, to, amount, chainId, { fromAddress }),
+      prepareSendTransaction(order.token, to, amount, chainId, order.tokenAddress
+        ? { fromAddress, tokenAddress: order.tokenAddress, decimals: order.decimals }
+        : { fromAddress }),
     sign: (tx) => {
+      if (order.tokenAddress && order.amountBaseUnits) {
+        assertPreparedTransfer(tx, { tokenAddress: order.tokenAddress, to, amountBaseUnits: order.amountBaseUnits, chainId });
+      }
       assertGasAffordable(tx.gasPrice, tx.gasLimit, nativeBalance, nativeCurrency.symbol, order.chain);
       return signTransaction(
         {

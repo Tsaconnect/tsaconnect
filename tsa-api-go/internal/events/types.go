@@ -78,6 +78,22 @@ const (
 	// source.
 	PayPaymentReceived = "pay_payment_received"
 
+	// A TSA Pay owner asked to rename their business, and an admin approved
+	// (the rename takes effect) or rejected it. Told to the owner.
+	PayBusinessNameRequested = "pay_business_name_requested"
+	PayBusinessNameApproved  = "pay_business_name_approved"
+	PayBusinessNameRejected  = "pay_business_name_rejected"
+
+	// Name change by re-verification: started (fee paid), applied, held for an
+	// admin because the evidence was not strong enough to apply itself,
+	// refused by that admin, or run out of attempts or time. Data carries
+	// nameChangeId and status.
+	NameChangeStarted  = "name_change_started"
+	NameChangeApproved = "name_change_approved"
+	NameChangeHeld     = "name_change_held"
+	NameChangeRejected = "name_change_rejected"
+	NameChangeLapsed   = "name_change_lapsed"
+
 	// Product events
 	ProductListed   = "product.listed"
 	ProductApproved = "product.approved"

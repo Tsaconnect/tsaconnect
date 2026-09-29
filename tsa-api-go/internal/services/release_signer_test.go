@@ -92,3 +92,32 @@ func TestLocalKeyReleaseSigner_InsufficientFundsIsNotBroadcast(t *testing.T) {
 		}
 	}
 }
+
+// A broadcast that fails after signing may still be on the network: the error
+// carries the signed transaction's hash, so the chain can later be asked about
+// that very transaction — while the signer itself still returns no hash.
+func TestLocalKeyReleaseSigner_UncertainBroadcastCarriesItsHash(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	unsigned, _ := json.Marshal(blockchain.UnsignedTx{
+		Nonce: 7, GasPrice: "1000000000", GasLimit: 90000,
+		To: "0x000000000000000000000000000000000000dEaD", Value: "0", ChainID: "146",
+	})
+	bc := &captureBroadcaster{chainID: big.NewInt(146), err: errors.New("context deadline exceeded")}
+	hash, err := NewLocalKeyReleaseSigner(key, bc).SignAndBroadcast(context.Background(), unsigned)
+	if err == nil || hash != "" || errors.Is(err, ErrTxNotBroadcast) || err.Error() != "context deadline exceeded" {
+		t.Fatalf("hash=%q err=%v", hash, err)
+	}
+	var sent types.Transaction
+	if derr := rlp.DecodeBytes(bc.lastSent, &sent); derr != nil {
+		t.Fatal(derr)
+	}
+	if got := uncertainTxHash(err); got != sent.Hash().Hex() {
+		t.Fatalf("uncertain hash %q, want the signed tx's %s", got, sent.Hash().Hex())
+	}
+	if got := uncertainTxHash(fmt.Errorf("wrapped: %w", err)); got != sent.Hash().Hex() {
+		t.Fatalf("wrapped: uncertain hash %q", got)
+	}
+	if uncertainTxHash(notBroadcast(errors.New("insufficient funds"))) != "" {
+		t.Fatal("a refusal that never left carries no hash")
+	}
+}

@@ -6,15 +6,15 @@
 // sent here from a pay link (a remembered pending payment) is offered the way
 // straight back to it, through goAfterAuth.
 import React, { useState, useCallback } from "react";
-import { View, ActivityIndicator, Alert, Linking } from "react-native";
+import { View, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
-import { Camera } from "expo-camera";
-import { WebView } from "react-native-webview";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { Text, Button, Icon, ScreenHeader } from "@/components/ui";
+import { DiditWebView, requestCameraPermission } from "@/components/kyc/DiditSession";
+import { StatusPanel } from "@/components/kyc/StatusPanel";
 import { goAfterAuth, hasPendingPayment } from "@/utils/postAuthRoute";
 
 type KYCState =
@@ -27,7 +27,7 @@ type KYCState =
   | "rejected";
 
 export default function KYCScreen() {
-  const { colors, spacing, radius } = useTheme();
+  const { colors, spacing } = useTheme();
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
   const [sessionUrl, setSessionUrl] = useState<string | null>(null);
@@ -71,21 +71,6 @@ export default function KYCScreen() {
     }, [checkStatus])
   );
 
-  const requestCameraPermission = async (): Promise<boolean> => {
-    const { status } = await Camera.requestCameraPermissionsAsync();
-    if (status === "granted") return true;
-
-    Alert.alert(
-      "Camera Permission Required",
-      "Camera access is needed for identity verification. Please enable it in your device settings.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Open Settings", onPress: () => Linking.openSettings() },
-      ]
-    );
-    return false;
-  };
-
   const startVerification = async () => {
     try {
       const hasPermission = await requestCameraPermission();
@@ -114,85 +99,18 @@ export default function KYCScreen() {
     }
   };
 
-  const handleWebViewNavigationChange = (navState: { url: string }) => {
-    // Didit redirects to callback with verificationSessionId + status,
-    // or to our tsaconnect://kyc/callback deep link.
-    const url = navState.url.toLowerCase();
-    const finished =
-      url.includes("verificationsessionid=") ||
-      url.includes("tsaconnect://kyc/callback") ||
-      url.includes("/kyc/callback") ||
-      url.includes("status=approved") ||
-      url.includes("status=declined") ||
-      url.includes("status=in%20review") ||
-      url.includes("status=in+review");
-    if (finished) {
-      // Ask the API what the session actually ended as — hard-coding
-      // "in progress" hides a resubmission request behind a wait screen.
-      setSessionUrl(null);
-      setState("loading");
-      checkStatus();
-    }
+  // Ask the API what the session actually ended as — hard-coding
+  // "in progress" hides a resubmission request behind a wait screen.
+  const handleSessionFinished = () => {
+    setSessionUrl(null);
+    setState("loading");
+    checkStatus();
   };
 
   // Reachable cold from the Didit deep link (/kyc/callback redirects here), so
   // back needs a real destination rather than a no-op pop.
   const Header = () => (
     <ScreenHeader title="KYC Verification" fallbackRoute="/profile" />
-  );
-
-  // Reusable centered status panel: hero icon ring + title + subtitle + actions.
-  const StatusPanel = ({
-    icon,
-    iconColor,
-    iconBg,
-    title,
-    subtitle,
-    children,
-  }: {
-    icon: React.ComponentProps<typeof Icon>["name"];
-    iconColor: string;
-    iconBg: string;
-    title: string;
-    subtitle?: string;
-    children?: React.ReactNode;
-  }) => (
-    <View
-      style={{
-        flex: 1,
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: spacing.lg,
-      }}
-    >
-      <View
-        style={{
-          width: 96,
-          height: 96,
-          borderRadius: radius.pill,
-          backgroundColor: iconBg,
-          alignItems: "center",
-          justifyContent: "center",
-          marginBottom: spacing.xl,
-        }}
-      >
-        <Icon name={icon} size={48} color={iconColor} />
-      </View>
-      <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.md }}>
-        {title}
-      </Text>
-      {subtitle && (
-        <Text
-          variant="bodySm"
-          color="textSecondary"
-          align="center"
-          style={{ marginBottom: spacing.xl }}
-        >
-          {subtitle}
-        </Text>
-      )}
-      {children}
-    </View>
   );
 
   if (state === "loading") {
@@ -210,22 +128,7 @@ export default function KYCScreen() {
   }
 
   if (state === "webview_active" && sessionUrl) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
-        <WebView
-          source={{ uri: sessionUrl }}
-          onNavigationStateChange={handleWebViewNavigationChange}
-          javaScriptEnabled
-          domStorageEnabled
-          mediaPlaybackRequiresUserAction={false}
-          allowsInlineMediaPlayback
-          mediaCapturePermissionGrantType="grant"
-          allowsBackForwardNavigationGestures={false}
-          onPermissionRequest={(event: any) => event.grant()}
-          style={{ flex: 1 }}
-        />
-      </SafeAreaView>
-    );
+    return <DiditWebView url={sessionUrl} onFinished={handleSessionFinished} />;
   }
 
   if (state === "verified") {

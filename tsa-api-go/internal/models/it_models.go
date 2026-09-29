@@ -35,6 +35,19 @@ const (
 	ITStatusAwaitingRate = "awaiting_rate"
 )
 
+// ITSellAwaitingPayoutStatuses are the sell states in which the user's naira
+// payout is still owed: their MCGP or stablecoin has left (or is leaving) and the
+// bank transfer has not settled.
+var ITSellAwaitingPayoutStatuses = []string{
+	ITStatusProcessing, ITStatusDebiting, ITStatusDebited, ITStatusNeedsReview,
+	ITStatusDepositReported, ITStatusDepositConfirmed, ITStatusConverting,
+}
+
+// ITBuyAwaitingAttributionStatuses are the buy states in which the user's
+// naira is on its way to, or has just been matched in, the company account —
+// attributed by matching the sender's bank name against their verified name.
+var ITBuyAwaitingAttributionStatuses = []string{ITStatusPendingPayment, ITStatusPaymentReceived}
+
 const (
 	ITAssetMCGP = "MCGP"
 	ITAssetUSDC = "USDC"

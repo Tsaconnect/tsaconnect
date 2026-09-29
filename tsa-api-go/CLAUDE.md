@@ -103,8 +103,8 @@ All routes prefixed with `/api/`:
   `X-Wallet-Proof-*` headers; a wallet the account proved before needs none. Reads use
   `requireOwnWallet` (never links; 403 on mismatch), writes use `callerWallet` (links only with
   proof; 403 `WALLET_PROOF_REQUIRED`), and every operator debit (IT sell, bills,
-  pay-spendable) goes through `requireProvenWallet`. A valid proof evicts holders of the same
-  wallet that never proved it (pre-fix links; `AUDIT wallet_link_evicted=1` log line); a
+  pay-spendable) and the name-change fee go through `requireProvenWallet`. A valid proof
+  evicts holders of the same wallet that never proved it (pre-fix links; `AUDIT wallet_link_evicted=1` log line); a
   proven holder is never evicted (409). Addresses are stored checksummed and unique
   case-insensitively (`config/wallet_address_index.go`, built CONCURRENTLY on Postgres; case
   duplicates it cannot resolve are logged `ALERT wallet_address_case_duplicates`). The signed

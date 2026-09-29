@@ -16,6 +16,14 @@ const (
 	BillPayStatusFailed   = "failed"   // never got as far as a confirmed debit
 )
 
+// What an MCGP debit paid for. The lifecycle is the same for every one-off
+// payment to the platform from spendable MCGP; the purpose keeps each owner's
+// rows (and their on-chain refs) apart.
+const (
+	BillPayPurposeBill       = "bill"
+	BillPayPurposeNameChange = "name_change"
+)
+
 // BillPayment is the MCGP leg of a utility-bill purchase.
 //
 // It deliberately holds ONLY the payment. What was bought — airtime, a meter
@@ -36,6 +44,8 @@ type BillPayment struct {
 	// OrderID ties the payment to the bill order that requested it. Unique, so a
 	// retried order can never open a second debit.
 	OrderID uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"orderId"`
+	// Purpose names what OrderID refers to: a bill order, or a name change.
+	Purpose string `gorm:"type:varchar(24);not null;default:'bill';index" json:"purpose"`
 
 	WalletAddress string `gorm:"type:varchar(42);not null" json:"walletAddress"`
 

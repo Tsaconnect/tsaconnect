@@ -51,4 +51,17 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ type: 'pay_payment_received', source: 'api' })).toBe('/merchants/pay-settings');
     expect(routeForNotification({ type: 'pay_payment_received' })).toBe('/merchants/pay-settings');
   });
+
+  it('routes every name-change outcome to the name-change screen', () => {
+    for (const type of ['name_change_started', 'name_change_approved', 'name_change_held', 'name_change_rejected', 'name_change_lapsed']) {
+      expect(routeForNotification({ type })).toBe('/profile/name-change');
+    }
+    expect(routeForNotification({ type: 'name_change_other' })).toBeNull();
+  });
+
+  it('routes a TSA Pay business rename (filed, approved, rejected) to Payment Settings', () => {
+    for (const type of ['pay_business_name_requested', 'pay_business_name_approved', 'pay_business_name_rejected']) {
+      expect(routeForNotification({ type })).toBe('/merchants/pay-settings');
+    }
+  });
 });

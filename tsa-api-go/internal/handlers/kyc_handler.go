@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -57,14 +58,33 @@ type diditIDVerification struct {
 	FullName  string `json:"full_name"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
+	// Read only by a name change's same-person check (fetchDiditIdentity):
+	// compared across two sessions, never logged, and the document number
+	// never stored.
+	DateOfBirth    string `json:"date_of_birth"`
+	DocumentNumber string `json:"document_number"`
+	IssuingState   string `json:"issuing_state"`
 }
 
-// diditDecisionResponse is GET /v3/session/{id}/decision/. Only the name fields
-// are modelled — nothing else in the identity report is ours to keep.
+// diditLivenessCheck is one liveness feature item. Matches are the earlier
+// sessions Didit's face search found the same face in (workflows with face
+// search / duplicate detection on; empty otherwise).
+type diditLivenessCheck struct {
+	Status  string `json:"status"`
+	Matches []struct {
+		SessionID  string  `json:"session_id"`
+		Similarity float64 `json:"similarity_percentage"`
+	} `json:"matches"`
+}
+
+// diditDecisionResponse is GET /v3/session/{id}/decision/. Only the fields a
+// decision here is made on are modelled — nothing else in the identity report
+// is ours to keep.
 type diditDecisionResponse struct {
 	Status           string                `json:"status"`
 	IDVerifications  []diditIDVerification `json:"id_verifications"`
 	NFCVerifications []diditIDVerification `json:"nfc_verifications"`
+	LivenessChecks   []diditLivenessCheck  `json:"liveness_checks"`
 }
 
 // errDiditNameUnresolved means Didit has no usable name for this session and
@@ -85,67 +105,114 @@ var errDiditNameUnresolved = errors.New("didit: no verified name for session")
 // proxy that gave up on the request — left the run spending provider calls
 // nobody would ever see the result of.
 func fetchDiditVerifiedName(ctx context.Context, baseURL, apiKey, sessionID string) (string, error) {
+	decision, err := fetchDiditDecision(ctx, baseURL, apiKey, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if item := approvedIdentity(decision); item != nil {
+		return item.name(), nil
+	}
+	return "", errDiditNameUnresolved
+}
+
+// fetchDiditDecision reads one session's decision report. errDiditNameUnresolved
+// means Didit no longer holds the session.
+func fetchDiditDecision(ctx context.Context, baseURL, apiKey, sessionID string) (*diditDecisionResponse, error) {
 	if sessionID == "" {
-		return "", errDiditNameUnresolved
+		return nil, errDiditNameUnresolved
 	}
 
 	endpoint := strings.TrimRight(baseURL, "/") + "/session/" + url.PathEscape(sessionID) + "/decision/"
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("x-api-key", apiKey)
 
 	resp, err := diditHTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", errDiditNameUnresolved
+		return nil, errDiditNameUnresolved
 	}
 	if resp.StatusCode != http.StatusOK {
 		// The body is the identity report, and error strings get logged, so the
 		// status code is the most that may go into one.
-		return "", fmt.Errorf("didit decision lookup returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("didit decision lookup returned status %d", resp.StatusCode)
 	}
 
 	var decision diditDecisionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
-		return "", errors.New("didit decision response was not valid JSON")
+		return nil, errors.New("didit decision response was not valid JSON")
 	}
-
-	// NFC is checked second: when a workflow reads the passport chip that name
-	// is the more authoritative one, but most workflows never run it.
-	for _, block := range [][]diditIDVerification{decision.IDVerifications, decision.NFCVerifications} {
-		if name := firstApprovedName(block); name != "" {
-			return name, nil
-		}
-	}
-	return "", errDiditNameUnresolved
+	return &decision, nil
 }
 
-// firstApprovedName returns the name from the first feature item that passed. A
-// declined item still carries whatever the scan guessed before it was rejected,
-// which is not a name to attribute money with.
-func firstApprovedName(items []diditIDVerification) string {
-	for _, item := range items {
+// approvedIdentity is the first document feature item that passed and carries
+// a name. NFC is checked second: when a workflow reads the passport chip that
+// name is the more authoritative one, but most workflows never run it.
+func approvedIdentity(decision *diditDecisionResponse) *diditIDVerification {
+	for _, block := range [][]diditIDVerification{decision.IDVerifications, decision.NFCVerifications} {
+		if item := firstApprovedItem(block); item != nil {
+			return item
+		}
+	}
+	return nil
+}
+
+// fetchDiditIdentity is what a session's decision says about the person, for a
+// name change's same-person check: the approved document's name, date of
+// birth, document number and issuing country, and the earlier sessions Didit's
+// face search matched. errDiditNameUnresolved: the session is gone or passed
+// no document.
+func fetchDiditIdentity(ctx context.Context, baseURL, apiKey, sessionID string) (*services.NameChangeIdentity, error) {
+	decision, err := fetchDiditDecision(ctx, baseURL, apiKey, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	item := approvedIdentity(decision)
+	if item == nil {
+		return nil, errDiditNameUnresolved
+	}
+	id := &services.NameChangeIdentity{Name: item.name(), DateOfBirth: item.DateOfBirth,
+		DocumentNumber: item.DocumentNumber, IssuingCountry: item.IssuingState}
+	for _, check := range decision.LivenessChecks {
+		for _, m := range check.Matches {
+			id.FaceMatches = append(id.FaceMatches, services.NameChangeFaceMatch{SessionID: m.SessionID, Similarity: m.Similarity})
+		}
+	}
+	return id, nil
+}
+
+// firstApprovedItem returns the first feature item that passed and names
+// someone. A declined item still carries whatever the scan guessed before it
+// was rejected, which is not a name to attribute money with.
+func firstApprovedItem(items []diditIDVerification) *diditIDVerification {
+	for i := range items {
+		item := &items[i]
 		// Didit publishes "Approved" everywhere but "APPROVED" in one example,
 		// so the comparison is case-insensitive; an item with no status at all
 		// is taken at face value.
 		if item.Status != "" && !strings.EqualFold(item.Status, "Approved") {
 			continue
 		}
-		name := item.FullName
-		if strings.TrimSpace(name) == "" {
-			name = item.FirstName + " " + item.LastName
-		}
-		if name = strings.Join(strings.Fields(name), " "); name != "" {
-			return name
+		if item.name() != "" {
+			return item
 		}
 	}
-	return ""
+	return nil
+}
+
+// name is the item's full name, or its first and last names joined.
+func (item *diditIDVerification) name() string {
+	name := item.FullName
+	if strings.TrimSpace(name) == "" {
+		name = item.FirstName + " " + item.LastName
+	}
+	return strings.Join(strings.Fields(name), " ")
 }
 
 // verifiedNameUpdates returns the column updates recording a user's Didit legal
@@ -235,6 +302,73 @@ func latestSessionState(userID uuid.UUID, sessionID string) (status, url string)
 	return status, url
 }
 
+// diditSessionError is why a Didit session could not be bought: the status to
+// answer with and the operator-facing detail for the log (see failKYCSession).
+type diditSessionError struct {
+	status int
+	detail string
+}
+
+// createDiditSession buys one hosted verification session. vendorData is what
+// Didit echoes on every webhook for it: the user id for first-time KYC, a
+// name-change marker for a re-verification.
+func createDiditSession(ctx context.Context, baseURL, apiKey, workflowID, callback, vendorData string) (*diditSessionCreateResponse, *diditSessionError) {
+	payload := map[string]interface{}{
+		"workflow_id": workflowID,
+		"vendor_data": vendorData,
+	}
+	if callback != "" {
+		payload["callback"] = callback
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &diditSessionError{http.StatusInternalServerError,
+			fmt.Sprintf("failed to marshal session payload: %v", err)}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/session/", bytes.NewReader(body))
+	if err != nil {
+		return nil, &diditSessionError{http.StatusInternalServerError,
+			fmt.Sprintf("failed to build Didit request: %v", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+
+	resp, err := diditHTTPClient.Do(req)
+	if err != nil {
+		return nil, &diditSessionError{http.StatusInternalServerError,
+			fmt.Sprintf("Didit request failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &diditSessionError{http.StatusInternalServerError,
+			fmt.Sprintf("failed to read Didit response: %v", err)}
+	}
+
+	var diditResp diditSessionCreateResponse
+	if err := json.Unmarshal(respBody, &diditResp); err != nil {
+		return nil, &diditSessionError{http.StatusInternalServerError,
+			fmt.Sprintf("failed to decode Didit response: %v", err)}
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// diditResp.Detail is Didit's own wording for operators; it is logged
+		// with the body rather than forwarded to the user.
+		return nil, &diditSessionError{http.StatusBadGateway,
+			fmt.Sprintf("Didit API error: status=%d detail=%q body=%s",
+				resp.StatusCode, diditResp.Detail, string(respBody))}
+	}
+
+	if diditResp.SessionID == "" || diditResp.URL == "" {
+		return nil, &diditSessionError{http.StatusBadGateway,
+			fmt.Sprintf("Didit response missing session fields: %s", string(respBody))}
+	}
+	return &diditResp, nil
+}
+
 // CreateKYCSession creates a Didit verification session for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -278,64 +412,9 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	payload := map[string]interface{}{
-		"workflow_id": workflowID,
-		"vendor_data": user.ID.String(),
-	}
-	if callback := h.Config.DiditCallbackURL; callback != "" {
-		payload["callback"] = callback
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		failKYCSession(c, http.StatusInternalServerError,
-			fmt.Sprintf("failed to marshal session payload: %v", err))
-		return
-	}
-
-	req, err := http.NewRequest("POST", baseURL+"/session/", bytes.NewReader(body))
-	if err != nil {
-		failKYCSession(c, http.StatusInternalServerError,
-			fmt.Sprintf("failed to build Didit request: %v", err))
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-
-	resp, err := diditHTTPClient.Do(req)
-	if err != nil {
-		failKYCSession(c, http.StatusInternalServerError,
-			fmt.Sprintf("Didit request failed: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		failKYCSession(c, http.StatusInternalServerError,
-			fmt.Sprintf("failed to read Didit response: %v", err))
-		return
-	}
-
-	var diditResp diditSessionCreateResponse
-	if err := json.Unmarshal(respBody, &diditResp); err != nil {
-		failKYCSession(c, http.StatusInternalServerError,
-			fmt.Sprintf("failed to decode Didit response: %v", err))
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		// diditResp.Detail is Didit's own wording for operators; it is logged
-		// with the body rather than forwarded to the user.
-		failKYCSession(c, http.StatusBadGateway,
-			fmt.Sprintf("Didit API error: status=%d detail=%q body=%s",
-				resp.StatusCode, diditResp.Detail, string(respBody)))
-		return
-	}
-
-	if diditResp.SessionID == "" || diditResp.URL == "" {
-		failKYCSession(c, http.StatusBadGateway,
-			fmt.Sprintf("Didit response missing session fields: %s", string(respBody)))
+	diditResp, serr := createDiditSession(context.Background(), baseURL, apiKey, workflowID, h.Config.DiditCallbackURL, user.ID.String())
+	if serr != nil {
+		failKYCSession(c, serr.status, serr.detail)
 		return
 	}
 
@@ -428,6 +507,23 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		return
 	}
 
+	// A re-verification for a name change is not first-time KYC: its result
+	// must never reach the approval path below, which would write the new
+	// document's name straight onto a verified account.
+	if h.handleNameChangeWebhook(c, payload) {
+		return
+	}
+	// A superseded name-change session is no longer any change's current one,
+	// but it is still a re-verification — never first-time KYC's to approve.
+	if isChange, err := h.NameChanges.IsNameChangeSession(c.Request.Context(), payload.SessionID); err != nil {
+		log.Printf("[KYC] name-change session lookup failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to look up session"})
+		return
+	} else if isChange {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event for a past name-change session"})
+		return
+	}
+
 	var user models.User
 	query := config.DB
 	switch {
@@ -494,9 +590,13 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		// The document name is the only name on this record that was checked
 		// against anything, and inbound bank transfers are attributed against
 		// it. Folded into the same update so the name and the approval land
-		// together; a lookup that fails leaves it for the backfill.
-		for column, value := range h.verifiedNameUpdates(c.Request.Context(), user.ID, sessionForName(payload, &user)) {
-			updates[column] = value
+		// together; a lookup that fails leaves it for the backfill. A name
+		// that came from a later name change is left alone: this session
+		// describes the old document (see NameChangeService.NameSetByChange).
+		if !h.NameChanges.NameSetByChange(c.Request.Context(), user.ID) {
+			for column, value := range h.verifiedNameUpdates(c.Request.Context(), user.ID, sessionForName(payload, &user)) {
+				updates[column] = value
+			}
 		}
 		logEntry.Action = models.VerificationActionDiditPassed
 		logEntry.Status = models.VerificationLogStatusVerified
@@ -579,6 +679,13 @@ func (h *Handlers) handleDiditDataUpdated(c *gin.Context, user *models.User, pay
 	// session must not overwrite the name the current one produced.
 	if payload.SessionID != "" && user.DiditSessionID != "" && payload.SessionID != user.DiditSessionID {
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event from non-current session"})
+		return
+	}
+
+	// A reviewer's edit of the original session must not undo a name the user
+	// has since changed with a newer document.
+	if h.NameChanges.NameSetByChange(c.Request.Context(), user.ID) {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Name kept: set by a later name change"})
 		return
 	}
 

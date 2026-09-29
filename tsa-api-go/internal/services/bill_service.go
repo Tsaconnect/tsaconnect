@@ -860,7 +860,7 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 	// a human.
 	var late []models.BillPayment
 	if err := s.scan.page("late", "", s.db.WithContext(ctx).Model(&models.BillPayment{}).
-		Where("status = ? AND updated_at > ?", models.BillPayStatusFailed, now.Add(-billLateDebitScanWindow)),
+		Where("purpose = ? AND status = ? AND updated_at > ?", models.BillPayPurposeBill, models.BillPayStatusFailed, now.Add(-billLateDebitScanWindow)),
 		billLateScanLimit).Find(&late).Error; err == nil {
 		if n := len(late); n > 0 {
 			s.scan.advance("late", n, billLateScanLimit, late[n-1].UpdatedAt, late[n-1].ID)
@@ -1257,16 +1257,8 @@ func checkLookupInput(customerID string) error {
 	return nil
 }
 
-// truncate512 is rune-safe: a byte slice could cut a multi-byte character in
-// half, and Postgres rejects invalid UTF-8 — which would fail the exact Save
-// that records a delivered token/PIN.
-func truncate512(s string) string {
-	if len(s) <= 512 {
-		return s
-	}
-	r := []rune(s)
-	if len(r) > 512 {
-		r = r[:512]
-	}
-	return string(r)
-}
+// truncate512 caps a stored vend payload at the column's 512 characters. Rune-
+// safe (truncateRunes): a byte slice could cut a multi-byte character in half,
+// and Postgres rejects invalid UTF-8 — which would fail the exact Save that
+// records a delivered token/PIN.
+func truncate512(s string) string { return truncateRunes(s, 512) }

@@ -5,7 +5,8 @@
 // @/components/ui primitives). The component name, props, exports, hook order,
 // image-picker flow, token handling, updateProfile payload shape, AuthContext
 // refresh, alerts, and the `/profile` navigation are all preserved verbatim —
-// this is a visual / structural restyle only.
+// this is a visual / structural restyle only. A verified user's name is locked
+// here — it is the name on her ID — and changes through /profile/name-change.
 import React, { useState } from 'react';
 import {
   View,
@@ -24,6 +25,9 @@ import { Button, Icon, Input, Text } from '@/components/ui';
 import { useAuth } from '../../AuthContext/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import apiService from '../services/api';
+import { NAME_CHANGE } from '@/constants/routes';
+import { NAME_CHANGE_CODES } from '@/services/nameChangeApi';
+import { useNameChangeEntry } from '@/hooks/useNameChangeEntry';
 
 const COUNTRY_TO_CCA2: Record<string, string> = {
   'Nigeria': 'NG',
@@ -45,6 +49,9 @@ const EditProfileScreen = ({ user }) => {
   const { colors, spacing, radius, fonts, type } = useTheme();
   const kbHeight = useKeyboardHeight();
   const defaultCca2 = COUNTRY_TO_CCA2[user.country] || 'NG';
+  // A verified name is the one on her ID: it changes by verifying again, not here.
+  const nameLocked = user.verificationStatus === 'verified';
+  const nameChangeOffered = useNameChangeEntry(nameLocked);
 
   const [name, setName] = useState(user.name || '');
   const [username, setUsername] = useState(user.username || '');
@@ -128,6 +135,13 @@ const EditProfileScreen = ({ user }) => {
       const result = await apiService.updateProfile(payload);
 
       if (!result.success) {
+        if (result.code === NAME_CHANGE_CODES.USE_NAME_CHANGE) {
+          Alert.alert('Change your name', result.message || 'Your name comes from your verified ID. Change it by verifying again.', [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Change name', onPress: () => router.push(NAME_CHANGE) },
+          ]);
+          return;
+        }
         Alert.alert('Error', result.message || 'Failed to update profile');
         return;
       }
@@ -209,8 +223,20 @@ const EditProfileScreen = ({ user }) => {
           value={name}
           onChangeText={setName}
           placeholder="Your Name"
-          containerStyle={{ marginBottom: spacing.lg }}
+          editable={!nameLocked}
+          helper={nameLocked ? 'This is the name on your verified ID.' : undefined}
+          containerStyle={{ marginBottom: nameLocked && nameChangeOffered ? spacing.xs : spacing.lg }}
         />
+        {nameLocked && nameChangeOffered ? (
+          <Button
+            title="Change name"
+            variant="ghost"
+            size="sm"
+            fullWidth={false}
+            onPress={() => router.push(NAME_CHANGE)}
+            style={{ alignSelf: 'flex-start', marginBottom: spacing.lg }}
+          />
+        ) : null}
 
         {/* Username */}
         <Input

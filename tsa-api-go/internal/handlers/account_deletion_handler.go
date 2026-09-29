@@ -49,15 +49,9 @@ type accountDeletionNoteInput struct {
 func blockingCommitments(db *gorm.DB, userID uuid.UUID) ([]string, error) {
 	var blockers []string
 
-	liveTradeStatuses := []string{
-		models.P2PTradeStatusPendingPayment,
-		models.P2PTradeStatusPaid,
-		models.P2PTradeStatusReleasing,
-		models.P2PTradeStatusDisputed,
-	}
 	var tradeCount int64
 	if err := db.Model(&models.P2PTrade{}).
-		Where("(buyer_id = ? OR seller_id = ?) AND status IN ?", userID, userID, liveTradeStatuses).
+		Where("(buyer_id = ? OR seller_id = ?) AND status IN ?", userID, userID, models.P2PTradeLiveStatuses).
 		Count(&tradeCount).Error; err != nil {
 		return nil, err
 	}

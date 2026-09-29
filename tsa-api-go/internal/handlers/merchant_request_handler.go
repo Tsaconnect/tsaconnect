@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -27,6 +28,10 @@ import (
 // payment_acceptance request returns 503 (TSA Pay dormant-by-default).
 type payMerchantProvisioner interface {
 	CreateFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PayMerchant, error)
+	// NormalizeBusinessName is the business-name rule (hidden characters,
+	// length, reserved words): an application is held to it when submitted
+	// and again when approved.
+	NormalizeBusinessName(name string) (string, error)
 }
 
 type MerchantRequestHandler struct {
@@ -86,6 +91,29 @@ type submitMerchantRequestInput struct {
 
 type adminNoteInput struct {
 	Note string `json:"note"`
+}
+
+// approveMerchantInput is an approval's body. BusinessName (TSA Pay only, super
+// admin only) renames the business as it is approved: the way on for a request
+// whose name the business-name rule refuses — including one already approved,
+// whose provisioning failed, which can no longer be rejected.
+type approveMerchantInput struct {
+	Note         string `json:"note"`
+	BusinessName string `json:"businessName"`
+}
+
+// businessNameRefusal is a refused business name's reason, written for the
+// person who typed it, or "" when err is not one.
+func businessNameRefusal(err error) string {
+	var bn *services.BusinessNameError
+	if !errors.As(err, &bn) {
+		return ""
+	}
+	reason := []rune(bn.Reason)
+	if len(reason) > 0 {
+		reason[0] = unicode.ToUpper(reason[0])
+	}
+	return string(reason)
 }
 
 var validStatuses = []string{
@@ -170,6 +198,20 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", services.KYCVerificationRequiredCode)
 			return
 		}
+	}
+
+	// A TSA Pay business name is what customers are shown and what payout
+	// accounts are matched against: the same rule as every later rename.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance {
+		name, err := h.PayMerchants.NormalizeBusinessName(input.BusinessName)
+		if reason := businessNameRefusal(err); reason != "" {
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest, reason, services.BusinessNameInvalidCode)
+			return
+		} else if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business name")
+			return
+		}
+		input.BusinessName = name
 	}
 
 	// A TSA Pay application's website is optional: a business with none sends
@@ -355,7 +397,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		return
 	}
 
-	var input adminNoteInput
+	var input approveMerchantInput
 	if c.Request.ContentLength > 0 {
 		if err := c.ShouldBindJSON(&input); err != nil {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
@@ -366,6 +408,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	var req models.MerchantRequest
 	if err := h.DB.First(&req, "id = ?", id).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Merchant request not found")
+		return
+	}
+	renameTo := strings.TrimSpace(input.BusinessName)
+	if renameTo != "" && req.BusinessType != models.BusinessTypePaymentAcceptance {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Only a TSA Pay request's business name can be changed as it is approved")
 		return
 	}
 
@@ -403,6 +450,40 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		if h.PayMerchants == nil {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay is not enabled")
 			return
+		}
+		// Requests filed before business names were held to the rule are
+		// refused here rather than approved into a merchant that can't exist.
+		// A super admin may rename the business as they approve (renaming a
+		// merchant is theirs everywhere else too).
+		name := req.BusinessName
+		if renameTo != "" {
+			if !hasSuperAdminPrivilege(c, admin) {
+				utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can rename a business")
+				return
+			}
+			name = renameTo
+		}
+		normalized, err := h.PayMerchants.NormalizeBusinessName(name)
+		if reason := businessNameRefusal(err); reason != "" {
+			next := " Reject the request so the applicant can apply again, or have a super admin approve it with a corrected business name."
+			if renameTo != "" {
+				next = ""
+			} else if req.Status == models.MerchantRequestStatusApproved {
+				// Approved already, its setup unfinished: it can no longer be
+				// rejected, so renaming is the only way on.
+				next = " The request is already approved, so a super admin needs to approve it again with a corrected business name to finish setting up TSA Pay."
+			}
+			utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity,
+				"This business name can't be used ("+strings.TrimSuffix(reason, ".")+")."+next, services.BusinessNameInvalidCode)
+			return
+		} else if err != nil {
+			log.Printf("ApproveMerchantRequest: business name check failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the business name")
+			return
+		}
+		renameTo = ""
+		if normalized != req.BusinessName {
+			renameTo = normalized
 		}
 	}
 
@@ -494,6 +575,16 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
 			return
 		}
+	}
+
+	if renameTo != "" {
+		// Recorded on the request, which the merchant is provisioned from.
+		if err := h.DB.Model(&models.MerchantRequest{}).Where("id = ?", req.ID).Update("business_name", renameTo).Error; err != nil {
+			log.Printf("ApproveMerchantRequest: rename of request %s failed: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but the business name couldn't be changed — approve again to finish")
+			return
+		}
+		log.Printf("[merchant-request] AUDIT request=%s admin=%s action=rename_on_approval from=%q to=%q", req.ID, admin.ID, req.BusinessName, renameTo)
 	}
 
 	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {

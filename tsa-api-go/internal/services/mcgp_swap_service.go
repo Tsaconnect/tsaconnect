@@ -597,6 +597,29 @@ func (e notBroadcastError) Unwrap() []error { return []error{e.err, ErrTxNotBroa
 
 func notBroadcast(err error) error { return notBroadcastError{err: err} }
 
+// broadcastUncertainError is the other side of ErrTxNotBroadcast: a signed
+// transaction whose broadcast failed and so may be on the network. It carries
+// the transaction's hash for a caller that must later ask the chain about it;
+// the signer still returns no hash with the error, so callers that read one as
+// success are unaffected. Error and Unwrap are the broadcast error's own.
+type broadcastUncertainError struct {
+	err    error
+	txHash string
+}
+
+func (e broadcastUncertainError) Error() string { return e.err.Error() }
+func (e broadcastUncertainError) Unwrap() error { return e.err }
+
+// uncertainTxHash is the hash of the transaction err says may have been
+// broadcast, or "" when err carries none.
+func uncertainTxHash(err error) string {
+	var u broadcastUncertainError
+	if errors.As(err, &u) {
+		return u.txHash
+	}
+	return ""
+}
+
 // DebitState mirrors the contract's DebitState enum for a debitRef.
 type DebitState uint8
 

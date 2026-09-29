@@ -858,6 +858,24 @@ func TestTreasury_TransferRefusedForFundsWasNeverBroadcast(t *testing.T) {
 	}
 }
 
+// A transfer whose broadcast failed after signing may still land: TransferToken
+// reports it as attempted WITH the transaction's hash, so the caller can ask
+// the chain about that very transaction later. A plain signer error (no hash
+// known) stays attempted with no hash.
+func TestTreasury_TransferUncertainBroadcastReturnsItsHash(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
+	signer.err = broadcastUncertainError{err: errors.New("context deadline exceeded"), txHash: "0xmaybe"}
+	hash, attempted, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1_000000))
+	if err == nil || !attempted || hash != "0xmaybe" {
+		t.Fatalf("hash=%q attempted=%v err=%v; want the uncertain tx's hash", hash, attempted, err)
+	}
+	signer.err = errors.New("rpc timeout")
+	hash, attempted, err = tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1_000000))
+	if err == nil || !attempted || hash != "" {
+		t.Fatalf("hash=%q attempted=%v err=%v; want attempted with no hash", hash, attempted, err)
+	}
+}
+
 // Quoting asks whether a lane can pay for a route's gas on every public quote
 // request, so the answer is cached briefly rather than costing two RPC reads
 // per request; execution always reads fresh (requireGas).

@@ -1,0 +1,274 @@
+// services/nameChangeApi.ts
+//
+// A verified user's name change (/api/users/me/name-change): her name is the
+// one on her ID, so changing it means paying the re-verification fee and
+// verifying again — the new document's name becomes her name. See
+// docs/specs/2026-09-28-name-change-rekyc.md. An unverified user edits her
+// name on the profile form instead (PUT /users/profile).
+//
+// A paid fee comes from the wallet linked to her account, which the account
+// must have proven it owns — the same wallet-link proof every operator debit
+// needs (services/walletProof.ts). If it never was, the server answers
+// WALLET_PROOF_REQUIRED and createApiRequest proves and links this phone's
+// wallet, then asks once more: there is no second signing path here. That
+// wallet is the only one the fee is taken from, and the only one a refund can
+// go to.
+import { ApiError, createApiRequest } from '@/services/apiRequest';
+
+export type NameChangeStatus =
+  | 'paying'
+  | 'paid'
+  | 'verifying'
+  | 'declined'
+  | 'held_for_review'
+  | 'approved'
+  | 'rejected'
+  | 'lapsed'
+  | 'cancelled';
+
+export type NameChangePayMethod = 'mcgp_spendable' | 'stablecoin' | 'free';
+
+/** Where a paid fee stands: none (unpaid, or free), held/received, kept, or on its way back. */
+export type NameChangeFeeStatus =
+  | 'none' | 'held' | 'received' | 'settled' | 'reversed'
+  | 'refund_sending' | 'refunded' | 'refund_failed' | 'refund_uncertain';
+
+/**
+ * The stablecoin payment she is to make. Amounts come twice: `amount` is a
+ * whole-token decimal string for reading, `amountBaseUnits` the exact figure a
+ * transfer is built and checked against.
+ */
+export type StablecoinTransfer = {
+  chain: string;
+  chainId: number;
+  token: string;
+  tokenAddress: string;
+  /** The account's proven wallet: the only one the fee is accepted from. */
+  from: string;
+  /** The treasury. */
+  to: string;
+  amount: string;
+  amountBaseUnits: string;
+  decimals: number;
+};
+
+export type NameChange = {
+  id: string;
+  status: NameChangeStatus;
+  /** A decimal string, e.g. "1.00". */
+  feeUsd: string;
+  payMethod: NameChangePayMethod;
+  payToken: string;
+  payChain: string;
+  payAmount: string;
+  payAmountBaseUnits: string;
+  payDecimals: number;
+  /** The account's proven wallet the fee comes from (and any refund goes to). */
+  payFrom?: string;
+  feeStatus: NameChangeFeeStatus;
+  /** Verification sessions started so far. */
+  attempts: number;
+  maxAttempts: number;
+  expiresAt: string;
+  oldName: string;
+  newVerifiedName?: string;
+  matchStrength?: 'exact' | 'partial' | 'none';
+  /** The one line about this change meant for her (a review outcome, a refund…). */
+  message?: string;
+  /** While a stablecoin fee is still to be paid: the transfer to make. */
+  transfer?: StablecoinTransfer;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NameChangeBlocker = { code: string; message: string };
+
+/** One stablecoin the fee can be paid in. `chain` is our chain key ('base', 'bsc'…). */
+export type StablecoinOption = {
+  chain: string;
+  chainId: number;
+  token: string;
+  tokenAddress: string;
+  amount: string;
+  amountBaseUnits: string;
+  decimals: number;
+};
+
+export type McgpMethodQuote = {
+  method: 'mcgp_spendable';
+  available: boolean;
+  /** Where spendable MCGP lives: 'sonic'. */
+  chain: string;
+  token: 'MCGP';
+  amount?: string;
+  amountBaseUnits?: string;
+  decimals: number;
+  /** The spendable MCGP of the wallet the overview was asked about. */
+  balance?: string;
+  balanceBaseUnits?: string;
+};
+export type StablecoinMethodQuote = { method: 'stablecoin'; available: boolean; options: StablecoinOption[] };
+export type NameChangeMethodQuote = McgpMethodQuote | StablecoinMethodQuote;
+
+export type NameChangeQuote = { feeUsd: string; methods: NameChangeMethodQuote[] };
+
+export type NameChangeOverview = {
+  enabled: boolean;
+  /** Why no change can be started at all; absent when one can (subject to eligible). */
+  unavailableReason?: 'disabled' | 'not_verified';
+  /** The open change — or, with none open, the latest one — or null. */
+  change: NameChange | null;
+  /** She may start a new change now. */
+  eligible: boolean;
+  /** Money in flight under her current name: finish these first. */
+  blockers: NameChangeBlocker[];
+  /** Past the yearly limit: when the next change becomes possible. */
+  nextAllowedAt?: string;
+  limits: { maxPerYear: number; completedInLastYear: number; maxAttempts: number; ttlDays: number };
+  /** The fee for a new change: null while one is open, or when none can be started. */
+  quote: NameChangeQuote | null;
+};
+
+export type NameChangeStart = { change: NameChange; transfer?: StablecoinTransfer };
+
+/**
+ * How she pays, and her account password. The fee comes from the account's
+ * proven wallet — named by the server, never by this body.
+ */
+export type NameChangePay =
+  | { payMethod: 'free'; password: string }
+  | { payMethod: 'mcgp_spendable'; password: string }
+  | { payMethod: 'stablecoin'; chain: string; token: string; password: string };
+
+/** Machine codes the name-change routes answer with — keyed on, never the words beside them. */
+export const NAME_CHANGE_CODES = {
+  DISABLED: 'name_change_disabled',
+  NOT_VERIFIED: 'not_verified',
+  USER_NOT_FOUND: 'user_not_found',
+  CHANGE_OPEN: 'change_open',
+  NO_OPEN_CHANGE: 'no_open_change',
+  INVALID_REQUEST: 'invalid_request',
+  LIMIT: 'name_change_limit',
+  CANCEL_LIMIT: 'cancel_limit',
+  MONEY_IN_FLIGHT: 'money_in_flight',
+  PASSWORD_INCORRECT: 'password_incorrect',
+  ACCOUNT_LOCKED: 'account_locked',
+  METHOD_UNAVAILABLE: 'method_unavailable',
+  INSUFFICIENT_BALANCE: 'insufficient_balance',
+  PAYMENT_FAILED: 'payment_failed',
+  /** The fee transaction isn't mined, or deep enough, yet: keep checking. */
+  PAYMENT_PENDING_CHAIN: 'payment_pending_chain',
+  /** The transaction can never pay this change (reverted, wrong recipient or sender, too early). */
+  PAYMENT_MISMATCH: 'payment_mismatch',
+  /** A payment (or MCGP debit) is still settling: not now. */
+  PAYMENT_PENDING: 'payment_pending',
+  ATTEMPTS_EXHAUSTED: 'attempts_exhausted',
+  SESSION_LIMIT: 'session_limit',
+  SESSION_PENDING: 'session_pending',
+  CHANGE_LAPSED: 'change_lapsed',
+  UNDER_REVIEW: 'under_review',
+  CANCEL_NOT_ALLOWED: 'cancel_not_allowed',
+  BAD_STATE: 'bad_state',
+  /** PUT /users/profile: a verified user's name changes only through this flow. */
+  USE_NAME_CHANGE: 'use_name_change',
+} as const;
+
+/** A refusal, with what it carries: the blockers, or when she may try again. */
+export class NameChangeError extends ApiError {
+  blockers: NameChangeBlocker[];
+  nextAllowedAt?: string;
+  constructor(message: string, status: number, code?: string, body?: unknown) {
+    super(message, status, code);
+    this.name = 'NameChangeError';
+    const data = (body as { data?: { blockers?: unknown; nextAllowedAt?: unknown } } | null)?.data;
+    this.blockers = Array.isArray(data?.blockers) ? (data.blockers as NameChangeBlocker[]) : [];
+    this.nextAllowedAt = typeof data?.nextAllowedAt === 'string' ? data.nextAllowedAt : undefined;
+  }
+}
+
+const request = createApiRequest({
+  prefix: '/users/me/name-change',
+  unavailableMessage: 'Name changes are not available right now. Please try again later.',
+  networkMessage: 'Could not reach the server. Check your connection and try again.',
+  makeError: (message, status, code, body) => new NameChangeError(message, status, code, body),
+});
+
+const walletQuery = (wallet: string | null | undefined) =>
+  wallet ? `?walletAddress=${encodeURIComponent(wallet)}` : '';
+
+/**
+ * The overview; `wallet` (this phone's) adds its spendable MCGP balance to the
+ * quote. The server reads only the account's own wallet: this phone's, when it
+ * isn't the linked one, is proven and linked first (WALLET_PROOF_REQUIRED).
+ */
+export function getNameChange(wallet?: string | null): Promise<NameChangeOverview> {
+  return request<NameChangeOverview>(walletQuery(wallet));
+}
+
+/**
+ * Open a change and start paying. Spendable MCGP is debited by the server
+ * (nothing to sign); a stablecoin answers with the transfer to make. An
+ * account whose wallet was never proven is sent through the wallet-link proof
+ * first (by createApiRequest), then this is asked once more.
+ * `idempotencyKey` is held by the screen across retries of the same payment.
+ * `wallet` is this phone's, the one that pays: named so the server holds the
+ * fee to it — a phone whose wallet is not the account's is sent through the
+ * proof first, rather than paying for (or from) a wallet it cannot sign for.
+ */
+export function startNameChange(pay: NameChangePay, idempotencyKey: string, wallet?: string | null): Promise<NameChangeStart> {
+  return request<NameChangeStart>(walletQuery(wallet), {
+    method: 'POST',
+    body: JSON.stringify(pay),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+}
+
+/**
+ * Hand the server the stablecoin fee's hash to prove on-chain. The change comes
+ * back paid — or cancelled and refunding when the payment was short or late
+ * (its message says so).
+ */
+export async function confirmNameChangePayment(txHash: string): Promise<NameChange> {
+  const { change } = await request<{ change: NameChange }>('/confirm-payment', { method: 'POST', body: JSON.stringify({ txHash }) });
+  return change;
+}
+
+/** The Didit session for an attempt: the hosted page to open, and where the attempts stand. */
+export type NameChangeSession = {
+  url: string;
+  sessionId: string;
+  /** The attempt's session was already open (nothing new was bought). */
+  resumed: boolean;
+  attempts: number;
+  maxAttempts: number;
+};
+
+/** A verification session for the next attempt, or the one already open. */
+export function startNameChangeVerification(): Promise<NameChangeSession> {
+  return request<NameChangeSession>('/start-verification', { method: 'POST' });
+}
+
+/** Only before the first verification attempt: the fee comes back to the paying wallet. */
+export async function cancelNameChange(): Promise<NameChange> {
+  const { change } = await request<{ change: NameChange }>('/cancel', { method: 'POST' });
+  return change;
+}
+
+/** A change she can do nothing more with. */
+export const isTerminalNameChange = (s: NameChangeStatus): boolean =>
+  s === 'approved' || s === 'rejected' || s === 'lapsed' || s === 'cancelled';
+
+/**
+ * She may cancel — and get the fee back — until her first attempt: a paid
+ * change, or a stablecoin one still to be paid. Never an MCGP debit that is
+ * still settling (the server refuses it: the hold could be left stranded).
+ */
+export const canCancelNameChange = (c: Pick<NameChange, 'status' | 'attempts' | 'payMethod'>): boolean =>
+  c.attempts === 0 && (c.status === 'paid' || (c.status === 'paying' && c.payMethod === 'stablecoin'));
+
+/** A fee figure from the server ("1.00") as a number; NaN when it isn't one. */
+export const parseFeeUsd = (s: string | null | undefined): number => {
+  const t = (s ?? '').trim();
+  return /^\d+(\.\d+)?$/.test(t) ? Number(t) : NaN;
+};

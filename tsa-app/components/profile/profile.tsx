@@ -18,7 +18,8 @@ import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
 import { useAuth } from "@/AuthContext/AuthContext";
 import { useTheme } from "@/theme";
-import { TSA_PAY_APPLY } from "@/constants/routes";
+import { NAME_CHANGE, TSA_PAY_APPLY } from "@/constants/routes";
+import { useNameChangeEntry } from "@/hooks/useNameChangeEntry";
 import {
   AccentCard,
   Avatar,
@@ -39,6 +40,7 @@ const ProfileScreen = () => {
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
+  const nameChangeOffered = useNameChangeEntry(user?.verificationStatus === "verified");
 
   // Get token on component mount — redirect if not authenticated
   useEffect(() => {
@@ -268,6 +270,16 @@ const ProfileScreen = () => {
                 <Text variant="bodyMed" weight="600" color="success">
                   Verified
                 </Text>
+                {/* A verified name is the one on her ID: it changes by verifying again. */}
+                {nameChangeOffered ? (
+                  <Button
+                    title="Change name"
+                    size="sm"
+                    variant="ghost"
+                    fullWidth={false}
+                    onPress={() => router.push(NAME_CHANGE)}
+                  />
+                ) : null}
               </View>
             ) : user.verificationStatus === 'in_review' ? (
               <PressableScale onPress={handleKycVerification} style={{ marginTop: spacing.md }}>
