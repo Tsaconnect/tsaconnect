@@ -16,7 +16,10 @@
 // with it — again and again while the chain catches up — never paid again.
 // A hash is forgotten only once the server has used the payment: a change that
 // took it only to send it back (paid short, or too late) keeps it on this
-// phone, the reference for that refund.
+// phone, the reference for that refund. A hash the server answered for with
+// "never" — refuted (payment_mismatch), or no change it could be for
+// (no_open_change, bad_state) — is kept too, as a support case: asking again
+// would only get the same answer, and spend the route's rate limit doing it.
 import { CHAINS, getChainByChainId, type ChainKey } from '@/constants/chains';
 import { depositOutcomeUnknown } from '@/services/depositGuard';
 import {
@@ -33,6 +36,7 @@ import { errorCode } from '@/utils/payCheckout';
 const sendHoldKey = (changeId: string) => `nameChange.payment.${changeId}`;
 const txHoldKey = (changeId: string) => `nameChange.paymentTx.${changeId}`;
 const refutedKey = (changeId: string) => `nameChange.paymentRefuted.${changeId}`;
+const unmatchedKey = (changeId: string) => `nameChange.paymentUnmatched.${changeId}`;
 
 const sameAddress = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
@@ -133,15 +137,40 @@ export async function payNameChangeInStablecoin(
     if (!depositOutcomeUnknown(e)) await clearHold(holdKey);
     throw e;
   }
-  await writeHold(txHoldKey(changeId), txHash).catch((e) => console.warn('[name-change] tx hash not recorded', e));
-  return confirmSent(changeId, txHash);
+  let recorded = true;
+  await writeHold(txHoldKey(changeId), txHash).catch((e) => {
+    recorded = false;
+    console.warn('[name-change] tx hash not recorded', e);
+  });
+  if (recorded) return confirmSent(changeId, txHash);
+  // The send hold is now the only thing on this phone saying money left: it
+  // stays unless the server has plainly used the payment, and she is told the
+  // hash, which nothing here can show her again.
+  const change = await confirmNameChangePayment(txHash).catch(() => null);
+  if (change && change.status !== 'cancelled') {
+    await forgetNameChangePayment(changeId);
+    return change;
+  }
+  throw new Error(`${TX_NOT_RECORDED} ${txHash}`);
 }
+
+/** Leads the error thrown when a sent payment's hash could not be kept on this phone; the hash follows it. */
+export const TX_NOT_RECORDED =
+  'Your payment was sent, but this phone couldn’t save its transaction. Keep this hash — support may ask for it:';
+
+/** Answers that mean the server will never take `txHash` for this change: a support case, not something to ask again. */
+const TERMINAL_CODES: Record<string, (changeId: string) => string> = {
+  [NAME_CHANGE_CODES.PAYMENT_MISMATCH]: refutedKey,
+  [NAME_CHANGE_CODES.NO_OPEN_CHANGE]: unmatchedKey,
+  [NAME_CHANGE_CODES.BAD_STATE]: unmatchedKey,
+};
 
 /**
  * Confirm `txHash`. Not mined yet → null (still confirming, the hold stays).
- * Refuted → recorded as refuted (for support), the holds lifted, and thrown.
- * Taken but unusable (the change comes back cancelled, refunding) → the hash
- * is kept: it is what the refund is about.
+ * An answer that it never will be — refuted, or no change it can pay → recorded
+ * for support with its hash, the holds lifted, and thrown. Taken but unusable
+ * (the change comes back cancelled, refunding) → the hash is kept: it is what
+ * the refund is about.
  */
 async function confirmSent(changeId: string, txHash: string): Promise<NameChange | null> {
   try {
@@ -152,9 +181,11 @@ async function confirmSent(changeId: string, txHash: string): Promise<NameChange
   } catch (e) {
     const code = errorCode(e);
     if (code === NAME_CHANGE_CODES.PAYMENT_PENDING_CHAIN) return null;
-    if (code === NAME_CHANGE_CODES.PAYMENT_MISMATCH) {
+    const supportKey = code ? TERMINAL_CODES[code] : undefined;
+    if (supportKey) {
+      // Written before the holds are lifted: the hash is never not on this phone.
+      await writeHold(supportKey(changeId), txHash).catch(() => {});
       await forgetNameChangePayment(changeId);
-      await writeHold(refutedKey(changeId), txHash).catch(() => {});
     }
     throw e;
   }
@@ -167,7 +198,13 @@ export type PaymentPending =
   | { kind: 'unknown' }
   /** The server said this transaction can never pay the change: a support case. */
   | { kind: 'refuted'; txHash: string }
+  /** The server had no change this transaction could pay (none open, or not in a state to take it): a support case. */
+  | { kind: 'unmatched'; txHash: string }
   | null;
+
+/** A payment the server answered "never" for: only support can say what happens to it. */
+export const needsSupport = (p: PaymentPending): p is { kind: 'refuted' | 'unmatched'; txHash: string } =>
+  p?.kind === 'refuted' || p?.kind === 'unmatched';
 
 /** What this phone knows of a payment for `changeId` the server has not accepted. Never throws. */
 export async function paymentPending(changeId: string): Promise<PaymentPending> {
@@ -176,6 +213,8 @@ export async function paymentPending(changeId: string): Promise<PaymentPending> 
     if (tx) return { kind: 'sent', txHash: tx.intentId };
     const refuted = await readHold(refutedKey(changeId));
     if (refuted) return { kind: 'refuted', txHash: refuted.intentId };
+    const unmatched = await readHold(unmatchedKey(changeId));
+    if (unmatched) return { kind: 'unmatched', txHash: unmatched.intentId };
     return holdActive(await readHold(sendHoldKey(changeId))) ? { kind: 'unknown' } : null;
   } catch {
     // "I could not look" is not "nothing was sent".

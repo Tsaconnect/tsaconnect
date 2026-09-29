@@ -31,7 +31,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DepositOutcomeUnknownError } from '../paycrestDeposit';
 import type { NameChange, StablecoinOption, StablecoinTransfer } from '../nameChangeApi';
 import {
-  PAYMENT_CHANGED, confirmRecordedPayment, nameChangeChainKey, optionFor,
+  PAYMENT_CHANGED, TX_NOT_RECORDED, confirmRecordedPayment, nameChangeChainKey, optionFor,
   otherWalletMessage, payNameChangeInStablecoin, paymentPending, shownFromChange, stablecoinShortfall,
 } from '../nameChangePay';
 
@@ -135,6 +135,54 @@ describe('sending the fee', () => {
     mockConfirm.mockRejectedValueOnce(coded('the transaction reverted', 'payment_mismatch', 422));
     await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).rejects.toThrow('reverted');
     await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'refuted', txHash: HASH });
+  });
+
+  it.each([
+    ['no_open_change', 404],
+    ['bad_state', 409],
+  ])('%s — no change the hash can pay — is a support case too, never asked again', async (code, status) => {
+    mockConfirm.mockRejectedValueOnce(coded('Not on-chain yet', 'payment_pending_chain'));
+    await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).resolves.toBeNull();
+    mockConfirm.mockRejectedValueOnce(coded('no change', code, status));
+    await expect(confirmRecordedPayment('nc1')).rejects.toThrow('no change');
+    await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'unmatched', txHash: HASH });
+    // Nothing left to confirm with: the hash is support's now.
+    await expect(confirmRecordedPayment('nc1')).rejects.toThrow('No payment from this phone');
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('a hash this phone could not save keeps the send hold and is shown to her — unless the server used the payment', async () => {
+    const setItem = AsyncStorage.setItem as jest.Mock;
+    const original = setItem.getMockImplementation()!;
+    const failTxWrite = () => setItem.mockImplementation(async (key: string, value: string) => {
+      if (key.startsWith('nameChange.paymentTx.')) throw new Error('disk full');
+      return original(key, value);
+    });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      failTxWrite();
+      mockConfirm.mockRejectedValueOnce(coded('Not on-chain yet', 'payment_pending_chain'));
+      await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).rejects.toThrow(`${TX_NOT_RECORDED} ${HASH}`);
+      // The server has the hash (confirm stores it); this phone still knows money left, and pays nothing again.
+      expect(mockConfirm).toHaveBeenCalledWith(HASH);
+      await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'unknown' });
+
+      // Taken only to be refunded: the hold stays too.
+      await AsyncStorage.clear();
+      failTxWrite();
+      mockConfirm.mockResolvedValueOnce({ id: 'nc1', status: 'cancelled', feeStatus: 'refund_sending' });
+      await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).rejects.toThrow(TX_NOT_RECORDED);
+      await expect(paymentPending('nc1')).resolves.toEqual({ kind: 'unknown' });
+
+      // Used: nothing left to hold.
+      await AsyncStorage.clear();
+      failTxWrite();
+      await expect(payNameChangeInStablecoin('nc1', transfer, shown, WALLET)).resolves.toEqual(paid);
+      await expect(paymentPending('nc1')).resolves.toBeNull();
+    } finally {
+      setItem.mockImplementation(original);
+      warn.mockRestore();
+    }
   });
 
   it('a send the server refused lifts the hold; an unanswered one keeps it', async () => {

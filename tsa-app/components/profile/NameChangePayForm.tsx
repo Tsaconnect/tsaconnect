@@ -32,7 +32,7 @@ export const paymentKey = (p: NameChangePayment): string =>
   p.payMethod === 'stablecoin' ? `stablecoin:${p.option.chainId}:${p.option.tokenAddress.toLowerCase()}` : p.payMethod;
 
 export function NameChangePayForm({
-  overview, busy, error, walletAddress, password, onChangePassword, onPay,
+  overview, busy, error, walletAddress, password, onChangePassword, onPay, onRetry,
 }: {
   overview: NameChangeOverview;
   busy: boolean;
@@ -42,6 +42,8 @@ export function NameChangePayForm({
   password: string;
   onChangePassword: (v: string) => void;
   onPay: (payment: NameChangePayment) => void;
+  /** Read the overview again — offered when the fee could not be quoted. */
+  onRetry?: () => void;
 }) {
   const { colors, spacing } = useTheme();
   const { quote, blockers, eligible, nextAllowedAt, limits } = overview;
@@ -118,6 +120,14 @@ export function NameChangePayForm({
               <Text variant="bodySm" style={{ flex: 1 }}>{b.message}</Text>
             </View>
           ))}
+        </Card>
+      ) : null}
+
+      {/* Eligible, nothing in the way, and still no price: the quote failed, so say so rather than show a form with nothing to pay. */}
+      {eligible && blockers.length === 0 && !quote ? (
+        <Card style={{ gap: spacing.sm, borderWidth: 1, borderColor: colors.warning }}>
+          <Text variant="bodySm">We couldn’t work out the fee right now, so a name change can’t be started. Please try again in a moment.</Text>
+          {onRetry ? <Button title="Try again" variant="secondary" onPress={onRetry} fullWidth /> : null}
         </Card>
       ) : null}
 

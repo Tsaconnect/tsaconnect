@@ -70,6 +70,8 @@ export const OWNER_CODES = {
   REFERENCE_TAKEN: 'reference_taken',
   NOT_CANCELLABLE: 'not_cancellable',
   LINK_NOT_FOUND: 'link_not_found',
+  /** A business name the rule refuses (hidden characters, length, reserved or mixed-script words); the message is the reason. */
+  BUSINESS_NAME_INVALID: 'business_name_invalid',
 } as const;
 
 const request = createApiRequest({

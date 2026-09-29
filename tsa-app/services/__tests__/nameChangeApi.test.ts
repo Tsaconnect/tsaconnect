@@ -64,6 +64,10 @@ it('a start carries the screen\'s key, the choice and the password; a free chang
 
   await startNameChange({ payMethod: 'free', password: 'pw' }, 'k2');
   expect(JSON.parse(String(call(1)[1].body))).toEqual({ payMethod: 'free', password: 'pw' });
+
+  // The paying wallet is named, so the server holds the fee to the wallet this phone signs for.
+  await startNameChange(mcgpPay, 'k3', WALLET);
+  expect(call(2)[0]).toBe(`${BASE}?walletAddress=${WALLET}`);
 });
 
 it('a refusal keeps its code, blockers and next allowed date', async () => {

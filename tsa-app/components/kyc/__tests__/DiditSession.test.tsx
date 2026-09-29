@@ -19,9 +19,11 @@ jest.mock('react-native-webview', () => ({
 }));
 
 import React from 'react';
-import { Alert } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
-import { DiditWebView, isDiditFinished, isDiditOrigin, shouldLoadInDidit, shouldLoadInDiditFrame } from '../DiditSession';
+import {
+  DIDIT_ORIGIN_WHITELIST, DiditWebView, isDiditFinished, isDiditOrigin, shouldLoadInDidit, shouldLoadInDiditFrame,
+} from '../DiditSession';
 
 beforeEach(() => { mockWebView.props = null; });
 
@@ -88,6 +90,7 @@ it('the WebView: grants the camera only to the page\'s own host, allowlists navi
   await act(async () => { TestRenderer.create(<DiditWebView url="https://verify.didit.me/session/abc" onFinished={onFinished} />); });
   const p = mockWebView.props;
   expect(p.source).toEqual({ uri: 'https://verify.didit.me/session/abc' });
+  expect(p.originWhitelist).toEqual(DIDIT_ORIGIN_WHITELIST);
   expect(p.mediaCapturePermissionGrantType).toBe('grantIfSameHostElsePrompt');
   expect(p.onPermissionRequest).toBeUndefined();
 
@@ -112,4 +115,36 @@ it('a session URL that is not Didit\'s is never opened', async () => {
   expect(alert).toHaveBeenCalled();
   expect(onFinished).toHaveBeenCalledTimes(1);
   alert.mockRestore();
+});
+
+it('in react-native-webview\'s real order — the origin list, then the handler — every URL the handler decides reaches it', async () => {
+  // The library's own gate: a URL off the origin list is handed to the OS and
+  // never loaded, without the handler hearing of it.
+  const { createOnShouldStartLoadWithRequest } = jest.requireActual('react-native-webview/lib/WebViewShared');
+  const canOpen = jest.spyOn(Linking, 'canOpenURL').mockResolvedValue(false);
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const onFinished = jest.fn();
+  await act(async () => { TestRenderer.create(<DiditWebView url="https://verify.didit.me/session/abc" onFinished={onFinished} />); });
+  const p = mockWebView.props;
+  const decided: Record<string, boolean> = {};
+  const gate = createOnShouldStartLoadWithRequest(
+    (ok: boolean, url: string) => { decided[url] = ok; }, p.originWhitelist, p.onShouldStartLoadWithRequest);
+  const load = (url: string, isTopFrame: boolean) => { gate({ nativeEvent: { url, isTopFrame, lockIdentifier: 1 } }); return decided[url]; };
+
+  // A frame's srcdoc document reaches the handler (it was dropped by the list
+  // before 'about:*' was on it) and is allowed; it is not a top page.
+  expect(load('about:srcdoc', false)).toBe(true);
+  expect(load('about:blank', true)).toBe(true);
+  expect(load('about:srcdoc', true)).toBe(false);
+  expect(load('https://verify.didit.me/step/2', true)).toBe(true);
+  expect(load('https://phish.example/', false)).toBe(false);
+  expect(canOpen).not.toHaveBeenCalled();
+  // Off the list: never loaded, never reaching the handler.
+  expect(load('data:text/html,x', false)).toBe(false);
+  expect(canOpen).toHaveBeenCalledWith('data:text/html,x');
+  // The callback is on the list so the handler can catch it: not loaded, reported once.
+  expect(load('tsaconnect://kyc/callback?flow=name_change', true)).toBe(false);
+  expect(onFinished).toHaveBeenCalledTimes(1);
+  canOpen.mockRestore();
+  warn.mockRestore();
 });

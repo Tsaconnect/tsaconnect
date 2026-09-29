@@ -13,15 +13,25 @@ import type { OwnMerchant } from '@/services/payMerchantApi';
 /** A business name as the server stores it: surrounding space dropped, inner runs of space made one. */
 export const normalizeBusinessName = (name: string): string => name.split(/\s+/).filter(Boolean).join(' ');
 
+/** The server's bounds on a business name, in characters (code points — what it counts, not UTF-16 units). */
+export const BUSINESS_NAME_MIN = 2;
+export const BUSINESS_NAME_MAX = 100;
+
 /**
  * The rename to send, or what is wrong. Her current name is allowed only while
- * a rename waits: asking for it back withdraws that request.
+ * a rename waits: asking for it back withdraws that request. The rest of the
+ * rule (hidden characters, reserved names) is the server's, answered as
+ * business_name_invalid.
  */
 export function businessNameChangeFrom(
   input: string, m: Pick<OwnMerchant, 'businessName' | 'pendingBusinessName'>,
 ): { name: string } | { missing: string } {
   const name = normalizeBusinessName(input);
   if (!name) return { missing: 'Enter the new business name.' };
+  const length = [...name].length;
+  if (length < BUSINESS_NAME_MIN || length > BUSINESS_NAME_MAX) {
+    return { missing: `Enter a name of ${BUSINESS_NAME_MIN} to ${BUSINESS_NAME_MAX} characters.` };
+  }
   if (name === m.pendingBusinessName) return { missing: 'That name is already waiting for approval.' };
   if (name === normalizeBusinessName(m.businessName) && !m.pendingBusinessName) return { missing: 'That is already your business name.' };
   return { name };

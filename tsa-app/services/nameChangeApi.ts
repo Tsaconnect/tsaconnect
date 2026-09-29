@@ -212,9 +212,12 @@ export function getNameChange(wallet?: string | null): Promise<NameChangeOvervie
  * account whose wallet was never proven is sent through the wallet-link proof
  * first (by createApiRequest), then this is asked once more.
  * `idempotencyKey` is held by the screen across retries of the same payment.
+ * `wallet` is this phone's, the one that pays: named so the server holds the
+ * fee to it — a phone whose wallet is not the account's is sent through the
+ * proof first, rather than paying for (or from) a wallet it cannot sign for.
  */
-export function startNameChange(pay: NameChangePay, idempotencyKey: string): Promise<NameChangeStart> {
-  return request<NameChangeStart>('', {
+export function startNameChange(pay: NameChangePay, idempotencyKey: string, wallet?: string | null): Promise<NameChangeStart> {
+  return request<NameChangeStart>(walletQuery(wallet), {
     method: 'POST',
     body: JSON.stringify(pay),
     headers: { 'Idempotency-Key': idempotencyKey },

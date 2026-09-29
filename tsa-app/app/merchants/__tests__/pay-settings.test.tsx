@@ -327,14 +327,27 @@ describe('business name', () => {
     expect(mockAuthorization.props.visible).toBeFalsy();
   });
 
-  it('a refusal (a reserved or hidden-character name) is shown in the server\'s words', async () => {
+  it('a refused name (business_name_invalid) is told as refused, with the server\'s reason — keyed on the code, not its words', async () => {
     jest.mocked(updateBusinessName).mockRejectedValue(Object.assign(
-      new Error('invalid merchant request: a business name can\'t contain "TSA Pay"'), { status: 400, code: 'invalid_request' }));
+      new Error('a business name can\'t contain "TSA Pay"'), { status: 422, code: 'business_name_invalid' }));
     const tree = await mount();
     await rename(tree, 'TSA Pay Refunds', 'correct-horse');
     await act(async () => { mockAuthorization.props.onAuthorized(); });
     await flush();
-    expect(text(tree)).toContain('a business name can\'t contain \\"TSA Pay\\"');
+    expect(text(tree)).toContain('That name can’t be used: a business name can\'t contain \\"TSA Pay\\"');
+  });
+
+  it('a name outside 2–100 characters, counted as characters (not UTF-16 units), is caught before anything is sent', async () => {
+    const tree = await mount();
+    await rename(tree, 'S', 'correct-horse');
+    expect(text(tree)).toContain('Enter a name of 2 to 100 characters.');
+    // 100 emoji are 200 UTF-16 units but 100 characters: allowed.
+    await act(async () => { byLabel(tree, 'input:New business name').props.onChangeText('😀'.repeat(100)); });
+    await act(async () => { byLabel(tree, 'button:Request new name').props.onPress(); });
+    expect(mockAuthorization.props.visible).toBe(true);
+    await act(async () => { byLabel(tree, 'input:New business name').props.onChangeText('a'.repeat(101)); });
+    await act(async () => { byLabel(tree, 'button:Request new name').props.onPress(); });
+    expect(text(tree)).toContain('Enter a name of 2 to 100 characters.');
   });
 
   it('with renames switched off (or an API that does not say), the name shows and there is no way to ask', async () => {

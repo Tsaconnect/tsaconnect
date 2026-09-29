@@ -154,7 +154,10 @@ export default function PaySettings() {
       const why = errorCode(e);
       setFormError(why === OWNER_CODES.NAME_MISMATCH && resolvedName
         ? `${errorMessage(e, '')} The bank says this account belongs to ${resolvedName}.`
-        : errorMessage(e, owner.kind === 'business_name' ? 'Could not request the new business name.' : 'Could not save your payment settings.'));
+        // The code says the name was refused; its message is only the reason.
+        : why === OWNER_CODES.BUSINESS_NAME_INVALID
+          ? `That name can’t be used: ${errorMessage(e, 'it breaks the business name rules')}`
+          : errorMessage(e, owner.kind === 'business_name' ? 'Could not request the new business name.' : 'Could not save your payment settings.'));
       if (why === OWNER_CODES.STALE) void refresh();
     } finally {
       submitting.current = false;

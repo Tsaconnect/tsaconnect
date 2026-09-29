@@ -227,10 +227,15 @@ describe('before a change', () => {
     expect(has(tree, 'button:Pay $1.00')).toBe(false);
   });
 
-  it('no quote (null) means no payment form, whatever else the overview says', async () => {
+  it('no quote (null) means no payment form, whatever else the overview says — and says the fee couldn\'t be worked out', async () => {
     const tree = await mount(overview({ quote: null }));
     expect(has(tree, 'button:Pay $1.00')).toBe(false);
     expect(has(tree, 'input:Account password')).toBe(false);
+    expect(text(tree)).toContain('We couldn’t work out the fee right now');
+    jest.mocked(getNameChange).mockResolvedValue(overview());
+    await press(tree, 'button:Try again');
+    await flush();
+    expect(has(tree, 'button:Pay $1.00')).toBe(true);
   });
 
   it.each([
@@ -298,7 +303,7 @@ describe('paying the fee', () => {
     jest.mocked(getNameChange).mockResolvedValue(withChange(changeOf('paid')));
     await authorize();
     expect(signMessage).not.toHaveBeenCalled();
-    expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'mcgp_spendable', password: 'correct-horse' }, expect.any(String));
+    expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'mcgp_spendable', password: 'correct-horse' }, expect.any(String), WALLET);
     expect(payNameChangeInStablecoin).not.toHaveBeenCalled();
     expect(text(tree)).toContain('button:Verify your identity');
   });
@@ -310,7 +315,7 @@ describe('paying the fee', () => {
     jest.mocked(startNameChange).mockResolvedValue({ change: changeOf('paid', { payMethod: 'free' }) });
     await press(tree, 'button:Continue');
     await authorize();
-    expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'free', password: 'correct-horse' }, expect.any(String));
+    expect(startNameChange).toHaveBeenCalledWith({ payMethod: 'free', password: 'correct-horse' }, expect.any(String), null);
   });
 
   it('a stablecoin: the coin she picks, the transfer the server returns, sent from her wallet', async () => {
@@ -334,7 +339,7 @@ describe('paying the fee', () => {
     expect(stablecoinShortfall).toHaveBeenCalledWith(usdc, WALLET);
     expect(startNameChange).toHaveBeenCalledWith({
       payMethod: 'stablecoin', chain: 'base', token: 'USDC', password: 'correct-horse',
-    }, expect.any(String));
+    }, expect.any(String), WALLET);
     expect(payNameChangeInStablecoin).toHaveBeenCalledWith('nc1', transfer, usdc, WALLET);
     expect(text(tree)).toContain('button:Verify your identity');
   });
@@ -358,6 +363,60 @@ describe('paying the fee', () => {
     const third = jest.mocked(startNameChange).mock.calls[2];
     expect(third[1]).not.toBe(first[1]);
     expect(third[0]).toMatchObject({ payMethod: 'stablecoin', chain: 'base', token: 'USDC' });
+  });
+
+  it('a lost answer whose change then shows: starting over is a new request with a new key', async () => {
+    const tree = await mount(overview());
+    await typePassword(tree);
+    jest.mocked(startNameChange).mockRejectedValueOnce(new ApiError('Could not reach the server.', 0, TRANSPORT_ERROR));
+    // The request the answer was lost for did create a change (cancelled since): the re-read shows it.
+    jest.mocked(getNameChange).mockResolvedValue(withChange(changeOf('cancelled', { feeStatus: 'reversed' }), { eligible: true, quote }));
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    expect(text(tree)).toContain('Name change cancelled');
+
+    await press(tree, 'button:Change my name again');
+    await typePassword(tree);
+    jest.mocked(startNameChange).mockResolvedValue({ change: changeOf('paid', { id: 'nc2' }) });
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    const [first, second] = jest.mocked(startNameChange).mock.calls;
+    // Same choice, but not the same request: the old key would only replay the first change's creation.
+    expect(second[0]).toEqual(first[0]);
+    expect(second[1]).not.toBe(first[1]);
+  });
+
+  it('a lost answer while an older change still shows is retried with the same key; a new change seen ends it', async () => {
+    const old = changeOf('rejected', { id: 'old', attempts: 1 });
+    const tree = await mount(overview({ change: old, eligible: true }));
+    await press(tree, 'button:Change my name again');
+    await typePassword(tree);
+    jest.mocked(startNameChange).mockRejectedValue(new ApiError('Could not reach the server.', 0, TRANSPORT_ERROR));
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    const [first, second] = jest.mocked(startNameChange).mock.calls;
+    expect(second[1]).toBe(first[1]);
+
+    // The re-read now shows a change made since (the lost request's): that request is over.
+    jest.mocked(getNameChange).mockResolvedValue(overview({ change: changeOf('rejected', { id: 'nc2', attempts: 1 }), eligible: true }));
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    const [, , third, fourth] = jest.mocked(startNameChange).mock.calls;
+    expect(third[1]).toBe(first[1]);
+    expect(fourth[1]).not.toBe(first[1]);
+  });
+
+  it('names this phone\'s wallet on the create, so the server holds the fee to the wallet that pays', async () => {
+    const tree = await mount(overview());
+    await typePassword(tree);
+    jest.mocked(startNameChange).mockResolvedValue({ change: changeOf('paid') });
+    await press(tree, 'button:Pay $1.00');
+    await authorize();
+    expect(startNameChange).toHaveBeenCalledWith(expect.anything(), expect.any(String), WALLET);
   });
 
   it.each([
@@ -446,6 +505,58 @@ describe('paying the fee', () => {
     await flush();
     expect(text(tree)).toContain('button:Verify your identity');
     expect(payNameChangeInStablecoin).not.toHaveBeenCalled();
+  });
+
+  it('confirming is paced: every poll reads the change, the hash is asked about at most every 30 s', async () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      jest.mocked(paymentPending).mockResolvedValue({ kind: 'sent', txHash: HASH });
+      jest.mocked(confirmRecordedPayment).mockResolvedValue(null);
+      await mount(withChange(stableChange('paying')));
+      expect(confirmRecordedPayment).toHaveBeenCalledTimes(1);
+      const [poll] = mockPolling.args;
+      const reads = jest.mocked(getNameChange).mock.calls.length;
+      await act(async () => { await poll(); });
+      await act(async () => { await poll(); });
+      expect(getNameChange).toHaveBeenCalledTimes(reads + 2);
+      expect(confirmRecordedPayment).toHaveBeenCalledTimes(1);
+      now.mockReturnValue(1_000_000 + 30_000);
+      await act(async () => { await poll(); });
+      expect(confirmRecordedPayment).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('an answer of "no change it can pay" (no_open_change / bad_state) is terminal: a support case, polling stops', async () => {
+    jest.mocked(paymentPending).mockResolvedValue({ kind: 'unmatched', txHash: HASH });
+    const tree = await mount(withChange(stableChange('paying')));
+    expect(text(tree)).toContain('This payment couldn’t be used');
+    expect(text(tree)).toContain('We couldn’t match this transaction');
+    expect(text(tree)).toContain(`Transaction:${HASH}`);
+    expect(mockPolling.args[2]).toBe(false);
+    expect(confirmRecordedPayment).not.toHaveBeenCalled();
+    expect(has(tree, 'button:Pay now')).toBe(false);
+  });
+
+  it('a closed change whose payment support now holds shows the hash, and neither confirms nor polls', async () => {
+    jest.mocked(paymentPending).mockResolvedValue({ kind: 'unmatched', txHash: HASH });
+    const tree = await mount(withChange(stableChange('cancelled', { feeStatus: 'none' })));
+    expect(text(tree)).toContain(`Transaction:${HASH}`);
+    expect(mockPolling.args[2]).toBe(false);
+    expect(confirmRecordedPayment).not.toHaveBeenCalled();
+    expect(forgetNameChangePayment).not.toHaveBeenCalled();
+  });
+
+  it('cancelling beside a payment support holds never says nothing was charged', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    jest.mocked(paymentPending).mockResolvedValue({ kind: 'refuted', txHash: HASH });
+    const tree = await mount(withChange(stableChange('paying')));
+    await press(tree, 'button:Cancel name change');
+    const message = alert.mock.calls[0][1] as string;
+    expect(message).not.toContain('Nothing has been charged');
+    expect(message).toContain('isn’t returned by cancelling');
+    alert.mockRestore();
   });
 
   it('payment_mismatch: a support case, with the transaction to quote', async () => {

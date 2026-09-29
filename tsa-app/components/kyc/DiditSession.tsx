@@ -11,10 +11,24 @@
 // any other origin is never loaded in it, as the page or in a frame of it
 // (DIDIT_HOSTS, https only). On iOS the
 // camera is granted without asking only to the host of the page on screen
-// (anything else prompts). react-native-webview 13.15 has no JS permission
-// hook on Android — its native client grants the camera to whatever page is
-// loaded once the app holds the permission — so there the allowlist on what
-// loads is the whole guard, which is why nothing but Didit is ever loaded.
+// (anything else prompts).
+//
+// Android is weaker, and nothing in this file can make it otherwise:
+// react-native-webview 13.15 has no JS permission hook there (no
+// onPermissionRequest prop — so there is no origin to check), and its native
+// client grants the camera to whatever page is loaded once the app holds the
+// permission. Nor does Android's WebView ask onShouldStartLoadWithRequest
+// about an ordinary http(s) frame — only about top-frame navigations — so a
+// frame Didit's page embeds loads unchecked and shares the camera grant. On
+// Android the guard is therefore that the top-level page is only ever Didit's,
+// and what Didit's own page chooses to frame is trusted as Didit.
+//
+// react-native-webview checks originWhitelist BEFORE onShouldStartLoadWithRequest:
+// a URL whose origin is not on the list never reaches the handler — it is
+// handed to the OS (Linking.openURL) and not loaded. So the list names every
+// scheme the handler is meant to decide (https for Didit, our callback, about:
+// for a frame's own blank/srcdoc document); the handler then allows only
+// Didit and the blank documents it names.
 import React from 'react';
 import { Alert, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -90,6 +104,13 @@ export function isDiditFinished(navUrl: string): boolean {
 }
 
 /**
+ * What the session WebView hands its handler (react-native-webview's origin
+ * list, checked first): Didit (https), the callback, and frames' blank
+ * documents — every URL shouldLoadInDidit/shouldLoadInDiditFrame decide.
+ */
+export const DIDIT_ORIGIN_WHITELIST = ['https://*', 'tsaconnect://*', 'about:*'];
+
+/**
  * Whether the session WebView may load `url`. The end of the flow is caught
  * here — never loaded, so the callback deep link is not handed to the OS (which
  * would open the first-time KYC route) — and reported through `onFinished`.
@@ -132,7 +153,7 @@ export function DiditWebView({ url, onFinished }: { url: string; onFinished: () 
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <WebView
         source={{ uri: url }}
-        originWhitelist={['https://*', 'tsaconnect://*']}
+        originWhitelist={DIDIT_ORIGIN_WHITELIST}
         onShouldStartLoadWithRequest={(req) =>
           (req.isTopFrame === false ? shouldLoadInDiditFrame(req.url) : shouldLoadInDidit(req.url, finish))}
         // A redirect some platforms report only here.
