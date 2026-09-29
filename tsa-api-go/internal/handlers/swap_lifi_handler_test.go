@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -458,6 +459,72 @@ func TestGetAllChainTokens_SearchRanksExactAndVerifiedFirst(t *testing.T) {
 	}
 	if body.Tokens[0].Address != "0x833589fc" {
 		t.Fatalf("first result = %+v, want the verified USDC", body.Tokens[0])
+	}
+}
+
+// The picker asks, in one request, which of the tokens a wallet holds LiFi can
+// swap: exact chain+address pairs, case-insensitive, never a flagged token.
+func TestGetAllChainTokens_TokensExactPairs(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"tokens":{
+			"8453":[
+				{"address":"0xNest","symbol":"NEST","decimals":18,"name":"Nest","chainId":8453,"verificationStatus":"unverified"},
+				{"address":"0xnest2","symbol":"NEST2","decimals":18,"name":"Nest two","chainId":8453,"verificationStatus":"unverified"},
+				{"address":"0xbad","symbol":"USDT","decimals":6,"name":"Tether Drainer","chainId":8453,"verificationStatus":"flagged"}
+			],
+			"56":[{"address":"0x55d3","symbol":"USDT","decimals":18,"name":"Tether","chainId":56,"coinKey":"USDT","verificationStatus":"verified"}]
+		}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+	r.GET("/swap/lifi/tokens/all", h.GetAllChainTokens)
+
+	// 0x55d3 is asked for on the wrong chain too: a pair matches on both halves.
+	req := httptest.NewRequest("GET", "/swap/lifi/tokens/all?tokens=8453:0xNEST,56:0x55D3,8453:0xbad,8453:0x55d3,junk", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Tokens []tokenWithChain `json:"tokens"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tok := range body.Tokens {
+		got[fmt.Sprintf("%d:%s", tok.ChainID, tok.Address)] = true
+	}
+	if len(got) != 2 || !got["8453:0xNest"] || !got["56:0x55d3"] {
+		t.Fatalf("tokens = %+v, want exactly 8453:0xNest and 56:0x55d3", body.Tokens)
+	}
+}
+
+func TestParseTokenPairs(t *testing.T) {
+	if parseTokenPairs("  ") != nil {
+		t.Fatal("an absent param must be nil, not an empty filter that matches nothing")
+	}
+	got := parseTokenPairs(":0xabc,0:0xabc,-1:0xabc,x:0xabc,56:,56,56:0xAbC, 8453:0xdef ")
+	if len(got) != 2 {
+		t.Fatalf("got %v, want only 56:0xabc and 8453:0xdef", got)
+	}
+	for _, k := range []string{"56:0xabc", "8453:0xdef"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("missing %s in %v", k, got)
+		}
+	}
+
+	var many []string
+	for i := 0; i < maxTokenPairs+50; i++ {
+		many = append(many, fmt.Sprintf("1:0x%x", i))
+	}
+	if n := len(parseTokenPairs(strings.Join(many, ","))); n != maxTokenPairs {
+		t.Fatalf("read %d pairs, want the cap of %d", n, maxTokenPairs)
 	}
 }
 

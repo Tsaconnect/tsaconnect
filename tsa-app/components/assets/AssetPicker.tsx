@@ -7,7 +7,8 @@
 // screen only says which side it is and what to do with the choice.
 //
 // `holdingsOnly` turns it into the sell flow's list: only coins the wallet
-// holds, only the networks it holds them on, and no search.
+// holds, only the networks it holds them on, and no search. On the receiving
+// side MCGP's balance is Spendable MCGP (hooks/useAssetCatalog), and says so.
 //
 // Contract with the screen is unchanged from the old TokenPickerModal:
 // onSelect(token, chainId).
@@ -24,6 +25,7 @@ import {
 } from '@/services/lifi';
 import { networksForSide, type Asset, type AssetNetwork, type PickerSide } from '@/services/assetCatalog';
 import { useAssetCatalog } from '@/hooks/useAssetCatalog';
+import { isWalletMcgp } from '@/utils/walletMcgp';
 
 export interface AssetPickerProps {
   visible: boolean;
@@ -97,9 +99,11 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
   const [query, setQuery] = useState('');
   const [networkFor, setNetworkFor] = useState<Asset | null>(null);
   const lifi = useLiFiChainNames(visible);
-  const { sections, loading, searching, error, hidesHeld } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
+  const { sections, loading, searching, error, hidesHeld, showsSpendableMcgp } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
   const showNote = !!note && !loading && (!allow || hidesHeld);
   const networksOf = (asset: Asset) => networksForSide(asset, side, allow, holdingsOnly);
+  const showsSpendable = (asset: Asset) =>
+    showsSpendableMcgp && asset.networks.some(n => (n.balance ?? 0) > 0 && isWalletMcgp(n.chainId, n.token));
 
   // Every open starts clean.
   useEffect(() => {
@@ -210,7 +214,7 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
                   key={asset.key}
                   onPress={() => tapAsset(asset)}
                   accessibilityRole="button"
-                  accessibilityLabel={`${asset.symbol}, ${sub}${asset.balance > 0 ? `, you hold ${fmtAmount(asset.balance)}` : ''}`}
+                  accessibilityLabel={`${asset.symbol}, ${sub}${asset.balance > 0 ? `, you hold ${fmtAmount(asset.balance)}${showsSpendable(asset) ? ' Spendable' : ''}` : ''}`}
                   style={{
                     flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md,
                     borderBottomWidth: 1, borderBottomColor: colors.hairline,
@@ -226,6 +230,7 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
                       <Text variant="bodyMed" weight="700" numberOfLines={1}>{asset.symbol}</Text>
                       {section.id === 'tsa' ? <Pill label="TSA" fg={colors.accent} bg={colors.accentMuted} /> : null}
+                      {showsSpendable(asset) ? <Pill label="Spendable" fg={colors.success} bg={colors.successBg} /> : null}
                       {isUnverified(asset, section.id) ? <Pill label="Unverified" fg={colors.warning} bg={colors.warningBg} /> : null}
                     </View>
                     <Text variant="caption" color="textSecondary" numberOfLines={1}>{asset.name} · {sub}</Text>

@@ -14,9 +14,10 @@ export type TokenLogoSource = { uri: string } | number;
 // a token by address, keyed `${chainId}:${lowercase address}`. MCGP is the one
 // that matters: LiFi carries no logo for it. Same address on both Sonic
 // networks (tsa-api-go config.go sonicPresets).
+export const MCGP_CONTRACT = '0x517600323e5e2938207fa2e2e915b9d80e5b2b21';
 const KNOWN_CONTRACTS: Record<string, string> = {
-  '146:0x517600323e5e2938207fa2e2e915b9d80e5b2b21': 'MCGP',
-  '14601:0x517600323e5e2938207fa2e2e915b9d80e5b2b21': 'MCGP',
+  [`146:${MCGP_CONTRACT}`]: 'MCGP',
+  [`14601:${MCGP_CONTRACT}`]: 'MCGP',
 };
 
 /**

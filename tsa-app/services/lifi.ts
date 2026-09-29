@@ -267,6 +267,8 @@ export async function getLiFiAllChainTokens(params: {
   chains?: number[];
   /** Only VERIFIED tokens with these coinKeys (the picker's major coins). */
   coinKeys?: string[];
+  /** Only these exact tokens (at most 200): which of a wallet's coins LiFi can swap. */
+  tokens?: { chainId: number; address: string }[];
 }): Promise<AllChainTokensPage> {
   const headers = await getAuthHeaders();
   const qs = new URLSearchParams();
@@ -275,6 +277,9 @@ export async function getLiFiAllChainTokens(params: {
   if (params.q && params.q.trim()) qs.append('q', params.q.trim());
   if (params.chains && params.chains.length > 0) qs.append('chains', params.chains.join(','));
   if (params.coinKeys && params.coinKeys.length > 0) qs.append('coinKeys', params.coinKeys.join(','));
+  if (params.tokens && params.tokens.length > 0) {
+    qs.append('tokens', params.tokens.map(t => `${t.chainId}:${t.address}`).join(','));
+  }
   const url = `${API_BASE_URL}/swap/lifi/tokens/all${qs.toString() ? `?${qs.toString()}` : ''}`;
   const res = await fetch(url, { headers });
   if (!res.ok) throw new Error('Failed to fetch all-chain token list');

@@ -11,15 +11,19 @@ jest.mock('@/services/wallet', () => ({ getActiveWallet: jest.fn() }));
 jest.mock('@/services/walletApi', () => ({
   ...jest.requireActual('@/services/walletApi'),
   getWalletBalances: jest.fn(),
+  getDiscoveredTokens: jest.fn(async () => ({ success: false })),
   // The rows below are already normalized.
   normalizeWalletBalances: (rows: unknown) => rows,
 }));
+jest.mock('@/hooks/useNetwork', () => ({ getNetwork: () => 'mainnet' }));
 jest.mock('@/services/chains/solanaWallet', () => ({ getSolanaAddress: jest.fn(async () => null), getSolanaBalances: jest.fn() }));
 jest.mock('@/services/chains/btcWallet', () => ({ getBtcAddress: jest.fn(async () => null), getBtcBalances: jest.fn() }));
 jest.mock('@/services/chains/suiWallet', () => ({ getSuiAddress: jest.fn(async () => null), getSuiBalances: jest.fn() }));
 
 // eslint-disable-next-line import/first -- jest hoists the mocks above.
-import { holdingFromRow, useWalletHoldings, invalidateWalletHoldings, prefetchWalletHoldings } from '../useWalletHoldings';
+import {
+  holdingFromRow, newDiscoveries, useWalletHoldings, invalidateWalletHoldings, prefetchWalletHoldings,
+} from '../useWalletHoldings';
 // eslint-disable-next-line import/first
 import React from 'react';
 // eslint-disable-next-line import/first
@@ -27,7 +31,7 @@ import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 // eslint-disable-next-line import/first
 import { getActiveWallet } from '@/services/wallet';
 // eslint-disable-next-line import/first
-import { getWalletBalances } from '@/services/walletApi';
+import { getDiscoveredTokens, getWalletBalances } from '@/services/walletApi';
 // eslint-disable-next-line import/first
 import { getSolanaAddress } from '@/services/chains/solanaWallet';
 // eslint-disable-next-line import/first
@@ -36,6 +40,8 @@ import { getBtcAddress } from '@/services/chains/btcWallet';
 import { getSuiAddress } from '@/services/chains/suiWallet';
 // eslint-disable-next-line import/first
 import type { WalletBalanceWithChain } from '@/services/walletApi';
+// eslint-disable-next-line import/first
+import type { Holding } from '@/services/assetCatalog';
 
 const row = (over: Partial<WalletBalanceWithChain>): WalletBalanceWithChain => ({
   symbol: 'USDC', name: 'USD Coin', balance: '5', usdValue: '5', contractAddress: '', decimals: 6,
@@ -238,4 +244,65 @@ describe('loading', () => {
       clock.mockRestore();
     }
   });
+});
+
+// Every other ERC-20 the wallet holds, from the same discovery the wallet
+// screen uses: added unvouched, and never a second row for one of ours.
+describe('discovery', () => {
+  const discoveredAnswer = {
+    success: true,
+    data: {
+      walletAddress: '0xD',
+      providerAvailable: true,
+      tokens: [
+        { chain: 'base', contractAddress: '0xusdc', symbol: 'USDC', name: 'USD Coin', decimals: 6, balance: '5000000', usdValue: 5, source: 'ankr' },
+        { chain: 'base', contractAddress: '0xDegen', symbol: 'DEGEN', name: 'Degen', decimals: 18, balance: '2500000000000000000', usdValue: 0.01, source: 'ankr' },
+        { chain: 'nowhere', contractAddress: '0xabc', symbol: 'X', name: 'X', decimals: 18, balance: '1', usdValue: 0, source: 'ankr' },
+      ],
+    },
+  };
+  let seen: { holdings: Holding[]; loading: boolean }[] = [];
+  function Probe() { seen.push(useWalletHoldings(true)); return null; }
+  const last = () => seen[seen.length - 1];
+  beforeEach(() => {
+    seen = [];
+    mockStore.clear();
+    invalidateWalletHoldings();
+    (getActiveWallet as jest.Mock).mockResolvedValue('0xD');
+    (getWalletBalances as jest.Mock).mockResolvedValueOnce({ success: true, data: [row({ contractAddress: '0xUSDC' })] });
+  });
+
+  it('adds discovered tokens the supported list does not cover', async () => {
+    (getDiscoveredTokens as jest.Mock).mockResolvedValueOnce(discoveredAnswer);
+    let tree!: ReactTestRenderer;
+    await act(async () => { tree = TestRenderer.create(React.createElement(Probe)); });
+    const held = last().holdings;
+    expect(held).toHaveLength(2);
+    expect(held.find(h => h.symbol === 'USDC')).toMatchObject({ trusted: true, balance: 5 });
+    expect(held.find(h => h.symbol === 'DEGEN')).toMatchObject({
+      chainId: 8453, address: '0xDegen', native: false, trusted: false, balance: 2.5, usdValue: 0.01,
+    });
+    tree.unmount();
+  });
+
+  // The indexer can take 25s on a cold cache; the sell list must not.
+  it('shows the balances without waiting for discovery, which joins when it lands', async () => {
+    let answer!: (v: unknown) => void;
+    (getDiscoveredTokens as jest.Mock).mockReturnValueOnce(new Promise(r => { answer = r; }));
+    let tree!: ReactTestRenderer;
+    await act(async () => { tree = TestRenderer.create(React.createElement(Probe)); });
+    expect(last().loading).toBe(false);
+    expect(last().holdings.map(h => h.symbol)).toEqual(['USDC']);
+
+    await act(async () => { answer(discoveredAnswer); });
+    expect(last().holdings.map(h => h.symbol)).toEqual(['USDC', 'DEGEN']);
+    tree.unmount();
+  });
+});
+
+it('matches a discovered token to ours by contract, not by its symbol', () => {
+  const ours = holdingFromRow(row({ contractAddress: '0xUSDC' }), true)!;
+  const lookalike = { ...ours, address: '0xfake', trusted: false };
+  const same = { ...ours, address: '0xusdc', trusted: false };
+  expect(newDiscoveries([ours], [lookalike, same])).toEqual([lookalike]);
 });

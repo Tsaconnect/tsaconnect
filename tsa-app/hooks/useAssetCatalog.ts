@@ -5,7 +5,8 @@
 //
 //   - "On TSA": the admin's Spot listings (base legs), resolved to LiFi tokens
 //   - "Stablecoins & major coins": MAJOR_COIN_KEYS, verified tokens only
-//   - "In your wallet": other coins the wallet holds
+//   - "In your wallet": other coins the wallet holds — ours, and any other token
+//     it holds that LiFi can swap
 //   - search: by name/symbol through the all-chains endpoint, or by pasted
 //     contract address looked up across chains
 //
@@ -13,6 +14,11 @@
 //
 // With `holdingsOnly` the same sections carry only what the wallet holds, and
 // search is off — the sell flow picks from her balances, not the catalogue.
+//
+// On the receiving side MCGP shows the Spendable MCGP balance, the only MCGP
+// usable in the app, not wallet MCGP. Never on the paying side: there the
+// balance is what the flow will move (All Swap spends wallet MCGP; the sell and
+// pay flows never offer it).
 //
 // Opening fast: the majors and the resolved On TSA coins are kept on the device
 // and shown at once on the next launch, and the reads start when the screen
@@ -27,6 +33,9 @@ import {
   MAJOR_COIN_KEYS, groupAssets, attachHoldings, assetFromHolding, buildSections, networksForSide,
   onlyMajorTokens, type Asset, type AssetSection, type PickerSide,
 } from '@/services/assetCatalog';
+import { withSpendableMcgp } from '@/utils/walletMcgp';
+import { resetSpendableMcgpCache, useSpendableMcgp } from '@/hooks/useSpendableMcgp';
+import { resetSwappableHeldCache, useSwappableHeld } from '@/hooks/useSwappableHeld';
 import { useSpotListings } from '@/hooks/useSpotListings';
 import { prefetchWalletHoldings, useWalletHoldings } from '@/hooks/useWalletHoldings';
 import { persistedCache } from '@/services/persistedCache';
@@ -222,8 +231,26 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     // eslint-disable-next-line react-hooks/exhaustive-deps -- allow is read at search time; a new function identity must not re-run the search.
   }, [visible, query, side, holdingsOnly]);
 
+  // The balances the list shows (see the MCGP note at the top).
+  const showsSpendableMcgp = side === 'to' && !holdingsOnly;
+  const spendableMcgp = useSpendableMcgp(visible && showsSpendableMcgp);
+  const shownHoldings = useMemo(
+    () => (showsSpendableMcgp ? withSpendableMcgp(holdings, spendableMcgp) : holdings),
+    [holdings, showsSpendableMcgp, spendableMcgp],
+  );
+
+  // Listed and major tokens are grouped TOGETHER, so a coin listed on one
+  // chain still shows every network it has; the listing only decides that
+  // it sits under "On TSA".
+  const known = useMemo(
+    () => attachHoldings(groupAssets([...listedTokens, ...majorTokens]), shownHoldings),
+    [listedTokens, majorTokens, shownHoldings],
+  );
+  const unvouched = useMemo(() => known.unmatched.filter(h => !h.trusted), [known]);
+  const swappableHeld = useSwappableHeld(unvouched, visible);
+
   const sections: AssetSection[] = useMemo(() => {
-    const withHoldings = (list: Asset[]) => attachHoldings(list, holdings).assets;
+    const withHoldings = (list: Asset[]) => attachHoldings(list, shownHoldings).assets;
 
     if (!holdingsOnly && query.trim().length >= 2) {
       if (!searchAssets) return [];
@@ -234,19 +261,16 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
       return found.length ? [{ id: 'search', title: 'Search results', assets: found }] : [];
     }
 
-    // Listed and major tokens are grouped TOGETHER, so a coin listed on one
-    // chain still shows every network it has; the listing only decides that
-    // it sits under "On TSA".
-    const known = attachHoldings(groupAssets([...listedTokens, ...majorTokens]), holdings);
     const listedAddrs = new Set(listedTokens.map(t => `${t.chainId}:${t.address.toLowerCase()}`));
     const isListed = (a: Asset) => a.networks.some(n => listedAddrs.has(`${n.chainId}:${n.token.address.toLowerCase()}`)
       || (n.alternates ?? []).some(t => listedAddrs.has(`${n.chainId}:${t.address.toLowerCase()}`)));
     const listed = known.assets.filter(isListed);
     const majors = known.assets.filter(a => !isListed(a));
-    // Held coins not already covered, including tokens LiFi's lists lack.
-    const held = known.unmatched.map(assetFromHolding);
+    // Held coins not already covered: ours as they are (LiFi's lists may lack
+    // them), the rest as LiFi knows them, so a verified one is labelled so.
+    const held = [...known.unmatched.filter(h => h.trusted).map(assetFromHolding), ...swappableHeld];
     return buildSections({ listed, majors, held, side, allow, holdingsOnly });
-  }, [query, searchAssets, listedTokens, majorTokens, holdings, side, allow, holdingsOnly]);
+  }, [query, searchAssets, listedTokens, known, swappableHeld, shownHoldings, side, allow, holdingsOnly]);
 
   // Whether `allow` keeps back a coin the wallet actually holds: the only case
   // in which a picker's "why isn't X here" note says anything.
@@ -266,6 +290,8 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     searching,
     error: isSearch ? searchError : error,
     hidesHeld,
+    /** MCGP balances in `sections` are Spendable MCGP, not wallet MCGP. */
+    showsSpendableMcgp,
   };
 }
 
@@ -274,4 +300,6 @@ export function resetAssetCatalogCache() {
   majorsCache = null;
   lastListed = null;
   listingTokenCache.clear();
+  resetSpendableMcgpCache();
+  resetSwappableHeldCache();
 }

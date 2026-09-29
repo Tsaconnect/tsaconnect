@@ -302,6 +302,9 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 //   - coinKeys (optional, comma-separated LiFi coinKeys, e.g. USDC,USDT,ETH):
 //     only VERIFIED tokens with one of these keys — the picker's default list
 //     of major coins in a single request
+//   - tokens (optional, comma-separated chainId:address pairs, max 200): only
+//     those exact tokens — which of the coins a wallet holds LiFi can swap,
+//     answered in one request
 //
 // Response: {"tokens": [...], "total": N, "offset": O, "limit": L}
 func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
@@ -335,6 +338,8 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 		}
 	}
 
+	pairs := parseTokenPairs(c.Query("tokens"))
+
 	flat, err := h.getOrFetchAllTokens()
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
@@ -343,7 +348,7 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 
 	// Filter
 	filtered := flat
-	if chainsFilter != nil || q != "" || coinKeys != nil {
+	if chainsFilter != nil || q != "" || coinKeys != nil || pairs != nil {
 		filtered = make([]tokenWithChain, 0, 1024)
 		for i := range flat {
 			t := &flat[i]
@@ -354,6 +359,11 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 			}
 			if coinKeys != nil {
 				if _, ok := coinKeys[strings.ToUpper(t.CoinKey)]; !ok || t.VerificationStatus != "verified" {
+					continue
+				}
+			}
+			if pairs != nil {
+				if _, ok := pairs[tokenPairKey(t.ChainID, t.Address)]; !ok {
 					continue
 				}
 			}
@@ -405,6 +415,34 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 		"offset": offset,
 		"limit":  limit,
 	})
+}
+
+const maxTokenPairs = 200
+
+func tokenPairKey(chainID int, address string) string {
+	return strconv.Itoa(chainID) + ":" + strings.ToLower(address)
+}
+
+// parseTokenPairs reads "chainId:address,…" into a set; nil when the param is
+// absent. Malformed entries are skipped, and reading stops at maxTokenPairs,
+// so a huge parameter is never split whole.
+func parseTokenPairs(raw string) map[string]struct{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	pairs := make(map[string]struct{})
+	for rest := raw; rest != "" && len(pairs) < maxTokenPairs; {
+		var entry string
+		entry, rest, _ = strings.Cut(rest, ",")
+		chain, address, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		id, err := strconv.Atoi(chain)
+		if !ok || err != nil || id <= 0 || address == "" {
+			continue
+		}
+		pairs[tokenPairKey(id, address)] = struct{}{}
+	}
+	return pairs
 }
 
 func parsePositiveInt(raw string, def int) int {

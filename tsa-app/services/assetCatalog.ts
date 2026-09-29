@@ -353,7 +353,8 @@ export function buildSections({
 
   const order = new Map<string, number>(MAJOR_COIN_KEYS.map((k, i) => [k, i]));
   const sortedMajors = [...majors].sort((a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99));
-  const sortedHeld = [...held].sort((a, b) => b.usdValue - a.usdValue);
+  // Coins someone vouches for first: an airdrop's indexer price can be anything.
+  const sortedHeld = [...held].sort((a, b) => Number(b.vouched) - Number(a.vouched) || b.usdValue - a.usdValue);
 
   return [
     { id: 'tsa' as const, title: 'On TSA', assets: usable(listed) },

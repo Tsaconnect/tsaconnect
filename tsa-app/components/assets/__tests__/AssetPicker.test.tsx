@@ -84,10 +84,17 @@ jest.mock('@/services/lifi', () => {
     t('USDT', 8453), { ...t('USDT', 56), address: '0xusdt56' },
     t('BNB', 56, { address: '0x0000000000000000000000000000000000000000' }),
   ];
-  const listing = t('MCGP', 146);
+  const listing = t('MCGP', 146, { address: '0x517600323e5e2938207fa2e2e915b9d80e5b2b21' });
   // What an API without the coinKeys filter sends back: alphabetical junk.
   const oldApiJunk = [t('SHOP', 1, { coinKey: undefined }), t('$COOL', 8453, { verificationStatus: 'unverified' })];
-  const state = { oldApi: false };
+  const state = { oldApi: false, tokensDown: false };
+  // Held tokens nobody vouches for that LiFi carries (unverified). Anything
+  // else the wallet holds unvouched is not on LiFi.
+  const onLiFi = [
+    t('USDC', 9270000000000000, { address: '0xbad1::usdc::USDC', verificationStatus: 'unverified' }),
+    t('MCGP', 146, { address: '0x000000000000000000000000000000000000bEEF', coinKey: undefined, verificationStatus: 'unverified', name: 'Look-alike' }),
+    t('DEGEN', 8453, { address: '0xdegen', coinKey: undefined, verificationStatus: 'unverified', name: 'Degen' }),
+  ];
   const search = [
     t('SHOP', 1, { coinKey: undefined, verificationStatus: 'unverified', name: 'Shopping.io' }),
   ];
@@ -95,6 +102,12 @@ jest.mock('@/services/lifi', () => {
     ...actual,
     __state: state,
     getLiFiAllChainTokens: jest.fn(async (p: any) => {
+      if (p.tokens) {
+        if (state.tokensDown) throw new Error('offline');
+        const asked = new Set(p.tokens.map((x: any) => `${x.chainId}:${x.address.toLowerCase()}`));
+        const hit = onLiFi.filter(x => asked.has(`${x.chainId}:${x.address.toLowerCase()}`));
+        return { tokens: hit, total: hit.length, offset: 0, limit: 500 };
+      }
       if (p.coinKeys) {
         const tokens = state.oldApi ? oldApiJunk : majors;
         return { tokens, total: tokens.length, offset: 0, limit: 500 };
@@ -111,17 +124,25 @@ jest.mock('@/services/lifi', () => {
   };
 });
 
+jest.mock('@/services/mcgpSwapApi', () => {
+  const state = { spendable: { balance: 0, usdValue: 0 } };
+  return { __esModule: true, __state: state, getPremiumMcgpAsset: jest.fn(async () => state.spendable) };
+});
+jest.mock('@/services/wallet', () => ({ getActiveWallet: jest.fn(async () => '0xW') }));
+
 import React from 'react';
 import TestRenderer, { act, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import AssetPicker from '../AssetPicker';
 import { notWalletMcgp } from '@/utils/walletMcgp';
 import { resetAssetCatalogCache } from '@/hooks/useAssetCatalog';
 import * as Lifi from '@/services/lifi';
+import * as McgpSwap from '@/services/mcgpSwapApi';
 
 import * as Holdings from '@/hooks/useWalletHoldings';
 import type { Holding } from '@/services/assetCatalog';
 
-const lifiState = (Lifi as unknown as { __state: { oldApi: boolean } }).__state;
+const lifiState = (Lifi as unknown as { __state: { oldApi: boolean; tokensDown: boolean } }).__state;
+const spendableState = (McgpSwap as unknown as { __state: { spendable: { balance: number; usdValue: number } } }).__state;
 const holdingsState = (Holdings as unknown as {
   __state: { DEFAULT_HOLDINGS: Holding[]; value: { holdings: Holding[]; loading: boolean } };
 }).__state;
@@ -159,10 +180,18 @@ async function open(props: Partial<React.ComponentProps<typeof AssetPicker>> = {
   return { tree, onSelect };
 }
 
+/** Close the sheet and open it again, as a screen that keeps its picker mounted does. */
+async function reopen(tree: ReactTestRenderer, props: Partial<React.ComponentProps<typeof AssetPicker>>) {
+  const el = (visible: boolean) => <AssetPicker visible={visible} side="to" onSelect={() => {}} onClose={() => {}} {...props} />;
+  await act(async () => { tree.update(el(false)); });
+  await act(async () => { tree.update(el(true)); });
+  await flush();
+}
+
 // The first render loads react-native cold, slower than jest's default budget.
 jest.setTimeout(30_000);
 
-beforeEach(() => { resetAssetCatalogCache(); lifiState.oldApi = false; setHoldings(holdingsState.DEFAULT_HOLDINGS); });
+beforeEach(() => { resetAssetCatalogCache(); lifiState.oldApi = false; lifiState.tokensDown = false; setHoldings(holdingsState.DEFAULT_HOLDINGS); });
 
 it('shows On TSA, then the majors, then other coins in the wallet', async () => {
   const { tree } = await open();
@@ -360,4 +389,89 @@ it('does not wait on her balances outside holdings mode', async () => {
   setHoldings([], true);
   const { tree } = await open({ side: 'to' });
   expect(text(tree)).toContain('Stablecoins & major coins');
+});
+
+// Wallet MCGP as she holds it, and a token merely called MCGP.
+const WALLET_MCGP: Holding = { chainId: 146, address: '0x517600323e5E2938207fA2e2e915B9D80e5B2b21', native: false, trusted: true, symbol: 'MCGP', name: 'MCG Protocol', decimals: 18, balance: 40, usdValue: 20 };
+const mcgpRow = (tree: ReactTestRenderer) => tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+  && n.props.accessibilityLabel.startsWith('MCGP, Sonic') && typeof n.props.onPress === 'function')[0];
+
+describe('Spendable MCGP', () => {
+  afterEach(() => { spendableState.spendable = { balance: 0, usdValue: 0 }; });
+  const label = (tree: ReactTestRenderer) => mcgpRow(tree).props.accessibilityLabel as string;
+
+  it('shows the Spendable MCGP balance on the MCGP row, not wallet MCGP', async () => {
+    setHoldings([...holdingsState.DEFAULT_HOLDINGS, WALLET_MCGP]);
+    spendableState.spendable = { balance: 84.2, usdValue: 8.42 };
+    const { tree } = await open({ side: 'to' });
+    expect(label(tree)).toContain('you hold 84.2 Spendable');
+    expect(rowText(mcgpRow(tree))).toContain('Spendable');
+  });
+
+  it('shows MCGP when she holds only Spendable MCGP', async () => {
+    spendableState.spendable = { balance: 5, usdValue: 1 };
+    const { tree } = await open({ side: 'to' });
+    expect(label(tree)).toContain('you hold 5 Spendable');
+  });
+
+  it('shows no wallet MCGP balance when she has no Spendable MCGP', async () => {
+    setHoldings([...holdingsState.DEFAULT_HOLDINGS, WALLET_MCGP]);
+    const { tree } = await open({ side: 'to' });
+    expect(label(tree)).not.toContain('you hold');
+    expect(rowText(mcgpRow(tree))).not.toContain('Spendable');
+  });
+
+  it('keeps the real wallet balance in holdings mode, where the flow moves wallet tokens', async () => {
+    setHoldings([...holdingsState.DEFAULT_HOLDINGS, WALLET_MCGP]);
+    spendableState.spendable = { balance: 84.2, usdValue: 8.42 };
+    const { tree } = await open({ side: 'from', holdingsOnly: true });
+    expect(label(tree)).toMatch(/you hold 40$/);
+    expect(rowText(mcgpRow(tree))).not.toContain('Spendable');
+  });
+
+  // All Swap's "You pay" spends wallet MCGP: a Spendable balance there would
+  // offer a swap that cannot be funded.
+  it('keeps the wallet balance on the paying side', async () => {
+    setHoldings([...holdingsState.DEFAULT_HOLDINGS, WALLET_MCGP]);
+    spendableState.spendable = { balance: 84.2, usdValue: 8.42 };
+    const { tree } = await open({ side: 'from' });
+    expect(label(tree)).toMatch(/you hold 40$/);
+    expect(rowText(mcgpRow(tree))).not.toContain('Spendable');
+  });
+
+  // A failed read comes back as zero; it must not hide Spendable MCGP for a minute.
+  it('asks again on the next open when it read no Spendable MCGP', async () => {
+    const { tree } = await open({ side: 'to' });
+    expect(label(tree)).not.toContain('you hold');
+    spendableState.spendable = { balance: 5, usdValue: 1 };
+    await reopen(tree, { side: 'to' });
+    expect(label(tree)).toContain('you hold 5 Spendable');
+  });
+});
+
+it('asks LiFi again on the next open when the lookup failed', async () => {
+  setHoldings([
+    ...holdingsState.DEFAULT_HOLDINGS,
+    { chainId: 8453, address: '0xDEGEN', native: false, trusted: false, symbol: 'DEGEN', name: 'Degen', decimals: 18, balance: 1000, usdValue: 2 },
+  ]);
+  lifiState.tokensDown = true;
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  expect(text(tree)).not.toContain('Degen');
+  lifiState.tokensDown = false;
+  await reopen(tree, { side: 'from', holdingsOnly: true });
+  expect(text(tree)).toContain('Degen');
+});
+
+it('lists a held token nobody vouches for only when LiFi can swap it', async () => {
+  setHoldings([
+    ...holdingsState.DEFAULT_HOLDINGS,
+    { chainId: 8453, address: '0xDEGEN', native: false, trusted: false, symbol: 'DEGEN', name: 'Degen', decimals: 18, balance: 1000, usdValue: 2 },
+    { chainId: 8453, address: '0xscam', native: false, trusted: false, symbol: 'CLAIM', name: 'Claim your reward', decimals: 18, balance: 1000, usdValue: 9999 },
+  ]);
+  const { tree } = await open({ side: 'from', holdingsOnly: true });
+  const t = text(tree);
+  expect(t).toContain('Degen');
+  expect(t).not.toContain('Claim your reward');
+  // Behind every coin someone vouches for, whatever its indexer price says.
+  expect(t.indexOf('Degen')).toBeGreaterThan(t.indexOf('Crepe'));
 });

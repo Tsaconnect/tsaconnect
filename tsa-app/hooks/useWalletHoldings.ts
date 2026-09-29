@@ -1,8 +1,10 @@
 // hooks/useWalletHoldings.ts
 //
 // What the active wallet holds on every chain the picker can show — EVM chains
-// through /wallet/balances, plus the Solana, Bitcoin and Sui sides from the same
-// mnemonic — as flat Holding rows keyed by LiFi chain id.
+// through /wallet/balances (our supported tokens) and /wallet/discovered-tokens
+// (every other ERC-20, the same source as the wallet screen), plus the Solana,
+// Bitcoin and Sui sides from the same mnemonic — as flat Holding rows keyed by
+// LiFi chain id.
 //
 // Read once per wallet and kept for a short while, so opening the picker for
 // "You pay" and then "You receive" does not reload the same balances. The last
@@ -10,10 +12,18 @@
 // those balances at once and swaps in the new read when it lands, instead of a
 // spinner. A screen's picker prefetches on mount, so the read is usually done
 // before the sheet opens.
+//
+// Discovery is its own lane: the indexer fan-out can take 25s on a cold cache,
+// so the balances show (and `loading` ends) without it, and the discovered
+// tokens join the list when they land.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { ethers } from 'ethers';
 import { CHAINS, NONEVM_CHAINS, type ChainKey } from '@/constants/chains';
-import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
+import {
+  getDiscoveredTokens, getWalletBalances, normalizeWalletBalances, type DiscoveredToken, type WalletBalanceWithChain,
+} from '@/services/walletApi';
+import { getNetwork } from '@/hooks/useNetwork';
 import { getActiveWallet } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
@@ -78,6 +88,47 @@ export function holdingFromRow(row: WalletBalanceWithChain, fromSupportedList: b
   };
 }
 
+/** Discovered holdings, or null when the read failed (not "holds nothing"). */
+async function loadDiscovered(wallet: string): Promise<Holding[] | null> {
+  // Discovery indexes mainnets only.
+  if (getNetwork() !== 'mainnet') return [];
+  const res = await getDiscoveredTokens(undefined, wallet);
+  if (!res.success || !res.data) return null;
+  if (!res.data.providerAvailable) return [];
+  return (res.data.tokens ?? []).flatMap(discoveredRow)
+    .map(row => holdingFromRow(row, false))
+    .filter((h): h is Holding => h !== null);
+}
+
+/** A discovered token as a balance row: never native, never from our list. */
+function discoveredRow(t: DiscoveredToken): WalletBalanceWithChain[] {
+  try {
+    return [{
+      chainKey: t.chain as ChainKey,
+      chainName: t.chain,
+      symbol: t.symbol,
+      name: t.name,
+      balance: ethers.formatUnits(t.balance, t.decimals),
+      usdValue: String(Number.isFinite(t.usdValue) ? t.usdValue : 0),
+      contractAddress: t.contractAddress,
+      decimals: t.decimals,
+      native: false,
+    }];
+  } catch {
+    return []; // an unparseable raw balance
+  }
+}
+
+/**
+ * Discovered holdings the other reads do not already cover, matched by
+ * contract. The indexer also reports our own tokens (USDC on Base); those keep
+ * the curated row.
+ */
+export function newDiscoveries(known: Holding[], discovered: Holding[]): Holding[] {
+  const seen = new Set(known.filter(h => h.address).map(h => `${h.chainId}:${h.address.toLowerCase()}`));
+  return discovered.filter(h => !seen.has(`${h.chainId}:${h.address.toLowerCase()}`));
+}
+
 /** null when every chain family failed — an unknown, never "holds nothing". */
 async function loadHoldings(wallet: string): Promise<Holding[] | null> {
   const [evm, sol, btc, sui] = await Promise.allSettled([
@@ -99,6 +150,26 @@ async function loadHoldings(wallet: string): Promise<Holding[] | null> {
     ...rowsOf(evm).map(row => holdingFromRow(row, true)),
     ...[sol, btc, sui].flatMap(rowsOf).map(row => holdingFromRow(row, false)),
   ].filter((h): h is Holding => h !== null);
+}
+
+// The discovery lane: same one-read-per-wallet and freshness rules, kept in
+// memory only. A stale copy for the same wallet is shown while it re-reads.
+let discovered: { wallet: string; at: number; holdings: Holding[] } | null = null;
+let discoveryInFlight: { wallet: string; read: Promise<Holding[] | null> } | null = null;
+
+function readDiscovered(wallet: string): Promise<Holding[] | null> {
+  if (discovered?.wallet === wallet && Date.now() - discovered.at < CACHE_MS) return Promise.resolve(discovered.holdings);
+  if (discoveryInFlight?.wallet === wallet) return discoveryInFlight.read;
+  const startedIn = generation;
+  const read = loadDiscovered(wallet)
+    .catch(() => null)
+    .then(next => {
+      if (next && startedIn === generation) discovered = { wallet, at: Date.now(), holdings: next };
+      return next;
+    })
+    .finally(() => { if (discoveryInFlight?.read === read) discoveryInFlight = null; });
+  discoveryInFlight = { wallet, read };
+  return read;
 }
 
 const freshInMemory = (wallet: string) =>
@@ -131,8 +202,9 @@ async function storedHoldings(wallet: string): Promise<{ holdings: Holding[]; fr
 /** Start reading the active wallet's balances before the picker opens. */
 export async function prefetchWalletHoldings(): Promise<void> {
   const wallet = await getActiveWallet();
-  if (!wallet || freshInMemory(wallet)) return;
-  await readHoldings(wallet);
+  if (!wallet) return;
+  void readDiscovered(wallet); // not awaited: the balances never wait for it
+  if (!freshInMemory(wallet)) await readHoldings(wallet);
 }
 
 export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; loading: boolean } {
@@ -143,6 +215,7 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
   // Until the first read settles, "no holdings" means "not read yet" — the
   // wallet lookup itself is async, so `loading` alone starts out false.
   const [settled, setSettled] = useState(false);
+  const [found, setFound] = useState<Holding[]>([]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -152,6 +225,10 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
       const wallet = await getActiveWallet();
       if (cancelled) return;
       if (!wallet) { settle([]); return; }
+
+      if (discovered?.wallet === wallet) setFound(discovered.holdings);
+      readDiscovered(wallet).then(next => { if (next && !cancelled) setFound(next); });
+
       const fresh = freshInMemory(wallet);
       if (fresh) { settle(fresh); return; }
 
@@ -173,13 +250,16 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
     return () => { cancelled = true; };
   }, [enabled]);
 
-  return { holdings, loading: enabled && (loading || !settled) };
+  const all = useMemo(() => [...holdings, ...newDiscoveries(holdings, found)], [holdings, found]);
+  return { holdings: all, loading: enabled && (loading || !settled) };
 }
 
 /** Forget cached balances — after a swap, or in tests — so the next open re-reads them. */
 export function invalidateWalletHoldings() {
   cache = null;
   inFlight = null;
+  discovered = null;
+  discoveryInFlight = null;
   generation += 1;
   stored.clear();
 }
