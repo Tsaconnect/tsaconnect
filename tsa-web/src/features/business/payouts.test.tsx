@@ -8,6 +8,12 @@ const wallet = '0x52908400098527886E0F7030069857D2E4169EE7';
 const settlementPending = (id: string) => accepted({ confirmation: { id, kind: 'settlement', expiresAt: soon, sentTo: 'a***@skyair.ng' } });
 const cryptoMerchant = { ...merchant, version: 8, settlementMode: 'crypto', tokenSymbol: 'USDC', chainId: 8453, walletAddress: wallet };
 
+/** Searches the bank list and picks the match. */
+async function chooseBank(search: string, name: string) {
+  await userEvent.type(await screen.findByRole('combobox', { name: 'Bank' }), search);
+  await userEvent.click(screen.getByRole('option', { name }));
+}
+
 async function chooseWallet(address = wallet) {
   await userEvent.click(await screen.findByRole('radio', { name: /crypto wallet/i }));
   await userEvent.selectOptions(await screen.findByLabelText('Token'), 'USDC:8453');
@@ -35,7 +41,7 @@ describe('payouts', () => {
       '/api/pay/merchant/actions/b1/confirm': ok({ merchant: { ...merchant, version: 8, bankCode: '057', accountNumber: '******6789', accountName: 'SKY AIR LTD' } }),
     });
     mountAt('/business/live/payouts');
-    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '057');
+    await chooseBank('zen', 'Zenith Bank');
     await userEvent.type(screen.getByLabelText('Account number'), '1023456789');
     expect(await screen.findByText(/SKY AIR LTD/)).toBeInTheDocument();
     const lookup = f.mock.calls.find(([u]) => String(u).startsWith('/api/pay/merchant/banks/resolve'));
@@ -68,7 +74,7 @@ describe('payouts', () => {
       '/api/pay/merchant/settlement': ok({ merchant }),
     });
     mountAt('/business/live/payouts');
-    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '044');
+    await chooseBank('acc', 'Access Bank');
     await userEvent.type(screen.getByLabelText('Account number'), '0123453210');
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -85,7 +91,7 @@ describe('payouts', () => {
       '/api/pay/merchant/settlement': () => new Promise<Response>((r) => { resolve = r; }),
     });
     mountAt('/business/live/payouts');
-    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '057');
+    await chooseBank('zen', 'Zenith Bank');
     await userEvent.type(screen.getByLabelText('Account number'), '1023456789');
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     const form = screen.getByLabelText('Password').closest('form')!;
@@ -106,7 +112,7 @@ describe('payouts', () => {
       '/api/pay/merchant/settlement': fail(422, "That account isn't in your business name or your verified name. Use an account in your own name.", 'name_mismatch'),
     });
     mountAt('/business/live/payouts');
-    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '057');
+    await chooseBank('zen', 'Zenith Bank');
     await userEvent.type(screen.getByLabelText('Account number'), '1023456789');
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -120,7 +126,7 @@ describe('payouts', () => {
       '/api/pay/merchant/banks/resolve': fail(502, "We couldn't reach the bank directory — try again"),
     });
     mountAt('/business/live/payouts');
-    await userEvent.selectOptions(await screen.findByLabelText('Bank'), '057');
+    await chooseBank('zen', 'Zenith Bank');
     await userEvent.type(screen.getByLabelText('Account number'), '1023456789');
     expect(await screen.findByText(/couldn't check this account — you can still save/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();

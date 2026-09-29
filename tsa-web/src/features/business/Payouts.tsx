@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient, type QueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { Check, Landmark, TriangleAlert, Wallet } from 'lucide-react';
 import { ApiError } from '@/lib/api';
@@ -8,6 +8,7 @@ import { Field } from '@/components/ui/field';
 import { FormError } from '@/components/ui/form-error';
 import { Input, PasswordInput } from '@/components/ui/input';
 import { Note } from '@/components/ui/note';
+import { SearchSelect } from '@/components/ui/search-select';
 import { Segmented } from '@/components/ui/segmented';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -84,6 +85,7 @@ function BankForm({ merchant: m, banks, onSaved }: { merchant: OwnMerchant; bank
   const typed = bankCode && ACCOUNT.test(accountNumber) ? `${bankCode}:${accountNumber}` : '';
   const settled = useSettled(typed, 400);
   const lookup = useQuery({ ...resolveQuery(bankCode, accountNumber), enabled: Boolean(typed) && settled === typed, retry: false });
+  const bankOptions = useMemo(() => (banks.data ?? []).map((b) => ({ value: b.code, label: b.name })), [banks.data]);
 
   if (banks.isPending) return <Skeleton className="h-11 w-full" />;
   if (banks.isError) {
@@ -121,10 +123,13 @@ function BankForm({ merchant: m, banks, onSaved }: { merchant: OwnMerchant; bank
     <form onSubmit={save} noValidate className="grid gap-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Bank">
-          <Select value={bankCode} onChange={(e) => setBankCode(e.target.value)}>
-            <option value="">Choose your bank</option>
-            {banks.data.map((b) => <option key={b.code} value={b.code}>{b.name}</option>)}
-          </Select>
+          <SearchSelect
+            value={bankCode}
+            onChange={setBankCode}
+            options={bankOptions}
+            placeholder="Choose your bank"
+            emptyText="No bank matches that name"
+          />
         </Field>
         <Field label="Account number">
           <Input
