@@ -34,6 +34,13 @@ describe('P2P status map', () => {
     expect(getStatusVisual('payLink', 'expired').label).toBe('Expired');
   });
 
+  it('covers every name-change status', () => {
+    expect(Object.keys(STATUS_MAP.nameChange).sort()).toEqual([
+      'approved', 'cancelled', 'declined', 'held_for_review', 'lapsed', 'paid', 'paying', 'rejected', 'verifying',
+    ]);
+    expect(getStatusVisual('nameChange', 'held_for_review').label).toBe('Under review');
+  });
+
   it('a reusable link is active, paused, or not taking payments', () => {
     expect(Object.keys(STATUS_MAP.openLink).sort()).toEqual(['active', 'not_taking', 'paused']);
     expect(getStatusVisual('openLink', 'paused').label).toBe('Paused');

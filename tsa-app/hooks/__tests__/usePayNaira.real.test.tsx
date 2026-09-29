@@ -33,7 +33,7 @@ jest.mock('@/services/paycrestDeposit', () => ({
   nativeBalanceFor: jest.fn(() => 0.5), fmtTokenAmount: (n: number) => String(n),
 }));
 jest.mock('@/services/walletApi', () => ({
-  __esModule: true, getWalletBalances: jest.fn(async () => ({ success: true, data: [] })), normalizeWalletBalances: (d: unknown) => d,
+  __esModule: true, readWalletBalances: jest.fn(async () => []),
 }));
 jest.mock('@/services/gasSponsorship', () => ({
   __esModule: true, getSponsoredRoutes: jest.fn(async () => []), isGasSponsored: () => false,

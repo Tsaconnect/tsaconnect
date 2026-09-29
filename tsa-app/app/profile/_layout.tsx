@@ -12,6 +12,7 @@ const ProfileLayout = () => {
       {/* <Verify> brings its own header row and heading. */}
       <Stack.Screen name="verify-email" options={{ headerShown: false }} />
       <Stack.Screen name="kyc" options={{ headerShown: false }} />
+      <Stack.Screen name="name-change" options={{ headerShown: false }} />
     </Stack>
   );
 };

@@ -434,6 +434,20 @@ export async function getWalletBalances(
 }
 
 /**
+ * A wallet's balances on every chain as flat rows, or null when they could not
+ * be read — a flaky indexer must not block a payment she can fund, so callers
+ * treat null as "unknown", never as "empty".
+ */
+export async function readWalletBalances(wallet: string): Promise<WalletBalanceWithChain[] | null> {
+  try {
+    const res = await getWalletBalances(undefined, wallet);
+    return res.success ? normalizeWalletBalances(res.data) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One row from GET /wallet/discovered-tokens — an ERC-20 the indexer
  * found in the wallet, regardless of whether we have it in supported_tokens.
  */

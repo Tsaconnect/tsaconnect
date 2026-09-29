@@ -1,8 +1,9 @@
 // services/payMerchantApi.ts
 //
 // A TSA Pay merchant's own account, from the app: where they are paid
-// (GET /api/pay/merchant), changing it (PUT /api/pay/merchant/settlement),
-// confirming the change with the code emailed to them
+// (GET /api/pay/merchant), changing it (PUT /api/pay/merchant/settlement) or
+// the business name (PUT /api/pay/merchant/business-name), confirming either
+// with the code emailed to them
 // (POST /api/pay/merchant/actions/:id/confirm), the payment links she sends
 // customers — one-time (/api/pay/merchant/links) and reusable, where the
 // customer enters the amount (/api/pay/merchant/open-links). The payer's side of TSA Pay is
@@ -16,7 +17,11 @@ export type SettlementMode = 'fiat' | 'crypto';
 /** The owner's view: the account number arrives masked (last four digits). */
 export type OwnMerchant = {
   id: string;
+  /** The name customers see and payouts are matched against — until an admin approves a rename. */
   businessName: string;
+  /** A rename she asked for, waiting for an admin since pendingSince; businessName stays in use until then. */
+  pendingBusinessName?: string;
+  pendingSince?: string;
   status: 'active' | 'suspended';
   /** A super admin has switched her live (her own switch only). */
   liveEnabled: boolean;
@@ -39,7 +44,7 @@ export type SettlementChange =
   | { settlementMode: 'fiat'; bankCode: string; accountNumber: string }
   | { settlementMode: 'crypto'; chainId: number; tokenAddress: string; walletAddress: string };
 
-/** A guarded change (every payout change) waits for the code emailed to the owner. */
+/** A guarded change (every payout change, a business rename) waits for the code emailed to the owner. */
 export type PendingConfirmation = { id: string; kind: string; expiresAt: string; sentTo: string };
 
 /**
@@ -82,6 +87,19 @@ export function updateSettlement(change: SettlementChange, password: string, exp
   return request<SettlementAnswer>('/settlement', {
     method: 'PUT',
     body: JSON.stringify({ ...change, password, expectedVersion }),
+  });
+}
+
+/**
+ * Ask for her business to be renamed. Guarded like a payout change (password,
+ * then the emailed code files the request); the new name takes effect only when
+ * an admin approves it. Asking for the current name files nothing and withdraws
+ * a request still waiting — answered with the merchant, no confirmation.
+ */
+export function updateBusinessName(name: string, password: string, expectedVersion: number): Promise<SettlementAnswer> {
+  return request<SettlementAnswer>('/business-name', {
+    method: 'PUT',
+    body: JSON.stringify({ name: name.trim(), password, expectedVersion }),
   });
 }
 

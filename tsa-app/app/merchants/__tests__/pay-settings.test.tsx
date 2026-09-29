@@ -6,6 +6,8 @@
  * one she filled in; a bank account or a wallet applies only with the emailed
  * code; a refused name says whose account the bank thinks it is. Her payment
  * links start here too, and a suspended merchant can read them but not request.
+ * A business rename is guarded the same way and takes effect only once an
+ * admin approves it: the name in use stays, the waiting one is shown beside it.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -76,13 +78,14 @@ jest.mock('@/services/payMerchantApi', () => ({
   OWNER_CODES: jest.requireActual('@/services/payMerchantApi').OWNER_CODES,
   getOwnMerchant: jest.fn(),
   updateSettlement: jest.fn(),
+  updateBusinessName: jest.fn(),
   confirmOwnerAction: jest.fn(),
 }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router } from 'expo-router';
-import { confirmOwnerAction, getOwnMerchant, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
+import { confirmOwnerAction, getOwnMerchant, updateBusinessName, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
 import PaySettings from '../pay-settings';
 
 const merchant = {
@@ -238,4 +241,105 @@ it('a suspended merchant can read her links but not request a payment', async ()
   const tree = await mount();
   expect(() => byLabel(tree, 'button:Request payment')).toThrow();
   expect(byLabel(tree, 'Payment links')).toBeTruthy();
+});
+
+describe('business name', () => {
+  const renamePending = {
+    confirmation: { id: 'act-2', kind: 'business_name', expiresAt: '2026-09-28T15:00:00Z', sentTo: 'o***@skyair.ng' },
+  };
+  const waiting = { ...merchant, version: 8, pendingBusinessName: 'Sky Air Travels', pendingSince: '2026-09-28T14:00:00Z' };
+
+  async function rename(tree: ReactTestRenderer, name: string, password: string) {
+    await act(async () => { byLabel(tree, 'button:Change business name').props.onPress(); });
+    await act(async () => { byLabel(tree, 'input:New business name').props.onChangeText(name); });
+    await act(async () => { byLabel(tree, 'input:Account password').props.onChangeText(password); });
+    await act(async () => { byLabel(tree, 'button:Request new name').props.onPress(); });
+  }
+
+  it('is sent only after PIN/biometric, with her password; the code files it — and the name stays until approval', async () => {
+    jest.mocked(updateBusinessName).mockResolvedValue(renamePending);
+    // Confirming files the request: the name in use is UNCHANGED, the rename waits.
+    jest.mocked(confirmOwnerAction).mockResolvedValue({ merchant: waiting });
+    const tree = await mount();
+    await rename(tree, '  Sky   Air Travels ', 'correct-horse');
+    expect(updateBusinessName).not.toHaveBeenCalled();
+    expect(mockAuthorization.props.title).toBe('Authorize changing your business name');
+
+    await act(async () => { mockAuthorization.props.onAuthorized(); mockAuthorization.props.onAuthorized(); });
+    await flush();
+    expect(updateBusinessName).toHaveBeenCalledTimes(1);
+    expect(updateBusinessName).toHaveBeenCalledWith('Sky Air Travels', 'correct-horse', 7);
+    expect(updateSettlement).not.toHaveBeenCalled();
+    expect(text(tree)).toContain('send your new business name for approval');
+    expect(mockToast.success).not.toHaveBeenCalled();
+
+    await act(async () => { byLabel(tree, 'input:Code').props.onChangeText('654321'); });
+    await act(async () => { byLabel(tree, 'button:Confirm').props.onPress(); });
+    await flush();
+    expect(confirmOwnerAction).toHaveBeenCalledWith('act-2', '654321');
+    expect(mockToast.success).toHaveBeenCalledTimes(1);
+    expect(mockToast.success).toHaveBeenCalledWith('New business name sent for approval');
+    expect(text(tree)).toContain('"Sky Air"');
+    expect(text(tree)).toContain("Your new name 'Sky Air Travels' is waiting for approval. Customers and payouts keep 'Sky Air' until then.");
+  });
+
+  it('shows a rename already waiting, with the name still in use', async () => {
+    jest.mocked(getOwnMerchant).mockResolvedValue(waiting);
+    const tree = await mount();
+    expect(text(tree)).toContain("Your new name 'Sky Air Travels' is waiting for approval. Customers and payouts keep 'Sky Air' until then.");
+  });
+
+  it('whitespace is normalised before the unchanged check; the same pending name is not asked twice', async () => {
+    const tree = await mount();
+    await rename(tree, '  Sky    Air ', 'correct-horse');
+    expect(text(tree)).toContain('That is already your business name.');
+    expect(mockAuthorization.props.visible).toBeFalsy();
+
+    jest.mocked(getOwnMerchant).mockResolvedValue(waiting);
+    const again = await mount();
+    await rename(again, 'Sky Air  Travels', 'correct-horse');
+    expect(text(again)).toContain('That name is already waiting for approval.');
+    expect(mockAuthorization.props.visible).toBeFalsy();
+  });
+
+  it('asking for the current name back withdraws a waiting rename: a 200 { merchant } — nothing to confirm, no toast', async () => {
+    jest.mocked(getOwnMerchant).mockResolvedValue(waiting);
+    jest.mocked(updateBusinessName).mockResolvedValue({ merchant: { ...merchant, version: 9 } });
+    const tree = await mount();
+    await rename(tree, 'Sky Air', 'correct-horse');
+    await act(async () => { mockAuthorization.props.onAuthorized(); });
+    await flush();
+    expect(updateBusinessName).toHaveBeenCalledWith('Sky Air', 'correct-horse', 8);
+    expect(confirmOwnerAction).not.toHaveBeenCalled();
+    expect(mockToast.success).not.toHaveBeenCalled();
+    expect(text(tree)).not.toContain('waiting for approval');
+    expect(text(tree)).not.toContain('input:Code');
+  });
+
+  it('asks for a name and the password before anything else', async () => {
+    const tree = await mount();
+    await rename(tree, '', 'correct-horse');
+    expect(text(tree)).toContain('Enter the new business name.');
+    await act(async () => { byLabel(tree, 'input:New business name').props.onChangeText('Sky Air Travels'); });
+    await act(async () => { byLabel(tree, 'input:Account password').props.onChangeText(''); });
+    await act(async () => { byLabel(tree, 'button:Request new name').props.onPress(); });
+    expect(text(tree)).toContain('Enter your account password to confirm.');
+    expect(mockAuthorization.props.visible).toBeFalsy();
+  });
+
+  it('a refusal (a reserved or hidden-character name) is shown in the server\'s words', async () => {
+    jest.mocked(updateBusinessName).mockRejectedValue(Object.assign(
+      new Error('invalid merchant request: a business name can\'t contain "TSA Pay"'), { status: 400, code: 'invalid_request' }));
+    const tree = await mount();
+    await rename(tree, 'TSA Pay Refunds', 'correct-horse');
+    await act(async () => { mockAuthorization.props.onAuthorized(); });
+    await flush();
+    expect(text(tree)).toContain('a business name can\'t contain \\"TSA Pay\\"');
+  });
+
+  it('a suspended merchant cannot rename', async () => {
+    jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, status: 'suspended' });
+    const tree = await mount();
+    expect(() => byLabel(tree, 'button:Change business name')).toThrow();
+  });
 });

@@ -36,7 +36,7 @@ import { depositOutcomeUnknown, sameDeposit, sendHeldDeposit, stillToSend } from
 import { payHoldKey } from '@/services/payHold';
 import { getOpenSellIntent, type SellIntent } from '@/services/paycrestSellSwap';
 import { getPayQuote, payConverted, payDirect, type PayCheckout } from '@/services/payApi';
-import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
+import { readWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import {
   classifyStartError, directPriceMovedCopy, errorCode, errorMessage, estimateError, exceedsPriced, intentForPayment, nairaFromKobo,
   nothingToContinueCopy, ORDER_AMOUNT_UNCHECKABLE, ORDER_MISMATCH, PAUSED_FAILURE, PAY_ATTEMPT_UNCERTAIN, PAYMENT_STILL_GOING, payAmountLabel, priceMovedMessage, REFUSED_FAILURE, startFailure, unsupportedNetworkMessage,
@@ -115,16 +115,6 @@ function orderAboveTolerance(tokenAmount: string | undefined, decimals: number, 
     return exceedsPriced(amount, BigInt(pricedBase)) ? amount : null;
   } catch {
     return 'unreadable';
-  }
-}
-
-/** Her wallet's balances, or null — a flaky indexer must not block a payment she can fund. */
-async function balancesOf(wallet: string): Promise<WalletBalanceWithChain[] | null> {
-  try {
-    const res = await getWalletBalances(undefined, wallet);
-    return res.success ? normalizeWalletBalances(res.data) : null;
-  } catch {
-    return null;
   }
 }
 
@@ -286,7 +276,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
   }, [address, checkout.id, dispatch, followDirect]);
 
   const payDirectly = async (venue: PaycrestVenue, wallet: string, token: LiFiToken, priced: PayEstimate) => {
-    const balances = await balancesOf(wallet);
+    const balances = await readWalletBalances(wallet);
     const routes = await getSponsoredRoutes().catch(() => []);
     const funding = checkFunding(venue, balances, { gasSponsored: isGasSponsored(routes, venue.chain, venue.token) });
     if (!funding.ok) {
@@ -370,7 +360,7 @@ export function usePayNaira(checkout: PayCheckout): UsePayNaira {
       return;
     }
     dispatch({ type: 'progress', swapStage: 'sending', order: fresh });
-    await sendDirectDeposit(fresh, address, await balancesOf(address));
+    await sendDirectDeposit(fresh, address, await readWalletBalances(address));
   };
 
   // Read fresh (not narrowed): the machine's answer to what was just dispatched.

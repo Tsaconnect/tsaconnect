@@ -5,7 +5,7 @@
 // notification still displays; tapping just opens the app (no dead navigation).
 // Non-P2P deep-links (orders/wallet) are a follow-on once those routes are
 // disambiguated (the app currently has two `orderdetail` routes).
-import { PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
+import { NAME_CHANGE, PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
 import { isPaymentId } from '@/utils/paymentId';
 
 export interface NotificationData {
@@ -42,5 +42,23 @@ export function routeForNotification(data: NotificationData | null | undefined):
     }
     return mode ? `${PAY_LINKS}?mode=${mode}` : PAY_LINKS;
   }
+  // Her name change started (fee paid), was approved, held for review, rejected or lapsed: its screen shows which.
+  if (NAME_CHANGE_EVENTS.has(type)) return NAME_CHANGE;
+  // Her TSA Pay business rename was filed, approved or rejected.
+  if (BUSINESS_NAME_EVENTS.has(type)) return PAY_SETTINGS;
   return null;
 }
+
+const BUSINESS_NAME_EVENTS = new Set([
+  'pay_business_name_requested',
+  'pay_business_name_approved',
+  'pay_business_name_rejected',
+]);
+
+const NAME_CHANGE_EVENTS = new Set([
+  'name_change_started',
+  'name_change_approved',
+  'name_change_held',
+  'name_change_rejected',
+  'name_change_lapsed',
+]);
