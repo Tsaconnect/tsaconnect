@@ -188,20 +188,14 @@ func refundBackoff(attempt int) time.Duration {
 // refund sends amount (base units) of a stablecoin fee back to the proven
 // wallet it came from: all that was credited when the fee is returned, the
 // overpaid part when it is kept. The send is claimed first (refund_sending,
-// with the amount, when, and the chain's head block just before), so of two
-// callers only one ever broadcasts — and an admin can later tell from the
-// chain whether a send cut off without a hash left.
+// with the amount and when), so of two callers only one ever broadcasts — and
+// an admin recording it as sent can be held to a transfer mined after the claim.
 func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChange, amount *big.Int) {
 	if s.rail == nil {
 		alertf("name-change-refund:"+ch.ID.String(), "[name-change] ALERT name_change_refund_unavailable_total=1 change=%s — no treasury to refund from", ch.ID)
 		return
 	}
 	unsent := []string{models.NameChangeFeeReceived, models.NameChangeFeeRefundFailed}
-	claimBlock, err := s.rail.HeadBlock(ctx, ch.PayChain)
-	if err != nil {
-		s.refundNotSent(ctx, ch, unsent, err)
-		return
-	}
 	recorded := ""
 	if amount != nil {
 		recorded = amount.String()
@@ -210,12 +204,12 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 	// fee_tx_hash is cleared with the claim: a hash left from an earlier send
 	// must never stand for this one.
 	if !s.setFeeWith(ctx, ch.ID, unsent, models.NameChangeFeeRefundSending, "",
-		map[string]any{"refund_amount": recorded, "refund_claimed_at": &claimedAt, "refund_claimed_block": &claimBlock, "fee_tx_hash": ""}) {
+		map[string]any{"refund_amount": recorded, "refund_claimed_at": &claimedAt, "fee_tx_hash": ""}) {
 		return
 	}
 	if amount == nil || amount.Sign() <= 0 || ch.PayFrom == "" {
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefundUncertain, "")
-		log.Printf("[name-change] ALERT name_change_refund_unsendable_total=1 change=%s amount=%q — record the outcome by hand", ch.ID, recorded)
+		log.Printf("[name-change] ALERT name_change_refund_unsendable_total=1 change=%s amount=%q — nothing was sent; support resolves it by hand", ch.ID, recorded)
 		return
 	}
 	// The treasury's value caps read USD: a $1 stablecoin's amount is its value.
@@ -229,7 +223,7 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 		s.refundNotSent(ctx, ch, []string{models.NameChangeFeeRefundSending}, err)
 	default:
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefundUncertain, txHash)
-		log.Printf("[name-change] ALERT name_change_refund_uncertain_total=1 change=%s chain=%s tx=%s — the refund may have left; check the chain, then record the outcome: %v",
+		log.Printf("[name-change] ALERT name_change_refund_uncertain_total=1 change=%s chain=%s tx=%s — the refund may have left; check the chain and record it as sent once mined, or leave it for support: %v",
 			ch.ID, ch.PayChain, txHash, err)
 	}
 }

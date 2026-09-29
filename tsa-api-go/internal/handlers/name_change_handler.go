@@ -411,29 +411,28 @@ func (h *Handlers) adminReviewNameChange(c *gin.Context, approve bool) {
 	utils.SuccessResponse(c, http.StatusOK, "Name change reviewed", gin.H{"change": out})
 }
 
-// POST /api/admin/name-changes/:id/refund-outcome {sent, txHash?, note} —
-// super admin: record what the chain shows for a refund whose broadcast ended
-// uncertain. Checked against the chain: sent:true must be a mined treasury
-// transfer of the refund to the paying wallet (422 refund_unproven); sent:false
-// is refused while the chain knows the refund transaction (409
-// refund_may_have_left), and returns it to refund_failed, which the sweep
-// retries. Never on the admin's own change.
+// POST /api/admin/name-changes/:id/refund-outcome {sent: true, txHash, note} —
+// super admin: record a refund whose broadcast ended uncertain as sent. Checked
+// against the chain: txHash must be a mined treasury transfer of the refund to
+// the paying wallet (422 refund_unproven). Only "sent" is taken — sent:false or
+// no txHash is 422 refund_outcome_sent_only: a refund that never left stays
+// flagged for support to resolve by hand. Never on the admin's own change.
 func (h *Handlers) AdminRecordNameChangeRefund(c *gin.Context) {
 	admin, svc, id, ok := h.nameChangeAdmin(c)
 	if !ok {
 		return
 	}
 	var req struct {
-		Sent   *bool  `json:"sent"`
+		Sent   bool   `json:"sent"`
 		TxHash string `json:"txHash"`
 		Note   string `json:"note"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Sent == nil {
-		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Say whether the refund was sent", "invalid_request")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Invalid request body", "invalid_request")
 		return
 	}
 	out, err := svc.AdminRecordRefundOutcome(c.Request.Context(), admin.ID, id,
-		services.NameChangeRefundOutcome{Sent: *req.Sent, TxHash: req.TxHash, Note: req.Note})
+		services.NameChangeRefundOutcome{Sent: req.Sent, TxHash: req.TxHash, Note: req.Note})
 	if err != nil {
 		nameChangeFail(c, err)
 		return
@@ -545,8 +544,8 @@ func nameChangeFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "bad_state")
 	case errors.Is(err, services.ErrNameChangePaymentLive):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "payment_may_land")
-	case errors.Is(err, services.ErrNameChangeRefundMayHaveLeft):
-		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "refund_may_have_left")
+	case errors.Is(err, services.ErrNameChangeRefundSentOnly):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "refund_outcome_sent_only")
 	case errors.Is(err, services.ErrNameChangeRefundUnproven):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "refund_unproven")
 	case errors.Is(err, services.ErrNameChangeChainUnreadable):

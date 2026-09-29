@@ -97,13 +97,6 @@ type stableFeeRail interface {
 	// known=false with a nil error only on a definite "no such transaction" —
 	// a read that fails is an error, never "unknown".
 	TransactionKnown(ctx context.Context, chain, txHash string) (known bool, sender string, err error)
-	// HeadBlock is the chain's latest block number.
-	HeadBlock(ctx context.Context, chain string) (uint64, error)
-	// TransferMinedSince reports whether a Transfer of exactly amount of the
-	// token from `from` to `to` was mined at or after fromBlock — found from
-	// the token's logs, for when no transaction hash is known. A scan that
-	// cannot finish is an error, never "none".
-	TransferMinedSince(ctx context.Context, chain, tokenAddress, from, to string, amount *big.Int, fromBlock uint64) (bool, error)
 }
 
 // StablePayment is what one fee transaction proved.
@@ -120,23 +113,14 @@ type StablePayment struct {
 	Confirmations uint64
 }
 
-// FeeTxReader is the slice of an Ethereum client a fee proof and a refund
-// check need; *ethclient.Client satisfies it.
+// FeeTxReader is the slice of an Ethereum client a fee proof needs;
+// *ethclient.Client satisfies it.
 type FeeTxReader interface {
 	TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error)
 	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
 	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 	BlockNumber(ctx context.Context) (uint64, error)
-	logFilterer
 }
-
-// feeLogScanChunk and feeLogCallTimeout bound TransferMinedSince's eth_getLogs
-// calls: a span most public RPCs accept (the shared scanner halves it when one
-// does not), and one call's wait.
-const (
-	feeLogScanChunk   uint64 = 2000
-	feeLogCallTimeout        = 10 * time.Second
-)
 
 // TreasuryFeeRail takes stablecoin fees into the ramp treasury, on the chains it
 // has lanes for, and refunds out of the same lanes. It needs no key or float of
@@ -328,52 +312,4 @@ func (r *TreasuryFeeRail) reader(chain string) (FeeTxReader, error) {
 		return nil, fmt.Errorf("no transaction reader for %s", chain)
 	}
 	return reader, nil
-}
-
-func (r *TreasuryFeeRail) HeadBlock(ctx context.Context, chain string) (uint64, error) {
-	reader, err := r.reader(chain)
-	if err != nil {
-		return 0, err
-	}
-	return reader.BlockNumber(ctx)
-}
-
-func (r *TreasuryFeeRail) TransferMinedSince(ctx context.Context, chain, tokenAddress, from, to string, amount *big.Int, fromBlock uint64) (bool, error) {
-	reader, err := r.reader(chain)
-	if err != nil {
-		return false, err
-	}
-	if !common.IsHexAddress(tokenAddress) || !common.IsHexAddress(from) || !common.IsHexAddress(to) || amount == nil {
-		return false, fmt.Errorf("transfer scan: token, from, to and amount are all required")
-	}
-	head, err := reader.BlockNumber(ctx)
-	if err != nil {
-		return false, fmt.Errorf("transfer scan: read chain head: %w", err)
-	}
-	if head < fromBlock {
-		// A node behind the head read before cannot see what came after it.
-		return false, fmt.Errorf("transfer scan: chain head %d is behind block %d", head, fromBlock)
-	}
-	q := ethereum.FilterQuery{
-		Addresses: []common.Address{common.HexToAddress(tokenAddress)},
-		Topics: [][]common.Hash{{common.HexToHash(erc20TransferTopic)},
-			{common.BytesToHash(common.HexToAddress(from).Bytes())}, {common.BytesToHash(common.HexToAddress(to).Bytes())}},
-	}
-	errFound := errors.New("found")
-	scanner := newLogScanner(feeLogScanChunk)
-	err = scanner.scanLogs(ctx, reader, q, fromBlock, head, feeLogCallTimeout, func(logs []types.Log, _ uint64) error {
-		for _, l := range logs {
-			if !l.Removed && len(l.Data) == 32 && new(big.Int).SetBytes(l.Data).Cmp(amount) == 0 {
-				return errFound
-			}
-		}
-		return nil
-	})
-	switch {
-	case errors.Is(err, errFound):
-		return true, nil
-	case err != nil:
-		return false, fmt.Errorf("transfer scan: %w", err)
-	}
-	return false, nil
 }

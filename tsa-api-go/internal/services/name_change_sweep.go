@@ -342,7 +342,7 @@ func (s *NameChangeService) sweepAlerts(ctx context.Context) (int, error) {
 	}
 	for _, ch := range stuck {
 		alertf("name-change-refund-stuck:"+ch.ID.String(),
-			"[name-change] ALERT name_change_refund_unresolved_total=1 change=%s fee_status=%s chain=%s tx=%s — check the chain, then record the outcome (POST /api/admin/name-changes/:id/refund-outcome)",
+			"[name-change] ALERT name_change_refund_unresolved_total=1 change=%s fee_status=%s chain=%s tx=%s — check the chain: if the refund was mined, record it as sent (POST /api/admin/name-changes/:id/refund-outcome); if it never left, support resolves it by hand",
 			ch.ID, ch.FeeStatus, ch.PayChain, ch.FeeTxHash)
 	}
 	return 0, nil

@@ -81,7 +81,7 @@ func TestNameChangeRoutes_AdminReviewNeedsAnAdmin(t *testing.T) {
 			t.Fatalf("%s listing business renames: %d %s", role, w.Code, w.Body.String())
 		}
 		// Recording a refund's on-chain outcome is super_admin only.
-		w := payRoutesDo(r, "POST", "/api/admin/name-changes/"+id+"/refund-outcome", tok, map[string]any{"sent": false})
+		w := payRoutesDo(r, "POST", "/api/admin/name-changes/"+id+"/refund-outcome", tok, map[string]any{"sent": true, "txHash": "0x" + strings.Repeat("ab", 32)})
 		if role == models.RoleAdmin && w.Code != http.StatusForbidden {
 			t.Fatalf("a plain admin recording a refund outcome: %d %s", w.Code, w.Body.String())
 		}

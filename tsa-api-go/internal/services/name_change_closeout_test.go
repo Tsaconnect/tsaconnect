@@ -13,8 +13,8 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// Tests for the last verification findings: refunds whose send was cut off
-// before a hash was known, a squatted hash the chain cannot judge yet, dropped
+// Tests for the last verification findings: refund claims and "sent"
+// outcomes held to the claim, a squatted hash the chain cannot judge yet, dropped
 // payments landing as dust, refutations racing on one change, and late
 // payments confirmed while a change paid another way is open.
 
@@ -30,97 +30,21 @@ func paidStable(t *testing.T) *nameChangeRig {
 	return r
 }
 
-// A refund claim records when it was made and the chain's head just before;
-// a head that cannot be read sends nothing and backs off like any send that
-// never left.
-func TestNameChange_RefundClaimRecordsWhenAndFromWhichBlock(t *testing.T) {
+// A refund claim records when it was made — a "sent" is held to a transfer
+// mined after it — and clears any earlier send's hash, so a hash left from an
+// earlier send never stands for a later one.
+func TestNameChange_RefundClaimRecordsWhenAndClearsAnEarlierHash(t *testing.T) {
 	ctx := context.Background()
 	r := paidStable(t)
-	r.rail.headErr = errors.New("rpc down")
-	view, err := r.svc.Cancel(ctx, r.user)
-	if err != nil || view.FeeStatus != models.NameChangeFeeRefundFailed || r.rail.refunds != 0 {
-		t.Fatalf("view %+v err %v refunds %d", view, err, r.rail.refunds)
-	}
-	if ch := r.change(t, view.ID); ch.RefundAttempts != 1 || ch.RefundRetryAt == nil || ch.RefundClaimedAt != nil {
-		t.Fatalf("an unreadable head is a send that never left: %+v", ch)
-	}
-	r.rail.headErr, r.rail.head = nil, 4242
-	r.rail.refundHash, r.rail.refundAttempted = "0xsent", true
+	r.db.Model(&models.UserNameChange{}).Where("user_id = ?", r.user).Update("fee_tx_hash", txHash("b1"))
 	r.now = r.now.Add(time.Hour)
-	if _, err := r.svc.Sweep(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ch := r.change(t, view.ID)
-	if ch.FeeStatus != models.NameChangeFeeRefunded || ch.RefundClaimedBlock == nil || *ch.RefundClaimedBlock != 4242 ||
-		ch.RefundClaimedAt == nil || !ch.RefundClaimedAt.Equal(r.now) {
-		t.Fatalf("change %+v", ch)
-	}
-}
-
-// M1: "never left" for a refund whose send was cut off before its hash was
-// known is taken only when the token's logs show no transfer of the refund
-// from the treasury to the paying wallet since the claim.
-func TestNameChange_NeverLeftWithoutAHashIsCheckedAgainstTheLogs(t *testing.T) {
-	ctx := context.Background()
-	admin := uuid.New()
-	r := paidStable(t)
-	r.rail.head = 5000
 	r.rail.refundErr, r.rail.refundAttempted, r.rail.refundHash = errors.New("connection reset"), true, ""
 	view, err := r.svc.Cancel(ctx, r.user)
 	if err != nil || view.FeeStatus != models.NameChangeFeeRefundUncertain {
 		t.Fatalf("view %+v err %v", view, err)
 	}
-	if ch := r.change(t, view.ID); ch.FeeTxHash != "" || ch.RefundClaimedBlock == nil || *ch.RefundClaimedBlock != 5000 {
+	if ch := r.change(t, view.ID); ch.FeeTxHash != "" || ch.RefundClaimedAt == nil || !ch.RefundClaimedAt.Equal(r.now) {
 		t.Fatalf("change %+v", ch)
-	}
-	r.rail.payment = nil // no stray "any hash is mined" answers
-
-	r.rail.transfers = []fakeTransferLog{{block: 5003, from: nameChangeTreasury, to: r.wallet, amount: 1_000_000}}
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, view.ID, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeRefundMayHaveLeft) {
-		t.Fatalf("a matching transfer since the claim: err = %v", err)
-	}
-	if r.rail.scannedFrom == nil || *r.rail.scannedFrom != 5000 {
-		t.Fatalf("scanned from %v, want the claim block", r.rail.scannedFrom)
-	}
-	r.rail.scanErr = errors.New("getLogs refused")
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, view.ID, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeChainUnreadable) {
-		t.Fatalf("a scan that cannot finish: err = %v", err)
-	}
-	r.rail.scanErr = nil
-	r.rail.transfers = []fakeTransferLog{
-		{block: 4999, from: nameChangeTreasury, to: r.wallet, amount: 1_000_000}, // before the claim
-		{block: 5003, from: nameChangeTreasury, to: r.wallet, amount: 999_999},   // another amount
-		{block: 5004, from: nameChangeTreasury, to: nameChangeTreasury, amount: 1_000_000},
-	}
-	av, err := r.svc.AdminRecordRefundOutcome(ctx, admin, view.ID, NameChangeRefundOutcome{Sent: false, Note: "nothing on basescan"})
-	if err != nil || av.FeeStatus != models.NameChangeFeeRefundFailed {
-		t.Fatalf("view %+v err %v", av, err)
-	}
-}
-
-// A hash left from an earlier send never stands for a later one: the claim
-// clears it, so an uncertain retry with no hash of its own is checked against
-// the logs, not against the old (unknown) transaction.
-func TestNameChange_RefundClaimClearsAnEarlierSendsHash(t *testing.T) {
-	ctx := context.Background()
-	admin := uuid.New()
-	r, id, maybeTx := uncertainRefund(t)
-	r.rail.payment, r.rail.txUnknown = nil, true
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, id, NameChangeRefundOutcome{Sent: false}); err != nil {
-		t.Fatal(err)
-	}
-	r.rail.head = 7000
-	r.rail.refundErr, r.rail.refundAttempted, r.rail.refundHash = errors.New("connection reset"), true, ""
-	if _, err := r.svc.Sweep(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ch := r.change(t, id)
-	if ch.FeeStatus != models.NameChangeFeeRefundUncertain || ch.FeeTxHash == maybeTx || ch.FeeTxHash != "" {
-		t.Fatalf("change %+v", ch)
-	}
-	r.rail.transfers = []fakeTransferLog{{block: 7001, from: nameChangeTreasury, to: r.wallet, amount: 1_000_000}}
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, id, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeRefundMayHaveLeft) {
-		t.Fatalf("the retry's transfer is on the chain: err = %v", err)
 	}
 }
 

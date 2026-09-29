@@ -269,25 +269,28 @@ func uncertainRefund(t *testing.T) (*nameChangeRig, uuid.UUID, string) {
 }
 
 // An admin's refund outcome is held to the chain: never their own change;
-// "never left" refused while the chain knows the refund transaction; "sent"
-// only for a mined treasury transfer of exactly the refund to the paying
-// wallet that no other change counts.
+// only "sent" is taken — "never left" stays flagged for support — and only
+// for a mined treasury transfer of exactly the refund to the paying wallet
+// that no other change counts.
 func TestNameChange_RefundOutcomeIsCheckedAgainstTheChain(t *testing.T) {
 	ctx := context.Background()
 	admin := uuid.New()
 	r, id, maybeTx := uncertainRefund(t)
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, r.user, id, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeSelfReview) {
+	if _, err := r.svc.AdminRecordRefundOutcome(ctx, r.user, id, NameChangeRefundOutcome{Sent: true, TxHash: txHash("f4")}); !errors.Is(err, ErrNameChangeSelfReview) {
 		t.Fatalf("own change: err = %v", err)
 	}
-	r.rail.pendingFrom = map[string]string{maybeTx: nameChangeTreasury}
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, id, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeRefundMayHaveLeft) {
-		t.Fatalf("never left, while the chain knows it: err = %v", err)
+	for name, o := range map[string]NameChangeRefundOutcome{
+		"never left":         {Sent: false, Note: "not on basescan"},
+		"never left, hashed": {Sent: false, TxHash: maybeTx},
+		"sent, no hash":      {Sent: true, TxHash: "  "},
+	} {
+		if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, id, o); !errors.Is(err, ErrNameChangeRefundSentOnly) {
+			t.Errorf("%s: err = %v", name, err)
+		}
 	}
-	r.rail.txLookupErr = errors.New("rpc down")
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, admin, id, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeChainUnreadable) {
-		t.Fatalf("an unreadable chain: err = %v", err)
+	if got := r.change(t, id); got.FeeStatus != models.NameChangeFeeRefundUncertain || r.rail.refunds != 1 {
+		t.Fatalf("a refused outcome moved the fee or sent again: %+v refunds=%d", got, r.rail.refunds)
 	}
-	r.rail.txLookupErr = nil
 
 	refund := func(credited int64, sender, from, to string) fakeChainTx {
 		return fakeChainTx{pay: &StablePayment{Credited: big.NewInt(credited), Sender: sender, BlockTime: r.now, Confirmations: 2}, from: from, to: to}
@@ -318,16 +321,6 @@ func TestNameChange_RefundOutcomeIsCheckedAgainstTheChain(t *testing.T) {
 	if err != nil || av.FeeStatus != models.NameChangeFeeRefunded || av.FeeTxHash != txHash("f4") {
 		t.Fatalf("view %+v err %v", av, err)
 	}
-
-	// "Never left", on a chain that has definitely never heard of it: sent
-	// again at once, its backoff and attempt count reset.
-	n, nid, _ := uncertainRefund(t)
-	n.rail.payment, n.rail.txUnknown = nil, true
-	n.db.Model(&models.UserNameChange{}).Where("id = ?", nid).Update("refund_attempts", 5)
-	nv, err := n.svc.AdminRecordRefundOutcome(ctx, admin, nid, NameChangeRefundOutcome{Sent: false, Note: "not on basescan"})
-	if err != nil || nv.FeeStatus != models.NameChangeFeeRefundFailed || nv.RefundAttempts != 0 || nv.RefundRetryAt != nil {
-		t.Fatalf("view %+v err %v", nv, err)
-	}
 }
 
 // The admin view says when a refund's outcome waits for an admin, and the list
@@ -347,7 +340,7 @@ func TestNameChange_AdminSeesStuckRefunds(t *testing.T) {
 	if v, _ := r.svc.adminView(ctx, r.change(t, id)); v.RefundStuck {
 		t.Fatal("a refund still sending is not stuck")
 	}
-	if _, err := r.svc.AdminRecordRefundOutcome(ctx, uuid.New(), id, NameChangeRefundOutcome{Sent: false}); !errors.Is(err, ErrNameChangeBadState) {
+	if _, err := r.svc.AdminRecordRefundOutcome(ctx, uuid.New(), id, NameChangeRefundOutcome{Sent: true, TxHash: txHash("f4")}); !errors.Is(err, ErrNameChangeBadState) {
 		t.Fatalf("an outcome for a refund still sending: err = %v", err)
 	}
 	r.db.Exec("UPDATE user_name_changes SET updated_at = ? WHERE id = ?", r.now.Add(-time.Hour), id)

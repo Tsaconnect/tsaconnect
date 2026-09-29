@@ -306,6 +306,27 @@ func TestCreateNameChange_AsksForThePassword(t *testing.T) {
 	}
 }
 
+// A refund outcome is only ever recorded as sent: "never left" (or no hash)
+// is refused with a code the console maps, and the refund stays flagged.
+func TestAdminRecordNameChangeRefund_OnlySent(t *testing.T) {
+	db := nameChangeHandlerDB(t)
+	admin := verifiedUser(t, db, "ADA CHIOMA OBI")
+	h := &Handlers{Config: &config.Config{}, NameChanges: freeNameChanges(db)}
+	for _, body := range []string{`{"sent":false,"note":"not on basescan"}`, `{"sent":true}`, `{}`} {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("user", admin)
+		c.Params = gin.Params{{Key: "id", Value: uuid.NewString()}}
+		c.Request, _ = http.NewRequest("POST", "/api/admin/name-changes/x/refund-outcome", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.AdminRecordNameChangeRefund(c)
+		if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `"code":"refund_outcome_sent_only"`) {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
 func putProfileName(h *Handlers, user *models.User, name string) *httptest.ResponseRecorder {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -400,10 +421,6 @@ func (oneStableRail) Refund(context.Context, string, string, string, *big.Int, f
 }
 func (oneStableRail) TransactionKnown(context.Context, string, string) (bool, string, error) {
 	return true, "", nil
-}
-func (oneStableRail) HeadBlock(context.Context, string) (uint64, error) { return 1, nil }
-func (oneStableRail) TransferMinedSince(context.Context, string, string, string, string, *big.Int, uint64) (bool, error) {
-	return true, nil // "may have left": the conservative answer
 }
 
 func paidNameChanges(db *gorm.DB) *services.NameChangeService {

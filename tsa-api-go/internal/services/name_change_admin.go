@@ -261,7 +261,8 @@ func (s *NameChangeService) AdminReject(ctx context.Context, adminID, changeID u
 }
 
 // NameChangeRefundOutcome is what an admin found on-chain for a refund whose
-// broadcast ended uncertain.
+// broadcast ended uncertain. Only "sent" can be recorded: a refund that never
+// left stays flagged until support resolves it by hand.
 type NameChangeRefundOutcome struct {
 	// Sent: the refund transaction TxHash did reach the user.
 	Sent   bool
@@ -282,16 +283,21 @@ func (s *NameChangeService) refundOutcomeFrom(ch *models.UserNameChange) []strin
 	return nil
 }
 
-// AdminRecordRefundOutcome closes a refund the sweep could not: one that may
-// have left (refund_uncertain, or refund_sending past the alert window). The
-// admin's word is checked against the chain before it moves money bookkeeping:
-// "sent" must be a mined transfer of exactly the refund from the treasury to
-// the paying wallet, mined after the send was claimed and used for no other
-// change; "never left" is taken only when the chain has definitely never heard
-// of the recorded transaction or, with none recorded, no such transfer has been
-// mined since the claim — that answer sends the refund again (refund_failed,
-// retried at once).
+// AdminRecordRefundOutcome closes a refund the sweep could not — one that may
+// have left (refund_uncertain, or refund_sending past the alert window) — as
+// sent. The admin's word is checked against the chain first: the hash must be
+// a mined transfer of exactly the refund from the treasury to the paying
+// wallet, mined after the send was claimed and used for no other change.
+// "Never left" cannot be recorded here: sending again on an admin's word risks
+// paying the user twice, so such a refund stays flagged for support.
 func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminID, changeID uuid.UUID, o NameChangeRefundOutcome) (*NameChangeAdminView, error) {
+	tx := strings.ToLower(strings.TrimSpace(o.TxHash))
+	if !o.Sent || tx == "" {
+		return nil, ErrNameChangeRefundSentOnly
+	}
+	if len(tx) != 66 || !strings.HasPrefix(tx, "0x") {
+		return nil, fmt.Errorf("%w: a sent refund needs its transaction hash", ErrNameChangeInvalid)
+	}
 	ch, err := s.get(ctx, changeID)
 	if err != nil {
 		return nil, err
@@ -303,26 +309,11 @@ func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminI
 	if from == nil {
 		return nil, ErrNameChangeBadState
 	}
-	to, tx := models.NameChangeFeeRefundFailed, ""
-	extra := map[string]any{}
-	if o.Sent {
-		tx = strings.ToLower(strings.TrimSpace(o.TxHash))
-		if len(tx) != 66 || !strings.HasPrefix(tx, "0x") {
-			return nil, fmt.Errorf("%w: a sent refund needs its transaction hash", ErrNameChangeInvalid)
-		}
-		if err := s.verifyRefundSent(ctx, ch, tx); err != nil {
-			return nil, err
-		}
-		to = models.NameChangeFeeRefunded
-	} else {
-		if err := s.verifyRefundNeverLeft(ctx, ch); err != nil {
-			return nil, err
-		}
-		// Found never to have left: the sweep retries it at once, its backoff
-		// (and the attempt count that grows it) reset.
-		extra["refund_retry_at"], extra["refund_attempts"] = nil, 0
+	if err := s.verifyRefundSent(ctx, ch, tx); err != nil {
+		return nil, err
 	}
-	if !s.setFeeWith(ctx, ch.ID, from, to, tx, extra) {
+	to := models.NameChangeFeeRefunded
+	if !s.setFee(ctx, ch.ID, from, to, tx) {
 		return nil, ErrNameChangeBadState
 	}
 	note := truncateRunes(fmt.Sprintf("refund recorded by an admin as %s. %s", to, strings.TrimSpace(o.Note)), 512)
@@ -374,48 +365,6 @@ func (s *NameChangeService) verifyRefundSent(ctx context.Context, ch *models.Use
 	}
 	if others > 0 {
 		return fmt.Errorf("%w: that transaction is already recorded as another change's refund", ErrNameChangeRefundUnproven)
-	}
-	return nil
-}
-
-// verifyRefundNeverLeft holds an admin's "never left" to the chain. With the
-// send's transaction recorded, only a chain that has definitely never heard of
-// it will do: a known one — even pending — may still pay the user, and sending
-// the refund again would pay them twice. With none recorded (a send cut off
-// before its hash was known), the token's logs must show no transfer of the
-// refund from the treasury to the paying wallet since the send was claimed.
-// refund() never broadcasts without an amount and a wallet, so a claim missing
-// either left nothing.
-func (s *NameChangeService) verifyRefundNeverLeft(ctx context.Context, ch *models.UserNameChange) error {
-	if s.rail == nil {
-		return ErrNameChangeChainUnreadable
-	}
-	if ch.FeeTxHash != "" {
-		known, _, err := s.rail.TransactionKnown(ctx, ch.PayChain, ch.FeeTxHash)
-		if err != nil {
-			log.Printf("[name-change] change=%s refund %s lookup failed: %v", ch.ID, ch.FeeTxHash, err)
-			return ErrNameChangeChainUnreadable
-		}
-		if known {
-			return ErrNameChangeRefundMayHaveLeft
-		}
-		return nil
-	}
-	amount, ok := new(big.Int).SetString(strings.TrimSpace(ch.RefundAmount), 10)
-	if !ok || amount.Sign() <= 0 || ch.PayFrom == "" {
-		return nil
-	}
-	if ch.RefundClaimedBlock == nil {
-		return fmt.Errorf("%w: no transaction or claim block recorded to check the chain against — check it by hand", ErrNameChangeRefundMayHaveLeft)
-	}
-	found, err := s.rail.TransferMinedSince(ctx, ch.PayChain, ch.PayTokenAddress, s.rail.To(), ch.PayFrom, amount, *ch.RefundClaimedBlock)
-	if err != nil {
-		log.Printf("[name-change] change=%s refund transfer scan from block %d failed: %v", ch.ID, *ch.RefundClaimedBlock, err)
-		return ErrNameChangeChainUnreadable
-	}
-	if found {
-		return fmt.Errorf("%w: a transfer of the refund to the paying wallet was mined after the send was claimed — record it as sent with its hash",
-			ErrNameChangeRefundMayHaveLeft)
 	}
 	return nil
 }

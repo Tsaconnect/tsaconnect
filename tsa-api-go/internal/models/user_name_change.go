@@ -126,11 +126,9 @@ type UserNameChange struct {
 	RefundAttempts int        `gorm:"not null;default:0" json:"-"`
 	RefundRetryAt  *time.Time `json:"-"`
 	// RefundClaimedAt is when the latest refund send was claimed
-	// (refund_sending), and RefundClaimedBlock the chain's head just before:
-	// a transfer that send made can only be mined at or after both, which is
-	// how an admin's "it never left" is checked when no hash was recorded.
-	RefundClaimedAt    *time.Time `json:"-"`
-	RefundClaimedBlock *uint64    `json:"-"`
+	// (refund_sending): a transfer that send made can only be mined after it,
+	// which is how an admin's "it was sent" is checked.
+	RefundClaimedAt *time.Time `json:"-"`
 
 	Attempts int `gorm:"not null;default:0" json:"attempts"`
 	// DiditSessionID/URL are the session in flight (resumed rather than paid for
