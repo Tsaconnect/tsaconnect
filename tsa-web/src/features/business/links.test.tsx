@@ -209,7 +209,7 @@ describe('payment links', () => {
     mountAt('/business/live/links');
     await openRequest();
     const dialog = await screen.findByRole('dialog', { name: 'Request payment' });
-    expect(within(dialog).getByText(/Live payments aren't on for your business yet — make a test link/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Live payments are switched off for your business — make a test link/)).toBeInTheDocument();
     expect(within(dialog).queryByLabelText('Amount (₦)')).not.toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: 'Create link' })).not.toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('link', { name: 'Switch to test mode' }));

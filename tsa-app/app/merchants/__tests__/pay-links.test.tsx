@@ -544,7 +544,7 @@ describe('A reusable link', () => {
       await mount(<OpenLinkDetail />);
       const out = text(tree);
       expect(out).toContain('Not taking payments');
-      expect(out).toContain("Live payments aren't switched on for your business yet.");
+      expect(out).toContain("Live payments are switched off for your business.");
       expect(out).not.toContain('Active');
     });
 

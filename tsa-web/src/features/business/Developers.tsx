@@ -50,7 +50,7 @@ function KeyRow({ merchant: m, mode, onRoll, locked }: { merchant: OwnMerchant; 
   const has = mode === 'live' ? m.hasLiveKey : m.hasTestKey;
   const prefix = mode === 'live' ? m.liveKeyPrefix : m.testKeyPrefix;
   const notLive = mode === 'live' && !m.liveEnabled && (
-    <Note tone="info" icon={<Clock />}>Live payments aren't on yet — your live key will be refused until TSA Connect switches you on.</Note>
+    <Note tone="info" icon={<Clock />}>Live payments are switched off — your live key is refused until TSA Connect switches them back on.</Note>
   );
   return (
     <Row after={notLive}>

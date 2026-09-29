@@ -210,6 +210,10 @@ func NewPayMerchantService(db *gorm.DB, banks BankDirectory, chains payChainRegi
 // and the account resolves via the name-enquiry: the account name stored is
 // always the resolver's, never the applicant-typed one. An unverifiable or
 // incomplete settlement destination is left unset for an admin to configure.
+//
+// The merchant is created live: approving the application is the review, so an
+// approved merchant takes real payments at once. A super admin can still
+// switch it off.
 func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PayMerchant, error) {
 	var existing models.PayMerchant
 	err := s.db.WithContext(ctx).Where("merchant_request_id = ?", req.ID).First(&existing).Error
@@ -238,6 +242,7 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 		WebsiteDomain:           domain,
 		ReturnDomains:           domain,
 		Status:                  models.PayMerchantActive,
+		LiveEnabled:             true,
 		CustomerFeeSharePercent: payMerchantDefaultFeeSharePercent,
 		MinAmountKobo:           payMerchantDefaultMinAmountKobo,
 		MaxAmountKobo:           payMerchantDefaultMaxAmountKobo,

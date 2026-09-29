@@ -1324,6 +1324,37 @@ func TestApproveMerchantRequest_PaymentAcceptanceRetriesAFailedProvisioning(t *t
 	}
 }
 
+// Approval makes a merchant live at once, so the applicant must still be
+// verified when it happens — not only when they applied: a verification that
+// lapsed in between (a name change's re-verification, say) must not take real
+// money.
+func TestApproveMerchantRequest_PaymentAcceptanceNeedsTheApplicantStillVerified(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	prov := &fakePayProvisioner{db: db}
+	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
+	user := createMerchantTestUser(t, db, "user")
+	admin := createMerchantTestUser(t, db, "admin")
+	reqID := submitPay(t, h, user)
+	if err := db.Exec(`UPDATE users SET verification_status = ? WHERE id = ?`, models.VerificationStatusPending, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	w := approvePay(h, admin, reqID)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"applicant_not_verified"`) || prov.calls != 0 {
+		t.Fatalf("approve an unverified applicant: %d calls %d: %s", w.Code, prov.calls, w.Body.String())
+	}
+	var req models.MerchantRequest
+	db.First(&req, "id = ?", reqID)
+	if req.Status != models.MerchantRequestStatusPending {
+		t.Fatalf("status = %q; a refused approval must leave the request pending", req.Status)
+	}
+
+	verifyMerchantTestUser(t, db, user)
+	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK || prov.calls != 1 {
+		t.Fatalf("approve once verified again: %d calls %d: %s", w.Code, prov.calls, w.Body.String())
+	}
+}
+
 func TestApproveMerchantRequest_PaymentAcceptanceNeedsAnAdminAndTheService(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	// Submitted while TSA Pay was enabled, approved after it went dormant.
@@ -1360,7 +1391,7 @@ func TestSubmitMerchantRequest_PaymentAcceptanceRefusedWhileTSAPayIsDormant(t *t
 
 func TestApprovalMessage_TSAPayHasItsOwnWording(t *testing.T) {
 	const want = "Your TSA Pay application is approved. Sign in at https://app.tsaconnectworld.com with your TSA Connect account" +
-		" to create API keys, set your webhook and payouts, and run a test payment. Live payments are switched on after a quick review."
+		" to create API keys, set your webhook and payouts, and start taking payments."
 	if got := approvalMessage(models.BusinessTypePaymentAcceptance, "https://app.tsaconnectworld.com"); got != want {
 		t.Fatalf("payment_acceptance message = %q", got)
 	}

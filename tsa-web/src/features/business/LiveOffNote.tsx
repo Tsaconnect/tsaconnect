@@ -13,13 +13,13 @@ export function TestModeLink({ reusable, onClick }: { reusable?: boolean; onClic
 }
 
 /**
- * Live payments aren't on for this business (see isLiveOff): say so before any
+ * Live payments are off for this business (see isLiveOff): say so before any
  * form, with the links in test mode. `doInstead` finishes the sentence.
  */
 export function LiveOffNote({ doInstead, reusable, onLeave }: { doInstead: string; reusable?: boolean; onLeave?: () => void }) {
   return (
     <Note tone="info" icon={<Clock />}>
-      Live payments aren't on for your business yet — {doInstead}. <TestModeLink reusable={reusable} onClick={onLeave} />
+      Live payments are switched off for your business — {doInstead}. <TestModeLink reusable={reusable} onClick={onLeave} />
     </Note>
   );
 }

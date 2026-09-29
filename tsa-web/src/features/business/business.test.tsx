@@ -51,7 +51,7 @@ describe('business area', () => {
     expect(within(card).getByRole('link', { name: /add a webhook/i })).toHaveAttribute('href', '/business/live/developers');
     expect(within(card).getByRole('link', { name: /make a test payment/i })).toHaveAttribute('href', '/docs');
     // Live is TSA Connect's step, not hers: it says so and links nowhere.
-    expect(within(card).getByText("Under review — finish a test payment and we'll switch you on")).toBeInTheDocument();
+    expect(within(card).getByText("Switched off — contact TSA Connect to turn them back on")).toBeInTheDocument();
     expect(within(card).queryByRole('link', { name: /live payments/i })).not.toBeInTheDocument();
   });
 
