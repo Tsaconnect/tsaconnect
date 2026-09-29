@@ -122,7 +122,18 @@ describe('app shell', () => {
     expect(within(card).getByText('Ada Obi')).toBeInTheDocument();
     expect(within(card).getByText('ada@skyair.ng')).toBeInTheDocument();
     expect(within(card).getByText('Verified')).toBeInTheDocument();
-    expect(within(card).getByText(/change your name or password in the TSA Connect app/i)).toBeInTheDocument();
+    // A verified name is the ID's: changing it means verifying again, in the app.
+    expect(within(card).getByText("To change your name, use the TSA Connect app — you'll verify your identity again.")).toBeInTheDocument();
+    expect(within(card).getByText('Change your password in the TSA Connect app.')).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Main' })?.textContent).not.toMatch(/Payouts/);
+  });
+
+  it('an unverified account is not told it will verify again to change its name', async () => {
+    f.mockImplementation(async () => ok({ user: { ...ada, verificationStatus: 'unverified' } }));
+    mount('/account');
+    const card = (await screen.findByRole('heading', { name: 'Your account' })).closest('section')!;
+    expect(await within(card).findByText('Not verified')).toBeInTheDocument();
+    expect(within(card).getByText('Change your name or password in the TSA Connect app.')).toBeInTheDocument();
+    expect(within(card).queryByText(/verify your identity again/)).not.toBeInTheDocument();
   });
 });

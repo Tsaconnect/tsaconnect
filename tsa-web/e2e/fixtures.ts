@@ -4,7 +4,8 @@
 // flows are covered by the Go tests. Shapes, status codes and machine codes
 // follow tsa-api-go: web_auth_handler.go (login/verify/refresh/logout/me),
 // middleware/auth.go (the uncoded 401), pay_owner_handler.go (the owner routes,
-// payment links included), pay_owner_actions.go (what a confirm applies) and
+// payment links included), pay_owner_actions.go (what a confirm applies),
+// pay_business_name.go (a rename waits for an admin) and
 // middleware/idempotency.go (a repeated Idempotency-Key replays its answer).
 import type { Page, Route } from '@playwright/test';
 
@@ -16,6 +17,7 @@ const sentTo = 'a***@skyair.ng';
 
 type Merchant = {
   id: string; businessName: string; status: 'active' | 'suspended'; liveEnabled: boolean; liveAllowed: boolean; version: number; settlementMode: 'fiat' | 'crypto' | '';
+  pendingBusinessName?: string; pendingSince?: string;
   bankCode?: string; accountNumber?: string; accountName?: string; websiteDomain?: string;
   hasLiveKey: boolean; hasTestKey: boolean; liveKeyPrefix?: string; testKeyPrefix?: string;
   webhookUrl: string; testWebhookUrl: string; returnDomains: string[];
@@ -32,7 +34,8 @@ type Payment = {
 type Pending =
   | { id: string; kind: 'keys'; mode: 'live' | 'test' }
   | { id: string; kind: 'endpoints'; webhookUrl: string; testWebhookUrl: string; returnDomains: string[] }
-  | { id: string; kind: 'webhook_secret'; action: 'reveal' | 'roll' };
+  | { id: string; kind: 'webhook_secret'; action: 'reveal' | 'roll' }
+  | { id: string; kind: 'business_name'; name: string };
 
 function payment(id: string, reference: string, mode: 'live' | 'test', status: string, amount: number, createdAt: string, extra: Partial<Payment> = {}): Payment {
   const customerTotal = Math.ceil((amount * 10_000) / 9_900);
@@ -289,6 +292,28 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       return ok({ payment: p, payer: p.status === 'pending' || p.status === 'expired' ? null : { name: 'Ada Obi' }, deliveries }, 'Payment');
     }
     if (route === 'GET /api/pay/merchant/banks') return ok([{ code: '044', name: 'Access Bank' }, { code: '058', name: 'GTBank' }], 'Banks');
+    if (route === 'PUT /api/pay/merchant/business-name') {
+      const refused = passwordRefused();
+      if (refused) return refused;
+      if (body.expectedVersion !== undefined && body.expectedVersion !== m.version) {
+        return fail(409, 'Your payment settings changed since you opened this screen — reload and try again', 'merchant_stale');
+      }
+      // normalizeBusinessName: hidden characters, 2–100 characters, reserved words.
+      const raw = String(body.name ?? '');
+      if (/[\p{Cc}\p{Cf}]/u.test(raw)) return fail(422, "invalid merchant settings: a business name can't contain hidden or control characters");
+      const name = raw.trim().split(/\s+/).filter(Boolean).join(' ');
+      if (name.length < 2 || name.length > 100) return fail(422, 'invalid merchant settings: a business name must be 2 to 100 characters');
+      const folded = name.toLowerCase().replace(/\s+/g, '');
+      const reserved = ['TSA Connect', 'TSAConnect', 'TSA Pay', 'TSAPay', 'support', 'refund'].find((w) => folded.includes(w.toLowerCase().replace(/\s+/g, '')));
+      if (reserved) return fail(422, `invalid merchant settings: a business name can't contain "${reserved}"`);
+      // The current name back files nothing, needs no code, and withdraws a rename still waiting.
+      if (name === m.businessName) {
+        delete m.pendingBusinessName;
+        delete m.pendingSince;
+        return ok({ merchant: m }, 'Business name unchanged');
+      }
+      return confirmation({ id: actionId(), kind: 'business_name', name });
+    }
     if (route === 'GET /api/pay/merchant/settlement-options') {
       return ok([{ chainId: 8453, chain: 'base', symbol: 'USDC', tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' }], 'Settlement options');
     }
@@ -324,6 +349,11 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
         if (action.mode === 'live') Object.assign(m, { hasLiveKey: true, liveKeyPrefix: key.prefix });
         else Object.assign(m, { hasTestKey: true, testKeyPrefix: key.prefix });
         return ok({ mode: action.mode, key: key.raw }, 'Change confirmed');
+      }
+      if (action.kind === 'business_name') {
+        // Files the request only: the name stays until an admin approves it.
+        Object.assign(m, { pendingBusinessName: action.name, pendingSince: new Date().toISOString() });
+        return ok({ merchant: m }, 'Change confirmed');
       }
       if (action.kind === 'endpoints') {
         Object.assign(m, { webhookUrl: action.webhookUrl, testWebhookUrl: action.testWebhookUrl, returnDomains: action.returnDomains, version: m.version + 1 });
