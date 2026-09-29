@@ -257,7 +257,7 @@ func newBillServiceRig(t *testing.T) *billRig {
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE bill_payments (
-			id TEXT PRIMARY KEY, user_id TEXT, order_id TEXT UNIQUE, wallet_address TEXT,
+			id TEXT PRIMARY KEY, user_id TEXT, order_id TEXT UNIQUE, purpose TEXT NOT NULL DEFAULT 'bill', wallet_address TEXT,
 			mcgp_amount TEXT, ngn_kobo TEXT, rate_kobo TEXT, from_bought TEXT,
 			debit_ref TEXT UNIQUE, status TEXT, tx_hash TEXT, resolve_tx_hash TEXT,
 			failure_reason TEXT, created_at DATETIME, updated_at DATETIME

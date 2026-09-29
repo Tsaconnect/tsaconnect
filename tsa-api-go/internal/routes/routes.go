@@ -117,6 +117,33 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// caller immediately and files an admin review row — see
 		// account_deletion_handler.go.
 		userGroup.POST("/account/deletion-request", h.RequestAccountDeletion)
+
+		// Name change by re-verification (verified users). NAME_CHANGE_ENABLED
+		// gates starting one (wallet-proof, create); a change already running
+		// can always be paid, verified and cancelled. The create takes a fee
+		// and checks the password, so a retried tap replays the first answer
+		// (Idempotency-Key) and every write that can spend a fee, a Didit
+		// session or a treasury refund has a tight per-user limit. A payment
+		// confirm is polled while a transfer mines, so it gets its own looser one.
+		nameChangeLimit := middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey)
+		userGroup.GET("/me/name-change", h.GetNameChange)
+		userGroup.GET("/me/name-change/wallet-proof", middleware.RateLimiterBy(30, 15*time.Minute, perUserRateKey), h.GetNameChangeWalletProof)
+		userGroup.POST("/me/name-change", nameChangeLimit, middleware.Idempotency(config.DB), h.CreateNameChange)
+		userGroup.POST("/me/name-change/confirm-payment", middleware.RateLimiterBy(60, 15*time.Minute, perUserRateKey), h.ConfirmNameChangePayment)
+		userGroup.POST("/me/name-change/start-verification", nameChangeLimit, h.StartNameChangeVerification)
+		userGroup.POST("/me/name-change/cancel", nameChangeLimit, h.CancelNameChange)
+	}
+
+	// Held name changes — any true admin (not merchant/support) reviews them,
+	// never their own. Recording a refund's on-chain outcome moves money
+	// bookkeeping, so it is super_admin only.
+	adminNameChanges := api.Group("/admin/name-changes")
+	adminNameChanges.Use(adminAuth, middleware.RequireP2PAdmin())
+	{
+		adminNameChanges.GET("", h.AdminListNameChanges)
+		adminNameChanges.POST("/:id/approve", h.AdminApproveNameChange)
+		adminNameChanges.POST("/:id/reject", h.AdminRejectNameChange)
+		adminNameChanges.POST("/:id/refund-outcome", middleware.RequireSuperAdmin(), h.AdminRecordNameChangeRefund)
 	}
 
 	// Admin routes
@@ -1251,6 +1278,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.POST("/merchants/:id/revoke-keys", middleware.RequireSuperAdmin(),
 				middleware.RateLimiterBy(6, time.Hour, func(c *gin.Context) string { return "pay-revoke:" + c.Param("id") }),
 				payh.AdminRevokeKeys)
+			// Owners' business rename requests: approving one renames the
+			// merchant. Any true admin decides the queue (never for their own
+			// merchant); renaming directly on the merchant PUT is super_admin.
+			adminPay.GET("/merchant-name-changes", payh.AdminListBusinessNameChanges)
+			adminPay.POST("/merchant-name-changes/:id/approve", payh.AdminApproveBusinessNameChange)
+			adminPay.POST("/merchant-name-changes/:id/reject", payh.AdminRejectBusinessNameChange)
 
 			// Payments + webhook-delivery console (Task 8): read-only across
 			// every merchant, plus the one write — requeueing a delivery —
@@ -1365,6 +1398,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// A name enquiry calls the bank provider.
 			owner.GET("/banks/resolve", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerResolveBank)
 			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
+			if cfg.NameChangeEnabled {
+				owner.PUT("/business-name", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestBusinessName)
+			}
 			owner.POST("/keys", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestKeys)
 			owner.PUT("/endpoints", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestEndpoints)
 			owner.POST("/webhook-secret", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestWebhookSecret)

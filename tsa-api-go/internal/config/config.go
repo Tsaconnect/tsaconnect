@@ -472,6 +472,37 @@ type Config struct {
 	BillsQuoteTTL      time.Duration
 	BillsFloatAlertNgn int64
 
+	// Name change by re-verification (verified users) and merchant
+	// business-name change. NameChangeEnabled (NAME_CHANGE_ENABLED, default off)
+	// is the switch that lets the API deploy dark. NameChangeFeeUSD is the
+	// re-verification fee as a plain decimal ("1.00"; "0" charges nothing), read
+	// when a change is quoted and frozen on it. A paid change allows
+	// NameChangeMaxAttempts Didit sessions within NameChangeTTL, and a user may
+	// complete NameChangeMaxPerYear changes in any 12 months.
+	NameChangeEnabled     bool
+	NameChangeFeeUSD      string
+	NameChangeMaxPerYear  int
+	NameChangeMaxAttempts int
+	NameChangeTTL         time.Duration
+	// NameChangeMaxSessionsPer30Days caps Didit sessions per user (Didit bills
+	// each one) whatever the fee. NameChangeMaxRefundedCancels fees may be
+	// returned per user in NameChangeRefundWindow. NameChangeRequireFaceMatch
+	// holds a change unless Didit's face search matched the account's original
+	// KYC session (needs face search on in the Didit workflow). A stablecoin fee
+	// counts once NameChangeMinConfirmations deep (per chain in
+	// NameChangeMinConfirmationsByChain).
+	NameChangeMaxSessionsPer30Days    int
+	NameChangeMaxRefundedCancels      int
+	NameChangeRefundWindow            time.Duration
+	NameChangeRequireFaceMatch        bool
+	NameChangeMinConfirmations        int
+	NameChangeMinConfirmationsByChain map[string]int
+
+	// TSAPayReservedBusinessNames are words no owner's business name may
+	// contain (TSA_PAY_RESERVED_BUSINESS_NAMES, comma-separated; unset keeps
+	// the built-in list).
+	TSAPayReservedBusinessNames []string
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -976,6 +1007,33 @@ func Load() *Config {
 	cfg.BillsDataMarkupBps = int(getEnvInt64("BILLS_DATA_MARKUP_BPS", 300))
 	cfg.BillsQuoteTTL = time.Duration(getEnvInt64("BILLS_QUOTE_TTL_SECONDS", 300)) * time.Second
 	cfg.BillsFloatAlertNgn = getEnvInt64("BILLS_FLOAT_ALERT_NGN", 100000)
+	cfg.NameChangeEnabled = getEnvBool("NAME_CHANGE_ENABLED", false)
+	cfg.NameChangeFeeUSD = strings.TrimSpace(getEnv("NAME_CHANGE_FEE_USD", "1.00"))
+	cfg.NameChangeMaxPerYear = int(getEnvInt64("NAME_CHANGE_MAX_PER_YEAR", 2))
+	cfg.NameChangeMaxAttempts = int(getEnvInt64("NAME_CHANGE_MAX_ATTEMPTS", 3))
+	cfg.NameChangeTTL = time.Duration(getEnvInt64("NAME_CHANGE_TTL_DAYS", 7)) * 24 * time.Hour
+	cfg.NameChangeMaxSessionsPer30Days = int(getEnvInt64("NAME_CHANGE_MAX_SESSIONS_PER_30_DAYS", 6))
+	cfg.NameChangeMaxRefundedCancels = int(getEnvInt64("NAME_CHANGE_MAX_REFUNDED_CANCELS", 1))
+	cfg.NameChangeRefundWindow = time.Duration(getEnvInt64("NAME_CHANGE_REFUND_WINDOW_DAYS", 30)) * 24 * time.Hour
+	cfg.NameChangeRequireFaceMatch = getEnvBool("NAME_CHANGE_REQUIRE_FACE_MATCH", true)
+	cfg.NameChangeMinConfirmations = int(getEnvInt64("NAME_CHANGE_MIN_CONFIRMATIONS", 3))
+	// Chains whose blocks reorganise deeper wait longer by default.
+	nameChangeConfirmationDefaults := map[string]int{"polygon": 10, "bsc": 5}
+	cfg.NameChangeMinConfirmationsByChain = map[string]int{}
+	for _, chain := range cfg.RampTreasuryChains {
+		def := cfg.NameChangeMinConfirmations
+		if d, ok := nameChangeConfirmationDefaults[chain]; ok {
+			def = d
+		}
+		cfg.NameChangeMinConfirmationsByChain[chain] = int(getEnvInt64("NAME_CHANGE_MIN_CONFIRMATIONS_"+strings.ToUpper(chain), int64(def)))
+	}
+	if raw := strings.TrimSpace(getEnv("TSA_PAY_RESERVED_BUSINESS_NAMES", "")); raw != "" {
+		for _, w := range strings.Split(raw, ",") {
+			if w = strings.TrimSpace(w); w != "" {
+				cfg.TSAPayReservedBusinessNames = append(cfg.TSAPayReservedBusinessNames, w)
+			}
+		}
+	}
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if

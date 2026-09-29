@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -108,5 +110,45 @@ func TestVerifyTransfer_RejectsWhenNoMatchingLogExists(t *testing.T) {
 	r := &stubLogReader{receipt: &types.Receipt{Status: types.ReceiptStatusSuccessful}}
 	if _, err := NewLogTransferVerifier(r).VerifyTransfer(context.Background(), "0xdest", testToken, testFWAddr); err == nil {
 		t.Fatal("empty receipt accepted")
+	}
+}
+
+// A sourced check counts only what the named sender moved: one user's transfer
+// must not be claimable as another's payment.
+func TestVerifyTransferFrom_CountsOnlyTheSendersTransfers(t *testing.T) {
+	payer := "0x2222222222222222222222222222222222222222"
+	r := &stubLogReader{receipt: &types.Receipt{
+		Status: types.ReceiptStatusSuccessful,
+		Logs: []*types.Log{
+			transferLog(testToken, payer, testFWAddr, big.NewInt(1_000_000)),
+			transferLog(testToken, testOther, testFWAddr, big.NewInt(7)),
+		},
+	}}
+	v := NewLogTransferVerifier(r)
+	got, err := v.VerifyTransferFrom(context.Background(), "0xdest", testToken, payer, testFWAddr)
+	if err != nil || got.String() != "1000000" {
+		t.Fatalf("got %v err %v", got, err)
+	}
+	if _, err := v.VerifyTransferFrom(context.Background(), "0xdest", testToken, "0x3333333333333333333333333333333333333333", testFWAddr); !errors.Is(err, ErrTransferNotFound) {
+		t.Fatalf("a sender who moved nothing: err = %v", err)
+	}
+}
+
+func TestClassifyTransfer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		credited *big.Int
+		err      error
+		want     TransferVerdict
+	}{
+		"proven":            {big.NewInt(1), nil, TransferProven},
+		"nothing credited":  {big.NewInt(0), nil, TransferUnproven},
+		"not mined yet":     {nil, ErrTransferNotFound, TransferUnproven},
+		"rpc down":          {nil, errors.New("dial tcp: timeout"), TransferUnproven},
+		"reverted":          {nil, fmt.Errorf("%w: 0xabc", ErrTransferReverted), TransferRefuted},
+		"paid someone else": {nil, ErrTransferWrongRecipient, TransferRefuted},
+	} {
+		if got := ClassifyTransfer(tc.credited, tc.err); got != tc.want {
+			t.Errorf("%s: got %v want %v", name, got, tc.want)
+		}
 	}
 }

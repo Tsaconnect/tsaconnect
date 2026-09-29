@@ -59,6 +59,9 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	}
 
 	merchants := services.NewPayMerchantService(db, banks, chains, master, time.Now)
+	if len(cfg.TSAPayReservedBusinessNames) > 0 {
+		merchants.SetReservedBusinessNames(cfg.TSAPayReservedBusinessNames)
+	}
 	if mailer != nil {
 		// An owner's guarded changes (crypto payout, keys, webhooks, the webhook
 		// secret) wait on a code emailed to them; with no working mailer those

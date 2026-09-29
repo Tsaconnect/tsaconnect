@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -44,28 +44,32 @@ func (h *PayHandler) WithEvents(bus *events.Bus) *PayHandler {
 // AND TSA Pay live being on globally — and is what a client picks the mode of
 // a new payment link by.
 type payOwnerMerchantView struct {
-	ID             uuid.UUID `json:"id"`
-	BusinessName   string    `json:"businessName"`
-	Status         string    `json:"status"`
-	LiveEnabled    bool      `json:"liveEnabled"`
-	LiveAllowed    bool      `json:"liveAllowed"`
-	Version        int       `json:"version"`
-	SettlementMode string    `json:"settlementMode"`
-	BankCode       string    `json:"bankCode,omitempty"`
-	AccountNumber  string    `json:"accountNumber,omitempty"`
-	AccountName    string    `json:"accountName,omitempty"`
-	ChainID        int64     `json:"chainId,omitempty"`
-	TokenAddress   string    `json:"tokenAddress,omitempty"`
-	TokenSymbol    string    `json:"tokenSymbol,omitempty"`
-	WalletAddress  string    `json:"walletAddress,omitempty"`
-	WebsiteDomain  string    `json:"websiteDomain,omitempty"`
-	HasLiveKey     bool      `json:"hasLiveKey"`
-	HasTestKey     bool      `json:"hasTestKey"`
-	LiveKeyPrefix  string    `json:"liveKeyPrefix,omitempty"`
-	TestKeyPrefix  string    `json:"testKeyPrefix,omitempty"`
-	WebhookURL     string    `json:"webhookUrl"`
-	TestWebhookURL string    `json:"testWebhookUrl"`
-	ReturnDomains  []string  `json:"returnDomains"`
+	ID           uuid.UUID `json:"id"`
+	BusinessName string    `json:"businessName"`
+	// PendingBusinessName is a rename the owner asked for that waits for an
+	// admin (since PendingSince); BusinessName stays in use until then.
+	PendingBusinessName string     `json:"pendingBusinessName,omitempty"`
+	PendingSince        *time.Time `json:"pendingSince,omitempty"`
+	Status              string     `json:"status"`
+	LiveEnabled         bool       `json:"liveEnabled"`
+	LiveAllowed         bool       `json:"liveAllowed"`
+	Version             int        `json:"version"`
+	SettlementMode      string     `json:"settlementMode"`
+	BankCode            string     `json:"bankCode,omitempty"`
+	AccountNumber       string     `json:"accountNumber,omitempty"`
+	AccountName         string     `json:"accountName,omitempty"`
+	ChainID             int64      `json:"chainId,omitempty"`
+	TokenAddress        string     `json:"tokenAddress,omitempty"`
+	TokenSymbol         string     `json:"tokenSymbol,omitempty"`
+	WalletAddress       string     `json:"walletAddress,omitempty"`
+	WebsiteDomain       string     `json:"websiteDomain,omitempty"`
+	HasLiveKey          bool       `json:"hasLiveKey"`
+	HasTestKey          bool       `json:"hasTestKey"`
+	LiveKeyPrefix       string     `json:"liveKeyPrefix,omitempty"`
+	TestKeyPrefix       string     `json:"testKeyPrefix,omitempty"`
+	WebhookURL          string     `json:"webhookUrl"`
+	TestWebhookURL      string     `json:"testWebhookUrl"`
+	ReturnDomains       []string   `json:"returnDomains"`
 }
 
 func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
@@ -73,6 +77,9 @@ func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 		LiveAllowed: m.LiveAllowed(h.liveEnabled), Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
 		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList()}
+	if p := h.pendingBusinessName(m); p != nil {
+		v.PendingBusinessName, v.PendingSince = p.Name, &p.Since
+	}
 	if v.HasLiveKey {
 		v.LiveKeyPrefix = m.LiveKeyPrefix
 	}
@@ -89,6 +96,17 @@ func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 		v.ChainID, v.TokenAddress, v.TokenSymbol, v.WalletAddress = m.ChainID, m.TokenAddress, m.TokenSymbol, m.WalletAddress
 	}
 	return v
+}
+
+// pendingBusinessName is the merchant's rename waiting for review, if any. A
+// failed read shows none rather than failing the whole view: the name in use
+// beside it is what everything runs on, and that is always shown.
+func (h *PayHandler) pendingBusinessName(m *models.PayMerchant) *services.PendingBusinessName {
+	p, err := h.merchants.PendingBusinessName(context.Background(), m.ID)
+	if err != nil {
+		log.Printf("[tsa-pay] pending business name for merchant %s: %v", m.ID, err)
+	}
+	return p
 }
 
 // payOwnerSettlementAnswer is a change's outcome: where the confirmation code
@@ -162,6 +180,35 @@ type payOwnerActionAnswer struct {
 	WebhookSecretTest string                `json:"webhookSecretTest,omitempty"`
 }
 
+// PUT /api/pay/merchant/business-name {name, password, expectedVersion} — the
+// owner asks for their business to be renamed. Guarded like a payout change
+// (password, then the emailed code at /actions/:id/confirm, which files the
+// request); the rename takes effect only when an admin approves it. Asking for
+// the current name answers 200 with the merchant unchanged and withdraws any
+// request still waiting.
+func (h *PayHandler) OwnerRequestBusinessName(c *gin.Context) {
+	var req struct {
+		Name            string `json:"name"`
+		Password        string `json:"password"`
+		ExpectedVersion *int   `json:"expectedVersion"`
+	}
+	user, ok := payOwnerBind(c, &req)
+	if !ok || !h.payOwnerPassword(c, user, req.Password) {
+		return
+	}
+	res, err := h.merchants.RequestBusinessNameChange(c.Request.Context(), user.ID, req.Name, req.ExpectedVersion)
+	if err != nil {
+		payOwnerFail(c, err)
+		return
+	}
+	if res.Pending != nil {
+		payOwnerPending(c, res.Pending)
+		return
+	}
+	view := h.payOwnerView(res.Merchant)
+	utils.SuccessResponse(c, http.StatusOK, "Business name unchanged", payOwnerSettlementAnswer{Merchant: &view})
+}
+
 // POST /api/pay/merchant/actions/:id/confirm — the emailed code that applies a
 // waiting guarded action. The key or secret it produces is returned once, here
 // (never cached: the route group sends no-store).
@@ -203,6 +250,14 @@ func (h *PayHandler) announceOwnerAction(owner uuid.UUID, res *services.PayOwner
 	switch res.Kind {
 	case models.PayOwnerActionSettlement:
 		h.announceSettlement(owner, res.Merchant)
+	case models.PayOwnerActionBusinessName:
+		pending := "your new name"
+		if p := h.pendingBusinessName(res.Merchant); p != nil {
+			pending = p.Name
+		}
+		h.announce(owner, events.PayBusinessNameRequested, "We've received your business name change",
+			fmt.Sprintf("Your business keeps the name %s until our team approves %s. If you didn't ask for this, contact support immediately.",
+				res.Merchant.BusinessName, pending))
 	case models.PayOwnerActionKeys:
 		h.announce(owner, events.SecurityPayKeyRolled, fmt.Sprintf("Your %s API key was rolled", res.Mode),
 			"The old key has stopped working. If you didn't do this, contact support immediately.")
@@ -264,15 +319,7 @@ func nonEmpty(s, fallback string) string {
 // be able to make a guarded change, nor guess the password here unseen. false
 // means the response has been written.
 func (h *PayHandler) payOwnerPassword(c *gin.Context, user *models.User, password string) bool {
-	switch err := checkPasswordWithLockout(config.DB, h.events, user, password); {
-	case errors.Is(err, errAccountLocked):
-		utils.ErrorResponseWithCode(c, http.StatusLocked, "Your account is temporarily locked. Try again later.", "account_locked")
-		return false
-	case err != nil:
-		utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "Incorrect password", "password_incorrect")
-		return false
-	}
-	return true
+	return requireAccountPassword(c, h.events, user, password)
 }
 
 // payOwnerPending answers 202 with where the code went.

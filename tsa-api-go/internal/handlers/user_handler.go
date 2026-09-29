@@ -18,8 +18,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
-	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
 // GetProfile handles GET /api/users/profile (auth required).
@@ -105,14 +105,16 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 	if req.Name != "" {
 		trimmedName := strings.TrimSpace(req.Name)
 		if trimmedName != dbUser.Name {
-			// Once a user has passed identity verification, their legal name is
-			// locked. Letting them change it silently would either break the
-			// link to their KYC record or kick them back into re-verification,
-			// neither of which is acceptable UX. Require support to intervene.
+			// Once a user has passed identity verification, their name is the
+			// name on their ID document. Typing a new one would break the link
+			// to their KYC record, so the only way to change it is to verify
+			// again with a document that carries the new name (the name-change
+			// flow); the code tells the app to send them there.
 			if dbUser.VerificationStatus == models.VerificationStatusVerified {
 				c.JSON(http.StatusForbidden, gin.H{
 					"success": false,
-					"message": "Your name is locked because your identity has been verified. Contact support to update your legal name.",
+					"message": "Your name is the one on your verified ID. To change it, use Change name and verify again with your new ID.",
+					"code":    "use_name_change",
 				})
 				return
 			}
@@ -240,8 +242,8 @@ func (h *Handlers) GetVerificationStatus(c *gin.Context) {
 	}
 
 	status := gin.H{
-		"overall":   dbUser.VerificationStatus,
-		"notes":     dbUser.VerificationNotes,
+		"overall":        dbUser.VerificationStatus,
+		"notes":          dbUser.VerificationNotes,
 		"diditSessionId": dbUser.DiditSessionID,
 		"completed":      dbUser.VerificationStatus == models.VerificationStatusVerified,
 	}

@@ -230,6 +230,10 @@ func AutoMigrate() error {
 		&models.PayOwnerAction{},
 		&models.PayOpenLink{},
 		&models.PayRetiredSlug{},
+		// Owners' business renames and whether payouts may use them.
+		&models.PayMerchantNameChange{},
+		// Verified users' name changes by re-verification, with their fees.
+		&models.UserNameChange{},
 		// TSA Connect web sign-in
 		&models.WebSigninChallenge{},
 		&models.WebTrustedBrowser{},
@@ -558,6 +562,16 @@ func AutoMigrate() error {
 	    ON ramp_sell_intents (pay_payment_id)
 	    WHERE pay_payment_id IS NOT NULL AND status IN ('swapping','swapped','ordering')`).Error; err != nil {
 		log.Printf("[Migrate] WARNING could not build uq_ramp_sell_intents_one_open_per_payment: %v — a TSA Pay payment most likely holds MORE THAN ONE open sale. The one-open-sale check still runs in the service; migrate again once the duplicates are resolved.", err)
+	}
+
+	// Name change — "at most one open change per user". The service checks
+	// first, but that is read-then-insert: two taps both read "none open" and
+	// both pay. Only a constraint refuses the second. Keep the WHERE list equal
+	// to models.NameChangeTerminalStatuses. Idempotent.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_user_name_changes_one_open
+	    ON user_name_changes (user_id)
+	    WHERE status NOT IN ('approved','rejected','lapsed','cancelled')`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_user_name_changes_one_open: %v — a user most likely holds MORE THAN ONE open name change. The service check still runs; close the duplicates and migrate again.", err)
 	}
 
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode

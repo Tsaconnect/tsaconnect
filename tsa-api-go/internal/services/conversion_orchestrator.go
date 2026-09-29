@@ -1028,7 +1028,8 @@ func (o *ConversionOrchestrator) verifyTransferOnChain(ctx context.Context, orde
 		return nil, nil
 	}
 	credited, err := verifier.VerifyTransfer(ctx, txHash, tokenAddr, order.WalletAddress)
-	if err != nil {
+	switch ClassifyTransfer(credited, err) {
+	case TransferRefuted:
 		// A REVERTED transfer, or one that paid someone else, is a settled
 		// question with a bad answer — it will never become true by waiting, so
 		// polling it until the stall deadline just costs hours before a human
@@ -1040,19 +1041,18 @@ func (o *ConversionOrchestrator) verifyTransferOnChain(ctx context.Context, orde
 		// and look again" branch below, and is then bounded by legCeiling. The
 		// ErrTransferWrongRecipient arm is defensive only, for a future
 		// verifier that does distinguish the two.
-		if errors.Is(err, ErrTransferReverted) || errors.Is(err, ErrTransferWrongRecipient) {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_transfer_bad_total=1 order=%s stage=%s tx=%s err=%v",
-				order.ID, stage, txHash, err)
-			return nil, o.toRecovery(ctx, order,
-				fmt.Sprintf("%s transfer %s did not credit the user: %v", stage, txHash, err), nil)
-		}
-		// Not mined yet, or not readable. The next tick looks again.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_unverified_total=1 order=%s stage=%s tx=%s err=%v",
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_transfer_bad_total=1 order=%s stage=%s tx=%s err=%v",
 			order.ID, stage, txHash, err)
-		return nil, nil
-	}
-	if credited == nil || credited.Sign() <= 0 {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_zero_total=1 order=%s stage=%s tx=%s", order.ID, stage, txHash)
+		return nil, o.toRecovery(ctx, order,
+			fmt.Sprintf("%s transfer %s did not credit the user: %v", stage, txHash, err), nil)
+	case TransferUnproven:
+		if err != nil {
+			// Not mined yet, or not readable. The next tick looks again.
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_unverified_total=1 order=%s stage=%s tx=%s err=%v",
+				order.ID, stage, txHash, err)
+		} else {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_dest_zero_total=1 order=%s stage=%s tx=%s", order.ID, stage, txHash)
+		}
 		return nil, nil
 	}
 	return credited, nil

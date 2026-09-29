@@ -244,10 +244,10 @@ func TestPayMerchant_UpdateGuardsShareLimitsURLsAndStatus(t *testing.T) {
 }
 
 func TestPayMerchant_SensitiveUpdates(t *testing.T) {
-	if (PayMerchantUpdate{BusinessName: payStr("x"), CustomerFeeSharePercent: payInt(0), Status: payStr("suspended")}).Sensitive() {
-		t.Fatal("name/share/status are not sensitive")
+	if (PayMerchantUpdate{CustomerFeeSharePercent: payInt(0), Status: payStr("suspended")}).Sensitive() {
+		t.Fatal("share/status are not sensitive")
 	}
-	for _, u := range []PayMerchantUpdate{{BankCode: payStr("044")}, {WalletAddress: payStr("0x1")}, {WebhookURL: payStr("https://x.ng")},
+	for _, u := range []PayMerchantUpdate{{BusinessName: payStr("x")}, {BankCode: payStr("044")}, {WalletAddress: payStr("0x1")}, {WebhookURL: payStr("https://x.ng")},
 		{TestWebhookURL: payStr("https://x.ng")}, {ReturnDomains: []string{"x.ng"}}, {SettlementMode: payStr("crypto")}} {
 		if !u.Sensitive() {
 			t.Fatalf("%+v must need a super admin", u)

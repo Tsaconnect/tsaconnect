@@ -257,6 +257,9 @@ const (
 	PayAuditActionMerchantKeys   PayAuditAction = "merchant.keys"
 	// An admin switched a credential off; the owner creates its replacement.
 	PayAuditActionMerchantKeysRevoked PayAuditAction = "merchant.keys_revoked"
+	// PayAuditActionBusinessNameReview: an admin approved (renaming the
+	// merchant) or rejected an owner's business-name request.
+	PayAuditActionBusinessNameReview PayAuditAction = "merchant.business_name_review"
 )
 
 // PayAuditEvent is the durable record of a settlement/credential change to a
@@ -306,11 +309,47 @@ const (
 	PayOwnerActionKeys          = "keys"
 	PayOwnerActionEndpoints     = "endpoints"
 	PayOwnerActionWebhookSecret = "webhook_secret"
+	PayOwnerActionBusinessName  = "business_name"
 )
 
 func (a *PayOwnerAction) BeforeCreate(tx *gorm.DB) error {
 	if a.ID == uuid.Nil {
 		a.ID = uuid.New()
+	}
+	return nil
+}
+
+// Business-name change review statuses.
+const (
+	PayNameChangePending  = "pending"
+	PayNameChangeApproved = "approved"
+	PayNameChangeRejected = "rejected"
+)
+
+// PayMerchantNameChange records one owner request to rename a TSA Pay
+// business, with the owner's verified legal name as it stood when they asked.
+// Nothing about the merchant changes until an admin approves it: customers,
+// checkout, links, receipts and the payout-account name check all keep the
+// current name meanwhile. A later request (or asking for the current name
+// back) closes a pending one as rejected, with a note saying why.
+type PayMerchantNameChange struct {
+	ID                uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"merchantId"`
+	OldName           string     `gorm:"size:255;not null" json:"oldName"`
+	NewName           string     `gorm:"size:255;not null" json:"newName"`
+	OwnerVerifiedName string     `gorm:"size:255" json:"ownerVerifiedName"`
+	Status            string     `gorm:"size:16;not null;index" json:"status"`
+	RequestedBy       uuid.UUID  `gorm:"type:uuid;not null" json:"requestedBy"`
+	ReviewedBy        *uuid.UUID `gorm:"type:uuid" json:"reviewedBy,omitempty"`
+	Note              string     `gorm:"size:512" json:"note,omitempty"`
+	ReviewedAt        *time.Time `json:"reviewedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
+func (c *PayMerchantNameChange) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
 	}
 	return nil
 }

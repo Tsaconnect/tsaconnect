@@ -31,6 +31,12 @@ import (
 // operator-signed end to end, so the user needs no gas and signs nothing, which
 // removes the blind-signing exposure rather than mitigating it.
 //
+// The same lifecycle serves every other one-off payment to the platform from
+// spendable MCGP — a name change's re-verification fee is one: held when asked
+// for, settled once the thing paid for happened, reversed if it never will.
+// ForPurpose scopes a copy of the service to such a payer, whose rows and
+// on-chain refs are kept apart from bills'.
+//
 // Dormant-by-default: with no operator signer wired, IsEnabled() is false and
 // every call returns ErrBillPayDisabled.
 var (
@@ -52,10 +58,44 @@ const billDebitAbandonAfter = 30 * time.Minute
 type BillPaymentService struct {
 	db   *gorm.DB
 	swap billPaySwap
+	// purpose is what OrderID means for this service's rows. Every lookup and
+	// scan is confined to it, so a bill sweep never touches a name-change fee.
+	purpose string
 }
 
 func NewBillPaymentService(db *gorm.DB, swap billPaySwap) *BillPaymentService {
-	return &BillPaymentService{db: db, swap: swap}
+	return &BillPaymentService{db: db, swap: swap, purpose: models.BillPayPurposeBill}
+}
+
+// ForPurpose is this service for another kind of MCGP payment: same swap, same
+// table, its own rows and its own on-chain refs.
+func (s *BillPaymentService) ForPurpose(purpose string) *BillPaymentService {
+	if s == nil {
+		return nil
+	}
+	return &BillPaymentService{db: s.db, swap: s.swap, purpose: purpose}
+}
+
+// payments is the table narrowed to this service's purpose.
+func (s *BillPaymentService) payments(ctx context.Context) *gorm.DB {
+	return s.db.WithContext(ctx).Model(&models.BillPayment{}).Where("purpose = ?", s.purpose)
+}
+
+// debitRef is the on-chain ref for one of this service's payments. Bills keep
+// the ref they have always had; any other purpose gets its own namespace, so no
+// two purposes can ever derive the same ref.
+func (s *BillPaymentService) debitRef(orderID uuid.UUID) [32]byte {
+	if s.purpose == models.BillPayPurposeBill {
+		return billDebitRef(orderID)
+	}
+	return spendableRef("mcgp-"+s.purpose+":", orderID)
+}
+
+// DebitRef is the on-chain ref of the payment for orderID, as a hex string —
+// what the caller records against its own row.
+func (s *BillPaymentService) DebitRef(orderID uuid.UUID) string {
+	ref := s.debitRef(orderID)
+	return common.BytesToHash(ref[:]).Hex()
 }
 
 func (s *BillPaymentService) IsEnabled() bool {
@@ -110,7 +150,7 @@ func (s *BillPaymentService) Debit(ctx context.Context, in DebitInput) (*models.
 	// would let the caller treat an unpaid order as paid (free vend). The ref
 	// is derived from the order id, so the safe retry path is a new order.
 	var existing models.BillPayment
-	err := s.db.WithContext(ctx).Where("order_id = ?", in.OrderID).First(&existing).Error
+	err := s.payments(ctx).Where("order_id = ?", in.OrderID).First(&existing).Error
 	if err == nil {
 		if existing.Status == models.BillPayStatusFailed {
 			return nil, ErrBillPayBadState
@@ -135,11 +175,12 @@ func (s *BillPaymentService) Debit(ctx context.Context, in DebitInput) (*models.
 		allowBought = new(big.Int)
 	}
 
-	ref := billDebitRef(in.OrderID)
+	ref := s.debitRef(in.OrderID)
 	pay := &models.BillPayment{
 		ID:            uuid.New(),
 		UserID:        in.UserID,
 		OrderID:       in.OrderID,
+		Purpose:       s.purpose,
 		WalletAddress: wallet,
 		McgpAmount:    in.McgpAmount.String(),
 		NgnKobo:       bigOrZero(in.NgnKobo),
@@ -205,11 +246,8 @@ func (s *BillPaymentService) resolve(ctx context.Context, orderID uuid.UUID, set
 	if !s.IsEnabled() {
 		return nil, ErrBillPayDisabled
 	}
-	var pay models.BillPayment
-	if err := s.db.WithContext(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrBillPayNotFound
-		}
+	pay, err := s.paymentForOrder(ctx, orderID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -218,15 +256,14 @@ func (s *BillPaymentService) resolve(ctx context.Context, orderID uuid.UUID, set
 		target = models.BillPayStatusSettled
 	}
 	if pay.Status == target {
-		return &pay, nil // idempotent
+		return pay, nil // idempotent
 	}
 	if pay.Status != models.BillPayStatusDebited {
 		return nil, ErrBillPayBadState
 	}
 
-	ref := billDebitRef(orderID)
+	ref := s.debitRef(orderID)
 	var txHash string
-	var err error
 	event := "PremiumDebitReversed"
 	if settle {
 		txHash, err = s.swap.OperatorSettleDebit(ctx, ref)
@@ -243,10 +280,10 @@ func (s *BillPaymentService) resolve(ctx context.Context, orderID uuid.UUID, set
 
 	pay.ResolveTxHash = txHash
 	pay.Status = target
-	if err := s.db.WithContext(ctx).Save(&pay).Error; err != nil {
+	if err := s.db.WithContext(ctx).Save(pay).Error; err != nil {
 		return nil, err
 	}
-	return &pay, nil
+	return pay, nil
 }
 
 // StuckPayments lists rows that never reached a terminal state — a debit that
@@ -262,7 +299,7 @@ func (s *BillPaymentService) StuckPayments(ctx context.Context, olderThan time.D
 		limit = 50
 	}
 	var out []models.BillPayment
-	err := s.db.WithContext(ctx).
+	err := s.payments(ctx).
 		Where("status IN ? AND updated_at <= ?",
 			[]string{models.BillPayStatusDebiting, models.BillPayStatusDebited}, time.Now().Add(-olderThan)).
 		Order("created_at asc").
@@ -293,7 +330,7 @@ func (s *BillPaymentService) ResolveDebiting(ctx context.Context, orderID uuid.U
 	if pay.Status != models.BillPayStatusDebiting {
 		return pay.Status, false, nil
 	}
-	ref := billDebitRef(orderID)
+	ref := s.debitRef(orderID)
 	rec, err := s.swap.DebitRecord(ctx, ref)
 	if err != nil {
 		return pay.Status, false, fmt.Errorf("bill payment: read debit: %w", err)
@@ -345,14 +382,14 @@ func (s *BillPaymentService) AlertLateDebitsBeyondWindow(ctx context.Context) (i
 	const batch = 200
 	for page := 0; page < 50; page++ {
 		var rows []models.BillPayment
-		q := s.db.WithContext(ctx).Model(&models.BillPayment{}).
+		q := s.payments(ctx).
 			Where("status = ? AND updated_at <= ?", models.BillPayStatusFailed, cutoff)
 		if err := cursor.page("deep", "", q, batch).Find(&rows).Error; err != nil {
 			return reported, err
 		}
 		for i := range rows {
 			pay := &rows[i]
-			rec, err := s.swap.DebitRecord(ctx, billDebitRef(pay.OrderID))
+			rec, err := s.swap.DebitRecord(ctx, s.debitRef(pay.OrderID))
 			if err != nil || rec.State != DebitStatePending {
 				continue
 			}
@@ -383,7 +420,7 @@ func (s *BillPaymentService) AdoptLateDebit(ctx context.Context, orderID uuid.UU
 	if pay.Status != models.BillPayStatusFailed {
 		return false, nil
 	}
-	rec, err := s.swap.DebitRecord(ctx, billDebitRef(orderID))
+	rec, err := s.swap.DebitRecord(ctx, s.debitRef(orderID))
 	if err != nil {
 		return false, fmt.Errorf("bill payment: read debit: %w", err)
 	}
@@ -411,7 +448,7 @@ func billDebitMatches(rec DebitRecord, pay *models.BillPayment) bool {
 
 func (s *BillPaymentService) paymentForOrder(ctx context.Context, orderID uuid.UUID) (*models.BillPayment, error) {
 	var pay models.BillPayment
-	if err := s.db.WithContext(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
+	if err := s.payments(ctx).Where("order_id = ?", orderID).First(&pay).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrBillPayNotFound
 		}

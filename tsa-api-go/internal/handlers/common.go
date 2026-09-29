@@ -238,6 +238,23 @@ func checkPasswordWithLockout(db *gorm.DB, bus *events.Bus, user *models.User, p
 	return nil
 }
 
+// requireAccountPassword answers a guarded request's password, counted toward
+// the login lockout: a session is not enough — a stolen or borrowed device must
+// not be able to make a guarded change, nor guess the password here unseen.
+// false means the refusal (423 account_locked / 401 password_incorrect) has
+// been written.
+func requireAccountPassword(c *gin.Context, bus *events.Bus, user *models.User, password string) bool {
+	switch err := checkPasswordWithLockout(config.DB, bus, user, password); {
+	case errors.Is(err, errAccountLocked):
+		utils.ErrorResponseWithCode(c, http.StatusLocked, "Your account is temporarily locked. Try again later.", "account_locked")
+		return false
+	case err != nil:
+		utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "Incorrect password", "password_incorrect")
+		return false
+	}
+	return true
+}
+
 // splitCommaList splits a comma-separated query value, trimming each part and
 // dropping empty ones. A blank input yields nil.
 func splitCommaList(raw string) []string {

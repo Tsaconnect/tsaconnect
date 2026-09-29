@@ -1557,6 +1557,9 @@ func main() {
 	// buildRampConversion actually runs) so the dispute service and handler,
 	// wired further down, can pick it up whether or not it ended up nil.
 	var conversionOrch *services.ConversionOrchestrator
+	// The treasury is hoisted for the same reason: a name change's stablecoin
+	// fee is paid into it and refunded out of it.
+	var rampTreasury *services.Treasury
 	// Likewise hoisted for TSA Pay (built after this block): a naira payment
 	// opens its payout through the same order service, sell intents and quoter
 	// the ramp sell uses. Each stays nil when its own gate is off.
@@ -1627,9 +1630,8 @@ func main() {
 		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
 		// nil-orchestrator gate itself lives in registerRampConversionWorkers
 		// (and is unit-tested there), not inlined here.
-		var treasury *services.Treasury
-		treasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
-		registerRampConversionWorkers(scheduler, treasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
+		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
+		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
@@ -1697,6 +1699,9 @@ func main() {
 	disputeHandler := handlers.NewDisputeHandler(disputeService).WithRampAdmin(conversionOrch)
 
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
+
+	// Name change by re-verification — see buildNameChanges.
+	h.NameChanges = buildNameChanges(cfg, mcgpSwapService, rampTreasury, blockchainService, eventBus, scheduler)
 
 	// Setup all routes
 	if alert := netlifyProxyAlert(cfg); alert != "" {

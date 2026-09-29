@@ -172,6 +172,20 @@ func (t *Treasury) Lane(chainKey string) *TreasuryLane {
 	return t.lanes[strings.ToLower(strings.TrimSpace(chainKey))]
 }
 
+// ChainKeys is every chain the treasury has a lane on, sorted — for a caller
+// offering the treasury as somewhere to be paid.
+func (t *Treasury) ChainKeys() []string {
+	if t == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(t.lanes))
+	for k := range t.lanes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // SetKillSwitch fans out to every lane's Guard — there is no second,
 // treasury-level switch to keep in sync.
 func (t *Treasury) SetKillSwitch(on bool) {

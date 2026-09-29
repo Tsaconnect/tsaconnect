@@ -3,10 +3,12 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -161,6 +163,10 @@ type payMerchantAdminView struct {
 	services.PayMerchantView
 	LiveKeyPrefix string `json:"liveKeyPrefix,omitempty"`
 	TestKeyPrefix string `json:"testKeyPrefix,omitempty"`
+	// PendingBusinessName is an owner's rename waiting in the review queue
+	// (since PendingSince); businessName stays in use until it is approved.
+	PendingBusinessName string     `json:"pendingBusinessName,omitempty"`
+	PendingSince        *time.Time `json:"pendingSince,omitempty"`
 }
 
 func newPayMerchantAdminView(v services.PayMerchantView) payMerchantAdminView {
@@ -190,9 +196,22 @@ func (h *PayHandler) AdminListMerchants(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list merchants")
 		return
 	}
+	ids := make([]uuid.UUID, len(merchants))
+	for i, v := range merchants {
+		ids[i] = v.ID
+	}
+	pending, err := h.merchants.PendingBusinessNames(c.Request.Context(), ids)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list pending business names failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list merchants")
+		return
+	}
 	views := make([]payMerchantAdminView, len(merchants))
 	for i, v := range merchants {
 		views[i] = newPayMerchantAdminView(v)
+		if p, ok := pending[v.ID]; ok {
+			views[i].PendingBusinessName, views[i].PendingSince = p.Name, &p.Since
+		}
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Merchants", gin.H{
 		"merchants": views,
@@ -213,13 +232,15 @@ func (h *PayHandler) AdminGetMerchant(c *gin.Context) {
 		payMerchantAdminFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Merchant", payMerchantAdminViewFor(m))
+	utils.SuccessResponse(c, http.StatusOK, "Merchant", h.payMerchantAdminViewWithPending(m))
 }
 
-// PUT /admin/pay/merchants/:id — a plain admin may change business name,
-// status and fee share; changing where money settles or events go
-// (settlement, crypto target, webhooks, return domains), or switching the
-// merchant's live payments on or off, needs super_admin.
+// PUT /admin/pay/merchants/:id — a plain admin may change status and fee
+// share; renaming the merchant (what customers see, and what a payout account
+// may be named — an owner's request goes through the review queue instead),
+// changing where money settles or events go (settlement, crypto target,
+// webhooks, return domains), or switching the merchant's live payments on or
+// off, needs super_admin.
 func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 	admin := getUserFromContext(c)
 	if admin == nil {
@@ -236,7 +257,7 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 		return
 	}
 	if in.Sensitive() && !hasSuperAdminPrivilege(c, admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can change where a merchant is paid or notified, or switch its live payments")
+		utils.ErrorResponse(c, http.StatusForbidden, "Only a super admin can rename a merchant, change where it is paid or notified, or switch its live payments")
 		return
 	}
 	m, before, err := h.merchants.Update(c.Request.Context(), admin.ID, id, in)
@@ -264,7 +285,115 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 		}
 		h.announceLive(m)
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", payMerchantAdminViewFor(m))
+	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", h.payMerchantAdminViewWithPending(m))
+}
+
+// payMerchantAdminViewWithPending is payMerchantAdminViewFor with the rename
+// waiting for review, if any.
+func (h *PayHandler) payMerchantAdminViewWithPending(m *models.PayMerchant) payMerchantAdminView {
+	v := payMerchantAdminViewFor(m)
+	if p := h.pendingBusinessName(m); p != nil {
+		v.PendingBusinessName, v.PendingSince = p.Name, &p.Since
+	}
+	return v
+}
+
+// payBusinessNameChangeView is one owner rename as the review queue shows it:
+// the names, the owner's verified legal name when they asked, and the decision.
+type payBusinessNameChangeView struct {
+	ID                uuid.UUID  `json:"id"`
+	MerchantID        uuid.UUID  `json:"merchantId"`
+	OldName           string     `json:"oldName"`
+	NewName           string     `json:"newName"`
+	OwnerVerifiedName string     `json:"ownerVerifiedName"`
+	Status            string     `json:"status"`
+	RequestedBy       uuid.UUID  `json:"requestedBy"`
+	ReviewedBy        *uuid.UUID `json:"reviewedBy"`
+	Note              string     `json:"note"`
+	ReviewedAt        *time.Time `json:"reviewedAt"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
+func payBusinessNameChangeViewFor(ch *models.PayMerchantNameChange) payBusinessNameChangeView {
+	return payBusinessNameChangeView{ID: ch.ID, MerchantID: ch.MerchantID, OldName: ch.OldName, NewName: ch.NewName,
+		OwnerVerifiedName: ch.OwnerVerifiedName, Status: ch.Status, RequestedBy: ch.RequestedBy, ReviewedBy: ch.ReviewedBy,
+		Note: ch.Note, ReviewedAt: ch.ReviewedAt, CreatedAt: ch.CreatedAt, UpdatedAt: ch.UpdatedAt}
+}
+
+// GET /admin/pay/merchant-name-changes?status=&page=&limit= — owners' business
+// renames, newest first; status=pending is the review queue.
+func (h *PayHandler) AdminListBusinessNameChanges(c *gin.Context) {
+	page := clamp(atoiDefault(c.Query("page"), 1), 1, 1<<30)
+	limit := clamp(atoiDefault(c.Query("limit"), 20), 1, 100)
+	changes, total, err := h.merchants.ListBusinessNameChanges(c.Request.Context(), c.Query("status"), page, limit)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list business name changes failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list business name changes")
+		return
+	}
+	views := make([]payBusinessNameChangeView, len(changes))
+	for i := range changes {
+		views[i] = payBusinessNameChangeViewFor(&changes[i])
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Business name changes", gin.H{"changes": views, "total": total, "page": page, "limit": limit})
+}
+
+// POST /admin/pay/merchant-name-changes/:id/approve {note} — the merchant is
+// renamed: checkout, links, receipts and the payout-account check use the new
+// name from now on.
+func (h *PayHandler) AdminApproveBusinessNameChange(c *gin.Context) {
+	h.adminReviewBusinessName(c, true)
+}
+
+// POST /admin/pay/merchant-name-changes/:id/reject {note} — the merchant keeps
+// its name; the owner is told, with the admin's note.
+func (h *PayHandler) AdminRejectBusinessNameChange(c *gin.Context) {
+	h.adminReviewBusinessName(c, false)
+}
+
+func (h *PayHandler) adminReviewBusinessName(c *gin.Context, approve bool) {
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Business name change not found", "not_found")
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	_ = c.ShouldBindJSON(&req) // the note is optional
+	change, m, err := h.merchants.ReviewBusinessNameChange(c.Request.Context(), admin.ID, id, approve, req.Note)
+	switch {
+	case errors.Is(err, services.ErrPayBusinessNameChangeNotFound):
+		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Business name change not found", "not_found")
+		return
+	case errors.Is(err, services.ErrPayBusinessNameSelfReview):
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, "You can't review a rename of your own business", "self_review")
+		return
+	case errors.Is(err, services.ErrPayBusinessNameChangeDecided):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "This change has already been decided or superseded", "already_decided")
+		return
+	case err != nil:
+		payMerchantAdminFail(c, err)
+		return
+	}
+	if approve {
+		h.announce(m.UserID, events.PayBusinessNameApproved, fmt.Sprintf("Your business is now called %s", change.NewName),
+			"Your new business name is approved. Customers see it from now on, and payouts can go to an account in this name.")
+	} else {
+		message := fmt.Sprintf("Your business keeps the name %s.", m.BusinessName)
+		if change.Note != "" {
+			message += " Our team's note: " + change.Note
+		}
+		h.announce(m.UserID, events.PayBusinessNameRejected, fmt.Sprintf("Your request to rename your business to %s was not approved", change.NewName), message)
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Business name change reviewed", gin.H{
+		"change": payBusinessNameChangeViewFor(change), "merchant": h.payMerchantAdminViewWithPending(m)})
 }
 
 type payRevokeKeysRequest struct {

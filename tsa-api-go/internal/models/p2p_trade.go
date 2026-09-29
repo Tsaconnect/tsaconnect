@@ -142,6 +142,15 @@ const (
 	P2PTradeStatusResolved       = "resolved"
 )
 
+// P2PTradeLiveStatuses are the states in which a trade still has money moving:
+// escrow locked, naira in flight, or a dispute open.
+var P2PTradeLiveStatuses = []string{
+	P2PTradeStatusPendingPayment,
+	P2PTradeStatusPaid,
+	P2PTradeStatusReleasing,
+	P2PTradeStatusDisputed,
+}
+
 // P2PTradeValidNextStatuses returns valid transitions for the trade
 // state-machine. Empty slice means terminal.
 func P2PTradeValidNextStatuses(current string) []string {

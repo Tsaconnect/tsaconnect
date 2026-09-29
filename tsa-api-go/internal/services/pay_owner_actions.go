@@ -253,6 +253,12 @@ func (s *PayMerchantService) applyOwnerAction(ctx context.Context, ownerID uuid.
 			return nil, err
 		}
 		out.Merchant = updated
+	case models.PayOwnerActionBusinessName:
+		updated, err := s.confirmBusinessNameByOwner(ctx, ownerID, m, a)
+		if err != nil {
+			return nil, err
+		}
+		out.Merchant = updated
 	case models.PayOwnerActionEndpoints:
 		var ch PayEndpointsChange
 		if err := json.Unmarshal([]byte(a.Payload), &ch); err != nil {

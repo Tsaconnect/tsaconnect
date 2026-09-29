@@ -9,14 +9,14 @@ import (
 
 // Handlers holds references to all services needed by route handlers.
 type Handlers struct {
-	PriceService           *services.PriceService
-	BlockchainService      *services.BlockchainService
-	OTCService             *services.OTCService
-	P2PService             *services.P2PService
-	TokenDiscoveryService  *services.TokenDiscoveryService
-	Config                 *config.Config
-	EventBus               *events.Bus
-	EmailService           *services.EmailService
+	PriceService          *services.PriceService
+	BlockchainService     *services.BlockchainService
+	OTCService            *services.OTCService
+	P2PService            *services.P2PService
+	TokenDiscoveryService *services.TokenDiscoveryService
+	Config                *config.Config
+	EventBus              *events.Bus
+	EmailService          *services.EmailService
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go after construction. Fee-settled sites route through
 	// settleFeeEarnings.
@@ -35,6 +35,10 @@ type Handlers struct {
 	// main.go after construction). Non-EVM wallet endpoints return 503 when
 	// their chain key is absent from the registry.
 	ChainRegistry *chains.Registry
+
+	// NameChanges runs verified users' name changes by re-verification
+	// (optional/nil-safe; wired from main.go). Nil answers the user routes 503.
+	NameChanges *services.NameChangeService
 
 	// WebCodeMailer sends the TSA Connect web app's sign-in codes straight to
 	// the account's email. nil = web sign-in from a new browser is refused

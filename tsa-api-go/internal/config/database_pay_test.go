@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -97,5 +98,28 @@ func TestAutoMigrate_RunsTheLiveSwitchStepFirst(t *testing.T) {
 	step, migrate := strings.Index(body, "migratePayMerchantLiveSwitch(DB)"), strings.Index(body, "DB.AutoMigrate(")
 	if step < 0 || migrate < 0 || step > migrate {
 		t.Fatalf("migratePayMerchantLiveSwitch(DB) must be called in AutoMigrate before DB.AutoMigrate (step at %d, AutoMigrate at %d)", step, migrate)
+	}
+}
+
+func TestAutoMigrate_MigratesTheNameChangeTables(t *testing.T) {
+	src, err := os.ReadFile("database.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)[strings.Index(string(src), "func AutoMigrate() error {"):]
+	for _, m := range []string{"&models.PayMerchantNameChange{}", "&models.UserNameChange{}", "uq_user_name_changes_one_open"} {
+		if !strings.Contains(body, m) {
+			t.Fatalf("AutoMigrate is missing %s", m)
+		}
+	}
+	// The one-open-change index must exclude exactly the statuses a change
+	// never leaves, or it would either allow two open changes or refuse a new
+	// one after the old one finished.
+	idx := body[strings.Index(body, "uq_user_name_changes_one_open"):]
+	idx = idx[:strings.Index(idx, "`")]
+	for _, status := range models.NameChangeTerminalStatuses {
+		if !strings.Contains(idx, "'"+status+"'") {
+			t.Fatalf("uq_user_name_changes_one_open does not exclude %q", status)
+		}
 	}
 }

@@ -33,8 +33,11 @@ const (
 	// VerificationActionDiditNameCaptured records that the verified legal name
 	// was read from Didit — never the name itself, which stays out of the log.
 	VerificationActionDiditNameCaptured = "didit_name_captured"
-	VerificationActionAdminOverride     = "admin_override_approved"
-	VerificationActionAdminRejection    = "admin_rejection"
+	// VerificationActionNameChanged records a verified user's name replaced by
+	// the one on a new document (name change by re-verification).
+	VerificationActionNameChanged    = "name_changed"
+	VerificationActionAdminOverride  = "admin_override_approved"
+	VerificationActionAdminRejection = "admin_rejection"
 )
 
 // Verification log status constants.
