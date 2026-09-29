@@ -1,7 +1,9 @@
 // components/dashboard/BackupBanner.tsx
 //
 // Surfaces a "set up your wallet" prompt (no wallet) or a "back up your seed
-// phrase" reminder (wallet exists, not backed up / not dismissed). Migrated onto
+// phrase" reminder (active wallet not backed up / not dismissed). Imported
+// wallets are recorded as backed up, so only generated ones get the reminder.
+// Migrated onto
 // the TSA Signature design system — the getActiveWallet check, all AsyncStorage
 // reads/writes (seedPhraseBackedUp / backupBannerDismissed / backupBannerRemindAt),
 // the remind/never Alert flow, and navigation routes are preserved verbatim.
@@ -9,7 +11,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Alert } from 'react-native';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getActiveWallet } from '@/services/wallet';
+import { getActiveWallet, getWalletList } from '@/services/wallet';
 import { useTheme } from '@/theme';
 import { AccentCard, Icon, IconButton, PressableScale, Text } from '@/components/ui';
 
@@ -30,9 +32,14 @@ export const BackupBanner: React.FC = () => {
           return;
         }
 
-        // Wallet exists — check if seed phrase backed up
-        const backedUp = await AsyncStorage.getItem('seedPhraseBackedUp');
-        if (backedUp === 'true') return;
+        // Per-wallet flag; the global key predates multi-wallet storage.
+        const active = (await getWalletList()).find(
+          (w) => w.address.toLowerCase() === walletAddress.toLowerCase(),
+        );
+        const backedUp = active
+          ? active.backedUp
+          : (await AsyncStorage.getItem('seedPhraseBackedUp')) === 'true';
+        if (backedUp) return;
         const dismissed = await AsyncStorage.getItem('backupBannerDismissed');
         if (dismissed === 'true') return;
         const remindAt = await AsyncStorage.getItem('backupBannerRemindAt');
