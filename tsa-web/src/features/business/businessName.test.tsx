@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { accepted, fail, merchant as base, mountAt, ok, soon, stubFetch } from '@/test/harness';
 
@@ -111,7 +111,7 @@ describe('business name', () => {
     stubFetch({
       '/api/pay/merchant': ok(merchant),
       '/api/pay/merchant/banks': banks,
-      '/api/pay/merchant/business-name': fail(422, 'invalid merchant settings: a business name can\'t contain "TSA Pay"'),
+      '/api/pay/merchant/business-name': fail(422, 'a business name can\'t contain "TSA Pay"', 'business_name_invalid'),
     });
     mountAt('/business/live/payouts');
     await typeNewName('Sky Air TSA Pay');
@@ -121,6 +121,39 @@ describe('business name', () => {
     expect(field).toHaveValue('Sky Air TSA Pay');
     expect(field).toHaveAttribute('aria-invalid', 'true');
     expect(within(edit).getByText('A business name can\'t contain "TSA Pay"')).toBeInTheDocument();
+  });
+
+  it('any other refusal stays with the password step', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/banks': banks,
+      '/api/pay/merchant/business-name': fail(422, 'Something else went wrong'),
+    });
+    mountAt('/business/live/payouts');
+    await typeNewName('Sky Air Nigeria');
+    const guard = await sendPassword('Confirm your new business name');
+    expect(await within(guard).findByRole('alert')).toHaveTextContent('Something else went wrong');
+    expect(screen.queryByRole('dialog', { name: 'Change your business name' })).not.toBeInTheDocument();
+  });
+
+  it('the length is counted in characters, so a name of astral characters is not cut short', async () => {
+    stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/banks': banks });
+    mountAt('/business/live/payouts');
+    await userEvent.click(await screen.findByRole('button', { name: 'Change business name' }));
+    const edit = await screen.findByRole('dialog', { name: 'Change your business name' });
+    const field = within(edit).getByLabelText('New business name');
+    // 60 characters, 120 UTF-16 units: within the API's 100.
+    const name = '𝐒'.repeat(60);
+    fireEvent.change(field, { target: { value: name } });
+    expect(field).toHaveValue(name);
+    await userEvent.click(within(edit).getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('dialog', { name: 'Confirm your new business name' })).toBeInTheDocument();
+    // And 101 of them is over.
+    await userEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm your new business name' })).getByRole('button', { name: 'Cancel' }));
+    const again = await screen.findByRole('dialog', { name: 'Change your business name' });
+    fireEvent.change(within(again).getByLabelText('New business name'), { target: { value: '𝐒'.repeat(101) } });
+    await userEvent.click(within(again).getByRole('button', { name: 'Continue' }));
+    expect(within(again).getByText('Enter a name of 2 to 100 characters.')).toBeInTheDocument();
   });
 
   it('cancelling the code step goes back to the form with the name typed', async () => {

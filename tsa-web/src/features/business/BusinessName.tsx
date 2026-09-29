@@ -20,13 +20,12 @@ const MAX_NAME = 100;
 const tidy = (name: string) => name.trim().split(/\s+/).filter(Boolean).join(' ');
 
 /**
- * An uncoded 422 is the API refusing the name itself (hidden characters, a
- * reserved word, the length). Its message comes as "invalid merchant settings: …".
+ * The API refusing the name itself (hidden characters, mixed scripts, a reserved
+ * word, the length) says so with its own code; the message is just the reason.
  */
 function nameRefusal(err: unknown): string | null {
-  if (!(err instanceof ApiError) || err.status !== 422 || err.code) return null;
-  const why = err.message.replace(/^invalid merchant settings:\s*/i, '');
-  return why.charAt(0).toUpperCase() + why.slice(1);
+  if (!(err instanceof ApiError) || err.code !== 'business_name_invalid') return null;
+  return err.message.charAt(0).toUpperCase() + err.message.slice(1);
 }
 
 /**
@@ -123,7 +122,8 @@ export function BusinessName({ merchant: m }: { merchant: OwnMerchant }) {
       >
         <form id="business-name" onSubmit={continueEdit} noValidate className="grid gap-4">
           <Field label="New business name" error={error || undefined}>
-            <Input value={name} maxLength={MAX_NAME} autoComplete="organization" onChange={(e) => setName(e.target.value)} />
+            {/* No maxLength: it counts UTF-16 units, so it would cut a name of emoji or other astral characters short of the API's 100; continueEdit checks the length in characters. */}
+            <Input value={name} autoComplete="organization" onChange={(e) => setName(e.target.value)} />
           </Field>
           <p className="text-caption text-text-secondary">
             We check every new name before it's used. Until we approve it, customers and payouts keep {m.businessName}.

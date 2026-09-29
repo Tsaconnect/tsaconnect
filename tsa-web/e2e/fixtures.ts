@@ -299,14 +299,16 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       if (body.expectedVersion !== undefined && body.expectedVersion !== m.version) {
         return fail(409, 'Your payment settings changed since you opened this screen — reload and try again', 'merchant_stale');
       }
-      // normalizeBusinessName: hidden characters, 2–100 characters, reserved words.
+      // normalizeBusinessName: hidden characters, 2–100 characters (code points), reserved words — each
+      // refused with the business_name_invalid code and the bare reason.
       const raw = String(body.name ?? '');
-      if (/[\p{Cc}\p{Cf}]/u.test(raw)) return fail(422, "invalid merchant settings: a business name can't contain hidden or control characters");
+      const refuse = (why: string) => fail(422, why, 'business_name_invalid');
+      if (/[\p{Cc}\p{Cf}]/u.test(raw)) return refuse("a business name can't contain hidden or control characters");
       const name = raw.trim().split(/\s+/).filter(Boolean).join(' ');
-      if (name.length < 2 || name.length > 100) return fail(422, 'invalid merchant settings: a business name must be 2 to 100 characters');
+      if ([...name].length < 2 || [...name].length > 100) return refuse('a business name must be 2 to 100 characters');
       const folded = name.toLowerCase().replace(/\s+/g, '');
       const reserved = ['TSA Connect', 'TSAConnect', 'TSA Pay', 'TSAPay', 'support', 'refund'].find((w) => folded.includes(w.toLowerCase().replace(/\s+/g, '')));
-      if (reserved) return fail(422, `invalid merchant settings: a business name can't contain "${reserved}"`);
+      if (reserved) return refuse(`a business name can't contain "${reserved}"`);
       // The current name back files nothing, needs no code, and withdraws a rename still waiting.
       if (name === m.businessName) {
         delete m.pendingBusinessName;
