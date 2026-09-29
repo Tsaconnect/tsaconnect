@@ -89,6 +89,22 @@ type fakeStableRail struct {
 	txUnknown   bool
 	txLookupErr error
 	pendingFrom map[string]string
+
+	// head is the chain's latest block (headErr: unreadable). transfers are
+	// the Transfer logs a scan finds (scanErr: it cannot finish), and
+	// scannedFrom the block the last scan started at.
+	head        uint64
+	headErr     error
+	transfers   []fakeTransferLog
+	scanErr     error
+	scannedFrom *uint64
+}
+
+// fakeTransferLog is one mined ERC-20 Transfer log.
+type fakeTransferLog struct {
+	block    uint64
+	from, to string
+	amount   int64
 }
 
 // fakeChainTx is one mined transaction: what it proves, and whose tokens it
@@ -152,6 +168,19 @@ func (f *fakeStableRail) TransactionKnown(_ context.Context, _, hash string) (bo
 		return true, tx.pay.Sender, nil
 	}
 	return !f.txUnknown, "", nil
+}
+func (f *fakeStableRail) HeadBlock(context.Context, string) (uint64, error) { return f.head, f.headErr }
+func (f *fakeStableRail) TransferMinedSince(_ context.Context, _, _, from, to string, amount *big.Int, fromBlock uint64) (bool, error) {
+	f.scannedFrom = &fromBlock
+	if f.scanErr != nil {
+		return false, f.scanErr
+	}
+	for _, l := range f.transfers {
+		if l.block >= fromBlock && strings.EqualFold(l.from, from) && strings.EqualFold(l.to, to) && big.NewInt(l.amount).Cmp(amount) == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 func (f *fakeStableRail) Refund(_ context.Context, _, _, to string, amount *big.Int, _ float64) (string, bool, error) {
 	f.refunds++

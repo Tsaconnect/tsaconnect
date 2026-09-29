@@ -21,6 +21,11 @@ type fakeFeeTxReader struct {
 	head    uint64
 	blockAt time.Time
 	txErr   error
+
+	logs     []types.Log
+	logsErr  error
+	maxSpan  uint64
+	logCalls int
 }
 
 func (f *fakeFeeTxReader) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
@@ -33,6 +38,35 @@ func (f *fakeFeeTxReader) HeaderByNumber(context.Context, *big.Int) (*types.Head
 	return &types.Header{Time: uint64(f.blockAt.Unix())}, nil
 }
 func (f *fakeFeeTxReader) BlockNumber(context.Context) (uint64, error) { return f.head, nil }
+
+// FilterLogs serves logs the way eth_getLogs does — by range, address and
+// topics — refusing any span over maxSpan (0: none), or everything on logsErr.
+func (f *fakeFeeTxReader) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	f.logCalls++
+	from, to := q.FromBlock.Uint64(), q.ToBlock.Uint64()
+	if f.logsErr != nil {
+		return nil, f.logsErr
+	}
+	if f.maxSpan > 0 && to-from+1 > f.maxSpan {
+		return nil, errors.New("block range too large")
+	}
+	var out []types.Log
+	for _, l := range f.logs {
+		if l.BlockNumber < from || l.BlockNumber > to || (len(q.Addresses) > 0 && l.Address != q.Addresses[0]) {
+			continue
+		}
+		match := true
+		for i, want := range q.Topics {
+			if len(want) > 0 && (i >= len(l.Topics) || l.Topics[i] != want[0]) {
+				match = false
+			}
+		}
+		if match {
+			out = append(out, l)
+		}
+	}
+	return out, nil
+}
 
 type fakeSourcedVerifier struct {
 	credited *big.Int
@@ -132,5 +166,56 @@ func TestTreasuryFeeRail_TransactionKnown(t *testing.T) {
 	}
 	if _, _, err := NewTreasuryFeeRail(nil, nil, nil).TransactionKnown(context.Background(), "bsc", "0x1"); err == nil {
 		t.Fatal("a chain with no reader is an error, not an unknown transaction")
+	}
+}
+
+// With no refund hash to ask about, "did the refund leave?" is answered from
+// the token's Transfer logs since the send was claimed: exactly the refund,
+// from the treasury, to the paying wallet, in a block at or after the claim —
+// scanned in chunks the RPC accepts. A scan that cannot finish, or a node
+// behind the claim block, is an error, never "no transfer".
+func TestTreasuryFeeRail_TransferMinedSince(t *testing.T) {
+	ctx := context.Background()
+	token := "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	treasury := "0x000000000000000000000000000000000000fEE5"
+	payer := "0x1111111111111111111111111111111111111111"
+	transfer := func(block uint64, from, to string, amount int64, removed bool) types.Log {
+		return types.Log{Address: common.HexToAddress(token), BlockNumber: block, Removed: removed,
+			Topics: []common.Hash{common.HexToHash(erc20TransferTopic), common.BytesToHash(common.HexToAddress(from).Bytes()),
+				common.BytesToHash(common.HexToAddress(to).Bytes())},
+			Data: common.LeftPadBytes(big.NewInt(amount).Bytes(), 32)}
+	}
+	decoys := []types.Log{
+		transfer(900, treasury, payer, 1_000_000, false),     // before the claim
+		transfer(1500, treasury, payer, 999_999, false),      // another amount
+		transfer(2500, treasury, payer, 1_000_000, true),     // reorged out
+		transfer(3000, payer, treasury, 1_000_000, false),    // the other way
+		transfer(3500, treasury, treasury, 1_000_000, false), // to someone else
+	}
+	rail := func(r *fakeFeeTxReader) *TreasuryFeeRail {
+		return NewTreasuryFeeRail(nil, nil, map[string]FeeTxReader{"base": r})
+	}
+
+	none := &fakeFeeTxReader{head: 9000, logs: decoys, maxSpan: 1000}
+	if found, err := rail(none).TransferMinedSince(ctx, "base", token, treasury, payer, big.NewInt(1_000_000), 1000); err != nil || found {
+		t.Fatalf("decoys only: found=%v err=%v", found, err)
+	}
+	if none.logCalls < 8 {
+		t.Fatalf("a 1000-block RPC cap must be scanned in chunks, got %d calls", none.logCalls)
+	}
+	hit := &fakeFeeTxReader{head: 9000, logs: append(decoys, transfer(8999, treasury, payer, 1_000_000, false))}
+	if found, err := rail(hit).TransferMinedSince(ctx, "base", token, treasury, payer, big.NewInt(1_000_000), 1000); err != nil || !found {
+		t.Fatalf("the refund: found=%v err=%v", found, err)
+	}
+	for name, r := range map[string]*fakeFeeTxReader{
+		"rpc refuses":       {head: 9000, logsErr: errors.New("rpc down")},
+		"node behind claim": {head: 500},
+	} {
+		if found, err := rail(r).TransferMinedSince(ctx, "base", token, treasury, payer, big.NewInt(1_000_000), 1000); err == nil || found {
+			t.Errorf("%s: found=%v err=%v, want an error", name, found, err)
+		}
+	}
+	if _, err := rail(none).TransferMinedSince(ctx, "bsc", token, treasury, payer, big.NewInt(1), 1); err == nil {
+		t.Fatal("a chain with no reader must be an error")
 	}
 }

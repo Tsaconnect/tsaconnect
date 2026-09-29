@@ -90,7 +90,10 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	if err != nil && rejectedForFunds(err) {
 		return "", notBroadcast(err)
 	}
-	return hash, err
+	if err != nil {
+		return "", broadcastUncertainError{err: err, txHash: signed.Hash().Hex()}
+	}
+	return hash, nil
 }
 
 // rejectedForFunds reports a node refusing a transaction because the sender

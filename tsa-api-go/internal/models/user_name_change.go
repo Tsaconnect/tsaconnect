@@ -97,6 +97,12 @@ type UserNameChange struct {
 	// should it land, sent back whole.
 	ClearedPayRef   *string    `gorm:"type:varchar(66);index" json:"-"`
 	PayRefClearedAt *time.Time `json:"-"`
+	// PayRefClearedByAdmin: an admin cleared it, rather than the sweep dropping
+	// it as unknown to the chain. Only an admin's clear is returned whole
+	// whatever its size; a dropped one that lands is held to the minimum refund,
+	// so a hash named but broadcast only later cannot make the treasury pay gas
+	// to return dust.
+	PayRefClearedByAdmin bool `gorm:"not null;default:false" json:"-"`
 	// RefutedPayRefs are transactions this change will never take again (they
 	// can never pay it), so a phone that keeps confirming one is told so.
 	RefutedPayRefs datatypes.JSONSlice[string] `gorm:"type:jsonb" json:"-"`
@@ -119,6 +125,12 @@ type UserNameChange struct {
 	// RefundRetryAt is when the sweep may try again (backing off, capped).
 	RefundAttempts int        `gorm:"not null;default:0" json:"-"`
 	RefundRetryAt  *time.Time `json:"-"`
+	// RefundClaimedAt is when the latest refund send was claimed
+	// (refund_sending), and RefundClaimedBlock the chain's head just before:
+	// a transfer that send made can only be mined at or after both, which is
+	// how an admin's "it never left" is checked when no hash was recorded.
+	RefundClaimedAt    *time.Time `json:"-"`
+	RefundClaimedBlock *uint64    `json:"-"`
 
 	Attempts int `gorm:"not null;default:0" json:"attempts"`
 	// DiditSessionID/URL are the session in flight (resumed rather than paid for

@@ -401,6 +401,10 @@ func (oneStableRail) Refund(context.Context, string, string, string, *big.Int, f
 func (oneStableRail) TransactionKnown(context.Context, string, string) (bool, string, error) {
 	return true, "", nil
 }
+func (oneStableRail) HeadBlock(context.Context, string) (uint64, error) { return 1, nil }
+func (oneStableRail) TransferMinedSince(context.Context, string, string, string, string, *big.Int, uint64) (bool, error) {
+	return true, nil // "may have left": the conservative answer
+}
 
 func paidNameChanges(db *gorm.DB) *services.NameChangeService {
 	svc := services.NewNameChangeService(db, services.NameChangeConfig{Enabled: true, FeeUSD: "1.00", RequireFaceMatch: true}, nil, time.Now)

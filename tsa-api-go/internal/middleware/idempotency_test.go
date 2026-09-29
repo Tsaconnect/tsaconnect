@@ -463,3 +463,18 @@ func TestIdempotency_IgnoredFieldIsNotFingerprinted(t *testing.T) {
 		t.Fatalf("a different request under the same key: %d", w.Code)
 	}
 }
+
+// encoding/json binds "Password" to a password field as readily as "password",
+// so the field is left out of the fingerprint whatever its case.
+func TestIdempotency_IgnoredFieldMatchesAnyCase(t *testing.T) {
+	cfg := idempotencyConfig{ignoreFields: []string{"password"}}
+	for _, body := range []string{
+		`{"payMethod":"stablecoin","Password":"hunter2-Secret!"}`,
+		`{"payMethod":"stablecoin","PASSWORD":"hunter2-Secret!"}`,
+		`{"payMethod":"stablecoin","password":"hunter2-Secret!"}`,
+	} {
+		if got := string(cfg.fingerprintBody([]byte(body))); got != `{"payMethod":"stablecoin"}` {
+			t.Fatalf("%s fingerprinted as %s, want the password left out", body, got)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Opening a change and paying for it. A paid change is paid from the wallet
@@ -301,18 +302,29 @@ func (s *NameChangeService) minConfirmations(chain string) int {
 	return s.cfg.MinConfirmations
 }
 
-// errPayRefTaken: another change holds the transaction and its claim stands.
-var errPayRefTaken = errors.New("name change: transaction already named by another change")
+var (
+	// errPayRefTaken: another change holds the transaction and its claim stands.
+	errPayRefTaken = errors.New("name change: transaction already named by another change")
+	// errPayRefUndecided: another change holds the transaction and the chain
+	// cannot say yet whether that claim is good — the node has not seen the
+	// transaction, or cannot be read. Asked again, it will be decided.
+	errPayRefUndecided = errors.New("name change: another change's claim on the transaction can't be tested yet")
+)
 
 // ConfirmPayment records the user's stablecoin transaction and proves it.
 //
 // The hash is stored first, whatever the proof says: a transfer that is not
 // mined yet is then still found by the sweep, and if the change closes before
-// it lands the money is refunded rather than stranded. A change that closed
-// unpaid within the last few days also takes a late confirm — its payment is
-// recorded and sent back. A hash this change already refuted, or one we
-// stopped waiting for on any of the user's changes, is answered from what is
-// known of it instead of being taken again.
+// it lands the money is refunded rather than stranded. A stablecoin change that
+// closed unpaid within the last few days also takes a late confirm — its
+// payment is recorded and sent back — even while a change paid another way is
+// open. A hash this change already refuted, or one we stopped waiting for on
+// any of the user's changes, is answered from what is known of it instead of
+// being taken again.
+//
+// "This transaction will never be taken" is always said as payment_mismatch
+// (or no_open_change): the app stops asking about a hash only on those, so
+// bad_state is kept for answers that may change.
 func (s *NameChangeService) ConfirmPayment(ctx context.Context, userID uuid.UUID, txHash string) (*NameChangeView, error) {
 	txHash = strings.ToLower(strings.TrimSpace(txHash))
 	if len(txHash) != 66 || !strings.HasPrefix(txHash, "0x") {
@@ -323,20 +335,23 @@ func (s *NameChangeService) ConfirmPayment(ctx context.Context, userID uuid.UUID
 	} else if cleared != nil {
 		return s.confirmCleared(ctx, cleared)
 	}
-	ch, err := s.openChange(ctx, userID)
+	open, err := s.openChange(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	if ch == nil {
+	ch := open
+	if ch == nil || ch.PayMethod != models.NameChangePayStablecoin {
+		// No stablecoin change open: the payment may be a late one for a
+		// stablecoin change that closed unpaid.
 		if ch, err = s.recentlyClosedUnpaid(ctx, userID); err != nil {
 			return nil, err
 		}
-		if ch == nil {
-			return nil, ErrNameChangeNotFound
-		}
 	}
-	if ch.PayMethod != models.NameChangePayStablecoin {
-		return nil, ErrNameChangeBadState
+	switch {
+	case ch == nil && open == nil:
+		return nil, ErrNameChangeNotFound
+	case ch == nil:
+		return nil, fmt.Errorf("%w: your name change is paid another way, so this transaction can't pay it", ErrNameChangePaymentMismatch)
 	}
 	if slices.Contains(ch.RefutedPayRefs, txHash) {
 		// Already read and found never to pay this change: taking it again
@@ -350,7 +365,7 @@ func (s *NameChangeService) ConfirmPayment(ctx context.Context, userID uuid.UUID
 			if ch.Status == models.NameChangeStatusPaying || ch.FeeStatus == models.NameChangeFeeNone {
 				return nil, ErrNameChangePaymentPending
 			}
-			return nil, ErrNameChangeBadState
+			return nil, fmt.Errorf("%w: this name change's fee was paid by another transaction", ErrNameChangePaymentMismatch)
 		}
 		s.clearPayRef(ctx, ch, *ch.PayRef)
 		ch = s.reload(ctx, ch)
@@ -363,10 +378,12 @@ func (s *NameChangeService) ConfirmPayment(ctx context.Context, userID uuid.UUID
 			return s.db.WithContext(ctx).Model(&models.UserNameChange{}).
 				Where("id = ? AND pay_ref IS NULL AND fee_status = ?", ch.ID, models.NameChangeFeeNone).Update("pay_ref", txHash)
 		})
-		if errors.Is(err, errPayRefTaken) {
+		switch {
+		case errors.Is(err, errPayRefTaken):
 			return nil, fmt.Errorf("%w: that transaction already paid for another change", ErrNameChangePaymentMismatch)
-		}
-		if err != nil {
+		case errors.Is(err, errPayRefUndecided):
+			return nil, ErrNameChangePaymentOnChain
+		case err != nil:
 			return nil, err
 		}
 		ch = s.reload(ctx, ch)
@@ -393,7 +410,8 @@ func (s *NameChangeService) ConfirmPayment(ctx context.Context, userID uuid.UUID
 // holder's claim (releaseSquattedRef) and tries once more. Without that, anyone
 // could name a victim's pending transaction for their own change first and the
 // victim could never record the payment they made. errPayRefTaken: the holder's
-// claim stands. The bool is whether write moved a row.
+// claim stands; errPayRefUndecided: it cannot be tested yet. The bool is
+// whether write moved a row.
 func (s *NameChangeService) claimPayRef(ctx context.Context, claimant *models.UserNameChange, txHash string, write func() *gorm.DB) (bool, error) {
 	res := write()
 	if res.Error == nil {
@@ -402,8 +420,8 @@ func (s *NameChangeService) claimPayRef(ctx context.Context, claimant *models.Us
 	if !isUniqueViolation(res.Error) {
 		return false, res.Error
 	}
-	if !s.releaseSquattedRef(ctx, claimant, txHash) {
-		return false, errPayRefTaken
+	if err := s.releaseSquattedRef(ctx, claimant, txHash); err != nil {
+		return false, err
 	}
 	if res = write(); res.Error != nil {
 		if isUniqueViolation(res.Error) {
@@ -418,42 +436,57 @@ func (s *NameChangeService) claimPayRef(ctx context.Context, claimant *models.Us
 // can never pay the holder: the transaction is refuted for it, or — readable
 // while the transaction is still pending — it was signed by a wallet other than
 // the holder's, or it lives on the claimant's chain rather than the holder's.
-// A holder whose fee is recorded, or whose claim may still be good, keeps it.
-func (s *NameChangeService) releaseSquattedRef(ctx context.Context, claimant *models.UserNameChange, txHash string) bool {
+// nil: released (or gone in between). errPayRefTaken: the holder keeps it — its
+// fee is recorded, it is the user's own other change, or the chain shows the
+// claim good (proven, or signed by the holder's wallet). errPayRefUndecided:
+// the chain cannot tell yet — the node has not seen the transaction (the victim
+// confirming a squatted hash before it reached our node), its signer cannot be
+// recovered, or the chain cannot be read.
+func (s *NameChangeService) releaseSquattedRef(ctx context.Context, claimant *models.UserNameChange, txHash string) error {
 	var holder models.UserNameChange
 	err := s.db.WithContext(ctx).Where("pay_ref = ?", txHash).First(&holder).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true // released in between
-	}
-	if err != nil || holder.ID == claimant.ID || holder.UserID == claimant.UserID ||
-		holder.PayMethod != models.NameChangePayStablecoin || holder.FeeStatus != models.NameChangeFeeNone || s.rail == nil {
-		return false
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil // released in between
+	case err != nil:
+		return err
+	case holder.ID == claimant.ID || holder.UserID == claimant.UserID ||
+		holder.PayMethod != models.NameChangePayStablecoin || holder.FeeStatus != models.NameChangeFeeNone:
+		return errPayRefTaken
+	case s.rail == nil:
+		return errPayRefUndecided
 	}
 	why := ""
 	switch out, _, reason := s.checkStablePayment(ctx, &holder, txHash); out {
 	case stableProven:
-		return false
+		return errPayRefTaken
 	case stableRefuted:
 		why = reason
 	default:
 		known, sender, err := s.rail.TransactionKnown(ctx, claimant.PayChain, txHash)
 		switch {
-		case err != nil || !known:
-			return false
+		case err != nil:
+			log.Printf("[name-change] change=%s claim on %s held by %s untestable: %v", claimant.ID, txHash, holder.ID, err)
+			return errPayRefUndecided
+		case !known:
+			return errPayRefUndecided
 		case holder.PayChain != claimant.PayChain:
 			why = "the transaction is on " + claimant.PayChain + ", not " + holder.PayChain
-		case sender != "" && !strings.EqualFold(sender, holder.PayFrom):
+		case sender == "":
+			return errPayRefUndecided
+		case !strings.EqualFold(sender, holder.PayFrom):
 			why = "signed by " + sender + ", not the holder's proven wallet"
 		default:
-			return false
+			return errPayRefTaken
 		}
 	}
 	if !s.clearPayRef(ctx, &holder, txHash) {
-		return false
+		// Moved in between (proven, recorded, or cleared by another call): ask again.
+		return errPayRefUndecided
 	}
 	log.Printf("[name-change] AUDIT name_change_pay_ref_released=1 tx=%s holder=%s holder_user=%s claimant=%s reason=%q",
 		txHash, holder.ID, holder.UserID, claimant.ID, why)
-	return true
+	return nil
 }
 
 // recentlyClosedUnpaid is the user's latest stablecoin change that closed with
@@ -558,6 +591,7 @@ func (s *NameChangeService) bounceRefusal(ctx context.Context, ch *models.UserNa
 const nameChangeRefutedKept = 16
 
 // withRefuted is the change's refuted hashes with txHash added (newest last).
+// Read from a row locked for the write (updateRefuting), never a stale copy.
 func withRefuted(ch *models.UserNameChange, txHash string) datatypes.JSONSlice[string] {
 	out := datatypes.JSONSlice[string]{}
 	for _, h := range ch.RefutedPayRefs {
@@ -572,17 +606,41 @@ func withRefuted(ch *models.UserNameChange, txHash string) datatypes.JSONSlice[s
 	return out
 }
 
+// updateRefuting runs a guarded update of change id (where must select it)
+// that also adds txHash to the change's refuted hashes. The hashes are re-read
+// under a row lock in the same transaction, so refutations racing on one change
+// — a named payment and a cleared one, say — each keep their entry. Reports
+// whether the guarded update moved the row.
+func (s *NameChangeService) updateRefuting(ctx context.Context, id uuid.UUID, txHash string, where func(*gorm.DB) *gorm.DB, updates map[string]any) (bool, error) {
+	moved := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var cur models.UserNameChange
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "refuted_pay_refs").
+			Where("id = ?", id).First(&cur).Error; err != nil {
+			return err
+		}
+		all := map[string]any{"refuted_pay_refs": withRefuted(&cur, txHash)}
+		for k, v := range updates {
+			all[k] = v
+		}
+		res := where(tx.Model(&models.UserNameChange{})).Updates(all)
+		moved = res.Error == nil && res.RowsAffected == 1
+		return res.Error
+	})
+	return moved, err
+}
+
 // clearPayRef forgets a transaction that can never pay this change, and
 // remembers it as refuted. Reports whether it was this call that cleared it.
 func (s *NameChangeService) clearPayRef(ctx context.Context, ch *models.UserNameChange, txHash string) bool {
-	res := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
-		Where("id = ? AND pay_ref = ? AND fee_status = ?", ch.ID, txHash, models.NameChangeFeeNone).
-		Updates(map[string]any{"pay_ref": nil, "refuted_pay_refs": withRefuted(ch, txHash)})
-	if res.Error != nil {
-		log.Printf("[name-change] change=%s could not clear a refuted payment: %v", ch.ID, res.Error)
+	moved, err := s.updateRefuting(ctx, ch.ID, txHash, func(q *gorm.DB) *gorm.DB {
+		return q.Where("id = ? AND pay_ref = ? AND fee_status = ?", ch.ID, txHash, models.NameChangeFeeNone)
+	}, map[string]any{"pay_ref": nil})
+	if err != nil {
+		log.Printf("[name-change] change=%s could not clear a refuted payment: %v", ch.ID, err)
 		return false
 	}
-	return res.RowsAffected == 1
+	return moved
 }
 
 // ─── payments we stopped waiting for ─────────────────────────────────────────
@@ -617,9 +675,11 @@ func (s *NameChangeService) confirmCleared(ctx context.Context, ch *models.UserN
 
 // settleClearedPayment looks again at a transaction the change stopped waiting
 // for. Refuted: it is forgotten. Proven: it landed after we gave up on it, and
-// as our side closed the change the money goes back whole — a return_ops
-// refund, not held to the minimum refund nor counted toward the user's refund
-// allowance.
+// as our side closed the change the money goes back — a return_ops refund, not
+// counted toward the user's refund allowance. An admin's clear goes back whole;
+// one the sweep dropped as unknown to the chain is held to the minimum refund
+// (below it: kept whole, for support), as a hash named first and broadcast only
+// after the drop is otherwise a way to have the treasury return dust.
 func (s *NameChangeService) settleClearedPayment(ctx context.Context, ch *models.UserNameChange) stableOutcome {
 	if ch.ClearedPayRef == nil || ch.FeeStatus != models.NameChangeFeeNone {
 		return stablePending
@@ -630,22 +690,32 @@ func (s *NameChangeService) settleClearedPayment(ctx context.Context, ch *models
 	case stablePending:
 		return out
 	case stableRefuted:
-		if err := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
-			Where("id = ? AND cleared_pay_ref = ? AND fee_status = ?", ch.ID, txHash, models.NameChangeFeeNone).
-			Updates(map[string]any{"cleared_pay_ref": nil, "refuted_pay_refs": withRefuted(ch, txHash)}).Error; err != nil {
+		if _, err := s.updateRefuting(ctx, ch.ID, txHash, func(q *gorm.DB) *gorm.DB {
+			return q.Where("id = ? AND cleared_pay_ref = ? AND fee_status = ?", ch.ID, txHash, models.NameChangeFeeNone)
+		}, map[string]any{"cleared_pay_ref": nil}); err != nil {
 			log.Printf("[name-change] change=%s could not forget a refuted cleared payment: %v", ch.ID, err)
 		}
 		return out
 	}
 	credited := p.Credited.String()
-	note := "payment " + txHash + " landed after we stopped waiting for it; returned"
+	decision, note := nameChangeFeeReturnOps, "payment "+txHash+" landed after we stopped waiting for it; returned"
+	msg := "Your payment reached the network after this name change was closed, so it is being sent back to your wallet."
+	if !ch.PayRefClearedByAdmin && p.Credited.Cmp(s.minRefund(ch)) < 0 {
+		// Dropped by the sweep, not an admin: returned only from the minimum up.
+		decision, note = nameChangeFeeKeepAll, "payment "+txHash+" landed after we stopped waiting for it; not sent back: below the minimum refund"
+		msg = "Your payment reached the network after this name change was closed, and it is too small to send back automatically. " +
+			"Contact support with your transaction and we'll sort it out."
+	}
 	moved, err := s.claimPayRef(ctx, ch, txHash, func() *gorm.DB {
 		return s.db.WithContext(ctx).Model(&models.UserNameChange{}).
 			Where("id = ? AND cleared_pay_ref = ? AND pay_ref IS NULL AND fee_status = ?", ch.ID, txHash, models.NameChangeFeeNone).
 			Updates(map[string]any{"pay_ref": txHash, "cleared_pay_ref": nil, "fee_status": models.NameChangeFeeReceived,
-				"pay_credited": credited, "fee_decision": nameChangeFeeReturnOps, "review_note": truncateRunes(note, 512),
-				"user_message": "Your payment reached the network after this name change was closed, so it is being sent back to your wallet."})
+				"pay_credited": credited, "fee_decision": decision, "review_note": truncateRunes(note, 512), "user_message": msg})
 	})
+	if errors.Is(err, errPayRefUndecided) {
+		log.Printf("[name-change] change=%s cleared payment %s landed but another change's claim on it can't be tested yet; asking again later", ch.ID, txHash)
+		return stablePending
+	}
 	if err != nil {
 		alertf("name-change-cleared:"+ch.ID.String(),
 			"[name-change] ALERT name_change_cleared_payment_unrecorded_total=1 change=%s tx=%s credited=%s — landed, but could not be recorded for its refund: %v",
@@ -655,7 +725,12 @@ func (s *NameChangeService) settleClearedPayment(ctx context.Context, ch *models
 	if !moved {
 		return stablePending
 	}
-	log.Printf("[name-change] change=%s cleared payment %s landed (%s); returning it", ch.ID, txHash, credited)
+	if decision == nameChangeFeeKeepAll {
+		log.Printf("[name-change] ALERT name_change_bounce_kept_total=1 change=%s user=%s chain=%s tx=%s credited=%s reason=%q — for support",
+			ch.ID, ch.UserID, ch.PayChain, txHash, credited, "landed after it was dropped; below the minimum refund")
+	} else {
+		log.Printf("[name-change] change=%s cleared payment %s landed (%s); returning it", ch.ID, txHash, credited)
+	}
 	s.resolveFee(ctx, s.reload(ctx, ch))
 	return stableProven
 }

@@ -39,13 +39,6 @@ const (
 	// RPC whose nodes disagree about the newest blocks cannot make us skip one
 	// for good. Sonic finalises in about a second; this is a minute or more.
 	otcLogOverlapBlocks uint64 = 128
-	// otcLogMinChunk is the smallest span the scanner halves down to before
-	// it gives up and reports the RPC as unreadable.
-	otcLogMinChunk uint64 = 128
-	// otcLogRegrowAfter successful chunks in a row double a halved span again
-	// (up to the configured maximum), so one transient refusal does not slow
-	// every later catch-up for the life of the process.
-	otcLogRegrowAfter = 8
 )
 
 // Time bounds (vars so tests can shorten them).
@@ -102,7 +95,7 @@ func otcAmount(v *big.Int) *big.Int {
 // *ethclient.Client (EVMClient.Client) satisfies it.
 type OTCLogSource interface {
 	BlockNumber(ctx context.Context) (uint64, error)
-	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
+	logFilterer
 }
 
 // OTCTokenBalanceReader reads an ERC-20 balance. *blockchain.EVMClient
@@ -143,11 +136,9 @@ type OTCPositionService struct {
 	lock chan struct{}
 
 	// Guarded by lock.
-	chunk     uint64 // current eth_getLogs span; 0 = unbounded
-	maxChunk  uint64 // configured span; regrowth stops here (0 = none)
-	chunkRuns int    // successful chunks since the span last changed
-	next      uint64 // first block not yet committed
-	committed map[common.Address]*otcTotals
+	logScanner        // eth_getLogs chunking, kept across refreshes
+	next       uint64 // first block not yet committed
+	committed  map[common.Address]*otcTotals
 	// tail holds provisional logs for blocks [next, head]. It is only valid
 	// while refreshedAt is set: a refresh that fails part-way clears both,
 	// because committed may have advanced into blocks tail still counts.
@@ -160,17 +151,16 @@ type OTCPositionService struct {
 // until the first Position or Warm call.
 func NewOTCPositionService(logs OTCLogSource, balances OTCTokenBalanceReader, contractAddress, mcgpToken string, deployBlock, maxBlockRange uint64) *OTCPositionService {
 	return &OTCPositionService{
-		logs:      logs,
-		balances:  balances,
-		contract:  common.HexToAddress(contractAddress),
-		mcgpToken: strings.TrimSpace(mcgpToken),
-		now:       time.Now,
-		lock:      make(chan struct{}, 1),
-		chunk:     maxBlockRange,
-		maxChunk:  maxBlockRange,
-		next:      deployBlock,
-		committed: map[common.Address]*otcTotals{},
-		tail:      map[common.Address]*otcTotals{},
+		logs:       logs,
+		balances:   balances,
+		contract:   common.HexToAddress(contractAddress),
+		mcgpToken:  strings.TrimSpace(mcgpToken),
+		now:        time.Now,
+		lock:       make(chan struct{}, 1),
+		logScanner: newLogScanner(maxBlockRange),
+		next:       deployBlock,
+		committed:  map[common.Address]*otcTotals{},
+		tail:       map[common.Address]*otcTotals{},
 	}
 }
 
@@ -326,57 +316,23 @@ func (s *OTCPositionService) refresh(ctx context.Context) (err error) {
 	return nil
 }
 
-// scan reads [from, to] in chunks, halving the span whenever the RPC refuses
-// one (range caps, result-count caps and timeouts all look alike from here)
-// and doubling it again after a run of successes. apply runs once per
-// successful chunk, after the whole chunk has decoded.
+// scan reads the desk's Bought/Sold logs in [from, to] with the shared
+// chunked scanner. apply runs once per successful chunk, after the whole chunk
+// has decoded.
 func (s *OTCPositionService) scan(ctx context.Context, from, to uint64, apply func([]otcDelta, uint64)) error {
-	for from <= to {
-		end := to
-		if s.chunk > 0 && to-from+1 > s.chunk {
-			end = from + s.chunk - 1
-		}
-		callCtx, cancel := context.WithTimeout(ctx, otcRPCCallTimeout)
-		logs, err := s.logs.FilterLogs(callCtx, ethereum.FilterQuery{
-			FromBlock: new(big.Int).SetUint64(from),
-			ToBlock:   new(big.Int).SetUint64(end),
-			Addresses: []common.Address{s.contract},
-			Topics:    [][]common.Hash{{otcBoughtTopic, otcSoldTopic}},
-		})
-		cancel()
-		if err != nil {
-			span := end - from + 1
-			if ctx.Err() != nil || span <= otcLogMinChunk {
-				return fmt.Errorf("%w: eth_getLogs %d-%d: %v", ErrOTCPositionUnavailable, from, end, err)
-			}
-			s.chunk, s.chunkRuns = span/2, 0
-			continue
-		}
+	q := ethereum.FilterQuery{Addresses: []common.Address{s.contract}, Topics: [][]common.Hash{{otcBoughtTopic, otcSoldTopic}}}
+	err := s.scanLogs(ctx, s.logs, q, from, to, otcRPCCallTimeout, func(logs []types.Log, end uint64) error {
 		deltas, err := s.decode(logs)
 		if err != nil {
 			return err
 		}
 		apply(deltas, end)
-		from = end + 1
-		s.regrowChunk()
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrOTCPositionUnavailable) {
+		return fmt.Errorf("%w: %v", ErrOTCPositionUnavailable, err)
 	}
-	return nil
-}
-
-// regrowChunk doubles a halved span after otcLogRegrowAfter full-size chunks
-// in a row, never past the configured maximum.
-func (s *OTCPositionService) regrowChunk() {
-	if s.chunk == 0 || (s.maxChunk != 0 && s.chunk >= s.maxChunk) {
-		return
-	}
-	s.chunkRuns++
-	if s.chunkRuns < otcLogRegrowAfter {
-		return
-	}
-	s.chunk, s.chunkRuns = s.chunk*2, 0
-	if s.maxChunk != 0 && s.chunk > s.maxChunk {
-		s.chunk = s.maxChunk
-	}
+	return err
 }
 
 // Event topics, set by otc_service.go's init once the ABI is parsed (a

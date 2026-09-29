@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -239,8 +240,15 @@ func (c idempotencyConfig) fingerprintBody(body []byte) []byte {
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
 		return body
 	}
-	for _, f := range c.ignoreFields {
-		delete(fields, f)
+	// Case-insensitively, as encoding/json binds keys to the handler's fields:
+	// "Password" reaches the handler as the password just as "password" does.
+	for key := range fields {
+		for _, f := range c.ignoreFields {
+			if strings.EqualFold(key, f) {
+				delete(fields, key)
+				break
+			}
+		}
 	}
 	out, err := json.Marshal(fields)
 	if err != nil {

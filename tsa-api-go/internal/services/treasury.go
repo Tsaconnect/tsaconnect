@@ -510,6 +510,9 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 // refund. Same uncertain-broadcast contract as ExecuteRoute, and the same
 // CheckCaps-first obligation: this method only checks the kill switch, that
 // the lane can pay for the gas, and the recipient's shape, not the value caps.
+// An attempted broadcast that errored returns the signed transaction's hash
+// when the signer knows it, so the caller can later ask the chain about that
+// very transaction; the ramp's callers ignore the hash on any error.
 func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
@@ -536,9 +539,11 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 	})
 	if err != nil {
 		if attempted {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=transfer err=%v", lane.ChainKey, err)
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=transfer tx=%s err=%v",
+				lane.ChainKey, uncertainTxHash(err), err)
+			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast transfer: %w", err)
 		}
-		return "", attempted, fmt.Errorf("treasury: broadcast transfer: %w", err)
+		return "", false, fmt.Errorf("treasury: broadcast transfer: %w", err)
 	}
 	return txHash, true, nil
 }

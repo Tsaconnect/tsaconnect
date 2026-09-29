@@ -58,7 +58,7 @@ var (
 	// Admin refusals on the money bookkeeping: each is what the chain showed.
 	ErrNameChangePaymentLive       = errors.New("the chain still shows this payment — it has paid or may yet pay, so it can't be cleared")
 	ErrNameChangeChainUnreadable   = errors.New("the chain couldn't be read — try again in a minute")
-	ErrNameChangeRefundMayHaveLeft = errors.New("the chain knows this refund's transaction, so it may have left — record it as sent once it is mined")
+	ErrNameChangeRefundMayHaveLeft = errors.New("the chain shows this refund may have left — record it as sent once it is mined")
 	ErrNameChangeRefundUnproven    = errors.New("that transaction isn't a mined refund of this fee from the treasury to the paying wallet")
 	ErrNameChangeAccountUnverified = errors.New("the account is no longer verified, so its name can't be changed")
 )

@@ -33,8 +33,9 @@ const (
 	// nameChangeFeeReturnOps is money returned because OUR side closed the
 	// change: a payment we stopped waiting for (dropped as unknown to the
 	// chain, or cleared by an admin) that landed after all. The user did
-	// nothing to cause it, so it goes back whole — not held to the minimum
-	// refund, and not counted toward their refund allowance.
+	// nothing to cause it, so it does not count toward their refund
+	// allowance; an admin's clear goes back whole, a dropped one only from
+	// the minimum refund up (below it, keep_all).
 	nameChangeFeeReturnOps = "return_ops"
 )
 
@@ -187,18 +188,29 @@ func refundBackoff(attempt int) time.Duration {
 // refund sends amount (base units) of a stablecoin fee back to the proven
 // wallet it came from: all that was credited when the fee is returned, the
 // overpaid part when it is kept. The send is claimed first (refund_sending,
-// with the amount), so of two callers only one ever broadcasts.
+// with the amount, when, and the chain's head block just before), so of two
+// callers only one ever broadcasts — and an admin can later tell from the
+// chain whether a send cut off without a hash left.
 func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChange, amount *big.Int) {
 	if s.rail == nil {
 		alertf("name-change-refund:"+ch.ID.String(), "[name-change] ALERT name_change_refund_unavailable_total=1 change=%s — no treasury to refund from", ch.ID)
+		return
+	}
+	unsent := []string{models.NameChangeFeeReceived, models.NameChangeFeeRefundFailed}
+	claimBlock, err := s.rail.HeadBlock(ctx, ch.PayChain)
+	if err != nil {
+		s.refundNotSent(ctx, ch, unsent, err)
 		return
 	}
 	recorded := ""
 	if amount != nil {
 		recorded = amount.String()
 	}
-	if !s.setFeeWith(ctx, ch.ID, []string{models.NameChangeFeeReceived, models.NameChangeFeeRefundFailed}, models.NameChangeFeeRefundSending, "",
-		map[string]any{"refund_amount": recorded}) {
+	claimedAt := s.now()
+	// fee_tx_hash is cleared with the claim: a hash left from an earlier send
+	// must never stand for this one.
+	if !s.setFeeWith(ctx, ch.ID, unsent, models.NameChangeFeeRefundSending, "",
+		map[string]any{"refund_amount": recorded, "refund_claimed_at": &claimedAt, "refund_claimed_block": &claimBlock, "fee_tx_hash": ""}) {
 		return
 	}
 	if amount == nil || amount.Sign() <= 0 || ch.PayFrom == "" {
@@ -214,17 +226,22 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 	case err == nil:
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefunded, txHash)
 	case !attempted:
-		// Provably never left: safe for the sweep to try again — later each time.
-		attempt := ch.RefundAttempts + 1
-		retryAt := s.now().Add(refundBackoff(attempt))
-		s.setFeeWith(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefundFailed, "",
-			map[string]any{"refund_attempts": attempt, "refund_retry_at": &retryAt})
-		log.Printf("[name-change] change=%s refund not sent (attempt %d), retrying from %s: %v", ch.ID, attempt, retryAt.UTC().Format(time.RFC3339), err)
+		s.refundNotSent(ctx, ch, []string{models.NameChangeFeeRefundSending}, err)
 	default:
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefundUncertain, txHash)
 		log.Printf("[name-change] ALERT name_change_refund_uncertain_total=1 change=%s chain=%s tx=%s — the refund may have left; check the chain, then record the outcome: %v",
 			ch.ID, ch.PayChain, txHash, err)
 	}
+}
+
+// refundNotSent records a refund that provably never left — from one of from —
+// as refund_failed: safe for the sweep to try again, later each time.
+func (s *NameChangeService) refundNotSent(ctx context.Context, ch *models.UserNameChange, from []string, why error) {
+	attempt := ch.RefundAttempts + 1
+	retryAt := s.now().Add(refundBackoff(attempt))
+	s.setFeeWith(ctx, ch.ID, from, models.NameChangeFeeRefundFailed, "",
+		map[string]any{"refund_attempts": attempt, "refund_retry_at": &retryAt})
+	log.Printf("[name-change] change=%s refund not sent (attempt %d), retrying from %s: %v", ch.ID, attempt, retryAt.UTC().Format(time.RFC3339), why)
 }
 
 // setFee moves the fee status only from one of from — the guard every fee step

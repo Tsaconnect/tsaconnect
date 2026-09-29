@@ -286,9 +286,11 @@ func (s *NameChangeService) refundOutcomeFrom(ch *models.UserNameChange) []strin
 // have left (refund_uncertain, or refund_sending past the alert window). The
 // admin's word is checked against the chain before it moves money bookkeeping:
 // "sent" must be a mined transfer of exactly the refund from the treasury to
-// the paying wallet, used for no other change; "never left" is taken only when
-// no transaction was recorded or the chain has definitely never heard of it —
-// that answer sends the refund again (refund_failed, retried at once).
+// the paying wallet, mined after the send was claimed and used for no other
+// change; "never left" is taken only when the chain has definitely never heard
+// of the recorded transaction or, with none recorded, no such transfer has been
+// mined since the claim — that answer sends the refund again (refund_failed,
+// retried at once).
 func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminID, changeID uuid.UUID, o NameChangeRefundOutcome) (*NameChangeAdminView, error) {
 	ch, err := s.get(ctx, changeID)
 	if err != nil {
@@ -332,9 +334,11 @@ func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminI
 	return s.adminView(ctx, s.reload(ctx, ch))
 }
 
-// verifyRefundSent holds an admin's "sent" to the chain: txHash is mined,
-// signed by the treasury, and moved exactly the claimed refund of the fee's
-// token to the paying wallet — and no other change already counts it.
+// verifyRefundSent holds an admin's "sent" to the chain: txHash is mined after
+// the refund was claimed, signed by the treasury, and moved exactly the claimed
+// refund of the fee's token to the paying wallet — and no other change already
+// counts it. An older treasury transfer of the same amount (an earlier refund,
+// or a ramp payout) is not this one.
 func (s *NameChangeService) verifyRefundSent(ctx context.Context, ch *models.UserNameChange, txHash string) error {
 	if s.rail == nil {
 		return ErrNameChangeChainUnreadable
@@ -357,10 +361,15 @@ func (s *NameChangeService) verifyRefundSent(ctx context.Context, ch *models.Use
 		return fmt.Errorf("%w: it was signed by %s, not the treasury", ErrNameChangeRefundUnproven, p.Sender)
 	case p.Credited == nil || p.Credited.Cmp(want) != 0:
 		return fmt.Errorf("%w: it moved %v, the refund is %s (base units)", ErrNameChangeRefundUnproven, p.Credited, want)
+	case ch.RefundClaimedAt == nil:
+		return fmt.Errorf("%w: no refund claim time recorded — check it by hand", ErrNameChangeRefundUnproven)
+	case p.BlockTime.Before(ch.RefundClaimedAt.Add(-time.Minute)): // a minute for clock skew between us and the chain
+		return fmt.Errorf("%w: it was mined at %s, before this refund was sent (%s)", ErrNameChangeRefundUnproven,
+			p.BlockTime.UTC().Format(time.RFC3339), ch.RefundClaimedAt.UTC().Format(time.RFC3339))
 	}
 	var others int64
 	if err := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
-		Where("fee_tx_hash = ? AND id <> ?", txHash, ch.ID).Count(&others).Error; err != nil {
+		Where("LOWER(fee_tx_hash) = ? AND id <> ?", txHash, ch.ID).Count(&others).Error; err != nil {
 		return err
 	}
 	if others > 0 {
@@ -369,24 +378,44 @@ func (s *NameChangeService) verifyRefundSent(ctx context.Context, ch *models.Use
 	return nil
 }
 
-// verifyRefundNeverLeft holds an admin's "never left" to the chain: only when
-// no refund transaction was recorded, or the chain has definitely never heard
-// of the one that was. A known one — even pending — may still pay the user,
-// and sending the refund again would pay them twice.
+// verifyRefundNeverLeft holds an admin's "never left" to the chain. With the
+// send's transaction recorded, only a chain that has definitely never heard of
+// it will do: a known one — even pending — may still pay the user, and sending
+// the refund again would pay them twice. With none recorded (a send cut off
+// before its hash was known), the token's logs must show no transfer of the
+// refund from the treasury to the paying wallet since the send was claimed.
+// refund() never broadcasts without an amount and a wallet, so a claim missing
+// either left nothing.
 func (s *NameChangeService) verifyRefundNeverLeft(ctx context.Context, ch *models.UserNameChange) error {
-	if ch.FeeTxHash == "" {
-		return nil
-	}
 	if s.rail == nil {
 		return ErrNameChangeChainUnreadable
 	}
-	known, _, err := s.rail.TransactionKnown(ctx, ch.PayChain, ch.FeeTxHash)
+	if ch.FeeTxHash != "" {
+		known, _, err := s.rail.TransactionKnown(ctx, ch.PayChain, ch.FeeTxHash)
+		if err != nil {
+			log.Printf("[name-change] change=%s refund %s lookup failed: %v", ch.ID, ch.FeeTxHash, err)
+			return ErrNameChangeChainUnreadable
+		}
+		if known {
+			return ErrNameChangeRefundMayHaveLeft
+		}
+		return nil
+	}
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(ch.RefundAmount), 10)
+	if !ok || amount.Sign() <= 0 || ch.PayFrom == "" {
+		return nil
+	}
+	if ch.RefundClaimedBlock == nil {
+		return fmt.Errorf("%w: no transaction or claim block recorded to check the chain against — check it by hand", ErrNameChangeRefundMayHaveLeft)
+	}
+	found, err := s.rail.TransferMinedSince(ctx, ch.PayChain, ch.PayTokenAddress, s.rail.To(), ch.PayFrom, amount, *ch.RefundClaimedBlock)
 	if err != nil {
-		log.Printf("[name-change] change=%s refund %s lookup failed: %v", ch.ID, ch.FeeTxHash, err)
+		log.Printf("[name-change] change=%s refund transfer scan from block %d failed: %v", ch.ID, *ch.RefundClaimedBlock, err)
 		return ErrNameChangeChainUnreadable
 	}
-	if known {
-		return ErrNameChangeRefundMayHaveLeft
+	if found {
+		return fmt.Errorf("%w: a transfer of the refund to the paying wallet was mined after the send was claimed — record it as sent with its hash",
+			ErrNameChangeRefundMayHaveLeft)
 	}
 	return nil
 }
@@ -437,7 +466,7 @@ func (s *NameChangeService) AdminClearUnprovenPayment(ctx context.Context, admin
 		}
 		watch = true
 	}
-	if !s.clearUnprovenPayment(ctx, ch, fmt.Sprintf("by admin %s (%s)", adminID, reason), watch) {
+	if !s.clearUnprovenPayment(ctx, ch, fmt.Sprintf("by admin %s (%s)", adminID, reason), watch, true) {
 		return nil, ErrNameChangeBadState // proven, or changed, in between
 	}
 	log.Printf("[name-change] AUDIT change=%s admin=%s action=clear_unproven_payment tx=%s status_was=%s watched=%t reason=%q",

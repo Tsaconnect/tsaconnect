@@ -155,7 +155,7 @@ func (s *NameChangeService) dropVanishedPayment(ctx context.Context, ch *models.
 	if known {
 		return false
 	}
-	if !s.clearUnprovenPayment(ctx, ch, "the named transaction "+*ch.PayRef+" was not found on-chain a day after the change expired", true) {
+	if !s.clearUnprovenPayment(ctx, ch, "the named transaction "+*ch.PayRef+" was not found on-chain a day after the change expired", true, false) {
 		return false
 	}
 	log.Printf("[name-change] change=%s named payment %s never reached %s; closed unpaid", ch.ID, *ch.PayRef, ch.PayChain)
@@ -169,9 +169,10 @@ func (s *NameChangeService) dropVanishedPayment(ctx context.Context, ch *models.
 //
 // watch: the transaction may yet land (the chain does not know it, which a
 // later broadcast could change), so it moves to ClearedPayRef and the sweep
-// keeps looking for it through the late-payment window, sending it back whole
-// if it lands. Otherwise it is refuted and remembered as such.
-func (s *NameChangeService) clearUnprovenPayment(ctx context.Context, ch *models.UserNameChange, note string, watch bool) bool {
+// keeps looking for it through the late-payment window, sending it back if it
+// lands — whole when byAdmin, else only from the minimum refund up. Otherwise
+// it is refuted and remembered as such.
+func (s *NameChangeService) clearUnprovenPayment(ctx context.Context, ch *models.UserNameChange, note string, watch, byAdmin bool) bool {
 	if ch.PayRef == nil {
 		return false
 	}
@@ -179,24 +180,30 @@ func (s *NameChangeService) clearUnprovenPayment(ctx context.Context, ch *models
 	txHash := *ch.PayRef
 	updates := map[string]any{"pay_ref": nil, "review_note": truncateRunes("payment cleared: "+note, 512)}
 	if watch {
-		updates["cleared_pay_ref"], updates["pay_ref_cleared_at"] = txHash, &now
-	} else {
-		updates["refuted_pay_refs"] = withRefuted(ch, txHash)
+		updates["cleared_pay_ref"], updates["pay_ref_cleared_at"], updates["pay_ref_cleared_by_admin"] = txHash, &now, byAdmin
 	}
 	if ch.Status == models.NameChangeStatusPaying {
 		updates["status"], updates["completed_at"] = models.NameChangeStatusCancelled, &now
 		updates["user_message"] = "This name change was closed because its payment never reached the network. " +
 			"If it does reach the network later, it will be sent back to your wallet automatically."
 	}
-	res := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
-		Where("id = ? AND status = ? AND pay_method = ? AND pay_ref = ? AND fee_status = ? AND cleared_pay_ref IS NULL",
-			ch.ID, ch.Status, models.NameChangePayStablecoin, txHash, models.NameChangeFeeNone).
-		Updates(finished(updates))
-	if res.Error != nil {
-		log.Printf("[name-change] change=%s could not clear its unproven payment: %v", ch.ID, res.Error)
+	guarded := func(q *gorm.DB) *gorm.DB {
+		return q.Where("id = ? AND status = ? AND pay_method = ? AND pay_ref = ? AND fee_status = ? AND cleared_pay_ref IS NULL",
+			ch.ID, ch.Status, models.NameChangePayStablecoin, txHash, models.NameChangeFeeNone)
+	}
+	var moved bool
+	var err error
+	if watch {
+		res := guarded(s.db.WithContext(ctx).Model(&models.UserNameChange{})).Updates(finished(updates))
+		moved, err = res.RowsAffected == 1, res.Error
+	} else {
+		moved, err = s.updateRefuting(ctx, ch.ID, txHash, guarded, finished(updates))
+	}
+	if err != nil {
+		log.Printf("[name-change] change=%s could not clear its unproven payment: %v", ch.ID, err)
 		return false
 	}
-	return res.RowsAffected == 1
+	return moved
 }
 
 // sweepClearedPayments looks again, through the late-payment window, at the
