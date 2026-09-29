@@ -451,6 +451,20 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay is not enabled")
 			return
 		}
+		// Approval makes the merchant live at once, so the applicant must still
+		// be verified now, not only when they applied: a verification that lapsed
+		// in between must not start taking real money.
+		verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, req.UserID)
+		if err != nil {
+			log.Printf("ApproveMerchantRequest: KYC check failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the applicant's identity")
+			return
+		}
+		if !verified {
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"The applicant's identity is no longer verified. They need to verify again before TSA Pay can be approved.", "applicant_not_verified")
+			return
+		}
 		// Requests filed before business names were held to the rule are
 		// refused here rather than approved into a merchant that can't exist.
 		// A super admin may rename the business as they approve (renaming a
@@ -641,8 +655,7 @@ func approvalMessage(businessType, webAppOrigin string) string {
 			where = webAppOrigin
 		}
 		return "Your TSA Pay application is approved. Sign in at " + where +
-			" with your TSA Connect account to create API keys, set your webhook and payouts, and run a test payment." +
-			" Live payments are switched on after a quick review."
+			" with your TSA Connect account to create API keys, set your webhook and payouts, and start taking payments."
 	}
 	return "Your merchant application has been approved. You can now list products."
 }

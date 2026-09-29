@@ -51,7 +51,7 @@ func TestPayMerchant_CreateFromRequestAppliesTheApprovalDefaults(t *testing.T) {
 	}
 	if m.Status != models.PayMerchantActive || m.CustomerFeeSharePercent != 100 || m.MinAmountKobo != 100_000 ||
 		m.MaxAmountKobo != 500_000_000 || m.WebsiteDomain != "www.skyair.ng" || m.ReturnDomains != "www.skyair.ng" ||
-		m.SettlementMode != models.PaySettlementFiat || m.BankCode != "058" || m.WebhookSecretVersion != 1 {
+		m.SettlementMode != models.PaySettlementFiat || m.BankCode != "058" || m.WebhookSecretVersion != 1 || !m.LiveEnabled {
 		t.Fatalf("merchant = %+v", m)
 	}
 	if m.AccountName != "SKY AIR LIMITED" {
@@ -1188,25 +1188,25 @@ func TestPayMerchant_ARequestThatKeepsLosingTheRaceIsBusy(t *testing.T) {
 }
 
 func TestPayMerchant_TheLiveSwitchIsSensitiveAndAudited(t *testing.T) {
-	on := true
-	if !(PayMerchantUpdate{LiveEnabled: &on}).Sensitive() {
+	off := false
+	if !(PayMerchantUpdate{LiveEnabled: &off}).Sensitive() {
 		t.Fatal("the live switch must need a super admin")
 	}
 	s, _ := newPayMerchantSvc(t)
 	m, _ := s.CreateFromRequest(context.Background(), payRequest())
-	if m.LiveEnabled {
-		t.Fatal("an approval must not switch a merchant live")
+	if !m.LiveEnabled {
+		t.Fatal("an approved merchant must be live")
 	}
-	got, before, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{LiveEnabled: &on})
-	if err != nil || !got.LiveEnabled || before.LiveEnabled || before.Version != m.Version {
-		t.Fatalf("switch on: %+v before %+v err %v", got, before, err)
+	got, before, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{LiveEnabled: &off})
+	if err != nil || got.LiveEnabled || !before.LiveEnabled || before.Version != m.Version {
+		t.Fatalf("switch off: %+v before %+v err %v", got, before, err)
 	}
 	stored, _ := s.Get(context.Background(), m.ID)
-	if !stored.LiveEnabled {
+	if stored.LiveEnabled {
 		t.Fatal("the switch did not persist")
 	}
 	rows := payAuditRows(t, s)
-	if len(rows) != 1 || rows[0].ActorID != payActor || !strings.Contains(rows[0].Details, `"liveEnabled":{"after":true,"before":false}`) {
+	if len(rows) != 1 || rows[0].ActorID != payActor || !strings.Contains(rows[0].Details, `"liveEnabled":{"after":false,"before":true}`) {
 		t.Fatalf("audit rows = %+v", rows)
 	}
 }

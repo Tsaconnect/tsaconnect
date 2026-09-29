@@ -53,7 +53,7 @@ export function openLinkStatus(link: Pick<OpenLink, 'active' | 'takingPayments' 
 const NOT_TAKING_WHY: Record<OpenLinkNotTakingReason, string> = {
   paused: "You paused it. A customer who opens it is told you aren't taking payments.",
   suspended: 'Your merchant account is suspended. Contact support to take payments again.',
-  live_off: "Live payments aren't switched on for your business yet.",
+  live_off: "Live payments are switched off for your business.",
   no_payout: "Set where you're paid in Payment Settings before customers can pay.",
   range_outside_limits: 'Your amount range no longer fits your limits — edit the link.',
 };

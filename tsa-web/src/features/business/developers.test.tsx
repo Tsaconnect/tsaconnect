@@ -27,7 +27,7 @@ describe('API keys & webhooks', () => {
   it('says a live key is refused until live payments are switched on', async () => {
     stubFetch({ '/api/pay/merchant': ok(merchant) });
     mountAt('/business/live/developers');
-    expect(await screen.findByText("Live payments aren't on yet — your live key will be refused until TSA Connect switches you on.")).toBeInTheDocument();
+    expect(await screen.findByText("Live payments are switched off — your live key is refused until TSA Connect switches them back on.")).toBeInTheDocument();
   });
 
   it('says nothing about live once it is on', async () => {

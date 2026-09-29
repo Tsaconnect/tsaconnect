@@ -50,7 +50,7 @@ function steps(m: OwnMerchant, mode: Mode, testPaid: boolean): Step[] {
       done: m.liveEnabled,
       title: 'Live payments',
       todo: 'Live payments',
-      hint: m.liveEnabled ? 'On — your live key takes real payments' : "Under review — finish a test payment and we'll switch you on",
+      hint: m.liveEnabled ? 'On — your live key takes real payments' : "Switched off — contact TSA Connect to turn them back on",
       to: '',
     },
   ];

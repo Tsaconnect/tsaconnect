@@ -124,7 +124,7 @@ func TestPayMerchantAuth_ALiveKeyNeedsTheMerchantSwitchedLive(t *testing.T) {
 
 	w := call("tsapk_live_x")
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"live_not_enabled"`) ||
-		!strings.Contains(w.Body.String(), "Live payments aren't switched on for this merchant yet — finish testing and contact TSA Connect") {
+		!strings.Contains(w.Body.String(), "Live payments are switched off for this merchant — contact TSA Connect") {
 		t.Fatalf("live key, merchant not switched live: %d %s", w.Code, w.Body.String())
 	}
 	if w := call("tsapk_test_x"); w.Code != http.StatusOK {
