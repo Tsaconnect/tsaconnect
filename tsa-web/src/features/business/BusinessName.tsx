@@ -40,6 +40,8 @@ export function BusinessName({ merchant: m }: { merchant: OwnMerchant }) {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const locked = m.status === 'suspended';
+  // Renames can be asked for only while the feature is switched on (the API says so).
+  const canRename = !locked && m.businessNameChangeEnabled === true;
   const pending = m.pendingBusinessName;
 
   const startEdit = () => {
@@ -94,7 +96,7 @@ export function BusinessName({ merchant: m }: { merchant: OwnMerchant }) {
         <CardHeader
           title="Business name"
           description="Customers see it at checkout, on payment links and on receipts. Payout accounts must be in this name or yours."
-          actions={!locked && <Button size="sm" variant="secondary" onClick={startEdit}>Change business name</Button>}
+          actions={canRename && <Button size="sm" variant="secondary" onClick={startEdit}>Change business name</Button>}
         />
         <CardBody className="grid gap-3">
           <p className="text-body-sm font-semibold break-words">{m.businessName}</p>

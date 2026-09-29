@@ -1,6 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { accepted, fail, merchant, mountAt, ok, soon, stubFetch } from '@/test/harness';
+import { accepted, fail, merchant as base, mountAt, ok, soon, stubFetch } from '@/test/harness';
+
+// Renames switched on, as the API says in the owner's merchant view.
+const merchant = { ...base, businessNameChangeEnabled: true };
 
 const banks = ok([{ code: '044', name: 'Access Bank' }, { code: '057', name: 'Zenith Bank' }]);
 const namePending = (id: string) => accepted({ confirmation: { id, kind: 'business_name', expiresAt: soon, sentTo: 'a***@skyair.ng' } });
@@ -140,6 +143,19 @@ describe('business name', () => {
     await typeNewName('Sky Air Nigeria');
     const guard = await sendPassword('Confirm your new business name', 'wrong');
     expect(await within(guard).findByRole('alert')).toHaveTextContent("That password isn't right.");
+  });
+
+  it('with renames switched off (or an API that does not say), the name and a waiting rename show, and there is no way to ask', async () => {
+    for (const off of [{ businessNameChangeEnabled: false }, { businessNameChangeEnabled: undefined }]) {
+      stubFetch({ '/api/pay/merchant': ok({ ...waiting, ...off }), '/api/pay/merchant/banks': banks });
+      const { unmount } = mountAt('/business/live/payouts');
+      const card = await nameCard();
+      expect(within(card).getByText('Sky Air Ltd')).toBeInTheDocument();
+      expect(within(card).getByText(/is waiting for approval/)).toBeInTheDocument();
+      expect(within(card).queryByRole('button', { name: 'Change business name' })).not.toBeInTheDocument();
+      unmount();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('a suspended merchant cannot ask for a new name', async () => {

@@ -17,7 +17,7 @@ const sentTo = 'a***@skyair.ng';
 
 type Merchant = {
   id: string; businessName: string; status: 'active' | 'suspended'; liveEnabled: boolean; liveAllowed: boolean; version: number; settlementMode: 'fiat' | 'crypto' | '';
-  pendingBusinessName?: string; pendingSince?: string;
+  pendingBusinessName?: string; pendingSince?: string; businessNameChangeEnabled?: boolean;
   bankCode?: string; accountNumber?: string; accountName?: string; websiteDomain?: string;
   hasLiveKey: boolean; hasTestKey: boolean; liveKeyPrefix?: string; testKeyPrefix?: string;
   webhookUrl: string; testWebhookUrl: string; returnDomains: string[];
@@ -102,6 +102,7 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
     merchant: {
       // Approved and testing: live payments not switched on yet.
       id: '6f1c2b7a-0d4e-4c8b-9a51-3e2f7d9c1b20', businessName: 'Sky Air Ltd', status: 'active', liveEnabled: false, liveAllowed: false, version: 7, settlementMode: 'fiat',
+      businessNameChangeEnabled: true,
       bankCode: '044', accountNumber: '******3210', accountName: 'SKY AIR LIMITED', websiteDomain: 'skyair.ng',
       hasLiveKey: true, hasTestKey: true, liveKeyPrefix: 'tsapk_live_7Hq2xP', testKeyPrefix: 'tsapk_test_Qz91mK',
       webhookUrl: '', testWebhookUrl: '', returnDomains: ['skyair.ng'],

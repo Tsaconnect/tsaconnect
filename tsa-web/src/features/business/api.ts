@@ -13,6 +13,8 @@ export type OwnMerchant = {
   pendingBusinessName?: string;
   /** When that rename was asked for. */
   pendingSince?: string;
+  /** The owner may ask for a rename now (the feature is on). Absent (an older API) reads as off. */
+  businessNameChangeEnabled?: boolean;
   status: 'active' | 'suspended';
   /** A super admin has switched this merchant's live payments on. Until then a live key is refused. */
   liveEnabled: boolean;

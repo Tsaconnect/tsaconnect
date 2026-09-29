@@ -49,6 +49,16 @@ test('an owner asks for a new business name: it waits for approval, and can be w
   expect(api.unhandled).toEqual([]);
 });
 
+test('with renames switched off the name shows, with no way to ask for a new one', async ({ page }) => {
+  const api = await mockApi(page, { signedIn: true });
+  api.merchant.businessNameChangeEnabled = false;
+  await page.goto('/business/live/payouts');
+  const card = page.getByRole('region', { name: 'Business name' });
+  await expect(card.getByText('Sky Air Ltd', { exact: true })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Change business name' })).toHaveCount(0);
+  expect(api.unhandled).toEqual([]);
+});
+
 test('the business name and the account hint hold at phone width', async ({ page }) => {
   const api = await mockApi(page, { signedIn: true });
   Object.assign(api.merchant, { pendingBusinessName: 'Sky Air Nigeria Aviation Services Limited', pendingSince: new Date().toISOString() });
