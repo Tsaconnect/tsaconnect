@@ -50,33 +50,37 @@ type payOwnerMerchantView struct {
 	// admin (since PendingSince); BusinessName stays in use until then.
 	PendingBusinessName string     `json:"pendingBusinessName,omitempty"`
 	PendingSince        *time.Time `json:"pendingSince,omitempty"`
-	Status              string     `json:"status"`
-	LiveEnabled         bool       `json:"liveEnabled"`
-	LiveAllowed         bool       `json:"liveAllowed"`
-	Version             int        `json:"version"`
-	SettlementMode      string     `json:"settlementMode"`
-	BankCode            string     `json:"bankCode,omitempty"`
-	AccountNumber       string     `json:"accountNumber,omitempty"`
-	AccountName         string     `json:"accountName,omitempty"`
-	ChainID             int64      `json:"chainId,omitempty"`
-	TokenAddress        string     `json:"tokenAddress,omitempty"`
-	TokenSymbol         string     `json:"tokenSymbol,omitempty"`
-	WalletAddress       string     `json:"walletAddress,omitempty"`
-	WebsiteDomain       string     `json:"websiteDomain,omitempty"`
-	HasLiveKey          bool       `json:"hasLiveKey"`
-	HasTestKey          bool       `json:"hasTestKey"`
-	LiveKeyPrefix       string     `json:"liveKeyPrefix,omitempty"`
-	TestKeyPrefix       string     `json:"testKeyPrefix,omitempty"`
-	WebhookURL          string     `json:"webhookUrl"`
-	TestWebhookURL      string     `json:"testWebhookUrl"`
-	ReturnDomains       []string   `json:"returnDomains"`
+	// BusinessNameChangeEnabled: the owner may ask for a rename right now
+	// (the feature is switched on); clients hide the rename form otherwise.
+	BusinessNameChangeEnabled bool     `json:"businessNameChangeEnabled"`
+	Status                    string   `json:"status"`
+	LiveEnabled               bool     `json:"liveEnabled"`
+	LiveAllowed               bool     `json:"liveAllowed"`
+	Version                   int      `json:"version"`
+	SettlementMode            string   `json:"settlementMode"`
+	BankCode                  string   `json:"bankCode,omitempty"`
+	AccountNumber             string   `json:"accountNumber,omitempty"`
+	AccountName               string   `json:"accountName,omitempty"`
+	ChainID                   int64    `json:"chainId,omitempty"`
+	TokenAddress              string   `json:"tokenAddress,omitempty"`
+	TokenSymbol               string   `json:"tokenSymbol,omitempty"`
+	WalletAddress             string   `json:"walletAddress,omitempty"`
+	WebsiteDomain             string   `json:"websiteDomain,omitempty"`
+	HasLiveKey                bool     `json:"hasLiveKey"`
+	HasTestKey                bool     `json:"hasTestKey"`
+	LiveKeyPrefix             string   `json:"liveKeyPrefix,omitempty"`
+	TestKeyPrefix             string   `json:"testKeyPrefix,omitempty"`
+	WebhookURL                string   `json:"webhookUrl"`
+	TestWebhookURL            string   `json:"testWebhookUrl"`
+	ReturnDomains             []string `json:"returnDomains"`
 }
 
 func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled,
 		LiveAllowed: m.LiveAllowed(h.liveEnabled), Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
-		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList()}
+		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList(),
+		BusinessNameChangeEnabled: h.businessNameChange}
 	if p := h.pendingBusinessName(m); p != nil {
 		v.PendingBusinessName, v.PendingSince = p.Name, &p.Since
 	}

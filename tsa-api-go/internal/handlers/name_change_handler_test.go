@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,8 +44,7 @@ func nameChangeHandlerDB(t *testing.T) *gorm.DB {
 // freeNameChanges is the service with no fee, so the tests are about the
 // verification and the account, not the money (the service tests cover that).
 func freeNameChanges(db *gorm.DB) *services.NameChangeService {
-	return services.NewNameChangeService(db, services.NameChangeConfig{Enabled: true, FeeUSD: "0", RequireFaceMatch: true,
-		ProofKey: []byte("k")}, nil, time.Now)
+	return services.NewNameChangeService(db, services.NameChangeConfig{Enabled: true, FeeUSD: "0", RequireFaceMatch: true}, nil, time.Now)
 }
 
 func verifiedUser(t *testing.T, db *gorm.DB, legal string) *models.User {
@@ -211,10 +212,12 @@ func TestKYCWebhook_FirstTimeKYCUnchangedWithNameChangesWired(t *testing.T) {
 		t.Fatalf("approved user %+v", got)
 	}
 
+	// Its own session: sharing "sess-1" with the approved user would let the
+	// webhook's session lookup resolve either user, whichever row came first.
 	declined := createKYCTestUser(t, db, models.VerificationStatusInReview)
-	declined.DiditSessionID = "sess-1"
+	declined.DiditSessionID = "sess-2"
 	db.Save(declined)
-	body = webhookBodyFor(declined, "Declined")
+	body = webhookBodyForSession(declined, "Declined", "sess-2")
 	if w := postKYCWebhook(h, body, signedHeaders(body, secret)); w.Code != http.StatusOK {
 		t.Fatalf("declined: %d %s", w.Code, w.Body.String())
 	}
@@ -373,5 +376,146 @@ func TestPayOwner_BusinessNameRenameRequest(t *testing.T) {
 	}
 	if !announced {
 		t.Fatal("the owner must be told their request was received")
+	}
+}
+
+// oneStableRail is a treasury offering one USDC lane, for the handler tests
+// that need a paid fee.
+type oneStableRail struct{}
+
+func (oneStableRail) Available() bool { return true }
+func (oneStableRail) To() string      { return "0x000000000000000000000000000000000000fEE5" }
+func (oneStableRail) Options(context.Context) []services.StableFeeOption {
+	return []services.StableFeeOption{{Chain: "base", ChainID: 8453, Token: "USDC",
+		TokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", Decimals: 6}}
+}
+func (oneStableRail) PrepareTransfer(string, string, string, *big.Int) ([]byte, error) {
+	return nil, fmt.Errorf("not built in tests")
+}
+func (oneStableRail) VerifyPayment(context.Context, string, string, string, string, string) (*services.StablePayment, error) {
+	return nil, services.ErrTransferNotFound
+}
+func (oneStableRail) Refund(context.Context, string, string, string, *big.Int, float64) (string, bool, error) {
+	return "", false, fmt.Errorf("no refunds in tests")
+}
+func (oneStableRail) TransactionKnown(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
+func paidNameChanges(db *gorm.DB) *services.NameChangeService {
+	svc := services.NewNameChangeService(db, services.NameChangeConfig{Enabled: true, FeeUSD: "1.00", RequireFaceMatch: true}, nil, time.Now)
+	svc.SetStableRail(oneStableRail{})
+	return svc
+}
+
+func nameChangeRequest(h *Handlers, user *models.User, method, target string, body any) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+	var reader *bytes.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		reader = bytes.NewReader(raw)
+	} else {
+		reader = bytes.NewReader(nil)
+	}
+	c.Request, _ = http.NewRequest(method, target, reader)
+	c.Request.Header.Set("Content-Type", "application/json")
+	if method == http.MethodPost {
+		h.CreateNameChange(c)
+	} else {
+		h.GetNameChange(c)
+	}
+	return w
+}
+
+// A paid change is paid from the account's linked wallet, and only once the
+// account has proven it owns it (main's wallet-link proof): until then the
+// create is refused with WALLET_PROOF_REQUIRED — which the app answers by
+// proving the wallet and retrying — and nothing is written. A wallet named in
+// the body is never read.
+func TestCreateNameChange_PaysOnlyFromAProvenLinkedWallet(t *testing.T) {
+	db := nameChangeHandlerDB(t)
+	ensureWalletLinkChallenges(t, db)
+	user := verifiedUser(t, db, "ADA CHIOMA OBI")
+	hashed, _ := models.HashPassword("correct-horse")
+	linked := canonicalWalletAddress("0x87c2422be9a11b71a5c530ecd156134d3b04e3ce")
+	db.Model(user).Updates(map[string]any{"password": hashed, "wallet_address": linked})
+	user.Password, user.WalletAddress = hashed, linked
+	h := &Handlers{Config: &config.Config{}, NameChanges: paidNameChanges(db)}
+	body := map[string]any{"payMethod": "stablecoin", "chain": "base", "token": "USDC", "password": "correct-horse",
+		// An old client's fields, and another wallet: all ignored.
+		"walletAddress": "0x1111111111111111111111111111111111111111", "nonce": "x", "signature": "0x00"}
+
+	w := nameChangeRequest(h, user, http.MethodPost, "/api/users/me/name-change", body)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"`+WalletProofRequiredCode+`"`) {
+		t.Fatalf("an unproven wallet: %d %s", w.Code, w.Body.String())
+	}
+	var n int64
+	db.Model(&models.UserNameChange{}).Count(&n)
+	if n != 0 {
+		t.Fatal("an unproven wallet opened a change")
+	}
+
+	mustRecordWalletProof(t, db, user.ID, linked)
+	w = nameChangeRequest(h, user, http.MethodPost, "/api/users/me/name-change", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("a proven wallet: %d %s", w.Code, w.Body.String())
+	}
+	var stored models.UserNameChange
+	db.First(&stored, "user_id = ?", user.ID)
+	if stored.PayFrom != linked || !strings.Contains(w.Body.String(), `"from":"`+linked+`"`) {
+		t.Fatalf("paid from %q, want the linked wallet: %s", stored.PayFrom, w.Body.String())
+	}
+	if got := reloadUser(t, db, user.ID); got.WalletAddress != linked {
+		t.Fatalf("a create re-pointed the account's wallet: %q", got.WalletAddress)
+	}
+}
+
+// The overview's wallet is a read: the account's own wallet (any case) adds its
+// balance, any other is refused — and never linked.
+func TestGetNameChange_ReadsOnlyTheAccountsOwnWallet(t *testing.T) {
+	db := nameChangeHandlerDB(t)
+	user := verifiedUser(t, db, "ADA CHIOMA OBI")
+	linked := canonicalWalletAddress("0x87c2422be9a11b71a5c530ecd156134d3b04e3ce")
+	db.Model(user).Update("wallet_address", linked)
+	user.WalletAddress = linked
+	h := &Handlers{Config: &config.Config{}, NameChanges: paidNameChanges(db)}
+
+	if w := nameChangeRequest(h, user, http.MethodGet, "/api/users/me/name-change?walletAddress="+strings.ToLower(linked), nil); w.Code != http.StatusOK {
+		t.Fatalf("own wallet: %d %s", w.Code, w.Body.String())
+	}
+	if w := nameChangeRequest(h, user, http.MethodGet, "/api/users/me/name-change", nil); w.Code != http.StatusOK {
+		t.Fatalf("no wallet named: %d %s", w.Code, w.Body.String())
+	}
+	other := "0x1111111111111111111111111111111111111111"
+	w := nameChangeRequest(h, user, http.MethodGet, "/api/users/me/name-change?walletAddress="+other, nil)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), WalletProofRequiredCode) {
+		t.Fatalf("another wallet: %d %s", w.Code, w.Body.String())
+	}
+	if got := reloadUser(t, db, user.ID); got.WalletAddress != linked {
+		t.Fatalf("a GET re-pointed the account's wallet: %q", got.WalletAddress)
+	}
+}
+
+// L5: the owner's merchant view says whether a rename can be asked for, so the
+// web and app hide the form while the feature is off.
+func TestPayOwner_MerchantViewSaysWhetherRenamesAreOn(t *testing.T) {
+	o := newOwnerRig(t)
+	read := func() map[string]any {
+		w := payDo(o.r, http.MethodGet, "/api/pay/merchant", nil, nil)
+		var body struct {
+			Data map[string]any `json:"data"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &body)
+		return body.Data
+	}
+	if v, ok := read()["businessNameChangeEnabled"]; !ok || v != false {
+		t.Fatalf("switched off: %v (present %v)", v, ok)
+	}
+	o.h.WithBusinessNameChange(true)
+	if v := read()["businessNameChangeEnabled"]; v != true {
+		t.Fatalf("switched on: %v", v)
 	}
 }

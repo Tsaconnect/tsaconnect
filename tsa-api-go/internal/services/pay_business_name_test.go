@@ -157,3 +157,54 @@ func TestPayMerchant_AdminRenameSupersedesAPendingRequest(t *testing.T) {
 		t.Fatalf("the owner's pending rename must be superseded: %+v", rows)
 	}
 }
+
+// M4: the reserved-word check reads a name as a customer does — through
+// punctuation, spacing, styled and full-width letters, accents, and Cyrillic,
+// Greek and digit lookalikes — without catching ordinary names.
+func TestFoldBusinessName_SeesThroughLookalikes(t *testing.T) {
+	s := &PayMerchantService{}
+	for _, bad := range []string{
+		"T.S.A-Pay", "T_S_A pay", "ＴＳＡ Ｐａｙ", "Tѕа Pay", // Cyrillic ѕ, а
+		"ΤSΑ Connect", // Greek Τ, Α
+		"TSA P@y", "TSA C0nnect", "Supp0rt Team", "Sùppört Desk", "R3fund Centre", "𝐓𝐒𝐀 𝐏𝐚𝐲",
+	} {
+		if _, err := s.NormalizeBusinessName(bad); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Errorf("%q passed as %q", bad, foldBusinessName(bad))
+		}
+	}
+	for _, fine := range []string{"Sky Air", "Obaino4Christ Ventures", "Kite Travel Nigeria", "Café Lagos", "Tasty Bites"} {
+		if got, err := s.NormalizeBusinessName(fine); err != nil || got != fine {
+			t.Errorf("%q refused: %v (%q)", fine, err, got)
+		}
+	}
+	if got := foldBusinessName("T.S.A-Pay"); got != "tsapay" {
+		t.Fatalf("fold = %q", got)
+	}
+}
+
+// The rule holds at onboarding and for a super admin's direct rename too.
+func TestPayMerchant_BusinessNameRuleAtOnboardingAndAdminRename(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	req := payRequest()
+	req.BusinessName = "TSA  Pay Official"
+	if _, err := s.CreateFromRequest(context.Background(), req); !errors.Is(err, ErrPayMerchantInvalid) {
+		t.Fatalf("onboarding a reserved name: err = %v", err)
+	}
+	req = payRequest()
+	req.BusinessName = "  Sky   Air "
+	m, err := s.CreateFromRequest(context.Background(), req)
+	if err != nil || m.BusinessName != "Sky Air" {
+		t.Fatalf("err %v merchant %+v", err, m)
+	}
+	for _, bad := range []string{"Sky\u202eAir", "Sky Air Supp0rt"} {
+		name := bad
+		if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{BusinessName: &name}); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Errorf("admin rename to %q: err = %v", bad, err)
+		}
+	}
+	renamed := " Sky  Air Limited "
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{BusinessName: &renamed})
+	if err != nil || got.BusinessName != "Sky Air Limited" {
+		t.Fatalf("err %v merchant %+v", err, got)
+	}
+}

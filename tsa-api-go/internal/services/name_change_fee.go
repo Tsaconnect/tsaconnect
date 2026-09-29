@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
@@ -89,6 +90,10 @@ type stableFeeRail interface {
 	// Refund sends a fee back. Same uncertain-broadcast contract as
 	// Treasury.TransferToken: attempted with an error means the money may have left.
 	Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (txHash string, attempted bool, err error)
+	// TransactionKnown reports whether the chain knows txHash at all, mined or
+	// pending. (false, nil) only on a definite "no such transaction" — a read
+	// that fails is an error, never "unknown".
+	TransactionKnown(ctx context.Context, chain, txHash string) (bool, error)
 }
 
 // StablePayment is what one fee transaction proved.
@@ -266,4 +271,19 @@ func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, a
 		return "", false, err
 	}
 	return r.treasury.TransferToken(ctx, lane, token, to, amount)
+}
+
+func (r *TreasuryFeeRail) TransactionKnown(ctx context.Context, chain, txHash string) (bool, error) {
+	reader := r.readers[strings.ToLower(strings.TrimSpace(chain))]
+	if reader == nil {
+		return false, fmt.Errorf("no transaction reader for %s", chain)
+	}
+	_, _, err := reader.TransactionByHash(ctx, common.HexToHash(txHash))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ethereum.NotFound):
+		return false, nil
+	}
+	return false, err
 }

@@ -41,7 +41,7 @@ func newNameChangeRoutesRig(t *testing.T, enabled bool) (*gin.Engine, *config.Co
 	now := func() time.Time { return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC) }
 	merchants := services.NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now)
-	payh := handlers.NewPayHandler(merchants, payments, nil, false)
+	payh := handlers.NewPayHandler(merchants, payments, nil, false).WithBusinessNameChange(enabled)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -59,6 +59,7 @@ func TestNameChangeRoutes_AdminReviewNeedsAnAdmin(t *testing.T) {
 		{"POST", "/api/admin/name-changes/" + id + "/approve"},
 		{"POST", "/api/admin/name-changes/" + id + "/reject"},
 		{"POST", "/api/admin/name-changes/" + id + "/refund-outcome"},
+		{"POST", "/api/admin/name-changes/" + id + "/clear-payment"},
 		{"GET", "/api/admin/pay/merchant-name-changes?status=pending"},
 		{"POST", "/api/admin/pay/merchant-name-changes/" + id + "/approve"},
 		{"POST", "/api/admin/pay/merchant-name-changes/" + id + "/reject"},
@@ -87,6 +88,14 @@ func TestNameChangeRoutes_AdminReviewNeedsAnAdmin(t *testing.T) {
 		if role == models.RoleSuperAdmin && w.Code != http.StatusNotFound {
 			t.Fatalf("a super admin recording an unknown change's refund: %d %s", w.Code, w.Body.String())
 		}
+		// So is clearing a named payment that will never pay.
+		w = payRoutesDo(r, "POST", "/api/admin/name-changes/"+id+"/clear-payment", tok, map[string]any{"reason": "not on basescan"})
+		if role == models.RoleAdmin && w.Code != http.StatusForbidden {
+			t.Fatalf("a plain admin clearing a payment: %d %s", w.Code, w.Body.String())
+		}
+		if role == models.RoleSuperAdmin && w.Code != http.StatusNotFound {
+			t.Fatalf("a super admin clearing an unknown change's payment: %d %s", w.Code, w.Body.String())
+		}
 		// Nothing held under this id: the route is reached and says so.
 		if w := payRoutesDo(r, "POST", "/api/admin/name-changes/"+id+"/approve", tok, map[string]string{"note": ""}); w.Code != http.StatusNotFound {
 			t.Fatalf("%s approving an unknown change: %d %s", role, w.Code, w.Body.String())
@@ -105,14 +114,14 @@ func TestNameChangeRoutes_FlagOff(t *testing.T) {
 		t.Fatalf("overview: %d %s", w.Code, w.Body.String())
 	}
 	// Starting a change is off...
-	for _, rt := range []struct{ method, path string }{
-		{"POST", "/api/users/me/name-change"},
-		{"GET", "/api/users/me/name-change/wallet-proof?walletAddress=0x87c2422be9A11b71A5c530ecd156134D3b04E3cE&chain=sonic"},
-	} {
-		w := payRoutesDo(r, rt.method, rt.path, tok, map[string]string{"payMethod": "mcgp_spendable"})
-		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"name_change_disabled"`) {
-			t.Fatalf("%s %s: %d %s", rt.method, rt.path, w.Code, w.Body.String())
-		}
+	if w := payRoutesDo(r, "POST", "/api/users/me/name-change", tok, map[string]string{"payMethod": "mcgp_spendable"}); w.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(w.Body.String(), `"code":"name_change_disabled"`) {
+		t.Fatalf("POST /api/users/me/name-change: %d %s", w.Code, w.Body.String())
+	}
+	// ...and the name change has no wallet proof of its own: the account's
+	// wallet is proven through /api/wallet/challenge like every other debit.
+	if w := payRoutesDo(r, "GET", "/api/users/me/name-change/wallet-proof?walletAddress=0x87c2422be9A11b71A5c530ecd156134D3b04E3cE&chain=sonic", tok, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("the name change's own wallet-proof route is gone: %d %s", w.Code, w.Body.String())
 	}
 	// ...but a change already running can still be paid, verified or
 	// cancelled (this user has none, so each says so).

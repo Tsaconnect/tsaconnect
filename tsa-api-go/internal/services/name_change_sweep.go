@@ -93,27 +93,84 @@ func (s *NameChangeService) sweepStablePayments(ctx context.Context) (int, error
 	}
 
 	// Paying changes out of time. One with no payment named closes; one whose
-	// payment is still unproven waits for it (the proof above decides), and a
-	// human hears about it once it has waited a day past the change's time.
+	// payment is still unproven waits for it (the proof above decides). A day
+	// past the change's time, a payment the chain has never heard of is taken
+	// as never sent: it is forgotten and the change closed unpaid (should it
+	// land after all, the late-payment window still takes and refunds it). One
+	// the chain does know of, or that cannot be read, is a human's to look at.
 	res := db.Model(&models.UserNameChange{}).
 		Where("status = ? AND pay_method = ? AND pay_ref IS NULL AND expires_at < ?", models.NameChangeStatusPaying, models.NameChangePayStablecoin, now).
-		Updates(map[string]any{"status": models.NameChangeStatusCancelled, "completed_at": &now,
-			"review_note": "fee not paid: no payment was confirmed in time", "user_message": "This name change was closed because its fee wasn't paid."})
+		Updates(finished(map[string]any{"status": models.NameChangeStatusCancelled, "completed_at": &now,
+			"review_note": "fee not paid: no payment was confirmed in time", "user_message": "This name change was closed because its fee wasn't paid."}))
 	if res.Error != nil {
 		return moved, res.Error
 	}
 	moved += int(res.RowsAffected)
 	var waiting []models.UserNameChange
-	if err := db.Where("status = ? AND pay_method = ? AND pay_ref IS NOT NULL AND expires_at < ?",
-		models.NameChangeStatusPaying, models.NameChangePayStablecoin, now.Add(-24*time.Hour)).
+	if err := db.Where("status = ? AND pay_method = ? AND pay_ref IS NOT NULL AND fee_status = ? AND expires_at < ?",
+		models.NameChangeStatusPaying, models.NameChangePayStablecoin, models.NameChangeFeeNone, now.Add(-nameChangeVanishedAfter)).
 		Limit(nameChangeSweepBatch).Find(&waiting).Error; err != nil {
 		return moved, err
 	}
-	for _, ch := range waiting {
+	for i := range waiting {
+		ch := &waiting[i]
+		if s.dropVanishedPayment(ctx, ch) {
+			moved++
+			continue
+		}
 		alertf("name-change-payment-unproven:"+ch.ID.String(),
-			"[name-change] ALERT name_change_payment_unproven_total=1 change=%s chain=%s tx=%s — the named payment still can't be proven a day after the change expired", ch.ID, ch.PayChain, *ch.PayRef)
+			"[name-change] ALERT name_change_payment_unproven_total=1 change=%s chain=%s tx=%s — the named payment still can't be proven a day after the change expired; check the chain (POST /api/admin/name-changes/:id/clear-payment once it is known never to pay)",
+			ch.ID, ch.PayChain, *ch.PayRef)
 	}
 	return moved, nil
+}
+
+// dropVanishedPayment closes a paying change whose named transaction the chain
+// definitely does not know — not merely unmined: a lagging or failing read
+// answers an error and leaves it waiting.
+func (s *NameChangeService) dropVanishedPayment(ctx context.Context, ch *models.UserNameChange) bool {
+	if s.rail == nil || ch.PayRef == nil {
+		return false
+	}
+	known, err := s.rail.TransactionKnown(ctx, ch.PayChain, *ch.PayRef)
+	if err != nil {
+		log.Printf("[name-change] change=%s could not look up its named payment %s: %v", ch.ID, *ch.PayRef, err)
+		return false
+	}
+	if known {
+		return false
+	}
+	if !s.clearUnprovenPayment(ctx, ch, "the named transaction "+*ch.PayRef+" was not found on-chain a day after the change expired") {
+		return false
+	}
+	log.Printf("[name-change] change=%s named payment %s never reached %s; closed unpaid", ch.ID, *ch.PayRef, ch.PayChain)
+	return true
+}
+
+// clearUnprovenPayment forgets a stablecoin change's named transaction that has
+// not been proven (no fee recorded) and, if the change is still paying, closes
+// it unpaid. Guarded on that very transaction and on no fee having been taken,
+// so a payment proven in between is never dropped. The hash stays in the note.
+func (s *NameChangeService) clearUnprovenPayment(ctx context.Context, ch *models.UserNameChange, note string) bool {
+	if ch.PayRef == nil {
+		return false
+	}
+	updates := map[string]any{"pay_ref": nil, "review_note": truncateRunes("payment cleared: "+note, 512)}
+	if ch.Status == models.NameChangeStatusPaying {
+		now := s.now()
+		updates["status"], updates["completed_at"] = models.NameChangeStatusCancelled, &now
+		updates["user_message"] = "This name change was closed because its payment never reached the network. " +
+			"If money did leave your wallet, confirm the payment again from this screen and it will be sent back."
+	}
+	res := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
+		Where("id = ? AND status = ? AND pay_method = ? AND pay_ref = ? AND fee_status = ?",
+			ch.ID, ch.Status, models.NameChangePayStablecoin, *ch.PayRef, models.NameChangeFeeNone).
+		Updates(finished(updates))
+	if res.Error != nil {
+		log.Printf("[name-change] change=%s could not clear its unproven payment: %v", ch.ID, res.Error)
+		return false
+	}
+	return res.RowsAffected == 1
 }
 
 // sweepExpired lapses changes out of time. One with a session still open gets a
@@ -158,8 +215,10 @@ func (s *NameChangeService) sweepExpired(ctx context.Context) (int, error) {
 // unrefunded on finished changes.
 func (s *NameChangeService) sweepUnresolvedFees(ctx context.Context) (int, error) {
 	var unresolved []models.UserNameChange
-	if err := s.db.WithContext(ctx).Where("status IN ? AND fee_status IN ?", models.NameChangeTerminalStatuses,
-		[]string{models.NameChangeFeeHeld, models.NameChangeFeeReceived, models.NameChangeFeeRefundFailed}).
+	// A refund that failed to send waits out its backoff (refund_retry_at).
+	if err := s.db.WithContext(ctx).Where("status IN ? AND (fee_status IN ? OR (fee_status = ? AND (refund_retry_at IS NULL OR refund_retry_at <= ?)))",
+		models.NameChangeTerminalStatuses, []string{models.NameChangeFeeHeld, models.NameChangeFeeReceived},
+		models.NameChangeFeeRefundFailed, s.now()).
 		Order("updated_at asc").Limit(nameChangeSweepBatch).Find(&unresolved).Error; err != nil {
 		return 0, err
 	}
@@ -228,13 +287,13 @@ func (s *NameChangeService) sweepLateDebits(ctx context.Context) (int, error) {
 
 // sweepAlerts tells a human about refunds the sweep cannot finish on its own:
 // one that may have left (never retried — a human reads the chain and records
-// the outcome) and one that has kept failing to send for an hour.
+// the outcome) and one that has kept failing to send for about an hour.
 func (s *NameChangeService) sweepAlerts(ctx context.Context) (int, error) {
 	now := s.now()
 	var stuck []models.UserNameChange
-	if err := s.db.WithContext(ctx).Where("(fee_status = ? AND updated_at < ?) OR fee_status = ? OR (fee_status = ? AND updated_at < ?)",
+	if err := s.db.WithContext(ctx).Where("(fee_status = ? AND updated_at < ?) OR fee_status = ? OR (fee_status = ? AND refund_attempts >= ?)",
 		models.NameChangeFeeRefundSending, now.Add(-nameChangeRefundAlertAfter), models.NameChangeFeeRefundUncertain,
-		models.NameChangeFeeRefundFailed, now.Add(-nameChangeRefundRetryAlertAfter)).
+		models.NameChangeFeeRefundFailed, nameChangeRefundAlertAttempts).
 		Limit(nameChangeSweepBatch).Find(&stuck).Error; err != nil {
 		return 0, err
 	}

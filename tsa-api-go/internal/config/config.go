@@ -497,6 +497,11 @@ type Config struct {
 	NameChangeRequireFaceMatch        bool
 	NameChangeMinConfirmations        int
 	NameChangeMinConfirmationsByChain map[string]int
+	// NameChangeMinRefundUSD (NAME_CHANGE_MIN_REFUND_USD, default 0.50) is the
+	// smallest stablecoin amount sent back on its own: a payment that bounced
+	// (short, or late) or the overpaid part of a kept fee. Anything less is
+	// kept and logged for support — a refund must not cost more than it returns.
+	NameChangeMinRefundUSD string
 
 	// TSAPayReservedBusinessNames are words no owner's business name may
 	// contain (TSA_PAY_RESERVED_BUSINESS_NAMES, comma-separated; unset keeps
@@ -1017,6 +1022,7 @@ func Load() *Config {
 	cfg.NameChangeRefundWindow = time.Duration(getEnvInt64("NAME_CHANGE_REFUND_WINDOW_DAYS", 30)) * 24 * time.Hour
 	cfg.NameChangeRequireFaceMatch = getEnvBool("NAME_CHANGE_REQUIRE_FACE_MATCH", true)
 	cfg.NameChangeMinConfirmations = int(getEnvInt64("NAME_CHANGE_MIN_CONFIRMATIONS", 3))
+	cfg.NameChangeMinRefundUSD = strings.TrimSpace(getEnv("NAME_CHANGE_MIN_REFUND_USD", "0.50"))
 	// Chains whose blocks reorganise deeper wait longer by default.
 	nameChangeConfirmationDefaults := map[string]int{"polygon": 10, "bsc": 5}
 	cfg.NameChangeMinConfirmationsByChain = map[string]int{}

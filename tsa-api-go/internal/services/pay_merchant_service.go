@@ -224,11 +224,17 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 	if err != nil {
 		return nil, err
 	}
+	// Checked at submit and approval too; this is the resume path for requests
+	// made before business names were held to the rule.
+	name, err := s.normalizeBusinessName(req.BusinessName)
+	if err != nil {
+		return nil, err
+	}
 
 	m := &models.PayMerchant{
 		MerchantRequestID:       req.ID,
 		UserID:                  req.UserID,
-		BusinessName:            req.BusinessName,
+		BusinessName:            name,
 		WebsiteDomain:           domain,
 		ReturnDomains:           domain,
 		Status:                  models.PayMerchantActive,
@@ -685,7 +691,12 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 	changes := map[string]interface{}{}
 
 	if in.BusinessName != nil {
-		updated.BusinessName = strings.TrimSpace(*in.BusinessName)
+		// A super admin's rename is held to the same rule as an owner's.
+		name, err := s.normalizeBusinessName(*in.BusinessName)
+		if err != nil {
+			return nil, err
+		}
+		updated.BusinessName = name
 		changes["business_name"] = updated.BusinessName
 	}
 	if in.Status != nil {

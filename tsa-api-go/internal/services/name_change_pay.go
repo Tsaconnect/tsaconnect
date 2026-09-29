@@ -2,125 +2,40 @@ package services
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/big"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// Opening a change and paying for it. Every paid change starts with the user
-// proving, by signing a message the server issued, that the wallet the fee
-// comes from is theirs: that wallet is then the only one a stablecoin fee is
+// Opening a change and paying for it. A paid change is paid from the wallet
+// linked to the account — one the account has proven it owns through the
+// wallet-link proof (handlers/wallet_proof.go), checked by the handler before
+// Create is called. That wallet is then the only one a stablecoin fee is
 // accepted from, the one an MCGP hold is taken on, and the only one a refund can
 // ever go to.
 
 // nameChangeMCGPChain is where spendable MCGP lives (Contract B on Sonic).
 const nameChangeMCGPChain = "sonic"
 
-// nameChangeProofTTL is how long a signed wallet challenge stays usable.
-const nameChangeProofTTL = 15 * time.Minute
-
 // nameChangePurchasePrefix marks a Didit session being bought (see ClaimSession).
 const nameChangePurchasePrefix = "purchasing:"
 
-// NameChangeWalletProof is the message the user signs (EIP-191 personal_sign)
-// with the wallet that will pay, and the nonce to send back with it.
-type NameChangeWalletProof struct {
-	Message   string    `json:"message"`
-	Nonce     string    `json:"nonce"`
-	Wallet    string    `json:"wallet"`
-	Chain     string    `json:"chain"`
-	ExpiresAt time.Time `json:"expiresAt"`
-}
-
-// WalletProof issues the challenge for wallet on chain. The nonce carries its
-// own expiry and an HMAC over (user, wallet, chain, expiry), so it needs no
-// storage and cannot be moved to another account, wallet or chain.
-func (s *NameChangeService) WalletProof(userID uuid.UUID, wallet, chain string) (*NameChangeWalletProof, error) {
-	if len(s.cfg.ProofKey) == 0 {
-		return nil, ErrNameChangeDisabled
-	}
-	if !common.IsHexAddress(wallet) {
-		return nil, fmt.Errorf("%w: walletAddress is not a wallet address", ErrNameChangeInvalid)
-	}
-	chain = strings.ToLower(strings.TrimSpace(chain))
-	if chain == "" {
-		return nil, fmt.Errorf("%w: chain is required", ErrNameChangeInvalid)
-	}
-	addr := common.HexToAddress(wallet).Hex()
-	exp := s.now().Add(nameChangeProofTTL).Unix()
-	nonce := strconv.FormatInt(exp, 10) + "." + s.proofMAC(userID, addr, chain, exp)
-	return &NameChangeWalletProof{Message: nameChangeProofMessage(userID, addr, chain, nonce), Nonce: nonce,
-		Wallet: addr, Chain: chain, ExpiresAt: time.Unix(exp, 0).UTC()}, nil
-}
-
-func (s *NameChangeService) proofMAC(userID uuid.UUID, wallet, chain string, exp int64) string {
-	mac := hmac.New(sha256.New, append([]byte("name-change-wallet-proof:"), s.cfg.ProofKey...))
-	fmt.Fprintf(mac, "%s|%s|%s|%d", userID, strings.ToLower(wallet), chain, exp)
-	return hex.EncodeToString(mac.Sum(nil))[:32]
-}
-
-func nameChangeProofMessage(userID uuid.UUID, wallet, chain, nonce string) string {
-	return "TSA Connect name change\n" +
-		"Sign to prove this wallet is yours. This moves no funds.\n" +
-		"Account: " + userID.String() + "\n" +
-		"Wallet: " + wallet + "\n" +
-		"Chain: " + chain + "\n" +
-		"Nonce: " + nonce
-}
-
-// verifyWalletProof checks a signed challenge and returns the proven wallet.
-func (s *NameChangeService) verifyWalletProof(userID uuid.UUID, wallet, chain, nonce, signature string) (string, error) {
-	if len(s.cfg.ProofKey) == 0 || !common.IsHexAddress(wallet) {
-		return "", ErrNameChangeWalletProof
-	}
-	chain = strings.ToLower(strings.TrimSpace(chain))
-	addr := common.HexToAddress(wallet).Hex()
-	expRaw, mac, ok := strings.Cut(strings.TrimSpace(nonce), ".")
-	exp, err := strconv.ParseInt(expRaw, 10, 64)
-	if !ok || err != nil || s.now().Unix() > exp ||
-		!hmac.Equal([]byte(mac), []byte(s.proofMAC(userID, addr, chain, exp))) {
-		return "", ErrNameChangeWalletProof
-	}
-	sig, err := decodeHexSig(signature)
-	if err != nil {
-		return "", ErrNameChangeWalletProof
-	}
-	signer, err := recoverPersonalSigner(nameChangeProofMessage(userID, addr, chain, nonce), sig)
-	if err != nil || signer != common.HexToAddress(addr) {
-		return "", ErrNameChangeWalletProof
-	}
-	return addr, nil
-}
-
-// recoverPersonalSigner is who signed message with personal_sign (EIP-191).
-func recoverPersonalSigner(message string, sig []byte) (common.Address, error) {
-	var digest [32]byte
-	copy(digest[:], accounts.TextHash([]byte(message)))
-	return RecoverSigner(digest, sig)
-}
-
-// NameChangeRequest is how the user chose to pay, and the wallet proof. Wallet
-// is the device's wallet (reconciled against the account by the handler).
+// NameChangeRequest is how the user chose to pay. ProvenWallet is never read
+// from the request body: the handler sets it to the account's linked wallet
+// once requireProvenWallet has confirmed the account proved it owns it.
 type NameChangeRequest struct {
-	PayMethod string `json:"payMethod"`
-	Chain     string `json:"chain"`
-	Token     string `json:"token"`
-	Wallet    string `json:"walletAddress"`
-	Nonce     string `json:"nonce"`
-	Signature string `json:"signature"`
+	PayMethod    string `json:"payMethod"`
+	Chain        string `json:"chain"`
+	Token        string `json:"token"`
+	ProvenWallet string `json:"-"`
 }
 
 // Create opens a change and starts paying for it. The account itself is not
@@ -183,10 +98,13 @@ func (s *NameChangeService) Create(ctx context.Context, userID uuid.UUID, in Nam
 	default:
 		return nil, fmt.Errorf("%w: payMethod must be %q or %q", ErrNameChangeInvalid, models.NameChangePayMCGP, models.NameChangePayStablecoin)
 	}
-	wallet, err := s.verifyWalletProof(userID, in.Wallet, chain, in.Nonce, in.Signature)
-	if err != nil {
-		return nil, err
+	// The handler proved the wallet; this holds it to still being the one on
+	// the account, so no caller can pay (or be refunded) from any other.
+	wallet := strings.TrimSpace(in.ProvenWallet)
+	if !common.IsHexAddress(wallet) || !strings.EqualFold(wallet, strings.TrimSpace(u.WalletAddress.String)) {
+		return nil, ErrNameChangeWalletUnproven
 	}
+	wallet = common.HexToAddress(wallet).Hex()
 	if method == models.NameChangePayMCGP {
 		return s.createMCGP(ctx, ch, wallet)
 	}
@@ -475,23 +393,55 @@ func (s *NameChangeService) settleStablePayment(ctx context.Context, ch *models.
 		s.markPaid(ctx, ch, map[string]any{"fee_status": models.NameChangeFeeReceived, "pay_credited": credited}) {
 		return out, p, ""
 	}
-	// Not usable for this change: record what arrived and send it back.
+	// Not usable for this change: record what arrived and send it back —
+	// unless it is too small to be worth sending, or the user has already had
+	// their allowance of refunds, when it is kept and left to support.
 	now := s.now()
 	note, msg := "payment arrived after the change closed", "Your payment arrived after this name change closed, so it is being refunded."
 	if want != nil && p.Credited.Cmp(want) < 0 {
 		note, msg = "underpaid: "+credited+" of "+ch.PayAmount, "Your payment was less than the fee, so it is being refunded. Start again to change your name."
 	}
+	decision := nameChangeFeeBounce
+	if why, told := s.bounceRefusal(ctx, ch, p.Credited); why != "" {
+		decision = nameChangeFeeKeepAll
+		note += "; not sent back: " + why
+		msg = "Your payment couldn't be used for this name change, and " + told +
+			". Contact support with your transaction and we'll sort it out."
+		log.Printf("[name-change] ALERT name_change_bounce_kept_total=1 change=%s user=%s chain=%s tx=%s credited=%s reason=%q — for support",
+			ch.ID, ch.UserID, ch.PayChain, *ch.PayRef, credited, why)
+	}
 	s.transition(ctx, ch.ID, []string{models.NameChangeStatusPaying}, map[string]any{
 		"status": models.NameChangeStatusCancelled, "completed_at": &now, "review_note": note, "user_message": msg})
 	res := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
 		Where("id = ? AND status = ? AND fee_status = ?", ch.ID, models.NameChangeStatusCancelled, models.NameChangeFeeNone).
-		Updates(map[string]any{"fee_status": models.NameChangeFeeReceived, "pay_credited": credited, "fee_decision": nameChangeFeeBounce,
-			"user_message": msg})
+		Updates(map[string]any{"fee_status": models.NameChangeFeeReceived, "pay_credited": credited, "fee_decision": decision,
+			"review_note": truncateRunes(note, 512), "user_message": msg})
 	if res.Error == nil && res.RowsAffected == 1 {
-		log.Printf("[name-change] change=%s stablecoin fee received but unusable (%s); refunding", ch.ID, note)
+		log.Printf("[name-change] change=%s stablecoin fee received but unusable (%s)", ch.ID, note)
 		s.resolveFee(ctx, s.reload(ctx, ch))
 	}
 	return out, p, ""
+}
+
+// bounceRefusal says why a payment that cannot pay its change is NOT sent back
+// (empty: it is): below the minimum refund, or past the user's refund
+// allowance — bounces count toward it, so short or late payments cannot be
+// used to make the treasury pay gas at will. why is for the record, told for
+// the user. A limit that cannot be read refunds: the user's money is not kept
+// on a database error.
+func (s *NameChangeService) bounceRefusal(ctx context.Context, ch *models.UserNameChange, credited *big.Int) (why, told string) {
+	if credited.Cmp(s.minRefund(ch)) < 0 {
+		return "below the minimum refund", "it is too small to send back automatically"
+	}
+	next, err := s.refundLimit(ctx, ch.UserID)
+	if err != nil {
+		log.Printf("[name-change] change=%s refund allowance unreadable, refunding the bounce: %v", ch.ID, err)
+		return "", ""
+	}
+	if next != nil {
+		return "refund allowance used (next from " + next.UTC().Format("2006-01-02") + ")", "you've already had a refund recently"
+	}
+	return "", ""
 }
 
 // clearPayRef forgets a transaction that can never pay this change.
@@ -562,8 +512,8 @@ func (s *NameChangeService) Cancel(ctx context.Context, userID uuid.UUID) (*Name
 	// spent the fee, and must win.
 	res := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
 		Where("id = ? AND status = ? AND attempts = 0", ch.ID, models.NameChangeStatusPaid).
-		Updates(map[string]any{"status": models.NameChangeStatusCancelled, "completed_at": &now, "fee_decision": nameChangeFeeReturn,
-			"review_note": "cancelled by the user before verification", "user_message": msg})
+		Updates(finished(map[string]any{"status": models.NameChangeStatusCancelled, "completed_at": &now, "fee_decision": nameChangeFeeReturn,
+			"review_note": "cancelled by the user before verification", "user_message": msg}))
 	if res.Error != nil {
 		return nil, res.Error
 	}

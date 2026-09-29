@@ -45,6 +45,11 @@ type NameChangeAdminView struct {
 	PayRef                  string             `json:"payRef,omitempty"`
 	PayCredited             string             `json:"payCreditedBaseUnits,omitempty"`
 	FeeTxHash               string             `json:"feeTxHash,omitempty"`
+	// RefundAmount is what a refund sends (or sent) back, in base units: all
+	// that was credited, or only the overpaid part of a kept fee.
+	RefundAmount   string     `json:"refundBaseUnits,omitempty"`
+	RefundAttempts int        `json:"refundAttempts"`
+	RefundRetryAt  *time.Time `json:"refundRetryAt,omitempty"`
 }
 
 // NameChangeUserInfo identifies whose change it is, and how established the
@@ -152,7 +157,8 @@ func (s *NameChangeService) adminViews(ctx context.Context, rows []models.UserNa
 			NewDocumentCountry: r.NewDocumentCountry, DocumentNumberMatch: r.DocumentNumberMatch, FaceMatch: r.FaceMatch,
 			FaceSimilarity: r.FaceSimilarity, HoldReason: r.HoldReason, ReviewNote: r.ReviewNote,
 			DiditSessionIDs: append([]string{}, r.DiditSessionIDs...), ReviewedBy: r.ReviewedBy, ReviewedAt: r.ReviewedAt,
-			PayCredited: r.PayCredited, FeeTxHash: r.FeeTxHash}
+			PayCredited: r.PayCredited, FeeTxHash: r.FeeTxHash, RefundAmount: r.RefundAmount,
+			RefundAttempts: r.RefundAttempts, RefundRetryAt: r.RefundRetryAt}
 		if r.PayRef != nil {
 			out[i].PayRef = *r.PayRef
 		}
@@ -264,7 +270,12 @@ func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminI
 		}
 		to = models.NameChangeFeeRefunded
 	}
-	if !s.setFee(ctx, ch.ID, from, to, tx) {
+	// Found never to have left: the sweep retries it at once, backoff reset.
+	extra := map[string]any{}
+	if !o.Sent {
+		extra["refund_retry_at"] = nil
+	}
+	if !s.setFeeWith(ctx, ch.ID, from, to, tx, extra) {
 		return nil, ErrNameChangeBadState
 	}
 	note := truncateRunes(fmt.Sprintf("refund recorded by an admin as %s. %s", to, strings.TrimSpace(o.Note)), 512)
@@ -273,5 +284,38 @@ func (s *NameChangeService) AdminRecordRefundOutcome(ctx context.Context, adminI
 		return nil, err
 	}
 	log.Printf("[name-change] AUDIT change=%s admin=%s refund_outcome=%s tx=%s", ch.ID, adminID, to, tx)
+	return s.adminView(ctx, s.reload(ctx, ch))
+}
+
+// AdminClearUnprovenPayment is a super admin's way out for a stablecoin change
+// stuck on a named transaction that will never pay it — one the sweep cannot
+// drop on its own because the chain still answers for it (stuck pending,
+// replaced) or cannot be read. The admin has checked the chain; the reason is
+// required and recorded. The transaction is forgotten and, if the change is
+// still paying, it closes unpaid. Nothing is lost if the admin is wrong: the
+// user can confirm the payment again within the late-payment window, and a
+// payment that lands is then taken and refunded.
+func (s *NameChangeService) AdminClearUnprovenPayment(ctx context.Context, adminID, changeID uuid.UUID, reason string) (*NameChangeAdminView, error) {
+	reason = strings.Join(strings.Fields(reason), " ")
+	if reason == "" {
+		return nil, fmt.Errorf("%w: say what the chain shows for this payment", ErrNameChangeInvalid)
+	}
+	ch, err := s.get(ctx, changeID)
+	if err != nil {
+		return nil, err
+	}
+	if ch.UserID == adminID {
+		return nil, ErrNameChangeSelfReview
+	}
+	if ch.PayMethod != models.NameChangePayStablecoin || ch.PayRef == nil || ch.FeeStatus != models.NameChangeFeeNone ||
+		(ch.Status != models.NameChangeStatusPaying && ch.Status != models.NameChangeStatusCancelled) {
+		return nil, ErrNameChangeBadState
+	}
+	tx := *ch.PayRef
+	if !s.clearUnprovenPayment(ctx, ch, fmt.Sprintf("by admin %s (%s)", adminID, reason)) {
+		return nil, ErrNameChangeBadState // proven, or changed, in between
+	}
+	log.Printf("[name-change] AUDIT change=%s admin=%s action=clear_unproven_payment tx=%s status_was=%s reason=%q",
+		ch.ID, adminID, tx, ch.Status, reason)
 	return s.adminView(ctx, s.reload(ctx, ch))
 }

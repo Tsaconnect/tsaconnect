@@ -80,9 +80,10 @@ type UserNameChange struct {
 	// treasury address it was quoted against.
 	PayTokenAddress string `gorm:"type:varchar(66)" json:"-"`
 	PayTo           string `gorm:"type:varchar(66)" json:"-"`
-	// PayFrom is the wallet the user PROVED is theirs (a signed challenge) when
-	// the change was opened: the only wallet a stablecoin fee is accepted from,
-	// the one an MCGP hold is taken on, and the only one a refund goes to.
+	// PayFrom is the account's linked wallet when the change was opened — one
+	// the account had proven it owns (the wallet-link proof): the only wallet a
+	// stablecoin fee is accepted from, the one an MCGP hold is taken on, and the
+	// only one a refund goes to.
 	PayFrom string `gorm:"type:varchar(66)" json:"-"`
 	// PayRef is the MCGP debit ref, or the stablecoin transaction hash — stored
 	// as soon as the user names it, before it is proven, so a payment that
@@ -99,6 +100,15 @@ type UserNameChange struct {
 	FeeDecision string `gorm:"type:varchar(8)" json:"-"`
 	// FeeTxHash is the settle / reverse / refund transaction that resolved the fee.
 	FeeTxHash string `gorm:"type:varchar(66)" json:"-"`
+	// RefundAmount is what a stablecoin refund sends back (base units), set
+	// when the send is claimed: all that was credited when the fee is returned,
+	// only the overpayment when it is kept — so a kept fee can end `refunded`
+	// too, and this says it was the excess.
+	RefundAmount string `gorm:"type:varchar(78)" json:"-"`
+	// RefundAttempts counts refund sends that provably never left, and
+	// RefundRetryAt is when the sweep may try again (backing off, capped).
+	RefundAttempts int        `gorm:"not null;default:0" json:"-"`
+	RefundRetryAt  *time.Time `json:"-"`
 
 	Attempts int `gorm:"not null;default:0" json:"attempts"`
 	// DiditSessionID/URL are the session in flight (resumed rather than paid for
@@ -122,8 +132,9 @@ type UserNameChange struct {
 	// time — so the date of birth, the document's country and (when the Didit
 	// workflow runs face search) a face match against the original session
 	// decide whether a change applies itself or waits for an admin. Dates of
-	// birth are kept only here, for the admin reviewing the change; document
-	// numbers are compared and never stored.
+	// birth are kept only here, for the admin reviewing the change, and are
+	// cleared once the change is finished (whether they matched is kept);
+	// document numbers are compared and never stored.
 	OriginalDiditSessionID  string   `gorm:"type:varchar(64)" json:"-"`
 	OriginalDocName         string   `gorm:"type:varchar(255)" json:"-"`
 	OriginalMatchStrength   string   `gorm:"type:varchar(16)" json:"-"`

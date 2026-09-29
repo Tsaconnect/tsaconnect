@@ -119,7 +119,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.POST("/account/deletion-request", h.RequestAccountDeletion)
 
 		// Name change by re-verification (verified users). NAME_CHANGE_ENABLED
-		// gates starting one (wallet-proof, create); a change already running
+		// gates starting one (create); a change already running
 		// can always be paid, verified and cancelled. The create takes a fee
 		// and checks the password, so a retried tap replays the first answer
 		// (Idempotency-Key) and every write that can spend a fee, a Didit
@@ -127,7 +127,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// confirm is polled while a transfer mines, so it gets its own looser one.
 		nameChangeLimit := middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey)
 		userGroup.GET("/me/name-change", h.GetNameChange)
-		userGroup.GET("/me/name-change/wallet-proof", middleware.RateLimiterBy(30, 15*time.Minute, perUserRateKey), h.GetNameChangeWalletProof)
 		userGroup.POST("/me/name-change", nameChangeLimit, middleware.Idempotency(config.DB), h.CreateNameChange)
 		userGroup.POST("/me/name-change/confirm-payment", middleware.RateLimiterBy(60, 15*time.Minute, perUserRateKey), h.ConfirmNameChangePayment)
 		userGroup.POST("/me/name-change/start-verification", nameChangeLimit, h.StartNameChangeVerification)
@@ -135,8 +134,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	}
 
 	// Held name changes — any true admin (not merchant/support) reviews them,
-	// never their own. Recording a refund's on-chain outcome moves money
-	// bookkeeping, so it is super_admin only.
+	// never their own. Recording a refund's on-chain outcome, and clearing a
+	// named payment that will never pay, move money bookkeeping, so they are
+	// super_admin only.
 	adminNameChanges := api.Group("/admin/name-changes")
 	adminNameChanges.Use(adminAuth, middleware.RequireP2PAdmin())
 	{
@@ -144,6 +144,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminNameChanges.POST("/:id/approve", h.AdminApproveNameChange)
 		adminNameChanges.POST("/:id/reject", h.AdminRejectNameChange)
 		adminNameChanges.POST("/:id/refund-outcome", middleware.RequireSuperAdmin(), h.AdminRecordNameChangeRefund)
+		adminNameChanges.POST("/:id/clear-payment", middleware.RequireSuperAdmin(), h.AdminClearNameChangePayment)
 	}
 
 	// Admin routes
@@ -1398,7 +1399,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// A name enquiry calls the bank provider.
 			owner.GET("/banks/resolve", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), payh.OwnerResolveBank)
 			owner.PUT("/settlement", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerUpdateSettlement)
-			if cfg.NameChangeEnabled {
+			if payh.BusinessNameChangeEnabled() {
 				owner.PUT("/business-name", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestBusinessName)
 			}
 			owner.POST("/keys", middleware.RateLimiterBy(5, 15*time.Minute, perUserRateKey), payh.OwnerRequestKeys)

@@ -380,7 +380,7 @@ func (s *NameChangeService) apply(ctx context.Context, ch *models.UserNameChange
 		if reviewer != nil {
 			updates["reviewed_by"], updates["reviewed_at"], updates["review_note"] = *reviewer, &now, truncateRunes(strings.TrimSpace(note), 512)
 		}
-		res := tx.Model(&models.UserNameChange{}).Where("id = ? AND status IN ?", ch.ID, from).Updates(updates)
+		res := tx.Model(&models.UserNameChange{}).Where("id = ? AND status IN ?", ch.ID, from).Updates(finished(updates))
 		if res.Error != nil {
 			return res.Error
 		}

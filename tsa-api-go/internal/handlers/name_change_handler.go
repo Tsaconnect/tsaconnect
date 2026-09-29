@@ -77,16 +77,20 @@ func (h *Handlers) nameChangeStarter(c *gin.Context) (*models.User, *services.Na
 
 // GET /api/users/me/name-change?walletAddress= — the change (open, or the
 // latest), whether a new one can start and why not, the limits, and the fee per
-// payment method (walletAddress, optional, adds its MCGP balance). Answers even
+// payment method. walletAddress (optional, the device's) adds the spendable MCGP
+// balance — only of the account's own linked wallet: a read never links, so any
+// other address is 403 WALLET_PROOF_REQUIRED (requireOwnWallet). Answers even
 // while the feature is off (enabled:false), so the app can hide it.
 func (h *Handlers) GetNameChange(c *gin.Context) {
 	user, svc, ok := h.nameChangeCaller(c)
 	if !ok {
 		return
 	}
-	wallet := strings.TrimSpace(c.Query("walletAddress"))
-	if !isValidEthAddress(wallet) {
-		wallet = ""
+	wallet := ""
+	if claimed := strings.TrimSpace(c.Query("walletAddress")); claimed != "" && user.WalletAddress != "" {
+		if wallet, ok = requireOwnWallet(c, user, claimed); !ok {
+			return
+		}
 	}
 	out, err := svc.Overview(c.Request.Context(), user.ID, wallet)
 	if err != nil {
@@ -96,37 +100,18 @@ func (h *Handlers) GetNameChange(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Name change", out)
 }
 
-// GET /api/users/me/name-change/wallet-proof?walletAddress=&chain= — the message
-// the paying wallet signs (personal_sign) to prove it is the user's. The device
-// wallet is reconciled against the account first (409 when another account
-// holds it). chain is "sonic" for an MCGP fee, the stablecoin's chain otherwise.
-func (h *Handlers) GetNameChangeWalletProof(c *gin.Context) {
-	user, svc, ok := h.nameChangeStarter(c)
-	if !ok {
-		return
-	}
-	wallet, ok := callerWallet(c, user, c.Query("walletAddress"))
-	if !ok {
-		return
-	}
-	proof, err := svc.WalletProof(user.ID, wallet, c.Query("chain"))
-	if err != nil {
-		nameChangeFail(c, err)
-		return
-	}
-	utils.SuccessResponse(c, http.StatusOK, "Sign this message with your wallet", proof)
-}
-
 type createNameChangeRequest struct {
 	services.NameChangeRequest
 	Password string `json:"password"`
 }
 
-// POST /api/users/me/name-change {payMethod, chain?, token?, walletAddress,
-// nonce, signature, password} — open a change and start paying for it. The
-// account password is asked again (counted toward the lockout): a change takes
-// a fee and ends with a new name on the account. Idempotency-Key: a retried
-// create replays the first answer.
+// POST /api/users/me/name-change {payMethod, chain?, token?, password} — open a
+// change and start paying for it. The account password is asked again (counted
+// toward the lockout): a change takes a fee and ends with a new name on the
+// account. A paid fee comes from the account's linked wallet, which must be one
+// the account has proven it owns (requireProvenWallet: 403
+// WALLET_PROOF_REQUIRED otherwise — the app proves it through the wallet-link
+// flow and retries). Idempotency-Key: a retried create replays the first answer.
 func (h *Handlers) CreateNameChange(c *gin.Context) {
 	user, svc, ok := h.nameChangeStarter(c)
 	if !ok {
@@ -141,11 +126,13 @@ func (h *Handlers) CreateNameChange(c *gin.Context) {
 		return
 	}
 	if !svc.FeeIsFree() {
-		wallet, ok := callerWallet(c, user, req.Wallet)
+		// The fee is held on (MCGP) or accepted from and refunded to (stablecoin)
+		// this wallet with no further signature from the user.
+		wallet, ok := requireProvenWallet(c, user)
 		if !ok {
 			return
 		}
-		req.Wallet = wallet
+		req.ProvenWallet = wallet
 	}
 	out, err := svc.Create(c.Request.Context(), user.ID, req.NameChangeRequest)
 	if err != nil {
@@ -435,6 +422,29 @@ func (h *Handlers) AdminRecordNameChangeRefund(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Refund outcome recorded", gin.H{"change": out})
 }
 
+// POST /api/admin/name-changes/:id/clear-payment {reason} — super admin: forget
+// a stablecoin change's named transaction that has been checked on-chain and
+// will never pay it, closing the change unpaid if it is still paying. Audited.
+func (h *Handlers) AdminClearNameChangePayment(c *gin.Context) {
+	admin, svc, id, ok := h.nameChangeAdmin(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Say what the chain shows for this payment", "invalid_request")
+		return
+	}
+	out, err := svc.AdminClearUnprovenPayment(c.Request.Context(), admin.ID, id, req.Reason)
+	if err != nil {
+		nameChangeFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment cleared", gin.H{"change": out})
+}
+
 // nameChangeAdmin is the admin, the service and the :id of an admin route.
 func (h *Handlers) nameChangeAdmin(c *gin.Context) (*models.User, *services.NameChangeService, uuid.UUID, bool) {
 	admin := getUserFromContext(c)
@@ -482,8 +492,8 @@ func nameChangeFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusNotFound, err.Error(), "no_open_change")
 	case errors.Is(err, services.ErrNameChangeInvalid):
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, err.Error(), "invalid_request")
-	case errors.Is(err, services.ErrNameChangeWalletProof):
-		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "wallet_proof_invalid")
+	case errors.Is(err, services.ErrNameChangeWalletUnproven):
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, walletProofRequiredMessage, WalletProofRequiredCode)
 	case errors.Is(err, services.ErrNameChangeMethodUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "method_unavailable")
 	case errors.Is(err, services.ErrNameChangeInsufficient):

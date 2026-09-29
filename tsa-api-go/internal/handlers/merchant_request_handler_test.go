@@ -1166,6 +1166,11 @@ func (f *fakePayProvisioner) CreateFromRequest(_ context.Context, req *models.Me
 	return m, f.db.Create(m).Error
 }
 
+// NormalizeBusinessName is the real rule, with the default reserved words.
+func (f *fakePayProvisioner) NormalizeBusinessName(name string) (string, error) {
+	return (&services.PayMerchantService{}).NormalizeBusinessName(name)
+}
+
 func validPayAcceptanceInput() map[string]interface{} {
 	in := validMerchantInput()
 	in["businessType"] = "payment_acceptance"
@@ -1424,5 +1429,52 @@ func TestSubmitMerchantRequest_PaymentAcceptanceNeedsAVerifiedIdentity(t *testin
 	h.SubmitMerchantRequest(c)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("verified applicant: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A TSA Pay application is held to the business-name rule when submitted — the
+// name stored tidied — and again when approved, for requests filed before it.
+func TestMerchantRequest_PaymentAcceptanceBusinessNameRule(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db, PayMerchants: &fakePayProvisioner{db: db}}
+	user := createMerchantTestUser(t, db, "user")
+	verifyMerchantTestUser(t, db, user)
+	for name, bad := range map[string]string{
+		"a reserved word, dotted":      "T.S.A-Pay Payments",
+		"a reserved word, in Cyrillic": "Suppоrt Desk Ltd", // Cyrillic о
+		"a reserved word, full-width":  "ＴＳＡ Ｃｏｎｎｅｃｔ",
+		"a hidden character":           "Sky\u200bAir",
+	} {
+		in := validPayAcceptanceInput()
+		in["businessName"] = bad
+		w, c := newMerchantContext("POST", "/api/merchant-requests", in, user)
+		h.SubmitMerchantRequest(c)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	in := validPayAcceptanceInput()
+	in["businessName"] = "  Sky   Air  "
+	w, c := newMerchantContext("POST", "/api/merchant-requests", in, user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("a fine name: %d %s", w.Code, w.Body.String())
+	}
+	var stored models.MerchantRequest
+	db.First(&stored, "user_id = ?", user.ID)
+	if stored.BusinessName != "Sky Air" {
+		t.Fatalf("stored %q", stored.BusinessName)
+	}
+
+	// Filed before the rule: approval refuses it, and nothing is provisioned.
+	db.Model(&stored).Update("business_name", "TSA Pay Refunds")
+	prov := h.PayMerchants.(*fakePayProvisioner)
+	admin := createMerchantTestUser(t, db, "admin")
+	if w := approvePay(h, admin, stored.ID.String()); w.Code != http.StatusUnprocessableEntity || prov.calls != 0 {
+		t.Fatalf("approving a reserved name: %d calls=%d %s", w.Code, prov.calls, w.Body.String())
+	}
+	db.First(&stored, "id = ?", stored.ID)
+	if stored.Status != models.MerchantRequestStatusPending {
+		t.Fatalf("a refused approval changed the request: %s", stored.Status)
 	}
 }

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"golang.org/x/text/unicode/norm"
 	"gorm.io/gorm"
 )
 
@@ -56,10 +58,17 @@ type payBusinessNamePayload struct {
 	Name string `json:"name"`
 }
 
-// normalizeBusinessName collapses the name's whitespace and refuses what a
-// customer could be misled by: hidden or direction-flipping characters (the
-// same rule payment-link text follows), a length outside the bounds, and the
-// reserved words.
+// NormalizeBusinessName is the one rule every business name is held to —
+// applied when a TSA Pay application is submitted, approved and provisioned,
+// when an owner asks for a rename, and when a super admin renames a merchant.
+// It collapses the name's whitespace and refuses what a customer could be
+// misled by: hidden or direction-flipping characters (the same rule
+// payment-link text follows), a length outside the bounds, and the reserved
+// words, however they are spelled (foldBusinessName).
+func (s *PayMerchantService) NormalizeBusinessName(name string) (string, error) {
+	return s.normalizeBusinessName(name)
+}
+
 func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) {
 	if payHasHiddenChars(name) {
 		return "", fmt.Errorf("%w: a business name can't contain hidden or control characters", ErrPayMerchantInvalid)
@@ -81,10 +90,40 @@ func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) 
 	return name, nil
 }
 
-// foldBusinessName lower-cases and drops spaces, so "T S A  pay" still reads
-// as "tsapay" when checked against the reserved words.
+// businessNameLookalikes maps characters that pass for Latin letters — the
+// common Cyrillic and Greek homoglyphs, and the digits and symbols used as
+// letters — to the letter they pass for. Applied to both sides of the
+// reserved-word check, so "i", "l", "1" and "|" all read as one letter.
+var businessNameLookalikes = map[rune]rune{
+	// Cyrillic
+	'а': 'a', 'в': 'b', 'е': 'e', 'ё': 'e', 'к': 'k', 'м': 'm', 'н': 'h', 'о': 'o', 'р': 'p', 'с': 'c',
+	'т': 't', 'у': 'y', 'х': 'x', 'ѕ': 's', 'і': 'l', 'ї': 'l', 'ј': 'j', 'ԁ': 'd', 'ԛ': 'q', 'ԝ': 'w',
+	'ӏ': 'l', 'ү': 'y', 'һ': 'h', 'п': 'n',
+	// Greek
+	'α': 'a', 'β': 'b', 'γ': 'y', 'ε': 'e', 'η': 'n', 'ι': 'l', 'κ': 'k', 'ν': 'v', 'ο': 'o', 'ρ': 'p',
+	'τ': 't', 'υ': 'u', 'χ': 'x', 'ω': 'w', 'ς': 's', 'σ': 'o',
+	// Digits, symbols and letters that read as another
+	'0': 'o', '1': 'l', 'i': 'l', '|': 'l', '!': 'l', '3': 'e', '5': 's', '$': 's', '@': 'a', '4': 'a', '7': 't',
+}
+
+// foldBusinessName reduces a name to the letters a reader sees, for the
+// reserved-word check: compatibility-decomposed (NFKD: full-width and styled
+// letters become plain ones, accents come off), lower-cased, lookalikes mapped
+// to the Latin letter they imitate, and everything that is not a letter or
+// digit dropped — so "T.S.A-Pay", "Ｔｓａ Ｐａｙ", "Tѕа Pay" (Cyrillic) and
+// "TSA P@y" all read as "tsapay".
 func foldBusinessName(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), ""))
+	var b strings.Builder
+	for _, r := range norm.NFKD.String(strings.ToLower(s)) {
+		r = unicode.ToLower(r)
+		if m, ok := businessNameLookalikes[r]; ok {
+			r = m
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // RequestBusinessNameChange asks to rename the owner's business, as a guarded

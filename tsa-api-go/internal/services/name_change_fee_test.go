@@ -2,10 +2,12 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -17,10 +19,11 @@ type fakeFeeTxReader struct {
 	block   uint64
 	head    uint64
 	blockAt time.Time
+	txErr   error
 }
 
 func (f *fakeFeeTxReader) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
-	return f.tx, false, nil
+	return f.tx, false, f.txErr
 }
 func (f *fakeFeeTxReader) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
 	return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: new(big.Int).SetUint64(f.block)}, nil
@@ -64,5 +67,28 @@ func TestTreasuryFeeRail_VerifyPaymentReportsSignerTimeAndDepth(t *testing.T) {
 	}
 	if _, err := rail.VerifyPayment(context.Background(), "bsc", "0x1", "0xtoken", "0xfrom", "0xto"); err == nil {
 		t.Fatal("a chain with no verifier must not prove anything")
+	}
+}
+
+// TransactionKnown says "unknown" only on the node's definite not-found; any
+// other failed read is an error, never taken as a payment that vanished.
+func TestTreasuryFeeRail_TransactionKnown(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err     error
+		known   bool
+		wantErr bool
+	}{
+		"mined or pending": {known: true},
+		"not found":        {err: ethereum.NotFound},
+		"rpc failure":      {err: errors.New("timeout"), wantErr: true},
+	} {
+		rail := NewTreasuryFeeRail(nil, nil, map[string]FeeTxReader{"base": &fakeFeeTxReader{txErr: tc.err}})
+		known, err := rail.TransactionKnown(context.Background(), "Base", "0x1")
+		if known != tc.known || (err != nil) != tc.wantErr {
+			t.Errorf("%s: known=%v err=%v", name, known, err)
+		}
+	}
+	if _, err := NewTreasuryFeeRail(nil, nil, nil).TransactionKnown(context.Background(), "bsc", "0x1"); err == nil {
+		t.Fatal("a chain with no reader is an error, not an unknown transaction")
 	}
 }

@@ -96,6 +96,9 @@ type PayHandler struct {
 	checkout    payCheckoutStarter
 	events      *events.Bus
 	liveEnabled bool
+	// businessNameChange: owners may ask for a rename (NAME_CHANGE_ENABLED).
+	// The route exists only when it is on, and the owner view says so.
+	businessNameChange bool
 }
 
 // NewPayHandler constructs a PayHandler. Any of merchants/payments/webhooks
@@ -110,6 +113,16 @@ func (h *PayHandler) WithCheckout(c payCheckoutStarter) *PayHandler {
 	h.checkout = c
 	return h
 }
+
+// WithBusinessNameChange lets owners ask for a business rename: the route is
+// registered and the owner view's businessNameChangeEnabled is true.
+func (h *PayHandler) WithBusinessNameChange(enabled bool) *PayHandler {
+	h.businessNameChange = enabled
+	return h
+}
+
+// BusinessNameChangeEnabled reports whether owners may ask for a rename.
+func (h *PayHandler) BusinessNameChangeEnabled() bool { return h != nil && h.businessNameChange }
 
 // WithOpenLinks turns the open-link routes on. Callers pass a real service or
 // nothing at all — never a typed-nil pointer, which would read as wired.

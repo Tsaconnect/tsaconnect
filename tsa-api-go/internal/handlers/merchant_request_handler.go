@@ -27,6 +27,10 @@ import (
 // payment_acceptance request returns 503 (TSA Pay dormant-by-default).
 type payMerchantProvisioner interface {
 	CreateFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PayMerchant, error)
+	// NormalizeBusinessName is the business-name rule (hidden characters,
+	// length, reserved words): an application is held to it when submitted
+	// and again when approved.
+	NormalizeBusinessName(name string) (string, error)
 }
 
 type MerchantRequestHandler struct {
@@ -170,6 +174,17 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before applying for TSA Pay", services.KYCVerificationRequiredCode)
 			return
 		}
+	}
+
+	// A TSA Pay business name is what customers are shown and what payout
+	// accounts are matched against: the same rule as every later rename.
+	if input.BusinessType == models.BusinessTypePaymentAcceptance {
+		name, err := h.PayMerchants.NormalizeBusinessName(input.BusinessName)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, strings.TrimPrefix(err.Error(), services.ErrPayMerchantInvalid.Error()+": "))
+			return
+		}
+		input.BusinessName = name
 	}
 
 	// A TSA Pay application's website is optional: a business with none sends
@@ -402,6 +417,14 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 		if h.PayMerchants == nil {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "TSA Pay is not enabled")
+			return
+		}
+		// Requests filed before business names were held to the rule are
+		// refused here rather than approved into a merchant that can't exist.
+		if _, err := h.PayMerchants.NormalizeBusinessName(req.BusinessName); err != nil {
+			utils.ErrorResponse(c, http.StatusUnprocessableEntity,
+				"This business name can't be used ("+strings.TrimPrefix(err.Error(), services.ErrPayMerchantInvalid.Error()+": ")+
+					"). Reject the request so the applicant can apply again.")
 			return
 		}
 	}

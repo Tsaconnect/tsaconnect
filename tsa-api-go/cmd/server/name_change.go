@@ -34,9 +34,7 @@ func buildNameChanges(cfg *config.Config, swap *services.MCGPSwapService, treasu
 		RequireFaceMatch:        cfg.NameChangeRequireFaceMatch,
 		MinConfirmations:        cfg.NameChangeMinConfirmations,
 		MinConfirmationsByChain: cfg.NameChangeMinConfirmationsByChain,
-		// The wallet-proof challenges are HMAC'd with a key derived from the
-		// JWT secret (the service domain-separates it): no new secret to run.
-		ProofKey: []byte(cfg.JWTSecret),
+		MinRefundUSD:            cfg.NameChangeMinRefundUSD,
 	}, bus, time.Now)
 
 	mcgp, stable := false, false

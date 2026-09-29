@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -77,6 +75,11 @@ type fakeStableRail struct {
 	refunds         int
 	refundedAmount  *big.Int
 	refundedTo      string
+
+	// txUnknown: the chain has never heard of the named transaction;
+	// txLookupErr: it cannot be asked.
+	txUnknown   bool
+	txLookupErr error
 }
 
 const nameChangeTreasury = "0x000000000000000000000000000000000000fEE5"
@@ -101,6 +104,12 @@ func (f *fakeStableRail) VerifyPayment(_ context.Context, _, _, _, from, to stri
 		return nil, ErrTransferNotFound
 	}
 	return f.payment, nil
+}
+func (f *fakeStableRail) TransactionKnown(context.Context, string, string) (bool, error) {
+	if f.txLookupErr != nil {
+		return false, f.txLookupErr
+	}
+	return !f.txUnknown, nil
 }
 func (f *fakeStableRail) Refund(_ context.Context, _, _, to string, amount *big.Int, _ float64) (string, bool, error) {
 	f.refunds++
@@ -147,7 +156,6 @@ func newNameChangeRig(t *testing.T, cfg NameChangeConfig) *nameChangeRig {
 		cfg.FeeUSD = "1.00"
 	}
 	cfg.Enabled = true
-	cfg.ProofKey = []byte("test-proof-key")
 	cfg.RequireFaceMatch = true
 	r.svc = NewNameChangeService(db, cfg, nil, func() time.Time { return r.now })
 	r.svc.SetMCGP(NewBillPaymentService(db, r.swap).ForPurpose(models.BillPayPurposeNameChange),
@@ -168,30 +176,15 @@ func (r *nameChangeRig) seedUser(t *testing.T, status, legal string) uuid.UUID {
 	return id
 }
 
-// proof signs the wallet challenge for chain with the rig's wallet key.
-func (r *nameChangeRig) proof(t *testing.T, user uuid.UUID, chain string) (nonce, sig string) {
+// mcgpRequest pays from spendable MCGP, from the wallet the handler proved.
+func (r *nameChangeRig) mcgpRequest(t *testing.T, _ uuid.UUID) NameChangeRequest {
 	t.Helper()
-	p, err := r.svc.WalletProof(user, r.wallet, chain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := crypto.Sign(accounts.TextHash([]byte(p.Message)), r.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p.Nonce, hexutil.Encode(s)
+	return NameChangeRequest{PayMethod: models.NameChangePayMCGP, ProvenWallet: r.wallet}
 }
 
-func (r *nameChangeRig) mcgpRequest(t *testing.T, user uuid.UUID) NameChangeRequest {
+func (r *nameChangeRig) stableRequest(t *testing.T, _ uuid.UUID) NameChangeRequest {
 	t.Helper()
-	nonce, sig := r.proof(t, user, nameChangeMCGPChain)
-	return NameChangeRequest{PayMethod: models.NameChangePayMCGP, Wallet: r.wallet, Nonce: nonce, Signature: sig}
-}
-
-func (r *nameChangeRig) stableRequest(t *testing.T, user uuid.UUID) NameChangeRequest {
-	t.Helper()
-	nonce, sig := r.proof(t, user, "base")
-	return NameChangeRequest{PayMethod: models.NameChangePayStablecoin, Chain: "base", Token: "USDC", Wallet: r.wallet, Nonce: nonce, Signature: sig}
+	return NameChangeRequest{PayMethod: models.NameChangePayStablecoin, Chain: "base", Token: "USDC", ProvenWallet: r.wallet}
 }
 
 type nameChangeUserRow struct {
@@ -399,38 +392,36 @@ func TestNameChange_MoneyInFlightBlocksAChange(t *testing.T) {
 	}
 }
 
-// ── wallet proof ─────────────────────────────────────────────────────────
+// ── the paying wallet ────────────────────────────────────────────────────
 
-func TestNameChange_WalletProofMustBeSignedByThatWalletForThisAccountAndChain(t *testing.T) {
+// The fee is only ever taken from the account's own linked wallet: a caller that
+// names no proven wallet, or any other wallet, is refused before anything is
+// written or debited.
+func TestNameChange_FeeIsPaidOnlyFromTheAccountsLinkedWallet(t *testing.T) {
 	r := newNameChangeRig(t, NameChangeConfig{})
-	good := r.mcgpRequest(t, r.user)
-	other := r.seedUser(t, models.VerificationStatusVerified, "EMEKA NWOSU")
-	stranger, _ := crypto.GenerateKey()
-	forged := good
-	s, _ := crypto.Sign(accounts.TextHash([]byte("anything")), stranger)
-	forged.Signature = hexutil.Encode(s)
-
-	stableProof := r.stableRequest(t, r.user) // signed for chain "base"
-	wrongChain := good
-	wrongChain.Nonce, wrongChain.Signature = stableProof.Nonce, stableProof.Signature
-
-	expired := good
-	r.now = r.now.Add(nameChangeProofTTL + time.Minute)
-	for name, tc := range map[string]struct {
-		user uuid.UUID
-		req  NameChangeRequest
-	}{
-		"another key's signature": {r.user, forged},
-		"another account's proof": {other, good},
-		"another chain's proof":   {r.user, wrongChain},
-		"an expired proof":        {r.user, expired},
+	for name, wallet := range map[string]string{
+		"no proven wallet":  "",
+		"another wallet":    "0x1111111111111111111111111111111111111111",
+		"not an address":    "0xnope",
+		"a lookalike (len)": r.wallet + "00",
 	} {
-		if _, err := r.svc.Create(context.Background(), tc.user, tc.req); !errors.Is(err, ErrNameChangeWalletProof) {
+		req := r.mcgpRequest(t, r.user)
+		req.ProvenWallet = wallet
+		if _, err := r.svc.Create(context.Background(), r.user, req); !errors.Is(err, ErrNameChangeWalletUnproven) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
-	if r.swap.debitCalls != 0 {
-		t.Fatal("a refused proof took a fee")
+	// The account's wallet in another letter case is the same wallet.
+	req := r.stableRequest(t, r.user)
+	req.ProvenWallet = strings.ToLower(r.wallet)
+	out, err := r.svc.Create(context.Background(), r.user, req)
+	if err != nil || out.Transfer == nil || out.Transfer.From != r.wallet {
+		t.Fatalf("out %+v err %v (the transfer names the checksummed wallet)", out, err)
+	}
+	var n int64
+	r.db.Model(&models.UserNameChange{}).Count(&n)
+	if n != 1 || r.swap.debitCalls != 0 {
+		t.Fatalf("a refused wallet took a fee or wrote a change: rows=%d debits=%d", n, r.swap.debitCalls)
 	}
 }
 
@@ -625,21 +616,21 @@ func TestNameChange_StablecoinFeeIsHeldToSenderTimeDepthAndAmount(t *testing.T) 
 func TestNameChange_UnderpaidStablecoinIsRefundedAsCredited(t *testing.T) {
 	r := newNameChangeRig(t, NameChangeConfig{})
 	out := r.openStable(t)
-	r.rail.payment = r.provenPayment(400_000)
+	r.rail.payment = r.provenPayment(600_000)
 	r.rail.refundHash, r.rail.refundAttempted = "0xback", true
 	if _, err := r.svc.ConfirmPayment(context.Background(), r.user, nameChangeTx); err != nil {
 		t.Fatalf("an underpayment is recorded and refunded, not refused: %v", err)
 	}
 	ch := r.change(t, out.Change.ID)
-	if ch.Status != models.NameChangeStatusCancelled || ch.FeeStatus != models.NameChangeFeeRefunded || ch.PayCredited != "400000" ||
-		r.rail.refundedAmount.String() != "400000" || ch.UserMessage == "" {
+	if ch.Status != models.NameChangeStatusCancelled || ch.FeeStatus != models.NameChangeFeeRefunded || ch.PayCredited != "600000" ||
+		r.rail.refundedAmount.String() != "600000" || ch.RefundAmount != "600000" || ch.UserMessage == "" {
 		t.Fatalf("change %+v refunded %v", ch, r.rail.refundedAmount)
 	}
 }
 
 // R1: a payment named while pending and proven after the change was closed —
 // or confirmed only after the sweep closed it — is recorded and refunded, never
-// answered with a mismatch, and does not use up the user's refund allowance.
+// answered with a mismatch. Its refund counts toward the user's allowance (L1).
 func TestNameChange_LateStablecoinPaymentIsRecordedAndRefunded(t *testing.T) {
 	ctx := context.Background()
 	t.Run("confirmed after the sweep closed the change", func(t *testing.T) {
@@ -659,8 +650,8 @@ func TestNameChange_LateStablecoinPaymentIsRecordedAndRefunded(t *testing.T) {
 		if err != nil || view.Status != models.NameChangeStatusCancelled || view.FeeStatus != models.NameChangeFeeRefunded {
 			t.Fatalf("view %+v err %v", view, err)
 		}
-		if next, _ := r.svc.refundLimit(ctx, r.user); next != nil {
-			t.Fatal("a late payment's refund must not use up the refund allowance")
+		if next, _ := r.svc.refundLimit(ctx, r.user); next == nil {
+			t.Fatal("a late payment's refund counts toward the refund allowance")
 		}
 	})
 	t.Run("named while pending, proven by the sweep", func(t *testing.T) {
@@ -703,6 +694,7 @@ func TestNameChange_StablecoinRefundRetriesOnlyWhatNeverLeft(t *testing.T) {
 		t.Fatalf("an unsent refund: %+v", view)
 	}
 	r.rail.refundErr, r.rail.refundHash, r.rail.refundAttempted = nil, "0xretry", true
+	r.now = r.now.Add(nameChangeRefundRetryBase) // its backoff
 	if _, err := r.svc.Sweep(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +785,7 @@ func TestNameChange_HeldChangeIsApprovedByAnotherAdmin(t *testing.T) {
 	}
 	if view.Status != models.NameChangeStatusApproved || view.ReviewedBy == nil || *view.ReviewedBy != admin || view.ReviewedAt == nil ||
 		view.OldVerifiedName != "ADA CHIOMA OBI" || view.User.ID != r.user || view.User.AccountAgeDays < 360 ||
-		view.OriginalDiditSessionID != "sess-first-kyc" || view.DOBMatch == nil || !*view.DOBMatch || view.OriginalDOB != "1990-05-17" ||
+		view.OriginalDiditSessionID != "sess-first-kyc" || view.DOBMatch == nil || !*view.DOBMatch || view.OriginalDOB != "" || view.NewDOB != "" ||
 		view.DocumentCountryMatch == nil || !*view.DocumentCountryMatch || view.ReviewNote != "marriage certificate seen" ||
 		strings.Contains(view.Message, "marriage") {
 		t.Fatalf("admin view %+v", view)
@@ -962,5 +954,271 @@ func TestParseFeeUSDMicrosAndAmounts(t *testing.T) {
 	}
 	if got := displayAmount(big.NewInt(1_500_000), 6); got != "1.50" {
 		t.Fatalf("display: %s", got)
+	}
+}
+
+// ── review fixes: stuck payments, bounces, overpayment, dates, backoff ───
+
+// namedPendingPayment opens a stablecoin change and names a transaction the
+// chain has not mined.
+func (r *nameChangeRig) namedPendingPayment(t *testing.T) *NameChangeCreated {
+	t.Helper()
+	out := r.openStable(t)
+	if _, err := r.svc.ConfirmPayment(context.Background(), r.user, nameChangeTx); !errors.Is(err, ErrNameChangePaymentOnChain) {
+		t.Fatalf("err = %v", err)
+	}
+	return out
+}
+
+// M1: a named payment the chain has never heard of, a day after the change
+// ran out of time, is forgotten and the change closed unpaid — and if it lands
+// after all, the late-payment window still takes it and sends it back. One the
+// chain knows (unmined), or that cannot be looked up, keeps waiting.
+func TestNameChange_VanishedPaymentClosesTheChangeUnpaid(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		after   time.Duration
+		unknown bool
+		lookup  error
+		closed  bool
+	}{
+		"unknown a day after expiry":    {after: 7*24*time.Hour + nameChangeVanishedAfter + time.Minute, unknown: true, closed: true},
+		"unknown, not a day yet":        {after: 7*24*time.Hour + time.Hour, unknown: true},
+		"known to the chain (pending)":  {after: 7*24*time.Hour + nameChangeVanishedAfter + time.Minute},
+		"the chain cannot be looked at": {after: 7*24*time.Hour + nameChangeVanishedAfter + time.Minute, unknown: true, lookup: errors.New("rpc down")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newNameChangeRig(t, NameChangeConfig{})
+			out := r.namedPendingPayment(t)
+			r.rail.txUnknown, r.rail.txLookupErr = tc.unknown, tc.lookup
+			r.now = r.now.Add(tc.after)
+			if _, err := r.svc.Sweep(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ch := r.change(t, out.Change.ID)
+			if !tc.closed {
+				if ch.Status != models.NameChangeStatusPaying || ch.PayRef == nil {
+					t.Fatalf("must keep waiting: %+v", ch)
+				}
+				return
+			}
+			if ch.Status != models.NameChangeStatusCancelled || ch.PayRef != nil || ch.FeeStatus != models.NameChangeFeeNone ||
+				!strings.Contains(ch.ReviewNote, nameChangeTx) || ch.UserMessage == "" {
+				t.Fatalf("change %+v", ch)
+			}
+			// It lands after all: confirmed within the late window, taken and refunded.
+			p := r.provenPayment(1_000_000)
+			p.BlockTime = r.now
+			r.rail.payment, r.rail.refundHash, r.rail.refundAttempted = p, "0xback", true
+			view, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx)
+			if err != nil || view.Status != models.NameChangeStatusCancelled || view.FeeStatus != models.NameChangeFeeRefunded {
+				t.Fatalf("a late landing: view %+v err %v", view, err)
+			}
+		})
+	}
+}
+
+// The manual way out: a super admin who has read the chain clears a named
+// payment that will never pay, with a reason — never their own change, never
+// one whose fee was already taken.
+func TestNameChange_AdminClearsAnUnprovenPayment(t *testing.T) {
+	ctx := context.Background()
+	r := newNameChangeRig(t, NameChangeConfig{})
+	out := r.namedPendingPayment(t)
+	admin := uuid.New()
+	if _, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "  "); !errors.Is(err, ErrNameChangeInvalid) {
+		t.Fatalf("no reason: err = %v", err)
+	}
+	if _, err := r.svc.AdminClearUnprovenPayment(ctx, r.user, out.Change.ID, "mine"); !errors.Is(err, ErrNameChangeSelfReview) {
+		t.Fatalf("own change: err = %v", err)
+	}
+	view, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "replaced by a zero-value tx on basescan")
+	if err != nil || view.Status != models.NameChangeStatusCancelled || view.PayRef != "" ||
+		!strings.Contains(view.ReviewNote, "basescan") || !strings.Contains(view.ReviewNote, admin.String()) {
+		t.Fatalf("view %+v err %v", view, err)
+	}
+	if _, err := r.svc.AdminClearUnprovenPayment(ctx, admin, out.Change.ID, "again"); !errors.Is(err, ErrNameChangeBadState) {
+		t.Fatalf("nothing left to clear: err = %v", err)
+	}
+
+	paid := newNameChangeRig(t, NameChangeConfig{})
+	pout := paid.openStable(t)
+	paid.rail.payment = paid.provenPayment(1_000_000)
+	if _, err := paid.svc.ConfirmPayment(ctx, paid.user, nameChangeTx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := paid.svc.AdminClearUnprovenPayment(ctx, admin, pout.Change.ID, "wrong"); !errors.Is(err, ErrNameChangeBadState) {
+		t.Fatalf("a proven payment is never cleared: err = %v", err)
+	}
+}
+
+// L1: a payment that cannot pay its change goes back only when it is worth
+// sending and the user still has a refund in their allowance; bounces count
+// toward that allowance. Otherwise it is kept and left for support.
+func TestNameChange_BouncesRespectTheMinimumAndTheAllowance(t *testing.T) {
+	ctx := context.Background()
+	t.Run("below the minimum", func(t *testing.T) {
+		r := newNameChangeRig(t, NameChangeConfig{MinRefundUSD: "0.50"})
+		out := r.openStable(t)
+		r.rail.payment = r.provenPayment(400_000) // $0.40
+		if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); err != nil {
+			t.Fatal(err)
+		}
+		ch := r.change(t, out.Change.ID)
+		if ch.Status != models.NameChangeStatusCancelled || ch.FeeStatus != models.NameChangeFeeSettled ||
+			ch.FeeDecision != nameChangeFeeKeepAll || r.rail.refunds != 0 ||
+			!strings.Contains(ch.ReviewNote, "minimum") || !strings.Contains(ch.UserMessage, "support") {
+			t.Fatalf("change %+v refunds=%d", ch, r.rail.refunds)
+		}
+	})
+	t.Run("counts toward, and is held to, the allowance", func(t *testing.T) {
+		r := newNameChangeRig(t, NameChangeConfig{MaxRefundedCancels: 1})
+		first := r.openStable(t)
+		r.rail.payment, r.rail.refundHash, r.rail.refundAttempted = r.provenPayment(600_000), "0xb1", true
+		if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); err != nil {
+			t.Fatal(err)
+		}
+		if ch := r.change(t, first.Change.ID); ch.FeeStatus != models.NameChangeFeeRefunded || ch.FeeDecision != nameChangeFeeBounce {
+			t.Fatalf("the first bounce is refunded: %+v", ch)
+		}
+		// The allowance is used: a cancel is refused its refund...
+		r.now = r.now.Add(time.Hour)
+		r.payMCGP(t)
+		var limit *NameChangeLimitError
+		if _, err := r.svc.Cancel(ctx, r.user); !errors.As(err, &limit) || !limit.Cancel {
+			t.Fatalf("a cancel after a bounce: err = %v", err)
+		}
+		// ...and so is a second bounce, which is kept for support.
+		other := newNameChangeRig(t, NameChangeConfig{MaxRefundedCancels: 1})
+		o1 := other.openStable(t)
+		other.rail.payment, other.rail.refundHash, other.rail.refundAttempted = other.provenPayment(600_000), "0xb1", true
+		if _, err := other.svc.ConfirmPayment(ctx, other.user, nameChangeTx); err != nil {
+			t.Fatal(err)
+		}
+		other.now = other.now.Add(time.Hour)
+		o2 := other.openStable(t)
+		second := "0x" + strings.Repeat("cd", 32)
+		p := other.provenPayment(700_000)
+		p.BlockTime = other.now.Add(time.Minute)
+		other.rail.payment = p
+		if _, err := other.svc.ConfirmPayment(ctx, other.user, second); err != nil {
+			t.Fatal(err)
+		}
+		if ch := other.change(t, o2.Change.ID); ch.FeeStatus != models.NameChangeFeeSettled || ch.FeeDecision != nameChangeFeeKeepAll ||
+			!strings.Contains(ch.ReviewNote, "allowance") || other.rail.refunds != 1 {
+			t.Fatalf("a second bounce in the window: %+v refunds=%d (first %s)", ch, other.rail.refunds, o1.Change.ID)
+		}
+	})
+}
+
+// L2: a kept fee that was overpaid sends the excess back — only the excess,
+// and only when it is above the minimum refund.
+func TestNameChange_KeptFeeReturnsTheOverpayment(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		credited int64
+		refund   string
+		fee      string
+	}{
+		"overpaid by $0.70": {credited: 1_700_000, refund: "700000", fee: models.NameChangeFeeRefunded},
+		"overpaid by $0.20": {credited: 1_200_000, fee: models.NameChangeFeeSettled},
+		"paid exactly":      {credited: 1_000_000, fee: models.NameChangeFeeSettled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newNameChangeRig(t, NameChangeConfig{MinRefundUSD: "0.50"})
+			out := r.openStable(t)
+			r.rail.payment, r.rail.refundHash, r.rail.refundAttempted = r.provenPayment(tc.credited), "0xexcess", true
+			if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); err != nil {
+				t.Fatal(err)
+			}
+			ch := r.session(t, "sess-1")
+			ch = r.decide(t, strongPass(ch, "ADA OBI"), ch.ID)
+			if ch.Status != models.NameChangeStatusApproved || ch.FeeStatus != tc.fee || ch.RefundAmount != tc.refund {
+				t.Fatalf("change %+v", ch)
+			}
+			if tc.refund != "" && (r.rail.refunds != 1 || r.rail.refundedAmount.String() != tc.refund || !strings.EqualFold(r.rail.refundedTo, r.wallet)) {
+				t.Fatalf("refunds=%d amount=%v to=%s", r.rail.refunds, r.rail.refundedAmount, r.rail.refundedTo)
+			}
+			if tc.refund == "" && r.rail.refunds != 0 {
+				t.Fatalf("nothing to send back, sent %d", r.rail.refunds)
+			}
+			_ = out
+		})
+	}
+}
+
+// L3: the dates of birth are kept for the admin while a change is held, and
+// dropped once it is decided — whether they matched stays on record.
+func TestNameChange_DatesOfBirthAreDroppedOnceDecided(t *testing.T) {
+	ctx := context.Background()
+	r := newNameChangeRig(t, NameChangeConfig{})
+	r.payMCGP(t)
+	ch := r.session(t, "sess-1")
+	ch = r.decide(t, strongPass(ch, "EMEKA NWOSU"), ch.ID)
+	if ch.Status != models.NameChangeStatusHeldForReview || ch.OriginalDOB != "1990-05-17" || ch.NewDOB != "1990-05-17" {
+		t.Fatalf("a held change keeps them for its reviewer: %+v", ch)
+	}
+	if _, err := r.svc.AdminReject(ctx, uuid.New(), ch.ID, "different person"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.change(t, ch.ID); got.OriginalDOB != "" || got.NewDOB != "" || got.DOBMatch == nil || !*got.DOBMatch {
+		t.Fatalf("rejected: %+v", got)
+	}
+
+	auto := newNameChangeRig(t, NameChangeConfig{})
+	auto.payMCGP(t)
+	ach := auto.session(t, "sess-1")
+	ach = auto.decide(t, strongPass(ach, "ADA OBI"), ach.ID)
+	if ach.Status != models.NameChangeStatusApproved || ach.OriginalDOB != "" || ach.NewDOB != "" || ach.DOBMatch == nil || !*ach.DOBMatch {
+		t.Fatalf("applied: %+v", ach)
+	}
+}
+
+// L8: a refund that never left is retried after 1m, 2m, 4m… capped at an hour —
+// not on every sweep.
+func TestNameChange_RefundRetriesBackOff(t *testing.T) {
+	for attempt, want := range map[int]time.Duration{1: time.Minute, 2: 2 * time.Minute, 3: 4 * time.Minute,
+		6: 32 * time.Minute, 7: time.Hour, 30: time.Hour} {
+		if got := refundBackoff(attempt); got != want {
+			t.Errorf("attempt %d: %s, want %s", attempt, got, want)
+		}
+	}
+	ctx := context.Background()
+	r := newNameChangeRig(t, NameChangeConfig{})
+	r.openStable(t)
+	r.rail.payment = r.provenPayment(1_000_000)
+	if _, err := r.svc.ConfirmPayment(ctx, r.user, nameChangeTx); err != nil {
+		t.Fatal(err)
+	}
+	r.rail.refundErr = ErrTreasuryKilled // never sent
+	view, _ := r.svc.Cancel(ctx, r.user)
+	ch := r.change(t, view.ID)
+	if ch.FeeStatus != models.NameChangeFeeRefundFailed || ch.RefundAttempts != 1 || ch.RefundRetryAt == nil ||
+		!ch.RefundRetryAt.Equal(r.now.Add(time.Minute)) {
+		t.Fatalf("change %+v", ch)
+	}
+	r.svc.Sweep(ctx)
+	if r.rail.refunds != 1 {
+		t.Fatalf("retried before its backoff (%d sends)", r.rail.refunds)
+	}
+	r.now = r.now.Add(time.Minute)
+	r.svc.Sweep(ctx) // fails again: next in 2m
+	if ch = r.change(t, view.ID); r.rail.refunds != 2 || ch.RefundAttempts != 2 || !ch.RefundRetryAt.Equal(r.now.Add(2*time.Minute)) {
+		t.Fatalf("second try: refunds=%d %+v", r.rail.refunds, ch)
+	}
+	r.now = r.now.Add(time.Minute)
+	r.svc.Sweep(ctx)
+	if r.rail.refunds != 2 {
+		t.Fatalf("retried inside the doubled backoff (%d sends)", r.rail.refunds)
+	}
+	// An admin who finds it never left sends it round again at once.
+	r.db.Model(&models.UserNameChange{}).Where("id = ?", view.ID).Update("fee_status", models.NameChangeFeeRefundUncertain)
+	if _, err := r.svc.AdminRecordRefundOutcome(ctx, uuid.New(), view.ID, NameChangeRefundOutcome{Sent: false}); err != nil {
+		t.Fatal(err)
+	}
+	r.rail.refundErr, r.rail.refundHash, r.rail.refundAttempted = nil, "0xok", true
+	r.svc.Sweep(ctx)
+	if got := r.change(t, view.ID); got.FeeStatus != models.NameChangeFeeRefunded || r.rail.refunds != 3 {
+		t.Fatalf("after the admin's outcome: %+v refunds=%d", got, r.rail.refunds)
 	}
 }
