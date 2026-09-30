@@ -70,13 +70,14 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
   // One form for both cards; its title says which one opened it.
   const [editTitle, setEditTitle] = useState('Edit webhooks');
   const [draft, setDraft] = useState<Draft>({ webhookUrl: '', testWebhookUrl: '', returnDomains: '', allowedIps: '' });
-  const allowedIps = m.allowedIps ?? [];
+  // Undefined only from an API that predates the allowlist: offering it there would save nothing.
+  const allowedIps = m.allowedIps;
   // A suspended merchant's settings are read-only (the API refuses every change).
   const locked = m.status === 'suspended';
 
   const startEdit = (title: string) => {
     setEditTitle(title);
-    setDraft({ webhookUrl: m.webhookUrl, testWebhookUrl: m.testWebhookUrl, returnDomains: m.returnDomains.join(', '), allowedIps: allowedIps.join(', ') });
+    setDraft({ webhookUrl: m.webhookUrl, testWebhookUrl: m.testWebhookUrl, returnDomains: m.returnDomains.join(', '), allowedIps: (allowedIps ?? []).join(', ') });
     setEditing(true);
   };
   const list = (s: string) => [...new Set(s.split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean))];
@@ -98,14 +99,14 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
     }
     if (action.kind === 'endpoints') {
       return {
-        title: 'Save webhook settings',
-        confirmLabel: 'Save webhooks',
+        title: 'Save these settings',
+        confirmLabel: 'Save settings',
         request: (password: string) =>
           requestEndpoints({
             webhookUrl: draft.webhookUrl.trim(),
             testWebhookUrl: draft.testWebhookUrl.trim(),
             returnDomains: list(draft.returnDomains),
-            allowedIps: list(draft.allowedIps),
+            ...(allowedIps && { allowedIps: list(draft.allowedIps) }),
             expectedVersion: m.version,
             password,
           }),
@@ -126,7 +127,7 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
     setAction(null);
     if (a?.kind === 'key' && r.key) setShown({ kind: 'key', mode: a.mode, key: r.key });
     else if (a?.kind === 'secret') setShown({ kind: 'secret', action: a.action, live: r.webhookSecretLive ?? '', test: r.webhookSecretTest ?? '' });
-    else if (a?.kind === 'endpoints') toast.success('Webhook settings saved');
+    else if (a?.kind === 'endpoints') toast.success('Settings saved');
   };
 
   const continueEdit = (e: FormEvent) => {
@@ -189,24 +190,26 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
         </Card>
       </section>
 
-      <section>
-        <Card>
-          <CardHeader
-            title="Allowed IPs"
-            description="Your live key only works from these addresses, so a leaked key is useless anywhere else. Your test key works from anywhere."
-            actions={<Button size="sm" variant="secondary" onClick={() => startEdit('Edit allowed IPs')} aria-label="Edit allowed IPs" disabled={locked}>Edit</Button>}
-          />
-          <CardBody className="flex flex-wrap gap-2">
-            {allowedIps.length ? (
-              allowedIps.map((ip) => (
-                <span key={ip} className="rounded-full border border-hairline bg-surface px-3 py-[5px] font-mono text-[12.5px]">{ip}</span>
-              ))
-            ) : (
-              <p className="text-body-sm text-text-secondary">Any IP address.</p>
-            )}
-          </CardBody>
-        </Card>
-      </section>
+      {allowedIps && (
+        <section>
+          <Card>
+            <CardHeader
+              title="Allowed IPs"
+              description="Your live key only works from these addresses, so a leaked key is useless anywhere else. Your test key works from anywhere."
+              actions={<Button size="sm" variant="secondary" onClick={() => startEdit('Edit allowed IPs')} aria-label="Edit allowed IPs" disabled={locked}>Edit</Button>}
+            />
+            <CardBody className="flex flex-wrap gap-2">
+              {allowedIps.length ? (
+                allowedIps.map((ip) => (
+                  <span key={ip} className="rounded-full border border-hairline bg-surface px-3 py-[5px] font-mono text-[12.5px]">{ip}</span>
+                ))
+              ) : (
+                <p className="text-body-sm text-text-secondary">Any IP address.</p>
+              )}
+            </CardBody>
+          </Card>
+        </section>
+      )}
 
       {locked ? (
         <SuspendedNote>create a key, change your webhooks or see your signing secret</SuspendedNote>
@@ -237,12 +240,14 @@ function DevelopersBody({ merchant: m }: { merchant: OwnMerchant }) {
           <Field label="Return domains" hint="Where customers may be sent back after paying, e.g. skyair.ng. Separate them with commas.">
             <Input value={draft.returnDomains} onChange={(e) => setDraft({ ...draft, returnDomains: e.target.value })} />
           </Field>
-          <Field
-            label="Allowed IPs"
-            hint="Your servers' public addresses or ranges, e.g. 203.0.113.7 or 203.0.113.0/24. Separate them with commas. Leave empty to accept your live key from anywhere."
-          >
-            <Input value={draft.allowedIps} onChange={(e) => setDraft({ ...draft, allowedIps: e.target.value })} />
-          </Field>
+          {allowedIps && (
+            <Field
+              label="Allowed IPs"
+              hint="Your servers' public addresses or ranges, e.g. 203.0.113.7 or 203.0.113.0/24 — list both IPv4 and IPv6 if your servers have both. Separate them with commas. Leave empty to accept your live key from anywhere."
+            >
+              <Input value={draft.allowedIps} onChange={(e) => setDraft({ ...draft, allowedIps: e.target.value })} />
+            </Field>
+          )}
         </form>
       </Dialog>
 

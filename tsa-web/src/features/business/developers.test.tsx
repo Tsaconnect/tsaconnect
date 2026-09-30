@@ -204,7 +204,7 @@ describe('API keys & webhooks', () => {
     await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
     await userEvent.click(screen.getByRole('button', { name: /send code/i }));
     await userEvent.type(await screen.findByLabelText('Code from your email'), '482913');
-    await userEvent.click(screen.getByRole('button', { name: 'Save webhooks' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(await screen.findByText('https://api.skyair.ng/tsa/webhook')).toBeInTheDocument();
     const put = f.mock.calls.find(([u]) => u === '/api/pay/merchant/endpoints');
     expect(put![1].method).toBe('PUT');
@@ -252,7 +252,7 @@ describe('API keys & webhooks', () => {
     expect(screen.getByRole('dialog', { name: 'Edit allowed IPs' })).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('Allowed IPs'), '203.0.113.7, 198.51.100.0/24 203.0.113.7');
     await passwordThenCode(/continue/i);
-    await userEvent.click(screen.getByRole('button', { name: 'Save webhooks' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
 
     expect(await within(card).findByText('198.51.100.0/24')).toBeInTheDocument();
     expect(within(card).getByText('203.0.113.7')).toBeInTheDocument();
@@ -263,11 +263,21 @@ describe('API keys & webhooks', () => {
     });
   });
 
-  it('an API that does not send allowed IPs yet reads as any address', async () => {
-    stubFetch({ '/api/pay/merchant': ok({ ...merchant, allowedIps: undefined }) });
+  it('against an API that has no allowlist yet it offers none, and never sends one', async () => {
+    const f = stubFetch({
+      '/api/pay/merchant': ok({ ...merchant, allowedIps: undefined }),
+      '/api/pay/merchant/endpoints': fail(422, 'invalid merchant settings: return domain: bad'),
+    });
     mountAt('/business/live/developers');
-    const card = (await screen.findByRole('heading', { name: 'Allowed IPs' })).closest('section')!;
-    expect(within(card).getByText('Any IP address.')).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /edit webhooks/i }));
+    expect(screen.queryByRole('heading', { name: 'Allowed IPs' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Allowed IPs')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /continue/i }));
+    await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
+    await userEvent.click(screen.getByRole('button', { name: /send code/i }));
+    await screen.findByRole('alert');
+    const put = f.mock.calls.find(([u]) => u === '/api/pay/merchant/endpoints');
+    expect(JSON.parse(put![1].body)).not.toHaveProperty('allowedIps');
   });
 
   it('opened from the webhooks card it is titled Edit webhooks', async () => {

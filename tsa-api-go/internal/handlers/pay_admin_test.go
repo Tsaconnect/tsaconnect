@@ -418,3 +418,59 @@ func TestPayAdmin_RevokeNoticeSendsASuspendedMerchantToSupport(t *testing.T) {
 		t.Fatalf("events = %+v", got)
 	}
 }
+
+func TestPayAdmin_OnlyASuperAdminSetsTheAllowlistAndTheOwnerIsTold(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	seen := collectEvents(bus)
+	h.WithEvents(bus)
+	m := seedHandlerMerchant(t, db)
+	url := "/admin/pay/merchants/" + m.ID.String()
+	gin.SetMode(gin.TestMode)
+	router := func(role string) *gin.Engine {
+		r := gin.New()
+		admin := &models.User{ID: uuid.New(), Role: role}
+		r.PUT("/admin/pay/merchants/:id", func(c *gin.Context) { c.Set("user", admin) }, h.AdminUpdateMerchant)
+		return r
+	}
+	admin, super := router(models.RoleAdmin), router(models.RoleSuperAdmin)
+
+	if w := payDo(admin, "PUT", url, map[string]any{"allowedIps": []string{}}, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain admin clearing the allowlist: %d %s", w.Code, w.Body.String())
+	}
+	if w := payDo(super, "PUT", url, map[string]any{"allowedIps": []string{"203.0.113.7"}}, nil); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), `"allowedIps":["203.0.113.7"]`) {
+		t.Fatalf("super admin setting it: %d %s", w.Code, w.Body.String())
+	}
+	if w := payDo(super, "PUT", url, map[string]any{"customerFeeSharePercent": 50}, nil); w.Code != http.StatusOK {
+		t.Fatalf("an unrelated edit: %d %s", w.Code, w.Body.String())
+	}
+	if w := payDo(super, "PUT", url, map[string]any{"allowedIps": []string{}}, nil); w.Code != http.StatusOK {
+		t.Fatalf("super admin clearing it: %d %s", w.Code, w.Body.String())
+	}
+	got := seen()
+	if len(got) != 2 || got[0].Type != events.SecurityPayEndpointsChanged || got[0].UserID != m.UserID ||
+		!strings.Contains(got[0].Message, "accepted from 203.0.113.7.") || !strings.Contains(got[1].Message, "accepted from any IP address.") {
+		t.Fatalf("events = %+v, want the owner told of each allowlist change and nothing else", got)
+	}
+}
+
+func TestPayAdmin_ARefusedLiveKeyIsAnnouncedAtMostOncePerWindow(t *testing.T) {
+	h, db := newPayHandlerRig(t)
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	seen := collectEvents(bus)
+	h.WithEvents(bus)
+	m := seedHandlerMerchant(t, db)
+	other := seedHandlerMerchant(t, db)
+	for i := 0; i < 5; i++ {
+		h.AnnounceLiveKeyRefused(m, "192.0.2.50")
+	}
+	h.AnnounceLiveKeyRefused(other, "192.0.2.51")
+	got := seen()
+	if len(got) != 2 || got[0].Type != events.SecurityPayKeyRefusedIP || got[0].UserID != m.UserID ||
+		!strings.Contains(got[0].Message, "came from 192.0.2.50 and was refused") || got[1].UserID != other.UserID {
+		t.Fatalf("events = %+v, want one per merchant", got)
+	}
+}

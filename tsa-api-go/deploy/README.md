@@ -151,6 +151,10 @@ health check can fail. This is safe only because of the rule below; if release N
 cannot run against release N's schema, recovery is a manual, data-losing restore — stop
 and escalate rather than improvising.
 
+Rolling back past a release that enforces a setting stops enforcing it silently: the column
+and the merchant's dashboard stay, the check does not. TSA Pay's live-key IP allowlist
+(`allowed_ips`) is one — tell merchants who rely on it if a rollback crosses it.
+
 ## Configuration (Doppler)
 
 Production config lives in Doppler, project `tsa-app`, config `prd`. `shared/env` is
@@ -214,8 +218,8 @@ exactly as before.
 A TSA Pay merchant sends its secret key on every request (`Authorization: Bearer
 tsapk_…`). Cloudflare's zone-wide **Always Use HTTPS** answers `http://` with a
 301, but by then the key has already crossed the network in the clear, and
-server-side HTTP clients ignore HSTS. So `/api/pay/` must refuse plain HTTP, not
-redirect it. Always Use HTTPS cannot exempt a path, so it is replaced by a Single
+server-side HTTP clients ignore HSTS. So the merchant API, `/api/pay/v1/`, must
+refuse plain HTTP, not redirect it. Always Use HTTPS cannot exempt a path, so it is replaced by a Single
 Redirect that does the same job everywhere else. Redirect rules run before WAF
 custom rules, so the block below sees the request.
 
@@ -223,13 +227,20 @@ Set this up in the Cloudflare dashboard for the zone. Create both rules first:
 while Always Use HTTPS is on it wins, so they are inert and there is no gap.
 
 1. **Rules → Redirect Rules → Create (Single Redirect)**, "HTTP to HTTPS except the merchant API":
-   - When: `(not ssl and not (http.host eq "tsa.mcgpchain.com" and starts_with(http.request.uri.path, "/api/pay/")))`
+   - When: `(not ssl and not starts_with(http.request.uri.path, "/api/pay/v1/"))`
    - Then: Dynamic, `concat("https://", http.host, http.request.uri.path)`, 301, **Preserve query string** on.
 2. **Security → WAF → Custom rules → Create**, "Refuse plain-HTTP TSA Pay":
-   - When: `(not ssl and http.host eq "tsa.mcgpchain.com" and starts_with(http.request.uri.path, "/api/pay/"))`
-   - Then: **Block**. If the plan offers a custom response, use 403, `application/json`:
+   - When: `(not ssl and starts_with(http.request.uri.path, "/api/pay/v1/"))` — every host, so
+     another name pointing at this origin cannot keep the old redirect.
+   - Then: **Block**. A custom response needs Pro or above; if the plan has it, use 403, `application/json`:
      `{"success":false,"message":"TSA Pay only accepts https. A key sent over http has leaked, so create a new one.","code":"https_required"}`
+   - Put it above any rule that skips custom rules, and check no IP Access "Allow" rule matches
+     merchants: either would let a plain-HTTP request through to the origin.
 3. **SSL/TLS → Edge Certificates → Always Use HTTPS → Off.** Leave HSTS on.
+
+If a request gets past the edge anyway, the API refuses it itself: the merchant API answers
+`403 https_required` when Cloudflare's `CF-Visitor` says the visitor used http
+(`middleware.PayMerchantTransport`), so the answer does not go back in the clear either.
 
 Check it:
 
@@ -241,6 +252,11 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://tsa.mcgpchain.com/api/p
 
 Any other host added to the zone later is redirected by rule 1, just as Always
 Use HTTPS did.
+
+When Cloudflare publishes new ranges, update `nginx-cloudflare-realip.conf` and
+`paySharedEgress` in `internal/services/pay_merchant_service.go` together — a test fails
+while they differ. A stale nginx list makes clients look like Cloudflare addresses: every
+merchant with an allowlist is then refused (logged as `shared_egress=true`).
 
 ## The migration rule
 

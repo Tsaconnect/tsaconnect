@@ -114,13 +114,58 @@ const (
 	minPayAllowedIPv6Len = 48
 )
 
+// paySharedEgress are ranges many unrelated parties send from, so listing one
+// would let anyone there use the key: Cloudflare's edge (our own proxy — the
+// same ranges as deploy/nginx-cloudflare-realip.conf, which a test holds them
+// to) and its Workers egress, carrier-grade NAT, and the Class E space
+// Cloudflare's Pseudo-IPv4 hands out.
+var paySharedEgress = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range []string{
+		"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+		"108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+		"162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+		"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+		"2a06:98c0::/29", "2c0f:f248::/32",
+		"100.64.0.0/10", // carrier-grade NAT
+		"240.0.0.0/4",   // Class E: Cloudflare Pseudo-IPv4
+	} {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}()
+
+// payBenchmarkNet (RFC 2544) is global unicast to netip but never on the
+// internet, so no request comes from it.
+var payBenchmarkNet = netip.MustParsePrefix("198.18.0.0/15")
+
+// PaySharedEgress reports whether ip is in a range many parties send from
+// (see paySharedEgress). Seeing a live-key request "from" one means the
+// real-client chain is broken — most likely Cloudflare added edge ranges that
+// nginx does not trust yet — not that a merchant should list it.
+func PaySharedEgress(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	for _, p := range paySharedEgress {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizePayAllowedIPs checks an owner-typed allowlist and returns its stored
 // form: each entry an IP or CIDR range, canonical (a range masked to its
 // network, a single-host range stored as the address), deduplicated, in order.
 // Private, loopback and other non-public addresses are refused: a request
 // never reaches us from one, so listing it is always a mistake — usually the
-// server's internal address instead of the one it is seen from.
+// server's internal address instead of the one it is seen from. So are
+// shared-egress ranges (PaySharedEgress).
 func normalizePayAllowedIPs(in []string) (string, error) {
+	// Counted raw, before deduplicating: the raw list is what a pending owner
+	// action stores, so one address repeated 100k times must be refused too.
+	if len(in) > maxPayAllowedIPs {
+		return "", fmt.Errorf("%w: at most %d allowed IPs", ErrPayMerchantInvalid, maxPayAllowedIPs)
+	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))
 	for _, raw := range in {
@@ -144,12 +189,20 @@ func normalizePayAllowedIPs(in []string) (string, error) {
 			return "", fmt.Errorf("%w: allowed IP %q is not an IP address or CIDR range", ErrPayMerchantInvalid, e)
 		}
 		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return "", fmt.Errorf("%w: allowed range %q is too wide", ErrPayMerchantInvalid, e)
+			}
 			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
 		p = p.Masked()
 		a := p.Addr()
-		if !a.IsGlobalUnicast() || a.IsPrivate() {
+		if !a.IsGlobalUnicast() || a.IsPrivate() || payBenchmarkNet.Overlaps(p) {
 			return "", fmt.Errorf("%w: allowed IP %q is not a public address — list the address your server's requests come from", ErrPayMerchantInvalid, e)
+		}
+		for _, shared := range paySharedEgress {
+			if shared.Overlaps(p) {
+				return "", fmt.Errorf("%w: allowed IP %q is shared by many senders (a proxy, cloud edge or carrier NAT), so it would let anyone there use your key", ErrPayMerchantInvalid, e)
+			}
 		}
 		if (a.Is4() && p.Bits() < minPayAllowedIPv4Len) || (a.Is6() && p.Bits() < minPayAllowedIPv6Len) {
 			return "", fmt.Errorf("%w: allowed range %q is too wide (at most /%d for IPv4, /%d for IPv6)", ErrPayMerchantInvalid, e, minPayAllowedIPv4Len, minPayAllowedIPv6Len)
@@ -162,9 +215,6 @@ func normalizePayAllowedIPs(in []string) (string, error) {
 			seen[canon] = true
 			out = append(out, canon)
 		}
-	}
-	if len(out) > maxPayAllowedIPs {
-		return "", fmt.Errorf("%w: at most %d allowed IPs", ErrPayMerchantInvalid, maxPayAllowedIPs)
 	}
 	return strings.Join(out, ","), nil
 }
@@ -206,9 +256,8 @@ type PayMerchantUpdate struct {
 // allowed to receive a checkout redirect, or where the live key may be used
 // from — whether the merchant may take real money at all (the live switch), or
 // the business name (what customers are shown, and what a payout account may
-// be named). Those need a super admin; a
-// fee-share or status change does not. An owner's own rename goes through the
-// review queue instead.
+// be named). Those need a super admin; a fee-share or status change does not.
+// An owner's own rename goes through the review queue instead.
 func (u PayMerchantUpdate) Sensitive() bool {
 	return u.BusinessName != nil || u.SettlementMode != nil || u.BankCode != nil || u.AccountNumber != nil ||
 		u.ChainID != nil || u.TokenAddress != nil || u.TokenSymbol != nil || u.WalletAddress != nil ||

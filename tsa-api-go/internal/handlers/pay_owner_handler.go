@@ -270,16 +270,43 @@ func (h *PayHandler) announceOwnerAction(owner uuid.UUID, res *services.PayOwner
 		h.announce(owner, events.SecurityPayKeyRolled, fmt.Sprintf("Your %s API key was rolled", res.Mode),
 			"The old key has stopped working. If you didn't do this, contact support immediately.")
 	case models.PayOwnerActionEndpoints:
-		h.announce(owner, events.SecurityPayEndpointsChanged, "Your TSA Pay webhook settings were changed",
-			// The host only: a webhook URL can carry a token, and this alert is stored, emailed and pushed.
-			fmt.Sprintf("Live webhooks: %s; test webhooks: %s. Your live API key is accepted from %s. If you didn't make this change, contact support immediately.",
-				nonEmpty(services.PayRedactURL(res.Merchant.WebhookURL), "none"), nonEmpty(services.PayRedactURL(res.Merchant.TestWebhookURL), "none"),
-				nonEmpty(strings.Join(res.Merchant.AllowedIPList(), ", "), "any IP address")))
+		h.announceEndpoints(owner, res.Merchant)
 	case models.PayOwnerActionWebhookSecret:
 		// "reveal" → "revealed", "roll" → "rolled".
 		h.announce(owner, events.SecurityPayWebhookSecret, fmt.Sprintf("Your webhook signing secret was %sed", strings.TrimSuffix(res.SecretAction, "e")),
 			"If you didn't do this, roll the secret and contact support immediately.")
 	}
+}
+
+// announceEndpoints tells the owner where their webhooks now go and where their
+// live key is now accepted from — after their own change, or a super admin's.
+func (h *PayHandler) announceEndpoints(owner uuid.UUID, m *models.PayMerchant) {
+	h.announce(owner, events.SecurityPayEndpointsChanged, "Your TSA Pay webhook settings were changed",
+		// The host only: a webhook URL can carry a token, and this alert is stored, emailed and pushed.
+		fmt.Sprintf("Live webhooks: %s; test webhooks: %s. Your live API key is accepted from %s. If you didn't make this change, contact support immediately.",
+			nonEmpty(services.PayRedactURL(m.WebhookURL), "none"), nonEmpty(services.PayRedactURL(m.TestWebhookURL), "none"),
+			nonEmpty(strings.Join(m.AllowedIPList(), ", "), "any IP address")))
+}
+
+// payKeyRefusedAlertEvery bounds the "your live key was refused" alert per
+// merchant: a leaked key hammered all day, or a server whose address changed,
+// must not bury the owner in email.
+const payKeyRefusedAlertEvery = 6 * time.Hour
+
+// AnnounceLiveKeyRefused tells the owner their live key was refused for the
+// address it came from — at most once per payKeyRefusedAlertEvery per
+// merchant (in memory, per process). PayMerchantAuth calls it on each refusal.
+func (h *PayHandler) AnnounceLiveKeyRefused(m *models.PayMerchant, ip string) {
+	now := time.Now()
+	if prev, loaded := h.keyRefusedAlerted.LoadOrStore(m.ID, now); loaded {
+		// Racing refusals: only the one that swaps the timestamp announces.
+		if now.Sub(prev.(time.Time)) < payKeyRefusedAlertEvery || !h.keyRefusedAlerted.CompareAndSwap(m.ID, prev, now) {
+			return
+		}
+	}
+	h.announce(m.UserID, events.SecurityPayKeyRefusedIP, "Your live API key was used from an address you haven't allowed",
+		fmt.Sprintf("A request with your live key came from %s and was refused. If that is your server, add it under Allowed IPs. "+
+			"If it isn't, your key has leaked: create a new live key now.", ip))
 }
 
 // announceLive tells the owner a super admin switched their live payments on or off.

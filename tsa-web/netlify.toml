@@ -24,9 +24,11 @@
   status = 200
 
 # The merchant API is served at https://tsa.mcgpchain.com/api/pay/v1 only (the
-# documented base URL). It is not proxied here: a merchant who used this origin
-# instead would get Netlify's http→https redirect, which the API host refuses
-# for a key-bearing request (see tsa-api-go/deploy/README.md, Cloudflare).
+# documented base URL), never through this origin: here a plain-http call gets
+# Netlify's redirect after the key has already crossed in the clear, and that
+# redirect cannot be turned off. The API refuses Netlify-proxied merchant calls
+# too (middleware.PayMerchantTransport), so an encoded path that slips past this
+# rule still gets nowhere.
 [[redirects]]
   from = "/api/pay/v1/*"
   to = "/404.html"

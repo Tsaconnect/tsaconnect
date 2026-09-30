@@ -151,8 +151,13 @@ export type ActionResult = {
 export const requestKeyRoll = (mode: Mode, password: string) =>
   api<{ confirmation: Pending }>('/pay/merchant/keys', { method: 'POST', body: { mode, password } });
 
-/** PUT /endpoints replaces all three settings, so every call sends all three. */
-export const requestEndpoints = (b: { webhookUrl: string; testWebhookUrl: string; returnDomains: string[]; allowedIps: string[]; expectedVersion: number; password: string }) =>
+/**
+ * PUT /endpoints replaces both webhook URLs and the return domains, so every call sends them. It
+ * replaces the allowed IPs only when they are sent: leave them out against an API that has none.
+ */
+export const requestEndpoints = (b: {
+  webhookUrl: string; testWebhookUrl: string; returnDomains: string[]; allowedIps?: string[]; expectedVersion: number; password: string;
+}) =>
   api<{ confirmation: Pending }>('/pay/merchant/endpoints', { method: 'PUT', body: b });
 
 export const requestWebhookSecret = (action: 'reveal' | 'roll', password: string) =>

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -1352,6 +1353,13 @@ func TestPayMerchant_AllowedIPsAreCheckedAndStoredCanonically(t *testing.T) {
 		"zoned":             {"2001:db8::1%eth0"},
 		"one too many":      tooMany,
 		"one bad of two ok": {"203.0.113.7", "10.1.2.3"},
+		"Cloudflare edge":   {"104.16.5.0/24"},
+		"Workers egress":    {"2a06:98c0:3600::103"},
+		"carrier NAT":       {"100.64.1.1"},
+		"Class E":           {"240.0.0.1"},
+		"benchmark net":     {"198.18.0.1"},
+		"wide 4-in-6 range": {"::ffff:0:0/80"},
+		"one repeated 21x":  append(make([]string, 0, 21), strings.Split(strings.Repeat("203.0.113.7,", 21), ",")[:21]...),
 	} {
 		if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AllowedIPs: ips}); !errors.Is(err, ErrPayMerchantInvalid) {
 			t.Fatalf("%s: err = %v", name, err)
@@ -1405,5 +1413,33 @@ func TestPayMerchant_OwnerEndpointsChangeSetsKeepsAndClearsAllowedIPs(t *testing
 	}
 	if m := change(PayEndpointsChange{AllowedIPs: []string{}}); m.AllowedIPs != "" {
 		t.Fatalf("clear: %q", m.AllowedIPs)
+	}
+}
+
+// The Cloudflare ranges an allowlist may not name are the ones nginx trusts to
+// name the real client: if Cloudflare adds a range and only one list is
+// updated, this fails.
+func TestPaySharedEgress_CloudflareRangesMatchNginxRealIP(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/nginx-cloudflare-realip.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nginx []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "set_real_ip_from" {
+			nginx = append(nginx, strings.TrimSuffix(f[1], ";"))
+		}
+	}
+	var ours []string
+	for _, p := range paySharedEgress {
+		if s := p.String(); s != "100.64.0.0/10" && s != "240.0.0.0/4" {
+			ours = append(ours, s)
+		}
+	}
+	if len(nginx) == 0 || strings.Join(nginx, " ") != strings.Join(ours, " ") {
+		t.Fatalf("nginx trusts %v\nPaySharedEgress has %v", nginx, ours)
+	}
+	if !PaySharedEgress(netip.MustParseAddr("::ffff:104.16.5.5")) || PaySharedEgress(netip.MustParseAddr("203.0.113.7")) {
+		t.Fatal("PaySharedEgress classifies wrongly")
 	}
 }

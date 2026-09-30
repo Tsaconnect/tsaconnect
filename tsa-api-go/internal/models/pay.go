@@ -114,8 +114,11 @@ func (m *PayMerchant) AllowedIPList() []string {
 // merchant has listed an address. An entry that no longer parses matches
 // nothing, so a bad row fails closed.
 func (m *PayMerchant) KeyAllowedFrom(mode string, ip netip.Addr) bool {
+	if mode != PayModeLive {
+		return true
+	}
 	list := m.AllowedIPList()
-	if mode != PayModeLive || len(list) == 0 {
+	if len(list) == 0 {
 		return true
 	}
 	ip = ip.Unmap()
