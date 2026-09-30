@@ -154,6 +154,8 @@ export interface AddToCartRequest {
     quantity?: number;
     selectedAttributes?: Array<{ name: string; value: string }>;
     notes?: string;
+    /** Set the existing line to exactly this pick instead of adding to it. */
+    replace?: boolean;
 }
 
 export interface UpdateCartItemRequest {

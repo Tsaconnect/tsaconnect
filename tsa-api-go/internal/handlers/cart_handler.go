@@ -133,6 +133,9 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		Quantity           int                        `json:"quantity"`
 		SelectedAttributes []models.CartItemAttribute `json:"selectedAttributes"`
 		Notes              string                     `json:"notes"`
+		// Replace makes an existing line exactly this pick instead of adding to
+		// it, so re-sending "Buy now" never grows the cart.
+		Replace bool `json:"replace"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
@@ -217,7 +220,7 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 
 	// Checkout refuses a cart holding more than the stock, so a repeat add is
 	// checked against the merged quantity.
-	if existingIndex >= 0 && !isService && items[existingIndex].Quantity+body.Quantity > product.Stock {
+	if existingIndex >= 0 && !body.Replace && !isService && items[existingIndex].Quantity+body.Quantity > product.Stock {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
 			"Only %d items available in stock (you already have %d in your cart)",
 			product.Stock, items[existingIndex].Quantity))
@@ -225,7 +228,12 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 	}
 
 	now := time.Now()
-	if existingIndex >= 0 {
+	if existingIndex >= 0 && body.Replace {
+		items[existingIndex].Quantity = body.Quantity
+		items[existingIndex].SelectedAttributes = body.SelectedAttributes
+		items[existingIndex].Notes = body.Notes
+		items[existingIndex].UpdatedAt = now
+	} else if existingIndex >= 0 {
 		items[existingIndex].Quantity += body.Quantity
 		items[existingIndex].UpdatedAt = now
 	} else {

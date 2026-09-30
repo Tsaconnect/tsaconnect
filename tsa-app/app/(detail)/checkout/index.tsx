@@ -65,6 +65,7 @@ import { FundingConfirmSheet, FundingPriceLine, FundingProgressView } from '@/co
 import { useCheckoutFundingRun, useFundingPrice, type FundingPick } from '@/hooks/useCheckoutFunding';
 import { canForgetRun } from '@/services/checkoutFundingRun';
 import { fundingPickerAllow } from '@/utils/fundingPicker';
+import { cartLineProductId } from '@/utils/cartLine';
 import {
   defaultPaySelection,
   orderTokenFor,
@@ -188,15 +189,6 @@ const CheckoutScreen = () => {
     };
   };
 
-  const getProductId = (item: CartItem) => {
-    if (typeof item.product === 'object') {
-      // The Go API returns `id`; `_id` is the legacy field name.
-      const product = item.product as Product & { id?: string };
-      return product.id || product._id;
-    }
-    return typeof item.product === 'string' ? item.product : '';
-  };
-
   // --- Derived data ---
   const items = useMemo(
     () => cartData?.itemsBySeller?.flatMap((group) => group.items) || cartData?.cart.items || [],
@@ -233,13 +225,13 @@ const CheckoutScreen = () => {
     const tiers: Record<string, string> = {};
     for (const item of items) {
       const meta = decodeServiceNotes(item.notes);
-      if (meta) tiers[getProductId(item)] = meta.tier;
+      if (meta) tiers[cartLineProductId(item)] = meta.tier;
     }
     return Object.keys(tiers).length > 0 ? tiers : undefined;
   }, [items]);
 
   const cartKey = useMemo(
-    () => items.map((it) => `${getProductId(it)}:${it.quantity}`).join(','),
+    () => items.map((it) => `${cartLineProductId(it)}:${it.quantity}`).join(','),
     [items],
   );
 
@@ -936,7 +928,7 @@ const CheckoutScreen = () => {
           </View>
           {items.map((item, index) => {
             const { name, imageUrl } = getProductData(item);
-            const line = quoteByProduct.get(getProductId(item));
+            const line = quoteByProduct.get(cartLineProductId(item));
             return (
               <View key={item._id || index}>
                 {index > 0 && <Divider spacing="sm" />}

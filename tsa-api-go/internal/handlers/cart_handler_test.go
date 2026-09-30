@@ -62,3 +62,67 @@ func TestAddToCart_IgnoresStockForServices(t *testing.T) {
 		}
 	}
 }
+
+// "Buy now" re-sends the buyer's pick every time it is tapped. With replace set,
+// the cart line becomes exactly that pick — quantity, specs and note — instead
+// of growing by one per tap, and a repeat on a 1-in-stock item is not refused.
+func TestAddToCart_ReplaceSetsTheLineInsteadOfAddingToIt(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 0.37)
+	if err := db.Model(product).Update("stock", 1).Error; err != nil {
+		t.Fatalf("set stock: %v", err)
+	}
+
+	first := map[string]interface{}{
+		"productId": product.ID.String(), "quantity": 1, "replace": true,
+		"selectedAttributes": []map[string]string{{"name": "Colour", "value": "White"}},
+		"notes":              "first",
+	}
+	again := map[string]interface{}{
+		"productId": product.ID.String(), "quantity": 1, "replace": true,
+		"selectedAttributes": []map[string]string{{"name": "Colour", "value": "Blue"}},
+		"notes":              "second",
+	}
+	for i, body := range []map[string]interface{}{first, again, again} {
+		if w, _ := callOrderHandler(t, h.AddToCart, buyer, body); w.Code != http.StatusOK {
+			t.Fatalf("add %d: expected 200, got %d: %s", i+1, w.Code, w.Body.String())
+		}
+	}
+
+	var cart models.Cart
+	if err := config.DB.Where("user_id = ? AND status = ?", buyer.ID, "active").First(&cart).Error; err != nil {
+		t.Fatalf("load cart: %v", err)
+	}
+	items := cart.GetItems()
+	if len(items) != 1 || items[0].Quantity != 1 {
+		t.Fatalf("cart should hold exactly 1 of the item, got %+v", items)
+	}
+	if items[0].Notes != "second" {
+		t.Errorf("notes = %q, want the latest pick", items[0].Notes)
+	}
+	if len(items[0].SelectedAttributes) != 1 || items[0].SelectedAttributes[0].Value != "Blue" {
+		t.Errorf("attributes = %+v, want the latest pick", items[0].SelectedAttributes)
+	}
+}
+
+// Replace is still bounded by stock — it only stops counting what the line held.
+func TestAddToCart_ReplaceRefusesMoreThanStock(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 0.37)
+	if err := db.Model(product).Update("stock", 2).Error; err != nil {
+		t.Fatalf("set stock: %v", err)
+	}
+
+	body := map[string]interface{}{"productId": product.ID.String(), "quantity": 3, "replace": true}
+	if w, _ := callOrderHandler(t, h.AddToCart, buyer, body); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
