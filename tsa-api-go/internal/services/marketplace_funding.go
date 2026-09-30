@@ -59,7 +59,7 @@ var (
 	// ErrFundingSource: the source is not her own wallet on an EVM network.
 	ErrFundingSource = errors.New("pay from your own wallet on an EVM network")
 	// ErrFundingTooCostly: the route costs more than the budget.
-	ErrFundingTooCostly = errors.New("converting this token would cost more than 2% of your order — pick another token, or pay with USDC or USDT")
+	ErrFundingTooCostly = errors.New("converting this token would cost more than 2% of your order — pick another token, or pay with MCGP or USDC sonic")
 	// ErrFundingTooSmall: she already holds most of the total, so the swap is
 	// too small to be worth its fixed costs.
 	ErrFundingTooSmall = errors.New("you already hold most of this order's total, so swapping the rest would cost too much for its size — add a little to your wallet and pay with it directly")

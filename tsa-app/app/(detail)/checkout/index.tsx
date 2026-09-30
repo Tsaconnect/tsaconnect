@@ -1116,7 +1116,7 @@ const CheckoutScreen = () => {
         holdingsNetwork="mainnet"
         title="Pay with"
         allow={SWAP_ALLOW}
-        note="Coins on other networks can't pay here; MCGP in your wallet can't pay."
+        note=""
         extraSections={[{ id: 'direct', title: 'Pay directly', options: payDirectOptions }]}
         sectionTitleOverrides={{ tsa: 'Swap to pay', major: 'Swap to pay', wallet: 'Swap to pay' }}
         onSelect={(token, chainId) => {
