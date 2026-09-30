@@ -25,6 +25,10 @@ const (
 	NetlifyClientIPHeader = "X-Nf-Client-Connection-Ip"
 )
 
+// NetlifyProxiedKey is set (true) on the context of a request whose Netlify
+// signature verified — it came in through the web app's origin.
+const NetlifyProxiedKey = "netlifyProxied"
+
 // netlifyUntrustedLogEvery bounds the "client address not trusted" log line: a
 // broken signature fails every web request, and one line a minute is enough to
 // be seen.
@@ -36,7 +40,8 @@ const netlifyUntrustedLogEvery = time.Minute
 // invalid signature leaves the request untouched, and is logged (at most once
 // a minute) when the request names a visitor — otherwise a secret that no
 // longer matches Netlify's would silently put every web visitor in one rate
-// limit bucket. An empty secret disables it.
+// limit bucket. A verified signature also sets NetlifyProxiedKey. An empty
+// secret disables it.
 func NetlifyClientIP(secret string) gin.HandlerFunc {
 	return netlifyClientIP(secret, time.Now)
 }
@@ -46,7 +51,10 @@ func netlifyClientIP(secret string, now func() time.Time) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if secret != "" {
 			at := now()
-			ip, why := netlifyVisitor(c.Request, secret, at)
+			ip, signed, why := netlifyVisitor(c.Request, secret, at)
+			if signed {
+				c.Set(NetlifyProxiedKey, true)
+			}
 			switch {
 			case ip != nil:
 				// Not a trusted proxy address, so gin takes it as the client as-is.
@@ -60,11 +68,11 @@ func netlifyClientIP(secret string, now func() time.Time) gin.HandlerFunc {
 }
 
 // netlifyVisitor is the visitor a correctly signed request names, or nil and
-// why not.
-func netlifyVisitor(r *http.Request, secret string, now time.Time) (net.IP, string) {
+// why not; signed says whether the signature itself verified.
+func netlifyVisitor(r *http.Request, secret string, now time.Time) (ip net.IP, signed bool, why string) {
 	sig := r.Header.Get(NetlifySignHeader)
 	if sig == "" {
-		return nil, "signature missing"
+		return nil, false, "signature missing"
 	}
 	_, err := jwt.Parse(sig, func(*jwt.Token) (interface{}, error) { return []byte(secret), nil },
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
@@ -73,19 +81,18 @@ func netlifyVisitor(r *http.Request, secret string, now time.Time) (net.IP, stri
 		jwt.WithTimeFunc(func() time.Time { return now }),
 	)
 	if err != nil {
-		return nil, "signature invalid: " + err.Error()
+		return nil, false, "signature invalid: " + err.Error()
 	}
 	// Exactly one: the signature does not cover the header, so a second copy is
 	// someone else's addition, and which one a reader takes is not ours to guess.
 	values := r.Header.Values(NetlifyClientIPHeader)
 	if len(values) != 1 {
-		return nil, "not exactly one visitor address"
+		return nil, true, "not exactly one visitor address"
 	}
-	ip := net.ParseIP(strings.TrimSpace(values[0]))
-	if ip == nil {
-		return nil, "visitor address unparseable"
+	if ip = net.ParseIP(strings.TrimSpace(values[0])); ip == nil {
+		return nil, true, "visitor address unparseable"
 	}
-	return ip, ""
+	return ip, true, ""
 }
 
 // logDue reports whether a line last logged at *last may be logged again at

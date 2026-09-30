@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -99,6 +100,9 @@ type PayHandler struct {
 	// businessNameChange: owners may ask for a rename (NAME_CHANGE_ENABLED).
 	// The route exists only when it is on, and the owner view says so.
 	businessNameChange bool
+	// keyRefusedAlerted: merchant ID → when its owner was last told a live
+	// key was refused for its address (AnnounceLiveKeyRefused).
+	keyRefusedAlerted sync.Map
 }
 
 // NewPayHandler constructs a PayHandler. Any of merchants/payments/webhooks
@@ -190,12 +194,7 @@ func newPayMerchantAdminView(v services.PayMerchantView) payMerchantAdminView {
 // model, for the two handlers (Get, Update) that have one in hand rather
 // than a services.PayMerchantView from List.
 func payMerchantAdminViewFor(m *models.PayMerchant) payMerchantAdminView {
-	return newPayMerchantAdminView(services.PayMerchantView{
-		PayMerchant:   *m,
-		ReturnDomains: m.ReturnDomainList(),
-		HasLiveKey:    m.LiveKeyHash != nil,
-		HasTestKey:    m.TestKeyHash != nil,
-	})
+	return newPayMerchantAdminView(services.NewPayMerchantView(*m))
 }
 
 // GET /admin/pay/merchants?page=&limit=
@@ -297,6 +296,11 @@ func (h *PayHandler) AdminUpdateMerchant(c *gin.Context) {
 			}
 		}
 		h.announceLive(m)
+	}
+	// The owner hears about the same changes an owner-made endpoints change
+	// announces: a cleared allowlist or a moved webhook must never be silent.
+	if m.WebhookURL != before.WebhookURL || m.TestWebhookURL != before.TestWebhookURL || m.AllowedIPs != before.AllowedIPs {
+		h.announceEndpoints(m.UserID, m)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Merchant updated", h.payMerchantAdminViewWithPending(m))
 }

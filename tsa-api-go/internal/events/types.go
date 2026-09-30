@@ -42,6 +42,7 @@ const (
 	SecurityPayKeyRolled        = "security.pay_key_rolled"
 	SecurityPayEndpointsChanged = "security.pay_endpoints_changed"
 	SecurityPayWebhookSecret    = "security.pay_webhook_secret"
+	SecurityPayKeyRefusedIP     = "security.pay_key_refused_ip"
 	// A TSA Pay admin revoked one of the merchant's credentials (an API key or
 	// the webhook signing secrets); the message carries the admin's reason.
 	SecurityPayKeysRevoked = "security.pay_keys_revoked"

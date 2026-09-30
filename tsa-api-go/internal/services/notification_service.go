@@ -40,6 +40,7 @@ var emailEvents = map[string]bool{
 	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
 	events.SecurityPayWebhookSecret:     true,
+	events.SecurityPayKeyRefusedIP:      true,
 	// Account deletion: the departing user needs a written record of what was
 	// closed and how to come back inside the grace window, and a reinstatement
 	// they didn't ask for must be visible to them out-of-band. In-app delivery
@@ -101,6 +102,7 @@ var pushEvents = map[string]bool{
 	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
 	events.SecurityPayWebhookSecret:     true,
+	events.SecurityPayKeyRefusedIP:      true,
 	events.VerificationApproved:         true,
 	events.VerificationRejected:         true,
 	events.MerchantApproved:             true,

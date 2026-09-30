@@ -1320,14 +1320,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// TSA Pay merchant API — its own top-level group, deliberately NOT
 		// nested under `api` (whose 500/15min limiter is shared by every
 		// unauthenticated caller behind one egress IP and would starve a
-		// merchant's integration traffic long before a real abuser). An IP
-		// limiter still runs first, before any DB work or key lookup, then
-		// auth, then a tighter per-merchant limiter. Both limiters are
+		// merchant's integration traffic long before a real abuser). A request
+		// that came through the web app's proxy or over plain http is refused
+		// first, then an IP limiter, both before any DB work or key lookup,
+		// then auth, then a tighter per-merchant limiter. Both limiters are
 		// in-memory per process — correct while prod runs one API process.
 		payRoot := router.Group("/api/pay")
 		merchantAPI := payRoot.Group("/v1")
-		merchantAPI.Use(middleware.RateLimiter(600, time.Minute),
-			middleware.PayMerchantAuth(payh.MerchantService().Authenticate, payh.LiveEnabled()),
+		merchantAPI.Use(middleware.PayMerchantTransport(), middleware.RateLimiter(600, time.Minute),
+			middleware.PayMerchantAuth(payh.MerchantService().Authenticate, payh.LiveEnabled(), payh.AnnounceLiveKeyRefused),
 			middleware.RateLimiterBy(120, time.Minute, middleware.PayMerchantRateKey))
 		{
 			merchantAPI.POST("/payments", payh.CreatePayment)

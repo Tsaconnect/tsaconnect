@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -1327,5 +1329,117 @@ func TestPayMerchant_RevokeKeysRefusesBadInput(t *testing.T) {
 	}
 	if rows := payAuditRows(t, s); len(rows) != 1 {
 		t.Fatalf("a refused revoke must write no audit row: %+v", rows)
+	}
+}
+
+func TestPayMerchant_AllowedIPsAreCheckedAndStoredCanonically(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	m, _ := s.CreateFromRequest(context.Background(), payRequest())
+	tooMany := make([]string, maxPayAllowedIPs+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("203.0.113.%d", i+1)
+	}
+	for name, ips := range map[string][]string{
+		"not an address":    {"api.skyair.ng"},
+		"a URL":             {"https://203.0.113.7"},
+		"private":           {"10.0.0.5"},
+		"private range":     {"192.168.1.0/24"},
+		"loopback":          {"127.0.0.1"},
+		"unspecified":       {"0.0.0.0"},
+		"everything":        {"0.0.0.0/0"},
+		"wide IPv4 range":   {"8.0.0.0/8"},
+		"wide IPv6 range":   {"2001:db8::/32"},
+		"link-local IPv6":   {"fe80::1"},
+		"zoned":             {"2001:db8::1%eth0"},
+		"one too many":      tooMany,
+		"one bad of two ok": {"203.0.113.7", "10.1.2.3"},
+		"Cloudflare edge":   {"104.16.5.0/24"},
+		"Workers egress":    {"2a06:98c0:3600::103"},
+		"carrier NAT":       {"100.64.1.1"},
+		"Class E":           {"240.0.0.1"},
+		"benchmark net":     {"198.18.0.1"},
+		"wide 4-in-6 range": {"::ffff:0:0/80"},
+		"one repeated 21x":  append(make([]string, 0, 21), strings.Split(strings.Repeat("203.0.113.7,", 21), ",")[:21]...),
+	} {
+		if _, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AllowedIPs: ips}); !errors.Is(err, ErrPayMerchantInvalid) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+	}
+
+	got, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AllowedIPs: []string{
+		" 203.0.113.7 ", "198.51.100.9/24", "203.0.113.7/32", "::ffff:198.51.100.1", "2001:DB8:1::5/48", "", "203.0.113.7"}})
+	if err != nil || got.AllowedIPs != "203.0.113.7,198.51.100.0/24,198.51.100.1,2001:db8:1::/48" {
+		t.Fatalf("err %v ips %q: want trimmed, masked, unmapped, lowercased and deduplicated", err, got.AllowedIPs)
+	}
+	if v := NewPayMerchantView(*got); len(v.AllowedIPs) != 4 {
+		t.Fatalf("view %v", v.AllowedIPs)
+	}
+
+	cleared, _, err := s.Update(context.Background(), payActor, m.ID, PayMerchantUpdate{AllowedIPs: []string{}})
+	if err != nil || cleared.AllowedIPs != "" || NewPayMerchantView(*cleared).AllowedIPs == nil {
+		t.Fatalf("err %v ips %q: an empty list clears it, and the view says [] not null", err, cleared.AllowedIPs)
+	}
+	if !(PayMerchantUpdate{AllowedIPs: []string{}}).Sensitive() {
+		t.Fatal("changing where the live key works needs a super admin")
+	}
+}
+
+func TestPayMerchant_OwnerEndpointsChangeSetsKeepsAndClearsAllowedIPs(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	change := func(ch PayEndpointsChange) *models.PayMerchant {
+		t.Helper()
+		ch.WebhookURL, ch.ReturnDomains = "https://api.skyair.ng/tsa/webhook", []string{"skyair.ng"}
+		pending, err := f.s.RequestEndpointsChange(ctx, f.owner, ch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := f.s.ConfirmOwnerAction(ctx, f.owner, pending.ID, f.mail.code(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Merchant
+	}
+
+	sent := f.mail.sent
+	if _, err := f.s.RequestEndpointsChange(ctx, f.owner, PayEndpointsChange{AllowedIPs: []string{"10.0.0.5"}}); !errors.Is(err, ErrPayMerchantInvalid) || f.mail.sent != sent {
+		t.Fatalf("err %v: a private address must be refused before any code is sent", err)
+	}
+	if m := change(PayEndpointsChange{AllowedIPs: []string{"203.0.113.7"}}); m.AllowedIPs != "203.0.113.7" {
+		t.Fatalf("set: %q", m.AllowedIPs)
+	}
+	if m := change(PayEndpointsChange{}); m.AllowedIPs != "203.0.113.7" {
+		t.Fatalf("a change without allowedIps (an older client) must keep the list, got %q", m.AllowedIPs)
+	}
+	if m := change(PayEndpointsChange{AllowedIPs: []string{}}); m.AllowedIPs != "" {
+		t.Fatalf("clear: %q", m.AllowedIPs)
+	}
+}
+
+// The Cloudflare ranges an allowlist may not name are the ones nginx trusts to
+// name the real client: if Cloudflare adds a range and only one list is
+// updated, this fails.
+func TestPaySharedEgress_CloudflareRangesMatchNginxRealIP(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/nginx-cloudflare-realip.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nginx []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "set_real_ip_from" {
+			nginx = append(nginx, strings.TrimSuffix(f[1], ";"))
+		}
+	}
+	var ours []string
+	for _, p := range paySharedEgress {
+		if s := p.String(); s != "100.64.0.0/10" && s != "240.0.0.0/4" {
+			ours = append(ours, s)
+		}
+	}
+	if len(nginx) == 0 || strings.Join(nginx, " ") != strings.Join(ours, " ") {
+		t.Fatalf("nginx trusts %v\nPaySharedEgress has %v", nginx, ours)
+	}
+	if !PaySharedEgress(netip.MustParseAddr("::ffff:104.16.5.5")) || PaySharedEgress(netip.MustParseAddr("203.0.113.7")) {
+		t.Fatal("PaySharedEgress classifies wrongly")
 	}
 }

@@ -711,3 +711,30 @@ func TestPayOwner_AnEndpointsChangeCannotMoveTheLiveSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestPayOwner_AllowedIPsAreShownAndAnnounced(t *testing.T) {
+	o := newOwnerRig(t)
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"allowedIps":[]`) {
+		t.Fatalf("no list yet must read as [], got %s", res.raw)
+	}
+	body := map[string]any{"webhookUrl": "https://api.skyair.ng/tsa/webhook", "returnDomains": []string{"skyair.ng"},
+		"allowedIps": []string{"203.0.113.7", "198.51.100.0/24"}, "password": "correct-horse"}
+	if ok := o.confirm(t, o.do(http.MethodPut, "/api/pay/merchant/endpoints", body)); ok.status != http.StatusOK {
+		t.Fatalf("confirm %d %s", ok.status, ok.raw)
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant", nil); !strings.Contains(res.raw, `"allowedIps":["203.0.113.7","198.51.100.0/24"]`) {
+		t.Fatalf("view %s", res.raw)
+	}
+	seen := o.events()
+	if len(seen) != 1 || !strings.Contains(seen[0].Message, "Your live API key is accepted from 203.0.113.7, 198.51.100.0/24.") {
+		t.Fatalf("events %+v: the alert must say where the live key now works", seen)
+	}
+
+	body["allowedIps"] = []string{}
+	if ok := o.confirm(t, o.do(http.MethodPut, "/api/pay/merchant/endpoints", body)); ok.status != http.StatusOK {
+		t.Fatalf("clear %d %s", ok.status, ok.raw)
+	}
+	if seen = o.events(); len(seen) != 2 || !strings.Contains(seen[1].Message, "Your live API key is accepted from any IP address.") {
+		t.Fatalf("events %+v", seen)
+	}
+}
