@@ -1,7 +1,7 @@
 // Primary action primitive. Variants × sizes, loading state (stable width),
 // optional icons, spring press. AA-correct foreground per variant.
 import React from 'react';
-import { ActivityIndicator, ViewStyle } from 'react-native';
+import { ActivityIndicator, View, ViewStyle } from 'react-native';
 import { useTheme } from '@/theme';
 import { PressableScale } from './PressableScale';
 import { Text } from './Text';
@@ -12,6 +12,8 @@ export type ButtonSize = 'sm' | 'md' | 'lg';
 
 export interface ButtonProps {
   title: string;
+  /** Optional second line under the title (e.g. a price), for labels too long for one. */
+  subtitle?: string;
   onPress?: () => void;
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -28,6 +30,7 @@ const HEIGHT: Record<ButtonSize, number> = { sm: 38, md: 48, lg: 56 };
 
 export const Button: React.FC<ButtonProps> = ({
   title,
+  subtitle,
   onPress,
   variant = 'primary',
   size = 'md',
@@ -58,7 +61,7 @@ export const Button: React.FC<ButtonProps> = ({
       onPress={onPress}
       disabled={isDisabled}
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel ?? title}
+      accessibilityLabel={accessibilityLabel ?? (subtitle ? `${title}, ${subtitle}` : title)}
       accessibilityState={{ disabled: !!isDisabled, busy: !!loading }}
       style={[
         {
@@ -83,9 +86,20 @@ export const Button: React.FC<ButtonProps> = ({
       ) : (
         <>
           {leftIcon && <Icon name={leftIcon} size={size === 'sm' ? 16 : 18} color={fg} />}
-          <Text variant={fontVariant} weight="600" style={{ color: fg }}>
-            {title}
-          </Text>
+          {subtitle ? (
+            <View style={{ alignItems: 'center', flexShrink: 1 }}>
+              <Text variant="bodySm" weight="700" numberOfLines={1} style={{ color: fg }}>
+                {title}
+              </Text>
+              <Text variant="caption" numeric numberOfLines={1} adjustsFontSizeToFit style={{ color: fg, opacity: 0.85 }}>
+                {subtitle}
+              </Text>
+            </View>
+          ) : (
+            <Text variant={fontVariant} weight="600" style={{ color: fg }}>
+              {title}
+            </Text>
+          )}
           {rightIcon && <Icon name={rightIcon} size={size === 'sm' ? 16 : 18} color={fg} />}
         </>
       )}

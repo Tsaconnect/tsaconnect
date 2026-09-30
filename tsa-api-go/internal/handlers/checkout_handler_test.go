@@ -782,6 +782,16 @@ func TestGetCartSummary_IncludesMerchantShippingMetadata(t *testing.T) {
 	if sellerData["country"] != "Nigeria" {
 		t.Errorf("expected seller country Nigeria, got %v", sellerData["country"])
 	}
+	// Any buyer can put any listing in a cart, so the summary must not hand
+	// out the seller's login email.
+	if _, ok := sellerData["email"]; ok {
+		t.Errorf("seller login email leaked in cart summary: %v", sellerData["email"])
+	}
+	if groupSeller, _ := group["seller"].(map[string]interface{}); groupSeller != nil {
+		if _, ok := groupSeller["email"]; ok {
+			t.Errorf("seller login email leaked in seller group: %v", groupSeller["email"])
+		}
+	}
 }
 
 func TestGetCartCount_SumsItemQuantities(t *testing.T) {

@@ -1,47 +1,52 @@
-// app/(dashboard)/(tabs)/(home)/product/[productId].tsx
+// app/(detail)/product/[productId].tsx
 //
-// Product detail (home tab) — gallery, info, seller, shipping, quantity, and the
-// add-to-cart / buy-now action bar. Restyled onto the TSA Signature design system
-// (@/theme tokens + @/components/ui primitives).
+// Product detail — photo pager, info, the buyer's choices (options, quantity,
+// note), seller, description, delivery, and a safe-area-aware action bar.
 //
-// MARKETPLACE screen: the product fetch (productData param → api.getProductById),
-// the service-redirect bounce, qty/variant selection bounds, add-to-cart
-// (cartService + cart-count), buy-now / checkout navigation, contact-seller
-// navigation, and the currency formatting are all preserved verbatim — this is a
-// visual / structural migration only.
-import React, { useState, useEffect, useCallback } from 'react';
+// Checkout pays for the whole cart, so Buy now puts the item in the cart first.
+// It sends `replace` so the line becomes exactly this pick: repeat taps never
+// grow the cart. Because replace overwrites the line, the choices open
+// prefilled from it — Buy now never silently drops a colour or note the buyer
+// added earlier. The in-cart strip shows what the cart already holds.
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   ScrollView,
   Image,
   TouchableOpacity,
   Alert,
-  Dimensions,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  useWindowDimensions,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-router';
 import { goBack } from '@/utils/back';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import api, { Product } from '@/components/services/api';
-import { cartService } from '@/components/services/cart';
+import { cartService, AddToCartRequest, CartItem } from '@/components/services/cart';
+import { isServiceNote } from '@/components/services/serviceCart';
+import { useCartCount } from '@/contexts/CartContext';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
+import { cartLineProductId, quantityInCart } from '@/utils/cartLine';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
   Avatar,
-  Badge,
+  BottomActionBar,
   Button,
   Card,
   Chip,
-  Divider,
   EmptyState,
   Icon,
+  type IconName,
   Input,
   PressableScale,
   Spinner,
   Text,
+  useToast,
 } from '@/components/ui';
 
 // parseSpecOptions splits a spec value ("White pink black blue" or "S, M, L")
@@ -62,8 +67,14 @@ function parseSpecOptions(value: string): string[] {
   return out;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const IMAGE_HEIGHT = SCREEN_WIDTH * 0.85;
+const IMAGE_ASPECT = 0.85;
+// Past this many characters the description opens clamped behind "Read more".
+const DESCRIPTION_CLAMP_CHARS = 220;
+const DESCRIPTION_CLAMP_LINES = 4;
+// Stock at or below this reads as scarcity ("2 left") rather than a count.
+const LOW_STOCK = 5;
+
+type CartAction = 'add' | 'buy';
 
 export default function ProductDetailsScreen() {
   const { productId, productData: productDataParam } = useLocalSearchParams<{
@@ -71,21 +82,48 @@ export default function ProductDetailsScreen() {
     productData?: string;
   }>();
   const router = useRouter();
+  const toast = useToast();
   const { colors, spacing, radius } = useTheme();
 
   const [product, setProduct] = useState<Product | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { token } = useAuth();
+  const { cartCount } = useCartCount();
+  const { width: windowWidth } = useWindowDimensions();
+  const imageHeight = windowWidth * IMAGE_ASPECT;
   const [quantity, setQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
-  const [cartCount, setCartCount] = useState(0);
+  const [inCartQty, setInCartQty] = useState(0);
+  const [pendingAction, setPendingAction] = useState<CartAction | null>(null);
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
   // Buyer-selected specs (attribute name → chosen option values) + a free-text
   // purchase note, so the merchant knows how to arrange the order.
   const [selectedSpecs, setSelectedSpecs] = useState<Record<string, string[]>>({});
   const [purchaseNotes, setPurchaseNotes] = useState('');
 
+  // A tap lands before React re-renders the disabled button, so a ref (not the
+  // pendingAction state) is what keeps a double tap from sending twice.
+  const inFlight = useRef(false);
+  // Cart reads can overlap (focus, then an add); only the latest one lands.
+  const cartReadSeq = useRef(0);
+  // The choices are prefilled from the cart line once per product, and never
+  // over something the buyer already changed.
+  const prefilledFor = useRef<string | null>(null);
+  const picksTouched = useRef(false);
+
+  const changeQuantity = (next: number) => {
+    picksTouched.current = true;
+    setQuantity(next);
+  };
+  const changeNotes = (next: string) => {
+    picksTouched.current = true;
+    setPurchaseNotes(next);
+  };
+
   const toggleSpec = useCallback((name: string, option: string) => {
+    picksTouched.current = true;
     setSelectedSpecs((prev) => {
       const cur = prev[name] ?? [];
       const next = cur.includes(option)
@@ -109,13 +147,52 @@ export default function ProductDetailsScreen() {
   const formatPrice = (price: number) =>
     formatPriceUtil(price, { currency, rate });
 
-  const loadCartCount = useCallback(async () => {
+  // Take in the cart's lines: how many of this product it holds, and — the
+  // first time only — the buyer's earlier choices for it.
+  const applyCartItems = useCallback(
+    (items: CartItem[] | undefined) => {
+      const id = productId as string;
+      setInCartQty(quantityInCart(items, id));
+      if (prefilledFor.current === id) return;
+      prefilledFor.current = id;
+      const line = items?.find((item) => cartLineProductId(item) === id);
+      if (!line || picksTouched.current) return;
+      setQuantity(Math.max(1, line.quantity));
+      const specs: Record<string, string[]> = {};
+      for (const attr of line.selectedAttributes ?? []) {
+        specs[attr.name] = attr.value.split(', ').filter(Boolean);
+      }
+      setSelectedSpecs(specs);
+      if (line.notes && !isServiceNote(line.notes)) setPurchaseNotes(line.notes);
+    },
+    [productId],
+  );
+
+  // /cart/summary never creates a cart (GET /cart does). It is a heavy read, so
+  // it runs when the screen gains focus rather than on every cart change; this
+  // screen's own adds update the strip from the add response instead.
+  const loadCartLine = useCallback(async () => {
     if (!token) return;
+    const seq = ++cartReadSeq.current;
     try {
-      const count = await cartService.getCartItemCount();
-      setCartCount(count);
+      const summary = await cartService.getCartSummary();
+      if (seq !== cartReadSeq.current) return;
+      if (summary.success) applyCartItems(summary.data?.cart?.items);
+      else if (summary.message === 'Cart not found') applyCartItems([]);
+      // Any other failure keeps the last known count.
     } catch {}
-  }, [token]);
+  }, [token, applyCartItems]);
+
+  useEffect(() => {
+    // A new product starts from a clean slate.
+    setSelectedImageIndex(0);
+    setQuantity(1);
+    setSelectedSpecs({});
+    setPurchaseNotes('');
+    setInCartQty(0);
+    prefilledFor.current = null;
+    picksTouched.current = false;
+  }, [productId]);
 
   useEffect(() => {
     if (token) {
@@ -123,8 +200,18 @@ export default function ProductDetailsScreen() {
       cartService.setToken(token);
     }
     loadProduct();
-    loadCartCount();
   }, [productId, token]);
+
+  // A prefilled quantity can exceed stock that has since sold down.
+  useEffect(() => {
+    if (product && product.stock > 0 && quantity > product.stock) setQuantity(product.stock);
+  }, [product, quantity]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadCartLine();
+    }, [loadCartLine]),
+  );
 
   // Services and products share the same backend collection, so a service id
   // can land on this product route from any "View product" link. Detect it
@@ -212,66 +299,56 @@ export default function ProductDetailsScreen() {
     return results;
   }, [product]);
 
-  const handleAddToCart = async () => {
-    if (!token) {
-      Alert.alert('Login Required', 'Please login to add items to your cart', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Login', onPress: () => router.push('/login') },
-      ]);
-      return;
-    }
-    if (!product) return;
+  const requireLogin = (message: string): boolean => {
+    if (token) return false;
+    Alert.alert('Login Required', message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Login', onPress: () => router.push('/login') },
+    ]);
+    return true;
+  };
 
+  // One cart write per tap, whichever button: `replace` is Buy now's — the line
+  // becomes this pick. Add to cart keeps adding on top, as a cart should.
+  const sendToCart = async (action: CartAction): Promise<boolean> => {
+    if (!product || inFlight.current) return false;
+    inFlight.current = true;
+    setPendingAction(action);
     try {
       const selectedAttributes = buildSelectedAttributes();
-      const cartResponse = await cartService.addToCart({
+      const request: AddToCartRequest = {
         productId: product._id || product.id || '',
         quantity,
         ...(selectedAttributes.length > 0 ? { selectedAttributes } : {}),
         ...(purchaseNotes.trim() ? { notes: purchaseNotes.trim() } : {}),
-      });
-      if (cartResponse.success) {
-        loadCartCount();
-        Alert.alert('Added to Cart', `${product.name} x${quantity} added`, [
-          { text: 'View Cart', onPress: () => router.push('/cart') },
-          { text: 'Continue', style: 'cancel' },
-        ]);
-      } else {
-        Alert.alert('Error', cartResponse.message || 'Failed to add to cart');
+        ...(action === 'buy' ? { replace: true } : {}),
+      };
+      const res = await cartService.addToCart(request);
+      if (!res.success) {
+        toast.error(res.message || 'Could not update your cart. Try again.');
+        return false;
       }
+      // The add returns the whole cart; it supersedes any read still in flight.
+      cartReadSeq.current += 1;
+      applyCartItems(res.data?.items);
+      return true;
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to add item to cart');
+      toast.error(error.message || 'Could not update your cart. Try again.');
+      return false;
+    } finally {
+      inFlight.current = false;
+      setPendingAction(null);
     }
   };
 
+  const handleAddToCart = async () => {
+    if (requireLogin('Please login to add items to your cart')) return;
+    if (await sendToCart('add')) toast.success(`Added ${quantity} to your cart`);
+  };
+
   const handleBuyNow = async () => {
-    if (!token) {
-      Alert.alert('Login Required', 'Please login to continue', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Login', onPress: () => router.push('/login') },
-      ]);
-      return;
-    }
-    if (!product) return;
-    // Checkout builds orders from the cart, so add this item (with the buyer's
-    // spec selections + note) first, then go straight to checkout.
-    try {
-      const selectedAttributes = buildSelectedAttributes();
-      const res = await cartService.addToCart({
-        productId: product._id || product.id || '',
-        quantity,
-        ...(selectedAttributes.length > 0 ? { selectedAttributes } : {}),
-        ...(purchaseNotes.trim() ? { notes: purchaseNotes.trim() } : {}),
-      });
-      if (!res.success) {
-        Alert.alert('Error', res.message || 'Failed to start checkout');
-        return;
-      }
-      loadCartCount();
-      router.push('/checkout');
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to start checkout');
-    }
+    if (requireLogin('Please login to continue')) return;
+    if (await sendToCart('buy')) router.push('/checkout');
   };
 
   const handleContactSeller = () => {
@@ -281,8 +358,6 @@ export default function ProductDetailsScreen() {
     );
   };
 
-  // formatPrice is now defined via useCurrency above
-
   const getCategoryName = () => {
     if (!product?.category) return product?.categoryName || null;
     if (typeof product.category === 'string')
@@ -290,11 +365,20 @@ export default function ProductDetailsScreen() {
     return product.category.title || product.categoryName || null;
   };
 
+  const onGalleryScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement } = e.nativeEvent;
+    const pageWidth = layoutMeasurement.width || windowWidth;
+    const last = Math.max(0, getValidImages().length - 1);
+    const index = Math.min(last, Math.max(0, Math.round(contentOffset.x / pageWidth)));
+    if (index !== selectedImageIndex) setSelectedImageIndex(index);
+  };
+
   // Header cart button — preserves the cartCount state + /cart navigation.
   const headerCartButton = () => (
     <TouchableOpacity
       onPress={() => router.push('/cart')}
       activeOpacity={0.7}
+      accessibilityLabel={`Cart, ${cartCount} items`}
       style={{ marginRight: spacing.sm, padding: spacing.xs, position: 'relative' }}
     >
       <Icon name="cart" size={22} color={colors.accent} />
@@ -366,6 +450,31 @@ export default function ProductDetailsScreen() {
   const validImages = getValidImages();
   const categoryName = getCategoryName();
   const isInStock = product.stock > 0;
+  // Nothing more to add once the cart holds every unit in stock.
+  const cartHoldsAllStock = inCartQty >= product.stock;
+  const ratingCount = product.rating?.count || 0;
+  const description = product.description?.trim() ?? '';
+  const descriptionClamped =
+    description.length > DESCRIPTION_CLAMP_CHARS && !descriptionOpen;
+  const showNote = noteOpen || purchaseNotes.length > 0;
+
+  // The four zones checkout charges (GetShippingRate). A zone priced at 0 is
+  // free; a fee the listing doesn't carry is left out rather than guessed.
+  const deliveryRows: { icon: IconName; label: string; fee?: number }[] = [
+    { icon: 'home', label: 'Same city', fee: product.shippingSameCity },
+    { icon: 'nearMe', label: 'Same state', fee: product.shippingSameState },
+    { icon: 'send', label: 'Nationwide', fee: product.shippingSameCountry },
+    { icon: 'send', label: 'International', fee: product.shippingInternational },
+  ];
+
+  const section = { marginTop: spacing.sm, borderRadius: 0 } as const;
+  const stepButton = (enabled: boolean) => ({
+    width: 36,
+    height: 36,
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+    opacity: enabled ? 1 : 0.4,
+  });
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -378,40 +487,74 @@ export default function ProductDetailsScreen() {
         }}
       />
 
-      <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
-        {/* ===== Image Section ===== */}
-        <View
-          style={{
-            backgroundColor: colors.surface,
-            width: '100%',
-            height: IMAGE_HEIGHT,
-            justifyContent: 'center',
-            alignItems: 'center',
-          }}
-        >
+      <ScrollView
+        style={{ flex: 1 }}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: spacing.lg }}
+      >
+        {/* ===== Photos ===== */}
+        <View style={{ backgroundColor: colors.surface, width: '100%', height: imageHeight }}>
           {validImages.length > 0 ? (
             <>
-              <Image
-                source={{ uri: validImages[selectedImageIndex]?.url }}
-                style={{ width: '100%', height: '100%' }}
-                resizeMode="cover"
-              />
+              <ScrollView
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={onGalleryScroll}
+              >
+                {validImages.map((img, i) => (
+                  <Image
+                    key={i}
+                    source={{ uri: img.url }}
+                    style={{ width: windowWidth, height: imageHeight }}
+                    accessible
+                    resizeMode="cover"
+                    accessibilityLabel={`${product.name}, photo ${i + 1} of ${validImages.length}`}
+                  />
+                ))}
+              </ScrollView>
               {validImages.length > 1 && (
-                <View
-                  style={{
-                    position: 'absolute',
-                    bottom: spacing.md,
-                    right: spacing.lg,
-                    backgroundColor: colors.overlay,
-                    borderRadius: radius.md,
-                    paddingHorizontal: spacing.md,
-                    paddingVertical: spacing.xs,
-                  }}
-                >
-                  <Text variant="caption" weight="600" style={{ color: colors.textInverse }}>
-                    {selectedImageIndex + 1}/{validImages.length}
-                  </Text>
-                </View>
+                <>
+                  <View
+                    style={{
+                      position: 'absolute',
+                      top: spacing.md,
+                      right: spacing.md,
+                      backgroundColor: colors.overlay,
+                      borderRadius: radius.pill,
+                      paddingHorizontal: spacing.sm,
+                      paddingVertical: 2,
+                    }}
+                  >
+                    <Text variant="caption" weight="600" style={{ color: colors.textInverse }}>
+                      {selectedImageIndex + 1} / {validImages.length}
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      position: 'absolute',
+                      bottom: spacing.md,
+                      left: 0,
+                      right: 0,
+                      flexDirection: 'row',
+                      justifyContent: 'center',
+                      gap: 5,
+                    }}
+                  >
+                    {validImages.map((_, i) => (
+                      <View
+                        key={i}
+                        style={{
+                          width: i === selectedImageIndex ? 16 : 6,
+                          height: 6,
+                          borderRadius: 3,
+                          backgroundColor: colors.textInverse,
+                          opacity: i === selectedImageIndex ? 1 : 0.5,
+                        }}
+                      />
+                    ))}
+                  </View>
+                </>
               )}
             </>
           ) : (
@@ -421,157 +564,198 @@ export default function ProductDetailsScreen() {
                 justifyContent: 'center',
                 alignItems: 'center',
                 backgroundColor: colors.surfaceAlt,
-                width: '100%',
-                overflow: 'hidden',
               }}
             >
               <View
                 style={{
+                  width: 88,
+                  height: 88,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.accentMuted,
                   justifyContent: 'center',
                   alignItems: 'center',
-                  paddingHorizontal: spacing['3xl'],
-                  paddingVertical: spacing['2xl'],
-                  borderWidth: 1.5,
-                  borderColor: colors.accentMuted,
-                  borderStyle: 'dashed',
-                  borderRadius: radius.lg,
+                  marginBottom: spacing.lg,
                 }}
               >
-                <View
-                  style={{
-                    width: 88,
-                    height: 88,
-                    borderRadius: radius.pill,
-                    backgroundColor: colors.accentMuted,
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    marginBottom: spacing.lg,
-                  }}
-                >
-                  <Icon name="image" size={48} color={colors.accent} />
-                </View>
-                <Text variant="bodyMed" weight="600" color="textSecondary" align="center">
-                  No Image Available
-                </Text>
-                <Text
-                  variant="bodySm"
-                  color="textMuted"
-                  align="center"
-                  style={{ maxWidth: 220, marginTop: spacing.xs }}
-                >
-                  The seller hasn&apos;t added photos for this product
-                </Text>
+                <Icon name="image" size={48} color={colors.accent} />
               </View>
-              <Text
-                variant="overline"
-                color="textMuted"
-                style={{
-                  position: 'absolute',
-                  bottom: spacing.lg,
-                  letterSpacing: 4,
-                  textTransform: 'uppercase',
-                  opacity: 0.4,
-                }}
-              >
-                TSA CONNECT
+              <Text variant="bodyMed" weight="600" color="textSecondary" align="center">
+                No photos yet
+              </Text>
+              <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.xs }}>
+                The seller hasn&apos;t added photos for this product
               </Text>
             </View>
           )}
         </View>
 
-        {/* Thumbnails */}
-        {validImages.length > 1 && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{
-              paddingHorizontal: spacing.lg,
-              paddingVertical: spacing.md,
-            }}
-            style={{ backgroundColor: colors.surface }}
-          >
-            {validImages.map((img, i) => (
-              <TouchableOpacity
-                key={i}
-                onPress={() => setSelectedImageIndex(i)}
-                style={{
-                  width: 56,
-                  height: 56,
-                  borderRadius: radius.sm,
-                  marginRight: spacing.md,
-                  borderWidth: 2,
-                  borderColor:
-                    selectedImageIndex === i ? colors.accent : 'transparent',
-                  overflow: 'hidden',
-                }}
-              >
-                <Image
-                  source={{ uri: img.url }}
-                  style={{ width: '100%', height: '100%' }}
-                  resizeMode="cover"
-                />
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
-
-        {/* ===== Product Info Card ===== */}
-        <Card
-          padding="xl"
-          style={{ marginTop: spacing.sm, borderRadius: 0 }}
-        >
-          {/* Price Row */}
+        {/* ===== Name, price, stock, rating ===== */}
+        <Card padding="lg" style={{ borderRadius: 0, gap: spacing.xs }}>
+          {categoryName && (
+            <Text variant="overline" color="textMuted" style={{ textTransform: 'uppercase' }}>
+              {categoryName}
+            </Text>
+          )}
+          <Text variant="title3" weight="700">
+            {product.name}
+          </Text>
           <View
             style={{
               flexDirection: 'row',
               justifyContent: 'space-between',
               alignItems: 'center',
-              marginBottom: spacing.md,
+              marginTop: spacing.xs,
             }}
           >
             <Text variant="title1" weight="800" color="accent" numeric>
               {formatPrice(product.price)}
             </Text>
-            <Badge
-              label={isInStock ? `${product.stock} in stock` : 'Out of stock'}
-              icon={isInStock ? 'checkCircle' : 'closeCircle'}
-              color={isInStock ? colors.success : colors.danger}
-              background={isInStock ? colors.successBg : colors.dangerBg}
-            />
+            <View
+              style={{
+                paddingHorizontal: spacing.sm,
+                paddingVertical: 3,
+                borderRadius: radius.pill,
+                backgroundColor: isInStock ? colors.successBg : colors.dangerBg,
+              }}
+            >
+              <Text variant="caption" weight="600" color={isInStock ? 'success' : 'danger'}>
+                {!isInStock
+                  ? 'Out of stock'
+                  : product.stock <= LOW_STOCK
+                    ? `${product.stock} left`
+                    : `${product.stock} in stock`}
+              </Text>
+            </View>
           </View>
-
-          {/* Name */}
-          <Text variant="title3" weight="600" style={{ marginBottom: spacing.md }}>
-            {product.name}
-          </Text>
-
-          {/* Category & Rating Row */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-            {categoryName && (
-              <Badge
-                label={categoryName}
-                icon="pricetag"
-                color={colors.accent}
-                background={colors.accentMuted}
-                size="sm"
-              />
-            )}
-            <Badge
-              label={`${product.rating?.average?.toFixed(1) || '0.0'} (${product.rating?.count || 0})`}
-              icon="star"
-              color={colors.warning}
-              background={colors.warningBg}
-              size="sm"
-            />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+            <Icon name="star" size={13} color={ratingCount > 0 ? colors.warning : colors.textMuted} />
+            <Text variant="caption" color="textMuted">
+              {ratingCount > 0
+                ? `${product.rating!.average.toFixed(1)} · ${ratingCount} ${ratingCount === 1 ? 'review' : 'reviews'}`
+                : 'No reviews yet'}
+              {product.sales > 0 ? ` · ${product.sales} sold` : ''}
+            </Text>
           </View>
         </Card>
 
-        {/* ===== Seller Card ===== */}
-        <PressableScale onPress={handleContactSeller}>
-          <Card
-            padding="lg"
-            style={{ marginTop: spacing.sm, borderRadius: 0 }}
-          >
+        {/* ===== The buyer's choices: options, quantity, note ===== */}
+        {isInStock && (
+          <Card padding="lg" style={section}>
+            {product.attributes?.map((attr, i) => {
+              const options = parseSpecOptions(attr.value);
+              const picked = selectedSpecs[attr.name] ?? [];
+              return (
+                <View key={i} style={{ marginBottom: spacing.lg }}>
+                  <Text variant="bodySm" weight="600" style={{ marginBottom: spacing.sm }}>
+                    {attr.name}
+                  </Text>
+                  {options.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                      {options.map((opt) => (
+                        <Chip
+                          key={opt}
+                          label={opt}
+                          selected={picked.includes(opt)}
+                          onPress={() => toggleSpec(attr.name, opt)}
+                        />
+                      ))}
+                    </View>
+                  ) : (
+                    <Text variant="bodySm" color="textSecondary">
+                      {attr.value}
+                    </Text>
+                  )}
+                </View>
+              );
+            })}
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View>
+                <Text variant="bodySm" weight="600">
+                  Quantity
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  {product.stock} available
+                </Text>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  borderRadius: radius.md,
+                }}
+              >
+                <TouchableOpacity
+                  accessibilityLabel="Decrease quantity"
+                  style={stepButton(quantity > 1)}
+                  onPress={() => changeQuantity(Math.max(1, quantity - 1))}
+                  disabled={quantity <= 1}
+                >
+                  <Icon name="minus" size={18} color={colors.accent} />
+                </TouchableOpacity>
+                <Text variant="bodyMed" weight="700" numeric style={{ minWidth: 32, textAlign: 'center' }}>
+                  {quantity}
+                </Text>
+                <TouchableOpacity
+                  accessibilityLabel="Increase quantity"
+                  style={stepButton(quantity < product.stock)}
+                  onPress={() => changeQuantity(Math.min(product.stock, quantity + 1))}
+                  disabled={quantity >= product.stock}
+                >
+                  <Icon name="plus" size={18} color={colors.accent} />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View
+              style={{
+                marginTop: spacing.md,
+                paddingTop: spacing.md,
+                borderTopWidth: 1,
+                borderTopColor: colors.hairline,
+              }}
+            >
+              {showNote ? (
+                <Input
+                  label="Note for the seller (optional)"
+                  value={purchaseNotes}
+                  onChangeText={changeNotes}
+                  placeholder="e.g. 2 white size 42, 1 blue size 43"
+                  multiline
+                  numberOfLines={3}
+                  maxLength={500}
+                  counter
+                  autoFocus={noteOpen && purchaseNotes.length === 0}
+                  inputStyle={{ minHeight: 72, textAlignVertical: 'top' }}
+                />
+              ) : (
+                <PressableScale
+                  onPress={() => setNoteOpen(true)}
+                  accessibilityRole="button"
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}
+                >
+                  <Icon name="edit" size={16} color={colors.textSecondary} />
+                  <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+                    Add a note for the seller
+                  </Text>
+                  <Text variant="bodySm" weight="600" color="accent">
+                    Add
+                  </Text>
+                </PressableScale>
+              )}
+            </View>
+          </Card>
+        )}
+
+        {/* ===== Seller ===== */}
+        <PressableScale
+          onPress={handleContactSeller}
+          accessibilityRole="button"
+          accessibilityLabel={`View ${product.companyName || 'seller'}'s shop`}
+        >
+          <Card padding="lg" style={section}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Avatar name={product.companyName || product.email || 'S'} size={44} />
               <View style={{ flex: 1, marginLeft: spacing.md }}>
@@ -587,7 +771,7 @@ export default function ProductDetailsScreen() {
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
                 <Text variant="bodySm" weight="600" color="accent">
-                  Visit
+                  View shop
                 </Text>
                 <Icon name="chevronRight" size={16} color={colors.accent} />
               </View>
@@ -596,292 +780,114 @@ export default function ProductDetailsScreen() {
         </PressableScale>
 
         {/* ===== Description ===== */}
-        {product.description ? (
-          <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-            <Text variant="title3" weight="700" style={{ marginBottom: spacing.sm }}>
+        {description ? (
+          <Card padding="lg" style={section}>
+            <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
               Description
             </Text>
-            <Text variant="bodySm" color="textSecondary" style={{ lineHeight: 22 }}>
-              {product.description}
+            <Text
+              variant="bodySm"
+              color="textSecondary"
+              style={{ lineHeight: 22 }}
+              numberOfLines={descriptionClamped ? DESCRIPTION_CLAMP_LINES : undefined}
+            >
+              {description}
             </Text>
+            {description.length > DESCRIPTION_CLAMP_CHARS && (
+              <PressableScale
+                onPress={() => setDescriptionOpen((open) => !open)}
+                hitSlop={8}
+                style={{ marginTop: spacing.sm, alignSelf: 'flex-start' }}
+              >
+                <Text variant="bodySm" weight="600" color="accent">
+                  {descriptionOpen ? 'Show less' : 'Read more'}
+                </Text>
+              </PressableScale>
+            )}
           </Card>
         ) : null}
 
-        {/* ===== Specifications (tap to select colour/size/other) ===== */}
-        {product.attributes && product.attributes.length > 0 && (
-          <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: spacing.xs,
-              }}
-            >
-              <Text variant="title3" weight="700">
-                Specifications
-              </Text>
-              <Text variant="caption" color="textMuted">
-                Tap to select
-              </Text>
-            </View>
-            {product.attributes.map((attr, i) => {
-              const options = parseSpecOptions(attr.value);
-              const picked = selectedSpecs[attr.name] ?? [];
-              return (
-                <View key={i} style={{ paddingVertical: spacing.md }}>
-                  <Text variant="bodySm" color="textMuted" style={{ marginBottom: spacing.sm }}>
-                    {attr.name}
-                  </Text>
-                  {options.length > 0 ? (
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                      {options.map((opt) => (
-                        <Chip
-                          key={opt}
-                          label={opt}
-                          selected={picked.includes(opt)}
-                          onPress={() => toggleSpec(attr.name, opt)}
-                        />
-                      ))}
-                    </View>
-                  ) : (
-                    <Text variant="bodySm" weight="500">
-                      {attr.value}
-                    </Text>
-                  )}
-                  {i < product.attributes!.length - 1 && <Divider spacing="sm" />}
-                </View>
-              );
-            })}
-          </Card>
-        )}
-
-        {/* ===== Shipping Info ===== */}
-        <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-          <Text variant="title3" weight="700" style={{ marginBottom: spacing.sm }}>
-            Shipping
+        {/* ===== Delivery ===== */}
+        <Card padding="lg" style={section}>
+          <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
+            Delivery
           </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}>
-            <Icon name="home" size={16} color={colors.textMuted} />
-            <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-              Same Residential Area
-            </Text>
-            <Text variant="bodySm" weight="600" color="success">
-              Free
-            </Text>
-          </View>
-          {(product.shippingSameCity ?? 0) > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}>
-              <Icon name="nearMe" size={16} color={colors.textMuted} />
-              <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-                Same City
-              </Text>
-              <Text variant="bodySm" weight="600" numeric>
-                ${product.shippingSameCity}
-              </Text>
-            </View>
-          )}
-          {(product.shippingSameState ?? 0) > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}>
-              <Icon name="nearMe" size={16} color={colors.textMuted} />
-              <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-                Same State
-              </Text>
-              <Text variant="bodySm" weight="600" numeric>
-                ${product.shippingSameState}
-              </Text>
-            </View>
-          )}
-          {(product.shippingSameCountry ?? 0) > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}>
-              <Icon name="send" size={16} color={colors.textMuted} />
-              <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-                Nationwide
-              </Text>
-              <Text variant="bodySm" weight="600" numeric>
-                ${product.shippingSameCountry}
-              </Text>
-            </View>
-          )}
-          {(product.shippingInternational ?? 0) > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}>
-              <Icon name="send" size={16} color={colors.textMuted} />
-              <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-                International
-              </Text>
-              <Text variant="bodySm" weight="600" numeric>
-                ${product.shippingInternational}
-              </Text>
-            </View>
-          )}
+          {deliveryRows
+            .filter((row): row is typeof row & { fee: number } => typeof row.fee === 'number')
+            .map((row) => (
+              <View
+                key={row.label}
+                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm, gap: spacing.sm }}
+              >
+                <Icon name={row.icon} size={16} color={colors.textMuted} />
+                <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+                  {row.label}
+                </Text>
+                {row.fee <= 0 ? (
+                  <Text variant="bodySm" weight="600" color="success">
+                    Free
+                  </Text>
+                ) : (
+                  <Text variant="bodySm" weight="600" numeric>
+                    {formatPrice(row.fee)}
+                  </Text>
+                )}
+              </View>
+            ))}
         </Card>
 
-        {/* ===== Quantity Selector ===== */}
-        {isInStock && (
-          <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-            <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
-              Quantity
-            </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity
-                style={{
-                  width: 38,
-                  height: 38,
-                  borderRadius: radius.pill,
-                  borderWidth: 1.5,
-                  borderColor: quantity <= 1 ? colors.border : colors.accent,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-                onPress={() => setQuantity(Math.max(1, quantity - 1))}
-                disabled={quantity <= 1}
-              >
-                <Icon name="minus" size={18} color={quantity <= 1 ? colors.textDisabled : colors.accent} />
-              </TouchableOpacity>
-              <Text variant="title3" weight="700" style={{ marginHorizontal: spacing['2xl'] }}>
-                {quantity}
-              </Text>
-              <TouchableOpacity
-                style={{
-                  width: 38,
-                  height: 38,
-                  borderRadius: radius.pill,
-                  borderWidth: 1.5,
-                  borderColor: quantity >= product.stock ? colors.border : colors.accent,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-                onPress={() => setQuantity(Math.min(product.stock, quantity + 1))}
-                disabled={quantity >= product.stock}
-              >
-                <Icon name="plus" size={18} color={quantity >= product.stock ? colors.textDisabled : colors.accent} />
-              </TouchableOpacity>
-              <Text variant="bodySm" color="textMuted" style={{ marginLeft: spacing.md }}>
-                of {product.stock}
-              </Text>
-            </View>
-          </Card>
-        )}
-
-        {/* ===== Purchase notes ===== */}
-        {isInStock && (
-          <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-            <Input
-              label="Purchase notes (optional)"
-              value={purchaseNotes}
-              onChangeText={setPurchaseNotes}
-              placeholder="Tell the seller how to arrange your order — e.g. 2 white size 42, 1 blue size 43"
-              multiline
-              numberOfLines={3}
-              maxLength={500}
-              counter
-              inputStyle={{ minHeight: 72, textAlignVertical: 'top' }}
-            />
-          </Card>
-        )}
-
         {/* ===== Meta ===== */}
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: spacing.lg,
-            paddingHorizontal: spacing.xl,
-            paddingVertical: spacing.md,
-            marginTop: spacing.sm,
-          }}
-        >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
-            <Icon name="clock" size={13} color={colors.textMuted} />
-            <Text variant="caption" color="textMuted">
-              Listed {new Date(product.createdAt).toLocaleDateString()}
-            </Text>
-          </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
-            <Icon name="eye" size={13} color={colors.textMuted} />
-            <Text variant="caption" color="textMuted">
-              {product.views || 0} views
-            </Text>
-          </View>
-          {product.sales > 0 && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
-              <Icon name="cart" size={13} color={colors.textMuted} />
-              <Text variant="caption" color="textMuted">
-                {product.sales} sold
-              </Text>
-            </View>
-          )}
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}>
+          <Text variant="caption" color="textMuted">
+            Listed {new Date(product.createdAt).toLocaleDateString()} · {product.views || 0} views
+          </Text>
         </View>
-
-        <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* ===== Bottom Action Bar ===== */}
-      <View
-        style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: spacing.lg,
-          paddingTop: spacing.md,
-          paddingBottom: spacing['2xl'],
-          backgroundColor: colors.surface,
-          borderTopWidth: 1,
-          borderTopColor: colors.hairline,
-          gap: spacing.md,
-        }}
-      >
+      {/* ===== Action bar (sits above the system nav / home indicator) ===== */}
+      <BottomActionBar>
         {isInStock ? (
           <>
-            <TouchableOpacity
-              onPress={handleContactSeller}
-              style={{
-                width: 48,
-                height: 48,
-                borderRadius: radius.md,
-                borderWidth: 1.5,
-                borderColor: colors.accent,
-                justifyContent: 'center',
-                alignItems: 'center',
-              }}
-            >
-              <Icon name="send" size={20} color={colors.accent} />
-            </TouchableOpacity>
-            <Button
-              title="Add to Cart"
-              variant="secondary"
-              leftIcon="cart"
-              onPress={handleAddToCart}
-              style={{ flex: 1 }}
-            />
-            <TouchableOpacity
-              onPress={handleBuyNow}
-              style={{
-                flex: 1.2,
-                height: 48,
-                justifyContent: 'center',
-                alignItems: 'center',
-                borderRadius: radius.md,
-                backgroundColor: colors.accent,
-              }}
-            >
-              <Text variant="bodySm" weight="700" style={{ color: colors.onAccent }}>
-                Buy Now
-              </Text>
-              <Text variant="caption" numeric style={{ color: colors.onAccent, opacity: 0.85, marginTop: 1 }}>
-                {formatPrice(product.price * quantity)}
-              </Text>
-            </TouchableOpacity>
+            {inCartQty > 0 && (
+              <PressableScale
+                onPress={() => router.push('/cart')}
+                accessibilityRole="button"
+                accessibilityLabel={`${inCartQty} in your cart. View cart`}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+              >
+                <Icon name="checkCircle" size={15} color={colors.success} />
+                <Text variant="caption" weight="600" color="success" style={{ flex: 1 }}>
+                  {inCartQty} in your cart
+                </Text>
+                <Text variant="caption" weight="600" color="success" style={{ textDecorationLine: 'underline' }}>
+                  View cart
+                </Text>
+              </PressableScale>
+            )}
+            <View style={{ flexDirection: 'row', gap: spacing.md }}>
+              <Button
+                title={cartHoldsAllStock ? 'All in cart' : 'Add to cart'}
+                variant="secondary"
+                leftIcon="cart"
+                onPress={handleAddToCart}
+                loading={pendingAction === 'add'}
+                disabled={cartHoldsAllStock || pendingAction !== null}
+                fullWidth={false}
+                style={{ flex: 1 }}
+              />
+              <Button
+                title="Buy now"
+                subtitle={formatPrice(product.price * quantity)}
+                onPress={handleBuyNow}
+                loading={pendingAction === 'buy'}
+                disabled={pendingAction !== null}
+                fullWidth={false}
+                style={{ flex: 1.15 }}
+              />
+            </View>
           </>
         ) : (
-          <AccentCard
-            railColor={colors.danger}
-            padding="md"
-            style={{ flex: 1, backgroundColor: colors.dangerBg }}
-          >
+          <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm }}>
               <Icon name="info" size={18} color={colors.danger} />
               <Text variant="bodySm" weight="500" color="danger">
@@ -890,7 +896,7 @@ export default function ProductDetailsScreen() {
             </View>
           </AccentCard>
         )}
-      </View>
+      </BottomActionBar>
     </SafeAreaView>
   );
 }
