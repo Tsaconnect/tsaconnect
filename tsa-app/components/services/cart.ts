@@ -49,7 +49,8 @@ export interface Product {
 export interface Seller {
     _id: string;
     name: string;
-    email: string;
+    /** No longer sent by /cart/summary (it was the seller's login email). */
+    email?: string;
     companyName?: string;
     city?: string;
     state?: string;

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -121,6 +122,38 @@ func (h *Handlers) GetOrCreateCart(c *gin.Context) {
 }
 
 // AddToCart handles POST /api/cart/items - adds an item to the user's cart.
+// Bounds on what a buyer can put on a cart line. The note and specs are copied
+// onto the order the seller reads, so the API enforces them rather than
+// trusting the app. The note cap leaves room for a service line's encoded
+// pricing note on top of the app's 500-character free-text limit.
+const (
+	maxCartItemQuantity      = 1000
+	maxCartItemNoteRunes     = 1000
+	maxCartItemAttributes    = 20
+	maxCartAttributeNameLen  = 64
+	maxCartAttributeValueLen = 500
+)
+
+// cartLineInputError says what is wrong with a cart line's note, specs or
+// quantity, or "" when they are within bounds.
+func cartLineInputError(quantity int, notes string, attrs []models.CartItemAttribute) string {
+	if quantity > maxCartItemQuantity {
+		return fmt.Sprintf("You can add at most %d of an item", maxCartItemQuantity)
+	}
+	if utf8.RuneCountInString(notes) > maxCartItemNoteRunes {
+		return fmt.Sprintf("Notes can be at most %d characters", maxCartItemNoteRunes)
+	}
+	if len(attrs) > maxCartItemAttributes {
+		return fmt.Sprintf("At most %d options can be selected", maxCartItemAttributes)
+	}
+	for _, a := range attrs {
+		if utf8.RuneCountInString(a.Name) > maxCartAttributeNameLen || utf8.RuneCountInString(a.Value) > maxCartAttributeValueLen {
+			return "An option name or value is too long"
+		}
+	}
+	return ""
+}
+
 func (h *Handlers) AddToCart(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -149,6 +182,10 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 
 	if body.Quantity <= 0 {
 		body.Quantity = 1
+	}
+	if msg := cartLineInputError(body.Quantity, body.Notes, body.SelectedAttributes); msg != "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		return
 	}
 
 	productOID, err := uuid.Parse(body.ProductID)
@@ -227,14 +264,34 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		return
 	}
 
+	// Services skip the stock check, so the merged quantity is capped here
+	// instead — it would otherwise grow without bound (and overflow).
+	if existingIndex >= 0 && !body.Replace && items[existingIndex].Quantity+body.Quantity > maxCartItemQuantity {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("You can add at most %d of an item", maxCartItemQuantity))
+		return
+	}
+
+	// Checkout prices from the product, not the line; the line's price is kept
+	// current so the cart shows what checkout will charge.
 	now := time.Now()
 	if existingIndex >= 0 && body.Replace {
 		items[existingIndex].Quantity = body.Quantity
+		items[existingIndex].Price = product.Price
 		items[existingIndex].SelectedAttributes = body.SelectedAttributes
 		items[existingIndex].Notes = body.Notes
 		items[existingIndex].UpdatedAt = now
+		// A legacy cart can hold more than one line for the product; the pick
+		// is the whole of it, so the others go.
+		kept := items[:existingIndex+1]
+		for _, item := range items[existingIndex+1:] {
+			if item.Product != productOID {
+				kept = append(kept, item)
+			}
+		}
+		items = kept
 	} else if existingIndex >= 0 {
 		items[existingIndex].Quantity += body.Quantity
+		items[existingIndex].Price = product.Price
 		items[existingIndex].UpdatedAt = now
 	} else {
 		items = append(items, models.CartItem{
@@ -279,6 +336,10 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Quantity < 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Valid quantity is required")
+		return
+	}
+	if msg := cartLineInputError(body.Quantity, "", nil); msg != "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -847,7 +908,6 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 			sellerMap[u.ID.String()] = gin.H{
 				"_id":     u.ID,
 				"name":    u.Name,
-				"email":   u.Email,
 				"city":    u.City,
 				"state":   u.State,
 				"country": u.Country,
@@ -867,7 +927,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		if _, ok := sellerGroups[sellerID]; !ok {
 			seller := sellerMap[sellerID]
 			if seller == nil {
-				seller = gin.H{"_id": item.Seller, "name": "Seller", "email": ""}
+				seller = gin.H{"_id": item.Seller, "name": "Seller"}
 			}
 			sellerGroups[sellerID] = gin.H{
 				"seller":   seller,

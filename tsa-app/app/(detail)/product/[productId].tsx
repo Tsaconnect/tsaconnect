@@ -5,28 +5,32 @@
 //
 // Checkout pays for the whole cart, so Buy now puts the item in the cart first.
 // It sends `replace` so the line becomes exactly this pick: repeat taps never
-// grow the cart. The in-cart strip shows what the cart already holds.
-import React, { useState, useEffect, useCallback } from 'react';
+// grow the cart. Because replace overwrites the line, the choices open
+// prefilled from it — Buy now never silently drops a colour or note the buyer
+// added earlier. The in-cart strip shows what the cart already holds.
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   ScrollView,
   Image,
   TouchableOpacity,
   Alert,
-  Dimensions,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  useWindowDimensions,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-router';
 import { goBack } from '@/utils/back';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import api, { Product } from '@/components/services/api';
-import { cartService, AddToCartRequest } from '@/components/services/cart';
+import { cartService, AddToCartRequest, CartItem } from '@/components/services/cart';
+import { isServiceNote } from '@/components/services/serviceCart';
+import { useCartCount } from '@/contexts/CartContext';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
-import { quantityInCart } from '@/utils/cartLine';
+import { cartLineProductId, quantityInCart } from '@/utils/cartLine';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -63,8 +67,7 @@ function parseSpecOptions(value: string): string[] {
   return out;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const IMAGE_HEIGHT = SCREEN_WIDTH * 0.85;
+const IMAGE_ASPECT = 0.85;
 // Past this many characters the description opens clamped behind "Read more".
 const DESCRIPTION_CLAMP_CHARS = 220;
 const DESCRIPTION_CLAMP_LINES = 4;
@@ -86,9 +89,11 @@ export default function ProductDetailsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { token } = useAuth();
+  const { cartCount } = useCartCount();
+  const { width: windowWidth } = useWindowDimensions();
+  const imageHeight = windowWidth * IMAGE_ASPECT;
   const [quantity, setQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
-  const [cartCount, setCartCount] = useState(0);
   const [inCartQty, setInCartQty] = useState(0);
   const [pendingAction, setPendingAction] = useState<CartAction | null>(null);
   const [descriptionOpen, setDescriptionOpen] = useState(false);
@@ -100,9 +105,25 @@ export default function ProductDetailsScreen() {
 
   // A tap lands before React re-renders the disabled button, so a ref (not the
   // pendingAction state) is what keeps a double tap from sending twice.
-  const inFlight = React.useRef(false);
+  const inFlight = useRef(false);
+  // Cart reads can overlap (focus, then an add); only the latest one lands.
+  const cartReadSeq = useRef(0);
+  // The choices are prefilled from the cart line once per product, and never
+  // over something the buyer already changed.
+  const prefilledFor = useRef<string | null>(null);
+  const picksTouched = useRef(false);
+
+  const changeQuantity = (next: number) => {
+    picksTouched.current = true;
+    setQuantity(next);
+  };
+  const changeNotes = (next: string) => {
+    picksTouched.current = true;
+    setPurchaseNotes(next);
+  };
 
   const toggleSpec = useCallback((name: string, option: string) => {
+    picksTouched.current = true;
     setSelectedSpecs((prev) => {
       const cur = prev[name] ?? [];
       const next = cur.includes(option)
@@ -126,20 +147,52 @@ export default function ProductDetailsScreen() {
   const formatPrice = (price: number) =>
     formatPriceUtil(price, { currency, rate });
 
-  const loadCartState = useCallback(async () => {
+  // Take in the cart's lines: how many of this product it holds, and — the
+  // first time only — the buyer's earlier choices for it.
+  const applyCartItems = useCallback(
+    (items: CartItem[] | undefined) => {
+      const id = productId as string;
+      setInCartQty(quantityInCart(items, id));
+      if (prefilledFor.current === id) return;
+      prefilledFor.current = id;
+      const line = items?.find((item) => cartLineProductId(item) === id);
+      if (!line || picksTouched.current) return;
+      setQuantity(Math.max(1, line.quantity));
+      const specs: Record<string, string[]> = {};
+      for (const attr of line.selectedAttributes ?? []) {
+        specs[attr.name] = attr.value.split(', ').filter(Boolean);
+      }
+      setSelectedSpecs(specs);
+      if (line.notes && !isServiceNote(line.notes)) setPurchaseNotes(line.notes);
+    },
+    [productId],
+  );
+
+  // /cart/summary never creates a cart (GET /cart does). It is a heavy read, so
+  // it runs when the screen gains focus rather than on every cart change; this
+  // screen's own adds update the strip from the add response instead.
+  const loadCartLine = useCallback(async () => {
     if (!token) return;
+    const seq = ++cartReadSeq.current;
     try {
-      // The summary read never creates a cart (GET /cart does); no cart → 0.
-      const [count, summary] = await Promise.all([
-        cartService.getCartItemCount(),
-        cartService.getCartSummary(),
-      ]);
-      setCartCount(count);
-      setInCartQty(
-        summary.success ? quantityInCart(summary.data?.cart?.items, productId as string) : 0,
-      );
+      const summary = await cartService.getCartSummary();
+      if (seq !== cartReadSeq.current) return;
+      if (summary.success) applyCartItems(summary.data?.cart?.items);
+      else if (summary.message === 'Cart not found') applyCartItems([]);
+      // Any other failure keeps the last known count.
     } catch {}
-  }, [token, productId]);
+  }, [token, applyCartItems]);
+
+  useEffect(() => {
+    // A new product starts from a clean slate.
+    setSelectedImageIndex(0);
+    setQuantity(1);
+    setSelectedSpecs({});
+    setPurchaseNotes('');
+    setInCartQty(0);
+    prefilledFor.current = null;
+    picksTouched.current = false;
+  }, [productId]);
 
   useEffect(() => {
     if (token) {
@@ -147,12 +200,18 @@ export default function ProductDetailsScreen() {
       cartService.setToken(token);
     }
     loadProduct();
-    loadCartState();
   }, [productId, token]);
 
-  // Every successful cart mutation (here, in the cart screen, at checkout)
-  // notifies, so the badge and the in-cart strip stay current.
-  useEffect(() => cartService.subscribe(loadCartState), [loadCartState]);
+  // A prefilled quantity can exceed stock that has since sold down.
+  useEffect(() => {
+    if (product && product.stock > 0 && quantity > product.stock) setQuantity(product.stock);
+  }, [product, quantity]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadCartLine();
+    }, [loadCartLine]),
+  );
 
   // Services and products share the same backend collection, so a service id
   // can land on this product route from any "View product" link. Detect it
@@ -269,6 +328,9 @@ export default function ProductDetailsScreen() {
         toast.error(res.message || 'Could not update your cart. Try again.');
         return false;
       }
+      // The add returns the whole cart; it supersedes any read still in flight.
+      cartReadSeq.current += 1;
+      applyCartItems(res.data?.items);
       return true;
     } catch (error: any) {
       toast.error(error.message || 'Could not update your cart. Try again.');
@@ -304,7 +366,10 @@ export default function ProductDetailsScreen() {
   };
 
   const onGalleryScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+    const { contentOffset, layoutMeasurement } = e.nativeEvent;
+    const pageWidth = layoutMeasurement.width || windowWidth;
+    const last = Math.max(0, getValidImages().length - 1);
+    const index = Math.min(last, Math.max(0, Math.round(contentOffset.x / pageWidth)));
     if (index !== selectedImageIndex) setSelectedImageIndex(index);
   };
 
@@ -393,9 +458,10 @@ export default function ProductDetailsScreen() {
     description.length > DESCRIPTION_CLAMP_CHARS && !descriptionOpen;
   const showNote = noteOpen || purchaseNotes.length > 0;
 
+  // The four zones checkout charges (GetShippingRate). A zone priced at 0 is
+  // free; a fee the listing doesn't carry is left out rather than guessed.
   const deliveryRows: { icon: IconName; label: string; fee?: number }[] = [
-    { icon: 'home', label: 'Same area' },
-    { icon: 'nearMe', label: 'Same city', fee: product.shippingSameCity },
+    { icon: 'home', label: 'Same city', fee: product.shippingSameCity },
     { icon: 'nearMe', label: 'Same state', fee: product.shippingSameState },
     { icon: 'send', label: 'Nationwide', fee: product.shippingSameCountry },
     { icon: 'send', label: 'International', fee: product.shippingInternational },
@@ -427,7 +493,7 @@ export default function ProductDetailsScreen() {
         contentContainerStyle={{ paddingBottom: spacing.lg }}
       >
         {/* ===== Photos ===== */}
-        <View style={{ backgroundColor: colors.surface, width: '100%', height: IMAGE_HEIGHT }}>
+        <View style={{ backgroundColor: colors.surface, width: '100%', height: imageHeight }}>
           {validImages.length > 0 ? (
             <>
               <ScrollView
@@ -440,7 +506,8 @@ export default function ProductDetailsScreen() {
                   <Image
                     key={i}
                     source={{ uri: img.url }}
-                    style={{ width: SCREEN_WIDTH, height: IMAGE_HEIGHT }}
+                    style={{ width: windowWidth, height: imageHeight }}
+                    accessible
                     resizeMode="cover"
                     accessibilityLabel={`${product.name}, photo ${i + 1} of ${validImages.length}`}
                   />
@@ -623,7 +690,7 @@ export default function ProductDetailsScreen() {
                 <TouchableOpacity
                   accessibilityLabel="Decrease quantity"
                   style={stepButton(quantity > 1)}
-                  onPress={() => setQuantity(Math.max(1, quantity - 1))}
+                  onPress={() => changeQuantity(Math.max(1, quantity - 1))}
                   disabled={quantity <= 1}
                 >
                   <Icon name="minus" size={18} color={colors.accent} />
@@ -634,7 +701,7 @@ export default function ProductDetailsScreen() {
                 <TouchableOpacity
                   accessibilityLabel="Increase quantity"
                   style={stepButton(quantity < product.stock)}
-                  onPress={() => setQuantity(Math.min(product.stock, quantity + 1))}
+                  onPress={() => changeQuantity(Math.min(product.stock, quantity + 1))}
                   disabled={quantity >= product.stock}
                 >
                   <Icon name="plus" size={18} color={colors.accent} />
@@ -654,7 +721,7 @@ export default function ProductDetailsScreen() {
                 <Input
                   label="Note for the seller (optional)"
                   value={purchaseNotes}
-                  onChangeText={setPurchaseNotes}
+                  onChangeText={changeNotes}
                   placeholder="e.g. 2 white size 42, 1 blue size 43"
                   multiline
                   numberOfLines={3}
@@ -683,7 +750,11 @@ export default function ProductDetailsScreen() {
         )}
 
         {/* ===== Seller ===== */}
-        <PressableScale onPress={handleContactSeller} accessibilityRole="button">
+        <PressableScale
+          onPress={handleContactSeller}
+          accessibilityRole="button"
+          accessibilityLabel={`View ${product.companyName || 'seller'}'s shop`}
+        >
           <Card padding="lg" style={section}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Avatar name={product.companyName || product.email || 'S'} size={44} />
@@ -742,7 +813,7 @@ export default function ProductDetailsScreen() {
             Delivery
           </Text>
           {deliveryRows
-            .filter((row) => row.fee === undefined || row.fee > 0)
+            .filter((row): row is typeof row & { fee: number } => typeof row.fee === 'number')
             .map((row) => (
               <View
                 key={row.label}
@@ -752,7 +823,7 @@ export default function ProductDetailsScreen() {
                 <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
                   {row.label}
                 </Text>
-                {row.fee === undefined ? (
+                {row.fee <= 0 ? (
                   <Text variant="bodySm" weight="600" color="success">
                     Free
                   </Text>
@@ -781,6 +852,7 @@ export default function ProductDetailsScreen() {
               <PressableScale
                 onPress={() => router.push('/cart')}
                 accessibilityRole="button"
+                accessibilityLabel={`${inCartQty} in your cart. View cart`}
                 style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
               >
                 <Icon name="checkCircle" size={15} color={colors.success} />
@@ -804,7 +876,8 @@ export default function ProductDetailsScreen() {
                 style={{ flex: 1 }}
               />
               <Button
-                title={`Buy now · ${formatPrice(product.price * quantity)}`}
+                title="Buy now"
+                subtitle={formatPrice(product.price * quantity)}
                 onPress={handleBuyNow}
                 loading={pendingAction === 'buy'}
                 disabled={pendingAction !== null}
