@@ -76,19 +76,18 @@ describe('developer docs', () => {
     expect(writeText.mock.calls[0][0]).toBe(sample.querySelector('pre')!.textContent);
   });
 
-  it('test mode says payouts come first, with the refusal a create gets until then', () => {
+  it('test mode says payouts come first, and what a create answers until then', () => {
     mount();
     const test = screen.getByRole('heading', { level: 2, name: 'Test mode' }).closest('section')!;
     expect(within(test).getByRole('link', { name: 'Payouts' })).toHaveAttribute('href', '/business/live/payouts');
-    expect(within(test).getByText(/every create, test or live, is refused with/)).toBeInTheDocument();
-    expect(within(test).getByText("this merchant can't take payments yet — settlement isn't configured")).toBeInTheDocument();
+    expect(within(test).getByText(/every\s+create answers/)).toBeInTheDocument();
   });
 
-  it('gives the reference and description limits in bytes, after trimming', () => {
+  it('gives the reference and description limits in bytes', () => {
     mount();
     const create = screen.getByRole('heading', { level: 2, name: 'Create a payment' }).closest('section')!;
-    expect(within(create).getByText(/1–128 bytes once surrounding spaces are trimmed/)).toBeInTheDocument();
-    expect(within(create).getByText(/up to 255 bytes once surrounding spaces are trimmed/)).toBeInTheDocument();
+    expect(within(create).getByText(/up to 128 bytes/)).toBeInTheDocument();
+    expect(within(create).getByText(/up to 255 bytes/)).toBeInTheDocument();
   });
 
   it('the Node create sample checks the answer is JSON before parsing it', () => {

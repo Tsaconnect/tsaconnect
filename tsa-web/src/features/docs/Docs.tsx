@@ -116,8 +116,8 @@ export function Docs() {
             <p className="text-overline font-semibold uppercase tracking-[.08em] text-accent-strong">Developers</p>
             <h1 className="text-display font-bold">Take payments with TSA Pay</h1>
             <p className="max-w-[72ch] text-body text-text-secondary">
-              Your server creates a payment, your customer pays it in the TSA Connect app, and we tell your server by webhook.
-              Your API keys, webhooks and signing secret are under <b className="font-semibold text-text-primary">API keys &amp; webhooks</b> in your dashboard.
+              Your server creates a payment, your customer pays in the TSA Connect app, and we notify your server by webhook.
+              Keys, webhooks and your signing secret live under <b className="font-semibold text-text-primary">API keys &amp; webhooks</b> in your dashboard.
             </p>
           </div>
 
@@ -125,31 +125,30 @@ export function Docs() {
             <Reference
               rows={[
                 ['Base URL', <C>{BASE_URL}</C>],
-                ['Authentication', <>Send your key on every request: <C>Authorization: Bearer &lt;key&gt;</C>, always over <C>https://</C>.</>],
-                ['Keys', <>A live key starts <C>tsapk_live_</C>, a test key <C>tsapk_test_</C>. The key decides the mode: a test key only ever sees test payments.</>],
-                ['Allowed IPs', <>Optional. List your servers' public addresses under <b className="font-semibold text-text-primary">API keys &amp; webhooks</b> and your live key is refused from anywhere else with <C>403 ip_not_allowed</C>, whose <C>message</C> names the address we saw. List both IPv4 and IPv6 if your servers have both. A test key is never restricted.</>],
-                ['Amounts', <>Integers in kobo: <C>8450000</C> is ₦84,500.00. The only currency is <C>NGN</C>.</>],
-                ['Responses', <>Every answer is <C>{'{"success": true, "message": …, "data": …}'}</C>; a refusal is <C>{'{"success": false, "message": …, "code": …}'}</C> (see <a href="#errors" className="font-semibold text-accent-strong hover:underline">Errors</a>).</>],
-                ['Limits', <>600 requests a minute per IP address, then 120 a minute per merchant.</>],
+                ['Authentication', <><C>Authorization: Bearer &lt;key&gt;</C> on every request, over <C>https://</C> only.</>],
+                ['Keys', <><C>tsapk_live_…</C> for live, <C>tsapk_test_…</C> for test. The key sets the mode.</>],
+                ['Allowed IPs', <>Optional. Restrict your live key to your servers' addresses in your dashboard; anything else gets <C>403 ip_not_allowed</C>. Include IPv6 if your servers use it.</>],
+                ['Amounts', <>Integers in kobo: <C>8450000</C> is ₦84,500.00. Currency is always <C>NGN</C>.</>],
+                ['Responses', <><C>{'{"success": true, "message": …, "data": …}'}</C>, or on failure <C>{'{"success": false, "message": …, "code": …}'}</C>.</>],
+                ['Rate limits', '600 requests a minute per IP, 120 per merchant.'],
               ]}
             />
             <Note tone="warning">
-              Keep your keys on your server. Anyone holding a key can create and cancel payments as you — never put one in a web page or an app.
-              If one leaks, create a new one from your dashboard: the old key stops working at once. A key sent over plain <C>http://</C> has
-              leaked too. Listing your servers under Allowed IPs makes a leaked live key useless anywhere else.
+              Keep keys on your server, never in a web page or app. If a key leaks — including by being sent over <C>http://</C> — create a new one
+              in your dashboard; the old one stops working immediately.
             </Note>
           </Section>
 
-          <Section id="create-a-payment" lead={<><C>POST /payments</C> starts one checkout for your customer. Send them to its <C>checkoutUrl</C> (or <C>appUrl</C>, which opens the TSA Connect app) to pay.</>}>
+          <Section id="create-a-payment" lead={<><C>POST /payments</C> creates a checkout. Send your customer to its <C>checkoutUrl</C>, or <C>appUrl</C> to open the app.</>}>
             <Reference
-              head={['Field', 'Type', 'What it is']}
+              head={['Field', 'Type', 'Description']}
               rows={[
-                [<C>amount</C>, 'integer', <>Required. The price in kobo, within your account's minimum and maximum — by default 100000 (₦1,000) to 500000000 (₦5,000,000).</>],
-                [<C>currency</C>, 'string', <>Optional. <C>"NGN"</C>, the default and the only one accepted.</>],
-                [<C>reference</C>, 'string', <>Required, 1–128 bytes once surrounding spaces are trimmed. Your own id for the order, unique per mode. Sending the same reference with the same body again returns the same payment (<C>200</C> instead of <C>201</C>), so a retry never makes a second one; the same reference with a different amount, currency, description or return URL is refused with <C>409</C>.</>],
-                [<C>description</C>, 'string', 'Optional, up to 255 bytes once surrounding spaces are trimmed (a naira sign or an accented letter is more than one byte). Shown to your customer.'],
-                [<C>returnUrl</C>, 'string', <>Optional. Where your customer goes back to after paying. It must be <C>https</C>, on the default port, with no user name or password, and its host must exactly match one of your return domains (a subdomain does not match). Set return domains in your dashboard.</>],
-                [<C>expiresIn</C>, 'integer', <>Optional. Seconds until the payment expires unpaid: 900 (15 minutes) to 86400 (24 hours); 1800 (30 minutes) if you leave it out. It is not part of the retry comparison.</>],
+                [<C>amount</C>, 'integer', <>Required. In kobo, within your account's limits (by default ₦1,000 to ₦5,000,000).</>],
+                [<C>currency</C>, 'string', <>Optional. <C>"NGN"</C> only.</>],
+                [<C>reference</C>, 'string', <>Required, up to 128 bytes. Your order id, unique per mode. Resending it returns the existing payment (<C>200</C>), so retries are safe; a different amount, currency, description or return URL is refused (<C>409</C>).</>],
+                [<C>description</C>, 'string', 'Optional, up to 255 bytes. Shown to your customer.'],
+                [<C>returnUrl</C>, 'string', <>Optional. An <C>https</C> URL whose host exactly matches one of your return domains, set in your dashboard.</>],
+                [<C>expiresIn</C>, 'integer', 'Optional. Seconds until an unpaid payment expires: 900 to 86400. Default 1800.'],
               ]}
             />
             <div className="grid gap-4">
@@ -157,137 +156,126 @@ export function Docs() {
               <CodeBlock title="Create a payment in Node" code={createNode} />
             </div>
             <CodeBlock title="Response — 201 Created" code={createResponse} />
-            <p className="text-body-sm text-text-secondary">Amounts are illustrative.</p>
 
             <H3>Read or cancel a payment</H3>
             <P>
-              <C>GET /payments/:id</C> returns the payment object. <C>POST /payments/:id/cancel</C> ends a payment that is still{' '}
-              <C>pending</C>: it becomes <C>expired</C> with <C>failureReason</C> <C>"cancelled by the merchant"</C>, and a{' '}
-              <C>payment.expired</C> webhook is sent. A payment that is no longer pending cannot be cancelled (<C>409</C>).
+              <C>GET /payments/:id</C> returns the payment. <C>POST /payments/:id/cancel</C> expires a <C>pending</C> payment and sends a{' '}
+              <C>payment.expired</C> webhook; any other status answers <C>409</C>.
             </P>
             <CodeBlock title="Read and cancel with curl" code={retrieveCurl} />
           </Section>
 
-          <Section id="the-payment-object" lead="Create, read and cancel answer with it, and every webhook carries it as data. Optional fields are left out when empty.">
+          <Section id="the-payment-object" lead="Returned by every endpoint and sent as the data of every webhook. Empty optional fields are omitted.">
             <Reference
-              head={['Field', 'Type', 'What it is']}
+              head={['Field', 'Type', 'Description']}
               rows={[
                 [<C>id</C>, 'string (UUID)', 'Our id for the payment.'],
-                [<C>reference</C>, 'string', 'Your reference, as you sent it.'],
-                [<C>mode</C>, 'string', <><C>live</C> or <C>test</C> — the mode of the key that created it.</>],
-                [<C>status</C>, 'string', <><C>pending</C>, <C>processing</C>, <C>succeeded</C>, <C>failed</C> or <C>expired</C> (below).</>],
-                [<C>amount</C>, 'integer', 'Your price in kobo, as you sent it.'],
+                [<C>reference</C>, 'string', 'Your reference.'],
+                [<C>mode</C>, 'string', <><C>live</C> or <C>test</C>.</>],
+                [<C>status</C>, 'string', <><C>pending</C>, <C>processing</C>, <C>succeeded</C>, <C>failed</C> or <C>expired</C>.</>],
+                [<C>amount</C>, 'integer', 'Your price, in kobo.'],
                 [<C>customerTotal</C>, 'integer', 'What your customer pays, in kobo.'],
-                [<C>merchantNet</C>, 'integer', 'What you are paid, in kobo.'],
-                [<C>fee</C>, 'integer', <><C>customerTotal − merchantNet</C>, in kobo. Who bears the fee is set on your account. Amounts in the examples are illustrative.</>],
+                [<C>merchantNet</C>, 'integer', 'What you receive, in kobo.'],
+                [<C>fee</C>, 'integer', <><C>customerTotal − merchantNet</C>. Who bears it is set on your account.</>],
                 [<C>currency</C>, 'string', <><C>NGN</C>.</>],
-                [<C>description</C>, 'string', 'As you sent it.'],
-                [<C>returnUrl</C>, 'string, optional', 'As you sent it.'],
-                [<C>expiresAt</C>, 'string (RFC 3339)', 'When a still-pending payment expires.'],
-                [<C>settlementRef</C>, 'string, optional', <>Our reference for the payout, once the payment succeeds. Its format varies: a payout order id, a transaction hash, or <C>"test"</C> in test mode. Store it as an opaque string.</>],
-                [<C>failureReason</C>, 'string, optional', <>Why it failed, expired or was cancelled, or why an attempt was abandoned. Branch on <C>status</C>, not on this field.</>],
-                [<C>succeededAt</C>, 'string (RFC 3339), optional', 'When the payment succeeded.'],
-                [<C>appUrl</C>, 'string', <>Opens the payment in the TSA Connect app: <C>tsaconnect://pay?id=&lt;id&gt;</C>.</>],
-                [<C>checkoutUrl</C>, 'string', 'The web page to send your customer to.'],
-                [<C>createdAt</C>, 'string (RFC 3339)', 'When you created it.'],
+                [<C>description</C>, 'string', 'Your description.'],
+                [<C>returnUrl</C>, 'string, optional', 'Your return URL.'],
+                [<C>expiresAt</C>, 'string (RFC 3339)', 'When a pending payment expires.'],
+                [<C>settlementRef</C>, 'string, optional', <>Our payout reference once the payment succeeds (<C>"test"</C> in test mode). Treat it as opaque.</>],
+                [<C>failureReason</C>, 'string, optional', <>Why it failed or expired. For display and logs — branch on <C>status</C>.</>],
+                [<C>succeededAt</C>, 'string (RFC 3339), optional', 'When it succeeded.'],
+                [<C>appUrl</C>, 'string', 'Opens the payment in the TSA Connect app.'],
+                [<C>checkoutUrl</C>, 'string', 'The web checkout page.'],
+                [<C>createdAt</C>, 'string (RFC 3339)', 'When it was created.'],
               ]}
             />
             <H3>Statuses</H3>
             <ul className="grid max-w-[72ch] gap-2 text-body">
-              <li><C>pending</C> → <C>processing</C> — a customer has started paying.</li>
-              <li><C>processing</C> → <C>succeeded</C> or <C>failed</C> — the end of that attempt. Both are final.</li>
-              <li><C>pending</C> → <C>expired</C> — nobody paid by <C>expiresAt</C>, you cancelled it, or your account was suspended. Final.</li>
-              <li><C>processing</C> → <C>pending</C> — an attempt was abandoned and the payment can be paid again (no webhook).</li>
+              <li><C>pending</C> → <C>processing</C> — the customer started paying.</li>
+              <li><C>processing</C> → <C>succeeded</C> or <C>failed</C> — final.</li>
+              <li><C>pending</C> → <C>expired</C> — unpaid by <C>expiresAt</C>, cancelled, or your account was suspended. Final.</li>
+              <li><C>processing</C> → <C>pending</C> — the customer abandoned the attempt; it can be paid again. No webhook.</li>
             </ul>
-            <P>Fulfil the order on <C>succeeded</C> only, and read it from the webhook or <C>GET /payments/:id</C> — never from the customer arriving at your <C>returnUrl</C>.</P>
+            <P>Fulfil orders on <C>succeeded</C> only, confirmed by webhook or <C>GET /payments/:id</C> — never by the customer reaching your <C>returnUrl</C>.</P>
           </Section>
 
-          <Section id="webhooks" lead="When a payment reaches a final status we POST an event to your webhook URL for that mode.">
+          <Section id="webhooks" lead="When a payment reaches a final status, we POST an event to that mode's webhook URL.">
             <Reference
               head={['Event', 'Sent when']}
               rows={[
                 [<C>payment.succeeded</C>, 'The customer paid. Fulfil the order.'],
-                [<C>payment.failed</C>, <>The attempt failed; <C>data.failureReason</C> says why.</>],
-                [<C>payment.expired</C>, 'Nobody paid in time, you cancelled the payment, or your account was suspended.'],
+                [<C>payment.failed</C>, <>The payment failed; see <C>data.failureReason</C>.</>],
+                [<C>payment.expired</C>, 'It expired unpaid, was cancelled, or your account was suspended.'],
               ]}
             />
             <P>
-              Live events go to your live webhook URL and test events to your test webhook URL — test events never reach the live one, and a mode with
-              no URL gets no events. A URL must be <C>https</C> on the default port and reach a public address.
+              Live and test events go to separate URLs; a mode with no URL gets no events. URLs must be <C>https</C> on a public address.
             </P>
             <CodeBlock title="Event body" code={webhookBody} />
             <Reference
               head={['Header', 'Value']}
               rows={[
-                [<C>Content-Type</C>, <C>application/json</C>],
                 [<C>X-TSA-Signature</C>, <><C>t=&lt;timestamp&gt;,v1=&lt;signature&gt;</C> — see <a href="#verify-the-signature" className="font-semibold text-accent-strong hover:underline">Verify the signature</a>.</>],
                 [<C>X-TSA-Event</C>, <>The event type, e.g. <C>payment.succeeded</C>.</>],
-                [<C>X-TSA-Delivery</C>, <>The event <C>id</C>, the same as in the body.</>],
+                [<C>X-TSA-Delivery</C>, <>The event <C>id</C>.</>],
               ]}
             />
             <H3>Delivery and retries</H3>
             <ul className="grid max-w-[72ch] list-disc gap-2 pl-5 text-body">
-              <li>Answer with any <C>2xx</C> within 5 seconds. Anything else — another status, a redirect (we do not follow them), a timeout — is a failed attempt.</li>
-              <li>A failed delivery is tried again after 1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours and 24 hours. If the last of those fails too, we stop.</li>
-              <li>The same event can reach you more than once. Its <C>id</C> never changes: store it, and ignore an id you have already handled.</li>
-              <li>Answer first and do slow work afterwards, so a slow job does not turn into a failed delivery and a repeat.</li>
+              <li>Reply <C>2xx</C> within 5 seconds, then do any slow work. Other statuses, redirects and timeouts count as failures.</li>
+              <li>Failures are retried after 1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours and 24 hours.</li>
+              <li>An event can arrive more than once. Deduplicate on its <C>id</C>.</li>
             </ul>
           </Section>
 
-          <Section id="verify-the-signature" lead="Check every event before you trust it: the signature proves it came from us and was not changed.">
+          <Section id="verify-the-signature" lead="Verify every event before acting on it.">
             <P>
-              Each request carries <C>X-TSA-Signature</C> in the form <C>t=&lt;timestamp&gt;,v1=&lt;signature&gt;</C>. <C>t</C> is when we signed it, in Unix
-              seconds, and <C>v1</C> is the hex HMAC-SHA256 of <C>&lt;t&gt;.&lt;raw body&gt;</C> — the timestamp, a full stop, then the body exactly as sent — keyed
-              with your signing secret. Each mode has its own secret (<C>whsec_…</C>); reveal them or create new ones in your dashboard.
+              <C>X-TSA-Signature</C> has the form <C>t=&lt;timestamp&gt;,v1=&lt;signature&gt;</C>: <C>t</C> is Unix seconds and <C>v1</C> is the hex
+              HMAC-SHA256 of <C>&lt;t&gt;.&lt;raw body&gt;</C>, keyed with that mode's signing secret (<C>whsec_…</C>).
             </P>
             <ol className="grid max-w-[72ch] list-decimal gap-2 pl-5 text-body">
-              <li>Read the raw body before any JSON parsing — re-serialised JSON will not match.</li>
-              <li>Recompute the HMAC with the secret for the event's mode and compare it with <C>v1</C> in constant time.</li>
-              <li>Refuse an old <C>t</C> (we suggest more than 5 minutes away) so a captured request cannot be replayed. Every retry is signed afresh.</li>
+              <li>Use the raw request body — re-serialised JSON will not match.</li>
+              <li>Compare your HMAC with <C>v1</C> in constant time.</li>
+              <li>Reject timestamps more than 5 minutes old to prevent replays. Each retry is signed with a fresh timestamp.</li>
             </ol>
             <CodeBlock title="Verify a webhook in Node" code={verifyNode} />
             <CodeBlock title="Use it in an Express route" code={expressNode} />
           </Section>
 
-          <Section id="test-mode" lead="Build and test your whole integration without moving real money.">
+          <Section id="test-mode" lead="Test your whole integration without moving money.">
             <ul className="grid max-w-[72ch] list-disc gap-2 pl-5 text-body">
-              <li>Create a test key under API keys &amp; webhooks in your dashboard and use it exactly like a live key. Test payments have <C>"mode": "test"</C>.</li>
-              <li>Set a test webhook URL there too. Test events carry <C>"livemode": false</C> and are signed with your test secret.</li>
-              <li>Open a test payment's <C>appUrl</C> in the TSA Connect app, signed in as the account that owns the business, and tap <b className="font-semibold">Approve</b> or <b className="font-semibold">Decline</b>.
-                Approve makes it <C>succeeded</C> (with <C>settlementRef</C> <C>"test"</C>); Decline makes it <C>failed</C> (<C>failureReason</C> <C>"declined in test mode"</C>). Either sends its webhook to your test URL.</li>
-              <li>Your test payments and their webhook attempts are listed in your dashboard in test mode.</li>
               <li>
-                Set up payouts first: a bank account or a crypto wallet, under{' '}
-                <Link to="/business/live/payouts" className="font-semibold text-accent-strong hover:underline">Payouts</Link> in your dashboard.
-                Until then every create, test or live, is refused with <C>422</C> and the message{' '}
-                <C>this merchant can't take payments yet — settlement isn't configured</C> (there is no <C>code</C>).
+                Set up payouts first, under{' '}
+                <Link to="/business/live/payouts" className="font-semibold text-accent-strong hover:underline">Payouts</Link>. Until then, every
+                create answers <C>422</C>.
               </li>
+              <li>Create a test key and a test webhook URL in your dashboard. Test events carry <C>"livemode": false</C> and use your test signing secret.</li>
+              <li>
+                Open a test payment's <C>appUrl</C> in the TSA Connect app as the business owner and tap <b className="font-semibold">Approve</b> or{' '}
+                <b className="font-semibold">Decline</b> to make it <C>succeeded</C> or <C>failed</C>.
+              </li>
+              <li>Test payments and their webhook deliveries appear in your dashboard in test mode.</li>
             </ul>
-            <Note tone="info">
-              Until live payments are switched on for TSA Pay, a live key is refused with <C>403 live_disabled</C>. Until we switch
-              live payments on for your business — after you have made a test payment — it is refused with <C>403 live_not_enabled</C>.
-              A test key always works.
-            </Note>
           </Section>
 
-          <Section id="errors" lead={<>A refusal has <C>"success": false</C>, a <C>message</C> you can log, and, where there is one, a <C>code</C> to branch on.</>}>
+          <Section id="errors" lead={<>Every error has a <C>message</C> to log and, where useful, a <C>code</C> to branch on.</>}>
             <CodeBlock title="Error body" code={errorBody} />
             <Reference
-              head={['Status', 'Code', 'Why']}
+              head={['Status', 'Code', 'Meaning']}
               rows={[
-                [<C>400</C>, '—', <>The body is not valid JSON of the right shape, or the payment id is not a UUID.</>],
-                [<C>401</C>, <C>invalid_key</C>, <>The <C>Authorization</C> header is missing or malformed, or the key is unknown or was replaced by a new one.</>],
-                [<C>403</C>, <C>merchant_suspended</C>, 'Your merchant account is suspended.'],
-                [<C>403</C>, <C>live_disabled</C>, 'A live key while live payments are not enabled.'],
-                [<C>403</C>, <C>live_not_enabled</C>, "A live key before live payments are switched on for your business. Finish testing and contact TSA Connect."],
-                [<C>403</C>, <C>https_required</C>, <>The request was sent over plain <C>http://</C>. The key has leaked — create a new one.</>],
-                [<C>403</C>, <C>ip_not_allowed</C>, <>A live key from an address that is not in your Allowed IPs. The <C>message</C> names the address we saw.</>],
-                [<C>404</C>, '—', 'Reading a payment this key cannot see: a wrong id, another merchant\'s, or one from the other mode.'],
-                [<C>409</C>, '—', <>The <C>reference</C> was already used with different details, or (cancel) the payment is no longer <C>pending</C>, isn't yours, or is from the other mode.</>],
-                [<C>422</C>, '—', <>A field is out of bounds (the <C>message</C> says which), or your payouts are not set up yet.</>],
-                [<C>429</C>, '—', 'Too many requests. Wait and retry.'],
-                [<C>500</C>, '—', 'Our fault. Retry with the same reference and body — you will not get a second payment.'],
-                [<C>503</C>, <C>auth_unavailable</C>, 'We could not check your key just now. Retry shortly.'],
+                [<C>400</C>, '—', 'Malformed JSON, or the payment id is not a UUID.'],
+                [<C>401</C>, <C>invalid_key</C>, 'Missing, malformed, unknown or replaced key.'],
+                [<C>403</C>, <C>merchant_suspended</C>, 'Your account is suspended.'],
+                [<C>403</C>, <C>live_disabled</C>, 'Live payments are paused on TSA Pay. Test keys still work.'],
+                [<C>403</C>, <C>live_not_enabled</C>, 'Live payments are switched off for your business. Contact TSA Connect.'],
+                [<C>403</C>, <C>https_required</C>, <>Sent over <C>http://</C>. Treat the key as leaked and create a new one.</>],
+                [<C>403</C>, <C>ip_not_allowed</C>, <>Live key used from an address outside your Allowed IPs. The <C>message</C> names the address.</>],
+                [<C>404</C>, '—', 'No such payment for this key.'],
+                [<C>409</C>, '—', <>Reference reused with different details, or cancelling a payment that is not <C>pending</C> or not this key's.</>],
+                [<C>422</C>, '—', <>A field is out of range (see <C>message</C>), or payouts are not set up.</>],
+                [<C>429</C>, '—', 'Rate limited. Retry shortly.'],
+                [<C>500</C>, '—', 'Our error. Retry with the same reference and body — no duplicate is created.'],
+                [<C>503</C>, <C>auth_unavailable</C>, 'Key check temporarily unavailable. Retry shortly.'],
               ]}
             />
           </Section>
