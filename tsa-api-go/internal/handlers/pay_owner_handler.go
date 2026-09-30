@@ -73,13 +73,14 @@ type payOwnerMerchantView struct {
 	WebhookURL                string   `json:"webhookUrl"`
 	TestWebhookURL            string   `json:"testWebhookUrl"`
 	ReturnDomains             []string `json:"returnDomains"`
+	AllowedIPs                []string `json:"allowedIps"`
 }
 
 func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled,
 		LiveAllowed: m.LiveAllowed(h.liveEnabled), Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
-		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList(),
+		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList(), AllowedIPs: m.AllowedIPList(),
 		BusinessNameChangeEnabled: h.businessNameChange}
 	if p := h.pendingBusinessName(m); p != nil {
 		v.PendingBusinessName, v.PendingSince = p.Name, &p.Since
@@ -92,6 +93,9 @@ func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
 	}
 	if v.ReturnDomains == nil {
 		v.ReturnDomains = []string{}
+	}
+	if v.AllowedIPs == nil {
+		v.AllowedIPs = []string{}
 	}
 	switch m.SettlementMode {
 	case models.PaySettlementFiat:
@@ -268,8 +272,9 @@ func (h *PayHandler) announceOwnerAction(owner uuid.UUID, res *services.PayOwner
 	case models.PayOwnerActionEndpoints:
 		h.announce(owner, events.SecurityPayEndpointsChanged, "Your TSA Pay webhook settings were changed",
 			// The host only: a webhook URL can carry a token, and this alert is stored, emailed and pushed.
-			fmt.Sprintf("Live webhooks: %s; test webhooks: %s. If you didn't make this change, contact support immediately.",
-				nonEmpty(services.PayRedactURL(res.Merchant.WebhookURL), "none"), nonEmpty(services.PayRedactURL(res.Merchant.TestWebhookURL), "none")))
+			fmt.Sprintf("Live webhooks: %s; test webhooks: %s. Your live API key is accepted from %s. If you didn't make this change, contact support immediately.",
+				nonEmpty(services.PayRedactURL(res.Merchant.WebhookURL), "none"), nonEmpty(services.PayRedactURL(res.Merchant.TestWebhookURL), "none"),
+				nonEmpty(strings.Join(res.Merchant.AllowedIPList(), ", "), "any IP address")))
 	case models.PayOwnerActionWebhookSecret:
 		// "reveal" → "revealed", "roll" → "rolled".
 		h.announce(owner, events.SecurityPayWebhookSecret, fmt.Sprintf("Your webhook signing secret was %sed", strings.TrimSuffix(res.SecretAction, "e")),

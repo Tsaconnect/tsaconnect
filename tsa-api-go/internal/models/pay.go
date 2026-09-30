@@ -1,6 +1,7 @@
 package models
 
 import (
+	"net/netip"
 	"strings"
 	"time"
 
@@ -68,6 +69,7 @@ type PayMerchant struct {
 	TestWebhookURL          string    `gorm:"size:512" json:"testWebhookUrl"`
 	WebhookSecretVersion    int       `gorm:"not null;default:1" json:"-"`
 	ReturnDomains           string    `gorm:"size:1024" json:"-"` // comma-separated lowercase hostnames
+	AllowedIPs              string    `gorm:"size:1024" json:"-"` // the live key's allowlist: comma-separated IPs/CIDRs, "" = anywhere (see KeyAllowedFrom)
 	Version                 int       `gorm:"not null;default:1" json:"version"`
 	LiveKeyHash             *string   `gorm:"size:64;uniqueIndex" json:"-"`
 	LiveKeyPrefix           string    `gorm:"size:24" json:"liveKeyPrefix"`
@@ -93,6 +95,40 @@ func (m *PayMerchant) ReturnDomainList() []string {
 		}
 	}
 	return out
+}
+
+// AllowedIPList is AllowedIPs split, for checks and the views.
+func (m *PayMerchant) AllowedIPList() []string {
+	var out []string
+	for _, e := range strings.Split(m.AllowedIPs, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// KeyAllowedFrom reports whether a request made with this merchant's key of
+// mode may come from ip. Only the live key is restricted — a test key moves
+// no money and is used from developers' own machines — and only once the
+// merchant has listed an address. An entry that no longer parses matches
+// nothing, so a bad row fails closed.
+func (m *PayMerchant) KeyAllowedFrom(mode string, ip netip.Addr) bool {
+	list := m.AllowedIPList()
+	if mode != PayModeLive || len(list) == 0 {
+		return true
+	}
+	ip = ip.Unmap()
+	for _, e := range list {
+		if p, err := netip.ParsePrefix(e); err == nil {
+			if p.Contains(ip) {
+				return true
+			}
+		} else if a, err := netip.ParseAddr(e); err == nil && a == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // LiveAllowed is the one live rule: a live key works, and a live payment can be

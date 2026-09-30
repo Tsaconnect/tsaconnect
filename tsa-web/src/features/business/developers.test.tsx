@@ -187,7 +187,7 @@ describe('API keys & webhooks', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/public https address/);
   });
 
-  it('saving webhooks sends all three settings against the version on screen and shows the result', async () => {
+  it('saving webhooks sends every setting against the version on screen and shows the result', async () => {
     const saved = { ...merchant, version: 8, webhookUrl: 'https://api.skyair.ng/tsa/webhook', returnDomains: ['skyair.ng', 'www.skyair.ng'] };
     const f = stubFetch({
       '/api/pay/merchant': ok(merchant),
@@ -209,7 +209,7 @@ describe('API keys & webhooks', () => {
     const put = f.mock.calls.find(([u]) => u === '/api/pay/merchant/endpoints');
     expect(put![1].method).toBe('PUT');
     expect(JSON.parse(put![1].body)).toEqual({
-      webhookUrl: 'https://api.skyair.ng/tsa/webhook', testWebhookUrl: '', returnDomains: ['skyair.ng', 'www.skyair.ng'], expectedVersion: 7, password: 'correct-horse',
+      webhookUrl: 'https://api.skyair.ng/tsa/webhook', testWebhookUrl: '', returnDomains: ['skyair.ng', 'www.skyair.ng'], allowedIps: [], expectedVersion: 7, password: 'correct-horse',
     });
     const domainsCard = screen.getByRole('heading', { name: 'Return domains' }).closest('section')!;
     expect(within(domainsCard).getByText('www.skyair.ng')).toBeInTheDocument();
@@ -217,7 +217,7 @@ describe('API keys & webhooks', () => {
     await waitFor(() => expect(f.mock.calls.filter(([u]) => u === '/api/pay/merchant')).toHaveLength(1));
   });
 
-  it('the same form opened from Return domains is titled for them, and still sends all three', async () => {
+  it('the same form opened from Return domains is titled for them, and still sends every setting', async () => {
     const f = stubFetch({
       '/api/pay/merchant': ok({ ...merchant, webhookUrl: 'https://api.skyair.ng/tsa/webhook' }),
       '/api/pay/merchant/endpoints': fail(422, 'invalid merchant settings: return domain: bad'),
@@ -232,8 +232,42 @@ describe('API keys & webhooks', () => {
     await screen.findByRole('alert');
     const put = f.mock.calls.find(([u]) => u === '/api/pay/merchant/endpoints');
     expect(JSON.parse(put![1].body)).toEqual({
-      webhookUrl: 'https://api.skyair.ng/tsa/webhook', testWebhookUrl: '', returnDomains: ['skyair.ng', 'pay.skyair.ng'], expectedVersion: 7, password: 'correct-horse',
+      webhookUrl: 'https://api.skyair.ng/tsa/webhook', testWebhookUrl: '', returnDomains: ['skyair.ng', 'pay.skyair.ng'], allowedIps: [], expectedVersion: 7, password: 'correct-horse',
     });
+  });
+
+  it('allowed IPs: says any address until set, then lists them after a guarded save that keeps the other settings', async () => {
+    const saved = { ...merchant, version: 8, allowedIps: ['203.0.113.7', '198.51.100.0/24'] };
+    const f = stubFetch({
+      '/api/pay/merchant': ok({ ...merchant, webhookUrl: 'https://api.skyair.ng/tsa/webhook' }),
+      '/api/pay/merchant/endpoints': accepted({ confirmation: { id: 'e1', kind: 'endpoints', expiresAt: soon, sentTo: 'a***@skyair.ng' } }),
+      '/api/pay/merchant/actions/e1/confirm': ok({ merchant: saved }),
+    });
+    mountAt('/business/live/developers');
+    const card = (await screen.findByRole('heading', { name: 'Allowed IPs' })).closest('section')!;
+    expect(within(card).getByText('Any IP address.')).toBeInTheDocument();
+    expect(within(card).getByText(/test key works from anywhere/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit allowed IPs' }));
+    expect(screen.getByRole('dialog', { name: 'Edit allowed IPs' })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Allowed IPs'), '203.0.113.7, 198.51.100.0/24 203.0.113.7');
+    await passwordThenCode(/continue/i);
+    await userEvent.click(screen.getByRole('button', { name: 'Save webhooks' }));
+
+    expect(await within(card).findByText('198.51.100.0/24')).toBeInTheDocument();
+    expect(within(card).getByText('203.0.113.7')).toBeInTheDocument();
+    const put = f.mock.calls.find(([u]) => u === '/api/pay/merchant/endpoints');
+    expect(JSON.parse(put![1].body)).toEqual({
+      webhookUrl: 'https://api.skyair.ng/tsa/webhook', testWebhookUrl: '', returnDomains: ['skyair.ng'],
+      allowedIps: ['203.0.113.7', '198.51.100.0/24'], expectedVersion: 7, password: 'correct-horse',
+    });
+  });
+
+  it('an API that does not send allowed IPs yet reads as any address', async () => {
+    stubFetch({ '/api/pay/merchant': ok({ ...merchant, allowedIps: undefined }) });
+    mountAt('/business/live/developers');
+    const card = (await screen.findByRole('heading', { name: 'Allowed IPs' })).closest('section')!;
+    expect(within(card).getByText('Any IP address.')).toBeInTheDocument();
   });
 
   it('opened from the webhooks card it is titled Edit webhooks', async () => {
@@ -282,7 +316,7 @@ describe('API keys & webhooks', () => {
     stubFetch({ '/api/pay/merchant': ok({ ...merchant, status: 'suspended' }) });
     mountAt('/business/live/developers');
     expect(await screen.findByText(/suspended — contact support to create a key, change your webhooks or see your signing secret/i)).toBeInTheDocument();
-    for (const name of ['Create new live key', 'Create new test key', 'Edit webhooks', 'Edit return domains', 'Reveal', 'Create new secret']) {
+    for (const name of ['Create new live key', 'Create new test key', 'Edit webhooks', 'Edit return domains', 'Edit allowed IPs', 'Reveal', 'Create new secret']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
   });

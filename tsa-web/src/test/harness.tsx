@@ -41,6 +41,7 @@ export const merchant: OwnMerchant = {
   webhookUrl: '',
   testWebhookUrl: '',
   returnDomains: ['skyair.ng'],
+  allowedIps: [],
 };
 
 export const payment: Payment = {

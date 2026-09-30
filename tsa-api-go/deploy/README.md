@@ -209,6 +209,39 @@ tsactl env-sync --restart
 Until `shared/doppler-token` exists, `env-sync.sh` is a no-op and deploys behave
 exactly as before.
 
+## Cloudflare: refuse plain HTTP to the merchant API
+
+A TSA Pay merchant sends its secret key on every request (`Authorization: Bearer
+tsapk_…`). Cloudflare's zone-wide **Always Use HTTPS** answers `http://` with a
+301, but by then the key has already crossed the network in the clear, and
+server-side HTTP clients ignore HSTS. So `/api/pay/` must refuse plain HTTP, not
+redirect it. Always Use HTTPS cannot exempt a path, so it is replaced by a Single
+Redirect that does the same job everywhere else. Redirect rules run before WAF
+custom rules, so the block below sees the request.
+
+Set this up in the Cloudflare dashboard for the zone. Create both rules first:
+while Always Use HTTPS is on it wins, so they are inert and there is no gap.
+
+1. **Rules → Redirect Rules → Create (Single Redirect)**, "HTTP to HTTPS except the merchant API":
+   - When: `(not ssl and not (http.host eq "tsa.mcgpchain.com" and starts_with(http.request.uri.path, "/api/pay/")))`
+   - Then: Dynamic, `concat("https://", http.host, http.request.uri.path)`, 301, **Preserve query string** on.
+2. **Security → WAF → Custom rules → Create**, "Refuse plain-HTTP TSA Pay":
+   - When: `(not ssl and http.host eq "tsa.mcgpchain.com" and starts_with(http.request.uri.path, "/api/pay/"))`
+   - Then: **Block**. If the plan offers a custom response, use 403, `application/json`:
+     `{"success":false,"message":"TSA Pay only accepts https. A key sent over http has leaked, so create a new one.","code":"https_required"}`
+3. **SSL/TLS → Edge Certificates → Always Use HTTPS → Off.** Leave HSTS on.
+
+Check it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://tsa.mcgpchain.com/api/pay/v1/payments   # 403, not 301
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" http://tsa.mcgpchain.com/api/health  # 301 → https
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://tsa.mcgpchain.com/api/pay/v1/payments  # 401 (no key)
+```
+
+Any other host added to the zone later is redirected by rule 1, just as Always
+Use HTTPS did.
+
 ## The migration rule
 
 **Every migration must be backward-compatible with the immediately preceding release.**

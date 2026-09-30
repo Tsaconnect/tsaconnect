@@ -54,11 +54,14 @@ type PayOwnerActionResult struct {
 }
 
 // PayEndpointsChange is where the merchant is told about payments and may send
-// customers back to.
+// customers back to, and where its live key may be used from. AllowedIPs nil
+// leaves the allowlist as it is (a client that predates it never clears it);
+// empty clears it.
 type PayEndpointsChange struct {
 	WebhookURL      string   `json:"webhookUrl"`
 	TestWebhookURL  string   `json:"testWebhookUrl"`
 	ReturnDomains   []string `json:"returnDomains"`
+	AllowedIPs      []string `json:"allowedIps"`
 	ExpectedVersion *int     `json:"expectedVersion"`
 }
 
@@ -111,11 +114,12 @@ func (s *PayMerchantService) RequestEndpointsChange(ctx context.Context, ownerID
 	}
 	ch.ExpectedVersion = nil // the action's BaseVersion carries it from here
 	return s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionEndpoints, ch,
-		"change where TSA Pay sends your webhooks and may return your customers")
+		"change where TSA Pay sends your webhooks, may return your customers and accepts your live API key from")
 }
 
 // endpointsUpdate is the admin edit an endpoints change amounts to: both webhook
-// URLs and the whole return-domain list, against version unless ch names one.
+// URLs, the whole return-domain list and the allowlist when ch carries one,
+// against version unless ch names one.
 func endpointsUpdate(ch PayEndpointsChange, version int) PayMerchantUpdate {
 	web, test := strings.TrimSpace(ch.WebhookURL), strings.TrimSpace(ch.TestWebhookURL)
 	domains := ch.ReturnDomains
@@ -125,7 +129,7 @@ func endpointsUpdate(ch PayEndpointsChange, version int) PayMerchantUpdate {
 	if ch.ExpectedVersion != nil {
 		version = *ch.ExpectedVersion
 	}
-	return PayMerchantUpdate{WebhookURL: &web, TestWebhookURL: &test, ReturnDomains: domains, ExpectedVersion: &version}
+	return PayMerchantUpdate{WebhookURL: &web, TestWebhookURL: &test, ReturnDomains: domains, AllowedIPs: ch.AllowedIPs, ExpectedVersion: &version}
 }
 
 // activeOwnedMerchant is the owner's merchant, refused while suspended.

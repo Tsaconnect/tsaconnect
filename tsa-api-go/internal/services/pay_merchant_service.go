@@ -106,13 +106,76 @@ func ValidPayDomain(host string) bool {
 	return err != nil
 }
 
+// A live key's allowlist: at most this many entries, and no range wider than
+// these — a /8 lets in whole providers and protects nothing.
+const (
+	maxPayAllowedIPs     = 20
+	minPayAllowedIPv4Len = 16
+	minPayAllowedIPv6Len = 48
+)
+
+// normalizePayAllowedIPs checks an owner-typed allowlist and returns its stored
+// form: each entry an IP or CIDR range, canonical (a range masked to its
+// network, a single-host range stored as the address), deduplicated, in order.
+// Private, loopback and other non-public addresses are refused: a request
+// never reaches us from one, so listing it is always a mistake — usually the
+// server's internal address instead of the one it is seen from.
+func normalizePayAllowedIPs(in []string) (string, error) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		var p netip.Prefix
+		var err error
+		if strings.Contains(e, "/") {
+			p, err = netip.ParsePrefix(e)
+		} else {
+			var a netip.Addr
+			if a, err = netip.ParseAddr(e); err == nil && a.Zone() == "" {
+				p, err = a.Prefix(a.BitLen())
+			} else if err == nil {
+				err = errors.New("zoned address") // Prefix would silently drop the zone
+			}
+		}
+		if err != nil {
+			return "", fmt.Errorf("%w: allowed IP %q is not an IP address or CIDR range", ErrPayMerchantInvalid, e)
+		}
+		if p.Addr().Is4In6() {
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
+		p = p.Masked()
+		a := p.Addr()
+		if !a.IsGlobalUnicast() || a.IsPrivate() {
+			return "", fmt.Errorf("%w: allowed IP %q is not a public address — list the address your server's requests come from", ErrPayMerchantInvalid, e)
+		}
+		if (a.Is4() && p.Bits() < minPayAllowedIPv4Len) || (a.Is6() && p.Bits() < minPayAllowedIPv6Len) {
+			return "", fmt.Errorf("%w: allowed range %q is too wide (at most /%d for IPv4, /%d for IPv6)", ErrPayMerchantInvalid, e, minPayAllowedIPv4Len, minPayAllowedIPv6Len)
+		}
+		canon := p.String()
+		if p.IsSingleIP() {
+			canon = a.String()
+		}
+		if !seen[canon] {
+			seen[canon] = true
+			out = append(out, canon)
+		}
+	}
+	if len(out) > maxPayAllowedIPs {
+		return "", fmt.Errorf("%w: at most %d allowed IPs", ErrPayMerchantInvalid, maxPayAllowedIPs)
+	}
+	return strings.Join(out, ","), nil
+}
+
 // payAccountNumberRE matches a 10-digit NUBAN.
 var payAccountNumberRE = regexp.MustCompile(`^[0-9]{10}$`)
 
 // PayMerchantUpdate is a partial edit to a merchant's settings: only non-nil
-// fields are applied. ReturnDomains is the one exception — nil means
-// unchanged, but a non-nil (possibly empty) slice replaces the list, so a
-// merchant's return domains can be cleared.
+// fields are applied. ReturnDomains and AllowedIPs are the exceptions — nil
+// means unchanged, but a non-nil (possibly empty) slice replaces the list, so
+// either can be cleared.
 type PayMerchantUpdate struct {
 	BusinessName            *string  `json:"businessName"`
 	Status                  *string  `json:"status"`
@@ -129,6 +192,7 @@ type PayMerchantUpdate struct {
 	WebhookURL              *string  `json:"webhookUrl"`
 	TestWebhookURL          *string  `json:"testWebhookUrl"`
 	ReturnDomains           []string `json:"returnDomains"` // nil = unchanged
+	AllowedIPs              []string `json:"allowedIps"`    // nil = unchanged
 	// LiveEnabled switches the merchant's live key on or off. Admin only: no
 	// owner route builds an update carrying it.
 	LiveEnabled *bool `json:"liveEnabled"`
@@ -138,16 +202,17 @@ type PayMerchantUpdate struct {
 }
 
 // Sensitive reports whether an update touches where money or events go —
-// settlement destination, crypto target, webhook endpoints, or the domains
-// allowed to receive a checkout redirect — whether the merchant may take real
-// money at all (the live switch), or the business name (what customers are
-// shown, and what a payout account may be named). Those need a super admin; a
+// settlement destination, crypto target, webhook endpoints, the domains
+// allowed to receive a checkout redirect, or where the live key may be used
+// from — whether the merchant may take real money at all (the live switch), or
+// the business name (what customers are shown, and what a payout account may
+// be named). Those need a super admin; a
 // fee-share or status change does not. An owner's own rename goes through the
 // review queue instead.
 func (u PayMerchantUpdate) Sensitive() bool {
 	return u.BusinessName != nil || u.SettlementMode != nil || u.BankCode != nil || u.AccountNumber != nil ||
 		u.ChainID != nil || u.TokenAddress != nil || u.TokenSymbol != nil || u.WalletAddress != nil ||
-		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil || u.LiveEnabled != nil
+		u.WebhookURL != nil || u.TestWebhookURL != nil || u.ReturnDomains != nil || u.AllowedIPs != nil || u.LiveEnabled != nil
 }
 
 // PayKeyScope selects which of a merchant's credentials IssueKeys rotates or
@@ -171,14 +236,30 @@ type PayMerchantKeys struct {
 	WebhookSecretTest string `json:"webhookSecretTest,omitempty"`
 }
 
-// PayMerchantView is the admin-facing read shape: the parsed return-domain
-// list plus whether a live/test key currently exists, without ever
+// PayMerchantView is the admin-facing read shape: the parsed return-domain and
+// allowed-IP lists plus whether a live/test key currently exists, without ever
 // including the hash (already excluded from models.PayMerchant's own JSON).
 type PayMerchantView struct {
 	models.PayMerchant
 	ReturnDomains []string `json:"returnDomains"`
+	AllowedIPs    []string `json:"allowedIps"`
 	HasLiveKey    bool     `json:"hasLiveKey"`
 	HasTestKey    bool     `json:"hasTestKey"`
+}
+
+// NewPayMerchantView is m in the admin read shape.
+func NewPayMerchantView(m models.PayMerchant) PayMerchantView {
+	v := PayMerchantView{
+		PayMerchant:   m,
+		ReturnDomains: m.ReturnDomainList(),
+		AllowedIPs:    m.AllowedIPList(),
+		HasLiveKey:    m.LiveKeyHash != nil,
+		HasTestKey:    m.TestKeyHash != nil,
+	}
+	if v.AllowedIPs == nil {
+		v.AllowedIPs = []string{}
+	}
+	return v
 }
 
 // PayMerchantService provisions and manages TSA Pay merchants.
@@ -341,12 +422,7 @@ func (s *PayMerchantService) List(ctx context.Context, page, limit int) ([]PayMe
 
 	views := make([]PayMerchantView, len(merchants))
 	for i, m := range merchants {
-		views[i] = PayMerchantView{
-			PayMerchant:   m,
-			ReturnDomains: m.ReturnDomainList(),
-			HasLiveKey:    m.LiveKeyHash != nil,
-			HasTestKey:    m.TestKeyHash != nil,
-		}
+		views[i] = NewPayMerchantView(m)
 	}
 	return views, total, nil
 }
@@ -775,6 +851,14 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 		updated.ReturnDomains = strings.Join(domains, ",")
 		changes["return_domains"] = updated.ReturnDomains
 	}
+	if in.AllowedIPs != nil {
+		ips, err := normalizePayAllowedIPs(in.AllowedIPs)
+		if err != nil {
+			return nil, err
+		}
+		updated.AllowedIPs = ips
+		changes["allowed_ips"] = updated.AllowedIPs
+	}
 
 	if err := s.validatePayMerchant(ctx, &before, &updated); err != nil {
 		return nil, err
@@ -818,7 +902,7 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 	updated.Version = before.Version + 1
 
 	if sensitive {
-		log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s fields=settlement liveEnabled=%t->%t bank=%s->%s account=%s->%s wallet=%s->%s webhookUrl=%q->%q testWebhookUrl=%q->%q returnDomains=%q->%q",
+		log.Printf("[tsa-pay] AUDIT merchant=%s actor=%s fields=settlement liveEnabled=%t->%t bank=%s->%s account=%s->%s wallet=%s->%s webhookUrl=%q->%q testWebhookUrl=%q->%q returnDomains=%q->%q allowedIPs=%q->%q",
 			id, actor, before.LiveEnabled, updated.LiveEnabled,
 			payLast4(before.BankCode), payLast4(updated.BankCode),
 			payLast4(before.AccountNumber), payLast4(updated.AccountNumber),
@@ -826,6 +910,7 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 			PayRedactURL(before.WebhookURL), PayRedactURL(updated.WebhookURL),
 			PayRedactURL(before.TestWebhookURL), PayRedactURL(updated.TestWebhookURL),
 			before.ReturnDomains, updated.ReturnDomains,
+			before.AllowedIPs, updated.AllowedIPs,
 		)
 	}
 
@@ -951,6 +1036,7 @@ func payAuditChanges(before, after *models.PayMerchant) map[string]map[string]an
 	addURL("webhookUrl", before.WebhookURL, after.WebhookURL)
 	addURL("testWebhookUrl", before.TestWebhookURL, after.TestWebhookURL)
 	add("returnDomains", before.ReturnDomains, after.ReturnDomains)
+	add("allowedIps", before.AllowedIPs, after.AllowedIPs)
 	add("liveEnabled", before.LiveEnabled, after.LiveEnabled)
 	return out
 }

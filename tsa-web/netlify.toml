@@ -23,6 +23,16 @@
   to = "/favicon.png"
   status = 200
 
+# The merchant API is served at https://tsa.mcgpchain.com/api/pay/v1 only (the
+# documented base URL). It is not proxied here: a merchant who used this origin
+# instead would get Netlify's http→https redirect, which the API host refuses
+# for a key-bearing request (see tsa-api-go/deploy/README.md, Cloudflare).
+[[redirects]]
+  from = "/api/pay/v1/*"
+  to = "/404.html"
+  status = 404
+  force = true
+
 # The API, on this origin: the SameSite=Strict session cookies and the API's
 # Origin check (WEB_APP_ORIGIN) both need the browser to see ONE origin.
 # `signed` makes Netlify add x-nf-sign (HS256, secret = the site's

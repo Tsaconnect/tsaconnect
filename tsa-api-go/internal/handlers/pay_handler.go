@@ -190,12 +190,7 @@ func newPayMerchantAdminView(v services.PayMerchantView) payMerchantAdminView {
 // model, for the two handlers (Get, Update) that have one in hand rather
 // than a services.PayMerchantView from List.
 func payMerchantAdminViewFor(m *models.PayMerchant) payMerchantAdminView {
-	return newPayMerchantAdminView(services.PayMerchantView{
-		PayMerchant:   *m,
-		ReturnDomains: m.ReturnDomainList(),
-		HasLiveKey:    m.LiveKeyHash != nil,
-		HasTestKey:    m.TestKeyHash != nil,
-	})
+	return newPayMerchantAdminView(services.NewPayMerchantView(*m))
 }
 
 // GET /admin/pay/merchants?page=&limit=

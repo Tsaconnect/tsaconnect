@@ -125,8 +125,9 @@ export function Docs() {
             <Reference
               rows={[
                 ['Base URL', <C>{BASE_URL}</C>],
-                ['Authentication', <>Send your key on every request: <C>Authorization: Bearer &lt;key&gt;</C>.</>],
+                ['Authentication', <>Send your key on every request: <C>Authorization: Bearer &lt;key&gt;</C>, always over <C>https://</C>.</>],
                 ['Keys', <>A live key starts <C>tsapk_live_</C>, a test key <C>tsapk_test_</C>. The key decides the mode: a test key only ever sees test payments.</>],
+                ['Allowed IPs', <>Optional. List your servers' public addresses under <b className="font-semibold text-text-primary">API keys &amp; webhooks</b> and your live key is refused from anywhere else with <C>403 ip_not_allowed</C>, whose <C>message</C> names the address we saw. A test key is never restricted.</>],
                 ['Amounts', <>Integers in kobo: <C>8450000</C> is ₦84,500.00. The only currency is <C>NGN</C>.</>],
                 ['Responses', <>Every answer is <C>{'{"success": true, "message": …, "data": …}'}</C>; a refusal is <C>{'{"success": false, "message": …, "code": …}'}</C> (see <a href="#errors" className="font-semibold text-accent-strong hover:underline">Errors</a>).</>],
                 ['Limits', <>600 requests a minute per IP address, then 120 a minute per merchant.</>],
@@ -134,7 +135,8 @@ export function Docs() {
             />
             <Note tone="warning">
               Keep your keys on your server. Anyone holding a key can create and cancel payments as you — never put one in a web page or an app.
-              If one leaks, create a new one from your dashboard: the old key stops working at once.
+              If one leaks, create a new one from your dashboard: the old key stops working at once. A key sent over plain <C>http://</C> has
+              leaked too. Listing your servers under Allowed IPs makes a leaked live key useless anywhere else.
             </Note>
           </Section>
 
@@ -278,6 +280,7 @@ export function Docs() {
                 [<C>403</C>, <C>merchant_suspended</C>, 'Your merchant account is suspended.'],
                 [<C>403</C>, <C>live_disabled</C>, 'A live key while live payments are not enabled.'],
                 [<C>403</C>, <C>live_not_enabled</C>, "A live key before live payments are switched on for your business. Finish testing and contact TSA Connect."],
+                [<C>403</C>, <C>ip_not_allowed</C>, <>A live key from an address that is not in your Allowed IPs. The <C>message</C> names the address we saw.</>],
                 [<C>404</C>, '—', 'Reading a payment this key cannot see: a wrong id, another merchant\'s, or one from the other mode.'],
                 [<C>409</C>, '—', <>The <C>reference</C> was already used with different details, or (cancel) the payment is no longer <C>pending</C>, isn't yours, or is from the other mode.</>],
                 [<C>422</C>, '—', <>A field is out of bounds (the <C>message</C> says which), or your payouts are not set up yet.</>],

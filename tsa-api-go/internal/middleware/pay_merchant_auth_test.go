@@ -135,3 +135,42 @@ func TestPayMerchantAuth_ALiveKeyNeedsTheMerchantSwitchedLive(t *testing.T) {
 		t.Fatalf("live key, merchant switched live: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestPayMerchantAuth_ALiveKeyIsOnlyAcceptedFromItsAllowedIPs(t *testing.T) {
+	merchant := &models.PayMerchant{LiveEnabled: true, AllowedIPs: "203.0.113.7,198.51.100.0/24"}
+	auth := func(_ context.Context, raw string) (*models.PayMerchant, string, error) {
+		if raw == "tsapk_test_x" {
+			return merchant, models.PayModeTest, nil
+		}
+		return merchant, models.PayModeLive, nil
+	}
+	call := func(key, from string, liveEnabled bool) *httptest.ResponseRecorder {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.GET("/x", PayMerchantAuth(auth, liveEnabled), func(c *gin.Context) { c.Status(http.StatusOK) })
+		req := httptest.NewRequest("GET", "/x", nil)
+		req.RemoteAddr = from
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	for _, from := range []string{"203.0.113.7:4000", "198.51.100.42:4000"} {
+		if w := call("tsapk_live_x", from, true); w.Code != http.StatusOK {
+			t.Fatalf("live key from listed %s: %d %s", from, w.Code, w.Body.String())
+		}
+	}
+	w := call("tsapk_live_x", "192.0.2.50:4000", true)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"ip_not_allowed"`) ||
+		!strings.Contains(w.Body.String(), "isn't allowed from 192.0.2.50") {
+		t.Fatalf("live key from an unlisted address: %d %s — want 403 ip_not_allowed naming the address", w.Code, w.Body.String())
+	}
+	// Refused before the live switches, so a stolen key cannot probe them.
+	if w := call("tsapk_live_x", "192.0.2.50:4000", false); !strings.Contains(w.Body.String(), `"code":"ip_not_allowed"`) {
+		t.Fatalf("with live off globally: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("tsapk_test_x", "192.0.2.50:4000", true); w.Code != http.StatusOK {
+		t.Fatalf("a test key is not restricted: %d %s", w.Code, w.Body.String())
+	}
+}

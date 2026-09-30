@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,10 @@ import (
 // liveEnabled is false answers 403 live_disabled, and a live key of a merchant
 // a super admin has switched off (PayMerchant.LiveEnabled) answers 403
 // live_not_enabled. A test key is always allowed regardless of either switch.
+// A live key used from an address its merchant has not listed (see
+// PayMerchant.KeyAllowedFrom) answers 403 ip_not_allowed, naming the address
+// we saw so the merchant can list the right one; it is checked before the live
+// switches so a stolen key learns nothing more about the merchant.
 // A failed key lookup (not a bad key) answers 503 auth_unavailable.
 func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models.PayMerchant, string, error), liveEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -45,6 +50,16 @@ func PayMerchantAuth(authenticate func(ctx context.Context, raw string) (*models
 			} else {
 				utils.ErrorResponseWithCode(c, http.StatusUnauthorized, "invalid API key", "invalid_key")
 			}
+			c.Abort()
+			return
+		}
+
+		ip, _ := netip.ParseAddr(c.ClientIP()) // unparseable → the zero Addr, which no allowlist matches
+		if !m.KeyAllowedFrom(mode, ip) {
+			seen := c.ClientIP()
+			log.Printf("[tsa-pay] live key refused: merchant=%s ip=%s %s %s", m.ID, seen, c.Request.Method, c.FullPath())
+			utils.ErrorResponseWithCode(c, http.StatusForbidden,
+				"this live API key isn't allowed from "+seen+" — add it to your allowed IPs in your TSA Pay dashboard", "ip_not_allowed")
 			c.Abort()
 			return
 		}

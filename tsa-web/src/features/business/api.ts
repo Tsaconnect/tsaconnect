@@ -37,6 +37,8 @@ export type OwnMerchant = {
   webhookUrl: string;
   testWebhookUrl: string;
   returnDomains: string[];
+  /** The only addresses the live key is accepted from; empty = anywhere. An API that predates it leaves it out. */
+  allowedIps?: string[];
 };
 
 export type PaymentStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
@@ -150,7 +152,7 @@ export const requestKeyRoll = (mode: Mode, password: string) =>
   api<{ confirmation: Pending }>('/pay/merchant/keys', { method: 'POST', body: { mode, password } });
 
 /** PUT /endpoints replaces all three settings, so every call sends all three. */
-export const requestEndpoints = (b: { webhookUrl: string; testWebhookUrl: string; returnDomains: string[]; expectedVersion: number; password: string }) =>
+export const requestEndpoints = (b: { webhookUrl: string; testWebhookUrl: string; returnDomains: string[]; allowedIps: string[]; expectedVersion: number; password: string }) =>
   api<{ confirmation: Pending }>('/pay/merchant/endpoints', { method: 'PUT', body: b });
 
 export const requestWebhookSecret = (action: 'reveal' | 'roll', password: string) =>
