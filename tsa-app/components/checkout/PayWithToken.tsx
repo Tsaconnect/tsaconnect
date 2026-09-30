@@ -1,13 +1,14 @@
 // components/checkout/PayWithToken.tsx
 //
-// "Pay with another token" at checkout: the picker row and its price, the
-// confirm sheet, and the progress of a run. Presentational — the money moves in
+// Paying checkout with a swap: what it costs (under the unified "Pay with"
+// selector on the review screen — see app/(detail)/checkout), the confirm
+// sheet, and the progress of a run. Presentational — the money moves in
 // services/checkoutFundingRun (via hooks/useCheckoutFunding); every figure shown
 // is the server's funding quote.
 import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
-import { AccentCard, Button, Card, Divider, Icon, PressableScale, Sheet, Spinner, Stepper, Text } from '@/components/ui';
+import { AccentCard, Button, Card, Divider, Icon, Sheet, Spinner, Stepper, Text } from '@/components/ui';
 import type { FundingQuote } from '@/services/checkoutFundingApi';
 import { canForgetRun, etaLabel, type FundingRunState } from '@/services/checkoutFundingRun';
 import type { FundingPick } from '@/hooks/useCheckoutFunding';
@@ -17,38 +18,28 @@ import { fundingSteps } from './fundingSteps';
 const usd = (n: number) => (n < 0.01 ? '< $0.01' : `$${n.toFixed(2)}`);
 const stable = (base: string, symbol: string) => payAmountLabel(base, 6, symbol);
 
-/** The token she pays with and what it costs — under "Pay with" on the review screen. */
-export function FundingForm({
+/**
+ * What a swap-to-pay selection costs, under the unified "Pay with" row: a
+ * spinner while pricing, an error, or "You'll send about X · arrives in Y".
+ */
+export function FundingPriceLine({
   pick,
-  onPick,
   quote,
   pricing,
   error,
-  disabled,
 }: {
   pick: FundingPick | null;
-  onPick: () => void;
   quote?: FundingQuote;
   pricing: boolean;
   error?: string;
-  disabled?: boolean;
 }) {
-  const { colors, spacing } = useTheme();
+  const { spacing } = useTheme();
+  if (!pick) return null;
   return (
-    <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
-      <PressableScale onPress={onPick} disabled={disabled} accessibilityRole="button" accessibilityLabel="Choose the token to pay with">
-        <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-          <Icon name="swap" size={18} color={colors.accent} />
-          <View style={{ flex: 1 }}>
-            <Text variant="caption" color="textMuted">Pay with another token</Text>
-            <Text variant="bodyMed" weight="700">{pick ? pick.token.symbol : 'Choose a token you hold'}</Text>
-          </View>
-          <Icon name="chevronRight" size={18} color={colors.textMuted} />
-        </Card>
-      </PressableScale>
+    <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
       {pricing ? <Spinner label="Checking the price…" /> : null}
       {error ? <Text variant="bodySm" color="danger">{error}</Text> : null}
-      {quote && pick ? (
+      {quote ? (
         <Text variant="bodySm" color="textSecondary">
           {`You'll send about ${payAmountLabel(quote.fromAmount, pick.token.decimals, pick.token.symbol)} · arrives in ${etaLabel(quote.etaSeconds)}`}
         </Text>

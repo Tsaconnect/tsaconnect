@@ -361,3 +361,78 @@ it('does not wait on her balances outside holdings mode', async () => {
   const { tree } = await open({ side: 'to' });
   expect(text(tree)).toContain('Stablecoins & major coins');
 });
+
+// Checkout's unified "Pay with" picker (owner decision 2026-09-29): a "Pay
+// directly" section of rows that are not LiFi-swappable tokens at all
+// (Spendable MCGP) sits above the ordinary coin catalogue, which is relabeled
+// "Swap to pay" for that screen.
+describe('extraSections and sectionTitleOverrides', () => {
+  it('shows an extra section above the coin catalogue, and selecting a row closes the picker', async () => {
+    const onSelectExtra = jest.fn();
+    const onClose = jest.fn();
+    const { tree } = await open({
+      side: 'from',
+      holdingsOnly: true,
+      onClose,
+      extraSections: [{
+        id: 'direct',
+        title: 'Pay directly',
+        options: [
+          { key: 'usdc', symbol: 'USDC', chainLabel: 'Sonic', balance: 12.4, onSelect: onSelectExtra },
+          { key: 'mcgp', symbol: 'MCGP', label: 'Spendable MCGP', chainLabel: 'No gas, no platform fee', balance: 5, badge: 'TSA', onSelect: jest.fn() },
+        ],
+      }],
+    });
+    const t = text(tree);
+    expect(t.indexOf('Pay directly')).toBeLessThan(t.indexOf('In your wallet'));
+    expect(t).toContain('Spendable MCGP');
+    expect(t).toContain('TSA');
+    expect(t).toMatch(/12\.4/);
+
+    await pressLabel(tree, 'USDC, Sonic');
+    expect(onSelectExtra).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows an extra row even at a zero balance (unlike the coin catalogue)', async () => {
+    const { tree } = await open({
+      side: 'from',
+      holdingsOnly: true,
+      extraSections: [{
+        id: 'direct',
+        title: 'Pay directly',
+        options: [{ key: 'usdc', symbol: 'USDC', chainLabel: 'Sonic', balance: 0, onSelect: jest.fn() }],
+      }],
+    });
+    const row = tree.root.findAll(n => typeof n.props.accessibilityLabel === 'string'
+      && n.props.accessibilityLabel.startsWith('USDC, Sonic'))[0];
+    expect(rowText(row)).toMatch(/\b0\b/);
+  });
+
+  it('renames a coin section and merges sections that end up sharing the new title', async () => {
+    // USDT is "On TSA" (listed on BSC) and CREPE is "In your wallet" — both
+    // relabeled "Swap to pay" become one section, not two headings.
+    const { tree } = await open({ side: 'from', holdingsOnly: true, sectionTitleOverrides: { tsa: 'Swap to pay', wallet: 'Swap to pay' } });
+    const t = text(tree);
+    expect(t).toContain('Swap to pay');
+    expect(t).not.toContain('On TSA');
+    expect(t).not.toContain('In your wallet');
+    expect(t.match(/Swap to pay/g)).toHaveLength(1);
+    expect(t).toContain('USDT');
+    expect(t).toContain('CREPE');
+  });
+
+  it('does not show the "nothing in your wallet" message when an extra section has rows', async () => {
+    setHoldings([]);
+    const { tree } = await open({
+      side: 'from',
+      holdingsOnly: true,
+      extraSections: [{
+        id: 'direct',
+        title: 'Pay directly',
+        options: [{ key: 'usdc', symbol: 'USDC', chainLabel: 'Sonic', balance: 0, onSelect: jest.fn() }],
+      }],
+    });
+    expect(text(tree)).not.toMatch(/no coins in your wallet/i);
+  });
+});

@@ -12,18 +12,47 @@
 // Contract with the screen is unchanged from the old TokenPickerModal:
 // onSelect(token, chainId).
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { Icon, Input, PressableScale, Sheet, Spinner, Text } from '@/components/ui';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
-import { getChainByChainId, NONEVM_CHAINS, type AnyChainKey } from '@/constants/chains';
+import { getChainByChainId, NONEVM_CHAINS, type AnyChainKey, type NetworkType } from '@/constants/chains';
 import {
   getLiFiChainsCached, isBtcLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, type LiFiChain, type LiFiToken,
 } from '@/services/lifi';
-import { networksForSide, type Asset, type AssetNetwork, type PickerSide } from '@/services/assetCatalog';
+import { networksForSide, type Asset, type AssetNetwork, type AssetSection, type PickerSide } from '@/services/assetCatalog';
 import { useAssetCatalog } from '@/hooks/useAssetCatalog';
+
+/**
+ * A row the picker offers outside its own coin catalogue — a payment method
+ * that is not a LiFi-swappable token at all (Spendable MCGP), or a short-list
+ * of balances a screen already has to hand (checkout's "Pay directly"). Kept
+ * generic so any caller can add a labelled section of its own rows above the
+ * coin sections, using the same row look (avatar, chain, balance) rather than
+ * building a second sheet.
+ */
+export interface AssetPickerExtraOption {
+  key: string;
+  /** The row's symbol, drawn through TokenAvatar exactly like a coin's. */
+  symbol: string;
+  /** Shown instead of `symbol` as the row's name, e.g. "Spendable MCGP". */
+  label?: string;
+  chainKey?: AnyChainKey;
+  /** The row's method/chain text, e.g. "Sonic" or "No gas, no platform fee". */
+  chainLabel: string;
+  balance: number;
+  usdValue?: number;
+  /** A small pill next to the name, styled like the "On TSA" section's — e.g. "TSA". */
+  badge?: string;
+  onSelect: () => void;
+}
+export interface AssetPickerExtraSection {
+  id: string;
+  title: string;
+  options: AssetPickerExtraOption[];
+}
 
 export interface AssetPickerProps {
   visible: boolean;
@@ -38,10 +67,22 @@ export interface AssetPickerProps {
    */
   holdingsOnly?: boolean;
   /**
+   * Read holdings on this network regardless of the app's testnet toggle. See
+   * useWalletHoldings — omitted, the toggle decides, as before.
+   */
+  holdingsNetwork?: NetworkType;
+  /**
    * A line under the coin list, e.g. why a coin she holds is not offered. With
    * `allow`, shown only when `allow` actually keeps back a coin she holds.
    */
   note?: string;
+  /** Extra, non-catalogue rows shown above the coin sections — see AssetPickerExtraSection. */
+  extraSections?: AssetPickerExtraSection[];
+  /**
+   * Rename a coin section for this screen (e.g. "In your wallet" → "Swap to
+   * pay"). Sections that end up with the same title are shown as one.
+   */
+  sectionTitleOverrides?: Partial<Record<AssetSection['id'], string>>;
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
 }
@@ -91,15 +132,40 @@ const isUnverified = (asset: Asset, sectionId: string) =>
 
 const fmtAmount = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: n < 1 ? 6 : 4 });
 
-export default function AssetPicker({ visible, side, title, allow, holdingsOnly = false, note, onSelect, onClose }: AssetPickerProps) {
+export default function AssetPicker({
+  visible, side, title, allow, holdingsOnly = false, holdingsNetwork, note, extraSections, sectionTitleOverrides,
+  onSelect, onClose,
+}: AssetPickerProps) {
   const { colors, spacing, radius } = useTheme();
   const { formatPrice } = useCurrency();
   const [query, setQuery] = useState('');
   const [networkFor, setNetworkFor] = useState<Asset | null>(null);
   const lifi = useLiFiChainNames(visible);
-  const { sections, loading, searching, error, hidesHeld } = useAssetCatalog({ visible, side, allow, query, holdingsOnly });
+  const { sections: rawSections, loading, searching, error, hidesHeld } =
+    useAssetCatalog({ visible, side, allow, query, holdingsOnly, holdingsNetwork });
   const showNote = !!note && !loading && (!allow || hidesHeld);
   const networksOf = (asset: Asset) => networksForSide(asset, side, allow, holdingsOnly);
+
+  // A caller renaming a section (e.g. "In your wallet" → "Swap to pay") may
+  // rename several of the catalogue's own sections to the same title — merge
+  // those into one so the picker never shows the same heading twice.
+  const sections = useMemo(() => {
+    if (!sectionTitleOverrides) return rawSections;
+    const merged: AssetSection[] = [];
+    const byTitle = new Map<string, AssetSection>();
+    for (const s of rawSections) {
+      const overridden = sectionTitleOverrides[s.id];
+      if (!overridden) { merged.push(s); continue; }
+      const existing = byTitle.get(overridden);
+      if (existing) existing.assets = [...existing.assets, ...s.assets];
+      else {
+        const next = { ...s, title: overridden };
+        byTitle.set(overridden, next);
+        merged.push(next);
+      }
+    }
+    return merged;
+  }, [rawSections, sectionTitleOverrides]);
 
   // Every open starts clean.
   useEffect(() => {
@@ -192,6 +258,36 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
           <View style={{ paddingVertical: spacing.xl }}><Spinner label={searching ? 'Searching…' : 'Loading coins…'} /></View>
         ) : null}
 
+        {(extraSections ?? []).filter(s => s.options.length > 0).map(section => (
+          <View key={section.id} style={{ marginTop: spacing.md }}>
+            <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.xs }}>{section.title}</Text>
+            {section.options.map(option => (
+              <PressableScale
+                key={option.key}
+                onPress={() => { option.onSelect(); onClose(); }}
+                accessibilityRole="button"
+                accessibilityLabel={`${option.label ?? option.symbol}, ${option.chainLabel}, ${fmtAmount(option.balance)}`}
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md,
+                  borderBottomWidth: 1, borderBottomColor: colors.hairline,
+                }}
+              >
+                <TokenAvatar symbol={option.symbol} chainKey={option.chainKey} size={40} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
+                    <Text variant="bodyMed" weight="700" numberOfLines={1}>{option.label ?? option.symbol}</Text>
+                    {option.badge ? <Pill label={option.badge} fg={colors.accent} bg={colors.accentMuted} /> : null}
+                  </View>
+                  <Text variant="caption" color="textSecondary" numberOfLines={1}>{option.chainLabel}</Text>
+                </View>
+                {balanceBlock(option.balance, option.usdValue ?? 0, option.symbol) ?? (
+                  <Text variant="bodySm" weight="700" numeric>{fmtAmount(option.balance)}</Text>
+                )}
+              </PressableScale>
+            ))}
+          </View>
+        ))}
+
         {sections.map(section => (
           <View key={section.id} style={{ marginTop: spacing.md }}>
             <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.xs }}>{section.title}</Text>
@@ -242,7 +338,8 @@ export default function AssetPicker({ visible, side, title, allow, holdingsOnly 
             No coin matches that. Try pasting its contract address.
           </Text>
         ) : null}
-        {holdingsOnly && !loading && !error && sections.length === 0 ? (
+        {holdingsOnly && !loading && !error && sections.length === 0
+          && !(extraSections ?? []).some(s => s.options.length > 0) ? (
           <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.xl }}>
             No coins in your wallet yet. Buy or receive some first, then come back.
           </Text>

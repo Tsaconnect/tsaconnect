@@ -4,15 +4,20 @@
 // through /wallet/balances, plus the Solana, Bitcoin and Sui sides from the same
 // mnemonic — as flat Holding rows keyed by LiFi chain id.
 //
-// Read once per wallet and kept for a short while, so opening the picker for
-// "You pay" and then "You receive" does not reload the same balances. The last
-// read is also kept on the device: an open with nothing fresh in memory shows
-// those balances at once and swaps in the new read when it lands, instead of a
-// spinner. A screen's picker prefetches on mount, so the read is usually done
-// before the sheet opens.
+// Read once per wallet (and network) and kept for a short while, so opening
+// the picker for "You pay" and then "You receive" does not reload the same
+// balances. The last read is also kept on the device: an open with nothing
+// fresh in memory shows those balances at once and swaps in the new read when
+// it lands, instead of a spinner. A screen's picker prefetches on mount, so
+// the read is usually done before the sheet opens.
+//
+// Callers normally follow the app's testnet toggle (the default). A caller
+// whose balances must mean something specific regardless of the toggle — the
+// marketplace checkout picker, always Sonic mainnet — pins `network`
+// explicitly; the cache is keyed on wallet+network so the two never collide.
 
 import { useEffect, useState } from 'react';
-import { CHAINS, NONEVM_CHAINS, type ChainKey } from '@/constants/chains';
+import { CHAINS, NONEVM_CHAINS, type ChainKey, type NetworkType } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
@@ -21,15 +26,17 @@ import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { BTC_LIFI_CHAIN_ID, SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID } from '@/services/lifi';
 import { isNativeLiFiToken, type Holding } from '@/services/assetCatalog';
 import { persistedCache } from '@/services/persistedCache';
+import { getNetwork } from '@/hooks/useNetwork';
 
 const CACHE_MS = 60_000;
-let cache: { wallet: string; at: number; holdings: Holding[] } | null = null;
-let inFlight: { wallet: string; read: Promise<Holding[] | null> } | null = null;
+const cacheKey = (wallet: string, network: NetworkType) => `${wallet}|${network}`;
+let cache: { key: string; at: number; holdings: Holding[] } | null = null;
+let inFlight: { key: string; read: Promise<Holding[] | null> } | null = null;
 // Bumped by invalidateWalletHoldings, so a read that began before a trade
 // cannot put pre-trade balances back.
 let generation = 0;
 
-interface StoredHoldings { wallet: string; holdings: Holding[] }
+interface StoredHoldings { wallet: string; network: NetworkType; holdings: Holding[] }
 const stored = persistedCache(
   'wallet_holdings_v1',
   CACHE_MS,
@@ -79,11 +86,11 @@ export function holdingFromRow(row: WalletBalanceWithChain, fromSupportedList: b
 }
 
 /** null when every chain family failed — an unknown, never "holds nothing". */
-async function loadHoldings(wallet: string): Promise<Holding[] | null> {
+async function loadHoldings(wallet: string, network: NetworkType): Promise<Holding[] | null> {
   const [evm, sol, btc, sui] = await Promise.allSettled([
     // This client answers {success:false} rather than throwing; that is a
     // failed read, not an empty wallet.
-    getWalletBalances(undefined, wallet).then(r => {
+    getWalletBalances(undefined, wallet, network).then(r => {
       if (!r.success || !r.data) throw new Error(r.message || 'balances unavailable');
       return normalizeWalletBalances(r.data);
     }),
@@ -101,43 +108,53 @@ async function loadHoldings(wallet: string): Promise<Holding[] | null> {
   ].filter((h): h is Holding => h !== null);
 }
 
-const freshInMemory = (wallet: string) =>
-  cache && cache.wallet === wallet && Date.now() - cache.at < CACHE_MS ? cache.holdings : null;
+const freshInMemory = (wallet: string, network: NetworkType) =>
+  cache && cache.key === cacheKey(wallet, network) && Date.now() - cache.at < CACHE_MS ? cache.holdings : null;
 
-/** One read per wallet at a time: a prefetch and an open share it. */
-function readHoldings(wallet: string): Promise<Holding[] | null> {
-  if (inFlight?.wallet === wallet) return inFlight.read;
+/** One read per wallet+network at a time: a prefetch and an open share it. */
+function readHoldings(wallet: string, network: NetworkType): Promise<Holding[] | null> {
+  const key = cacheKey(wallet, network);
+  if (inFlight?.key === key) return inFlight.read;
   const startedIn = generation;
-  const read = loadHoldings(wallet)
+  const read = loadHoldings(wallet, network)
     .then(next => {
       // A load where nothing answered is not remembered, so the next open retries.
       if (next && startedIn === generation) {
-        cache = { wallet, at: Date.now(), holdings: next };
-        stored.write({ wallet, holdings: next });
+        cache = { key, at: Date.now(), holdings: next };
+        stored.write({ wallet, network, holdings: next });
       }
       return next;
     })
     .finally(() => { if (inFlight?.read === read) inFlight = null; });
-  inFlight = { wallet, read };
+  inFlight = { key, read };
   return read;
 }
 
-/** The last balances this device saw for `wallet`, and whether they are recent enough to skip a read. */
-async function storedHoldings(wallet: string): Promise<{ holdings: Holding[]; fresh: boolean } | null> {
+/** The last balances this device saw for `wallet` on `network`, and whether they are recent enough to skip a read. */
+async function storedHoldings(wallet: string, network: NetworkType): Promise<{ holdings: Holding[]; fresh: boolean } | null> {
   const hit = await stored.read();
-  return hit && hit.value.wallet === wallet ? { holdings: hit.value.holdings, fresh: hit.fresh } : null;
+  return hit && hit.value.wallet === wallet && hit.value.network === network
+    ? { holdings: hit.value.holdings, fresh: hit.fresh }
+    : null;
 }
 
-/** Start reading the active wallet's balances before the picker opens. */
-export async function prefetchWalletHoldings(): Promise<void> {
+/**
+ * Start reading the active wallet's balances before the picker opens. Follows
+ * the app's testnet toggle unless `network` pins it (the checkout picker
+ * always pins 'mainnet' — see the file header).
+ */
+export async function prefetchWalletHoldings(network: NetworkType = getNetwork()): Promise<void> {
   const wallet = await getActiveWallet();
-  if (!wallet || freshInMemory(wallet)) return;
-  await readHoldings(wallet);
+  if (!wallet || freshInMemory(wallet, network)) return;
+  await readHoldings(wallet, network);
 }
 
-export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; loading: boolean } {
-  // Starts empty, not from the cache: the cache may be another wallet's until
-  // the active wallet is known below.
+export function useWalletHoldings(
+  enabled: boolean,
+  network: NetworkType = getNetwork(),
+): { holdings: Holding[]; loading: boolean } {
+  // Starts empty, not from the cache: the cache may be another wallet's (or
+  // network's) until the active wallet is known below.
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [loading, setLoading] = useState(false);
   // Until the first read settles, "no holdings" means "not read yet" — the
@@ -152,11 +169,11 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
       const wallet = await getActiveWallet();
       if (cancelled) return;
       if (!wallet) { settle([]); return; }
-      const fresh = freshInMemory(wallet);
+      const fresh = freshInMemory(wallet, network);
       if (fresh) { settle(fresh); return; }
 
       // Something to show while the read is out: the device copy, written with every read.
-      const earlier = await storedHoldings(wallet);
+      const earlier = await storedHoldings(wallet, network);
       if (cancelled) return;
       if (earlier) {
         settle(earlier.holdings);
@@ -164,14 +181,14 @@ export function useWalletHoldings(enabled: boolean): { holdings: Holding[]; load
       } else {
         setLoading(true);
       }
-      const next = await readHoldings(wallet);
+      const next = await readHoldings(wallet, network);
       if (cancelled) return;
       if (next) settle(next);
       else if (!earlier) settle([]);
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [enabled]);
+  }, [enabled, network]);
 
   return { holdings, loading: enabled && (loading || !settled) };
 }

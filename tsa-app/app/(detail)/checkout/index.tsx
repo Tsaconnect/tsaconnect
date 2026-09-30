@@ -1,26 +1,33 @@
 // app/(detail)/checkout/index.tsx
 //
-// Checkout — review the cart, pick a delivery address and pay token, confirm
-// the exact amount in a sheet, then run the escrow flow (createOrders → approve
-// → escrow → submit), signing and broadcasting client-side.
+// Checkout — review the cart, pick a delivery address and a "Pay with" asset,
+// confirm the exact amount in a sheet, then run the escrow flow (createOrders
+// → approve → escrow → submit), signing and broadcasting client-side.
 //
 // FINANCIAL screen. Every amount shown comes from the backend cart quote
 // (POST /orders/quote), which is priced by the same code that creates the
 // orders — so the total a buyer confirms is the total the wallet is asked to
 // approve. The escrow sign/broadcast/submit sequence itself is unchanged.
 //
-// MCGP is the exception: it is paid from Spendable MCGP (the entitlement
-// balance), never from MCGP in the wallet. Its balance, shortfall and payment
-// all go through that path — the backend holds the MCGP with no signature and
-// no gas, so the buyer authorizes it with the app's PIN/biometric prompt.
-//
-// "Pay with another token": any token she holds on an EVM chain is swapped
-// through LiFi into USDC/USDT in HER OWN wallet on Sonic, and the same escrow
-// flow then pays each order from there (services/checkoutFundingRun). That run
-// is app-wide and persisted, so it survives leaving the screen or a restart.
+// ONE "Pay with" selector (owner decision 2026-09-29, replacing separate
+// chips + a "pay with another token" link) covers three ways to pay
+// (utils/checkoutPaySelection.PaySelection):
+//   - direct: Sonic USDC or USDT she already holds — today's escrow
+//     approve+createOrder, unchanged.
+//   - mcgp: Spendable MCGP (the entitlement balance), never wallet MCGP — the
+//     backend holds it with no signature and no gas, so the buyer authorizes
+//     it with the app's PIN/biometric prompt instead.
+//   - swap: any other EVM holding, swapped through LiFi into Sonic USDC in HER
+//     OWN wallet first, then paid the same way (services/checkoutFundingRun).
+//     That run is app-wide and persisted, so it survives leaving the screen or
+//     a restart.
+// checkoutPaySelection.defaultPaySelection picks a sensible default (USDC →
+// Spendable MCGP → smallest sufficient swap holding → USDC-with-shortfall) and
+// is re-run whenever the total changes, but only until she picks for herself.
 //
 // Everything here is Sonic MAINNET whatever the app's testnet toggle says: the
-// escrow lives there, so balances, signing and the funding swap are pinned to it.
+// escrow lives there, so balances, holdings, signing and the funding swap are
+// all pinned to it.
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, ScrollView, Alert, Image } from 'react-native';
 import { router } from 'expo-router';
@@ -41,6 +48,7 @@ import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '@/hooks/useKycVerification';
 import { listingAmount, quoteUnits, useCheckoutQuote, useQuoteFormat } from '@/hooks/useCheckoutQuote';
 import { useCheckoutBalances } from '@/hooks/useCheckoutBalances';
+import { useWalletHoldings } from '@/hooks/useWalletHoldings';
 import { ConfirmPaymentSheet } from '@/components/checkout/ConfirmPaymentSheet';
 import { DeliveryAddressSheet } from '@/components/checkout/DeliveryAddressSheet';
 import { useDeliveryAddresses } from '@/hooks/useDeliveryAddresses';
@@ -49,11 +57,21 @@ import { PaymentProgress, type PaymentPhase } from '@/components/checkout/Paymen
 import { QuoteBreakdown } from '@/components/checkout/QuoteBreakdown';
 import { useTheme } from '@/theme';
 import { MARKETPLACE_TAB } from '@/constants/routes';
-import AssetPicker from '@/components/assets/AssetPicker';
-import { FundingConfirmSheet, FundingForm, FundingProgressView } from '@/components/checkout/PayWithToken';
+import AssetPicker, { type AssetPickerExtraOption } from '@/components/assets/AssetPicker';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
+import { getChainByChainId } from '@/constants/chains';
+import { isNativeLiFiToken } from '@/services/assetCatalog';
+import { FundingConfirmSheet, FundingPriceLine, FundingProgressView } from '@/components/checkout/PayWithToken';
 import { useCheckoutFundingRun, useFundingPrice, type FundingPick } from '@/hooks/useCheckoutFunding';
 import { canForgetRun } from '@/services/checkoutFundingRun';
 import { fundingPickerAllow } from '@/utils/fundingPicker';
+import {
+  defaultPaySelection,
+  orderTokenFor,
+  payShortfallMessage,
+  swapCandidatesFromHoldings,
+  type PaySelection,
+} from '@/utils/checkoutPaySelection';
 import { useNetwork } from '@/hooks/useNetwork';
 import {
   BottomActionBar,
@@ -71,16 +89,10 @@ import {
 
 type CheckoutStep = 'review' | 'signing' | 'success';
 
-const SUPPORTED_TOKENS = ['USDC', 'USDT', 'MCGP'] as const;
-
-// Brand-identity colors for each stablecoin/token (used only to tint the token
-// icon chip so the selector reads as the real coin). These are token identity,
-// not UI theme — all surface/text chrome comes from useTheme tokens below.
-const TOKEN_META: Record<string, { icon: string; color: string }> = {
-  USDC: { icon: 'card', color: '#2775CA' },
-  USDT: { icon: 'card', color: '#26A17B' },
-  MCGP: { icon: 'pricetag', color: '#D4AF37' },
-};
+// The "Swap to pay" side of the selector always targets Sonic USDC (see
+// checkoutPaySelection.orderTokenFor): a held Sonic USDT still pays directly,
+// never as a swap into itself.
+const SWAP_ALLOW = fundingPickerAllow('USDC');
 
 const formatBalance = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 2 });
 
@@ -93,7 +105,12 @@ const CheckoutScreen = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [step, setStep] = useState<CheckoutStep>('review');
-  const [selectedToken, setSelectedToken] = useState<string>('USDC');
+  // What she is about to pay with (checkoutPaySelection.PaySelection): direct
+  // Sonic USDC/USDT, Spendable MCGP, or a swap. Starts null (still computing
+  // the default) and is re-picked whenever the total changes, but only until
+  // `manualSelection` is set — she chose for herself via the "Change" picker.
+  const [selection, setSelection] = useState<PaySelection | null>(null);
+  const manualSelection = useRef(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [signingPhase, setSigningPhase] = useState<PaymentPhase>('idle');
   const [currentOrderIndex, setCurrentOrderIndex] = useState(0);
@@ -121,9 +138,6 @@ const CheckoutScreen = () => {
   } = useDeliveryAddresses();
   const { currency, rate } = useCurrency();
   const { network } = useNetwork();
-  // Pay from the wallet's own USDC/USDT/Spendable MCGP, or swap another token in first.
-  const [payMode, setPayMode] = useState<'wallet' | 'swap'>('wallet');
-  const [fundingPick, setFundingPick] = useState<FundingPick | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [fundingConfirmOpen, setFundingConfirmOpen] = useState(false);
   const { state: funding, runner: fundingRunner } = useCheckoutFundingRun();
@@ -190,7 +204,11 @@ const CheckoutScreen = () => {
   );
   const totalQuantity = cartData?.summary?.totalQuantity ?? items.reduce((n, it) => n + it.quantity, 0);
   const feeConfig = cartData?.feeConfig;
-  const isMCGP = selectedToken === 'MCGP';
+  const isMCGP = selection?.kind === 'mcgp';
+  const swapMode = selection?.kind === 'swap';
+  // The order token an order/quote is created for — always USDC for a swap
+  // (checkoutPaySelection.orderTokenFor).
+  const orderToken = orderTokenFor(selection);
   // Service line items charge a "Call-out fee", not "Shipping". Relabel the
   // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
   const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
@@ -225,23 +243,28 @@ const CheckoutScreen = () => {
     [items],
   );
 
-  const {
-    quote,
-    loading: quoteLoading,
-    error: quoteError,
-    refresh: refreshQuote,
-  } = useCheckoutQuote({
-    token: selectedToken,
-    city: location?.city ?? '',
-    state: location?.state ?? '',
-    country: location?.country ?? '',
-    serviceTiers,
-    enabled: hasAddress && items.length > 0 && step === 'review',
-    cartKey,
+  // Always-on quotes for the two tokens the default-selection algorithm needs
+  // to compare against her balances (checkoutPaySelection.defaultPaySelection)
+  // — a direct USDC payment and Spendable MCGP both need the total in their
+  // own units. A USDT quote runs only when she has actually picked Sonic USDT
+  // directly (not part of the default, only a manual "Pay directly" choice).
+  const quoteBase = { city: location?.city ?? '', state: location?.state ?? '', country: location?.country ?? '', serviceTiers, cartKey };
+  const reviewing = hasAddress && items.length > 0 && step === 'review';
+  const usdcQuote = useCheckoutQuote({ token: 'USDC', ...quoteBase, enabled: reviewing });
+  const mcgpQuote = useCheckoutQuote({ token: 'MCGP', ...quoteBase, enabled: reviewing });
+  const usdtQuote = useCheckoutQuote({
+    token: 'USDT', ...quoteBase,
+    enabled: reviewing && selection?.kind === 'direct' && selection.token === 'USDT',
   });
+  const activeQuote = isMCGP ? mcgpQuote : orderToken === 'USDT' ? usdtQuote : usdcQuote;
+  const { quote, loading: quoteLoading, error: quoteError, refresh: refreshQuote } = activeQuote;
   const fmt = useQuoteFormat(quote);
   const paidFmt = useQuoteFormat(paidQuote);
   const { balances, address: walletAddress, refresh: refreshBalances } = useCheckoutBalances();
+  // What "Swap to pay" may offer, and what the smart default picks from — held
+  // regardless of the app's testnet toggle: a checkout swap is always Sonic
+  // mainnet (see useWalletHoldings).
+  const { holdings } = useWalletHoldings(true, 'mainnet');
 
   const quoteByProduct = useMemo(() => {
     const map = new Map<string, NonNullable<typeof quote>['lines'][number]>();
@@ -264,29 +287,51 @@ const CheckoutScreen = () => {
     void fundingRunner.resume();
   }, [fundingRunner]);
 
-  // Not offered on the testnet toggle: the picker lists the active network's
-  // holdings, and a checkout's funding is always a mainnet swap.
-  const swapMode = payMode === 'swap' && !isMCGP && network !== 'testnet';
+  // The smart default (checkoutPaySelection spec §3): USDC → Spendable MCGP →
+  // smallest sufficient swap holding → USDC-with-shortfall — re-run whenever
+  // the total or a balance changes, but only until she picks for herself.
+  useEffect(() => {
+    if (manualSelection.current || !reviewing) return;
+    const usdcNeeded = usdcQuote.quote ? quoteUnits(usdcQuote.quote.totals.total, usdcQuote.quote.decimals) : null;
+    const mcgpNeeded = mcgpQuote.quote ? quoteUnits(mcgpQuote.quote.totals.total, mcgpQuote.quote.decimals) : null;
+    const totalUsd = usdcQuote.quote && usdcNeeded != null ? usdcNeeded * usdcQuote.quote.usdPerToken : null;
+    setSelection(defaultPaySelection({
+      usdcBalance: balances.USDC,
+      usdcNeeded,
+      mcgpBalance: balances.MCGP,
+      mcgpNeeded,
+      totalUsd,
+      swapCandidates: swapCandidatesFromHoldings(holdings),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- usdcQuote/mcgpQuote objects are the real trigger; their .quote identity changes when the total does.
+  }, [usdcQuote.quote, mcgpQuote.quote, balances.USDC, balances.MCGP, holdings, reviewing]);
+
+  // A swap always targets Sonic USDC in her own wallet (checkoutFundingRun);
+  // derived from `selection` rather than kept as its own state, so the two can
+  // never drift apart.
+  const fundingPick: FundingPick | null = useMemo(
+    () => (selection?.kind === 'swap' ? { token: selection.token, chainId: selection.chainId } : null),
+    [selection],
+  );
   // The cart quote's own fields, so the server prices the very cart the orders
   // will be created from (useFundingPrice keys on its content, not identity).
-  const fundingCart =
-    location && !isMCGP
-      ? {
-          token: selectedToken,
-          buyerCity: location.city,
-          buyerState: location.state,
-          buyerCountry: location.country,
-          serviceTiers,
-          deliveryAddressId: deliveryAddress?.id,
-        }
-      : null;
+  const fundingCart = location
+    ? {
+        token: orderToken,
+        buyerCity: location.city,
+        buyerState: location.state,
+        buyerCountry: location.country,
+        serviceTiers,
+        deliveryAddressId: deliveryAddress?.id,
+      }
+    : null;
   const {
     price: fundingPrice,
     pricing: fundingPricing,
     stale: fundingStale,
     reprice: repriceFunding,
   } = useFundingPrice({
-    pick: swapMode ? fundingPick : null,
+    pick: fundingPick,
     wallet: walletAddress,
     cart: fundingCart,
     live: swapMode && step === 'review' && funding.stage === 'idle',
@@ -310,11 +355,69 @@ const CheckoutScreen = () => {
     live: !!retryRecord,
   });
   const [retryConfirmOpen, setRetryConfirmOpen] = useState(false);
-  const fundingAllow = useMemo(() => fundingPickerAllow(selectedToken), [selectedToken]);
 
-  const tokenBalance = balances[selectedToken as 'USDC' | 'USDT' | 'MCGP'];
+  const tokenBalance =
+    selection?.kind === 'mcgp' ? balances.MCGP : selection?.kind === 'direct' ? balances[selection.token] : null;
   const totalUnits = quote ? quoteUnits(quote.totals.total, quote.decimals) : null;
-  const shortOnToken = tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
+  const shortOnToken = !swapMode && tokenBalance != null && totalUnits != null && tokenBalance < totalUnits;
+  const shortfallText =
+    shortOnToken && quote && selection && (selection.kind === 'direct' || selection.kind === 'mcgp')
+      ? payShortfallMessage({
+          kind: selection.kind,
+          token: selection.kind === 'direct' ? selection.token : undefined,
+          neededLabel: fmt.token(quote.totals.total),
+          haveLabel: `${formatBalance(tokenBalance!)} ${selection.kind === 'mcgp' ? 'MCGP' : selection.token}`,
+        })
+      : null;
+
+  // The row under "Pay with": what to draw and what it says, for whichever
+  // kind of selection is active.
+  const payRow = useMemo(() => {
+    if (!selection) return null;
+    if (selection.kind === 'direct') {
+      return {
+        symbol: selection.token, name: selection.token, chainLabel: 'Sonic', chainKey: 'sonic' as const,
+        balance: balances[selection.token] ?? 0, badge: undefined as string | undefined,
+      };
+    }
+    if (selection.kind === 'mcgp') {
+      return {
+        symbol: 'MCGP', name: 'Spendable MCGP', chainLabel: 'No gas, no platform fee', chainKey: 'sonic' as const,
+        balance: balances.MCGP ?? 0, badge: 'TSA',
+      };
+    }
+    const held = holdings.find(h => h.chainId === selection.chainId
+      && (h.native ? isNativeLiFiToken(selection.token) : h.address.toLowerCase() === selection.token.address.toLowerCase()));
+    return {
+      symbol: selection.token.symbol, name: selection.token.symbol,
+      chainLabel: getChainByChainId(selection.chainId)?.name ?? `Chain ${selection.chainId}`,
+      chainKey: getChainByChainId(selection.chainId)?.key,
+      balance: held?.balance ?? 0, badge: undefined as string | undefined,
+    };
+  }, [selection, balances, holdings]);
+
+  // "Pay directly" — always Sonic USDC (even unfunded, the default target)
+  // and Spendable MCGP; Sonic USDT joins only when she actually holds some.
+  const payDirectOptions: AssetPickerExtraOption[] = useMemo(() => {
+    const pick = (sel: PaySelection) => { manualSelection.current = true; setSelection(sel); };
+    const options: AssetPickerExtraOption[] = [
+      {
+        key: 'usdc', symbol: 'USDC', chainLabel: 'Sonic', chainKey: 'sonic',
+        balance: balances.USDC ?? 0, onSelect: () => pick({ kind: 'direct', token: 'USDC' }),
+      },
+    ];
+    if ((balances.USDT ?? 0) > 0) {
+      options.push({
+        key: 'usdt', symbol: 'USDT', chainLabel: 'Sonic', chainKey: 'sonic',
+        balance: balances.USDT ?? 0, onSelect: () => pick({ kind: 'direct', token: 'USDT' }),
+      });
+    }
+    options.push({
+      key: 'mcgp', symbol: 'MCGP', label: 'Spendable MCGP', chainLabel: 'No gas, no platform fee', chainKey: 'sonic',
+      badge: 'TSA', balance: balances.MCGP ?? 0, onSelect: () => pick({ kind: 'mcgp' }),
+    });
+    return options;
+  }, [balances.USDC, balances.USDT, balances.MCGP]);
 
   // --- Step 1 → 2: validate, then show the confirm sheet ---
   const openConfirm = async () => {
@@ -368,7 +471,7 @@ const CheckoutScreen = () => {
       pricedFromAmount: priced.fromAmount,
       createOrders: async () => {
         const res = await createOrders(
-          selectedToken,
+          orderToken,
           location.city,
           location.state,
           location.country,
@@ -435,7 +538,7 @@ const CheckoutScreen = () => {
     let newOrders: Order[];
     try {
       const createResult = await createOrders(
-        selectedToken,
+        orderToken,
         location.city,
         location.state,
         location.country,
@@ -611,7 +714,7 @@ const CheckoutScreen = () => {
           <FundingProgressView
             state={funding}
             sourceSymbol={rec?.token.symbol ?? fundingPick?.token.symbol ?? 'your token'}
-            orderToken={rec?.orders[0]?.token ?? selectedToken}
+            orderToken={rec?.orders[0]?.token ?? orderToken}
             orderNames={orderNames}
             onContinue={() => void fundingRunner.resume()}
             onPayAgain={payAgain}
@@ -879,7 +982,7 @@ const CheckoutScreen = () => {
           })}
         </Card>
 
-        {/* Payment Token */}
+        {/* Pay with — one selector: direct Sonic USDC/USDT, Spendable MCGP, or a swap. */}
         <Card>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
             <Icon name="wallet" size={16} color={colors.accent} />
@@ -889,92 +992,47 @@ const CheckoutScreen = () => {
           </View>
           {network === 'testnet' ? (
             <Notice tone="danger" icon="info">
-              {"Marketplace payments use real funds on Sonic mainnet — testnet tokens can't pay."}
+              {'Marketplace payments use real funds on Sonic mainnet.'}
             </Notice>
           ) : null}
-          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: network === 'testnet' ? spacing.sm : 0 }}>
-            {SUPPORTED_TOKENS.map((tk) => {
-              const meta = TOKEN_META[tk];
-              const active = selectedToken === tk;
-              const bal = balances[tk];
-              return (
-                <PressableScale
-                  key={tk}
-                  onPress={() => {
-                    setSelectedToken(tk);
-                    if (tk === 'MCGP') setPayMode('wallet');
-                  }}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={`Pay with ${tk === 'MCGP' ? 'Spendable MCGP' : tk}${bal != null ? `, balance ${formatBalance(bal)}` : ''}`}
-                  style={{
-                    flex: 1,
-                    alignItems: 'center',
-                    paddingVertical: spacing.md,
-                    paddingHorizontal: spacing.sm,
-                    borderRadius: radius.md,
-                    borderWidth: 1.5,
-                    borderColor: active ? colors.accent : colors.border,
-                    backgroundColor: active ? colors.accentMuted : colors.surfaceAlt,
-                    gap: spacing.xs,
-                  }}
-                >
-                  <View
-                    style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: radius.pill,
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                      backgroundColor: active ? meta.color + '22' : colors.surfaceAlt,
-                    }}
-                  >
-                    <Icon name={meta.icon as any} size={18} color={active ? meta.color : colors.textMuted} />
-                  </View>
-                  <Text variant="bodySm" weight="700" style={active ? { color: meta.color } : undefined}>
-                    {tk}
-                  </Text>
-                  <Text variant="caption" color="textMuted" numeric>
-                    {bal != null ? `${tk === 'MCGP' ? 'Spendable' : 'Bal'} ${formatBalance(bal)}` : '—'}
-                  </Text>
-                </PressableScale>
-              );
-            })}
-          </View>
-          {!isMCGP && network !== 'testnet' ? (
-            swapMode ? (
-              <>
-                <FundingForm
-                  pick={fundingPick}
-                  onPick={() => setPickerOpen(true)}
-                  quote={fundingPrice?.quote}
-                  pricing={fundingPricing}
-                  error={fundingPrice?.error}
-                />
-                <PressableScale onPress={() => setPayMode('wallet')} style={{ paddingVertical: spacing.sm }}>
-                  <Text variant="bodySm" weight="600" color="accent">{`Pay with ${selectedToken} in my wallet instead`}</Text>
-                </PressableScale>
-              </>
-            ) : (
-              <PressableScale
-                onPress={() => {
-                  setPayMode('swap');
-                  if (!fundingPick) setPickerOpen(true);
-                }}
-                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingTop: spacing.md }}
-                accessibilityRole="button"
-              >
-                <Icon name="swap" size={16} color={colors.accent} />
-                <Text variant="bodySm" weight="600" color="accent">Pay with another token</Text>
-              </PressableScale>
-            )
+          {payRow ? (
+            <PressableScale
+              onPress={() => setPickerOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={`Pay with ${payRow.name}, ${payRow.chainLabel}, balance ${formatBalance(payRow.balance)}. Change`}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.md,
+                paddingVertical: spacing.sm,
+                marginTop: network === 'testnet' ? spacing.sm : 0,
+              }}
+            >
+              <TokenAvatar symbol={payRow.symbol} chainKey={payRow.chainKey} size={40} />
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                  <Text variant="bodyMed" weight="700">{payRow.name}</Text>
+                  {payRow.badge ? (
+                    <View style={{ backgroundColor: colors.accentMuted, borderRadius: radius.pill, paddingHorizontal: 6, paddingVertical: 1 }}>
+                      <Text variant="caption" weight="700" color="accent">{payRow.badge}</Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text variant="bodySm" color="textSecondary" numeric>
+                  {`${payRow.chainLabel} · ${formatBalance(payRow.balance)}`}
+                </Text>
+              </View>
+              <Text variant="bodySm" weight="600" color="accent">Change</Text>
+              <Icon name="chevronRight" size={18} color={colors.textMuted} />
+            </PressableScale>
+          ) : (
+            <Spinner label="Loading your balances…" />
+          )}
+          {swapMode ? (
+            <FundingPriceLine pick={fundingPick} quote={fundingPrice?.quote} pricing={fundingPricing} error={fundingPrice?.error} />
           ) : null}
-          {swapMode ? null : shortOnToken ? (
-            <Notice tone="danger" icon="info">
-              {isMCGP
-                ? `Not enough Spendable MCGP. You need ${fmt.token(quote!.totals.total)}; your Spendable MCGP balance is ${formatBalance(tokenBalance!)} MCGP. MCGP in your wallet can't pay.`
-                : `Not enough ${selectedToken}. You need ${fmt.token(quote!.totals.total)}; your balance is ${formatBalance(tokenBalance!)} ${selectedToken}.`}
-            </Notice>
+          {swapMode ? null : shortfallText ? (
+            <Notice tone="danger" icon="info">{shortfallText}</Notice>
           ) : isMCGP ? (
             <Notice tone="success" icon="star">
               Paid from your Spendable MCGP: no gas, no platform fee
@@ -1055,11 +1113,15 @@ const CheckoutScreen = () => {
         visible={pickerOpen}
         side="from"
         holdingsOnly
+        holdingsNetwork="mainnet"
         title="Pay with"
-        allow={fundingAllow}
-        note="Tokens on EVM networks you hold. MCGP in your wallet can't pay."
+        allow={SWAP_ALLOW}
+        note="Coins on other networks can't pay here; MCGP in your wallet can't pay."
+        extraSections={[{ id: 'direct', title: 'Pay directly', options: payDirectOptions }]}
+        sectionTitleOverrides={{ tsa: 'Swap to pay', major: 'Swap to pay', wallet: 'Swap to pay' }}
         onSelect={(token, chainId) => {
-          setFundingPick({ token: { ...token, chainId }, chainId });
+          manualSelection.current = true;
+          setSelection({ kind: 'swap', token: { ...token, chainId }, chainId });
           setPickerOpen(false);
         }}
         onClose={() => setPickerOpen(false)}
