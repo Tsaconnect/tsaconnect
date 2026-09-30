@@ -41,6 +41,7 @@ import { prefetchWalletHoldings, useWalletHoldings } from '@/hooks/useWalletHold
 import { persistedCache } from '@/services/persistedCache';
 import { resolveLiFiChainId } from '@/utils/spotChains';
 import type { SpotListing } from '@/services/spotApi';
+import type { NetworkType } from '@/constants/chains';
 
 // The backend refreshes LiFi's list (and the prices on it) daily; the device
 // copy is re-read after half that, so a shown price is never much older.
@@ -137,11 +138,17 @@ interface Options {
    * what she can sell.
    */
   holdingsOnly?: boolean;
+  /**
+   * Read holdings on this network regardless of the app's testnet toggle —
+   * the marketplace checkout picker always means Sonic mainnet. Omitted, the
+   * toggle decides, as before.
+   */
+  holdingsNetwork?: NetworkType;
 }
 
-export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = false }: Options) {
+export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = false, holdingsNetwork }: Options) {
   const { listings, loading: listingsLoading, error: listingsError } = useSpotListings();
-  const { holdings, loading: holdingsLoading } = useWalletHoldings(visible);
+  const { holdings, loading: holdingsLoading } = useWalletHoldings(visible, holdingsNetwork);
 
   const [majorTokens, setMajorTokens] = useState<LiFiToken[]>([]);
   const [listedTokens, setListedTokens] = useState<LiFiToken[]>([]);
@@ -162,7 +169,7 @@ export function useAssetCatalog({ visible, side, allow, query, holdingsOnly = fa
     return () => { cancelled = true; };
   }, [visible]);
 
-  useEffect(() => { prefetchWalletHoldings().catch(() => {}); }, []);
+  useEffect(() => { prefetchWalletHoldings(holdingsNetwork).catch(() => {}); }, [holdingsNetwork]);
 
   // Keyed on what the listings say, not the array's identity, so a refetch
   // that returns the same listings does not re-resolve them.
