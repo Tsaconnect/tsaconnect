@@ -62,6 +62,11 @@ type LiFiRoute struct {
 	// wallet's native balance has to be compared against. The USD figure
 	// cannot answer that question: it prices the gas, not the coin.
 	GasCostWei *big.Int
+	// TxGasPriceWei is the price the transaction is signed at (maxFeePerGas,
+	// else gasPrice). With GasLimit it is what a node reserves from her
+	// balance before accepting the tx — more than GasCostWei, an estimate of
+	// what the tx will use. nil when LiFi sent neither.
+	TxGasPriceWei *big.Int
 	// ToTokenDecimals and ToTokenSymbol come from LiFi's own action.toToken,
 	// never the caller: the server must not trust the client for either.
 	ToTokenDecimals int
@@ -191,10 +196,12 @@ type lifiQuoteResponse struct {
 		} `json:"toToken"`
 	} `json:"action"`
 	TransactionRequest struct {
-		To       string `json:"to"`
-		Data     string `json:"data"`
-		Value    string `json:"value"`
-		GasLimit string `json:"gasLimit"`
+		To           string `json:"to"`
+		Data         string `json:"data"`
+		Value        string `json:"value"`
+		GasLimit     string `json:"gasLimit"`
+		GasPrice     string `json:"gasPrice"`
+		MaxFeePerGas string `json:"maxFeePerGas"`
 	} `json:"transactionRequest"`
 }
 
@@ -289,6 +296,7 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		ValidUntil:      parsed.Estimate.ValidUntil,
 	}
 	route.Raw = json.RawMessage(body)
+	route.TxGasPriceWei = lifiTxGasPrice(parsed.TransactionRequest.MaxFeePerGas, parsed.TransactionRequest.GasPrice)
 	route.ToTokenDecimals = parsed.Action.ToToken.Decimals
 	route.ToTokenSymbol = parsed.Action.ToToken.Symbol
 	// Every USD figure prices a budget, so one that is not a finite number
@@ -405,4 +413,14 @@ func IsIntegratorFeeUnconfigured(body []byte) bool {
 	}
 	msg := strings.ToLower(parsed.Message)
 	return strings.Contains(msg, "not configured for collecting fees")
+}
+
+// lifiTxGasPrice is the first positive hex price of maxFee, gasPrice, or nil.
+func lifiTxGasPrice(maxFee, gasPrice string) *big.Int {
+	for _, v := range []string{maxFee, gasPrice} {
+		if p, err := hexutil.DecodeBig(strings.TrimSpace(v)); err == nil && p.Sign() > 0 {
+			return p
+		}
+	}
+	return nil
 }

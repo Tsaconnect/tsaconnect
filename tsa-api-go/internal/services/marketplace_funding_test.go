@@ -324,7 +324,7 @@ func TestFunding_TooCostlyIsRefusedPlainly(t *testing.T) {
 // Every refusal about what converting costs — fees, her balance, gas, or a
 // route LiFi will not give — points her at Spendable MCGP, which needs neither.
 func TestFunding_CostRefusalsPointAtSpendableMCGP(t *testing.T) {
-	for _, err := range []error{ErrFundingTooCostly, ErrFundingShortBalance, ErrFundingNeedsGas, ErrFundingKYC, ErrFundingKeepS, ErrFundingUnavailable} {
+	for _, err := range []error{ErrFundingTooCostly, ErrFundingShortBalance, ErrFundingNeedsGas, ErrFundingSourceGas, ErrFundingKYC, ErrFundingKeepS, ErrFundingUnavailable} {
 		if !strings.Contains(err.Error(), fundingMCGPHint) {
 			t.Errorf("%q does not offer Spendable MCGP", err)
 		}
@@ -376,19 +376,59 @@ func TestFunding_AdmittedWhenHerSourceBalanceCoversTheRoute(t *testing.T) {
 }
 
 // Paying with a chain's own coin spends from the balance that also pays the
-// route's gas, so both must fit.
+// route's gas — and a node reserves the signed LIMIT at its price, not LiFi's
+// estimate, so the swap plus that reserve must fit.
 func TestFunding_NativeSourceMustAlsoCoverTheRouteGas(t *testing.T) {
 	r := newFundingRig(t)
 	g := r.group(t, "80000")
-	r.quoter.quote.Route.GasCostWei = big.NewInt(1_000_000)
+	r.quoter.quote.Route.GasCostWei = big.NewInt(1_000_000) // the estimate
+	r.quoter.quote.Route.TxGasPriceWei = big.NewInt(10)     // 300,000 limit × 10 × 1.25 = 3,750,000 reserved
 	src := FundingSource{ChainID: 56, Token: evmNativeAddress, Address: fundingWallet}
-	r.sources.native = big.NewInt(160_000_000_000_000_000) // the swap, but not its gas
+	r.sources.native = big.NewInt(160_000_000_001_000_000) // the swap + the estimate, not the reserve
 	if _, err := r.svc.Quote(context.Background(), r.user, g, src); !errors.Is(err, ErrFundingShortBalance) {
 		t.Fatalf("err = %v, want ErrFundingShortBalance", err)
 	}
-	r.sources.native = big.NewInt(160_000_000_001_000_000)
+	r.sources.native = big.NewInt(160_000_000_003_750_000)
 	if _, err := r.svc.Quote(context.Background(), r.user, g, src); err != nil {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The source-chain top-up is asked of its lane at quote time — the ceiling,
+// the float, the gas budget — sized as the top-up will be (reserve − what she
+// holds), so she never signs a route whose gas would then be refused.
+func TestFunding_SourceLaneRefusalsAreAskedBeforeSigning(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.quoter.quote.GasTopUp, r.quoter.quote.TopUpWei = true, "5000"
+	r.sources.native = big.NewInt(1_000)
+	r.sponsor.checkErr = ErrTopUpTooExpensive
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingSourceGas) {
+		t.Fatalf("quote: err = %v, want ErrFundingSourceGas", err)
+	}
+	if r.sponsor.checked == nil || r.sponsor.checked.String() != "4000" {
+		t.Fatalf("checked %v, want the top-up she would get: 5000 − 1000", r.sponsor.checked)
+	}
+	if _, err := r.svc.Start(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingSourceGas) {
+		t.Fatalf("start: err = %v, want ErrFundingSourceGas", err)
+	}
+	if open, _ := r.svc.Open(context.Background(), r.user.ID); open != nil {
+		t.Fatal("a refused start must not leave an intent holding her slot")
+	}
+	r.sponsor.checkErr = nil
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); err != nil {
+		t.Fatalf("lane can send it: %v", err)
+	}
+}
+
+// No source sponsor wired: a route that needs her topped up cannot be paid.
+func TestFunding_SourceTopUpWithNoSponsorIsRefused(t *testing.T) {
+	r := newFundingRig(t)
+	r.svc.SetSponsors(nil, r.sponsor)
+	g := r.group(t, "80000")
+	r.quoter.quote.GasTopUp, r.quoter.quote.TopUpWei = true, "5000"
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingSourceGas) {
+		t.Fatalf("err = %v, want ErrFundingSourceGas", err)
 	}
 }
 
@@ -914,6 +954,17 @@ func TestFunding_NativeSOnSonicSource(t *testing.T) {
 	t.Run("the swap would eat the escrow gas", func(t *testing.T) {
 		r := newFundingRig(t)
 		r.chain.native = big.NewInt(170_000_000_000_000_000) // 0.17 S; 0.17 − 0.16 < 0.04
+		g := r.group(t, "80000")
+		if _, err := r.svc.Quote(context.Background(), r.user, g, src); !errors.Is(err, ErrFundingKeepS) {
+			t.Fatalf("err = %v, want ErrFundingKeepS", err)
+		}
+	})
+	t.Run("the swap's signed gas reserve counts, not its estimate", func(t *testing.T) {
+		r := newFundingRig(t)
+		// 0.2 S − 0.16 swap = 0.04, exactly the escrows' need — until the
+		// route's own gas reserve (300,000 × 1 gwei × 1.25) comes out of it.
+		r.chain.native = big.NewInt(200_000_000_000_000_000)
+		r.quoter.quote.Route.TxGasPriceWei = big.NewInt(1_000_000_000)
 		g := r.group(t, "80000")
 		if _, err := r.svc.Quote(context.Background(), r.user, g, src); !errors.Is(err, ErrFundingKeepS) {
 			t.Fatalf("err = %v, want ErrFundingKeepS", err)

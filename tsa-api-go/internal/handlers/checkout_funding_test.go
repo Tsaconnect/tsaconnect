@@ -249,6 +249,7 @@ func TestFundingError_MapsTheCheckoutsWords(t *testing.T) {
 		services.ErrFundingInProgress:   {http.StatusConflict, "funding_in_progress"},
 		services.ErrFundingKYC:          {http.StatusForbidden, services.KYCVerificationRequiredCode},
 		services.ErrFundingShortBalance: {http.StatusUnprocessableEntity, "funding_short_balance"},
+		services.ErrFundingSourceGas:    {http.StatusUnprocessableEntity, "funding_needs_source_gas"},
 		services.ErrFundingKeepS:        {http.StatusUnprocessableEntity, "funding_keep_s"},
 		&services.SwapEndedShortError{Status: services.LiFiStatusDone, Substatus: services.LiFiSubstatusRefunded}: {http.StatusConflict, sellCodeSwapRefunded},
 	} {

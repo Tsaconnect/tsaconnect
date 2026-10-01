@@ -644,7 +644,10 @@ func (g *GasTopUp) gasNeeded(lane *SponsorLane, order *models.PaycrestOrderRecor
 func (g *GasTopUp) confirm(ctx context.Context, lane *SponsorLane, txHash string) error {
 	receipt, err := lane.Native.WaitForReceiptContext(ctx, txHash, g.receiptTimeout)
 	if err != nil {
-		return ErrTopUpUnconfirmed
+		// Keep the cause: an RPC that refuses every receipt read looks exactly
+		// like a slow chain from the outside.
+		log.Printf("[ramp-sponsor] top-up unconfirmed chain=%s tx=%s: %v", lane.ChainKey, txHash, err)
+		return fmt.Errorf("%w: %v", ErrTopUpUnconfirmed, err)
 	}
 	if receipt.Status != 1 {
 		log.Printf("[ramp-sponsor] ALERT ramp_topup_reverted_total=1 chain=%s tx=%s", lane.ChainKey, txHash)

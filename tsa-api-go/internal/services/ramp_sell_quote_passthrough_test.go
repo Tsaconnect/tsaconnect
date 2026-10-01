@@ -193,3 +193,35 @@ func TestPassThrough_UnpricedRouteIsReportedAsUnpriced(t *testing.T) {
 		t.Fatalf("err = %v, want ErrSellRouteUnpriced (wrapping ErrSellRouteTooCostly)", err)
 	}
 }
+
+// End to end through Quote: a route LiFi priced for signing carries a top-up
+// sized from what the node reserves (routeGasReserveWei), priced at the gas's
+// own USD-per-wei — not the estimate that left a buyer short on 2026-10-01.
+func TestPassThrough_TopUpIsSizedFromTheSignedReserve(t *testing.T) {
+	priced := func(toUSD float64) *LiFiRoute {
+		r := fundingRoute(t, toUSD)
+		r.GasLimit, r.TxGasPriceWei = 300_000, big.NewInt(10_000)
+		r.GasCostWei, r.GasCostUSD = big.NewInt(1_000_000_000), 0.001 // the estimate: ~100k gas
+		return r
+	}
+	first, second := priced(9.98), priced(9.93)
+	q, _ := newDeliveryQuoter(t, first, second)
+	q.SetNativeBalanceReader(func(context.Context, int64, string) (*big.Int, bool) { return big.NewInt(0), true })
+	in := fundingIn
+	in.FromToken = bscUSDT
+	res, err := q.Quote(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := routeGasReserveWei(second)
+	if !res.GasTopUp || res.TopUpWei != want.String() {
+		t.Fatalf("topUp = %v wei = %q, want %s from the signed route", res.GasTopUp, res.TopUpWei, want)
+	}
+	limits := new(big.Int).Mul(big.NewInt(300_000+lifiApproveGasLimit), big.NewInt(10_000))
+	if want.Cmp(limits) <= 0 {
+		t.Fatalf("reserve %v does not cover the signed limits %v", want, limits)
+	}
+	if res.GasBps != USDGasBps(TopUpUSDForRoute(second), second.FromAmountUSD) {
+		t.Fatalf("gas = %d bps, want the reserve priced: %d", res.GasBps, USDGasBps(TopUpUSDForRoute(second), second.FromAmountUSD))
+	}
+}

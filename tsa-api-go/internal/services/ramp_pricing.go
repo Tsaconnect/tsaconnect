@@ -118,12 +118,67 @@ func TreasuryGasBps(route *LiFiRoute, extraGasUnits uint64) int {
 }
 
 // TopUpUSDForRoute is what a sponsored source-chain gas top-up for this route
-// costs us: its gas plus an approve, times topUpGasBuffer — exactly what the
-// top-up sends. The quote prices it into the round-trip budget and the
+// costs us at most: routeGasReserveWei in dollars — exactly what the top-up
+// sends to an empty wallet. The quote prices it into the round-trip budget and the
 // intent later spends it, so both read this one function: a quote that
 // budgets less than the top-up actually costs is money leaking per sell.
 func TopUpUSDForRoute(route *LiFiRoute) float64 {
-	return RouteGasUSD(route, treasuryERC20Gas) * topUpGasBuffer
+	reserve := routeGasReserveWei(route)
+	if reserve == nil {
+		return RouteGasUSD(route, treasuryERC20Gas) * topUpGasBuffer
+	}
+	// The gas's own USD-per-wei (a non-nil reserve implies a wei cost), so
+	// what we price is what we send.
+	usd, _ := new(big.Rat).Mul(new(big.Rat).SetInt(reserve),
+		new(big.Rat).Quo(new(big.Rat).SetFloat64(route.GasCostUSD), new(big.Rat).SetInt(route.GasCostWei))).Float64()
+	return usd
+}
+
+// lifiApproveGasLimit is the gas limit the app signs a route's approve with
+// (tsa-app services/lifiFlow.ts, approveTx.gasLimit). Keep the two in step.
+const lifiApproveGasLimit = 65_000
+
+// routeGasReserveMarginPct covers what gas limit × price leaves out: an
+// OP-stack chain's L1 data fee, charged on top (measured ~3% of an approve's
+// L2 gas on Base, 2026-10-01; a swap's longer calldata costs more).
+const routeGasReserveMarginPct = 25
+
+// routeGasReserveWei is the native coin her wallet must hold for a node to
+// accept the approve and the swap — the one figure that both decides a
+// source-chain top-up is needed and sizes it. nil when the route quoted no
+// gas in wei: with no USD-per-wei to price it at, the top-up is an unknown
+// on both sides, never sized one way and priced another.
+func routeGasReserveWei(route *LiFiRoute) *big.Int {
+	if route == nil || route.GasCostWei == nil || route.GasCostWei.Sign() <= 0 {
+		return nil
+	}
+	return routeReserveWei(route, lifiApproveGasLimit, treasuryERC20Gas)
+}
+
+// routeSwapReserveWei is what a node reserves for the swap alone: paying with
+// a chain's own coin has no approve, and the coin itself pays the gas.
+func routeSwapReserveWei(route *LiFiRoute) *big.Int {
+	return routeReserveWei(route, 0, 0)
+}
+
+// routeReserveWei is the route's signed gas limit plus extraLimit at the price
+// LiFi signs it at, plus the L1-fee margin. A node admits a tx only when the
+// wallet holds limit × price — LiFi's estimate of what it will USE is ~3.8x
+// lower on Base (2026-10-01), and a wallet holding the estimate is refused
+// ("insufficient funds for gas * price"). With no signed price it falls back
+// to the estimate (plus extraEstimate gas), times topUpGasBuffer.
+func routeReserveWei(route *LiFiRoute, extraLimit, extraEstimate uint64) *big.Int {
+	if route != nil && route.GasLimit > 0 && route.TxGasPriceWei != nil && route.TxGasPriceWei.Sign() > 0 {
+		r := new(big.Int).SetUint64(route.GasLimit + extraLimit)
+		r.Mul(r, route.TxGasPriceWei)
+		r.Mul(r, big.NewInt(100+routeGasReserveMarginPct))
+		return r.Quo(r, big.NewInt(100))
+	}
+	est := RouteGasWei(route, extraEstimate)
+	if est == nil {
+		return nil
+	}
+	return est.Mul(est, big.NewInt(topUpGasBuffer))
 }
 
 // quotedTopUpWei is what a source-chain gas top-up for this route would cost,
@@ -135,11 +190,11 @@ func TopUpUSDForRoute(route *LiFiRoute) float64 {
 // "" when the route quoted no gas in wei. That is an unknown, and a caller
 // must decide what to do about it rather than read a zero as "free".
 func quotedTopUpWei(route *LiFiRoute) string {
-	need := RouteGasWei(route, treasuryERC20Gas)
+	need := routeGasReserveWei(route)
 	if need == nil {
 		return ""
 	}
-	return new(big.Int).Mul(need, big.NewInt(topUpGasBuffer)).String()
+	return need.String()
 }
 
 // USDGasBps is a USD gas cost as bps of an order's USD value.
