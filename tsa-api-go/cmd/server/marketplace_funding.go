@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/big"
 	"time"
@@ -49,8 +50,8 @@ func buildMarketplaceFunding(cfg *config.Config, chains *services.BlockchainServ
 		log.Printf("[marketplace-funding] dormant: no USDC/USDT address on %s", marketplaceEscrowChain)
 		return nil
 	}
-	if cfg.MarketplaceFundingBudgetBps <= 0 || cfg.MarketplaceEscrowGasPerOrder == 0 {
-		log.Printf("[marketplace-funding] dormant: MARKETPLACE_FUNDING_BUDGET_BPS and MARKETPLACE_ESCROW_GAS_PER_ORDER must be > 0")
+	if cfg.MarketplaceEscrowGasPerOrder == 0 {
+		log.Printf("[marketplace-funding] dormant: MARKETPLACE_ESCROW_GAS_PER_ORDER must be > 0")
 		return nil
 	}
 	if quoter == nil {
@@ -67,7 +68,7 @@ func buildMarketplaceFunding(cfg *config.Config, chains *services.BlockchainServ
 		wireDeliveryIntents(intents, cfg, chains, fees)
 	}
 	svc := services.NewMarketplaceFundingService(config.DB, services.MarketplaceFundingConfig{
-		ChainID: chainID, Tokens: tokens, BudgetBps: cfg.MarketplaceFundingBudgetBps, GasPerOrder: cfg.MarketplaceEscrowGasPerOrder,
+		ChainID: chainID, Tokens: tokens, GasPerOrder: cfg.MarketplaceEscrowGasPerOrder,
 	}, quoter, intents, nil, fundingChain{client: client}, time.Now)
 	// Nil pointers stay nil interfaces: a typed nil would read as "wired".
 	var src services.SourceGasSponsor
@@ -79,8 +80,9 @@ func buildMarketplaceFunding(cfg *config.Config, chains *services.BlockchainServ
 		dst = sonicGas
 	}
 	svc.SetSponsors(src, dst)
-	log.Printf("[marketplace-funding] enabled (chain %d, tokens %v, budget %d bps of the order, sonic gas lane=%v, source top-ups=%v)",
-		chainID, tokens, cfg.MarketplaceFundingBudgetBps, sonicGas != nil, source != nil)
+	svc.SetSourceBalances(fundingSourceBalances{chains: chains})
+	log.Printf("[marketplace-funding] enabled (chain %d, tokens %v, sonic gas lane=%v, source top-ups=%v)",
+		chainID, tokens, sonicGas != nil, source != nil)
 	return svc
 }
 
@@ -98,4 +100,32 @@ func (f fundingChain) NativeBalance(_ context.Context, wallet string) (*big.Int,
 
 func (f fundingChain) GasPrice(_ context.Context) (*big.Int, error) {
 	return f.client.SuggestGasPrice()
+}
+
+// fundingSourceBalances reads her balance of the token she pays with on its own
+// chain, through the registry's client for that chain.
+type fundingSourceBalances struct{ chains *services.BlockchainService }
+
+func (f fundingSourceBalances) client(chainID int64) (*blockchain.EVMClient, error) {
+	client, _ := f.chains.ClientForChainID(chainID)
+	if client == nil {
+		return nil, fmt.Errorf("no client for chain %d", chainID)
+	}
+	return client, nil
+}
+
+func (f fundingSourceBalances) TokenBalanceOn(_ context.Context, chainID int64, token, wallet string) (*big.Int, error) {
+	client, err := f.client(chainID)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetTokenBalance(token, wallet)
+}
+
+func (f fundingSourceBalances) NativeBalanceOn(_ context.Context, chainID int64, wallet string) (*big.Int, error) {
+	client, err := f.client(chainID)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetBalance(wallet)
 }

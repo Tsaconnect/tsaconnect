@@ -240,16 +240,16 @@ func TestFundingError_MapsTheCheckoutsWords(t *testing.T) {
 		code int
 		key  string
 	}{
-		services.ErrFundingTooCostly:   {http.StatusUnprocessableEntity, "funding_too_costly"},
-		services.ErrFundingNeedsGas:    {http.StatusUnprocessableEntity, "funding_needs_gas"},
-		services.ErrFundingNotNeeded:   {http.StatusConflict, "funding_not_needed"},
-		services.ErrFundingGroup:       {http.StatusConflict, "order_not_payable"},
-		services.ErrSwapNotLanded:      {http.StatusConflict, sellCodeSwapPending},
-		services.ErrFundingUnavailable: {http.StatusServiceUnavailable, "funding_unavailable"},
-		services.ErrFundingInProgress:  {http.StatusConflict, "funding_in_progress"},
-		services.ErrFundingKYC:         {http.StatusForbidden, services.KYCVerificationRequiredCode},
-		services.ErrFundingTooSmall:    {http.StatusUnprocessableEntity, "funding_too_small"},
-		services.ErrFundingKeepS:       {http.StatusUnprocessableEntity, "funding_keep_s"},
+		services.ErrFundingTooCostly:    {http.StatusUnprocessableEntity, "funding_too_costly"},
+		services.ErrFundingNeedsGas:     {http.StatusUnprocessableEntity, "funding_needs_gas"},
+		services.ErrFundingNotNeeded:    {http.StatusConflict, "funding_not_needed"},
+		services.ErrFundingGroup:        {http.StatusConflict, "order_not_payable"},
+		services.ErrSwapNotLanded:       {http.StatusConflict, sellCodeSwapPending},
+		services.ErrFundingUnavailable:  {http.StatusServiceUnavailable, "funding_unavailable"},
+		services.ErrFundingInProgress:   {http.StatusConflict, "funding_in_progress"},
+		services.ErrFundingKYC:          {http.StatusForbidden, services.KYCVerificationRequiredCode},
+		services.ErrFundingShortBalance: {http.StatusUnprocessableEntity, "funding_short_balance"},
+		services.ErrFundingKeepS:        {http.StatusUnprocessableEntity, "funding_keep_s"},
 		&services.SwapEndedShortError{Status: services.LiFiStatusDone, Substatus: services.LiFiSubstatusRefunded}: {http.StatusConflict, sellCodeSwapRefunded},
 	} {
 		ch, buyer := fundingCheckout(t)

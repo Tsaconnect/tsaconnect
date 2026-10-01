@@ -371,8 +371,8 @@ func fundingError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "funding_not_needed")
 	case errors.Is(err, services.ErrFundingNeedsGas):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, services.ErrFundingNeedsGas.Error(), "funding_needs_gas")
-	case errors.Is(err, services.ErrFundingTooSmall):
-		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "funding_too_small")
+	case errors.Is(err, services.ErrFundingShortBalance):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "funding_short_balance")
 	case errors.Is(err, services.ErrFundingKeepS):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "funding_keep_s")
 	case errors.Is(err, services.ErrFundingKYC):

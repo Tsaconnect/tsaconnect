@@ -180,3 +180,16 @@ func TestPassThrough_RefusesADestinationCallOrAnotherReceiver(t *testing.T) {
 		})
 	}
 }
+
+// A route LiFi did not price in USD has no cost we can judge. It is reported
+// as unpriced — still a "too costly" refusal to a sale, which shows that copy,
+// but distinguishable so a checkout can say "unavailable" instead.
+func TestPassThrough_UnpricedRouteIsReportedAsUnpriced(t *testing.T) {
+	route := fundingRoute(t, 9.98)
+	route.FromAmountUSD = 0
+	q, _ := newDeliveryQuoter(t, route)
+	_, err := q.Quote(context.Background(), fundingIn)
+	if !errors.Is(err, ErrSellRouteUnpriced) || !errors.Is(err, ErrSellRouteTooCostly) {
+		t.Fatalf("err = %v, want ErrSellRouteUnpriced (wrapping ErrSellRouteTooCostly)", err)
+	}
+}

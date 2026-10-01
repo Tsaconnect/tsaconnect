@@ -45,10 +45,15 @@ import (
 // grace after she reports it), never past the intent's creation + 2h, and a
 // buyer has at most one such checkout awaiting payment.
 
+// fundingMCGPHint ends every refusal about what converting costs: Spendable
+// MCGP needs no swap and no gas, so it is the payment that always goes through.
+const fundingMCGPHint = "pay with Spendable MCGP instead — no gas, no fees"
+
 var (
 	// ErrFundingUnavailable: the funding cannot be priced or started for a
-	// reason of ours (a read that failed, a price we cannot get).
-	ErrFundingUnavailable = errors.New("paying with another token isn't available right now — try again, or pay with USDC or USDT")
+	// reason of ours (a read that failed, a price we cannot get) — or LiFi's,
+	// such as a route that will not carry the gas we recover on a tiny order.
+	ErrFundingUnavailable = errors.New("paying with this token isn't available right now — " + fundingMCGPHint + ", or pay with USDC or USDT")
 	// ErrFundingGroup: no checkout of hers by that id awaits payment in a
 	// stablecoin — not hers, already paid or cancelled, MCGP, or mixed tokens.
 	ErrFundingGroup = errors.New("these orders can't be paid with another token")
@@ -58,20 +63,20 @@ var (
 	ErrFundingSameToken = errors.New("that's the token this order is paid in — pay with it directly")
 	// ErrFundingSource: the source is not her own wallet on an EVM network.
 	ErrFundingSource = errors.New("pay from your own wallet on an EVM network")
-	// ErrFundingTooCostly: the route costs more than the budget.
-	ErrFundingTooCostly = errors.New("converting this token would cost more than 2% of your order — pick another token, or pay with MCGP or USDC sonic")
-	// ErrFundingTooSmall: she already holds most of the total, so the swap is
-	// too small to be worth its fixed costs.
-	ErrFundingTooSmall = errors.New("you already hold most of this order's total, so swapping the rest would cost too much for its size — add a little to your wallet and pay with it directly")
+	// ErrFundingTooCostly: the swap's fees alone would be more than it delivers.
+	ErrFundingTooCostly = errors.New("converting this token would cost more in fees than the amount being paid — " + fundingMCGPHint + ", or pick another token")
+	// ErrFundingShortBalance: her wallet holds less of the token she pays with
+	// than the route takes (what it delivers plus every cost of the swap).
+	ErrFundingShortBalance = errors.New("you don't have enough of this token to cover the order and the swap's fees — " + fundingMCGPHint + ", or pick another token")
 	// ErrFundingNeedsGas: she will need Sonic's coin to pay the sellers after
 	// the swap and we cannot cover it. Refused before she signs anything.
-	ErrFundingNeedsGas = errors.New("after the swap you'd need a little S on Sonic to pay the seller, and we can't cover it right now — add some S to your wallet first, or pay with USDC or USDT")
+	ErrFundingNeedsGas = errors.New("after the swap you'd need a little S on Sonic to pay the seller, and we can't cover it right now — add some S to your wallet first, or " + fundingMCGPHint)
 	// ErrFundingKYC: paying this way needs gas we would send her (on the
 	// source chain or on Sonic), and we only sponsor verified accounts.
-	ErrFundingKYC = errors.New("verify your identity to have the network fees covered — or add a little gas to your wallet yourself and try again")
+	ErrFundingKYC = errors.New("verify your identity to have the network fees covered, add a little gas to your wallet yourself, or " + fundingMCGPHint)
 	// ErrFundingKeepS: she pays with S on Sonic, and what the swap spends would
 	// leave too little S to sign the escrow payments afterwards.
-	ErrFundingKeepS = errors.New("paying with S would leave too little S to pay the network fees afterwards — keep a little S, or pay with another token")
+	ErrFundingKeepS = errors.New("paying with S would leave too little S to pay the network fees afterwards — keep a little S, or " + fundingMCGPHint)
 	// ErrFundingInProgress: she already has a checkout waiting on a funding
 	// swap (or its orders still wait to be paid). One at a time.
 	ErrFundingInProgress = errors.New("you already have a checkout being paid with another token — it closes on its own once that swap lands or is refunded; until then, finish it from the checkout or pay this order with Sonic USDC or USDT")
@@ -93,10 +98,11 @@ const (
 	fundingGiveUp       = 24 * time.Hour
 	fundingBatch        = 200
 	fundingMaxPages     = 5
-	// fundingMaxBudgetBps bounds the budget as a share of the SWAP: a tiny
-	// top-up swap is not allowed to cost half of itself however large the
-	// order behind it.
-	fundingMaxBudgetBps = 2_000
+	// fundingBudgetBps is what the route may cost, as bps of the swap: all of
+	// it. There is no share-of-the-order cap (owner decision 2026-10-01) — she
+	// sees the cost before signing, and what bounds it is her own balance of
+	// the token she pays with (checkSourceBalance).
+	fundingBudgetBps = 10_000
 )
 
 // fundingQuoter prices the swap. *RampSellQuoter fills it.
@@ -149,15 +155,19 @@ type FundingChain interface {
 	GasPrice(ctx context.Context) (*big.Int, error)
 }
 
-// MarketplaceFundingConfig is where a checkout is paid and what its funding
-// may cost.
+// SourceBalances reads her balance of the token she pays with, on its own
+// chain (FundingChain only reads Sonic).
+type SourceBalances interface {
+	TokenBalanceOn(ctx context.Context, chainID int64, token, wallet string) (*big.Int, error)
+	NativeBalanceOn(ctx context.Context, chainID int64, wallet string) (*big.Int, error)
+}
+
+// MarketplaceFundingConfig is where a checkout is paid.
 type MarketplaceFundingConfig struct {
 	// ChainID is the escrow chain (Sonic mainnet, 146).
 	ChainID int64
 	// Tokens are the order tokens a checkout can be funded into, by symbol.
 	Tokens map[string]string
-	// BudgetBps caps LiFi's cost plus our gas, as bps of the order total.
-	BudgetBps int
 	// GasPerOrder is one order's approve + createOrder in gas units.
 	GasPerOrder uint64
 }
@@ -175,7 +185,9 @@ type MarketplaceFundingService struct {
 	// would need it is refused before signing.
 	source SourceGasSponsor
 	dest   DestGasSponsor
-	now    func() time.Time
+	// sources reads her balance on the source chain; nil skips the check.
+	sources SourceBalances
+	now     func() time.Time
 }
 
 func NewMarketplaceFundingService(db *gorm.DB, cfg MarketplaceFundingConfig, quoter fundingQuoter, intents fundingIntents,
@@ -191,12 +203,16 @@ func (s *MarketplaceFundingService) SetSponsors(source SourceGasSponsor, dest De
 	s.source, s.dest = source, dest
 }
 
+// SetSourceBalances wires the source-chain balance check. Pass a nil
+// interface, never a typed nil.
+func (s *MarketplaceFundingService) SetSourceBalances(b SourceBalances) { s.sources = b }
+
 // SetOrderPulls wires the order pricer (the checkout handler, built after this).
 func (s *MarketplaceFundingService) SetOrderPulls(p OrderPullPricer) { s.pulls = p }
 
 func (s *MarketplaceFundingService) ready() bool {
 	return s != nil && s.db != nil && s.quoter != nil && s.intents != nil && s.pulls != nil &&
-		s.chain != nil && s.cfg.ChainID > 0 && s.cfg.BudgetBps > 0 && len(s.cfg.Tokens) > 0
+		s.chain != nil && s.cfg.ChainID > 0 && len(s.cfg.Tokens) > 0
 }
 
 // Enabled reports the funding routes can serve.
@@ -219,9 +235,6 @@ type fundingPlan struct {
 	balance   *big.Int // what her wallet already holds of it
 	short     *big.Int // what the swap must deliver at least (the proof's floor)
 	toAmount  *big.Int // short, padded for slippage: what the swap is asked for
-	budgetBps int
-	// budgetCapped: the budget hit fundingMaxBudgetBps (a small top-up swap).
-	budgetCapped bool
 	// Sonic gas: what her wallet must hold for the escrow txs (sonicNeed) and
 	// holds now (sonicHave). destNeed/destShort are set when we top her up:
 	// destShort (need − have now) is the most that top-up may ever send.
@@ -335,7 +348,7 @@ func (s *MarketplaceFundingService) QuoteTotal(ctx context.Context, user *models
 func (s *MarketplaceFundingService) quote(ctx context.Context, user *models.User, groupID uuid.UUID, src FundingSource, plan *fundingPlan) (*FundingQuote, error) {
 	q, err := s.quoter.Quote(ctx, s.quoteInput(user, src, plan))
 	if err != nil {
-		return nil, s.quoteError(plan, err)
+		return nil, s.quoteError(err)
 	}
 	if q == nil || q.Route == nil || q.Route.ToAmount == nil || q.Route.ToAmount.Cmp(plan.toAmount) < 0 || q.Route.ToAmountMin == nil {
 		return nil, ErrFundingUnavailable
@@ -343,7 +356,7 @@ func (s *MarketplaceFundingService) quote(ctx context.Context, user *models.User
 	if err := checkDeliveryRoute(s.intentInput(user, groupID, src, plan), q.Route); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFundingUnavailable, err)
 	}
-	if err := s.afterQuote(user, plan, q); err != nil {
+	if err := s.afterQuote(ctx, user, src, plan, q); err != nil {
 		return nil, err
 	}
 	return s.view(groupID, plan, q), nil
@@ -371,9 +384,9 @@ func (s *MarketplaceFundingService) Start(ctx context.Context, user *models.User
 	}
 	intent, q, err := s.intents.Create(ctx, user, s.intentInput(user, groupID, src, plan))
 	if err != nil {
-		return nil, s.quoteError(plan, err)
+		return nil, s.quoteError(err)
 	}
-	if err := s.afterQuote(user, plan, q); err != nil {
+	if err := s.afterQuote(ctx, user, src, plan, q); err != nil {
 		// Nothing was signed: close it so it does not hold her one slot.
 		if aerr := s.intents.AbandonForReference(ctx, intent.ID, nil); aerr != nil && !errors.Is(aerr, ErrSellIntentState) {
 			log.Printf("[marketplace-funding] could not close refused intent %s: %v", intent.ID, aerr)
@@ -384,12 +397,11 @@ func (s *MarketplaceFundingService) Start(ctx context.Context, user *models.User
 }
 
 // quoteError turns the quoter's refusals into the checkout's words.
-func (s *MarketplaceFundingService) quoteError(plan *fundingPlan, err error) error {
+func (s *MarketplaceFundingService) quoteError(err error) error {
 	switch {
+	case errors.Is(err, ErrSellRouteUnpriced):
+		return fmt.Errorf("%w: %v", ErrFundingUnavailable, err)
 	case errors.Is(err, ErrSellRouteTooCostly):
-		if plan != nil && plan.budgetCapped {
-			return ErrFundingTooSmall
-		}
 		return ErrFundingTooCostly
 	case errors.Is(err, ErrSellWalletMCGP), errors.Is(err, ErrSellIntentOpen), errors.Is(err, ErrFundingNeedsGas):
 		return err
@@ -405,15 +417,20 @@ func (s *MarketplaceFundingService) quoteError(plan *fundingPlan, err error) err
 }
 
 // afterQuote is what can only be judged once the route is known: whether it
-// needs a source-chain top-up we would only send a verified account, and, when
-// she pays with S itself, whether the S the swap spends leaves enough to sign
-// the escrow payments.
-func (s *MarketplaceFundingService) afterQuote(user *models.User, p *fundingPlan, q *SellSwapQuote) error {
+// needs a source-chain top-up we would only send a verified account, whether
+// her wallet holds what the route takes, and, when she pays with S itself,
+// whether the S the swap spends leaves enough to sign the escrow payments.
+func (s *MarketplaceFundingService) afterQuote(ctx context.Context, user *models.User, src FundingSource, p *fundingPlan, q *SellSwapQuote) error {
 	if q == nil || q.Route == nil {
 		return ErrFundingUnavailable
 	}
 	if q.GasTopUp && !fundingVerified(user) {
 		return ErrFundingKYC
+	}
+	if !p.nativeSource {
+		if err := s.checkSourceBalance(ctx, src, q.Route); err != nil {
+			return err
+		}
 	}
 	if p.nativeSource && p.sonicNeed != nil {
 		spend, ok := new(big.Int).SetString(strings.TrimSpace(q.Route.FromAmount), 10)
@@ -431,6 +448,40 @@ func (s *MarketplaceFundingService) afterQuote(user *models.User, p *fundingPlan
 	return nil
 }
 
+// checkSourceBalance refuses a route that takes more of the token she pays with
+// than her wallet holds — and, when that token is the chain's own coin, more
+// than it holds after the route's gas. S on Sonic is afterQuote's own check. A
+// balance that cannot be read is let through: the swap reverts on-chain if she
+// is short, and an RPC outage must not take checkout down.
+func (s *MarketplaceFundingService) checkSourceBalance(ctx context.Context, src FundingSource, route *LiFiRoute) error {
+	if s.sources == nil {
+		return nil
+	}
+	spend, ok := new(big.Int).SetString(strings.TrimSpace(route.FromAmount), 10)
+	if !ok || spend.Sign() <= 0 {
+		return ErrFundingUnavailable
+	}
+	token := strings.TrimSpace(src.Token)
+	var have *big.Int
+	var err error
+	if isNativeTokenAddress(token) {
+		have, err = s.sources.NativeBalanceOn(ctx, src.ChainID, src.Address)
+		if gas := RouteGasWei(route, 0); gas != nil {
+			spend.Add(spend, gas)
+		}
+	} else {
+		have, err = s.sources.TokenBalanceOn(ctx, src.ChainID, token, src.Address)
+	}
+	if err != nil || have == nil {
+		log.Printf("[marketplace-funding] source balance unread chain=%d token=%s: %v — not checked", src.ChainID, token, err)
+		return nil
+	}
+	if have.Cmp(spend) < 0 {
+		return ErrFundingShortBalance
+	}
+	return nil
+}
+
 func fundingVerified(user *models.User) bool {
 	return user != nil && user.VerificationStatus == models.VerificationStatusVerified
 }
@@ -440,7 +491,7 @@ func (s *MarketplaceFundingService) quoteInput(user *models.User, src FundingSou
 		FromChainID: src.ChainID, FromToken: strings.TrimSpace(src.Token), FromAddress: strings.TrimSpace(src.Address),
 		WalletAddress: user.WalletAddress, ToAmount: p.toAmount.String(),
 		ToChainID: s.cfg.ChainID, ToToken: p.tokenAddr, ToAddress: user.WalletAddress,
-		BudgetBps: p.budgetBps, Delivery: true, PassThrough: true, DestGasUSD: p.destGasUSD,
+		BudgetBps: fundingBudgetBps, Delivery: true, PassThrough: true, DestGasUSD: p.destGasUSD,
 	}
 }
 
@@ -459,7 +510,7 @@ func (s *MarketplaceFundingService) intentInput(user *models.User, groupID uuid.
 		DestTokenAddress: p.tokenAddr,
 		DestAddress:      user.WalletAddress,
 		DestAmount:       p.short.String(),
-		BudgetBps:        p.budgetBps,
+		BudgetBps:        fundingBudgetBps,
 		// A stablecoin: what it is worth is its face value, to the cent.
 		ExpectedToUSD:   stableUSD(p.toAmount),
 		Purpose:         models.SellIntentPurposeMarketplace,
@@ -543,27 +594,10 @@ func (s *MarketplaceFundingService) size(ctx context.Context, user *models.User,
 		return nil, ErrFundingNotNeeded
 	}
 	p.toAmount = padForSlippage(p.short)
-	p.budgetBps, p.budgetCapped = fundingBudgetBps(s.cfg.BudgetBps, p.total, p.toAmount)
 	if err := s.planDestGas(ctx, user, p); err != nil {
 		return nil, err
 	}
 	return p, nil
-}
-
-// fundingBudgetBps is the budget — BudgetBps of the ORDER TOTAL — expressed as
-// bps of the swap the route is priced on (the quoter's l and g are shares of
-// what is swapped), floored, and capped at fundingMaxBudgetBps of the swap
-// (capped reports that the cap bound it).
-func fundingBudgetBps(orderBps int, total, swap *big.Int) (bps int, capped bool) {
-	if swap == nil || swap.Sign() <= 0 {
-		return 0, false
-	}
-	b := new(big.Int).Mul(total, big.NewInt(int64(orderBps)))
-	b.Quo(b, swap)
-	if !b.IsInt64() || b.Int64() > fundingMaxBudgetBps {
-		return fundingMaxBudgetBps, true
-	}
-	return int(b.Int64()), false
 }
 
 // planDestGas decides whether her wallet will need S to sign each order's
@@ -634,7 +668,7 @@ func (s *MarketplaceFundingService) view(groupID uuid.UUID, p *fundingPlan, q *S
 		OrderTotal: p.total.String(), WalletBalance: p.balance.String(), Shortfall: p.short.String(), ToAmount: p.toAmount.String(),
 		FromAmount: r.FromAmount, FromAmountUSD: r.FromAmountUSD,
 		LiFiCostUSD: r.FromAmountUSD * float64(q.CostBps) / 10_000, GasUSD: r.FromAmountUSD * float64(q.GasBps) / 10_000,
-		CostBps: q.CostBps, GasBps: q.GasBps, BudgetBps: p.budgetBps,
+		CostBps: q.CostBps, GasBps: q.GasBps, BudgetBps: fundingBudgetBps,
 		ETASeconds: r.ETASeconds, Tool: r.Tool,
 		SourceGasTopUp: q.GasTopUp, DestGasTopUp: p.destNeed != nil,
 	}

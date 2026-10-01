@@ -213,8 +213,8 @@ Marketplace checkout "pay with another token" (`services/marketplace_funding.go`
   `purpose='marketplace'` + `reference_id` = the orders' `checkout_group_id`, the Sonic
   `ConfirmDelivery` proof) and builds delivery-only copies when Paycrest is off.
 - Pass-through pricing: no TSA fee; the only integrator fee is the gas we sponsor (source-chain
-  top-up, S on Sonic for the escrow txs), and routes over `MARKETPLACE_FUNDING_BUDGET_BPS` (200 =
-  2% of the order total) are refused. `MARKETPLACE_FUNDING` (default OFF) turns it on;
+  top-up, S on Sonic for the escrow txs). No share-of-the-order cap: she sees the cost before
+  signing and is refused only when her wallet can't cover what the route takes (2026-10-01). `MARKETPLACE_FUNDING` (default OFF) turns it on;
   `MARKETPLACE_ESCROW_GAS_PER_ORDER` sizes the S top-up. The Sonic top-up is the funding's OWN
   lane (`MARKETPLACE_SONIC_GAS`, default off, ramp sponsor key, own floor/ceiling/guard) — never
   a `RAMP_SPONSOR_CHAINS` lane, so enabling it changes nothing for sells or TSA Pay. Every

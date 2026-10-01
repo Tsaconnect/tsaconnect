@@ -8,11 +8,11 @@ import (
 )
 
 // The funding is dormant, never a boot failure, whenever what it needs is
-// missing: switched off, no Sonic mainnet client, or no budget.
+// missing: switched off, no Sonic mainnet client, or no chain registry.
 func TestBuildMarketplaceFunding_DormantWithoutItsPieces(t *testing.T) {
 	base := func() *config.Config {
 		return &config.Config{
-			MarketplaceFundingEnabled: true, MarketplaceFundingBudgetBps: 200, MarketplaceEscrowGasPerOrder: 400_000,
+			MarketplaceFundingEnabled: true, MarketplaceEscrowGasPerOrder: 400_000,
 			Networks: map[string]config.NetworkConfig{"mainnet": {
 				Chains:         map[string]config.ChainConfig{"sonic": {ChainID: 146}},
 				TokenAddresses: map[string]string{"sonic:USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"},

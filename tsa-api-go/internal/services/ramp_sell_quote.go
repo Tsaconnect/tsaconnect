@@ -39,6 +39,11 @@ const (
 // a loss (design §3.2).
 var ErrSellRouteTooCostly = errors.New("this token costs too much to sell for naira right now")
 
+// ErrSellRouteUnpriced: LiFi gave the route no USD value, so its cost cannot
+// be judged. It is a ErrSellRouteTooCostly to every caller that only checks
+// that (a sale keeps its copy); a checkout tells the two apart.
+var ErrSellRouteUnpriced = fmt.Errorf("%w: the route has no USD price", ErrSellRouteTooCostly)
+
 // ErrSellUnavailable: we cannot price this sell at all — no settlement token
 // configured, or LiFi will not let us collect our fee on this chain. Never
 // advertise a fee we cannot collect.
@@ -311,7 +316,7 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	}
 	l, ok := LiFiCostBps(first)
 	if !ok {
-		return nil, ErrSellRouteTooCostly
+		return nil, ErrSellRouteUnpriced
 	}
 	gas := q.gasFor(ctx, in, first, target.offramp)
 	if in.PassThrough {
@@ -358,7 +363,7 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		// first route's g would let a costlier tool spend past B.
 		l2, ok2 := LiFiCostBps(route)
 		if !ok2 {
-			return nil, ErrSellRouteTooCostly
+			return nil, ErrSellRouteUnpriced
 		}
 		gas = q.gasFor(ctx, in, route, target.offramp)
 		if raisedLimit > 0 {
@@ -434,7 +439,10 @@ func (q *RampSellQuoter) passThrough(ctx context.Context, req LiFiQuoteRequest, 
 		return nil, ErrSellUnavailable
 	}
 	l2, ok := LiFiCostBps(route)
-	if !ok || l2 > target.budgetBps {
+	if !ok {
+		return nil, ErrSellRouteUnpriced
+	}
+	if l2 > target.budgetBps {
 		return nil, ErrSellRouteTooCostly
 	}
 	gas2 := q.gasFor(ctx, in, route, target.offramp)
