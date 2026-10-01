@@ -659,15 +659,14 @@ func (q *RampSellQuoter) gasFor(ctx context.Context, in SellQuoteInput, route *L
 // source chain. Only EVM token sells can: a native-coin sell pays its own gas
 // out of what it sends, and a non-EVM source has no sponsor lane.
 //
-// The threshold is the SAME gas TopUpUSDForRoute prices — the swap plus an
-// approve — because a wallet holding the swap's gas to the wei still cannot
-// send the approve, and judging her funded there leaves her holding a route
-// she cannot execute.
+// The threshold is the SAME figure the top-up is sized from
+// (routeGasReserveWei): what a node reserves for the approve and the swap, not
+// what they are estimated to use — a wallet holding the estimate is refused.
 func (q *RampSellQuoter) needsTopUp(ctx context.Context, in SellQuoteInput, route *LiFiRoute) bool {
 	if q.nativeBalance == nil || addressFamily(in.FromChainID) != "evm" || isNativeTokenAddress(in.FromToken) {
 		return false
 	}
-	need := RouteGasWei(route, treasuryERC20Gas)
+	need := routeGasReserveWei(route)
 	have, ok := q.nativeBalance(ctx, in.FromChainID, in.FromAddress)
 	if need == nil || !ok || have == nil {
 		// Either side of the comparison can be unknown: LiFi may not have

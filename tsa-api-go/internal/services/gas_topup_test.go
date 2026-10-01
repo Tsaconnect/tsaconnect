@@ -265,10 +265,15 @@ func TestGasTopUp_RecordsHashWhenRequestContextCancelled(t *testing.T) {
 func TestGasTopUp_UnconfirmedReturnsHashWithError(t *testing.T) {
 	r, orderID := newSponsorRig("bsc", "USDT")
 	r.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(0)
-	r.native.receiptErr = errors.New("timeout")
+	r.native.receiptErr = errors.New("archive requests require a personal token")
 	got, err := newTestTopUp(r).TopUp(context.Background(), topUpUser(r), orderID)
 	if !errors.Is(err, ErrTopUpUnconfirmed) || got.TxHash != "0xsponsored" {
 		t.Fatalf("result = %+v, err = %v; want the hash with ErrTopUpUnconfirmed", got, err)
+	}
+	// Why the receipt could not be read must survive: an RPC refusing every
+	// receipt (2026-10-01, publicnode) otherwise looks like a slow chain.
+	if !strings.Contains(err.Error(), "archive requests require a personal token") {
+		t.Fatalf("err = %v; want the receipt read's own cause kept", err)
 	}
 }
 

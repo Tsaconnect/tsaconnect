@@ -71,6 +71,10 @@ var (
 	// ErrFundingNeedsGas: she will need Sonic's coin to pay the sellers after
 	// the swap and we cannot cover it. Refused before she signs anything.
 	ErrFundingNeedsGas = errors.New("after the swap you'd need a little S on Sonic to pay the seller, and we can't cover it right now — add some S to your wallet first, or " + fundingMCGPHint)
+	// ErrFundingSourceGas: the route needs gas on the source chain that she
+	// lacks and our lane there cannot send right now (ceiling, float, budget).
+	// Refused before she signs anything.
+	ErrFundingSourceGas = errors.New("you need a little of this network's coin to pay the swap's network fee, and we can't cover it right now — add some to your wallet first, or " + fundingMCGPHint)
 	// ErrFundingKYC: paying this way needs gas we would send her (on the
 	// source chain or on Sonic), and we only sponsor verified accounts.
 	ErrFundingKYC = errors.New("verify your identity to have the network fees covered, add a little gas to your wallet yourself, or " + fundingMCGPHint)
@@ -129,6 +133,9 @@ type fundingIntents interface {
 // sponsor lanes (*RampSponsorship), exactly as for a sale.
 type SourceGasSponsor interface {
 	TopUpForIntent(ctx context.Context, user *models.User, intent *models.RampSellIntent, store IntentTopUpStore) (GasTopUpResult, error)
+	// CheckTopUp asks the source lane, before she signs, whether it could
+	// send `amount` on chainID now (ceiling, float floor, gas budget).
+	CheckTopUp(ctx context.Context, chainID int64, amount *big.Int) error
 }
 
 // DestGasSponsor sends S on Sonic for her escrow txs: the funding's OWN Sonic
@@ -427,6 +434,11 @@ func (s *MarketplaceFundingService) afterQuote(ctx context.Context, user *models
 	if q.GasTopUp && !fundingVerified(user) {
 		return ErrFundingKYC
 	}
+	if q.GasTopUp {
+		if err := s.checkSourceTopUp(ctx, src, q); err != nil {
+			return err
+		}
+	}
 	if !p.nativeSource {
 		if err := s.checkSourceBalance(ctx, src, q.Route); err != nil {
 			return err
@@ -438,12 +450,39 @@ func (s *MarketplaceFundingService) afterQuote(ctx context.Context, user *models
 			return ErrFundingUnavailable
 		}
 		left := new(big.Int).Sub(p.sonicHave, spend)
-		if gas := RouteGasWei(q.Route, 0); gas != nil {
+		if gas := routeSwapReserveWei(q.Route); gas != nil {
 			left.Sub(left, gas)
 		}
 		if left.Cmp(p.sonicNeed) < 0 {
 			return ErrFundingKeepS
 		}
+	}
+	return nil
+}
+
+// checkSourceTopUp asks the source lane whether it could send the top-up this
+// route was quoted with, sized as the send will be: the quoted reserve less
+// what her wallet holds (all of it when that cannot be read). Mirrors
+// planDestGas, so a route whose gas would be refused is never signed.
+func (s *MarketplaceFundingService) checkSourceTopUp(ctx context.Context, src FundingSource, q *SellSwapQuote) error {
+	if s.source == nil {
+		return ErrFundingSourceGas
+	}
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(q.TopUpWei), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil // no wei quoted: sized live at send time (intentGasNeeded)
+	}
+	if s.sources != nil {
+		if have, err := s.sources.NativeBalanceOn(ctx, src.ChainID, src.Address); err == nil && have != nil {
+			amount.Sub(amount, have)
+		}
+	}
+	if amount.Sign() <= 0 {
+		return nil
+	}
+	if err := s.source.CheckTopUp(ctx, src.ChainID, amount); err != nil {
+		log.Printf("[marketplace-funding] source top-up refused at quote chain=%d amount=%s: %v", src.ChainID, amount, err)
+		return fmt.Errorf("%w (%v)", ErrFundingSourceGas, err)
 	}
 	return nil
 }
@@ -466,7 +505,7 @@ func (s *MarketplaceFundingService) checkSourceBalance(ctx context.Context, src 
 	var err error
 	if isNativeTokenAddress(token) {
 		have, err = s.sources.NativeBalanceOn(ctx, src.ChainID, src.Address)
-		if gas := RouteGasWei(route, 0); gas != nil {
+		if gas := routeSwapReserveWei(route); gas != nil {
 			spend.Add(spend, gas)
 		}
 	} else {
