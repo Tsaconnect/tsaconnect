@@ -81,6 +81,23 @@ func (f *fakeFundingChain) NativeBalance(context.Context, string) (*big.Int, err
 }
 func (f *fakeFundingChain) GasPrice(context.Context) (*big.Int, error) { return f.gasPrice, nil }
 
+type fakeSourceBalances struct {
+	token, native *big.Int
+	err           error
+
+	lastChain             int64
+	lastToken, lastWallet string
+}
+
+func (f *fakeSourceBalances) TokenBalanceOn(_ context.Context, chainID int64, token, wallet string) (*big.Int, error) {
+	f.lastChain, f.lastToken, f.lastWallet = chainID, token, wallet
+	return f.token, f.err
+}
+func (f *fakeSourceBalances) NativeBalanceOn(_ context.Context, chainID int64, wallet string) (*big.Int, error) {
+	f.lastChain, f.lastWallet = chainID, wallet
+	return f.native, f.err
+}
+
 type fakeFundingSponsor struct {
 	can                bool
 	checkErr           error
@@ -113,6 +130,7 @@ type fundingRig struct {
 	dest    *fakeTransferVerifier
 	chain   *fakeFundingChain
 	sponsor *fakeFundingSponsor
+	sources *fakeSourceBalances
 	db      *gorm.DB
 	user    *models.User
 	now     time.Time
@@ -144,6 +162,7 @@ func newFundingRig(t *testing.T) *fundingRig {
 		status: &fakeStatusReader{}, dest: &fakeTransferVerifier{amount: big.NewInt(1_000_000_000)},
 		chain:   &fakeFundingChain{token: big.NewInt(50_000), native: big.NewInt(1e18), gasPrice: big.NewInt(50_000_000_000)},
 		sponsor: &fakeFundingSponsor{can: true},
+		sources: &fakeSourceBalances{token: big.NewInt(1e18), native: big.NewInt(1e18)},
 		user:    &models.User{ID: uuid.New(), WalletAddress: fundingWallet, VerificationStatus: models.VerificationStatusVerified},
 	}
 	r.quoter.quote = &SellSwapQuote{
@@ -157,9 +176,10 @@ func newFundingRig(t *testing.T) *fundingRig {
 	})
 	r.svc = NewMarketplaceFundingService(db, MarketplaceFundingConfig{
 		ChainID: 146, Tokens: map[string]string{"USDC": fundingTestSonicUSDC, "USDT": fundingTestSonicUSDT},
-		BudgetBps: 200, GasPerOrder: 400_000,
+		GasPerOrder: 400_000,
 	}, r.quoter, r.intents, fakeOrderPulls{gasFee: 20_000}, r.chain, now)
 	r.svc.SetSponsors(r.sponsor, r.sponsor)
+	r.svc.SetSourceBalances(r.sources)
 	return r
 }
 
@@ -211,33 +231,13 @@ func TestFunding_SizedFromTheServersOrdersLessHerBalancePadded(t *testing.T) {
 		!in.Delivery || !in.PassThrough || in.FromAddress != fundingWallet {
 		t.Fatalf("quote input = %+v", in)
 	}
-	// 2% of the ORDER total, as bps of the swap: 200 x 200000 / 150754 = 265.
-	if in.BudgetBps != 265 || q.BudgetBps != 265 {
-		t.Fatalf("budget = %d, want 265 bps of the swap (2%% of the order)", in.BudgetBps)
+	// No share-of-the-order cap: the route may cost up to the whole swap, and
+	// her balance of the token she pays with is what bounds it.
+	if in.BudgetBps != 10_000 || q.BudgetBps != 10_000 {
+		t.Fatalf("budget = %d, want the whole swap (10000 bps)", in.BudgetBps)
 	}
 	if q.ETASeconds != 1080 || q.Orders != 2 {
 		t.Fatalf("eta/orders = %d/%d", q.ETASeconds, q.Orders)
-	}
-}
-
-func TestFunding_BudgetIsBoundedAsAShareOfTheSwap(t *testing.T) {
-	if got, capped := fundingBudgetBps(200, big.NewInt(1_000_000), big.NewInt(1_000)); got != fundingMaxBudgetBps || !capped {
-		t.Fatalf("a tiny top-up swap got a %d bps budget (capped %v)", got, capped)
-	}
-	if got, capped := fundingBudgetBps(200, big.NewInt(100), big.NewInt(100)); got != 200 || capped {
-		t.Fatalf("a whole-order swap got %d bps (capped %v), want 200", got, capped)
-	}
-}
-
-// When the cap binds (she holds most of the total), "too costly" says why and
-// what to do instead.
-func TestFunding_TinySwapTooCostlySaysPayDirectly(t *testing.T) {
-	r := newFundingRig(t)
-	r.chain.token = big.NewInt(199_000) // holds all but 1000 of 200000
-	g := r.group(t, "80000", "80000")
-	r.quoter.err = ErrSellRouteTooCostly
-	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingTooSmall) {
-		t.Fatalf("err = %v, want ErrFundingTooSmall", err)
 	}
 }
 
@@ -309,14 +309,96 @@ func TestFunding_SourceIsHerOwnEVMWalletAndNotTheOrderToken(t *testing.T) {
 	}
 }
 
-// Pass-through admission: a route over 2% of the order is refused in the
-// checkout's own words.
+// Pass-through admission: a route costing more than the whole swap (fees
+// larger than the order) is refused in the checkout's own words.
 func TestFunding_TooCostlyIsRefusedPlainly(t *testing.T) {
 	r := newFundingRig(t)
 	g := r.group(t, "80000")
 	r.quoter.err = ErrSellRouteTooCostly
 	_, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc)
-	if !errors.Is(err, ErrFundingTooCostly) || !strings.Contains(err.Error(), "2%") {
+	if !errors.Is(err, ErrFundingTooCostly) || strings.Contains(err.Error(), "2%") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Every refusal about what converting costs — fees, her balance, gas, or a
+// route LiFi will not give — points her at Spendable MCGP, which needs neither.
+func TestFunding_CostRefusalsPointAtSpendableMCGP(t *testing.T) {
+	for _, err := range []error{ErrFundingTooCostly, ErrFundingShortBalance, ErrFundingNeedsGas, ErrFundingKYC, ErrFundingKeepS, ErrFundingUnavailable} {
+		if !strings.Contains(err.Error(), fundingMCGPHint) {
+			t.Errorf("%q does not offer Spendable MCGP", err)
+		}
+	}
+}
+
+// A route LiFi could not price is not "too costly" — nothing says it costs too
+// much — so the checkout calls it unavailable.
+func TestFunding_UnpricedRouteIsUnavailableNotTooCostly(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.quoter.err = ErrSellRouteUnpriced
+	_, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc)
+	if !errors.Is(err, ErrFundingUnavailable) || errors.Is(err, ErrFundingTooCostly) {
+		t.Fatalf("err = %v, want ErrFundingUnavailable", err)
+	}
+}
+
+// ─── her balance of the token she pays with ───────────────────────────────
+
+// The route's FromAmount — the order plus every cost of the swap — must be in
+// her wallet on the source chain; otherwise she is told before she signs.
+func TestFunding_RefusedWhenHerSourceBalanceCannotCoverTheRoute(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.sources.token = big.NewInt(159_999_999_999_999_999) // route takes 0.16e18
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingShortBalance) {
+		t.Fatalf("quote err = %v, want ErrFundingShortBalance", err)
+	}
+	if _, err := r.svc.Start(context.Background(), r.user, g, fundingSrc); !errors.Is(err, ErrFundingShortBalance) {
+		t.Fatalf("start err = %v, want ErrFundingShortBalance", err)
+	}
+	// The refused start must not hold her one open-funding slot.
+	if open, err := r.intents.OpenFor(context.Background(), r.user.ID, models.SellIntentPurposeMarketplace); err != nil || open != nil {
+		t.Fatalf("open intent after refusal = %v, %v", open, err)
+	}
+	if r.sources.lastChain != fundingSrc.ChainID || r.sources.lastToken != fundingSrc.Token || r.sources.lastWallet != fundingWallet {
+		t.Fatalf("read %d/%s/%s, want her source token on its chain", r.sources.lastChain, r.sources.lastToken, r.sources.lastWallet)
+	}
+}
+
+func TestFunding_AdmittedWhenHerSourceBalanceCoversTheRoute(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.sources.token = big.NewInt(160_000_000_000_000_000) // exactly what the route takes
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); err != nil {
+		t.Fatalf("quote err = %v", err)
+	}
+}
+
+// Paying with a chain's own coin spends from the balance that also pays the
+// route's gas, so both must fit.
+func TestFunding_NativeSourceMustAlsoCoverTheRouteGas(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.quoter.quote.Route.GasCostWei = big.NewInt(1_000_000)
+	src := FundingSource{ChainID: 56, Token: evmNativeAddress, Address: fundingWallet}
+	r.sources.native = big.NewInt(160_000_000_000_000_000) // the swap, but not its gas
+	if _, err := r.svc.Quote(context.Background(), r.user, g, src); !errors.Is(err, ErrFundingShortBalance) {
+		t.Fatalf("err = %v, want ErrFundingShortBalance", err)
+	}
+	r.sources.native = big.NewInt(160_000_000_001_000_000)
+	if _, err := r.svc.Quote(context.Background(), r.user, g, src); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A balance we cannot read is not a refusal: the swap itself reverts if she is
+// short, and an RPC outage must not take checkout down with it.
+func TestFunding_UnreadableSourceBalanceIsNotARefusal(t *testing.T) {
+	r := newFundingRig(t)
+	g := r.group(t, "80000")
+	r.sources.err = errors.New("rpc down")
+	if _, err := r.svc.Quote(context.Background(), r.user, g, fundingSrc); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 }

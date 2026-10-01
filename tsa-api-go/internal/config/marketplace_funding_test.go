@@ -25,7 +25,7 @@ func TestLoad_MarketplaceFundingDefaultsOff(t *testing.T) {
 	if cfg.MarketplaceSonicGasFloorWei != "5000000000000000000" || cfg.MarketplaceSonicGasTopUpMaxWei != "500000000000000000" {
 		t.Fatalf("sonic lane floor/max = %s/%s, want 5 S / 0.5 S", cfg.MarketplaceSonicGasFloorWei, cfg.MarketplaceSonicGasTopUpMaxWei)
 	}
-	if cfg.MarketplaceFundingBudgetBps != 200 || cfg.MarketplaceEscrowGasPerOrder != 400_000 {
-		t.Fatalf("budget/gas = %d/%d", cfg.MarketplaceFundingBudgetBps, cfg.MarketplaceEscrowGasPerOrder)
+	if cfg.MarketplaceEscrowGasPerOrder != 400_000 {
+		t.Fatalf("gas per order = %d", cfg.MarketplaceEscrowGasPerOrder)
 	}
 }

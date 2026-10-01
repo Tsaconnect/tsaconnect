@@ -341,15 +341,14 @@ type Config struct {
 	// it. On by default (MARKETPLACE_FUNDING=false turns it off); it needs no
 	// credential beyond LiFi, which works anonymously.
 	//
-	// MarketplaceFundingBudgetBps is the most the round trip may cost her —
-	// LiFi's cost plus the gas we pay for her — as bps of the ORDER TOTAL. We
-	// keep no margin: whatever the route costs under it is all she pays.
+	// There is no cap on what the round trip may cost as a share of the order:
+	// she sees LiFi's cost plus the gas we pay for her before signing, keeps no
+	// margin for us, and is refused only when her wallet cannot cover it.
 	// MarketplaceEscrowGasPerOrder is the gas one order's approve + createOrder
 	// takes on Sonic, what the destination top-up is sized from (x2 buffer).
 	//
 	// Off by default (flag-off-first, like gas sponsorship and converted buys).
 	MarketplaceFundingEnabled    bool
-	MarketplaceFundingBudgetBps  int
 	MarketplaceEscrowGasPerOrder uint64
 	// MarketplaceSonicGas* is the funding's OWN Sonic gas lane: S sent to a
 	// buyer whose funds landed but who holds none to sign the escrow txs. It is
@@ -921,7 +920,6 @@ func Load() *Config {
 	// alerts at twice it), and the ceiling covers a ~10-order cart.
 	cfg.MarketplaceSonicGasFloorWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_FLOOR_WEI", "5000000000000000000"))       // 5 S
 	cfg.MarketplaceSonicGasTopUpMaxWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI", "500000000000000000")) // 0.5 S
-	cfg.MarketplaceFundingBudgetBps = int(getEnvInt64("MARKETPLACE_FUNDING_BUDGET_BPS", 200))
 	cfg.MarketplaceEscrowGasPerOrder = uint64(max(getEnvInt64("MARKETPLACE_ESCROW_GAS_PER_ORDER", 400_000), 0))
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
