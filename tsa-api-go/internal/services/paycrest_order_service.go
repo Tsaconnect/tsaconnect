@@ -384,6 +384,11 @@ func validSenderFeeAddress(raw string) (string, bool) {
 // PaycrestBuyRequest is what the app sends to start a purchase.
 type PaycrestBuyRequest struct {
 	UserID uuid.UUID
+	// MaxRate/PriceGuard are set only by the ramp router: the highest
+	// fiat-per-token rate this buy may bind at, and what to do past it.
+	// Empty/off on /api/paycrest/*, which keeps today's behaviour.
+	MaxRate    string
+	PriceGuard PriceGuardMode
 	// WalletAddress is the user's connected wallet — where the stablecoin is
 	// delivered. Already reconciled against the account by the handler.
 	WalletAddress string
@@ -655,6 +660,10 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		if verr != nil {
 			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
 		}
+		// Before anything is sent: a refusal here leaves no order anywhere.
+		if err := checkPriceGuard("buy", v.Rate, req.MaxRate, req.PriceGuard); err != nil {
+			return nil, err
+		}
 		venue = v
 	}
 
@@ -814,6 +823,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 // from their connected wallet.
 type PaycrestSellRequest struct {
 	UserID uuid.UUID
+	// MinRate/PriceGuard: the lowest rate this sell may bind at (ramp router only).
+	MinRate    string
+	PriceGuard PriceGuardMode
 	// WalletAddress funds the sale and receives the refund if it fails.
 	WalletAddress string
 	FiatCode      string
@@ -873,6 +885,9 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
 		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+	}
+	if err := checkPriceGuard("sell", venue.Rate, req.MinRate, req.PriceGuard); err != nil {
+		return nil, err
 	}
 
 	// Paycrest prices an offramp in token units. venue.TokenAmount is sized at
