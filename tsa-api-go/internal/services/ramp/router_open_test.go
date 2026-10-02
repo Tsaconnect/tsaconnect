@@ -1,0 +1,228 @@
+package ramp
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+)
+
+func openReq(handle, quoted string) OpenRequest {
+	return OpenRequest{
+		Request:    Request{Side: Buy, FiatCode: "NGN", FiatAmount: "1000", Token: "USDC", ChainKey: "base"},
+		Handle:     handle,
+		QuotedRate: quoted,
+		Input:      OrderInput{UserID: uuid.New(), WalletAddress: "0xabc"},
+	}
+}
+
+var okOrder = &Order{Provider: "a", Paycrest: &models.PaycrestOrderRecord{}}
+
+func TestRouterOpen_OpensAtTheHandleWithTheLimit(t *testing.T) {
+	a := &fakeProvider{name: "a", openResults: []openResult{{order: okOrder}}}
+	o, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if err != nil || o != okOrder {
+		t.Fatalf("%v %v", o, err)
+	}
+	if a.opened[0] != (VenueKey{"base", "USDC"}) || a.openInputs[0].LimitRate != "1407.00000000" ||
+		a.openInputs[0].Guard != services.PriceGuardEnforce {
+		t.Fatalf("open input = %+v %+v", a.opened, a.openInputs)
+	}
+}
+
+func TestRouterOpen_RejectsAMissingOrBadQuote(t *testing.T) {
+	r := testRouter(&fakeProvider{name: "a"})
+	if _, err := r.Open(context.Background(), openReq("", "")); !errors.Is(err, ErrInvalidQuote) {
+		t.Fatalf("no quoted rate: %v", err)
+	}
+	if _, err := r.Open(context.Background(), openReq("!!!", "1400")); !errors.Is(err, ErrInvalidQuote) {
+		t.Fatalf("bad handle: %v", err)
+	}
+	other := openReq(EncodeHandle("a", VenueKey{"polygon", "USDT"}), "1400")
+	if _, err := r.Open(context.Background(), other); !errors.Is(err, ErrInvalidQuote) {
+		t.Fatalf("handle for another pair: %v", err)
+	}
+	unpinned := openReq("", "1400")
+	unpinned.Request.Token = ""
+	if _, err := r.Open(context.Background(), unpinned); !errors.Is(err, ErrInvalidQuote) {
+		t.Fatalf("unpinned open: %v", err)
+	}
+}
+
+func TestRouterOpen_PreflightRefusesWhenAnyProviderHasAnOpenOrder(t *testing.T) {
+	a := &fakeProvider{name: "a", openResults: []openResult{{order: okOrder}}}
+	b := &fakeProvider{name: "b", hasOpen: []bool{true}}
+	_, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, ErrRefusedForUser) || !errors.Is(err, services.ErrPaycrestOrderOpen) || len(a.opened) != 0 {
+		t.Fatalf("err = %v opened = %v", err, a.opened)
+	}
+}
+
+func TestRouterOpen_RefusedForUserStopsImmediately(t *testing.T) {
+	refusal := WrapClass(ErrRefusedForUser, services.ErrKYCVerificationRequired)
+	a := &fakeProvider{name: "a", openResults: []openResult{{err: refusal}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1390")}},
+		openResults: []openResult{{order: okOrder}}}
+	_, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, services.ErrKYCVerificationRequired) || len(b.opened) != 0 {
+		t.Fatalf("err = %v, b opened %v — a user refusal must never fail over", err, b.opened)
+	}
+}
+
+func TestRouterOpen_FailsOverOnPriceMovedAndUnavailable(t *testing.T) {
+	for name, firstErr := range map[string]error{
+		"price moved": services.ErrPriceMovedPastQuote,
+		"unavailable": WrapClass(ErrVenueUnavailable, errors.New("502")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+				openResults: []openResult{{err: firstErr}}}
+			b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1405")}},
+				openResults: []openResult{{order: okOrder}}}
+			o, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+			if err != nil || o != okOrder || len(a.opened) != 1 || len(b.opened) != 1 {
+				t.Fatalf("o=%v err=%v a=%v b=%v", o, err, a.opened, b.opened)
+			}
+		})
+	}
+}
+
+func TestRouterOpen_UnknownOutcomeWithOpenOrderRefuses(t *testing.T) {
+	a := &fakeProvider{name: "a", hasOpen: []bool{false, true}, // pre-flight clean, then the row turned out committed
+		openResults: []openResult{{err: WrapClass(ErrOutcomeUnknown, errors.New("commit lost"))}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1390")}},
+		openResults: []openResult{{order: okOrder}}}
+	_, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, ErrRefusedForUser) || len(b.opened) != 0 {
+		t.Fatalf("err = %v, b opened %v — an order may exist, so no second one", err, b.opened)
+	}
+}
+
+func TestRouterOpen_UnknownOutcomeWithoutOpenOrderFailsOver(t *testing.T) {
+	a := &fakeProvider{name: "a", openResults: []openResult{{err: WrapClass(ErrOutcomeUnknown, errors.New("timeout"))}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1390")}},
+		openResults: []openResult{{order: okOrder}}}
+	if o, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400")); err != nil || o != okOrder {
+		t.Fatalf("%v %v", o, err)
+	}
+}
+
+func TestRouterOpen_InfrastructureErrorStops(t *testing.T) {
+	dbDown := errors.New("db connection refused")
+	a := &fakeProvider{name: "a", openResults: []openResult{{err: dbDown}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1390")}},
+		openResults: []openResult{{order: okOrder}}}
+	if _, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400")); !errors.Is(err, dbDown) || len(b.opened) != 0 {
+		t.Fatalf("err = %v b = %v", err, b.opened)
+	}
+}
+
+func TestRouterOpen_NoHandleStartsFromTheBestVenueWithinTolerance(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1420")}}} // outside 1407
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1402")}},
+		openResults: []openResult{{order: okOrder}}}
+	o, err := testRouter(a, b).Open(context.Background(), openReq("", "1400"))
+	if err != nil || o != okOrder || len(a.opened) != 0 || len(b.opened) != 1 {
+		t.Fatalf("o=%v err=%v a=%v b=%v", o, err, a.opened, b.opened)
+	}
+}
+
+func TestRouterOpen_Outcomes(t *testing.T) {
+	t.Run("price moved carries the fresh quote", func(t *testing.T) {
+		a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1500")}}}
+		_, err := testRouter(a).Open(context.Background(), openReq("", "1400"))
+		var pm *PriceMovedError
+		if !errors.As(err, &pm) || pm.Quote == nil || pm.Quote.Best.Rate != "1500" {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("guard refusal at the only venue is price moved", func(t *testing.T) {
+		a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+			openResults: []openResult{{err: services.ErrPriceMovedPastQuote}}}
+		_, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+		var pm *PriceMovedError
+		if !errors.As(err, &pm) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("nothing quotes: no venue / leg closed", func(t *testing.T) {
+		a := &fakeProvider{name: "a", quoteErr: ErrLegClosed}
+		if _, err := testRouter(a).Open(context.Background(), openReq("", "1400")); !errors.Is(err, ErrLegClosed) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("the only provider is down: unavailable, not price moved", func(t *testing.T) {
+		a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+			openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, errors.New("502"))}}}
+		_, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestRouterOpen_BudgetStopsAttempts(t *testing.T) {
+	a := &fakeProvider{name: "a", quoteDelay: 50 * time.Millisecond,
+		quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}}}
+	r := NewRouter(Config{ToleranceBps: 50, Guard: services.PriceGuardEnforce,
+		ProviderTimeout: time.Second, AttemptTimeout: time.Second, OpenBudget: 10 * time.Millisecond}, a)
+	start := time.Now()
+	_, err := r.Open(context.Background(), openReq("", "1400"))
+	if err == nil || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("err = %v after %v", err, time.Since(start))
+	}
+}
+
+// The rollout default: log mode must never refuse — it records and opens.
+func TestRouterOpen_LogModeOpensOutsideToleranceAndRecordsIt(t *testing.T) {
+	buf := captureRampLog(t)
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1500")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := NewRouter(Config{ToleranceBps: 50, Guard: services.PriceGuardLog,
+		ProviderTimeout: time.Second, AttemptTimeout: time.Second, OpenBudget: 2 * time.Second}, a)
+	o, err := r.Open(context.Background(), openReq("", "1400"))
+	if err != nil || o != okOrder {
+		t.Fatalf("log mode must open: %v %v", o, err)
+	}
+	if !strings.Contains(buf.String(), "ramp_price_guard_would_refuse") {
+		t.Fatalf("log mode must record the would-refuse: %q", buf.String())
+	}
+}
+
+// A provider refusing for a reason the user can act on (a payout bank it
+// cannot pay) reaches her with its own wording, not a generic outage.
+func TestRouterOpen_UnavailableCarriesTheProvidersReason(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrPaycrestBankUnsupported)}}}
+	_, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, services.ErrPaycrestBankUnsupported) ||
+		err.Error() != services.ErrPaycrestBankUnsupported.Error() {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRouterOpen_PriceMovedNeverSendsNullVenues(t *testing.T) {
+	a := &fakeProvider{name: "a", quoteErr: errors.New("down"),
+		openResults: []openResult{{err: services.ErrPriceMovedPastQuote}}}
+	_, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	var pm *PriceMovedError
+	if !errors.As(err, &pm) || pm.Quote == nil || pm.Quote.Venues == nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func captureRampLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var b bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&b)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &b
+}
