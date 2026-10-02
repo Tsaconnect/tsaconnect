@@ -50,7 +50,8 @@ export function fundingSteps(
       key: 'swap',
       label: `Swap ${opts.sourceSymbol} into ${opts.orderToken}`,
       state: state(1),
-      detail: s.stage === 'signing' ? 'Approve in your wallet — nothing leaves it until you sign' : undefined,
+      // The in-app wallet signs as soon as she taps Pay: nothing for her to do here.
+      detail: s.stage === 'signing' ? 'Sending from your wallet — this takes a few seconds' : undefined,
     },
     {
       key: 'bridge',

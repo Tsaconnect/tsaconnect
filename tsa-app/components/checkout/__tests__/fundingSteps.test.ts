@@ -41,3 +41,12 @@ test('a failure marks the step it failed at', () => {
 test('done: every step done', () => {
   expect(states({ stage: 'done', record: rec({ delivered: true, paid: ['o1', 'o2'] }) }).every((s) => s.endsWith(':done'))).toBe(true);
 });
+
+// The in-app wallet signs the moment she taps Pay — there is no prompt to
+// answer, so the swap step must not read like an instruction to go approve
+// something (owner, 2026-10-02).
+test('signing: says the swap is being sent, never asks her to approve', () => {
+  const steps = fundingSteps({ stage: 'signing', record: rec({ intentId: 'i' }) }, opts);
+  expect(steps[1].detail).toBe('Sending from your wallet — this takes a few seconds');
+  expect(steps[1].detail).not.toMatch(/approve|sign/i);
+});
