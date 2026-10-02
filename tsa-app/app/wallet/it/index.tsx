@@ -40,6 +40,7 @@ import {
   PressableScale,
   Skeleton,
   Text,
+  useToast,
 } from '@/components/ui';
 import ITActivityRow, { ACTIVITY_DIVIDER_INSET } from '@/components/it/ITActivityRow';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
@@ -90,6 +91,10 @@ const fmtNairaPerMcgp = (kobo?: string) => {
 const fmtToken = (n: number) =>
   n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 4 : 6 });
 
+/** A row's Buy or Sell button: what a tap does, and how a screen reader names
+ *  it when that differs from its title (a side closed for now). */
+type RowAction = { onPress: () => void; accessibilityLabel?: string };
+
 /** One row of the asset list. */
 type AssetRow = {
   token: string;
@@ -99,8 +104,8 @@ type AssetRow = {
   balanceNote: string;
   /** Price line, only where a single published rate actually exists. */
   rateLine?: string;
-  onBuy?: () => void;
-  onSell?: () => void;
+  buy?: RowAction;
+  sell?: RowAction;
   /** Set when the selected currency cannot trade this asset at all. */
   unavailable?: string;
   /** A registry icon in place of TokenAvatar, for a row with no real token
@@ -110,6 +115,7 @@ type AssetRow = {
 
 export default function ITHub() {
   const { colors, spacing } = useTheme();
+  const toast = useToast();
   const { formatPrice, allRates } = useCurrency();
   const symbolFor = useFiatSymbol();
   const { address, ready: walletReady } = useSignableWallet();
@@ -205,6 +211,20 @@ export default function ITHub() {
   const legs = useMemo(() => rampLegsFor(currencies, code), [currencies, code]);
 
   const assets: AssetRow[] = useMemo(() => {
+    // A side that trades opens its screen. A side closed for now keeps its
+    // button and says why on a tap (see utils/rampRow.ts) — a button that
+    // simply vanished read as a bug (owner, 2026-10-02).
+    const rowAction = (
+      label: string,
+      live: boolean,
+      open: () => void,
+      closed?: string,
+    ): RowAction | undefined => {
+      if (live) return { onPress: open };
+      if (!closed) return undefined;
+      return { onPress: () => toast.info(closed), accessibilityLabel: `${label}, not available right now` };
+    };
+
     // Until the wallet check resolves, no row knows its balance or what it may
     // offer. Treating that as "no wallet" flashed "Connect a wallet to trade"
     // at users who have one.
@@ -224,9 +244,8 @@ export default function ITHub() {
         balanceNote: address ? 'in your wallet' : 'connect a wallet',
       };
       // What this row may offer, and why not when it may not — see
-      // utils/rampRow.ts. Each action is attached only if its direction is
-      // live, so a sell-only currency shows Sell alone rather than a Buy that
-      // fails once the user has already picked an amount.
+      // utils/rampRow.ts. A direction nobody is quoting never opens its screen
+      // (it would fail once she had picked an amount); its button says so.
       const actions = stableRowActions({
         token,
         currency: code,
@@ -243,8 +262,8 @@ export default function ITHub() {
 
       return {
         ...base,
-        onBuy: actions.buy ? () => router.push(route('buy') as never) : undefined,
-        onSell: actions.sell ? () => router.push(route('sell') as never) : undefined,
+        buy: rowAction(`Buy ${token}`, actions.buy, () => router.push(route('buy') as never), actions.closed?.buy),
+        sell: rowAction(`Sell ${token}`, actions.sell, () => router.push(route('sell') as never), actions.closed?.sell),
       };
     };
     // MCGP needs a wallet this device can sign for, like the stablecoins, and
@@ -266,6 +285,8 @@ export default function ITHub() {
       currency: code,
       hasWallet: !!address,
       swappedSellEnabled,
+      // An empty list means not loaded yet (or failed to): unknown, not closed.
+      legs: currencies.length > 0 ? legs : null,
     });
     const anyTokenRow: AssetRow = {
       token: 'Any other token',
@@ -281,8 +302,8 @@ export default function ITHub() {
         ? { ...mcgpRow, unavailable: mcgpActions.unavailable }
         : {
             ...mcgpRow,
-            onBuy: () => router.push('/wallet/it/buy'),
-            onSell: () => router.push('/wallet/it/sell'),
+            buy: { onPress: () => router.push('/wallet/it/buy') },
+            sell: { onPress: () => router.push('/wallet/it/sell') },
           },
       stableRow('USDC'),
       stableRow('USDT'),
@@ -290,10 +311,18 @@ export default function ITHub() {
         ? { ...anyTokenRow, unavailable: anyTokenActions.unavailable }
         : {
             ...anyTokenRow,
-            onBuy: anyTokenActions.buy ? () => router.push(anyTokenRoute('buy') as never) : undefined,
-            onSell: anyTokenActions.sell
-              ? () => router.push(anyTokenRoute('sell') as never)
-              : undefined,
+            buy: rowAction(
+              'Buy other tokens',
+              anyTokenActions.buy,
+              () => router.push(anyTokenRoute('buy') as never),
+              anyTokenActions.closed?.buy,
+            ),
+            sell: rowAction(
+              'Sell other tokens',
+              anyTokenActions.sell,
+              () => router.push(anyTokenRoute('sell') as never),
+              anyTokenActions.closed?.sell,
+            ),
           },
     ];
   }, [
@@ -303,10 +332,12 @@ export default function ITHub() {
     stable,
     support,
     legs,
+    currencies,
     code,
     spendable,
     mcgpRateLine,
     swappedSellEnabled,
+    toast,
   ]);
 
   const activity = useMemo(
@@ -411,13 +442,23 @@ export default function ITHub() {
                     {a.unavailable}
                   </Text>
                 ) : (
-                  // Only the directions that actually trade get a button. A
-                  // disabled-looking Buy would still read as "try me"; absence
-                  // is the honest rendering of a leg no provider quotes.
                   <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-                    {a.onBuy ? <Button title="Buy" size="sm" onPress={a.onBuy} /> : null}
-                    {a.onSell ? (
-                      <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
+                    {a.buy ? (
+                      <Button
+                        title="Buy"
+                        size="sm"
+                        onPress={a.buy.onPress}
+                        accessibilityLabel={a.buy.accessibilityLabel}
+                      />
+                    ) : null}
+                    {a.sell ? (
+                      <Button
+                        title="Sell"
+                        size="sm"
+                        variant="secondary"
+                        onPress={a.sell.onPress}
+                        accessibilityLabel={a.sell.accessibilityLabel}
+                      />
                     ) : null}
                   </View>
                 )}
