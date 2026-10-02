@@ -3,6 +3,7 @@ package ramp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,14 +21,17 @@ type fakeProvider struct {
 	legs        map[string]services.RampLegs
 	legsErr     error
 	openResults []openResult
-	opened      []VenueKey
-	openInputs  []OrderInput
-	hasOpen     []bool // consumed per CheckNoOpenOrder call; last value repeats
-	hasOpenErr  error
-	hasOpenN    int
-	orders      map[string]*Order
-	list        []Order
-	listErr     error
+	// bindRate, when set, is the rate Open binds at: like the Paycrest guard,
+	// an enforced limit it misses is refused with that rate.
+	bindRate   string
+	opened     []VenueKey
+	openInputs []OrderInput
+	hasOpen    []bool // consumed per CheckNoOpenOrder call; last value repeats
+	hasOpenErr error
+	hasOpenN   int
+	orders     map[string]*Order
+	list       []Order
+	listErr    error
 }
 
 type openResult struct {
@@ -49,9 +53,12 @@ func (f *fakeProvider) Quote(ctx context.Context, _ Request) (*ProviderQuote, er
 	}
 	return f.quote, f.quoteErr
 }
-func (f *fakeProvider) Open(_ context.Context, k VenueKey, _ Request, in OrderInput) (*Order, error) {
+func (f *fakeProvider) Open(_ context.Context, k VenueKey, req Request, in OrderInput) (*Order, error) {
 	f.opened = append(f.opened, k)
 	f.openInputs = append(f.openInputs, in)
+	if f.bindRate != "" && in.Guard == services.PriceGuardEnforce && !Acceptable(req.Side, f.bindRate, in.LimitRate) {
+		return nil, &services.PriceMovedPastQuoteError{BoundRate: f.bindRate}
+	}
 	if len(f.openResults) == 0 {
 		return nil, ErrVenueUnavailable
 	}
@@ -216,5 +223,22 @@ func TestRouterList_MergesNewestFirst(t *testing.T) {
 	}
 	if _, err := testRouter(broken).List(context.Background(), uuid.New(), 5); err == nil {
 		t.Fatal("all providers failing must error")
+	}
+}
+
+// A nil Paycrest service must not become a typed-nil provider the router
+// counts as live.
+func TestNewRouter_SkipsAProviderBuiltFromNilServices(t *testing.T) {
+	if r := NewRouter(Config{}, NewPaycrestProvider(nil, nil, nil)); r.Enabled() {
+		t.Fatal("a provider built from nil services must leave the router disabled")
+	}
+}
+
+// RAMP_PRICE_TOLERANCE_BPS=0 falls back to 50, but never silently.
+func TestNewRouter_WarnsWhenToleranceIsDefaulted(t *testing.T) {
+	buf := captureRampLog(t)
+	NewRouter(Config{ToleranceBps: 0})
+	if !strings.Contains(buf.String(), "RAMP_PRICE_TOLERANCE_BPS") {
+		t.Fatalf("log = %q", buf.String())
 	}
 }

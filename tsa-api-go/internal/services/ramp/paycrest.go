@@ -41,7 +41,9 @@ type PaycrestProvider struct {
 	reg    providerRegistry // nil: no kill-switch filter on legs
 }
 
-func NewPaycrestProvider(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, reg *services.CurrencyRegistry) *PaycrestProvider {
+// NewPaycrestProvider returns a nil Provider (not a typed nil, which
+// NewRouter would count as live) when either service is missing.
+func NewPaycrestProvider(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, reg *services.CurrencyRegistry) Provider {
 	if orders == nil || quotes == nil {
 		return nil
 	}
@@ -70,7 +72,7 @@ func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.Ra
 
 func (p *PaycrestProvider) Quote(ctx context.Context, r Request) (*ProviderQuote, error) {
 	if err := p.orders.RequirePaycrestEnabled(r.FiatCode); err != nil {
-		return nil, fmt.Errorf("paycrest disabled for %s: %w", r.FiatCode, err)
+		return nil, fmt.Errorf("paycrest disabled for %q: %w", r.FiatCode, err)
 	}
 	res, err := p.quotes.Quote(ctx, string(r.Side), r.FiatCode, r.FiatAmount)
 	if err != nil {

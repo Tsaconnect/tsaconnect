@@ -35,6 +35,20 @@ func TestCheckPriceGuard(t *testing.T) {
 	}
 }
 
+// An enforce refusal names the rate it bound at, so the router can show that
+// rate (not the book's) for re-confirmation — while still reading as the
+// sentinel, wording unchanged.
+func TestCheckPriceGuard_EnforceRefusalCarriesTheBoundRate(t *testing.T) {
+	err := checkPriceGuard("buy", " 1450.5 ", "1407", PriceGuardEnforce)
+	var moved *PriceMovedPastQuoteError
+	if !errors.As(err, &moved) || moved.BoundRate != "1450.5" {
+		t.Fatalf("err = %#v, want the bound rate 1450.5", err)
+	}
+	if !errors.Is(err, ErrPriceMovedPastQuote) || err.Error() != ErrPriceMovedPastQuote.Error() {
+		t.Fatalf("err = %v, must stay ErrPriceMovedPastQuote with its wording", err)
+	}
+}
+
 // The whole point: an enforced refusal happens BEFORE Paycrest is asked to
 // open anything, so failing over cannot leave an order behind.
 func TestPriceGuard_EnforceRefusesBeforeCreate(t *testing.T) {
@@ -72,8 +86,8 @@ func TestPriceGuard_LogModeStillCreates(t *testing.T) {
 	if err != nil || row == nil {
 		t.Fatalf("log mode must create: row=%v err=%v", row, err)
 	}
-	if !strings.Contains(buf.String(), "ramp_price_guard_would_refuse") {
-		t.Fatalf("log mode must record the would-refuse, got %q", buf.String())
+	if !strings.Contains(buf.String(), "ramp_price_guard_would_refuse stage=bind provider=paycrest side=buy") {
+		t.Fatalf("log mode must record the bind-stage would-refuse, got %q", buf.String())
 	}
 }
 

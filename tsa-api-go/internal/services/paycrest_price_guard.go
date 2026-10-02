@@ -29,6 +29,17 @@ const (
 // limit allows. Nothing was sent to the provider.
 var ErrPriceMovedPastQuote = errors.New("the price moved since your quote")
 
+// PriceMovedPastQuoteError is an enforce refusal naming the rate the order
+// would have bound at. The router shows that rate for re-confirmation: the
+// quote prices off the book, so re-showing the book rate could be confirmed
+// and refused again forever. It reads as ErrPriceMovedPastQuote, wording too.
+type PriceMovedPastQuoteError struct{ BoundRate string }
+
+func (e *PriceMovedPastQuoteError) Error() string { return ErrPriceMovedPastQuote.Error() }
+func (e *PriceMovedPastQuoteError) Is(target error) bool {
+	return target == ErrPriceMovedPastQuote
+}
+
 // checkPriceGuard compares a bound fiat-per-token rate with the limit. On a
 // buy she pays naira per token, so bound must not exceed limit; on a sell she
 // receives naira per token, so bound must not fall below it. Exact decimal
@@ -45,9 +56,12 @@ func checkPriceGuard(side, bound, limit string, mode PriceGuardMode) error {
 	if !worse {
 		return nil
 	}
-	log.Printf("[ramp] METRIC ramp_price_guard_would_refuse side=%s bound=%q limit=%q mode=%s", side, bound, limit, mode)
+	// Only stage=bind predicts enforce refusals: enforce decides on this bound
+	// rate, while the router's stage=quote line compares the book's.
+	log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=bind provider=paycrest side=%s bound=%q limit=%q mode=%s",
+		side, bound, limit, mode)
 	if mode == PriceGuardEnforce {
-		return ErrPriceMovedPastQuote
+		return &PriceMovedPastQuoteError{BoundRate: strings.TrimSpace(bound)}
 	}
 	return nil
 }

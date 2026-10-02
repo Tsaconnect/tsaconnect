@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -33,6 +35,7 @@ type Router struct {
 
 func NewRouter(cfg Config, providers ...Provider) *Router {
 	if cfg.ToleranceBps <= 0 {
+		log.Printf("[ramp] RAMP_PRICE_TOLERANCE_BPS=%d is not positive; using 50", cfg.ToleranceBps)
 		cfg.ToleranceBps = 50
 	}
 	if cfg.ProviderTimeout <= 0 {
@@ -91,7 +94,7 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 				err = ErrNoVenue
 			}
 			if err != nil {
-				log.Printf("[ramp] METRIC ramp_provider_quote_failed provider=%s side=%s fiat=%s err=%v",
+				log.Printf("[ramp] METRIC ramp_provider_quote_failed provider=%s side=%s fiat=%q err=%v",
 					p.Name(), req.Side, req.FiatCode, err)
 			}
 			answers[i] = answer{q, err}
@@ -314,7 +317,7 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 
 	st := openState{tried: map[string]bool{}}
 	logOutcome := func(outcome string) {
-		log.Printf("[ramp] METRIC ramp_route side=%s fiat=%s token=%s chain=%s quoted_rate=%s chosen=%s attempts=%d failovers=%s outcome=%s",
+		log.Printf("[ramp] METRIC ramp_route side=%s fiat=%q token=%q chain=%q quoted_rate=%q chosen=%s attempts=%d failovers=%s outcome=%s",
 			q.Side, q.FiatCode, q.Token, q.ChainKey, req.QuotedRate, st.chosen, st.attempts, strings.Join(st.failovers, ","), outcome)
 	}
 
@@ -346,8 +349,8 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 					st.outsideTolerance = true
 					continue
 				}
-				log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=quote side=%s quoted=%s venue_rate=%s limit=%s",
-					q.Side, req.QuotedRate, v.Rate, limit)
+				log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=quote provider=%s side=%s quoted=%q venue_rate=%s limit=%s tol_bps=%d",
+					v.Provider, q.Side, req.QuotedRate, v.Rate, limit, r.cfg.ToleranceBps)
 			}
 			p := r.provider(v.Provider)
 			if p == nil {
@@ -369,6 +372,7 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			fresh = &QuoteResult{FiatCode: q.FiatCode, FiatAmount: q.FiatAmount, Side: string(q.Side),
 				Venues: []Venue{}, QuotedAt: time.Now()} // never "venues": null
 		}
+		showBoundRates(fresh, pinned, st.bound)
 		return nil, &PriceMovedError{Quote: fresh}
 	case fresh == nil && qerr != nil && !errors.Is(qerr, ErrUnavailable):
 		// The re-quote says why (leg closed, no venue, below minimum),
@@ -390,8 +394,11 @@ type openState struct {
 	chosen           string
 	sawPriceMoved    bool
 	outsideTolerance bool
-	lastCause        error // the last ErrVenueUnavailable, for the final message
+	lastCause        error       // the last ErrVenueUnavailable, for the final message
+	bound            []boundRate // what each guard refusal bound at, in attempt order
 }
+
+type boundRate struct{ provider, rate string }
 
 // attempt opens at one provider. stop=true means return (o, err) as-is.
 func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q Request, in OrderInput, st *openState) (*Order, bool, error) {
@@ -419,6 +426,10 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q 
 		return nil, true, err
 	case errors.Is(err, services.ErrPriceMovedPastQuote):
 		st.sawPriceMoved = true
+		var moved *services.PriceMovedPastQuoteError
+		if errors.As(err, &moved) {
+			st.bound = append(st.bound, boundRate{p.Name(), moved.BoundRate})
+		}
 	case errors.Is(err, ErrVenueUnavailable):
 		st.lastCause = err
 	default:
@@ -429,6 +440,52 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q 
 	log.Printf("[ramp] open failed over provider=%s side=%s err=%v", p.Name(), q.Side, err)
 	st.failovers = append(st.failovers, p.Name())
 	return nil, false, nil
+}
+
+// showBoundRates puts the rate each refusing provider actually bound at into
+// its venue for the pinned pair, priced as the provider prices a venue
+// (tokenAmount = fiat / rate). The guard refuses on the bound rate (Paycrest:
+// /v2/rates), not the book rate the re-quote shows; re-showing the book rate
+// could be confirmed and refused forever, while a limit from the bound rate
+// passes the same bind.
+func showBoundRates(res *QuoteResult, k VenueKey, bound []boundRate) {
+	amt, _ := strconv.ParseFloat(strings.TrimSpace(res.FiatAmount), 64)
+	changed := false
+	for _, b := range bound {
+		rateStr := strings.TrimSpace(b.rate)
+		rate, err := strconv.ParseFloat(rateStr, 64)
+		if err != nil || rate <= 0 {
+			continue // an unreadable bound rate: nothing honest to show
+		}
+		i := -1
+		for j, v := range res.Venues {
+			if v.Provider == b.provider && strings.EqualFold(v.ChainKey, k.ChainKey) && strings.EqualFold(v.Token, k.Token) {
+				i = j
+				break
+			}
+		}
+		if i < 0 { // the re-quote failed or no longer lists it
+			res.Venues = append(res.Venues, Venue{Handle: EncodeHandle(b.provider, k), Provider: b.provider,
+				ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect})
+			i = len(res.Venues) - 1
+		}
+		v := &res.Venues[i]
+		v.Rate = rateStr
+		if amt > 0 {
+			v.TokenAmount = amt / rate
+		}
+		if res.MarketRate > 0 {
+			v.SpreadPercent = (rate/res.MarketRate - 1) * 100
+		}
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	sort.SliceStable(res.Venues, func(i, j int) bool {
+		return RateBetter(Side(res.Side), res.Venues[i].Rate, res.Venues[j].Rate)
+	})
+	res.Best = &res.Venues[0]
 }
 
 // preflight refuses when any provider holds an open order for this user and

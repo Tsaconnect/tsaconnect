@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -485,5 +488,25 @@ func TestLoad_TSAPayDefaultsOff(t *testing.T) {
 	}
 	if cfg.TSAPayCheckoutBaseURL != "https://tsaconnectworld.com/pay" {
 		t.Fatalf("checkout base = %q", cfg.TSAPayCheckoutBaseURL)
+	}
+}
+
+// An unknown RAMP_PRICE_GUARD still means log, but never silently.
+func TestLoad_UnknownRampPriceGuardWarns(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	t.Setenv("RAMP_PRICE_GUARD", "enforced")
+	Load()
+	if !strings.Contains(buf.String(), `RAMP_PRICE_GUARD="enforced" is unknown`) {
+		t.Fatalf("log = %q", buf.String())
+	}
+	buf.Reset()
+	t.Setenv("RAMP_PRICE_GUARD", "enforce")
+	Load()
+	if strings.Contains(buf.String(), "RAMP_PRICE_GUARD") {
+		t.Fatalf("a known mode must not warn: %q", buf.String())
 	}
 }

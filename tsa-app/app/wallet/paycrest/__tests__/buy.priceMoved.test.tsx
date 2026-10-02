@@ -1,8 +1,10 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
 
 /**
- * Sell screen, price_moved: a refusal for a moved rate shows the new rate and
- * opens nothing; confirming again holds the order to the rate she now sees.
+ * Buy screen routing and price_moved: a direct venue opens through the ramp
+ * router, and a refusal for a moved rate shows the new rate and opens nothing;
+ * confirming again holds the order to the rate she now sees. A converted venue
+ * stays on /paycrest/buy.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
@@ -220,4 +222,32 @@ it('a direct buy opens through the ramp router at the confirmed rate; a moved ra
   expect(ramp.createRampBuy.mock.calls[1][0]).toMatchObject({ quotedRate: '1405.00' });
   expect(api.createBuy).not.toHaveBeenCalled();
   alert.mockRestore();
+});
+
+it('a converted venue confirms through /paycrest/buy, never the ramp router', async () => {
+  // Nothing fills USDC on Base directly; Paycrest settles USDT on Polygon and
+  // a LiFi leg delivers the USDC she asked for.
+  const converted = {
+    chain: 'polygon', token: 'USDT', rate: '1410.00', spreadPercent: 1, tokenAmount: 0.7, kind: 'converted',
+    viaChain: 'polygon', viaToken: 'USDT', requestedChain: 'base', requestedToken: 'USDC',
+    requestedChainId: 8453, requestedTokenAddress: '0xusdc', markupBps: 120, promisedAmount: '700000', etaSeconds: 60,
+  };
+  api.getQuote.mockResolvedValue({ venues: [converted], best: converted } as any);
+  api.createBuy.mockResolvedValueOnce({ ...order, routeKind: 'converted' } as PaycrestOrder);
+
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = TestRenderer.create(<BuyScreen />); });
+  await flush();
+  await act(async () => { byLabel(tree, 'amount:You pay').props.onChangeText('1000'); });
+  await act(async () => { jest.advanceTimersByTime(500); });
+  await flush();
+  expect(text(tree)).toContain('Settles as USDT');
+
+  await act(async () => { await byLabel(tree, 'button:Continue').props.onPress(); });
+  await flush();
+  expect(api.createBuy).toHaveBeenCalledTimes(1);
+  expect(api.createBuy.mock.calls[0][0]).toMatchObject({
+    chain: 'polygon', token: 'USDT', requestedChainId: 8453, requestedTokenAddress: '0xusdc', quotedMarkupBps: 120,
+  });
+  expect(ramp.createRampBuy).not.toHaveBeenCalled();
 });

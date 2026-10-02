@@ -932,6 +932,9 @@ func Load() *Config {
 	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))
 	cfg.RampPriceToleranceBps = int(getEnvInt64("RAMP_PRICE_TOLERANCE_BPS", 50))
 	cfg.RampPriceGuard = strings.ToLower(strings.TrimSpace(getEnv("RAMP_PRICE_GUARD", "log")))
+	if g := cfg.RampPriceGuard; g != "" && g != "log" && g != "enforce" {
+		log.Printf("[config] RAMP_PRICE_GUARD=%q is unknown; falling back to 'log'", g)
+	}
 	cfg.RampProviderTimeout = getEnvDuration("RAMP_PROVIDER_TIMEOUT", 8*time.Second)
 	cfg.RampOpenAttemptTimeout = getEnvDuration("RAMP_OPEN_ATTEMPT_TIMEOUT", 15*time.Second)
 	cfg.RampOpenBudget = getEnvDuration("RAMP_OPEN_BUDGET", 20*time.Second)

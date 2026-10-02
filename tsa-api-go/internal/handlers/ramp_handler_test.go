@@ -226,3 +226,35 @@ func TestRampOrders_AuthAndNotFound(t *testing.T) {
 		t.Fatalf("another user's order: %d %s", w.Code, w.Body)
 	}
 }
+
+// The currency reaches log lines and provider calls verbatim: anything but
+// three letters is refused before the router sees it.
+func TestRamp_RejectsAMalformedCurrency(t *testing.T) {
+	f := &fakeRampRoutes{quote: &ramp.QuoteResult{}}
+	user := rampUser()
+	if w := rampDoJSON(rampTestServer(t, f, user), "GET", "/api/ramp/quote?side=buy&amount=1000&currency=NG%0AX", nil); w.Code != 400 {
+		t.Fatalf("quote: %d %s", w.Code, w.Body)
+	}
+	buy := rampBuyJSON()
+	buy["currency"] = "NGNX"
+	if w := rampDoJSON(rampTestServer(t, f, user), "POST", "/api/ramp/buy", buy); w.Code != 400 {
+		t.Fatalf("buy: %d %s", w.Code, w.Body)
+	}
+	sell := map[string]any{"amount": "1000", "currency": "N1N", "chain": "base", "token": "USDC", "bankCode": "044",
+		"accountNumber": "0123456789", "quotedRate": "1353.25"}
+	if w := rampDoJSON(rampTestServer(t, f, user), "POST", "/api/ramp/sell", sell); w.Code != 400 {
+		t.Fatalf("sell: %d %s", w.Code, w.Body)
+	}
+	if f.openReq.QuotedRate != "" {
+		t.Fatalf("the router was asked to open: %+v", f.openReq)
+	}
+	// Lower case and an omitted currency are still fine.
+	buy["currency"] = "ngn"
+	f.order = &ramp.Order{Provider: ramp.ProviderPaycrest, Paycrest: &models.PaycrestOrderRecord{ID: uuid.New()}}
+	if w := rampDoJSON(rampTestServer(t, f, user), "POST", "/api/ramp/buy", buy); w.Code != http.StatusCreated {
+		t.Fatalf("lower-case buy: %d %s", w.Code, w.Body)
+	}
+	if w := rampDoJSON(rampTestServer(t, f, nil), "GET", "/api/ramp/quote?side=buy&amount=1000", nil); w.Code != 200 {
+		t.Fatalf("default currency: %d %s", w.Code, w.Body)
+	}
+}

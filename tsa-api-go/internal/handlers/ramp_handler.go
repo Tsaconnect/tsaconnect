@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -54,6 +55,17 @@ type rampSellBody struct {
 	Handle     string `json:"handle"`
 }
 
+// fiatCodeRE: a currency reaches log lines and provider calls verbatim, so
+// anything but three letters is refused at the door. Empty means NGN.
+var fiatCodeRE = regexp.MustCompile(`^[A-Za-z]{3}$`)
+
+func validFiatCode(code string) bool {
+	code = strings.TrimSpace(code)
+	return code == "" || fiatCodeRE.MatchString(code)
+}
+
+const badFiatCodeMsg = "currency must be a three-letter code"
+
 // GET /api/ramp/quote — public, like /paycrest/quote.
 func (h *RampHandler) Quote(c *gin.Context) {
 	side := ramp.Side(c.DefaultQuery("side", "buy"))
@@ -66,8 +78,13 @@ func (h *RampHandler) Quote(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
 		return
 	}
+	currency := c.DefaultQuery("currency", "NGN")
+	if !validFiatCode(currency) {
+		utils.ErrorResponse(c, http.StatusBadRequest, badFiatCodeMsg)
+		return
+	}
 	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
-		Side: side, FiatCode: c.DefaultQuery("currency", "NGN"), FiatAmount: amount,
+		Side: side, FiatCode: currency, FiatAmount: amount,
 		Token: c.Query("token"), ChainKey: c.Query("chain"),
 	})
 	if err != nil {
@@ -88,6 +105,10 @@ func (h *RampHandler) Buy(c *gin.Context) {
 	var body rampBuyBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !validFiatCode(body.Currency) {
+		utils.ErrorResponse(c, http.StatusBadRequest, badFiatCodeMsg)
 		return
 	}
 	if strings.TrimSpace(body.QuotedRate) == "" {
@@ -137,6 +158,10 @@ func (h *RampHandler) Sell(c *gin.Context) {
 	var body rampSellBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !validFiatCode(body.Currency) {
+		utils.ErrorResponse(c, http.StatusBadRequest, badFiatCodeMsg)
 		return
 	}
 	if strings.TrimSpace(body.QuotedRate) == "" {

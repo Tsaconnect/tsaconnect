@@ -218,6 +218,68 @@ func TestRouterOpen_PriceMovedNeverSendsNullVenues(t *testing.T) {
 	}
 }
 
+// Enforce refuses on the rate the order binds at (Paycrest: /v2/rates), not
+// the book rate the quote shows. The re-quote must show the bound rate, or
+// she confirms the book rate and is refused again, forever.
+func TestRouterOpen_PriceMovedShowsTheBoundRate(t *testing.T) {
+	handle := EncodeHandle("a", VenueKey{"base", "USDC"})
+	a := &fakeProvider{name: "a", bindRate: "1450",
+		quote:       &ProviderQuote{MarketRate: 1380, Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := testRouter(a)
+	_, err := r.Open(context.Background(), openReq(handle, "1400"))
+	var pm *PriceMovedError
+	if !errors.As(err, &pm) || pm.Quote == nil || pm.Quote.Best == nil || len(pm.Quote.Venues) != 1 {
+		t.Fatalf("err = %v", err)
+	}
+	v := pm.Quote.Best
+	if v.Rate != "1450" || v.Handle != handle || v.Provider != "a" {
+		t.Fatalf("venue = %+v, want the bound rate 1450 at a", v)
+	}
+	if want := 1000 / 1450.0; v.TokenAmount < want-1e-9 || v.TokenAmount > want+1e-9 {
+		t.Fatalf("tokenAmount = %v, want %v (repriced at the bound rate)", v.TokenAmount, want)
+	}
+	if want := (1450.0/1380 - 1) * 100; v.SpreadPercent < want-1e-9 || v.SpreadPercent > want+1e-9 {
+		t.Fatalf("spreadPercent = %v, want %v", v.SpreadPercent, want)
+	}
+
+	// Confirming what she was shown gives a limit the same bind passes.
+	o, err := r.Open(context.Background(), openReq(v.Handle, v.Rate))
+	if err != nil || o != okOrder {
+		t.Fatalf("re-confirm at the bound rate: o=%v err=%v (limit %s)", o, err, a.openInputs[len(a.openInputs)-1].LimitRate)
+	}
+}
+
+// A refusal whose re-quote failed still shows the bound venue to confirm.
+func TestRouterOpen_PriceMovedShowsTheBoundRateWithoutARequote(t *testing.T) {
+	a := &fakeProvider{name: "a", bindRate: "1450", quoteErr: errors.New("down")}
+	_, err := testRouter(a).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	var pm *PriceMovedError
+	if !errors.As(err, &pm) || pm.Quote == nil || len(pm.Quote.Venues) != 1 || pm.Quote.Best == nil {
+		t.Fatalf("err = %v", err)
+	}
+	if v := pm.Quote.Best; v.Rate != "1450" || v.ChainKey != "base" || v.Token != "USDC" ||
+		v.Handle != EncodeHandle("a", VenueKey{"base", "USDC"}) || v.Kind != models.RouteKindDirect {
+		t.Fatalf("venue = %+v", v)
+	}
+}
+
+// Only stage=bind predicts enforce refusals; the quote-stage line says so.
+func TestRouterOpen_QuoteStageWouldRefuseIsTagged(t *testing.T) {
+	buf := captureRampLog(t)
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1500")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := NewRouter(Config{ToleranceBps: 50, Guard: services.PriceGuardLog,
+		ProviderTimeout: time.Second, AttemptTimeout: time.Second, OpenBudget: 2 * time.Second}, a)
+	if _, err := r.Open(context.Background(), openReq("", "1400")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ramp_price_guard_would_refuse stage=quote provider=a side=buy") ||
+		!strings.Contains(buf.String(), "tol_bps=50") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
 func captureRampLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var b bytes.Buffer
