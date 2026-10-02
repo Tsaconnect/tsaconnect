@@ -105,12 +105,17 @@ jest.mock('@/services/ngBanks', () => ({
 }));
 jest.mock('@/services/paycrestApi', () => ({
   ...jest.requireActual('@/services/paycrestApi'),
-  getQuote: jest.fn(),
   getPayoutInstitutions: jest.fn(async () => [{ code: '058', name: 'GTBank' }]),
-  createSell: jest.fn(),
-  cancelOrder: jest.fn(),
-  claimPayment: jest.fn(async () => ({})),
-  getOrder: jest.fn(),
+}));
+jest.mock('@/services/rampApi', () => ({
+  ...jest.requireActual('@/services/rampApi'),
+  getRampQuote: jest.fn(),
+  createRampSell: jest.fn(),
+  createRampBuy: jest.fn(),
+  getRampOrder: jest.fn(),
+  cancelRampOrder: jest.fn(),
+  claimRampPayment: jest.fn(async () => ({})),
+  listRampOrders: jest.fn(async () => []),
 }));
 jest.mock('@/services/paycrestSellSwap', () => ({
   __esModule: true,
@@ -145,13 +150,13 @@ import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import SellScreen from '../sell';
 import * as Swapped from '@/hooks/useSwappedSell';
-import * as PaycrestApi from '@/services/paycrestApi';
+import * as RampApi from '@/services/rampApi';
 import * as Deposit from '@/services/paycrestDeposit';
 import { PaycrestError, type PaycrestOrder } from '@/services/paycrestApi';
 import { DEPOSIT_OUTCOME_UNKNOWN, DepositOutcomeUnknownError } from '@/services/paycrestDeposit';
 import { depositHoldKey, readHold, writeHold } from '@/services/payHold';
 
-const api = jest.mocked(PaycrestApi);
+const ramp = jest.mocked(RampApi);
 const send = jest.mocked(Deposit.sendSponsoredPaycrestDeposit);
 const swappedState = (Swapped as unknown as { __state: { value: any } }).__state;
 
@@ -199,11 +204,11 @@ async function mount() {
 
 /** A direct sale, created from the form: amount → route → bank → Continue. */
 async function openDirect() {
-  api.getQuote.mockResolvedValue({
+  ramp.getRampQuote.mockResolvedValue({
     venues: [{ chain: 'base', token: 'USDC', rate: '1373', tokenAmount: 36.42 }],
     best: { chain: 'base', token: 'USDC', rate: '1373', tokenAmount: 36.42 },
   } as any);
-  api.createSell.mockResolvedValue(order);
+  ramp.createRampSell.mockResolvedValue(order);
   const tree = await mount();
   await act(async () => { byLabel(tree, 'amount:You receive').props.onChangeText('50000'); });
   await act(async () => { jest.advanceTimersByTime(500); });
@@ -241,8 +246,8 @@ beforeEach(async () => {
   jest.clearAllMocks();
   await AsyncStorage.clear();
   swappedState.value = { ...swappedState.value, stage: 'idle', error: undefined, order: undefined };
-  api.getOrder.mockResolvedValue(order);
-  api.claimPayment.mockResolvedValue({} as PaycrestOrder);
+  ramp.getRampOrder.mockResolvedValue(order);
+  ramp.claimRampPayment.mockResolvedValue({} as PaycrestOrder);
 });
 afterEach(() => { jest.useRealTimers(); });
 
@@ -256,9 +261,9 @@ it('a clean send is held under its order before it goes out, claimed, and follow
   expect(all(tree, 'button:Cancel this sale')).toHaveLength(1);
 
   await tapSend(tree);
-  expect(api.getOrder).toHaveBeenCalledWith('o1');
+  expect(ramp.getRampOrder).toHaveBeenCalledWith('o1');
   expect(send).toHaveBeenCalledTimes(1);
-  expect(api.claimPayment).toHaveBeenCalledWith('o1');
+  expect(ramp.claimRampPayment).toHaveBeenCalledWith('o1');
   expect(router.replace).toHaveBeenCalledWith('/wallet/paycrest/order/o1?sentTx=0xdeposit');
   // Kept until the order is terminal: a lost claim must not reopen Send.
   expect((await readHold(HOLD))?.intentId).toBe('o1');
@@ -269,7 +274,7 @@ it('a broadcast whose answer was lost goes to the order with the honest notice �
   const tree = await openDirect();
   await tapSend(tree);
   expect(router.replace).toHaveBeenCalledWith('/wallet/paycrest/order/o1?unconfirmed=1');
-  expect(api.claimPayment).not.toHaveBeenCalled();
+  expect(ramp.claimRampPayment).not.toHaveBeenCalled();
   expect((await readHold(HOLD))?.intentId).toBe('o1');
 });
 
@@ -300,12 +305,12 @@ it('reopened after a kill mid-send (hold on the phone, nothing reported): no Sen
 
 it('reopened after a good send whose claim failed: the hold still stands, so no Send', async () => {
   send.mockImplementation(broadcastThen(async () => '0xdeposit'));
-  api.claimPayment.mockRejectedValue(new Error('offline'));
+  ramp.claimRampPayment.mockRejectedValue(new Error('offline'));
   const first = await openDirect();
   await tapSend(first);
   await act(async () => { first.unmount(); });
 
-  api.getOrder.mockResolvedValue(order); // Paycrest has not reported it, and no claim landed
+  ramp.getRampOrder.mockResolvedValue(order); // Paycrest has not reported it, and no claim landed
   const tree = await reopenOn(order);
   offersNoWayToSend(tree);
 });
@@ -326,7 +331,7 @@ it('Send re-reads the order and sends nothing once a hold appeared meanwhile', a
 
 it('Send sends nothing for an order already reported or claimed', async () => {
   const tree = await openDirect();
-  api.getOrder.mockResolvedValue({ ...order, paymentClaimedAt: '2026-09-25T10:01:00Z' });
+  ramp.getRampOrder.mockResolvedValue({ ...order, paymentClaimedAt: '2026-09-25T10:01:00Z' });
   await tapSend(tree);
   expect(send).not.toHaveBeenCalled();
   expect(router.replace).toHaveBeenCalledWith('/wallet/paycrest/order/o1');
@@ -334,7 +339,7 @@ it('Send sends nothing for an order already reported or claimed', async () => {
 
 it('Send refuses an order opened for a different wallet', async () => {
   const tree = await openDirect();
-  api.getOrder.mockResolvedValue({ ...order, walletAddress: '0xSomeoneElse' });
+  ramp.getRampOrder.mockResolvedValue({ ...order, walletAddress: '0xSomeoneElse' });
   await tapSend(tree);
   expect(send).not.toHaveBeenCalled();
   expect(text(tree)).toMatch(/started from a different wallet, so nothing was sent/);
@@ -347,7 +352,7 @@ it.each([
   ['chain', { chain: 'polygon' }],
 ])('Send refuses an order whose %s changed since it was shown — and shows it as it is now', async (_n, change) => {
   const tree = await openDirect();
-  api.getOrder.mockResolvedValue({ ...order, ...change } as PaycrestOrder);
+  ramp.getRampOrder.mockResolvedValue({ ...order, ...change } as PaycrestOrder);
   await tapSend(tree);
   expect(send).not.toHaveBeenCalled();
   expect(text(tree)).toMatch(/changed since you opened it, so nothing was sent/);
@@ -355,7 +360,7 @@ it.each([
 
 it('an order that could not be re-read is not sent — and Send stays', async () => {
   const tree = await openDirect();
-  api.getOrder.mockRejectedValue(new TypeError('Network request failed'));
+  ramp.getRampOrder.mockRejectedValue(new TypeError('Network request failed'));
   await tapSend(tree);
   expect(send).not.toHaveBeenCalled();
   expect(text(tree)).toMatch(/Could not check on your order, so nothing was sent/);
@@ -384,11 +389,11 @@ it('with no hold, the stopped sale offers Send and Cancel as before', async () =
 
 it('Cancel still asks first, and cancels on confirm', async () => {
   const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
-  api.cancelOrder.mockResolvedValue({ ...order, status: 'cancelled' });
+  ramp.cancelRampOrder.mockResolvedValue({ ...order, status: 'cancelled' });
   const tree = await reopenOn(order);
   await act(async () => { byLabel(tree, 'button:Cancel this sale').props.onPress(); });
   const buttons = alert.mock.calls[0][2] as { text: string; onPress?: () => Promise<void> }[];
   await act(async () => { await buttons.find((b) => b.text === 'Cancel sale')!.onPress!(); });
-  expect(api.cancelOrder).toHaveBeenCalledWith('o1');
+  expect(ramp.cancelRampOrder).toHaveBeenCalledWith('o1');
   alert.mockRestore();
 });

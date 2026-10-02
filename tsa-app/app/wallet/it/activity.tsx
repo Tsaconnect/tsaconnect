@@ -25,7 +25,8 @@ import {
 } from '@/components/ui';
 import ITActivityRow, { ACTIVITY_DIVIDER_INSET } from '@/components/it/ITActivityRow';
 import { listITIntents, type ITIntent } from '@/services/itApi';
-import { listOrders as listPaycrestOrders, type PaycrestOrder } from '@/services/paycrestApi';
+import { type PaycrestOrder } from '@/services/paycrestApi';
+import { listRampOrders } from '@/services/rampApi';
 import { useFiatSymbol } from '@/hooks/useFiatSymbol';
 import { buildITActivity } from '@/utils/itActivity';
 
@@ -59,7 +60,7 @@ export default function ITActivityScreen() {
   const load = useCallback(async () => {
     const [list, pc] = await Promise.all([
       listITIntents().catch(() => null),
-      listPaycrestOrders(LIST_CAP).catch(() => null),
+      listRampOrders(LIST_CAP).catch(() => null),
     ]);
     const intentsOk = !!(list?.success && list.data?.intents);
     if (intentsOk) setIntents(list!.data!.intents);

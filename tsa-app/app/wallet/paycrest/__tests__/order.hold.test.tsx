@@ -59,22 +59,27 @@ jest.mock('@/hooks/useCountdown', () => ({
   __esModule: true,
   useCountdown: () => ({ label: '10:00', expired: false, secs: 600 }),
 }));
-jest.mock('@/services/paycrestApi', () => ({
-  ...jest.requireActual('@/services/paycrestApi'),
-  getOrder: jest.fn(),
-  cancelOrder: jest.fn(),
+jest.mock('@/services/rampApi', () => ({
+  ...jest.requireActual('@/services/rampApi'),
+  getRampQuote: jest.fn(),
+  createRampSell: jest.fn(),
+  createRampBuy: jest.fn(),
+  getRampOrder: jest.fn(),
+  cancelRampOrder: jest.fn(),
+  claimRampPayment: jest.fn(async () => ({})),
+  listRampOrders: jest.fn(async () => []),
 }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import OrderScreen from '../order/[id]';
-import * as PaycrestApi from '@/services/paycrestApi';
+import * as RampApi from '@/services/rampApi';
 import type { PaycrestOrder } from '@/services/paycrestApi';
 import { DEPOSIT_OUTCOME_UNKNOWN } from '@/services/paycrestDeposit';
 import { depositHoldKey, readHold, writeHold } from '@/services/payHold';
 
-const api = jest.mocked(PaycrestApi);
+const ramp = jest.mocked(RampApi);
 const HOLD = depositHoldKey('o1');
 const DEPOSIT_ADDRESS = '0x2222222222222222222222222222222222222222';
 const order = {
@@ -114,7 +119,7 @@ beforeEach(async () => {
   jest.clearAllMocks();
   await AsyncStorage.clear();
   mockParams.value = { id: 'o1' };
-  api.getOrder.mockResolvedValue(order);
+  ramp.getRampOrder.mockResolvedValue(order);
 });
 
 it('with nothing held, asks for the deposit and offers Cancel, as before', async () => {
@@ -156,14 +161,14 @@ it('a deposit just sent from here offers no Cancel either', async () => {
 
 it('a terminal order lifts the hold', async () => {
   await writeHold(HOLD, 'o1');
-  api.getOrder.mockResolvedValue({ ...order, status: 'settled' });
+  ramp.getRampOrder.mockResolvedValue({ ...order, status: 'settled' });
   await mount();
   expect(await readHold(HOLD)).toBeNull();
 });
 
 it('a live order keeps it', async () => {
   await writeHold(HOLD, 'o1');
-  api.getOrder.mockResolvedValue({ ...order, status: 'pending' });
+  ramp.getRampOrder.mockResolvedValue({ ...order, status: 'pending' });
   await mount();
   expect((await readHold(HOLD))?.intentId).toBe('o1');
 });
@@ -185,18 +190,18 @@ describe('progress and details', () => {
 
   it('"You paid" only once the provider has seen the transfer — never on a buy that expired unpaid', async () => {
     const buy = { ...order, direction: 'buy', payAmount: '50250.00' } as PaycrestOrder;
-    api.getOrder.mockResolvedValue({ ...buy, status: 'expired' });
+    ramp.getRampOrder.mockResolvedValue({ ...buy, status: 'expired' });
     let tree = await mount();
     expect(text(tree)).not.toContain('You paid');
     await act(async () => { mounted.splice(0).forEach((t) => t.unmount()); });
-    api.getOrder.mockResolvedValue({ ...buy, status: 'settled' });
+    ramp.getRampOrder.mockResolvedValue({ ...buy, status: 'settled' });
     tree = await mount();
     expect(text(tree)).toContain('You paid');
     expect(text(tree)).toContain('₦50,250.00');
   });
 
   it('a settled sale: naira headline, rate per token, readable times, every step done', async () => {
-    api.getOrder.mockResolvedValue({
+    ramp.getRampOrder.mockResolvedValue({
       ...order, status: 'settled', amount: '1000.00', rate: '1347.67',
       settledAt: '2026-09-25T17:08:40.763369+02:00',
     });
@@ -212,7 +217,7 @@ describe('progress and details', () => {
   });
 
   it('an expired order ends its steps there', async () => {
-    api.getOrder.mockResolvedValue({ ...order, status: 'expired' });
+    ramp.getRampOrder.mockResolvedValue({ ...order, status: 'expired' });
     const tree = await mount();
     expect(text(tree)).toContain('Expired — no deposit arrived:failed');
     expect(text(tree)).not.toContain('Paid to your bank');

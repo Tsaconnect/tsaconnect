@@ -62,7 +62,6 @@ import {
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
 import {
-  claimPayment,
   createBuy,
   getPayoutInstitutions,
   getQuote,
@@ -79,6 +78,7 @@ import {
   type PaycrestVenue,
   type RequestedAsset,
 } from '@/services/paycrestApi';
+import { claimRampPayment, createRampBuy, priceMovedQuote } from '@/services/rampApi';
 import { formatTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 // The destination token AND chain picker — reused verbatim from the swap
@@ -409,30 +409,43 @@ export default function PaycrestBuyScreen() {
     if (!venue || !address || !refundBank || !want.chain || !want.address) return;
     setCreating(true);
     try {
-      const created = await createBuy({
-        amount: amount.trim(),
-        // The settlement leg — what Paycrest itself is asked to fill.
-        chain: venue.chain,
-        token: venue.token,
-        // What the user actually asked for, by chain id + address — the
-        // server derives decimals itself, so that never gets sent. Sent
-        // explicitly and always, whether or not this venue converts: on a
-        // direct match the two pairs are identical anyway, and the server
-        // defaults one from the other regardless — this is just never
-        // leaving it to inference.
-        requestedChainId: want.chainId,
-        requestedTokenAddress: want.address,
-        requestedToken: want.token,
-        // Where a destination the EVM wallet cannot receive on is delivered
-        // (Solana). Absent everywhere else, where the wallet IS the recipient.
-        ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
-        // Holds the order to the fee she was just shown.
-        ...(isConvertedVenue(venue) && venue.markupBps ? { quotedMarkupBps: venue.markupBps } : {}),
-        walletAddress: address,
-        refundBankCode: refundBank.code,
-        refundAccount,
-        currency: currencyCode,
-      });
+      // A direct venue goes through the ramp router, held to the rate she
+      // saw. A converted venue (Paycrest + a LiFi leg) keeps its own route.
+      const created = isConvertedVenue(venue)
+        ? await createBuy({
+          amount: amount.trim(),
+          // The settlement leg — what Paycrest itself is asked to fill.
+          chain: venue.chain,
+          token: venue.token,
+          // What the user actually asked for, by chain id + address — the
+          // server derives decimals itself, so that never gets sent. Sent
+          // explicitly and always, whether or not this venue converts: on a
+          // direct match the two pairs are identical anyway, and the server
+          // defaults one from the other regardless — this is just never
+          // leaving it to inference.
+          requestedChainId: want.chainId,
+          requestedTokenAddress: want.address,
+          requestedToken: want.token,
+          // Where a destination the EVM wallet cannot receive on is delivered
+          // (Solana). Absent everywhere else, where the wallet IS the recipient.
+          ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
+          // Holds the order to the fee she was just shown.
+          ...(isConvertedVenue(venue) && venue.markupBps ? { quotedMarkupBps: venue.markupBps } : {}),
+          walletAddress: address,
+          refundBankCode: refundBank.code,
+          refundAccount,
+          currency: currencyCode,
+        })
+        : await createRampBuy({
+            amount: amount.trim(),
+            chain: venue.chain,
+            token: venue.token,
+            walletAddress: address,
+            refundBankCode: refundBank.code,
+            refundAccount,
+            currency: currencyCode,
+            quotedRate: venue.rate,
+          });
       // Remember it only once an order actually succeeded with it.
       AsyncStorage.setItem(
         REFUND_STORE_KEY(currencyCode),
@@ -440,6 +453,15 @@ export default function PaycrestBuyScreen() {
       ).catch(() => {});
       setOrder(created);
     } catch (e) {
+      // The rate moved past what she confirmed: show the new one and let her
+      // confirm again — never open at a price she did not see.
+      const fresh = priceMovedQuote(e);
+      if (fresh) {
+        setQuote(fresh as PaycrestQuote);
+        setVenue(selectVenue(fresh.venues, want));
+        Alert.alert('The rate changed', 'Check the new rate and confirm again.');
+        return;
+      }
       // Not verified (or verified with no legal name): offer the next step
       // instead of a dead-end "could not start" alert.
       if (e instanceof PaycrestError && promptKycRefusal(e.code, e.message)) return;
@@ -600,7 +622,7 @@ export default function PaycrestBuyScreen() {
               // sent the money, so a failed claim must not block navigation —
               // it just means this order degrades to a plain "expired" if it
               // never matches, the same as before this existed.
-              claimPayment(order.id).catch(() => {});
+              claimRampPayment(order.id).catch(() => {});
               router.replace(`/wallet/paycrest/order/${order.id}` as never);
             }}
             disabled={expired}

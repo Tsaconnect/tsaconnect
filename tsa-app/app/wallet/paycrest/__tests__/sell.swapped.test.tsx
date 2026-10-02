@@ -125,6 +125,16 @@ jest.mock('@/services/paycrestApi', () => ({
   cancelOrder: jest.fn(),
   claimPayment: jest.fn(),
 }));
+jest.mock('@/services/rampApi', () => ({
+  ...jest.requireActual('@/services/rampApi'),
+  getRampQuote: jest.fn(),
+  createRampSell: jest.fn(),
+  createRampBuy: jest.fn(),
+  getRampOrder: jest.fn(),
+  cancelRampOrder: jest.fn(),
+  claimRampPayment: jest.fn(async () => ({})),
+  listRampOrders: jest.fn(async () => []),
+}));
 jest.mock('@/services/paycrestSellSwap', () => ({
   __esModule: true,
   getSwappedSellState: jest.fn(async () => ({ enabled: true, intent: null })),
@@ -166,7 +176,7 @@ import * as SellSwap from '@/services/paycrestSellSwap';
 import * as Swapped from '@/hooks/useSwappedSell';
 import * as Holdings from '@/hooks/useWalletHoldings';
 import * as Wallet from '@/services/wallet';
-import * as PaycrestApi from '@/services/paycrestApi';
+import * as RampApi from '@/services/rampApi';
 import { PaycrestError } from '@/services/paycrestApi';
 import { SOLANA_LIFI_CHAIN_ID } from '@/services/lifi';
 
@@ -279,7 +289,7 @@ it('keeps a stablecoin Paycrest takes on the direct sale', async () => {
 // are direct, and a direct pick selects its own route.
 it('a pick a live route takes selects that route; any other coin is swapped', async () => {
   const venue = (chain: string, token: string) => ({ chain, token, rate: '1500', tokenAmount: 10 });
-  jest.mocked(PaycrestApi.getQuote).mockResolvedValue({
+  jest.mocked(RampApi.getRampQuote).mockResolvedValue({
     venues: [venue('base', 'USDC'), venue('bsc', 'USDT')], best: venue('base', 'USDC'),
   } as any);
   const tree = await mount();

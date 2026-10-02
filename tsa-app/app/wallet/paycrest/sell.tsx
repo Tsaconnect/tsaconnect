@@ -71,19 +71,22 @@ import {
   sanitizeAccountNumberInput,
 } from '@/utils/payoutAccount';
 import {
-  cancelOrder,
-  claimPayment,
-  createSell,
-  getOrder,
   getPayoutInstitutions,
-  getQuote,
   isTerminal,
   PaycrestError,
   type PaycrestOrder,
-  type PaycrestQuote,
-  type PaycrestVenue,
   type PayoutInstitution,
 } from '@/services/paycrestApi';
+import {
+  cancelRampOrder,
+  claimRampPayment,
+  createRampSell,
+  getRampOrder,
+  getRampQuote,
+  priceMovedQuote,
+  type RampQuote,
+  type RampVenue,
+} from '@/services/rampApi';
 import {
   balanceOf,
   CHAIN_LABELS,
@@ -128,8 +131,8 @@ const OTHER_WALLET =
 const ORDER_CHANGED =
   'This order changed since you opened it, so nothing was sent. Check the amount and address above before sending.';
 
-const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
-const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
+const venueId = (v: RampVenue) => `${v.token}:${v.chain}`;
+const venueLabel = (v: RampVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
 
 /** The trailing half of a route's sublabel — silent when the route is fine. */
 function routeNote(check: FundingCheck): string {
@@ -190,8 +193,8 @@ export default function PaycrestSellScreen() {
   const requiresNameCheck = currencyCode === 'NGN';
 
   const [amount, setAmount] = useState('');
-  const [quote, setQuote] = useState<PaycrestQuote | null>(null);
-  const [venue, setVenue] = useState<PaycrestVenue | null>(null);
+  const [quote, setQuote] = useState<RampQuote | null>(null);
+  const [venue, setVenue] = useState<RampVenue | null>(null);
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [routeOpen, setRouteOpen] = useState(false);
@@ -351,7 +354,7 @@ export default function PaycrestSellScreen() {
     setQuoting(true);
     const t = setTimeout(async () => {
       try {
-        const q = await getQuote('sell', raw, currencyCode);
+        const q = await getRampQuote('sell', raw, currencyCode);
         if (seq !== quoteSeq.current) return;
         setQuote(q);
         setQuoteError(null);
@@ -516,7 +519,7 @@ export default function PaycrestSellScreen() {
     if (!venue || !address || !bank) return;
     setCreating(true);
     try {
-      const created = await createSell({
+      const created = await createRampSell({
         amount: amount.trim(),
         chain: venue.chain,
         token: venue.token,
@@ -525,9 +528,21 @@ export default function PaycrestSellScreen() {
         accountNumber: accountNo,
         accountName,
         currency: currencyCode,
+        quotedRate: venue.rate,
+        ...(venue.handle ? { handle: venue.handle } : {}),
       });
       setOrder(created);
     } catch (e) {
+      // The rate moved past what she confirmed: show the new one and let
+      // her confirm again — never open at a price she did not see.
+      const fresh = priceMovedQuote(e);
+      if (fresh) {
+        setQuote(fresh);
+        const same = fresh.venues.find((v) => v.chain === venue.chain && v.token.toUpperCase() === venue.token.toUpperCase());
+        setVenue(same ?? fresh.best ?? null);
+        Alert.alert('The rate changed', 'Check the new rate and confirm again.');
+        return;
+      }
       Alert.alert(
         'Could not start your sale',
         e instanceof PaycrestError ? e.message : 'Please try again.',
@@ -563,7 +578,7 @@ export default function PaycrestSellScreen() {
     // checkout. Fire-and-forget: the send already happened, so a failed claim
     // must not block navigation — it just means this order degrades to a
     // plain "expired" if it never matches, the same as before.
-    claimPayment(id).catch(() => {});
+    claimRampPayment(id).catch(() => {});
     const to = sentTx
       ? `/wallet/paycrest/order/${id}?sentTx=${encodeURIComponent(sentTx)}`
       : `/wallet/paycrest/order/${id}`;
@@ -612,7 +627,7 @@ export default function PaycrestSellScreen() {
     try {
       let fresh: PaycrestOrder;
       try {
-        fresh = await getOrder(order.id);
+        fresh = await getRampOrder(order.id);
       } catch (e) {
         setSendError(e instanceof PaycrestError ? e.message : CHECK_FAILED);
         return;
@@ -671,7 +686,7 @@ export default function PaycrestSellScreen() {
           onPress: async () => {
             setCancelling(true);
             try {
-              await cancelOrder(order.id);
+              await cancelRampOrder(order.id);
               // Back to the form with the lock released, rather than to a dead
               // order screen the user would only have to leave again.
               setOrder(null);
