@@ -46,7 +46,7 @@ func (f *fakePcOrders) Cancel(context.Context, uuid.UUID, uuid.UUID) (*models.Pa
 	return f.row, nil
 }
 func (f *fakePcOrders) AssertNoOpenOrder(context.Context, uuid.UUID, string) error { return f.openErr }
-func (f *fakePcOrders) RequirePaycrestEnabled(string) error                          { return f.disabled }
+func (f *fakePcOrders) RequirePaycrestEnabled(string) error                        { return f.disabled }
 func (f *fakePcOrders) ExplainMissingVenue(_ context.Context, _, _ string, err error) error {
 	return err
 }
@@ -60,7 +60,9 @@ type fakePcQuotes struct {
 func (f *fakePcQuotes) Quote(context.Context, string, string, string) (*services.PaycrestQuoteResult, error) {
 	return f.res, f.err
 }
-func (f *fakePcQuotes) RampLegs(context.Context) (map[string]services.RampLegs, error) { return f.legs, nil }
+func (f *fakePcQuotes) RampLegs(context.Context) (map[string]services.RampLegs, error) {
+	return f.legs, nil
+}
 
 type fakeReg map[string]string
 

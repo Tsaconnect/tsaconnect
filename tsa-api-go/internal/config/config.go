@@ -376,6 +376,12 @@ type Config struct {
 	// LiFi's cost plus the gas we pay. Converted orders send Paycrest F − B;
 	// a route costing more than B is not offered; the unspent rest is ours.
 	RampRoundTripBudgetBps int
+	// Ramp router (docs/specs/2026-10-02-ramp-router-design.md §5).
+	RampPriceToleranceBps  int
+	RampPriceGuard         string // "log" (default) | "enforce"
+	RampProviderTimeout    time.Duration
+	RampOpenAttemptTimeout time.Duration
+	RampOpenBudget         time.Duration
 	RampTreasuryPrivateKey string
 	RampTreasuryChains     []string
 	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
@@ -924,6 +930,11 @@ func Load() *Config {
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
 	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))
+	cfg.RampPriceToleranceBps = int(getEnvInt64("RAMP_PRICE_TOLERANCE_BPS", 50))
+	cfg.RampPriceGuard = strings.ToLower(strings.TrimSpace(getEnv("RAMP_PRICE_GUARD", "log")))
+	cfg.RampProviderTimeout = getEnvDuration("RAMP_PROVIDER_TIMEOUT", 8*time.Second)
+	cfg.RampOpenAttemptTimeout = getEnvDuration("RAMP_OPEN_ATTEMPT_TIMEOUT", 15*time.Second)
+	cfg.RampOpenBudget = getEnvDuration("RAMP_OPEN_BUDGET", 20*time.Second)
 	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
 	cfg.RampTreasuryChains = nil
 	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {
