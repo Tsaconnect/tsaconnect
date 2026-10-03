@@ -32,6 +32,18 @@ func ErrorResponseWithCode(c *gin.Context, status int, message string, code stri
 	})
 }
 
+// ErrorResponseWithCodeData is ErrorResponseWithCode plus a data payload —
+// for a refusal the client acts on with fresh server data (a ramp price
+// that moved carries the new quote).
+func ErrorResponseWithCodeData(c *gin.Context, status int, message, code string, data interface{}) {
+	c.JSON(status, gin.H{
+		"success": false,
+		"message": message,
+		"code":    code,
+		"data":    data,
+	})
+}
+
 // ValidationErrorResponse sends a validation error response with field-level errors.
 func ValidationErrorResponse(c *gin.Context, errors interface{}) {
 	c.JSON(422, gin.H{

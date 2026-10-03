@@ -34,9 +34,8 @@ import { useCountdown } from '@/hooks/useCountdown';
 import { DepositProgress } from '@/components/paycrest/DepositProgress';
 import { depositCardState } from '@/utils/paycrestDepositView';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
+import { cancelRampOrder, getRampOrder } from '@/services/rampApi';
 import {
-  cancelOrder,
-  getOrder,
   isAwaitingUser,
   isConvertedOrder,
   isDisputableOrder,
@@ -116,7 +115,7 @@ export default function PaycrestOrderScreen() {
   const load = useCallback(async () => {
     if (!id) return;
     try {
-      const o = await getOrder(id);
+      const o = await getRampOrder(id);
       const terminal = isTerminal(o.status);
       const holdKey = depositHoldKey(o.id);
       // Nothing more can happen to a terminal order's deposit: its hold has done its job.
@@ -188,7 +187,7 @@ export default function PaycrestOrderScreen() {
           onPress: async () => {
             setCancelling(true);
             try {
-              const updated = await cancelOrder(order.id);
+              const updated = await cancelRampOrder(order.id);
               setOrder(updated);
               // Nothing can move a cancelled order, so stop the poll rather
               // than letting it keep hitting the provider.

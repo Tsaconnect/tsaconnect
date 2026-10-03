@@ -208,6 +208,38 @@ const quotedFeeToleranceBps = 10
 // GET /it/currencies advertises to not-yet-updated app builds.
 func (s *PaycrestOrderService) SetCurrencyRegistry(r *CurrencyRegistry) { s.currencies = r }
 
+// Refusals only the user can fix. The ramp router (services/ramp) must tell
+// these from provider failures so it never fails a user's own problem over
+// to another provider. Wording unchanged from the plain errors they replace.
+var (
+	ErrBuyNeedsWallet         = errors.New("connect a wallet before buying")
+	ErrBuyNeedsRefundAccount  = errors.New("a refund account is required in case the order fails")
+	ErrSellNeedsWallet        = errors.New("connect a wallet before selling")
+	ErrSellNeedsPayoutAccount = errors.New("a payout bank account is required")
+)
+
+// ErrOrderRequestSent marks an error from the provider's create call itself
+// that is not a clean refusal (timeout, transport, 5xx): the request left us,
+// so an order may exist upstream even though we hold no row for it.
+var ErrOrderRequestSent = errors.New("paycrest: order request sent")
+
+// ErrPaycrestOrderRejected: Paycrest answered the create with a 400/422 — it
+// refused the request, so nothing was opened.
+var ErrPaycrestOrderRejected = errors.New("paycrest: order request rejected")
+
+// ErrBuyAttemptMayExist is the buy twin of ErrSellAttemptMayExist: Paycrest
+// answered with an order but our row did not persist — and a failed commit
+// does not prove nothing was written.
+var ErrBuyAttemptMayExist = errors.New("a buy order may still exist for this attempt")
+
+// markCreateErr classifies an error from the provider's create call.
+func markCreateErr(err error) error {
+	if paycrestRejected(err) {
+		return fmt.Errorf("%w: %w", ErrPaycrestOrderRejected, err)
+	}
+	return fmt.Errorf("%w: %w", ErrOrderRequestSent, err)
+}
+
 // requirePaycrestEnabled refuses when the registry says this currency's ramp
 // provider is not (or no longer) paycrest. A nil registry is "no gate" —
 // see SetCurrencyRegistry.
@@ -219,6 +251,40 @@ func (s *PaycrestOrderService) requirePaycrestEnabled(fiat string) error {
 		return ErrPaycrestDisabled
 	}
 	return nil
+}
+
+// RequirePaycrestEnabled is the currency kill switch for callers outside
+// this file (the ramp router's Paycrest adapter). Empty means NGN, as in
+// CreateBuy/CreateSell.
+func (s *PaycrestOrderService) RequirePaycrestEnabled(fiat string) error {
+	if s == nil {
+		return ErrPaycrestDisabled
+	}
+	f := strings.ToUpper(strings.TrimSpace(fiat))
+	if f == "" {
+		f = "NGN"
+	}
+	return s.requirePaycrestEnabled(f)
+}
+
+// ExplainMissingVenue exposes explainMissingVenue: it turns a bare
+// ErrPaycrestNoVenue into ErrPaycrestLegClosed when the whole direction is
+// closed, which the router reports differently from "no venue for this size".
+func (s *PaycrestOrderService) ExplainMissingVenue(ctx context.Context, side, fiat string, err error) error {
+	if s == nil {
+		return err
+	}
+	return s.explainMissingVenue(ctx, side, strings.ToUpper(strings.TrimSpace(fiat)), err)
+}
+
+// AssertNoOpenOrder is assertNoOpenOrder for the ramp router's cross-provider
+// pre-flight. It returns the same refusal CreateBuy/CreateSell would — a TSA
+// Pay payment in progress keeps its own wording.
+func (s *PaycrestOrderService) AssertNoOpenOrder(ctx context.Context, userID uuid.UUID, direction string) error {
+	if s == nil {
+		return ErrPaycrestDisabled
+	}
+	return s.assertNoOpenOrder(ctx, userID, direction)
 }
 
 // explainMissingVenue separates "nobody fills THIS amount" from "this currency
@@ -318,6 +384,11 @@ func validSenderFeeAddress(raw string) (string, bool) {
 // PaycrestBuyRequest is what the app sends to start a purchase.
 type PaycrestBuyRequest struct {
 	UserID uuid.UUID
+	// MaxRate/PriceGuard are set only by the ramp router: the highest
+	// fiat-per-token rate this buy may bind at, and what to do past it.
+	// Empty/off on /api/paycrest/*, which keeps today's behaviour.
+	MaxRate    string
+	PriceGuard PriceGuardMode
 	// WalletAddress is the user's connected wallet — where the stablecoin is
 	// delivered. Already reconciled against the account by the handler.
 	WalletAddress string
@@ -482,10 +553,10 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, ErrPaycrestDisabled
 	}
 	if strings.TrimSpace(req.WalletAddress) == "" {
-		return nil, errors.New("connect a wallet before buying")
+		return nil, ErrBuyNeedsWallet
 	}
 	if req.RefundBankCode == "" || req.RefundAccount == "" {
-		return nil, errors.New("a refund account is required in case the order fails")
+		return nil, ErrBuyNeedsRefundAccount
 	}
 	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionBuy); err != nil {
 		return nil, err
@@ -589,6 +660,10 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		if verr != nil {
 			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
 		}
+		// Before anything is sent: a refusal here leaves no order anywhere.
+		if err := checkPriceGuard("buy", v.Rate, req.MaxRate, req.PriceGuard); err != nil {
+			return nil, err
+		}
 		venue = v
 	}
 
@@ -613,7 +688,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
-		return nil, err
+		return nil, markCreateErr(err)
 	}
 
 	feePercent := s.chargedFeePercent(order, ref, feeForOrder)
@@ -728,13 +803,16 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			}
 		}
 	}
-	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+	// Paycrest has answered: the row must land even if the HTTP request was
+	// cancelled meanwhile (the app gives up at 30s), or the order exists
+	// upstream with no row.
+	if err := s.db.WithContext(context.WithoutCancel(ctx)).Create(row).Error; err != nil {
 		// The order exists at Paycrest but we failed to record it. Log loudly
 		// with the reference: without this line the user could pay an account
 		// nothing on our side knows about.
 		log.Printf("[paycrest] ALARM created order %s (ref=%s) but could not persist it: %v",
 			order.ID, ref, err)
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrBuyAttemptMayExist, err)
 	}
 	return row, nil
 }
@@ -745,6 +823,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 // from their connected wallet.
 type PaycrestSellRequest struct {
 	UserID uuid.UUID
+	// MinRate/PriceGuard: the lowest rate this sell may bind at (ramp router only).
+	MinRate    string
+	PriceGuard PriceGuardMode
 	// WalletAddress funds the sale and receives the refund if it fails.
 	WalletAddress string
 	FiatCode      string
@@ -774,10 +855,10 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 		return nil, ErrPaycrestDisabled
 	}
 	if strings.TrimSpace(req.WalletAddress) == "" {
-		return nil, errors.New("connect a wallet before selling")
+		return nil, ErrSellNeedsWallet
 	}
 	if req.BankCode == "" || req.AccountNo == "" {
-		return nil, errors.New("a payout bank account is required")
+		return nil, ErrSellNeedsPayoutAccount
 	}
 	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
 		return nil, err
@@ -805,6 +886,9 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	if err != nil {
 		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
 	}
+	if err := checkPriceGuard("sell", venue.Rate, req.MinRate, req.PriceGuard); err != nil {
+		return nil, err
+	}
 
 	// Paycrest prices an offramp in token units. venue.TokenAmount is sized at
 	// the fee-inclusive rate, so the deposit covers our fee and the payout is
@@ -828,10 +912,10 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 		return nil, ErrPaycrestDisabled
 	}
 	if strings.TrimSpace(req.WalletAddress) == "" {
-		return nil, errors.New("connect a wallet before selling")
+		return nil, ErrSellNeedsWallet
 	}
 	if req.BankCode == "" || req.AccountNo == "" {
-		return nil, errors.New("a payout bank account is required")
+		return nil, ErrSellNeedsPayoutAccount
 	}
 	// Checked HERE, where the order is opened, not only when the sale began:
 	// a direct sell opened in between must still hold the one live sell.
@@ -954,7 +1038,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		SenderFeeAddress: s.senderFeeAddress,
 	})
 	if err != nil {
-		return nil, err
+		return nil, markCreateErr(err)
 	}
 
 	feePercent := s.chargedFeePercent(order, ref, senderFee)
@@ -986,7 +1070,10 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		row.DepositAddress = pa.ReceiveAddress
 		row.ValidUntil = parsePaycrestTime(pa.ValidUntil)
 	}
-	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+	// Paycrest has answered: the row must land even if the HTTP request was
+	// cancelled meanwhile (the app gives up at 30s), or the order exists
+	// upstream with no row.
+	if err := s.db.WithContext(context.WithoutCancel(ctx)).Create(row).Error; err != nil {
 		log.Printf("[paycrest] ALARM created offramp %s (ref=%s) but could not persist it: %v",
 			order.ID, ref, err)
 		// Paycrest has an order we hold no row for: a caller that pairs the

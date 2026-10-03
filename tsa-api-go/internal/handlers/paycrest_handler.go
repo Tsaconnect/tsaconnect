@@ -31,10 +31,28 @@ type PaycrestHandler struct {
 	// sellIntents drives one such sale to its payout. Nil for the same
 	// reason — see paycrest_sell_intents.go.
 	sellIntents sellIntents
+	// ramp serves /api/ramp/*; nil leaves those routes unregistered.
+	ramp *RampHandler
 }
 
 func NewPaycrestHandler(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, dir *services.PaycrestDirectory) *PaycrestHandler {
 	return &PaycrestHandler{orders: orders, quotes: quotes, dir: dir}
+}
+
+// SetRamp attaches the provider-neutral /api/ramp handler. Kept on
+// PaycrestHandler so SetupRoutes' signature does not grow; nil leaves the
+// /ramp routes unregistered.
+func (h *PaycrestHandler) SetRamp(r *RampHandler) {
+	if h != nil {
+		h.ramp = r
+	}
+}
+
+func (h *PaycrestHandler) Ramp() *RampHandler {
+	if h == nil {
+		return nil
+	}
+	return h.ramp
 }
 
 // Enabled reports whether the routes should be registered at all.

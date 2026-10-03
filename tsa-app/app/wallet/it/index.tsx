@@ -56,7 +56,8 @@ import {
   type ITIntent,
   type ITRate,
 } from '@/services/itApi';
-import { listOrders as listPaycrestOrders, type PaycrestOrder } from '@/services/paycrestApi';
+import { type PaycrestOrder } from '@/services/paycrestApi';
+import { listRampOrders } from '@/services/rampApi';
 import { getSwappedSellState } from '@/services/paycrestSellSwap';
 import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
@@ -142,7 +143,7 @@ export default function ITHub() {
       getITBalance(),
       getITRate(),
       listITIntents(),
-      listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
+      listRampOrders(20).catch(() => [] as PaycrestOrder[]),
       address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
       getSwappedSellState().catch(() => ({ enabled: false, intent: null })),
     ]);

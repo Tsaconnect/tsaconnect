@@ -1091,6 +1091,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 					pc.POST("/sell-intents/:id/gas-topup", paycrestWriteLimit, pch.SellIntentGasTopUp)
 				}
 			}
+
+			// Provider-neutral ramp (docs/specs/2026-10-02-ramp-router-design.md).
+			// Same auth, idempotency and per-user write limits as /paycrest.
+			if rh := pch.Ramp(); rh != nil {
+				rg := api.Group("/ramp")
+				rg.GET("/quote", rh.Quote) // public, like /paycrest/quote
+				rg.Use(auth)
+				{
+					rampWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+					rg.POST("/buy", itIdem, rampWriteLimit, rh.Buy)
+					rg.POST("/sell", itIdem, rampWriteLimit, rh.Sell)
+					rg.GET("/orders", rh.ListOrders)
+					rg.GET("/orders/:id", rh.GetOrder)
+					rg.POST("/orders/:id/claim-payment", rh.ClaimPayment)
+					rg.POST("/orders/:id/cancel", itIdem, rh.Cancel)
+				}
+			}
 		}
 
 		// One dispute queue for every order type that cannot resolve itself.

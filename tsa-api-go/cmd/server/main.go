@@ -30,6 +30,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/routes"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"github.com/ojimcy/tsa-api-go/internal/services/ramp"
 	"github.com/ojimcy/tsa-api-go/internal/ws"
 )
 
@@ -1599,15 +1600,37 @@ func main() {
 			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
 			paycrestOrders.SetCurrencyRegistry(currencyRegistry)
 		}
+		// The ramp router (Paycrest is its only provider today) answers the
+		// hub's legs and serves /api/ramp/*. Without an order service there
+		// is nothing to route, and the legs come straight from the quotes.
+		var rampRouter *ramp.Router
+		if paycrestOrders != nil {
+			guard := services.PriceGuardLog
+			if cfg.RampPriceGuard == string(services.PriceGuardEnforce) {
+				guard = services.PriceGuardEnforce
+			}
+			rampRouter = ramp.NewRouter(ramp.Config{
+				ToleranceBps: cfg.RampPriceToleranceBps, Guard: guard,
+				ProviderTimeout: cfg.RampProviderTimeout, AttemptTimeout: cfg.RampOpenAttemptTimeout, OpenBudget: cfg.RampOpenBudget,
+			}, ramp.NewPaycrestProvider(paycrestOrders, paycrestQuotes, currencyRegistry))
+			log.Printf("[ramp] router enabled (providers=paycrest, guard=%s, tolerance=%dbps)", guard, cfg.RampPriceToleranceBps)
+		}
 		// Direction lives on the order book, not in our config: /api/it/currencies
 		// asks the quote service which way each currency can actually trade, so
 		// the app never offers a leg no provider will fill. itHandler is nil
 		// when IT itself is unconfigured, and the endpoint falls back to
 		// "both directions" whenever this is unwired.
 		if itHandler != nil {
-			itHandler.SetRampLegs(paycrestQuotes)
+			if rampRouter != nil {
+				itHandler.SetRampLegs(rampRouter)
+			} else {
+				itHandler.SetRampLegs(paycrestQuotes)
+			}
 		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		if rampRouter != nil {
+			paycrestHandler.SetRamp(handlers.NewRampHandler(rampRouter))
+		}
 		payOrders = paycrestOrders
 		payRates = paycrestQuotes
 		// Order sponsorship needs the order service; without it the sponsor is
