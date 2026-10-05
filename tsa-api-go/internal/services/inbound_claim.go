@@ -66,5 +66,43 @@ type ClaimSource interface {
 	// MUST be idempotent on credit.ProviderRef. The poller re-runs every 30
 	// seconds and a crash between the settle and the status write is expected,
 	// so a replayed credit has to be a no-op rather than a second credit.
+	//
+	// Returning a *ClaimNeedsReviewError holds the credit for an operator
+	// instead of retrying it; any other error is retried next tick.
 	Accept(ctx context.Context, claimID uuid.UUID, credit *models.InboundCredit) error
+}
+
+// ClaimNeedsReviewError is how a source says "this credit is correctly
+// attributed, but the product's own rules say a person must approve it before
+// it settles" — a paused merchant, a trade over a cap. It must be returned
+// before the source has moved any money.
+//
+// It is a hold rather than an ordinary error because nothing about it is
+// transient: retrying every tick would re-derive the same refusal forever while
+// the credit sat `unmatched`, where no operator queue looks.
+type ClaimNeedsReviewError struct {
+	// Code is one of the models.InboundHold* values. It reaches logs and alert
+	// email, so it must name nobody.
+	Code string
+	// Reason is the console prose an operator reads.
+	Reason string
+}
+
+func (e *ClaimNeedsReviewError) Error() string {
+	return "claim needs review (" + e.Code + "): " + e.Reason
+}
+
+type manualBindKey struct{}
+
+// withManualBind marks ctx as an operator's explicit assignment of a credit.
+func withManualBind(ctx context.Context) context.Context {
+	return context.WithValue(ctx, manualBindKey{}, true)
+}
+
+// isManualBind reports whether Accept is running on an operator's assignment.
+// A source skips its review gates then: the assignment IS the review, and
+// refusing it again would leave the operator only refund-or-ignore.
+func isManualBind(ctx context.Context) bool {
+	v, _ := ctx.Value(manualBindKey{}).(bool)
+	return v
 }

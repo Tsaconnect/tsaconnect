@@ -771,44 +771,59 @@ export const messagesApi = {
 export interface MyPmStatus {
   isPm: boolean;
   status: string;
+  /**
+   * Whether activation asks for a BVN/NIN. False under central inbound, where
+   * the API mints no virtual account. Defaults to true when the API is older
+   * than the field, or unreachable — the form it implies is the safe one.
+   */
+  activationNeedsId: boolean;
 }
+
+const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
 
 /**
  * Read the current user's PM status from GET /p2p/pm/me.
  *
- * Returns { isPm, status } on success. On ANY error (network, 401, non-200)
- * returns { isPm: false, status: '' } — never throws to the UI. The route is
- * dormant-safe: if the PM/Nomba stack is unconfigured the backend returns
- * 200 { isPm: false } rather than 503, so this function always resolves.
+ * Returns { isPm, status, activationNeedsId } on success. On ANY error
+ * (network, 401, non-200) returns the no-PM default — never throws to the UI.
+ * The route is dormant-safe: if the PM stack is unconfigured the backend
+ * returns 200 { isPm: false } rather than 503, so this function always resolves.
  */
 export async function getMyPmStatus(): Promise<MyPmStatus> {
   try {
-    const res = await request<{ isPm: boolean; status: string }>('GET', '/p2p/pm/me');
+    const res = await request<{ isPm: boolean; status: string; activationNeedsId?: boolean }>(
+      'GET',
+      '/p2p/pm/me'
+    );
     if (res.success && res.data != null) {
-      return { isPm: !!res.data.isPm, status: res.data.status ?? '' };
+      return {
+        isPm: !!res.data.isPm,
+        status: res.data.status ?? '',
+        activationNeedsId: res.data.activationNeedsId !== false,
+      };
     }
-    return { isPm: false, status: '' };
+    return NO_PM;
   } catch {
-    return { isPm: false, status: '' };
+    return NO_PM;
   }
 }
 
 export type PmIdType = 'BVN' | 'NIN';
 
 /**
- * Activate an APPROVED Payment Merchant by supplying the account holder's
- * BVN or NIN. The id number is forwarded to the licensed fiat provider to mint
- * the NGN virtual account and is NEVER stored by TSA — it only transits this
- * request. On success the caller's PM flips to `active`.
+ * Activate an APPROVED Payment Merchant. In virtual-account mode the caller
+ * supplies the account holder's BVN or NIN, which is forwarded to the licensed
+ * fiat provider to mint the NGN virtual account and is NEVER stored by TSA —
+ * it only transits this request. Under central inbound (activationNeedsId is
+ * false) call it with no arguments: nothing is minted and no id is sent. On
+ * success the caller's PM flips to `active`.
  *
  * Returns the raw ApiResponse so the caller can surface the server message on
  * validation (400) / not-approved (409) / not-found (404) errors.
  */
-export function activatePmAccount(idType: PmIdType, idNumber: string) {
-  return request<{ status: string }>('POST', '/p2p/pm/activate', {
-    idType,
-    idNumber: idNumber.trim(),
-  });
+export function activatePmAccount(idType?: PmIdType, idNumber?: string) {
+  const body = idType && idNumber ? { idType, idNumber: idNumber.trim() } : {};
+  return request<{ status: string }>('POST', '/p2p/pm/activate', body);
 }
 
 // ─── Sellers ────────────────────────────────────────────────────────────────

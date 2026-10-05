@@ -45,7 +45,13 @@ export default function MerchantDashboard() {
   const [items, setItems] = useState<Product[]>([]);
   const [merchantName, setMerchantName] = useState('Merchant');
   const { formatPrice } = useCurrency();
-  const { isPm, status: pmStatus, loading: pmLoading, reload: reloadPmStatus } = useIsPaymentMerchant();
+  const {
+    isPm,
+    status: pmStatus,
+    activationNeedsId,
+    loading: pmLoading,
+    reload: reloadPmStatus,
+  } = useIsPaymentMerchant();
   const { load: payMerchant } = useOwnPayMerchant();
 
   const loadDashboard = useCallback(async () => {
@@ -205,8 +211,9 @@ export default function MerchantDashboard() {
           </AccentCard>
 
           {/* PM activation CTA — the application was approved but the merchant
-              still has to verify identity (BVN/NIN) to mint their NGN account
-              and go live. Takes priority over the upgrade CTA. */}
+              still has to activate to go live: with a BVN/NIN that mints their
+              NGN account, or (central inbound) a single confirm. Takes priority
+              over the upgrade CTA. */}
           {!pmLoading && !isPm && pmStatus === 'approved' && (
             <PressableScale
               onPress={() => router.push('/merchants/activate-pm' as any)}
@@ -220,7 +227,9 @@ export default function MerchantDashboard() {
                       Activate your Payment Merchant
                     </Text>
                     <Text variant="caption" color="textSecondary">
-                      Approved! Verify your BVN/NIN to go live.
+                      {activationNeedsId
+                        ? 'Approved! Verify your BVN/NIN to go live.'
+                        : 'Approved! Confirm to go live.'}
                     </Text>
                   </View>
                   <Icon name="chevronRight" size={20} color={colors.textMuted} />

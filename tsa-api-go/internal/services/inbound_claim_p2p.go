@@ -262,23 +262,33 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// buyer's crypto stays escrowed forever while the merchant has been
 	// credited AND forwarded to their bank, and the credit reads `matched` with
 	// nothing left to alert anyone.
-	if trade.Status != models.P2PTradeStatusPendingPayment {
-		// Unless this ref already owns this trade's forward row. That is a
-		// replay of an attempt that credited and then failed to finish
-		// settling, and it is the one case that MUST be re-driven — refusing it
-		// would wedge a half-done settle forever with the money already booked
-		// and nothing coming back for it.
-		//
-		// Scoped to this trade as well as this ref: a ref that settled some
-		// OTHER trade is not a replay of this one, and admitting it would clear
-		// the guard and then hand settleTrade a trade no credit ever paid for.
-		replay, err := s.forwardFor(ctx, trade.ID, ref)
-		if err != nil {
+	//
+	// Unless this ref already owns this trade's forward row. That is a replay
+	// of an attempt that credited and then failed to finish settling, and it is
+	// the one case that MUST be re-driven — refusing it would wedge a half-done
+	// settle forever with the money already booked and nothing coming back for
+	// it.
+	//
+	// Scoped to this trade as well as this ref: a ref that settled some OTHER
+	// trade is not a replay of this one, and admitting it would clear the guard
+	// and then hand settleTrade a trade no credit ever paid for.
+	replay, err := s.forwardFor(ctx, trade.ID, ref)
+	if err != nil {
+		return err
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment && replay == nil {
+		return fmt.Errorf("p2p accept: trade %s is %s, not pending_payment; credit %s must not settle it",
+			trade.ID, trade.Status, ref)
+	}
+
+	// The merchant's own limits, which the VA path has always applied
+	// (HandleInbound steps 3 and 6). Only on a fresh admission: a replay
+	// already passed them and has booked the money, so re-asking would strand
+	// a credited ledger behind a hold. And not on an operator's assignment,
+	// which is the answer to exactly this question.
+	if replay == nil && !isManualBind(ctx) {
+		if err := s.reviewGate(ctx, pm, &trade); err != nil {
 			return err
-		}
-		if replay == nil {
-			return fmt.Errorf("p2p accept: trade %s is %s, not pending_payment; credit %s must not settle it",
-				trade.ID, trade.Status, ref)
 		}
 	}
 
@@ -321,6 +331,32 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// here would make the matcher re-drive an already-settled credit.
 	if err := s.forwarder.Forward(ctx, forward.ID); err != nil {
 		log.Printf("[inbound p2p] forward deferred for trade=%s pm=%s: %v", trade.ID, pm.ID, err)
+	}
+	return nil
+}
+
+// reviewGate turns the merchant's auto-settle refusal into a hold, and holds
+// a trade too small for the provider to transfer onward. A daily cap that
+// cannot be evaluated is an ordinary error instead: that one IS transient, and
+// the next tick should simply ask again.
+func (s *P2PTradeClaimSource) reviewGate(ctx context.Context, pm *models.PaymentMerchant, trade *models.P2PTrade) error {
+	refusal, err := s.pm.CheckAutoSettle(ctx, pm, trade)
+	if err != nil {
+		return fmt.Errorf("p2p accept: %w", err)
+	}
+	if refusal != nil {
+		return &ClaimNeedsReviewError{Code: refusal.Code, Reason: refusal.Reason}
+	}
+	gross, ok := ngnToKobo(trade.FiatAmount)
+	if !ok {
+		return fmt.Errorf("p2p accept: trade %s has unusable fiat_amount %q", trade.ID, trade.FiatAmount)
+	}
+	if gross < defaultMinSellNgnKobo {
+		return &ClaimNeedsReviewError{
+			Code: models.InboundHoldPayoutBelowMinimum,
+			Reason: fmt.Sprintf("P2P trade %s: merchant %q would be sent ₦%s, under the ₦%s transfer minimum. Refund the sender, or assign this credit and pay the merchant by hand",
+				trade.ID, pm.Name, koboToNGNString(gross), koboToNGNString(defaultMinSellNgnKobo)),
+		}
 	}
 	return nil
 }

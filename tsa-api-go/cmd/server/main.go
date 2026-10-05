@@ -1162,8 +1162,13 @@ func main() {
 	// fiat provider (Flutterwave static VAs when selected, else Nomba).
 	// DORMANT-BY-DEFAULT: built only when the chosen provider is configured.
 	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
+	//
+	// ONE instance, shared with the PM handler's approve/activate below, so the
+	// central-inbound switch (SetVirtualAccountsRetired) reaches every caller.
+	var pmOnboarding *services.PMOnboardingService
 	if prov := pmProvisioner(cfg, fwClient, fwCustomerID, nombaClient); prov != nil {
-		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, prov))
+		pmOnboarding = services.NewPMOnboardingService(config.DB, prov)
+		mrh.PMOnboarding = pmOnboarding
 		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
 	} else {
 		log.Printf("[pm] onboarding service dormant: no fiat provider configured — corporate PM approval disabled")
@@ -1381,8 +1386,7 @@ func main() {
 		// own BVN/NIN). Both use the same onboarding service; when FW isn't
 		// configured the provisioner is nil and approve/activate 503 while
 		// reject/pause/resume still work — it never routes provisioning to Nomba.
-		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
-			pmOnboarding := services.NewPMOnboardingService(config.DB, prov)
+		if pmOnboarding != nil {
 			pmh.SetApprover(pmOnboarding)
 			pmh.SetActivator(pmOnboarding)
 			log.Printf("[pm] admin PM approval + merchant activation ready (provider=%s)", cfg.ResolveFiatProvider())
@@ -1490,6 +1494,29 @@ func main() {
 		p2pHandler.SetInboundCentralSource(itService)
 		log.Printf("[inbound] P2P buyers routed to the company account (%s claim source registered)",
 			services.InboundClaimTypeP2PTrade)
+		// Decided here, from the routing itself, so activation can never mint
+		// a merchant account that buyers are no longer sent to — nor skip one
+		// they still are.
+		//
+		// With no account to mint, activation needs no provider either, so a
+		// missing Flutterwave company-customer id must not leave approval and
+		// activation 503ing while buyers are already being routed.
+		if pmh != nil {
+			if pmOnboarding == nil {
+				pmOnboarding = services.NewPMOnboardingService(config.DB, nil)
+				mrh.PMOnboarding = pmOnboarding
+				pmh.SetApprover(pmOnboarding)
+				pmh.SetActivator(pmOnboarding)
+			}
+			pmOnboarding.SetVirtualAccountsRetired(true)
+			log.Printf("[pm] merchant activation mints no virtual account, asks no BVN/NIN and requires Didit verification (central inbound)")
+		}
+		// Unattributed PM trades now settle only by assigning their held
+		// credit; a manual release would pay out the crypto and strand it.
+		if pmAuto != nil {
+			pmAuto.SetCentralInbound(true)
+			log.Printf("[pm] manual queue limited to paid orphans; unattributed trades settle via the inbound assign")
+		}
 	} else if warning != "" {
 		log.Printf("[inbound] WARNING: %s", warning)
 	}

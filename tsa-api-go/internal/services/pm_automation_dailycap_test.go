@@ -57,9 +57,9 @@ func TestWithinDailyCap(t *testing.T) {
 
 	t.Run("zero daily cap is unlimited", func(t *testing.T) {
 		pm := seedActivePMWithDailyCap(t, db, "acct-unl", 0, 0)
-		ok, err := auto.withinDailyCap(ctx, pm, 1_000_000)
+		ok, err := auto.pm.WithinDailyCap(ctx, pm, 1_000_000)
 		if err != nil {
-			t.Fatalf("withinDailyCap: %v", err)
+			t.Fatalf("WithinDailyCap: %v", err)
 		}
 		if !ok {
 			t.Fatal("zero daily cap must be unlimited (ok=true)")
@@ -68,13 +68,13 @@ func TestWithinDailyCap(t *testing.T) {
 
 	t.Run("no prior trades: prospective alone vs cap", func(t *testing.T) {
 		pm := seedActivePMWithDailyCap(t, db, "acct-none", 0, 1000)
-		ok, err := auto.withinDailyCap(ctx, pm, 999)
+		ok, err := auto.pm.WithinDailyCap(ctx, pm, 999)
 		if err != nil || !ok {
 			t.Fatalf("999 <= 1000 should be within (ok=%v err=%v)", ok, err)
 		}
-		ok, err = auto.withinDailyCap(ctx, pm, 1001)
+		ok, err = auto.pm.WithinDailyCap(ctx, pm, 1001)
 		if err != nil {
-			t.Fatalf("withinDailyCap: %v", err)
+			t.Fatalf("WithinDailyCap: %v", err)
 		}
 		if ok {
 			t.Fatal("1001 > 1000 should be over cap (ok=false)")
@@ -92,14 +92,14 @@ func TestWithinDailyCap(t *testing.T) {
 		_ = tr2
 
 		// $1 consumed + $1 prospective = $2 <= $2 → within.
-		ok, err := auto.withinDailyCap(ctx, pm, 1.0)
+		ok, err := auto.pm.WithinDailyCap(ctx, pm, 1.0)
 		if err != nil || !ok {
 			t.Fatalf("$1 + $1 <= $2 should be within (ok=%v err=%v)", ok, err)
 		}
 		// $1 consumed + $1.5 prospective = $2.5 > $2 → over.
-		ok, err = auto.withinDailyCap(ctx, pm, 1.5)
+		ok, err = auto.pm.WithinDailyCap(ctx, pm, 1.5)
 		if err != nil {
-			t.Fatalf("withinDailyCap: %v", err)
+			t.Fatalf("WithinDailyCap: %v", err)
 		}
 		if ok {
 			t.Fatal("$1 consumed + $1.5 > $2 should be over cap")

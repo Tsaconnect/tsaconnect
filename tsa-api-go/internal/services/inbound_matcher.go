@@ -367,10 +367,20 @@ func (m *InboundMatcher) bindCredit(ctx context.Context, credit *models.InboundC
 		return false, fmt.Errorf("inbound match: no source registered for claim type %q", cand.claim.Type)
 	}
 	if err := src.Accept(ctx, cand.claim.ID, credit); err != nil {
-		// Deliberately NOT a hold. A settle path that failed is a retryable
-		// condition, and a hold is terminal until a human acts — turning a
-		// transient chain or provider error into an operator ticket would bury
-		// the queue in work that the next tick would have done for free.
+		// The one hold Accept can ask for: the source has rules the matcher
+		// cannot see, and they refused before any money moved. Never on an
+		// operator's own assignment, though: holding the credit they just
+		// chose would answer them with a misleading "decided by someone else"
+		// instead of the refusal itself.
+		var review *ClaimNeedsReviewError
+		if resolvedBy == nil && errors.As(err, &review) {
+			return m.holdCredit(ctx, credit, review.Code, review.Reason)
+		}
+		// Every other failure is deliberately NOT a hold. A settle path that
+		// failed is a retryable condition, and a hold is terminal until a
+		// human acts — turning a transient chain or provider error into an
+		// operator ticket would bury the queue in work that the next tick
+		// would have done for free.
 		return false, fmt.Errorf("inbound match: accept %s claim %s for ref %s: %w",
 			cand.claim.Type, cand.claim.ID, credit.ProviderRef, err)
 	}
@@ -575,7 +585,7 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 			inboundMoney(credit.Currency, want))
 	}
 
-	bound, err := m.bindCredit(ctx, &credit, inboundCandidate{claim: *target}, &adminID)
+	bound, err := m.bindCredit(withManualBind(ctx), &credit, inboundCandidate{claim: *target}, &adminID)
 	if err != nil {
 		return err
 	}

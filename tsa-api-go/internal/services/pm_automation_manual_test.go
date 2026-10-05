@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -369,5 +370,98 @@ func TestManualRelease_PaidOrphan_SkipsDailyCap(t *testing.T) {
 	}
 	if len(signer.calls) != 1 {
 		t.Errorf("signer called %d times, want 1", len(signer.calls))
+	}
+}
+
+// ─── Central inbound ──────────────────────────────────────────────────────────
+//
+// Under central inbound a PM buyer's naira lands in the company account and is
+// attributed by the inbound matcher. An unpaid-looking trade in this queue is
+// one whose credit is HELD (or that nobody has paid yet), and releasing it from
+// here pays out the crypto while the credit stays held: the merchant is never
+// credited and the assign that would have paid them now fails, because the
+// trade is closed. The held credit's assign is the only correct exit.
+
+func TestManualRelease_CentralInboundRefusesAnUnattributedTrade(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{buyerID: "ALICE"}))
+	auto.SetCentralInbound(true)
+
+	_, err := auto.ManualRelease(context.Background(), trade.ID, uuid.New())
+	if !errors.Is(err, ErrSettleViaInboundAssign) {
+		t.Fatalf("ManualRelease err = %v, want ErrSettleViaInboundAssign", err)
+	}
+	if len(signer.calls) != 0 {
+		t.Fatalf("signer called %d times — the crypto was released with the merchant unpaid", len(signer.calls))
+	}
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("status = %q, want pending_payment", persisted.Status)
+	}
+}
+
+func TestManualRelease_CentralInboundStillRecoversAPaidOrphan(t *testing.T) {
+	// A `paid` orphan already has its money attributed — it is a failed
+	// release, not an unpaid trade — so re-driving it stays the operator's job.
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	if err := db.Exec("UPDATE p2p_trades SET status = ? WHERE id = ?",
+		models.P2PTradeStatusPaid, trade.ID).Error; err != nil {
+		t.Fatalf("set paid: %v", err)
+	}
+	setReleasedEvent(esc, trade)
+
+	auto, _ := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{buyerID: "ALICE"}))
+	auto.SetCentralInbound(true)
+
+	got, err := auto.ManualRelease(context.Background(), trade.ID, uuid.New())
+	if err != nil {
+		t.Fatalf("ManualRelease on paid orphan: %v", err)
+	}
+	if got.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released", got.Status)
+	}
+}
+
+func TestListBuyManualQueue_CentralInboundListsOnlyPaidOrphans(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	unpaid := seedBuyTradeOnAd(t, db, ad, uuid.New(), "1500.00")
+	orphan := seedBuyTradeOnAd(t, db, ad, uuid.New(), "2500.00")
+	if err := db.Exec("UPDATE p2p_trades SET status = ? WHERE id = ?",
+		models.P2PTradeStatusPaid, orphan.ID).Error; err != nil {
+		t.Fatalf("set paid: %v", err)
+	}
+
+	auto, _ := newPMAutomationService(t, db, nil, svc, nameMap(nil))
+	auto.SetCentralInbound(true)
+
+	items, err := auto.ListBuyManualQueue(context.Background())
+	if err != nil {
+		t.Fatalf("ListBuyManualQueue: %v", err)
+	}
+	if len(items) != 1 || items[0].TradeID != orphan.ID {
+		t.Fatalf("queue = %+v, want only the paid orphan %s (unpaid %s must go through the inbound assign)",
+			items, orphan.ID, unpaid.ID)
 	}
 }
