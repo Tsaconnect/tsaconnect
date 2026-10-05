@@ -19,7 +19,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
@@ -1409,69 +1408,5 @@ func TestPMHandler_ActivatePM_UnverifiedMerchantIsSentToVerification(t *testing.
 	// The app's one KYC handler branches on this code, never the words.
 	if resp["code"] != services.KYCVerificationRequiredCode {
 		t.Errorf("code = %v, want %s", resp["code"], services.KYCVerificationRequiredCode)
-	}
-}
-
-// ─── Payout fees shown before posting an ad ───────────────────────────────────
-
-func TestGetMyPMStatus_ShowsPayoutFeesUnderCentralInbound(t *testing.T) {
-	user := testRegularUser()
-	active := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusActive}
-	h := &PMHandler{auto: &fakePMAutomation{}}
-	h.pmStatus = &fakePMStatusGetter{pm: active}
-	h.SetPayoutFees(services.MerchantPayoutFees{
-		FundingBps: 140,
-		TransferTiers: []config.TransferFeeTier{
-			{UpToKobo: 500000, FeeKobo: 1075},
-			{UpToKobo: 0, FeeKobo: 5375},
-		},
-	})
-
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
-	buildPMStatusRouter(h, user).ServeHTTP(w, req)
-
-	var resp struct {
-		Data struct {
-			PayoutFees *struct {
-				FundingFeeBps    int64 `json:"fundingFeeBps"`
-				MinPayoutNgn     string `json:"minPayoutNgn"`
-				TransferFeeTiers []struct {
-					UpToNgn *string `json:"upToNgn"`
-					FeeNgn  string  `json:"feeNgn"`
-				} `json:"transferFeeTiers"`
-			} `json:"payoutFees"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	f := resp.Data.PayoutFees
-	if f == nil {
-		t.Fatalf("no payoutFees in %s", w.Body.String())
-	}
-	if f.FundingFeeBps != 140 || f.MinPayoutNgn != "100.00" || len(f.TransferFeeTiers) != 2 {
-		t.Fatalf("payoutFees = %+v", f)
-	}
-	if f.TransferFeeTiers[0].UpToNgn == nil || *f.TransferFeeTiers[0].UpToNgn != "5000.00" || f.TransferFeeTiers[0].FeeNgn != "10.75" {
-		t.Errorf("first tier = %+v, want up to 5000.00 for 10.75", f.TransferFeeTiers[0])
-	}
-	if f.TransferFeeTiers[1].UpToNgn != nil || f.TransferFeeTiers[1].FeeNgn != "53.75" {
-		t.Errorf("top tier = %+v, want open-ended 53.75", f.TransferFeeTiers[1])
-	}
-}
-
-func TestGetMyPMStatus_NoPayoutFeesOffCentralInbound(t *testing.T) {
-	// Merchants are only charged on forwards, which only central inbound makes.
-	user := testRegularUser()
-	h := &PMHandler{auto: &fakePMAutomation{}}
-	h.pmStatus = &fakePMStatusGetter{pm: &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusActive}}
-
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
-	buildPMStatusRouter(h, user).ServeHTTP(w, req)
-
-	if strings.Contains(w.Body.String(), "payoutFees") {
-		t.Errorf("body %s carries payoutFees with no schedule set", w.Body.String())
 	}
 }

@@ -737,14 +737,6 @@ type Config struct {
 	InboundCentralBankName      string
 	InboundCentralAccountName   string
 
-	// P2PForward* are the Flutterwave costs a payment merchant's proceeds pay
-	// on their way to the merchant's bank under central inbound (owner
-	// decision 2026-10-05: the merchant pays, and is shown it before posting an
-	// ad). FundingFeeBps is the wallet-funding charge on the buyer's transfer
-	// (1.40% measured on prod); the tiers price the payout transfer itself.
-	P2PForwardFundingFeeBps    int64
-	P2PForwardTransferFeeTiers []TransferFeeTier
-
 	// StableSpreadBps is the company margin on brokered stablecoin trades, in
 	// basis points. It REPLACES the swap/routing bps legs for these flows
 	// rather than stacking on them, and it is the buffer that absorbs FX drift
@@ -1282,8 +1274,6 @@ func Load() *Config {
 	cfg.InboundCentralBankName = os.Getenv("INBOUND_CENTRAL_BANK_NAME")
 	cfg.InboundCentralAccountName = os.Getenv("INBOUND_CENTRAL_ACCOUNT_NAME")
 	cfg.InboundAlertEmails = dedupeEmails(splitAndTrim(getEnv("INBOUND_ALERT_EMAILS", ""), ","))
-	cfg.P2PForwardFundingFeeBps = getEnvInt64("P2P_FORWARD_FUNDING_FEE_BPS", 140)
-	cfg.P2PForwardTransferFeeTiers = loadTransferFeeTiers(getEnv("P2P_FORWARD_TRANSFER_FEE_TIERS", ""))
 
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
@@ -1937,89 +1927,4 @@ func splitAndTrim(s, sep string) []string {
 		}
 	}
 	return result
-}
-
-// TransferFeeTier prices one band of payout transfers: a transfer of at most
-// UpToKobo costs FeeKobo. UpToKobo 0 is the open-ended top band.
-type TransferFeeTier struct {
-	UpToKobo int64
-	FeeKobo  int64
-}
-
-// defaultTransferFeeTiers is Flutterwave's published NGN transfer pricing,
-// VAT included. Verify it against the fee row of the first live forward on the
-// wallet statement and correct it in Doppler if the tenant is priced
-// differently.
-const defaultTransferFeeTiers = "5000:10.75,50000:26.88,*:53.75"
-
-// loadTransferFeeTiers parses P2P_FORWARD_TRANSFER_FEE_TIERS, keeping the
-// default on an empty or malformed value: a typo must never price a transfer
-// at zero, and refusing to boot over a fee schedule would take every other
-// product down with it.
-func loadTransferFeeTiers(raw string) []TransferFeeTier {
-	if strings.TrimSpace(raw) != "" {
-		tiers, err := parseTransferFeeTiers(raw)
-		if err == nil {
-			return tiers
-		}
-		log.Printf("[config] ALERT p2p_forward_transfer_fee_tiers_invalid=1 err=%q — using the default %s", err.Error(), defaultTransferFeeTiers)
-	}
-	tiers, err := parseTransferFeeTiers(defaultTransferFeeTiers)
-	if err != nil {
-		panic("config: default transfer fee tiers do not parse: " + err.Error())
-	}
-	return tiers
-}
-
-// parseTransferFeeTiers reads "upToNaira:feeNaira,...,*:feeNaira": bands in
-// ascending order, ending in exactly one open-ended "*" band so that no
-// transfer, however large, is left unpriced.
-func parseTransferFeeTiers(raw string) ([]TransferFeeTier, error) {
-	parts := splitAndTrim(raw, ",")
-	if len(parts) == 0 {
-		return nil, fmt.Errorf("no tiers")
-	}
-	tiers := make([]TransferFeeTier, 0, len(parts))
-	var last int64
-	for i, p := range parts {
-		limit, fee, ok := strings.Cut(p, ":")
-		if !ok {
-			return nil, fmt.Errorf("tier %q: want upTo:fee", p)
-		}
-		feeKobo, err := nairaToKobo(strings.TrimSpace(fee))
-		if err != nil {
-			return nil, fmt.Errorf("tier %q: fee: %w", p, err)
-		}
-		limit = strings.TrimSpace(limit)
-		if limit == "*" {
-			if i != len(parts)-1 {
-				return nil, fmt.Errorf("the open-ended * tier must be last")
-			}
-			tiers = append(tiers, TransferFeeTier{UpToKobo: 0, FeeKobo: feeKobo})
-			return tiers, nil
-		}
-		upTo, err := nairaToKobo(limit)
-		if err != nil || upTo <= last {
-			return nil, fmt.Errorf("tier %q: limits must be positive and ascending", p)
-		}
-		last = upTo
-		tiers = append(tiers, TransferFeeTier{UpToKobo: upTo, FeeKobo: feeKobo})
-	}
-	return nil, fmt.Errorf("no open-ended * tier: transfers above %d kobo would be unpriced", last)
-}
-
-// nairaToKobo parses a non-negative naira amount with at most 2 decimals.
-func nairaToKobo(s string) (int64, error) {
-	whole, frac, _ := strings.Cut(s, ".")
-	if whole == "" || len(frac) > 2 {
-		return 0, fmt.Errorf("bad amount %q", s)
-	}
-	for len(frac) < 2 {
-		frac += "0"
-	}
-	n, err := strconv.ParseInt(whole+frac, 10, 64)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("bad amount %q", s)
-	}
-	return n, nil
 }

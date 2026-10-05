@@ -17,7 +17,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
-import { PmPayoutFeeNotice } from '@/components/p2p/PmPayoutFeeNotice';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { TSA_PAY_APPLY } from '@/constants/routes';
@@ -50,7 +49,6 @@ export default function MerchantDashboard() {
     isPm,
     status: pmStatus,
     activationNeedsId,
-    payoutFees,
     loading: pmLoading,
     reload: reloadPmStatus,
   } = useIsPaymentMerchant();
@@ -238,13 +236,6 @@ export default function MerchantDashboard() {
                 </View>
               </AccentCard>
             </PressableScale>
-          )}
-
-          {/* Live PMs see what each payout deducts before they post an ad. */}
-          {!pmLoading && isPm && payoutFees && (
-            <View style={{ marginBottom: spacing.lg }}>
-              <PmPayoutFeeNotice fees={payoutFees} />
-            </View>
           )}
 
           {/* PM upgrade CTA — visible only to merchants with no existing PM

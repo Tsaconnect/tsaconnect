@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -114,76 +113,7 @@ type P2PTradeClaimSource struct {
 	// ledger credit still happens and the money simply waits for the existing
 	// manual withdrawal path, which is the pre-decision-7 behaviour.
 	forwarder *P2PSettlementForwarder
-
-	// payoutFees is what the merchant pays to be paid. The zero value charges
-	// nothing.
-	payoutFees MerchantPayoutFees
 }
-
-// MerchantPayoutFees prices getting a merchant's proceeds to their bank: a
-// basis-point charge on the buyer's transfer (Flutterwave's wallet-funding
-// fee) and a banded fee on the payout transfer.
-type MerchantPayoutFees struct {
-	FundingBps    int64
-	TransferTiers []config.TransferFeeTier
-}
-
-// PayoutFeeBreakdown is one trade's deduction, in kobo.
-type PayoutFeeBreakdown struct {
-	Funding, Transfer, Net int64
-}
-
-// Apply prices a trade of grossKobo. The transfer band is chosen on what is
-// left after the funding fee, which is (to within the transfer fee itself) the
-// amount the transfer carries. Net may be zero or negative for a tiny trade;
-// callers must refuse to forward that rather than send it.
-func (f MerchantPayoutFees) Apply(grossKobo int64) PayoutFeeBreakdown {
-	funding := (grossKobo*f.FundingBps + 5000) / 10000 // half up, to the kobo
-	afterFunding := grossKobo - funding
-	var transfer int64
-	for _, t := range f.TransferTiers {
-		if t.UpToKobo == 0 || afterFunding <= t.UpToKobo {
-			transfer = t.FeeKobo
-			break
-		}
-	}
-	return PayoutFeeBreakdown{Funding: funding, Transfer: transfer, Net: afterFunding - transfer}
-}
-
-// PayoutFeeSchedule is MerchantPayoutFees as a merchant reads it, in naira.
-type PayoutFeeSchedule struct {
-	FundingFeeBps    int64           `json:"fundingFeeBps"`
-	TransferFeeTiers []PayoutFeeBand `json:"transferFeeTiers"`
-	MinPayoutNgn     string          `json:"minPayoutNgn"`
-}
-
-// PayoutFeeBand is one transfer-fee band. UpToNgn nil is the open top band.
-type PayoutFeeBand struct {
-	UpToNgn *string `json:"upToNgn"`
-	FeeNgn  string  `json:"feeNgn"`
-}
-
-// Schedule renders the fees for display, with the same minimum the settle
-// path enforces, so what a merchant is told is what is applied.
-func (f MerchantPayoutFees) Schedule() PayoutFeeSchedule {
-	bands := make([]PayoutFeeBand, 0, len(f.TransferTiers))
-	for _, t := range f.TransferTiers {
-		band := PayoutFeeBand{FeeNgn: koboToNGNString(t.FeeKobo)}
-		if t.UpToKobo != 0 {
-			upTo := koboToNGNString(t.UpToKobo)
-			band.UpToNgn = &upTo
-		}
-		bands = append(bands, band)
-	}
-	return PayoutFeeSchedule{
-		FundingFeeBps:    f.FundingBps,
-		TransferFeeTiers: bands,
-		MinPayoutNgn:     koboToNGNString(defaultMinSellNgnKobo),
-	}
-}
-
-// SetPayoutFees sets what merchants pay for each forward.
-func (s *P2PTradeClaimSource) SetPayoutFees(f MerchantPayoutFees) { s.payoutFees = f }
 
 // NewP2PTradeClaimSource wires the P2P product into the inbound matcher.
 func NewP2PTradeClaimSource(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner) *P2PTradeClaimSource {
@@ -405,9 +335,10 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	return nil
 }
 
-// reviewGate turns the merchant's auto-settle refusal into a hold. A daily
-// cap that cannot be evaluated is an ordinary error instead: that one IS
-// transient, and the next tick should simply ask again.
+// reviewGate turns the merchant's auto-settle refusal into a hold, and holds
+// a trade too small for the provider to transfer onward. A daily cap that
+// cannot be evaluated is an ordinary error instead: that one IS transient, and
+// the next tick should simply ask again.
 func (s *P2PTradeClaimSource) reviewGate(ctx context.Context, pm *models.PaymentMerchant, trade *models.P2PTrade) error {
 	refusal, err := s.pm.CheckAutoSettle(ctx, pm, trade)
 	if err != nil {
@@ -420,12 +351,11 @@ func (s *P2PTradeClaimSource) reviewGate(ctx context.Context, pm *models.Payment
 	if !ok {
 		return fmt.Errorf("p2p accept: trade %s has unusable fiat_amount %q", trade.ID, trade.FiatAmount)
 	}
-	if fees := s.payoutFees.Apply(gross); fees.Net < defaultMinSellNgnKobo {
+	if gross < defaultMinSellNgnKobo {
 		return &ClaimNeedsReviewError{
 			Code: models.InboundHoldPayoutBelowMinimum,
-			Reason: fmt.Sprintf("P2P trade %s: after payout fees (funding ₦%s, transfer ₦%s) merchant %q would be sent ₦%s, under the ₦%s transfer minimum. Refund the sender, or assign this credit and pay the merchant by hand",
-				trade.ID, koboToNGNString(fees.Funding), koboToNGNString(fees.Transfer), pm.Name,
-				koboToNGNString(fees.Net), koboToNGNString(defaultMinSellNgnKobo)),
+			Reason: fmt.Sprintf("P2P trade %s: merchant %q would be sent ₦%s, under the ₦%s transfer minimum. Refund the sender, or assign this credit and pay the merchant by hand",
+				trade.ID, pm.Name, koboToNGNString(gross), koboToNGNString(defaultMinSellNgnKobo)),
 		}
 	}
 	return nil
@@ -481,24 +411,13 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 	pm *models.PaymentMerchant,
 	ref string,
 ) (*models.P2PSettlementForward, bool, error) {
-	gross, ok := ngnToKobo(trade.FiatAmount)
-	if !ok {
-		return nil, false, fmt.Errorf("p2p accept: trade %s has unusable fiat_amount %q", trade.ID, trade.FiatAmount)
-	}
-	// The merchant's claim is the NET: the Flutterwave costs of paying them are
-	// theirs (owner decision 2026-10-05), so ledger, forward and transfer all
-	// carry the same post-fee figure and the fees stay with the company wallet
-	// that paid them.
-	fees := s.payoutFees.Apply(gross)
 	forward := &models.P2PSettlementForward{
 		ID:          uuid.New(),
 		TradeID:     trade.ID,
 		PMID:        pm.ID,
 		ProviderRef: ref,
 		Currency:    normaliseCurrency(trade.FiatCurrency),
-		Amount:      koboToNGNString(fees.Net),
-		FundingFee:  koboToNGNString(fees.Funding),
-		TransferFee: koboToNGNString(fees.Transfer),
+		Amount:      trade.FiatAmount,
 		Status:      models.P2PForwardPending,
 		Reference:   p2pForwardRefPrefix + uuid.New().String(),
 	}

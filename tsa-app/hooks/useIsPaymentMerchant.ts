@@ -19,14 +19,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { getMyPmStatus } from '../services/p2p';
-import type { PayoutFeeSchedule } from '../utils/pmPayoutFees';
 
 export interface IsPaymentMerchantState {
   isPm: boolean;
   status: string;
   activationNeedsId: boolean;
-  /** Fees each payout deducts, under central inbound only; else null. */
-  payoutFees: PayoutFeeSchedule | null;
   loading: boolean;
   reload: () => void;
 }
@@ -35,7 +32,6 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
   const [isPm, setIsPm] = useState(false);
   const [status, setStatus] = useState('');
   const [activationNeedsId, setActivationNeedsId] = useState(true);
-  const [payoutFees, setPayoutFees] = useState<PayoutFeeSchedule | null>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
 
@@ -50,7 +46,6 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setIsPm(s.isPm);
           setStatus(s.status);
           setActivationNeedsId(s.activationNeedsId);
-          setPayoutFees(s.payoutFees);
         }
       })
       .catch(() => {
@@ -60,7 +55,6 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setIsPm(false);
           setStatus('');
           setActivationNeedsId(true);
-          setPayoutFees(null);
         }
       })
       .finally(() => {
@@ -71,5 +65,5 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
     };
   }, [nonce]);
 
-  return { isPm, status, activationNeedsId, payoutFees, loading, reload };
+  return { isPm, status, activationNeedsId, loading, reload };
 }

@@ -1240,13 +1240,6 @@ func main() {
 	// is nothing to attribute a P2P payment to. Routing is decided after that
 	// block so the two cannot be enabled independently; see p2pCentralRouting.
 	p2pClaimsRegistered := false
-	// What a payment merchant pays to be paid under central inbound: one value,
-	// used by the settle path and shown on GET /p2p/pm/me, so the merchant is
-	// told exactly what is deducted.
-	pmPayoutFees := services.MerchantPayoutFees{
-		FundingBps:    cfg.P2PForwardFundingFeeBps,
-		TransferTiers: cfg.P2PForwardTransferFeeTiers,
-	}
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
@@ -1462,7 +1455,6 @@ func main() {
 		// is credited and forwarded to; see inbound_claim_p2p.go.
 		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
 		p2pClaims.SetForwarder(settlementForwarder)
-		p2pClaims.SetPayoutFees(pmPayoutFees)
 		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
 		// Read below to decide whether P2P buyers may be sent to the company
 		// account at all. Set from the registration itself, never from the
@@ -1517,9 +1509,6 @@ func main() {
 				pmh.SetActivator(pmOnboarding)
 			}
 			pmOnboarding.SetVirtualAccountsRetired(true)
-			pmh.SetPayoutFees(pmPayoutFees)
-			log.Printf("[pm] merchant payout fees: funding %d bps, transfer tiers %+v (kobo)",
-				pmPayoutFees.FundingBps, pmPayoutFees.TransferTiers)
 			log.Printf("[pm] merchant activation mints no virtual account, asks no BVN/NIN and requires Didit verification (central inbound)")
 		}
 		// Unattributed PM trades now settle only by assigning their held

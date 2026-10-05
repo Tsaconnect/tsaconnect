@@ -65,12 +65,6 @@ type P2PSettlementForward struct {
 	// Amount is the merchant's proceeds as a 2dp decimal string, matching the
 	// ledger columns it is credited to and debited from.
 	Amount string `gorm:"type:numeric(38,2);not null" json:"amount"`
-	// FundingFee and TransferFee are the Flutterwave costs deducted from the
-	// trade's fiat to reach Amount: the wallet-funding charge on the buyer's
-	// transfer and the payout transfer fee. The merchant pays both (owner
-	// decision 2026-10-05); kept here so every forward shows its own sum.
-	FundingFee  string `gorm:"type:numeric(38,2);not null;default:0" json:"fundingFee"`
-	TransferFee string `gorm:"type:numeric(38,2);not null;default:0" json:"transferFee"`
 
 	Status string `gorm:"size:16;not null;default:'pending';index" json:"status"`
 

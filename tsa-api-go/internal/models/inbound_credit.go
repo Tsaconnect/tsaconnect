@@ -74,9 +74,9 @@ const (
 	// InboundHoldOutsideMerchantCap — the trade is over the merchant's
 	// per-trade or daily cap, or cannot be valued to show it is within them.
 	InboundHoldOutsideMerchantCap = "trade_not_within_merchant_cap"
-	// InboundHoldPayoutBelowMinimum — after the merchant's payout fees, what
-	// would be forwarded is under the provider's minimum transfer, so settling
-	// would release the crypto and then fail the bank transfer.
+	// InboundHoldPayoutBelowMinimum — the merchant's proceeds are under the
+	// provider's minimum transfer, so settling would release the crypto and
+	// then fail the bank transfer.
 	InboundHoldPayoutBelowMinimum = "payout_below_transfer_minimum"
 )
 
