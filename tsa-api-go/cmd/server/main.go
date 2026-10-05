@@ -1310,10 +1310,11 @@ func main() {
 	}
 
 	var (
-		pmAuto *services.PMAutomationService
-		pmh    *handlers.PMHandler
-		nwh    *handlers.NombaWebhookHandler
-		fwh    *handlers.FlutterwaveWebhookHandler
+		pmAuto       *services.PMAutomationService
+		pmh          *handlers.PMHandler
+		pmOnboarding *services.PMOnboardingService
+		nwh          *handlers.NombaWebhookHandler
+		fwh          *handlers.FlutterwaveWebhookHandler
 	)
 	if releaseSigner != nil && p2pTradeSvc != nil {
 		// Gateway selection: live Nomba transfer gateway when client credentials
@@ -1382,7 +1383,7 @@ func main() {
 		// configured the provisioner is nil and approve/activate 503 while
 		// reject/pause/resume still work — it never routes provisioning to Nomba.
 		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
-			pmOnboarding := services.NewPMOnboardingService(config.DB, prov)
+			pmOnboarding = services.NewPMOnboardingService(config.DB, prov)
 			pmh.SetApprover(pmOnboarding)
 			pmh.SetActivator(pmOnboarding)
 			log.Printf("[pm] admin PM approval + merchant activation ready (provider=%s)", cfg.ResolveFiatProvider())
@@ -1490,6 +1491,22 @@ func main() {
 		p2pHandler.SetInboundCentralSource(itService)
 		log.Printf("[inbound] P2P buyers routed to the company account (%s claim source registered)",
 			services.InboundClaimTypeP2PTrade)
+		// Decided here, from the routing itself, so activation can never mint
+		// a merchant account that buyers are no longer sent to — nor skip one
+		// they still are.
+		//
+		// With no account to mint, activation needs no provider either, so a
+		// missing Flutterwave company-customer id must not leave approval and
+		// activation 503ing while buyers are already being routed.
+		if pmh != nil {
+			if pmOnboarding == nil {
+				pmOnboarding = services.NewPMOnboardingService(config.DB, nil)
+				pmh.SetApprover(pmOnboarding)
+				pmh.SetActivator(pmOnboarding)
+			}
+			pmOnboarding.SetVirtualAccountsRetired(true)
+			log.Printf("[pm] merchant activation mints no virtual account and asks no BVN/NIN (central inbound)")
+		}
 	} else if warning != "" {
 		log.Printf("[inbound] WARNING: %s", warning)
 	}

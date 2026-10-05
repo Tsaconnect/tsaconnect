@@ -67,6 +67,13 @@ const (
 	// InboundHoldCurrencyMismatch — a claim source answered with a claim in
 	// the wrong currency. Not an operator's mistake to fix: a bug in us.
 	InboundHoldCurrencyMismatch = "claim_currency_does_not_match_credit"
+	// InboundHoldMerchantNotActive — the credit is attributed to a P2P trade
+	// whose payment merchant is paused (or otherwise not live), so it is not
+	// settled automatically.
+	InboundHoldMerchantNotActive = "merchant_is_not_active"
+	// InboundHoldOutsideMerchantCap — the trade is over the merchant's
+	// per-trade or daily cap, or cannot be valued to show it is within them.
+	InboundHoldOutsideMerchantCap = "trade_not_within_merchant_cap"
 )
 
 // InboundCredit is an immutable record of one credit into the central account.

@@ -1489,3 +1489,146 @@ func TestP2PForward_ConcurrentHoldLeavesAnInFlightTransferConfirmable(t *testing
 		t.Fatalf("available_ngn = %q, want 0 — a confirmed disbursement must debit the ledger exactly once", got)
 	}
 }
+
+// ─── Merchant review gate ────────────────────────────────────────────────────
+//
+// The VA path refuses to auto-settle for a paused merchant or a trade over the
+// merchant's caps (HandleInbound steps 3 and 6). The central path must refuse
+// the same trades, and must refuse them as a HOLD: the money has arrived and
+// is correctly attributed, so it needs an operator, not a retry every tick.
+
+func (r *fwdRig) setMerchant(t *testing.T, field string, value any) {
+	t.Helper()
+	if err := r.db.Model(&models.PaymentMerchant{}).Where("id = ?", r.pm.ID).
+		Update(field, value).Error; err != nil {
+		t.Fatalf("set merchant %s: %v", field, err)
+	}
+}
+
+// assertHeldUnsettled checks the whole "nothing moved" picture, not just the
+// credit: a hold that still credited or forwarded would pay the merchant for a
+// trade an operator has not yet approved.
+func (r *fwdRig) assertHeldUnsettled(t *testing.T, creditID uuid.UUID, wantCode string) {
+	t.Helper()
+	got := reloadCredit(t, r.db, creditID)
+	if got.Status != models.InboundCreditHeld {
+		t.Fatalf("credit status = %q, want held", got.Status)
+	}
+	if got.HoldReasonCode != wantCode {
+		t.Fatalf("hold code = %q, want %q", got.HoldReasonCode, wantCode)
+	}
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		t.Fatalf("trade status = %q, want pending_payment — the crypto was released without review", trade.Status)
+	}
+	if bal := r.availableNGN(t); !ngnEqual(bal, "0") {
+		t.Fatalf("available_ngn = %q, want 0 — the merchant was credited for an unreviewed trade", bal)
+	}
+	var count int64
+	r.db.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", r.trade.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("%d forward row(s) written — the sweep would pay the merchant anyway", count)
+	}
+}
+
+func TestP2PMatch_PausedMerchantHoldsTheCreditUnsettled(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	r.setMerchant(t, "status", models.PaymentMerchantStatusPaused)
+	m, credit := r.matchRig(t, "999000000101", "")
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v — a merchant review is a hold, not a retryable failure", err)
+	}
+	r.assertHeldUnsettled(t, credit.ID, models.InboundHoldMerchantNotActive)
+}
+
+func TestP2PMatch_TradeOverPerTradeCapHoldsTheCreditUnsettled(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	r.setMerchant(t, "per_trade_cap_usd", 0.5) // the rig's trade is $1
+	m, credit := r.matchRig(t, "999000000102", "")
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	r.assertHeldUnsettled(t, credit.ID, models.InboundHoldOutsideMerchantCap)
+}
+
+func TestP2PMatch_TradeOverDailyCapHoldsTheCreditUnsettled(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	r.setMerchant(t, "daily_cap_usd", 0.5)
+	m, credit := r.matchRig(t, "999000000103", "")
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	r.assertHeldUnsettled(t, credit.ID, models.InboundHoldOutsideMerchantCap)
+}
+
+func TestP2PMatch_UnvaluableTradeHoldsRatherThanPassingTheCap(t *testing.T) {
+	// A trade we cannot value cannot be shown to be within the cap. The VA
+	// path routes it to manual review; passing it here would make the cap
+	// something a malformed row walks straight through.
+	r := newForwardRig(t, "1500.00")
+	r.setMerchant(t, "per_trade_cap_usd", 100)
+	if err := r.db.Model(&models.P2PTrade{}).Where("id = ?", r.trade.ID).
+		Update("token_amount", "not-a-number").Error; err != nil {
+		t.Fatalf("corrupt token_amount: %v", err)
+	}
+	m, credit := r.matchRig(t, "999000000104", "")
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	r.assertHeldUnsettled(t, credit.ID, models.InboundHoldOutsideMerchantCap)
+}
+
+func TestP2PMatch_ManualBindSettlesAHeldMerchantReview(t *testing.T) {
+	// The hold is a question for an operator, and assigning the credit is their
+	// answer. Re-applying the cap on that path would leave the operator only
+	// refund-or-ignore for money they have already decided to accept.
+	r := newForwardRig(t, "1500.00")
+	r.setMerchant(t, "per_trade_cap_usd", 0.5)
+	m, credit := r.matchRig(t, "999000000105", "")
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+
+	if err := m.BindManually(context.Background(), credit.ID, InboundClaimTypeP2PTrade, r.trade.ID, uuid.New()); err != nil {
+		t.Fatalf("BindManually: %v", err)
+	}
+
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("trade status = %q, want released", trade.Status)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1500.00") {
+		t.Fatalf("available_ngn = %q, want 1500.00", got)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditMatched {
+		t.Fatalf("credit status = %q, want matched", got.Status)
+	}
+}
+
+func TestP2PAccept_ReplayOfAnAdmittedSettleIsNotReReviewed(t *testing.T) {
+	// A credit that already passed the gate and credited the merchant, then
+	// failed to finish settling, is re-driven by the next tick. Pausing the
+	// merchant in between must not hold it: the ledger is already credited and
+	// the forward row already exists, so a hold would strand both.
+	r := newForwardRig(t, "1500.00")
+	credit := p2pInboundCredit("999000000106", "1500.00")
+	if _, _, err := r.src.claimAndCredit(context.Background(), r.trade, r.pm, credit.ProviderRef); err != nil {
+		t.Fatalf("seed the half-done settle: %v", err)
+	}
+	r.setMerchant(t, "status", models.PaymentMerchantStatusPaused)
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, credit); err != nil {
+		t.Fatalf("Accept replay: %v", err)
+	}
+	var trade models.P2PTrade
+	r.db.First(&trade, "id = ?", r.trade.ID)
+	if trade.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("trade status = %q, want released — the replay was blocked by a gate it already passed", trade.Status)
+	}
+}

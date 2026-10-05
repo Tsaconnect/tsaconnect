@@ -343,3 +343,59 @@ func TestActivateWithKYC_NilProvisioner(t *testing.T) {
 		t.Fatalf("want ErrPMProvisioningUnavailable, got %v", err)
 	}
 }
+
+// ── Central inbound: no virtual account ─────────────────────────────────────
+//
+// Once P2P buyers are routed to the company account, a merchant's virtual
+// account is never shown to anyone. Minting one would still ask the merchant
+// for a BVN/NIN purely to create an account nothing reads.
+
+func TestActivateWithKYC_VirtualAccountsRetiredActivatesWithoutAnID(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	fake := &fakeNombaProvisioner{}
+	svc := NewPMOnboardingService(db, fake)
+	svc.SetVirtualAccountsRetired(true)
+
+	userID := uuid.New()
+	pm := approvedPM(t, svc, userID)
+
+	out, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", "")
+	if err != nil {
+		t.Fatalf("ActivateWithKYC: %v", err)
+	}
+	if out.Status != models.PaymentMerchantStatusActive {
+		t.Errorf("status = %q, want active", out.Status)
+	}
+	if fake.createVirtualAccountCalls != 0 {
+		t.Errorf("CreateVirtualAccount called %d times, want 0 — nothing routes buyers to it", fake.createVirtualAccountCalls)
+	}
+	var raw models.PaymentMerchant
+	db.First(&raw, "id = ?", pm.ID)
+	if raw.Status != models.PaymentMerchantStatusActive || raw.InboundAccountNumber != "" {
+		t.Errorf("persisted status=%q inbound=%q, want active with no account", raw.Status, raw.InboundAccountNumber)
+	}
+}
+
+func TestActivateWithKYC_VirtualAccountsRetiredNeedsNoProvisioner(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, nil)
+	svc.SetVirtualAccountsRetired(true)
+
+	userID := uuid.New()
+	pm := approvedPM(t, svc, userID)
+
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", ""); err != nil {
+		t.Fatalf("ActivateWithKYC: %v — with no account to create, no provider is needed", err)
+	}
+}
+
+func TestNeedsIdentity_FollowsVirtualAccountRetirement(t *testing.T) {
+	svc := NewPMOnboardingService(newSQLiteForOnboarding(t), &fakeNombaProvisioner{})
+	if !svc.NeedsIdentity() {
+		t.Error("NeedsIdentity = false by default, want true — VA mode mints an account from the BVN/NIN")
+	}
+	svc.SetVirtualAccountsRetired(true)
+	if svc.NeedsIdentity() {
+		t.Error("NeedsIdentity = true with virtual accounts retired, want false")
+	}
+}

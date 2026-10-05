@@ -1129,6 +1129,7 @@ type fakePMActivator struct {
 	calls        int
 	lastIDType   string
 	lastIDNumber string
+	noIdentity   bool
 }
 
 func (f *fakePMActivator) ActivateWithKYC(_ context.Context, _, _ uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error) {
@@ -1287,5 +1288,84 @@ func TestPMHandler_PauseResume(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("resume: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Central inbound: activation without an id ────────────────────────────────
+
+func (f *fakePMActivator) NeedsIdentity() bool { return !f.noIdentity }
+
+func TestPMHandler_ActivatePM_NoIdentityNeededAcceptsAnEmptyBody(t *testing.T) {
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+	act := &fakePMActivator{out: &models.PaymentMerchant{ID: approved.ID, Status: models.PaymentMerchantStatusActive}, noIdentity: true}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: approved}
+	h.SetActivator(act)
+
+	for _, body := range []string{``, `{}`} {
+		w := activatePost(buildActivateRouter(h, user), body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("body %q: expected 200, got %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+	if act.lastIDNumber != "" {
+		t.Errorf("forwarded id number %q, want none", act.lastIDNumber)
+	}
+}
+
+func TestPMHandler_ActivatePM_NoIdentityNeededDropsASuppliedID(t *testing.T) {
+	// An older app still sends the BVN. With no account to create there is no
+	// reason for it to travel any further than the handler.
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+	act := &fakePMActivator{out: &models.PaymentMerchant{ID: approved.ID, Status: models.PaymentMerchantStatusActive}, noIdentity: true}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: approved}
+	h.SetActivator(act)
+
+	w := activatePost(buildActivateRouter(h, user), `{"idType":"BVN","idNumber":"22233344455"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if act.lastIDType != "" || act.lastIDNumber != "" {
+		t.Errorf("forwarded id (%q,%q), want none", act.lastIDType, act.lastIDNumber)
+	}
+}
+
+func TestGetMyPMStatus_ReportsWhetherActivationNeedsAnID(t *testing.T) {
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+
+	for _, tc := range []struct {
+		name string
+		act  PMActivator
+		want bool
+	}{
+		{"virtual accounts", &fakePMActivator{}, true},
+		{"central inbound", &fakePMActivator{noIdentity: true}, false},
+		// No activator means activation 503s; claiming it needs nothing would
+		// send the app to a form that cannot succeed either way.
+		{"dormant", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &PMHandler{auto: &fakePMAutomation{}}
+			h.pmStatus = &fakePMStatusGetter{pm: approved}
+			if tc.act != nil {
+				h.SetActivator(tc.act)
+			}
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+			buildPMStatusRouter(h, user).ServeHTTP(w, req)
+
+			var resp map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			data := resp["data"].(map[string]interface{})
+			if data["activationNeedsId"] != tc.want {
+				t.Errorf("activationNeedsId = %v, want %v", data["activationNeedsId"], tc.want)
+			}
+		})
 	}
 }

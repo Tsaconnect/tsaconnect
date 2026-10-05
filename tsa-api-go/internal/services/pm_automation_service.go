@@ -283,7 +283,7 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 
 	// Daily-cap gate. A cap we can't evaluate (query error) must NOT auto-release:
 	// fail safe by routing to the manual queue. Over the daily cap → manual queue.
-	withinDaily, dErr := s.withinDailyCap(ctx, pm, usd)
+	withinDaily, dErr := s.pm.WithinDailyCap(ctx, pm, usd)
 	if dErr != nil {
 		log.Printf("[pm automation] trade=%s daily-cap check failed: %v; routing to manual queue (fail-safe, no release)", tradeID, dErr)
 		return nil
@@ -325,54 +325,6 @@ func tradeUSDValue(trade *models.P2PTrade) (float64, bool) {
 		return 0, false
 	}
 	return baseUnitsToUSD(amt, tokenDecimalsFor(trade.ChainID, trade.Token)), true
-}
-
-// withinDailyCap reports whether releasing prospectiveUSD for pm would keep the
-// PM's total released/committed USD for "today" (>= the current UTC midnight)
-// within pm.DailyCapUSD. A cap of 0 is unlimited (always true).
-//
-// "Today" is computed from time.Now().UTC() truncated to midnight (the service
-// holds no injected clock). The consumed total sums tradeUSDValue over this PM's
-// trades created since midnight that have committed/consumed capacity — statuses
-// IN ('paid','releasing','released') on this PM's ads. Rows with an unparseable
-// token_amount (tradeUSDValue ok=false) are skipped, mirroring the per-trade
-// guard. Returns (sum+prospectiveUSD) <= cap. A query error is surfaced so the
-// caller can fail safe (never auto-release on a cap it can't evaluate).
-func (s *PMAutomationService) withinDailyCap(ctx context.Context, pm *models.PaymentMerchant, prospectiveUSD float64) (bool, error) {
-	if pm.DailyCapUSD == 0 {
-		return true, nil // unlimited
-	}
-	now := time.Now().UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-
-	var trades []models.P2PTrade
-	if err := s.db.WithContext(ctx).
-		Table("p2p_trades").
-		Select("p2p_trades.*").
-		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
-		Where("p2p_ads.pm_id = ?", pm.ID).
-		Where("p2p_trades.status IN ?", []string{
-			models.P2PTradeStatusPaid,
-			models.P2PTradeStatusReleasing,
-			models.P2PTradeStatusReleased,
-		}).
-		Where("p2p_trades.created_at >= ?", midnight).
-		Scan(&trades).Error; err != nil {
-		return false, err
-	}
-
-	var sum float64
-	for i := range trades {
-		usd, ok := tradeUSDValue(&trades[i])
-		if !ok {
-			// Unparseable token_amount — can't value this row; skip it (the same
-			// row is independently blocked from auto-release by the per-trade guard).
-			log.Printf("[pm automation] daily-cap: skipping trade=%s with unparseable token_amount %q", trades[i].ID, trades[i].TokenAmount)
-			continue
-		}
-		sum += usd
-	}
-	return sum+prospectiveUSD <= pm.DailyCapUSD, nil
 }
 
 // ─── Webhook dispatch + recovery ─────────────────────────────────────────────
@@ -924,7 +876,7 @@ func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminI
 			// Fresh admission — apply the daily-cap gate.
 			usd, ok := s.tradeUSDForCap(ctx, tradeID)
 			if ok {
-				within, derr := s.withinDailyCap(ctx, pm, usd)
+				within, derr := s.pm.WithinDailyCap(ctx, pm, usd)
 				if derr != nil {
 					return nil, fmt.Errorf("daily-cap check: %w", derr)
 				}

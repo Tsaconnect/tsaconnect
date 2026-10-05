@@ -47,6 +47,9 @@ type PMApprover interface {
 // no fiat provider is configured — activation then returns 503.
 type PMActivator interface {
 	ActivateWithKYC(ctx context.Context, pmID, userID uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error)
+	// NeedsIdentity is false under central inbound, where activation mints no
+	// virtual account and so has no use for a BVN/NIN.
+	NeedsIdentity() bool
 }
 
 // PMHandler serves the PM operator endpoints (manual-release queue, release
@@ -85,6 +88,15 @@ func (h *PMHandler) SetActivator(a PMActivator) { h.activator = a }
 type pmStatusResponse struct {
 	IsPm   bool   `json:"isPm"`
 	Status string `json:"status"`
+	// ActivationNeedsID tells the app whether to ask for a BVN/NIN.
+	ActivationNeedsID bool `json:"activationNeedsId"`
+}
+
+// activationNeedsID is true unless an activator is wired and says otherwise.
+// With no activator, activation 503s; reporting "no id needed" would send the
+// app to a form that cannot succeed either way.
+func (h *PMHandler) activationNeedsID() bool {
+	return h.activator == nil || h.activator.NeedsIdentity()
 }
 
 // GetMyPMStatus handles GET /p2p/pm/me — returns the caller's PM status.
@@ -99,8 +111,9 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 	}
 
 	// Dormant path: PM stack is not configured — return safe default.
+	needsID := h.activationNeedsID()
 	if h.pmStatus == nil {
-		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
 		return
 	}
 
@@ -109,18 +122,19 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 		// isPm is true only for a live (active) PM; "approved" reports back so the
 		// app can prompt the merchant to complete KYC activation.
 		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{
-			IsPm:   pm.Status == models.PaymentMerchantStatusActive,
-			Status: pm.Status,
+			IsPm:              pm.Status == models.PaymentMerchantStatusActive,
+			Status:            pm.Status,
+			ActivationNeedsID: needsID,
 		})
 		return
 	}
 	if errors.Is(err, services.ErrPMNotFound) {
-		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
 		return
 	}
 	// Unexpected error — log and fail open (UX-safe; never 503).
 	log.Printf("[pm handler] GetMyPMStatus user=%s: %v", user.ID, err)
-	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
+	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
 }
 
 // pmListItem is the safe projection returned by ListPMs and the lifecycle
@@ -383,7 +397,8 @@ type activateRequest struct {
 // ActivatePM handles POST /api/p2p/pm/activate — the merchant completes their own
 // PM onboarding by supplying a BVN/NIN, which is forwarded to the fiat provider to
 // mint the NGN virtual account. The id number is passed straight through and never
-// persisted or logged. Only valid on the caller's own 'approved' PM.
+// persisted or logged. Only valid on the caller's own 'approved' PM. Under central
+// inbound no account is minted and no id is asked for (see PMActivator).
 func (h *PMHandler) ActivatePM(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -395,20 +410,25 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		return
 	}
 
-	var req activateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	idType := strings.ToUpper(strings.TrimSpace(req.IDType))
-	if idType != "BVN" && idType != "NIN" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "idType must be BVN or NIN")
-		return
-	}
-	idNumber := strings.TrimSpace(req.IDNumber)
-	if !utils.IsValidNgIDNumber(idNumber) {
-		utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
-		return
+	// Under central inbound there is no account to mint, so the body is not
+	// read at all: an id an older app still sends goes no further than here.
+	var idType, idNumber string
+	if h.activator.NeedsIdentity() {
+		var req activateRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		idType = strings.ToUpper(strings.TrimSpace(req.IDType))
+		if idType != "BVN" && idType != "NIN" {
+			utils.ErrorResponse(c, http.StatusBadRequest, "idType must be BVN or NIN")
+			return
+		}
+		idNumber = strings.TrimSpace(req.IDNumber)
+		if !utils.IsValidNgIDNumber(idNumber) {
+			utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
+			return
+		}
 	}
 
 	// Resolve the caller's PM (never trust a client-supplied id — activation is

@@ -48,6 +48,11 @@ var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the paym
 type PMOnboardingService struct {
 	db          *gorm.DB
 	provisioner NombaProvisioner
+
+	// virtualAccountsRetired is set when P2P buyers are routed to the company
+	// account. Activation then mints no virtual account, because nothing would
+	// ever send a buyer to it, and so needs no BVN/NIN.
+	virtualAccountsRetired bool
 }
 
 // NewPMOnboardingService returns a PMOnboardingService.
@@ -56,6 +61,16 @@ type PMOnboardingService struct {
 func NewPMOnboardingService(db *gorm.DB, provisioner NombaProvisioner) *PMOnboardingService {
 	return &PMOnboardingService{db: db, provisioner: provisioner}
 }
+
+// SetVirtualAccountsRetired switches activation to the central-inbound model:
+// no virtual account, no identity. Set once at boot, from the same decision
+// that routes P2P buyers to the company account, so the two cannot disagree.
+func (s *PMOnboardingService) SetVirtualAccountsRetired(retired bool) {
+	s.virtualAccountsRetired = retired
+}
+
+// NeedsIdentity reports whether activation asks the merchant for a BVN/NIN.
+func (s *PMOnboardingService) NeedsIdentity() bool { return !s.virtualAccountsRetired }
 
 // pmAccountRef derives a deterministic, unique virtual-account reference for a
 // PM from its user id. Deterministic so a retry produces the SAME ref (Nomba
@@ -156,12 +171,17 @@ func (s *PMOnboardingService) ApprovePM(ctx context.Context, pmID, adminID uuid.
 //
 // idNumber (the BVN/NIN) is forwarded to the provider and NEVER stored or logged.
 // Retry-safe: a row whose nomba_account_ref is already set skips the VA create.
+//
+// With virtual accounts retired (central inbound) step 3 is skipped entirely:
+// there is no account to create, so neither a provider nor an id is required.
 func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error) {
-	if s.provisioner == nil {
-		return nil, ErrPMProvisioningUnavailable
-	}
-	if strings.TrimSpace(idNumber) == "" {
-		return nil, ErrPMKYCRequired
+	if !s.virtualAccountsRetired {
+		if s.provisioner == nil {
+			return nil, ErrPMProvisioningUnavailable
+		}
+		if strings.TrimSpace(idNumber) == "" {
+			return nil, ErrPMKYCRequired
+		}
 	}
 
 	var pm models.PaymentMerchant
@@ -183,7 +203,7 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 	}
 
 	// ── Virtual account (skip if a prior attempt already created it) ──────────
-	if pm.NombaAccountRef == "" {
+	if pm.NombaAccountRef == "" && !s.virtualAccountsRetired {
 		accountRef := pmAccountRef(pm.UserID)
 		vaNumber, err := s.provisioner.CreateVirtualAccount(ctx, accountRef, pm.Name, idType, idNumber)
 		if err != nil {
