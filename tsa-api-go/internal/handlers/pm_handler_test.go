@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1367,5 +1368,45 @@ func TestGetMyPMStatus_ReportsWhetherActivationNeedsAnID(t *testing.T) {
 				t.Errorf("activationNeedsId = %v, want %v", data["activationNeedsId"], tc.want)
 			}
 		})
+	}
+}
+
+func TestPMHandler_ReleaseTrade_CentralInboundPointsToTheAssign(t *testing.T) {
+	// A 500 "Release failed" would read as a retryable glitch; the operator
+	// needs to know the release is refused on purpose and where to go instead.
+	fake := &fakePMAutomation{releaseErr: services.ErrSettleViaInboundAssign}
+	router := buildPMRouter(NewPMHandler(fake, nil), testAdminUser())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/trades/"+uuid.New().String()+"/release", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Inbound credits") {
+		t.Errorf("body %s does not tell the operator where to settle it", w.Body.String())
+	}
+}
+
+func TestPMHandler_ActivatePM_UnverifiedMerchantIsSentToVerification(t *testing.T) {
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+	act := &fakePMActivator{err: services.ErrKYCVerificationRequired, noIdentity: true}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: approved}
+	h.SetActivator(act)
+
+	w := activatePost(buildActivateRouter(h, user), `{}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// The app's one KYC handler branches on this code, never the words.
+	if resp["code"] != services.KYCVerificationRequiredCode {
+		t.Errorf("code = %v, want %s", resp["code"], services.KYCVerificationRequiredCode)
 	}
 }

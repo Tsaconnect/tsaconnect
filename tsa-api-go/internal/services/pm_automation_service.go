@@ -130,6 +130,10 @@ type PMAutomationService struct {
 	// share this webhook but are keyed by their own reference prefix. nil when
 	// the instant forward is not wired — see HandlePayoutStatus.
 	forwards *P2PSettlementForwarder
+
+	// centralInbound is set when PM buyers pay the company account (see
+	// SetCentralInbound).
+	centralInbound bool
 }
 
 // SetSettlementForwarder routes settlement-forward disburse results to the
@@ -264,32 +268,21 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
-	// 6. Cap check (USD). Over-cap → manual queue. Unknown USD (unparseable
-	//    TokenAmount) → also route to manual: never auto-release when the value
-	//    of the trade cannot be verified.
+	// 6. The merchant's limits (PMService.CheckAutoSettle, shared with central
+	//    inbound). A refusal routes to the manual queue, and so does a daily
+	//    cap that cannot be evaluated: never auto-release on a check that did
+	//    not run. Only the code is logged — the reason names the merchant.
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		return err
 	}
-	usd, usdOK := tradeUSDValue(&trade)
-	if !usdOK {
-		log.Printf("[pm automation] trade=%s has unparseable token_amount %q; routing to manual queue (cannot verify cap)", tradeID, trade.TokenAmount)
+	refusal, err := s.pm.CheckAutoSettle(ctx, pm, &trade)
+	if err != nil {
+		log.Printf("[pm automation] trade=%s: %v; routing to manual queue (fail-safe, no release)", tradeID, err)
 		return nil
 	}
-	if !WithinPerTradeCap(pm, usd) {
-		log.Printf("[pm automation] trade=%s usd=%.2f over PM per-trade cap; routing to manual queue", tradeID, usd)
-		return nil
-	}
-
-	// Daily-cap gate. A cap we can't evaluate (query error) must NOT auto-release:
-	// fail safe by routing to the manual queue. Over the daily cap → manual queue.
-	withinDaily, dErr := s.pm.WithinDailyCap(ctx, pm, usd)
-	if dErr != nil {
-		log.Printf("[pm automation] trade=%s daily-cap check failed: %v; routing to manual queue (fail-safe, no release)", tradeID, dErr)
-		return nil
-	}
-	if !withinDaily {
-		log.Printf("[pm automation] trade=%s usd=%.2f over PM daily cap; routing to manual queue", tradeID, usd)
+	if refusal != nil {
+		log.Printf("[pm automation] trade=%s refused auto-settle (%s); routing to manual queue", tradeID, refusal.Code)
 		return nil
 	}
 
@@ -737,6 +730,19 @@ type ManualQueueItem struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+// ErrSettleViaInboundAssign refuses an operator release of a PM buy trade that
+// has no attributed payment while buyers pay the company account. Its money,
+// if any arrived, is a held inbound credit, and only assigning that credit
+// credits the merchant; releasing from here would pay out the crypto and leave
+// the merchant unpaid with the assign no longer possible.
+var ErrSettleViaInboundAssign = errors.New("this trade's payment goes to the company account: assign its held credit under Admin → Inbound credits instead of releasing it here")
+
+// SetCentralInbound is set at boot from the same decision that routes PM
+// buyers to the company account. The manual queue then lists only `paid`
+// orphans — trades whose money is already attributed — and ManualRelease
+// refuses the rest with ErrSettleViaInboundAssign.
+func (s *PMAutomationService) SetCentralInbound(central bool) { s.centralInbound = central }
+
 // manualQueueRow is the lightweight projection scanned from the join for
 // ListBuyManualQueue.
 type manualQueueRow struct {
@@ -765,6 +771,12 @@ type manualQueueRow struct {
 // ErrInvalidTransition from SystemMarkPaid and re-runs AutoRelease). The
 // release_tx_hash guard ensures already-released trades never appear.
 func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQueueItem, error) {
+	statuses := []string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}
+	if s.centralInbound {
+		// Unattributed trades are settled by assigning their held credit; see
+		// ErrSettleViaInboundAssign.
+		statuses = []string{models.P2PTradeStatusPaid}
+	}
 	var rows []manualQueueRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
@@ -772,7 +784,7 @@ func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQ
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
 		Where("p2p_ads.side = ?", models.P2PAdSideSell).
-		Where("p2p_trades.status IN ?", []string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+		Where("p2p_trades.status IN ?", statuses).
 		Where("p2p_trades.release_tx_hash = ? OR p2p_trades.release_tx_hash IS NULL", "").
 		Where("p2p_trades.funding = ?", models.P2PTradeFundingPooled).
 		Where("p2p_trades.open_tx_hash <> ?", "").
@@ -871,6 +883,9 @@ func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminI
 			Where("id = ?", tradeID).
 			Scan(&tradeStatus).Error; err != nil {
 			return nil, fmt.Errorf("load trade status for cap check: %w", err)
+		}
+		if tradeStatus.Status == models.P2PTradeStatusPendingPayment && s.centralInbound {
+			return nil, ErrSettleViaInboundAssign
 		}
 		if tradeStatus.Status == models.P2PTradeStatusPendingPayment {
 			// Fresh admission — apply the daily-cap gate.

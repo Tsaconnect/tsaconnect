@@ -235,7 +235,8 @@ func (h *PMHandler) ReleaseTrade(c *gin.Context) {
 		switch {
 		case errors.Is(err, services.ErrTradeNotFound):
 			utils.ErrorResponse(c, http.StatusNotFound, err.Error())
-		case errors.Is(err, services.ErrInvalidTransition):
+		case errors.Is(err, services.ErrInvalidTransition),
+			errors.Is(err, services.ErrSettleViaInboundAssign):
 			utils.ErrorResponse(c, http.StatusConflict, err.Error())
 		default:
 			log.Printf("[pm handler] ManualRelease trade=%s: %v", id, err)
@@ -451,6 +452,9 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM activation unavailable: no fiat provider configured")
 		case errors.Is(err, services.ErrPMKYCRequired):
 			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
+		case services.KYCRefusalCode(err) != "":
+			utils.ErrorResponseWithCode(c, http.StatusForbidden,
+				"Verify your identity before activating as a payment merchant", services.KYCRefusalCode(err))
 		case errors.Is(err, services.ErrPMNotFound):
 			utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
 		case errors.Is(err, services.ErrInvalidPMTransition):

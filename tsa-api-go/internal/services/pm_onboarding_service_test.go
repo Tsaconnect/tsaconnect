@@ -350,6 +350,21 @@ func TestActivateWithKYC_NilProvisioner(t *testing.T) {
 // account is never shown to anyone. Minting one would still ask the merchant
 // for a BVN/NIN purely to create an account nothing reads.
 
+// seedKYCUser gives the onboarding DB a users row with the given Didit status.
+// Without a BVN/NIN, that verification is the merchant's only proof of
+// identity before third-party money starts being forwarded to them.
+func seedKYCUser(t *testing.T, db *gorm.DB, userID uuid.UUID, status string) {
+	t.Helper()
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY, verification_status TEXT, verified_legal_name TEXT)`).Error; err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO users (id, verification_status, verified_legal_name) VALUES (?, ?, ?)`,
+		userID, status, "ADA OBI").Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+}
+
 func TestActivateWithKYC_VirtualAccountsRetiredActivatesWithoutAnID(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 	fake := &fakeNombaProvisioner{}
@@ -357,6 +372,7 @@ func TestActivateWithKYC_VirtualAccountsRetiredActivatesWithoutAnID(t *testing.T
 	svc.SetVirtualAccountsRetired(true)
 
 	userID := uuid.New()
+	seedKYCUser(t, db, userID, models.VerificationStatusVerified)
 	pm := approvedPM(t, svc, userID)
 
 	out, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", "")
@@ -382,6 +398,7 @@ func TestActivateWithKYC_VirtualAccountsRetiredNeedsNoProvisioner(t *testing.T) 
 	svc.SetVirtualAccountsRetired(true)
 
 	userID := uuid.New()
+	seedKYCUser(t, db, userID, models.VerificationStatusVerified)
 	pm := approvedPM(t, svc, userID)
 
 	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", ""); err != nil {
@@ -397,5 +414,39 @@ func TestNeedsIdentity_FollowsVirtualAccountRetirement(t *testing.T) {
 	svc.SetVirtualAccountsRetired(true)
 	if svc.NeedsIdentity() {
 		t.Error("NeedsIdentity = true with virtual accounts retired, want false")
+	}
+}
+
+func TestActivateWithKYC_VirtualAccountsRetiredRequiresVerifiedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string // "" = no users row at all
+	}{
+		{"unverified", "pending"},
+		{"no user row", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newSQLiteForOnboarding(t)
+			svc := NewPMOnboardingService(db, nil)
+			svc.SetVirtualAccountsRetired(true)
+
+			userID := uuid.New()
+			if tc.status != "" {
+				seedKYCUser(t, db, userID, tc.status)
+			} else {
+				seedKYCUser(t, db, uuid.New(), models.VerificationStatusVerified) // someone else
+			}
+			pm := approvedPM(t, svc, userID)
+
+			_, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", "")
+			if !errors.Is(err, ErrKYCVerificationRequired) {
+				t.Fatalf("err = %v, want ErrKYCVerificationRequired", err)
+			}
+			var raw models.PaymentMerchant
+			db.First(&raw, "id = ?", pm.ID)
+			if raw.Status != models.PaymentMerchantStatusApproved {
+				t.Errorf("status = %q, want approved — an unverified merchant went live", raw.Status)
+			}
+		})
 	}
 }

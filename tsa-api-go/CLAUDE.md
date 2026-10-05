@@ -188,6 +188,17 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   held credit automatically; unset is legitimate but means the admin queue is the only place
   it is ever seen. The same list also receives background-job failure alerts (below).
 - Per-variable rationale is in `.env.example`; read it before changing any of them.
+- Payment-merchant P2P under central routing (`p2pCentralRouting` in `cmd/server/main.go`):
+  - A payment matched to a trade still has to pass `PMService.CheckAutoSettle`: the merchant
+    is active, and the trade is within the per-trade and daily caps. The VA webhook uses the
+    same check.
+  - A refusal holds the credit (`merchant_is_not_active` / `trade_not_within_merchant_cap`).
+    A super-admin assigning that credit is the override.
+  - The PM manual queue then lists only `paid` orphans. `ManualRelease` refuses unattributed
+    trades (`ErrSettleViaInboundAssign`), because releasing one pays out the crypto while the
+    credit stays held and the merchant unpaid.
+  - Activation mints no virtual account and takes no BVN/NIN. It requires the merchant's own
+    Didit verification instead.
 
 Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
 - A worker registered with `jobs.AlertOnFailureStreak()` alerts when it has failed every tick

@@ -46,18 +46,25 @@ jest.mock('@/hooks/useIsPaymentMerchant', () => ({
   __esModule: true,
   useIsPaymentMerchant: () => mockStatus,
 }));
+jest.mock('@/utils/kycRefusal', () => ({
+  __esModule: true,
+  promptKycRefusal: jest.fn((code?: string) => code === 'kyc_verification_required'),
+}));
 jest.mock('@/services/p2p', () => ({
   __esModule: true,
   activatePmAccount: jest.fn().mockResolvedValue({ success: true }),
 }));
 
 import React from 'react';
-import { Alert, TextInput } from 'react-native';
+import { Alert } from 'react-native';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { activatePmAccount } from '@/services/p2p';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 import ActivatePmScreen from '@/app/merchants/activate-pm';
 
 let tree: ReactTestRenderer;
+/** The BVN/NIN field — the only number-pad input on the screen. */
+const idInputs = () => tree.root.findAllByProps({ keyboardType: 'number-pad' });
 async function render() {
   await act(async () => {
     tree = TestRenderer.create(<ActivatePmScreen />);
@@ -73,14 +80,14 @@ describe('ActivatePmScreen', () => {
   it('asks for a BVN/NIN when activation mints a virtual account', async () => {
     mockStatus.activationNeedsId = true;
     await render();
-    expect(tree.root.findAllByType(TextInput)).toHaveLength(1);
+    expect(idInputs().length).toBeGreaterThan(0);
     expect(tree.root.findAll((n) => n.props.accessibilityLabel === 'chip:BVN').length).toBeGreaterThan(0);
   });
 
   it('asks for no id under central inbound and activates without one', async () => {
     mockStatus.activationNeedsId = false;
     await render();
-    expect(tree.root.findAllByType(TextInput)).toHaveLength(0);
+    expect(idInputs()).toHaveLength(0);
     expect(tree.root.findAll((n) => n.props.accessibilityLabel === 'chip:BVN')).toHaveLength(0);
 
     const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
@@ -89,5 +96,24 @@ describe('ActivatePmScreen', () => {
       await button.props.onPress();
     });
     expect(activatePmAccount).toHaveBeenCalledWith();
+  });
+
+  it('sends an unverified merchant to verification instead of a generic failure', async () => {
+    mockStatus.activationNeedsId = false;
+    (activatePmAccount as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      message: 'Verify your identity before activating as a payment merchant',
+      code: 'kyc_verification_required',
+    });
+    await render();
+    const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
+    await act(async () => {
+      await button.props.onPress();
+    });
+    expect(promptKycRefusal).toHaveBeenCalledWith(
+      'kyc_verification_required',
+      'Verify your identity before activating as a payment merchant'
+    );
+    expect(Alert.alert).not.toHaveBeenCalledWith('Activation failed', expect.anything());
   });
 });

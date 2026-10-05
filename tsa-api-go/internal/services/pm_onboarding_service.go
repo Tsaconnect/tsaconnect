@@ -173,7 +173,8 @@ func (s *PMOnboardingService) ApprovePM(ctx context.Context, pmID, adminID uuid.
 // Retry-safe: a row whose nomba_account_ref is already set skips the VA create.
 //
 // With virtual accounts retired (central inbound) step 3 is skipped entirely:
-// there is no account to create, so neither a provider nor an id is required.
+// there is no account to create, so neither a provider nor an id is required —
+// instead the merchant's own Didit verification must have passed.
 func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error) {
 	if !s.virtualAccountsRetired {
 		if s.provisioner == nil {
@@ -200,6 +201,20 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 	}
 	if pm.Status != models.PaymentMerchantStatusApproved {
 		return nil, ErrInvalidPMTransition
+	}
+
+	// Without a virtual account there is no BVN/NIN either, and the merchant is
+	// about to have third-party money forwarded to them. Their own Didit
+	// verification is the identity check that replaces it — the same one a
+	// TSA Pay applicant must pass.
+	if s.virtualAccountsRetired {
+		verified, err := IsKYCVerified(ctx, s.db, userID)
+		if err != nil {
+			return nil, fmt.Errorf("pm_onboarding: check verification: %w", err)
+		}
+		if !verified {
+			return nil, ErrKYCVerificationRequired
+		}
 	}
 
 	// ── Virtual account (skip if a prior attempt already created it) ──────────
