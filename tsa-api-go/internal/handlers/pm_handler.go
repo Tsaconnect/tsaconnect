@@ -61,6 +61,16 @@ type PMHandler struct {
 	pmStatus  PMStatusGetter // nil when PM stack is unconfigured (dormant)
 	approver  PMApprover     // nil when no fiat provider: approve returns 503
 	activator PMActivator    // nil when no fiat provider: activate returns 503
+	// payoutFees is set only under central inbound, the one mode that
+	// forwards proceeds and so charges for it.
+	payoutFees *services.PayoutFeeSchedule
+}
+
+// SetPayoutFees publishes the merchant payout fees on GET /p2p/pm/me so the
+// app can show them before a merchant posts an ad.
+func (h *PMHandler) SetPayoutFees(f services.MerchantPayoutFees) {
+	schedule := f.Schedule()
+	h.payoutFees = &schedule
 }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
@@ -90,6 +100,9 @@ type pmStatusResponse struct {
 	Status string `json:"status"`
 	// ActivationNeedsID tells the app whether to ask for a BVN/NIN.
 	ActivationNeedsID bool `json:"activationNeedsId"`
+	// PayoutFees is what each forward to the merchant's bank deducts; absent
+	// when nothing is forwarded (VA mode).
+	PayoutFees *services.PayoutFeeSchedule `json:"payoutFees,omitempty"`
 }
 
 // activationNeedsID is true unless an activator is wired and says otherwise.
@@ -113,7 +126,7 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 	// Dormant path: PM stack is not configured — return safe default.
 	needsID := h.activationNeedsID()
 	if h.pmStatus == nil {
-		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID, PayoutFees: h.payoutFees})
 		return
 	}
 
@@ -125,16 +138,17 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 			IsPm:              pm.Status == models.PaymentMerchantStatusActive,
 			Status:            pm.Status,
 			ActivationNeedsID: needsID,
+			PayoutFees:        h.payoutFees,
 		})
 		return
 	}
 	if errors.Is(err, services.ErrPMNotFound) {
-		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID, PayoutFees: h.payoutFees})
 		return
 	}
 	// Unexpected error — log and fail open (UX-safe; never 503).
 	log.Printf("[pm handler] GetMyPMStatus user=%s: %v", user.ID, err)
-	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID})
+	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{ActivationNeedsID: needsID, PayoutFees: h.payoutFees})
 }
 
 // pmListItem is the safe projection returned by ListPMs and the lifecycle

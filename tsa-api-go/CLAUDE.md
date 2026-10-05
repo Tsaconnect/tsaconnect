@@ -199,6 +199,13 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
     credit stays held and the merchant unpaid.
   - Activation mints no virtual account and takes no BVN/NIN. It requires the merchant's own
     Didit verification instead.
+  - The merchant pays the Flutterwave costs of being paid (`P2P_FORWARD_FUNDING_FEE_BPS`,
+    `P2P_FORWARD_TRANSFER_FEE_TIERS`; `services.MerchantPayoutFees`).
+  - The ledger credit, the forward and the bank transfer all carry the NET. Each forward row
+    records its `funding_fee` and `transfer_fee`.
+  - A trade netting under the ₦100 transfer floor is held (`payout_below_transfer_minimum`).
+  - The same schedule is returned on `GET /p2p/pm/me` (`payoutFees`) and shown in the app
+    before an ad is posted.
 
 Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
 - A worker registered with `jobs.AlertOnFailureStreak()` alerts when it has failed every tick

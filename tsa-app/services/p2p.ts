@@ -20,6 +20,7 @@
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
 import { getChainByChainId, type ChainKey } from '../constants/chains';
+import type { PayoutFeeSchedule } from '../utils/pmPayoutFees';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -777,9 +778,14 @@ export interface MyPmStatus {
    * than the field, or unreachable — the form it implies is the safe one.
    */
   activationNeedsId: boolean;
+  /**
+   * What each forward to the merchant's bank deducts, under central inbound
+   * only — the one mode that forwards. Null when the API sends none.
+   */
+  payoutFees: PayoutFeeSchedule | null;
 }
 
-const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
+const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true, payoutFees: null };
 
 /**
  * Read the current user's PM status from GET /p2p/pm/me.
@@ -791,15 +797,18 @@ const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
  */
 export async function getMyPmStatus(): Promise<MyPmStatus> {
   try {
-    const res = await request<{ isPm: boolean; status: string; activationNeedsId?: boolean }>(
-      'GET',
-      '/p2p/pm/me'
-    );
+    const res = await request<{
+      isPm: boolean;
+      status: string;
+      activationNeedsId?: boolean;
+      payoutFees?: PayoutFeeSchedule | null;
+    }>('GET', '/p2p/pm/me');
     if (res.success && res.data != null) {
       return {
         isPm: !!res.data.isPm,
         status: res.data.status ?? '',
         activationNeedsId: res.data.activationNeedsId !== false,
+        payoutFees: res.data.payoutFees ?? null,
       };
     }
     return NO_PM;

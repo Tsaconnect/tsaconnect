@@ -43,6 +43,7 @@ import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
+import { PmPayoutFeeNotice } from '@/components/p2p/PmPayoutFeeNotice';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
@@ -113,7 +114,7 @@ const CreateAdScreen: React.FC = () => {
   // Active PMs settle via their Nomba VA (buyers pay the VA, auto-settled), so
   // they don't attach a manual payment method — the selector is replaced by an
   // info card and the publish requirement is waived for them.
-  const { isPm } = useIsPaymentMerchant();
+  const { isPm, payoutFees } = useIsPaymentMerchant();
   const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
   const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
   const currencyConfig =
@@ -1063,22 +1064,29 @@ const CreateAdScreen: React.FC = () => {
             {isPm ? 'Payment method' : 'Payment methods'}
           </Text>
           {isPm ? (
-            // PM ads settle through the merchant's Nomba virtual account — buyers
-            // are shown the VA to pay, and settlement is automatic. No manual
-            // payment method is selected or required.
-            <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                <Icon name="checkCircle" size={22} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Auto-settled via your Nomba account
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Buyers pay your virtual account and crypto releases automatically — no manual payment method needed.
-                  </Text>
+            // PM ads settle automatically, so no manual payment method is
+            // selected or required. Under central inbound (payoutFees set)
+            // buyers pay TSA Connect's account and the merchant's naira is
+            // forwarded net of fees; otherwise buyers pay the merchant's own
+            // virtual account.
+            <View style={{ gap: spacing.sm }}>
+              <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Icon name="checkCircle" size={22} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      {payoutFees ? 'Auto-settled through TSA Connect' : 'Auto-settled via your virtual account'}
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      {payoutFees
+                        ? 'Buyers pay TSA Connect’s account. Crypto releases automatically and your naira is sent to your settlement bank as each trade settles.'
+                        : 'Buyers pay your virtual account and crypto releases automatically — no manual payment method needed.'}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-            </Card>
+              </Card>
+              <PmPayoutFeeNotice fees={payoutFees} />
+            </View>
           ) : loadingPms ? (
             <View style={{ paddingVertical: spacing.lg }}>
               <Spinner />

@@ -35,7 +35,25 @@ describe('getMyPmStatus', () => {
       isPm: false,
       status: 'approved',
       activationNeedsId: false,
+      payoutFees: null,
     });
+  });
+
+  it('passes through the payout fee schedule under central inbound', async () => {
+    const payoutFees = {
+      fundingFeeBps: 140,
+      transferFeeTiers: [{ upToNgn: null, feeNgn: '53.75' }],
+      minPayoutNgn: '100.00',
+    };
+    respond({ isPm: true, status: 'active', activationNeedsId: false, payoutFees });
+    const s = await getMyPmStatus();
+    expect(s.payoutFees).toEqual(payoutFees);
+  });
+
+  it('has no payout fees when the API sends none', async () => {
+    respond({ isPm: true, status: 'active' });
+    const s = await getMyPmStatus();
+    expect(s.payoutFees).toBeNull();
   });
 
   it('assumes an id is needed when an older API omits the field', async () => {

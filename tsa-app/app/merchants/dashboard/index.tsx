@@ -17,6 +17,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
+import { PmPayoutFeeNotice } from '@/components/p2p/PmPayoutFeeNotice';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { TSA_PAY_APPLY } from '@/constants/routes';
@@ -45,7 +46,14 @@ export default function MerchantDashboard() {
   const [items, setItems] = useState<Product[]>([]);
   const [merchantName, setMerchantName] = useState('Merchant');
   const { formatPrice } = useCurrency();
-  const { isPm, status: pmStatus, loading: pmLoading, reload: reloadPmStatus } = useIsPaymentMerchant();
+  const {
+    isPm,
+    status: pmStatus,
+    activationNeedsId,
+    payoutFees,
+    loading: pmLoading,
+    reload: reloadPmStatus,
+  } = useIsPaymentMerchant();
   const { load: payMerchant } = useOwnPayMerchant();
 
   const loadDashboard = useCallback(async () => {
@@ -205,8 +213,9 @@ export default function MerchantDashboard() {
           </AccentCard>
 
           {/* PM activation CTA — the application was approved but the merchant
-              still has to verify identity (BVN/NIN) to mint their NGN account
-              and go live. Takes priority over the upgrade CTA. */}
+              still has to activate to go live: with a BVN/NIN that mints their
+              NGN account, or (central inbound) a single confirm. Takes priority
+              over the upgrade CTA. */}
           {!pmLoading && !isPm && pmStatus === 'approved' && (
             <PressableScale
               onPress={() => router.push('/merchants/activate-pm' as any)}
@@ -220,13 +229,22 @@ export default function MerchantDashboard() {
                       Activate your Payment Merchant
                     </Text>
                     <Text variant="caption" color="textSecondary">
-                      Approved! Verify your BVN/NIN to go live.
+                      {activationNeedsId
+                        ? 'Approved! Verify your BVN/NIN to go live.'
+                        : 'Approved! Confirm to go live.'}
                     </Text>
                   </View>
                   <Icon name="chevronRight" size={20} color={colors.textMuted} />
                 </View>
               </AccentCard>
             </PressableScale>
+          )}
+
+          {/* Live PMs see what each payout deducts before they post an ad. */}
+          {!pmLoading && isPm && payoutFees && (
+            <View style={{ marginBottom: spacing.lg }}>
+              <PmPayoutFeeNotice fees={payoutFees} />
+            </View>
           )}
 
           {/* PM upgrade CTA — visible only to merchants with no existing PM

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -27,6 +28,8 @@ func createSettlementForwardTable(t *testing.T, db *gorm.DB) {
 		provider_ref   TEXT NOT NULL,
 		currency       TEXT NOT NULL,
 		amount         TEXT NOT NULL,
+		funding_fee    TEXT NOT NULL DEFAULT '0',
+		transfer_fee   TEXT NOT NULL DEFAULT '0',
 		status         TEXT NOT NULL DEFAULT 'pending',
 		attempts       INTEGER NOT NULL DEFAULT 0,
 		reference      TEXT NOT NULL,
@@ -1631,4 +1634,93 @@ func TestP2PAccept_ReplayOfAnAdmittedSettleIsNotReReviewed(t *testing.T) {
 	if trade.Status != models.P2PTradeStatusReleased {
 		t.Fatalf("trade status = %q, want released — the replay was blocked by a gate it already passed", trade.Status)
 	}
+}
+
+// ─── Merchant payout fees ─────────────────────────────────────────────────────
+//
+// Owner decision 2026-10-05: the merchant pays the Flutterwave costs of getting
+// their proceeds to them — the 1.40% wallet-funding charge on the buyer's
+// transfer and the payout transfer fee — so the ledger, the forward and the
+// bank transfer all carry the NET.
+
+var flutterwavePayoutFees = MerchantPayoutFees{
+	FundingBps: 140,
+	TransferTiers: []config.TransferFeeTier{
+		{UpToKobo: 500000, FeeKobo: 1075},
+		{UpToKobo: 5000000, FeeKobo: 2688},
+		{UpToKobo: 0, FeeKobo: 5375},
+	},
+}
+
+func TestMerchantPayoutFees_Apply(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		gross                      int64
+		funding, transfer, wantNet int64
+	}{
+		// ₦1,500: 1.40% = ₦21.00; ₦1,479 to send is in the ≤₦5,000 band.
+		{"small", 150000, 2100, 1075, 146825},
+		// ₦50,000: ₦700 funding; ₦49,300 to send is still ≤₦50,000.
+		{"band edge", 5000000, 70000, 2688, 4927312},
+		// ₦100,000: top band.
+		{"large", 10000000, 140000, 5375, 9854625},
+		// Rounds half up to the kobo: 1.40% of ₦0.75 is 1.05 kobo.
+		{"rounding", 75, 1, 1075, 75 - 1 - 1075},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := flutterwavePayoutFees.Apply(tc.gross)
+			if got.Funding != tc.funding || got.Transfer != tc.transfer || got.Net != tc.wantNet {
+				t.Fatalf("Apply(%d) = %+v, want funding=%d transfer=%d net=%d",
+					tc.gross, got, tc.funding, tc.transfer, tc.wantNet)
+			}
+		})
+	}
+}
+
+func TestMerchantPayoutFees_ZeroScheduleChargesNothing(t *testing.T) {
+	got := MerchantPayoutFees{}.Apply(150000)
+	if got.Funding != 0 || got.Transfer != 0 || got.Net != 150000 {
+		t.Fatalf("Apply = %+v, want the gross untouched", got)
+	}
+}
+
+func TestP2PAccept_MerchantIsCreditedAndPaidTheNet(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	r.src.SetPayoutFees(flutterwavePayoutFees)
+
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000201", "1500.00")); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if got := r.availableNGN(t); !ngnEqual(got, "1468.25") {
+		t.Fatalf("available_ngn = %q, want 1468.25 — the merchant's claim is the net", got)
+	}
+	if len(r.gateway.calls) != 1 || !ngnEqual(r.gateway.calls[0].Amount, "1468.25") {
+		t.Fatalf("gateway calls = %+v, want one transfer of 1468.25", r.gateway.calls)
+	}
+	f := r.forward(t)
+	if !ngnEqual(f.Amount, "1468.25") || !ngnEqual(f.FundingFee, "21.00") || !ngnEqual(f.TransferFee, "10.75") {
+		t.Fatalf("forward amount=%q funding=%q transfer=%q, want 1468.25 / 21.00 / 10.75",
+			f.Amount, f.FundingFee, f.TransferFee)
+	}
+}
+
+func TestP2PMatch_PayoutBelowTheTransferFloorAfterFeesIsHeld(t *testing.T) {
+	// ₦110 nets ₦97.71 after fees, under Flutterwave's ₦100 transfer floor.
+	// Settling would release the crypto and then fail the bank transfer, so
+	// it is held before anything moves.
+	r := newForwardRig(t, "110.00")
+	r.src.SetPayoutFees(flutterwavePayoutFees)
+	createInboundMatchTables(t, r.db)
+	if err := r.db.Exec(`INSERT INTO users (id, name, verified_legal_name) VALUES (?, ?, ?)`,
+		r.trade.BuyerID, "Display Name", "JOHN DOE").Error; err != nil {
+		t.Fatalf("seed buyer: %v", err)
+	}
+	credit := seedCredit(t, r.db, "999000000202", 11000, "JOHN DOE")
+	m := NewInboundMatcher(r.db)
+	m.Register(InboundClaimTypeP2PTrade, r.src)
+
+	if _, err := m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	r.assertHeldUnsettled(t, credit.ID, models.InboundHoldPayoutBelowMinimum)
 }
