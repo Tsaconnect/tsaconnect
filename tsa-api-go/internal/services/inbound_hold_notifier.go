@@ -385,3 +385,43 @@ func koboAsNairaText(kobo int64) string {
 	}
 	return fmt.Sprintf("%s%s.%02d", sign, grouped.String(), minor)
 }
+
+// StockLowAlert is the company wallet's low-stock or low-gas finding (spec
+// 2026-10-03 §5.3). Have and Threshold are ready to read ("41.20 USDC free").
+type StockLowAlert struct {
+	Chain, Asset, Address string
+	Have, Threshold       string
+	Recovered             bool
+}
+
+// NotifyStockLow emails operators that the company wallet needs stock (or
+// gas) — or that it was refilled. Same contract as NotifyHold: never errors,
+// never blocks, a no-op when unconfigured. The monitor rate-limits it.
+func (n *InboundHoldNotifier) NotifyStockLow(_ context.Context, a StockLowAlert) error {
+	if n == nil || n.mailer == nil || len(n.to) == 0 {
+		return nil
+	}
+	var subject, title string
+	var b strings.Builder
+	if a.Recovered {
+		subject = fmt.Sprintf("Company wallet stock refilled — %s on %s", a.Asset, a.Chain)
+		title = "Company wallet stock is back"
+		fmt.Fprintf(&b, "%s on %s is back above the alert threshold (%s).\n\nNow: %s\n", a.Asset, a.Chain, a.Threshold, a.Have)
+	} else {
+		subject = fmt.Sprintf("Company wallet stock low — %s on %s", a.Asset, a.Chain)
+		title = "The company wallet needs a refill"
+		fmt.Fprintf(&b, "%s on %s is below the alert threshold (%s).\n\nNow: %s\n", a.Asset, a.Chain, a.Threshold, a.Have)
+		fmt.Fprintf(&b, "Wallet: %s\n\n", a.Address)
+		b.WriteString("Send it to the wallet address above on that chain. Buyers are offered this token only while its free stock covers the smallest order; " +
+			"the app sees a refill within 30 seconds. This repeats hourly until it is refilled.")
+	}
+	ctaText, ctaURL := "", ""
+	if n.consoleBaseURL != "" {
+		ctaText, ctaURL = "Open the company wallet", n.consoleBaseURL+"/company-wallet"
+	}
+	n.enqueue(alertJob{
+		kind: "company wallet stock", ref: a.Chain + " " + a.Asset,
+		subject: subject, title: title, message: b.String(), ctaText: ctaText, ctaURL: ctaURL,
+	})
+	return nil
+}

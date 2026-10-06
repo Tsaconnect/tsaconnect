@@ -46,6 +46,9 @@ type SponsorFloat struct {
 	// a converted buy leaves the round trip's unspent budget sitting here as
 	// USDC, which nothing sweeps automatically.
 	TokenUSD float64
+	// Tokens is free stock per token in USD — only the company wallet
+	// populates it (spec 2026-10-03 §5.3), for its low-stock alert.
+	Tokens map[string]float64
 }
 
 // RampSponsorship is the one surface the HTTP layer and the float monitor
