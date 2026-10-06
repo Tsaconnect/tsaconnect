@@ -47,7 +47,7 @@ type TreasuryProvider struct {
 // NewTreasuryProvider returns a true nil Provider unless RAMP_TREASURY_BUY is
 // on, the company wallet is wired and a market rate exists.
 func NewTreasuryProvider(it *services.ITService, market services.TreasuryRateSource, enabled bool) Provider {
-	if !enabled || it == nil || !it.HasCompanyWallet() || market == nil {
+	if tm, typed := market.(*services.TreasuryMarketRate); !enabled || it == nil || market == nil || (typed && tm == nil) || !it.HasCompanyWallet() {
 		return nil
 	}
 	return newTreasuryProvider(it, market)
@@ -156,7 +156,7 @@ func (p *TreasuryProvider) Open(ctx context.Context, k VenueKey, r Request, in O
 	}
 	chain, token := strings.ToLower(k.ChainKey), strings.ToUpper(k.Token)
 	if !p.offers(chain, token) {
-		return nil, WrapClass(ErrNoVenue, fmt.Errorf("the company wallet does not sell %s on %s", token, chain))
+		return nil, WrapClass(ErrVenueUnavailable, fmt.Errorf("the company wallet does not sell %s on %s right now", token, chain))
 	}
 	market, err := p.market.BuyRate(ctx, fiat)
 	if err != nil {

@@ -118,6 +118,10 @@ func TestNewTreasuryProvider_NilUnlessEnabledAndWired(t *testing.T) {
 	if p := NewTreasuryProvider(services.NewITService(nil, nil, nil), nil, true); p != nil {
 		t.Fatal("no market rate must not register")
 	}
+	var typedNil *services.TreasuryMarketRate
+	if p := NewTreasuryProvider(services.NewITService(nil, nil, nil), typedNil, true); p != nil {
+		t.Fatal("a typed-nil market rate must be a true nil Provider")
+	}
 }
 
 // §4.1 / §11: margin maths, Base venue, no fee lines, no stock figure.
@@ -234,7 +238,7 @@ func TestTreasuryOpen_PriceGuardAndCapsBeforeAnyWrite(t *testing.T) {
 	if len(f.opened) != 0 {
 		t.Fatalf("wrote %d orders past a refusal", len(f.opened))
 	}
-	if _, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, trBuy("10000"), trInput("1389.49")); !errors.Is(err, ErrNoVenue) {
+	if _, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, trBuy("10000"), trInput("1389.49")); !errors.Is(err, ErrVenueUnavailable) {
 		t.Fatalf("a chain without a lane: %v", err)
 	}
 }
@@ -319,3 +323,28 @@ func TestTreasuryReads_OtherProvidersIdIsNotFound(t *testing.T) {
 		t.Fatalf("a Flutterwave order through the company wallet: %v", err)
 	}
 }
+
+// The lane quoted a moment ago is gone (receipt probe failed) at open: the
+// order fails over to Paycrest on the same pair instead of being refused.
+func TestTreasuryOpen_LaneGoneFailsOverToPaycrest(t *testing.T) {
+	f := newFakeTreasuryIT(t)
+	tr := newTestTreasuryProvider(f)
+	if q, err := tr.Quote(context.Background(), trBuy("10000")); err != nil || len(q.Venues) != 1 {
+		t.Fatalf("quote: %+v %v", q, err)
+	}
+	gone := &laneGoneIT{fakeTreasuryIT: f}
+	tr = newTestTreasuryProvider(f)
+	tr.it = gone
+	pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "base", "USDC", "1385"))
+	pc.openResults = []openResult{{order: okOrder}}
+	req := openReq(EncodeHandle(ProviderTreasury, VenueKey{"base", "USDC"}), "1382.57")
+	req.Request.FiatAmount = "10000"
+	o, err := testRouter(tr, pc).Open(context.Background(), req)
+	if err != nil || o != okOrder || len(f.opened) != 0 {
+		t.Fatalf("o=%v err=%v opened=%d", o, err, len(f.opened))
+	}
+}
+
+type laneGoneIT struct{ *fakeTreasuryIT }
+
+func (laneGoneIT) TreasuryChains() []string { return nil }
