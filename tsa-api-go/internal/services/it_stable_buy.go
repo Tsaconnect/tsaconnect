@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -624,9 +625,28 @@ func (s *ITService) FinalizeBuyConversion(ctx context.Context, intentID uuid.UUI
 		return s.db.WithContext(ctx).Model(intent).
 			Update("status", models.ITStatusDelivering).Error
 	case "FAILED":
+		pr := tr.ProviderResponse
+		reason := fwFailureReason("buy conversion failed", tr)
+		log.Printf("[it stable buy] conversion failed intent=%s transfer=%s code=%s msg=%q",
+			intent.ID, tr.ID, safeLogToken(pr.Code), pr.Message)
+		if pr.BelowLimit() {
+			// Under Flutterwave's floor the same amount fails every time —
+			// intent 898ce9ef burned all ten attempts on it. Park it for an
+			// operator (it is in the stuck list) instead of retrying; the operator
+			// refunds, or resumes once the amount is fixed.
+			log.Printf("[it stable buy] ALERT it_stable_buy_below_provider_limit intent=%s leg=conversion — parked, not retried", intent.ID)
+			return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+				"status":         models.ITStatusBuyAwaitingRate,
+				"failure_reason": reason,
+				"conversion_id":  "",
+				// The parked reference is spent: Flutterwave would replay its
+				// cached FAILED transfer. A resume mints a fresh one (I7).
+				"conversion_attempts": intent.ConversionAttempts + 1,
+			}).Error
+		}
 		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
 			"status":              models.ITStatusAwaitingFunds,
-			"failure_reason":      "buy conversion failed: " + tr.ID,
+			"failure_reason":      reason,
 			"conversion_id":       "",
 			"conversion_attempts": intent.ConversionAttempts + 1,
 		}).Error
@@ -651,6 +671,38 @@ var ErrStableDeliveryExhausted = errors.New("it stable buy: delivery attempts ex
 // every 30s, so a misleading sentinel here would be the noisiest line in the
 // log and would point at the wrong hop.
 var ErrStableDeliveryPending = errors.New("it stable buy: delivery has not settled yet")
+
+// ErrStableFloatShort means a converted buy is waiting for the company's
+// stablecoin float to cover its delivery: the conversion landed below
+// AssetAmount (an honoured quote, or slippage past the spread). It always
+// comes with ErrStableCreditNotVisible, so it is still a wait that burns no
+// attempt — and the watcher reports it so its failure-streak alert fires.
+var ErrStableFloatShort = errors.New("it stable buy: not enough stablecoin in the Flutterwave wallet to deliver")
+
+// fwFailureReason records why Flutterwave failed a transfer: its own code,
+// type and message when it gave them (message %q, so provider text cannot
+// forge a field), within failure_reason's 256 bytes.
+func fwFailureReason(prefix string, tr FWTransfer) string {
+	reason := prefix + ": " + tr.ID
+	if pr := tr.ProviderResponse; !pr.Empty() {
+		reason += fmt.Sprintf(" code=%s type=%s msg=%q", safeLogToken(pr.Code), safeLogToken(pr.Type), pr.Message)
+	}
+	if len(reason) > 256 {
+		reason = strings.ToValidUTF8(reason[:256], "")
+	}
+	return reason
+}
+
+// safeLogToken prints a provider token bare when it is plain, quoted
+// otherwise, so a code can never smuggle a space or newline into a log line.
+func safeLogToken(s string) string {
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' || r == '-') {
+			return strconv.Quote(s)
+		}
+	}
+	return s
+}
 
 // stableDeliverer is the slice of the Flutterwave client used to pay a user
 // their stablecoin.
@@ -739,10 +791,13 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 		log.Printf("[IT] it_stable_balance_line_missing asset=%s intent=%s", intent.Asset, intent.ID)
 	}
 	if !found || available < amountMajor {
-		// ErrStableCreditNotVisible, so the watcher treats it as a wait rather
-		// than a failure and does NOT burn a delivery attempt.
-		return fmt.Errorf("%w: %s available=%v needed=%v",
-			ErrStableCreditNotVisible, intent.Asset, available, amountMajor)
+		// The conversion settled, so a shortfall here is the company float not
+		// covering it. Still a wait (ErrStableCreditNotVisible: no delivery
+		// attempt burned), but one that needs a top-up, so it is marked.
+		log.Printf("[it stable buy] METRIC ramp_fw_float_short intent=%s asset=%s available=%v needed=%v",
+			intent.ID, intent.Asset, available, amountMajor)
+		return fmt.Errorf("%w: %w: %s available=%v needed=%v",
+			ErrStableFloatShort, ErrStableCreditNotVisible, intent.Asset, available, amountMajor)
 	}
 
 	ref := itBuyDeliveryRef(intent.ID, intent.DeliveryAttempts)
@@ -799,10 +854,21 @@ func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID)
 		// reference instead of colliding with Flutterwave's idempotency on the
 		// transfer that just failed. Stays in `delivering`: the asset is in our
 		// balance and the user has not been paid.
+		pr := tr.ProviderResponse
+		log.Printf("[it stable buy] delivery failed intent=%s transfer=%s code=%s msg=%q",
+			intent.ID, tr.ID, safeLogToken(pr.Code), pr.Message)
+		attempts := intent.DeliveryAttempts + 1
+		if pr.BelowLimit() {
+			// Decision D17: below the send floor never succeeds. Jump to the
+			// cap — DeliverStableBuy then refuses with ErrStableDeliveryExhausted
+			// and the stuck list shows it — instead of retrying ten times.
+			log.Printf("[it stable buy] ALERT it_stable_buy_below_provider_limit intent=%s leg=delivery — parked, not retried", intent.ID)
+			attempts = maxStableDeliveryAttempts
+		}
 		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-			"failure_reason":    "delivery failed: " + tr.ID,
+			"failure_reason":    fwFailureReason("delivery failed", tr),
 			"delivery_id":       "",
-			"delivery_attempts": intent.DeliveryAttempts + 1,
+			"delivery_attempts": attempts,
 		}).Error
 	default:
 		return fmt.Errorf("%w: delivery %s is %s", ErrStableDeliveryPending, tr.ID, tr.Status)

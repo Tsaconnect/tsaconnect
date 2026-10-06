@@ -13,6 +13,7 @@ type fakeBuyDriver struct {
 	convertCalls, finalizeConvCalls            []uuid.UUID
 	deliverCalls, finalizeDelCalls             []uuid.UUID
 	convertErr                                 error
+	deliverErr                                 error
 }
 
 func (f *fakeBuyDriver) PendingStableBuys(context.Context) ([]uuid.UUID, []uuid.UUID, []uuid.UUID, []uuid.UUID, error) {
@@ -28,7 +29,7 @@ func (f *fakeBuyDriver) FinalizeBuyConversion(_ context.Context, id uuid.UUID) e
 }
 func (f *fakeBuyDriver) DeliverStableBuy(_ context.Context, id uuid.UUID) error {
 	f.deliverCalls = append(f.deliverCalls, id)
-	return nil
+	return f.deliverErr
 }
 func (f *fakeBuyDriver) FinalizeBuyDelivery(_ context.Context, id uuid.UUID) error {
 	f.finalizeDelCalls = append(f.finalizeDelCalls, id)

@@ -661,11 +661,67 @@ type FWTransfer struct {
 	Reference string          `json:"reference"`
 	Status    string          `json:"status"` // NEW | PENDING | SUCCESSFUL | FAILED
 	Fee       json.RawMessage `json:"fee,omitempty"`
+	// ProviderResponse is why the downstream processor failed the transfer
+	// (e.g. code 0302 transfer_amount_below_limit, "Minimum: USDC 5.0").
+	// Zero when absent. It never fails decoding — see FWProviderResponse.
+	ProviderResponse FWProviderResponse `json:"provider_response"`
 	// CacheHit is set on a DirectTransfer result Flutterwave served from its
 	// idempotency cache (X-Idempotency-Cache-Hit) — the answer to the FIRST
 	// request that used this reference, not a new transfer.
 	CacheHit bool `json:"-"`
 }
+
+// FWProviderResponse is the processor's verdict on a transfer. The field is
+// undocumented, so decoding it never fails a transfer read: a number code is
+// kept as its digits, a bare string as Message, anything else as nothing.
+type FWProviderResponse struct {
+	Code    string
+	Message string
+	Type    string
+}
+
+// fwCodeBelowLimit is Flutterwave's transfer_amount_below_limit.
+const fwCodeBelowLimit = "0302"
+
+func (r *FWProviderResponse) UnmarshalJSON(b []byte) error {
+	*r = FWProviderResponse{}
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	var obj struct {
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+		Type    string          `json:"type"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		var s string
+		if json.Unmarshal(b, &s) == nil {
+			r.Message = s
+		}
+		return nil
+	}
+	r.Message, r.Type = obj.Message, obj.Type
+	code := strings.TrimSpace(string(obj.Code))
+	if unquoted, err := strconv.Unquote(code); err == nil {
+		code = unquoted
+	}
+	if code == "null" {
+		code = ""
+	}
+	r.Code = strings.TrimSpace(code)
+	return nil
+}
+
+// BelowLimit reports Flutterwave refusing the amount as under its minimum.
+// The same amount can never succeed, so retrying it only burns attempts.
+func (r FWProviderResponse) BelowLimit() bool {
+	return strings.TrimLeft(r.Code, "0") == strings.TrimLeft(fwCodeBelowLimit, "0") ||
+		strings.EqualFold(r.Type, "transfer_amount_below_limit")
+}
+
+// Empty reports that Flutterwave gave no reason.
+func (r FWProviderResponse) Empty() bool { return r.Code == "" && r.Message == "" && r.Type == "" }
 
 // ProviderRejectedError means the provider answered a money-moving request
 // and refused it, so that request moved no money. It is deliberately narrow:

@@ -1049,7 +1049,11 @@ func main() {
 		// the request path believes cannot drift apart.
 		itService.SetStableDeliverer(fwClient)
 		if itService.HasStableBuy() {
-			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second), jobs.AlertOnFailureStreak())
+			buyWatcher := jobs.NewStableBuyWatcher(itService, 30*time.Second)
+			// Sustained conditions (a short float) alert on their own channel
+			// (Decision D16), to the same recipients as worker failures.
+			buyWatcher.SetAlerter(workerFailureAlerts{to: inboundAlerts})
+			scheduler.Register(buyWatcher, jobs.AlertOnFailureStreak())
 			stableBuyEnabled = true
 			log.Printf("[it stable] brokered stablecoin BUY ready (spread=%dbps min=%s)",
 				cfg.StableSpreadBps, cfg.StableMinSell)
