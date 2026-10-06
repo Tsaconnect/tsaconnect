@@ -17,11 +17,22 @@ const (
 	RampLegKindDeliver = "deliver"
 	RampLegKindTopUp   = "topup"
 	RampLegKindRefund  = "refund"
+	// RampLegKindSale is the company wallet delivering a buy from its own
+	// stock (spec 2026-10-03 S3). At most one live per order (below).
+	RampLegKindSale = "sale"
 
 	RampLegStatusPending   = "pending"
 	RampLegStatusConfirmed = "confirmed"
 	RampLegStatusFailed    = "failed"
 )
+
+// RampLegsOneLiveSaleIndexSQL: at most one sale in flight or done per order,
+// ever (spec §5.4). A second tick's Reserve returns the existing leg instead
+// of sending. Shared by config.AutoMigrate and the tests (SQLite supports
+// partial indexes too).
+const RampLegsOneLiveSaleIndexSQL = `CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_live_sale
+    ON ramp_legs (order_id)
+    WHERE kind = 'sale' AND status IN ('pending','confirmed')`
 
 func RampLegTerminal(status string) bool {
 	return status == RampLegStatusConfirmed || status == RampLegStatusFailed
@@ -73,6 +84,12 @@ type RampLeg struct {
 	AmountReceived string `gorm:"size:64" json:"amountReceived,omitempty"`
 
 	TxHash string `gorm:"size:128;index" json:"txHash,omitempty"`
+	// Nonce is the sale's transaction nonce, written before it is broadcast
+	// (review C1): with the hash lost, it is what tells "dropped" from "mined
+	// under a hash we never learned". FromBlock is the head when the sale was
+	// sent — where an operator re-send's chain scan starts.
+	Nonce     *uint64 `gorm:"column:nonce" json:"nonce,omitempty"`
+	FromBlock uint64  `gorm:"column:from_block;default:0" json:"fromBlock,omitempty"`
 	// LiFiTool is named explicitly so the column stays predictable for the
 	// leg-store's Updates(map[string]any{...}) calls (GORM would otherwise
 	// name it "li_fi_tool" from the initialism).

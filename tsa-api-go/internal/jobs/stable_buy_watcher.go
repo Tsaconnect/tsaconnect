@@ -21,6 +21,11 @@ type stableBuyDriver interface {
 	FinalizeBuyConversion(ctx context.Context, id uuid.UUID) error
 	DeliverStableBuy(ctx context.Context, id uuid.UUID) error
 	FinalizeBuyDelivery(ctx context.Context, id uuid.UUID) error
+
+	// The company wallet's branch (spec 2026-10-03 §5.4).
+	PendingTreasuryBuys(ctx context.Context) (received, delivering []uuid.UUID, err error)
+	SendTreasuryBuy(ctx context.Context, id uuid.UUID) error
+	FinalizeTreasuryBuy(ctx context.Context, id uuid.UUID) error
 }
 
 // StableBuyWatcher drives the brokered stablecoin buy state machine.
@@ -36,7 +41,10 @@ type StableBuyWatcher struct {
 
 	// Conditions that wait on a human (a top-up, a refill) alert on their own
 	// channels and never fail Run (Decisions D16, D43).
-	floatShort *sustainedAlert
+	floatShort  *sustainedAlert
+	stockShort  *sustainedAlert
+	sendStalled *sustainedAlert
+	sendBlocked *sustainedAlert
 }
 
 func NewStableBuyWatcher(driver stableBuyDriver, interval time.Duration) *StableBuyWatcher {
@@ -50,13 +58,30 @@ func NewStableBuyWatcher(driver stableBuyDriver, interval time.Duration) *Stable
 			what:  "%d stablecoin deliveries waiting on a short Flutterwave float (ramp_fw_float_short)",
 			after: 5 * time.Minute, every: time.Hour,
 		},
+		stockShort: &sustainedAlert{
+			worker: "it-stable-buy-stock", metric: "ramp_treasury_stock_short",
+			what:  "%d company-wallet deliveries waiting for stock (ramp_treasury_stock_short) — refill the wallet",
+			after: 5 * time.Minute, every: time.Hour,
+		},
+		sendStalled: &sustainedAlert{
+			worker: "ramp-treasury-send-stalled", metric: "ramp_treasury_send_stalled",
+			what:  "%d company-wallet sends with no on-chain proof past the stall window, or proven short — check them; nothing re-sends automatically",
+			every: time.Hour,
+		},
+		sendBlocked: &sustainedAlert{
+			worker: "ramp-treasury-send-blocked", metric: "ramp_treasury_send_blocked",
+			what:  "%d paid company-wallet orders cannot be sent (kill switch, gas, a refused broadcast, an unreadable balance) — fix it, or mark them refunded",
+			after: 10 * time.Minute, every: time.Hour,
+		},
 	}
 }
 
 // SetAlerter wires where the watcher's sustained conditions are reported, to
 // the same recipients as worker failures. Nil logs only.
 func (w *StableBuyWatcher) SetAlerter(n WorkerFailureNotifier) {
-	w.floatShort.notifier = n
+	for _, a := range []*sustainedAlert{w.floatShort, w.stockShort, w.sendStalled, w.sendBlocked} {
+		a.notifier = n
+	}
 }
 
 func (w *StableBuyWatcher) Name() string            { return "it-stable-buy-watcher" }
@@ -97,5 +122,33 @@ func (w *StableBuyWatcher) Run(ctx context.Context) error {
 		}
 	}
 	w.floatShort.track(ctx, floatShort, w.now())
+
+	// The company wallet: send (a no-op with a live sale leg), then prove.
+	// Errors can carry an RPC URL, so they are logged redacted.
+	tReceived, tDelivering, err := w.driver.PendingTreasuryBuys(ctx)
+	if err != nil {
+		return err
+	}
+	stockShort, stalled, blocked := 0, 0, 0
+	for _, id := range slices.Concat(tReceived, tDelivering) {
+		if err := w.driver.SendTreasuryBuy(ctx, id); err != nil {
+			if errors.Is(err, services.ErrTreasuryStockShort) {
+				stockShort++
+			} else {
+				blocked++
+			}
+			log.Printf("[it-stable-buy-watcher] send company-wallet intent=%s: %s", id, services.RedactAlertText(err.Error()))
+		}
+		if err := w.driver.FinalizeTreasuryBuy(ctx, id); err != nil {
+			if errors.Is(err, services.ErrTreasurySendStalled) {
+				stalled++
+			}
+			log.Printf("[it-stable-buy-watcher] prove company-wallet intent=%s: %s", id, services.RedactAlertText(err.Error()))
+		}
+	}
+	now := w.now()
+	w.stockShort.track(ctx, stockShort, now)
+	w.sendStalled.track(ctx, stalled, now)
+	w.sendBlocked.track(ctx, blocked, now)
 	return nil
 }

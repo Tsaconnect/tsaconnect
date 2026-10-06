@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -261,6 +262,8 @@ type fakeSponsorNative struct {
 	transferTo    string
 	transferAmt   *big.Int
 	transferErr   error
+	// transferNonce is the nonce PrepareERC20Transfer's payload carries.
+	transferNonce uint64
 
 	// tokenBalances answers GetTokenBalance per token address (lowercase),
 	// for the treasury's kept-USDC float check. Unset addresses read as
@@ -380,7 +383,7 @@ func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, 
 	if f.transferErr != nil {
 		return nil, f.transferErr
 	}
-	return []byte(`{"transfer":true}`), nil
+	return []byte(`{"transfer":true,"nonce":` + strconv.FormatUint(f.transferNonce, 10) + `}`), nil
 }
 
 // transferCall is the mutex-guarded accessor for the last

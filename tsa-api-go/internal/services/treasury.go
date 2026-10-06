@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 var (
@@ -507,13 +509,21 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 }
 
 // TransferToken moves a token out of the treasury — a shortfall top-up or a
-// refund. Same uncertain-broadcast contract as ExecuteRoute, and the same
-// CheckCaps-first obligation: this method only checks the kill switch, that
-// the lane can pay for the gas, and the recipient's shape, not the value caps.
-// An attempted broadcast that errored returns the signed transaction's hash
-// when the signer knows it, so the caller can later ask the chain about that
-// very transaction; the ramp's callers ignore the hash on any error.
+// refund. See TransferTokenRecorded.
 func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int) (string, bool, error) {
+	return t.TransferTokenRecorded(ctx, lane, token, to, amount, nil)
+}
+
+// TransferTokenRecorded is TransferToken with a hook that receives the
+// prepared transaction's nonce before it is broadcast (review C1): the company
+// wallet writes it on its sale leg, so a broadcast whose hash is lost can still
+// be told apart from one that never happened. A hook error means nothing was
+// broadcast. Same uncertain-broadcast contract as ExecuteRoute, and the same
+// CheckCaps-first obligation: this method only checks the kill switch, that the
+// lane can pay for the gas, and the recipient's shape, not the value caps. An
+// attempted broadcast that errored returns the signed transaction's hash when
+// the signer knows it, so the caller can later ask the chain about it.
+func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared func(nonce uint64) error) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -535,12 +545,24 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 		return "", false, err
 	}
 	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
-		return lane.Native.PrepareERC20Transfer(tokenAddr, lane.Signer.Address(), to, amount)
+		unsigned, err := lane.Native.PrepareERC20Transfer(tokenAddr, lane.Signer.Address(), to, amount)
+		if err != nil || onPrepared == nil {
+			return unsigned, err
+		}
+		// Inside lane.send's nonce lock: the nonce read here is the one signed.
+		var u blockchain.UnsignedTx
+		if err := json.Unmarshal(unsigned, &u); err != nil {
+			return nil, fmt.Errorf("treasury: read the prepared nonce: %w", err)
+		}
+		if err := onPrepared(u.Nonce); err != nil {
+			return nil, fmt.Errorf("treasury: record the nonce before broadcast: %w", err)
+		}
+		return unsigned, nil
 	})
 	if err != nil {
 		if attempted {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=transfer tx=%s err=%v",
-				lane.ChainKey, uncertainTxHash(err), err)
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=transfer tx=%s err=%s",
+				lane.ChainKey, uncertainTxHash(err), RedactAlertText(err.Error()))
 			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast transfer: %w", err)
 		}
 		return "", false, fmt.Errorf("treasury: broadcast transfer: %w", err)

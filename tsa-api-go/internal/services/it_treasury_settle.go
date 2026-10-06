@@ -13,6 +13,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrITOperatorNoteRequired: an operator's money decision needs a note — it is
@@ -114,9 +115,12 @@ func (s *ITService) DeliverParkedTreasuryBuy(ctx context.Context, adminID, inten
 	})
 }
 
-// MarkStableBuyRefunded records that an operator returned a parked buy's
-// naira (spec §5.2), for either provider: terminal `refunded`, with an audit
-// row, in one transaction (Decision D56).
+// MarkStableBuyRefunded records that an operator returned a buy's naira (spec
+// §5.2), for either provider: terminal `refunded`, with an audit row, in one
+// transaction (Decision D56). It closes a parked buy, and — review C2 — a
+// company-wallet buy stuck in `delivering` with no live send (a kill switch,
+// gas, a refused broadcast). The intent row is locked first, as the send path
+// locks it before reserving a sale, so a refund and a send never both happen.
 func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error) {
 	note = strings.TrimSpace(note)
 	if note == "" {
@@ -125,25 +129,48 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 	var provider string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var intent models.ITIntent
-		if err := tx.First(&intent, "id = ?", intentID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&intent, "id = ?", intentID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrStableIntentNotFound
 			}
 			return err
 		}
 		provider = models.ITIntentProvider(&intent)
+		refundable := []string{models.ITStatusBuyAwaitingRate}
+		if intent.Status == models.ITStatusDelivering && provider == models.ITProviderTreasury {
+			live, err := liveSaleLegOn(ctx, tx, intentID)
+			if err != nil {
+				return err
+			}
+			if live != nil {
+				return fmt.Errorf("%w: a send is in flight or done — prove it or re-send it, never refund it", ErrITBadState)
+			}
+			// Review N1: a sale failed as "dropped" was signed; until its nonce
+			// is consumed and a trusted scan shows nothing reached her, the
+			// original can still land after the naira is returned.
+			reason, err := s.failedSalesRefundable(ctx, tx, intentID)
+			if err != nil {
+				return err
+			}
+			if reason != "" {
+				return fmt.Errorf("%w: %s", ErrITBadState, reason)
+			}
+			refundable = append(refundable, models.ITStatusDelivering)
+		}
 		res := tx.Model(&models.ITIntent{}).
-			Where("id = ? AND direction = ? AND status = ? AND asset IN ?", intentID, models.ITDirectionBuy,
-				models.ITStatusBuyAwaitingRate, []string{models.ITAssetUSDC, models.ITAssetUSDT}).
+			Where("id = ? AND direction = ? AND status IN ? AND asset IN ?", intentID, models.ITDirectionBuy,
+				refundable, []string{models.ITAssetUSDC, models.ITAssetUSDT}).
 			Updates(map[string]any{"status": models.ITStatusRefunded, "failure_reason": "refunded by an operator"})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			return fmt.Errorf("%w: only a parked buy can be marked refunded (status %s)", ErrITBadState, intent.Status)
+			return fmt.Errorf("%w: only a parked buy, or a company-wallet delivery with no send, can be marked refunded (status %s)",
+				ErrITBadState, intent.Status)
 		}
 		return auditIntent(tx, intentID, adminID, models.ITAuditStableBuyRefunded, note, map[string]any{
-			"receivedAmount": intent.ReceivedAmount, "provider": provider, "parkedReason": intent.FailureReason,
+			"receivedAmount": intent.ReceivedAmount, "provider": provider, "fromStatus": intent.Status,
+			"parkedReason": intent.FailureReason,
 		})
 	})
 	if err != nil {

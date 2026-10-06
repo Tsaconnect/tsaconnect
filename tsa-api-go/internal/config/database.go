@@ -536,6 +536,12 @@ func AutoMigrate() error {
 	    ON ramp_legs (order_id)
 	    WHERE kind = 'refund' AND status = 'pending'`)
 
+	// Company wallet — "one live sale per order" (spec 2026-10-03 §5.4). Kind
+	// 'sale' is new, so no existing row can block the build. Idempotent.
+	if err := DB.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_legs_one_live_sale: %v — the company wallet stays dormant without it", err)
+	}
+
 	// Ramp sell — "at most one sale in progress per user" (design §5.2). Keep
 	// the WHERE list equal to models.SellIntentOpenStatuses. The
 	// service checks it first, but the check is read-then-insert: two taps on

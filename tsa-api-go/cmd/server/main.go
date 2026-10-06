@@ -1016,8 +1016,14 @@ func main() {
 	// re-probed every 5 minutes and quotes again once it passes.
 	if itService != nil {
 		if wallet := buildCompanyWallet(cfg, blockchainService); wallet != nil {
-			itService.SetCompanyWallet(wallet)
-			scheduler.Register(jobs.NewCompanyWalletReceiptProbe(wallet, 5*time.Minute))
+			// Without the one-live-sale index a second tick could send twice:
+			// stay dormant (review C1) — the migration's WARNING is not enough.
+			if ok, err := services.RampLegsOneLiveSaleIndexPresent(config.DB); !ok {
+				log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_index_missing=1 index=uq_ramp_legs_one_live_sale err=%v — dormant", err)
+			} else {
+				itService.SetCompanyWallet(wallet)
+				scheduler.Register(jobs.NewCompanyWalletReceiptProbe(wallet, 5*time.Minute))
+			}
 		}
 	}
 

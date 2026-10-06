@@ -14,6 +14,10 @@ type fakeBuyDriver struct {
 	deliverCalls, finalizeDelCalls             []uuid.UUID
 	convertErr                                 error
 	deliverErr                                 error
+
+	treasuryReceived, treasuryDelivering []uuid.UUID
+	sendCalls, finalizeTCalls            []uuid.UUID
+	sendErr, finalizeTErr                error
 }
 
 func (f *fakeBuyDriver) PendingStableBuys(context.Context) ([]uuid.UUID, []uuid.UUID, []uuid.UUID, []uuid.UUID, error) {
@@ -34,6 +38,18 @@ func (f *fakeBuyDriver) DeliverStableBuy(_ context.Context, id uuid.UUID) error 
 func (f *fakeBuyDriver) FinalizeBuyDelivery(_ context.Context, id uuid.UUID) error {
 	f.finalizeDelCalls = append(f.finalizeDelCalls, id)
 	return nil
+}
+
+func (f *fakeBuyDriver) PendingTreasuryBuys(context.Context) ([]uuid.UUID, []uuid.UUID, error) {
+	return f.treasuryReceived, f.treasuryDelivering, nil
+}
+func (f *fakeBuyDriver) SendTreasuryBuy(_ context.Context, id uuid.UUID) error {
+	f.sendCalls = append(f.sendCalls, id)
+	return f.sendErr
+}
+func (f *fakeBuyDriver) FinalizeTreasuryBuy(_ context.Context, id uuid.UUID) error {
+	f.finalizeTCalls = append(f.finalizeTCalls, id)
+	return f.finalizeTErr
 }
 
 func TestStableBuyWatcher_AdvancesEveryBucket(t *testing.T) {

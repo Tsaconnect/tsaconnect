@@ -1,0 +1,654 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/testutil"
+)
+
+type recordingSaleVerifier struct {
+	credited              *big.Int
+	err                   error
+	calls                 int
+	token, from, to, hash string
+}
+
+func (v *recordingSaleVerifier) VerifyTransfer(context.Context, string, string, string) (*big.Int, error) {
+	return nil, errors.New("unused")
+}
+func (v *recordingSaleVerifier) VerifyTransferFrom(_ context.Context, hash, token, from, to string) (*big.Int, error) {
+	v.calls++
+	v.hash, v.token, v.from, v.to = hash, token, from, to
+	return v.credited, v.err
+}
+
+type fakeTxProbe struct {
+	known           bool
+	pending, latest uint64
+	head            uint64 // BlockNumber
+	receiptBlock    uint64 // the sale's receipt block
+	// matches are Transfer(wallet → her) logs; background is the token's other
+	// Transfer traffic, which the scan's sanity query must see. Both are
+	// returned only for the block range asked.
+	matches, background []types.Log
+	logsErr             error
+	scans               int // filtered (3-topic) queries
+}
+
+func (p *fakeTxProbe) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
+	if p.known {
+		return &types.Transaction{}, true, nil
+	}
+	return nil, false, ethereum.NotFound
+}
+func (p *fakeTxProbe) PendingNonceAt(context.Context, common.Address) (uint64, error) {
+	return p.pending, nil
+}
+func (p *fakeTxProbe) NonceAt(context.Context, common.Address, *big.Int) (uint64, error) {
+	return p.latest, nil
+}
+func (p *fakeTxProbe) BlockNumber(context.Context) (uint64, error) { return p.head, nil }
+func (p *fakeTxProbe) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+	return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: new(big.Int).SetUint64(p.receiptBlock)}, nil
+}
+func (p *fakeTxProbe) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	if p.logsErr != nil {
+		return nil, p.logsErr
+	}
+	src := p.background
+	if len(q.Topics) == 3 {
+		p.scans++
+		src = p.matches
+	}
+	var out []types.Log
+	for _, lg := range src {
+		if lg.BlockNumber >= q.FromBlock.Uint64() && lg.BlockNumber <= q.ToBlock.Uint64() {
+			out = append(out, lg)
+		}
+	}
+	return out, nil
+}
+
+type deliverRig struct {
+	s        *ITService
+	intent   *models.ITIntent
+	native   *fakeSponsorNative
+	signer   *fakeRelaySigner
+	verifier *recordingSaleVerifier
+	probe    *fakeTxProbe
+}
+
+// newDeliverRig opens and pays (exactly, on time) the company wallet's worked
+// example: 7.232937 USDC owed to testRoutedEVM, 50 USDC in stock. The wallet's
+// lane has production's caps (none); the next send uses nonce 7 at head block
+// 100, and a receipt lands at block 90 (11 deep).
+func newDeliverRig(t *testing.T) *deliverRig {
+	t.Helper()
+	ctx := context.Background()
+	s, userID := newRoutedBuyService(t)
+	w0, native, signer := newTestCompanyWallet(t, 50_000_000)
+	native.transferNonce = 7
+	r := &deliverRig{s: s, native: native, signer: signer,
+		verifier: &recordingSaleVerifier{err: errors.New("verify: not found")},
+		probe:    &fakeTxProbe{head: 100, receiptBlock: 90, background: []types.Log{{BlockNumber: 100}}}}
+	s.SetCompanyWallet(NewCompanyWallet(CompanyWalletConfig{
+		Treasury: w0.Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		Verifiers: map[string]ERC20SourcedTransferVerifier{"base": r.verifier},
+		Probes:    map[string]TreasuryTxProbe{"base": r.probe},
+	}))
+	s.SetTreasuryMarketRate(&fixedTreasuryRate{rate: treasuryMarket})
+	if err := s.db.AutoMigrate(&models.RampLeg{}, &models.ITIntentAuditLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	intent, _, err := s.OpenTreasuryBuy(ctx, userID, treasuryTestQuote(t, s), "base", testRoutedEVM)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := s.settleStableBuyFromCharge(ctx, userID, "chg_deliver_t", "1000000"); err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+	r.intent = intent
+	return r
+}
+
+func (r *deliverRig) legs(t *testing.T) []models.RampLeg {
+	t.Helper()
+	var legs []models.RampLeg
+	r.s.db.Where("order_id = ? AND kind = ?", r.intent.ID, models.RampLegKindSale).Order("attempt ASC").Find(&legs)
+	return legs
+}
+
+func TestSendTreasuryBuy_SendsOnceAndSettlesOnlyOnAProofFromTheWallet(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	legs := r.legs(t)
+	if len(legs) != 1 || legs[0].TxHash != "0xsponsored" || legs[0].Status != models.RampLegStatusPending ||
+		legs[0].Amount != "7232937" || !strings.EqualFold(legs[0].ToAddr, testRoutedEVM) ||
+		legs[0].Nonce == nil || *legs[0].Nonce != 7 || legs[0].FromBlock != 100 {
+		t.Fatalf("legs = %+v", legs)
+	}
+	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt.Int64() != 7_232_937 {
+		t.Fatalf("transfer to %s of %v", to, amt)
+	}
+	// Not readable yet: wait, never settle.
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("finalize (not yet): %v", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s, want delivering until the receipt proves it", got.Status)
+	}
+	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if r.verifier.from != sponsorTestSigner || r.verifier.to != testRoutedEVM || r.verifier.token != sponsorTestUSDC {
+		t.Fatalf("verified %s → %s in %s, want wallet → her address in USDC", r.verifier.from, r.verifier.to, r.verifier.token)
+	}
+	got := reloadIntent(t, r.s, r.intent.ID)
+	if got.Status != models.ITStatusSettled || got.TxHash != "0xsponsored" {
+		t.Fatalf("status=%s tx=%s", got.Status, got.TxHash)
+	}
+	if legs := r.legs(t); legs[0].Status != models.RampLegStatusConfirmed {
+		t.Fatalf("leg = %+v", legs[0])
+	}
+}
+
+// Review Focus 1: a second tick observes; it never sends.
+func TestSendTreasuryBuy_SecondTickNeverBroadcastsAgain(t *testing.T) {
+	r := newDeliverRig(t)
+	for i := 0; i < 3; i++ {
+		if err := r.s.SendTreasuryBuy(context.Background(), r.intent.ID); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	if r.signer.calls() != 1 || len(r.legs(t)) != 1 {
+		t.Fatalf("broadcasts = %d legs = %d, want exactly one", r.signer.calls(), len(r.legs(t)))
+	}
+}
+
+// Review Focus 1: a broadcast whose outcome is unknown and whose hash we never
+// learned is never sent again by the machine — it stalls and alerts.
+func TestSendTreasuryBuy_LegWithoutAHashIsNeverResent(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	r.signer.err = errors.New("rpc timeout after send")
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("uncertain send must not fail the tick: %v", err)
+	}
+	r.signer.err = nil
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r.signer.calls() != 1 {
+		t.Fatalf("broadcasts = %d, want 1", r.signer.calls())
+	}
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("inside the stall window: %v", err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	logs := captureLog(t)
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrTreasurySendStalled) {
+		t.Fatalf("past the stall: %v", err)
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_treasury_send_stalled intent="+r.intent.ID.String()) || r.signer.calls() != 1 {
+		t.Fatalf("log=%q broadcasts=%d", logs.String(), r.signer.calls())
+	}
+}
+
+// §5.4: a send the node refused (provably never left) frees the leg; the next
+// tick sends attempt 2.
+func TestSendTreasuryBuy_NotBroadcastRetriesAsANewAttempt(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	r.signer.err = fmt.Errorf("%w: insufficient funds for gas", ErrTxNotBroadcast)
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err == nil {
+		t.Fatal("want the refusal reported")
+	}
+	r.signer.err = nil
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	legs := r.legs(t)
+	if len(legs) != 2 || legs[0].Status != models.RampLegStatusFailed || legs[1].Attempt != 2 || legs[1].TxHash != "0xsponsored" {
+		t.Fatalf("legs = %+v", legs)
+	}
+}
+
+// §5.4: a reverted receipt moved nothing; the next tick sends attempt 2.
+func TestFinalizeTreasuryBuy_RevertedFreesTheLegForAFreshAttempt(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.verifier.credited, r.verifier.err = nil, fmt.Errorf("%w: 0xsponsored", ErrTransferReverted)
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if legs := r.legs(t); len(legs) != 2 || legs[0].Status != models.RampLegStatusFailed || r.signer.calls() != 2 {
+		t.Fatalf("legs = %+v broadcasts = %d", legs, r.signer.calls())
+	}
+}
+
+func TestFinalizeTreasuryBuy_AShortCreditNeverSettles(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	_ = r.s.SendTreasuryBuy(ctx, r.intent.ID)
+	r.verifier.credited, r.verifier.err = big.NewInt(7_000_000), nil
+	// Review minor: a short credit never improves — it is a stall, alerted at once.
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrTreasurySendStalled) {
+		t.Fatalf("a credit below the amount must not settle, and must alert: %v", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+// §5.4: stock short at send waits, logs, never sends part.
+func TestSendTreasuryBuy_StockShortWaitsAndNeverSendsPart(t *testing.T) {
+	r := newDeliverRig(t)
+	setStock(r.native, 1_000_000)
+	logs := captureLog(t)
+	if err := r.s.SendTreasuryBuy(context.Background(), r.intent.ID); !errors.Is(err, ErrTreasuryStockShort) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(r.legs(t)) != 0 || r.signer.calls() != 0 || !strings.Contains(logs.String(), "ramp_treasury_stock_short intent=") {
+		t.Fatalf("legs=%d broadcasts=%d log=%q", len(r.legs(t)), r.signer.calls(), logs.String())
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s, want delivering (waiting for a refill)", got.Status)
+	}
+}
+
+func TestSendTreasuryBuy_KillSwitchStopsSends(t *testing.T) {
+	r := newDeliverRig(t)
+	r.s.CompanyWallet().Treasury().SetKillSwitch(true)
+	if err := r.s.SendTreasuryBuy(context.Background(), r.intent.ID); !errors.Is(err, ErrTreasuryKilled) {
+		t.Fatalf("err = %v", err)
+	}
+	if r.signer.calls() != 0 {
+		t.Fatal("sent through the kill switch")
+	}
+}
+
+// Review Focus 1 / S3: the database refuses a second live sale for one order.
+func TestRampLegs_OneLiveSalePerOrderIndex(t *testing.T) {
+	r := newDeliverRig(t)
+	leg := func(attempt int, status string) error {
+		return r.s.db.Create(&models.RampLeg{OrderID: r.intent.ID, Kind: models.RampLegKindSale, Attempt: attempt,
+			ChainKey: "base", Token: "USDC", FromAddr: "0xw", ToAddr: "0xd", Amount: "1", Status: status}).Error
+	}
+	if err := leg(1, models.RampLegStatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := leg(2, models.RampLegStatusPending); err != nil {
+		t.Fatal(err)
+	}
+	if err := leg(3, models.RampLegStatusPending); err == nil {
+		t.Fatal("a second live sale for the same order was accepted")
+	}
+}
+
+// §5.4: an operator re-send only after the dropped-transaction check.
+func TestResendTreasuryBuy_OnlyOnProofNothingMoved(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	admin := uuid.New()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "dropped"); !errors.Is(err, ErrTreasuryResendRefused) {
+		t.Fatalf("inside the stall window: %v", err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.known = true
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "dropped"); !errors.Is(err, ErrTreasuryResendRefused) {
+		t.Fatalf("node still knows the hash: %v", err)
+	}
+	r.probe.known, r.probe.pending, r.probe.latest = false, 9, 7
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "dropped"); !errors.Is(err, ErrTreasuryResendRefused) {
+		t.Fatalf("a pending tx: %v", err)
+	}
+	// Nonce 7 is unused (latest = 7) and nothing is pending: provably dropped.
+	r.probe.pending = 7
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, ""); !errors.Is(err, ErrITOperatorNoteRequired) {
+		t.Fatalf("no note: %v", err)
+	}
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: unknown hash"); err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	legs := r.legs(t)
+	if len(legs) != 2 || legs[0].Status != models.RampLegStatusFailed || !strings.Contains(legs[0].Error, "dropped") || r.signer.calls() != 2 {
+		t.Fatalf("legs = %+v broadcasts = %d", legs, r.signer.calls())
+	}
+	var n int64
+	r.s.db.Model(&models.ITIntentAuditLog{}).Where("intent_id = ? AND action = ?", r.intent.ID, models.ITAuditStableBuyResent).Count(&n)
+	if n != 1 {
+		t.Fatalf("audit rows = %d", n)
+	}
+}
+
+// Review C1: the broadcast was mined but its hash was never learned. Its nonce
+// was used, the node knows no hash and the mempool is empty (pending ==
+// latest): only the chain can tell, and a transfer to her refuses the re-send.
+func TestResendTreasuryBuy_MinedButHashLostIsRefused(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	admin := uuid.New()
+	r.signer.err = errors.New("rpc timeout after send") // it went out; we never learn the hash
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	leg := r.legs(t)[0]
+	if leg.TxHash != "" || leg.Nonce == nil || *leg.Nonce != 7 || leg.FromBlock != 100 {
+		t.Fatalf("leg = %+v, want the nonce and start block recorded before the broadcast", leg)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("id = ?", leg.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500 // nonce 7 consumed, nothing pending
+	// Chunks 100–2099, 2100–4099, 4100–4500: the token's traffic is visible at each chunk's end.
+	visible := []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+	r.probe.background = visible
+	r.probe.matches = []types.Log{{BlockNumber: 3000, TxHash: common.HexToHash("0xbeef")}}
+	_, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "looks dropped")
+	if !errors.Is(err, ErrTreasuryResendRefused) || !strings.Contains(err.Error(), "a transfer to her was mined") {
+		t.Fatalf("err = %v, want refused on the mined transfer", err)
+	}
+	if r.probe.scans != 3 {
+		t.Fatalf("filtered scans = %d, want 3 chunks of 2000 over blocks 100–4500", r.probe.scans)
+	}
+	// A blind RPC — empty answers, no error — refuses too.
+	r.probe.matches, r.probe.background = nil, nil
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "looks dropped"); !errors.Is(err, ErrTreasuryResendRefused) ||
+		!strings.Contains(err.Error(), "could not be trusted") {
+		t.Fatalf("blind RPC: %v", err)
+	}
+	// Review N2: one blind chunk in the middle is enough to refuse — the
+	// other chunks' visibility says nothing about it.
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4500}}
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "looks dropped"); !errors.Is(err, ErrTreasuryResendRefused) ||
+		!strings.Contains(err.Error(), "could not be trusted") || !strings.Contains(err.Error(), "blocks 4095–4099") {
+		t.Fatalf("blind middle chunk: %v", err)
+	}
+	// Only a clean scan with every chunk visible allows it.
+	r.probe.background = visible
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: nothing to her since block 100"); err != nil {
+		t.Fatalf("clean scan: %v", err)
+	}
+	if r.signer.calls() != 1 {
+		t.Fatalf("broadcasts = %d: the re-send only frees the leg; the next tick sends", r.signer.calls())
+	}
+}
+
+// Review N1: after a re-send on an unused nonce, the original signed send can
+// still land — so the order cannot be refunded until that nonce is consumed by
+// something else and a trusted scan shows nothing reached her.
+func TestMarkStableBuyRefunded_RefusedWhileADroppedSendCanStillLand(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	admin := uuid.New()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil { // nonce 7, from block 100
+		t.Fatal(err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.pending, r.probe.latest = 7, 7 // nonce 7 unused: the re-send is allowed
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: unknown hash"); err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	r.s.CompanyWallet().Treasury().SetKillSwitch(true) // the next attempt cannot go out
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrTreasuryKilled) {
+		t.Fatalf("send: %v", err)
+	}
+	_, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked for her naira back")
+	if !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "can still land") {
+		t.Fatalf("err = %v, want refused: attempt 1 can still land", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s", got.Status)
+	}
+	// Nonce 7 consumed by something else, and a trusted scan to the head shows
+	// nothing reached her: now nothing can land, and the refund goes through.
+	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+	got, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked for her naira back")
+	if err != nil || got.Status != models.ITStatusRefunded {
+		t.Fatalf("refund after the nonce was consumed: %+v %v", got, err)
+	}
+}
+
+// Review minor: a proven sale settles only RAMP_TREASURY_CONFIRMATIONS (5) blocks deep.
+func TestFinalizeTreasuryBuy_SettlesOnlyAtTheConfirmationDepth(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.probe.receiptBlock, r.probe.head = 200, 203 // 4 deep
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("4 confirmations: status = %s", got.Status)
+	}
+	r.probe.head = 204 // 5 deep
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusSettled {
+		t.Fatalf("5 confirmations: status = %s", got.Status)
+	}
+}
+
+// Review C2: "deliver anyway" above $200 is really sent — the lane has
+// production's caps (none), so CheckCaps never refuses the waived amount.
+func TestSendTreasuryBuy_DeliverAnywayAboveTheMaximumActuallySends(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	parkTreasury(t, r.s, r.intent, "30000000") // ₦300,000 → 216.988129 USDC live
+	setStock(r.native, 300_000_000)
+	if _, err := r.s.DeliverParkedTreasuryBuy(ctx, uuid.New(), r.intent.ID, "owner approved the overpayment"); err != nil {
+		t.Fatalf("deliver anyway: %v", err)
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt == nil || amt.Int64() != 216_988_129 || r.signer.calls() != 1 {
+		t.Fatalf("sent %v to %s in %d broadcasts, want 216.988129 USDC once", amt, to, r.signer.calls())
+	}
+}
+
+// Review C2: an order stuck in delivering with no send in flight can be
+// marked refunded — and is then never sent.
+func TestMarkStableBuyRefunded_StuckDeliveryWithNoLiveSend(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	r.s.CompanyWallet().Treasury().SetKillSwitch(true)
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrTreasuryKilled) {
+		t.Fatalf("send: %v", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s", got.Status)
+	}
+	got, err := r.s.MarkStableBuyRefunded(ctx, uuid.New(), r.intent.ID, "returned by bank transfer, ref 991")
+	if err != nil || got.Status != models.ITStatusRefunded {
+		t.Fatalf("refund: %+v %v", got, err)
+	}
+	r.s.CompanyWallet().Treasury().SetKillSwitch(false)
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrITBadState) || r.signer.calls() != 0 {
+		t.Fatalf("a refunded order was sent: err=%v broadcasts=%d", err, r.signer.calls())
+	}
+}
+
+func TestMarkStableBuyRefunded_RefusedOnceASendIsLive(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.MarkStableBuyRefunded(ctx, uuid.New(), r.intent.ID, "customer asked"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want refused while a send is live", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+// Review C1: the boot gate's check.
+func TestRampLegsOneLiveSaleIndexPresent(t *testing.T) {
+	r := newDeliverRig(t) // builds the index
+	if ok, err := RampLegsOneLiveSaleIndexPresent(r.s.db); err != nil || !ok {
+		t.Fatalf("with the index: ok=%v err=%v", ok, err)
+	}
+	s, _ := newRoutedBuyService(t)
+	if err := s.db.AutoMigrate(&models.RampLeg{}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := RampLegsOneLiveSaleIndexPresent(s.db); err != nil || ok {
+		t.Fatalf("without the index: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPendingTreasuryBuys(t *testing.T) {
+	r := newDeliverRig(t)
+	received, delivering, err := r.s.PendingTreasuryBuys(context.Background())
+	if err != nil || len(received) != 1 || received[0] != r.intent.ID || len(delivering) != 0 {
+		t.Fatalf("received=%v delivering=%v err=%v", received, delivering, err)
+	}
+}
+
+// newDeliverPostgres is a Postgres-backed company wallet with one USDC order
+// in `delivering` and no sale yet: the state every concurrent tick races from.
+func newDeliverPostgres(t *testing.T) (*ITService, *models.ITIntent, *fakeRelaySigner) {
+	t.Helper()
+	db := testutil.TempPostgres(t, "it_treasury_deliver_", &models.ITIntent{}, &models.RampLeg{}, &models.ITIntentAuditLog{})
+	if err := db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	s := NewITService(db, nil, stubFx{ngn: 1500})
+	w0, _, signer := newTestCompanyWallet(t, 50_000_000)
+	s.SetCompanyWallet(NewCompanyWallet(CompanyWalletConfig{
+		Treasury: w0.Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		Verifiers: map[string]ERC20SourcedTransferVerifier{"base": &recordingSaleVerifier{err: errors.New("verify: not found")}},
+		Probes:    map[string]TreasuryTxProbe{"base": &fakeTxProbe{head: 100}},
+	}))
+	intent := newUSDCOrder()
+	intent.Status = models.ITStatusDelivering
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	return s, intent, signer
+}
+
+// raceTicks runs fns at once and returns their errors.
+func raceTicks(fns ...func() error) []error {
+	start := make(chan struct{})
+	errs := make([]error, len(fns))
+	var wg sync.WaitGroup
+	for i, fn := range fns {
+		wg.Add(1)
+		go func(i int, fn func() error) {
+			defer wg.Done()
+			<-start
+			errs[i] = fn()
+		}(i, fn)
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+// Review Focus 1 / S3 on the real database: ticks racing for one order's
+// first sale broadcast once — the row lock and the partial unique index, not
+// a read-then-insert check, decide it.
+func TestSendTreasuryBuy_ConcurrentTicksBroadcastOnce_Postgres(t *testing.T) {
+	s, intent, signer := newDeliverPostgres(t)
+	send := func() error { return s.SendTreasuryBuy(context.Background(), intent.ID) }
+	for i, err := range raceTicks(send, send, send, send, send) {
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	var legs []models.RampLeg
+	s.db.Where("order_id = ? AND kind = ?", intent.ID, models.RampLegKindSale).Find(&legs)
+	if signer.calls() != 1 || len(legs) != 1 || legs[0].Nonce == nil || legs[0].TxHash != "0xsponsored" {
+		t.Fatalf("broadcasts = %d legs = %+v, want exactly one recorded sale", signer.calls(), legs)
+	}
+	// A second live sale is refused by the database itself, at any attempt.
+	err := s.db.Create(&models.RampLeg{OrderID: intent.ID, Kind: models.RampLegKindSale, Attempt: 9,
+		ChainKey: "base", Token: "USDC", FromAddr: "0xw", ToAddr: "0xd", Amount: "1", Status: models.RampLegStatusPending}).Error
+	if err == nil {
+		t.Fatal("a second live sale was accepted")
+	}
+	// Reserve resolves that conflict to the live leg rather than an error.
+	got, err := (&GormRampLegStore{DB: s.db}).Reserve(context.Background(), &models.RampLeg{OrderID: intent.ID,
+		Kind: models.RampLegKindSale, Attempt: 9, ChainKey: "base", Token: "USDC", FromAddr: "0xw", ToAddr: "0xd", Amount: "1"})
+	if err != nil || got == nil || got.ID != legs[0].ID {
+		t.Fatalf("reserve = %+v, %v, want the live leg back", got, err)
+	}
+}
+
+// Review C2 on the real database: a refund racing a send — exactly one wins.
+// Either the order is refunded and nothing was broadcast, or it was sent and
+// the refund was refused.
+func TestMarkStableBuyRefunded_RacingASendNeverBoth_Postgres(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		s, intent, signer := newDeliverPostgres(t)
+		ctx := context.Background()
+		errs := raceTicks(
+			func() error { return s.SendTreasuryBuy(ctx, intent.ID) },
+			func() error {
+				_, err := s.MarkStableBuyRefunded(ctx, uuid.New(), intent.ID, "returned by bank transfer")
+				return err
+			})
+		got := reloadIntent(t, s, intent.ID)
+		switch {
+		case errs[1] == nil:
+			if got.Status != models.ITStatusRefunded || signer.calls() != 0 || !errors.Is(errs[0], ErrITBadState) {
+				t.Fatalf("refund won but status=%s broadcasts=%d send=%v", got.Status, signer.calls(), errs[0])
+			}
+		case errors.Is(errs[1], ErrITBadState):
+			if errs[0] != nil || got.Status != models.ITStatusDelivering || signer.calls() != 1 {
+				t.Fatalf("send won but status=%s broadcasts=%d send=%v", got.Status, signer.calls(), errs[0])
+			}
+		default:
+			t.Fatalf("refund: %v", errs[1])
+		}
+	}
+}
+
+// Review C1: the boot gate sees only this schema's ramp_legs — another
+// schema's index of the same name in the same database never stands in.
+func TestRampLegsOneLiveSaleIndexPresent_Postgres(t *testing.T) {
+	s, _, _ := newDeliverPostgres(t)
+	if ok, err := RampLegsOneLiveSaleIndexPresent(s.db); err != nil || !ok {
+		t.Fatalf("with the index: ok=%v err=%v", ok, err)
+	}
+	bare := testutil.TempPostgres(t, "it_treasury_noindex_", &models.RampLeg{})
+	if ok, err := RampLegsOneLiveSaleIndexPresent(bare); err != nil || ok {
+		t.Fatalf("without the index: ok=%v err=%v", ok, err)
+	}
+}

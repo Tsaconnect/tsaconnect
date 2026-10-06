@@ -904,3 +904,26 @@ func TestTreasury_CanPayForGas(t *testing.T) {
 		t.Fatal("after the cache window the drained balance must be seen")
 	}
 }
+
+// Review C1: the prepared transaction's nonce reaches the caller before the
+// broadcast; a nonce that cannot be recorded is never broadcast.
+func TestTreasury_TransferTokenRecordedHandsOverTheNonceFirst(t *testing.T) {
+	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	native.transferNonce = 42
+	ctx := context.Background()
+	var got uint64
+	callsAtHook := -1
+	_, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(n uint64) error {
+		got, callsAtHook = n, signer.calls()
+		return nil
+	})
+	if err != nil || !attempted || got != 42 || callsAtHook != 0 || signer.calls() != 1 {
+		t.Fatalf("err=%v attempted=%v nonce=%d broadcasts-at-hook=%d broadcasts=%d", err, attempted, got, callsAtHook, signer.calls())
+	}
+	_, attempted, err = tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(uint64) error {
+		return errors.New("db down")
+	})
+	if err == nil || attempted || signer.calls() != 1 {
+		t.Fatalf("err=%v attempted=%v broadcasts=%d, want nothing broadcast", err, attempted, signer.calls())
+	}
+}
