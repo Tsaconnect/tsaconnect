@@ -18,17 +18,94 @@ import {
   createSell,
   getOrder,
   getQuote,
+  isConvertedVenue,
   listOrders,
   type PaycrestOrder,
   type PaycrestQuote,
   type PaycrestVenue,
 } from '@/services/paycrestApi';
 
-export type RampVenue = PaycrestVenue & { handle?: string };
+/** One provider fee inside a venue or an order (spec 2026-10-03 §14): the fee
+ *  in tokens and its naira value at the display rate. */
+export interface RampFee {
+  kind: string; // 'conversion' | 'network'
+  label: string;
+  /** Display name the line is tagged with ("Flutterwave"). */
+  provider: string;
+  token: string;
+  ngn: string;
+}
+
+/** `rate` is the display rate (margin in, provider fees out); `effectiveRate`
+ *  the all-in rate the server ranks and holds the order to; `tokenAmount` is
+ *  what she receives after every fee. */
+export type RampVenue = PaycrestVenue & { handle?: string; effectiveRate?: string; fees?: RampFee[] };
 export type RampQuote = Omit<PaycrestQuote, 'venues' | 'best'> & {
   venues: RampVenue[];
   best: RampVenue | null;
 };
+
+/** Where to pay for a company-wallet or Flutterwave buy. */
+export interface RampPayInto {
+  bank: string;
+  accountName: string;
+  accountNumber: string;
+  /** Central mode only: the exact naira to send. */
+  amountNgn?: string;
+  payerInstruction?: string;
+}
+
+export type RampProviderName = 'paycrest' | 'treasury' | 'flutterwave';
+
+/** An order from any provider. A Paycrest body is unchanged (no `provider`);
+ *  an IT-backed buy says which provider fills it and carries its pay-into
+ *  card, its rate hold, its quoted breakdown and, once sent, the tx. */
+export type RampOrder = PaycrestOrder & {
+  provider?: RampProviderName;
+  payInto?: RampPayInto;
+  honourUntil?: string;
+  repriced?: boolean;
+  effectiveRate?: string;
+  fees?: RampFee[];
+};
+
+/** The rate an order is held to: the all-in one when the server sent it (§14). */
+export function quotedRateOf(v: { rate: string; effectiveRate?: string }): string {
+  return v.effectiveRate || v.rate;
+}
+
+/** The Instant Transfer purchase behind an order the company wallet or
+ *  Flutterwave fills — its screen. Null for anything Paycrest fills. */
+export function itIntentIdOf(o: unknown): string | null {
+  if (!o || typeof o !== 'object') return null;
+  const { provider, id } = o as { provider?: unknown; id?: unknown };
+  return (provider === 'treasury' || provider === 'flutterwave') && typeof id === 'string' && id ? id : null;
+}
+
+export const RAMP_ORDER_OPEN = 'ramp_order_open';
+
+/** The purchase a `ramp_order_open` refusal names, or null for anything else. */
+export function openOrderOf(e: unknown): { orderId: string } | null {
+  if (!(e instanceof RampError) || e.code !== RAMP_ORDER_OPEN) return null;
+  const data = (e.body as { data?: { orderId?: unknown } | null } | null)?.data;
+  if (!data || typeof data.orderId !== 'string' || !data.orderId) return null;
+  return { orderId: data.orderId };
+}
+
+/** One venue list for the buy screen: the router's direct venues (every
+ *  provider, best per pair, in the server's order) plus the converted venues
+ *  only /paycrest prices. Either may be missing and the other still stands. */
+export function mergeBuyQuotes(
+  direct: RampQuote | null | undefined,
+  converted: PaycrestQuote | null | undefined,
+): RampQuote | null {
+  const d = direct && Array.isArray(direct.venues) ? direct : null;
+  const c = converted && Array.isArray(converted.venues) ? converted : null;
+  if (!d && !c) return null;
+  if (!d) return c as RampQuote;
+  const conv = (c?.venues ?? []).filter((v) => isConvertedVenue(v));
+  return { ...d, venues: [...d.venues, ...conv], best: d.best ?? c?.best ?? null };
+}
 
 /** A PaycrestError, so every screen's existing `instanceof PaycrestError`
  *  message handling keeps working; carries the raw body for price_moved. */
@@ -100,9 +177,9 @@ export interface CreateRampBuyInput {
   handle?: string;
 }
 
-export function createRampBuy(input: CreateRampBuyInput): Promise<PaycrestOrder> {
+export function createRampBuy(input: CreateRampBuyInput): Promise<RampOrder> {
   return withFallback(
-    () => request<PaycrestOrder>('/buy', { method: 'POST', body: JSON.stringify(input) }),
+    () => request<RampOrder>('/buy', { method: 'POST', body: JSON.stringify(input) }),
     () => createBuy(withoutQuote(input)),
   );
 }
@@ -120,31 +197,31 @@ export interface CreateRampSellInput {
   handle?: string;
 }
 
-export function createRampSell(input: CreateRampSellInput): Promise<PaycrestOrder> {
+export function createRampSell(input: CreateRampSellInput): Promise<RampOrder> {
   return withFallback(
-    () => request<PaycrestOrder>('/sell', { method: 'POST', body: JSON.stringify(input) }),
+    () => request<RampOrder>('/sell', { method: 'POST', body: JSON.stringify(input) }),
     () => createSell(withoutQuote(input)),
   );
 }
 
-export function getRampOrder(id: string): Promise<PaycrestOrder> {
-  return withFallback(() => request<PaycrestOrder>(`/orders/${encodeURIComponent(id)}`), () => getOrder(id));
+export function getRampOrder(id: string): Promise<RampOrder> {
+  return withFallback(() => request<RampOrder>(`/orders/${encodeURIComponent(id)}`), () => getOrder(id));
 }
 
-export function listRampOrders(limit = 25): Promise<PaycrestOrder[]> {
-  return withFallback(() => request<PaycrestOrder[]>(`/orders?limit=${limit}`), () => listOrders(limit));
+export function listRampOrders(limit = 25): Promise<RampOrder[]> {
+  return withFallback(() => request<RampOrder[]>(`/orders?limit=${limit}`), () => listOrders(limit));
 }
 
-export function claimRampPayment(id: string): Promise<PaycrestOrder> {
+export function claimRampPayment(id: string): Promise<RampOrder> {
   return withFallback(
-    () => request<PaycrestOrder>(`/orders/${encodeURIComponent(id)}/claim-payment`, { method: 'POST' }),
+    () => request<RampOrder>(`/orders/${encodeURIComponent(id)}/claim-payment`, { method: 'POST' }),
     () => claimPayment(id),
   );
 }
 
-export function cancelRampOrder(id: string): Promise<PaycrestOrder> {
+export function cancelRampOrder(id: string): Promise<RampOrder> {
   return withFallback(
-    () => request<PaycrestOrder>(`/orders/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    () => request<RampOrder>(`/orders/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
     () => cancelOrder(id),
   );
 }

@@ -78,7 +78,21 @@ import {
   type PaycrestVenue,
   type RequestedAsset,
 } from '@/services/paycrestApi';
-import { claimRampPayment, createRampBuy, priceMovedQuote } from '@/services/rampApi';
+import {
+  cancelRampOrder,
+  claimRampPayment,
+  createRampBuy,
+  getRampQuote,
+  itIntentIdOf,
+  mergeBuyQuotes,
+  openOrderOf,
+  priceMovedQuote,
+  quotedRateOf,
+  type RampVenue,
+} from '@/services/rampApi';
+import { itIntentRoute } from '@/utils/itBuyOrder';
+import { IT_AGREEMENT_REQUIRED } from '@/services/itApi';
+import { FeeLines, groupThousands } from '@/components/ramp/FeeLines';
 import { formatTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 // The destination token AND chain picker — reused verbatim from the swap
@@ -372,8 +386,24 @@ export default function PaycrestBuyScreen() {
     setQuoting(true);
     const t = setTimeout(async () => {
       try {
-        const q = await getQuote('buy', raw, currencyCode, want);
+        // The router's direct venues (every provider, best per pair, in the
+        // server's order) plus the converted ones only /paycrest prices.
+        // Either can fail alone — Paycrest's naira book has been empty.
+        const [direct, converted] = await Promise.allSettled([
+          getRampQuote('buy', raw, currencyCode),
+          getQuote('buy', raw, currencyCode, want),
+        ]);
         if (seq !== quoteSeq.current) return;
+        const merged = mergeBuyQuotes(
+          direct.status === 'fulfilled' ? direct.value : null,
+          converted.status === 'fulfilled' ? converted.value : null,
+        );
+        if (!merged) {
+          // Both failed: the router's reason first — it speaks for every provider.
+          const failed = [direct, converted].find((r): r is PromiseRejectedResult => r.status === 'rejected');
+          throw failed ? failed.reason : new Error('no quote');
+        }
+        const q = merged as PaycrestQuote;
         setQuote(q);
         setQuoteError(null);
         // Never infer a substitute here. Either the exact pair the user asked
@@ -444,13 +474,24 @@ export default function PaycrestBuyScreen() {
             refundBankCode: refundBank.code,
             refundAccount,
             currency: currencyCode,
-            quotedRate: venue.rate,
+            // Held to the all-in rate she was shown (spec §14); try the
+            // provider she was shown first — the router falls back.
+            quotedRate: quotedRateOf(venue as RampVenue),
+            ...((venue as RampVenue).handle ? { handle: (venue as RampVenue).handle } : {}),
           });
       // Remember it only once an order actually succeeded with it.
       AsyncStorage.setItem(
         REFUND_STORE_KEY(currencyCode),
         JSON.stringify({ code: refundBank.code, account: refundAccount }),
       ).catch(() => {});
+      const itIntent = itIntentIdOf(created);
+      if (itIntent) {
+        // The company wallet or Flutterwave fills it: an Instant Transfer
+        // purchase, whose screen has the pay-into card, the rate hold,
+        // "I've sent the transfer" and Cancel.
+        router.replace(itIntentRoute(itIntent) as never);
+        return;
+      }
       setOrder(created);
     } catch (e) {
       // The rate moved past what she confirmed: show the new one and let her
@@ -460,6 +501,35 @@ export default function PaycrestBuyScreen() {
         setQuote(fresh as PaycrestQuote);
         setVenue(selectVenue(fresh.venues, want));
         Alert.alert('The rate changed', 'Check the new rate and confirm again.');
+        return;
+      }
+      // One purchase waits for payment at a time: offer the way to it, or
+      // out of it, instead of a dead end (spec §6).
+      const open = openOrderOf(e);
+      if (open) {
+        Alert.alert(
+          'You have a purchase waiting for payment',
+          'Pay into it, or cancel it to start a new one. Only cancel if you have not sent the money.',
+          [
+            { text: 'Keep it', style: 'cancel' },
+            {
+              text: 'Cancel it',
+              style: 'destructive',
+              onPress: () => {
+                cancelRampOrder(open.orderId)
+                  .then(() => Alert.alert('Purchase cancelled', 'You can start a new purchase now.'))
+                  .catch((err) =>
+                    Alert.alert('Could not cancel', err instanceof PaycrestError ? err.message : 'Please try again.'));
+              },
+            },
+            { text: 'View', onPress: () => router.push(itIntentRoute(open.orderId) as never) },
+          ],
+        );
+        return;
+      }
+      // A routed Flutterwave buy needs the IT agreement; the hub owns its gate.
+      if (e instanceof PaycrestError && e.code === IT_AGREEMENT_REQUIRED) {
+        router.replace('/wallet/it' as never);
         return;
       }
       // Not verified (or verified with no legal name): offer the next step
@@ -707,7 +777,7 @@ export default function PaycrestBuyScreen() {
                   <Text variant="title1" weight="700" style={{ color: colors.textPrimary }}>
                     {isConvertedVenue(venue)
                       ? (formatEstimate(venue) ?? `${formatPromisedAmount(venue) ?? venue.tokenAmount} ${venue.requestedToken}`)
-                      : `${venue.tokenAmount.toFixed(6)} ${venue.token}`}
+                      : `${Number(venue.tokenAmount).toFixed(6)} ${venue.token}`}
                   </Text>
                   <Text variant="caption" style={{ color: colors.textMuted }}>
                     {/* The rate is always priced against the SETTLEMENT leg
@@ -723,8 +793,13 @@ export default function PaycrestBuyScreen() {
                       ? `Settles as ${venue.token} on ${chainLabel(venue.chain)}`
                       : `on ${chainLabel(venue.chain)}`}{' '}
                     · {symbol}
-                    {venue.rate} per {venue.token}
+                    {groupThousands(venue.rate)} per {venue.token}
                   </Text>
+                  {/* Every provider fee as its own line (spec §14); "You
+                      receive" above is already after all of them. */}
+                  {!isConvertedVenue(venue) ? (
+                    <FeeLines fees={(venue as RampVenue).fees ?? []} token={venue.token} symbol={symbol} />
+                  ) : null}
                   {/* A converted route is labelled honestly, every time — this
                       is the one thing that must never be quiet: what the
                       route settles as, that it converts, and roughly how

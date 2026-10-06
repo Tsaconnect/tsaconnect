@@ -7,7 +7,11 @@ import {
   createRampBuy,
   getRampOrder,
   getRampQuote,
+  itIntentIdOf,
+  mergeBuyQuotes,
+  openOrderOf,
   priceMovedQuote,
+  quotedRateOf,
   RampError,
 } from '../rampApi';
 import { PaycrestError } from '../paycrestApi';
@@ -79,5 +83,50 @@ describe('rampApi', () => {
     expect(b.requestedChainId).toBeUndefined();
     expect(b.requestedTokenAddress).toBeUndefined();
     expect(b.quotedRate).toBe('1400');
+  });
+});
+
+describe('the router with the company wallet and Flutterwave', () => {
+  const fw = {
+    chain: 'polygon', token: 'USDC', rate: '1692.57', effectiveRate: '1745.61', spreadPercent: 5.8, tokenAmount: 94.5375,
+    kind: 'direct' as const, handle: 'h',
+    fees: [{ kind: 'network', label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2538.85' }],
+  };
+  const pcDirect = { chain: 'base', token: 'USDC', rate: '1397.59', spreadPercent: 1, tokenAmount: 0.71, kind: 'direct' as const };
+  const converted = { chain: 'polygon', token: 'USDT', rate: '1410', spreadPercent: 1, tokenAmount: 0.7, kind: 'converted' as const };
+  const quote = (venues: any[]) =>
+    ({ currency: 'NGN', amount: '1000', side: 'buy', marketRate: 1380, venues, best: venues[0] ?? null, quotedAt: '' }) as any;
+
+  it('keeps the router direct venues, in its order, and only the converted ones from /paycrest', () => {
+    const merged = mergeBuyQuotes(quote([fw]), quote([pcDirect, converted]))!;
+    expect(merged.venues).toEqual([fw, converted]);
+    expect(merged.best).toEqual(fw);
+  });
+
+  it('stands on either quote alone', () => {
+    expect(mergeBuyQuotes(null, quote([pcDirect, converted]))!.venues).toEqual([pcDirect, converted]);
+    expect(mergeBuyQuotes(quote([fw]), undefined)!.venues).toEqual([fw]);
+    expect(mergeBuyQuotes(undefined, null)).toBeNull();
+  });
+
+  it('holds an order to the all-in rate when the server sends one (spec §14)', () => {
+    expect(quotedRateOf(fw)).toBe('1745.61');
+    expect(quotedRateOf(pcDirect)).toBe('1397.59');
+  });
+
+  it('reads the purchase a ramp_order_open refusal names', () => {
+    const body = { success: false, code: 'ramp_order_open', data: { orderId: 'i9' } };
+    expect(openOrderOf(new RampError('waiting', 409, 'ramp_order_open', body))).toEqual({ orderId: 'i9' });
+    expect(openOrderOf(new RampError('waiting', 409, 'ramp_order_open', { data: null }))).toBeNull();
+    expect(openOrderOf(new RampError('x', 409, 'price_moved', body))).toBeNull();
+    expect(openOrderOf(new Error('x'))).toBeNull();
+  });
+
+  it('finds the Instant Transfer purchase behind a company-wallet or Flutterwave order', () => {
+    expect(itIntentIdOf({ id: 't1', provider: 'treasury' })).toBe('t1');
+    expect(itIntentIdOf({ id: 'f1', provider: 'flutterwave' })).toBe('f1');
+    expect(itIntentIdOf({ id: 'o1', reference: 'PCB-1' })).toBeNull();
+    expect(itIntentIdOf({ id: 'o2', provider: 'paycrest' })).toBeNull();
+    expect(itIntentIdOf(null)).toBeNull();
   });
 });

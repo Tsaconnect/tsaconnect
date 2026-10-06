@@ -203,7 +203,7 @@ it('a direct buy opens through the ramp router at the confirmed rate; a moved ra
   await act(async () => { byLabel(tree, 'amount:You pay').props.onChangeText('1000'); });
   await act(async () => { jest.advanceTimersByTime(500); });
   await flush();
-  expect(text(tree)).toContain('1397.59');
+  expect(text(tree)).toContain('1,397.59');
 
   await act(async () => { await byLabel(tree, 'button:Continue').props.onPress(); });
   await flush();
@@ -213,8 +213,8 @@ it('a direct buy opens through the ramp router at the confirmed rate; a moved ra
   expect(first).not.toHaveProperty('requestedChainId');
   expect(first).not.toHaveProperty('requestedTokenAddress');
   expect(alert).toHaveBeenCalledWith('The rate changed', expect.any(String));
-  expect(text(tree)).toContain('1405.00');
-  expect(text(tree)).not.toContain('1397.59');
+  expect(text(tree)).toContain('1,405.00');
+  expect(text(tree)).not.toContain('1,397.59');
 
   await act(async () => { await byLabel(tree, 'button:Continue').props.onPress(); });
   await flush();
