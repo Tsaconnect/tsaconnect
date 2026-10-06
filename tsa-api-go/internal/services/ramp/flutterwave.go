@@ -50,6 +50,9 @@ type FlutterwaveProvider struct {
 	itBuyProvider
 	it  flutterwaveIT
 	now func() time.Time
+	// conv prices a converted venue on Flutterwave's Polygon USDC leg
+	// (spec §15, route 2); nil until WithConversion attaches one.
+	conv ConvertedPricer
 
 	mu     sync.Mutex
 	rates  map[string]cachedRate
@@ -232,6 +235,10 @@ func (p *FlutterwaveProvider) Open(ctx context.Context, k VenueKey, r Request, i
 // Shared with the company wallet (treasury.go), which adds its own causes.
 func classifyITOpen(err error, writing bool) error {
 	switch {
+	case errors.Is(err, services.ErrStableBuyAbandonCapReached):
+		return WrapClass(ErrVenueUnavailable, ErrAbandonCapReached) // N2: the service's own refusal
+	case errors.Is(err, services.ErrConversionUnavailable):
+		return WrapClass(ErrVenueUnavailable, err) // refused before the write
 	case errors.Is(err, services.ErrKYCVerificationRequired),
 		errors.Is(err, services.ErrITAgreementRequired),
 		errors.Is(err, services.ErrStableBuyAlreadyOpen),

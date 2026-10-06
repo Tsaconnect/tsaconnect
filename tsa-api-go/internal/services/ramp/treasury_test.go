@@ -40,6 +40,10 @@ type fakeTreasuryIT struct {
 	pending   *models.ITIntent
 	abandoned int64
 	afterOpen func()
+	// conversion is what ConversionFor reads; convOpens records every
+	// converted open.
+	conversion *models.PaycrestOrderRecord
+	convOpens  []services.ConvertedOpen
 }
 
 func newFakeTreasuryIT(t *testing.T) *fakeTreasuryIT {
@@ -76,6 +80,17 @@ func (f *fakeTreasuryIT) OpenTreasuryBuy(_ context.Context, user uuid.UUID, q *s
 		return nil, nil, f.openErr
 	}
 	return f.intent, &services.StableBuyInstructions{AccountNumber: "9988776655"}, nil
+}
+func (f *fakeTreasuryIT) OpenTreasuryConvertedBuy(_ context.Context, user uuid.UUID, q *services.StableBuyQuote, chain string, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error) {
+	f.opened = append(f.opened, openTreasuryCall{user, q, chain, in.WalletAddress})
+	f.convOpens = append(f.convOpens, in)
+	if f.openErr != nil {
+		return nil, nil, nil, f.openErr
+	}
+	return f.intent, &services.StableBuyInstructions{AccountNumber: "9988776655"}, &models.PaycrestOrderRecord{Reference: "ITC-x"}, nil
+}
+func (f *fakeTreasuryIT) ConversionFor(context.Context, *models.ITIntent) (*models.PaycrestOrderRecord, error) {
+	return f.conversion, nil
 }
 func (f *fakeTreasuryIT) OpenStableBuy(context.Context, uuid.UUID) (*models.ITIntent, error) {
 	return f.pending, nil

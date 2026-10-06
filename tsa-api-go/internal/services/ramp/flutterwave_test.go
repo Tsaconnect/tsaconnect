@@ -38,6 +38,8 @@ type fakeFWIT struct {
 	abandoned int64
 	cancelErr error
 	afterOpen func()
+
+	conversion *models.PaycrestOrderRecord // what ConversionFor reads
 }
 
 func newFakeFWIT(t *testing.T) *fakeFWIT {
@@ -62,6 +64,9 @@ func (f *fakeFWIT) OpenRoutedStableBuy(_ context.Context, user uuid.UUID, q *ser
 		return nil, nil, f.openErr
 	}
 	return f.intent, f.payInto, nil
+}
+func (f *fakeFWIT) ConversionFor(context.Context, *models.ITIntent) (*models.PaycrestOrderRecord, error) {
+	return f.conversion, nil
 }
 func (f *fakeFWIT) OpenStableBuy(context.Context, uuid.UUID) (*models.ITIntent, error) {
 	return f.pending, nil

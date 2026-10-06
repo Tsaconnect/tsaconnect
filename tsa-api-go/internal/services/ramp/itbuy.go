@@ -21,6 +21,8 @@ type itBuyReads interface {
 	CancelBuy(ctx context.Context, userID, intentID uuid.UUID) (*models.ITIntent, error)
 	CountAbandonedRoutedStableBuys(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error)
 	RoutedAbandonCap() int
+	// ConversionFor is the conversion record a buy feeds, or nil (N1).
+	ConversionFor(ctx context.Context, intent *models.ITIntent) (*models.PaycrestOrderRecord, error)
 }
 
 // itBuyProvider is the read side the company wallet and Flutterwave share:
@@ -67,9 +69,15 @@ func (p *itBuyProvider) order(ctx context.Context, intent *models.ITIntent) *Ord
 	payInto, err := p.reads.StableBuyPayInto(ctx, intent)
 	if err != nil {
 		log.Printf("[ramp] %s pay-into intent=%s: %v", p.name, intent.ID, err) // the order still reads
+	} else {
+		o.PayInto = payInto
+	}
+	rec, err := p.reads.ConversionFor(ctx, intent)
+	if err != nil {
+		log.Printf("[ramp] %s conversion intent=%s: %s", p.name, intent.ID, services.RedactAlertText(err.Error())) // the order still reads
 		return o
 	}
-	o.PayInto = payInto
+	o.Conversion = rec
 	return o
 }
 
@@ -150,4 +158,57 @@ func itVenue(provider, chain, token string, q *services.StableBuyQuote, market f
 		TokenAmount: services.StableFromBaseUnits(q.AssetUnits), Fees: VenueFees(q.Fees),
 		Kind: models.RouteKindDirect,
 	}
+}
+
+// convertedLegToken is the settlement leg's token for every converted buy
+// (Decision C3: USDC-only stock, owner ruling Q1).
+const convertedLegToken = models.ITAssetUSDC
+
+// WithConversion lets the company-wallet or Flutterwave provider also reach
+// assets it does not deliver directly (spec §15). main.go calls it only when
+// that provider's converted switch holds; a nil conv (or a typed-nil pricer)
+// leaves p as it was, so no typed nil is ever wired into the interface.
+func WithConversion(p Provider, conv ConvertedPricer) Provider {
+	if p == nil || conv == nil {
+		return p
+	}
+	if pq, ok := conv.(*services.PaycrestQuoteService); ok && pq == nil {
+		return p
+	}
+	switch tp := p.(type) {
+	case *TreasuryProvider:
+		if tp != nil {
+			tp.conv = conv
+		}
+	case *FlutterwaveProvider:
+		if tp != nil {
+			tp.conv = conv
+		}
+	}
+	return p
+}
+
+// convertedVenue is one converted IT-backed venue (spec §15.7): the leg's
+// display rate, the all-in rate on T, T itself and the leg's fee lines plus
+// the Conversion (LiFi) line.
+func convertedVenue(provider string, q *services.StableBuyQuote, pv *services.PaycrestVenue, market float64) (Venue, error) {
+	terms, err := services.NewConvertedTerms(q, pv)
+	if err != nil {
+		return Venue{}, err
+	}
+	effective := services.FormatMinor(terms.EffectiveRateMinor.String())
+	spread := 0.0
+	if eff, err := strconv.ParseFloat(effective, 64); err == nil && market > 0 {
+		spread = (eff/market - 1) * 100
+	}
+	return Venue{
+		Handle: EncodeHandle(provider, VenueKey{ChainKey: pv.ChainKey, Token: pv.Token}), Provider: provider,
+		ChainKey: pv.ChainKey, Token: pv.Token, Rate: pv.Rate, EffectiveRate: effective, SpreadPercent: spread,
+		TokenAmount: services.StableFromBaseUnits(terms.OwedUnits), Fees: VenueFees(terms.Fees),
+		Kind: models.RouteKindConverted, ViaChain: pv.ChainKey, ViaToken: pv.Token,
+		RequestedChain: pv.RequestedChain, RequestedToken: pv.RequestedToken, RequestedChainID: pv.RequestedChainID,
+		RequestedAddress: pv.RequestedAddress, RequestedDecimals: pv.RequestedDecimals,
+		RequestedDestination: pv.RequestedDestination, EstimatedAmount: pv.EstimatedAmount,
+		MarkupBps: pv.MarkupBps, CostBps: pv.CostBps, PromisedAmount: pv.PromisedAmount, ETASeconds: pv.ETASeconds,
+	}, nil
 }
