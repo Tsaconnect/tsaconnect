@@ -164,6 +164,21 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 	if live != nil {
 		return nil // in flight or done: FinalizeTreasuryBuy observes it
 	}
+	// N1: a sale to the conversion treasury is a converted buy's leg and is
+	// allowed only while its record waits for it — whatever is wired.
+	rec, err := s.ConversionFor(ctx, intent)
+	if err != nil {
+		return err
+	}
+	switch {
+	case rec == nil && s.wallet.IsConversionTreasury(intent.DestAddress):
+		log.Printf("[it treasury buy] ALERT ramp_treasury_send_to_conversion_without_record intent=%s", intent.ID)
+		return fmt.Errorf("%w: a sale to the conversion treasury needs its conversion record", ErrITBadState)
+	case rec != nil && rec.Status != models.PaycrestStatusAwaitingPayment && rec.Status != models.PaycrestStatusPending:
+		log.Printf("[it treasury buy] ALERT ramp_treasury_send_to_conversion_without_record intent=%s record=%s status=%s",
+			intent.ID, rec.ID, rec.Status)
+		return fmt.Errorf("%w: its conversion record is %s", ErrITBadState, rec.Status)
+	}
 	chain, token := strings.ToLower(intent.DestChain), strings.ToUpper(intent.Asset)
 	lane := s.wallet.Lane(chain)
 	if lane == nil || lane.SponsorLane == nil {
@@ -409,9 +424,16 @@ func (s *ITService) settleTreasuryBuy(ctx context.Context, intent *models.ITInte
 				return fmt.Errorf("%w: leg %s is %s, not settling over it", ErrITBadState, leg.ID, cur.Status)
 			}
 		}
-		return tx.Model(&models.ITIntent{}).
+		res := tx.Model(&models.ITIntent{}).
 			Where("id = ? AND status = ?", intent.ID, models.ITStatusDelivering).
-			Updates(map[string]any{"status": models.ITStatusSettled, "tx_hash": leg.TxHash, "failure_reason": ""}).Error
+			Updates(map[string]any{"status": models.ITStatusSettled, "tx_hash": leg.TxHash, "failure_reason": ""})
+		if res.Error != nil {
+			return res.Error
+		}
+		// Decision C7: a converted buy hands its proven leg to the orchestrator
+		// in this same transaction — never a settled intent with nothing
+		// driving the bridge. No record: a direct buy, nothing to do.
+		return s.handoffConversion(ctx, tx, intent, leg.TxHash)
 	})
 	if err == nil {
 		log.Printf("[it treasury buy] METRIC ramp_treasury_settled intent=%s tx=%s", intent.ID, leg.TxHash)

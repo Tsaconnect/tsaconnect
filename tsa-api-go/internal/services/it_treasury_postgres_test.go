@@ -52,10 +52,11 @@ func TestInsertTreasuryIntent_ConcurrentOpensForTheLastStock_Postgres(t *testing
 }
 
 // newLockedStockService is a Postgres-backed service with a company wallet
-// holding stockUnits of USDC on Base.
+// holding stockUnits of USDC on Base. Production always has the conversion
+// records table: live pricing reads it for the converted ceiling (N4).
 func newLockedStockService(t *testing.T, stockUnits int64) (*gorm.DB, *ITService) {
 	t.Helper()
-	db := testutil.TempPostgres(t, "it_treasury_lock_", &models.ITIntent{})
+	db := testutil.TempPostgres(t, "it_treasury_lock_", &models.ITIntent{}, &models.PaycrestOrderRecord{})
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	tr, _, native, _ := newTestTreasuryWithFakes(t)
 	native.tokenBalances = map[string]*big.Int{strings.ToLower(sponsorTestUSDC): big.NewInt(stockUnits)}
@@ -174,5 +175,83 @@ func TestClaimLivePricedTreasuryBuy_WaitsOnTheStockLock_Postgres(t *testing.T) {
 	}
 	if got.Status != models.ITStatusPaymentReceived || !got.Repriced || got.AssetAmount == candidate.AssetAmount {
 		t.Fatalf("status=%s repriced=%v asset=%s, want claimed at the live price", got.Status, got.Repriced, got.AssetAmount)
+	}
+}
+
+// Review Focus 5: two converted opens for the last stock — one intent, one record.
+func TestOpenTreasuryConvertedBuy_ConcurrentOpensForTheLastStock_Postgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "it_treasury_conv_lock_", &models.ITIntent{}, &models.PaycrestOrderRecord{})
+	s := NewITService(db, nil, stubFx{ngn: 1500})
+	tr, _, native, _ := newTestTreasuryWithFakes(t)
+	native.tokenBalances = map[string]*big.Int{strings.ToLower(sponsorTestUSDC): big.NewInt(7_232_937)}
+	s.SetCompanyWallet(NewCompanyWallet(CompanyWalletConfig{Treasury: tr, Decimals: map[string]map[string]int{"base": {"USDC": 6}}}))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			order := newUSDCOrder()
+			errs[i] = s.insertTreasuryIntentWith(context.Background(), order, func(tx *gorm.DB, intent *models.ITIntent) error {
+				return tx.Create(newConversionRecord(intent, ConvertedOpen{Venue: convertedVenueForTest(), WalletAddress: testRoutedEVM},
+					models.HolderCompanyWallet)).Error
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	var intents, records int64
+	db.Model(&models.ITIntent{}).Count(&intents)
+	db.Model(&models.PaycrestOrderRecord{}).Count(&records)
+	won := 0
+	for _, err := range errs {
+		if err == nil {
+			won++
+		} else if !errors.Is(err, ErrTreasuryStockShort) {
+			t.Fatalf("unexpected: %v", err)
+		}
+	}
+	if won != 1 || intents != 1 || records != 1 {
+		t.Fatalf("won=%d intents=%d records=%d, want exactly one of each", won, intents, records)
+	}
+}
+
+// Review Focus 3 on the real database: a refused handoff rolls the leg's
+// confirmation and the settle back with it; the next tick hands off and
+// settles together.
+func TestSettleTreasuryBuy_HandoffCommitsOrRollsBackWithTheSettle_Postgres(t *testing.T) {
+	ctx := context.Background()
+	s, intent, _ := newDeliverPostgres(t)
+	rec := newConversionRecord(intent, ConvertedOpen{Venue: convertedVenueForTest(), WalletAddress: testRoutedEVM},
+		models.HolderCompanyWallet)
+	rec.Status = models.PaycrestStatusRecoveryPending // an operator took it
+	if err := s.db.Create(rec).Error; err != nil {
+		t.Fatal(err)
+	}
+	leg := &models.RampLeg{OrderID: intent.ID, Kind: models.RampLegKindSale, Attempt: 1, ChainKey: "base", Token: "USDC",
+		FromAddr: s.wallet.Address(), ToAddr: intent.DestAddress, Amount: "7232937", TxHash: "0xsale",
+		Status: models.RampLegStatusPending, CreatedAt: time.Now().UTC()}
+	if err := s.db.Create(leg).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.settleTreasuryBuy(ctx, intent, leg, "7232937"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("settle over a taken record: %v", err)
+	}
+	var gotLeg models.RampLeg
+	s.db.First(&gotLeg, "id = ?", leg.ID)
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusDelivering || gotLeg.Status != models.RampLegStatusPending {
+		t.Fatalf("intent=%s leg=%s, want both untouched", got.Status, gotLeg.Status)
+	}
+	s.db.Model(rec).Update("status", models.PaycrestStatusPending)
+	if err := s.settleTreasuryBuy(ctx, intent, leg, "7232937"); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	s.db.First(&gotLeg, "id = ?", leg.ID)
+	got, after := reloadIntent(t, s, intent.ID), conversionRecord(t, s, intent.ID)
+	if got.Status != models.ITStatusSettled || gotLeg.Status != models.RampLegStatusConfirmed ||
+		after.Status != models.PaycrestStatusConverting || after.TxHash != "0xsale" || after.QuotedAmount != "7196772" {
+		t.Fatalf("intent=%s leg=%s record=%s %s %s", got.Status, gotLeg.Status, after.Status, after.TxHash, after.QuotedAmount)
 	}
 }

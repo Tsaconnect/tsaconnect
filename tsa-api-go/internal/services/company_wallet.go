@@ -119,6 +119,9 @@ type CompanyWalletConfig struct {
 	// probe's verdict per chain (nil: every chain readable).
 	ReceiptRPCs map[string]RawRPCCaller
 	ReceiptsOK  map[string]bool
+	// ConversionTreasury is derived from RAMP_TREASURY_PRIVATE_KEY at boot; a
+	// sale to it needs a conversion record (spec §15.5 N1).
+	ConversionTreasury string
 }
 
 const (
@@ -147,7 +150,8 @@ type CompanyWallet struct {
 	probes    map[string]TreasuryTxProbe
 	now       func() time.Time
 
-	receiptRPCs map[string]RawRPCCaller
+	receiptRPCs        map[string]RawRPCCaller
+	conversionTreasury string
 
 	mu         sync.Mutex
 	stock      map[string]stockReading
@@ -186,11 +190,18 @@ func NewCompanyWallet(c CompanyWalletConfig) *CompanyWallet {
 		treasury: c.Treasury, decimals: decimals, verifiers: lowerChainKeys(c.Verifiers), probes: lowerChainKeys(c.Probes),
 		now: time.Now, stock: map[string]stockReading{}, free: map[string]stockReading{},
 		receiptRPCs: lowerChainKeys(c.ReceiptRPCs), receiptsOK: receiptsVerdict(decimals, lowerChainKeys(c.ReceiptsOK)),
+		conversionTreasury: strings.TrimSpace(c.ConversionTreasury),
 	}
 }
 
 func (w *CompanyWallet) Address() string     { return w.treasury.Address() }
 func (w *CompanyWallet) Treasury() *Treasury { return w.treasury }
+
+// IsConversionTreasury: addr is the conversion treasury — a sale there is a
+// converted buy's settlement leg and needs its record (N1).
+func (w *CompanyWallet) IsConversionTreasury(addr string) bool {
+	return w != nil && w.conversionTreasury != "" && strings.EqualFold(strings.TrimSpace(addr), w.conversionTreasury)
+}
 
 // Chains are the chains with at least one offered token, sorted.
 func (w *CompanyWallet) Chains() []string {

@@ -100,6 +100,7 @@ func TestCompanyWalletAdmin_RefusalCodes(t *testing.T) {
 		{services.ErrITBadState, 409, "bad_state"},
 		{fmt.Errorf("%w: needs 216.99", services.ErrTreasuryStockShort), 409, "stock_short"},
 		{fmt.Errorf("%w: pending tx", services.ErrTreasuryResendRefused), 409, "resend_refused"},
+		{services.ErrConvertedNoWaiver, 409, "converted_no_waiver"},
 		{services.ErrStableIntentNotFound, 404, "not_found"},
 	} {
 		w := walletDo(walletAdminServer(&fakeWalletAdmin{err: tc.err}, uuid.New()), "POST",

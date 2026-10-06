@@ -139,6 +139,13 @@ func (s *ITService) TreasuryFreeUnits(ctx context.Context, chain, token string) 
 // agreement, §13 Q3), a chain and token the wallet offers, her own EVM address
 // (Decision D48), the $200 maximum, and the stock taken under the lock.
 func (s *ITService) OpenTreasuryBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, chain, destAddress string) (*models.ITIntent, *StableBuyInstructions, error) {
+	// N1, in depth: a sale to the conversion treasury needs a conversion
+	// record, which only OpenTreasuryConvertedBuy writes. SendTreasuryBuy
+	// refuses it too; refusing here keeps the order from ever opening.
+	if s.wallet.IsConversionTreasury(destAddress) {
+		log.Printf("[it treasury buy] ALERT ramp_treasury_direct_buy_to_conversion_treasury user=%s", userID)
+		return nil, nil, fmt.Errorf("%w: that address cannot receive a purchase", ErrBadDeliveryAddress)
+	}
 	return s.openTreasuryBuy(ctx, userID, q, chain, destAddress, nil)
 }
 

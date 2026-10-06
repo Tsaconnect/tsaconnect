@@ -745,6 +745,9 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 	if err != nil {
 		return nil, err
 	}
+	if err := s.convertedCeiling(ctx, intent, q.AssetUnits); err != nil {
+		return nil, err
+	}
 	return &routedArrival{
 		units: q.AssetUnits, rate: q.RatePerUnitMinor, quote: q, repriced: true,
 		needsStock: models.ITIntentProvider(intent) == models.ITProviderTreasury,
@@ -800,12 +803,15 @@ func creditArrival(credit *models.InboundCredit, now time.Time) time.Time {
 // pointless — park it on every path (D32).
 func isDeterministicPricingError(err error) bool {
 	return errors.Is(err, ErrStableBuyBelowMinimum) || errors.Is(err, ErrStableNotAnAsset) ||
-		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible)
+		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible) ||
+		errors.Is(err, ErrConvertedOverpaid)
 }
 
 // parkReasonOf names a park for the ramp_treasury_parked metric.
 func parkReasonOf(err error) string {
 	switch {
+	case errors.Is(err, ErrConvertedOverpaid):
+		return "converted_overpaid"
 	case errors.Is(err, ErrStableBuyAboveMaximum):
 		return "maximum"
 	case errors.Is(err, ErrStableBuyBelowMinimum):
@@ -845,7 +851,14 @@ func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent,
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, fiatMinor)
 	}
-	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+	q, err := s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.convertedCeiling(ctx, intent, q.AssetUnits); err != nil {
+		return nil, err
+	}
+	return q, nil
 }
 
 // routedDeliveryAmounts is what a Flutterwave delivery sends and what the

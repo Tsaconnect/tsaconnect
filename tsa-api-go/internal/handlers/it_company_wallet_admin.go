@@ -110,6 +110,8 @@ func companyWalletAdminError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, msg, "note_required")
 	case errors.Is(err, services.ErrTreasuryStockShort):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "stock_short")
+	case errors.Is(err, services.ErrConvertedNoWaiver):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "converted_no_waiver")
 	case errors.Is(err, services.ErrTreasuryResendNeedsCancel):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "needs_cancel")
 	case errors.Is(err, services.ErrTreasuryResendRefused):

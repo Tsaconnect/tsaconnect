@@ -102,9 +102,12 @@ type CompanyWalletOrder struct {
 	SendTxHash    string    `json:"sendTxHash,omitempty"`
 	// Evidence is the dropped-transaction check on a stalled send, exactly as
 	// ResendTreasuryBuy would see it (review C1).
-	Evidence  *ResendEvidence `json:"evidence,omitempty"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	Actions   []string        `json:"actions"`
+	Evidence *ResendEvidence `json:"evidence,omitempty"`
+	// ConvertsTo is a converted buy's target ("USDT on optimism"): its leg
+	// feeds a conversion, so "deliver anyway" is never offered (N4).
+	ConvertsTo string    `json:"convertsTo,omitempty"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	Actions    []string  `json:"actions"`
 }
 
 // The orders list reads the chain per stalled order; these bound that work so
@@ -140,12 +143,27 @@ func (s *ITService) ListCompanyWalletOrders(ctx context.Context) ([]CompanyWalle
 			TokenAmount: FormatStableUnits(r.AssetAmount), FailureReason: r.FailureReason, UpdatedAt: r.UpdatedAt,
 			Actions: []string{},
 		}
+		// The request's context, not listCtx: slow chain checks on earlier rows
+		// must not make a later row lose its record and look like a direct buy.
+		rec, recErr := conversionRecordOn(ctx, s.db, r.ID)
+		if rec != nil {
+			o.ConvertsTo = rec.RequestedToken + " on " + rec.RequestedChain
+		}
 		switch r.Status {
 		case models.ITStatusBuyAwaitingRate:
 			expected, okE := new(big.Int).SetString(strings.TrimSpace(r.AmountMinor), 10)
 			paid, okP := new(big.Int).SetString(strings.TrimSpace(r.ReceivedAmount), 10)
 			o.Overpaid = okE && okP && paid.Cmp(expected) > 0
 			o.Actions = []string{"deliver", "refund"}
+			// N4: a converted buy is never delivered anyway. Unreadable: offer
+			// only the exit that is right either way.
+			if rec != nil || recErr != nil {
+				o.Actions = []string{"refund"}
+			}
+			if recErr != nil {
+				o.FailureReason = strings.TrimPrefix(o.FailureReason+" — could not read its conversion record: "+
+					RedactAlertText(recErr.Error()), " — ")
+			}
 		case models.ITStatusDelivering:
 			if !s.classifyDelivering(listCtx, r, &o, stall) {
 				continue // in flight inside the window, or confirmed: nothing to act on

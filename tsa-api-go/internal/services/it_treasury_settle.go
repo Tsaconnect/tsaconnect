@@ -49,6 +49,9 @@ func (s *ITService) repriceTreasuryParked(ctx context.Context, intent *models.IT
 	if err != nil {
 		return nil, err
 	}
+	if err := s.convertedCeiling(ctx, intent, q.AssetUnits); err != nil {
+		return nil, err
+	}
 	applied := false
 	chain := strings.ToLower(intent.DestChain)
 	err = s.withStockLock(ctx, chain, intent.Asset, func(tx *gorm.DB) error {
@@ -116,6 +119,11 @@ func (s *ITService) DeliverParkedTreasuryBuy(ctx context.Context, adminID, inten
 	}
 	if intent.Direction != models.ITDirectionBuy || models.ITIntentProvider(intent) != models.ITProviderTreasury {
 		return nil, ErrITBadState
+	}
+	if rec, err := s.ConversionFor(ctx, intent); err != nil {
+		return nil, err
+	} else if rec != nil {
+		return nil, ErrConvertedNoWaiver // N4: refund is the only exit
 	}
 	return s.repriceTreasuryParked(ctx, intent, true, func(tx *gorm.DB) error {
 		return auditIntent(tx, intent.ID, adminID, models.ITAuditStableBuyDeliveredAnyway, note, map[string]any{

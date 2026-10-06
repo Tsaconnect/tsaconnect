@@ -26,6 +26,14 @@ const (
 
 var ErrStableBuyAbandonCapReached = errors.New("too many unpaid purchases were cancelled or expired today")
 
+var (
+	// ErrConvertedOverpaid: live pricing gives more than the converted buy was
+	// opened for (N4). Deterministic: it parks.
+	ErrConvertedOverpaid = errors.New("converted buy: the live amount is above what was opened")
+	// ErrConvertedNoWaiver: "deliver anyway" never applies to a converted buy (N4).
+	ErrConvertedNoWaiver = errors.New("a converted purchase cannot be delivered above its opened amount; refund it")
+)
+
 func ITConversionRef(intentID uuid.UUID) string { return ITConversionRefPrefix + intentID.String() }
 
 func IsITConversion(o *models.PaycrestOrderRecord) bool {
@@ -171,6 +179,57 @@ func conversionRecordOn(ctx context.Context, db *gorm.DB, intentID uuid.UUID) (*
 func markConversion(ctx context.Context, db *gorm.DB, intentID uuid.UUID, from []string, updates map[string]any) error {
 	return db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Where("reference = ? AND status IN ?", ITConversionRef(intentID), from).Updates(updates).Error
+}
+
+// handoffConversion gives a delivered leg to the orchestrator: the record
+// becomes `converting` with the leg's hash, restated from what was delivered.
+// Runs on the caller's transaction. Idempotent for the same hash.
+func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *models.ITIntent, txHash string) error {
+	rec, err := conversionRecordOn(ctx, tx, intent.ID)
+	if err != nil || rec == nil {
+		return err
+	}
+	delivered, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
+	if !ok || delivered.Sign() <= 0 {
+		return fmt.Errorf("it converted buy: intent %s has no delivered amount", intent.ID)
+	}
+	res := tx.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND status IN ?", rec.ID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
+		Updates(map[string]any{
+			"status": models.PaycrestStatusConverting, "tx_hash": txHash, "failure_reason": "",
+			"token_amount":  FormatStableUnits(delivered.String()),
+			"quoted_amount": ConversionOwed(delivered, rec.MarkupBps).String(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 1 {
+		log.Printf("[it converted buy] METRIC ramp_conversion_handoff intent=%s record=%s tx=%s", intent.ID, rec.ID, txHash)
+		return nil
+	}
+	if rec.Status == models.PaycrestStatusConverting && strings.EqualFold(rec.TxHash, txHash) {
+		return nil // already handed off with this leg
+	}
+	log.Printf("[it converted buy] ALERT ramp_conversion_handoff_refused intent=%s record=%s status=%s", intent.ID, rec.ID, rec.Status)
+	return fmt.Errorf("%w: conversion record %s is %s", ErrITBadState, rec.ID, rec.Status)
+}
+
+// convertedCeiling (N4): a converted buy never delivers more than it was
+// opened for — a bigger bridge was never priced, capped or reserved for.
+func (s *ITService) convertedCeiling(ctx context.Context, intent *models.ITIntent, units *big.Int) error {
+	rec, err := s.ConversionFor(ctx, intent)
+	if err != nil || rec == nil {
+		return err
+	}
+	opened, err := DecimalToBaseUnits(rec.TokenAmount, StableAssetDecimals)
+	if err != nil {
+		return fmt.Errorf("%w: its opened amount %q is unreadable", ErrConvertedOverpaid, rec.TokenAmount)
+	}
+	if units.Cmp(opened) > 0 {
+		return fmt.Errorf("%w: %s USDC above the %s opened", ErrConvertedOverpaid,
+			FormatStableUnits(units.String()), FormatStableUnits(opened.String()))
+	}
+	return nil
 }
 
 // ConvertedTerms are a converted venue's economics on a delivered leg (spec

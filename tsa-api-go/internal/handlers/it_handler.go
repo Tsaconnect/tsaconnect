@@ -1601,6 +1601,8 @@ func stableStatusFor(err error) int {
 		// the sense that acting on the wrong id/state is the caller's mistake,
 		// not a server fault — a DB error below still falls through to 500.
 		errors.Is(err, services.ErrITBadState),
+		// Re-pricing a converted buy above what it was opened for: refund it.
+		errors.Is(err, services.ErrConvertedOverpaid),
 		errors.Is(err, services.ErrStableBuyBelowMinimum),
 		errors.Is(err, services.ErrStableBuyAlreadyOpen),
 		errors.Is(err, services.ErrStableBuyNoVA),
@@ -1658,6 +1660,8 @@ func stableCodeFor(err error) string {
 		return "stable_not_configured"
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"
+	case errors.Is(err, services.ErrConvertedOverpaid):
+		return "converted_overpaid"
 	case errors.Is(err, services.ErrITBadState):
 		// "this action does not apply to the intent's current state", one
 		// machine code for every ramp endpoint that can raise it. NOT

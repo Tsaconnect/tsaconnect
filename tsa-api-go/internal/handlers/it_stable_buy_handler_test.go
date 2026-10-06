@@ -34,6 +34,7 @@ func TestStableCodeFor_CoversBuyErrors(t *testing.T) {
 		// Not buy-specific: it_stable_sell.go raises ErrITBadState at seven
 		// sites, so a buy-flavoured code here would mislabel a sell failure.
 		{services.ErrITBadState, "stable_bad_state"},
+		{services.ErrConvertedOverpaid, "converted_overpaid"},
 	} {
 		if got := stableCodeFor(tc.err); got != tc.want {
 			t.Fatalf("code for %v = %q, want %q", tc.err, got, tc.want)
@@ -50,6 +51,7 @@ func TestStableStatusFor_BuyInputErrorsAre400(t *testing.T) {
 		// the wrong one, and a 5xx would have it retry forever.
 		services.ErrStableBuyWrongRamp,
 		services.ErrUnsupportedChainAsset,
+		services.ErrConvertedOverpaid,
 	} {
 		if got := stableStatusFor(err); got != 400 {
 			t.Fatalf("status for %v = %d, want 400", err, got)
