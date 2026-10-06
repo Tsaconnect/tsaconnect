@@ -582,3 +582,41 @@ func TestLoad_RampTreasuryLowBalanceRejectsBadValues(t *testing.T) {
 		t.Fatalf("75.5 -> %v", got)
 	}
 }
+
+// Spec §15.3: both converted routes are off unless switched on, and a bad
+// hash wait keeps the 10-minute default (loudly).
+func TestLoad_RampConvertedSwitches(t *testing.T) {
+	for _, k := range []string{"RAMP_TREASURY_CONVERTED", "RAMP_FLUTTERWAVE_CONVERTED",
+		"RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", "RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	cfg := Load()
+	if cfg.RampTreasuryConverted || cfg.RampFlutterwaveConverted || cfg.RampFlutterwaveConvertedUSDC != "" ||
+		cfg.RampFlutterwaveHashWait != 10*time.Minute {
+		t.Fatalf("defaults = %v %v %q %s", cfg.RampTreasuryConverted, cfg.RampFlutterwaveConverted,
+			cfg.RampFlutterwaveConvertedUSDC, cfg.RampFlutterwaveHashWait)
+	}
+	t.Setenv("RAMP_TREASURY_CONVERTED", "true")
+	t.Setenv("RAMP_FLUTTERWAVE_CONVERTED", "true")
+	t.Setenv("RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", " 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 ")
+	t.Setenv("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", "25")
+	cfg = Load()
+	if !cfg.RampTreasuryConverted || !cfg.RampFlutterwaveConverted ||
+		cfg.RampFlutterwaveConvertedUSDC != "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" || cfg.RampFlutterwaveHashWait != 25*time.Minute {
+		t.Fatalf("overrides = %+v", cfg)
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	for _, bad := range []string{"0", "-3"} {
+		t.Setenv("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", bad)
+		if got := Load().RampFlutterwaveHashWait; got != 10*time.Minute {
+			t.Fatalf("%s → %s, want the 10-minute default", bad, got)
+		}
+	}
+	if !strings.Contains(buf.String(), "ramp_fw_hash_wait_invalid") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}

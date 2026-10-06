@@ -21,6 +21,7 @@ import (
 type rampRoutes interface {
 	Quote(ctx context.Context, r ramp.Request) (*ramp.QuoteResult, error)
 	Open(ctx context.Context, r ramp.OpenRequest) (*ramp.Order, error)
+	OpenConverted(ctx context.Context, r ramp.OpenRequest) (*ramp.Order, error)
 	Get(ctx context.Context, userID uuid.UUID, id string) (*ramp.Order, error)
 	List(ctx context.Context, userID uuid.UUID, limit int) ([]ramp.Order, error)
 	ClaimPayment(ctx context.Context, userID uuid.UUID, id string) (*ramp.Order, error)
@@ -95,8 +96,49 @@ func (h *RampHandler) Quote(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
 }
 
-// POST /api/ramp/buy — a DIRECT buy only; the converted path stays on
-// /api/paycrest/buy in v1.
+// GET /api/ramp/converted-quote — authenticated, per-user limited (it prices
+// a LiFi route for the asset she names): every direct venue plus converted
+// venues for that asset, company wallet first (spec §15.8). The asset's
+// fields are read as /paycrest/converted-quote reads them; nothing is trusted,
+// the pricer resolves chain, decimals and symbol server-side.
+func (h *RampHandler) ConvertedQuote(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	amount := strings.TrimSpace(c.Query("amount"))
+	if amount == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
+		return
+	}
+	currency := c.DefaultQuery("currency", "NGN")
+	if !validFiatCode(currency) {
+		utils.ErrorResponse(c, http.StatusBadRequest, badFiatCodeMsg)
+		return
+	}
+	chainID, _ := strconv.ParseInt(c.Query("requestedChainId"), 10, 64)
+	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
+		Side: ramp.Buy, FiatCode: currency, FiatAmount: amount, UserID: user.ID,
+		Want: &services.RequestedAsset{
+			ChainID: chainID, Address: strings.TrimSpace(c.Query("requestedTokenAddress")),
+			Token: strings.TrimSpace(c.Query("requestedToken")), Chain: strings.TrimSpace(c.Query("requestedChain")),
+			Destination: strings.TrimSpace(c.Query("destinationAddress")),
+			// Priced to where it is delivered; the open re-prices to the
+			// wallet she opens with.
+			Recipient: user.WalletAddress,
+		},
+	})
+	if err != nil {
+		rampError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
+}
+
+// POST /api/ramp/buy — a direct buy, or a converted one the router priced
+// (requested fields plus a company-wallet or Flutterwave handle). Paycrest's
+// converted buys stay on /api/paycrest/buy.
 func (h *RampHandler) Buy(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -117,8 +159,7 @@ func (h *RampHandler) Buy(c *gin.Context) {
 		return
 	}
 	if isConvertedBuyBody(body.paycrestBuyBody) {
-		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
-			"This purchase needs the conversion route. Update the app and try again.", "use_paycrest_route")
+		h.buyConverted(c, user, body)
 		return
 	}
 	wallet, ok := callerWallet(c, user, body.WalletAddress)
@@ -139,8 +180,38 @@ func (h *RampHandler) Buy(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", rampOrderView(o))
 }
 
+// buyConverted opens a converted venue the router priced. Only a
+// company-wallet or Flutterwave handle reaches the router; anything else is
+// Paycrest's converted buy, served on /paycrest/buy.
+func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampBuyBody) {
+	name, _, herr := ramp.DecodeHandle(body.Handle)
+	if herr != nil || (name != ramp.ProviderTreasury && name != ramp.ProviderFlutterwave) {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"This purchase needs the conversion route. Update the app and try again.", "use_paycrest_route")
+		return
+	}
+	wallet, ok := callerWallet(c, user, body.WalletAddress)
+	if !ok {
+		return
+	}
+	o, err := h.router.OpenConverted(c.Request.Context(), ramp.OpenRequest{
+		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount, UserID: user.ID,
+			Want: &services.RequestedAsset{Chain: strings.TrimSpace(body.RequestedChain), Token: strings.TrimSpace(body.RequestedToken),
+				ChainID: body.RequestedChainID, Address: strings.TrimSpace(body.RequestedTokenAddress),
+				Destination: strings.TrimSpace(body.DestinationAddress), Recipient: wallet}},
+		Handle: body.Handle, QuotedRate: body.QuotedRate,
+		Input: ramp.OrderInput{UserID: user.ID, WalletAddress: wallet,
+			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName},
+	})
+	if err != nil {
+		rampError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", rampOrderView(o))
+}
+
 // isConvertedBuyBody reports a body asking for something other than what the venue
-// fills — the converted buy, which v1 leaves on /api/paycrest/buy.
+// fills — a converted buy (see buyConverted).
 func isConvertedBuyBody(b paycrestBuyBody) bool {
 	return b.RequestedChainID != 0 ||
 		strings.TrimSpace(b.RequestedTokenAddress) != "" ||
@@ -281,6 +352,39 @@ type itOrderView struct {
 	HonourUntil   *time.Time      `json:"honourUntil,omitempty"`
 	Repriced      bool            `json:"repriced"`
 	TxHash        string          `json:"txHash,omitempty"`
+	// Conversion is the bridge a converted buy feeds; WalletAddress is then
+	// hers, never the conversion treasury the leg delivers to (spec §15.8).
+	Conversion *conversionView `json:"conversion,omitempty"`
+}
+
+// conversionView is what an IT order shows of the conversion it feeds (spec
+// §15.8): where it is, what she receives, and the Conversion (LiFi) line in
+// the intent's fee shape. One view for the ramp order and the IT intent.
+type conversionView struct {
+	OrderID                string                 `json:"orderId"`
+	Status                 string                 `json:"status"`
+	Holder                 string                 `json:"holder,omitempty"`
+	RequestedToken         string                 `json:"requestedToken"`
+	RequestedChain         string                 `json:"requestedChain"`
+	RequestedChainID       int64                  `json:"requestedChainId,omitempty"`
+	RequestedTokenDecimals int                    `json:"requestedTokenDecimals,omitempty"`
+	EstimatedAmount        string                 `json:"estimatedAmount,omitempty"`
+	PromisedAmount         string                 `json:"promisedAmount,omitempty"`
+	MarkupBps              int                    `json:"markupBps"`
+	Fee                    *services.StableBuyFee `json:"fee,omitempty"`
+	WalletAddress          string                 `json:"walletAddress"`
+	DestinationAddress     string                 `json:"destinationAddress,omitempty"`
+}
+
+func newConversionView(rec *models.PaycrestOrderRecord, intent *models.ITIntent) *conversionView {
+	if rec == nil || intent == nil {
+		return nil
+	}
+	return &conversionView{OrderID: rec.ID.String(), Status: rec.Status, Holder: rec.Holder,
+		RequestedToken: rec.RequestedToken, RequestedChain: rec.RequestedChain, RequestedChainID: rec.RequestedChainID,
+		RequestedTokenDecimals: rec.RequestedTokenDecimals, EstimatedAmount: rec.EstimatedAmount,
+		PromisedAmount: rec.PromisedAmount, MarkupBps: rec.MarkupBps, Fee: services.ConversionFeeLine(intent, rec),
+		WalletAddress: rec.WalletAddress, DestinationAddress: rec.DestinationAddress}
 }
 
 func itOrderBody(o *ramp.Order) itOrderView {
@@ -305,6 +409,10 @@ func itOrderBody(o *ramp.Order) itOrderView {
 		Repriced:      services.StableBuyRateUpdated(i),
 		TxHash:        i.TxHash,
 	}
+	if o.Conversion != nil {
+		v.Conversion = newConversionView(o.Conversion, i)
+		v.WalletAddress = o.Conversion.WalletAddress
+	}
 	if p := o.PayInto; p != nil {
 		v.PayInto = &rampPayInto{Bank: p.BankName, AccountName: p.AccountName, AccountNumber: p.AccountNumber,
 			AmountNgn: p.AmountNGN, PayerInstruction: p.PayerInstruction}
@@ -316,6 +424,9 @@ const (
 	rampOrderOpenCode  = "ramp_order_open"
 	rampAbandonCapCode = "ramp_abandon_cap"
 	rampDailyLimitCode = "ramp_daily_limit"
+	// convertedOverpaidCode: a converted buy priced above what it was opened
+	// for parks and is refunded, never bridged (N4).
+	convertedOverpaidCode = "converted_overpaid"
 )
 
 // rampError maps router outcomes; everything else (refusals keep their
@@ -341,7 +452,7 @@ func rampError(c *gin.Context, err error) {
 	case errors.Is(err, ramp.ErrInvalidQuote):
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
 			"Your quote is missing or out of date. Refresh the rate and try again.", "invalid_quote")
-	case errors.Is(err, ramp.ErrAbandonCapReached):
+	case errors.Is(err, ramp.ErrAbandonCapReached), errors.Is(err, services.ErrStableBuyAbandonCapReached):
 		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
 			"You've cancelled too many unpaid purchases today. Try again tomorrow.", rampAbandonCapCode)
 	case errors.Is(err, services.ErrTreasuryDailyCapReached):
@@ -351,6 +462,9 @@ func rampError(c *gin.Context, err error) {
 		// A provider's own reason the user can act on (carried on an
 		// unavailable outcome): today's 400 wording, not a generic outage.
 		paycrestError(c, err)
+	case errors.Is(err, services.ErrConvertedOverpaid):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"This payment is more than the purchase was opened for, so it is on hold to be refunded to you.", convertedOverpaidCode)
 	case errors.Is(err, services.ErrITBuyPaymentArrived):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, itBuyPaymentArrivedMessage, itBuyPaymentArrivedCode)
 	case errors.Is(err, services.ErrITBadState):

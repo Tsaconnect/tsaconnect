@@ -1,0 +1,116 @@
+package main
+
+import (
+	"context"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+)
+
+// laneSigner is a lane's signer for address checks only; it never signs.
+type laneSigner struct{ addr string }
+
+func (s laneSigner) Address() string { return s.addr }
+func (laneSigner) SignAndBroadcast(context.Context, []byte) (string, error) {
+	panic("laneSigner never signs")
+}
+
+// testTreasury is a treasury with one lane per chain, each offering USDC at
+// the given address.
+func testTreasury(usdc map[string]string) *services.Treasury {
+	lanes := map[string]*services.TreasuryLane{}
+	for chain, addr := range usdc {
+		lanes[chain] = &services.TreasuryLane{SponsorLane: &services.SponsorLane{
+			ChainKey: chain, Signer: laneSigner{"0x00000000000000000000000000000000000000A1"},
+			Tokens: map[string]string{"USDC": addr},
+		}}
+	}
+	return services.NewTreasury(lanes, services.CompanyWalletCaps(), nil)
+}
+
+func keyAddress(t *testing.T, hexKey string) string {
+	t.Helper()
+	k, err := crypto.HexToECDSA(hexKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return crypto.PubkeyToAddress(k.PublicKey).Hex()
+}
+
+func TestConversionTreasuryAddress_DerivedFromTheKeyAlone(t *testing.T) {
+	want := keyAddress(t, testKeyA)
+	for _, raw := range []string{testKeyA, "0x" + testKeyA, "  0x" + testKeyA + " "} {
+		// RAMP_CONVERSION_BUY off: the address is still known (Plan C6).
+		cfg := &config.Config{RampTreasuryPrivateKey: raw, RampConversionBuyEnabled: false}
+		if got := conversionTreasuryAddress(cfg); got != want {
+			t.Fatalf("%q: address = %s, want %s", raw, got, want)
+		}
+	}
+	if conversionTreasuryAddress(&config.Config{}) != "" || conversionTreasuryAddress(&config.Config{RampTreasuryPrivateKey: "zz"}) != "" {
+		t.Fatal("no key or a bad key derives nothing")
+	}
+}
+
+// The company wallet is built knowing the conversion treasury, so a sale to
+// it without a record is refused (Task 3's guard) whatever the switches say.
+func TestNewCompanyWallet_KnowsTheConversionTreasury(t *testing.T) {
+	treasury := testTreasury(map[string]string{"base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"})
+	cw := services.CompanyWalletConfig{Treasury: treasury, Decimals: map[string]map[string]int{"base": {"USDC": 6}}}
+
+	cfg := &config.Config{RampTreasuryPrivateKey: testKeyB}
+	w := newCompanyWallet(cfg, cw)
+	if w == nil || !w.IsConversionTreasury(keyAddress(t, testKeyB)) {
+		t.Fatal("the wallet does not know the conversion treasury")
+	}
+	if w.IsConversionTreasury(keyAddress(t, testKeyA)) {
+		t.Fatal("another address taken for the conversion treasury")
+	}
+	if w := newCompanyWallet(&config.Config{}, cw); w == nil || w.IsConversionTreasury(keyAddress(t, testKeyB)) {
+		t.Fatal("no conversion key: no conversion treasury")
+	}
+}
+
+func TestConvertedPricerFor_NilUnlessConversionIsBuilt(t *testing.T) {
+	treasury := testTreasury(map[string]string{"base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"})
+	quotes := &services.PaycrestQuoteService{}
+	if p := convertedPricerFor(&config.Config{RampConversionBuyEnabled: false}, treasury, quotes, "route1"); p != nil {
+		t.Fatal("conversion off: no pricer")
+	}
+	on := &config.Config{RampConversionBuyEnabled: true}
+	if p := convertedPricerFor(on, nil, quotes, "route1"); p != nil {
+		t.Fatal("no conversion treasury: no pricer")
+	}
+	// A typed-nil quote service must come back as a true nil interface.
+	var none *services.PaycrestQuoteService
+	if p := convertedPricerFor(on, treasury, none, "route1"); p != nil {
+		t.Fatal("no quote service: no pricer")
+	}
+	if p := convertedPricerFor(on, treasury, quotes, "route1"); p == nil {
+		t.Fatal("conversion built: the quote service prices converted legs")
+	}
+}
+
+func TestFlutterwaveConvertedGate(t *testing.T) {
+	const polygonUSDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+	polygon := testTreasury(map[string]string{"polygon": polygonUSDC})
+	for _, tc := range []struct {
+		name     string
+		treasury *services.Treasury
+		usdc     string
+		want     bool
+	}{
+		{"no conversion treasury", nil, polygonUSDC, false},
+		{"no polygon lane", testTreasury(map[string]string{"base": polygonUSDC}), polygonUSDC, false},
+		{"unrecorded token", polygon, "", false},
+		{"USDC.e recorded, lane holds native USDC", polygon, "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", false},
+		{"match", polygon, polygonUSDC, true},
+		{"match, other case", polygon, " 0x3C499C542CEF5E3811E1192CE70D8CC03D5C3359 ", true},
+	} {
+		cfg := &config.Config{RampFlutterwaveConvertedUSDC: tc.usdc}
+		if got := flutterwaveConvertedGate(cfg, tc.treasury); got != tc.want {
+			t.Fatalf("%s: gate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

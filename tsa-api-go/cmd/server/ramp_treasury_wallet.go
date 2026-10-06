@@ -110,7 +110,9 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		log.Printf("[ramp-company-wallet] dormant: lanes disagree on their signer")
 		return nil
 	}
-	w := services.NewCompanyWallet(services.CompanyWalletConfig{
+	// It knows the conversion treasury whatever RAMP_CONVERSION_BUY says, so
+	// a sale there with no conversion record is refused (Plan C6).
+	w := newCompanyWallet(cfg, services.CompanyWalletConfig{
 		Treasury: treasury, Decimals: decimals, Verifiers: verifiers, Probes: probes,
 		ReceiptRPCs: receiptRPCs, ReceiptsOK: receiptsOK,
 	})
@@ -119,8 +121,8 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		return nil
 	}
 	// Where the operator sends stock and gas (spec §4.1 boot line).
-	log.Printf("[ramp-company-wallet] enabled address=%s chains=%v quotable=%v tokens=%v max_order=$%s",
-		w.Address(), w.Chains(), w.QuotableChains(), decimals, services.FormatStableUnits(maxUnits.String()))
+	log.Printf("[ramp-company-wallet] enabled address=%s chains=%v quotable=%v tokens=%v max_order=$%s conversion_treasury=%s",
+		w.Address(), w.Chains(), w.QuotableChains(), decimals, services.FormatStableUnits(maxUnits.String()), conversionTreasuryAddress(cfg))
 	return w
 }
 

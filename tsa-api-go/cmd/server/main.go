@@ -1702,6 +1702,16 @@ func main() {
 			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
 			paycrestOrders.SetCurrencyRegistry(currencyRegistry)
 		}
+		// Converted buys: a provider delivers into our own treasury instead of
+		// the user's wallet, then the treasury bridges it via LiFi. Dormant
+		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
+		// nil-orchestrator gate itself lives in registerRampConversionWorkers
+		// (and is unit-tested there), not inlined here. Built before the
+		// router so the company wallet and Flutterwave can price converted
+		// venues on it (spec §15).
+		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
+		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
+		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg)
 		// The ramp router (Paycrest is its only provider today) answers the
 		// hub's legs and serves /api/ramp/*. Without an order service there
 		// is nothing to route, and the legs come straight from the quotes.
@@ -1717,6 +1727,23 @@ func main() {
 			// and nowhere else: off stops new quotes and opens only (I1).
 			treasuryProvider := ramp.NewTreasuryProvider(itService, treasuryRates, cfg.RampTreasuryBuy)
 			fwProvider := ramp.NewFlutterwaveProvider(itService, cfg.RampFlutterwaveBuy)
+			// Converted venues (spec §15.3): each switch attaches a converted
+			// pricer to its provider, quoting and opening only. WithConversion
+			// ignores a nil provider and a nil pricer, so a dormant provider
+			// stays a true nil.
+			route1, route2 := false, false
+			if cfg.RampTreasuryConverted && treasuryProvider != nil {
+				if pricer := convertedPricerFor(cfg, rampTreasury, paycrestQuotes, "route 1"); pricer != nil {
+					treasuryProvider, route1 = ramp.WithConversion(treasuryProvider, pricer), true
+				}
+			}
+			if cfg.RampFlutterwaveConverted && fwProvider != nil && flutterwaveConvertedGate(cfg, rampTreasury) {
+				if pricer := convertedPricerFor(cfg, rampTreasury, paycrestQuotes, "route 2"); pricer != nil {
+					fwProvider, route2 = ramp.WithConversion(fwProvider, pricer), true
+				}
+			}
+			log.Printf("[ramp] converted venues: route1=%v (RAMP_TREASURY_CONVERTED=%v) route2=%v (RAMP_FLUTTERWAVE_CONVERTED=%v)",
+				route1, cfg.RampTreasuryConverted, route2, cfg.RampFlutterwaveConverted)
 			names := []string{}
 			if treasuryProvider != nil {
 				names = append(names, ramp.ProviderTreasury)
@@ -1776,13 +1803,6 @@ func main() {
 				paySellers = sellIntents
 			}
 		}
-		// Converted buys: Paycrest delivers into our own treasury instead of
-		// the user's wallet, then the treasury bridges it via LiFi. Dormant
-		// unless RAMP_CONVERSION_BUY is set — see buildRampConversion. The
-		// nil-orchestrator gate itself lives in registerRampConversionWorkers
-		// (and is unit-tested there), not inlined here.
-		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
-		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.
 		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {

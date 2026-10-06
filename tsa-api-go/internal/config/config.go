@@ -465,6 +465,27 @@ type Config struct {
 	// RampTreasuryMaxUSD is the per-order maximum (quote, open, live pricing).
 	RampTreasuryMaxUSD string
 
+	// Converted venues (spec 2026-10-03 §15.3). Each switch gates its route's
+	// quoting and opening only — claim, send, handoff and the orchestrator
+	// never read it, so an in-flight converted order always finishes — and is
+	// read in cmd/server alone.
+	// RampTreasuryConverted: route 1, the company wallet delivers USDC to the
+	// conversion treasury. Also needs RAMP_TREASURY_BUY, RAMP_CONVERSION_BUY
+	// and a conversion-treasury lane on the leg chain.
+	RampTreasuryConverted bool
+	// RampFlutterwaveConverted: route 2, Flutterwave delivers Polygon USDC to
+	// the conversion treasury. Also needs RAMP_FLUTTERWAVE_BUY,
+	// RAMP_CONVERSION_BUY, a Polygon conversion-treasury lane and
+	// RampFlutterwaveConvertedUSDC.
+	RampFlutterwaveConverted bool
+	// RampFlutterwaveConvertedUSDC is the Polygon USDC contract Flutterwave
+	// actually sends (N5), recorded from the canary. Route 2 stays dormant
+	// unless it equals the treasury lane's USDC.
+	RampFlutterwaveConvertedUSDC string
+	// RampFlutterwaveHashWait is how long a hashless SUCCESSFUL Flutterwave
+	// delivery waits for an on-chain hash before it parks (N5).
+	RampFlutterwaveHashWait time.Duration
+
 	// RampConversionSellEnabled is the sell half of the same round trip: she
 	// swaps her own token into USDC on Base (in her own wallet, we never hold
 	// it) and we offramp that. Independent of RAMP_CONVERSION_BUY — the sell
@@ -1019,6 +1040,15 @@ func Load() *Config {
 		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
 	}
 	cfg.RampTreasuryBuy = getEnvBool("RAMP_TREASURY_BUY", false)
+	cfg.RampTreasuryConverted = getEnvBool("RAMP_TREASURY_CONVERTED", false)
+	cfg.RampFlutterwaveConverted = getEnvBool("RAMP_FLUTTERWAVE_CONVERTED", false)
+	cfg.RampFlutterwaveConvertedUSDC = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", ""))
+	if m := getEnvInt64("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", 10); m > 0 {
+		cfg.RampFlutterwaveHashWait = time.Duration(m) * time.Minute
+	} else {
+		log.Printf("[config] ALERT ramp_fw_hash_wait_invalid value=%d — using 10 minutes", m)
+		cfg.RampFlutterwaveHashWait = 10 * time.Minute
+	}
 	cfg.RampTreasuryWalletPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_WALLET_PRIVATE_KEY", ""))
 	cfg.RampTreasuryWalletChains = nil
 	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_WALLET_CHAINS", "base"), ",") {

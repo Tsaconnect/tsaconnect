@@ -1029,6 +1029,13 @@ func (h *ITHandler) intentData(ctx context.Context, user *models.User, intent *m
 			data["payTo"] = payTo
 		}
 	}
+	// A converted buy: what she receives and where the bridge is (spec
+	// §15.8). A failed lookup still answers with the order.
+	if rec, err := h.it.ConversionFor(ctx, intent); err != nil {
+		log.Printf("[it] intent=%s conversion: %s", intent.ID, services.RedactAlertText(err.Error()))
+	} else if rec != nil {
+		data["conversion"] = newConversionView(rec, intent)
+	}
 	return data
 }
 
@@ -1620,6 +1627,8 @@ func stableStatusFor(err error) int {
 		// it needs an operator, not a retry from the caller. Ours, not theirs.
 		errors.Is(err, services.ErrStableDeliveryExhausted):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrStableBuyAbandonCapReached):
+		return http.StatusTooManyRequests
 	case errors.Is(err, services.ErrKYCVerificationRequired):
 		// 403, alongside the agreement gate: the caller is authenticated and
 		// the request is well-formed, but they are not permitted to transact
@@ -1661,7 +1670,9 @@ func stableCodeFor(err error) string {
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"
 	case errors.Is(err, services.ErrConvertedOverpaid):
-		return "converted_overpaid"
+		return convertedOverpaidCode
+	case errors.Is(err, services.ErrStableBuyAbandonCapReached):
+		return rampAbandonCapCode
 	case errors.Is(err, services.ErrITBadState):
 		// "this action does not apply to the intent's current state", one
 		// machine code for every ramp endpoint that can raise it. NOT

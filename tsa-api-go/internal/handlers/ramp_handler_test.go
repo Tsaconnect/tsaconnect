@@ -22,16 +22,23 @@ import (
 )
 
 type fakeRampRoutes struct {
-	quote    *ramp.QuoteResult
-	quoteErr error
-	openReq  ramp.OpenRequest
-	order    *ramp.Order
-	openErr  error
-	getErr   error
+	quote        *ramp.QuoteResult
+	quoteErr     error
+	quoteReq     ramp.Request
+	openReq      ramp.OpenRequest
+	convertedReq ramp.OpenRequest
+	order        *ramp.Order
+	openErr      error
+	getErr       error
 }
 
-func (f *fakeRampRoutes) Quote(context.Context, ramp.Request) (*ramp.QuoteResult, error) {
+func (f *fakeRampRoutes) Quote(_ context.Context, r ramp.Request) (*ramp.QuoteResult, error) {
+	f.quoteReq = r
 	return f.quote, f.quoteErr
+}
+func (f *fakeRampRoutes) OpenConverted(_ context.Context, r ramp.OpenRequest) (*ramp.Order, error) {
+	f.convertedReq = r
+	return f.order, f.openErr
 }
 func (f *fakeRampRoutes) Open(_ context.Context, r ramp.OpenRequest) (*ramp.Order, error) {
 	f.openReq = r
@@ -68,6 +75,7 @@ func rampTestServer(t *testing.T, f *fakeRampRoutes, user *models.User) *gin.Eng
 	g := r.Group("/api/ramp")
 	g.GET("/quote", h.Quote)
 	g.Use(auth)
+	g.GET("/converted-quote", h.ConvertedQuote)
 	g.POST("/buy", h.Buy)
 	g.POST("/sell", h.Sell)
 	g.GET("/orders", h.ListOrders)

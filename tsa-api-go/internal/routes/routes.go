@@ -1101,6 +1101,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				rg.GET("/quote", middleware.RateLimiter(60, time.Minute), rh.Quote)
 				rg.Use(auth)
 				{
+					// Prices a LiFi route for the asset she names: never free
+					// to trigger (spec §15.8).
+					rg.GET("/converted-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), rh.ConvertedQuote)
 					rampWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
 					rg.POST("/buy", itIdem, rampWriteLimit, rh.Buy)
 					rg.POST("/sell", itIdem, rampWriteLimit, rh.Sell)
