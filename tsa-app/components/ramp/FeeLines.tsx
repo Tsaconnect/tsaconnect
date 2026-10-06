@@ -7,13 +7,13 @@ import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import { Text } from '@/components/ui';
+import { formatNaira } from '@/utils/stableSellQuote';
+import { formatFiat } from '@/services/p2p';
 
-/** "2474.8" -> "2,474.80": a fiat amount with thousands separators and 2 dp,
- *  the way the app writes naira everywhere (PF13). Non-numbers pass through. */
-export function groupThousands(value: string): string {
-  const n = Number(value);
-  if (!value || !Number.isFinite(n)) return value;
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** A fiat amount the way the app writes it (PF13): naira through the shared
+ *  string-maths formatter ("₦2,474.80"), any other currency through formatFiat. */
+export function fiatText(value: string, symbol: string): string {
+  return symbol === '₦' ? formatNaira(value) : `${symbol}${formatFiat(value)}`;
 }
 
 export interface FeeLine {
@@ -55,7 +55,7 @@ export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
             ) : null}
           </View>
           <Text variant="caption" style={{ color: colors.textSecondary }}>
-            {f.ngn ? `−${f.token} ${token} (≈ ${symbol}${groupThousands(f.ngn)})` : `−${f.token} ${token}`}
+            {f.ngn ? `−${f.token} ${token} (≈ ${fiatText(f.ngn, symbol)})` : `−${f.token} ${token}`}
           </Text>
         </View>
       ))}

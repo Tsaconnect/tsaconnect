@@ -103,6 +103,13 @@ describe('the router with the company wallet and Flutterwave', () => {
     expect(merged.best).toEqual(fw);
   });
 
+  it('falls back to a merged venue for best, never a dropped /paycrest direct one', () => {
+    const d = { ...quote([]), best: null };
+    const merged = mergeBuyQuotes(d, { ...quote([pcDirect, converted]), best: pcDirect })!;
+    expect(merged.venues).toEqual([converted]);
+    expect(merged.best).toEqual(converted);
+  });
+
   it('stands on either quote alone', () => {
     expect(mergeBuyQuotes(null, quote([pcDirect, converted]))!.venues).toEqual([pcDirect, converted]);
     expect(mergeBuyQuotes(quote([fw]), undefined)!.venues).toEqual([fw]);

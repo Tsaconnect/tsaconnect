@@ -1,4 +1,7 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
+jest.mock('@react-native-async-storage/async-storage', () =>
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
+  require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 jest.mock('@/theme', () => ({
   __esModule: true,
   useTheme: () => ({ colors: new Proxy({}, { get: () => '#000' }), spacing: { xs: 4, sm: 8, md: 12 } }),

@@ -92,7 +92,7 @@ import {
 } from '@/services/rampApi';
 import { itIntentRoute } from '@/utils/itBuyOrder';
 import { IT_AGREEMENT_REQUIRED } from '@/services/itApi';
-import { FeeLines, groupThousands } from '@/components/ramp/FeeLines';
+import { FeeLines, fiatText } from '@/components/ramp/FeeLines';
 import { formatTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 // The destination token AND chain picker — reused verbatim from the swap
@@ -792,8 +792,7 @@ export default function PaycrestBuyScreen() {
                     {isConvertedVenue(venue)
                       ? `Settles as ${venue.token} on ${chainLabel(venue.chain)}`
                       : `on ${chainLabel(venue.chain)}`}{' '}
-                    · {symbol}
-                    {groupThousands(venue.rate)} per {venue.token}
+                    · {fiatText(venue.rate, symbol)} per {venue.token}
                   </Text>
                   {/* Every provider fee as its own line (spec §14); "You
                       receive" above is already after all of them. */}

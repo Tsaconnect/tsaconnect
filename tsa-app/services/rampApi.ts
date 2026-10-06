@@ -104,7 +104,9 @@ export function mergeBuyQuotes(
   if (!d && !c) return null;
   if (!d) return c as RampQuote;
   const conv = (c?.venues ?? []).filter((v) => isConvertedVenue(v));
-  return { ...d, venues: [...d.venues, ...conv], best: d.best ?? c?.best ?? null };
+  const venues = [...d.venues, ...conv];
+  // `best` must be one of the venues shown, never a /paycrest direct venue the merge dropped.
+  return { ...d, venues, best: d.best ?? venues[0] ?? null };
 }
 
 /** A PaycrestError, so every screen's existing `instanceof PaycrestError`
