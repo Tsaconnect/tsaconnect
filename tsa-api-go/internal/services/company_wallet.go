@@ -183,9 +183,9 @@ func NewCompanyWallet(c CompanyWalletConfig) *CompanyWallet {
 		return nil
 	}
 	return &CompanyWallet{
-		treasury: c.Treasury, decimals: decimals, verifiers: c.Verifiers, probes: c.Probes,
+		treasury: c.Treasury, decimals: decimals, verifiers: lowerChainKeys(c.Verifiers), probes: lowerChainKeys(c.Probes),
 		now: time.Now, stock: map[string]stockReading{}, free: map[string]stockReading{},
-		receiptRPCs: c.ReceiptRPCs, receiptsOK: receiptsVerdict(decimals, c.ReceiptsOK),
+		receiptRPCs: lowerChainKeys(c.ReceiptRPCs), receiptsOK: receiptsVerdict(decimals, lowerChainKeys(c.ReceiptsOK)),
 	}
 }
 
@@ -219,6 +219,19 @@ func (w *CompanyWallet) Offers(chain, token string) bool {
 }
 
 func (w *CompanyWallet) Lane(chain string) *TreasuryLane { return w.treasury.Lane(chain) }
+
+// lowerChainKeys normalises per-chain config keys the way Decimals is, so a
+// "Base" key cannot silently miss a lookup by "base".
+func lowerChainKeys[V any](in map[string]V) map[string]V {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]V, len(in))
+	for k, v := range in {
+		out[strings.ToLower(strings.TrimSpace(k))] = v
+	}
+	return out
+}
 
 // receiptsVerdict is the boot probe's verdict per offered chain; nil means
 // every chain is readable.

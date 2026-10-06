@@ -239,3 +239,75 @@ func TestCheckTreasuryDailyCap(t *testing.T) {
 		t.Fatalf("another user: %v", err)
 	}
 }
+
+func intentCount(s *ITService) int64 {
+	var n int64
+	s.db.Model(&models.ITIntent{}).Count(&n)
+	return n
+}
+
+// An exported money-writing function enforces its own limits: a hand-built
+// quote that skipped QuoteTreasuryBuy is refused, and nothing is written.
+func TestOpenTreasuryBuy_EnforcesItsOwnLimits(t *testing.T) {
+	ctx := context.Background()
+
+	s, userID, _ := newTreasuryBuyService(t, 50_000_000)
+	below := &StableBuyQuote{Asset: "USDC", Currency: "NGN", FiatMinor: big.NewInt(5_000), AssetUnits: big.NewInt(1_000_000), RatePerUnitMinor: big.NewInt(138257)}
+	if _, _, err := s.OpenTreasuryBuy(ctx, userID, below, "base", testRoutedEVM); !errors.Is(err, ErrStableBuyBelowMinimum) {
+		t.Fatalf("below the naira minimum: %v", err)
+	}
+	if n := intentCount(s); n != 0 {
+		t.Fatalf("%d rows written below the minimum", n)
+	}
+
+	big495 := seedTreasuryIntent(t, s, userID, models.ITStatusSettled)
+	s.db.Model(big495).Update("asset_amount", "495000000")
+	before := intentCount(s)
+	if _, _, err := s.OpenTreasuryBuy(ctx, userID, treasuryTestQuote(t, s), "base", testRoutedEVM); !errors.Is(err, ErrTreasuryDailyCapReached) {
+		t.Fatalf("over the daily cap: %v", err)
+	}
+	if n := intentCount(s); n != before {
+		t.Fatalf("%d rows written over the daily cap", n-before)
+	}
+
+	w0, _, _ := newTestCompanyWallet(t, 50_000_000)
+	closed := NewCompanyWallet(CompanyWalletConfig{
+		Treasury: w0.Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		ReceiptsOK: map[string]bool{"base": false},
+	})
+	s2, user2 := newRoutedBuyService(t)
+	s2.SetCompanyWallet(closed)
+	if _, _, err := s2.OpenTreasuryBuy(ctx, user2, treasuryTestQuote(t, s), "base", testRoutedEVM); !errors.Is(err, ErrTreasuryUnavailable) {
+		t.Fatalf("receipts unreadable: %v", err)
+	}
+	if n := intentCount(s2); n != 0 {
+		t.Fatalf("%d rows written on an unreadable chain", n)
+	}
+}
+
+// A hand-built lowercase asset or chain must still be reserved.
+func TestInsertTreasuryIntent_NormalisesSoItIsReserved(t *testing.T) {
+	s, userID, _ := newTreasuryBuyService(t, 50_000_000)
+	i := seedTreasuryIntent(t, s, userID, models.ITStatusPendingPayment)
+	s.db.Delete(i)
+	i.ID = uuid.New()
+	i.Asset, i.DestChain = "usdc", "base"
+	if err := s.insertTreasuryIntent(context.Background(), i); err != nil {
+		t.Fatal(err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", i.ID)
+	if got.Asset != "USDC" || got.DestChain != "BASE" {
+		t.Fatalf("stored %q %q", got.Asset, got.DestChain)
+	}
+	if r := reservedNow(t, s); r != 7_232_937 {
+		t.Fatalf("reserved = %d, the lowercase order was not reserved", r)
+	}
+}
+
+func TestITService_DormantWalletAccessorsAreNilSafe(t *testing.T) {
+	s, _ := newRoutedBuyService(t)
+	if s.TreasuryChains() != nil || s.TreasuryTokens("base") != nil || s.TreasuryCanPayGas(context.Background(), "base") {
+		t.Fatal("a dormant wallet must offer nothing")
+	}
+}

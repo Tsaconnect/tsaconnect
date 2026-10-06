@@ -24,13 +24,28 @@ var (
 	ErrTreasuryDailyCapReached = errors.New("company wallet: daily purchase limit reached")
 )
 
-func (s *ITService) SetCompanyWallet(w *CompanyWallet)    { s.wallet = w }
-func (s *ITService) HasCompanyWallet() bool               { return s != nil && s.wallet != nil }
-func (s *ITService) CompanyWallet() *CompanyWallet        { return s.wallet }
-func (s *ITService) TreasuryChains() []string             { return s.wallet.QuotableChains() }
-func (s *ITService) TreasuryTokens(chain string) []string { return s.wallet.Tokens(chain) }
+func (s *ITService) SetCompanyWallet(w *CompanyWallet) { s.wallet = w }
+func (s *ITService) HasCompanyWallet() bool            { return s != nil && s.wallet != nil }
+func (s *ITService) CompanyWallet() *CompanyWallet     { return s.wallet }
+
+// TreasuryChains, TreasuryTokens and TreasuryCanPayGas are nil-safe: a dormant
+// wallet offers nothing.
+func (s *ITService) TreasuryChains() []string {
+	if !s.HasCompanyWallet() {
+		return nil
+	}
+	return s.wallet.QuotableChains()
+}
+
+func (s *ITService) TreasuryTokens(chain string) []string {
+	if !s.HasCompanyWallet() {
+		return nil
+	}
+	return s.wallet.Tokens(chain)
+}
+
 func (s *ITService) TreasuryCanPayGas(ctx context.Context, chain string) bool {
-	return s.wallet.CanPayForTransfer(ctx, chain)
+	return s.HasCompanyWallet() && s.wallet.CanPayForTransfer(ctx, chain)
 }
 
 // withStockLock runs fn in one transaction holding the (chain, token) advisory
@@ -133,12 +148,26 @@ func (s *ITService) OpenTreasuryBuy(ctx context.Context, userID uuid.UUID, q *St
 	if !s.wallet.Offers(chain, q.Asset) {
 		return nil, nil, fmt.Errorf("%w: the company wallet does not sell %s on %s", ErrUnsupportedChainAsset, q.Asset, chain)
 	}
+	// This function writes money-bearing rows, so it enforces its own limits
+	// rather than trusting that its caller quoted first.
+	if !s.wallet.ReceiptsReadable(chain) {
+		return nil, nil, fmt.Errorf("%w: %s cannot prove deliveries right now", ErrTreasuryUnavailable, chain)
+	}
+	lim := s.treasuryLimits()
+	if q.FiatMinor == nil || q.FiatMinor.Cmp(lim.minKobo) < 0 {
+		return nil, nil, fmt.Errorf("%w: minimum is %s %s", ErrStableBuyBelowMinimum, FormatMinor(lim.minKobo.String()), q.Currency)
+	}
 	if err := s.stableBuyPrechecks(ctx, userID, q, false); err != nil {
 		return nil, nil, err
 	}
+	if q.AssetUnits != nil && q.AssetUnits.Sign() > 0 {
+		if err := s.CheckTreasuryDailyCap(ctx, userID, q.AssetUnits); err != nil {
+			return nil, nil, err
+		}
+	}
 	return s.openStableBuy(ctx, userID, q, chain, destAddress, stableBuyOpen{
 		provider: models.ITProviderTreasury, routed: true,
-		maxUnits: s.treasuryLimits().maxUnits,
+		maxUnits: lim.maxUnits,
 		validate: func(_, _, addr string) error {
 			if !common.IsHexAddress(addr) {
 				return fmt.Errorf("%w: delivery needs an EVM address", ErrBadDeliveryAddress)
@@ -156,6 +185,10 @@ func (s *ITService) insertTreasuryIntent(ctx context.Context, intent *models.ITI
 	if !ok || units.Sign() <= 0 {
 		return fmt.Errorf("it treasury buy: unusable asset amount %q", intent.AssetAmount)
 	}
+	// The reservation filters on upper-case chain and token; a row written any
+	// other way would be invisible to it.
+	intent.Asset = strings.ToUpper(strings.TrimSpace(intent.Asset))
+	intent.DestChain = strings.ToUpper(strings.TrimSpace(intent.DestChain))
 	chain := strings.ToLower(intent.DestChain)
 	return s.withStockLock(ctx, chain, intent.Asset, func(tx *gorm.DB) error {
 		free, _, err := s.freeTreasuryStock(ctx, tx, chain, intent.Asset, uuid.Nil, true)

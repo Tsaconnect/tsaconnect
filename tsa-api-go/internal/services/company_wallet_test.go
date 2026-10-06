@@ -220,3 +220,35 @@ func TestProbeReceipts(t *testing.T) {
 		t.Fatalf("no block: %v", err)
 	}
 }
+
+type cwStubVerifier struct{}
+
+func (cwStubVerifier) VerifyTransferFrom(context.Context, string, string, string, string) (*big.Int, error) {
+	return nil, nil
+}
+
+type cwStubProbe struct{ TreasuryTxProbe }
+
+// Per-chain config keys are normalised like Decimals: "Base" works.
+func TestNewCompanyWallet_NormalisesChainKeys(t *testing.T) {
+	w0, _, _ := newTestCompanyWallet(t, 1)
+	rpc := &fakeRawRPC{blocks: map[string]map[string]any{"latest": {"number": "0x10", "transactions": []string{"0xaa"}}}, receipt: `{"status":"0x1"}`}
+	probe := cwStubProbe{}
+	w := NewCompanyWallet(CompanyWalletConfig{
+		Treasury: w0.Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		Verifiers:   map[string]ERC20SourcedTransferVerifier{"Base": cwStubVerifier{}},
+		Probes:      map[string]TreasuryTxProbe{"Base": probe},
+		ReceiptRPCs: map[string]RawRPCCaller{"Base": rpc},
+		ReceiptsOK:  map[string]bool{"Base": false},
+	})
+	if w.ReceiptsReadable("base") {
+		t.Fatal(`ReceiptsOK["Base"]=false must close "base"`)
+	}
+	w.ReprobeReceipts(context.Background())
+	if !w.ReceiptsReadable("base") {
+		t.Fatal(`ReceiptRPCs["Base"] was not re-probed`)
+	}
+	if w.Verifier("base") == nil || w.Probe("base") == nil {
+		t.Fatal(`Verifiers/Probes["Base"] not found by "base"`)
+	}
+}
