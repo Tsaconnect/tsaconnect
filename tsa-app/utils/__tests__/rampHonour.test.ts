@@ -20,6 +20,15 @@ describe('honourOf', () => {
       .toEqual({ holding: false, rateUpdated: false });
   });
 
+  it('shows the notice only while the order is live, delivered or being delivered', () => {
+    for (const status of ['refunded', 'cancelled', 'failed', 'buy_awaiting_rate']) {
+      expect(honourOf({ ...routed, status, repriced: true }, now).rateUpdated).toBe(false);
+    }
+    for (const status of ['payment_received', 'delivering', 'settled']) {
+      expect(honourOf({ ...routed, status, repriced: true }, now).rateUpdated).toBe(true);
+    }
+  });
+
   it('ignores MCGP, sells and nothing at all', () => {
     expect(honourOf({ ...routed, asset: 'MCGP' }, now).holding).toBe(false);
     expect(honourOf({ ...routed, direction: 'sell' }, now).holding).toBe(false);

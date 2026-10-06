@@ -42,5 +42,6 @@ describe('deliveryExplorerUrl', () => {
     expect(deliveryExplorerUrl({ ...settled, provider: undefined })).toBeUndefined();
     expect(deliveryExplorerUrl({ ...settled, txHash: '../address/0x1' })).toBeUndefined();
     expect(deliveryExplorerUrl({ ...settled, destChain: undefined })).toBeUndefined();
+    expect(deliveryExplorerUrl({ ...settled, destChain: 'bogus' })).toBeUndefined();
   });
 });

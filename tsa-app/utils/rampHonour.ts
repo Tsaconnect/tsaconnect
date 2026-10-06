@@ -26,6 +26,8 @@ export interface HonourState {
 }
 
 const STABLE = new Set(['USDC', 'USDT']);
+/** No priced amount to announce: the order ended unfilled, or is parked unpriced. */
+const NO_RATE_NOTICE = new Set(['cancelled', 'failed', 'refunded', 'buy_awaiting_rate']);
 
 export function honourOf(intent: HonourIntent | null | undefined, now: number = Date.now()): HonourState {
   if (
@@ -39,6 +41,6 @@ export function honourOf(intent: HonourIntent | null | undefined, now: number = 
   return {
     honourUntil: intent.rateExpiresAt,
     holding: intent.status === 'pending_payment' && secondsLeft(intent.rateExpiresAt, now) > 0,
-    rateUpdated: !!intent.repriced,
+    rateUpdated: !!intent.repriced && !NO_RATE_NOTICE.has(intent.status ?? ''),
   };
 }
