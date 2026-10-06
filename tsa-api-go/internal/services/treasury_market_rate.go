@@ -142,7 +142,7 @@ func newTreasuryMarketRate(pc paycrestMarketRates, mid stableMidSource, tolBps i
 }
 
 // BuyRate is fiat per token for a company-wallet buy:
-//   - both sources up: they must agree within tolBps, and Paycrest's is used;
+//   - both sources up: they must agree within tolBps, and the higher is used;
 //   - one up: it must agree with the FX feed within tolBps;
 //   - otherwise the leg is closed.
 func (r *TreasuryMarketRate) BuyRate(ctx context.Context, fiat string) (*big.Rat, error) {
@@ -156,6 +156,10 @@ func (r *TreasuryMarketRate) BuyRate(ctx context.Context, fiat string) (*big.Rat
 				fiat, pc.FloatString(2), mid.FloatString(2), r.tolBps)
 			return nil, fmt.Errorf("%w: paycrest %s vs flutterwave mid %s", ErrTreasuryRateDisagree, pc.FloatString(2), mid.FloatString(2))
 		}
+		// The company is the seller: of two agreeing figures, take the higher.
+		if mid.Cmp(pc) > 0 {
+			return mid, nil
+		}
 		return pc, nil
 	case pcErr == nil:
 		return r.checkedAgainstFX(ctx, fiat, pc, "paycrest")
@@ -166,6 +170,7 @@ func (r *TreasuryMarketRate) BuyRate(ctx context.Context, fiat string) (*big.Rat
 		}
 		return rate, err
 	default:
+		log.Printf("[ramp-treasury] ALERT ramp_treasury_rate_unavailable fiat=%s paycrest=%v flutterwave_mid=%v", fiat, pcErr, midErr)
 		return nil, fmt.Errorf("%w: company wallet market rate: paycrest: %v; flutterwave mid: %v",
 			ErrStableQuoteUnavailable, pcErr, midErr)
 	}
@@ -227,7 +232,7 @@ func (r *TreasuryMarketRate) midRate(ctx context.Context, fiat string) (*big.Rat
 	last, ok := r.mids[fiat]
 	r.mu.Unlock()
 	if ok && r.now().Sub(last.at) < treasuryMidFreshTTL {
-		return last.rate, nil
+		return new(big.Rat).Set(last.rate), nil
 	}
 	v, err, _ := r.flight.Do(fiat, func() (any, error) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), treasuryMidTimeout)
@@ -242,11 +247,11 @@ func (r *TreasuryMarketRate) midRate(ctx context.Context, fiat string) (*big.Rat
 		return rate, nil
 	})
 	if err == nil {
-		return v.(*big.Rat), nil
+		return new(big.Rat).Set(v.(*big.Rat)), nil
 	}
 	if ok && r.now().Sub(last.at) < treasuryMidMaxStale {
 		log.Printf("[ramp-treasury] serving a %s-old Flutterwave mid for %s: %v", r.now().Sub(last.at).Round(time.Second), fiat, err)
-		return last.rate, nil
+		return new(big.Rat).Set(last.rate), nil
 	}
 	return nil, err
 }

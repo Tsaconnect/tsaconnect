@@ -229,3 +229,81 @@ func TestPaycrestMarketRate_CachesAFailureBriefly(t *testing.T) {
 		t.Fatalf("after the window: %v %v calls=%d", v, err, q.marketCall)
 	}
 }
+
+// Fix round 1: the company is the seller, so when both sources agree the
+// higher figure is used.
+func TestTreasuryMarketRate_BothAgreeUsesTheHigher(t *testing.T) {
+	ctx := context.Background()
+	// Mid is 1348; make both orderings via the quoter's buy/sell around 1380 and 1340.
+	hiMid := &midRateQuoter{buy: 1390, sell: 1370} // mid 1380
+	r := newTreasuryMarketRate(&fakePaycrestMarket{rate: 1340}, rateService(t, hiMid, fx1350), 400)
+	got, err := r.BuyRate(ctx, "NGN")
+	// The mid is derived from float quotes, so it is 1380 only approximately.
+	if f, _ := got.Float64(); err != nil || f < 1379.99 || f > 1380.01 {
+		t.Fatalf("paycrest 1340 vs mid 1380: %v %v", got, err)
+	}
+
+	loMid := &midRateQuoter{buy: 1350, sell: 1330} // mid 1340
+	r = newTreasuryMarketRate(&fakePaycrestMarket{rate: 1380}, rateService(t, loMid, fx1350), 400)
+	got, err = r.BuyRate(ctx, "NGN")
+	wantRate(t, got, err, big.NewRat(1380, 1))
+}
+
+func TestTreasuryMarketRate_MidAloneIsCheckedAgainstFX(t *testing.T) {
+	ctx := context.Background()
+	down := func() *fakePaycrestMarket { return &fakePaycrestMarket{err: errors.New("paycrest 503")} }
+	logs := captureLog(t)
+	r := newTreasuryMarketRate(down(), rateService(t, usualMid(), fxStale), 400)
+	if _, err := r.BuyRate(ctx, "NGN"); !errors.Is(err, ErrTreasuryRateUnverified) {
+		t.Fatalf("stale fx: %v", err)
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_treasury_rate_unverified fiat=NGN source=flutterwave_mid") {
+		t.Fatalf("log = %q", logs.String())
+	}
+	r = newTreasuryMarketRate(down(), rateService(t, usualMid(), stubFx{ngn: 1250}), 400)
+	if _, err := r.BuyRate(ctx, "NGN"); !errors.Is(err, ErrTreasuryRateDisagree) {
+		t.Fatalf("mid off fx: %v", err)
+	}
+}
+
+func TestTreasuryMarketRate_ToleranceBoundaryIsExact(t *testing.T) {
+	ctx := context.Background()
+	down := midDown()
+	// Second source = the FX feed (1350): 1350 x 1.04 = 1404 in, x 1.0401 = 1404.135 out.
+	for _, tc := range []struct {
+		rate float64
+		ok   bool
+	}{{1404, true}, {1404.135, false}} {
+		r := newTreasuryMarketRate(&fakePaycrestMarket{rate: tc.rate}, rateService(t, down, fx1350), 400)
+		_, err := r.BuyRate(ctx, "NGN")
+		if (err == nil) != tc.ok || (!tc.ok && !errors.Is(err, ErrTreasuryRateDisagree)) {
+			t.Fatalf("rate %v: err = %v, want ok=%v", tc.rate, err, tc.ok)
+		}
+	}
+}
+
+func TestTreasuryMarketRate_BothDownAlerts(t *testing.T) {
+	logs := captureLog(t)
+	r := newTreasuryMarketRate(&fakePaycrestMarket{err: errors.New("pc boom")}, rateService(t, midDown(), fx1350), 400)
+	if _, err := r.BuyRate(context.Background(), "NGN"); !errors.Is(err, ErrStableQuoteUnavailable) {
+		t.Fatal(err)
+	}
+	if l := logs.String(); !strings.Contains(l, "ALERT ramp_treasury_rate_unavailable fiat=NGN") || !strings.Contains(l, "pc boom") || !strings.Contains(l, "flutterwave down") {
+		t.Fatalf("log = %q", l)
+	}
+}
+
+func TestTreasuryMarketRate_CachedMidCannotBeMutatedByCallers(t *testing.T) {
+	ctx := context.Background()
+	r := newTreasuryMarketRate(&fakePaycrestMarket{err: errors.New("down")}, rateService(t, usualMid(), fx1350), 400)
+	first, err := r.BuyRate(ctx, "NGN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := new(big.Rat).Set(first)
+	first.Add(first, big.NewRat(1000, 1))
+	again, err := r.BuyRate(ctx, "NGN")
+	if err != nil || again.Cmp(want) != 0 {
+		t.Fatalf("cache mutated: %v %v", again, err)
+	}
+}
