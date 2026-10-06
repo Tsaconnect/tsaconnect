@@ -158,6 +158,11 @@ func (s *ITService) cancelBuy(ctx context.Context, userID, intentID uuid.UUID, s
 		// the router's cancel and /api/it/buy/:id/cancel both land here.
 		log.Printf("[it stable buy] METRIC ramp_it_open_unpaid intent=%s user=%s provider=%s reason=cancelled",
 			intent.ID, userID, models.ITIntentProvider(intent))
+		// A converted buy's record closes with it (spec §15.4).
+		if err := markConversion(ctx, s.db, intent.ID, []string{models.PaycrestStatusAwaitingPayment},
+			map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "cancelled by user"}); err != nil {
+			log.Printf("[it stable buy] ALERT ramp_conversion_mark_failed intent=%s to=cancelled err=%s", intent.ID, RedactAlertText(err.Error()))
+		}
 	}
 	return s.getIntentForUser(ctx, userID, intentID)
 }

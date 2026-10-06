@@ -62,6 +62,12 @@ const (
 	HolderUser     = "user"
 	HolderTreasury = "treasury"
 	HolderPaycrest = "paycrest"
+	// HolderCompanyWallet / HolderFlutterwave: an IT-settled converted buy
+	// (spec §15) whose settlement leg the company wallet or Flutterwave has not
+	// yet proven into the conversion treasury. Like HolderPaycrest, the
+	// orchestrator's custody step still has to prove it.
+	HolderCompanyWallet = "company_wallet"
+	HolderFlutterwave   = "flutterwave"
 
 	FaultPlatform = "platform"
 	FaultUser     = "user"
@@ -196,7 +202,8 @@ type PaycrestOrderRecord struct {
 	// PromisedAmount is what we guaranteed the user receives: token base units
 	// on a buy. The conversion must land at least this much.
 	PromisedAmount string `gorm:"size:64" json:"promisedAmount,omitempty"`
-	Holder         string `gorm:"size:12" json:"holder,omitempty"`
+	// size 24: "company_wallet" (14) does not fit the original 12.
+	Holder string `gorm:"size:24" json:"holder,omitempty"`
 	// OwedToUser is computed from the legs, never entered by hand. It has three
 	// states and they are not interchangeable: a number is what we still owe,
 	// "0" means nothing is owed, and "" means UNDETERMINED — a transfer is in

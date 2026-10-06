@@ -1313,7 +1313,9 @@ func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID 
 	if err != nil {
 		return nil, err
 	}
-	if row.PaymentClaimedAt != nil {
+	// An IT-settled converted buy's record follows its IT purchase, which is
+	// cancelled from its own order screen.
+	if IsITConversion(row) || row.PaymentClaimedAt != nil {
 		return nil, ErrPaycrestNotCancellable
 	}
 
@@ -1346,8 +1348,10 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 	// A TSA Pay payment's order is how the payment moves, not a sale of hers:
 	// listed here it read as "Sell USDC — paid to your bank" when the money
 	// went to the merchant. Her payments are listed as payments (GET /pay/history).
+	// An IT-settled converted buy's conversion record (ITC-) is not listed
+	// either: the IT purchase is her list entry.
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND pay_payment_id IS NULL", userID).
+		Where("user_id = ? AND pay_payment_id IS NULL AND reference NOT LIKE ?", userID, ITConversionRefPrefix+"%").
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -1381,7 +1385,10 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 	var n struct{ OpenCount, PayCount int64 }
 	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Select("COUNT(*) AS open_count, COUNT(pay_payment_id) AS pay_count").
-		Where("user_id = ? AND direction = ? AND status IN ?", userID, direction, open).
+		// An IT-settled converted buy's record is not a Paycrest order: it
+		// never holds her to one Paycrest order per direction.
+		Where("user_id = ? AND direction = ? AND status IN ? AND reference NOT LIKE ?",
+			userID, direction, open, ITConversionRefPrefix+"%").
 		Scan(&n).Error; err != nil {
 		return err
 	}

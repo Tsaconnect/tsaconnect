@@ -36,7 +36,9 @@ func newStableBuyDBService(t *testing.T) (*ITService, uuid.UUID) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}, &models.FiatVirtualAccount{}); err != nil {
+	// paycrest_order_records: a converted buy's conversion record follows
+	// its intent, so the routed paths read it (production always has it).
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.FiatVirtualAccount{}, &models.PaycrestOrderRecord{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	// The buy leg reads users.verification_status before it writes anything,

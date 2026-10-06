@@ -912,7 +912,10 @@ func TestSettleTreasuryBuy_RefusedOverAFailedLeg(t *testing.T) {
 // in `delivering` and no sale yet: the state every concurrent tick races from.
 func newDeliverPostgres(t *testing.T) (*ITService, *models.ITIntent, *fakeRelaySigner) {
 	t.Helper()
-	db := testutil.TempPostgres(t, "it_treasury_deliver_", &models.ITIntent{}, &models.RampLeg{}, &models.ITIntentAuditLog{})
+	// paycrest_order_records: a refund closes a converted buy's record in the
+	// same transaction (production always has the table).
+	db := testutil.TempPostgres(t, "it_treasury_deliver_", &models.ITIntent{}, &models.RampLeg{}, &models.ITIntentAuditLog{},
+		&models.PaycrestOrderRecord{})
 	if err := db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
 		t.Fatalf("index: %v", err)
 	}

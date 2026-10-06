@@ -136,6 +136,9 @@ type ITService struct {
 
 	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
 	wallet *CompanyWallet
+	// converted gates OPENING converted buys and the attach-hash pre-check
+	// (spec §15.5). Nothing that settles, sends or hands off reads it (N1).
+	converted ConvertedBuys
 
 	// rateNotifier tells a buyer their payment was priced at the live rate
 	// (Decision D18). Nil leaves settlement silent. See SetEventBus.

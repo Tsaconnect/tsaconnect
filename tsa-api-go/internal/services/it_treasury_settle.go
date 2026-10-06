@@ -171,6 +171,13 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 			return fmt.Errorf("%w: only a parked buy, or a company-wallet delivery with no send, can be marked refunded (status %s)",
 				ErrITBadState, intent.Status)
 		}
+		// A converted buy's record closes with it: the naira went back, no
+		// conversion will ever run (spec §15.4).
+		if err := markConversion(ctx, tx, intentID,
+			[]string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending},
+			map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "refunded in naira by an operator"}); err != nil {
+			return err
+		}
 		return auditIntent(tx, intentID, adminID, models.ITAuditStableBuyRefunded, note, map[string]any{
 			"receivedAmount": intent.ReceivedAmount, "provider": provider, "fromStatus": intent.Status,
 			"parkedReason": intent.FailureReason,

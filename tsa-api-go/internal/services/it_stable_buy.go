@@ -317,6 +317,13 @@ func (s *ITService) openStableBuy(
 	if open != nil {
 		return nil, nil, &StableBuyOpenError{IntentID: open.ID}
 	}
+	// N2: the shared abandon cap holds at every routed entry point, not only
+	// behind the router's adapters.
+	if o.routed {
+		if err := s.checkRoutedAbandonCap(ctx, userID); err != nil {
+			return nil, nil, err
+		}
+	}
 	// Find-then-Create is not atomic: the partial unique index
 	// uq_it_intents_open_stable_buy (config/database.go) closes the race on
 	// Postgres and is translated below. SQLite has none, hence the find.
@@ -481,21 +488,36 @@ func (s *ITService) payIntoForStableBuy(
 // pending_payment and an age inside the window, so a row this touches was
 // already unclaimable.
 func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID) error {
-	stale := func() *gorm.DB {
-		return s.db.WithContext(ctx).Model(&models.ITIntent{}).
+	// One cutoff for both reads: every row the update retires was also read
+	// as routed or not, so no converted buy's record is left behind.
+	cutoff := time.Now().Add(-stableBuyClaimWindow)
+	stale := func(db *gorm.DB) *gorm.DB {
+		return db.WithContext(ctx).Model(&models.ITIntent{}).
 			Where("user_id = ? AND direction = ? AND status = ? AND asset IN ? AND created_at < ?",
 				userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
-				[]string{models.ITAssetUSDC, models.ITAssetUSDT},
-				time.Now().Add(-stableBuyClaimWindow))
+				[]string{models.ITAssetUSDC, models.ITAssetUSDT}, cutoff)
 	}
 	var routed []models.ITIntent
-	if err := stale().Where("rate_expires_at IS NOT NULL").Select("id", "provider").Find(&routed).Error; err != nil {
+	if err := stale(s.db).Where("rate_expires_at IS NOT NULL").Select("id", "provider").Find(&routed).Error; err != nil {
 		return err
 	}
-	if err := stale().Updates(map[string]any{
-		"status":         models.ITStatusCancelled,
-		"failure_reason": "expired before payment",
-	}).Error; err != nil {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := stale(tx).Updates(map[string]any{
+			"status":         models.ITStatusCancelled,
+			"failure_reason": "expired before payment",
+		}).Error; err != nil {
+			return err
+		}
+		// A converted buy's record expires with it, in the same write (spec
+		// §15.4). No record (any other buy) is a no-op.
+		for i := range routed {
+			if err := markConversion(ctx, tx, routed[i].ID, []string{models.PaycrestStatusAwaitingPayment},
+				map[string]any{"status": models.PaycrestStatusExpired}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	for i := range routed {

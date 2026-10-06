@@ -285,6 +285,13 @@ func (s *ITService) claimAndPriceStableBuy(
 		return false, nil
 	}
 
+	// A converted buy's record follows its money: claimed (honoured, live or
+	// parked) → pending (spec §15.4). Best effort: the handoff accepts either.
+	if err := markConversion(ctx, s.db, candidate.ID, []string{models.PaycrestStatusAwaitingPayment},
+		map[string]any{"status": models.PaycrestStatusPending}); err != nil {
+		log.Printf("[it stable buy] ALERT ramp_conversion_mark_failed intent=%s to=pending err=%s", candidate.ID, RedactAlertText(err.Error()))
+	}
+
 	switch {
 	case parkedReason != "":
 		if parkedReason == "stock" || parkedReason == "daily_cap" {

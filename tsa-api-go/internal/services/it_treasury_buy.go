@@ -139,6 +139,13 @@ func (s *ITService) TreasuryFreeUnits(ctx context.Context, chain, token string) 
 // agreement, §13 Q3), a chain and token the wallet offers, her own EVM address
 // (Decision D48), the $200 maximum, and the stock taken under the lock.
 func (s *ITService) OpenTreasuryBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, chain, destAddress string) (*models.ITIntent, *StableBuyInstructions, error) {
+	return s.openTreasuryBuy(ctx, userID, q, chain, destAddress, nil)
+}
+
+// openTreasuryBuy is OpenTreasuryBuy with `also` written in the intent's own
+// transaction, under the stock lock (a converted buy's record, Decision C4).
+func (s *ITService) openTreasuryBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, chain, destAddress string,
+	also func(tx *gorm.DB, intent *models.ITIntent) error) (*models.ITIntent, *StableBuyInstructions, error) {
 	if !s.HasCompanyWallet() {
 		return nil, nil, ErrTreasuryUnavailable
 	}
@@ -174,13 +181,20 @@ func (s *ITService) OpenTreasuryBuy(ctx context.Context, userID uuid.UUID, q *St
 			}
 			return nil
 		},
-		insert: s.insertTreasuryIntent,
+		insert: func(ctx context.Context, i *models.ITIntent) error { return s.insertTreasuryIntentWith(ctx, i, also) },
 	})
 }
 
 // insertTreasuryIntent writes the order only if free stock covers it, under
 // the lock: two opens can never both take the last tokens (S4).
 func (s *ITService) insertTreasuryIntent(ctx context.Context, intent *models.ITIntent) error {
+	return s.insertTreasuryIntentWith(ctx, intent, nil)
+}
+
+// insertTreasuryIntentWith is insertTreasuryIntent plus `also`, run in the
+// same transaction under the same lock: the intent and what it brings commit
+// together or not at all.
+func (s *ITService) insertTreasuryIntentWith(ctx context.Context, intent *models.ITIntent, also func(tx *gorm.DB, intent *models.ITIntent) error) error {
 	units, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
 	if !ok || units.Sign() <= 0 {
 		return fmt.Errorf("it treasury buy: unusable asset amount %q", intent.AssetAmount)
@@ -200,7 +214,13 @@ func (s *ITService) insertTreasuryIntent(ctx context.Context, intent *models.ITI
 				chain, intent.Asset, units, free)
 			return ErrTreasuryStockShort
 		}
-		return tx.Create(intent).Error
+		if err := tx.Create(intent).Error; err != nil {
+			return err
+		}
+		if also != nil {
+			return also(tx, intent)
+		}
+		return nil
 	})
 }
 
