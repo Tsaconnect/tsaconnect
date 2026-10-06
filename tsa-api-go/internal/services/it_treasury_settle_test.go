@@ -25,7 +25,7 @@ func newTreasurySettleService(t *testing.T, stockUnits int64) (*ITService, uuid.
 	t.Helper()
 	s, userID, native := newTreasuryBuyService(t, stockUnits)
 	s.SetTreasuryMarketRate(&fixedTreasuryRate{rate: treasuryMarket})
-	if err := s.db.AutoMigrate(&models.ITIntentAuditLog{}); err != nil {
+	if err := s.db.AutoMigrate(&models.ITIntentAuditLog{}, &models.RampLeg{}); err != nil {
 		t.Fatal(err)
 	}
 	intent, _, err := s.OpenTreasuryBuy(context.Background(), userID, treasuryTestQuote(t, s), "base", testRoutedEVM)

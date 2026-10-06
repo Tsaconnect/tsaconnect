@@ -52,6 +52,15 @@ func (s *ITService) repriceTreasuryParked(ctx context.Context, intent *models.IT
 	applied := false
 	chain := strings.ToLower(intent.DestChain)
 	err = s.withStockLock(ctx, chain, intent.Asset, func(tx *gorm.DB) error {
+		// Deliver-anyway and a re-price lead to a send: the same gate as every
+		// other second-payment path.
+		reason, err := s.secondPaymentGate(ctx, tx, intent.ID, uuid.Nil)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			return fmt.Errorf("%w: %s", ErrITBadState, reason)
+		}
 		free, _, err := s.freeTreasuryStock(ctx, tx, chain, intent.Asset, intent.ID, true)
 		if err != nil {
 			return err
@@ -137,25 +146,19 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 		}
 		provider = models.ITIntentProvider(&intent)
 		refundable := []string{models.ITStatusBuyAwaitingRate}
-		if intent.Status == models.ITStatusDelivering && provider == models.ITProviderTreasury {
-			live, err := liveSaleLegOn(ctx, tx, intentID)
-			if err != nil {
-				return err
-			}
-			if live != nil {
-				return fmt.Errorf("%w: a send is in flight or done — prove it or re-send it, never refund it", ErrITBadState)
-			}
-			// Review N1: a sale failed as "dropped" was signed; until its nonce
-			// is consumed and a trusted scan shows nothing reached her, the
-			// original can still land after the naira is returned.
-			reason, err := s.failedSalesRefundable(ctx, tx, intentID)
+		if provider == models.ITProviderTreasury {
+			// Review N1 / C2: never refund while any sale can still pay her —
+			// the one gate every second-payment path shares.
+			reason, err := s.secondPaymentGate(ctx, tx, intentID, uuid.Nil)
 			if err != nil {
 				return err
 			}
 			if reason != "" {
 				return fmt.Errorf("%w: %s", ErrITBadState, reason)
 			}
-			refundable = append(refundable, models.ITStatusDelivering)
+			if intent.Status == models.ITStatusDelivering {
+				refundable = append(refundable, models.ITStatusDelivering)
+			}
 		}
 		res := tx.Model(&models.ITIntent{}).
 			Where("id = ? AND direction = ? AND status IN ? AND asset IN ?", intentID, models.ITDirectionBuy,

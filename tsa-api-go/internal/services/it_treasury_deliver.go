@@ -25,6 +25,11 @@ var (
 	ErrTreasurySendStalled = errors.New("company wallet: a send has no proof past the stall window")
 	// ErrTreasuryResendRefused: the dropped-transaction check did not pass.
 	ErrTreasuryResendRefused = errors.New("company wallet: re-send refused — the last send may still land")
+	// ErrTreasuryResendNeedsCancel: the stuck send's nonce is still unused, so
+	// its signed transaction can still be mined — even if no node we ask has
+	// it. Only consuming that nonce (a same-nonce zero-value cancel, per the
+	// runbook) ends it. Always returned wrapped with ErrTreasuryResendRefused.
+	ErrTreasuryResendNeedsCancel = errors.New("the stuck send can still land — broadcast a same-nonce zero-value cancel first (runbook), then retry")
 	// errScanUnreliable: the RPC returned no Transfer logs for the token at all
 	// over a range where a busy stablecoin always has some — it may be blind.
 	errScanUnreliable = errors.New("the RPC returned none of the token's Transfer logs in a chunk's last blocks, so that chunk's empty answer proves nothing")
@@ -225,6 +230,15 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 			existing = live
 			return err
 		}
+		// The same gate as a re-send, a refund and deliver-anyway: no earlier
+		// attempt may still pay her.
+		reason, err := s.secondPaymentGate(ctx, tx, intent.ID, uuid.Nil)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			return fmt.Errorf("%w: %s", ErrITBadState, reason)
+		}
 		txLegs := s.treasuryLegs(tx)
 		attempt, err := txLegs.NextAttempt(ctx, intent.ID, models.RampLegKindSale)
 		if err != nil {
@@ -322,7 +336,14 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 		}
 		return s.settleTreasuryBuy(ctx, intent, leg, credited.String())
 	case TransferRefuted:
-		// Reverted: it moved nothing. Free the leg; the next tick sends attempt n+1.
+		// Reverted: it moved nothing — but only a receipt RAMP_TREASURY_CONFIRMATIONS
+		// deep says so for good; a shallow one can be reorged into a success.
+		// Until then the leg stays live: no re-send, no refund.
+		deep, err := s.saleConfirmed(ctx, leg)
+		if err != nil || !deep {
+			return err
+		}
+		// Free the leg; the next tick sends attempt n+1.
 		log.Printf("[it treasury buy] METRIC ramp_treasury_send_reverted intent=%s tx=%s", intent.ID, leg.TxHash)
 		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err
@@ -384,6 +405,9 @@ type ResendEvidence struct {
 	LatestNonce   uint64  `json:"latestNonce"`
 	HashKnown     bool    `json:"hashKnown"`
 	NonceConsumed bool    `json:"nonceConsumed"`
+	// NeedsCancel: the recorded nonce is unused at the head, so the signed
+	// send can still land; the operator must consume it with a cancel first.
+	NeedsCancel bool `json:"needsCancel"`
 	// ScanTrusted: the scan reached the head with every chunk proved visible.
 	ScanTrusted    bool     `json:"scanTrusted"`
 	ScannedFrom    uint64   `json:"scannedFrom,omitempty"`
@@ -394,22 +418,44 @@ type ResendEvidence struct {
 }
 
 // resendEvidence runs the dropped-transaction check on a pending sale leg: the
-// stall window first, then chainEvidence.
+// stall window first, then chainEvidence on the leg, then secondPaymentGate
+// over every other sale of the order.
 func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent, leg *models.RampLeg) (*ResendEvidence, error) {
 	if stall := s.treasuryLimits().sendStall; time.Since(leg.CreatedAt) <= stall {
 		return &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce, Reason: fmt.Sprintf("inside the %s stall window", stall)}, nil
 	}
-	return s.chainEvidence(ctx, leg)
+	ev, err := s.chainEvidence(ctx, leg)
+	if err != nil || !ev.Allowed {
+		return ev, err
+	}
+	// The leg itself is proved above; every other sale of the order passes the
+	// same gate as the automatic send, a refund and deliver-anyway.
+	reason, err := s.secondPaymentGate(ctx, s.db, intent.ID, leg.ID)
+	if err != nil {
+		return nil, err
+	}
+	if reason != "" {
+		ev.Allowed, ev.Reason = false, reason
+	}
+	return ev, nil
 }
 
 // chainEvidence asks the chain whether a signed sale can still land, or
 // landed. Allowed only when nothing can and nothing did:
 //  1. the node does not know the stored hash;
 //  2. the wallet has nothing pending (pending nonce == the nonce at head H);
-//  3. the leg's nonce is unused at H (nonce ≥ latest) — or, when it was
-//     consumed or never recorded (the send may have been mined under a hash we
-//     lost), a chunked scan to exactly H finds no Transfer(wallet → her) since
-//     the send, every chunk of it proved visible (ScanTrusted).
+//  3. the leg's nonce is CONSUMED at H (latest > nonce), so its signed
+//     transaction can never be mined again; and
+//  4. a chunked scan to exactly H finds no Transfer(wallet → her) since the
+//     send, every chunk of it proved visible (ScanTrusted) — so whatever
+//     consumed the nonce was not her payment.
+//
+// An unused nonce is never an allowance, however empty the mempool looks: a
+// signed transaction our node forgot can resurface from a peer and win that
+// nonce after a fresh attempt went out on the next one — paying her twice. It
+// is refused with NeedsCancel (ErrTreasuryResendNeedsCancel) until a cancel
+// consumes it. A leg with no recorded nonce was never signed (the nonce is
+// written before the broadcast), so it needs only the trusted scan.
 //
 // The head is read once, so the nonce and the scan describe the same block.
 func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*ResendEvidence, error) {
@@ -446,8 +492,8 @@ func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*Re
 		return ev, nil
 	}
 	if leg.Nonce != nil && ev.LatestNonce <= *leg.Nonce {
-		ev.Allowed = true
-		ev.Reason = fmt.Sprintf("nonce %d was never used: nothing with it is pending or mined", *leg.Nonce)
+		ev.NeedsCancel = true
+		ev.Reason = fmt.Sprintf("nonce %d is still unused, so %s", *leg.Nonce, ErrTreasuryResendNeedsCancel)
 		return ev, nil
 	}
 	ev.NonceConsumed = leg.Nonce != nil
@@ -520,25 +566,53 @@ func (s *ITService) scanSaleTransfers(ctx context.Context, probe TreasuryTxProbe
 	return found, from, nil
 }
 
-// failedSalesRefundable says whether a delivering company-wallet order whose
-// sales all failed can be refunded without paying twice (review N1). A leg
-// that never left ("not broadcast") or reverted moved nothing. A leg failed as
-// "dropped" was signed, and its transaction can still land until its nonce is
-// consumed by something else: refundable only when chainEvidence shows the
-// nonce consumed and a trusted scan with no transfer to her. Anything else —
-// an unrecorded nonce, an unrecognised failure — refuses. The reason is ""
-// when the refund may go ahead.
-func (s *ITService) failedSalesRefundable(ctx context.Context, db *gorm.DB, intentID uuid.UUID) (string, error) {
+// secondPaymentGate is the one check before anything that could pay her a
+// second time or hand her naira back (review N1, D61): the automatic send of a
+// new attempt, an operator re-send, a refund of a company-wallet order and
+// deliver-anyway all call it, so none can be looser than another. It returns
+// "" only when no sale of the order can still pay her:
+//   - no sale is live (pending or confirmed), except `except` — the stalled
+//     leg an operator re-send replaces, which the caller proves itself with
+//     chainEvidence;
+//   - every failed sale moved nothing and never can:
+//     "not broadcast" — the node refused it, or it was never signed;
+//     "reverted" — its own receipt still refutes it, at least
+//     RAMP_TREASURY_CONFIRMATIONS deep (a shallow revert can be reorged);
+//     "dropped" — signed, so only chainEvidence's allowance counts: its nonce
+//     consumed at head H and a trusted scan to H with no transfer to her.
+//
+// Anything else — an unused nonce, a blind scan, an unrecognised failure —
+// refuses. An unreadable chain is an error, which every caller treats as a
+// refusal.
+func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID, except uuid.UUID) (string, error) {
 	var legs []models.RampLeg
-	if err := db.WithContext(ctx).Where("order_id = ? AND kind = ? AND status = ?", intentID, models.RampLegKindSale,
-		models.RampLegStatusFailed).Order("attempt ASC").Find(&legs).Error; err != nil {
+	if err := db.WithContext(ctx).Where("order_id = ? AND kind = ?", intentID, models.RampLegKindSale).
+		Order("attempt ASC").Find(&legs).Error; err != nil {
 		return "", err
 	}
 	for i := range legs {
 		leg := &legs[i]
+		if leg.Status != models.RampLegStatusFailed {
+			if leg.ID == except && leg.Status == models.RampLegStatusPending {
+				continue
+			}
+			return fmt.Sprintf("attempt %d is %s: a send is in flight or done — prove it or re-send it", leg.Attempt, leg.Status), nil
+		}
 		switch {
-		case strings.HasPrefix(leg.Error, "not broadcast:"), strings.HasPrefix(leg.Error, "reverted:"):
+		case strings.HasPrefix(leg.Error, "not broadcast:"):
 			continue
+		case strings.HasPrefix(leg.Error, "reverted:"):
+			if !s.HasCompanyWallet() {
+				return "", ErrTreasuryUnavailable
+			}
+			deep, err := s.saleRefutedDeep(ctx, leg)
+			if err != nil {
+				return "", err
+			}
+			if !deep {
+				return fmt.Sprintf("attempt %d reverted, but its receipt is not yet %d blocks deep (or no longer refutes it)",
+					leg.Attempt, s.treasuryLimits().confirmations), nil
+			}
 		case strings.HasPrefix(leg.Error, "dropped:"):
 			if !s.HasCompanyWallet() {
 				return "", ErrTreasuryUnavailable
@@ -547,18 +621,33 @@ func (s *ITService) failedSalesRefundable(ctx context.Context, db *gorm.DB, inte
 			if err != nil {
 				return "", err
 			}
-			if ev.Allowed && ev.NonceConsumed && ev.ScanTrusted {
-				continue
+			if !ev.Allowed {
+				return fmt.Sprintf("attempt %d was signed and may still land or have landed: %s", leg.Attempt, ev.Reason), nil
 			}
-			if ev.Allowed && !ev.NonceConsumed {
-				return fmt.Sprintf("attempt %d was signed and its nonce is still unused: it can still land", leg.Attempt), nil
-			}
-			return fmt.Sprintf("attempt %d was signed and may still land or have landed: %s", leg.Attempt, ev.Reason), nil
 		default:
 			return fmt.Sprintf("attempt %d failed for a reason that does not prove nothing moved (%q)", leg.Attempt, leg.Error), nil
 		}
 	}
 	return "", nil
+}
+
+// saleRefutedDeep: the leg's own transaction still reads as refuted (reverted,
+// or paid no one we sent to) and its receipt is RAMP_TREASURY_CONFIRMATIONS
+// deep — the same depth a settle needs.
+func (s *ITService) saleRefutedDeep(ctx context.Context, leg *models.RampLeg) (bool, error) {
+	if leg.TxHash == "" {
+		return false, nil
+	}
+	verifier := s.wallet.Verifier(leg.ChainKey)
+	if verifier == nil {
+		return false, fmt.Errorf("company wallet: no verifier on %s", leg.ChainKey)
+	}
+	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, s.wallet.TokenAddress(leg.ChainKey, leg.Token),
+		s.wallet.Address(), leg.ToAddr)
+	if ClassifyTransfer(credited, verr) != TransferRefuted {
+		return false, nil
+	}
+	return s.saleConfirmed(ctx, leg)
 }
 
 // ResendTreasuryBuy is an operator's re-send of a stalled sale, allowed only
@@ -582,6 +671,9 @@ func (s *ITService) ResendTreasuryBuy(ctx context.Context, adminID, intentID uui
 	ev, err := s.resendEvidence(ctx, intent, leg)
 	if err != nil {
 		return nil, err
+	}
+	if ev.NeedsCancel {
+		return nil, fmt.Errorf("%w: %w (nonce %d)", ErrTreasuryResendRefused, ErrTreasuryResendNeedsCancel, *leg.Nonce)
 	}
 	if !ev.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrTreasuryResendRefused, ev.Reason)

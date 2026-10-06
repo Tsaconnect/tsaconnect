@@ -315,7 +315,7 @@ func TestResendTreasuryBuy_OnlyOnProofNothingMoved(t *testing.T) {
 	r := newDeliverRig(t)
 	ctx := context.Background()
 	admin := uuid.New()
-	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil { // nonce 7, from block 100
 		t.Fatal(err)
 	}
 	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "dropped"); !errors.Is(err, ErrTreasuryResendRefused) {
@@ -330,12 +330,29 @@ func TestResendTreasuryBuy_OnlyOnProofNothingMoved(t *testing.T) {
 	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "dropped"); !errors.Is(err, ErrTreasuryResendRefused) {
 		t.Fatalf("a pending tx: %v", err)
 	}
-	// Nonce 7 is unused (latest = 7) and nothing is pending: provably dropped.
+	// Controller ruling: nonce 7 unused with nothing pending is NOT proof — a
+	// signed send our node forgot can still win nonce 7 after a re-send went
+	// out on nonce 8. Refused until a same-nonce cancel consumes it.
 	r.probe.pending = 7
+	_, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: unknown hash")
+	if !errors.Is(err, ErrTreasuryResendRefused) || !errors.Is(err, ErrTreasuryResendNeedsCancel) ||
+		!strings.Contains(err.Error(), "nonce 7") {
+		t.Fatalf("unused nonce: %v, want refused until a cancel consumes nonce 7", err)
+	}
+	leg := r.legs(t)[0]
+	ev, err := r.s.resendEvidence(ctx, r.intent, &leg)
+	if err != nil || ev.Allowed || !ev.NeedsCancel || ev.NonceConsumed ||
+		!strings.Contains(ev.Reason, "nonce 7 is still unused") || !strings.Contains(ev.Reason, "same-nonce zero-value cancel") {
+		t.Fatalf("evidence = %+v %v, want the cancel instruction shown", ev, err)
+	}
+	// The cancel consumed nonce 7, and a trusted scan to the head finds
+	// nothing to her: now nothing can land.
+	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
 	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, ""); !errors.Is(err, ErrITOperatorNoteRequired) {
 		t.Fatalf("no note: %v", err)
 	}
-	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: unknown hash"); err != nil {
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "cancel 0xc4 consumed nonce 7"); err != nil {
 		t.Fatalf("resend: %v", err)
 	}
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
@@ -403,9 +420,10 @@ func TestResendTreasuryBuy_MinedButHashLostIsRefused(t *testing.T) {
 	}
 }
 
-// Review N1: after a re-send on an unused nonce, the original signed send can
-// still land — so the order cannot be refunded until that nonce is consumed by
-// something else and a trusted scan shows nothing reached her.
+// Review N1: a refund after a dropped send stands on the same proof as the
+// re-send did — nonce consumed at the head and a trusted scan with nothing to
+// her — re-checked at refund time, because a re-send never makes the original
+// signed transaction go away.
 func TestMarkStableBuyRefunded_RefusedWhileADroppedSendCanStillLand(t *testing.T) {
 	r := newDeliverRig(t)
 	ctx := context.Background()
@@ -414,28 +432,195 @@ func TestMarkStableBuyRefunded_RefusedWhileADroppedSendCanStillLand(t *testing.T
 		t.Fatal(err)
 	}
 	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
-	r.probe.pending, r.probe.latest = 7, 7 // nonce 7 unused: the re-send is allowed
-	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "basescan: unknown hash"); err != nil {
+	visible := []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+	r.probe.pending, r.probe.latest, r.probe.head, r.probe.background = 8, 8, 4500, visible
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "cancel consumed nonce 7"); err != nil {
 		t.Fatalf("resend: %v", err)
 	}
 	r.s.CompanyWallet().Treasury().SetKillSwitch(true) // the next attempt cannot go out
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrTreasuryKilled) {
 		t.Fatalf("send: %v", err)
 	}
-	_, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked for her naira back")
-	if !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "can still land") {
-		t.Fatalf("err = %v, want refused: attempt 1 can still land", err)
+	refund := func() error {
+		_, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked for her naira back")
+		return err
+	}
+	// A node that reads nonce 7 as unused: the original can still land.
+	r.probe.pending, r.probe.latest = 7, 7
+	if err := refund(); !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "can still land") {
+		t.Fatalf("unused nonce: %v, want refused", err)
+	}
+	r.probe.pending, r.probe.latest = 8, 8
+	// Consumed, but a transfer to her was mined: refused.
+	r.probe.matches = []types.Log{{BlockNumber: 3000, TxHash: common.HexToHash("0xbeef")}}
+	if err := refund(); !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "a transfer to her was mined") {
+		t.Fatalf("transfer found: %v, want refused", err)
+	}
+	// Consumed, nothing to her, but one chunk blind: refused.
+	r.probe.matches = nil
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4500}}
+	if err := refund(); !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "could not be trusted") {
+		t.Fatalf("blind chunk: %v, want refused", err)
 	}
 	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
 		t.Fatalf("status = %s", got.Status)
 	}
-	// Nonce 7 consumed by something else, and a trusted scan to the head shows
-	// nothing reached her: now nothing can land, and the refund goes through.
-	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500
-	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
-	got, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked for her naira back")
-	if err != nil || got.Status != models.ITStatusRefunded {
-		t.Fatalf("refund after the nonce was consumed: %+v %v", got, err)
+	// Consumed and a trusted scan to the head shows nothing reached her.
+	r.probe.background = visible
+	if err := refund(); err != nil {
+		t.Fatalf("refund after the nonce was consumed: %v", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusRefunded {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+// Security scan A: a revert frees the leg only RAMP_TREASURY_CONFIRMATIONS (5)
+// blocks deep — a shallow revert can be reorged into a success. Until then the
+// leg is live: no re-send, no refund, no new attempt.
+func TestFinalizeTreasuryBuy_ARevertFreesTheLegOnlyAtTheConfirmationDepth(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	admin := uuid.New()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.verifier.credited, r.verifier.err = nil, fmt.Errorf("%w: 0xsponsored", ErrTransferReverted)
+	r.probe.receiptBlock, r.probe.head = 200, 203 // 4 deep
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if legs := r.legs(t); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("a 4-deep revert freed the leg: %+v", legs[0])
+	}
+	if _, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "customer asked"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("refund on a shallow revert: %v", err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.known = true // mined: the node knows it
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "reverted"); !errors.Is(err, ErrTreasuryResendRefused) {
+		t.Fatalf("re-send on a shallow revert: %v", err)
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil || r.signer.calls() != 1 {
+		t.Fatalf("a new attempt on a shallow revert: err=%v broadcasts=%d", err, r.signer.calls())
+	}
+	r.probe.head = 204 // 5 deep
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if legs := r.legs(t); len(legs) != 2 || legs[0].Status != models.RampLegStatusFailed || r.signer.calls() != 2 {
+		t.Fatalf("legs = %+v broadcasts = %d, want attempt 2 once the revert is 5 deep", legs, r.signer.calls())
+	}
+}
+
+// Security scan B: every path that could pay her a second time or return her
+// naira — the automatic send, an operator re-send, a refund, deliver-anyway —
+// goes through one gate (secondPaymentGate), so each earlier-sale state gets
+// the same answer on every path.
+func TestSecondPaymentGate_EveryEntryPointAgrees(t *testing.T) {
+	type state struct {
+		name   string
+		legs   []models.RampLeg // earlier sales of the order (attempts from 1)
+		setup  func(r *deliverRig)
+		allow  bool
+		noLive bool // the state is itself a live sale: no separate leg for a re-send to replace
+	}
+	nonce := func(n uint64) *uint64 { return &n }
+	failed := func(errText, hash string, n *uint64) models.RampLeg {
+		return models.RampLeg{Status: models.RampLegStatusFailed, Error: errText, TxHash: hash, Nonce: n}
+	}
+	reverted := func(r *deliverRig) {
+		r.verifier.credited, r.verifier.err = nil, fmt.Errorf("%w: 0xrev", ErrTransferReverted)
+	}
+	states := []state{
+		{name: "no earlier sale", allow: true},
+		{name: "not broadcast", legs: []models.RampLeg{failed("not broadcast: insufficient funds for gas", "", nonce(5))}, allow: true},
+		{name: "reverted, 5+ deep", legs: []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
+			setup: reverted, allow: true},
+		{name: "reverted, shallow", legs: []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
+			setup: func(r *deliverRig) { reverted(r); r.probe.receiptBlock = 4498 }},
+		{name: "reverted, now reads as paid", legs: []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
+			setup: func(r *deliverRig) { r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil }},
+		{name: "dropped, nonce unused", legs: []models.RampLeg{failed("dropped: operator re-send", "", nonce(9))}},
+		{name: "dropped, nonce consumed, clean trusted scan", legs: []models.RampLeg{failed("dropped: operator re-send", "", nonce(5))}, allow: true},
+		{name: "dropped, nonce consumed, transfer to her found", legs: []models.RampLeg{failed("dropped: operator re-send", "", nonce(5))},
+			setup: func(r *deliverRig) {
+				r.probe.matches = []types.Log{{BlockNumber: 3000, TxHash: common.HexToHash("0xbeef")}}
+			}},
+		{name: "dropped, nonce consumed, blind chunk", legs: []models.RampLeg{failed("dropped: operator re-send", "", nonce(5))},
+			setup: func(r *deliverRig) { r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4500}} }},
+		{name: "failed for an unknown reason", legs: []models.RampLeg{failed("something odd", "", nonce(5))}},
+		{name: "a live sale", legs: []models.RampLeg{{Status: models.RampLegStatusPending, TxHash: "0xlive", Nonce: nonce(5)}}, noLive: true},
+	}
+	type entry struct {
+		name   string
+		status string // the order's status before the call
+		live   bool   // a stalled live sale for a re-send to replace
+		call   func(r *deliverRig) bool
+	}
+	ctx := context.Background()
+	entries := []entry{
+		{name: "automatic send", status: models.ITStatusDelivering, call: func(r *deliverRig) bool {
+			err := r.s.SendTreasuryBuy(ctx, r.intent.ID)
+			return err == nil && r.signer.calls() == 1
+		}},
+		{name: "operator re-send", status: models.ITStatusDelivering, live: true, call: func(r *deliverRig) bool {
+			_, err := r.s.ResendTreasuryBuy(ctx, uuid.New(), r.intent.ID, "checked on basescan")
+			return err == nil
+		}},
+		{name: "refund", status: models.ITStatusDelivering, call: func(r *deliverRig) bool {
+			_, err := r.s.MarkStableBuyRefunded(ctx, uuid.New(), r.intent.ID, "returned by bank transfer")
+			return err == nil
+		}},
+		{name: "deliver anyway", status: models.ITStatusBuyAwaitingRate, call: func(r *deliverRig) bool {
+			_, err := r.s.DeliverParkedTreasuryBuy(ctx, uuid.New(), r.intent.ID, "owner approved")
+			return err == nil
+		}},
+	}
+	for _, st := range states {
+		for _, en := range entries {
+			if en.live && st.noLive {
+				continue // the one-live-sale index forbids a second live leg
+			}
+			t.Run(st.name+"/"+en.name, func(t *testing.T) {
+				r := newDeliverRig(t)
+				// A chain where nonce 8 is next and nothing is pending, the
+				// token's traffic visible at every chunk's end, receipts 90.
+				r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500
+				r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+				if en.status == models.ITStatusBuyAwaitingRate {
+					parkTreasury(t, r.s, r.intent, "1000000")
+				} else {
+					r.s.db.Model(&models.ITIntent{}).Where("id = ?", r.intent.ID).Update("status", en.status)
+				}
+				legs := append([]models.RampLeg(nil), st.legs...)
+				if en.live { // nonce 7 consumed, from block 100: provable on its own
+					legs = append(legs, models.RampLeg{Status: models.RampLegStatusPending, Nonce: nonce(7),
+						CreatedAt: time.Now().Add(-31 * time.Minute)})
+				}
+				for i := range legs {
+					l := legs[i]
+					l.OrderID, l.Kind, l.Attempt = r.intent.ID, models.RampLegKindSale, i+1
+					l.ChainKey, l.Token, l.FromAddr, l.ToAddr, l.Amount = "base", "USDC", sponsorTestSigner, testRoutedEVM, "7232937"
+					l.FromBlock = 100
+					if l.CreatedAt.IsZero() {
+						l.CreatedAt = time.Now().Add(-time.Hour)
+					}
+					if err := r.s.db.Create(&l).Error; err != nil {
+						t.Fatalf("leg %d: %v", i+1, err)
+					}
+				}
+				if st.setup != nil {
+					st.setup(r)
+				}
+				if got := en.call(r); got != st.allow {
+					t.Fatalf("proceeded = %v, want %v (the same answer on every path)", got, st.allow)
+				}
+			})
+		}
 	}
 }
 
