@@ -7,6 +7,7 @@
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders, withWalletProof } from '@/services/walletApi';
 import { getActiveWallet } from './wallet';
+import type { ITIntentFee } from '@/utils/itIntentView';
 
 export interface ITRate {
   buyRateKobo: string; // kobo per 1 MCGP
@@ -53,6 +54,19 @@ export interface ITIntent {
    *  never sent by the client. */
   destChain?: string;
   destAddress?: string;
+
+  /** A stablecoin buy the ramp router opened: who fills it. Absent on every
+   *  other intent. */
+  provider?: 'treasury' | 'flutterwave';
+  /** Set only on a buy opened through the ramp router: when its quote stops
+   *  being held. With it, `repriced` means "priced at a live rate instead"
+   *  (utils/rampHonour). */
+  rateExpiresAt?: string;
+  repriced?: boolean;
+  /** The quoted breakdown (spec §14): the display rate in minor units and one
+   *  line per provider fee (utils/itIntentView). */
+  displayRate?: string;
+  fees?: ITIntentFee[];
 }
 
 // code carries the backend's machine error code (e.g. "it_agreement_required")

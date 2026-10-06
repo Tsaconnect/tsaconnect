@@ -72,6 +72,10 @@ describe('buyStatusToHops', () => {
 });
 
 describe('isTerminalBuyStatus', () => {
+  it('treats an operator refund as finished (spec §6)', () => {
+    expect(isTerminalBuyStatus('refunded')).toBe(true);
+  });
+
   it('treats only genuinely finished states as terminal', () => {
     expect(isTerminalBuyStatus('settled')).toBe(true);
     expect(isTerminalBuyStatus('cancelled')).toBe(true);
@@ -83,5 +87,16 @@ describe('isTerminalBuyStatus', () => {
     // would freeze the screen after they did.
     expect(isTerminalBuyStatus('buy_awaiting_rate')).toBe(false);
     expect(isTerminalBuyStatus('converting')).toBe(false);
+  });
+});
+
+describe('buyStatusLabel', () => {
+  it('names the review and refund states the way spec §6 words them', () => {
+    expect(buyStatusLabel('buy_awaiting_rate')).toBe('Waiting for us to review');
+    expect(buyStatusLabel('refunded')).toBe('Refunded');
+  });
+
+  it('shows no progress on a refunded purchase', () => {
+    expect(buyStatusToHops('refunded').every((h) => h.state === 'pending')).toBe(true);
   });
 });

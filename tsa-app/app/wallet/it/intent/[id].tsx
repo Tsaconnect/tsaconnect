@@ -2,7 +2,7 @@
 //
 // Instant Transfer order detail — status progress for a single buy/sell intent.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, RefreshControl, View, Platform, Alert } from 'react-native';
+import { ScrollView, RefreshControl, View, Platform, Alert, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -22,6 +22,10 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { PayIntoCard } from '@/components/it/PayIntoCard';
+import { HonourNotice } from '@/components/it/HonourNotice';
+import { FeeLines } from '@/components/ramp/FeeLines';
+import { honourOf } from '@/utils/rampHonour';
+import { deliveryExplorerUrl, intentDisplayRateMinor, intentFeeLines } from '@/utils/itIntentView';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { cancelBuyErrorMessage, confirmCancelITBuy } from '@/utils/itBuyOrder';
 import { formatTokenAmount } from '@/services/p2p';
@@ -455,7 +459,13 @@ export default function ITIntentDetail() {
   // struck when the naira lands, and settlement rewrites both the asset amount
   // and the rate. Confirm already renders "≈"; dropping it here made the same
   // number read as settled one tap later, then visibly change.
-  const buyIsEstimate = isStableBuy && intent.status === 'pending_payment';
+  // A routed buy inside its rate hold is firm, not an estimate (spec §5.2).
+  const honour = honourOf(intent);
+  const buyIsEstimate = isStableBuy && intent.status === 'pending_payment' && !honour.holding;
+  // The quoted breakdown (spec §14): the display rate in the Rate row, each
+  // provider fee on its own line. Empty for everything but a routed buy.
+  const buyFeeLines = isStableBuy ? intentFeeLines(intent.fees) : [];
+  const explorerUrl = isStableBuy ? deliveryExplorerUrl(intent) : undefined;
 
   // "Transfer ANY amount" is true for an MCGP buy — that leg reprices whatever
   // lands. It is false for a stablecoin buy: settleStableBuyFromCharge prices
@@ -552,7 +562,7 @@ export default function ITIntentDetail() {
               label="Rate"
               value={
                 isStableAsset
-                  ? `${buyIsEstimate ? '≈ ' : ''}${formatKobo(intent.rateKobo)} / ${intent.asset}`
+                  ? `${buyIsEstimate ? '≈ ' : ''}${formatKobo(isStableBuy ? intentDisplayRateMinor(intent) : intent.rateKobo)} / ${intent.asset}`
                   : `₦${fmtRate(intent.rateKobo)} / MCGP`
               }
             />
@@ -565,6 +575,21 @@ export default function ITIntentDetail() {
               </>
             ) : null}
           </SummaryCard>
+          {buyFeeLines.length ? (
+            // "You get" above is already after every one of these.
+            <FeeLines fees={buyFeeLines} token={intent.asset ?? ''} symbol="₦" />
+          ) : null}
+          {explorerUrl ? (
+            <View style={{ marginTop: spacing.md }}>
+              <Button
+                title="View on explorer"
+                variant="secondary"
+                onPress={() => {
+                  void Linking.openURL(explorerUrl);
+                }}
+              />
+            </View>
+          ) : null}
           {isStableAsset ? (
             <View style={{ marginTop: spacing.md }}>
               <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.sm }}>
@@ -606,10 +631,25 @@ export default function ITIntentDetail() {
               </Text>
             </View>
           ) : null}
+          {isStableBuy ? (
+            <HonourNotice
+              honourUntil={honour.honourUntil}
+              pending={intent.status === 'pending_payment'}
+              rateUpdated={honour.rateUpdated}
+              receive={`${fmtAsset(intent.assetAmount)} ${intent.asset}`}
+            />
+          ) : null}
           {isStableBuy && intent.status === 'pending_payment' ? (
             <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
               {stableBuyPayCopy}
             </Text>
+          ) : null}
+          {isStableBuy && intent.status === 'pending_payment' && payTo ? (
+            // Where to send it (D60): the API returns this card for a
+            // stablecoin buy too; only the MCGP branch below rendered it.
+            <View style={{ marginTop: spacing.md }}>
+              <PayIntoCard payTo={payTo} />
+            </View>
           ) : null}
           {isMcgpBuyAwaitingTransfer ? (
             payTo ? (

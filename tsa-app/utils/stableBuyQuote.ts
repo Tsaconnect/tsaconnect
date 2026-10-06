@@ -25,12 +25,13 @@ export const STABLE_BUY_STATUSES = [
   'buy_awaiting_rate',
   'cancelled',
   'failed',
+  'refunded',
 ] as const;
 
-/** Finished for good. `buy_awaiting_rate` is deliberately absent: the money
+/** Finished for good (refunded: an operator returned her naira). `buy_awaiting_rate` is deliberately absent: the money
  *  landed but could not be priced, and an operator can resume it back to
  *  payment_received — so the screen must keep polling. */
-const TERMINAL = new Set(['settled', 'cancelled', 'failed']);
+const TERMINAL = new Set(['settled', 'cancelled', 'failed', 'refunded']);
 
 export function isTerminalBuyStatus(status: string): boolean {
   return TERMINAL.has((status || '').trim());
@@ -75,9 +76,10 @@ const LABELS: Record<string, string> = {
   converting: 'Buying',
   delivering: 'Sending to your wallet',
   settled: 'Delivered',
-  buy_awaiting_rate: 'Needs review — we\'ve been notified',
+  buy_awaiting_rate: 'Waiting for us to review',
   cancelled: 'Cancelled',
   failed: 'Failed',
+  refunded: 'Refunded',
 };
 
 export function buyStatusLabel(status: string): string {
@@ -89,7 +91,7 @@ export function buyStatusToHops(status: string): Hop[] {
   const s = (status || '').trim();
   const shown = ['awaiting_funds', 'converting', 'delivering', 'settled'];
 
-  if (s === 'cancelled' || s === 'failed') {
+  if (s === 'cancelled' || s === 'failed' || s === 'refunded') {
     return shown.map((k) => ({ label: LABELS[k], state: 'pending' as HopState }));
   }
   if (s === 'buy_awaiting_rate') {
