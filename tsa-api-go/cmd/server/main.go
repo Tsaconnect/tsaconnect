@@ -1636,10 +1636,19 @@ func main() {
 		// (built after this block) sends Sonic gas through it with or without
 		// Paycrest.
 		rampSponsor *services.RampSponsorship
+		// Nil when Paycrest is off; the company wallet's rate source still works.
+		paycrestQuotes *services.PaycrestQuoteService
+		// The company wallet's rate source: Paycrest's reference rate (when on)
+		// and a Flutterwave mid that must agree within RAMP_TREASURY_RATE_TOL_BPS,
+		// or one of them checked against the FX feed, else its leg closes (§13 Q4,
+		// review I2). Settlement prices from the same instance, so it is wired
+		// whenever Paycrest is on or off.
+		treasuryRates *services.TreasuryMarketRate
 	)
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
-		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
+		paycrestQuotes = services.NewPaycrestQuoteService(paycrestClient, nil, nil)
+		treasuryRates = wireTreasuryMarketRate(itService, paycrestQuotes, cfg.RampTreasuryRateTolBps)
 		// Also sets the fee on paycrestQuotes, so quotes price in what orders send.
 		paycrestOrders := services.NewPaycrestOrderService(
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
@@ -1671,14 +1680,6 @@ func main() {
 			guard := services.PriceGuardLog
 			if cfg.RampPriceGuard == string(services.PriceGuardEnforce) {
 				guard = services.PriceGuardEnforce
-			}
-			// The company wallet prices from Paycrest's reference rate and a
-			// Flutterwave mid that must agree within RAMP_TREASURY_RATE_TOL_BPS,
-			// or one of them checked against the FX feed, else its leg closes
-			// (§13 Q4, review I2); settlement prices from the same instance.
-			treasuryRates := services.NewTreasuryMarketRate(paycrestQuotes, itService, cfg.RampTreasuryRateTolBps)
-			if itService != nil {
-				itService.SetTreasuryMarketRate(treasuryRates)
 			}
 			// Registration order is the rate tie-break: company wallet →
 			// Paycrest → Flutterwave (S6, D36). A disabled or unwired provider
@@ -1771,6 +1772,10 @@ func main() {
 		}
 	} else {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
+	}
+
+	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
+		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)
 	}
 
 	// Marketplace checkout funding — "pay with another token". Reuses the ramp's

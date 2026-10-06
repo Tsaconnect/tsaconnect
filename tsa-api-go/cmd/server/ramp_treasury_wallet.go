@@ -141,3 +141,14 @@ func alertReceiptsUnreadable(chain, host string, err error) {
 	log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_receipts_unreadable=1 chain=%s rpc_host=%s err=%v — not quoted until a re-probe passes",
 		chain, host, services.RedactAlertText(err.Error()))
 }
+
+// wireTreasuryMarketRate builds the company wallet's rate source and hands it
+// to the IT service for settlement. A nil Paycrest source falls back to the
+// Flutterwave mid checked against the FX feed.
+func wireTreasuryMarketRate(it *services.ITService, pc *services.PaycrestQuoteService, tolBps int64) *services.TreasuryMarketRate {
+	rates := services.NewTreasuryMarketRate(pc, it, tolBps)
+	if it != nil {
+		it.SetTreasuryMarketRate(rates)
+	}
+	return rates
+}

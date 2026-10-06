@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -366,6 +367,9 @@ func TestRampBuy_ITRefusals(t *testing.T) {
 			ramp.WrapClass(ramp.ErrVenueUnavailable, services.ErrTreasuryDailyCapReached)), 429, "ramp_daily_limit"},
 		{"above the maximum", ramp.WrapClass(ramp.ErrAboveMaximum, services.ErrStableBuyAboveMaximum), 400, ""},
 		{"agreement", ramp.WrapClass(ramp.ErrRefusedForUser, services.ErrITAgreementRequired), 403, "it_agreement_required"},
+		{"no saved address (classified no-venue)", ramp.WrapClass(ramp.ErrNoVenue,
+			fmt.Errorf("%w: you have no POLYGON address to receive on", services.ErrBadDeliveryAddress)), 400, ""},
+		{"no wallet", ramp.WrapClass(ramp.ErrRefusedForUser, services.ErrStableBuyNoWallet), 400, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := rampDoJSON(rampTestServer(t, &fakeRampRoutes{openErr: tc.err}, rampUser()), "POST", "/api/ramp/buy", rampBuyJSON())

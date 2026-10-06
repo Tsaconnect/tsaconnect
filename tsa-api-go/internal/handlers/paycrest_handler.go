@@ -74,7 +74,7 @@ func paycrestError(c *gin.Context, err error) {
 		// words the IT endpoints send, so the app shows its prompt.
 		utils.ErrorResponseWithCode(c, http.StatusForbidden,
 			"Please review and accept the trading agreement to continue", "it_agreement_required")
-	case errors.Is(err, services.ErrBadDeliveryAddress):
+	case errors.Is(err, services.ErrBadDeliveryAddress), errors.Is(err, services.ErrStableBuyNoWallet):
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"You have no wallet address saved on that network. Set that wallet up, then try again.")
 	case errors.Is(err, services.ErrStableBuyAlreadyOpen):

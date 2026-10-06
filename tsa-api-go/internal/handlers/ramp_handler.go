@@ -366,6 +366,10 @@ func rampError(c *gin.Context, err error) {
 		paycrestError(c, services.ErrPaycrestBelowMinimum)
 	case errors.Is(err, ramp.ErrAboveMaximum):
 		utils.ErrorResponse(c, http.StatusBadRequest, "That amount is above the maximum for this route. Try a smaller amount.")
+	case errors.Is(err, services.ErrBadDeliveryAddress), errors.Is(err, services.ErrStableBuyNoWallet):
+		// Classified as no-venue or refused-for-user by the provider, but the
+		// user's fix is the same: save a wallet address. Keep it above ErrNoVenue.
+		paycrestError(c, err)
 	case errors.Is(err, ramp.ErrNoVenue):
 		paycrestError(c, services.ErrPaycrestNoVenue)
 	default:

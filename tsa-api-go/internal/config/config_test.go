@@ -569,3 +569,16 @@ func TestLoad_RampProviderDefaults(t *testing.T) {
 		t.Fatalf("1000 → %d, want 1000 (the ceiling is allowed)", got)
 	}
 }
+
+func TestLoad_RampTreasuryLowBalanceRejectsBadValues(t *testing.T) {
+	for _, bad := range []string{"0", "-1", "NaN"} {
+		t.Setenv("RAMP_TREASURY_LOW_BALANCE_USD", bad)
+		if got := Load().RampTreasuryLowBalanceUSD; got != 50 {
+			t.Fatalf("RAMP_TREASURY_LOW_BALANCE_USD=%s -> %v, want the default 50", bad, got)
+		}
+	}
+	t.Setenv("RAMP_TREASURY_LOW_BALANCE_USD", "75.5")
+	if got := Load().RampTreasuryLowBalanceUSD; got != 75.5 {
+		t.Fatalf("75.5 -> %v", got)
+	}
+}

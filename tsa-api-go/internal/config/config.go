@@ -979,6 +979,10 @@ func Load() *Config {
 	cfg.RampTreasuryMinNGN = strings.TrimSpace(getEnv("RAMP_TREASURY_MIN_NGN", "100"))
 	cfg.RampTreasuryDailyUserMaxUSD = strings.TrimSpace(getEnv("RAMP_TREASURY_DAILY_USER_MAX_USD", "500"))
 	cfg.RampTreasuryLowBalanceUSD = getEnvFloat64("RAMP_TREASURY_LOW_BALANCE_USD", 50)
+	if v := cfg.RampTreasuryLowBalanceUSD; !(v > 0) { // also catches NaN
+		log.Printf("[config] ALERT ramp_treasury_low_balance_invalid_total=1 RAMP_TREASURY_LOW_BALANCE_USD=%v must be positive — using 50", v)
+		cfg.RampTreasuryLowBalanceUSD = 50
+	}
 	cfg.RampTreasurySendStall = time.Duration(getEnvInt64("RAMP_TREASURY_SEND_STALL_MINUTES", 30)) * time.Minute
 	cfg.RampTreasuryRateTolBps = getEnvInt64("RAMP_TREASURY_RATE_TOL_BPS", 400)
 	if cfg.RampTreasuryRateTolBps <= 0 || cfg.RampTreasuryRateTolBps > 1000 {
