@@ -140,6 +140,7 @@ func TestPaycrestOpen_Classification(t *testing.T) {
 		"no payout":      {services.ErrSellNeedsPayoutAccount, ErrRefusedForUser},
 		"account shape":  {services.ErrPaycrestAccountShape, ErrRefusedForUser},
 		"request sent":   {fmt.Errorf("%w: %w", services.ErrOrderRequestSent, errors.New("timeout")), ErrOutcomeUnknown},
+		"nothing sent":   {fmt.Errorf("%w: %w", services.ErrPaycrestNothingSent, errors.New("rates timeout")), ErrVenueUnavailable},
 		"rejected 4xx":   {fmt.Errorf("%w: %w", services.ErrPaycrestOrderRejected, errors.New("HTTP 422")), ErrVenueUnavailable},
 		"buy persist":    {services.ErrBuyAttemptMayExist, ErrOutcomeUnknown},
 		"sell persist":   {services.ErrSellAttemptMayExist, ErrOutcomeUnknown},

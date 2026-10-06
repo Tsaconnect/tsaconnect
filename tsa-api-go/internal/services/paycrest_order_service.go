@@ -65,6 +65,27 @@ var (
 	ErrPaycrestNotCancellable = errors.New("this order can no longer be cancelled")
 )
 
+// ErrPaycrestNothingSent marks a refusal that happened before any request to
+// open an order left us — a rate read or a bank-directory lookup failing. The
+// ramp router may fail over on it (router spec §4.3/§9).
+var ErrPaycrestNothingSent = errors.New("paycrest: refused before anything was sent")
+
+// nothingSentError keeps the cause's own text — paycrestError and the app
+// read it unchanged — while matching ErrPaycrestNothingSent too.
+type nothingSentError struct{ cause error }
+
+func (e nothingSentError) Error() string   { return e.cause.Error() }
+func (e nothingSentError) Unwrap() []error { return []error{ErrPaycrestNothingSent, e.cause} }
+
+// nothingSent marks err as a pre-create failure. Nil stays nil; an error
+// already marked is returned as-is.
+func nothingSent(err error) error {
+	if err == nil || errors.Is(err, ErrPaycrestNothingSent) {
+		return err
+	}
+	return nothingSentError{cause: err}
+}
+
 // PaycrestOrderer is the client surface this service needs.
 type PaycrestOrderer interface {
 	CreateOnrampOrder(ctx context.Context, req PaycrestOnrampRequest) (*PaycrestOrder, error)
@@ -629,7 +650,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			Destination: req.DestinationAddress,
 		}})
 		if verr != nil {
-			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
+			return nil, nothingSent(s.explainMissingVenue(ctx, "buy", fiat, verr))
 		}
 		if len(venues) == 0 {
 			return nil, fmt.Errorf("%w: no route can deliver %s right now",
@@ -658,7 +679,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	} else {
 		v, verr := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
 		if verr != nil {
-			return nil, s.explainMissingVenue(ctx, "buy", fiat, verr)
+			return nil, nothingSent(s.explainMissingVenue(ctx, "buy", fiat, verr))
 		}
 		// Before anything is sent: a refusal here leaves no order anywhere.
 		if err := checkPriceGuard("buy", v.Rate, req.MaxRate, req.PriceGuard); err != nil {
@@ -884,7 +905,7 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 
 	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
-		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+		return nil, nothingSent(s.explainMissingVenue(ctx, "sell", fiat, err))
 	}
 	if err := checkPriceGuard("sell", venue.Rate, req.MinRate, req.PriceGuard); err != nil {
 		return nil, err
@@ -954,12 +975,12 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 	// binds is whatever the venue comes back with.
 	market, err := s.quotes.cachedMarketRate(ctx, fiat, "sell")
 	if err != nil {
-		return nil, err
+		return nil, nothingSent(err)
 	}
 	venue, err := s.quotes.VenueForFee(ctx, "sell", fiat,
 		strconv.FormatFloat(amount*market, 'f', 2, 64), req.ChainKey, req.Token, feeVal)
 	if err != nil {
-		return nil, s.explainMissingVenue(ctx, "sell", fiat, err)
+		return nil, nothingSent(s.explainMissingVenue(ctx, "sell", fiat, err))
 	}
 	// What she is actually owed: the tokens the chain proved, at the rate the
 	// venue just quoted. Never the other way round, and never through a
@@ -1399,7 +1420,7 @@ func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code 
 	if strings.ToUpper(strings.TrimSpace(fiat)) != "NGN" {
 		institutions, err := s.dir.Institutions(ctx, fiat)
 		if err != nil {
-			return "", "", err
+			return "", "", nothingSent(err)
 		}
 		for _, inst := range institutions {
 			if inst.Code == code {
@@ -1410,7 +1431,7 @@ func (s *PaycrestOrderService) paycrestBankCode(ctx context.Context, fiat, code 
 	}
 	m, err := s.dir.BankMap(ctx, fiat)
 	if err != nil {
-		return "", "", err
+		return "", "", nothingSent(err)
 	}
 	paycrestCode, ok := m.NIBSSToPaycrest[code]
 	if !ok {

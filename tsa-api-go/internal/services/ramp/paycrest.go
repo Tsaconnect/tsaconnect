@@ -154,7 +154,8 @@ func classifyOpenErr(err error) error {
 		errors.Is(err, services.ErrSellNeedsPayoutAccount),
 		errors.Is(err, services.ErrPaycrestAccountShape):
 		return WrapClass(ErrRefusedForUser, err)
-	case errors.Is(err, services.ErrPaycrestDisabled),
+	case errors.Is(err, services.ErrPaycrestNothingSent),
+		errors.Is(err, services.ErrPaycrestDisabled),
 		errors.Is(err, services.ErrPaycrestBelowMinimum),
 		errors.Is(err, services.ErrPaycrestLegClosed),
 		errors.Is(err, services.ErrPaycrestNoVenue),
@@ -163,12 +164,9 @@ func classifyOpenErr(err error) error {
 		errors.Is(err, services.ErrPaycrestOrderRejected): // a 400/422: nothing opened
 		return WrapClass(ErrVenueUnavailable, err)
 	default:
-		// Infrastructure (e.g. the KYC read failing) and pre-create provider
-		// errors with no sentinel (a /v2/rates transport error in VenueFor, a
-		// bank-directory failure): v1 deliberately does not fail over on
-		// these — with one provider there is nowhere to go. The Flutterwave
-		// adapter must not land until VenueFor/directory errors carry a
-		// "nothing sent" sentinel (spec §9).
+		// Infrastructure with no "nothing sent" mark (e.g. the KYC read
+		// failing): not classified, so the router stops rather than risk a
+		// second provider over an order whose fate it cannot tell.
 		return err
 	}
 }
