@@ -97,7 +97,8 @@ func TestTreasurySettle_LiveBeyondFreeStockParks(t *testing.T) {
 	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusBuyAwaitingRate {
 		t.Fatalf("status = %s, want parked", got.Status)
 	}
-	if !strings.Contains(logs.String(), "reason=stock") {
+	if !strings.Contains(logs.String(), "reason=stock") ||
+		!strings.Contains(logs.String(), "ALERT it_stable_buy_parked_unpriceable intent="+intent.ID.String()+" payment=chg_t_stock reason=\"stock\"") {
 		t.Fatalf("log = %q", logs.String())
 	}
 }
@@ -159,8 +160,8 @@ func TestRepriceParkedStableBuy_CompanyWalletNeedsStockAndKeepsTheMaximum(t *tes
 	}
 	setStock(native, 50_000_000) // refilled
 	got, err := s.RepriceParkedStableBuy(context.Background(), intent.ID)
-	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" {
-		t.Fatalf("after refill: %+v %v", got, err)
+	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" || got.MaxWaived {
+		t.Fatalf("after refill: %+v %v, want priced with no waiver", got, err)
 	}
 	parkTreasury(t, s, intent, "30000000") // ₦300,000 → above $200
 	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrStableBuyAboveMaximum) {
@@ -188,6 +189,108 @@ func TestDeliverParkedTreasuryBuy_WaivesTheMaximumButNotTheStock(t *testing.T) {
 	if err := s.db.First(&audit, "intent_id = ? AND action = ?", intent.ID, models.ITAuditStableBuyDeliveredAnyway).Error; err != nil ||
 		audit.ActorID == nil || *audit.ActorID != admin || audit.Note != "customer confirmed" {
 		t.Fatalf("audit = %+v %v", audit, err)
+	}
+	// It is no longer parked: neither exit may act on it again.
+	if _, err := s.DeliverParkedTreasuryBuy(context.Background(), admin, intent.ID, "again"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("second deliver anyway: %v, want ErrITBadState", err)
+	}
+	if _, err := s.MarkStableBuyRefunded(context.Background(), admin, intent.ID, "refund it too"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("refund after deliver anyway: %v, want ErrITBadState", err)
+	}
+	var n int64
+	s.db.Model(&models.ITIntentAuditLog{}).Where("intent_id = ?", intent.ID).Count(&n)
+	if n != 1 {
+		t.Fatalf("audit rows = %d, want only the one delivery", n)
+	}
+}
+
+// max_waived records a waiver only when one happened: a parked buy delivered
+// anyway inside the maximum waived nothing.
+func TestDeliverParkedTreasuryBuy_InsideTheMaximumWaivesNothing(t *testing.T) {
+	s, _, intent, _ := newTreasurySettleService(t, 50_000_000)
+	parkTreasury(t, s, intent, "1200000") // 8.679525 USDC, well under $200
+	got, err := s.DeliverParkedTreasuryBuy(context.Background(), uuid.New(), intent.ID, "parked on a stock dip")
+	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" || got.MaxWaived {
+		t.Fatalf("deliver anyway: %+v %v, want max_waived=false", got, err)
+	}
+}
+
+// seedSettledTreasuryBuy is an earlier company-wallet purchase of units today.
+func seedSettledTreasuryBuy(t *testing.T, s *ITService, userID uuid.UUID, units string) {
+	t.Helper()
+	prior := seedTreasuryIntent(t, s, userID, models.ITStatusSettled)
+	if err := s.db.Model(prior).Update("asset_amount", units).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Ruling (Task 8 review): the $500 rolling daily cap holds at live pricing too,
+// with the order's own row left out of the total. ₦20,000 → ~14.47 USDC on
+// top of 495 already bought today breaches it.
+func TestTreasurySettle_LiveBeyondTheDailyCapParks(t *testing.T) {
+	s, userID, intent, _ := newTreasurySettleService(t, 50_000_000)
+	seedSettledTreasuryBuy(t, s, userID, "495000000")
+	logs := captureLog(t)
+	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_cap", "2000000"); err != nil {
+		t.Fatal(err)
+	}
+	got := reloadIntent(t, s, intent.ID)
+	if got.Status != models.ITStatusBuyAwaitingRate || got.AssetAmount != "7232937" || got.Repriced {
+		t.Fatalf("status=%s asset=%s repriced=%v, want parked with the quote untouched", got.Status, got.AssetAmount, got.Repriced)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "ramp_treasury_parked intent="+intent.ID.String()+" reason=daily_cap") ||
+		!strings.Contains(out, "ALERT it_stable_buy_parked_unpriceable intent="+intent.ID.String()) {
+		t.Fatalf("log = %q", out)
+	}
+	// A plain operator re-price keeps the cap too.
+	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrTreasuryDailyCapReached) {
+		t.Fatalf("re-price: %v, want ErrTreasuryDailyCapReached", err)
+	}
+}
+
+// The exact on-time payment was capped at open; it is honoured even though
+// her own order would now count past the cap a second time.
+func TestTreasurySettle_HonouredIgnoresTheDailyCap(t *testing.T) {
+	s, userID, intent, _ := newTreasurySettleService(t, 50_000_000)
+	seedSettledTreasuryBuy(t, s, userID, "495000000") // 495 + 7.232937 > 500
+	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_cap_exact", "1000000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7232937" || got.Repriced {
+		t.Fatalf("status=%s asset=%s repriced=%v, want honoured", got.Status, got.AssetAmount, got.Repriced)
+	}
+}
+
+// Under the cap with her own row excluded: 490 + 8.68 live fits, though
+// 490 + 7.23 (own) + 8.68 would not.
+func TestTreasurySettle_DailyCapExcludesItsOwnOrder(t *testing.T) {
+	s, userID, intent, _ := newTreasurySettleService(t, 50_000_000)
+	seedSettledTreasuryBuy(t, s, userID, "490000000")
+	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_cap_own", "1200000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" {
+		t.Fatalf("status=%s asset=%s, want priced live", got.Status, got.AssetAmount)
+	}
+}
+
+// Ruling (Task 8 review): with the company wallet gone dormant the central
+// path keeps retrying, but loudly.
+func TestTreasurySettle_CentralWithNoCompanyWalletAlertsAndRetries(t *testing.T) {
+	s, _, intent, _ := newTreasurySettleService(t, 50_000_000)
+	s.SetCompanyWallet(nil)
+	logs := captureLog(t)
+	err := NewITStableClaimSource(s).Accept(context.Background(), intent.ID,
+		centralCredit("100004261003120000000000000092", 900_000, time.Now()))
+	if !errors.Is(err, ErrTreasuryUnavailable) {
+		t.Fatalf("err = %v, want ErrTreasuryUnavailable so the poller retries", err)
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPendingPayment {
+		t.Fatalf("status = %s, want untouched", got.Status)
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_treasury_unavailable_at_settle intent="+intent.ID.String()) {
+		t.Fatalf("log = %q", logs.String())
 	}
 }
 

@@ -59,9 +59,14 @@ func (s *ITService) repriceTreasuryParked(ctx context.Context, intent *models.IT
 			return fmt.Errorf("%w: needs %s, %s free", ErrTreasuryStockShort,
 				FormatStableUnits(q.AssetUnits.String()), FormatStableUnits(free.String()))
 		}
+		// The daily cap is the buyer's limit, not the order's: "deliver
+		// anyway" waives only the per-order maximum.
+		if err := s.checkTreasuryDailyCap(ctx, tx, intent.UserID, q.AssetUnits, intent.ID); err != nil {
+			return err
+		}
 		cols := map[string]any{"status": models.ITStatusPaymentReceived, "repriced": true, "failure_reason": ""}
-		if waiveMax {
-			cols["max_waived"] = true // §13 Q9: the waiver lives on the order too
+		if waiveMax && q.AssetUnits.Cmp(s.treasuryLimits().maxUnits) > 0 {
+			cols["max_waived"] = true // §13 Q9: a waiver that happened lives on the order too
 		}
 		setQuoteColumns(cols, q.AssetUnits, q.RatePerUnitMinor, q.DisplayRateMinor, q.Fees)
 		res := tx.Model(&models.ITIntent{}).

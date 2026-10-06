@@ -347,3 +347,27 @@ func TestRepriceParkedStableBuy_RefusesAParkWithNoConversionAttemptsLeft(t *test
 		t.Fatalf("status = %s, want it left parked", got.Status)
 	}
 }
+
+// §5.2 / D56: mark refunded closes a Flutterwave park too — here one taken
+// on the provider's 0302 floor with its conversion attempts spent.
+func TestMarkStableBuyRefunded_FlutterwaveBelowLimitPark(t *testing.T) {
+	s, _, intent := openRoutedForSettle(t)
+	if err := s.db.AutoMigrate(&models.ITIntentAuditLog{}); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Updates(map[string]any{
+		"status": models.ITStatusBuyAwaitingRate, "payment_ref": "chg_0302", "received_amount": "16502500",
+		"failure_reason":      `buy conversion failed: trf_1 code=0302 type=transfer_amount_below_limit msg="Minimum: USDC 5.0"`,
+		"conversion_attempts": maxStableConversionAttempts,
+	})
+	admin := uuid.New()
+	got, err := s.MarkStableBuyRefunded(context.Background(), admin, intent.ID, "returned via GTB 0456")
+	if err != nil || got.Status != models.ITStatusRefunded {
+		t.Fatalf("refund: %+v %v", got, err)
+	}
+	var audit models.ITIntentAuditLog
+	if err := s.db.First(&audit, "intent_id = ? AND action = ?", intent.ID, models.ITAuditStableBuyRefunded).Error; err != nil ||
+		audit.ActorID == nil || *audit.ActorID != admin || !strings.Contains(string(audit.Metadata), `"provider":"flutterwave"`) {
+		t.Fatalf("audit = %+v %v", audit, err)
+	}
+}

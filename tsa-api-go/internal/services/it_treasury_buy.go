@@ -207,12 +207,21 @@ func (s *ITService) insertTreasuryIntent(ctx context.Context, intent *models.ITI
 // CheckTreasuryDailyCap refuses when this order would take the user past
 // RAMP_TREASURY_DAILY_USER_MAX_USD over a rolling 24h (§13 Q2, D59).
 func (s *ITService) CheckTreasuryDailyCap(ctx context.Context, userID uuid.UUID, units *big.Int) error {
+	return s.checkTreasuryDailyCap(ctx, s.db, userID, units, uuid.Nil)
+}
+
+// checkTreasuryDailyCap is CheckTreasuryDailyCap on db, leaving out exclude:
+// an order being priced live counts at its new amount, not twice.
+func (s *ITService) checkTreasuryDailyCap(ctx context.Context, db *gorm.DB, userID uuid.UUID, units *big.Int, exclude uuid.UUID) error {
 	var amounts []string
-	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+	q := db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("user_id = ? AND provider = ? AND direction = ? AND status NOT IN ? AND created_at >= ?",
 			userID, models.ITProviderTreasury, models.ITDirectionBuy,
-			[]string{models.ITStatusCancelled, models.ITStatusRefunded}, time.Now().Add(-24*time.Hour)).
-		Pluck("asset_amount", &amounts).Error; err != nil {
+			[]string{models.ITStatusCancelled, models.ITStatusRefunded}, time.Now().Add(-24*time.Hour))
+	if exclude != uuid.Nil {
+		q = q.Where("id <> ?", exclude)
+	}
+	if err := q.Pluck("asset_amount", &amounts).Error; err != nil {
 		return fmt.Errorf("company wallet: read daily total: %w", err)
 	}
 	total := new(big.Int).Set(units)

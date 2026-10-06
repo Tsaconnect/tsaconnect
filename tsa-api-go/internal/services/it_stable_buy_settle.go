@@ -218,8 +218,21 @@ func (s *ITService) claimAndPriceStableBuy(
 	if routed && qErr == nil && arrival.needsStock {
 		// The company wallet, priced live: the stock is won under the lock,
 		// with this order's own reservation excluded (spec §5.2/§5.3).
+		// The live amount also counts against her rolling daily cap, with this
+		// order's own row left out (it was capped at open at its old amount).
 		var stockErr error
 		lockErr := s.withStockLock(ctx, candidate.DestChain, candidate.Asset, func(tx *gorm.DB) error {
+			capErr := s.checkTreasuryDailyCap(ctx, tx, candidate.UserID, arrival.units, candidate.ID)
+			switch {
+			case errors.Is(capErr, ErrTreasuryDailyCapReached):
+				parkClaim(claim, "the live amount is above the buyer's daily company-wallet limit")
+				parkedReason = "daily_cap"
+				res = write(tx)
+				return res.Error
+			case capErr != nil:
+				stockErr = capErr
+				return capErr
+			}
 			free, _, err := s.freeTreasuryStock(ctx, tx, candidate.DestChain, candidate.Asset, candidate.ID, true)
 			if err != nil {
 				stockErr = err
@@ -234,7 +247,13 @@ func (s *ITService) claimAndPriceStableBuy(
 		})
 		switch {
 		case stockErr != nil:
-			// The balance could not be read: transient, like a rate outage.
+			// The balance (or her daily total) could not be read: transient,
+			// like a rate outage. A dormant wallet is too, but it must not
+			// retry silently: nothing on this path can deliver until it is back.
+			if errors.Is(stockErr, ErrTreasuryUnavailable) {
+				log.Printf("[it stable buy] ALERT ramp_treasury_unavailable_at_settle intent=%s payment=%s — the company wallet is not configured",
+					candidate.ID, chargeID)
+			}
 			if !parkOnBadRate {
 				return false, fmt.Errorf("it stable buy: cannot check stock for %q: %w", paymentRef, stockErr)
 			}
@@ -268,6 +287,12 @@ func (s *ITService) claimAndPriceStableBuy(
 
 	switch {
 	case parkedReason != "":
+		if parkedReason == "stock" || parkedReason == "daily_cap" {
+			// Deterministic for this money, like a pricing error (D32):
+			// retrying cannot help, a human must decide.
+			log.Printf("[it stable buy] ALERT it_stable_buy_parked_unpriceable intent=%s payment=%s reason=%q",
+				candidate.ID, chargeID, parkedReason)
+		}
 		if routedMetric(candidate) == "treasury" {
 			log.Printf("[it stable buy] METRIC ramp_treasury_parked intent=%s reason=%s", candidate.ID, parkedReason)
 		}
