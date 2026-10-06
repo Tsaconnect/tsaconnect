@@ -124,6 +124,12 @@ type ITService struct {
 	// See it_stable_quote.go.
 	stableMinSellUnits *big.Int
 
+	// Buys the ramp router opens. Nil means the documented defaults; see
+	// it_stable_buy_routed.go.
+	routed       *routedStableBuyLimits // Flutterwave (RAMP_FLUTTERWAVE_*)
+	rampTerm     *rampBuyTerms          // shared (RAMP_DAILY_ABANDON_CAP, RAMP_HONOUR_GRACE_SECONDS)
+	treasuryLims *treasuryBuyLimits     // company wallet (RAMP_TREASURY_*)
+
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.
 	stableDepositAddrs map[string]string

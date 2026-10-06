@@ -32,7 +32,16 @@ type StableBuyQuote struct {
 	// RatePerUnitMinor is fiat minor units per one whole asset unit, spread
 	// applied. Indicative only: the intent is priced again when money lands.
 	RatePerUnitMinor *big.Int
-	ExpiresAt        time.Time
+	// DisplayRateMinor is the rate shown beside the fee lines (spec §14): our
+	// margin in, provider fees out. Equal to RatePerUnitMinor when Fees is empty.
+	DisplayRateMinor *big.Int
+	// Fees are the provider fees already taken out of AssetUnits, one line each.
+	// AssetUnits = units(FiatMinor ÷ DisplayRateMinor) − Σ Fees (Decision D38).
+	Fees []StableBuyFee
+	// SendFeeUnits is Flutterwave's external-send fee inside AssetUnits. Nil
+	// for every other quote.
+	SendFeeUnits *big.Int
+	ExpiresAt    time.Time
 }
 
 // QuoteStableBuy prices `fiatMinor` of `currency` into `asset`.
@@ -58,45 +67,15 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 		return nil, fmt.Errorf("%w: amount must be a positive integer of minor units", ErrStableBuyBelowMinimum)
 	}
 
-	// Probe one whole asset unit. Direction matters and is the inverse of
-	// sell: fiat is the SOURCE, the asset the DESTINATION.
-	rate, err := s.rateQuoter.QuoteRate(ctx, currency, asset, 1)
-	if err != nil {
-		return nil, fmt.Errorf("it stable buy quote: %w", err)
-	}
-	fiatPerUnit, err := DeriveBuyFiatPerUnit(rate)
+	fiatPerUnit, err := s.StableBuyFiatPerUnit(ctx, currency, asset)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkRatePlausible(ctx, fiatPerUnit, currency); err != nil {
-		return nil, err
-	}
-
-	// grossUnits = fiatMinor / 100 / fiatPerUnit * 10^6, floored.
-	exp := new(big.Int).Exp(big.NewInt(10), big.NewInt(StableAssetDecimals), nil)
-	grossRat := new(big.Rat).SetInt(fiat)
-	grossRat.Quo(grossRat, new(big.Rat).SetInt64(100))
-	grossRat.Quo(grossRat, fiatPerUnit)
-	grossRat.Mul(grossRat, new(big.Rat).SetInt(exp))
-	gross := new(big.Int).Quo(grossRat.Num(), grossRat.Denom())
-
-	net := ApplyBuySpread(gross, s.stableSpread())
-
+	gross, net, ratePerUnit := priceStableBuyAt(fiatPerUnit, fiat, s.stableSpread())
 	if net.Cmp(s.stableMinSell()) < 0 {
 		return nil, fmt.Errorf("%w: minimum delivery is %g %s",
 			ErrStableBuyBelowMinimum, StableFromBaseUnits(s.stableMinSell()), asset)
 	}
-
-	// Effective per-unit price the user is getting, in fiat minor units.
-	//
-	// SetFrac64(10000, 10000-spread) divides by zero if the spread is ever
-	// configured to 10000 bps. Unreachable today (SetStableSpreadBps rejects
-	// that, and stableSpread() never returns <= 0), but guarded there rather
-	// than leaving a latent panic on a money path.
-	perUnit := new(big.Rat).Mul(fiatPerUnit, new(big.Rat).SetInt64(100))
-	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000, 10000-s.stableSpread()))
-	ratePerUnit := new(big.Int).Quo(perUnit.Num(), perUnit.Denom())
-
 	return &StableBuyQuote{
 		Asset:            asset,
 		Currency:         currency,
@@ -104,6 +83,25 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 		GrossAssetUnits:  gross,
 		AssetUnits:       net,
 		RatePerUnitMinor: ratePerUnit,
+		DisplayRateMinor: new(big.Int).Set(ratePerUnit),
 		ExpiresAt:        time.Now().Add(s.stableLockTTL()),
 	}, nil
+}
+
+// priceStableBuyAt is the arithmetic every stablecoin buy quote shares (spec
+// §4.1 extraction): gross units from fiat per unit, then the spread, then the
+// per-unit rate with the spread applied (floored, as QuoteStableBuy always
+// showed it). spreadBps is IT_STABLE_SPREAD_BPS on the old endpoint and the
+// margin on the company wallet.
+func priceStableBuyAt(fiatPerUnit *big.Rat, fiatMinor *big.Int, spreadBps int64) (gross, net, spreadRate *big.Int) {
+	gross = grossStableUnits(fiatMinor, fiatPerUnit)
+	net = ApplyBuySpread(gross, spreadBps)
+	// SetFrac64(10000, 10000-spread) would divide by zero at 10000 bps; every
+	// setter refuses that, so it is unreachable — kept guarded all the same.
+	perUnit := new(big.Rat).Mul(fiatPerUnit, new(big.Rat).SetInt64(100))
+	if spreadBps > 0 && spreadBps < 10000 {
+		perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000, 10000-spreadBps))
+	}
+	spreadRate = new(big.Int).Quo(perUnit.Num(), perUnit.Denom())
+	return gross, net, spreadRate
 }
