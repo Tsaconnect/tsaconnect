@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -78,6 +79,16 @@ const (
 	ITStatusBuyAwaitingRate = "buy_awaiting_rate"
 )
 
+// Routed stablecoin buy providers (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md §4.2).
+const (
+	ITProviderFlutterwave = "flutterwave" // Flutterwave buys and sends each order
+	ITProviderTreasury    = "treasury"    // the company wallet sells its own stock
+)
+
+// ITStatusRefunded closes a parked stablecoin buy whose naira an operator
+// returned (spec §5.2). Terminal.
+const ITStatusRefunded = "refunded"
+
 // ITIntentAsset reads an intent's asset, treating rows written before the
 // column existed as MCGP. Like ITIntentCurrency, this fallback is scoped to
 // historical rows and lives in exactly one place so it cannot quietly become
@@ -87,6 +98,16 @@ func ITIntentAsset(i *ITIntent) string {
 		return ITAssetMCGP
 	}
 	return i.Asset
+}
+
+// ITIntentProvider reads a stablecoin buy's provider, treating rows written
+// before the column existed as Flutterwave's — the only provider there was.
+// Like ITIntentAsset, the fallback lives in exactly one place.
+func ITIntentProvider(i *ITIntent) string {
+	if i == nil || i.Provider == "" {
+		return ITProviderFlutterwave
+	}
+	return i.Provider
 }
 
 // ITIntent is one IT buy or sell. Amounts are base-unit decimal strings (MCGP
@@ -136,6 +157,11 @@ type ITIntent struct {
 	//
 	// Deliberately has NO column default — see ITIntentAsset.
 	Asset string `gorm:"size:8;index" json:"asset"`
+
+	// Provider is which routed provider a stablecoin buy belongs to. '' on
+	// rows written before the column existed — read it through
+	// ITIntentProvider.
+	Provider string `gorm:"size:16;not null;default:'';index" json:"provider,omitempty"`
 
 	// AssetAmount is the asset leg in its own base units (6 decimals for both
 	// stablecoins). For MCGP intents it mirrors McgpAmount via BeforeSave;
@@ -254,6 +280,13 @@ type ITIntent struct {
 	LockedRate    string     `gorm:"type:numeric(38,0);default:0" json:"lockedRate,omitempty"`
 	RateExpiresAt *time.Time `json:"rateExpiresAt,omitempty"`
 	Repriced      bool       `gorm:"default:false" json:"repriced,omitempty"`
+
+	// DisplayRate and Fees are the quote's breakdown (spec §14): the rate shown
+	// beside the fee lines (minor units per token) and the provider fees
+	// inside AssetAmount, as JSON []services.StableBuyFee. LockedRate stays the
+	// all-in rate. Set on routed buys; empty elsewhere.
+	DisplayRate string         `gorm:"type:numeric(38,0);default:0" json:"displayRate,omitempty"`
+	Fees        datatypes.JSON `gorm:"type:jsonb" json:"fees,omitempty"`
 
 	// Sell payout destination (captured at sell creation for auto-payout; empty
 	// on legacy manual-payout intents).

@@ -195,12 +195,17 @@ type StableBuyInstructions struct {
 	PayerInstruction string `json:"payerInstruction,omitempty"`
 }
 
-// CreateStableBuyIntent opens a purchase and tells the user where to pay.
-//
-// The delivery target is validated HERE rather than at delivery time, because
-// delivery is the one irreversible step: Flutterwave rejects an unsupported
-// (chain, asset) pair and a rejected transfer to a live address cannot be
-// recovered. Nothing is written if the target is bad.
+// StableBuyOpenError is ErrStableBuyAlreadyOpen naming the purchase that is
+// open, so a caller can send the user to it (Decision D26). Its text is the
+// sentinel's and errors.Is matches the sentinel, so every refusal reads unchanged.
+type StableBuyOpenError struct{ IntentID uuid.UUID }
+
+func (e *StableBuyOpenError) Error() string        { return ErrStableBuyAlreadyOpen.Error() }
+func (e *StableBuyOpenError) Is(target error) bool { return target == ErrStableBuyAlreadyOpen }
+
+// CreateStableBuyIntent opens a purchase through POST /api/it/stable/buy and
+// tells the user where to pay. Delivery is validated before anything is
+// written: it is the one irreversible step.
 func (s *ITService) CreateStableBuyIntent(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -210,108 +215,131 @@ func (s *ITService) CreateStableBuyIntent(
 	if !s.HasStableBuy() {
 		return nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
 	}
-	if q == nil {
-		return nil, nil, errors.New("it stable buy: nil quote")
-	}
-	// Before the pay-into lookup, so an unverified user is told to verify
-	// rather than told to activate a virtual account — a dead end that sends
-	// them to a rail being retired. Opening only; settleStableBuyFromCharge
-	// deliberately has no such check, or money already in flight for a user
-	// who has not finished verification would strand.
-	if err := requireVerifiedForMoneyIn(ctx, s.db, userID); err != nil {
+	if err := s.stableBuyPrechecks(ctx, userID, q, false); err != nil {
 		return nil, nil, err
 	}
-	// Which provider serves this currency's ramp is a server fact. The app
-	// routes naira to Paycrest and leaves these screens in place but unlinked,
-	// which made the routing a client-side convention — an older build still
-	// calls this path, opens a Flutterwave order for a Paycrest currency, and
-	// Flutterwave then refuses the conversion while the money is already held.
-	//
-	// Gated ONLY here, not in QuoteStableBuy: settleStableBuyFromCharge prices
-	// an already-claimed intent through that quote, so gating it would strand
-	// in-flight purchases the moment a currency moved to another provider.
-	// Refusing to OPEN one is the whole of the fix; nothing already funded
-	// needs to be blocked.
-	//
-	// A nil registry is deliberately no gate. It is optional on ITService and
-	// several construction sites never wire one; gating on its absence would
-	// take the rail down wherever that is true.
+	// Which provider serves this currency's ramp is a server fact. An older
+	// app build still calls this path for naira, and Flutterwave then refuses
+	// the conversion while the money is held. Gated ONLY here: not in
+	// QuoteStableBuy (settlement prices through it) and not on the ramp
+	// router's path, which chose the provider itself. A nil registry is
+	// deliberately no gate.
 	if s.currencies != nil {
 		if p := s.currencies.RampProvider(q.Currency); p != RampProviderFlutterwave {
-			// Both quoted: the currency reaches here from a request body, and
-			// TrimSpace does not remove an embedded newline that could forge a
-			// second log line.
+			// Both quoted: the currency comes from a request body.
 			log.Printf("[it stable buy] refused: %q ramps on %q, not flutterwave — caller is an out-of-date client",
 				q.Currency, p)
 			return nil, nil, ErrStableBuyWrongRamp
 		}
 	}
+	return s.openStableBuy(ctx, userID, q, destChain, destAddress, stableBuyOpen{
+		provider: models.ITProviderFlutterwave,
+		minUnits: s.stableMinSell(),
+		validate: ValidateBuyDelivery,
+	})
+}
+
+// stableBuyPrechecks is what every entry point refuses on first: no quote,
+// then — before the pay-into lookup, so an unverified user is told to verify
+// rather than to activate a virtual account — KYC. A routed Flutterwave buy
+// also needs the IT agreement (owner 2026-10-04 #4). Opening only: settlement
+// has no such check, or money in flight would strand. Which rail must be wired
+// is each entry point's own check (Decision D47).
+func (s *ITService) stableBuyPrechecks(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, requireAgreement bool) error {
+	if q == nil {
+		return errors.New("it stable buy: nil quote")
+	}
+	if err := requireVerifiedForMoneyIn(ctx, s.db, userID); err != nil {
+		return err
+	}
+	if requireAgreement {
+		return s.RequireITAgreement(ctx, userID)
+	}
+	return nil
+}
+
+// stableBuyOpen is how one entry point opens a purchase.
+type stableBuyOpen struct {
+	provider string
+	// routed stamps RateExpiresAt: the quote is honoured until then plus the
+	// processing grace (spec §5.1).
+	routed bool
+	// minUnits/maxUnits bound the delivered tokens; nil is no bound (the
+	// company wallet's minimum is on naira, checked by its quote).
+	minUnits, maxUnits *big.Int
+	validate           func(chain, asset, address string) error
+	// insert writes the row; nil is a plain insert. The company wallet's takes
+	// its stock under the (chain, token) lock (Task 6).
+	insert func(ctx context.Context, intent *models.ITIntent) error
+}
+
+// openStableBuy is the one write every entry point shares.
+func (s *ITService) openStableBuy(
+	ctx context.Context,
+	userID uuid.UUID,
+	q *StableBuyQuote,
+	destChain, destAddress string,
+	o stableBuyOpen,
+) (*models.ITIntent, *StableBuyInstructions, error) {
 	destChain = strings.ToUpper(strings.TrimSpace(destChain))
 	destAddress = strings.TrimSpace(destAddress)
-	if err := ValidateBuyDelivery(destChain, q.Asset, destAddress); err != nil {
+	if err := o.validate(destChain, q.Asset, destAddress); err != nil {
 		return nil, nil, err
 	}
-	if q.AssetUnits == nil || q.AssetUnits.Cmp(s.stableMinSell()) < 0 {
-		return nil, nil, fmt.Errorf("%w: minimum delivery is %g %s",
-			ErrStableBuyBelowMinimum, StableFromBaseUnits(s.stableMinSell()), q.Asset)
+	if q.AssetUnits == nil || q.AssetUnits.Sign() <= 0 ||
+		(o.minUnits != nil && q.AssetUnits.Cmp(o.minUnits) < 0) {
+		floor := 0.0
+		if o.minUnits != nil {
+			floor = StableFromBaseUnits(o.minUnits)
+		}
+		return nil, nil, fmt.Errorf("%w: minimum delivery is %g %s", ErrStableBuyBelowMinimum, floor, q.Asset)
+	}
+	if o.maxUnits != nil && q.AssetUnits.Cmp(o.maxUnits) > 0 {
+		return nil, nil, fmt.Errorf("%w: maximum is %g %s", ErrStableBuyAboveMaximum, StableFromBaseUnits(o.maxUnits), q.Asset)
 	}
 
-	// Resolve where the user pays BEFORE anything is written. In central mode
-	// this never touches the virtual-account table, which is what makes
-	// ErrStableBuyNoVA genuinely unreachable there rather than merely unlikely:
-	// there is no lookup left to fail. See payIntoForStableBuy.
+	// Where she pays, resolved before anything is written. Central mode never
+	// touches the virtual-account table (see payIntoForStableBuy).
 	payInto, fiatMinor, err := s.payIntoForStableBuy(ctx, userID, q.Currency, q.FiatMinor)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Retire this user's abandoned purchases before counting the open ones.
+	// Retire abandoned purchases before looking for an open one.
 	if err := s.expireStaleStableBuys(ctx, userID); err != nil {
 		return nil, nil, err
 	}
-
-	var open int64
-	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
-			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
-		Count(&open).Error; err != nil {
+	open, err := s.findOpenStableBuy(ctx, userID)
+	if err != nil {
 		return nil, nil, err
 	}
-	if open > 0 {
-		return nil, nil, ErrStableBuyAlreadyOpen
+	if open != nil {
+		return nil, nil, &StableBuyOpenError{IntentID: open.ID}
 	}
-	// This Count-then-Create is still not atomic on its own: two concurrent
-	// requests can both see zero and both insert. The backing partial unique
-	// index uq_it_intents_open_stable_buy (config/database.go) closes that
-	// gap — a losing race trips it on Create below, translated to
-	// ErrStableBuyAlreadyOpen rather than a raw driver error. SQLite has no
-	// partial index, which is why the Count check above stays as well.
+	// Find-then-Create is not atomic: the partial unique index
+	// uq_it_intents_open_stable_buy (config/database.go) closes the race on
+	// Postgres and is translated below. SQLite has none, hence the find.
 
+	display := q.RatePerUnitMinor
+	if q.DisplayRateMinor != nil {
+		display = q.DisplayRateMinor
+	}
 	intent := &models.ITIntent{
 		ID:          uuid.New(),
 		UserID:      userID,
 		Direction:   models.ITDirectionBuy,
 		Status:      models.ITStatusPendingPayment,
+		Provider:    o.provider,
 		Asset:       q.Asset,
 		AssetAmount: q.AssetUnits.String(),
 		Currency:    q.Currency,
 		DestChain:   destChain,
 		DestAddress: destAddress,
 		LockedRate:  q.RatePerUnitMinor.String(),
-
-		// Every numeric column must carry a value, not "". PostgreSQL rejects
-		// ''::numeric outright and GORM sends unset fields in the INSERT.
-		// SQLite's type affinity accepts them silently, which is how this bit
-		// the sell leg. The values below are correct, not filler:
-		//
-		//	NgnKobo/AmountMinor  what the user pays, as quoted
-		//	McgpAmount           a stablecoin buy has no MCGP leg
-		//	FeeNgnKobo/NetNgnKobo  B1 charges the spread only; no fee line
-		//	ReceivedAmount       unknown until the naira actually lands
-		// fiatMinor, not q.FiatMinor: central mode mints the ask at whole
-		// naira so it can be matched at naira granularity. In VA mode the two
-		// are the same value.
+		DisplayRate: display.String(),
+		Fees:        marshalFees(q.Fees),
+		// Every numeric column carries a value: PostgreSQL rejects
+		// ''::numeric and SQLite hides it. fiatMinor, not q.FiatMinor:
+		// central mode asks for whole naira (in VA mode they are equal).
 		NgnKobo:     fiatMinor.String(),
 		AmountMinor: fiatMinor.String(),
 		RateKobo:    q.RatePerUnitMinor.String(),
@@ -319,23 +347,46 @@ func (s *ITService) CreateStableBuyIntent(
 		McgpAmount:  "0",
 		FeeNgnKobo:  "0",
 		NetNgnKobo:  fiatMinor.String(),
-		// PlatformKeptKobo has no `default:` tag, so GORM puts it in the INSERT
-		// as '' and BeforeSave mirrors that into PlatformKeptMinor. Postgres
-		// rejects ''::numeric (SQLSTATE 22P02). This is the EXACT defect the
-		// sell leg hit — it sets the same field explicitly at
-		// it_stable_sell.go:191. SQLite's type affinity hides it, so the test
-		// suite stays green while production INSERTs fail.
+		// No default tag, so '' would reach Postgres (SQLSTATE 22P02) — the
+		// exact defect the sell leg hit.
 		PlatformKeptKobo: "0",
 		ReceivedAmount:   "0",
 	}
-	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
+	if o.routed {
+		honourUntil := time.Now().Add(s.stableLockTTL())
+		intent.RateExpiresAt = &honourUntil
+	}
+	insert := o.insert
+	if insert == nil {
+		insert = func(ctx context.Context, i *models.ITIntent) error { return s.db.WithContext(ctx).Create(i).Error }
+	}
+	if err := insert(ctx, intent); err != nil {
 		if isUniqueViolation(err) {
+			if winner, ferr := s.findOpenStableBuy(ctx, userID); ferr == nil && winner != nil {
+				return nil, nil, &StableBuyOpenError{IntentID: winner.ID}
+			}
 			return nil, nil, ErrStableBuyAlreadyOpen
 		}
 		return nil, nil, err
 	}
-
 	return intent, payInto, nil
+}
+
+// findOpenStableBuy is the user's stablecoin purchase awaiting payment, of any
+// provider, or nil.
+func (s *ITService) findOpenStableBuy(ctx context.Context, userID uuid.UUID) (*models.ITIntent, error) {
+	var rows []models.ITIntent
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
+			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
+			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
+		Order("created_at DESC").Limit(1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
 }
 
 // payIntoForStableBuy resolves where the buyer sends their naira, and the exact
@@ -428,15 +479,29 @@ func (s *ITService) payIntoForStableBuy(
 // pending_payment and an age inside the window, so a row this touches was
 // already unclaimable.
 func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID) error {
-	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ? AND created_at < ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
-			[]string{models.ITAssetUSDC, models.ITAssetUSDT},
-			time.Now().Add(-stableBuyClaimWindow)).
-		Updates(map[string]any{
-			"status":         models.ITStatusCancelled,
-			"failure_reason": "expired before payment",
-		}).Error
+	stale := func() *gorm.DB {
+		return s.db.WithContext(ctx).Model(&models.ITIntent{}).
+			Where("user_id = ? AND direction = ? AND status = ? AND asset IN ? AND created_at < ?",
+				userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
+				[]string{models.ITAssetUSDC, models.ITAssetUSDT},
+				time.Now().Add(-stableBuyClaimWindow))
+	}
+	var routed []models.ITIntent
+	if err := stale().Where("rate_expires_at IS NOT NULL").Select("id", "provider").Find(&routed).Error; err != nil {
+		return err
+	}
+	if err := stale().Updates(map[string]any{
+		"status":         models.ITStatusCancelled,
+		"failure_reason": "expired before payment",
+	}).Error; err != nil {
+		return err
+	}
+	for i := range routed {
+		// Spec §7: unpaid routed opens are logged however they end.
+		log.Printf("[it stable buy] METRIC ramp_it_open_unpaid intent=%s user=%s provider=%s reason=expired",
+			routed[i].ID, userID, models.ITIntentProvider(&routed[i]))
+	}
+	return nil
 }
 
 // CancelStableBuy is the stablecoin-only form of CancelBuy, kept for the
@@ -470,6 +535,11 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 	intent, err := s.getIntent(ctx, intentID)
 	if err != nil {
 		return err
+	}
+	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+		// Spec §5.4: the company wallet delivers from its own stock. Converting
+		// here would buy a second time at Flutterwave with the user's naira.
+		return fmt.Errorf("%w: a company-wallet buy is never converted at Flutterwave", ErrITBadState)
 	}
 	switch intent.Status {
 	case models.ITStatusConverting, models.ITStatusDelivering, models.ITStatusSettled:
@@ -730,6 +800,11 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 	if err != nil {
 		return err
 	}
+	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+		// Spec §5.4: the company wallet delivers from its own stock. Converting
+		// here would buy a second time at Flutterwave with the user's naira.
+		return fmt.Errorf("%w: a company-wallet buy is never sent by Flutterwave", ErrITBadState)
+	}
 	if intent.Status == models.ITStatusSettled {
 		return nil
 	}
@@ -898,6 +973,8 @@ func (s *ITService) PendingStableBuys(ctx context.Context) (received, awaiting, 
 				models.ITStatusConverting,
 				models.ITStatusDelivering,
 			}).
+		// The company wallet has its own branch (PendingTreasuryBuys, Task 9).
+		Where("provider <> ?", models.ITProviderTreasury).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, nil, nil, nil, err

@@ -2,11 +2,16 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/datatypes"
 )
 
 // Buys the ramp router opens (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md
@@ -510,4 +515,141 @@ func FormatStableUnits(units string) string {
 	}
 	out := new(big.Rat).SetFrac(n, stableUnitsPerToken()).FloatString(StableAssetDecimals)
 	return strings.TrimSuffix(strings.TrimRight(out, "0"), ".")
+}
+
+// ── routed open seams (spec §4.2) ──────────────────────────────────────────
+
+// IsRoutedStableBuy: a stablecoin buy the ramp router opened. Only that path
+// sets RateExpiresAt on a buy (Decision D1).
+func IsRoutedStableBuy(i *models.ITIntent) bool {
+	return i != nil && i.Direction == models.ITDirectionBuy && IsStableAsset(i.Asset) && i.RateExpiresAt != nil
+}
+
+// StableBuyHonourUntil is when a routed buy's quote stops being honoured for
+// money arriving; nil for every other intent.
+func StableBuyHonourUntil(i *models.ITIntent) *time.Time {
+	if !IsRoutedStableBuy(i) {
+		return nil
+	}
+	t := *i.RateExpiresAt
+	return &t
+}
+
+// StableBuyRateUpdated: a routed buy priced at a live rate instead of its
+// quote. On an old-path buy Repriced means "priced at settlement", so it never
+// reads as an update there.
+func StableBuyRateUpdated(i *models.ITIntent) bool { return IsRoutedStableBuy(i) && i.Repriced }
+
+// marshalFees is the stored form of a quote's fee lines; nil when there are none.
+func marshalFees(fees []StableBuyFee) datatypes.JSON {
+	if len(fees) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(fees) // plain strings: cannot fail
+	return datatypes.JSON(b)
+}
+
+// StableBuyFees decodes an intent's stored fee lines (spec §14). Unreadable
+// JSON reads as none — the amounts on the intent stay authoritative.
+func StableBuyFees(i *models.ITIntent) []StableBuyFee {
+	if i == nil || len(i.Fees) == 0 {
+		return nil
+	}
+	var out []StableBuyFee
+	if err := json.Unmarshal(i.Fees, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// StableBuyDisplayRate is the rate shown beside an intent's fee lines, in
+// minor units: the stored display rate, else the all-in rate.
+func StableBuyDisplayRate(i *models.ITIntent) string {
+	if i == nil {
+		return ""
+	}
+	if d, ok := new(big.Int).SetString(strings.TrimSpace(i.DisplayRate), 10); ok && d.Sign() > 0 {
+		return d.String()
+	}
+	return i.LockedRate
+}
+
+// RoutedDirectChain is the only chain Flutterwave's routed venue delivers to
+// (spec 2.3 #6).
+const RoutedDirectChain = "POLYGON"
+
+// OpenRoutedStableBuy opens a purchase the ramp router chose Flutterwave for:
+// no currency-routing check, the IT agreement, delivered to the user's own
+// address on Polygon — never an address from the request.
+func (s *ITService) OpenRoutedStableBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, destChain string) (*models.ITIntent, *StableBuyInstructions, error) {
+	if !strings.EqualFold(strings.TrimSpace(destChain), RoutedDirectChain) {
+		return nil, nil, fmt.Errorf("%w: a routed Flutterwave buy delivers on Polygon only, not %s",
+			ErrUnsupportedChainAsset, strings.ToUpper(strings.TrimSpace(destChain)))
+	}
+	if !s.HasStableBuy() {
+		return nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
+	}
+	if err := s.stableBuyPrechecks(ctx, userID, q, true); err != nil {
+		return nil, nil, err
+	}
+	addr, err := s.UserDeliveryAddress(ctx, userID, destChain)
+	if err != nil {
+		return nil, nil, err
+	}
+	lim := s.routedLimits()
+	return s.openStableBuy(ctx, userID, q, destChain, addr, stableBuyOpen{
+		provider: models.ITProviderFlutterwave, routed: true,
+		minUnits: lim.minUnits, maxUnits: lim.maxUnits,
+		validate: ValidateBuyDelivery,
+	})
+}
+
+// OpenStableBuy is the user's purchase awaiting payment, of any provider, or
+// nil. Abandoned ones past the claim window are retired first, so a stale row
+// never blocks the router's pre-flight.
+func (s *ITService) OpenStableBuy(ctx context.Context, userID uuid.UUID) (*models.ITIntent, error) {
+	if err := s.expireStaleStableBuys(ctx, userID); err != nil {
+		return nil, err
+	}
+	return s.findOpenStableBuy(ctx, userID)
+}
+
+// CountAbandonedRoutedStableBuys counts the user's routed buys — either
+// provider — cancelled or expired since `since` (spec §7, shared cap D14).
+func (s *ITService) CountAbandonedRoutedStableBuys(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("user_id = ? AND direction = ? AND asset IN ? AND status = ? AND rate_expires_at IS NOT NULL AND updated_at >= ?",
+			userID, models.ITDirectionBuy, []string{models.ITAssetUSDC, models.ITAssetUSDT},
+			models.ITStatusCancelled, since).
+		Count(&n).Error
+	return n, err
+}
+
+// GetStableBuyForUser is the user's own stablecoin buy of `provider`. Another
+// user's intent, another provider's, a sell or an MCGP order are all
+// ErrStableIntentNotFound (spec §4.2: a foreign or other-provider id is a 404).
+func (s *ITService) GetStableBuyForUser(ctx context.Context, userID, intentID uuid.UUID, provider string) (*models.ITIntent, error) {
+	i, err := s.getIntentForUser(ctx, userID, intentID)
+	if err != nil {
+		return nil, err
+	}
+	if i.Direction != models.ITDirectionBuy || !IsStableAsset(i.Asset) || models.ITIntentProvider(i) != provider {
+		return nil, ErrStableIntentNotFound
+	}
+	return i, nil
+}
+
+// StableBuyPayInto is where to pay for intent while it awaits the transfer;
+// nil afterwards, so no screen invites a second transfer.
+func (s *ITService) StableBuyPayInto(ctx context.Context, intent *models.ITIntent) (*StableBuyInstructions, error) {
+	if !IsBuyAwaitingTransfer(intent) || !IsStableAsset(intent.Asset) {
+		return nil, nil
+	}
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(intent.AmountMinor), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("it stable buy: intent %s has no amount", intent.ID)
+	}
+	payInto, _, err := s.payIntoForStableBuy(ctx, intent.UserID, intent.Currency, amount)
+	return payInto, err
 }

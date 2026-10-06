@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -151,6 +152,12 @@ func (s *ITService) cancelBuy(ctx context.Context, userID, intentID uuid.UUID, s
 		// Lost to a payment claiming it. Not cancellable any more, and saying
 		// so is the truth: the intent genuinely is not pending.
 		return nil, ErrITBadState
+	}
+	if IsRoutedStableBuy(intent) {
+		// Spec §7: an unpaid routed open is logged however it is cancelled —
+		// the router's cancel and /api/it/buy/:id/cancel both land here.
+		log.Printf("[it stable buy] METRIC ramp_it_open_unpaid intent=%s user=%s provider=%s reason=cancelled",
+			intent.ID, userID, models.ITIntentProvider(intent))
 	}
 	return s.getIntentForUser(ctx, userID, intentID)
 }
