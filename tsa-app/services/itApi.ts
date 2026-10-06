@@ -8,6 +8,7 @@ import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders, withWalletProof } from '@/services/walletApi';
 import { getActiveWallet } from './wallet';
 import type { ITIntentFee } from '@/utils/itIntentView';
+import type { PaycrestStatus } from '@/services/paycrestApi';
 
 export interface ITRate {
   buyRateKobo: string; // kobo per 1 MCGP
@@ -154,7 +155,24 @@ export const listITIntents = () => req<{ intents: ITIntent[] }>('GET', '/it/inte
 /** payTo is present only on a buy still waiting for the user's transfer — the
  *  same card POST /it/buy returned. */
 export const getITIntent = (id: string) =>
-  req<{ intent: ITIntent; payTo?: ITPayTo | null }>('GET', `/it/intents/${id}`);
+  req<{ intent: ITIntent; payTo?: ITPayTo | null; conversion?: ITConversion }>('GET', `/it/intents/${id}`);
+
+/** The conversion a converted Instant Transfer buy feeds (spec §15.8). */
+export interface ITConversion {
+  orderId: string;
+  status: PaycrestStatus;
+  holder?: string;
+  requestedToken: string;
+  requestedChain: string;
+  requestedChainId?: number;
+  requestedTokenDecimals?: number;
+  estimatedAmount?: string;
+  promisedAmount?: string;
+  markupBps: number;
+  fee?: ITIntentFee;
+  walletAddress: string;
+  destinationAddress?: string;
+}
 
 export interface ITPayTo {
   accountNumber: string;
@@ -205,7 +223,7 @@ export const cancelITBuy = (intentId: string) =>
  *  its next scheduled poll. `checked` is false when a lookup had just run or
  *  was still running — the returned intent is current either way. */
 export const checkITBuyPayment = (intentId: string) =>
-  req<{ intent: ITIntent; payTo?: ITPayTo; checked: boolean }>(
+  req<{ intent: ITIntent; payTo?: ITPayTo; checked: boolean; conversion?: ITConversion }>(
     'POST',
     `/it/buy/${intentId}/check-payment`
   );

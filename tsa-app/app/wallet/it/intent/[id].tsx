@@ -19,11 +19,15 @@ import {
   cancelStableBuy,
   IT_STABLE_DEPOSIT_CLAIMED,
   type ITIntent,
+  type ITConversion,
   type ITPayTo,
 } from '@/services/itApi';
 import { PayIntoCard } from '@/components/it/PayIntoCard';
 import { HonourNotice } from '@/components/it/HonourNotice';
 import { FeeLines } from '@/components/ramp/FeeLines';
+import { ConversionProgress } from '@/components/it/ConversionProgress';
+import { formatEstimate, formatPromisedAmount, isTerminal } from '@/services/paycrestApi';
+import { getChainDisplay, type ChainKey } from '@/constants/chains';
 import { honourOf } from '@/utils/rampHonour';
 import { deliveryExplorerUrl, intentDisplayRateMinor, intentFeeLines } from '@/utils/itIntentView';
 import { buyFeeBreakdown } from '@/utils/buyQuote';
@@ -126,6 +130,7 @@ export default function ITIntentDetail() {
   // Where to pay, for a buy still waiting for the transfer. The API sends it
   // only in that state, so its absence is not an error.
   const [payTo, setPayTo] = useState<ITPayTo | null>(null);
+  const [conversion, setConversion] = useState<ITConversion | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   // Whether an unreported deposit hash is sitting in AsyncStorage for this
@@ -165,6 +170,7 @@ export default function ITIntentDetail() {
     if (r.success && r.data?.intent) {
       setIntent(r.data.intent);
       setPayTo(r.data.payTo ?? null);
+      setConversion(r.data.conversion ?? null);
     } else setError(r.message || 'Order not found');
     setLoading(false);
   }, [id]);
@@ -212,7 +218,9 @@ export default function ITIntentDetail() {
   const pollingActive =
     isFocused &&
     (isStableAsset
-      ? !(isStableBuy ? isTerminalBuyStatus(intent?.status ?? '') : isTerminalStableStatus(intent?.status ?? ''))
+      ? !(isStableBuy
+          ? isTerminalBuyStatus(intent?.status ?? '') && (!conversion || isTerminal(conversion.status))
+          : isTerminalStableStatus(intent?.status ?? ''))
       : isMcgpBuyAwaitingTransfer);
 
   useEffect(() => {
@@ -348,6 +356,7 @@ export default function ITIntentDetail() {
     if (r.success && r.data?.intent) {
       setIntent(r.data.intent);
       setPayTo(r.data.payTo ?? null);
+      setConversion(r.data.conversion ?? null);
       if (r.data.intent.status === 'pending_payment') {
         setPaymentCheckNote(
           "We haven't seen your transfer yet. Bank transfers can take a few minutes to arrive — this page updates on its own as soon as it does."
@@ -464,8 +473,19 @@ export default function ITIntentDetail() {
   const buyIsEstimate = isStableBuy && intent.status === 'pending_payment' && !honour.holding;
   // The quoted breakdown (spec §14): the display rate in the Rate row, each
   // provider fee on its own line. Empty for everything but a routed buy.
-  const buyFeeLines = isStableBuy ? intentFeeLines(intent.fees) : [];
-  const explorerUrl = isStableBuy ? deliveryExplorerUrl(intent) : undefined;
+  const buyFeeLines = isStableBuy
+    ? intentFeeLines([...(intent.fees ?? []), ...(conversion?.fee ? [conversion.fee] : [])])
+    : [];
+  // A converted buy's USDC leg is internal; the order screen has the delivery.
+  const explorerUrl = isStableBuy && !conversion ? deliveryExplorerUrl(intent) : undefined;
+  const conversionGet = conversion
+    ? conversion.promisedAmount
+      ? `${formatPromisedAmount(conversion) ?? '—'} ${conversion.requestedToken}`
+      : (formatEstimate(conversion) ?? `— ${conversion.requestedToken}`)
+    : null;
+  const conversionChain = conversion
+    ? (getChainDisplay(conversion.requestedChain as ChainKey)?.name ?? conversion.requestedChain)
+    : null;
 
   // "Transfer ANY amount" is true for an MCGP buy — that leg reprices whatever
   // lands. It is false for a stablecoin buy: settleStableBuyFromCharge prices
@@ -503,12 +523,12 @@ export default function ITIntentDetail() {
                 <Divider spacing="xs" />
                 <SummaryRow
                   label="You get"
-                  value={`${buyIsEstimate ? '≈ ' : ''}${fmtAsset(intent.assetAmount)} ${intent.asset}`}
+                  value={conversionGet ?? `${buyIsEstimate ? '≈ ' : ''}${fmtAsset(intent.assetAmount)} ${intent.asset}`}
                 />
-                {intent.destChain ? (
+                {conversionChain || intent.destChain ? (
                   <>
                     <Divider spacing="xs" />
-                    <SummaryRow label="On" value={intent.destChain} />
+                    <SummaryRow label="On" value={conversionChain ?? intent.destChain ?? ''} />
                   </>
                 ) : null}
               </>
@@ -596,9 +616,15 @@ export default function ITIntentDetail() {
                 Progress
               </Text>
               <Stepper steps={hops} />
+              {conversion ? (
+                <ConversionProgress
+                  conversion={conversion}
+                  paid={intent.status !== 'pending_payment' && intent.status !== 'cancelled'}
+                />
+              ) : null}
             </View>
           ) : null}
-          {isBuy && isStableAsset && intent.destAddress ? (
+          {isBuy && isStableAsset && (conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress) ? (
             <View style={{ marginTop: spacing.md }}>
               {/* FULL address, never truncated, and never inside SummaryRow
                   (which ellipsises) — same reasoning as the confirm step
@@ -617,7 +643,8 @@ export default function ITIntentDetail() {
                   lineHeight: 18,
                 }}
               >
-                {intent.destAddress}
+                {/* A converted buy's intent.destAddress is the treasury leg, never hers. */}
+                {conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress}
               </Text>
             </View>
           ) : null}

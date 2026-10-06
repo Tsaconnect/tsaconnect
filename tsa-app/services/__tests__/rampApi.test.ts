@@ -38,6 +38,26 @@ describe('rampApi', () => {
     expect(q.venues[0].handle).toBe('h');
   });
 
+  it('asks the converted quote when a target is named, and falls back when the route is missing', async () => {
+    fetchMock().mockResolvedValueOnce(ok({ venues: [], best: null }));
+    await getRampQuote('buy', '10000', 'NGN', { token: 'USDT', chainId: 10, address: '0xopt', chain: 'optimism' });
+    expect(urlOf(0)).toContain('/ramp/converted-quote?');
+    expect(urlOf(0)).toContain('requestedChainId=10');
+    expect(urlOf(0)).toContain('requestedChain=optimism');
+    fetchMock().mockResolvedValueOnce(routeMissing()).mockResolvedValueOnce(ok({ venues: [], best: null }));
+    await getRampQuote('buy', '10000', 'NGN', { token: 'USDT', chainId: 10, address: '0xopt' });
+    expect(urlOf(1)).toContain('/ramp/converted-quote?');
+    expect(urlOf(2)).toContain('/ramp/quote?');
+  });
+
+  it('never asks the converted quote for a sell or without a target', async () => {
+    fetchMock().mockResolvedValue(ok({ venues: [], best: null }));
+    await getRampQuote('buy', '10000', 'NGN');
+    await getRampQuote('sell', '10', 'NGN', { token: 'USDT', chainId: 10, address: '0xopt' });
+    expect(urlOf(0)).toContain('/ramp/quote?');
+    expect(urlOf(1)).toContain('/ramp/quote?');
+  });
+
   it('falls back to /paycrest only when the ramp route is missing, dropping the quote fields', async () => {
     fetchMock()
       .mockResolvedValueOnce(routeMissing())

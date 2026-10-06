@@ -23,7 +23,9 @@ import {
   type PaycrestOrder,
   type PaycrestQuote,
   type PaycrestVenue,
+  type RequestedAsset,
 } from '@/services/paycrestApi';
+import type { ITConversion } from '@/services/itApi';
 
 /** One provider fee inside a venue or an order (spec 2026-10-03 §14): the fee
  *  in tokens and its naira value at the display rate. */
@@ -67,6 +69,8 @@ export type RampOrder = PaycrestOrder & {
   repriced?: boolean;
   effectiveRate?: string;
   fees?: RampFee[];
+  /** A converted Instant Transfer buy: the conversion it feeds (spec §15.8). */
+  conversion?: ITConversion;
 };
 
 /** The rate an order is held to: the all-in one when the server sent it (§14). */
@@ -156,15 +160,36 @@ async function withFallback<T>(primary: () => Promise<T>, fallback: () => Promis
   }
 }
 
-export function getRampQuote(side: 'buy' | 'sell', amount: string, currency = 'NGN'): Promise<RampQuote> {
+/** The router's venues. With `want` (a buy of a named asset) the authenticated
+ *  converted quote answers: every direct venue plus converted ones, company
+ *  wallet first (spec §15.8). Older servers fall back to /ramp/quote, then
+ *  /paycrest/quote. */
+export function getRampQuote(
+  side: 'buy' | 'sell',
+  amount: string,
+  currency = 'NGN',
+  want?: RequestedAsset,
+): Promise<RampQuote> {
   const q = new URLSearchParams({ side, amount, currency });
-  return withFallback(
-    () => request<RampQuote>(`/quote?${q.toString()}`),
-    () => getQuote(side, amount, currency) as Promise<RampQuote>,
-  );
+  const direct = () =>
+    withFallback(
+      () => request<RampQuote>(`/quote?${q.toString()}`),
+      () => getQuote(side, amount, currency) as Promise<RampQuote>,
+    );
+  if (side !== 'buy' || !want) return direct();
+  const c = new URLSearchParams({
+    amount,
+    currency,
+    requestedChainId: String(want.chainId),
+    requestedTokenAddress: want.address,
+    requestedToken: want.token,
+  });
+  if (want.chain) c.set('requestedChain', want.chain);
+  if (want.destinationAddress) c.set('destinationAddress', want.destinationAddress);
+  return withFallback(() => request<RampQuote>(`/converted-quote?${c.toString()}`), direct);
 }
 
-/** A DIRECT buy: the converted path (requested asset ≠ venue) stays on createBuy. */
+/** A direct buy, or a converted one the router priced (requested* set). */
 export interface CreateRampBuyInput {
   amount: string;
   chain: string;
@@ -177,6 +202,12 @@ export interface CreateRampBuyInput {
   /** The venue rate she confirmed; the order is held to it (server tolerance). */
   quotedRate: string;
   handle?: string;
+  /** A converted venue the router priced (spec §15): what she asked for. */
+  requestedChainId?: number;
+  requestedTokenAddress?: string;
+  requestedToken?: string;
+  requestedChain?: string;
+  destinationAddress?: string;
 }
 
 export function createRampBuy(input: CreateRampBuyInput): Promise<RampOrder> {

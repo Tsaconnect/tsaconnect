@@ -295,6 +295,14 @@ describe('selectVenue — the one rule this phase exists to enforce', () => {
       selectVenue([convertedVenue], { chain: 'base', token: 'USDT', chainId: 8453, address: BASE_USDT_ADDRESS }),
     ).toBeNull();
   });
+
+  it('picks the cheapest converted match on the all-in rate', () => {
+    const want = { token: 'USDT', chain: 'optimism', chainId: 10, address: OPTIMISM_USDT_ADDRESS };
+    const pc = { ...convertedVenue, rate: '1395' };
+    const cw = { ...convertedVenue, rate: '1382.57', effectiveRate: '1389.52', handle: 'h' };
+    expect(selectVenue([pc, cw] as PaycrestVenue[], want)).toBe(cw);
+    expect(selectVenue([cw, pc] as PaycrestVenue[], want)).toBe(cw);
+  });
 });
 
 describe('describeConvertedVenue — the no-silent-substitution sentence', () => {

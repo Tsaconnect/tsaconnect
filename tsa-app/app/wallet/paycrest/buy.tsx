@@ -390,7 +390,7 @@ export default function PaycrestBuyScreen() {
         // server's order) plus the converted ones only /paycrest prices.
         // Either can fail alone — Paycrest's naira book has been empty.
         const [direct, converted] = await Promise.allSettled([
-          getRampQuote('buy', raw, currencyCode),
+          getRampQuote('buy', raw, currencyCode, want),
           getQuote('buy', raw, currencyCode, want),
         ]);
         if (seq !== quoteSeq.current) return;
@@ -439,9 +439,11 @@ export default function PaycrestBuyScreen() {
     if (!venue || !address || !refundBank || !want.chain || !want.address) return;
     setCreating(true);
     try {
-      // A direct venue goes through the ramp router, held to the rate she
-      // saw. A converted venue (Paycrest + a LiFi leg) keeps its own route.
-      const created = isConvertedVenue(venue)
+      // A direct venue, or a converted one the router priced (it carries a
+      // handle), goes through the ramp router, held to the rate she saw.
+      // Paycrest's own converted venue (no handle) keeps its route.
+      const routerVenue = !!(venue as RampVenue).handle;
+      const created = isConvertedVenue(venue) && !routerVenue
         ? await createBuy({
           amount: amount.trim(),
           // The settlement leg — what Paycrest itself is asked to fill.
@@ -478,6 +480,15 @@ export default function PaycrestBuyScreen() {
             // provider she was shown first — the router falls back.
             quotedRate: quotedRateOf(venue as RampVenue),
             ...((venue as RampVenue).handle ? { handle: (venue as RampVenue).handle } : {}),
+            ...(isConvertedVenue(venue)
+              ? {
+                  requestedChainId: want.chainId,
+                  requestedTokenAddress: want.address,
+                  requestedToken: want.token,
+                  ...(want.chain ? { requestedChain: want.chain } : {}),
+                  ...(want.destinationAddress ? { destinationAddress: want.destinationAddress } : {}),
+                }
+              : {}),
           });
       // Remember it only once an order actually succeeded with it.
       AsyncStorage.setItem(
@@ -796,9 +807,9 @@ export default function PaycrestBuyScreen() {
                   </Text>
                   {/* Every provider fee as its own line (spec §14); "You
                       receive" above is already after all of them. */}
-                  {!isConvertedVenue(venue) ? (
-                    <FeeLines fees={(venue as RampVenue).fees ?? []} token={venue.token} symbol={symbol} />
-                  ) : null}
+                  {/* Empty for Paycrest's converted venue, whose markup is
+                      inside its rate. */}
+                  <FeeLines fees={(venue as RampVenue).fees ?? []} token={venue.token} symbol={symbol} />
                   {/* A converted route is labelled honestly, every time — this
                       is the one thing that must never be quiet: what the
                       route settles as, that it converts, and roughly how

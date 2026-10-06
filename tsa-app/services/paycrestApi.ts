@@ -463,12 +463,17 @@ export function selectVenue(venues: PaycrestVenue[], want: RequestedAsset): Payc
   // A converted venue is matched by (chain id, address) — the server's own
   // key for "what was actually requested" — never by chain/token strings,
   // which cannot name a token outside our registry.
-  const converted = venues.find(
-    (v) =>
-      isConvertedVenue(v) &&
-      v.requestedChainId === want.chainId &&
-      v.requestedTokenAddress?.toLowerCase() === want.address.toLowerCase(),
-  );
+  // Among converted matches the lowest all-in rate wins (spec §15.2): the
+  // router's carry effectiveRate; Paycrest's rate is already all-in.
+  const allIn = (v: PaycrestVenue) => Number((v as { effectiveRate?: string }).effectiveRate || v.rate);
+  const converted = venues
+    .filter(
+      (v) =>
+        isConvertedVenue(v) &&
+        v.requestedChainId === want.chainId &&
+        v.requestedTokenAddress?.toLowerCase() === want.address.toLowerCase(),
+    )
+    .sort((a, b) => allIn(a) - allIn(b))[0];
   return converted ?? null;
 }
 

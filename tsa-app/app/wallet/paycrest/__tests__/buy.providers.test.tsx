@@ -227,6 +227,40 @@ it('a Flutterwave venue shows its rate and fee lines and holds the order to the 
   expect(router.replace).toHaveBeenCalledWith('/wallet/it/intent/f1');
 });
 
+// Spec §15: a company-wallet converted venue opens through the router with the target.
+it('opens a company-wallet converted venue through the router with the target', async () => {
+  const cw = {
+    chain: 'base', token: 'USDC', rate: '1382.57', effectiveRate: '1389.52', spreadPercent: 3, tokenAmount: 7.196772,
+    kind: 'converted', handle: 'h-cw', viaChain: 'base', viaToken: 'USDC', requestedChain: 'optimism', requestedToken: 'USDT',
+    requestedChainId: 10, requestedTokenAddress: '0xusdt', requestedTokenDecimals: 6, estimatedAmount: '7190000',
+    promisedAmount: '7196772', etaSeconds: 60,
+    fees: [{ kind: 'conversion', label: 'Conversion (LiFi)', provider: 'LiFi', token: '0.036165', ngn: '50' }],
+  };
+  ramp.getRampQuote.mockResolvedValue(rampQuote('10000', [cw]) as any);
+  ramp.createRampBuy.mockResolvedValueOnce({ id: 'i7', provider: 'treasury' } as any);
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = TestRenderer.create(<BuyScreen />); });
+  await flush();
+  await act(async () => { byLabel(tree, 'row:You want').props.onPress(); });
+  await act(async () => {
+    await byLabel(tree, 'asset-picker').props.onSelect(
+      { symbol: 'USDT', address: '0xusdt', chainId: 10, name: 'Tether', decimals: 6, logoURI: '' }, 10);
+  });
+  await flush();
+  await act(async () => { byLabel(tree, 'amount:You pay').props.onChangeText('10000'); });
+  await act(async () => { jest.advanceTimersByTime(500); });
+  await flush();
+  expect(ramp.getRampQuote).toHaveBeenCalledWith('buy', '10000', 'NGN', expect.objectContaining({ chainId: 10 }));
+  expect(text(tree)).toContain('Conversion (LiFi)');
+  await act(async () => { await byLabel(tree, 'button:Continue').props.onPress(); });
+  await flush();
+  expect(ramp.createRampBuy).toHaveBeenCalledWith(expect.objectContaining({
+    handle: 'h-cw', quotedRate: '1389.52', requestedChainId: 10, requestedTokenAddress: '0xusdt', requestedToken: 'USDT',
+  }));
+  expect(api.createBuy).not.toHaveBeenCalled();
+  expect(router.replace).toHaveBeenCalledWith(expect.stringContaining('i7'));
+});
+
 it('a Paycrest order still shows its own pay screen', async () => {
   ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
   ramp.createRampBuy.mockResolvedValueOnce({ ...order, payAmount: '100' } as any);
