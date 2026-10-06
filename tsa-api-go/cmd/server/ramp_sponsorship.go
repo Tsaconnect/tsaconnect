@@ -125,10 +125,11 @@ func buildMarketplaceSonicGas(cfg *config.Config, chains *services.BlockchainSer
 		return nil
 	}
 	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
+		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
+		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
 	}); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
@@ -208,10 +209,11 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
 	sponsorAddr := crypto.PubkeyToAddress(key.PublicKey)
 	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
+		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
+		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
 	}); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil

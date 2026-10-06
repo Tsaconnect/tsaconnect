@@ -1008,6 +1008,19 @@ func main() {
 		log.Printf("[inbound] matcher dormant: IT service unavailable — credits will be recorded but not attributed")
 	}
 
+	// Company wallet (spec 2026-10-03 §4.1): the company's own stablecoin
+	// stock, sold as a ramp provider. Built whenever its own key is set;
+	// RAMP_TREASURY_BUY only decides whether the provider registers (router
+	// block), so orders already open keep settling and delivering with the
+	// flag off (review I1). A chain whose RPC failed the receipt probe is
+	// re-probed every 5 minutes and quotes again once it passes.
+	if itService != nil {
+		if wallet := buildCompanyWallet(cfg, blockchainService); wallet != nil {
+			itService.SetCompanyWallet(wallet)
+			scheduler.Register(jobs.NewCompanyWalletReceiptProbe(wallet, 5*time.Minute))
+		}
+	}
+
 	// Brokered stablecoin ramp (design doc 2026-08-27-stablecoin-fiat-ramp).
 	// A user sends USDC/USDT straight to Flutterwave's own Polygon address —
 	// the platform is never in the custody path — and once the deposit is

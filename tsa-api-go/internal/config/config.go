@@ -437,6 +437,16 @@ type Config struct {
 	// nothing sweeps it automatically. Zero disables the check.
 	RampTreasuryKeptUSDCAlert float64
 
+	// Company wallet: the company sells its own stablecoin stock as a ramp
+	// provider (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md
+	// §4.1). Its key MUST differ from every other hot key (asserted at boot)
+	// and from the conversion treasury's: that one holds user funds in transit.
+	RampTreasuryBuy              bool
+	RampTreasuryWalletPrivateKey string
+	RampTreasuryWalletChains     []string
+	// RampTreasuryMaxUSD is the per-order maximum (quote, open, live pricing).
+	RampTreasuryMaxUSD string
+
 	// RampConversionSellEnabled is the sell half of the same round trip: she
 	// swaps her own token into USDC on Base (in her own wallet, we never hold
 	// it) and we offramp that. Independent of RAMP_CONVERSION_BUY — the sell
@@ -965,6 +975,23 @@ func Load() *Config {
 		up := strings.ToUpper(chain)
 		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
 	}
+	cfg.RampTreasuryBuy = getEnvBool("RAMP_TREASURY_BUY", false)
+	cfg.RampTreasuryWalletPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_WALLET_PRIVATE_KEY", ""))
+	cfg.RampTreasuryWalletChains = nil
+	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_WALLET_CHAINS", "base"), ",") {
+		if chain = strings.ToLower(strings.TrimSpace(chain)); chain != "" {
+			cfg.RampTreasuryWalletChains = append(cfg.RampTreasuryWalletChains, chain)
+		}
+	}
+	// The wallet's gas-floor alert reuses RAMP_TREASURY_NATIVE_FLOOR_WEI_<CHAIN>
+	// (spec §9), so the map covers its chains too.
+	for _, chain := range cfg.RampTreasuryWalletChains {
+		if _, ok := cfg.RampTreasuryNativeFloorWei[chain]; !ok {
+			cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(
+				getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+strings.ToUpper(chain), rampTreasuryFloorDefaults[chain]))
+		}
+	}
+	cfg.RampTreasuryMaxUSD = strings.TrimSpace(getEnv("RAMP_TREASURY_MAX_USD", "200"))
 	// LiFi's own diamond per chain, read from li.quest/v1/chains (last
 	// checked 2026-09-22) and PINNED here deliberately: resolving the
 	// allowlist at runtime from the same API whose responses it exists to

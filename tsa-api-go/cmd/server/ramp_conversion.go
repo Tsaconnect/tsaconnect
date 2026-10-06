@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"log"
 	"math/big"
 	"sort"
@@ -57,10 +58,11 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":      cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":  cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":   cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY": cfg.RampSponsorPrivateKey,
+		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
+		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
 	}); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil, nil
@@ -77,37 +79,10 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 
-	lanes := map[string]*services.TreasuryLane{}
-	var missing []string
-	for _, chain := range cfg.RampTreasuryChains {
-		floor, skipReason := rampTreasuryLaneFloor(cfg, chain)
-		if skipReason != "" {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
-			missing = append(missing, chain)
-			continue
-		}
-		lane := buildSponsorLane(chains, chain, key, "ramp_treasury_"+chain, services.SponsorLimits{
-			BalanceFloor: floor,
-		}, nil)
-		if lane == nil {
-			log.Printf("[ramp-conversion] skipping %s: no chain client", chain)
-			missing = append(missing, chain)
-			continue
-		}
-		chainID, idOK := chains.ChainIDForName(chain)
-		if !idOK {
-			log.Printf("[ramp-conversion] skipping %s: no chain id configured", chain)
-			missing = append(missing, chain)
-			continue
-		}
-		routers, skipReason := rampTreasuryLaneRouters(cfg, chain, lane.Tokens)
-		if skipReason != "" {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
-			missing = append(missing, chain)
-			continue
-		}
-		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID, Routers: routers}
-	}
+	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
+		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_",
+		logTag: "[ramp-conversion]", metric: "ramp_treasury", needRouters: true,
+	})
 	if len(missing) > 0 {
 		// Named once, in one line, rather than only inferred from the
 		// per-chain skip lines above: RampConversionMinUSDByChain is
@@ -184,6 +159,59 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	log.Printf("[ramp-conversion] enabled treasury=%s chains=%v caps=order:$%.0f/chain:$%.0f",
 		addr, cfg.RampTreasuryChains, cfg.RampTreasuryMaxInflightUSDPerOrder, cfg.RampTreasuryMaxInflightUSDPerChain)
 	return treasury, orchestrator
+}
+
+// treasuryLaneSpec is how one treasury's lanes are built (Decision D49).
+type treasuryLaneSpec struct {
+	chains      []string
+	guardPrefix string // the lane guard's namespace, so two treasuries never share a kill switch
+	logTag      string
+	metric      string
+	// needRouters: only a treasury that executes LiFi routes needs a router
+	// allowlist. The company wallet only ever transfers.
+	needRouters bool
+}
+
+// buildTreasuryLanes builds one TreasuryLane per chain — the floor, the
+// sponsor-lane shape, the chain id and, when needed, the router allowlist —
+// skipping (and naming) every chain that cannot have one. Extracted from
+// buildRampConversion so the company wallet reuses it (spec §4.1).
+func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, key *ecdsa.PrivateKey, spec treasuryLaneSpec) (map[string]*services.TreasuryLane, []string) {
+	lanes := map[string]*services.TreasuryLane{}
+	var missing []string
+	for _, chain := range spec.chains {
+		floor, skipReason := rampTreasuryLaneFloor(cfg, chain)
+		if skipReason != "" {
+			log.Printf("%s ALERT %s_lane_skipped_total=1 chain=%s reason=%s", spec.logTag, spec.metric, chain, skipReason)
+			missing = append(missing, chain)
+			continue
+		}
+		lane := buildSponsorLane(chains, chain, key, spec.guardPrefix+chain, services.SponsorLimits{
+			BalanceFloor: floor,
+		}, nil)
+		if lane == nil {
+			log.Printf("%s skipping %s: no chain client", spec.logTag, chain)
+			missing = append(missing, chain)
+			continue
+		}
+		chainID, idOK := chains.ChainIDForName(chain)
+		if !idOK {
+			log.Printf("%s skipping %s: no chain id configured", spec.logTag, chain)
+			missing = append(missing, chain)
+			continue
+		}
+		var routers []common.Address
+		if spec.needRouters {
+			routers, skipReason = rampTreasuryLaneRouters(cfg, chain, lane.Tokens)
+			if skipReason != "" {
+				log.Printf("%s ALERT %s_lane_skipped_total=1 chain=%s reason=%s", spec.logTag, spec.metric, chain, skipReason)
+				missing = append(missing, chain)
+				continue
+			}
+		}
+		lanes[chain] = &services.TreasuryLane{SponsorLane: lane, ChainID: chainID, Routers: routers}
+	}
+	return lanes, missing
 }
 
 // evmChainKeys is every EVM chain key the registry knows on mainnet, sorted:

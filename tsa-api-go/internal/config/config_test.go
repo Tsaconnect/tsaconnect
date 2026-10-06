@@ -510,3 +510,25 @@ func TestLoad_UnknownRampPriceGuardWarns(t *testing.T) {
 		t.Fatalf("a known mode must not warn: %q", buf.String())
 	}
 }
+
+func TestLoad_CompanyWalletDefaults(t *testing.T) {
+	for _, k := range []string{"RAMP_TREASURY_BUY", "RAMP_TREASURY_WALLET_PRIVATE_KEY", "RAMP_TREASURY_WALLET_CHAINS",
+		"RAMP_TREASURY_MAX_USD", "RAMP_TREASURY_CHAINS", "RAMP_TREASURY_NATIVE_FLOOR_WEI_BASE"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	t.Setenv("RAMP_TREASURY_CHAINS", "polygon") // the conversion treasury elsewhere
+	cfg := Load()
+	if cfg.RampTreasuryBuy || cfg.RampTreasuryWalletPrivateKey != "" || cfg.RampTreasuryMaxUSD != "200" ||
+		len(cfg.RampTreasuryWalletChains) != 1 || cfg.RampTreasuryWalletChains[0] != "base" {
+		t.Fatalf("defaults = %v %q %v", cfg.RampTreasuryBuy, cfg.RampTreasuryMaxUSD, cfg.RampTreasuryWalletChains)
+	}
+	// Spec §9: the wallet's gas-floor alert reuses RAMP_TREASURY_NATIVE_FLOOR_WEI_<CHAIN>.
+	if cfg.RampTreasuryNativeFloorWei["base"] != "5000000000000000" {
+		t.Fatalf("base floor = %q, want the default for a wallet chain", cfg.RampTreasuryNativeFloorWei["base"])
+	}
+	t.Setenv("RAMP_TREASURY_WALLET_CHAINS", " Base , sonic ")
+	if got := Load().RampTreasuryWalletChains; len(got) != 2 || got[0] != "base" || got[1] != "sonic" {
+		t.Fatalf("chains = %v", got)
+	}
+}
