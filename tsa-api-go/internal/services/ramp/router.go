@@ -75,8 +75,16 @@ func normalise(req Request) Request {
 
 // Quote fans out to every provider (each under ProviderTimeout), merges and
 // sorts best-first. Errors only when no venue remains, by spec §4.2's
-// precedence.
+// precedence. With Want set, providers that convert add their converted
+// venues; per target the company wallet goes before Flutterwave and one venue
+// (the best) is kept (spec §15.2, Decision C2).
 func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
+	return r.quote(ctx, req, true)
+}
+
+// quote is Quote; rule=false keeps every venue (an open's re-quote, which
+// fails over through all of them and applies the rule itself).
+func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResult, error) {
 	req = normalise(req)
 	type answer struct {
 		q   *ProviderQuote
@@ -93,6 +101,24 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 			q, err := p.Quote(pctx, req)
 			if err == nil && q == nil {
 				err = ErrNoVenue
+			}
+			if req.Want != nil {
+				if cq, ok := p.(ConvertedQuoter); ok {
+					conv, cerr := cq.QuoteConverted(pctx, req)
+					if cerr != nil {
+						log.Printf("[ramp] METRIC ramp_provider_converted_quote_failed provider=%s err=%s",
+							p.Name(), services.RedactAlertText(cerr.Error()))
+					}
+					if len(conv) > 0 {
+						merged := &ProviderQuote{}
+						if err == nil {
+							merged.MarketRate = q.MarketRate
+							merged.Venues = append(merged.Venues, q.Venues...)
+						}
+						merged.Venues = append(merged.Venues, conv...)
+						q, err = merged, nil
+					}
+				}
 			}
 			if err != nil {
 				log.Printf("[ramp] METRIC ramp_provider_quote_failed provider=%s side=%s fiat=%q err=%v",
@@ -130,10 +156,13 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 			res.Venues = append(res.Venues, v)
 		}
 	}
+	if rule {
+		res.Venues = companyWalletFirst(res.Venues)
+	}
 	sort.SliceStable(res.Venues, func(i, j int) bool {
 		return RateBetter(req.Side, res.Venues[i].RankRate(), res.Venues[j].RankRate())
 	})
-	if req.Token == "" || req.ChainKey == "" {
+	if rule && (req.Token == "" || req.ChainKey == "") {
 		res.Venues = bestPerPair(res.Venues)
 	}
 	if len(res.Venues) == 0 {
@@ -143,12 +172,14 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 	return res, nil
 }
 
-// bestPerPair keeps the first (best, since sorted) venue per (token, chain).
+// bestPerPair keeps the first (best, since sorted) venue per target — what it
+// delivers to her, direct or converted (Decision C2).
 func bestPerPair(sorted []Venue) []Venue {
 	seen := map[string]bool{}
 	out := sorted[:0:0]
 	for _, v := range sorted {
-		k := strings.ToUpper(v.Token) + "|" + strings.ToLower(v.ChainKey)
+		t := v.Target()
+		k := t.Token + "|" + t.ChainKey
 		if seen[k] {
 			continue
 		}
@@ -156,6 +187,57 @@ func bestPerPair(sorted []Venue) []Venue {
 		out = append(out, v)
 	}
 	return out
+}
+
+// companyWalletFirst drops every Flutterwave venue for a target the company
+// wallet has a venue for (spec §15.2). Paycrest is never dropped.
+func companyWalletFirst(venues []Venue) []Venue {
+	cw := map[VenueKey]bool{}
+	for _, v := range venues {
+		if v.Provider == ProviderTreasury {
+			cw[v.Target()] = true
+		}
+	}
+	if len(cw) == 0 {
+		return venues
+	}
+	out := venues[:0:0]
+	for _, v := range venues {
+		if v.Provider == ProviderFlutterwave && cw[v.Target()] {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// companyWalletFirstOrder moves Flutterwave venues behind the rest (stable),
+// so failover reaches the company wallet first whatever the rates.
+func companyWalletFirstOrder(venues []Venue) []Venue {
+	out := make([]Venue, 0, len(venues))
+	var later []Venue
+	for _, v := range venues {
+		if v.Provider == ProviderFlutterwave {
+			later = append(later, v)
+			continue
+		}
+		out = append(out, v)
+	}
+	return append(out, later...)
+}
+
+// companyWalletUntried: a Flutterwave venue waits while the company wallet has
+// a venue for the same target and has not yet been tried (spec §15.2).
+func companyWalletUntried(v Venue, venues []Venue, st *openState) bool {
+	if v.Provider != ProviderFlutterwave || st.tried[ProviderTreasury] {
+		return false
+	}
+	for _, o := range venues {
+		if o.Provider == ProviderTreasury && o.Target() == v.Target() {
+			return true
+		}
+	}
+	return false
 }
 
 // quoteError picks the user-facing reason when nothing quoted (spec §4.2, as
@@ -349,7 +431,8 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 
 	// Steps 1–2: the venue she was shown.
 	if first != nil {
-		o, stop, err := r.attempt(ctx, budget, first, pinned, q, in, &st)
+		o, stop, err := r.attempt(ctx, budget, first, q.Side, in.UserID, &st,
+			func(actx context.Context) (*Order, error) { return first.Open(actx, pinned, q, in) })
 		if o != nil || stop {
 			logOutcome(outcomeOf(o, err))
 			return o, err
@@ -361,13 +444,13 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 	// default) a venue outside it is recorded and still tried, so shadow mode
 	// never changes what the user gets.
 	enforce := r.cfg.Guard == services.PriceGuardEnforce
-	fresh, qerr := r.Quote(budget, q)
+	fresh, qerr := r.quote(budget, q, false)
 	if fresh != nil {
-		for _, v := range fresh.Venues {
+		for _, v := range companyWalletFirstOrder(fresh.Venues) {
 			if budget.Err() != nil {
 				break
 			}
-			if st.tried[v.Provider] {
+			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
 			}
 			if !Acceptable(q.Side, v.RankRate(), limit) {
@@ -382,7 +465,8 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			if p == nil {
 				continue
 			}
-			o, stop, err := r.attempt(ctx, budget, p, pinned, q, in, &st)
+			o, stop, err := r.attempt(ctx, budget, p, q.Side, in.UserID, &st,
+				func(actx context.Context) (*Order, error) { return p.Open(actx, pinned, q, in) })
 			if o != nil || stop {
 				logOutcome(outcomeOf(o, err))
 				return o, err
@@ -390,7 +474,11 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 		}
 	}
 
-	// Step 4: nothing opened.
+	return nil, r.noneOpened(&st, fresh, qerr, pinned, q, logOutcome)
+}
+
+// noneOpened is step 4 of an open that opened nothing (Open and OpenConverted).
+func (r *Router) noneOpened(st *openState, fresh *QuoteResult, qerr error, pinned VenueKey, q Request, logOutcome func(string)) error {
 	switch {
 	case st.sawPriceMoved || st.outsideTolerance:
 		logOutcome("price_moved")
@@ -398,19 +486,142 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			fresh = &QuoteResult{FiatCode: q.FiatCode, FiatAmount: q.FiatAmount, Side: string(q.Side),
 				Venues: []Venue{}, QuotedAt: time.Now()} // never "venues": null
 		}
+		// What she is shown again obeys the same rules as any quote: the
+		// re-quote kept every venue for failover (rule=false).
+		fresh.Venues = companyWalletFirst(fresh.Venues)
+		if q.Token == "" || q.ChainKey == "" {
+			fresh.Venues = bestPerPair(fresh.Venues) // still sorted best-first
+		}
+		fresh.Best = nil
+		if len(fresh.Venues) > 0 {
+			fresh.Best = &fresh.Venues[0]
+		}
 		showBoundRates(fresh, pinned, st.bound)
-		return nil, &PriceMovedError{Quote: fresh}
+		return &PriceMovedError{Quote: fresh}
 	case fresh == nil && qerr != nil && !errors.Is(qerr, ErrUnavailable):
 		// The re-quote says why (leg closed, no venue, below minimum),
 		// whatever earlier attempts hit.
 		logOutcome("no_venue")
-		return nil, qerr
+		return qerr
 	default:
 		// Carry the last provider's own reason (e.g. a payout bank it cannot
 		// pay), so the handler can show it instead of a generic outage.
 		logOutcome("unavailable")
-		return nil, WrapClass(ErrUnavailable, st.lastCause)
+		return WrapClass(ErrUnavailable, st.lastCause)
 	}
+}
+
+// OpenConverted opens a buy of a requested asset (spec §15): the venue she
+// was shown first, then every venue for her target best-first — company
+// wallet before Flutterwave — direct or converted.
+func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, error) {
+	q := normalise(req.Request)
+	if q.Side != Buy || q.Want == nil {
+		return nil, ErrInvalidQuote
+	}
+	q.Token, q.ChainKey = "", "" // pinned on the target, never on a leg
+	target := VenueKey{ChainKey: strings.ToLower(strings.TrimSpace(q.Want.Chain)), Token: strings.ToUpper(strings.TrimSpace(q.Want.Token))}
+	limit, err := LimitRate(q.Side, req.QuotedRate, r.cfg.ToleranceBps)
+	if err != nil {
+		return nil, err
+	}
+	var first Provider
+	var shown Venue // the venue the handle names, as far as a handle can say
+	if h := strings.TrimSpace(req.Handle); h != "" {
+		name, k, err := DecodeHandle(h)
+		if err != nil {
+			return nil, err
+		}
+		first = r.provider(name) // nil when that provider is gone: start at the re-quote
+		// A handle carries the pair the provider delivers: her target means a
+		// direct venue, anything else the settlement leg of a conversion.
+		shown = Venue{Provider: name, ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect}
+		if shown.Target() != target {
+			shown.Kind = models.RouteKindConverted
+		}
+	}
+
+	in := req.Input
+	in.LimitRate, in.Guard = limit, r.cfg.Guard
+	budget, cancel := context.WithTimeout(ctx, r.cfg.OpenBudget)
+	defer cancel()
+
+	if err := r.preflight(ctx, in.UserID, q.Side); err != nil {
+		return nil, err
+	}
+
+	st := openState{tried: map[string]bool{}}
+	logOutcome := func(outcome string) {
+		log.Printf("[ramp] METRIC ramp_route kind=converted side=%s fiat=%q target=%s/%s quoted_rate=%q chosen=%s attempts=%d failovers=%s outcome=%s",
+			q.Side, q.FiatCode, target.ChainKey, target.Token, req.QuotedRate, st.chosen, st.attempts, strings.Join(st.failovers, ","), outcome)
+	}
+	// openVenue is how venue v opens at p, or nil when p cannot open it.
+	openVenue := func(p Provider, v Venue) func(context.Context) (*Order, error) {
+		if v.Kind == models.RouteKindConverted {
+			cq, ok := p.(ConvertedQuoter)
+			if !ok {
+				return nil
+			}
+			return func(actx context.Context) (*Order, error) { return cq.OpenConverted(actx, q, in) }
+		}
+		k := v.Target()
+		direct := Request{Side: q.Side, FiatCode: q.FiatCode, FiatAmount: q.FiatAmount, Token: k.Token, ChainKey: k.ChainKey}
+		return func(actx context.Context) (*Order, error) { return p.Open(actx, k, direct, in) }
+	}
+
+	// The venue she was shown.
+	if first != nil {
+		if open := openVenue(first, shown); open != nil {
+			o, stop, err := r.attempt(ctx, budget, first, q.Side, in.UserID, &st, open)
+			if o != nil || stop {
+				logOutcome(outcomeOf(o, err))
+				return o, err
+			}
+		}
+	}
+
+	// Re-quote and fail over best-first, company wallet before Flutterwave,
+	// as Open does (log-only guard mode still tries a venue outside tolerance).
+	enforce := r.cfg.Guard == services.PriceGuardEnforce
+	fresh, qerr := r.quote(budget, q, false)
+	if fresh != nil {
+		for _, v := range companyWalletFirstOrder(fresh.Venues) {
+			if budget.Err() != nil {
+				break
+			}
+			if v.Kind != models.RouteKindConverted && v.Target() != target {
+				continue // a direct venue for another pair: an alternative, not her order
+			}
+			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
+				continue
+			}
+			if !Acceptable(q.Side, v.RankRate(), limit) {
+				if enforce {
+					st.outsideTolerance = true
+					continue
+				}
+				log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=quote kind=converted provider=%s quoted=%q venue_rate=%s limit=%s tol_bps=%d",
+					v.Provider, req.QuotedRate, v.RankRate(), limit, r.cfg.ToleranceBps)
+			}
+			p := r.provider(v.Provider)
+			if p == nil {
+				continue
+			}
+			open := openVenue(p, v)
+			if open == nil {
+				continue
+			}
+			o, stop, err := r.attempt(ctx, budget, p, q.Side, in.UserID, &st, open)
+			if o != nil || stop {
+				logOutcome(outcomeOf(o, err))
+				return o, err
+			}
+		}
+	}
+	// Bound rates are Paycrest's direct-guard figures; re-showing one as a
+	// venue for her converted target would invent a direct venue.
+	st.bound = nil
+	return nil, r.noneOpened(&st, fresh, qerr, target, q, logOutcome)
 }
 
 type openState struct {
@@ -426,8 +637,9 @@ type openState struct {
 
 type boundRate struct{ provider, rate string }
 
-// attempt opens at one provider. stop=true means return (o, err) as-is.
-func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q Request, in OrderInput, st *openState) (*Order, bool, error) {
+// attempt opens at one provider through open. stop=true means return (o, err)
+// as-is.
+func (r *Router) attempt(ctx, budget context.Context, p Provider, side Side, userID uuid.UUID, st *openState, open func(context.Context) (*Order, error)) (*Order, bool, error) {
 	if budget.Err() != nil {
 		return nil, false, nil
 	}
@@ -435,7 +647,7 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q 
 	st.tried[p.Name()] = true
 	actx, cancel := context.WithTimeout(budget, r.cfg.AttemptTimeout)
 	defer cancel()
-	o, err := p.Open(actx, k, q, in)
+	o, err := open(actx)
 	switch {
 	case err == nil && o != nil:
 		st.chosen = p.Name()
@@ -445,7 +657,7 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q 
 		fallthrough
 	case errors.Is(err, ErrOutcomeUnknown):
 		// Something may have been written. Never open a second order over it.
-		if perr := r.preflight(ctx, in.UserID, q.Side); perr != nil {
+		if perr := r.preflight(ctx, userID, side); perr != nil {
 			return nil, true, perr
 		}
 	case errors.Is(err, ErrRefusedForUser):
@@ -463,7 +675,7 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, k VenueKey, q 
 		// sent" (v1 deliberately does not fail over on these — spec §4.3).
 		return nil, true, err
 	}
-	log.Printf("[ramp] open failed over provider=%s side=%s err=%v", p.Name(), q.Side, err)
+	log.Printf("[ramp] open failed over provider=%s side=%s err=%v", p.Name(), side, err)
 	st.failovers = append(st.failovers, p.Name())
 	return nil, false, nil
 }

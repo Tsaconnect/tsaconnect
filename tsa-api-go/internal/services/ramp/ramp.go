@@ -42,6 +42,11 @@ type Request struct {
 	FiatAmount string
 	Token      string
 	ChainKey   string
+	// Want is the asset she asked for when no venue may deliver it directly
+	// (spec §15); nil on a direct request. UserID is set only on the
+	// authenticated converted quote (Decision C12).
+	Want   *services.RequestedAsset
+	UserID uuid.UUID
 }
 
 // Venue keeps today's PaycrestVenue JSON shape — the app calls
@@ -59,8 +64,33 @@ type Venue struct {
 	SpreadPercent float64    `json:"spreadPercent"`
 	TokenAmount   float64    `json:"tokenAmount"`
 	Fees          []VenueFee `json:"fees"`
-	// Kind is always "direct" (converted venues stay on /paycrest).
-	Kind string `json:"kind,omitempty"`
+	// Kind is "direct" or "converted" (models.RouteKind*). A converted venue
+	// delivers ChainKey/Token (the settlement leg) to the conversion treasury
+	// and names what she receives in the Requested* fields, with Paycrest's
+	// converted-venue JSON names.
+	Kind                 string `json:"kind,omitempty"`
+	ViaChain             string `json:"viaChain,omitempty"`
+	ViaToken             string `json:"viaToken,omitempty"`
+	RequestedChain       string `json:"requestedChain,omitempty"`
+	RequestedToken       string `json:"requestedToken,omitempty"`
+	RequestedChainID     int64  `json:"requestedChainId,omitempty"`
+	RequestedAddress     string `json:"requestedTokenAddress,omitempty"`
+	RequestedDecimals    int    `json:"requestedTokenDecimals,omitempty"`
+	RequestedDestination string `json:"requestedDestination,omitempty"`
+	EstimatedAmount      string `json:"estimatedAmount,omitempty"`
+	MarkupBps            int    `json:"markupBps,omitempty"`
+	CostBps              int    `json:"costBps,omitempty"`
+	PromisedAmount       string `json:"promisedAmount,omitempty"`
+	ETASeconds           int    `json:"etaSeconds,omitempty"`
+}
+
+// Target is what the venue delivers to her: the requested asset for a
+// converted venue, its own pair for a direct one (Decision C2).
+func (v Venue) Target() VenueKey {
+	if v.Kind == models.RouteKindConverted {
+		return VenueKey{ChainKey: strings.ToLower(v.RequestedChain), Token: strings.ToUpper(v.RequestedToken)}
+	}
+	return VenueKey{ChainKey: strings.ToLower(v.ChainKey), Token: strings.ToUpper(v.Token)}
 }
 
 // VenueFee is one provider fee inside a venue (spec §14): Token is the fee in
@@ -108,6 +138,8 @@ type Order struct {
 	// is where to pay while it awaits the transfer; nil after.
 	IT      *models.ITIntent
 	PayInto *services.StableBuyInstructions
+	// Conversion is the record an IT-settled converted buy feeds (spec §15.4).
+	Conversion *models.PaycrestOrderRecord
 }
 
 func (o Order) CreatedAt() time.Time {
@@ -153,6 +185,21 @@ type Provider interface {
 	ClaimPayment(ctx context.Context, userID uuid.UUID, nativeID string) (*Order, error)
 	Cancel(ctx context.Context, userID uuid.UUID, nativeID string) (*Order, error)
 }
+
+// ConvertedQuoter is a provider that also reaches a requested asset through a
+// settlement leg it delivers to the conversion treasury (spec §15).
+type ConvertedQuoter interface {
+	QuoteConverted(ctx context.Context, r Request) ([]Venue, error)
+	OpenConverted(ctx context.Context, r Request, in OrderInput) (*Order, error)
+}
+
+// ConvertedPricer prices a requested asset from a delivered leg.
+// *services.PaycrestQuoteService satisfies it.
+type ConvertedPricer interface {
+	PriceConvertedLeg(ctx context.Context, leg services.SettlementLeg, want services.RequestedAsset) (*services.PaycrestVenue, error)
+}
+
+var _ ConvertedPricer = (*services.PaycrestQuoteService)(nil)
 
 var (
 	// Open outcomes (spec §4.1).

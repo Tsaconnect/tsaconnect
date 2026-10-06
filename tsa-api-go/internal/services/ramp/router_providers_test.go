@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,19 +63,37 @@ func TestRouterQuote_RanksOnTheEffectiveRate(t *testing.T) {
 	}
 }
 
-// S6 / D36: an exact tie goes treasury → paycrest → flutterwave.
+// S6 / D36: an exact tie goes by registration order (treasury → paycrest →
+// flutterwave in production). The company wallet and Flutterwave never tie on
+// one target: the company wallet drops Flutterwave there (spec §15.2), so each
+// tie is checked pairwise.
 func TestRouterQuote_ExactTieFollowsRegistrationOrder(t *testing.T) {
 	tr := fakeNamed(ProviderTreasury, venue(ProviderTreasury, "base", "USDC", "1382.57"))
 	pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "base", "USDC", "1382.570"))
 	fw := fakeNamed(ProviderFlutterwave, feeVenue(ProviderFlutterwave, "base", "USDC", "1300", "1382.57"))
-	res, err := testRouter(tr, pc, fw).Quote(context.Background(), buyReq("USDC", "base"))
-	if err != nil || len(res.Venues) != 3 ||
-		res.Venues[0].Provider != ProviderTreasury || res.Venues[1].Provider != ProviderPaycrest || res.Venues[2].Provider != ProviderFlutterwave {
-		t.Fatalf("order = %+v err = %v", res.Venues, err)
+	order := func(ps ...Provider) []string {
+		res, err := testRouter(ps...).Quote(context.Background(), buyReq("USDC", "base"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, v := range res.Venues {
+			got = append(got, v.Provider)
+		}
+		return got
 	}
-	res, _ = testRouter(fw, pc, tr).Quote(context.Background(), buyReq("USDC", "base"))
-	if res.Venues[0].Provider != ProviderFlutterwave {
-		t.Fatal("the tie-break must be registration order, nothing else")
+	for _, c := range []struct {
+		ps   []Provider
+		want string
+	}{
+		{[]Provider{tr, pc}, "treasury,paycrest"},
+		{[]Provider{pc, tr}, "paycrest,treasury"},
+		{[]Provider{pc, fw}, "paycrest,flutterwave"},
+		{[]Provider{fw, pc}, "flutterwave,paycrest"},
+	} {
+		if got := strings.Join(order(c.ps...), ","); got != c.want {
+			t.Fatalf("order = %s, want %s: the tie-break must be registration order, nothing else", got, c.want)
+		}
 	}
 }
 
