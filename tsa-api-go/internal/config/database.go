@@ -194,6 +194,7 @@ func AutoMigrate() error {
 		// Paycrest order. (order_id, kind, attempt) unique index is the
 		// once-per-attempt rule.
 		&models.RampLeg{},
+		&models.ITIntentAuditLog{},
 		// Ramp conversion (sell) — one row per sale in progress: which swap
 		// was hers, which quote it executed, whether the payout is open. The
 		// unique index on swap_tx_hash is the "one swap backs one sale" rule;

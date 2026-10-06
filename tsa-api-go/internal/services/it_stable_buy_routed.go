@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
 )
@@ -652,4 +654,242 @@ func (s *ITService) StableBuyPayInto(ctx context.Context, intent *models.ITInten
 	}
 	payInto, _, err := s.payIntoForStableBuy(ctx, intent.UserID, intent.Currency, amount)
 	return payInto, err
+}
+
+// ── routed settlement (spec §5.2) ──────────────────────────────────────────
+
+// rateUpdatePublisher is the slice of *events.Bus settlement uses.
+type rateUpdatePublisher interface{ Publish(events.Event) }
+
+// SetEventBus wires the "Rate updated" notice. nil disables it.
+func (s *ITService) SetEventBus(b *events.Bus) {
+	if b == nil {
+		s.rateNotifier = nil
+		return
+	}
+	s.rateNotifier = b
+}
+
+// routedArrival is how a routed buy's money is priced when it lands.
+type routedArrival struct {
+	units, rate *big.Int
+	quote       *StableBuyQuote // the live quote; nil when honoured
+	honoured    bool
+	repriced    bool
+	needsStock  bool // company wallet, priced live: win the stock under the lock
+}
+
+// setQuoteColumns writes a price onto a claim or re-price. display is nil on
+// the old endpoint, which carries no breakdown.
+func setQuoteColumns(cols map[string]any, units, rate, display *big.Int, fees []StableBuyFee) {
+	cols["asset_amount"] = units.String()
+	cols["locked_rate"] = rate.String()
+	cols["rate_minor"] = rate.String()
+	cols["rate_kobo"] = rate.String()
+	if display != nil {
+		cols["display_rate"] = display.String()
+		cols["fees"] = marshalFees(fees)
+	}
+}
+
+func (a *routedArrival) writeTo(claim map[string]any) {
+	if a.quote != nil {
+		setQuoteColumns(claim, a.units, a.rate, a.quote.DisplayRateMinor, a.quote.Fees)
+	} else {
+		setQuoteColumns(claim, a.units, a.rate, nil, nil) // honoured: the stored breakdown stands
+	}
+	// false when honoured: Repriced means "priced at a live rate" (D2).
+	claim["repriced"] = a.repriced
+}
+
+// parkClaim turns a claim into a park: the money is recorded, the quote is left
+// as it was, and the reason goes on the row (it is in the stuck list).
+func parkClaim(claim map[string]any, reason string) {
+	for _, k := range []string{"asset_amount", "locked_rate", "rate_minor", "rate_kobo", "display_rate", "fees", "repriced"} {
+		delete(claim, k)
+	}
+	claim["status"] = models.ITStatusBuyAwaitingRate
+	claim["failure_reason"] = truncateRunes(reason, 256)
+}
+
+// priceRoutedArrival applies D33: only the exact naira, arrived inside the
+// window and processed inside the grace, is honoured. Everything else is
+// priced live on the intent's own provider terms (D3).
+func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITIntent, amountMinor string, arrivedAt time.Time) (*routedArrival, error) {
+	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
+	if !ok || paid.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, amountMinor)
+	}
+	expected, okE := new(big.Int).SetString(strings.TrimSpace(intent.AmountMinor), 10)
+	expiry := *intent.RateExpiresAt
+	onTime := !arrivedAt.After(expiry) && !time.Now().After(expiry.Add(s.rampTerms().honourGrace))
+	if okE && expected.Cmp(paid) == 0 && onTime {
+		units, okU := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
+		locked, okR := new(big.Int).SetString(strings.TrimSpace(intent.LockedRate), 10)
+		if !okU || units.Sign() <= 0 || !okR || locked.Sign() <= 0 {
+			return nil, fmt.Errorf("it stable buy: routed intent %s has no usable quote", intent.ID)
+		}
+		return &routedArrival{units: units, rate: locked, honoured: true}, nil
+	}
+	q, err := s.quoteRoutedLiveFor(ctx, intent, paid)
+	if err != nil {
+		return nil, err
+	}
+	return &routedArrival{
+		units: q.AssetUnits, rate: q.RatePerUnitMinor, quote: q, repriced: true,
+		needsStock: models.ITIntentProvider(intent) == models.ITProviderTreasury,
+	}, nil
+}
+
+// quoteRoutedLiveFor prices paid live on the intent's provider terms: the
+// company wallet always within its maximum. The one exception, an operator's
+// "deliver anyway", calls quoteTreasuryLive itself.
+func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITIntent, paid *big.Int) (*StableBuyQuote, error) {
+	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true)
+	}
+	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+}
+
+// quoteTreasuryLive prices fiatMinor at the company wallet's current market
+// rate plus its margin.
+func (s *ITService) quoteTreasuryLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string, enforceMax bool) (*StableBuyQuote, error) {
+	if s.treasuryRates == nil {
+		return nil, fmt.Errorf("%w: no company-wallet market rate", ErrStableQuoteUnavailable)
+	}
+	market, err := s.treasuryRates.BuyRate(ctx, currency)
+	if err != nil {
+		return nil, err
+	}
+	return s.treasuryQuoteAt(strings.ToUpper(asset), strings.ToUpper(currency), fiatMinor, market, enforceMax)
+}
+
+// creditArrival is when a central-account credit ARRIVED (D33): the statement's
+// transaction time when it carries a time of day — but never later than when
+// we first saw the credit, since a statement time is zone-less and parsed as
+// UTC — else when we first saw it, else now. A date-only statement time reads
+// as midnight.
+func creditArrival(credit *models.InboundCredit, now time.Time) time.Time {
+	if credit == nil {
+		return now
+	}
+	t := credit.TransactionDate
+	if !t.IsZero() && (t.Hour() != 0 || t.Minute() != 0 || t.Second() != 0 || t.Nanosecond() != 0) {
+		if !credit.SeenAt.IsZero() && t.After(credit.SeenAt) {
+			return credit.SeenAt
+		}
+		return t
+	}
+	if !credit.SeenAt.IsZero() {
+		return credit.SeenAt
+	}
+	return now
+}
+
+// isDeterministicPricingError: the same money can never price, so retrying is
+// pointless — park it on every path (D32).
+func isDeterministicPricingError(err error) bool {
+	return errors.Is(err, ErrStableBuyBelowMinimum) || errors.Is(err, ErrStableNotAnAsset) ||
+		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible)
+}
+
+// parkReasonOf names a park for the ramp_treasury_parked metric.
+func parkReasonOf(err error) string {
+	switch {
+	case errors.Is(err, ErrStableBuyAboveMaximum):
+		return "maximum"
+	case errors.Is(err, ErrStableBuyBelowMinimum):
+		return "minimum"
+	case errors.Is(err, ErrStableNotAnAsset):
+		return "not_an_asset"
+	case errors.Is(err, ErrStableRateImplausible):
+		return "rate_implausible"
+	default:
+		return "rate_unavailable"
+	}
+}
+
+// routedMetric is the provider stem of the routed metric lines.
+func routedMetric(i *models.ITIntent) string {
+	if models.ITIntentProvider(i) == models.ITProviderTreasury {
+		return "treasury"
+	}
+	return "fw"
+}
+
+// stableBuyPriced: a routed buy is priced from the moment it opens, so
+// Repriced=false on it is not the "claimed but never priced" state (D2).
+func stableBuyPriced(i *models.ITIntent) bool { return i.Repriced || IsRoutedStableBuy(i) }
+
+// quoteForIntent prices fiatMinor at the live rate on the terms the intent
+// was opened under (D3). The company wallet is never re-priced here: its
+// re-price must win stock under the lock (repriceTreasuryParked).
+func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent, fiatMinor string) (*StableBuyQuote, error) {
+	if !IsRoutedStableBuy(intent) {
+		return s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)
+	}
+	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+		return nil, fmt.Errorf("%w: a company-wallet buy is re-priced only under its stock lock", ErrITBadState)
+	}
+	paid, ok := new(big.Int).SetString(strings.TrimSpace(fiatMinor), 10)
+	if !ok || paid.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, fiatMinor)
+	}
+	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+}
+
+// routedDeliveryAmounts is what a Flutterwave delivery sends and what the
+// wallet must hold (D31). Every other buy sends and holds units.
+func (s *ITService) routedDeliveryAmounts(intent *models.ITIntent, units *big.Int) (send, hold *big.Int) {
+	send, hold = new(big.Int).Set(units), new(big.Int).Set(units)
+	if !IsRoutedStableBuy(intent) || models.ITIntentProvider(intent) != models.ITProviderFlutterwave {
+		return send, hold
+	}
+	lim := s.routedLimits()
+	hold.Add(hold, lim.sendFeeUnits)
+	if lim.sendFeeFromAmount {
+		send.Add(send, lim.sendFeeUnits)
+	}
+	return send, hold
+}
+
+// logHonoured records what honouring cost: drift_bps > 0 means the live rate
+// would have delivered less; for Flutterwave, shortfall_units is how much less
+// (what the float covers). Best effort, after the claim.
+func (s *ITService) logHonoured(ctx context.Context, intent *models.ITIntent, paidMinor string, honoured, locked *big.Int) {
+	drift, shortfall := "unknown", "unknown"
+	if paid, ok := new(big.Int).SetString(strings.TrimSpace(paidMinor), 10); ok && locked.Sign() > 0 {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if q, err := s.quoteRoutedLiveFor(rctx, intent, paid); err == nil && q.AssetUnits.Sign() > 0 {
+			diff := new(big.Int).Sub(q.RatePerUnitMinor, locked)
+			drift = diff.Mul(diff, big.NewInt(10000)).Quo(diff, locked).String()
+			short := new(big.Int).Sub(honoured, q.AssetUnits)
+			if short.Sign() < 0 {
+				short.SetInt64(0)
+			}
+			shortfall = short.String()
+		}
+	}
+	if routedMetric(intent) == "treasury" {
+		log.Printf("[it stable buy] METRIC ramp_treasury_honoured intent=%s drift_bps=%s", intent.ID, drift)
+		return
+	}
+	log.Printf("[it stable buy] METRIC ramp_fw_honoured intent=%s drift_bps=%s shortfall_units=%s", intent.ID, drift, shortfall)
+}
+
+// notifyRateUpdated tells her a payment was priced at the live rate.
+func (s *ITService) notifyRateUpdated(intent *models.ITIntent, units *big.Int) {
+	if s.rateNotifier == nil {
+		return
+	}
+	s.rateNotifier.Publish(events.Event{
+		Type:    events.RampRateUpdated,
+		UserID:  intent.UserID,
+		Title:   "Rate updated",
+		Message: fmt.Sprintf("Rate updated: you'll receive %s %s", FormatStableUnits(units.String()), intent.Asset),
+		Data: map[string]interface{}{
+			"intentId": intent.ID.String(), "asset": intent.Asset, "assetAmount": units.String(),
+		},
+	})
 }

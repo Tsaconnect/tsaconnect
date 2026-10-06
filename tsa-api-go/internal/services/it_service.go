@@ -137,6 +137,10 @@ type ITService struct {
 	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
 	wallet *CompanyWallet
 
+	// rateNotifier tells a buyer their payment was priced at the live rate
+	// (Decision D18). Nil leaves settlement silent. See SetEventBus.
+	rateNotifier rateUpdatePublisher
+
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.
 	stableDepositAddrs map[string]string

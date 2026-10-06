@@ -288,6 +288,11 @@ type ITIntent struct {
 	DisplayRate string         `gorm:"type:numeric(38,0);default:0" json:"displayRate,omitempty"`
 	Fees        datatypes.JSON `gorm:"type:jsonb" json:"fees,omitempty"`
 
+	// MaxWaived: an operator delivered this company-wallet buy above
+	// RAMP_TREASURY_MAX_USD ("deliver anyway", §13 Q9). The audit row says who
+	// and why; this says that it happened, on the order itself.
+	MaxWaived bool `gorm:"default:false" json:"maxWaived,omitempty"`
+
 	// Sell payout destination (captured at sell creation for auto-payout; empty
 	// on legacy manual-payout intents).
 	BankCode      string `gorm:"size:16" json:"bankCode,omitempty"`

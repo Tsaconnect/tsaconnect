@@ -556,7 +556,7 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 	// still carries the CREATION-TIME asset_amount: an overpayer silently
 	// loses the excess, and an underpayer's delivery is drawn from the POOLED
 	// merchant balance, i.e. another user's stablecoin.
-	if !intent.Repriced {
+	if !stableBuyPriced(intent) {
 		priced, err := s.priceStableBuy(ctx, intent, intent.ReceivedAmount, intent.Status, intent.Status)
 		if err != nil {
 			// Money has landed and cannot be handed back: park it visibly for
@@ -832,8 +832,10 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 	if !ok || units.Sign() <= 0 {
 		return errors.New("it stable buy: intent has no asset amount")
 	}
-	amountMajor, _ := new(big.Rat).SetFrac(units,
-		new(big.Int).Exp(big.NewInt(10), big.NewInt(StableAssetDecimals), nil)).Float64()
+	// What is sent, and what the wallet must hold to send it (D31).
+	sendUnits, holdUnits := s.routedDeliveryAmounts(intent, units)
+	amountMajor := StableFromBaseUnits(sendUnits)
+	neededMajor := StableFromBaseUnits(holdUnits)
 
 	// Prove we hold the stablecoin before spending it — the same gate
 	// ConvertStableBuy applies to the naira, and for the same reason. This is
@@ -865,14 +867,14 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 	if !found {
 		log.Printf("[IT] it_stable_balance_line_missing asset=%s intent=%s", intent.Asset, intent.ID)
 	}
-	if !found || available < amountMajor {
+	if !found || available < neededMajor {
 		// The conversion settled, so a shortfall here is the company float not
 		// covering it. Still a wait (ErrStableCreditNotVisible: no delivery
 		// attempt burned), but one that needs a top-up, so it is marked.
 		log.Printf("[it stable buy] METRIC ramp_fw_float_short intent=%s asset=%s available=%v needed=%v",
-			intent.ID, intent.Asset, available, amountMajor)
+			intent.ID, intent.Asset, available, neededMajor)
 		return fmt.Errorf("%w: %w: %s available=%v needed=%v",
-			ErrStableFloatShort, ErrStableCreditNotVisible, intent.Asset, available, amountMajor)
+			ErrStableFloatShort, ErrStableCreditNotVisible, intent.Asset, available, neededMajor)
 	}
 
 	ref := itBuyDeliveryRef(intent.ID, intent.DeliveryAttempts)

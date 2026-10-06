@@ -276,7 +276,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 			// already owns — and payment_ref carries a partial unique index.
 			if s.HasStableBuy() &&
 				models.ITIntentAsset(&existing) != models.ITAssetMCGP &&
-				existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+				existing.Status == models.ITStatusPaymentReceived && !stableBuyPriced(&existing) {
 				break
 			}
 			return nil

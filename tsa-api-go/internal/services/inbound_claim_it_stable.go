@@ -179,7 +179,9 @@ func (s *ITStableClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// webhook path ever had. Parking would turn a transient provider blip into
 	// a manual recovery, and a parked intent is one an operator has to resume
 	// by hand before the buyer sees anything at all.
-	claimed, err := s.it.claimAndPriceStableBuy(ctx, &intent, ref, fmt.Sprintf("%d", gross), false)
+	// D33: the honour window is measured when the money ARRIVED.
+	claimed, err := s.it.claimAndPriceStableBuy(ctx, &intent, ref, fmt.Sprintf("%d", gross),
+		creditArrival(credit, time.Now()), false)
 	if err != nil {
 		return err
 	}

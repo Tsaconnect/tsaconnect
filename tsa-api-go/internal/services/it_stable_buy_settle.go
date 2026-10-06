@@ -70,7 +70,9 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, err
 	}
 
-	return s.claimAndPriceStableBuy(ctx, &candidate, chargeID, amountMinor, true)
+	// The VA webhook carries no charge time and arrives within seconds, so
+	// processing time stands in for arrival (D33).
+	return s.claimAndPriceStableBuy(ctx, &candidate, chargeID, amountMinor, time.Now(), true)
 }
 
 // finishStableBuyReplay handles money we have already seen.
@@ -105,7 +107,7 @@ func (s *ITService) finishStableBuyReplay(ctx context.Context, paymentRef string
 	if !IsStableAsset(existing.Asset) {
 		return true, false, nil
 	}
-	if existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+	if existing.Status == models.ITStatusPaymentReceived && !stableBuyPriced(&existing) {
 		if _, pErr := s.priceStableBuy(ctx, &existing, existing.ReceivedAmount,
 			models.ITStatusPaymentReceived, models.ITStatusPaymentReceived); pErr != nil {
 			if !parkOnBadRate {
@@ -152,79 +154,106 @@ func (s *ITService) finishStableBuyReplay(ctx context.Context, paymentRef string
 //	                  it every 30 seconds, so a transient rate outage resolves
 //	                  itself. Parking would convert a 30-second wait into a
 //	                  manual operator recovery for no gain.
+//
+// arrivedAt is when the money arrived (D33); a routed buy is honoured or priced live from it.
 func (s *ITService) claimAndPriceStableBuy(
 	ctx context.Context,
 	candidate *models.ITIntent,
 	paymentRef, amountMinor string,
+	arrivedAt time.Time,
 	parkOnBadRate bool,
 ) (bool, error) {
-	// Price BEFORE claiming, so that claiming and pricing are ONE write.
-	//
-	// Pricing in a second write left a window as wide as an HTTP round-trip to
-	// Flutterwave in which the intent sat at payment_received carrying its
-	// CREATION-TIME asset_amount. Anything that interrupted that window — a
-	// rolling deploy, a panic, a cancelled context — left the watcher to
-	// convert the real received_amount while delivering the stale figure: an
-	// overpayer silently loses the excess, and an underpayer's delivery is
-	// drawn from the POOLED merchant balance, i.e. another user's stablecoin.
-	// Quoting first costs one wasted quote if we then lose the claim race,
-	// which is far cheaper than the window.
+	// Price BEFORE claiming, so that claiming and pricing are ONE write: a
+	// window between them left the creation-time asset_amount in place.
 	chargeID := paymentRef
 	claim := map[string]any{
 		"status":          models.ITStatusPaymentReceived,
 		"payment_ref":     chargeID,
 		"received_amount": amountMinor,
 	}
-	q, qErr := s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
-	if qErr != nil && !parkOnBadRate {
-		// Caller has its own retry (see parkOnBadRate). Nothing is written, so
-		// the intent stays open and the next attempt prices it properly.
+	routed := IsRoutedStableBuy(candidate)
+	var (
+		q       *StableBuyQuote
+		arrival *routedArrival
+		qErr    error
+	)
+	if routed {
+		arrival, qErr = s.priceRoutedArrival(ctx, candidate, amountMinor, arrivedAt)
+	} else {
+		q, qErr = s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
+	}
+	// D32: money that can never price parks on both paths; a transient outage
+	// on the central path writes nothing and the poller retries in 30s.
+	if qErr != nil && !parkOnBadRate && !isDeterministicPricingError(qErr) {
 		return false, fmt.Errorf("it stable buy: cannot price %q at settlement: %w", paymentRef, qErr)
 	}
-	if qErr != nil {
-		// The money is here and cannot be handed back, so this must NOT error
-		// the webhook — that would leave the charge unprocessed and re-driven
-		// forever. Park for an operator with the reason recorded, in the SAME
-		// write that claims: the charge is never recorded against an intent
-		// without either a price or a park. Covers an unusable rate and an
-		// underpayment below the provider floor alike — both mean "money
-		// landed, a human must decide".
-		//
-		// The park status is ITStatusBuyAwaitingRate, NOT the MCGP flow's
-		// awaiting_rate. Sharing that status would expose the intent to
-		// RepriceAndCreditAwaitingRate, which credits MCGP from company supply
-		// and then sets status back to pending_payment — re-opening the intent
-		// so the next incoming charge could claim it.
+	parkedReason := ""
+	switch {
+	case qErr != nil:
+		// The money is here and cannot be handed back: park for an operator,
+		// in the SAME write that claims. ITStatusBuyAwaitingRate, never the
+		// MCGP flow's awaiting_rate (that would re-open the intent).
 		log.Printf("[it stable buy] ALARM charge=%s landed but could not be priced: %v", chargeID, qErr)
-		claim["status"] = models.ITStatusBuyAwaitingRate
-		claim["failure_reason"] = "could not price at settlement: " + qErr.Error()
-	} else {
-		// Priced at the LIVE rate on what actually landed. This is the binding
-		// price; the figure quoted at creation was indicative. Pricing on what
-		// arrived rather than what was quoted also handles under- and
-		// overpayment with no special case — the mirror of the sell leg's
-		// received/quoted.
-		claim["asset_amount"] = q.AssetUnits.String()
-		claim["locked_rate"] = q.RatePerUnitMinor.String()
-		claim["rate_minor"] = q.RatePerUnitMinor.String()
-		claim["rate_kobo"] = q.RatePerUnitMinor.String()
+		if isDeterministicPricingError(qErr) {
+			log.Printf("[it stable buy] ALERT it_stable_buy_parked_unpriceable intent=%s payment=%s reason=%q",
+				candidate.ID, chargeID, qErr.Error())
+		}
+		parkClaim(claim, "could not price at settlement: "+qErr.Error())
+		parkedReason = parkReasonOf(qErr)
+	case routed:
+		arrival.writeTo(claim)
+	default:
+		// The old endpoint: priced at the LIVE rate on what actually landed.
+		setQuoteColumns(claim, q.AssetUnits, q.RatePerUnitMinor, nil, nil)
 		claim["repriced"] = true
 	}
 
-	// The status in the WHERE is the concurrency guard: two webhooks racing on
-	// the same intent, only one wins and the loser sees RowsAffected == 0.
-	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ?", candidate.ID, models.ITStatusPendingPayment).
-		Updates(claim)
+	// The status in the WHERE is the concurrency guard.
+	write := func(db *gorm.DB) *gorm.DB {
+		return db.Model(&models.ITIntent{}).
+			Where("id = ? AND status = ?", candidate.ID, models.ITStatusPendingPayment).
+			Updates(claim)
+	}
+	var res *gorm.DB
+	if routed && qErr == nil && arrival.needsStock {
+		// The company wallet, priced live: the stock is won under the lock,
+		// with this order's own reservation excluded (spec §5.2/§5.3).
+		var stockErr error
+		lockErr := s.withStockLock(ctx, candidate.DestChain, candidate.Asset, func(tx *gorm.DB) error {
+			free, _, err := s.freeTreasuryStock(ctx, tx, candidate.DestChain, candidate.Asset, candidate.ID, true)
+			if err != nil {
+				stockErr = err
+				return err
+			}
+			if free.Cmp(arrival.units) < 0 {
+				parkClaim(claim, "the company wallet's free stock does not cover the live amount")
+				parkedReason = "stock"
+			}
+			res = write(tx)
+			return res.Error
+		})
+		switch {
+		case stockErr != nil:
+			// The balance could not be read: transient, like a rate outage.
+			if !parkOnBadRate {
+				return false, fmt.Errorf("it stable buy: cannot check stock for %q: %w", paymentRef, stockErr)
+			}
+			parkClaim(claim, "could not read the company wallet's stock: "+stockErr.Error())
+			parkedReason = "stock_unreadable"
+			res = write(s.db.WithContext(ctx))
+		case lockErr != nil:
+			return false, lockErr
+		}
+	} else {
+		res = write(s.db.WithContext(ctx))
+	}
 	if res.Error != nil {
 		return false, res.Error
 	}
 	if res.RowsAffected == 0 {
-		// Lost the race: another call (a concurrent redelivery, most likely)
-		// claimed this exact intent first — and may have claimed it with THIS
-		// chargeID, in which case falling through to MCGP would hand the
-		// winner's charge to the wrong path. Re-check by payment_ref rather
-		// than assuming "someone else, unrelated" was the cause.
+		// Lost the race: another call claimed this intent first — maybe with
+		// THIS chargeID, in which case falling through to MCGP would hand the
+		// winner's charge to the wrong path. Re-check by payment_ref.
 		var winner models.ITIntent
 		wErr := s.db.WithContext(ctx).
 			Where("payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).
@@ -237,7 +266,20 @@ func (s *ITService) claimAndPriceStableBuy(
 		return false, nil
 	}
 
-	if qErr == nil {
+	switch {
+	case parkedReason != "":
+		if routedMetric(candidate) == "treasury" {
+			log.Printf("[it stable buy] METRIC ramp_treasury_parked intent=%s reason=%s", candidate.ID, parkedReason)
+		}
+	case routed && arrival.honoured:
+		log.Printf("[it stable buy] payment=%s funded %s %s for user=%s (quote honoured)",
+			chargeID, arrival.units, candidate.Asset, candidate.UserID)
+		s.logHonoured(ctx, candidate, amountMinor, arrival.units, arrival.rate)
+	case routed:
+		log.Printf("[it stable buy] METRIC ramp_%s_repriced intent=%s quoted_rate=%s live_rate=%s",
+			routedMetric(candidate), candidate.ID, candidate.LockedRate, arrival.rate)
+		s.notifyRateUpdated(candidate, arrival.units)
+	default:
 		log.Printf("[it stable buy] payment=%s funded %s %s for user=%s",
 			chargeID, q.AssetUnits, candidate.Asset, candidate.UserID)
 	}
@@ -271,7 +313,7 @@ func (s *ITService) claimAndPriceStableBuy(
 // that the first settlement can price BEFORE it claims — see
 // settleStableBuyFromCharge. Callers after the claim pass ReceivedAmount.
 func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent, fiatMinor, fromStatus, toStatus string) (bool, error) {
-	q, err := s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)
+	q, err := s.quoteForIntent(ctx, intent, fiatMinor)
 	if err != nil {
 		return false, err
 	}
@@ -280,15 +322,17 @@ func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent,
 	if fromStatus == models.ITStatusDelivering {
 		cas = cas.Where("delivery_id = ?", "")
 	}
-	res := cas.Updates(map[string]any{
+	cols := map[string]any{
 		"status":         toStatus,
-		"asset_amount":   q.AssetUnits.String(),
-		"locked_rate":    q.RatePerUnitMinor.String(),
-		"rate_minor":     q.RatePerUnitMinor.String(),
-		"rate_kobo":      q.RatePerUnitMinor.String(),
 		"repriced":       true,
 		"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
-	})
+	}
+	if IsRoutedStableBuy(intent) {
+		setQuoteColumns(cols, q.AssetUnits, q.RatePerUnitMinor, q.DisplayRateMinor, q.Fees)
+	} else {
+		setQuoteColumns(cols, q.AssetUnits, q.RatePerUnitMinor, nil, nil)
+	}
+	res := cas.Updates(cols)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -338,11 +382,27 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 	if intent.Direction != models.ITDirectionBuy || !IsStableAsset(intent.Asset) {
 		return nil, ErrITBadState
 	}
+	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+		// D3: market + margin, the maximum, and stock won under the lock.
+		return s.repriceTreasuryParked(ctx, intent, false, nil)
+	}
 	var to string
 	switch {
 	case intent.Status == models.ITStatusBuyAwaitingRate:
+		if intent.ConversionAttempts >= maxStableConversionAttempts {
+			// A park taken on the last conversion attempt (Flutterwave's 0302
+			// floor) cannot convert again: resuming it would only stall the
+			// watcher on ErrStableConversionExhausted. Refund it instead.
+			return nil, fmt.Errorf("%w: its conversion attempts are exhausted (%d of %d); mark it refunded instead",
+				ErrITBadState, intent.ConversionAttempts, maxStableConversionAttempts)
+		}
 		to = models.ITStatusPaymentReceived
 	case intent.Status == models.ITStatusDelivering && intent.DeliveryID == "":
+		if IsRoutedStableBuy(intent) && !intent.Repriced {
+			// An honoured buy short of float waits for the top-up: re-pricing
+			// would take back what she was promised (spec §5.2).
+			return nil, fmt.Errorf("%w: an honoured routed buy waits for the float top-up", ErrITBadState)
+		}
 		to = models.ITStatusDelivering
 	default:
 		return nil, ErrITBadState

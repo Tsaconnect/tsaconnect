@@ -143,6 +143,11 @@ const (
 	// physical prize manually (NEVER auto-paid). UserID is the recipient; Data
 	// carries "level" (int) and "prize" (string).
 	TPPrizeDue = "tp.prize.due"
+
+	// RampRateUpdated: a routed stablecoin buy's money arrived late or
+	// off-amount, so it was priced at the live rate. Data carries intentId,
+	// asset and assetAmount (base units).
+	RampRateUpdated = "ramp.rate_updated"
 )
 
 // Event is the payload passed through the event bus.
