@@ -69,6 +69,20 @@ func paycrestError(c *gin.Context, err error) {
 		// Buy only (money in). The machine code is what the app routes on:
 		// verify now, or contact support for a verified user with no legal name.
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), services.KYCRefusalCode(err))
+	case errors.Is(err, services.ErrITAgreementRequired):
+		// A routed Flutterwave buy needs the IT agreement: the same code and
+		// words the IT endpoints send, so the app shows its prompt.
+		utils.ErrorResponseWithCode(c, http.StatusForbidden,
+			"Please review and accept the trading agreement to continue", "it_agreement_required")
+	case errors.Is(err, services.ErrBadDeliveryAddress):
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"You have no wallet address saved on that network. Set that wallet up, then try again.")
+	case errors.Is(err, services.ErrStableBuyAlreadyOpen):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"You already have an order awaiting payment. Finish it, or cancel it from your orders.")
+	case errors.Is(err, services.ErrStableBuyBelowMinimum):
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"That amount is below the minimum for this route. Try a larger amount.")
 	case errors.Is(err, services.ErrPaycrestDisabled):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable")

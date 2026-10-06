@@ -163,14 +163,24 @@ func bpsSetting(name string, v int64, dst *int64, errs *[]error) {
 	}
 }
 
+// ParseStableLimit is the one parser for a stablecoin limit in major units
+// (boot checks and pricing share it): positive, or zero when allowZero.
+func ParseStableLimit(v string, allowZero bool) (*big.Int, error) {
+	u, err := StableToBaseUnits(strings.TrimSpace(v))
+	if err != nil || u.Sign() < 0 || (u.Sign() == 0 && !allowZero) {
+		return nil, fmt.Errorf("%q is not a usable amount", v)
+	}
+	return u, nil
+}
+
 // unitsSetting parses a major-unit stablecoin amount: "" keeps.
 func unitsSetting(name, v string, dst **big.Int, allowZero bool, errs *[]error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return
 	}
-	u, err := StableToBaseUnits(v)
-	if err != nil || u.Sign() < 0 || (u.Sign() == 0 && !allowZero) {
+	u, err := ParseStableLimit(v, allowZero)
+	if err != nil {
 		*errs = append(*errs, fmt.Errorf("%s=%q is not a usable amount", name, v))
 		return
 	}

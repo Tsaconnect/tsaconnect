@@ -382,8 +382,26 @@ type Config struct {
 	RampProviderTimeout    time.Duration
 	RampOpenAttemptTimeout time.Duration
 	RampOpenBudget         time.Duration
-	RampTreasuryPrivateKey string
-	RampTreasuryChains     []string
+	// Flutterwave and the company wallet as ramp buy providers
+	// (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md §9).
+	RampFlutterwaveBuy              bool
+	RampFlutterwaveMinTokens        string
+	RampFlutterwaveMaxUSD           string
+	RampFlutterwaveSendFeeUSD       string
+	RampFlutterwaveSpreadBps        int64
+	RampFlutterwaveConversionFeeBps int64
+	RampFlutterwaveSendFeeMode      string
+	RampDailyAbandonCap             int
+	RampHonourGrace                 time.Duration
+	RampTreasuryMarginBps           int64
+	RampTreasuryMinNGN              string
+	RampTreasuryDailyUserMaxUSD     string
+	RampTreasuryLowBalanceUSD       float64
+	RampTreasurySendStall           time.Duration
+	RampTreasuryRateTolBps          int64
+	RampTreasuryConfirmations       int
+	RampTreasuryPrivateKey          string
+	RampTreasuryChains              []string
 	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
 	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
 	// across every converted buy the treasury has not yet settled.
@@ -948,6 +966,27 @@ func Load() *Config {
 	cfg.RampProviderTimeout = getEnvDuration("RAMP_PROVIDER_TIMEOUT", 8*time.Second)
 	cfg.RampOpenAttemptTimeout = getEnvDuration("RAMP_OPEN_ATTEMPT_TIMEOUT", 15*time.Second)
 	cfg.RampOpenBudget = getEnvDuration("RAMP_OPEN_BUDGET", 20*time.Second)
+	cfg.RampFlutterwaveBuy = getEnvBool("RAMP_FLUTTERWAVE_BUY", false)
+	cfg.RampFlutterwaveMinTokens = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_MIN_TOKENS", "10"))
+	cfg.RampFlutterwaveMaxUSD = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_MAX_USD", "2000"))
+	cfg.RampFlutterwaveSendFeeUSD = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_SEND_FEE_USD", "1.50"))
+	cfg.RampFlutterwaveSpreadBps = getEnvInt64("RAMP_FLUTTERWAVE_SPREAD_BPS", 250)
+	cfg.RampFlutterwaveConversionFeeBps = getEnvInt64("RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS", 150)
+	cfg.RampFlutterwaveSendFeeMode = strings.ToLower(strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_SEND_FEE_MODE", "wallet")))
+	cfg.RampDailyAbandonCap = int(getEnvInt64("RAMP_DAILY_ABANDON_CAP", 5))
+	cfg.RampHonourGrace = time.Duration(getEnvInt64("RAMP_HONOUR_GRACE_SECONDS", 600)) * time.Second
+	cfg.RampTreasuryMarginBps = getEnvInt64("RAMP_TREASURY_MARGIN_BPS", 250)
+	cfg.RampTreasuryMinNGN = strings.TrimSpace(getEnv("RAMP_TREASURY_MIN_NGN", "100"))
+	cfg.RampTreasuryDailyUserMaxUSD = strings.TrimSpace(getEnv("RAMP_TREASURY_DAILY_USER_MAX_USD", "500"))
+	cfg.RampTreasuryLowBalanceUSD = getEnvFloat64("RAMP_TREASURY_LOW_BALANCE_USD", 50)
+	cfg.RampTreasurySendStall = time.Duration(getEnvInt64("RAMP_TREASURY_SEND_STALL_MINUTES", 30)) * time.Minute
+	cfg.RampTreasuryRateTolBps = getEnvInt64("RAMP_TREASURY_RATE_TOL_BPS", 400)
+	if cfg.RampTreasuryRateTolBps <= 0 || cfg.RampTreasuryRateTolBps > 1000 {
+		// A wide tolerance defeats the cross-check that guards the company wallet's price.
+		log.Printf("[config] ALERT ramp_treasury_rate_tol_invalid_total=1 RAMP_TREASURY_RATE_TOL_BPS=%d must be 1..1000 — using 400", cfg.RampTreasuryRateTolBps)
+		cfg.RampTreasuryRateTolBps = 400
+	}
+	cfg.RampTreasuryConfirmations = int(getEnvInt64("RAMP_TREASURY_CONFIRMATIONS", 5))
 	cfg.RampTreasuryPrivateKey = strings.TrimSpace(getEnv("RAMP_TREASURY_PRIVATE_KEY", ""))
 	cfg.RampTreasuryChains = nil
 	for _, chain := range strings.Split(getEnv("RAMP_TREASURY_CHAINS", "base,arbitrum,polygon,bsc,optimism,avalanche,linea,sonic,ethereum"), ",") {

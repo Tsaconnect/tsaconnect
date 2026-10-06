@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -235,29 +236,125 @@ func (h *RampHandler) ListOrders(c *gin.Context) {
 }
 
 // rampOrderView is the order body: today's Paycrest view (TSA Pay masking
-// included), id unchanged.
+// included), id unchanged — or the IT view below.
 func rampOrderView(o *ramp.Order) any {
-	if o == nil || o.Paycrest == nil {
+	switch {
+	case o == nil:
 		return nil
+	case o.IT != nil:
+		return itOrderBody(o)
+	case o.Paycrest != nil:
+		return orderForCaller(o.Paycrest)
 	}
-	return orderForCaller(o.Paycrest)
+	return nil
 }
+
+// rampPayInto is where to send the naira for an IT-backed buy.
+type rampPayInto struct {
+	Bank             string `json:"bank"`
+	AccountName      string `json:"accountName"`
+	AccountNumber    string `json:"accountNumber"`
+	AmountNgn        string `json:"amountNgn,omitempty"`
+	PayerInstruction string `json:"payerInstruction,omitempty"`
+}
+
+// itOrderView has the Paycrest view's shape (spec §4.4) plus the provider, the
+// pay-into card, the honour window, whether it was re-priced, the delivery
+// hash, and the quoted breakdown (§14). The id is the bare intent UUID.
+type itOrderView struct {
+	ID            string          `json:"id"`
+	Provider      string          `json:"provider"`
+	Direction     string          `json:"direction"`
+	Status        string          `json:"status"`
+	Currency      string          `json:"currency"`
+	Amount        string          `json:"amount"`
+	Token         string          `json:"token"`
+	Chain         string          `json:"chain"`
+	Rate          string          `json:"rate"`
+	EffectiveRate string          `json:"effectiveRate"`
+	TokenAmount   string          `json:"tokenAmount"`
+	Fees          []ramp.VenueFee `json:"fees"`
+	WalletAddress string          `json:"walletAddress"`
+	FailureReason string          `json:"failureReason,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	PayInto       *rampPayInto    `json:"payInto,omitempty"`
+	HonourUntil   *time.Time      `json:"honourUntil,omitempty"`
+	Repriced      bool            `json:"repriced"`
+	TxHash        string          `json:"txHash,omitempty"`
+}
+
+func itOrderBody(o *ramp.Order) itOrderView {
+	i := o.IT
+	v := itOrderView{
+		ID:            i.ID.String(),
+		Provider:      models.ITIntentProvider(i),
+		Direction:     i.Direction,
+		Status:        i.Status,
+		Currency:      i.Currency,
+		Amount:        services.FormatMinor(i.AmountMinor),
+		Token:         i.Asset,
+		Chain:         strings.ToLower(i.DestChain),
+		Rate:          services.FormatMinor(services.StableBuyDisplayRate(i)),
+		EffectiveRate: services.FormatMinor(i.LockedRate),
+		TokenAmount:   services.FormatStableUnits(i.AssetAmount),
+		Fees:          ramp.VenueFees(services.StableBuyFees(i)),
+		WalletAddress: i.DestAddress,
+		FailureReason: services.UserFacingITFailure(i.FailureReason),
+		CreatedAt:     i.CreatedAt,
+		HonourUntil:   services.StableBuyHonourUntil(i),
+		Repriced:      services.StableBuyRateUpdated(i),
+		TxHash:        i.TxHash,
+	}
+	if p := o.PayInto; p != nil {
+		v.PayInto = &rampPayInto{Bank: p.BankName, AccountName: p.AccountName, AccountNumber: p.AccountNumber,
+			AmountNgn: p.AmountNGN, PayerInstruction: p.PayerInstruction}
+	}
+	return v
+}
+
+const (
+	rampOrderOpenCode  = "ramp_order_open"
+	rampAbandonCapCode = "ramp_abandon_cap"
+	rampDailyLimitCode = "ramp_daily_limit"
+)
 
 // rampError maps router outcomes; everything else (refusals keep their
 // cause) goes through paycrestError, so wording and statuses match today.
+// User copy never names a provider.
 func rampError(c *gin.Context, err error) {
 	var moved *ramp.PriceMovedError
+	var open *services.StableBuyOpenError
 	switch {
 	case errors.As(err, &moved):
 		utils.ErrorResponseWithCodeData(c, http.StatusConflict,
 			"The price changed since your quote. Check the new rate and confirm again.", "price_moved", moved.Quote)
+	case errors.As(err, &open) || errors.Is(err, services.ErrStableBuyAlreadyOpen):
+		// A purchase waiting for payment: name it so the app offers View and
+		// Cancel instead of a dead end (D26).
+		var data any
+		if open != nil {
+			data = gin.H{"orderId": open.IntentID.String()}
+		}
+		utils.ErrorResponseWithCodeData(c, http.StatusConflict,
+			"You have a purchase waiting for payment. Pay into it, or cancel it to start a new one.",
+			rampOrderOpenCode, data)
 	case errors.Is(err, ramp.ErrInvalidQuote):
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
 			"Your quote is missing or out of date. Refresh the rate and try again.", "invalid_quote")
+	case errors.Is(err, ramp.ErrAbandonCapReached):
+		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
+			"You've cancelled too many unpaid purchases today. Try again tomorrow.", rampAbandonCapCode)
+	case errors.Is(err, services.ErrTreasuryDailyCapReached):
+		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
+			"You've reached today's limit for instant purchases. Try a smaller amount, or come back tomorrow.", rampDailyLimitCode)
 	case errors.Is(err, services.ErrPaycrestBankUnsupported), errors.Is(err, services.ErrPaycrestBelowMinimum):
 		// A provider's own reason the user can act on (carried on an
 		// unavailable outcome): today's 400 wording, not a generic outage.
 		paycrestError(c, err)
+	case errors.Is(err, services.ErrITBuyPaymentArrived):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, itBuyPaymentArrivedMessage, itBuyPaymentArrivedCode)
+	case errors.Is(err, services.ErrITBadState):
+		paycrestError(c, services.ErrPaycrestNotCancellable)
 	case errors.Is(err, ramp.ErrUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable. Please try again shortly.", "ramp_unavailable")
@@ -267,6 +364,8 @@ func rampError(c *gin.Context, err error) {
 		paycrestError(c, services.ErrPaycrestLegClosed)
 	case errors.Is(err, ramp.ErrBelowMinimum):
 		paycrestError(c, services.ErrPaycrestBelowMinimum)
+	case errors.Is(err, ramp.ErrAboveMaximum):
+		utils.ErrorResponse(c, http.StatusBadRequest, "That amount is above the maximum for this route. Try a smaller amount.")
 	case errors.Is(err, ramp.ErrNoVenue):
 		paycrestError(c, services.ErrPaycrestNoVenue)
 	default:

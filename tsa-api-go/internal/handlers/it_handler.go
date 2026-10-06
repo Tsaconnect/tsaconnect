@@ -183,11 +183,11 @@ func (h *ITHandler) Currencies(c *gin.Context) {
 		//   legs Paycrest's book still lists, so the app would show live
 		//   buttons for a rail that refuses everything.
 		//
-		//   A second provider. The legs come from PAYCREST's book; looking a
-		//   Flutterwave currency up in it would report closed with no error and
-		//   no log. Any other provider stays false until it has a leg source of
-		//   its own, which is the honest answer and matches what the order path
-		//   will actually do.
+		//   Other providers. The legs come from the ramp router, which ORs
+		//   every provider's legs for a currency — the company wallet and
+		//   Flutterwave report naira Buy — so a currency the router serves
+		//   reopens a direction any provider fills. ramp_provider stays the
+		//   master switch for the router-backed rail as a whole (D15).
 		if provider == services.RampProviderPaycrest {
 			if legs == nil {
 				buy, sell = true, true

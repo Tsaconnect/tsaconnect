@@ -532,3 +532,40 @@ func TestLoad_CompanyWalletDefaults(t *testing.T) {
 		t.Fatalf("chains = %v", got)
 	}
 }
+
+func TestLoad_RampProviderDefaults(t *testing.T) {
+	for _, k := range []string{"RAMP_FLUTTERWAVE_BUY", "RAMP_FLUTTERWAVE_MIN_TOKENS", "RAMP_FLUTTERWAVE_MAX_USD",
+		"RAMP_FLUTTERWAVE_SEND_FEE_USD", "RAMP_FLUTTERWAVE_SPREAD_BPS", "RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS",
+		"RAMP_FLUTTERWAVE_SEND_FEE_MODE", "RAMP_DAILY_ABANDON_CAP", "RAMP_HONOUR_GRACE_SECONDS", "RAMP_TREASURY_MARGIN_BPS",
+		"RAMP_TREASURY_MIN_NGN", "RAMP_TREASURY_DAILY_USER_MAX_USD", "RAMP_TREASURY_LOW_BALANCE_USD", "RAMP_TREASURY_SEND_STALL_MINUTES",
+		"RAMP_TREASURY_RATE_TOL_BPS", "RAMP_TREASURY_CONFIRMATIONS"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	cfg := Load()
+	if cfg.RampFlutterwaveBuy || cfg.RampFlutterwaveMinTokens != "10" || cfg.RampFlutterwaveMaxUSD != "2000" ||
+		cfg.RampFlutterwaveSendFeeUSD != "1.50" || cfg.RampFlutterwaveSpreadBps != 250 || cfg.RampFlutterwaveConversionFeeBps != 150 ||
+		cfg.RampFlutterwaveSendFeeMode != "wallet" || cfg.RampDailyAbandonCap != 5 || cfg.RampHonourGrace != 10*time.Minute ||
+		cfg.RampTreasuryMarginBps != 250 || cfg.RampTreasuryMinNGN != "100" || cfg.RampTreasuryDailyUserMaxUSD != "500" ||
+		cfg.RampTreasuryLowBalanceUSD != 50 || cfg.RampTreasurySendStall != 30*time.Minute ||
+		cfg.RampTreasuryRateTolBps != 400 || cfg.RampTreasuryConfirmations != 5 {
+		t.Fatalf("defaults = %+v", cfg)
+	}
+	t.Setenv("RAMP_FLUTTERWAVE_BUY", "true")
+	t.Setenv("RAMP_FLUTTERWAVE_SEND_FEE_MODE", " Amount ")
+	t.Setenv("RAMP_HONOUR_GRACE_SECONDS", "300")
+	cfg = Load()
+	if !cfg.RampFlutterwaveBuy || cfg.RampFlutterwaveSendFeeMode != "amount" || cfg.RampHonourGrace != 5*time.Minute {
+		t.Fatalf("overrides = %v %q %s", cfg.RampFlutterwaveBuy, cfg.RampFlutterwaveSendFeeMode, cfg.RampHonourGrace)
+	}
+	for _, bad := range []string{"1001", "0", "-5"} {
+		t.Setenv("RAMP_TREASURY_RATE_TOL_BPS", bad)
+		if got := Load().RampTreasuryRateTolBps; got != 400 {
+			t.Fatalf("RAMP_TREASURY_RATE_TOL_BPS=%s → %d, want the default 400", bad, got)
+		}
+	}
+	t.Setenv("RAMP_TREASURY_RATE_TOL_BPS", "1000")
+	if got := Load().RampTreasuryRateTolBps; got != 1000 {
+		t.Fatalf("1000 → %d, want 1000 (the ceiling is allowed)", got)
+	}
+}

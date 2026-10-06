@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -53,8 +52,9 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		log.Printf("[ramp-company-wallet] dormant: no chain registry available")
 		return nil
 	}
-	maxUSD, err := strconv.ParseFloat(cfg.RampTreasuryMaxUSD, 64)
-	if err != nil || maxUSD <= 0 {
+	// The same parser pricing uses, so the boot check and the live limit agree.
+	maxUnits, err := services.ParseStableLimit(cfg.RampTreasuryMaxUSD, false)
+	if err != nil {
 		// The lane carries no caps (C2); this is the one per-order maximum, enforced
 		// in pricing, and a typo must not silently remove or zero it.
 		log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_cap_invalid_total=1 var=RAMP_TREASURY_MAX_USD value=%q — dormant", cfg.RampTreasuryMaxUSD)
@@ -119,8 +119,8 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		return nil
 	}
 	// Where the operator sends stock and gas (spec §4.1 boot line).
-	log.Printf("[ramp-company-wallet] enabled address=%s chains=%v quotable=%v tokens=%v max_order=$%.2f",
-		w.Address(), w.Chains(), w.QuotableChains(), decimals, maxUSD)
+	log.Printf("[ramp-company-wallet] enabled address=%s chains=%v quotable=%v tokens=%v max_order=$%s",
+		w.Address(), w.Chains(), w.QuotableChains(), decimals, services.FormatStableUnits(maxUnits.String()))
 	return w
 }
 

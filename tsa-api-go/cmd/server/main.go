@@ -1112,6 +1112,46 @@ func main() {
 		log.Printf("[it stable] dormant — set FLUTTERWAVE_MERCHANT_ID (and Flutterwave credentials) to enable")
 	}
 
+	// Routed buys (spec 2026-10-03): the terms both ramp providers share, and
+	// each provider's own limits. Set whether or not the Flutterwave rail is
+	// wired — the company wallet stands alone (D47). A bad value is loud and
+	// leaves that value's default in force (D25).
+	if itService != nil {
+		itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
+		if err := itService.SetRampBuyTerms(services.RampBuyTerms{
+			DailyAbandonCap: cfg.RampDailyAbandonCap, HonourGrace: cfg.RampHonourGrace,
+		}); err != nil {
+			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS invalid (%v) — defaults in force", err)
+		}
+		if err := itService.SetRoutedStableBuyLimits(services.RoutedStableBuyLimits{
+			MinTokens: cfg.RampFlutterwaveMinTokens, MaxUSD: cfg.RampFlutterwaveMaxUSD, SendFeeUSD: cfg.RampFlutterwaveSendFeeUSD,
+			SpreadBps: cfg.RampFlutterwaveSpreadBps, ConversionFeeBps: cfg.RampFlutterwaveConversionFeeBps,
+			SendFeeMode: cfg.RampFlutterwaveSendFeeMode,
+		}); err != nil {
+			log.Printf("[ramp] WARNING: RAMP_FLUTTERWAVE_* invalid (%v) — those values keep their defaults", err)
+		}
+		if err := itService.SetTreasuryBuyLimits(services.TreasuryBuyLimits{
+			MarginBps: cfg.RampTreasuryMarginBps, MinNGN: cfg.RampTreasuryMinNGN, MaxUSD: cfg.RampTreasuryMaxUSD,
+			DailyUserMaxUSD: cfg.RampTreasuryDailyUserMaxUSD, SendStall: cfg.RampTreasurySendStall,
+			Confirmations: cfg.RampTreasuryConfirmations,
+		}); err != nil {
+			log.Printf("[ramp] WARNING: RAMP_TREASURY_* invalid (%v) — those values keep their defaults", err)
+		}
+		// "Rate updated" for a routed buy priced live (D18).
+		itService.SetEventBus(eventBus)
+		if itService.HasCompanyWallet() {
+			// The company wallet delivers through the same watcher; register it
+			// here when the Flutterwave rail did not (D47).
+			if !stableBuyEnabled {
+				buyWatcher := jobs.NewStableBuyWatcher(itService, 30*time.Second)
+				buyWatcher.SetAlerter(workerFailureAlerts{to: inboundAlerts})
+				scheduler.Register(buyWatcher, jobs.AlertOnFailureStreak())
+			}
+			scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_company_wallet", itService.CompanyWalletFloats(), 5*time.Minute).
+				WithTokenLowAlert(cfg.RampTreasuryLowBalanceUSD, inboundAlerts))
+		}
+	}
+
 	// Resolve the company customer that parents all FW virtual accounts. Uses
 	// FLUTTERWAVE_CUSTOMER_ID when set, else mints one lazily and persists it
 	// (per environment) so operators needn't find it in the dashboard.
@@ -1632,11 +1672,37 @@ func main() {
 			if cfg.RampPriceGuard == string(services.PriceGuardEnforce) {
 				guard = services.PriceGuardEnforce
 			}
+			// The company wallet prices from Paycrest's reference rate and a
+			// Flutterwave mid that must agree within RAMP_TREASURY_RATE_TOL_BPS,
+			// or one of them checked against the FX feed, else its leg closes
+			// (§13 Q4, review I2); settlement prices from the same instance.
+			treasuryRates := services.NewTreasuryMarketRate(paycrestQuotes, itService, cfg.RampTreasuryRateTolBps)
+			if itService != nil {
+				itService.SetTreasuryMarketRate(treasuryRates)
+			}
+			// Registration order is the rate tie-break: company wallet →
+			// Paycrest → Flutterwave (S6, D36). A disabled or unwired provider
+			// is a true nil, which NewRouter skips. The two flags are read here
+			// and nowhere else: off stops new quotes and opens only (I1).
+			treasuryProvider := ramp.NewTreasuryProvider(itService, treasuryRates, cfg.RampTreasuryBuy)
+			fwProvider := ramp.NewFlutterwaveProvider(itService, cfg.RampFlutterwaveBuy)
+			names := []string{}
+			if treasuryProvider != nil {
+				names = append(names, ramp.ProviderTreasury)
+			} else if cfg.RampTreasuryBuy {
+				log.Printf("[ramp] RAMP_TREASURY_BUY=true but the company wallet is dormant — provider not registered")
+			}
+			names = append(names, ramp.ProviderPaycrest)
+			if fwProvider != nil {
+				names = append(names, ramp.ProviderFlutterwave)
+			} else if cfg.RampFlutterwaveBuy {
+				log.Printf("[ramp] RAMP_FLUTTERWAVE_BUY=true but the Flutterwave buy rail is dormant — provider not registered")
+			}
 			rampRouter = ramp.NewRouter(ramp.Config{
 				ToleranceBps: cfg.RampPriceToleranceBps, Guard: guard,
 				ProviderTimeout: cfg.RampProviderTimeout, AttemptTimeout: cfg.RampOpenAttemptTimeout, OpenBudget: cfg.RampOpenBudget,
-			}, ramp.NewPaycrestProvider(paycrestOrders, paycrestQuotes, currencyRegistry))
-			log.Printf("[ramp] router enabled (providers=paycrest, guard=%s, tolerance=%dbps)", guard, cfg.RampPriceToleranceBps)
+			}, treasuryProvider, ramp.NewPaycrestProvider(paycrestOrders, paycrestQuotes, currencyRegistry), fwProvider)
+			log.Printf("[ramp] router enabled (providers=%s, guard=%s, tolerance=%dbps)", strings.Join(names, ","), guard, cfg.RampPriceToleranceBps)
 		}
 		// Direction lives on the order book, not in our config: /api/it/currencies
 		// asks the quote service which way each currency can actually trade, so
