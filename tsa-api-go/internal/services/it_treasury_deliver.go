@@ -330,7 +330,7 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 				intent.ID, leg.TxHash, credited, leg.Amount)
 			return fmt.Errorf("%w: %s credited %s of %s", ErrTreasurySendStalled, leg.TxHash, credited, leg.Amount)
 		}
-		deep, err := s.saleConfirmed(ctx, leg)
+		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusSuccessful)
 		if err != nil || !deep {
 			return err // not deep enough yet: the next tick looks again
 		}
@@ -339,7 +339,7 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 		// Reverted: it moved nothing — but only a receipt RAMP_TREASURY_CONFIRMATIONS
 		// deep says so for good; a shallow one can be reorged into a success.
 		// Until then the leg stays live: no re-send, no refund.
-		deep, err := s.saleConfirmed(ctx, leg)
+		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed)
 		if err != nil || !deep {
 			return err
 		}
@@ -358,15 +358,18 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 	}
 }
 
-// saleConfirmed: the sale's receipt is at least RAMP_TREASURY_CONFIRMATIONS
-// blocks deep (review minor). An unreadable receipt or head reads as "not yet".
-func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg) (bool, error) {
+// saleConfirmed: the sale's receipt has status want (success for a settle,
+// failed for a revert) and is at least RAMP_TREASURY_CONFIRMATIONS blocks deep
+// (review minor). The status is checked here too, so the verifier's verdict and
+// this depth read can never disagree about what happened. An unreadable
+// receipt or head, or a status other than want, reads as "not yet".
+func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want uint64) (bool, error) {
 	probe := s.wallet.Probe(leg.ChainKey)
 	if probe == nil {
 		return false, fmt.Errorf("company wallet: no probe on %s", leg.ChainKey)
 	}
 	receipt, err := probe.TransactionReceipt(ctx, common.HexToHash(leg.TxHash))
-	if err != nil || receipt == nil || receipt.BlockNumber == nil {
+	if err != nil || receipt == nil || receipt.BlockNumber == nil || receipt.Status != want {
 		return false, nil
 	}
 	head, err := probe.BlockNumber(ctx)
@@ -382,8 +385,19 @@ func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg) (boo
 // transaction (Decision D55): never settled without the hash and the proof.
 func (s *ITService) settleTreasuryBuy(ctx context.Context, intent *models.ITIntent, leg *models.RampLeg, received string) error {
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := s.treasuryLegs(tx).Confirm(ctx, leg.ID, received, time.Now()); err != nil && !errors.Is(err, ErrLegNotPending) {
-			return err
+		if err := s.treasuryLegs(tx).Confirm(ctx, leg.ID, received, time.Now()); err != nil {
+			if !errors.Is(err, ErrLegNotPending) {
+				return err
+			}
+			// Already terminal: settle only over a leg that is confirmed — never
+			// over one an operator failed meanwhile (a re-send).
+			var cur models.RampLeg
+			if err := tx.Select("status").First(&cur, "id = ?", leg.ID).Error; err != nil {
+				return err
+			}
+			if cur.Status != models.RampLegStatusConfirmed {
+				return fmt.Errorf("%w: leg %s is %s, not settling over it", ErrITBadState, leg.ID, cur.Status)
+			}
 		}
 		return tx.Model(&models.ITIntent{}).
 			Where("id = ? AND status = ?", intent.ID, models.ITStatusDelivering).
@@ -408,6 +422,11 @@ type ResendEvidence struct {
 	// NeedsCancel: the recorded nonce is unused at the head, so the signed
 	// send can still land; the operator must consume it with a cancel first.
 	NeedsCancel bool `json:"needsCancel"`
+	// DeepBlock is H − (confirmations − 1); DeepNonce the wallet's nonce
+	// there. A nonce counts as consumed only once DeepNonce > Nonce, so a
+	// shallow reorg cannot hand it back to the original send.
+	DeepBlock uint64 `json:"deepBlock,omitempty"`
+	DeepNonce uint64 `json:"deepNonce,omitempty"`
 	// ScanTrusted: the scan reached the head with every chunk proved visible.
 	ScanTrusted    bool     `json:"scanTrusted"`
 	ScannedFrom    uint64   `json:"scannedFrom,omitempty"`
@@ -444,8 +463,9 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 // landed. Allowed only when nothing can and nothing did:
 //  1. the node does not know the stored hash;
 //  2. the wallet has nothing pending (pending nonce == the nonce at head H);
-//  3. the leg's nonce is CONSUMED at H (latest > nonce), so its signed
-//     transaction can never be mined again; and
+//  3. the leg's nonce is CONSUMED RAMP_TREASURY_CONFIRMATIONS deep — the
+//     wallet's nonce at H − (confirmations − 1) is past it — so its signed
+//     transaction can never be mined again, not even after a shallow reorg;
 //  4. a chunked scan to exactly H finds no Transfer(wallet → her) since the
 //     send, every chunk of it proved visible (ScanTrusted) — so whatever
 //     consumed the nonce was not her payment.
@@ -491,12 +511,34 @@ func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*Re
 		ev.Reason = fmt.Sprintf("the wallet has %d pending transaction(s)", ev.PendingNonce-ev.LatestNonce)
 		return ev, nil
 	}
-	if leg.Nonce != nil && ev.LatestNonce <= *leg.Nonce {
-		ev.NeedsCancel = true
-		ev.Reason = fmt.Sprintf("nonce %d is still unused, so %s", *leg.Nonce, ErrTreasuryResendNeedsCancel)
-		return ev, nil
+	if leg.Nonce != nil {
+		if ev.LatestNonce <= *leg.Nonce {
+			ev.NeedsCancel = true
+			ev.Reason = fmt.Sprintf("nonce %d is still unused, so %s", *leg.Nonce, ErrTreasuryResendNeedsCancel)
+			return ev, nil
+		}
+		// Consumed at H is not enough: the cancel the runbook sends lands at the
+		// tip, and a shallow reorg could hand the nonce back to the original
+		// send. It must be consumed as deep as a settle needs.
+		need := uint64(s.treasuryLimits().confirmations)
+		if need < 1 {
+			need = 1
+		}
+		if head < need {
+			ev.Reason = fmt.Sprintf("the chain head %d is shallower than %d confirmations", head, need)
+			return ev, nil
+		}
+		ev.DeepBlock = head - (need - 1)
+		if ev.DeepNonce, err = probe.NonceAt(ctx, addr, new(big.Int).SetUint64(ev.DeepBlock)); err != nil {
+			return nil, fmt.Errorf("company wallet: nonce at block %d: %w", ev.DeepBlock, err)
+		}
+		if ev.DeepNonce <= *leg.Nonce {
+			ev.Reason = fmt.Sprintf("nonce %d is consumed at the head but not yet %d blocks deep (the wallet's nonce at block %d is %d) — wait",
+				*leg.Nonce, need, ev.DeepBlock, ev.DeepNonce)
+			return ev, nil
+		}
+		ev.NonceConsumed = true
 	}
-	ev.NonceConsumed = leg.Nonce != nil
 	found, from, serr := s.scanSaleTransfers(ctx, probe, leg, head)
 	ev.ScannedFrom, ev.ScannedTo = from, head
 	switch {
@@ -575,11 +617,12 @@ func (s *ITService) scanSaleTransfers(ctx context.Context, probe TreasuryTxProbe
 //     leg an operator re-send replaces, which the caller proves itself with
 //     chainEvidence;
 //   - every failed sale moved nothing and never can:
-//     "not broadcast" — the node refused it, or it was never signed;
-//     "reverted" — its own receipt still refutes it, at least
+//     "reverted" — its own receipt still reads failed and refuted, at least
 //     RAMP_TREASURY_CONFIRMATIONS deep (a shallow revert can be reorged);
-//     "dropped" — signed, so only chainEvidence's allowance counts: its nonce
-//     consumed at head H and a trusted scan to H with no transfer to her.
+//     "dropped", or "not broadcast" — only chainEvidence's allowance counts:
+//     with a recorded nonce (it was signed), that nonce consumed
+//     RAMP_TREASURY_CONFIRMATIONS deep and a trusted scan to H with no
+//     transfer to her; with none (never signed), the trusted scan alone.
 //
 // Anything else — an unused nonce, a blind scan, an unrecognised failure —
 // refuses. An unreadable chain is an error, which every caller treats as a
@@ -599,8 +642,21 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 			return fmt.Sprintf("attempt %d is %s: a send is in flight or done — prove it or re-send it", leg.Attempt, leg.Status), nil
 		}
 		switch {
-		case strings.HasPrefix(leg.Error, "not broadcast:"):
-			continue
+		case strings.HasPrefix(leg.Error, "not broadcast:"), strings.HasPrefix(leg.Error, "dropped:"):
+			// A "not broadcast" leg with a nonce was signed, and another node
+			// may still hold it: it is a dropped send in all but name. Without
+			// a nonce it was never signed, and chainEvidence needs only the
+			// trusted scan.
+			if !s.HasCompanyWallet() {
+				return "", ErrTreasuryUnavailable
+			}
+			ev, err := s.chainEvidence(ctx, leg)
+			if err != nil {
+				return "", err
+			}
+			if !ev.Allowed {
+				return fmt.Sprintf("attempt %d may still land or have landed: %s", leg.Attempt, ev.Reason), nil
+			}
 		case strings.HasPrefix(leg.Error, "reverted:"):
 			if !s.HasCompanyWallet() {
 				return "", ErrTreasuryUnavailable
@@ -612,17 +668,6 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 			if !deep {
 				return fmt.Sprintf("attempt %d reverted, but its receipt is not yet %d blocks deep (or no longer refutes it)",
 					leg.Attempt, s.treasuryLimits().confirmations), nil
-			}
-		case strings.HasPrefix(leg.Error, "dropped:"):
-			if !s.HasCompanyWallet() {
-				return "", ErrTreasuryUnavailable
-			}
-			ev, err := s.chainEvidence(ctx, leg)
-			if err != nil {
-				return "", err
-			}
-			if !ev.Allowed {
-				return fmt.Sprintf("attempt %d was signed and may still land or have landed: %s", leg.Attempt, ev.Reason), nil
 			}
 		default:
 			return fmt.Sprintf("attempt %d failed for a reason that does not prove nothing moved (%q)", leg.Attempt, leg.Error), nil
@@ -647,7 +692,7 @@ func (s *ITService) saleRefutedDeep(ctx context.Context, leg *models.RampLeg) (b
 	if ClassifyTransfer(credited, verr) != TransferRefuted {
 		return false, nil
 	}
-	return s.saleConfirmed(ctx, leg)
+	return s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed)
 }
 
 // ResendTreasuryBuy is an operator's re-send of a stalled sale, allowed only
