@@ -569,10 +569,29 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 		}
 		out = append(out, SponsorFloat{
 			Chain: chain, Address: addr, BalanceWei: bal, FloorWei: lane.Guard.Floor(),
-			TokenUSD: t.laneKeptUSD(lane, addr),
+			TokenUSD: t.laneKeptUSD(lane),
 		})
 	}
 	return out, errors.Join(errs...)
+}
+
+// laneTokenBalance is one stablecoin's raw balance on the lane's own address,
+// and its decimals. Shared by the kept-USDC float (laneKeptUSD) and the
+// company wallet's stock (CompanyWallet.Balance) — extracted, not copied.
+func laneTokenBalance(lane *TreasuryLane, symbol string) (*big.Int, int, error) {
+	tokenAddr := lane.tokenAddress(symbol)
+	if tokenAddr == "" {
+		return nil, 0, fmt.Errorf("treasury: no %s configured on %s", symbol, lane.ChainKey)
+	}
+	bal, err := lane.Native.GetTokenBalance(tokenAddr, lane.Signer.Address())
+	if err != nil {
+		return nil, 0, fmt.Errorf("balance: %w", err)
+	}
+	decimals, err := lane.Native.GetTokenDecimals(tokenAddr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("decimals: %w", err)
+	}
+	return bal, decimals, nil
 }
 
 // laneKeptUSD sums a lane's USDC/USDT balances — the unspent round-trip
@@ -581,20 +600,15 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 // a bad token read is logged and treated as 0 rather than failing the whole
 // FloatBalances call, the same carry-on-past-one-bad-read stance the native
 // balance loop above takes at the chain level.
-func (t *Treasury) laneKeptUSD(lane *TreasuryLane, address string) float64 {
+func (t *Treasury) laneKeptUSD(lane *TreasuryLane) float64 {
 	var usd float64
-	for symbol, tokenAddr := range lane.Tokens {
+	for symbol := range lane.Tokens {
 		if !IsStableAsset(symbol) {
 			continue
 		}
-		bal, err := lane.Native.GetTokenBalance(tokenAddr, address)
+		bal, decimals, err := laneTokenBalance(lane, symbol)
 		if err != nil {
 			log.Printf("[ramp-conversion] treasury kept-USDC read %s %s: %v", lane.ChainKey, symbol, err)
-			continue
-		}
-		decimals, err := lane.Native.GetTokenDecimals(tokenAddr)
-		if err != nil {
-			log.Printf("[ramp-conversion] treasury kept-USDC decimals %s %s: %v", lane.ChainKey, symbol, err)
 			continue
 		}
 		amount, err := strconv.ParseFloat(BaseUnitsToDecimal(bal, decimals), 64)

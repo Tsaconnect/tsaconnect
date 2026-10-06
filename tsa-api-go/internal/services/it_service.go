@@ -134,6 +134,9 @@ type ITService struct {
 	// company-wallet live pricing is unavailable. See treasury_market_rate.go.
 	treasuryRates TreasuryRateSource
 
+	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
+	wallet *CompanyWallet
+
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.
 	stableDepositAddrs map[string]string
