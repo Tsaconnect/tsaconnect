@@ -109,7 +109,8 @@ const mcgpFromWei = (wei?: string) => {
 
 export function intentActivity(i: ITIntent, symbolFor: SymbolFor): ITActivity {
   // A stablecoin intent carries asset/assetAmount and leaves mcgpAmount empty.
-  const asset = i.asset && i.asset !== 'MCGP' ? i.asset : 'MCGP';
+  // A converted buy names what she receives, not the USDC leg it settles on.
+  const asset = i.requestedToken || (i.asset && i.asset !== 'MCGP' ? i.asset : 'MCGP');
   const currency = i.currency || 'NGN';
   const amount =
     i.direction === 'buy'

@@ -53,7 +53,16 @@ type ConvertedBuys struct {
 	TreasuryAddress string
 	Treasury        ConvertedTreasury
 	Verifiers       map[string]ERC20TransferVerifier // by chain key: the attach-hash pre-check
-	Probes          map[string]TreasuryTxProbe       // by chain key: its depth check
+	Probes          map[string]TreasuryTxProbe       // by chain key: its depth and block-time check
+	// FeeCaps holds RAMP_CONVERTED_FEE_MAX_BPS for the opens (the pricer's own
+	// caps). Nil applies the pricer's default cap.
+	FeeCaps ConvertedFeeCaps
+}
+
+// ConvertedFeeCaps answers whether a conversion budget B′ is one the pricer
+// could have offered for the requested chain; *PaycrestQuoteService is it.
+type ConvertedFeeCaps interface {
+	ConvertedBudgetAllowed(requestedChain string, budgetBps int) bool
 }
 
 func (s *ITService) SetConvertedBuys(c ConvertedBuys) {
@@ -77,6 +86,12 @@ func (s *ITService) convertedTreasuryFor(chain string, q *StableBuyQuote, v Payc
 	if c.TreasuryAddress == "" || c.Treasury == nil || c.Treasury.Lane(chain) == nil {
 		return "", fmt.Errorf("%w: no conversion treasury on %s", ErrConversionUnavailable, chain)
 	}
+	// The fee cap is the pricer's, held here too: an exported open never
+	// relies on its caller having priced the venue (ledger rule).
+	if !c.feeCaps().ConvertedBudgetAllowed(v.RequestedChain, v.MarkupBps) {
+		return "", fmt.Errorf("%w: a %d bps conversion budget is over the cap for %s",
+			ErrConversionUnavailable, v.MarkupBps, v.RequestedChain)
+	}
 	// T must be what this D owes at the venue's budget, and something: a
 	// budget outside [0, 100%) would open a buy that owes her nothing or more
 	// than was bought.
@@ -89,6 +104,14 @@ func (s *ITService) convertedTreasuryFor(chain string, q *StableBuyQuote, v Payc
 		return "", fmt.Errorf("%w: %s", ErrConversionUnavailable, RedactAlertText(err.Error()))
 	}
 	return c.TreasuryAddress, nil
+}
+
+// feeCaps is the wired cap, or the pricer's default when none is wired.
+func (c ConvertedBuys) feeCaps() ConvertedFeeCaps {
+	if c.FeeCaps == nil {
+		return (*PaycrestQuoteService)(nil)
+	}
+	return c.FeeCaps
 }
 
 // newConversionRecord is the row the orchestrator drives once the leg lands.
@@ -164,6 +187,33 @@ func (s *ITService) ConversionFor(ctx context.Context, intent *models.ITIntent) 
 	return conversionRecordOn(ctx, s.db, intent.ID)
 }
 
+// ConversionsFor is ConversionFor over a list, in one query: each converted
+// buy's record by intent id.
+func (s *ITService) ConversionsFor(ctx context.Context, intents []models.ITIntent) (map[uuid.UUID]*models.PaycrestOrderRecord, error) {
+	refs := map[string]uuid.UUID{}
+	for i := range intents {
+		if intents[i].Direction == models.ITDirectionBuy && IsRoutedStableBuy(&intents[i]) {
+			refs[ITConversionRef(intents[i].ID)] = intents[i].ID
+		}
+	}
+	out := map[uuid.UUID]*models.PaycrestOrderRecord{}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	keys := make([]string, 0, len(refs))
+	for ref := range refs {
+		keys = append(keys, ref)
+	}
+	var rows []models.PaycrestOrderRecord
+	if err := s.db.WithContext(ctx).Where("reference IN ?", keys).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		out[refs[rows[i].Reference]] = &rows[i]
+	}
+	return out, nil
+}
+
 func conversionRecordOn(ctx context.Context, db *gorm.DB, intentID uuid.UUID) (*models.PaycrestOrderRecord, error) {
 	var rows []models.PaycrestOrderRecord
 	if err := db.WithContext(ctx).Where("reference = ?", ITConversionRef(intentID)).Limit(1).Find(&rows).Error; err != nil {
@@ -193,6 +243,18 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 	delivered, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
 	if !ok || delivered.Sign() <= 0 {
 		return fmt.Errorf("it converted buy: intent %s has no delivered amount", intent.ID)
+	}
+	// N4 at the last gate: whatever priced D, a bridge larger than the record
+	// was opened (and capped, and reserved) for never starts. Before the
+	// handoff, token_amount is still the opened D.
+	if rec.Status != models.PaycrestStatusConverting {
+		opened, err := DecimalToBaseUnits(rec.TokenAmount, StableAssetDecimals)
+		if err != nil || delivered.Cmp(opened) > 0 {
+			log.Printf("[it converted buy] ALERT ramp_conversion_handoff_overpaid intent=%s record=%s delivered=%s opened=%q",
+				intent.ID, rec.ID, delivered, rec.TokenAmount)
+			return fmt.Errorf("%w: %s USDC delivered against %q opened", ErrConvertedOverpaid,
+				FormatStableUnits(delivered.String()), rec.TokenAmount)
+		}
 	}
 	res := tx.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Where("id = ? AND status IN ?", rec.ID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
@@ -310,27 +372,18 @@ func (s *ITService) checkRoutedAbandonCap(ctx context.Context, userID uuid.UUID)
 // delivering USDC on Polygon to the conversion treasury, and its record, in
 // one transaction (Decision C4).
 func (s *ITService) OpenFlutterwaveConvertedBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, in ConvertedOpen) (*models.ITIntent, *StableBuyInstructions, *models.PaycrestOrderRecord, error) {
-	if !s.HasStableBuy() {
-		return nil, nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
-	}
 	if q == nil {
 		return nil, nil, nil, errors.New("it flutterwave converted buy: nil quote")
 	}
-	if err := s.stableBuyPrechecks(ctx, userID, q, true); err != nil {
-		return nil, nil, nil, err
-	}
-	in.WalletAddress = strings.TrimSpace(in.WalletAddress)
-	if !common.IsHexAddress(in.WalletAddress) {
-		return nil, nil, nil, fmt.Errorf("%w: a converted buy needs her EVM wallet", ErrBadDeliveryAddress)
-	}
-	treasury, err := s.convertedTreasuryFor(strings.ToLower(RoutedDirectChain), q, in.Venue)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	lim := s.routedLimits()
 	var rec *models.PaycrestOrderRecord
-	intent, payInto, err := s.openStableBuy(ctx, userID, q, RoutedDirectChain, treasury, stableBuyOpen{
-		provider: models.ITProviderFlutterwave, routed: true, minUnits: lim.minUnits, maxUnits: lim.maxUnits,
+	intent, payInto, err := s.openRoutedStableBuy(ctx, userID, q, routedDelivery{
+		address: func() (string, error) {
+			in.WalletAddress = strings.TrimSpace(in.WalletAddress)
+			if !common.IsHexAddress(in.WalletAddress) {
+				return "", fmt.Errorf("%w: a converted buy needs her EVM wallet", ErrBadDeliveryAddress)
+			}
+			return s.convertedTreasuryFor(strings.ToLower(RoutedDirectChain), q, in.Venue)
+		},
 		validate: func(_, _, addr string) error {
 			if !common.IsHexAddress(addr) {
 				return fmt.Errorf("%w: the conversion treasury address is not an EVM address", ErrBadDeliveryAddress)
@@ -377,13 +430,16 @@ func (s *ITService) finishFlutterwaveConverted(ctx context.Context, intent *mode
 	if time.Since(intent.UpdatedAt) < s.rampTerms().fwHashWait {
 		return nil // the next tick reads the transfer again
 	}
-	log.Printf("[it converted buy] ALERT it_stable_buy_conversion_no_hash intent=%s transfer=%s — parked for an operator", intent.ID, tr.ID)
+	log.Printf("[it converted buy] ALERT it_stable_buy_conversion_no_hash provider=flutterwave intent=%s transfer=%s — "+
+		"Flutterwave reported SUCCESSFUL without an on-chain hash; parked for an operator", intent.ID, tr.ID)
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.PaycrestOrderRecord{}).
 			Where("reference = ? AND status IN ?", ITConversionRef(intent.ID),
 				[]string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
+			// She reads this reason on her order screen: user copy never
+			// names a provider (the ALERT above carries the detail).
 			Updates(map[string]any{"status": models.PaycrestStatusRecoveryPending, "fault": models.FaultPlatform,
-				"failure_reason": "Flutterwave reported the delivery without an on-chain hash; custody cannot be proven automatically."})
+				"failure_reason": hashlessParkReason})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -401,9 +457,20 @@ func (s *ITService) finishFlutterwaveConverted(ctx context.Context, intent *mode
 				return fmt.Errorf("%w: the conversion record is %s", ErrITBadState, status)
 			}
 		}
-		return settleDeliveringIntent(tx, intent.ID)
+		// UpdateColumn, not Update: updated_at stays the delivery send time,
+		// which attach-hash measures a pasted transfer against (M2).
+		return tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intent.ID, models.ITStatusDelivering).
+			UpdateColumn("status", models.ITStatusSettled).Error
 	})
 }
+
+// hashlessParkReason is the parked record's reason, as she reads it.
+const hashlessParkReason = "Your payment was delivered for conversion; we are confirming it on-chain before converting."
+
+// conversionHashSendSkew is how far before the recorded send a transfer may
+// be mined and still be this delivery's: the send is recorded only once the
+// transfer request returns, and block clocks drift.
+const conversionHashSendSkew = 2 * time.Minute
 
 func settleDeliveringIntent(tx *gorm.DB, intentID uuid.UUID) error {
 	return tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, models.ITStatusDelivering).
@@ -477,6 +544,22 @@ func (s *ITService) AttachConversionHash(ctx context.Context, adminID, intentID 
 	}
 	if mined := receipt.BlockNumber.Uint64(); head < mined || head-mined+1 < need {
 		return nil, fmt.Errorf("%w: the receipt is not %d blocks deep yet", ErrITBadState, need)
+	}
+	// A transfer to the treasury proves THIS delivery only if it was mined
+	// after the delivery was sent — never an older top-up. The park keeps
+	// the intent's updated_at at the send.
+	header, err := probe.HeaderByNumber(ctx, receipt.BlockNumber)
+	if err != nil || header == nil {
+		reason := "no block"
+		if err != nil {
+			reason = RedactAlertText(err.Error())
+		}
+		return nil, fmt.Errorf("%w: its block is unreadable: %s", ErrITBadState, reason)
+	}
+	sent := intent.UpdatedAt.Add(-conversionHashSendSkew)
+	if minedAt := time.Unix(int64(header.Time), 0); minedAt.Before(sent) {
+		return nil, fmt.Errorf("%w: the transaction was mined at %s, before the delivery was sent at %s",
+			ErrITBadState, minedAt.UTC().Format(time.RFC3339), intent.UpdatedAt.UTC().Format(time.RFC3339))
 	}
 	var others int64
 	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).

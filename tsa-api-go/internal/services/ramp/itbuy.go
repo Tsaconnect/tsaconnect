@@ -188,6 +188,93 @@ func WithConversion(p Provider, conv ConvertedPricer) Provider {
 	return p
 }
 
+// itConvertedLeg is a provider's settlement leg for a converted buy: the
+// leg's quote, the chain it delivers on, and the market mid.
+type itConvertedLeg struct {
+	q     *services.StableBuyQuote
+	chain string
+	mid   float64
+}
+
+// itConverted is what differs between the IT-backed providers' converted
+// buys; the flow around it is itBuyProvider's (one implementation, DRY).
+type itConverted struct {
+	conv ConvertedPricer
+	// leg prices the settlement leg. At quote time (open false) an error only
+	// skips the venue; at open it is the classified refusal.
+	leg func(ctx context.Context, r Request, open bool) (*itConvertedLeg, error)
+	// admit is the provider's own open-time check after the price guard
+	// (nil: none).
+	admit func(ctx context.Context, userID uuid.UUID, leg *itConvertedLeg) error
+	// open writes the intent and its record.
+	open func(ctx context.Context, userID uuid.UUID, leg *itConvertedLeg, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error)
+}
+
+// quoteConverted is a provider's converted venue for r, or none — never an
+// error. Every skip is logged (redacted), so a venue that silently vanished
+// (and let a dearer provider show) can be seen.
+func (p *itBuyProvider) quoteConverted(ctx context.Context, c itConverted, r Request) []Venue {
+	skip := func(reason string) []Venue {
+		log.Printf("[ramp] METRIC ramp_%s_converted_quote_skipped reason=%q", p.name, services.RedactAlertText(reason))
+		return nil
+	}
+	leg, err := c.leg(ctx, r, false)
+	if err != nil {
+		return skip(err.Error())
+	}
+	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.q, r.FiatAmount, leg.mid), *r.Want)
+	if err != nil {
+		return skip("no conversion route: " + err.Error())
+	}
+	if pv == nil {
+		return skip("no conversion route")
+	}
+	v, err := convertedVenue(p.name, leg.q, pv, leg.mid)
+	if err != nil {
+		return skip(err.Error())
+	}
+	return []Venue{v}
+}
+
+// openConverted re-prices both legs, guards on the new all-in rate, then
+// opens the intent and its record (spec §15.7). The venue opened is always
+// the one priced here, at open time, to her own wallet — never one the
+// request carried — so the fee cap and her destination are the pricer's.
+// Refusals before the write fail over to the next venue for her target.
+func (p *itBuyProvider) openConverted(ctx context.Context, c itConverted, r Request, in OrderInput) (*Order, error) {
+	leg, err := c.leg(ctx, r, true)
+	if err != nil {
+		return nil, err
+	}
+	want := *r.Want
+	want.Recipient = in.WalletAddress
+	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.q, r.FiatAmount, leg.mid), want)
+	if err != nil || pv == nil {
+		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
+	}
+	terms, err := services.NewConvertedTerms(leg.q, pv)
+	if err != nil {
+		return nil, WrapClass(ErrVenueUnavailable, err)
+	}
+	bound := services.FormatMinor(terms.EffectiveRateMinor.String())
+	if err := services.CheckPriceGuard(p.name, string(Buy), bound, in.LimitRate, in.Guard); err != nil {
+		return nil, err
+	}
+	if c.admit != nil {
+		if err := c.admit(ctx, in.UserID, leg); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.checkAbandonCap(ctx, in.UserID); err != nil {
+		return nil, err
+	}
+	intent, payInto, rec, err := c.open(ctx, in.UserID, leg, services.ConvertedOpen{Venue: *pv, WalletAddress: in.WalletAddress})
+	if err != nil {
+		return nil, classifyITOpen(err, true)
+	}
+	return &Order{Provider: p.name, IT: intent, PayInto: payInto, Conversion: rec}, nil
+}
+
 // convertedVenue is one converted IT-backed venue (spec §15.7): the leg's
 // display rate, the all-in rate on T, T itself and the leg's fee lines plus
 // the Conversion (LiFi) line.

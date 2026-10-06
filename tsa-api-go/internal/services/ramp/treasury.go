@@ -213,31 +213,54 @@ func (p *TreasuryProvider) QuoteConverted(ctx context.Context, r Request) ([]Ven
 	if !p.converts(r) {
 		return nil, nil
 	}
+	return p.quoteConverted(ctx, p.converted(), r), nil
+}
+
+// converted is the company wallet's part of the shared converted flow.
+func (p *TreasuryProvider) converted() itConverted {
+	return itConverted{
+		conv: p.conv,
+		leg:  p.convertedLegFor,
+		admit: func(ctx context.Context, userID uuid.UUID, leg *itConvertedLeg) error {
+			if err := p.it.CheckTreasuryDailyCap(ctx, userID, leg.q.AssetUnits); err != nil {
+				return classifyITOpen(err, false)
+			}
+			return nil
+		},
+		open: func(ctx context.Context, userID uuid.UUID, leg *itConvertedLeg, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error) {
+			return p.it.OpenTreasuryConvertedBuy(ctx, userID, leg.q, leg.chain, in)
+		},
+	}
+}
+
+// convertedLegFor prices the company wallet's USDC leg at the market rate,
+// on the first chain whose stock and gas cover it.
+func (p *TreasuryProvider) convertedLegFor(ctx context.Context, r Request, open bool) (*itConvertedLeg, error) {
 	market, err := p.market.BuyRate(ctx, treasuryFiat)
 	if err != nil {
-		return nil, nil
+		return nil, WrapClass(ErrVenueUnavailable, err)
 	}
 	q, err := p.it.QuoteTreasuryBuy(convertedLegToken, r.FiatAmount, treasuryFiat, market)
 	if err != nil {
-		return nil, nil
+		return nil, classifyITOpen(err, false)
 	}
-	if r.UserID != uuid.Nil && p.it.CheckTreasuryDailyCap(ctx, r.UserID, q.AssetUnits) != nil {
-		return nil, nil // Decision C12: she cannot buy this from the wallet today
+	if !open && r.UserID != uuid.Nil {
+		// Decision C12: she cannot buy this from the wallet today. Only a
+		// REACHED cap drops the venue; a cap that cannot be read keeps it —
+		// the open re-checks — so a read error never shows Flutterwave.
+		if err := p.it.CheckTreasuryDailyCap(ctx, r.UserID, q.AssetUnits); errors.Is(err, services.ErrTreasuryDailyCapReached) {
+			return nil, err
+		} else if err != nil {
+			log.Printf("[ramp] treasury converted quote: daily cap unreadable, venue kept (the open re-checks): %s",
+				services.RedactAlertText(err.Error()))
+		}
 	}
 	chain, ok := p.convertedLegChain(ctx, q)
 	if !ok {
-		return nil, nil
+		return nil, WrapClass(ErrVenueUnavailable, services.ErrTreasuryStockShort)
 	}
 	mid, _ := market.Float64()
-	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(chain, q, r.FiatAmount, mid), *r.Want)
-	if err != nil || pv == nil {
-		return nil, nil
-	}
-	v, err := convertedVenue(ProviderTreasury, q, pv, mid)
-	if err != nil {
-		return nil, nil
-	}
-	return []Venue{v}, nil
+	return &itConvertedLeg{q: q, chain: chain, mid: mid}, nil
 }
 
 // converts: a pricer is attached and r asks for an asset by naira buy.
@@ -273,54 +296,13 @@ func (p *TreasuryProvider) convertedLegChain(ctx context.Context, q *services.St
 
 var errConversionGone = errors.New("the conversion route is no longer on offer")
 
-// OpenConverted re-prices both legs, guards on the new all-in rate, then
-// opens the intent and its record (spec §15.7). The venue opened is always
-// the one priced here, at open time, to her own wallet — never one the
-// request carried — so the fee cap and her destination are the pricer's.
-// Refusals before the write fail over to the next venue for her target.
+// OpenConverted is the shared converted open (itBuyProvider.openConverted)
+// on the company wallet's leg, with her daily cap after the price guard.
 func (p *TreasuryProvider) OpenConverted(ctx context.Context, r Request, in OrderInput) (*Order, error) {
 	if !p.converts(r) {
 		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
 	}
-	market, err := p.market.BuyRate(ctx, treasuryFiat)
-	if err != nil {
-		return nil, WrapClass(ErrVenueUnavailable, err)
-	}
-	q, err := p.it.QuoteTreasuryBuy(convertedLegToken, r.FiatAmount, treasuryFiat, market)
-	if err != nil {
-		return nil, classifyITOpen(err, false)
-	}
-	chain, ok := p.convertedLegChain(ctx, q)
-	if !ok {
-		return nil, WrapClass(ErrVenueUnavailable, services.ErrTreasuryStockShort)
-	}
-	mid, _ := market.Float64()
-	want := *r.Want
-	want.Recipient = in.WalletAddress
-	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(chain, q, r.FiatAmount, mid), want)
-	if err != nil || pv == nil {
-		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
-	}
-	terms, err := services.NewConvertedTerms(q, pv)
-	if err != nil {
-		return nil, WrapClass(ErrVenueUnavailable, err)
-	}
-	bound := services.FormatMinor(terms.EffectiveRateMinor.String())
-	if err := services.CheckPriceGuard(ProviderTreasury, string(Buy), bound, in.LimitRate, in.Guard); err != nil {
-		return nil, err
-	}
-	if err := p.it.CheckTreasuryDailyCap(ctx, in.UserID, q.AssetUnits); err != nil {
-		return nil, classifyITOpen(err, false)
-	}
-	if err := p.checkAbandonCap(ctx, in.UserID); err != nil {
-		return nil, err
-	}
-	intent, payInto, rec, err := p.it.OpenTreasuryConvertedBuy(ctx, in.UserID, q, chain,
-		services.ConvertedOpen{Venue: *pv, WalletAddress: in.WalletAddress})
-	if err != nil {
-		return nil, classifyITOpen(err, true)
-	}
-	return &Order{Provider: ProviderTreasury, IT: intent, PayInto: payInto, Conversion: rec}, nil
+	return p.openConverted(ctx, p.converted(), r, in)
 }
 
 var (

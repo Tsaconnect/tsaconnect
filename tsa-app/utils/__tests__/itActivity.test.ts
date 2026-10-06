@@ -176,3 +176,14 @@ describe('fiatSymbol', () => {
     expect(fiatSymbol('UGX', [])).toBe('UGX');
   });
 });
+
+describe('converted buys', () => {
+  it('a converted buy lists what she receives, not its USDC leg', () => {
+    const row = intentActivity(
+      intent({ asset: 'USDC', assetAmount: '7232937', requestedToken: 'USDT', requestedChain: 'optimism' }),
+      symbolFor,
+    );
+    expect(row.asset).toBe('USDT');
+    expect(intentActivity(intent({ asset: 'USDC' }), symbolFor).asset).toBe('USDC');
+  });
+});

@@ -281,6 +281,17 @@ func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
 	return limit
 }
 
+// ConvertedBudgetAllowed is the pricer's cap rule for a conversion budget B′
+// on a delivered leg, for an open to re-check (it must not rely on its
+// caller): the base budget B always, a raised one only up to the requested
+// chain's cap.
+func (s *PaycrestQuoteService) ConvertedBudgetAllowed(requestedChain string, budgetBps int) bool {
+	if s == nil {
+		return budgetBps <= defaultConvertedFeeMaxBps
+	}
+	return budgetBps <= s.roundTripBudgetBps || budgetBps <= s.convertedFeeMaxBps(requestedChain)
+}
+
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
 // would charge, low enough that a typo ("5" for "0.5") is refused rather than
 // quietly charging users ten times over.

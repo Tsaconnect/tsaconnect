@@ -223,3 +223,19 @@ describe('progress and details', () => {
     expect(text(tree)).not.toContain('Paid to your bank');
   });
 });
+
+// A converted purchase's conversion record (ITC-) is paid through its
+// purchase, never into this order: no pay-in card, no transfer instruction,
+// no Cancel — even while the record still reads awaiting_payment.
+it('an ITC- conversion record is conversion-only: no pay-in UI and no Cancel', async () => {
+  ramp.getRampOrder.mockResolvedValue({
+    ...order, direction: 'buy', status: 'awaiting_payment', reference: 'ITC-7c1f', routeKind: 'converted',
+    holder: 'treasury', requestedToken: 'USDT', requestedChain: 'optimism', payAmount: '10000.00',
+    payAccountNumber: '', payAccountName: '', payInstitution: '',
+  } as PaycrestOrder);
+  const tree = await mount();
+  expect(text(tree)).not.toContain('Pay into');
+  expect(text(tree)).not.toContain('to the account below');
+  expect(cancels(tree)).toHaveLength(0);
+  expect(text(tree)).toContain('This conversion starts once your purchase is paid.');
+});

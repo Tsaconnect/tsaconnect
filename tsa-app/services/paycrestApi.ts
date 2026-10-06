@@ -439,6 +439,13 @@ export function isConvertedOrder(o: Pick<PaycrestOrder, 'routeKind'>): boolean {
   return o.routeKind === 'converted';
 }
 
+/** A converted purchase's own conversion record (reference ITC-…): paid
+ *  through that purchase, never into this order, so it takes no pay-in,
+ *  payment claim or cancel here. */
+export function isITConversionOrder(o: Pick<PaycrestOrder, 'reference'>): boolean {
+  return (o.reference ?? '').startsWith('ITC-');
+}
+
 /**
  * The single rule this whole phase exists to enforce: pick the venue that
  * fills the user's exact requested (chainKey, symbol) — or nothing.

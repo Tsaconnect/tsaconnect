@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +310,127 @@ func TestInsertTreasuryIntentWith_RecordCommitsWithTheIntent_Postgres(t *testing
 	db.Model(&models.PaycrestOrderRecord{}).Count(&records)
 	if intents != 1 || records != 1 {
 		t.Fatalf("intents=%d records=%d, want the failed open to leave nothing", intents, records)
+	}
+}
+
+// M1: a late payment that claims a stale converted intent between expire's
+// read and its write keeps its record open — only the intents this write
+// actually expired take their records with them.
+func TestExpireStaleStableBuys_LeavesTheRecordOfAnIntentClaimedMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	s, userID := newConvertedTreasuryService(t, 50_000_000)
+	intent, _ := openConvertedTreasury(t, s, userID)
+	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("created_at", time.Now().Add(-25*time.Hour))
+	claimed := false
+	if err := s.db.Callback().Update().Before("gorm:update").Register("test:claim_meanwhile", func(db *gorm.DB) {
+		if claimed || db.Statement.Table != "it_intents" {
+			return
+		}
+		claimed = true
+		if _, err := db.Statement.ConnPool.ExecContext(ctx, "UPDATE it_intents SET status = ? WHERE id = ?",
+			models.ITStatusPaymentReceived, intent.ID); err != nil {
+			_ = db.AddError(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.expireStaleStableBuys(ctx, userID); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if !claimed {
+		t.Fatal("the claim never ran inside expire's write")
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived {
+		t.Fatalf("intent = %s", got.Status)
+	}
+	if rec := conversionRecord(t, s, intent.ID); rec.Status != models.PaycrestStatusAwaitingPayment {
+		t.Fatalf("the claimed intent's record was closed: %s", rec.Status)
+	}
+}
+
+// M8: the exported opens hold the converted fee cap themselves — a budget
+// over RAMP_CONVERTED_FEE_MAX_BPS for her chain never opens, whoever priced it.
+func TestOpenConvertedBuys_RefuseABudgetOverTheFeeCap(t *testing.T) {
+	ctx := context.Background()
+	s, userID := newConvertedTreasuryService(t, 50_000_000)
+	q := treasuryTestQuote(t, s)
+	over := convertedVenueForTest()
+	over.MarkupBps = 300 // over the 200 bps default cap
+	over.TokenAmountBaseUnits = ConversionOwed(q.AssetUnits, over.MarkupBps).String()
+	if _, _, _, err := s.OpenTreasuryConvertedBuy(ctx, userID, q, "base", ConvertedOpen{Venue: over, WalletAddress: testRoutedEVM}); !errors.Is(err, ErrConversionUnavailable) {
+		t.Fatalf("company wallet over the default cap: %v", err)
+	}
+	fs, fu := openFWConvertedRig(t)
+	fwOver := fwConvertedVenue()
+	fwOver.MarkupBps = 300
+	fwOver.TokenAmountBaseUnits = ConversionOwed(big.NewInt(94_537_500), fwOver.MarkupBps).String()
+	if _, _, _, err := fs.OpenFlutterwaveConvertedBuy(ctx, fu, routedTestQuote(t, fs), ConvertedOpen{Venue: fwOver, WalletAddress: testRoutedEVM}); !errors.Is(err, ErrConversionUnavailable) {
+		t.Fatalf("flutterwave over the default cap: %v", err)
+	}
+	var n int64
+	s.db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("intents = %d", n)
+	}
+}
+
+// M8 with the quote service's own caps: the requested chain's cap applies,
+// and the base budget B is always allowed (the pricer only caps a raise).
+func TestOpenConvertedBuys_UseTheQuoteServicesFeeCaps(t *testing.T) {
+	ctx := context.Background()
+	s, userID := newConvertedTreasuryService(t, 50_000_000)
+	caps := &PaycrestQuoteService{}
+	caps.SetConvertedFeeCaps(map[string]int{"optimism": 100}, 200)
+	caps.SetRoundTripBudgetBps(50)
+	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
+		Treasury: &fakeConvertedTreasury{laned: map[string]bool{"base": true}}, FeeCaps: caps})
+	q := treasuryTestQuote(t, s)
+	v := convertedVenueForTest() // to Optimism
+	v.MarkupBps = 150
+	v.TokenAmountBaseUnits = ConversionOwed(q.AssetUnits, v.MarkupBps).String()
+	if _, _, _, err := s.OpenTreasuryConvertedBuy(ctx, userID, q, "base", ConvertedOpen{Venue: v, WalletAddress: testRoutedEVM}); !errors.Is(err, ErrConversionUnavailable) {
+		t.Fatalf("over optimism's 100 bps: %v", err)
+	}
+	v.MarkupBps = 100
+	v.TokenAmountBaseUnits = ConversionOwed(q.AssetUnits, v.MarkupBps).String()
+	if _, _, _, err := s.OpenTreasuryConvertedBuy(ctx, userID, q, "base", ConvertedOpen{Venue: v, WalletAddress: testRoutedEVM}); err != nil {
+		t.Fatalf("at the cap: %v", err)
+	}
+	if !caps.ConvertedBudgetAllowed("optimism", 50) || caps.ConvertedBudgetAllowed("optimism", 101) || !caps.ConvertedBudgetAllowed("arbitrum", 200) {
+		t.Fatal("ConvertedBudgetAllowed disagrees with the pricer's caps")
+	}
+	caps.SetConvertedFeeCaps(map[string]int{}, 0) // raising off: B still opens
+	if !caps.ConvertedBudgetAllowed("optimism", 50) || caps.ConvertedBudgetAllowed("optimism", 51) {
+		t.Fatal("raising off must still allow the base budget, and only it")
+	}
+}
+
+// openFWConvertedRig is a Flutterwave-converted-ready service without an open.
+func openFWConvertedRig(t *testing.T) (*ITService, uuid.UUID) {
+	t.Helper()
+	s, userID := newRoutedBuyService(t)
+	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
+		Treasury: &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}}})
+	return s, userID
+}
+
+// M10: a conversion record takes no Paycrest payment claim — it is paid
+// through its purchase.
+func TestPaycrestClaimPayment_RefusesAnITConversionRow(t *testing.T) {
+	svc, _ := newPaycrestOrderTestService(t)
+	ctx := context.Background()
+	user := uuid.New()
+	itc := &models.PaycrestOrderRecord{UserID: user, Direction: models.PaycrestDirectionBuy,
+		Status: models.PaycrestStatusAwaitingPayment, Reference: ITConversionRef(uuid.New())}
+	if err := svc.db.Create(itc).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ClaimPayment(ctx, user, itc.ID); !errors.Is(err, ErrPaycrestNotClaimable) {
+		t.Fatalf("claim: %v", err)
+	}
+	var got models.PaycrestOrderRecord
+	svc.db.First(&got, "id = ?", itc.ID)
+	if got.PaymentClaimedAt != nil {
+		t.Fatal("the claim was recorded on a conversion row")
 	}
 }

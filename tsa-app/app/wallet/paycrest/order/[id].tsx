@@ -39,6 +39,7 @@ import {
   isAwaitingUser,
   isConvertedOrder,
   isDisputableOrder,
+  isITConversionOrder,
   isTerminal,
   statusLabel,
   formatPromisedAmount,
@@ -225,7 +226,10 @@ export default function PaycrestOrderScreen() {
     );
   }
 
-  const awaiting = isAwaitingUser(order.status);
+  // A purchase's conversion record is paid through that purchase: never
+  // render pay-in instructions or Cancel for it, whatever its status reads.
+  const conversionOnly = isITConversionOrder(order);
+  const awaiting = isAwaitingUser(order.status) && !conversionOnly;
   const unmatched = order.status === 'unmatched';
   const settled = order.status === 'settled';
   const converted = isConvertedOrder(order);
@@ -338,6 +342,11 @@ export default function PaycrestOrderScreen() {
                     // how a sale becomes two. Once it is moving, report, do not ask.
                     `Confirming ${order.tokenAmount} ${order.token} from your wallet.`
                   : `Send ${order.tokenAmount} ${order.token} from your wallet. ${countdown} left.`}
+            </Text>
+          )}
+          {conversionOnly && isAwaitingUser(order.status) && (
+            <Text variant="bodySm" align="center" style={{ color: colors.textSecondary, marginTop: spacing.xs }}>
+              This conversion starts once your purchase is paid.
             </Text>
           )}
           {order.failureReason && !unmatched && (

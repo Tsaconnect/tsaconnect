@@ -89,14 +89,19 @@ func conversionProbes(chains *services.BlockchainService, keys []string) map[str
 // wireConvertedBuys hands the IT service the conversion treasury converted
 // opens and attach-hash need (Plan C5). Without a treasury nothing is set, so
 // no typed nil reaches ConvertedBuys.Treasury; the handoff itself is decided
-// by the record and never by this wiring.
-func wireConvertedBuys(it *services.ITService, treasury *services.Treasury, chains *services.BlockchainService, cfg *config.Config) {
+// by the record and never by this wiring. feeCaps is the pricer whose
+// RAMP_CONVERTED_FEE_MAX_BPS the opens re-check (nil: its default cap).
+func wireConvertedBuys(it *services.ITService, treasury *services.Treasury, chains *services.BlockchainService, cfg *config.Config, feeCaps *services.PaycrestQuoteService) {
 	if it == nil || treasury == nil {
 		return
 	}
-	it.SetConvertedBuys(services.ConvertedBuys{
+	c := services.ConvertedBuys{
 		TreasuryAddress: treasury.Address(), Treasury: treasury,
 		Verifiers: rampTransferVerifiers(chains, evmChainKeys(cfg)),
 		Probes:    conversionProbes(chains, treasury.ChainKeys()),
-	})
+	}
+	if feeCaps != nil { // never a typed nil in the interface
+		c.FeeCaps = feeCaps
+	}
+	it.SetConvertedBuys(c)
 }

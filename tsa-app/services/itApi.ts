@@ -68,6 +68,10 @@ export interface ITIntent {
    *  line per provider fee (utils/itIntentView). */
   displayRate?: string;
   fees?: ITIntentFee[];
+  /** On the intents list, a converted buy's requested asset and chain: what
+   *  she receives, where `asset`/`destChain` are its USDC leg. */
+  requestedToken?: string;
+  requestedChain?: string;
 }
 
 // code carries the backend's machine error code (e.g. "it_agreement_required")

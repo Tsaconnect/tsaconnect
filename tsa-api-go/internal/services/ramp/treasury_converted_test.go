@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -174,5 +175,33 @@ func TestWithConversion_NilPricerLeavesTheProviderAsItWas(t *testing.T) {
 	}
 	if got := WithConversion(nil, &fakePricer{}); got != nil {
 		t.Fatalf("nil provider: %#v", got)
+	}
+}
+
+// M4: only a reached daily cap drops the company wallet's converted venue —
+// a cap that cannot be read keeps it (the open re-checks), so Flutterwave is
+// never shown on a read error. Every skip is logged, redacted.
+func TestTreasuryQuoteConverted_OnlyAReachedDailyCapDropsTheVenue(t *testing.T) {
+	p, f := convertingTreasury(t, &fakePricer{venue: optVenue()})
+	logs := captureRampLog(t)
+	f.dailyErr = errors.New("daily cap read: dial tcp: i/o timeout")
+	if venues, err := p.QuoteConverted(context.Background(), convertedTreasuryReq("10000")); err != nil || len(venues) != 1 {
+		t.Fatalf("cap unreadable: venues = %+v err = %v", venues, err)
+	}
+	f.dailyErr = services.ErrTreasuryDailyCapReached
+	if venues, _ := p.QuoteConverted(context.Background(), convertedTreasuryReq("10000")); len(venues) != 0 {
+		t.Fatalf("cap reached: %+v", venues)
+	}
+	if !strings.Contains(logs.String(), "METRIC ramp_treasury_converted_quote_skipped reason=") {
+		t.Fatalf("no skip metric: %q", logs.String())
+	}
+	logs.Reset()
+	f.dailyErr = nil
+	p.market = &fakeMarket{err: errors.New(`Post "https://base-mainnet.g.alchemy.com/v2/SECRETKEY123": timeout`)}
+	if venues, _ := p.QuoteConverted(context.Background(), convertedTreasuryReq("10000")); len(venues) != 0 {
+		t.Fatalf("no market rate: %+v", venues)
+	}
+	if !strings.Contains(logs.String(), "METRIC ramp_treasury_converted_quote_skipped") || strings.Contains(logs.String(), "SECRETKEY123") {
+		t.Fatalf("skip log = %q", logs.String())
 	}
 }

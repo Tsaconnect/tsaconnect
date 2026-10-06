@@ -125,6 +125,9 @@ func paycrestError(c *gin.Context, err error) {
 		// the one thing cancelling must not appear to do.
 		utils.ErrorResponse(c, http.StatusConflict,
 			"This order can no longer be cancelled. If you have already sent the payment, contact support instead.")
+	case errors.Is(err, services.ErrPaycrestNotClaimable):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"There is nothing to pay on this order — it follows your purchase. Track it from that purchase.")
 	case errors.Is(err, services.ErrPaycrestAccountShape):
 		utils.ErrorResponse(c, http.StatusBadRequest,
 			"That account number doesn't look right for the destination you chose. Check it and try again.")

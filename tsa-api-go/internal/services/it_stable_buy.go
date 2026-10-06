@@ -471,6 +471,9 @@ func (s *ITService) payIntoForStableBuy(
 	}, fiatMinor, nil
 }
 
+// stableBuyExpiredReason marks the rows expireStaleStableBuys retired.
+const stableBuyExpiredReason = "expired before payment"
+
 // expireStaleStableBuys retires this user's abandoned purchases.
 //
 // Past stableBuyClaimWindow a pending_payment row can no longer claim a charge
@@ -497,19 +500,34 @@ func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID)
 				userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
 				[]string{models.ITAssetUSDC, models.ITAssetUSDT}, cutoff)
 	}
-	var routed []models.ITIntent
-	if err := stale(s.db).Where("rate_expires_at IS NOT NULL").Select("id", "provider").Find(&routed).Error; err != nil {
+	var candidates []models.ITIntent
+	if err := stale(s.db).Where("rate_expires_at IS NOT NULL").Select("id", "provider").Find(&candidates).Error; err != nil {
 		return err
 	}
+	var routed []models.ITIntent // the routed buys this write actually expired
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := stale(tx).Updates(map[string]any{
 			"status":         models.ITStatusCancelled,
-			"failure_reason": "expired before payment",
+			"failure_reason": stableBuyExpiredReason,
 		}).Error; err != nil {
 			return err
 		}
-		// A converted buy's record expires with it, in the same write (spec
-		// §15.4). No record (any other buy) is a no-op.
+		if len(candidates) == 0 {
+			return nil
+		}
+		// A converted buy's record expires with its intent, in the same
+		// write (spec §15.4) — but only if THIS write expired the intent: a
+		// late payment may have claimed it since the read above, and its
+		// record must stay open for that claim. No record is a no-op.
+		ids := make([]uuid.UUID, len(candidates))
+		for i := range candidates {
+			ids[i] = candidates[i].ID
+		}
+		if err := tx.WithContext(ctx).Model(&models.ITIntent{}).Select("id", "provider").
+			Where("id IN ? AND status = ? AND failure_reason = ?", ids, models.ITStatusCancelled, stableBuyExpiredReason).
+			Find(&routed).Error; err != nil {
+			return err
+		}
 		for i := range routed {
 			if err := markConversion(ctx, tx, routed[i].ID, []string{models.PaycrestStatusAwaitingPayment},
 				map[string]any{"status": models.PaycrestStatusExpired}); err != nil {

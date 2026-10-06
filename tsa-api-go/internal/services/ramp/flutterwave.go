@@ -238,25 +238,34 @@ func (p *FlutterwaveProvider) QuoteConverted(ctx context.Context, r Request) ([]
 	if !p.converts(r) {
 		return nil, nil
 	}
+	return p.quoteConverted(ctx, p.converted(), r), nil
+}
+
+// converted is Flutterwave's part of the shared converted flow.
+func (p *FlutterwaveProvider) converted() itConverted {
+	return itConverted{
+		conv: p.conv,
+		leg:  p.convertedLegFor,
+		open: func(ctx context.Context, userID uuid.UUID, leg *itConvertedLeg, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error) {
+			return p.it.OpenFlutterwaveConvertedBuy(ctx, userID, leg.q, in)
+		},
+	}
+}
+
+// convertedLegFor prices Flutterwave's Polygon USDC leg: the cached rate for
+// a quote, a fresh one for an open.
+func (p *FlutterwaveProvider) convertedLegFor(ctx context.Context, r Request, open bool) (*itConvertedLeg, error) {
 	fiat := strings.ToUpper(strings.TrimSpace(r.FiatCode))
-	rate, err := p.rate(ctx, fiat, convertedLegToken, false)
+	rate, err := p.rate(ctx, fiat, convertedLegToken, open)
 	if err != nil {
-		return nil, nil
+		return nil, WrapClass(ErrVenueUnavailable, err)
 	}
 	q, err := p.it.QuoteRoutedStableBuy(convertedLegToken, r.FiatAmount, fiat, rate)
 	if err != nil {
-		return nil, nil
+		return nil, classifyITOpen(err, false)
 	}
 	mid, _ := rate.Float64()
-	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(fwConvertedLegChain, q, r.FiatAmount, mid), *r.Want)
-	if err != nil || pv == nil {
-		return nil, nil
-	}
-	v, err := convertedVenue(ProviderFlutterwave, q, pv, mid)
-	if err != nil {
-		return nil, nil
-	}
-	return []Venue{v}, nil
+	return &itConvertedLeg{q: q, chain: fwConvertedLegChain, mid: mid}, nil
 }
 
 // fwConvertedLegChain: Flutterwave delivers on Polygon only.
@@ -267,48 +276,14 @@ func (p *FlutterwaveProvider) converts(r Request) bool {
 	return p.conv != nil && r.Want != nil && r.Side == Buy && flutterwaveFiats[strings.ToUpper(strings.TrimSpace(r.FiatCode))]
 }
 
-// OpenConverted re-quotes at the fresh rate, re-prices the conversion to her
-// own wallet, guards on the new all-in rate, then opens the intent and its
-// record (spec §15.7). The venue opened is always the one priced here, never
-// one the request carried. The router reaches it only after the company
-// wallet refused her target (Decision C2).
+// OpenConverted is the shared converted open (itBuyProvider.openConverted)
+// on Flutterwave's Polygon leg at the fresh rate. The router reaches it only
+// after the company wallet refused her target (Decision C2).
 func (p *FlutterwaveProvider) OpenConverted(ctx context.Context, r Request, in OrderInput) (*Order, error) {
 	if !p.converts(r) {
 		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
 	}
-	fiat := strings.ToUpper(strings.TrimSpace(r.FiatCode))
-	rate, err := p.rate(ctx, fiat, convertedLegToken, true)
-	if err != nil {
-		return nil, WrapClass(ErrVenueUnavailable, err)
-	}
-	q, err := p.it.QuoteRoutedStableBuy(convertedLegToken, r.FiatAmount, fiat, rate)
-	if err != nil {
-		return nil, classifyITOpen(err, false)
-	}
-	mid, _ := rate.Float64()
-	want := *r.Want
-	want.Recipient = in.WalletAddress
-	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(fwConvertedLegChain, q, r.FiatAmount, mid), want)
-	if err != nil || pv == nil {
-		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
-	}
-	terms, err := services.NewConvertedTerms(q, pv)
-	if err != nil {
-		return nil, WrapClass(ErrVenueUnavailable, err)
-	}
-	bound := services.FormatMinor(terms.EffectiveRateMinor.String())
-	if err := services.CheckPriceGuard(ProviderFlutterwave, string(Buy), bound, in.LimitRate, in.Guard); err != nil {
-		return nil, err
-	}
-	if err := p.checkAbandonCap(ctx, in.UserID); err != nil {
-		return nil, err
-	}
-	intent, payInto, rec, err := p.it.OpenFlutterwaveConvertedBuy(ctx, in.UserID, q,
-		services.ConvertedOpen{Venue: *pv, WalletAddress: in.WalletAddress})
-	if err != nil {
-		return nil, classifyITOpen(err, true)
-	}
-	return &Order{Provider: ProviderFlutterwave, IT: intent, PayInto: payInto, Conversion: rec}, nil
+	return p.openConverted(ctx, p.converted(), r, in)
 }
 
 // classifyITOpen wraps an IT-backed open refusal in its outcome class; the

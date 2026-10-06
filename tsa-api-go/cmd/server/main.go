@@ -1712,7 +1712,7 @@ func main() {
 		// venues on it (spec §15).
 		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
 		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
-		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg)
+		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg, paycrestQuotes)
 		// The ramp router (Paycrest is its only provider today) answers the
 		// hub's legs and serves /api/ramp/*. Without an order service there
 		// is nothing to route, and the legs come straight from the quotes.

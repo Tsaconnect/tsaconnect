@@ -63,6 +63,9 @@ var (
 	// order past the waiting-for-the-user stage, and one whose payment the user
 	// has already claimed to have sent.
 	ErrPaycrestNotCancellable = errors.New("this order can no longer be cancelled")
+	// ErrPaycrestNotClaimable: a conversion record (ITC-) is paid through its
+	// purchase, never into a Paycrest order, so it takes no payment claim.
+	ErrPaycrestNotClaimable = errors.New("this order is paid through its purchase")
 )
 
 // ErrPaycrestNothingSent marks a refusal that happened before any request to
@@ -1211,6 +1214,9 @@ func (s *PaycrestOrderService) ClaimPayment(ctx context.Context, userID, orderID
 	row, err := s.Get(ctx, userID, orderID)
 	if err != nil {
 		return nil, err
+	}
+	if IsITConversion(row) {
+		return nil, ErrPaycrestNotClaimable // paid through its purchase
 	}
 	if row.PaymentClaimedAt != nil {
 		return row, nil

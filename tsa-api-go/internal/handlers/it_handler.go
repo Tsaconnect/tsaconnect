@@ -914,11 +914,30 @@ func (h *ITHandler) ListIntents(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	intents, _ := h.it.ListUserIntents(c.Request.Context(), user.ID)
+	ctx := c.Request.Context()
+	intents, _ := h.it.ListUserIntents(ctx, user.ID)
+	// A converted buy lists what she receives, not its USDC leg (spec §15.8).
+	conversions, err := h.it.ConversionsFor(ctx, intents)
+	if err != nil {
+		log.Printf("[it] list intents user=%s conversions: %s", user.ID, services.RedactAlertText(err.Error()))
+	}
+	rows := make([]intentListRow, len(intents))
 	for i := range intents {
 		intents[i].FailureReason = services.UserFacingITFailure(intents[i].FailureReason)
+		rows[i].ITIntent = intents[i]
+		if rec := conversions[intents[i].ID]; rec != nil {
+			rows[i].RequestedToken, rows[i].RequestedChain = rec.RequestedToken, rec.RequestedChain
+		}
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Intents", gin.H{"intents": intents})
+	utils.SuccessResponse(c, http.StatusOK, "Intents", gin.H{"intents": rows})
+}
+
+// intentListRow is an intent as the list shows it: a converted buy also
+// names the asset and chain she receives.
+type intentListRow struct {
+	models.ITIntent
+	RequestedToken string `json:"requestedToken,omitempty"`
+	RequestedChain string `json:"requestedChain,omitempty"`
 }
 
 // GET /api/it/intents/:id — single intent (scoped to caller).

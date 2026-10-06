@@ -610,21 +610,40 @@ func (s *ITService) OpenRoutedStableBuy(ctx context.Context, userID uuid.UUID, q
 		return nil, nil, fmt.Errorf("%w: a routed Flutterwave buy delivers on Polygon only, not %s",
 			ErrUnsupportedChainAsset, strings.ToUpper(strings.TrimSpace(destChain)))
 	}
+	return s.openRoutedStableBuy(ctx, userID, q, routedDelivery{
+		address:  func() (string, error) { return s.UserDeliveryAddress(ctx, userID, destChain) },
+		validate: ValidateBuyDelivery,
+	})
+}
+
+// routedDelivery is what differs between Flutterwave's routed opens (direct
+// and converted): where it delivers — resolved after the shared checks — and
+// how the row is written (nil: a plain insert).
+type routedDelivery struct {
+	address  func() (string, error)
+	validate func(chain, asset, address string) error
+	insert   func(ctx context.Context, intent *models.ITIntent) error
+}
+
+// openRoutedStableBuy is every routed Flutterwave open: the switch, the
+// prechecks (KYC, the IT agreement, one open buy), the routed limits, on
+// Polygon.
+func (s *ITService) openRoutedStableBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, d routedDelivery) (*models.ITIntent, *StableBuyInstructions, error) {
 	if !s.HasStableBuy() {
 		return nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
 	}
 	if err := s.stableBuyPrechecks(ctx, userID, q, true); err != nil {
 		return nil, nil, err
 	}
-	addr, err := s.UserDeliveryAddress(ctx, userID, destChain)
+	addr, err := d.address()
 	if err != nil {
 		return nil, nil, err
 	}
 	lim := s.routedLimits()
-	return s.openStableBuy(ctx, userID, q, destChain, addr, stableBuyOpen{
+	return s.openStableBuy(ctx, userID, q, RoutedDirectChain, addr, stableBuyOpen{
 		provider: models.ITProviderFlutterwave, routed: true,
 		minUnits: lim.minUnits, maxUnits: lim.maxUnits,
-		validate: ValidateBuyDelivery,
+		validate: d.validate, insert: d.insert,
 	})
 }
 

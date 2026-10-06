@@ -49,6 +49,9 @@ type fakeTxProbe struct {
 	matches, background []types.Log
 	logsErr             error
 	scans               int // filtered (3-topic) queries
+	// blockTime is the receipt block's time; zero reads as now, so a test
+	// that does not care about it sees a transfer mined just now.
+	blockTime time.Time
 }
 
 func (p *fakeTxProbe) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
@@ -73,6 +76,13 @@ func (p *fakeTxProbe) TransactionReceipt(context.Context, common.Hash) (*types.R
 		status = types.ReceiptStatusFailed
 	}
 	return &types.Receipt{Status: status, BlockNumber: new(big.Int).SetUint64(p.receiptBlock)}, nil
+}
+func (p *fakeTxProbe) HeaderByNumber(_ context.Context, n *big.Int) (*types.Header, error) {
+	at := p.blockTime
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return &types.Header{Number: n, Time: uint64(at.Unix())}, nil
 }
 func (p *fakeTxProbe) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	if p.logsErr != nil {

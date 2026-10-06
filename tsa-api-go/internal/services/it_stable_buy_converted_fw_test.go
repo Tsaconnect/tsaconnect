@@ -366,3 +366,114 @@ func TestFlutterwaveConvertedPark_AttachOnPostgres(t *testing.T) {
 		t.Fatalf("rec = %+v err = %v", rec, err)
 	}
 }
+
+// I1: the parked record is hers to read (the order screen renders its
+// reason), so the reason never names a provider; the provider detail stays
+// in the ALERT.
+func TestFinalizeBuyDelivery_HashlessParkReasonNamesNoProvider(t *testing.T) {
+	s, intent := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL"}, 11*time.Minute)
+	logs := captureLog(t)
+	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	reason := strings.ToLower(conversionRecord(t, s, intent.ID).FailureReason)
+	if reason == "" || strings.Contains(reason, "flutterwave") || strings.Contains(reason, "paycrest") {
+		t.Fatalf("stored reason %q must be neutral copy", reason)
+	}
+	if !strings.Contains(logs.String(), "ALERT it_stable_buy_conversion_no_hash") || !strings.Contains(strings.ToLower(logs.String()), "flutterwave") {
+		t.Fatalf("the ALERT lost the provider detail: %q", logs.String())
+	}
+}
+
+// M2: a hash proves THIS delivery only if it was mined after the delivery
+// was sent — never an older transfer to the treasury (a top-up).
+func TestAttachConversionHash_RefusesATransferMinedBeforeTheDeliverySend(t *testing.T) {
+	s, intent := parkedHashlessFW(t) // sent 11 minutes ago
+	hash := "0x" + strings.Repeat("cd", 32)
+	probe := &fakeTxProbe{head: 100, receiptBlock: 90, blockTime: time.Now().Add(-time.Hour)}
+	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
+		Treasury:  &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}},
+		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(94_537_500)}},
+		Probes:    map[string]TreasuryTxProbe{"polygon": probe}})
+	if _, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("a transfer mined before the send: err = %v", err)
+	}
+	if rec := conversionRecord(t, s, intent.ID); rec.Status != models.PaycrestStatusRecoveryPending || rec.TxHash != "" {
+		t.Fatalf("a refused attach wrote: %+v", rec)
+	}
+	probe.blockTime = time.Now().Add(-10 * time.Minute) // after the send
+	if rec, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); err != nil ||
+		rec.Status != models.PaycrestStatusConverting {
+		t.Fatalf("rec = %+v err = %v", rec, err)
+	}
+}
+
+// M5: a hashless park whose delivery never happened has an operator exit —
+// refunded in naira, the record closed in the same transaction. Any other
+// settled buy stays refused.
+func TestMarkStableBuyRefunded_ClosesAHashlessFlutterwavePark(t *testing.T) {
+	ctx := context.Background()
+	s, intent := parkedHashlessFW(t)
+	got, err := s.MarkStableBuyRefunded(ctx, uuid.New(), intent.ID, "FW confirmed nothing was sent")
+	if err != nil || got.Status != models.ITStatusRefunded {
+		t.Fatalf("refund: %+v %v", got, err)
+	}
+	if rec := conversionRecord(t, s, intent.ID); rec.Status != models.PaycrestStatusCancelled || rec.TxHash != "" {
+		t.Fatalf("record = %+v", rec)
+	}
+	// Closed: no hash attaches to it afterwards.
+	if _, err := s.AttachConversionHash(ctx, uuid.New(), intent.ID, "0x"+strings.Repeat("cd", 32), "late"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("attach after refund: %v", err)
+	}
+
+	// Handed off with a hash: the conversion runs, so no naira refund.
+	s2, i2 := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL", TxHash: "0x" + strings.Repeat("ab", 32)}, time.Minute)
+	if err := s2.FinalizeBuyDelivery(ctx, i2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.MarkStableBuyRefunded(ctx, uuid.New(), i2.ID, "n"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("converting record: %v", err)
+	}
+	if got := reloadIntent(t, s2, i2.ID); got.Status != models.ITStatusSettled {
+		t.Fatalf("intent = %s", got.Status)
+	}
+	if rec := conversionRecord(t, s2, i2.ID); rec.Status != models.PaycrestStatusConverting {
+		t.Fatalf("record = %s", rec.Status)
+	}
+
+	// A settled direct Flutterwave buy has no record: refused as before.
+	s3, u3 := newRoutedBuyService(t)
+	if err := s3.db.AutoMigrate(&models.ITIntentAuditLog{}); err != nil {
+		t.Fatal(err)
+	}
+	direct, _, err := s3.OpenRoutedStableBuy(ctx, u3, routedTestQuote(t, s3), "POLYGON")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3.db.Model(&models.ITIntent{}).Where("id = ?", direct.ID).Update("status", models.ITStatusSettled)
+	if _, err := s3.MarkStableBuyRefunded(ctx, uuid.New(), direct.ID, "n"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("settled direct buy: %v", err)
+	}
+}
+
+// M7: the handoff itself refuses a delivered amount above what the record
+// was opened for, whatever priced it.
+func TestHandoffConversion_RefusesADeliveryAboveTheOpenedAmount(t *testing.T) {
+	hash := "0x" + strings.Repeat("ab", 32)
+	s, intent := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL", TxHash: hash}, time.Minute)
+	// A pricing path that forgot the ceiling: D one unit above the opened 94.5375.
+	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "94537501")
+	logs := captureLog(t)
+	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); !errors.Is(err, ErrConvertedOverpaid) {
+		t.Fatalf("err = %v", err)
+	}
+	if rec := conversionRecord(t, s, intent.ID); rec.Status == models.PaycrestStatusConverting || rec.TxHash != "" {
+		t.Fatalf("record handed off: %+v", rec)
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusDelivering {
+		t.Fatalf("intent = %s", got.Status)
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_conversion_handoff_overpaid") {
+		t.Fatalf("log = %q", logs.String())
+	}
+}

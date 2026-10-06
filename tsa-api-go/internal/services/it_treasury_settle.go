@@ -168,6 +168,22 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 				refundable = append(refundable, models.ITStatusDelivering)
 			}
 		}
+		// Ledger ruling M5: a Flutterwave converted buy parked without a hash
+		// is settled, yet nothing proves Flutterwave delivered. Its operator
+		// exit is a naira refund, closing the park in this transaction under
+		// a compare-and-set, so an attach-hash and a refund never both win.
+		// Any other settled buy stays refused.
+		hashlessPark := false
+		if provider == models.ITProviderFlutterwave && intent.Status == models.ITStatusSettled {
+			rec, err := conversionRecordOn(ctx, tx, intentID)
+			if err != nil {
+				return err
+			}
+			if isHashlessPark(rec) {
+				hashlessPark = true
+				refundable = append(refundable, models.ITStatusSettled)
+			}
+		}
 		res := tx.Model(&models.ITIntent{}).
 			Where("id = ? AND direction = ? AND status IN ? AND asset IN ?", intentID, models.ITDirectionBuy,
 				refundable, []string{models.ITAssetUSDC, models.ITAssetUSDT}).
@@ -178,6 +194,18 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 		if res.RowsAffected == 0 {
 			return fmt.Errorf("%w: only a parked buy, or a company-wallet delivery with no send, can be marked refunded (status %s)",
 				ErrITBadState, intent.Status)
+		}
+		if hashlessPark {
+			closed := tx.Model(&models.PaycrestOrderRecord{}).
+				Where("reference = ? AND status = ? AND holder = ? AND tx_hash = ?", ITConversionRef(intentID),
+					models.PaycrestStatusRecoveryPending, models.HolderFlutterwave, "").
+				Updates(map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "refunded in naira by an operator"})
+			if closed.Error != nil {
+				return closed.Error
+			}
+			if closed.RowsAffected != 1 {
+				return fmt.Errorf("%w: the conversion record changed while the refund was recorded", ErrITBadState)
+			}
 		}
 		// A converted buy's record closes with it: the naira went back, no
 		// conversion will ever run (spec §15.4).

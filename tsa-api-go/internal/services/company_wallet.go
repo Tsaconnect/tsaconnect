@@ -79,6 +79,9 @@ type TreasuryTxProbe interface {
 	// block, and the chunked Transfer scan behind an operator re-send.
 	BlockNumber(ctx context.Context) (uint64, error)
 	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
+	// HeaderByNumber: a receipt block's time (the conversion attach-hash
+	// check that a transfer was mined after the delivery was sent).
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
