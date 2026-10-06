@@ -318,3 +318,39 @@ func TestMarkStableBuyRefunded(t *testing.T) {
 		t.Fatal("a refunded order still holds stock")
 	}
 }
+
+// Final review F1: an unreadable stock read on the VA path parks the order with
+// a failure_reason an operator reads in the console — never the RPC key.
+func TestTreasurySettle_StockUnreadableParksWithoutTheRPCKey(t *testing.T) {
+	s, userID, intent, native := newTreasurySettleService(t, 50_000_000)
+	native.tokenBalanceErr = errors.New(leakyRPCErr)
+	logs := captureLog(t)
+	// Off-amount: priced live, so the stock is read under the lock.
+	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_unreadable", "900000"); err != nil {
+		t.Fatal(err)
+	}
+	got := reloadIntent(t, s, intent.ID)
+	if got.Status != models.ITStatusBuyAwaitingRate || !strings.Contains(got.FailureReason, "could not read the company wallet's stock") ||
+		strings.Contains(got.FailureReason, "SECRETKEY") {
+		t.Fatalf("status=%s failure_reason=%q, want parked without the key", got.Status, got.FailureReason)
+	}
+	if strings.Contains(logs.String(), "SECRETKEY") {
+		t.Fatalf("log = %q", logs.String())
+	}
+}
+
+// Final review F1: an open that cannot read the stock fails over; the router
+// logs this error as it is (`open failed over … err=%v`), so it must already
+// be clean.
+func TestOpenTreasuryBuy_StockUnreadableCarriesNoRPCKey(t *testing.T) {
+	s, userID, native := newTreasuryBuyService(t, 50_000_000)
+	native.tokenBalanceErr = errors.New(leakyRPCErr)
+	logs := captureLog(t)
+	_, _, err := s.OpenTreasuryBuy(context.Background(), userID, treasuryTestQuote(t, s), "base", testRoutedEVM)
+	if !errors.Is(err, ErrTreasuryStockUnreadable) || strings.Contains(err.Error(), "SECRETKEY") {
+		t.Fatalf("err = %v, want unreadable stock without the key", err)
+	}
+	if strings.Contains(logs.String(), "SECRETKEY") {
+		t.Fatalf("log = %q", logs.String())
+	}
+}

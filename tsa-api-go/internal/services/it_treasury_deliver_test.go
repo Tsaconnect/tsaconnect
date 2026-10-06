@@ -1020,3 +1020,93 @@ func TestRampLegsOneLiveSaleIndexPresent_Postgres(t *testing.T) {
 		t.Fatalf("without the index: ok=%v err=%v", ok, err)
 	}
 }
+
+// Final review F2: two company-wallet orders to one address. Order B's mined
+// sale — its hash recorded on B's own leg — shows up in order A's scan. It is
+// B's payment, not A's, so it must not refuse A's re-send or refund forever. A
+// transfer whose hash no other order records still refuses A: it may be A's
+// own lost-hash send.
+func TestSecondPaymentGate_AnotherOrdersRecordedSaleIsNotHers(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	admin := uuid.New()
+	r.signer.err = errors.New("rpc timeout after send") // A's send went out; its hash is lost
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.signer.err = nil
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500 // A's nonce 7 consumed 5+ deep
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+
+	orderB := seedTreasuryIntent(t, r.s, r.intent.UserID, models.ITStatusSettled)
+	bHash := common.HexToHash("0xb0b")
+	if err := r.s.db.Create(&models.RampLeg{OrderID: orderB.ID, Kind: models.RampLegKindSale, Attempt: 1,
+		ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: testRoutedEVM, Amount: "7232937",
+		Status: models.RampLegStatusConfirmed, TxHash: "0x" + strings.ToUpper(bHash.Hex()[2:]), FromBlock: 2500,
+		CreatedAt: time.Now().Add(-time.Hour)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	unrecorded := common.HexToHash("0xbeef")
+	both := []types.Log{{BlockNumber: 3000, TxHash: bHash}, {BlockNumber: 3100, TxHash: unrecorded}}
+	onlyB := []types.Log{{BlockNumber: 3000, TxHash: bHash}}
+
+	r.probe.matches = both
+	_, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "A's nonce consumed by a cancel")
+	if !errors.Is(err, ErrTreasuryResendRefused) || !strings.Contains(err.Error(), unrecorded.Hex()) ||
+		strings.Contains(err.Error(), bHash.Hex()) {
+		t.Fatalf("an unrecorded transfer to her: %v, want refused on it alone", err)
+	}
+	r.probe.matches = onlyB
+	if _, err := r.s.ResendTreasuryBuy(ctx, admin, r.intent.ID, "B's transfer is B's; A's nonce consumed by a cancel"); err != nil {
+		t.Fatalf("re-send with only B's recorded sale to her: %v", err)
+	}
+
+	refund := func() error {
+		_, err := r.s.MarkStableBuyRefunded(ctx, admin, r.intent.ID, "returned by bank transfer")
+		return err
+	}
+	r.probe.matches = both
+	if err := refund(); !errors.Is(err, ErrITBadState) || !strings.Contains(err.Error(), "a transfer to her was mined") {
+		t.Fatalf("refund with an unrecorded transfer to her: %v, want refused", err)
+	}
+	r.probe.matches = onlyB
+	if err := refund(); err != nil {
+		t.Fatalf("refund with only B's recorded sale to her: %v", err)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusRefunded {
+		t.Fatalf("status = %s", got.Status)
+	}
+	if r.signer.calls() != 1 {
+		t.Fatalf("broadcasts = %d", r.signer.calls())
+	}
+}
+
+// Final review F4: a send-time backstop. Whatever path priced an order above
+// the per-order maximum, it is never sent unless an operator's waiver is
+// recorded on it; the refusal is not "stock short", so the watcher reports it
+// on the send-blocked channel.
+func TestSendTreasuryBuy_AboveTheMaximumWithoutAWaiverIsNeverSent(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	setStock(r.native, 300_000_000)
+	r.s.db.Model(&models.ITIntent{}).Where("id = ?", r.intent.ID).Update("asset_amount", "216988129") // $216.99 > $200
+	logs := captureLog(t)
+	err := r.s.SendTreasuryBuy(ctx, r.intent.ID)
+	if !errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrTreasuryStockShort) {
+		t.Fatalf("err = %v, want refused above the maximum (and not as stock short)", err)
+	}
+	if r.signer.calls() != 0 || len(r.legs(t)) != 0 {
+		t.Fatalf("broadcasts = %d legs = %d, want nothing sent or reserved", r.signer.calls(), len(r.legs(t)))
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_treasury_send_above_maximum intent="+r.intent.ID.String()) {
+		t.Fatalf("log = %q", logs.String())
+	}
+	r.s.db.Model(&models.ITIntent{}).Where("id = ?", r.intent.ID).Update("max_waived", true)
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("waived: %v", err)
+	}
+	if _, _, _, amt := r.native.transferCall(); r.signer.calls() != 1 || amt == nil || amt.Int64() != 216_988_129 {
+		t.Fatalf("sent %v in %d broadcasts, want the waived amount once", amt, r.signer.calls())
+	}
+}

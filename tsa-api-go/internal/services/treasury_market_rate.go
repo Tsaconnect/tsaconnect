@@ -166,13 +166,16 @@ func (r *TreasuryMarketRate) BuyRate(ctx context.Context, fiat string) (*big.Rat
 	case midErr == nil:
 		rate, err := r.checkedAgainstFX(ctx, fiat, mid, "flutterwave_mid")
 		if err == nil {
-			log.Printf("[ramp-treasury] METRIC ramp_treasury_market_fallback source=flutterwave_mid fiat=%s reason=%q", fiat, pcErr.Error())
+			log.Printf("[ramp-treasury] METRIC ramp_treasury_market_fallback source=flutterwave_mid fiat=%s reason=%q", fiat, RedactAlertText(pcErr.Error()))
 		}
 		return rate, err
 	default:
-		log.Printf("[ramp-treasury] ALERT ramp_treasury_rate_unavailable fiat=%s paycrest=%v flutterwave_mid=%v", fiat, pcErr, midErr)
-		return nil, fmt.Errorf("%w: company wallet market rate: paycrest: %v; flutterwave mid: %v",
-			ErrStableQuoteUnavailable, pcErr, midErr)
+		// Upstream errors can carry a request URL with a key in it; this error
+		// also reaches the router's log and a parked order's failure_reason.
+		pcText, midText := RedactAlertText(pcErr.Error()), RedactAlertText(midErr.Error())
+		log.Printf("[ramp-treasury] ALERT ramp_treasury_rate_unavailable fiat=%s paycrest=%s flutterwave_mid=%s", fiat, pcText, midText)
+		return nil, fmt.Errorf("%w: company wallet market rate: paycrest: %s; flutterwave mid: %s",
+			ErrStableQuoteUnavailable, pcText, midText)
 	}
 }
 
@@ -250,7 +253,7 @@ func (r *TreasuryMarketRate) midRate(ctx context.Context, fiat string) (*big.Rat
 		return new(big.Rat).Set(v.(*big.Rat)), nil
 	}
 	if ok && r.now().Sub(last.at) < treasuryMidMaxStale {
-		log.Printf("[ramp-treasury] serving a %s-old Flutterwave mid for %s: %v", r.now().Sub(last.at).Round(time.Second), fiat, err)
+		log.Printf("[ramp-treasury] serving a %s-old Flutterwave mid for %s: %s", r.now().Sub(last.at).Round(time.Second), fiat, RedactAlertText(err.Error()))
 		return new(big.Rat).Set(last.rate), nil
 	}
 	return nil, err

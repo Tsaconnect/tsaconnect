@@ -173,6 +173,16 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 	if !ok || units.Sign() <= 0 {
 		return fmt.Errorf("it treasury buy: intent %s has no asset amount", intent.ID)
 	}
+	// 0. The per-order maximum, at the send itself: every pricing path enforces
+	// it, and only an operator's recorded waiver (deliver anyway) lifts it. An
+	// amount above it here is a bug upstream, so it stops and alerts instead of
+	// paying out; not stock short, so the watcher reports it as a blocked send.
+	if maxUnits := s.treasuryLimits().maxUnits; units.Cmp(maxUnits) > 0 && !intent.MaxWaived {
+		log.Printf("[it treasury buy] ALERT ramp_treasury_send_above_maximum intent=%s amount=%s max=%s — not sent; no waiver is recorded",
+			intent.ID, units, maxUnits)
+		return fmt.Errorf("%w: %s above the per-order maximum %s with no waiver recorded — not sent",
+			ErrStableBuyAboveMaximum, FormatStableUnits(units.String()), FormatStableUnits(maxUnits.String()))
+	}
 	tr := s.wallet.Treasury()
 	// 1. Kill switch (the lane has no value caps: CompanyWalletCaps, D63).
 	// 2. Gas. 3. Fresh stock, never part.
@@ -432,8 +442,11 @@ type ResendEvidence struct {
 	ScannedFrom    uint64   `json:"scannedFrom,omitempty"`
 	ScannedTo      uint64   `json:"scannedTo,omitempty"`
 	TransfersFound []string `json:"transfersFound,omitempty"`
-	Allowed        bool     `json:"allowed"`
-	Reason         string   `json:"reason"`
+	// OtherOrdersTransfers: transfers to her the scan saw whose hash another
+	// order's sale leg records — that order's payment, so not evidence here.
+	OtherOrdersTransfers []string `json:"otherOrdersTransfers,omitempty"`
+	Allowed              bool     `json:"allowed"`
+	Reason               string   `json:"reason"`
 }
 
 // resendEvidence runs the dropped-transaction check on a pending sale leg: the
@@ -443,7 +456,7 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 	if stall := s.treasuryLimits().sendStall; time.Since(leg.CreatedAt) <= stall {
 		return &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce, Reason: fmt.Sprintf("inside the %s stall window", stall)}, nil
 	}
-	ev, err := s.chainEvidence(ctx, leg)
+	ev, err := s.chainEvidence(ctx, s.db, leg)
 	if err != nil || !ev.Allowed {
 		return ev, err
 	}
@@ -468,7 +481,10 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 //     transaction can never be mined again, not even after a shallow reorg;
 //  4. a chunked scan to exactly H finds no Transfer(wallet → her) since the
 //     send, every chunk of it proved visible (ScanTrusted) — so whatever
-//     consumed the nonce was not her payment.
+//     consumed the nonce was not her payment. A transfer whose hash another
+//     order's sale leg records is that order's payment and does not count
+//     (she may have two orders to one address); one recorded nowhere does —
+//     it may be this leg's own send, its hash lost.
 //
 // An unused nonce is never an allowance, however empty the mempool looks: a
 // signed transaction our node forgot can resurface from a peer and win that
@@ -478,7 +494,8 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 // written before the broadcast), so it needs only the trusted scan.
 //
 // The head is read once, so the nonce and the scan describe the same block.
-func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*ResendEvidence, error) {
+// db reads the other orders' sale legs (the caller's transaction, if any).
+func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.RampLeg) (*ResendEvidence, error) {
 	ev := &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce}
 	probe := s.wallet.Probe(leg.ChainKey)
 	if probe == nil {
@@ -539,8 +556,8 @@ func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*Re
 		}
 		ev.NonceConsumed = true
 	}
-	found, from, serr := s.scanSaleTransfers(ctx, probe, leg, head)
-	ev.ScannedFrom, ev.ScannedTo = from, head
+	found, others, from, serr := s.scanSaleTransfers(ctx, db, probe, leg, head)
+	ev.ScannedFrom, ev.ScannedTo, ev.OtherOrdersTransfers = from, head, others
 	switch {
 	case serr != nil:
 		ev.Reason = "the chain scan could not be trusted: " + RedactAlertText(serr.Error())
@@ -556,20 +573,21 @@ func (s *ITService) chainEvidence(ctx context.Context, leg *models.RampLeg) (*Re
 }
 
 // scanSaleTransfers lists Transfer(wallet → her) events of the leg's token
-// from the leg's start block to exactly head, in chunks. Each chunk is proved
+// from the leg's start block to exactly head, in chunks, leaving out (in
+// others) any whose hash another order's sale leg records. Each chunk is proved
 // visible on its own: an unfiltered Transfer query for the token over the
 // chunk's last saleScanVisibleBlocks blocks must return logs, or that chunk's
 // empty answer proves nothing and the scan fails (review N2;
 // reference_sonic_rpc_logs). The window is small on purpose: a busy
 // stablecoin has transfers in every few blocks, and an unfiltered query over
 // thousands of blocks is exactly what RPCs cap or time out.
-func (s *ITService) scanSaleTransfers(ctx context.Context, probe TreasuryTxProbe, leg *models.RampLeg, head uint64) (found []string, from uint64, err error) {
+func (s *ITService) scanSaleTransfers(ctx context.Context, db *gorm.DB, probe TreasuryTxProbe, leg *models.RampLeg, head uint64) (found, others []string, from uint64, err error) {
 	if leg.FromBlock == 0 {
-		return nil, 0, errors.New("the send recorded no start block")
+		return nil, nil, 0, errors.New("the send recorded no start block")
 	}
 	from = leg.FromBlock
 	if head < from {
-		return nil, from, fmt.Errorf("head %d is before the send's block %d", head, from)
+		return nil, nil, from, fmt.Errorf("head %d is before the send's block %d", head, from)
 	}
 	token := common.HexToAddress(s.wallet.TokenAddress(leg.ChainKey, leg.Token))
 	topic := common.HexToHash(erc20TransferTopic)
@@ -603,9 +621,46 @@ func (s *ITService) scanSaleTransfers(ctx context.Context, probe TreasuryTxProbe
 		return nil
 	})
 	if err != nil {
-		return nil, from, err
+		return nil, nil, from, err
 	}
-	return found, from, nil
+	if len(found) == 0 {
+		return nil, nil, from, nil
+	}
+	recorded, err := otherOrdersSaleHashes(ctx, db, leg, found)
+	if err != nil {
+		return nil, nil, from, err
+	}
+	var mine []string
+	for _, h := range found {
+		if recorded[strings.ToLower(h)] {
+			others = append(others, h)
+		} else {
+			mine = append(mine, h)
+		}
+	}
+	return mine, others, from, nil
+}
+
+// otherOrdersSaleHashes is the subset of hashes (lower-cased) that a sale leg
+// of another order on the leg's chain records. Its own order's legs never
+// count: an earlier attempt's transfer is her payment.
+func otherOrdersSaleHashes(ctx context.Context, db *gorm.DB, leg *models.RampLeg, hashes []string) (map[string]bool, error) {
+	lower := make([]string, len(hashes))
+	for i, h := range hashes {
+		lower[i] = strings.ToLower(h)
+	}
+	var recorded []string
+	if err := db.WithContext(ctx).Model(&models.RampLeg{}).
+		Where("kind = ? AND order_id <> ? AND chain_key = ? AND LOWER(tx_hash) IN ?",
+			models.RampLegKindSale, leg.OrderID, leg.ChainKey, lower).
+		Pluck("tx_hash", &recorded).Error; err != nil {
+		return nil, fmt.Errorf("company wallet: read other orders' sales: %w", err)
+	}
+	out := make(map[string]bool, len(recorded))
+	for _, h := range recorded {
+		out[strings.ToLower(h)] = true
+	}
+	return out, nil
 }
 
 // secondPaymentGate is the one check before anything that could pay her a
@@ -650,7 +705,7 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 			if !s.HasCompanyWallet() {
 				return "", ErrTreasuryUnavailable
 			}
-			ev, err := s.chainEvidence(ctx, leg)
+			ev, err := s.chainEvidence(ctx, db, leg)
 			if err != nil {
 				return "", err
 			}

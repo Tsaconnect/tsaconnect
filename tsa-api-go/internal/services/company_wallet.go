@@ -412,7 +412,11 @@ func (w *CompanyWallet) read(ctx context.Context, chain, token string) (*big.Int
 		r = result{err: fmt.Errorf("read timed out: %w", rctx.Err())}
 	}
 	if r.err != nil {
-		r.err = fmt.Errorf("%w: %s on %s: %v", ErrTreasuryStockUnreadable, token, chain, r.err)
+		// Redacted here, where it is made: the transport error carries the RPC
+		// URL, key in its path, and this error is logged by the router and the
+		// inbound matcher, stored as a parked order's failure_reason and shown
+		// in the console.
+		r.err = fmt.Errorf("%w: %s on %s: %s", ErrTreasuryStockUnreadable, token, chain, RedactAlertText(r.err.Error()))
 	}
 	w.mu.Lock()
 	w.stock[chain+"|"+token] = stockReading{units: r.units, err: r.err, at: w.now()}

@@ -129,3 +129,50 @@ func TestInsertTreasuryIntent_WaitsOnItsOwnStockLockOnly_Postgres(t *testing.T) 
 		t.Fatal("a lock on another token blocked a USDC open")
 	}
 }
+
+// Final review F3 (carried from Task 8): a live-priced company-wallet claim
+// reads the free stock and writes its new amount inside the same (chain,
+// token) lock an open takes, so a claim and an open can never both spend the
+// last stock. Deterministically: the claim waits while another transaction
+// holds that lock, and completes once it is released.
+func TestClaimLivePricedTreasuryBuy_WaitsOnTheStockLock_Postgres(t *testing.T) {
+	db, s := newLockedStockService(t, 50_000_000)
+	s.SetTreasuryMarketRate(&fixedTreasuryRate{rate: treasuryMarket})
+	candidate := newUSDCOrder()
+	if err := db.Create(candidate).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	release := holdLock(t, db, "ramp_treasury:base:USDC")
+	done := make(chan error, 1)
+	go func() {
+		// ₦9,000 against a ₦10,000 quote: priced live, so it needs the stock.
+		claimed, err := s.claimAndPriceStableBuy(context.Background(), candidate, "chg_pg_live", "900000", time.Now(), true)
+		if err == nil && !claimed {
+			err = errors.New("the claim was lost")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("the live-priced claim returned while the stock lock was held: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("claim after release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the claim did not proceed after the lock was released")
+	}
+	var got models.ITIntent
+	if err := db.First(&got, "id = ?", candidate.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.ITStatusPaymentReceived || !got.Repriced || got.AssetAmount == candidate.AssetAmount {
+		t.Fatalf("status=%s repriced=%v asset=%s, want claimed at the live price", got.Status, got.Repriced, got.AssetAmount)
+	}
+}

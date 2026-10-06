@@ -267,3 +267,22 @@ func TestReprobeReceipts_RedactsTheRPCKey(t *testing.T) {
 		t.Fatalf("log = %q", logs.String())
 	}
 }
+
+// leakyRPCErr is what go-ethereum's transport puts in an error: the whole
+// request URL, and RPC providers carry the API key in its path.
+const leakyRPCErr = `Post "https://base-mainnet.g.alchemy.com/v2/SECRETKEY": dial tcp: i/o timeout`
+
+// Final review F1: a failed stock read reaches the router's failover log, the
+// inbound matcher's warning, a parked order's failure_reason and the console.
+// It is redacted where it is made — and still reads as unreadable stock.
+func TestCompanyWalletBalance_ReadErrorCarriesNoRPCKey(t *testing.T) {
+	w, native, _ := newTestCompanyWallet(t, 50_000_000)
+	native.tokenBalanceErr = errors.New(leakyRPCErr)
+	for _, fresh := range []bool{true, false} {
+		_, err := w.Balance(context.Background(), "base", "USDC", fresh)
+		if err == nil || !errors.Is(err, ErrTreasuryStockUnreadable) || strings.Contains(err.Error(), "SECRETKEY") ||
+			!strings.Contains(err.Error(), "base-mainnet.g.alchemy.com") {
+			t.Fatalf("fresh=%v: err = %v, want unreadable stock naming the host but not the key", fresh, err)
+		}
+	}
+}

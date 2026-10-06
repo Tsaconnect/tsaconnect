@@ -307,3 +307,51 @@ func TestTreasuryMarketRate_CachedMidCannotBeMutatedByCallers(t *testing.T) {
 		t.Fatalf("cache mutated: %v %v", again, err)
 	}
 }
+
+// Final review F5: an upstream error can carry a request URL with a key in its
+// path or query. Every log line and the returned error are redacted.
+func TestTreasuryMarketRate_UpstreamErrorsCarryNoKey(t *testing.T) {
+	ctx := context.Background()
+	pcLeak := func() *fakePaycrestMarket {
+		return &fakePaycrestMarket{err: errors.New(`Get "https://api.paycrest.io/v1/rates/SECRETKEY?apikey=SECRETKEY": timeout`)}
+	}
+
+	logs := captureLog(t)
+	r := newTreasuryMarketRate(pcLeak(), rateService(t, &midRateQuoter{err: errors.New(leakyRPCErr)}, fx1350), 400)
+	_, err := r.BuyRate(ctx, "NGN")
+	if !errors.Is(err, ErrStableQuoteUnavailable) || strings.Contains(err.Error(), "SECRETKEY") {
+		t.Fatalf("both down: err = %v", err)
+	}
+	if l := logs.String(); strings.Contains(l, "SECRETKEY") || !strings.Contains(l, "ALERT ramp_treasury_rate_unavailable fiat=NGN") ||
+		!strings.Contains(l, "api.paycrest.io") {
+		t.Fatalf("both down: log = %q", l)
+	}
+
+	// Paycrest down, the mid up: the fallback METRIC names the reason.
+	logs.Reset()
+	if _, err := newTreasuryMarketRate(pcLeak(), rateService(t, usualMid(), fx1350), 400).BuyRate(ctx, "NGN"); err != nil {
+		t.Fatal(err)
+	}
+	if l := logs.String(); strings.Contains(l, "SECRETKEY") || !strings.Contains(l, "ramp_treasury_market_fallback") {
+		t.Fatalf("fallback: log = %q", l)
+	}
+
+	// A stale mid served over a failing probe.
+	q := usualMid()
+	r = newTreasuryMarketRate(pcLeak(), rateService(t, q, fx1350), 400)
+	start := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	clock := start
+	r.now = func() time.Time { return clock }
+	if _, err := r.BuyRate(ctx, "NGN"); err != nil {
+		t.Fatal(err)
+	}
+	q.err = errors.New(leakyRPCErr)
+	clock = start.Add(2 * time.Minute)
+	logs.Reset()
+	if _, err := r.BuyRate(ctx, "NGN"); err != nil {
+		t.Fatal(err)
+	}
+	if l := logs.String(); strings.Contains(l, "SECRETKEY") || !strings.Contains(l, "serving a") {
+		t.Fatalf("stale mid: log = %q", l)
+	}
+}
