@@ -343,3 +343,110 @@ func TestActivateWithKYC_NilProvisioner(t *testing.T) {
 		t.Fatalf("want ErrPMProvisioningUnavailable, got %v", err)
 	}
 }
+
+// ── Central inbound: no virtual account ─────────────────────────────────────
+//
+// Once P2P buyers are routed to the company account, a merchant's virtual
+// account is never shown to anyone. Minting one would still ask the merchant
+// for a BVN/NIN purely to create an account nothing reads.
+
+// seedKYCUser gives the onboarding DB a users row with the given Didit status.
+// Without a BVN/NIN, that verification is the merchant's only proof of
+// identity before third-party money starts being forwarded to them.
+func seedKYCUser(t *testing.T, db *gorm.DB, userID uuid.UUID, status string) {
+	t.Helper()
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY, verification_status TEXT, verified_legal_name TEXT)`).Error; err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO users (id, verification_status, verified_legal_name) VALUES (?, ?, ?)`,
+		userID, status, "ADA OBI").Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+}
+
+func TestActivateWithKYC_VirtualAccountsRetiredActivatesWithoutAnID(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	fake := &fakeNombaProvisioner{}
+	svc := NewPMOnboardingService(db, fake)
+	svc.SetVirtualAccountsRetired(true)
+
+	userID := uuid.New()
+	seedKYCUser(t, db, userID, models.VerificationStatusVerified)
+	pm := approvedPM(t, svc, userID)
+
+	out, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", "")
+	if err != nil {
+		t.Fatalf("ActivateWithKYC: %v", err)
+	}
+	if out.Status != models.PaymentMerchantStatusActive {
+		t.Errorf("status = %q, want active", out.Status)
+	}
+	if fake.createVirtualAccountCalls != 0 {
+		t.Errorf("CreateVirtualAccount called %d times, want 0 — nothing routes buyers to it", fake.createVirtualAccountCalls)
+	}
+	var raw models.PaymentMerchant
+	db.First(&raw, "id = ?", pm.ID)
+	if raw.Status != models.PaymentMerchantStatusActive || raw.InboundAccountNumber != "" {
+		t.Errorf("persisted status=%q inbound=%q, want active with no account", raw.Status, raw.InboundAccountNumber)
+	}
+}
+
+func TestActivateWithKYC_VirtualAccountsRetiredNeedsNoProvisioner(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, nil)
+	svc.SetVirtualAccountsRetired(true)
+
+	userID := uuid.New()
+	seedKYCUser(t, db, userID, models.VerificationStatusVerified)
+	pm := approvedPM(t, svc, userID)
+
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", ""); err != nil {
+		t.Fatalf("ActivateWithKYC: %v — with no account to create, no provider is needed", err)
+	}
+}
+
+func TestNeedsIdentity_FollowsVirtualAccountRetirement(t *testing.T) {
+	svc := NewPMOnboardingService(newSQLiteForOnboarding(t), &fakeNombaProvisioner{})
+	if !svc.NeedsIdentity() {
+		t.Error("NeedsIdentity = false by default, want true — VA mode mints an account from the BVN/NIN")
+	}
+	svc.SetVirtualAccountsRetired(true)
+	if svc.NeedsIdentity() {
+		t.Error("NeedsIdentity = true with virtual accounts retired, want false")
+	}
+}
+
+func TestActivateWithKYC_VirtualAccountsRetiredRequiresVerifiedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string // "" = no users row at all
+	}{
+		{"unverified", "pending"},
+		{"no user row", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newSQLiteForOnboarding(t)
+			svc := NewPMOnboardingService(db, nil)
+			svc.SetVirtualAccountsRetired(true)
+
+			userID := uuid.New()
+			if tc.status != "" {
+				seedKYCUser(t, db, userID, tc.status)
+			} else {
+				seedKYCUser(t, db, uuid.New(), models.VerificationStatusVerified) // someone else
+			}
+			pm := approvedPM(t, svc, userID)
+
+			_, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "", "")
+			if !errors.Is(err, ErrKYCVerificationRequired) {
+				t.Fatalf("err = %v, want ErrKYCVerificationRequired", err)
+			}
+			var raw models.PaymentMerchant
+			db.First(&raw, "id = ?", pm.ID)
+			if raw.Status != models.PaymentMerchantStatusApproved {
+				t.Errorf("status = %q, want approved — an unverified merchant went live", raw.Status)
+			}
+		})
+	}
+}

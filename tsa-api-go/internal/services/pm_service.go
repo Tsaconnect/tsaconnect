@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -138,6 +139,108 @@ func WithinPerTradeCap(pm *models.PaymentMerchant, usd float64) bool {
 	return pm.PerTradeCapUSD == 0 || usd <= pm.PerTradeCapUSD
 }
 
+// AutoSettleRefusal is why a PM buy trade may not settle without a person:
+// Code is a models.InboundHold* value (safe for logs and email, names nobody)
+// and Reason is console prose for an operator.
+type AutoSettleRefusal struct {
+	Code   string
+	Reason string
+}
+
+// CheckAutoSettle applies the merchant's own limits to a buy trade about to be
+// settled automatically: the merchant must be active, the trade must be
+// valuable, and it must fit the per-trade and daily caps. A trade that cannot
+// be valued is refused — "within the cap" is something to show, not assume.
+//
+// The one check for both inbound paths. The VA webhook routes a refusal to the
+// PM manual queue; central inbound holds the credit. A non-nil error means the
+// daily cap could not be evaluated, which callers must treat as "do not
+// settle" and may retry.
+func (s *PMService) CheckAutoSettle(ctx context.Context, pm *models.PaymentMerchant, trade *models.P2PTrade) (*AutoSettleRefusal, error) {
+	if !pm.IsActive() {
+		return &AutoSettleRefusal{
+			Code: models.InboundHoldMerchantNotActive,
+			Reason: fmt.Sprintf("P2P trade %s: merchant %q is %s, so the payment was not settled automatically. Resume the merchant and assign this credit to the trade, or refund the sender",
+				trade.ID, pm.Name, pm.Status),
+		}, nil
+	}
+	usd, ok := tradeUSDValue(trade)
+	if !ok {
+		return &AutoSettleRefusal{
+			Code: models.InboundHoldOutsideMerchantCap,
+			Reason: fmt.Sprintf("P2P trade %s has an unreadable token amount %q, so it cannot be checked against merchant %q's caps. Check the trade, then assign this credit to it or refund the sender",
+				trade.ID, trade.TokenAmount, pm.Name),
+		}, nil
+	}
+	if !WithinPerTradeCap(pm, usd) {
+		return &AutoSettleRefusal{
+			Code: models.InboundHoldOutsideMerchantCap,
+			Reason: fmt.Sprintf("P2P trade %s is $%.2f, over merchant %q's per-trade cap of $%.2f. Assign this credit to the trade to settle it anyway, or refund the sender",
+				trade.ID, usd, pm.Name, pm.PerTradeCapUSD),
+		}, nil
+	}
+	within, err := s.WithinDailyCap(ctx, pm, usd)
+	if err != nil {
+		return nil, fmt.Errorf("daily-cap check for trade %s: %w", trade.ID, err)
+	}
+	if !within {
+		return &AutoSettleRefusal{
+			Code: models.InboundHoldOutsideMerchantCap,
+			Reason: fmt.Sprintf("P2P trade %s ($%.2f) would take merchant %q over their daily cap of $%.2f. Assign this credit to the trade to settle it anyway, or refund the sender",
+				trade.ID, usd, pm.Name, pm.DailyCapUSD),
+		}, nil
+	}
+	return nil, nil
+}
+
+// WithinDailyCap reports whether releasing prospectiveUSD for pm would keep the
+// PM's total released/committed USD for "today" (>= the current UTC midnight)
+// within pm.DailyCapUSD. A cap of 0 is unlimited (always true).
+//
+// "Today" is computed from time.Now().UTC() truncated to midnight (the service
+// holds no injected clock). The consumed total sums tradeUSDValue over this PM's
+// trades created since midnight that have committed/consumed capacity — statuses
+// IN ('paid','releasing','released') on this PM's ads. Rows with an unparseable
+// token_amount (tradeUSDValue ok=false) are skipped, mirroring the per-trade
+// guard. Returns (sum+prospectiveUSD) <= cap. A query error is surfaced so the
+// caller can fail safe (never auto-release on a cap it can't evaluate).
+func (s *PMService) WithinDailyCap(ctx context.Context, pm *models.PaymentMerchant, prospectiveUSD float64) (bool, error) {
+	if pm.DailyCapUSD == 0 {
+		return true, nil // unlimited
+	}
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	var trades []models.P2PTrade
+	if err := s.db.WithContext(ctx).
+		Table("p2p_trades").
+		Select("p2p_trades.id, p2p_trades.token, p2p_trades.chain_id, p2p_trades.token_amount").
+		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
+		Where("p2p_ads.pm_id = ?", pm.ID).
+		Where("p2p_trades.status IN ?", []string{
+			models.P2PTradeStatusPaid,
+			models.P2PTradeStatusReleasing,
+			models.P2PTradeStatusReleased,
+		}).
+		Where("p2p_trades.created_at >= ?", midnight).
+		Scan(&trades).Error; err != nil {
+		return false, err
+	}
+
+	var sum float64
+	for i := range trades {
+		usd, ok := tradeUSDValue(&trades[i])
+		if !ok {
+			// Unparseable token_amount — can't value this row; skip it (the same
+			// row is independently blocked from auto-release by the per-trade guard).
+			log.Printf("[pm] daily-cap: skipping trade=%s with unparseable token_amount %q", trades[i].ID, trades[i].TokenAmount)
+			continue
+		}
+		sum += usd
+	}
+	return sum+prospectiveUSD <= pm.DailyCapUSD, nil
+}
+
 // SumActiveAvailableNGN returns the SUM of available_ngn over all ACTIVE PMs as
 // a 2-dp NGN decimal string, plus the count of active PMs summed. Under the
 // VA-only model the NGN reconciler compares this aggregate against the single
@@ -268,4 +371,3 @@ func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, erro
 	}
 	return pms, nil
 }
-

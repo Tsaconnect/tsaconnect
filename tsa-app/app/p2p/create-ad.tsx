@@ -1063,18 +1063,19 @@ const CreateAdScreen: React.FC = () => {
             {isPm ? 'Payment method' : 'Payment methods'}
           </Text>
           {isPm ? (
-            // PM ads settle through the merchant's Nomba virtual account — buyers
-            // are shown the VA to pay, and settlement is automatic. No manual
-            // payment method is selected or required.
+            // PM ads settle automatically — buyers are shown the account to pay
+            // on the trade (the merchant's virtual account, or TSA Connect's
+            // under central inbound). No manual payment method is selected or
+            // required.
             <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                 <Icon name="checkCircle" size={22} color={colors.accent} />
                 <View style={{ flex: 1 }}>
                   <Text variant="bodyMed" weight="700">
-                    Auto-settled via your Nomba account
+                    Settled automatically
                   </Text>
                   <Text variant="caption" color="textSecondary">
-                    Buyers pay your virtual account and crypto releases automatically — no manual payment method needed.
+                    Buyers pay into the account shown on the trade and crypto releases automatically — no manual payment method needed.
                   </Text>
                 </View>
               </View>
