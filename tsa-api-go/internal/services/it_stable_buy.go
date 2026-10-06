@@ -229,11 +229,9 @@ func (s *ITService) CreateStableBuyIntent(
 			// Both quoted: the currency reaches here from a request body, and
 			// TrimSpace does not remove an embedded newline that could forge a
 			// second log line.
-			// TEST BRANCH ONLY (test/fw-stable-canary) — never merge. Lets the
-			// owner run the Flutterwave production canary for a currency routed
-			// to another provider. Redeploy origin/main to restore the refusal.
-			log.Printf("[it stable buy] CANARY: opening a flutterwave buy for %q although it ramps on %q",
+			log.Printf("[it stable buy] refused: %q ramps on %q, not flutterwave — caller is an out-of-date client",
 				q.Currency, p)
+			return nil, nil, ErrStableBuyWrongRamp
 		}
 	}
 	return s.openStableBuy(ctx, userID, q, destChain, destAddress, stableBuyOpen{
