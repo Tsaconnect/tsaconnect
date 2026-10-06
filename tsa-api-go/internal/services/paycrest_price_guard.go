@@ -40,11 +40,12 @@ func (e *PriceMovedPastQuoteError) Is(target error) bool {
 	return target == ErrPriceMovedPastQuote
 }
 
-// checkPriceGuard compares a bound fiat-per-token rate with the limit. On a
+// CheckPriceGuard compares a bound fiat-per-token rate with the limit the
+// router set from the user's quote — the same guard for every provider. On a
 // buy she pays naira per token, so bound must not exceed limit; on a sell she
-// receives naira per token, so bound must not fall below it. Exact decimal
-// arithmetic — never float. An empty limit or PriceGuardOff skips the check.
-func checkPriceGuard(side, bound, limit string, mode PriceGuardMode) error {
+// receives it, so bound must not fall below it. Exact decimal arithmetic. An
+// empty limit or PriceGuardOff skips the check.
+func CheckPriceGuard(provider, side, bound, limit string, mode PriceGuardMode) error {
 	if mode == PriceGuardOff || strings.TrimSpace(limit) == "" {
 		return nil
 	}
@@ -58,10 +59,16 @@ func checkPriceGuard(side, bound, limit string, mode PriceGuardMode) error {
 	}
 	// Only stage=bind predicts enforce refusals: enforce decides on this bound
 	// rate, while the router's stage=quote line compares the book's.
-	log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=bind provider=paycrest side=%s bound=%q limit=%q mode=%s",
-		side, bound, limit, mode)
+	log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=bind provider=%s side=%s bound=%q limit=%q mode=%s",
+		provider, side, bound, limit, mode)
 	if mode == PriceGuardEnforce {
 		return &PriceMovedPastQuoteError{BoundRate: strings.TrimSpace(bound)}
 	}
 	return nil
+}
+
+// checkPriceGuard is CheckPriceGuard for Paycrest's own order paths; its log
+// line is byte-identical to before.
+func checkPriceGuard(side, bound, limit string, mode PriceGuardMode) error {
+	return CheckPriceGuard("paycrest", side, bound, limit, mode)
 }
