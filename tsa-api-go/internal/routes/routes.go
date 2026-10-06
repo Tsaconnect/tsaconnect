@@ -1096,7 +1096,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// Same auth, idempotency and per-user write limits as /paycrest.
 			if rh := pch.Ramp(); rh != nil {
 				rg := api.Group("/ramp")
-				rg.GET("/quote", rh.Quote) // public, like /paycrest/quote
+				// Public, like /paycrest/quote, but each call can read the
+				// company wallet's stock: a per-IP limit (review minor).
+				rg.GET("/quote", middleware.RateLimiter(60, time.Minute), rh.Quote)
 				rg.Use(auth)
 				{
 					rampWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
@@ -1214,6 +1216,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// user's naira, same class of action as AdminRepriceCredit above —
 			// it belongs behind the same super_admin gate, not plain admin.
 			superIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
+		}
+		// The company wallet's console (spec 2026-10-03 §13 Q6): stock, parked
+		// and stalled orders, and the money-moving operator actions — all
+		// super_admin, viewing included (D57). Registered only when the
+		// wallet is wired.
+		if ith.CompanyWalletEnabled() {
+			cw := api.Group("/admin/ramp/company-wallet")
+			cw.Use(adminAuth, middleware.RequireP2PAdmin(), middleware.RequireSuperAdmin())
+			{
+				cw.GET("", ith.AdminCompanyWallet)
+				cw.GET("/orders", ith.AdminCompanyWalletOrders)
+				cw.POST("/orders/:id/deliver", ith.AdminDeliverTreasuryBuy)
+				cw.POST("/orders/:id/refund", ith.AdminRefundStableBuy)
+				cw.POST("/orders/:id/resend", ith.AdminResendTreasuryBuy)
+			}
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")

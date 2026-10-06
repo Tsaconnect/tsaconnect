@@ -40,6 +40,10 @@ type ITHandler struct {
 	// paymentsCtx bounds an on-demand lookup by the server's lifetime instead
 	// of the request's (see checkPaymentsNow).
 	paymentsCtx context.Context
+	// cwAdmin serves the super-admin company-wallet console (spec 2026-10-03
+	// §13 Q6). Nil: the routes are not registered.
+	cwAdmin  CompanyWalletAdmin
+	cwLowUSD float64
 }
 
 // PaymentChecker is the narrow seam over jobs.InboundCreditPoller that

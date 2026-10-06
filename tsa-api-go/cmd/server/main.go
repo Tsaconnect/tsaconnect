@@ -1149,6 +1149,9 @@ func main() {
 			}
 			scheduler.Register(jobs.NewGasFloatMonitorNamed("ramp_company_wallet", itService.CompanyWalletFloats(), 5*time.Minute).
 				WithTokenLowAlert(cfg.RampTreasuryLowBalanceUSD, inboundAlerts))
+			if itHandler != nil {
+				itHandler.SetCompanyWalletAdmin(itService, cfg.RampTreasuryLowBalanceUSD)
+			}
 		}
 	}
 
