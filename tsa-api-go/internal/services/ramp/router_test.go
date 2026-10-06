@@ -175,7 +175,8 @@ func TestRouterQuote_ErrorPrecedence(t *testing.T) {
 	if err := q(ErrNoVenue, errors.New("timeout")); !errors.Is(err, ErrNoVenue) {
 		t.Errorf("no-venue beside an outage → %v (spec: any no-venue wins)", err)
 	}
-	if err := q(ErrLegClosed, ErrBelowMinimum); !errors.Is(err, ErrUnavailable) {
+	// Decision D13 (spec rev 3 §4.4): a closed leg no longer hides the amount.
+	if err := q(ErrLegClosed, ErrBelowMinimum); !errors.Is(err, ErrBelowMinimum) {
 		t.Errorf("closed + below-minimum, no no-venue → %v", err)
 	}
 }

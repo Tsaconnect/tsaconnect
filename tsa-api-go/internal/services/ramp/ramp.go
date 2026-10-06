@@ -27,6 +27,13 @@ const (
 // forever: sponsorship, disputes and the app's hold keys parse them as UUIDs.
 const ProviderPaycrest = "paycrest"
 
+// The two IT-backed providers (spec 2026-10-03 rev 3). Their order ids are the
+// bare IT intent UUIDs; "<provider>:<uuid>" is accepted too.
+const (
+	ProviderTreasury    = "treasury"    // the company wallet
+	ProviderFlutterwave = "flutterwave" // Flutterwave buys and sends each order
+)
+
 // Request is what the user asked for. Token/ChainKey are optional on a quote
 // (unpinned: best venue per pair) and required on an open.
 type Request struct {
@@ -37,19 +44,42 @@ type Request struct {
 	ChainKey   string
 }
 
-// Venue keeps today's PaycrestVenue JSON shape exactly — the app calls
-// tokenAmount.toFixed(), so it stays a number — plus the opaque handle.
+// Venue keeps today's PaycrestVenue JSON shape — the app calls
+// tokenAmount.toFixed(), so it stays a number — plus the opaque handle and the
+// fee display (spec §14): Rate is the display rate (our margin in, provider
+// fees out), EffectiveRate the all-in rate the router ranks and guards on, and
+// Fees one line per provider fee. TokenAmount is after every fee.
 type Venue struct {
-	Handle        string  `json:"handle"`
-	Provider      string  `json:"-"`
-	ChainKey      string  `json:"chain"`
-	Token         string  `json:"token"`
-	Rate          string  `json:"rate"`
-	SpreadPercent float64 `json:"spreadPercent"`
-	TokenAmount   float64 `json:"tokenAmount"`
-	// Kind is always "direct" in v1 (converted venues stay on /paycrest);
-	// emitted so the venue JSON is exactly today's.
+	Handle        string     `json:"handle"`
+	Provider      string     `json:"-"`
+	ChainKey      string     `json:"chain"`
+	Token         string     `json:"token"`
+	Rate          string     `json:"rate"`
+	EffectiveRate string     `json:"effectiveRate"`
+	SpreadPercent float64    `json:"spreadPercent"`
+	TokenAmount   float64    `json:"tokenAmount"`
+	Fees          []VenueFee `json:"fees"`
+	// Kind is always "direct" (converted venues stay on /paycrest).
 	Kind string `json:"kind,omitempty"`
+}
+
+// VenueFee is one provider fee inside a venue (spec §14): Token is the fee in
+// tokens and Ngn its naira value at the display rate, both decimal strings.
+type VenueFee struct {
+	Kind     string `json:"kind"` // "conversion" | "network"
+	Label    string `json:"label"`
+	Provider string `json:"provider"` // display name for the tag (Decision D39)
+	Token    string `json:"token"`
+	Ngn      string `json:"ngn"`
+}
+
+// RankRate is the rate a venue is ranked and price-guarded on: the all-in
+// rate, or the rate itself when the provider gives no separate one (D40).
+func (v Venue) RankRate() string {
+	if strings.TrimSpace(v.EffectiveRate) != "" {
+		return v.EffectiveRate
+	}
+	return v.Rate
 }
 
 type VenueKey struct{ ChainKey, Token string }
@@ -69,17 +99,23 @@ type OrderInput struct {
 	AccountName       string
 }
 
-// Order is one provider's order. v1 carries the Paycrest record as-is so the
-// handler applies its existing view (orderForCaller); a later provider adds
-// its own field.
+// Order is one provider's order, carried as the provider's own record so the
+// handler applies that provider's view.
 type Order struct {
 	Provider string
 	Paycrest *models.PaycrestOrderRecord
+	// IT is a company-wallet or Flutterwave buy (an it_intents row). PayInto
+	// is where to pay while it awaits the transfer; nil after.
+	IT      *models.ITIntent
+	PayInto *services.StableBuyInstructions
 }
 
 func (o Order) CreatedAt() time.Time {
-	if o.Paycrest != nil {
+	switch {
+	case o.Paycrest != nil:
 		return o.Paycrest.CreatedAt
+	case o.IT != nil:
+		return o.IT.CreatedAt
 	}
 	return time.Time{}
 }
@@ -124,12 +160,16 @@ var (
 	ErrOutcomeUnknown   = errors.New("ramp: order outcome unknown")
 	ErrVenueUnavailable = errors.New("ramp: venue unavailable")
 	// Quote / routing outcomes.
-	ErrLegClosed     = errors.New("ramp: nobody trades this way right now")
-	ErrBelowMinimum  = errors.New("ramp: amount below the minimum")
-	ErrNoVenue       = errors.New("ramp: no venue can fill this request")
-	ErrUnavailable   = errors.New("ramp: every provider failed")
-	ErrOrderNotFound = errors.New("ramp: order not found")
-	ErrInvalidQuote  = errors.New("ramp: missing or invalid quote")
+	ErrLegClosed    = errors.New("ramp: nobody trades this way right now")
+	ErrBelowMinimum = errors.New("ramp: amount below the minimum")
+	ErrAboveMaximum = errors.New("ramp: amount above the maximum")
+	// ErrAbandonCapReached: too many unpaid routed buys cancelled or expired
+	// in the last 24h (spec §7). Carried on ErrVenueUnavailable.
+	ErrAbandonCapReached = errors.New("ramp: too many unpaid purchases abandoned today")
+	ErrNoVenue           = errors.New("ramp: no venue can fill this request")
+	ErrUnavailable       = errors.New("ramp: every provider failed")
+	ErrOrderNotFound     = errors.New("ramp: order not found")
+	ErrInvalidQuote      = errors.New("ramp: missing or invalid quote")
 )
 
 // PriceMovedError: nothing opened within tolerance; Quote is the fresh
@@ -181,8 +221,9 @@ func DecodeHandle(h string) (string, VenueKey, error) {
 	return parts[0], VenueKey{ChainKey: parts[1], Token: parts[2]}, nil
 }
 
-// ResolveID maps an order id to its provider: a bare UUID is Paycrest's
-// (never prefixed — spec §4.4); "<provider>:<native>" is any other's.
+// ResolveID splits "<provider>:<native>". A bare UUID comes back as Paycrest's
+// for compatibility, but it may be any provider's (the IT providers' ids are
+// bare too): the Router asks each provider in turn (Decision D11).
 func ResolveID(id string) (string, string, error) {
 	id = strings.TrimSpace(id)
 	if _, err := uuid.Parse(id); err == nil {

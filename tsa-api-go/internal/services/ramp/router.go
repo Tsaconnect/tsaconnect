@@ -25,8 +25,9 @@ type Config struct {
 	OpenBudget      time.Duration
 }
 
-// Router routes quotes and orders across providers, in a fixed order
-// (Paycrest first) that also breaks rate ties.
+// Router routes quotes and orders across providers, in a fixed registration
+// order (treasury, paycrest, flutterwave in production) that also breaks rate
+// ties (Decision D36).
 type Router struct {
 	cfg       Config
 	providers []Provider
@@ -113,6 +114,13 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 			res.MarketRate = a.q.MarketRate
 		}
 		for _, v := range a.q.Venues {
+			// Uniform JSON: every venue carries both rates and a fee list (§14).
+			if strings.TrimSpace(v.EffectiveRate) == "" {
+				v.EffectiveRate = v.Rate
+			}
+			if v.Fees == nil {
+				v.Fees = []VenueFee{}
+			}
 			if req.Token != "" && !strings.EqualFold(v.Token, req.Token) {
 				continue
 			}
@@ -123,7 +131,7 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 		}
 	}
 	sort.SliceStable(res.Venues, func(i, j int) bool {
-		return RateBetter(req.Side, res.Venues[i].Rate, res.Venues[j].Rate)
+		return RateBetter(req.Side, res.Venues[i].RankRate(), res.Venues[j].RankRate())
 	})
 	if req.Token == "" || req.ChainKey == "" {
 		res.Venues = bestPerPair(res.Venues)
@@ -150,29 +158,39 @@ func bestPerPair(sorted []Venue) []Venue {
 	return out
 }
 
-// quoteError picks the user-facing reason when nothing quoted (spec §4.2).
+// quoteError picks the user-facing reason when nothing quoted (spec §4.2, as
+// amended by rev 3 §4.4: a closed leg no longer hides an amount-range answer).
 func quoteError(errs []error) error {
 	if len(errs) == 0 {
 		return ErrNoVenue // every provider answered, with nothing for this request
-	}
-	all := func(target error) bool {
-		for _, e := range errs {
-			if !errors.Is(e, target) {
-				return false
-			}
-		}
-		return true
 	}
 	for _, e := range errs {
 		if errors.Is(e, ErrNoVenue) {
 			return ErrNoVenue // spec rule: any "no venue for this size/pair"
 		}
 	}
+	all := func(match func(error) bool) bool {
+		for _, e := range errs {
+			if !match(e) {
+				return false
+			}
+		}
+		return true
+	}
+	closed := func(e error) bool { return errors.Is(e, ErrLegClosed) }
+	outOfRange := func(e error) bool { return errors.Is(e, ErrBelowMinimum) || errors.Is(e, ErrAboveMaximum) }
 	switch {
-	case all(ErrLegClosed):
+	case all(closed):
 		return ErrLegClosed
-	case all(ErrBelowMinimum):
-		return ErrBelowMinimum
+	case all(func(e error) bool { return closed(e) || outOfRange(e) }):
+		// Every provider that trades this way is out of range for this amount;
+		// below wins when they disagree.
+		for _, e := range errs {
+			if errors.Is(e, ErrBelowMinimum) {
+				return ErrBelowMinimum
+			}
+		}
+		return ErrAboveMaximum
 	default:
 		return ErrUnavailable
 	}
@@ -206,40 +224,48 @@ func (r *Router) RampLegs(ctx context.Context) (map[string]services.RampLegs, er
 	return out, nil
 }
 
-func (r *Router) resolve(id string) (Provider, string, error) {
+// order runs fn at the provider holding id. "<provider>:<native>" goes
+// straight there. A bare UUID can be any provider's, so providers are asked in
+// registration order and a not-found answer moves on (D11).
+func (r *Router) order(id string, fn func(p Provider, native string) (*Order, error)) (*Order, error) {
 	name, native, err := ResolveID(id)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	p := r.provider(name)
-	if p == nil {
-		return nil, "", ErrOrderNotFound
+	if _, perr := uuid.Parse(strings.TrimSpace(id)); perr != nil {
+		p := r.provider(name)
+		if p == nil {
+			return nil, ErrOrderNotFound
+		}
+		return fn(p, native)
 	}
-	return p, native, nil
+	for _, p := range r.providers {
+		o, err := fn(p, native)
+		if !isNotFound(err) {
+			return o, err
+		}
+	}
+	return nil, ErrOrderNotFound
+}
+
+// isNotFound is "this provider does not hold that id for this user", in any
+// provider's words.
+func isNotFound(err error) bool {
+	return errors.Is(err, ErrOrderNotFound) ||
+		errors.Is(err, services.ErrPaycrestOrderNotYours) ||
+		errors.Is(err, services.ErrPaycrestOrderNotFound)
 }
 
 func (r *Router) Get(ctx context.Context, userID uuid.UUID, id string) (*Order, error) {
-	p, native, err := r.resolve(id)
-	if err != nil {
-		return nil, err
-	}
-	return p.Get(ctx, userID, native)
+	return r.order(id, func(p Provider, native string) (*Order, error) { return p.Get(ctx, userID, native) })
 }
 
 func (r *Router) ClaimPayment(ctx context.Context, userID uuid.UUID, id string) (*Order, error) {
-	p, native, err := r.resolve(id)
-	if err != nil {
-		return nil, err
-	}
-	return p.ClaimPayment(ctx, userID, native)
+	return r.order(id, func(p Provider, native string) (*Order, error) { return p.ClaimPayment(ctx, userID, native) })
 }
 
 func (r *Router) Cancel(ctx context.Context, userID uuid.UUID, id string) (*Order, error) {
-	p, native, err := r.resolve(id)
-	if err != nil {
-		return nil, err
-	}
-	return p.Cancel(ctx, userID, native)
+	return r.order(id, func(p Provider, native string) (*Order, error) { return p.Cancel(ctx, userID, native) })
 }
 
 // List merges every provider's orders newest first. A failing provider is
@@ -344,13 +370,13 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			if st.tried[v.Provider] {
 				continue
 			}
-			if !Acceptable(q.Side, v.Rate, limit) {
+			if !Acceptable(q.Side, v.RankRate(), limit) {
 				if enforce {
 					st.outsideTolerance = true
 					continue
 				}
 				log.Printf("[ramp] METRIC ramp_price_guard_would_refuse stage=quote provider=%s side=%s quoted=%q venue_rate=%s limit=%s tol_bps=%d",
-					v.Provider, q.Side, req.QuotedRate, v.Rate, limit, r.cfg.ToleranceBps)
+					v.Provider, q.Side, req.QuotedRate, v.RankRate(), limit, r.cfg.ToleranceBps)
 			}
 			p := r.provider(v.Provider)
 			if p == nil {
@@ -466,11 +492,16 @@ func showBoundRates(res *QuoteResult, k VenueKey, bound []boundRate) {
 		}
 		if i < 0 { // the re-quote failed or no longer lists it
 			res.Venues = append(res.Venues, Venue{Handle: EncodeHandle(b.provider, k), Provider: b.provider,
-				ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect})
+				ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect, Fees: []VenueFee{}})
 			i = len(res.Venues) - 1
 		}
 		v := &res.Venues[i]
-		v.Rate = rateStr
+		// The bound rate is all-in. A venue with fee lines keeps its display
+		// rate from the re-quote; one without has no other rate to show.
+		v.EffectiveRate = rateStr
+		if len(v.Fees) == 0 {
+			v.Rate = rateStr
+		}
 		if amt > 0 {
 			v.TokenAmount = amt / rate
 		}
@@ -483,7 +514,7 @@ func showBoundRates(res *QuoteResult, k VenueKey, bound []boundRate) {
 		return
 	}
 	sort.SliceStable(res.Venues, func(i, j int) bool {
-		return RateBetter(Side(res.Side), res.Venues[i].Rate, res.Venues[j].Rate)
+		return RateBetter(Side(res.Side), res.Venues[i].RankRate(), res.Venues[j].RankRate())
 	})
 	res.Best = &res.Venues[0]
 }

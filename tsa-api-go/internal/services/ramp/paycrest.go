@@ -99,6 +99,8 @@ func (p *PaycrestProvider) Quote(ctx context.Context, r Request) (*ProviderQuote
 			ChainKey:      v.ChainKey,
 			Token:         v.Token,
 			Rate:          v.Rate,
+			EffectiveRate: v.Rate, // Paycrest's rate is already all-in (§14)
+			Fees:          []VenueFee{},
 			SpreadPercent: v.SpreadPercent,
 			TokenAmount:   v.TokenAmount,
 			Kind:          models.RouteKindDirect,
