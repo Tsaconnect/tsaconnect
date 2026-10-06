@@ -243,3 +243,10 @@ func EntitledAmount(quoted, expected, received *big.Int) *big.Int {
 	out := new(big.Int).Mul(quoted, received)
 	return out.Quo(out, expected)
 }
+
+// ConversionOwed is T, what a converted buy owes in the settlement token once
+// the round-trip budget B′ is held back: D × (10 000 − B′) ÷ 10 000, floored
+// (spec §15.7). The pricer, the open and the handoff all use it.
+func ConversionOwed(delivered *big.Int, markupBps int) *big.Int {
+	return bpsShare(delivered, int64(10_000-markupBps))
+}
