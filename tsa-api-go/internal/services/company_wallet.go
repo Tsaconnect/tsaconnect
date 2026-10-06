@@ -277,7 +277,7 @@ func (w *CompanyWallet) ReprobeReceipts(ctx context.Context) {
 		w.mu.Unlock()
 		switch {
 		case err != nil:
-			log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_receipts_unreadable=1 chain=%s err=%v — not quoted until a re-probe passes", chain, err)
+			log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_receipts_unreadable=1 chain=%s err=%v — not quoted until a re-probe passes", chain, RedactAlertText(err.Error()))
 		case !was:
 			log.Printf("[ramp-company-wallet] METRIC ramp_company_wallet_receipts_restored chain=%s — quoting again", chain)
 		}

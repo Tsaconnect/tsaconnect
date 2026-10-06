@@ -252,3 +252,18 @@ func TestNewCompanyWallet_NormalisesChainKeys(t *testing.T) {
 		t.Fatal(`Verifiers/Probes["Base"] not found by "base"`)
 	}
 }
+
+// An RPC transport error carries the full URL, API key included.
+func TestReprobeReceipts_RedactsTheRPCKey(t *testing.T) {
+	w0, _, _ := newTestCompanyWallet(t, 1)
+	rpc := &fakeRawRPC{blockErr: errors.New(`Post "https://base-mainnet.g.alchemy.com/v2/SECRETKEY": dial tcp: timeout`)}
+	w := NewCompanyWallet(CompanyWalletConfig{
+		Treasury: w0.Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		ReceiptRPCs: map[string]RawRPCCaller{"base": rpc}, ReceiptsOK: map[string]bool{"base": true},
+	})
+	logs := captureLog(t)
+	w.ReprobeReceipts(context.Background())
+	if strings.Contains(logs.String(), "SECRETKEY") || !strings.Contains(logs.String(), "receipts_unreadable") {
+		t.Fatalf("log = %q", logs.String())
+	}
+}

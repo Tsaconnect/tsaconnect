@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"strings"
 	"testing"
@@ -30,29 +31,82 @@ func TestBuildCompanyWallet_IgnoresTheProviderFlag(t *testing.T) {
 	}
 }
 
+func captureWalletLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &logs
+}
+
+// Each dormancy case must stop at its OWN branch, so every case asserts its
+// own reason rather than just a nil return.
 func TestBuildCompanyWallet_Dormancy(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(c *config.Config)
+		chains *services.BlockchainService
+		want   string
+	}{
+		{"no key", func(c *config.Config) { c.RampTreasuryWalletPrivateKey = "" }, nil, "not set"},
+		{"bad key", func(c *config.Config) { c.RampTreasuryWalletPrivateKey = "not-hex" }, nil, "invalid RAMP_TREASURY_WALLET_PRIVATE_KEY"},
+		{"no chain registry", func(c *config.Config) {}, nil, "no chain registry"},
+		{"raw key refused in production", func(c *config.Config) { c.Env = "production" }, &services.BlockchainService{}, "refused in production"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureWalletLog(t)
+			cfg := testConfig(t)
+			cfg.RampTreasuryBuy = true
+			cfg.RampTreasuryMaxUSD = "200"
+			cfg.RampTreasuryWalletChains = []string{"base"}
+			cfg.RampTreasuryWalletPrivateKey = testKeyA
+			tc.mutate(cfg)
+			if buildCompanyWallet(cfg, tc.chains) != nil {
+				t.Fatal("must be dormant")
+			}
+			if !strings.Contains(logs.String(), tc.want) {
+				t.Fatalf("log = %q, want reason %q", logs.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildCompanyWallet_BadKeyLogDoesNotEchoTheParserError(t *testing.T) {
+	logs := captureWalletLog(t)
 	cfg := testConfig(t)
-	cfg.RampTreasuryBuy = true
-	cfg.RampTreasuryMaxUSD = "200"
-	cfg.RampTreasuryWalletPrivateKey = ""
-	if buildCompanyWallet(cfg, nil) != nil {
-		t.Fatal("no key must be dormant")
+	cfg.RampTreasuryWalletPrivateKey = "zz-secret-ish"
+	buildCompanyWallet(cfg, nil)
+	if strings.Contains(logs.String(), "zz-secret-ish") || strings.Contains(logs.String(), "invalid byte") {
+		t.Fatalf("log echoes the key material: %q", logs.String())
 	}
-	cfg.RampTreasuryWalletPrivateKey = "not-hex"
-	if buildCompanyWallet(cfg, nil) != nil {
-		t.Fatal("a bad key must be dormant")
+}
+
+func TestBuildCompanyWallet_InvalidMaxUSDIsDormant(t *testing.T) {
+	for _, v := range []string{"abc", "0", "-5", ""} {
+		t.Run(v, func(t *testing.T) {
+			logs := captureWalletLog(t)
+			cfg := testConfig(t)
+			cfg.RampTreasuryWalletPrivateKey = testKeyA
+			cfg.RampTreasuryMaxUSD = v
+			if buildCompanyWallet(cfg, &services.BlockchainService{}) != nil {
+				t.Fatal("an invalid max must leave the wallet dormant")
+			}
+			if !strings.Contains(logs.String(), "ramp_company_wallet_cap_invalid_total=1") {
+				t.Fatalf("log = %q, want the cap_invalid ALERT", logs.String())
+			}
+		})
 	}
-	cfg.RampTreasuryWalletPrivateKey = testKeyA
-	if buildCompanyWallet(cfg, nil) != nil {
-		t.Fatal("no chain registry must be dormant")
-	}
-	prod := testConfig(t)
-	prod.Env = "production"
-	prod.RampTreasuryBuy = true
-	prod.RampTreasuryMaxUSD = "200"
-	prod.RampTreasuryWalletPrivateKey = testKeyA
-	if buildCompanyWallet(prod, &services.BlockchainService{}) != nil {
-		t.Fatal("a raw key refused in production must be dormant")
+}
+
+// An RPC transport error carries the full URL, API key included.
+func TestAlertReceiptsUnreadable_RedactsTheRPCKey(t *testing.T) {
+	logs := captureWalletLog(t)
+	alertReceiptsUnreadable("base", "base-mainnet.g.alchemy.com",
+		errors.New(`Post "https://base-mainnet.g.alchemy.com/v2/SECRETKEY": dial tcp: timeout`))
+	if strings.Contains(logs.String(), "SECRETKEY") || !strings.Contains(logs.String(), "receipts_unreadable") {
+		t.Fatalf("log = %q", logs.String())
 	}
 }
 
@@ -93,6 +147,13 @@ func TestOtherSigners_RefuseTheWalletKey(t *testing.T) {
 	cfg.RampTreasuryWalletPrivateKey = testKeyA
 	if !refusesToStart(t, func() { buildRampConversion(cfg, nil, nil, nil, nil) }) {
 		t.Fatal("the conversion treasury must refuse the wallet's key")
+	}
+	mk := testConfig(t)
+	mk.MarketplaceSonicGasEnabled = true
+	mk.RampSponsorPrivateKey = testKeyA
+	mk.RampTreasuryWalletPrivateKey = testKeyA
+	if !refusesToStart(t, func() { buildMarketplaceSonicGas(mk, &services.BlockchainService{}) }) {
+		t.Fatal("the marketplace sonic gas sponsor must refuse the wallet's key")
 	}
 	sp := testConfig(t)
 	sp.RampGasSponsorshipEnabled = true
