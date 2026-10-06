@@ -150,3 +150,23 @@ func TestCompanyWalletAdmin_UnexpectedErrorsAreRedacted(t *testing.T) {
 		}
 	}
 }
+
+func TestCompanyWalletAdmin_RaceAndCancelCodes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{fmt.Errorf("leg: %w", services.ErrLegNotPending), "bad_state"},
+		{fmt.Errorf("%w: %w (nonce 7)", services.ErrTreasuryResendRefused, services.ErrTreasuryResendNeedsCancel), "needs_cancel"},
+	} {
+		w := walletDo(walletAdminServer(&fakeWalletAdmin{err: tc.err}, uuid.New()), "POST",
+			"/w/orders/"+uuid.NewString()+"/resend", map[string]string{"note": "n"})
+		var env struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &env)
+		if w.Code != 409 || env.Code != tc.code {
+			t.Errorf("%v → %d %s", tc.err, w.Code, w.Body)
+		}
+	}
+}

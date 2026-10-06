@@ -2,10 +2,12 @@ package services
 
 import (
 	"context"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -100,5 +102,80 @@ func TestListCompanyWalletOrders_StuckWithNoSendOffersRefund(t *testing.T) {
 	if err != nil || len(orders) != 1 || !orders[0].Stalled || len(orders[0].Actions) != 1 || orders[0].Actions[0] != "refund" ||
 		orders[0].SendTxHash != "" {
 		t.Fatalf("orders = %+v err = %v", orders, err)
+	}
+}
+
+func stuckNoSendRig(t *testing.T) *deliverRig {
+	t.Helper()
+	r := newDeliverRig(t)
+	r.s.CompanyWallet().Treasury().SetKillSwitch(true)
+	_ = r.s.SendTreasuryBuy(context.Background(), r.intent.ID) // → delivering, refused
+	r.s.db.Model(&models.ITIntent{}).Where("id = ?", r.intent.ID).Update("updated_at", time.Now().Add(-31*time.Minute))
+	return r
+}
+
+// A delivering order holds her naira: an unreadable send keeps the row.
+func TestListCompanyWalletOrders_UnreadableSendKeepsTheRow(t *testing.T) {
+	r := stuckNoSendRig(t)
+	if err := r.s.db.Exec("DROP TABLE ramp_legs").Error; err != nil {
+		t.Fatal(err)
+	}
+	orders, err := r.s.ListCompanyWalletOrders(context.Background())
+	if err != nil || len(orders) != 1 || len(orders[0].Actions) != 0 ||
+		!strings.HasPrefix(orders[0].FailureReason, "could not read its send: ") {
+		t.Fatalf("orders = %+v err = %v", orders, err)
+	}
+}
+
+// A refused refund shows the stored reason AND the gate's, redacted.
+func TestListCompanyWalletOrders_RefundHeldShowsBothReasons(t *testing.T) {
+	r := stuckNoSendRig(t)
+	r.s.db.Model(&models.ITIntent{}).Where("id = ?", r.intent.ID).UpdateColumns(map[string]any{"failure_reason": "kill switch is on"})
+	r.s.db.Create(&models.RampLeg{OrderID: r.intent.ID, Kind: models.RampLegKindSale, Attempt: 1,
+		Status: models.RampLegStatusFailed, Error: "mystery", ChainKey: "base", Token: "USDC", Amount: "1"})
+	orders, err := r.s.ListCompanyWalletOrders(context.Background())
+	if err != nil || len(orders) != 1 || len(orders[0].Actions) != 0 ||
+		!strings.Contains(orders[0].FailureReason, "kill switch is on — refund held: ") ||
+		!strings.Contains(orders[0].FailureReason, "does not prove nothing moved") {
+		t.Fatalf("orders = %+v err = %v", orders, err)
+	}
+}
+
+type ctxBlockedProbe struct{ *fakeTxProbe }
+
+func (p ctxBlockedProbe) BlockNumber(ctx context.Context) (uint64, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+func (p ctxBlockedProbe) NonceAt(ctx context.Context, _ common.Address, _ *big.Int) (uint64, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+func (p ctxBlockedProbe) PendingNonceAt(ctx context.Context, _ common.Address) (uint64, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func TestListCompanyWalletOrders_SlowChainTimesOutPerOrder(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.s.SetCompanyWallet(NewCompanyWallet(CompanyWalletConfig{
+		Treasury: r.s.CompanyWallet().Treasury(), Decimals: map[string]map[string]int{"base": {"USDC": 6}},
+		Verifiers: map[string]ERC20SourcedTransferVerifier{"base": r.verifier},
+		Probes:    map[string]TreasuryTxProbe{"base": ctxBlockedProbe{r.probe}},
+	}))
+	oldO, oldL := companyWalletOrderCheckTimeout, companyWalletListTimeout
+	companyWalletOrderCheckTimeout, companyWalletListTimeout = 50*time.Millisecond, time.Second
+	defer func() { companyWalletOrderCheckTimeout, companyWalletListTimeout = oldO, oldL }()
+
+	start := time.Now()
+	orders, err := r.s.ListCompanyWalletOrders(ctx)
+	if err != nil || len(orders) != 1 || len(orders[0].Actions) != 0 || orders[0].Evidence == nil ||
+		orders[0].Evidence.Reason != chainCheckTimedOut || time.Since(start) > 2*time.Second {
+		t.Fatalf("orders = %+v err = %v (%s)", orders, err, time.Since(start))
 	}
 }

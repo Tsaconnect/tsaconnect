@@ -110,9 +110,11 @@ func companyWalletAdminError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, msg, "note_required")
 	case errors.Is(err, services.ErrTreasuryStockShort):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "stock_short")
+	case errors.Is(err, services.ErrTreasuryResendNeedsCancel):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "needs_cancel")
 	case errors.Is(err, services.ErrTreasuryResendRefused):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "resend_refused")
-	case errors.Is(err, services.ErrITBadState):
+	case errors.Is(err, services.ErrITBadState), errors.Is(err, services.ErrLegNotPending):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "bad_state")
 	case errors.Is(err, services.ErrStableIntentNotFound), strings.Contains(msg, "intent not found"):
 		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Order not found", "not_found")
