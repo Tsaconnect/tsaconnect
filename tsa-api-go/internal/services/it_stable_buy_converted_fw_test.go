@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/testutil"
 )
@@ -456,24 +457,66 @@ func TestMarkStableBuyRefunded_ClosesAHashlessFlutterwavePark(t *testing.T) {
 	}
 }
 
-// M7: the handoff itself refuses a delivered amount above what the record
-// was opened for, whatever priced it.
-func TestHandoffConversion_RefusesADeliveryAboveTheOpenedAmount(t *testing.T) {
+// M7/N1 on route 2: the handoff never bridges more than the record was
+// opened for — a delivery above it is capped at the opened amount (ALERT:
+// refund her the excess naira) and the order still moves, never stuck.
+func TestHandoffConversion_CapsADeliveryAboveTheOpenedAmount(t *testing.T) {
 	hash := "0x" + strings.Repeat("ab", 32)
 	s, intent := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL", TxHash: hash}, time.Minute)
 	// A pricing path that forgot the ceiling: D one unit above the opened 94.5375.
 	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "94537501")
 	logs := captureLog(t)
+	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	rec := conversionRecord(t, s, intent.ID)
+	if rec.Status != models.PaycrestStatusConverting || rec.TxHash != hash || rec.TokenAmount != "94.5375" ||
+		rec.QuotedAmount != ConversionOwed(big.NewInt(94_537_500), rec.MarkupBps).String() {
+		t.Fatalf("record = %+v, want converting at the opened amount", rec)
+	}
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusSettled {
+		t.Fatalf("intent = %s, want settled", got.Status)
+	}
+	l := logs.String()
+	if !strings.Contains(l, "ALERT ramp_converted_handoff_capped") || !strings.Contains(l, "excess=0.000001") ||
+		!strings.Contains(l, "refund") {
+		t.Fatalf("log = %q", l)
+	}
+}
+
+// An opened amount that cannot be read is still refused: nothing to cap at.
+func TestHandoffConversion_RefusesAnUnreadableOpenedAmount(t *testing.T) {
+	s, intent := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL", TxHash: "0x" + strings.Repeat("ab", 32)}, time.Minute)
+	s.db.Model(&models.PaycrestOrderRecord{}).Where("reference = ?", ITConversionRef(intent.ID)).Update("token_amount", "")
 	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); !errors.Is(err, ErrConvertedOverpaid) {
 		t.Fatalf("err = %v", err)
-	}
-	if rec := conversionRecord(t, s, intent.ID); rec.Status == models.PaycrestStatusConverting || rec.TxHash != "" {
-		t.Fatalf("record handed off: %+v", rec)
 	}
 	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusDelivering {
 		t.Fatalf("intent = %s", got.Status)
 	}
-	if !strings.Contains(logs.String(), "ALERT ramp_conversion_handoff_overpaid") {
-		t.Fatalf("log = %q", logs.String())
+}
+
+type recordingRatePublisher struct{ events []events.Event }
+
+func (p *recordingRatePublisher) Publish(e events.Event) { p.events = append(p.events, e) }
+
+// N2: a converted buy repriced live is told what SHE receives — T of her
+// requested token — never the USDC leg D it settles on.
+func TestNotifyRateUpdated_ConvertedBuyNamesTheRequestedTokenAndAmount(t *testing.T) {
+	s, _, intent := openFWConverted(t)
+	pub := &recordingRatePublisher{}
+	s.rateNotifier = pub
+	d := big.NewInt(90_000_000)
+	s.notifyRateUpdated(&intent, d)
+	owed := FormatStableUnits(ConversionOwed(d, fwConvertedVenue().MarkupBps).String())
+	if len(pub.events) != 1 {
+		t.Fatalf("events = %+v", pub.events)
+	}
+	e := pub.events[0]
+	if want := "Rate updated: you'll receive " + owed + " USDT"; e.Message != want || e.Data["asset"] != "USDT" {
+		t.Fatalf("event = %+v, want %q", e, want)
+	}
+	if strings.Contains(e.Message, "USDC") {
+		t.Fatalf("message names the USDC leg: %q", e.Message)
 	}
 }

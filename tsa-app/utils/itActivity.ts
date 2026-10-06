@@ -39,6 +39,23 @@ const intentStatus: Record<string, ITActivity['status']> = {
   reversed: { label: 'Reversed', tone: 'neutral' },
 };
 
+/** A converted buy's intent settles when its leg lands; until its conversion
+ *  settles too, the row says where the conversion is, never "Complete". */
+function convertedStatus(conversionStatus: string): ITActivity['status'] {
+  switch (conversionStatus) {
+    case 'recovery_pending':
+      return { label: 'Recovering', tone: 'warning' };
+    case 'refunding':
+      return { label: 'Refunding', tone: 'info' };
+    case 'refunded':
+      return { label: 'Refunded', tone: 'neutral' };
+    case 'failed':
+      return { label: 'Failed', tone: 'danger' };
+    default:
+      return { label: 'Converting', tone: 'info' };
+  }
+}
+
 function paycrestStatus(o: PaycrestOrder): ITActivity['status'] {
   switch (o.status) {
     case 'awaiting_payment':
@@ -123,7 +140,10 @@ export function intentActivity(i: ITIntent, symbolFor: SymbolFor): ITActivity {
     direction: i.direction,
     asset,
     amount,
-    status: intentStatus[i.status] ?? { label: humanize(i.status), tone: 'neutral' },
+    status:
+      i.status === 'settled' && i.conversionStatus && i.conversionStatus !== 'settled'
+        ? convertedStatus(i.conversionStatus)
+        : intentStatus[i.status] ?? { label: humanize(i.status), tone: 'neutral' },
     at: i.createdAt,
     href: `/wallet/it/intent/${i.id}`,
   };

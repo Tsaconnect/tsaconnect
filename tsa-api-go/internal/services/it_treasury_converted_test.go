@@ -208,3 +208,33 @@ func TestOpenTreasuryBuy_RefusesTheConversionTreasuryAsHerAddress(t *testing.T) 
 		t.Fatalf("log = %q", logs.String())
 	}
 }
+
+// M7/N1 on route 1: a sale proven above the record's opened amount settles —
+// the handoff caps the bridge at the opened amount (ALERT: refund the excess
+// naira) instead of rolling the settle back every tick.
+func TestConvertedBuy_Route1DeliveryAboveTheOpenedAmountIsCappedNotStuck(t *testing.T) {
+	r := newConvertedDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// A pricing path that forgot the ceiling: the record was opened for 7 USDC.
+	r.s.db.Model(&models.PaycrestOrderRecord{}).Where("reference = ?", ITConversionRef(r.intent.ID)).
+		Update("token_amount", "7")
+	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	logs := captureLog(t)
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	got, rec := reloadIntent(t, r.s, r.intent.ID), conversionRecord(t, r.s, r.intent.ID)
+	if got.Status != models.ITStatusSettled || rec.Status != models.PaycrestStatusConverting || rec.TokenAmount != "7" ||
+		rec.QuotedAmount != ConversionOwed(big.NewInt(7_000_000), rec.MarkupBps).String() {
+		t.Fatalf("intent=%s record=%+v", got.Status, rec)
+	}
+	if legs := r.legs(t); legs[0].Status == models.RampLegStatusPending {
+		t.Fatalf("leg still pending")
+	}
+	if !strings.Contains(logs.String(), "ALERT ramp_converted_handoff_capped") || !strings.Contains(logs.String(), "excess=0.232937") {
+		t.Fatalf("log = %q", logs.String())
+	}
+}

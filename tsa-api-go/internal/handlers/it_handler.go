@@ -927,17 +927,20 @@ func (h *ITHandler) ListIntents(c *gin.Context) {
 		rows[i].ITIntent = intents[i]
 		if rec := conversions[intents[i].ID]; rec != nil {
 			rows[i].RequestedToken, rows[i].RequestedChain = rec.RequestedToken, rec.RequestedChain
+			rows[i].ConversionStatus = rec.Status
 		}
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Intents", gin.H{"intents": rows})
 }
 
 // intentListRow is an intent as the list shows it: a converted buy also
-// names the asset and chain she receives.
+// names the asset and chain she receives, and where its conversion is (the
+// intent settles when its leg lands, while the bridge still runs).
 type intentListRow struct {
 	models.ITIntent
-	RequestedToken string `json:"requestedToken,omitempty"`
-	RequestedChain string `json:"requestedChain,omitempty"`
+	RequestedToken   string `json:"requestedToken,omitempty"`
+	RequestedChain   string `json:"requestedChain,omitempty"`
+	ConversionStatus string `json:"conversionStatus,omitempty"`
 }
 
 // GET /api/it/intents/:id — single intent (scoped to caller).

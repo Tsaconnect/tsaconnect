@@ -105,7 +105,8 @@ func TestListIntents_CarriesAConvertedBuysRequestedAsset(t *testing.T) {
 	for _, row := range env.Data.Intents {
 		switch row["id"] {
 		case converted.ID.String():
-			if row["requestedToken"] != "USDT" || row["requestedChain"] != "optimism" || row["asset"] != "USDC" {
+			if row["requestedToken"] != "USDT" || row["requestedChain"] != "optimism" || row["asset"] != "USDC" ||
+				row["conversionStatus"] != models.PaycrestStatusConverting {
 				t.Fatalf("converted row = %v", row)
 			}
 		case direct.ID.String():

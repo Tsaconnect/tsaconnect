@@ -72,6 +72,9 @@ export interface ITIntent {
    *  she receives, where `asset`/`destChain` are its USDC leg. */
   requestedToken?: string;
   requestedChain?: string;
+  /** Its conversion record's status (list only): a converted buy's intent
+   *  settles when its leg lands, while the bridge still runs. */
+  conversionStatus?: string;
 }
 
 // code carries the backend's machine error code (e.g. "it_agreement_required")

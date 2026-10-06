@@ -937,13 +937,20 @@ func (s *ITService) notifyRateUpdated(intent *models.ITIntent, units *big.Int) {
 	if s.rateNotifier == nil {
 		return
 	}
+	// A converted buy delivers T of her requested token, not the USDC leg D.
+	asset, amount := intent.Asset, units
+	if rec, err := s.ConversionFor(context.Background(), intent); err != nil {
+		log.Printf("[it stable buy] rate notice intent=%s conversion: %s", intent.ID, RedactAlertText(err.Error()))
+	} else if rec != nil && rec.RequestedToken != "" {
+		asset, amount = rec.RequestedToken, ConversionOwed(units, rec.MarkupBps)
+	}
 	s.rateNotifier.Publish(events.Event{
 		Type:    events.RampRateUpdated,
 		UserID:  intent.UserID,
 		Title:   "Rate updated",
-		Message: fmt.Sprintf("Rate updated: you'll receive %s %s", FormatStableUnits(units.String()), intent.Asset),
+		Message: fmt.Sprintf("Rate updated: you'll receive %s %s", FormatStableUnits(amount.String()), asset),
 		Data: map[string]interface{}{
-			"intentId": intent.ID.String(), "asset": intent.Asset, "assetAmount": units.String(),
+			"intentId": intent.ID.String(), "asset": asset, "assetAmount": amount.String(),
 		},
 	})
 }

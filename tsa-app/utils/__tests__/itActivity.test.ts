@@ -186,4 +186,17 @@ describe('converted buys', () => {
     expect(row.asset).toBe('USDT');
     expect(intentActivity(intent({ asset: 'USDC' }), symbolFor).asset).toBe('USDC');
   });
+
+  it('a settled converted buy whose conversion still runs is not Complete', () => {
+    const converted = (conversionStatus: string) =>
+      intentActivity(intent({ status: 'settled', requestedToken: 'USDT', conversionStatus }), symbolFor).status;
+    expect(converted('converting')).toEqual({ label: 'Converting', tone: 'info' });
+    expect(converted('pending')).toEqual({ label: 'Converting', tone: 'info' });
+    expect(converted('recovery_pending')).toEqual({ label: 'Recovering', tone: 'warning' });
+    expect(converted('refunding')).toEqual({ label: 'Refunding', tone: 'info' });
+    expect(converted('refunded')).toEqual({ label: 'Refunded', tone: 'neutral' });
+    expect(converted('settled')).toEqual({ label: 'Complete', tone: 'success' });
+    // A direct buy, or one whose conversion status is unknown, keeps its own label.
+    expect(intentActivity(intent({ status: 'settled' }), symbolFor).status.label).toBe('Complete');
+  });
 });

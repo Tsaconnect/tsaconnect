@@ -246,14 +246,23 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 	}
 	// N4 at the last gate: whatever priced D, a bridge larger than the record
 	// was opened (and capped, and reserved) for never starts. Before the
-	// handoff, token_amount is still the opened D.
+	// handoff, token_amount is still the opened D. A larger D is capped at
+	// it — the excess stays in our treasury and an operator refunds its
+	// naira — rather than refused: the leg is already delivered, and a
+	// refusal would roll the settle back every tick with no exit (N1).
 	if rec.Status != models.PaycrestStatusConverting {
 		opened, err := DecimalToBaseUnits(rec.TokenAmount, StableAssetDecimals)
-		if err != nil || delivered.Cmp(opened) > 0 {
-			log.Printf("[it converted buy] ALERT ramp_conversion_handoff_overpaid intent=%s record=%s delivered=%s opened=%q",
-				intent.ID, rec.ID, delivered, rec.TokenAmount)
-			return fmt.Errorf("%w: %s USDC delivered against %q opened", ErrConvertedOverpaid,
-				FormatStableUnits(delivered.String()), rec.TokenAmount)
+		if err != nil || opened.Sign() <= 0 {
+			log.Printf("[it converted buy] ALERT ramp_conversion_handoff_overpaid intent=%s record=%s opened=%q unreadable",
+				intent.ID, rec.ID, rec.TokenAmount)
+			return fmt.Errorf("%w: its opened amount %q is unreadable", ErrConvertedOverpaid, rec.TokenAmount)
+		}
+		if delivered.Cmp(opened) > 0 {
+			excess := new(big.Int).Sub(delivered, opened)
+			log.Printf("[it converted buy] ALERT ramp_converted_handoff_capped intent=%s record=%s opened=%s delivered=%s excess=%s "+
+				"— bridging the opened amount only; refund her the excess naira", intent.ID, rec.ID,
+				FormatStableUnits(opened.String()), FormatStableUnits(delivered.String()), FormatStableUnits(excess.String()))
+			delivered = opened
 		}
 	}
 	res := tx.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
