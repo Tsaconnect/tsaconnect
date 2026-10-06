@@ -129,6 +129,10 @@ type ITService struct {
 	routed       *routedStableBuyLimits // Flutterwave (RAMP_FLUTTERWAVE_*)
 	rampTerm     *rampBuyTerms          // shared (RAMP_DAILY_ABANDON_CAP, RAMP_HONOUR_GRACE_SECONDS)
 	treasuryLims *treasuryBuyLimits     // company wallet (RAMP_TREASURY_*)
+	// treasuryRates is the company wallet's market rate (two sources that must
+	// agree, else one checked against the FX feed, else closed). Nil:
+	// company-wallet live pricing is unavailable. See treasury_market_rate.go.
+	treasuryRates TreasuryRateSource
 
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.

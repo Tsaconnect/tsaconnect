@@ -352,8 +352,14 @@ func quotedRate(side, rate string, feePercent float64) (string, float64, error) 
 
 type marketRateEntry struct {
 	rate float64
+	err  error // a remembered failure, kept for paycrestMarketRateFailTTL
 	at   time.Time
 }
+
+// paycrestMarketRateFailTTL is how long a failed reference-rate read is
+// remembered, so an outage costs one call per window instead of one per public
+// quote (spec 2026-10-03 §4.1).
+const paycrestMarketRateFailTTL = 5 * time.Second
 
 // paycrestMarketRateTTL keeps the reference mid fresh enough to size a naira
 // amount into token units without hammering the endpoint. It is NOT used to
@@ -1272,20 +1278,48 @@ func venueBaseUnits(fiatAmount, rate string, decimals int) (*big.Int, error) {
 func (s *PaycrestQuoteService) cachedMarketRate(ctx context.Context, fiat, side string) (float64, error) {
 	key := strings.ToUpper(fiat) + ":" + side
 	s.marketMu.Lock()
-	if e, ok := s.marketRate[key]; ok && time.Since(e.at) < paycrestMarketRateTTL {
-		s.marketMu.Unlock()
-		return e.rate, nil
+	if e, ok := s.marketRate[key]; ok {
+		age := time.Since(e.at)
+		if e.err == nil && age < paycrestMarketRateTTL {
+			s.marketMu.Unlock()
+			return e.rate, nil
+		}
+		if e.err != nil && age < paycrestMarketRateFailTTL {
+			s.marketMu.Unlock()
+			return 0, e.err
+		}
 	}
 	s.marketMu.Unlock()
 
 	rate, err := s.pc.MarketRate(ctx, fiat, side)
+	if err != nil && ctx.Err() != nil {
+		return 0, err // our caller gave up; that says nothing about Paycrest
+	}
+	s.marketMu.Lock()
+	s.marketRate[key] = marketRateEntry{rate: rate, err: err, at: time.Now()}
+	s.marketMu.Unlock()
 	if err != nil {
 		return 0, err
 	}
-	s.marketMu.Lock()
-	s.marketRate[key] = marketRateEntry{rate: rate, at: time.Now()}
-	s.marketMu.Unlock()
 	return rate, nil
+}
+
+// MarketRate is Paycrest's protocol reference rate (marketBuyRate /
+// marketSellRate), cached 60s with failures remembered 5s. It exists even
+// while the order book is empty, which is why the company wallet prices
+// from it (spec 2026-10-03 §4.1).
+func (s *PaycrestQuoteService) MarketRate(ctx context.Context, fiat, side string) (float64, error) {
+	return s.cachedMarketRate(ctx, fiat, side)
+}
+
+// expireMarketRate ages every cached reference rate out. Test-only.
+func (s *PaycrestQuoteService) expireMarketRate() {
+	s.marketMu.Lock()
+	for k, e := range s.marketRate {
+		e.at = e.at.Add(-2 * paycrestMarketRateTTL)
+		s.marketRate[k] = e
+	}
+	s.marketMu.Unlock()
 }
 
 // expireBook ages the cached book out so a test can exercise the refresh and
