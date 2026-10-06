@@ -36,6 +36,7 @@ type flutterwaveIT interface {
 	StableBuyFiatPerUnit(ctx context.Context, currency, asset string) (*big.Rat, error)
 	QuoteRoutedStableBuy(asset, fiatMajor, currency string, fiatPerUnit *big.Rat) (*services.StableBuyQuote, error)
 	OpenRoutedStableBuy(ctx context.Context, userID uuid.UUID, q *services.StableBuyQuote, destChain string) (*models.ITIntent, *services.StableBuyInstructions, error)
+	OpenFlutterwaveConvertedBuy(ctx context.Context, userID uuid.UUID, q *services.StableBuyQuote, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error)
 }
 
 type cachedRate struct {
@@ -229,6 +230,87 @@ func (p *FlutterwaveProvider) Open(ctx context.Context, k VenueKey, r Request, i
 	return &Order{Provider: ProviderFlutterwave, IT: intent, PayInto: payInto}, nil
 }
 
+// QuoteConverted offers Flutterwave's Polygon USDC leg converted into her
+// requested asset (spec §15, route 2). No venue — never an error — when the
+// leg cannot be quoted or no route reaches her asset. The router shows it
+// only for a target the company wallet cannot fill (Decision C2).
+func (p *FlutterwaveProvider) QuoteConverted(ctx context.Context, r Request) ([]Venue, error) {
+	if !p.converts(r) {
+		return nil, nil
+	}
+	fiat := strings.ToUpper(strings.TrimSpace(r.FiatCode))
+	rate, err := p.rate(ctx, fiat, convertedLegToken, false)
+	if err != nil {
+		return nil, nil
+	}
+	q, err := p.it.QuoteRoutedStableBuy(convertedLegToken, r.FiatAmount, fiat, rate)
+	if err != nil {
+		return nil, nil
+	}
+	mid, _ := rate.Float64()
+	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(fwConvertedLegChain, q, r.FiatAmount, mid), *r.Want)
+	if err != nil || pv == nil {
+		return nil, nil
+	}
+	v, err := convertedVenue(ProviderFlutterwave, q, pv, mid)
+	if err != nil {
+		return nil, nil
+	}
+	return []Venue{v}, nil
+}
+
+// fwConvertedLegChain: Flutterwave delivers on Polygon only.
+var fwConvertedLegChain = strings.ToLower(services.RoutedDirectChain)
+
+// converts: a pricer is attached and r asks for an asset by a naira buy.
+func (p *FlutterwaveProvider) converts(r Request) bool {
+	return p.conv != nil && r.Want != nil && r.Side == Buy && flutterwaveFiats[strings.ToUpper(strings.TrimSpace(r.FiatCode))]
+}
+
+// OpenConverted re-quotes at the fresh rate, re-prices the conversion to her
+// own wallet, guards on the new all-in rate, then opens the intent and its
+// record (spec §15.7). The venue opened is always the one priced here, never
+// one the request carried. The router reaches it only after the company
+// wallet refused her target (Decision C2).
+func (p *FlutterwaveProvider) OpenConverted(ctx context.Context, r Request, in OrderInput) (*Order, error) {
+	if !p.converts(r) {
+		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
+	}
+	fiat := strings.ToUpper(strings.TrimSpace(r.FiatCode))
+	rate, err := p.rate(ctx, fiat, convertedLegToken, true)
+	if err != nil {
+		return nil, WrapClass(ErrVenueUnavailable, err)
+	}
+	q, err := p.it.QuoteRoutedStableBuy(convertedLegToken, r.FiatAmount, fiat, rate)
+	if err != nil {
+		return nil, classifyITOpen(err, false)
+	}
+	mid, _ := rate.Float64()
+	want := *r.Want
+	want.Recipient = in.WalletAddress
+	pv, err := p.conv.PriceConvertedLeg(ctx, convertedLeg(fwConvertedLegChain, q, r.FiatAmount, mid), want)
+	if err != nil || pv == nil {
+		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
+	}
+	terms, err := services.NewConvertedTerms(q, pv)
+	if err != nil {
+		return nil, WrapClass(ErrVenueUnavailable, err)
+	}
+	bound := services.FormatMinor(terms.EffectiveRateMinor.String())
+	if err := services.CheckPriceGuard(ProviderFlutterwave, string(Buy), bound, in.LimitRate, in.Guard); err != nil {
+		return nil, err
+	}
+	if err := p.checkAbandonCap(ctx, in.UserID); err != nil {
+		return nil, err
+	}
+	intent, payInto, rec, err := p.it.OpenFlutterwaveConvertedBuy(ctx, in.UserID, q,
+		services.ConvertedOpen{Venue: *pv, WalletAddress: in.WalletAddress})
+	if err != nil {
+		return nil, classifyITOpen(err, true)
+	}
+	return &Order{Provider: ProviderFlutterwave, IT: intent, PayInto: payInto, Conversion: rec}, nil
+}
+
 // classifyITOpen wraps an IT-backed open refusal in its outcome class; the
 // cause survives for the handler's wording. writing is true once the open
 // write has started: an unnamed error from there on may follow a commit (D34).
@@ -267,4 +349,7 @@ func classifyITOpen(err error, writing bool) error {
 	}
 }
 
-var _ Provider = (*FlutterwaveProvider)(nil)
+var (
+	_ Provider        = (*FlutterwaveProvider)(nil)
+	_ ConvertedQuoter = (*FlutterwaveProvider)(nil)
+)

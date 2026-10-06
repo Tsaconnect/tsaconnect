@@ -1219,6 +1219,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// user's naira, same class of action as AdminRepriceCredit above —
 			// it belongs behind the same super_admin gate, not plain admin.
 			superIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
+			// Route 2's exit from a hashless conversion park (spec §15.5 N5).
+			superIT.POST("/stable/buy/:id/conversion-hash", ith.AdminAttachConversionHash)
 		}
 		// The company wallet's console (spec 2026-10-03 §13 Q6): stock, parked
 		// and stalled orders, and the money-moving operator actions — all

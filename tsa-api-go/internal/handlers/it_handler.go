@@ -1129,6 +1129,42 @@ func (h *ITHandler) PostRepriceParkedStableBuy(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": intent})
 }
 
+// POST /api/it/admin/stable/buy/:id/conversion-hash — super-admin (route 2,
+// spec §15.5 N5): attach Flutterwave's on-chain hash to a converted buy it
+// delivered without one. Body: {"txHash": "0x…", "note": "…"}. The service
+// attaches it only once the chain proves the delivery.
+func (h *ITHandler) AdminAttachConversionHash(c *gin.Context) {
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Order not found", "not_found")
+		return
+	}
+	var body struct {
+		TxHash string `json:"txHash"`
+		Note   string `json:"note"`
+	}
+	_ = c.ShouldBindJSON(&body) // an empty body reaches the checks below
+	if strings.TrimSpace(body.Note) == "" {
+		companyWalletAdminError(c, services.ErrITOperatorNoteRequired)
+		return
+	}
+	if strings.TrimSpace(body.TxHash) == "" {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "txHash is required", "tx_hash_required")
+		return
+	}
+	rec, err := h.it.AttachConversionHash(c.Request.Context(), admin.ID, id, body.TxHash, body.Note)
+	if err != nil {
+		companyWalletAdminError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Hash attached; the conversion resumes", gin.H{"conversion": rec})
+}
+
 // POST /api/it/admin/settle/:id — finalize an MCGP sell. With automated
 // payouts, refused unless Flutterwave reports the transfer SUCCESSFUL: settling
 // a payout that failed takes the user's MCGP.

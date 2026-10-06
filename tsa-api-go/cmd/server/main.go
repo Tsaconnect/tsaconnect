@@ -1120,8 +1120,9 @@ func main() {
 		itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
 		if err := itService.SetRampBuyTerms(services.RampBuyTerms{
 			DailyAbandonCap: cfg.RampDailyAbandonCap, HonourGrace: cfg.RampHonourGrace,
+			FlutterwaveHashWait: cfg.RampFlutterwaveHashWait,
 		}); err != nil {
-			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS invalid (%v) — defaults in force", err)
+			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS / RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES invalid (%v) — defaults in force", err)
 		}
 		if err := itService.SetRoutedStableBuyLimits(services.RoutedStableBuyLimits{
 			MinTokens: cfg.RampFlutterwaveMinTokens, MaxUSD: cfg.RampFlutterwaveMaxUSD, SendFeeUSD: cfg.RampFlutterwaveSendFeeUSD,

@@ -665,6 +665,11 @@ type FWTransfer struct {
 	// (e.g. code 0302 transfer_amount_below_limit, "Minimum: USDC 5.0").
 	// Zero when absent. It never fails decoding — see FWProviderResponse.
 	ProviderResponse FWProviderResponse `json:"provider_response"`
+	// TxHash / Meta carry a crypto transfer's on-chain hash. Which key
+	// Flutterwave uses is a canary check (Decision D28); OnChainHash reads
+	// both shapes, and Meta stays raw so no shape of it breaks a decode.
+	TxHash string          `json:"tx_hash,omitempty"`
+	Meta   json.RawMessage `json:"meta,omitempty"`
 	// CacheHit is set on a DirectTransfer result Flutterwave served from its
 	// idempotency cache (X-Idempotency-Cache-Hit) — the answer to the FIRST
 	// request that used this reference, not a new transfer.
@@ -722,6 +727,24 @@ func (r FWProviderResponse) BelowLimit() bool {
 
 // Empty reports that Flutterwave gave no reason.
 func (r FWProviderResponse) Empty() bool { return r.Code == "" && r.Message == "" && r.Type == "" }
+
+// OnChainHash is the transfer's on-chain hash, or "" when Flutterwave
+// reported none in any shape we read.
+func (t FWTransfer) OnChainHash() string {
+	if h := strings.TrimSpace(t.TxHash); h != "" {
+		return h
+	}
+	var meta map[string]any
+	if json.Unmarshal(t.Meta, &meta) != nil {
+		return ""
+	}
+	for _, k := range []string{"tx_hash", "transaction_hash"} {
+		if h, ok := meta[k].(string); ok && strings.TrimSpace(h) != "" {
+			return strings.TrimSpace(h)
+		}
+	}
+	return ""
+}
 
 // ProviderRejectedError means the provider answered a money-moving request
 // and refused it, so that request moved no money. It is deliberately narrow:

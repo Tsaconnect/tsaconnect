@@ -948,6 +948,14 @@ func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID)
 	}
 	switch strings.ToUpper(tr.Status) {
 	case "SUCCESSFUL":
+		// The record existing decides the handoff, never the wiring (N1).
+		rec, err := s.ConversionFor(ctx, intent)
+		if err != nil {
+			return err
+		}
+		if rec != nil {
+			return s.finishFlutterwaveConverted(ctx, intent, tr)
+		}
 		return s.db.WithContext(ctx).Model(intent).
 			Update("status", models.ITStatusSettled).Error
 	case "FAILED":

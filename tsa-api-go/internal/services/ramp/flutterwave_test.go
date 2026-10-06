@@ -40,6 +40,7 @@ type fakeFWIT struct {
 	afterOpen func()
 
 	conversion *models.PaycrestOrderRecord // what ConversionFor reads
+	convOpens  []services.ConvertedOpen    // OpenFlutterwaveConvertedBuy calls
 }
 
 func newFakeFWIT(t *testing.T) *fakeFWIT {
@@ -64,6 +65,14 @@ func (f *fakeFWIT) OpenRoutedStableBuy(_ context.Context, user uuid.UUID, q *ser
 		return nil, nil, f.openErr
 	}
 	return f.intent, f.payInto, nil
+}
+func (f *fakeFWIT) OpenFlutterwaveConvertedBuy(_ context.Context, user uuid.UUID, q *services.StableBuyQuote, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error) {
+	f.opened = append(f.opened, fwOpenCall{user, q, services.RoutedDirectChain})
+	f.convOpens = append(f.convOpens, in)
+	if f.openErr != nil {
+		return nil, nil, nil, f.openErr
+	}
+	return f.intent, f.payInto, &models.PaycrestOrderRecord{Holder: models.HolderFlutterwave}, nil
 }
 func (f *fakeFWIT) ConversionFor(context.Context, *models.ITIntent) (*models.PaycrestOrderRecord, error) {
 	return f.conversion, nil

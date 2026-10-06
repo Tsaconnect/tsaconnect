@@ -34,6 +34,9 @@ const (
 
 	DefaultRampDailyAbandonCap = 5
 	DefaultRampHonourGrace     = 10 * time.Minute
+	// A converted buy Flutterwave reports SUCCESSFUL without an on-chain hash
+	// waits this long from the send before it parks (Decision C13).
+	DefaultRampFlutterwaveHashWait = 10 * time.Minute
 
 	DefaultTreasuryMarginBps       int64 = 250
 	DefaultTreasuryMinNGN                = "100"
@@ -91,13 +94,15 @@ type routedStableBuyLimits struct {
 
 // RampBuyTerms are shared by both routed providers. 0 keeps a value.
 type RampBuyTerms struct {
-	DailyAbandonCap int           // cancelled routed buys per user per 24h
-	HonourGrace     time.Duration // processing grace past RateExpiresAt
+	DailyAbandonCap     int           // cancelled routed buys per user per 24h
+	HonourGrace         time.Duration // processing grace past RateExpiresAt
+	FlutterwaveHashWait time.Duration // RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES
 }
 
 type rampBuyTerms struct {
 	abandonCap  int
 	honourGrace time.Duration
+	fwHashWait  time.Duration
 }
 
 // TreasuryBuyLimits configures the company wallet's buys. "" or 0 keeps a value.
@@ -137,7 +142,8 @@ func (s *ITService) rampTerms() rampBuyTerms {
 	if s.rampTerm != nil {
 		return *s.rampTerm
 	}
-	return rampBuyTerms{abandonCap: DefaultRampDailyAbandonCap, honourGrace: DefaultRampHonourGrace}
+	return rampBuyTerms{abandonCap: DefaultRampDailyAbandonCap, honourGrace: DefaultRampHonourGrace,
+		fwHashWait: DefaultRampFlutterwaveHashWait}
 }
 
 func (s *ITService) treasuryLimits() treasuryBuyLimits {
@@ -230,6 +236,12 @@ func (s *ITService) SetRampBuyTerms(t RampBuyTerms) error {
 		next.honourGrace = t.HonourGrace
 	case t.HonourGrace < 0:
 		errs = append(errs, fmt.Errorf("RAMP_HONOUR_GRACE_SECONDS=%s must not be negative", t.HonourGrace))
+	}
+	switch {
+	case t.FlutterwaveHashWait > 0:
+		next.fwHashWait = t.FlutterwaveHashWait
+	case t.FlutterwaveHashWait < 0:
+		errs = append(errs, fmt.Errorf("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES=%s must not be negative", t.FlutterwaveHashWait))
 	}
 	s.rampTerm = &next
 	return errors.Join(errs...)

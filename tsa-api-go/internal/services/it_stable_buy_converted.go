@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -195,11 +196,7 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 	}
 	res := tx.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Where("id = ? AND status IN ?", rec.ID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
-		Updates(map[string]any{
-			"status": models.PaycrestStatusConverting, "tx_hash": txHash, "failure_reason": "",
-			"token_amount":  FormatStableUnits(delivered.String()),
-			"quoted_amount": ConversionOwed(delivered, rec.MarkupBps).String(),
-		})
+		Updates(handoffUpdates(rec, delivered, txHash))
 	if res.Error != nil {
 		return res.Error
 	}
@@ -212,6 +209,16 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 	}
 	log.Printf("[it converted buy] ALERT ramp_conversion_handoff_refused intent=%s record=%s status=%s", intent.ID, rec.ID, rec.Status)
 	return fmt.Errorf("%w: conversion record %s is %s", ErrITBadState, rec.ID, rec.Status)
+}
+
+// handoffUpdates turn a record into `converting` on txHash, restated from what
+// was delivered: D can be smaller than opened (live pricing), never larger (N4).
+func handoffUpdates(rec *models.PaycrestOrderRecord, delivered *big.Int, txHash string) map[string]any {
+	return map[string]any{
+		"status": models.PaycrestStatusConverting, "tx_hash": txHash, "failure_reason": "",
+		"token_amount":  FormatStableUnits(delivered.String()),
+		"quoted_amount": ConversionOwed(delivered, rec.MarkupBps).String(),
+	}
 }
 
 // convertedCeiling (N4): a converted buy never delivers more than it was
@@ -296,4 +303,207 @@ func (s *ITService) checkRoutedAbandonCap(ctx context.Context, userID uuid.UUID)
 		return ErrStableBuyAbandonCapReached
 	}
 	return nil
+}
+
+// OpenFlutterwaveConvertedBuy opens a route-2 converted buy (spec §15):
+// Flutterwave's routed purchase — the IT agreement, its minimum and maximum —
+// delivering USDC on Polygon to the conversion treasury, and its record, in
+// one transaction (Decision C4).
+func (s *ITService) OpenFlutterwaveConvertedBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, in ConvertedOpen) (*models.ITIntent, *StableBuyInstructions, *models.PaycrestOrderRecord, error) {
+	if !s.HasStableBuy() {
+		return nil, nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
+	}
+	if q == nil {
+		return nil, nil, nil, errors.New("it flutterwave converted buy: nil quote")
+	}
+	if err := s.stableBuyPrechecks(ctx, userID, q, true); err != nil {
+		return nil, nil, nil, err
+	}
+	in.WalletAddress = strings.TrimSpace(in.WalletAddress)
+	if !common.IsHexAddress(in.WalletAddress) {
+		return nil, nil, nil, fmt.Errorf("%w: a converted buy needs her EVM wallet", ErrBadDeliveryAddress)
+	}
+	treasury, err := s.convertedTreasuryFor(strings.ToLower(RoutedDirectChain), q, in.Venue)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	lim := s.routedLimits()
+	var rec *models.PaycrestOrderRecord
+	intent, payInto, err := s.openStableBuy(ctx, userID, q, RoutedDirectChain, treasury, stableBuyOpen{
+		provider: models.ITProviderFlutterwave, routed: true, minUnits: lim.minUnits, maxUnits: lim.maxUnits,
+		validate: func(_, _, addr string) error {
+			if !common.IsHexAddress(addr) {
+				return fmt.Errorf("%w: the conversion treasury address is not an EVM address", ErrBadDeliveryAddress)
+			}
+			return nil
+		},
+		insert: func(ctx context.Context, intent *models.ITIntent) error {
+			return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				if err := tx.Create(intent).Error; err != nil {
+					return err
+				}
+				rec = newConversionRecord(intent, in, models.HolderFlutterwave)
+				return tx.Create(rec).Error
+			})
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return intent, payInto, rec, nil
+}
+
+// finishFlutterwaveConverted is FinalizeBuyDelivery's SUCCESSFUL case for a
+// converted buy (spec §15.4, Decision C13): hand off with Flutterwave's hash;
+// without one, wait from the send, then settle the intent and park the
+// record for an operator. The intent never settles past a record that cannot
+// take the delivery.
+func (s *ITService) finishFlutterwaveConverted(ctx context.Context, intent *models.ITIntent, tr FWTransfer) error {
+	hash := tr.OnChainHash()
+	if hash != "" && !evmTxHashRe.MatchString(hash) {
+		log.Printf("[it converted buy] ALERT it_stable_buy_conversion_bad_hash intent=%s transfer=%s — treated as no hash",
+			intent.ID, tr.ID)
+		hash = ""
+	}
+	if hash != "" {
+		// The orchestrator proves custody from this hash before it bridges.
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := s.handoffConversion(ctx, tx, intent, hash); err != nil {
+				return err
+			}
+			return settleDeliveringIntent(tx, intent.ID)
+		})
+	}
+	if time.Since(intent.UpdatedAt) < s.rampTerms().fwHashWait {
+		return nil // the next tick reads the transfer again
+	}
+	log.Printf("[it converted buy] ALERT it_stable_buy_conversion_no_hash intent=%s transfer=%s — parked for an operator", intent.ID, tr.ID)
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.PaycrestOrderRecord{}).
+			Where("reference = ? AND status IN ?", ITConversionRef(intent.ID),
+				[]string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
+			Updates(map[string]any{"status": models.PaycrestStatusRecoveryPending, "fault": models.FaultPlatform,
+				"failure_reason": "Flutterwave reported the delivery without an on-chain hash; custody cannot be proven automatically."})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			rec, err := conversionRecordOn(ctx, tx, intent.ID)
+			if err != nil {
+				return err
+			}
+			if !isHashlessPark(rec) {
+				status := "missing"
+				if rec != nil {
+					status = rec.Status
+				}
+				log.Printf("[it converted buy] ALERT ramp_conversion_handoff_refused intent=%s status=%s", intent.ID, status)
+				return fmt.Errorf("%w: the conversion record is %s", ErrITBadState, status)
+			}
+		}
+		return settleDeliveringIntent(tx, intent.ID)
+	})
+}
+
+func settleDeliveringIntent(tx *gorm.DB, intentID uuid.UUID) error {
+	return tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, models.ITStatusDelivering).
+		Update("status", models.ITStatusSettled).Error
+}
+
+// isHashlessPark: a route-2 record Flutterwave delivered without a hash, still
+// before custody — the only record an operator may attach a hash to.
+func isHashlessPark(rec *models.PaycrestOrderRecord) bool {
+	return rec != nil && rec.Status == models.PaycrestStatusRecoveryPending &&
+		rec.Holder == models.HolderFlutterwave && rec.TxHash == ""
+}
+
+// AttachConversionHash is the operator's exit from a hashless park (N5): the
+// hash is attached only when the chain proves it — a successful receipt
+// RAMP_TREASURY_CONFIRMATIONS deep, a Transfer of the lane's USDC to the
+// treasury of at least the delivered amount, and no other record holding it.
+// The orchestrator verifies it again at custody.
+func (s *ITService) AttachConversionHash(ctx context.Context, adminID, intentID uuid.UUID, hash, note string) (*models.PaycrestOrderRecord, error) {
+	note, hash = strings.TrimSpace(note), strings.TrimSpace(hash)
+	if note == "" {
+		return nil, ErrITOperatorNoteRequired
+	}
+	if !evmTxHashRe.MatchString(hash) {
+		return nil, fmt.Errorf("%w: not a transaction hash", ErrITBadState)
+	}
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := s.ConversionFor(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+	if !isHashlessPark(rec) {
+		return nil, fmt.Errorf("%w: only a hashless Flutterwave conversion can take a hash", ErrITBadState)
+	}
+	delivered, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
+	if !ok || delivered.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: the order has no delivered amount", ErrITBadState)
+	}
+	c := s.converted
+	chain := rec.ChainKey
+	verifier, probe := c.Verifiers[chain], c.Probes[chain]
+	var lane *TreasuryLane
+	if c.Treasury != nil {
+		lane = c.Treasury.Lane(chain)
+	}
+	if verifier == nil || probe == nil || lane == nil || lane.SponsorLane == nil || lane.tokenAddress(rec.Token) == "" || c.TreasuryAddress == "" {
+		return nil, fmt.Errorf("%w: no verifier or lane on %s", ErrConversionUnavailable, chain)
+	}
+	credited, err := verifier.VerifyTransfer(ctx, hash, lane.tokenAddress(rec.Token), c.TreasuryAddress)
+	if err != nil || credited == nil || credited.Cmp(delivered) < 0 {
+		reason := "it credited the treasury less than was delivered"
+		if err != nil {
+			reason = RedactAlertText(err.Error())
+		}
+		return nil, fmt.Errorf("%w: the hash does not prove the delivery: %s", ErrITBadState, reason)
+	}
+	need := uint64(s.treasuryLimits().confirmations)
+	receipt, err := probe.TransactionReceipt(ctx, common.HexToHash(hash))
+	if err != nil {
+		return nil, fmt.Errorf("%w: its receipt is unreadable: %s", ErrITBadState, RedactAlertText(err.Error()))
+	}
+	if receipt == nil || receipt.BlockNumber == nil || receipt.Status != types.ReceiptStatusSuccessful {
+		return nil, fmt.Errorf("%w: the transaction did not succeed", ErrITBadState)
+	}
+	head, err := probe.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the chain head is unreadable: %s", ErrITBadState, RedactAlertText(err.Error()))
+	}
+	if mined := receipt.BlockNumber.Uint64(); head < mined || head-mined+1 < need {
+		return nil, fmt.Errorf("%w: the receipt is not %d blocks deep yet", ErrITBadState, need)
+	}
+	var others int64
+	if err := s.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("LOWER(tx_hash) = LOWER(?) AND id <> ?", hash, rec.ID).Count(&others).Error; err != nil {
+		return nil, err
+	}
+	if others > 0 {
+		return nil, fmt.Errorf("%w: another order already holds that hash", ErrITBadState)
+	}
+	updates := handoffUpdates(rec, delivered, hash)
+	updates["fault"] = ""
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.PaycrestOrderRecord{}).
+			Where("id = ? AND status = ? AND holder = ? AND tx_hash = ?", rec.ID, models.PaycrestStatusRecoveryPending, models.HolderFlutterwave, "").
+			Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("%w: the record changed while the hash was checked", ErrITBadState)
+		}
+		return auditIntent(tx, intent.ID, adminID, models.ITAuditConversionHashAttached, note,
+			map[string]any{"txHash": hash, "record": rec.ID.String()})
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[it converted buy] ALERT ramp_conversion_hash_attached intent=%s record=%s tx=%s admin=%s", intent.ID, rec.ID, hash, adminID)
+	return conversionRecordOn(ctx, s.db, intent.ID)
 }

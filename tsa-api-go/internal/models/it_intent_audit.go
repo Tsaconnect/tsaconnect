@@ -13,6 +13,9 @@ const (
 	ITAuditStableBuyRefunded        = "it.stable_buy.refunded"
 	ITAuditStableBuyDeliveredAnyway = "it.stable_buy.delivered_anyway"
 	ITAuditStableBuyResent          = "it.stable_buy.resent"
+	// An operator attached Flutterwave's on-chain hash to a converted buy it
+	// delivered without one (route 2, spec §15.5 N5).
+	ITAuditConversionHashAttached = "it.stable_buy.conversion_hash_attached"
 )
 
 // ITIntentAuditLog is the append-only record of operator actions on a parked
