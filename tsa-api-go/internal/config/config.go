@@ -143,6 +143,10 @@ type ChainConfig struct {
 type NetworkConfig struct {
 	Chains         map[string]ChainConfig
 	TokenAddresses map[string]string // "chain:symbol" → contract address
+	// FlutterwavePolygonUSDC is the Polygon USDC contract Flutterwave delivers
+	// a stable buy in. Converted route 2 (spec 2026-10-03 §15, N5) stays off
+	// unless it equals the conversion treasury's Polygon USDC. "" = none.
+	FlutterwavePolygonUSDC string
 }
 
 // IsWalletMCGP reports whether token on the chain with chainID is the plain
@@ -465,23 +469,6 @@ type Config struct {
 	// RampTreasuryMaxUSD is the per-order maximum (quote, open, live pricing).
 	RampTreasuryMaxUSD string
 
-	// Converted venues (spec 2026-10-03 §15.3). Each switch gates its route's
-	// quoting and opening only — claim, send, handoff and the orchestrator
-	// never read it, so an in-flight converted order always finishes — and is
-	// read in cmd/server alone.
-	// RampTreasuryConverted: route 1, the company wallet delivers USDC to the
-	// conversion treasury. Also needs RAMP_TREASURY_BUY, RAMP_CONVERSION_BUY
-	// and a conversion-treasury lane on the leg chain.
-	RampTreasuryConverted bool
-	// RampFlutterwaveConverted: route 2, Flutterwave delivers Polygon USDC to
-	// the conversion treasury. Also needs RAMP_FLUTTERWAVE_BUY,
-	// RAMP_CONVERSION_BUY, a Polygon conversion-treasury lane and
-	// RampFlutterwaveConvertedUSDC.
-	RampFlutterwaveConverted bool
-	// RampFlutterwaveConvertedUSDC is the Polygon USDC contract Flutterwave
-	// actually sends (N5), recorded from the canary. Route 2 stays dormant
-	// unless it equals the treasury lane's USDC.
-	RampFlutterwaveConvertedUSDC string
 	// RampFlutterwaveHashWait is how long a hashless SUCCESSFUL Flutterwave
 	// delivery waits for an on-chain hash before it parks (N5).
 	RampFlutterwaveHashWait time.Duration
@@ -1040,9 +1027,6 @@ func Load() *Config {
 		cfg.RampTreasuryNativeFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_TREASURY_NATIVE_FLOOR_WEI_"+up, rampTreasuryFloorDefaults[chain]))
 	}
 	cfg.RampTreasuryBuy = getEnvBool("RAMP_TREASURY_BUY", false)
-	cfg.RampTreasuryConverted = getEnvBool("RAMP_TREASURY_CONVERTED", false)
-	cfg.RampFlutterwaveConverted = getEnvBool("RAMP_FLUTTERWAVE_CONVERTED", false)
-	cfg.RampFlutterwaveConvertedUSDC = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", ""))
 	if m := getEnvInt64("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", 10); m > 0 {
 		cfg.RampFlutterwaveHashWait = time.Duration(m) * time.Minute
 	} else {
@@ -1558,7 +1542,10 @@ func Load() *Config {
 	}
 
 	cfg.Networks = map[string]NetworkConfig{
-		"mainnet": {Chains: mainnetChains, TokenAddresses: mainnetTokens},
+		"mainnet": {Chains: mainnetChains, TokenAddresses: mainnetTokens,
+			// The route-2 canary must confirm Flutterwave sends native USDC, not USDC.e.
+			FlutterwavePolygonUSDC: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"},
+		// Flutterwave has no verified testnet Polygon delivery, so route 2 stays off.
 		"testnet": {Chains: testnetChains, TokenAddresses: testnetTokens},
 	}
 

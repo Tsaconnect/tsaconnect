@@ -92,25 +92,62 @@ func TestConvertedPricerFor_NilUnlessConversionIsBuilt(t *testing.T) {
 	}
 }
 
-func TestFlutterwaveConvertedGate(t *testing.T) {
+// Route 1 follows the company wallet's switch: on only when the provider is
+// registered, RAMP_CONVERSION_BUY is on and a conversion-treasury lane sits on
+// one of the wallet's chains.
+func TestCompanyWalletConverts(t *testing.T) {
+	baseLane := testTreasury(map[string]string{"base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"})
+	on := &config.Config{RampConversionBuyEnabled: true}
+	for _, tc := range []struct {
+		name       string
+		cfg        *config.Config
+		registered bool
+		chains     []string
+		treasury   *services.Treasury
+		want       bool
+	}{
+		{"all prerequisites", on, true, []string{"base"}, baseLane, true},
+		{"lane on one of several chains", on, true, []string{"arbitrum", "base"}, baseLane, true},
+		{"provider not registered", on, false, []string{"base"}, baseLane, false},
+		{"RAMP_CONVERSION_BUY off", &config.Config{}, true, []string{"base"}, baseLane, false},
+		{"no conversion treasury", on, true, []string{"base"}, nil, false},
+		{"no lane on the wallet's chain", on, true, []string{"bsc"}, baseLane, false},
+	} {
+		got, why := companyWalletConverts(tc.cfg, tc.registered, tc.chains, tc.treasury)
+		if got != tc.want || (got != (why == "")) {
+			t.Fatalf("%s: route 1 = %v (%q), want %v", tc.name, got, why, tc.want)
+		}
+	}
+}
+
+// Route 2 follows Flutterwave's switch, and stays off — never fatal — unless
+// the network bundle's Flutterwave Polygon USDC is the Polygon lane's USDC.
+func TestFlutterwaveConverts(t *testing.T) {
 	const polygonUSDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 	polygon := testTreasury(map[string]string{"polygon": polygonUSDC})
+	withFW := func(usdc string, conversion bool) *config.Config {
+		return &config.Config{RampConversionBuyEnabled: conversion,
+			Networks: map[string]config.NetworkConfig{"mainnet": {FlutterwavePolygonUSDC: usdc}}}
+	}
 	for _, tc := range []struct {
-		name     string
-		treasury *services.Treasury
-		usdc     string
-		want     bool
+		name       string
+		cfg        *config.Config
+		registered bool
+		treasury   *services.Treasury
+		want       bool
 	}{
-		{"no conversion treasury", nil, polygonUSDC, false},
-		{"no polygon lane", testTreasury(map[string]string{"base": polygonUSDC}), polygonUSDC, false},
-		{"unrecorded token", polygon, "", false},
-		{"USDC.e recorded, lane holds native USDC", polygon, "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", false},
-		{"match", polygon, polygonUSDC, true},
-		{"match, other case", polygon, " 0x3C499C542CEF5E3811E1192CE70D8CC03D5C3359 ", true},
+		{"match", withFW(polygonUSDC, true), true, polygon, true},
+		{"match, other case", withFW(" 0x3C499C542CEF5E3811E1192CE70D8CC03D5C3359 ", true), true, polygon, true},
+		{"provider not registered", withFW(polygonUSDC, true), false, polygon, false},
+		{"RAMP_CONVERSION_BUY off", withFW(polygonUSDC, false), true, polygon, false},
+		{"no conversion treasury", withFW(polygonUSDC, true), true, nil, false},
+		{"no polygon lane", withFW(polygonUSDC, true), true, testTreasury(map[string]string{"base": polygonUSDC}), false},
+		{"no Flutterwave USDC on the network", withFW("", true), true, polygon, false},
+		{"Flutterwave sends USDC.e, lane holds native USDC", withFW("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", true), true, polygon, false},
 	} {
-		cfg := &config.Config{RampFlutterwaveConvertedUSDC: tc.usdc}
-		if got := flutterwaveConvertedGate(cfg, tc.treasury); got != tc.want {
-			t.Fatalf("%s: gate = %v, want %v", tc.name, got, tc.want)
+		got, why := flutterwaveConverts(tc.cfg, tc.registered, tc.treasury)
+		if got != tc.want || (got != (why == "")) {
+			t.Fatalf("%s: route 2 = %v (%q), want %v", tc.name, got, why, tc.want)
 		}
 	}
 }

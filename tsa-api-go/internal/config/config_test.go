@@ -583,28 +583,25 @@ func TestLoad_RampTreasuryLowBalanceRejectsBadValues(t *testing.T) {
 	}
 }
 
-// Spec §15.3: both converted routes are off unless switched on, and a bad
-// hash wait keeps the 10-minute default (loudly).
-func TestLoad_RampConvertedSwitches(t *testing.T) {
-	for _, k := range []string{"RAMP_TREASURY_CONVERTED", "RAMP_FLUTTERWAVE_CONVERTED",
-		"RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", "RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES"} {
-		t.Setenv(k, "")
-		os.Unsetenv(k)
-	}
+// Spec §15: the Polygon USDC Flutterwave sends is bundled per network (native
+// USDC on mainnet, none on testnet), and a bad hash wait keeps the 10-minute
+// default (loudly).
+func TestLoad_FlutterwavePolygonUSDCAndHashWait(t *testing.T) {
+	t.Setenv("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", "")
+	os.Unsetenv("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES")
 	cfg := Load()
-	if cfg.RampTreasuryConverted || cfg.RampFlutterwaveConverted || cfg.RampFlutterwaveConvertedUSDC != "" ||
-		cfg.RampFlutterwaveHashWait != 10*time.Minute {
-		t.Fatalf("defaults = %v %v %q %s", cfg.RampTreasuryConverted, cfg.RampFlutterwaveConverted,
-			cfg.RampFlutterwaveConvertedUSDC, cfg.RampFlutterwaveHashWait)
+	if got := cfg.Networks["mainnet"].FlutterwavePolygonUSDC; got != "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" {
+		t.Fatalf("mainnet Flutterwave Polygon USDC = %q", got)
 	}
-	t.Setenv("RAMP_TREASURY_CONVERTED", "true")
-	t.Setenv("RAMP_FLUTTERWAVE_CONVERTED", "true")
-	t.Setenv("RAMP_FLUTTERWAVE_CONVERTED_USDC_ADDRESS", " 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 ")
+	if got := cfg.Networks["testnet"].FlutterwavePolygonUSDC; got != "" {
+		t.Fatalf("testnet Flutterwave Polygon USDC = %q, want none", got)
+	}
+	if cfg.RampFlutterwaveHashWait != 10*time.Minute {
+		t.Fatalf("default hash wait = %s", cfg.RampFlutterwaveHashWait)
+	}
 	t.Setenv("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES", "25")
-	cfg = Load()
-	if !cfg.RampTreasuryConverted || !cfg.RampFlutterwaveConverted ||
-		cfg.RampFlutterwaveConvertedUSDC != "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" || cfg.RampFlutterwaveHashWait != 25*time.Minute {
-		t.Fatalf("overrides = %+v", cfg)
+	if got := Load().RampFlutterwaveHashWait; got != 25*time.Minute {
+		t.Fatalf("override hash wait = %s", got)
 	}
 	var buf bytes.Buffer
 	prev := log.Writer()

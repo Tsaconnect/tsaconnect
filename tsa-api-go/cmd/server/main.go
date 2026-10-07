@@ -1728,23 +1728,32 @@ func main() {
 			// and nowhere else: off stops new quotes and opens only (I1).
 			treasuryProvider := ramp.NewTreasuryProvider(itService, treasuryRates, cfg.RampTreasuryBuy)
 			fwProvider := ramp.NewFlutterwaveProvider(itService, cfg.RampFlutterwaveBuy)
-			// Converted venues (spec §15.3): each switch attaches a converted
-			// pricer to its provider, quoting and opening only. WithConversion
-			// ignores a nil provider and a nil pricer, so a dormant provider
-			// stays a true nil.
-			route1, route2 := false, false
-			if cfg.RampTreasuryConverted && treasuryProvider != nil {
+			// Converted venues (spec §15.3): a route follows its provider's
+			// switch plus RAMP_CONVERSION_BUY and the treasury's lanes, and
+			// attaches a converted pricer to its provider — quoting and
+			// opening only. WithConversion ignores a nil provider and a nil
+			// pricer, so a dormant provider stays a true nil.
+			var walletChains []string
+			if treasuryProvider != nil {
+				walletChains = itService.CompanyWallet().Chains()
+			}
+			route1, why1 := companyWalletConverts(cfg, treasuryProvider != nil, walletChains, rampTreasury)
+			if route1 {
 				if pricer := convertedPricerFor(cfg, rampTreasury, paycrestQuotes, "route 1"); pricer != nil {
-					treasuryProvider, route1 = ramp.WithConversion(treasuryProvider, pricer), true
+					treasuryProvider = ramp.WithConversion(treasuryProvider, pricer)
+				} else {
+					route1, why1 = false, "no converted pricer"
 				}
 			}
-			if cfg.RampFlutterwaveConverted && fwProvider != nil && flutterwaveConvertedGate(cfg, rampTreasury) {
+			route2, why2 := flutterwaveConverts(cfg, fwProvider != nil, rampTreasury)
+			if route2 {
 				if pricer := convertedPricerFor(cfg, rampTreasury, paycrestQuotes, "route 2"); pricer != nil {
-					fwProvider, route2 = ramp.WithConversion(fwProvider, pricer), true
+					fwProvider = ramp.WithConversion(fwProvider, pricer)
+				} else {
+					route2, why2 = false, "no converted pricer"
 				}
 			}
-			log.Printf("[ramp] converted venues: route1=%v (RAMP_TREASURY_CONVERTED=%v) route2=%v (RAMP_FLUTTERWAVE_CONVERTED=%v)",
-				route1, cfg.RampTreasuryConverted, route2, cfg.RampFlutterwaveConverted)
+			log.Printf("[ramp] converted venues: route1=%v%s route2=%v%s", route1, offReason(why1), route2, offReason(why2))
 			names := []string{}
 			if treasuryProvider != nil {
 				names = append(names, ramp.ProviderTreasury)
