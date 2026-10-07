@@ -24,8 +24,9 @@ type StableBuyQuote struct {
 	Currency string
 	// FiatMinor is what the user pays, in fiat minor units.
 	FiatMinor *big.Int
-	// GrossAssetUnits is what the fiat buys at Flutterwave's own rate;
-	// AssetUnits is that less the company spread — what the user receives.
+	// GrossAssetUnits is what the fiat buys at the base rate (Flutterwave's
+	// own, or the market); AssetUnits is what the user receives after the
+	// company spread or take and every fee line.
 	// Both in asset base units (6 decimals).
 	GrossAssetUnits *big.Int
 	AssetUnits      *big.Int
@@ -33,7 +34,7 @@ type StableBuyQuote struct {
 	// applied. Indicative only: the intent is priced again when money lands.
 	RatePerUnitMinor *big.Int
 	// DisplayRateMinor is the rate shown beside the fee lines (spec §14): our
-	// margin in, provider fees out. Equal to RatePerUnitMinor when Fees is empty.
+	// take in, third-party fees out. Equal to RatePerUnitMinor when Fees is empty.
 	DisplayRateMinor *big.Int
 	// Fees are the provider fees already taken out of AssetUnits, one line each.
 	// AssetUnits = units(FiatMinor ÷ DisplayRateMinor) − Σ Fees (Decision D38).
@@ -91,8 +92,8 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 // priceStableBuyAt is the arithmetic every stablecoin buy quote shares (spec
 // §4.1 extraction): gross units from fiat per unit, then the spread, then the
 // per-unit rate with the spread applied (floored, as QuoteStableBuy always
-// showed it). spreadBps is IT_STABLE_SPREAD_BPS on the old endpoint and the
-// margin on the company wallet.
+// showed it). spreadBps is IT_STABLE_SPREAD_BPS: the old endpoint only — the
+// ramp's in-house buys price through priceInHouseBuy.
 func priceStableBuyAt(fiatPerUnit *big.Rat, fiatMinor *big.Int, spreadBps int64) (gross, net, spreadRate *big.Int) {
 	gross = grossStableUnits(fiatMinor, fiatPerUnit)
 	net = ApplyBuySpread(gross, spreadBps)

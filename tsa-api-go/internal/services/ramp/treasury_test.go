@@ -139,8 +139,9 @@ func TestNewTreasuryProvider_NilUnlessEnabledAndWired(t *testing.T) {
 	}
 }
 
-// §4.1 / §11: margin maths, Base venue, no fee lines, no stock figure.
-func TestTreasuryQuote_PricesAtMarketPlusMargin(t *testing.T) {
+// §4.1 / §11 (owner ruling 2026-10-07): market + take, the funding line, Base
+// venue, no stock figure.
+func TestTreasuryQuote_PricesAtMarketPlusTake(t *testing.T) {
 	f := newFakeTreasuryIT(t)
 	q, err := newTestTreasuryProvider(f).Quote(context.Background(), trBuy("10000"))
 	if err != nil {
@@ -150,14 +151,14 @@ func TestTreasuryQuote_PricesAtMarketPlusMargin(t *testing.T) {
 		t.Fatalf("venues = %+v", q.Venues)
 	}
 	v := q.Venues[0]
-	if v.Provider != ProviderTreasury || v.ChainKey != "base" || v.Token != "USDC" || v.Rate != "1382.57" ||
-		v.EffectiveRate != "1382.57" || v.TokenAmount != 7.232937 || len(v.Fees) != 0 || q.MarketRate != 1348 {
+	if v.Provider != ProviderTreasury || v.ChainKey != "base" || v.Token != "USDC" || v.Rate != "1354.74" ||
+		v.EffectiveRate != "1373.98" || v.TokenAmount != 7.27815 || len(v.Fees) != 1 || v.Fees[0].Kind != services.FeeKindFunding || q.MarketRate != 1348 {
 		t.Fatalf("venue = %+v market = %v", v, q.MarketRate)
 	}
 	if name, k, _ := DecodeHandle(v.Handle); name != ProviderTreasury || k != (VenueKey{"base", "USDC"}) {
 		t.Fatalf("handle → %s %+v", name, k)
 	}
-	if q, err := newTestTreasuryProvider(f).Quote(context.Background(), trBuy("100")); err != nil || q.Venues[0].TokenAmount != 0.072328 {
+	if q, err := newTestTreasuryProvider(f).Quote(context.Background(), trBuy("100")); err != nil || q.Venues[0].TokenAmount != 0.072781 {
 		t.Fatalf("₦100: %+v %v", q, err)
 	}
 }
@@ -219,13 +220,13 @@ func TestTreasuryLegs(t *testing.T) {
 
 func TestTreasuryOpen_OpensWithTheServerQuoteToHerOwnWallet(t *testing.T) {
 	f := newFakeTreasuryIT(t)
-	in := trInput("1389.49")
+	in := trInput("1373.98")
 	o, err := newTestTreasuryProvider(f).Open(context.Background(), VenueKey{"base", "USDC"}, trBuy("10000"), in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(f.opened) != 1 || f.opened[0].chain != "base" || f.opened[0].dest != in.WalletAddress ||
-		f.opened[0].q.AssetUnits.Cmp(big.NewInt(7_232_937)) != 0 || f.opened[0].user != in.UserID {
+		f.opened[0].q.AssetUnits.Cmp(big.NewInt(7_278_150)) != 0 || f.opened[0].user != in.UserID {
 		t.Fatalf("opened = %+v", f.opened)
 	}
 	if o.Provider != ProviderTreasury || o.IT != f.intent || o.PayInto == nil {
@@ -238,22 +239,22 @@ func TestTreasuryOpen_PriceGuardAndCapsBeforeAnyWrite(t *testing.T) {
 	f := newFakeTreasuryIT(t)
 	p := newTestTreasuryProvider(f)
 	var moved *services.PriceMovedPastQuoteError
-	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1380.00")); !errors.As(err, &moved) || moved.BoundRate != "1382.57" {
+	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1373.00")); !errors.As(err, &moved) || moved.BoundRate != "1373.98" {
 		t.Fatalf("guard: %v", err)
 	}
 	f.dailyErr = services.ErrTreasuryDailyCapReached
-	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1389.49")); !errors.Is(err, ErrVenueUnavailable) || !errors.Is(err, services.ErrTreasuryDailyCapReached) {
+	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1373.98")); !errors.Is(err, ErrVenueUnavailable) || !errors.Is(err, services.ErrTreasuryDailyCapReached) {
 		t.Fatalf("daily cap: %v", err)
 	}
 	f.dailyErr = nil
 	f.abandoned = int64(services.DefaultRampDailyAbandonCap)
-	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1389.49")); !errors.Is(err, ErrAbandonCapReached) {
+	if _, err := p.Open(ctx, VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1373.98")); !errors.Is(err, ErrAbandonCapReached) {
 		t.Fatalf("abandon cap: %v", err)
 	}
 	if len(f.opened) != 0 {
 		t.Fatalf("wrote %d orders past a refusal", len(f.opened))
 	}
-	if _, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, trBuy("10000"), trInput("1389.49")); !errors.Is(err, ErrVenueUnavailable) {
+	if _, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, trBuy("10000"), trInput("1373.98")); !errors.Is(err, ErrVenueUnavailable) {
 		t.Fatalf("a chain without a lane: %v", err)
 	}
 }
@@ -263,7 +264,7 @@ func TestTreasuryOpen_PriceGuardAndCapsBeforeAnyWrite(t *testing.T) {
 func TestTreasuryOpen_GasCheckedBeforeTheWrite(t *testing.T) {
 	f := newFakeTreasuryIT(t)
 	f.gasOK = false
-	_, err := newTestTreasuryProvider(f).Open(context.Background(), VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1389.49"))
+	_, err := newTestTreasuryProvider(f).Open(context.Background(), VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1373.98"))
 	if !errors.Is(err, ErrVenueUnavailable) || len(f.opened) != 0 {
 		t.Fatalf("err = %v, opened = %d, want unavailable and nothing written", err, len(f.opened))
 	}
@@ -285,7 +286,7 @@ func TestTreasuryOpen_RefusalClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeTreasuryIT(t)
 			f.openErr = tc.cause
-			_, err := newTestTreasuryProvider(f).Open(context.Background(), VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1389.49"))
+			_, err := newTestTreasuryProvider(f).Open(context.Background(), VenueKey{"base", "USDC"}, trBuy("10000"), trInput("1373.98"))
 			if !errors.Is(err, tc.class) || !errors.Is(err, tc.cause) {
 				t.Fatalf("err = %v, want %v carrying %v", err, tc.class, tc.cause)
 			}

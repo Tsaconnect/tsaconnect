@@ -29,8 +29,15 @@ const (
 	DefaultRoutedMinTokens              = "10"
 	DefaultRoutedMaxUSD                 = "2000"
 	DefaultRoutedSendFeeUSD             = "1.50"
-	DefaultRoutedSpreadBps        int64 = 250
 	DefaultRoutedConversionFeeBps int64 = 150
+
+	// Owner ruling 2026-10-07: she pays the base rate grossed up by the
+	// company take (RAMP_COMPANY_TAKE_BPS, both in-house providers) plus each
+	// third-party cost at cost. The central-account funding fee is measured
+	// (Flutterwave wallet funding, 1.40%), so it is a default, not a setting
+	// an operator has to make (RAMP_FUNDING_FEE_BPS overrides it).
+	DefaultRampCompanyTakeBps int64 = 50
+	DefaultRampFundingFeeBps  int64 = 140
 
 	DefaultRampDailyAbandonCap = 5
 	DefaultRampHonourGrace     = 10 * time.Minute
@@ -38,11 +45,10 @@ const (
 	// waits this long from the send before it parks (Decision C13).
 	DefaultRampFlutterwaveHashWait = 10 * time.Minute
 
-	DefaultTreasuryMarginBps       int64 = 250
-	DefaultTreasuryMinNGN                = "100"
-	DefaultTreasuryMaxUSD                = "200"
-	DefaultTreasuryDailyUserMaxUSD       = "500"
-	DefaultTreasurySendStall             = 30 * time.Minute
+	DefaultTreasuryMinNGN          = "100"
+	DefaultTreasuryMaxUSD          = "200"
+	DefaultTreasuryDailyUserMaxUSD = "500"
+	DefaultTreasurySendStall       = 30 * time.Minute
 
 	// A company-wallet sale settles only this many blocks deep
 	// (RAMP_TREASURY_CONFIRMATIONS; review fix 2026-10-05).
@@ -58,6 +64,7 @@ const (
 
 // Fee lines (spec §14, Decision D39).
 const (
+	FeeKindFunding         = "funding"
 	FeeKindConversion      = "conversion"
 	FeeKindNetwork         = "network"
 	FeeProviderFlutterwave = "Flutterwave"
@@ -81,14 +88,13 @@ type RoutedStableBuyLimits struct {
 	MinTokens        string // delivered, after every fee
 	MaxUSD           string // delivered tokens; quotes and opens only
 	SendFeeUSD       string
-	SpreadBps        int64
 	ConversionFeeBps int64
 	SendFeeMode      string // SendFeeFromWallet | SendFeeFromAmount
 }
 
 type routedStableBuyLimits struct {
 	minUnits, maxUnits, sendFeeUnits *big.Int
-	spreadBps, conversionFeeBps      int64
+	conversionFeeBps                 int64
 	sendFeeFromAmount                bool
 }
 
@@ -97,17 +103,19 @@ type RampBuyTerms struct {
 	DailyAbandonCap     int           // cancelled routed buys per user per 24h
 	HonourGrace         time.Duration // processing grace past RateExpiresAt
 	FlutterwaveHashWait time.Duration // RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES
+	CompanyTakeBps      int64         // RAMP_COMPANY_TAKE_BPS: our only margin
+	FundingFeeBps       int64         // RAMP_FUNDING_FEE_BPS: central-account funding, at cost
 }
 
 type rampBuyTerms struct {
-	abandonCap  int
-	honourGrace time.Duration
-	fwHashWait  time.Duration
+	abandonCap             int
+	honourGrace            time.Duration
+	fwHashWait             time.Duration
+	takeBps, fundingFeeBps int64
 }
 
 // TreasuryBuyLimits configures the company wallet's buys. "" or 0 keeps a value.
 type TreasuryBuyLimits struct {
-	MarginBps       int64
 	MinNGN          string // on naira paid
 	MaxUSD          string // on delivered tokens; quote, open and live pricing
 	DailyUserMaxUSD string // rolling 24h per user
@@ -116,7 +124,6 @@ type TreasuryBuyLimits struct {
 }
 
 type treasuryBuyLimits struct {
-	marginBps                            int64
 	minKobo, maxUnits, dailyUserMaxUnits *big.Int
 	sendStall                            time.Duration
 	confirmations                        int
@@ -133,8 +140,7 @@ func (s *ITService) routedLimits() routedStableBuyLimits {
 	}
 	return routedStableBuyLimits{
 		minUnits: mustUnits(DefaultRoutedMinTokens), maxUnits: mustUnits(DefaultRoutedMaxUSD),
-		sendFeeUnits: mustUnits(DefaultRoutedSendFeeUSD),
-		spreadBps:    DefaultRoutedSpreadBps, conversionFeeBps: DefaultRoutedConversionFeeBps,
+		sendFeeUnits: mustUnits(DefaultRoutedSendFeeUSD), conversionFeeBps: DefaultRoutedConversionFeeBps,
 	}
 }
 
@@ -143,7 +149,8 @@ func (s *ITService) rampTerms() rampBuyTerms {
 		return *s.rampTerm
 	}
 	return rampBuyTerms{abandonCap: DefaultRampDailyAbandonCap, honourGrace: DefaultRampHonourGrace,
-		fwHashWait: DefaultRampFlutterwaveHashWait}
+		fwHashWait: DefaultRampFlutterwaveHashWait,
+		takeBps:    DefaultRampCompanyTakeBps, fundingFeeBps: DefaultRampFundingFeeBps}
 }
 
 func (s *ITService) treasuryLimits() treasuryBuyLimits {
@@ -152,7 +159,7 @@ func (s *ITService) treasuryLimits() treasuryBuyLimits {
 	}
 	minKobo, _ := nairaToKobo(DefaultTreasuryMinNGN)
 	return treasuryBuyLimits{
-		marginBps: DefaultTreasuryMarginBps, minKobo: minKobo,
+		minKobo:  minKobo,
 		maxUnits: mustUnits(DefaultTreasuryMaxUSD), dailyUserMaxUnits: mustUnits(DefaultTreasuryDailyUserMaxUSD),
 		sendStall: DefaultTreasurySendStall, confirmations: DefaultTreasuryConfirmations,
 	}
@@ -202,7 +209,6 @@ func (s *ITService) SetRoutedStableBuyLimits(l RoutedStableBuyLimits) error {
 	unitsSetting("RAMP_FLUTTERWAVE_MIN_TOKENS", l.MinTokens, &next.minUnits, false, &errs)
 	unitsSetting("RAMP_FLUTTERWAVE_MAX_USD", l.MaxUSD, &next.maxUnits, false, &errs)
 	unitsSetting("RAMP_FLUTTERWAVE_SEND_FEE_USD", l.SendFeeUSD, &next.sendFeeUnits, true, &errs)
-	bpsSetting("RAMP_FLUTTERWAVE_SPREAD_BPS", l.SpreadBps, &next.spreadBps, &errs)
 	bpsSetting("RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS", l.ConversionFeeBps, &next.conversionFeeBps, &errs)
 	switch mode := strings.ToLower(strings.TrimSpace(l.SendFeeMode)); mode {
 	case "":
@@ -243,6 +249,8 @@ func (s *ITService) SetRampBuyTerms(t RampBuyTerms) error {
 	case t.FlutterwaveHashWait < 0:
 		errs = append(errs, fmt.Errorf("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES=%s must not be negative", t.FlutterwaveHashWait))
 	}
+	bpsSetting("RAMP_COMPANY_TAKE_BPS", t.CompanyTakeBps, &next.takeBps, &errs)
+	bpsSetting("RAMP_FUNDING_FEE_BPS", t.FundingFeeBps, &next.fundingFeeBps, &errs)
 	s.rampTerm = &next
 	return errors.Join(errs...)
 }
@@ -251,7 +259,6 @@ func (s *ITService) SetRampBuyTerms(t RampBuyTerms) error {
 func (s *ITService) SetTreasuryBuyLimits(l TreasuryBuyLimits) error {
 	next := s.treasuryLimits()
 	var errs []error
-	bpsSetting("RAMP_TREASURY_MARGIN_BPS", l.MarginBps, &next.marginBps, &errs)
 	if v := strings.TrimSpace(l.MinNGN); v != "" {
 		if k, err := nairaToKobo(v); err != nil || k.Sign() <= 0 {
 			errs = append(errs, fmt.Errorf("RAMP_TREASURY_MIN_NGN=%q is not a usable amount", v))
@@ -279,9 +286,6 @@ func (s *ITService) SetTreasuryBuyLimits(l TreasuryBuyLimits) error {
 
 // RoutedAbandonCap is how many routed buys a user may abandon per 24h (both providers).
 func (s *ITService) RoutedAbandonCap() int { return s.rampTerms().abandonCap }
-
-// RoutedSpreadBps is Flutterwave's routed margin (RAMP_FLUTTERWAVE_SPREAD_BPS).
-func (s *ITService) RoutedSpreadBps() int64 { return s.routedLimits().spreadBps }
 
 // ── shared arithmetic ──────────────────────────────────────────────────────
 
@@ -341,14 +345,10 @@ func lockedUnits(fiatMinor, ratePerUnit *big.Int) *big.Int {
 	return num.Quo(num, ratePerUnit)
 }
 
-// ceilRatMinor is r × 100 rounded up to a whole minor unit.
-func ceilRatMinor(r *big.Rat) *big.Int {
+// floorRatMinor is r × 100 rounded down to a whole minor unit.
+func floorRatMinor(r *big.Rat) *big.Int {
 	m := new(big.Rat).Mul(r, big.NewRat(100, 1))
-	q, rem := new(big.Int).QuoRem(m.Num(), m.Denom(), new(big.Int))
-	if rem.Sign() > 0 {
-		q.Add(q, big.NewInt(1))
-	}
-	return q
+	return new(big.Int).Quo(m.Num(), m.Denom())
 }
 
 // formatBps renders bps as a trimmed percentage: 150 → "1.5".
@@ -357,58 +357,81 @@ func formatBps(bps int64) string {
 	return strings.TrimSuffix(strings.TrimRight(out, "0"), ".")
 }
 
-// ── Flutterwave ────────────────────────────────────────────────────────────
+// ── in-house pricing (owner ruling 2026-10-07) ─────────────────────────────
 
-// routedPricing is one Flutterwave pricing: the effective path (gross →
-// conversion fee → spread → send fee, Decision D37) and the display path
-// (Decision D38).
-type routedPricing struct {
-	gross, afterFees, net       *big.Int
-	displayRate, displayUnits   *big.Int
-	conversionFee, sendFeeUnits *big.Int
-	conversionFeeBps            int64
+// passThroughCost is a third-party cost an in-house buy passes on at cost,
+// shown as its own fee line: bps of what is left when it is charged, or a
+// flat number of token units.
+type passThroughCost struct {
+	kind, label, provider string
+	bps                   int64
+	flat                  *big.Int
 }
 
-func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat) routedPricing {
-	lim := s.routedLimits()
-	p := routedPricing{conversionFeeBps: lim.conversionFeeBps, sendFeeUnits: new(big.Int).Set(lim.sendFeeUnits)}
-	p.gross = grossStableUnits(fiatMinor, fiatPerUnit)
-	p.afterFees = ApplyBuySpread(ApplyBuySpread(p.gross, lim.conversionFeeBps), lim.spreadBps)
-	p.net = new(big.Int).Sub(p.afterFees, lim.sendFeeUnits)
-	// Display rate: Flutterwave's rate plus our spread, no provider fee,
-	// rounded up to a kobo. The conversion line is whatever separates the
-	// tokens that rate buys from the tokens actually left after the fee and
-	// spread, so amount ÷ rate − Σfees = net exactly at the 2-dp rate.
-	p.displayRate = ceilRatMinor(new(big.Rat).Mul(fiatPerUnit, big.NewRat(10000, 10000-lim.spreadBps)))
-	p.displayUnits = lockedUnits(fiatMinor, p.displayRate)
-	p.conversionFee = new(big.Int).Sub(p.displayUnits, p.afterFees)
-	if p.conversionFee.Sign() < 0 {
-		p.conversionFee.SetInt64(0) // a zero fee: the display rounding is then within one unit
+// inHousePrice is one in-house buy price: the display rate, what she
+// receives, and the fee lines between them.
+type inHousePrice struct {
+	gross, displayRate, net *big.Int
+	fees                    []StableBuyFee
+}
+
+// priceInHouseBuy is the one price of both in-house providers — the company
+// wallet and Flutterwave — for a quote, an open and every live re-price alike.
+// The display rate is the base rate (the market, or Flutterwave's own) grossed
+// up by the company take and nothing else; every third-party cost then comes
+// off what that rate buys, in order, at cost, one line each. So
+// fiat ÷ displayRate − Σfees = net exactly (spec §14). Rounding is hers: the
+// rate is rounded down to a kobo and each fee down to a base unit. net can be
+// zero or negative; the caller's minimum refuses it.
+func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs []passThroughCost) inHousePrice {
+	p := inHousePrice{
+		gross:       grossStableUnits(fiatMinor, baseRate),
+		displayRate: floorRatMinor(new(big.Rat).Mul(baseRate, big.NewRat(10_000+takeBps, 10_000))),
 	}
+	if p.displayRate.Sign() <= 0 {
+		p.net = new(big.Int)
+		return p
+	}
+	left := lockedUnits(fiatMinor, p.displayRate)
+	for _, c := range costs {
+		units := new(big.Int)
+		if c.flat != nil {
+			units.Set(c.flat)
+		} else {
+			units.Mul(left, big.NewInt(c.bps)).Quo(units, big.NewInt(10_000))
+		}
+		if units.Sign() <= 0 {
+			continue
+		}
+		left.Sub(left, units)
+		ngn := new(big.Int).Mul(units, p.displayRate)
+		p.fees = append(p.fees, StableBuyFee{Kind: c.kind, Label: c.label, Provider: c.provider,
+			Units: units.String(), NgnMinor: ngn.Quo(ngn, stableUnitsPerToken()).String()})
+	}
+	p.net = left
 	return p
 }
 
-// fees renders the provider fee lines, each priced at the display rate.
-func (p routedPricing) fees() []StableBuyFee {
-	ngn := func(units *big.Int) string {
-		n := new(big.Int).Mul(units, p.displayRate)
-		return n.Quo(n, stableUnitsPerToken()).String()
-	}
-	var out []StableBuyFee
-	if p.conversionFee.Sign() > 0 {
-		out = append(out, StableBuyFee{
-			Kind: FeeKindConversion, Provider: FeeProviderFlutterwave,
-			Label: fmt.Sprintf("Flutterwave conversion fee (%s%%)", formatBps(p.conversionFeeBps)),
-			Units: p.conversionFee.String(), NgnMinor: ngn(p.conversionFee),
-		})
-	}
-	if p.sendFeeUnits.Sign() > 0 {
-		out = append(out, StableBuyFee{
-			Kind: FeeKindNetwork, Provider: FeeProviderFlutterwave, Label: "Network fee",
-			Units: p.sendFeeUnits.String(), NgnMinor: ngn(p.sendFeeUnits),
-		})
-	}
-	return out
+// fundingCost is the central-account funding fee: all naira for an in-house
+// buy lands in the Flutterwave-held central account, which charges it.
+func (s *ITService) fundingCost() passThroughCost {
+	bps := s.rampTerms().fundingFeeBps
+	return passThroughCost{kind: FeeKindFunding, provider: FeeProviderFlutterwave, bps: bps,
+		label: fmt.Sprintf("Funding fee (%s%%)", formatBps(bps))}
+}
+
+// ── Flutterwave ────────────────────────────────────────────────────────────
+
+// routedPrice is Flutterwave's price: its rate plus the take, less funding,
+// its conversion fee and its send fee.
+func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat) inHousePrice {
+	lim := s.routedLimits()
+	return priceInHouseBuy(fiatMinor, fiatPerUnit, s.rampTerms().takeBps, []passThroughCost{
+		s.fundingCost(),
+		{kind: FeeKindConversion, provider: FeeProviderFlutterwave, bps: lim.conversionFeeBps,
+			label: fmt.Sprintf("Flutterwave conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
+		{kind: FeeKindNetwork, provider: FeeProviderFlutterwave, label: "Network fee", flat: lim.sendFeeUnits},
+	})
 }
 
 // QuoteRoutedStableBuy prices fiatMajor naira at Flutterwave's fiatPerUnit
@@ -447,10 +470,10 @@ func (s *ITService) routedQuoteAt(asset, currency string, fiatMinor *big.Int, fi
 		FiatMinor:        new(big.Int).Set(fiatMinor),
 		GrossAssetUnits:  p.gross,
 		AssetUnits:       p.net,
-		SendFeeUnits:     p.sendFeeUnits,
+		SendFeeUnits:     new(big.Int).Set(lim.sendFeeUnits),
 		RatePerUnitMinor: ratePerDeliveredUnit(fiatMinor, p.net),
 		DisplayRateMinor: p.displayRate,
-		Fees:             p.fees(),
+		Fees:             p.fees,
 		ExpiresAt:        time.Now().Add(s.stableLockTTL()),
 	}, nil
 }
@@ -468,7 +491,7 @@ func (s *ITService) quoteRoutedLive(ctx context.Context, asset string, fiatMinor
 // ── company wallet ─────────────────────────────────────────────────────────
 
 // QuoteTreasuryBuy prices fiatMajor naira at the market rate plus the
-// company wallet's margin (spec §4.1). Pure.
+// company take, less the funding fee (spec §4.1, owner ruling 2026-10-07). Pure.
 func (s *ITService) QuoteTreasuryBuy(asset, fiatMajor, currency string, marketRate *big.Rat) (*StableBuyQuote, error) {
 	asset = strings.ToUpper(strings.TrimSpace(asset))
 	currency = strings.ToUpper(strings.TrimSpace(currency))
@@ -492,20 +515,26 @@ func (s *ITService) treasuryQuoteAt(asset, currency string, fiatMinor *big.Int, 
 	if fiatMinor.Cmp(lim.minKobo) < 0 {
 		return nil, fmt.Errorf("%w: minimum is %s %s", ErrStableBuyBelowMinimum, FormatMinor(lim.minKobo.String()), currency)
 	}
-	gross, net, _ := priceStableBuyAt(marketRate, fiatMinor, lim.marginBps)
-	if net.Sign() <= 0 {
+	p := s.treasuryPrice(fiatMinor, marketRate)
+	if p.net.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount buys nothing", ErrStableBuyBelowMinimum)
 	}
-	if enforceMax && net.Cmp(lim.maxUnits) > 0 {
+	if enforceMax && p.net.Cmp(lim.maxUnits) > 0 {
 		return nil, fmt.Errorf("%w: maximum is %g %s", ErrStableBuyAboveMaximum, StableFromBaseUnits(lim.maxUnits), asset)
 	}
-	rate := ratePerDeliveredUnit(fiatMinor, net) // Decision D42
 	return &StableBuyQuote{
 		Asset: asset, Currency: currency,
-		FiatMinor: new(big.Int).Set(fiatMinor), GrossAssetUnits: gross, AssetUnits: net,
-		RatePerUnitMinor: rate, DisplayRateMinor: new(big.Int).Set(rate),
+		FiatMinor: new(big.Int).Set(fiatMinor), GrossAssetUnits: p.gross, AssetUnits: p.net,
+		RatePerUnitMinor: ratePerDeliveredUnit(fiatMinor, p.net), // Decision D42
+		DisplayRateMinor: p.displayRate, Fees: p.fees,
 		ExpiresAt: time.Now().Add(s.stableLockTTL()),
 	}, nil
+}
+
+// treasuryPrice is the company wallet's price: the market plus the take, less
+// the funding fee.
+func (s *ITService) treasuryPrice(fiatMinor *big.Int, marketRate *big.Rat) inHousePrice {
+	return priceInHouseBuy(fiatMinor, marketRate, s.rampTerms().takeBps, []passThroughCost{s.fundingCost()})
 }
 
 // TreasuryMinOrderUnits is what the company wallet's minimum naira buys at
@@ -516,8 +545,10 @@ func (s *ITService) TreasuryMinOrderUnits(marketRate *big.Rat) *big.Int {
 	if marketRate == nil || marketRate.Sign() <= 0 {
 		return new(big.Int)
 	}
-	_, net, _ := priceStableBuyAt(marketRate, lim.minKobo, lim.marginBps)
-	return net
+	if net := s.treasuryPrice(lim.minKobo, marketRate).net; net.Sign() > 0 {
+		return net
+	}
+	return new(big.Int)
 }
 
 // ── display helpers ────────────────────────────────────────────────────────
@@ -796,7 +827,7 @@ func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITInt
 }
 
 // quoteTreasuryLive prices fiatMinor at the company wallet's current market
-// rate plus its margin.
+// rate on its in-house terms (take plus funding fee).
 func (s *ITService) quoteTreasuryLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string, enforceMax bool) (*StableBuyQuote, error) {
 	if s.treasuryRates == nil {
 		return nil, fmt.Errorf("%w: no company-wallet market rate", ErrStableQuoteUnavailable)

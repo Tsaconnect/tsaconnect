@@ -16,11 +16,11 @@ import (
 )
 
 // fwConvertedVenue is PriceConvertedLeg's answer for Flutterwave's worked
-// example (₦165,025 → D = 94.5375 USDC on Polygon) at 50 bps: T = 94.064812.
+// example (₦165,025 → D = 95.137885 USDC on Polygon) at 50 bps: T = 94.662195.
 func fwConvertedVenue() PaycrestVenue {
 	v := convertedVenueForTest()
-	v.ChainKey, v.Network, v.ViaChain, v.Rate = "polygon", "polygon", "polygon", "1745.61"
-	v.TokenAmountBaseUnits = ConversionOwed(big.NewInt(94_537_500), 50).String()
+	v.ChainKey, v.Network, v.ViaChain, v.Rate = "polygon", "polygon", "polygon", "1658.50"
+	v.TokenAmountBaseUnits = ConversionOwed(big.NewInt(95_137_885), 50).String()
 	return v
 }
 
@@ -246,7 +246,7 @@ func TestAttachConversionHash_PreChecksTheChain(t *testing.T) {
 	if _, err := s.AttachConversionHash(context.Background(), admin, intent.ID, hash, "from FW support"); err == nil {
 		t.Fatal("a short credit was attached")
 	}
-	verifier.credited = big.NewInt(94_537_500)
+	verifier.credited = big.NewInt(95_137_885)
 	probe.head = 91 // 2 deep, not 5
 	if _, err := s.AttachConversionHash(context.Background(), admin, intent.ID, hash, "from FW support"); err == nil {
 		t.Fatal("a shallow receipt was attached")
@@ -285,7 +285,7 @@ func TestAttachConversionHash_RefusesAHashAnotherRecordHolds(t *testing.T) {
 	}
 	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
 		Treasury:  &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}},
-		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(94_537_500)}},
+		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(95_137_885)}},
 		Probes:    map[string]TreasuryTxProbe{"polygon": &fakeTxProbe{head: 100, receiptBlock: 90}}})
 	if _, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); !errors.Is(err, ErrITBadState) ||
 		!strings.Contains(err.Error(), "another order") {
@@ -332,7 +332,7 @@ func TestFlutterwaveConvertedPark_AttachOnPostgres(t *testing.T) {
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	intent := newUSDCOrder()
 	intent.Provider, intent.DestChain, intent.DestAddress = models.ITProviderFlutterwave, "POLYGON", testConversionTreasury
-	intent.AssetAmount, intent.Status, intent.DeliveryID = "94537500", models.ITStatusDelivering, "trf_fwc"
+	intent.AssetAmount, intent.Status, intent.DeliveryID = "95137885", models.ITStatusDelivering, "trf_fwc"
 	if err := db.Create(intent).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -356,14 +356,14 @@ func TestFlutterwaveConvertedPark_AttachOnPostgres(t *testing.T) {
 	}
 	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
 		Treasury:  &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}},
-		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(94_537_500)}},
+		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(95_137_885)}},
 		Probes:    map[string]TreasuryTxProbe{"polygon": &fakeTxProbe{head: 100, receiptBlock: 90}}})
 	if _, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("held elsewhere: %v", err)
 	}
 	db.Delete(other)
 	rec, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support")
-	if err != nil || rec.Status != models.PaycrestStatusConverting || rec.TxHash != hash || rec.TokenAmount != "94.5375" {
+	if err != nil || rec.Status != models.PaycrestStatusConverting || rec.TxHash != hash || rec.TokenAmount != "95.137885" {
 		t.Fatalf("rec = %+v err = %v", rec, err)
 	}
 }
@@ -394,7 +394,7 @@ func TestAttachConversionHash_RefusesATransferMinedBeforeTheDeliverySend(t *test
 	probe := &fakeTxProbe{head: 100, receiptBlock: 90, blockTime: time.Now().Add(-time.Hour)}
 	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
 		Treasury:  &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}},
-		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(94_537_500)}},
+		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(95_137_885)}},
 		Probes:    map[string]TreasuryTxProbe{"polygon": probe}})
 	if _, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("a transfer mined before the send: err = %v", err)
@@ -463,15 +463,15 @@ func TestMarkStableBuyRefunded_ClosesAHashlessFlutterwavePark(t *testing.T) {
 func TestHandoffConversion_CapsADeliveryAboveTheOpenedAmount(t *testing.T) {
 	hash := "0x" + strings.Repeat("ab", 32)
 	s, intent := deliveringFW(t, FWTransfer{ID: "trf_fwc", Status: "SUCCESSFUL", TxHash: hash}, time.Minute)
-	// A pricing path that forgot the ceiling: D one unit above the opened 94.5375.
-	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "94537501")
+	// A pricing path that forgot the ceiling: D one unit above the opened 95.137885.
+	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "95137886")
 	logs := captureLog(t)
 	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	rec := conversionRecord(t, s, intent.ID)
-	if rec.Status != models.PaycrestStatusConverting || rec.TxHash != hash || rec.TokenAmount != "94.5375" ||
-		rec.QuotedAmount != ConversionOwed(big.NewInt(94_537_500), rec.MarkupBps).String() {
+	if rec.Status != models.PaycrestStatusConverting || rec.TxHash != hash || rec.TokenAmount != "95.137885" ||
+		rec.QuotedAmount != ConversionOwed(big.NewInt(95_137_885), rec.MarkupBps).String() {
 		t.Fatalf("record = %+v, want converting at the opened amount", rec)
 	}
 	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusSettled {

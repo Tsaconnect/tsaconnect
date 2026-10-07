@@ -535,8 +535,8 @@ func TestLoad_CompanyWalletDefaults(t *testing.T) {
 
 func TestLoad_RampProviderDefaults(t *testing.T) {
 	for _, k := range []string{"RAMP_FLUTTERWAVE_BUY", "RAMP_FLUTTERWAVE_MIN_TOKENS", "RAMP_FLUTTERWAVE_MAX_USD",
-		"RAMP_FLUTTERWAVE_SEND_FEE_USD", "RAMP_FLUTTERWAVE_SPREAD_BPS", "RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS",
-		"RAMP_FLUTTERWAVE_SEND_FEE_MODE", "RAMP_DAILY_ABANDON_CAP", "RAMP_HONOUR_GRACE_SECONDS", "RAMP_TREASURY_MARGIN_BPS",
+		"RAMP_FLUTTERWAVE_SEND_FEE_USD", "RAMP_COMPANY_TAKE_BPS", "RAMP_FUNDING_FEE_BPS", "RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS",
+		"RAMP_FLUTTERWAVE_SEND_FEE_MODE", "RAMP_DAILY_ABANDON_CAP", "RAMP_HONOUR_GRACE_SECONDS",
 		"RAMP_TREASURY_MIN_NGN", "RAMP_TREASURY_DAILY_USER_MAX_USD", "RAMP_TREASURY_LOW_BALANCE_USD", "RAMP_TREASURY_SEND_STALL_MINUTES",
 		"RAMP_TREASURY_RATE_TOL_BPS", "RAMP_TREASURY_CONFIRMATIONS"} {
 		t.Setenv(k, "")
@@ -544,9 +544,10 @@ func TestLoad_RampProviderDefaults(t *testing.T) {
 	}
 	cfg := Load()
 	if cfg.RampFlutterwaveBuy || cfg.RampFlutterwaveMinTokens != "10" || cfg.RampFlutterwaveMaxUSD != "2000" ||
-		cfg.RampFlutterwaveSendFeeUSD != "1.50" || cfg.RampFlutterwaveSpreadBps != 250 || cfg.RampFlutterwaveConversionFeeBps != 150 ||
+		cfg.RampFlutterwaveSendFeeUSD != "1.50" || cfg.RampCompanyTakeBps != 50 || cfg.RampFundingFeeBps != 140 ||
+		cfg.RampFlutterwaveConversionFeeBps != 150 ||
 		cfg.RampFlutterwaveSendFeeMode != "wallet" || cfg.RampDailyAbandonCap != 5 || cfg.RampHonourGrace != 10*time.Minute ||
-		cfg.RampTreasuryMarginBps != 250 || cfg.RampTreasuryMinNGN != "100" || cfg.RampTreasuryDailyUserMaxUSD != "500" ||
+		cfg.RampTreasuryMinNGN != "100" || cfg.RampTreasuryDailyUserMaxUSD != "500" ||
 		cfg.RampTreasuryLowBalanceUSD != 50 || cfg.RampTreasurySendStall != 30*time.Minute ||
 		cfg.RampTreasuryRateTolBps != 400 || cfg.RampTreasuryConfirmations != 5 {
 		t.Fatalf("defaults = %+v", cfg)

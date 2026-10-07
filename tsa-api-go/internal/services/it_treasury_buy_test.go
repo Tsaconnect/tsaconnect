@@ -22,7 +22,7 @@ func newTreasuryBuyService(t *testing.T, stockUnits int64) (*ITService, uuid.UUI
 	return s, userID, native
 }
 
-// treasuryTestQuote is the company wallet's worked example: ₦10,000 → 7.232937 USDC.
+// treasuryTestQuote is the company wallet's worked example: ₦10,000 → 7.27815 USDC.
 func treasuryTestQuote(t *testing.T, s *ITService) *StableBuyQuote {
 	t.Helper()
 	q, err := s.QuoteTreasuryBuy("USDC", "10000", "NGN", treasuryMarket)
@@ -49,17 +49,17 @@ func TestOpenTreasuryBuy_WritesAReservedHonouredBuy(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	if intent.Provider != models.ITProviderTreasury || intent.DestChain != "BASE" || intent.DestAddress != testRoutedEVM ||
-		intent.AssetAmount != "7232937" || intent.LockedRate != "138257" || intent.RateExpiresAt == nil {
+		intent.AssetAmount != "7278150" || intent.LockedRate != "137398" || intent.RateExpiresAt == nil {
 		t.Fatalf("intent = %+v", intent)
 	}
 	if pay == nil || pay.AccountNumber != "1234567890" {
 		t.Fatalf("pay into = %+v", pay)
 	}
-	if got := reservedNow(t, s); got != 7_232_937 {
+	if got := reservedNow(t, s); got != 7_278_150 {
 		t.Fatalf("reserved = %d", got)
 	}
 	free, err := s.TreasuryFreeUnits(ctx, "base", "USDC")
-	if err != nil || free.Int64() != 50_000_000-7_232_937 {
+	if err != nil || free.Int64() != 50_000_000-7_278_150 {
 		t.Fatalf("free = %v %v", free, err)
 	}
 }
@@ -161,11 +161,11 @@ func TestTreasuryReservation_LifeCycle(t *testing.T) {
 		cols map[string]any
 		want int64
 	}{
-		{"open, inside the window", map[string]any{"rate_expires_at": time.Now().Add(time.Minute)}, 7_232_937},
-		{"window over, inside the grace", map[string]any{"rate_expires_at": time.Now().Add(-9 * time.Minute)}, 7_232_937},
+		{"open, inside the window", map[string]any{"rate_expires_at": time.Now().Add(time.Minute)}, 7_278_150},
+		{"window over, inside the grace", map[string]any{"rate_expires_at": time.Now().Add(-9 * time.Minute)}, 7_278_150},
 		{"past window + grace (no write needed)", map[string]any{"rate_expires_at": time.Now().Add(-11 * time.Minute)}, 0},
-		{"paid", map[string]any{"status": models.ITStatusPaymentReceived}, 7_232_937},
-		{"delivering", map[string]any{"status": models.ITStatusDelivering}, 7_232_937},
+		{"paid", map[string]any{"status": models.ITStatusPaymentReceived}, 7_278_150},
+		{"delivering", map[string]any{"status": models.ITStatusDelivering}, 7_278_150},
 		{"parked", map[string]any{"status": models.ITStatusBuyAwaitingRate}, 0},
 		{"refunded", map[string]any{"status": models.ITStatusRefunded}, 0},
 		{"settled", map[string]any{"status": models.ITStatusSettled}, 0},
@@ -204,13 +204,13 @@ func TestTreasuryFreeUnits_CachedFiveSeconds(t *testing.T) {
 	if free, err := s.TreasuryFreeUnits(ctx, "base", "USDC"); err != nil || free.Int64() != 50_000_000 {
 		t.Fatalf("first read: %v %v", free, err)
 	}
-	seedTreasuryIntent(t, s, userID, models.ITStatusDelivering) // reserves 7.232937
+	seedTreasuryIntent(t, s, userID, models.ITStatusDelivering) // reserves 7.27815
 	clock = clock.Add(4 * time.Second)
 	if free, _ := s.TreasuryFreeUnits(ctx, "base", "USDC"); free.Int64() != 50_000_000 {
 		t.Fatalf("inside 5s: %v, want the cached reading", free)
 	}
 	clock = clock.Add(2 * time.Second)
-	if free, _ := s.TreasuryFreeUnits(ctx, "base", "USDC"); free.Int64() != 50_000_000-7_232_937 {
+	if free, _ := s.TreasuryFreeUnits(ctx, "base", "USDC"); free.Int64() != 50_000_000-7_278_150 {
 		t.Fatalf("after 5s: %v, want the reservation counted", free)
 	}
 }
@@ -300,7 +300,7 @@ func TestInsertTreasuryIntent_NormalisesSoItIsReserved(t *testing.T) {
 	if got.Asset != "USDC" || got.DestChain != "BASE" {
 		t.Fatalf("stored %q %q", got.Asset, got.DestChain)
 	}
-	if r := reservedNow(t, s); r != 7_232_937 {
+	if r := reservedNow(t, s); r != 7_278_150 {
 		t.Fatalf("reserved = %d, the lowercase order was not reserved", r)
 	}
 }

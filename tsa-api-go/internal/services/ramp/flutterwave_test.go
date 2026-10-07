@@ -129,8 +129,9 @@ func TestFlutterwaveLegs_BuyOnly(t *testing.T) {
 	}
 }
 
-// The worked example: ₦165,025 at ₦1650.25 → 94.5375 delivered; display
-// ₦1692.57, effective ₦1745.61, two fee lines (spec §14).
+// The worked example (owner ruling 2026-10-07): ₦165,025 at ₦1650.25 →
+// 95.137885 delivered; display ₦1658.50 (the take only), effective ₦1734.59,
+// three fee lines at cost (spec §14).
 func TestFlutterwaveQuote_DisplayRateEffectiveRateAndFees(t *testing.T) {
 	q, err := newFlutterwaveProvider(newFakeFWIT(t)).Quote(context.Background(), fwBuy("165025"))
 	if err != nil {
@@ -148,16 +149,17 @@ func TestFlutterwaveQuote_DisplayRateEffectiveRateAndFees(t *testing.T) {
 			usdc = &q.Venues[i]
 		}
 	}
-	if usdc == nil || usdc.Rate != "1692.57" || usdc.EffectiveRate != "1745.61" || usdc.TokenAmount != 94.5375 {
+	if usdc == nil || usdc.Rate != "1658.50" || usdc.EffectiveRate != "1734.59" || usdc.TokenAmount != 95.137885 {
 		t.Fatalf("polygon USDC = %+v", usdc)
 	}
-	if len(usdc.Fees) != 2 ||
-		usdc.Fees[0] != (VenueFee{Kind: "conversion", Label: "Flutterwave conversion fee (1.5%)", Provider: "Flutterwave", Token: "1.46216", Ngn: "2474.80"}) ||
-		usdc.Fees[1] != (VenueFee{Kind: "network", Label: "Network fee", Provider: "Flutterwave", Token: "1.5", Ngn: "2538.85"}) {
+	if len(usdc.Fees) != 3 ||
+		usdc.Fees[0] != (VenueFee{Kind: "funding", Label: "Funding fee (1.4%)", Provider: "Flutterwave", Token: "1.393035", Ngn: "2310.34"}) ||
+		usdc.Fees[1] != (VenueFee{Kind: "conversion", Label: "Flutterwave conversion fee (1.5%)", Provider: "Flutterwave", Token: "1.471642", Ngn: "2440.71"}) ||
+		usdc.Fees[2] != (VenueFee{Kind: "network", Label: "Network fee", Provider: "Flutterwave", Token: "1.5", Ngn: "2487.75"}) {
 		t.Fatalf("fees = %+v", usdc.Fees)
 	}
-	if math.Abs(usdc.SpreadPercent-5.7785) > 0.01 {
-		t.Fatalf("spread%% = %v, want ~5.78 all-in against the raw rate", usdc.SpreadPercent)
+	if math.Abs(usdc.SpreadPercent-5.1107) > 0.01 {
+		t.Fatalf("spread%% = %v, want ~5.11 all-in against the raw rate", usdc.SpreadPercent)
 	}
 	name, k, err := DecodeHandle(usdc.Handle)
 	if err != nil || name != ProviderFlutterwave || k != (VenueKey{"polygon", "USDC"}) {
@@ -299,7 +301,7 @@ func TestFlutterwaveOpen_RequotesFreshAndOpensWithTheServerQuote(t *testing.T) {
 	if _, err := p.Quote(ctx, Request{Side: Buy, FiatCode: "NGN", FiatAmount: "165025", Token: "USDC"}); err != nil {
 		t.Fatal(err)
 	}
-	in := fwInput("1754.34", services.PriceGuardEnforce)
+	in := fwInput("1734.59", services.PriceGuardEnforce)
 	o, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, fwBuy("165025"), in)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -308,7 +310,7 @@ func TestFlutterwaveOpen_RequotesFreshAndOpensWithTheServerQuote(t *testing.T) {
 		t.Fatalf("fetches = %d, want a fresh rate at open (D7)", f.rateCalls.Load())
 	}
 	if len(f.opened) != 1 || f.opened[0].chain != "POLYGON" || f.opened[0].user != in.UserID ||
-		f.opened[0].q.AssetUnits.Cmp(big.NewInt(94_537_500)) != 0 {
+		f.opened[0].q.AssetUnits.Cmp(big.NewInt(95_137_885)) != 0 {
 		t.Fatalf("opened = %+v", f.opened)
 	}
 	if o.Provider != ProviderFlutterwave || o.IT != f.intent || o.PayInto != f.payInto {
@@ -324,7 +326,7 @@ func TestFlutterwaveOpen_PriceGuard(t *testing.T) {
 	ctx := context.Background()
 	_, err := p.Open(ctx, VenueKey{"polygon", "USDC"}, fwBuy("165025"), fwInput("1700.00", services.PriceGuardEnforce))
 	var moved *services.PriceMovedPastQuoteError
-	if !errors.As(err, &moved) || moved.BoundRate != "1745.61" || len(f.opened) != 0 {
+	if !errors.As(err, &moved) || moved.BoundRate != "1734.59" || len(f.opened) != 0 {
 		t.Fatalf("enforce: err = %v opened = %d", err, len(f.opened))
 	}
 	logs := captureRampLog(t)
@@ -400,7 +402,7 @@ func TestFlutterwaveOpen_UncertainWriteRechecksBeforeFailover(t *testing.T) {
 	fw := newFlutterwaveProvider(f)
 	pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "polygon", "USDC", "1700"))
 	pc.openResults = []openResult{{order: okOrder}}
-	req := openReq(EncodeHandle(ProviderFlutterwave, VenueKey{"polygon", "USDC"}), "1745.61")
+	req := openReq(EncodeHandle(ProviderFlutterwave, VenueKey{"polygon", "USDC"}), "1734.59")
 	req.Request.ChainKey = "polygon"
 	req.Request.FiatAmount = "165025"
 	_, err := testRouter(pc, fw).Open(context.Background(), req)

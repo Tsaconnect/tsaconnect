@@ -51,7 +51,7 @@ type Request struct {
 
 // Venue keeps today's PaycrestVenue JSON shape — the app calls
 // tokenAmount.toFixed(), so it stays a number — plus the opaque handle and the
-// fee display (spec §14): Rate is the display rate (our margin in, provider
+// fee display (spec §14): Rate is the display rate (our take in, third-party
 // fees out), EffectiveRate the all-in rate the router ranks and guards on, and
 // Fees one line per provider fee. TokenAmount is after every fee.
 type Venue struct {

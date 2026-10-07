@@ -112,7 +112,7 @@ type deliverRig struct {
 }
 
 // newDeliverRig opens and pays (exactly, on time) the company wallet's worked
-// example: 7.232937 USDC owed to testRoutedEVM, 50 USDC in stock. The wallet's
+// example: 7.27815 USDC owed to testRoutedEVM, 50 USDC in stock. The wallet's
 // lane has production's caps (none); the next send uses nonce 7 at head block
 // 100, and a receipt lands at block 90 (11 deep).
 func newDeliverRig(t *testing.T) *deliverRig {
@@ -162,11 +162,11 @@ func TestSendTreasuryBuy_SendsOnceAndSettlesOnlyOnAProofFromTheWallet(t *testing
 	}
 	legs := r.legs(t)
 	if len(legs) != 1 || legs[0].TxHash != "0xsponsored" || legs[0].Status != models.RampLegStatusPending ||
-		legs[0].Amount != "7232937" || !strings.EqualFold(legs[0].ToAddr, testRoutedEVM) ||
+		legs[0].Amount != "7278150" || !strings.EqualFold(legs[0].ToAddr, testRoutedEVM) ||
 		legs[0].Nonce == nil || *legs[0].Nonce != 7 || legs[0].FromBlock != 100 {
 		t.Fatalf("legs = %+v", legs)
 	}
-	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt.Int64() != 7_232_937 {
+	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt.Int64() != 7_278_150 {
 		t.Fatalf("transfer to %s of %v", to, amt)
 	}
 	// Not readable yet: wait, never settle.
@@ -176,7 +176,7 @@ func TestSendTreasuryBuy_SendsOnceAndSettlesOnlyOnAProofFromTheWallet(t *testing
 	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
 		t.Fatalf("status = %s, want delivering until the receipt proves it", got.Status)
 	}
-	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestSecondPaymentGate_EveryEntryPointAgrees(t *testing.T) {
 		{name: "reverted, shallow", legs: []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
 			setup: func(r *deliverRig) { reverted(r); r.probe.receiptBlock = 4498 }},
 		{name: "reverted, now reads as paid", legs: []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
-			setup: func(r *deliverRig) { r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil }},
+			setup: func(r *deliverRig) { r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil }},
 		{name: "reverted per the verifier, but the receipt reads success",
 			legs:  []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
 			setup: func(r *deliverRig) { reverted(r); r.probe.receiptFailed = false }},
@@ -683,7 +683,7 @@ func TestSecondPaymentGate_EveryEntryPointAgrees(t *testing.T) {
 				for i := range legs {
 					l := legs[i]
 					l.OrderID, l.Kind, l.Attempt = r.intent.ID, models.RampLegKindSale, i+1
-					l.ChainKey, l.Token, l.FromAddr, l.ToAddr, l.Amount = "base", "USDC", sponsorTestSigner, testRoutedEVM, "7232937"
+					l.ChainKey, l.Token, l.FromAddr, l.ToAddr, l.Amount = "base", "USDC", sponsorTestSigner, testRoutedEVM, "7278150"
 					l.FromBlock = 100
 					if l.CreatedAt.IsZero() {
 						l.CreatedAt = time.Now().Add(-time.Hour)
@@ -710,7 +710,7 @@ func TestFinalizeTreasuryBuy_SettlesOnlyAtTheConfirmationDepth(t *testing.T) {
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatal(err)
 	}
-	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 	r.probe.receiptBlock, r.probe.head = 200, 203 // 4 deep
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatal(err)
@@ -732,7 +732,7 @@ func TestFinalizeTreasuryBuy_SettlesOnlyAtTheConfirmationDepth(t *testing.T) {
 func TestSendTreasuryBuy_DeliverAnywayAboveTheMaximumActuallySends(t *testing.T) {
 	r := newDeliverRig(t)
 	ctx := context.Background()
-	parkTreasury(t, r.s, r.intent, "30000000") // ₦300,000 → 216.988129 USDC live
+	parkTreasury(t, r.s, r.intent, "30000000") // ₦300,000 → 218.34448 USDC live
 	setStock(r.native, 300_000_000)
 	if _, err := r.s.DeliverParkedTreasuryBuy(ctx, uuid.New(), r.intent.ID, "owner approved the overpayment"); err != nil {
 		t.Fatalf("deliver anyway: %v", err)
@@ -740,8 +740,8 @@ func TestSendTreasuryBuy_DeliverAnywayAboveTheMaximumActuallySends(t *testing.T)
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt == nil || amt.Int64() != 216_988_129 || r.signer.calls() != 1 {
-		t.Fatalf("sent %v to %s in %d broadcasts, want 216.988129 USDC once", amt, to, r.signer.calls())
+	if _, _, to, amt := r.native.transferCall(); to != testRoutedEVM || amt == nil || amt.Int64() != 218_344_480 || r.signer.calls() != 1 {
+		t.Fatalf("sent %v to %s in %d broadcasts, want 218.34448 USDC once", amt, to, r.signer.calls())
 	}
 }
 
@@ -854,7 +854,7 @@ func TestFinalizeTreasuryBuy_TheReceiptStatusMustMatchTheVerdict(t *testing.T) {
 		if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 			t.Fatal(err)
 		}
-		r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+		r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 		r.probe.receiptFailed = true
 		if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 			t.Fatal(err)
@@ -894,7 +894,7 @@ func TestSettleTreasuryBuy_RefusedOverAFailedLeg(t *testing.T) {
 	if err := r.s.treasuryLegs(r.s.db).Fail(ctx, leg.ID, "dropped: operator re-send"); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.s.settleTreasuryBuy(ctx, &intent, &leg, "7232937"); !errors.Is(err, ErrITBadState) {
+	if err := r.s.settleTreasuryBuy(ctx, &intent, &leg, "7278150"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("settle over a failed leg: %v, want refused", err)
 	}
 	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering || got.TxHash != "" {
@@ -907,10 +907,10 @@ func TestSettleTreasuryBuy_RefusedOverAFailedLeg(t *testing.T) {
 	}
 	leg2 := r2.legs(t)[0]
 	intent2 := reloadIntent(t, r2.s, r2.intent.ID)
-	if err := r2.s.treasuryLegs(r2.s.db).Confirm(ctx, leg2.ID, "7232937", time.Now()); err != nil {
+	if err := r2.s.treasuryLegs(r2.s.db).Confirm(ctx, leg2.ID, "7278150", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := r2.s.settleTreasuryBuy(ctx, &intent2, &leg2, "7232937"); err != nil {
+	if err := r2.s.settleTreasuryBuy(ctx, &intent2, &leg2, "7278150"); err != nil {
 		t.Fatalf("settle over a confirmed leg: %v", err)
 	}
 	if got := reloadIntent(t, r2.s, r2.intent.ID); got.Status != models.ITStatusSettled {
@@ -1055,7 +1055,7 @@ func TestSecondPaymentGate_AnotherOrdersRecordedSaleIsNotHers(t *testing.T) {
 	orderB := seedTreasuryIntent(t, r.s, r.intent.UserID, models.ITStatusSettled)
 	bHash := common.HexToHash("0xb0b")
 	if err := r.s.db.Create(&models.RampLeg{OrderID: orderB.ID, Kind: models.RampLegKindSale, Attempt: 1,
-		ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: testRoutedEVM, Amount: "7232937",
+		ChainKey: "base", Token: "USDC", FromAddr: sponsorTestSigner, ToAddr: testRoutedEVM, Amount: "7278150",
 		Status: models.RampLegStatusConfirmed, TxHash: "0x" + strings.ToUpper(bHash.Hex()[2:]), FromBlock: 2500,
 		CreatedAt: time.Now().Add(-time.Hour)}).Error; err != nil {
 		t.Fatal(err)

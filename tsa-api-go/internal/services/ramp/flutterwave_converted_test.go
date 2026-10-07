@@ -14,7 +14,7 @@ import (
 // polygonVenue is the pricer's answer on Flutterwave's Polygon USDC leg.
 func polygonVenue() *services.PaycrestVenue {
 	v := optVenue()
-	v.ChainKey, v.Network, v.ViaChain, v.Rate = "polygon", "polygon", "polygon", "1692.57"
+	v.ChainKey, v.Network, v.ViaChain, v.Rate = "polygon", "polygon", "polygon", "1658.50"
 	return v
 }
 
@@ -42,17 +42,17 @@ func TestFlutterwaveQuoteConverted_VenueCarriesTheLiFiLineAfterFlutterwavesFees(
 		t.Fatalf("venues = %+v err = %v", venues, err)
 	}
 	v := venues[0]
-	if v.Kind != models.RouteKindConverted || v.Provider != ProviderFlutterwave || v.Rate != "1692.57" ||
-		v.EffectiveRate != "1754.38" || v.ViaChain != "polygon" || v.ViaToken != "USDC" || v.RequestedToken != "USDT" {
+	if v.Kind != models.RouteKindConverted || v.Provider != ProviderFlutterwave || v.Rate != "1658.50" ||
+		v.EffectiveRate != "1743.31" || v.ViaChain != "polygon" || v.ViaToken != "USDC" || v.RequestedToken != "USDT" {
 		t.Fatalf("venue = %+v", v)
 	}
-	if len(v.Fees) != 3 || v.Fees[0].Provider != "Flutterwave" || v.Fees[1].Provider != "Flutterwave" {
+	if len(v.Fees) != 4 || v.Fees[0].Provider != "Flutterwave" || v.Fees[1].Provider != "Flutterwave" || v.Fees[2].Provider != "Flutterwave" {
 		t.Fatalf("fees = %+v", v.Fees)
 	}
-	if last := v.Fees[2]; last.Label != "Conversion (LiFi)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.472688" {
+	if last := v.Fees[3]; last.Label != "Conversion (LiFi)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.47569" {
 		t.Fatalf("LiFi line = %+v", last)
 	}
-	if leg := pricer.legs[0]; leg.ChainKey != "polygon" || leg.Token != "USDC" || leg.Delivered.Cmp(big.NewInt(94_537_500)) != 0 {
+	if leg := pricer.legs[0]; leg.ChainKey != "polygon" || leg.Token != "USDC" || leg.Delivered.Cmp(big.NewInt(95_137_885)) != 0 {
 		t.Fatalf("leg = %+v", leg)
 	}
 	name, k, err := DecodeHandle(v.Handle)
@@ -83,7 +83,7 @@ func TestFlutterwaveOpenConverted_GuardsOnTheAllInRateThenOpensBothRecords(t *te
 	pricer := &fakePricer{venue: polygonVenue()}
 	p, f := convertingFlutterwave(t, pricer)
 	f.intent = &models.ITIntent{ID: uuid.New()}
-	if _, err := p.OpenConverted(context.Background(), convertedTreasuryReq("165025"), convertedFWInput("1754.00")); !errors.Is(err, services.ErrPriceMovedPastQuote) {
+	if _, err := p.OpenConverted(context.Background(), convertedTreasuryReq("165025"), convertedFWInput("1743.00")); !errors.Is(err, services.ErrPriceMovedPastQuote) {
 		t.Fatalf("guard: %v", err)
 	}
 	if len(f.convOpens) != 0 {
@@ -96,7 +96,7 @@ func TestFlutterwaveOpenConverted_GuardsOnTheAllInRateThenOpensBothRecords(t *te
 	}
 	last := pricer.wants[len(pricer.wants)-1]
 	if last.Recipient != in.WalletAddress || f.convOpens[0].WalletAddress != in.WalletAddress ||
-		f.convOpens[0].Venue.TokenAmountBaseUnits != services.ConversionOwed(big.NewInt(94_537_500), 50).String() {
+		f.convOpens[0].Venue.TokenAmountBaseUnits != services.ConversionOwed(big.NewInt(95_137_885), 50).String() {
 		t.Fatalf("want=%+v open=%+v", last, f.convOpens[0])
 	}
 }

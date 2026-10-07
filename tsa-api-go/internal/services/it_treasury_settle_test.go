@@ -20,7 +20,7 @@ type fixedTreasuryRate struct {
 func (f *fixedTreasuryRate) BuyRate(context.Context, string) (*big.Rat, error) { return f.rate, f.err }
 
 // newTreasurySettleService opens the company wallet's worked example
-// (₦10,000 → 7.232937 USDC on Base) with stockUnits in the wallet.
+// (₦10,000 → 7.27815 USDC on Base) with stockUnits in the wallet.
 func newTreasurySettleService(t *testing.T, stockUnits int64) (*ITService, uuid.UUID, *models.ITIntent, *fakeSponsorNative) {
 	t.Helper()
 	s, userID, native := newTreasuryBuyService(t, stockUnits)
@@ -49,7 +49,7 @@ func TestTreasurySettle_HonouredNeedsNoStockCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := reloadIntent(t, s, intent.ID)
-	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7232937" || got.Repriced {
+	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7278150" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v", got.Status, got.AssetAmount, got.Repriced)
 	}
 	if !strings.Contains(logs.String(), "ramp_treasury_honoured intent="+intent.ID.String()) {
@@ -78,7 +78,7 @@ func TestTreasurySettle_LiveAboveTheMaximumParks(t *testing.T) {
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_big", "30000000"); err != nil {
 		t.Fatal(err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusBuyAwaitingRate || got.AssetAmount != "7232937" {
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusBuyAwaitingRate || got.AssetAmount != "7278150" {
 		t.Fatalf("status=%s asset=%s, want parked with the quote untouched", got.Status, got.AssetAmount)
 	}
 	if !strings.Contains(logs.String(), "ramp_treasury_parked intent="+intent.ID.String()+" reason=maximum") {
@@ -104,9 +104,9 @@ func TestTreasurySettle_LiveBeyondFreeStockParks(t *testing.T) {
 }
 
 // §5.2: live pricing excludes the order's own reservation — with stock
-// exactly its own 7.232937, a slightly smaller live amount still fits.
+// exactly its own 7.27815, a slightly smaller live amount still fits.
 func TestTreasurySettle_LivePricingExcludesItsOwnReservation(t *testing.T) {
-	s, userID, intent, _ := newTreasurySettleService(t, 7_232_937)
+	s, userID, intent, _ := newTreasurySettleService(t, 7_278_150)
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_own", "999000"); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func parkTreasury(t *testing.T, s *ITService, intent *models.ITIntent, received 
 }
 
 func TestRepriceParkedStableBuy_CompanyWalletNeedsStockAndKeepsTheMaximum(t *testing.T) {
-	// Open with stock (₦10,000 needs 7.232937), then let the wallet run low.
+	// Open with stock (₦10,000 needs 7.27815), then let the wallet run low.
 	s, _, intent, native := newTreasurySettleService(t, 50_000_000)
 	setStock(native, 1_000_000)
 	parkTreasury(t, s, intent, "1200000") // ₦12,000 → 8.679525 USDC
@@ -160,7 +160,7 @@ func TestRepriceParkedStableBuy_CompanyWalletNeedsStockAndKeepsTheMaximum(t *tes
 	}
 	setStock(native, 50_000_000) // refilled
 	got, err := s.RepriceParkedStableBuy(context.Background(), intent.ID)
-	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" || got.MaxWaived {
+	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8733779" || got.MaxWaived {
 		t.Fatalf("after refill: %+v %v, want priced with no waiver", got, err)
 	}
 	parkTreasury(t, s, intent, "30000000") // ₦300,000 → above $200
@@ -172,7 +172,7 @@ func TestRepriceParkedStableBuy_CompanyWalletNeedsStockAndKeepsTheMaximum(t *tes
 // Review Focus 4 / §13 Q9: "deliver anyway" waives the maximum, never the stock.
 func TestDeliverParkedTreasuryBuy_WaivesTheMaximumButNotTheStock(t *testing.T) {
 	s, _, intent, native := newTreasurySettleService(t, 100_000_000)
-	parkTreasury(t, s, intent, "30000000") // 216.988129 USDC live
+	parkTreasury(t, s, intent, "30000000") // 218.34448 USDC live
 	admin := uuid.New()
 	if _, err := s.DeliverParkedTreasuryBuy(context.Background(), admin, intent.ID, ""); !errors.Is(err, ErrITOperatorNoteRequired) {
 		t.Fatalf("no note: %v", err)
@@ -182,7 +182,7 @@ func TestDeliverParkedTreasuryBuy_WaivesTheMaximumButNotTheStock(t *testing.T) {
 	}
 	setStock(native, 300_000_000)
 	got, err := s.DeliverParkedTreasuryBuy(context.Background(), admin, intent.ID, "customer confirmed")
-	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "216988129" || !got.MaxWaived {
+	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "218344480" || !got.MaxWaived {
 		t.Fatalf("deliver anyway: %+v %v, want the waiver recorded on the intent", got, err)
 	}
 	var audit models.ITIntentAuditLog
@@ -210,7 +210,7 @@ func TestDeliverParkedTreasuryBuy_InsideTheMaximumWaivesNothing(t *testing.T) {
 	s, _, intent, _ := newTreasurySettleService(t, 50_000_000)
 	parkTreasury(t, s, intent, "1200000") // 8.679525 USDC, well under $200
 	got, err := s.DeliverParkedTreasuryBuy(context.Background(), uuid.New(), intent.ID, "parked on a stock dip")
-	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" || got.MaxWaived {
+	if err != nil || got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8733779" || got.MaxWaived {
 		t.Fatalf("deliver anyway: %+v %v, want max_waived=false", got, err)
 	}
 }
@@ -235,7 +235,7 @@ func TestTreasurySettle_LiveBeyondTheDailyCapParks(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := reloadIntent(t, s, intent.ID)
-	if got.Status != models.ITStatusBuyAwaitingRate || got.AssetAmount != "7232937" || got.Repriced {
+	if got.Status != models.ITStatusBuyAwaitingRate || got.AssetAmount != "7278150" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v, want parked with the quote untouched", got.Status, got.AssetAmount, got.Repriced)
 	}
 	out := logs.String()
@@ -253,11 +253,11 @@ func TestTreasurySettle_LiveBeyondTheDailyCapParks(t *testing.T) {
 // her own order would now count past the cap a second time.
 func TestTreasurySettle_HonouredIgnoresTheDailyCap(t *testing.T) {
 	s, userID, intent, _ := newTreasurySettleService(t, 50_000_000)
-	seedSettledTreasuryBuy(t, s, userID, "495000000") // 495 + 7.232937 > 500
+	seedSettledTreasuryBuy(t, s, userID, "495000000") // 495 + 7.27815 > 500
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_cap_exact", "1000000"); err != nil {
 		t.Fatal(err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7232937" || got.Repriced {
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7278150" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v, want honoured", got.Status, got.AssetAmount, got.Repriced)
 	}
 }
@@ -270,7 +270,7 @@ func TestTreasurySettle_DailyCapExcludesItsOwnOrder(t *testing.T) {
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_cap_own", "1200000"); err != nil {
 		t.Fatal(err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8679525" {
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "8733779" {
 		t.Fatalf("status=%s asset=%s, want priced live", got.Status, got.AssetAmount)
 	}
 }

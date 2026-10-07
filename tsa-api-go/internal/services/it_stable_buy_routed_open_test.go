@@ -35,7 +35,7 @@ func acceptITAgreement(t *testing.T, s *ITService, userID uuid.UUID) {
 	}
 }
 
-// routedTestQuote is the Flutterwave worked example: ₦165,025 → 94.5375 USDC.
+// routedTestQuote is the Flutterwave worked example: ₦165,025 → 95.137885 USDC.
 func routedTestQuote(t *testing.T, s *ITService) *StableBuyQuote {
 	t.Helper()
 	q, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", big.NewRat(165025, 100))
@@ -46,16 +46,16 @@ func routedTestQuote(t *testing.T, s *ITService) *StableBuyQuote {
 }
 
 // seedTreasuryIntent writes a company-wallet buy directly: the company
-// wallet's worked example (₦10,000 → 7.232937 USDC on Base).
+// wallet's worked example (₦10,000 → 7.27815 USDC on Base).
 func seedTreasuryIntent(t *testing.T, s *ITService, userID uuid.UUID, status string) *models.ITIntent {
 	t.Helper()
 	until := time.Now().Add(15 * time.Minute)
 	i := &models.ITIntent{
 		ID: uuid.New(), UserID: userID, Direction: models.ITDirectionBuy, Status: status,
-		Provider: models.ITProviderTreasury, Asset: models.ITAssetUSDC, AssetAmount: "7232937",
+		Provider: models.ITProviderTreasury, Asset: models.ITAssetUSDC, AssetAmount: "7278150",
 		Currency: "NGN", DestChain: "BASE", DestAddress: testRoutedEVM,
-		LockedRate: "138257", DisplayRate: "138257", RateExpiresAt: &until,
-		NgnKobo: "1000000", AmountMinor: "1000000", RateKobo: "138257", RateMinor: "138257",
+		LockedRate: "137398", DisplayRate: "135474", RateExpiresAt: &until,
+		NgnKobo: "1000000", AmountMinor: "1000000", RateKobo: "137398", RateMinor: "137398",
 		McgpAmount: "0", FeeNgnKobo: "0", NetNgnKobo: "1000000", PlatformKeptKobo: "0", ReceivedAmount: "0",
 	}
 	if err := s.db.Create(i).Error; err != nil {
@@ -83,7 +83,7 @@ func TestOpenRoutedStableBuy_HonoursTheQuoteAndKeepsItsBreakdown(t *testing.T) {
 		intent.RateExpiresAt.After(time.Now().Add(16*time.Minute)) {
 		t.Fatalf("rate_expires_at = %v, want ~now+15m (IT_STABLE_RATE_LOCK_SECONDS)", intent.RateExpiresAt)
 	}
-	if intent.LockedRate != "174561" || intent.AssetAmount != "94537500" || intent.AmountMinor != "16502500" {
+	if intent.LockedRate != "173459" || intent.AssetAmount != "95137885" || intent.AmountMinor != "16502500" {
 		t.Fatalf("locked=%s asset=%s amount=%s", intent.LockedRate, intent.AssetAmount, intent.AmountMinor)
 	}
 	if intent.Provider != models.ITProviderFlutterwave || intent.DestChain != "POLYGON" || intent.DestAddress != testRoutedEVM {
@@ -91,10 +91,10 @@ func TestOpenRoutedStableBuy_HonoursTheQuoteAndKeepsItsBreakdown(t *testing.T) {
 	}
 	var got models.ITIntent
 	s.db.First(&got, "id = ?", intent.ID)
-	if StableBuyDisplayRate(&got) != "169257" {
-		t.Fatalf("display rate = %q, want 169257 (spec §14: stored with the intent)", StableBuyDisplayRate(&got))
+	if StableBuyDisplayRate(&got) != "165850" {
+		t.Fatalf("display rate = %q, want 165850 (spec §14: stored with the intent)", StableBuyDisplayRate(&got))
 	}
-	if fees := StableBuyFees(&got); len(fees) != 2 || fees[0].Units != "1462160" || fees[1].Units != "1500000" {
+	if fees := StableBuyFees(&got); len(fees) != 3 || fees[0].Units != "1393035" || fees[1].Units != "1471642" || fees[2].Units != "1500000" {
 		t.Fatalf("fees = %+v", fees)
 	}
 	if pay.AccountNumber != "1234567890" {

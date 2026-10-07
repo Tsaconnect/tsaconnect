@@ -30,14 +30,14 @@ func (f *fakeConvertedTreasury) Lane(chain string) *TreasuryLane {
 func (f *fakeConvertedTreasury) CheckCaps(string, float64, float64) error { return f.capErr }
 
 // convertedVenueForTest is PriceConvertedLeg's answer for the company
-// wallet's worked example (₦10,000 → D = 7.232937 USDC on Base) to USDT on
-// Optimism at a 50 bps budget: T = 7.196772.
+// wallet's worked example (₦10,000 → D = 7.278150 USDC on Base) to USDT on
+// Optimism at a 50 bps budget: T = 7.241759.
 func convertedVenueForTest() PaycrestVenue {
 	return PaycrestVenue{Kind: models.RouteKindConverted, ChainKey: "base", Network: "base", Token: "USDC",
-		ViaChain: "base", ViaToken: "USDC", Rate: "1382.57",
+		ViaChain: "base", ViaToken: "USDC", Rate: "1354.74",
 		RequestedChain: "optimism", RequestedToken: "USDT", RequestedChainID: 10,
 		RequestedAddress: "0xOptUSDT000000000000000000000000000001", RequestedDecimals: 6,
-		TokenAmountBaseUnits: "7196772", MarkupBps: 50, EstimatedAmount: "7190000", PromisedAmount: "7196772"}
+		TokenAmountBaseUnits: "7241759", MarkupBps: 50, EstimatedAmount: "7235000", PromisedAmount: "7241759"}
 }
 
 func wireConverted(s *ITService) {
@@ -79,15 +79,15 @@ func TestOpenTreasuryConvertedBuy_ReservesTheLegAndWritesBothRecords(t *testing.
 	s, userID := newConvertedTreasuryService(t, 50_000_000)
 	intent, rec := openConvertedTreasury(t, s, userID)
 	if !strings.EqualFold(intent.DestAddress, testConversionTreasury) || intent.DestChain != "BASE" ||
-		intent.Provider != models.ITProviderTreasury || intent.RateExpiresAt == nil || intent.AssetAmount != "7232937" {
+		intent.Provider != models.ITProviderTreasury || intent.RateExpiresAt == nil || intent.AssetAmount != "7278150" {
 		t.Fatalf("intent = %+v", intent)
 	}
-	if got := reservedNow(t, s); got != 7_232_937 {
+	if got := reservedNow(t, s); got != 7_278_150 {
 		t.Fatalf("reserved = %d, want the leg reserved exactly like a direct buy", got)
 	}
 	if rec.Status != models.PaycrestStatusAwaitingPayment || rec.Holder != models.HolderCompanyWallet ||
 		rec.RouteKind != models.RouteKindConverted || rec.PaycrestID != "" || rec.ChainKey != "base" || rec.Token != "USDC" ||
-		rec.TokenAmount != "7.232937" || rec.QuotedAmount != "7196772" || rec.MarkupBps != 50 ||
+		rec.TokenAmount != "7.27815" || rec.QuotedAmount != "7241759" || rec.MarkupBps != 50 ||
 		rec.WalletAddress != testRoutedEVM || rec.DestinationAddress != testRoutedEVM || rec.RequestedToken != "USDT" ||
 		rec.UserID != userID {
 		t.Fatalf("record = %+v", rec)
@@ -213,14 +213,14 @@ func TestNewConvertedTerms_OwedAllInRateAndTheLiFiLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// T = 7.196772; ⌈1,000,000 kobo × 10⁶ ÷ 7,196,772⌉ = 138,952 → ₦1,389.52.
-	if terms.OwedUnits.String() != "7196772" || terms.EffectiveRateMinor.String() != "138952" {
+	// T = 7.241759; ⌈1,000,000 kobo × 10⁶ ÷ 7,241,759⌉ = 138,088 → ₦1,380.88.
+	if terms.OwedUnits.String() != "7241759" || terms.EffectiveRateMinor.String() != "138088" {
 		t.Fatalf("terms = %+v", terms)
 	}
 	last := terms.Fees[len(terms.Fees)-1]
-	// D − T = 0.036165 USDC at ₦1,382.57 = ₦50.00.
+	// D − T = 0.036391 USDC at ₦1,354.74 = ₦49.30.
 	if last.Kind != FeeKindConversion || last.Label != ConversionLiFiLabel || last.Provider != FeeProviderLiFi ||
-		last.Units != "36165" || last.NgnMinor != "5000" {
+		last.Units != "36391" || last.NgnMinor != "4930" {
 		t.Fatalf("fee line = %+v", last)
 	}
 	all := PaycrestVenue{MarkupBps: 10_000}
@@ -291,7 +291,7 @@ func TestInsertTreasuryIntentWith_RecordCommitsWithTheIntent_Postgres(t *testing
 	}
 	var rec models.PaycrestOrderRecord
 	if err := db.First(&rec, "reference = ?", ITConversionRef(first.ID)).Error; err != nil ||
-		rec.Holder != models.HolderCompanyWallet || rec.QuotedAmount != "7196772" {
+		rec.Holder != models.HolderCompanyWallet || rec.QuotedAmount != "7241759" {
 		t.Fatalf("record = %+v err = %v", rec, err)
 	}
 	// A record that cannot be written (its reference is already taken) takes

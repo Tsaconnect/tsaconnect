@@ -23,8 +23,8 @@ func TestCompanyWalletFloats_ReportFreeStockAndGas(t *testing.T) {
 	if got.Chain != "base" || got.Address != sponsorTestSigner || got.BalanceWei == nil || got.FloorWei == nil {
 		t.Fatalf("native = %+v", got)
 	}
-	if usd := got.Tokens["USDC"]; usd < 52.767 || usd > 52.768 {
-		t.Fatalf("free USDC = %v, want 60 − 7.232937", usd)
+	if usd := got.Tokens["USDC"]; usd < 52.721 || usd > 52.722 {
+		t.Fatalf("free USDC = %v, want 60 − 7.27815", usd)
 	}
 	dormant, _ := newRoutedBuyService(t)
 	if dormant.CompanyWalletFloats().Enabled() {

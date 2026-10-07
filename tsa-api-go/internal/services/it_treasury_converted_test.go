@@ -59,16 +59,16 @@ func TestConvertedBuy_HandoffIsDecidedByTheRecordNotTheWiring(t *testing.T) {
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if _, _, to, amt := r.native.transferCall(); !strings.EqualFold(to, testConversionTreasury) || amt.Int64() != 7_232_937 {
+	if _, _, to, amt := r.native.transferCall(); !strings.EqualFold(to, testConversionTreasury) || amt.Int64() != 7_278_150 {
 		t.Fatalf("sent %v to %s, want the leg to the conversion treasury", amt, to)
 	}
-	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	got, rec := reloadIntent(t, r.s, r.intent.ID), conversionRecord(t, r.s, r.intent.ID)
 	if got.Status != models.ITStatusSettled || rec.Status != models.PaycrestStatusConverting || rec.TxHash != "0xsponsored" ||
-		rec.TokenAmount != "7.232937" || rec.QuotedAmount != "7196772" || rec.Holder != models.HolderCompanyWallet {
+		rec.TokenAmount != "7.27815" || rec.QuotedAmount != "7241759" || rec.Holder != models.HolderCompanyWallet {
 		t.Fatalf("intent=%s record=%+v", got.Status, rec)
 	}
 }
@@ -100,7 +100,7 @@ func TestConvertedBuy_HandoffRollsBackWithTheSettle(t *testing.T) {
 	}
 	r.s.db.Model(&models.PaycrestOrderRecord{}).Where("reference = ?", ITConversionRef(r.intent.ID)).
 		Update("status", models.PaycrestStatusRecoveryPending) // an operator took it
-	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("finalize: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestConvertedBuy_HonourWindowHasTheProcessingBound(t *testing.T) {
 			t.Fatalf("%s: accept: %v", tc.name, err)
 		}
 		got := reloadIntent(t, s, intent.ID)
-		if tc.honoured && (got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7232937" || got.Repriced) {
+		if tc.honoured && (got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "7278150" || got.Repriced) {
 			t.Fatalf("%s: %s %s repriced=%v, want honoured", tc.name, got.Status, got.AssetAmount, got.Repriced)
 		}
 		if !tc.honoured && got.Status != models.ITStatusBuyAwaitingRate {
@@ -221,7 +221,7 @@ func TestConvertedBuy_Route1DeliveryAboveTheOpenedAmountIsCappedNotStuck(t *test
 	// A pricing path that forgot the ceiling: the record was opened for 7 USDC.
 	r.s.db.Model(&models.PaycrestOrderRecord{}).Where("reference = ?", ITConversionRef(r.intent.ID)).
 		Update("token_amount", "7")
-	r.verifier.credited, r.verifier.err = big.NewInt(7_232_937), nil
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
 	logs := captureLog(t)
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -234,7 +234,7 @@ func TestConvertedBuy_Route1DeliveryAboveTheOpenedAmountIsCappedNotStuck(t *test
 	if legs := r.legs(t); legs[0].Status == models.RampLegStatusPending {
 		t.Fatalf("leg still pending")
 	}
-	if !strings.Contains(logs.String(), "ALERT ramp_converted_handoff_capped") || !strings.Contains(logs.String(), "excess=0.232937") {
+	if !strings.Contains(logs.String(), "ALERT ramp_converted_handoff_capped") || !strings.Contains(logs.String(), "excess=0.27815") {
 		t.Fatalf("log = %q", logs.String())
 	}
 }

@@ -28,8 +28,8 @@ func TestCompanyWalletStatus_BalanceReservedFreeLow(t *testing.T) {
 		t.Fatalf("chain = %+v", c)
 	}
 	tok := c.Tokens[0]
-	if tok.Token != "USDC" || tok.Balance != "60" || tok.Reserved != "7.232937" || tok.Free != "52.767063" || !tok.Low {
-		t.Fatalf("token = %+v, want free 52.77 flagged low against $55", tok)
+	if tok.Token != "USDC" || tok.Balance != "60" || tok.Reserved != "7.27815" || tok.Free != "52.72185" || !tok.Low {
+		t.Fatalf("token = %+v, want free 52.72 flagged low against $55", tok)
 	}
 }
 

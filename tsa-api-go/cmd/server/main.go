@@ -1121,18 +1121,19 @@ func main() {
 		if err := itService.SetRampBuyTerms(services.RampBuyTerms{
 			DailyAbandonCap: cfg.RampDailyAbandonCap, HonourGrace: cfg.RampHonourGrace,
 			FlutterwaveHashWait: cfg.RampFlutterwaveHashWait,
+			CompanyTakeBps:      cfg.RampCompanyTakeBps, FundingFeeBps: cfg.RampFundingFeeBps,
 		}); err != nil {
-			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS / RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES invalid (%v) — defaults in force", err)
+			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS / RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES / RAMP_COMPANY_TAKE_BPS / RAMP_FUNDING_FEE_BPS invalid (%v) — defaults in force", err)
 		}
 		if err := itService.SetRoutedStableBuyLimits(services.RoutedStableBuyLimits{
 			MinTokens: cfg.RampFlutterwaveMinTokens, MaxUSD: cfg.RampFlutterwaveMaxUSD, SendFeeUSD: cfg.RampFlutterwaveSendFeeUSD,
-			SpreadBps: cfg.RampFlutterwaveSpreadBps, ConversionFeeBps: cfg.RampFlutterwaveConversionFeeBps,
-			SendFeeMode: cfg.RampFlutterwaveSendFeeMode,
+			ConversionFeeBps: cfg.RampFlutterwaveConversionFeeBps,
+			SendFeeMode:      cfg.RampFlutterwaveSendFeeMode,
 		}); err != nil {
 			log.Printf("[ramp] WARNING: RAMP_FLUTTERWAVE_* invalid (%v) — those values keep their defaults", err)
 		}
 		if err := itService.SetTreasuryBuyLimits(services.TreasuryBuyLimits{
-			MarginBps: cfg.RampTreasuryMarginBps, MinNGN: cfg.RampTreasuryMinNGN, MaxUSD: cfg.RampTreasuryMaxUSD,
+			MinNGN: cfg.RampTreasuryMinNGN, MaxUSD: cfg.RampTreasuryMaxUSD,
 			DailyUserMaxUSD: cfg.RampTreasuryDailyUserMaxUSD, SendStall: cfg.RampTreasurySendStall,
 			Confirmations: cfg.RampTreasuryConfirmations,
 		}); err != nil {

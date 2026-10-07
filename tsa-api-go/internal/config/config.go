@@ -392,20 +392,23 @@ type Config struct {
 	RampFlutterwaveMinTokens        string
 	RampFlutterwaveMaxUSD           string
 	RampFlutterwaveSendFeeUSD       string
-	RampFlutterwaveSpreadBps        int64
 	RampFlutterwaveConversionFeeBps int64
 	RampFlutterwaveSendFeeMode      string
 	RampDailyAbandonCap             int
 	RampHonourGrace                 time.Duration
-	RampTreasuryMarginBps           int64
-	RampTreasuryMinNGN              string
-	RampTreasuryDailyUserMaxUSD     string
-	RampTreasuryLowBalanceUSD       float64
-	RampTreasurySendStall           time.Duration
-	RampTreasuryRateTolBps          int64
-	RampTreasuryConfirmations       int
-	RampTreasuryPrivateKey          string
-	RampTreasuryChains              []string
+	// Owner ruling 2026-10-07: both in-house providers price at the base rate
+	// plus RampCompanyTakeBps (our only margin) and pass third-party costs on
+	// at cost; RampFundingFeeBps is the measured central-account funding fee.
+	RampCompanyTakeBps          int64
+	RampFundingFeeBps           int64
+	RampTreasuryMinNGN          string
+	RampTreasuryDailyUserMaxUSD string
+	RampTreasuryLowBalanceUSD   float64
+	RampTreasurySendStall       time.Duration
+	RampTreasuryRateTolBps      int64
+	RampTreasuryConfirmations   int
+	RampTreasuryPrivateKey      string
+	RampTreasuryChains          []string
 	// RampTreasuryMaxInflightUSDPerOrder mirrors Paycrest's own onramp cap.
 	// RampTreasuryMaxInflightUSDPerChain bounds this chain's TOTAL exposure
 	// across every converted buy the treasury has not yet settled.
@@ -978,12 +981,12 @@ func Load() *Config {
 	cfg.RampFlutterwaveMinTokens = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_MIN_TOKENS", "10"))
 	cfg.RampFlutterwaveMaxUSD = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_MAX_USD", "2000"))
 	cfg.RampFlutterwaveSendFeeUSD = strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_SEND_FEE_USD", "1.50"))
-	cfg.RampFlutterwaveSpreadBps = getEnvInt64("RAMP_FLUTTERWAVE_SPREAD_BPS", 250)
 	cfg.RampFlutterwaveConversionFeeBps = getEnvInt64("RAMP_FLUTTERWAVE_CONVERSION_FEE_BPS", 150)
 	cfg.RampFlutterwaveSendFeeMode = strings.ToLower(strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_SEND_FEE_MODE", "wallet")))
 	cfg.RampDailyAbandonCap = int(getEnvInt64("RAMP_DAILY_ABANDON_CAP", 5))
 	cfg.RampHonourGrace = time.Duration(getEnvInt64("RAMP_HONOUR_GRACE_SECONDS", 600)) * time.Second
-	cfg.RampTreasuryMarginBps = getEnvInt64("RAMP_TREASURY_MARGIN_BPS", 250)
+	cfg.RampCompanyTakeBps = getEnvInt64("RAMP_COMPANY_TAKE_BPS", 50)
+	cfg.RampFundingFeeBps = getEnvInt64("RAMP_FUNDING_FEE_BPS", 140)
 	cfg.RampTreasuryMinNGN = strings.TrimSpace(getEnv("RAMP_TREASURY_MIN_NGN", "100"))
 	cfg.RampTreasuryDailyUserMaxUSD = strings.TrimSpace(getEnv("RAMP_TREASURY_DAILY_USER_MAX_USD", "500"))
 	cfg.RampTreasuryLowBalanceUSD = getEnvFloat64("RAMP_TREASURY_LOW_BALANCE_USD", 50)

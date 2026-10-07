@@ -1062,8 +1062,8 @@ func (s *PaycrestQuoteService) paycrestLeg(src PaycrestVenue, fiatAmount string,
 }
 
 // deliveredLeg prices a leg whose D is known: at budget b she is owed
-// T = D·(1 − b), and the cap limits b alone (D29) — the company wallet's
-// margin and Flutterwave's spread and fees are their own prices. Only a 6-dp
+// T = D·(1 − b), and the cap limits b alone (D29) — the company take and the
+// in-house providers' third-party fees are their own lines. Only a 6-dp
 // token is accepted, so D, T and the intent share one precision (Decision C3).
 func (s *PaycrestQuoteService) deliveredLeg(chain, token string, leg SettlementLeg) (*settlementLeg, bool) {
 	id := s.chainID(chain)

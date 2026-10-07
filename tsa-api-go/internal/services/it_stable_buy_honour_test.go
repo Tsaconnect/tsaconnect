@@ -14,7 +14,7 @@ import (
 )
 
 // openRoutedForSettle opens the Flutterwave worked example (₦165,025 →
-// 94.5375 USDC at ₦1745.61) and returns it waiting for payment.
+// 95.137885 USDC at ₦1734.59) and returns it waiting for payment.
 func openRoutedForSettle(t *testing.T) (*ITService, uuid.UUID, *models.ITIntent) {
 	t.Helper()
 	s, userID := newRoutedBuyService(t)
@@ -62,8 +62,8 @@ func TestRoutedBuy_OnTimeExactPaymentIsHonoured(t *testing.T) {
 		t.Fatalf("claimed=%v err=%v", claimed, err)
 	}
 	got := reloadIntent(t, s, intent.ID)
-	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "94537500" || got.LockedRate != "174561" ||
-		got.Repriced || StableBuyDisplayRate(&got) != "169257" {
+	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "95137885" || got.LockedRate != "173459" ||
+		got.Repriced || StableBuyDisplayRate(&got) != "165850" {
 		t.Fatalf("status=%s asset=%s rate=%s display=%s repriced=%v", got.Status, got.AssetAmount, got.LockedRate, got.DisplayRate, got.Repriced)
 	}
 	out := logs.String()
@@ -88,7 +88,7 @@ func TestRoutedBuy_OffAmountInsideTheWindowIsPricedLive(t *testing.T) {
 	}
 	got := reloadIntent(t, s, intent.ID)
 	if got.AssetAmount != want.AssetUnits.String() || got.LockedRate != want.RatePerUnitMinor.String() || !got.Repriced ||
-		got.DisplayRate != want.DisplayRateMinor.String() || len(StableBuyFees(&got)) != 2 ||
+		got.DisplayRate != want.DisplayRateMinor.String() || len(StableBuyFees(&got)) != 3 ||
 		StableBuyFees(&got)[0].Units != want.Fees[0].Units {
 		t.Fatalf("intent = %+v, want the live quote %+v", got, want)
 	}
@@ -171,7 +171,7 @@ func TestRoutedBuy_ArrivedOnTimeProcessedInsideTheGraceIsHonoured(t *testing.T) 
 		centralCredit("100004261003120000000000000097", 16_502_500, expiry.Add(-time.Minute))); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.AssetAmount != "94537500" || got.Repriced {
+	if got := reloadIntent(t, s, intent.ID); got.AssetAmount != "95137885" || got.Repriced {
 		t.Fatalf("asset=%s repriced=%v, want honoured", got.AssetAmount, got.Repriced)
 	}
 }
@@ -186,7 +186,7 @@ func TestRoutedBuy_ProcessedAfterTheGraceIsPricedLive(t *testing.T) {
 		centralCredit("100004261003120000000000000096", 16_502_500, expiry.Add(-time.Minute))); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.AssetAmount == "94537500" || !got.Repriced {
+	if got := reloadIntent(t, s, intent.ID); got.AssetAmount == "95137885" || !got.Repriced {
 		t.Fatalf("asset=%s repriced=%v, want priced live", got.AssetAmount, got.Repriced)
 	}
 }
@@ -226,7 +226,7 @@ func TestRoutedBuy_ConvertDoesNotRepriceAnHonouredIntent(t *testing.T) {
 	if err := s.ConvertStableBuy(context.Background(), intent.ID); err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusConverting || got.AssetAmount != "94537500" || got.Repriced {
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusConverting || got.AssetAmount != "95137885" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v", got.Status, got.AssetAmount, got.Repriced)
 	}
 }
@@ -256,13 +256,13 @@ func TestRoutedBuy_WebhookRedeliveryOfAnHonouredChargeDoesNotReprice(t *testing.
 	if replayed, claimed, err := s.finishStableBuyReplay(ctx, "chg_va_honour", false); err != nil || !replayed || !claimed {
 		t.Fatalf("poller replay: replayed=%v claimed=%v err=%v", replayed, claimed, err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "94537500" || got.Repriced {
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "95137885" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v", got.Status, got.AssetAmount, got.Repriced)
 	}
 }
 
 // D3: an operator re-price of a routed Flutterwave buy uses the routed terms.
-// ₦33,005 → 20 gross → 19.7075… → 17.7075 delivered.
+// ₦33,005 → 19.900512 at ₦1,658.50 → less 1.4%, 1.5% and 1.50 → 17.827577 delivered.
 func TestRepriceParkedStableBuy_RoutedUsesTheRoutedTerms(t *testing.T) {
 	s, _, intent := openRoutedForSettle(t)
 	s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Updates(map[string]any{
@@ -272,7 +272,7 @@ func TestRepriceParkedStableBuy_RoutedUsesTheRoutedTerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reprice: %v", err)
 	}
-	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "17707500" || !got.Repriced {
+	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "17827577" || !got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v", got.Status, got.AssetAmount, got.Repriced)
 	}
 }
@@ -302,31 +302,31 @@ func deliveringRoutedIntent(t *testing.T, balance float64) (*ITService, *models.
 	return s, intent, d
 }
 
-// D31: the gate holds amount + send fee (94.5375 + 1.50).
+// D31: the gate holds amount + send fee (95.137885 + 1.50).
 func TestDeliverStableBuy_RoutedGateHoldsAmountPlusFee(t *testing.T) {
-	s, intent, d := deliveringRoutedIntent(t, 96)
+	s, intent, d := deliveringRoutedIntent(t, 96.6)
 	if err := s.DeliverStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrStableFloatShort) || d.calls != 0 {
 		t.Fatalf("err = %v calls = %d, want float short before sending", err, d.calls)
 	}
-	s.SetStableConverter(&stubConverter{balances: []FWBalance{{Currency: "USDC", AvailableBalance: 96.0375}}}, "merchant_1")
+	s.SetStableConverter(&stubConverter{balances: []FWBalance{{Currency: "USDC", AvailableBalance: 96.637885}}}, "merchant_1")
 	if err := s.DeliverStableBuy(context.Background(), intent.ID); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if got := d.got.PaymentInstruction.Amount.Value; got != 94.5375 {
+	if got := d.got.PaymentInstruction.Amount.Value; got != 95.137885 {
 		t.Fatalf("sent %v, want exactly AssetAmount (wallet mode)", got)
 	}
 }
 
 func TestDeliverStableBuy_AmountModeSendsTheFeeOnTop(t *testing.T) {
-	s, intent, d := deliveringRoutedIntent(t, 96.0375)
+	s, intent, d := deliveringRoutedIntent(t, 96.637885)
 	if err := s.SetRoutedStableBuyLimits(RoutedStableBuyLimits{SendFeeMode: SendFeeFromAmount}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeliverStableBuy(context.Background(), intent.ID); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if got := d.got.PaymentInstruction.Amount.Value; got != 96.0375 {
-		t.Fatalf("sent %v, want 96.0375 (94.5375 + the 1.50 fee)", got)
+	if got := d.got.PaymentInstruction.Amount.Value; got != 96.637885 {
+		t.Fatalf("sent %v, want 96.637885 (95.137885 + the 1.50 fee)", got)
 	}
 }
 

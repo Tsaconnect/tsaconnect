@@ -30,9 +30,9 @@ func (f *fakePricer) PriceConvertedLeg(_ context.Context, leg services.Settlemen
 
 func optVenue() *services.PaycrestVenue {
 	return &services.PaycrestVenue{Kind: models.RouteKindConverted, ChainKey: "base", Network: "base", Token: "USDC",
-		ViaChain: "base", ViaToken: "USDC", Rate: "1382.57", RequestedChain: "optimism", RequestedToken: "USDT",
+		ViaChain: "base", ViaToken: "USDC", Rate: "1354.74", RequestedChain: "optimism", RequestedToken: "USDT",
 		RequestedChainID: 10, RequestedAddress: "0xOptUSDT", RequestedDecimals: 6, MarkupBps: 50,
-		EstimatedAmount: "7190000", PromisedAmount: "7196772", ETASeconds: 60}
+		EstimatedAmount: "7235000", PromisedAmount: "7241759", ETASeconds: 60}
 }
 
 func convertingTreasury(t *testing.T, pricer *fakePricer) (*TreasuryProvider, *fakeTreasuryIT) {
@@ -57,15 +57,15 @@ func TestTreasuryQuoteConverted_VenueCarriesTheLiFiLineAndTheAllInRate(t *testin
 		t.Fatalf("venues = %+v err = %v", venues, err)
 	}
 	v := venues[0]
-	if v.Kind != models.RouteKindConverted || v.Provider != ProviderTreasury || v.Rate != "1382.57" || v.EffectiveRate != "1389.52" ||
+	if v.Kind != models.RouteKindConverted || v.Provider != ProviderTreasury || v.Rate != "1354.74" || v.EffectiveRate != "1380.88" ||
 		v.RequestedToken != "USDT" || v.RequestedChainID != 10 || v.ViaChain != "base" {
 		t.Fatalf("venue = %+v", v)
 	}
 	last := v.Fees[len(v.Fees)-1]
-	if last.Label != "Conversion (LiFi)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.036165" || last.Ngn != "50.00" {
+	if last.Label != "Conversion (LiFi)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.036391" || last.Ngn != "49.30" {
 		t.Fatalf("fee = %+v", last)
 	}
-	if pricer.legs[0].ChainKey != "base" || pricer.legs[0].Delivered.Cmp(big.NewInt(7_232_937)) != 0 {
+	if pricer.legs[0].ChainKey != "base" || pricer.legs[0].Delivered.Cmp(big.NewInt(7_278_150)) != 0 {
 		t.Fatalf("leg = %+v", pricer.legs[0])
 	}
 }
@@ -99,7 +99,7 @@ func TestTreasuryQuoteConverted_OffWithoutAPricerOrStock(t *testing.T) {
 func TestTreasuryOpenConverted_GuardsOnTheAllInRateThenOpensBothRecords(t *testing.T) {
 	pricer := &fakePricer{venue: optVenue()}
 	p, f := convertingTreasury(t, pricer)
-	in := trInput("1389.00") // below the all-in 1389.52
+	in := trInput("1380.00") // below the all-in 1380.88
 	in.Guard = services.PriceGuardEnforce
 	if _, err := p.OpenConverted(context.Background(), convertedTreasuryReq("10000"), in); !errors.Is(err, services.ErrPriceMovedPastQuote) {
 		t.Fatalf("guard: %v", err)
@@ -107,7 +107,7 @@ func TestTreasuryOpenConverted_GuardsOnTheAllInRateThenOpensBothRecords(t *testi
 	if len(f.convOpens) != 0 {
 		t.Fatalf("opened past the guard: %+v", f.convOpens)
 	}
-	in = trInput("1390")
+	in = trInput("1381")
 	o, err := p.OpenConverted(context.Background(), convertedTreasuryReq("10000"), in)
 	if err != nil || o.Conversion == nil || len(f.convOpens) != 1 || f.convOpens[0].Venue.RequestedToken != "USDT" {
 		t.Fatalf("o=%+v err=%v opens=%+v", o, err, f.convOpens)
@@ -116,7 +116,7 @@ func TestTreasuryOpenConverted_GuardsOnTheAllInRateThenOpensBothRecords(t *testi
 	// wallet, on the leg the server chose.
 	last := pricer.wants[len(pricer.wants)-1]
 	if last.Recipient != in.WalletAddress || f.convOpens[0].WalletAddress != in.WalletAddress ||
-		f.convOpens[0].Venue.TokenAmountBaseUnits != "7196772" || f.opened[0].chain != "base" {
+		f.convOpens[0].Venue.TokenAmountBaseUnits != "7241759" || f.opened[0].chain != "base" {
 		t.Fatalf("want=%+v open=%+v call=%+v", last, f.convOpens[0], f.opened[0])
 	}
 }

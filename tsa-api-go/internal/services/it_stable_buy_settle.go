@@ -415,7 +415,7 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 		return nil, ErrITBadState
 	}
 	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
-		// D3: market + margin, the maximum, and stock won under the lock.
+		// D3: market + take, the maximum, and stock won under the lock.
 		return s.repriceTreasuryParked(ctx, intent, false, nil)
 	}
 	var to string

@@ -37,12 +37,14 @@ func TestQuoteRoutedStableBuy_FoldsEveryFeeIntoTheEffectiveRate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}
+	// Owner 2026-10-07: ₦1,650.25 × 1.005 = ₦1,658.50 buys 99.502562; less
+	// funding 1.4%, conversion 1.5% and the $1.50 send, she receives 95.137885.
 	wantUnits(t, "fiat", q.FiatMinor, 16_502_500)
 	wantUnits(t, "gross", q.GrossAssetUnits, 100_000_000)
-	wantUnits(t, "net", q.AssetUnits, 94_537_500)
+	wantUnits(t, "net", q.AssetUnits, 95_137_885)
 	wantUnits(t, "send fee", q.SendFeeUnits, 1_500_000)
-	wantUnits(t, "effective rate", q.RatePerUnitMinor, 174561)
-	wantUnits(t, "display rate", q.DisplayRateMinor, 169257)
+	wantUnits(t, "effective rate", q.RatePerUnitMinor, 173459)
+	wantUnits(t, "display rate", q.DisplayRateMinor, 165850)
 	if q.Asset != "USDC" || q.Currency != "NGN" {
 		t.Fatalf("asset/currency = %q/%q", q.Asset, q.Currency)
 	}
@@ -59,77 +61,165 @@ func TestQuoteRoutedStableBuy_FeeLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(q.Fees) != 2 {
+	if len(q.Fees) != 3 {
 		t.Fatalf("fees = %+v", q.Fees)
 	}
-	conv, network := q.Fees[0], q.Fees[1]
+	funding, conv, network := q.Fees[0], q.Fees[1], q.Fees[2]
+	if funding.Kind != FeeKindFunding || funding.Label != "Funding fee (1.4%)" || funding.Provider != "Flutterwave" ||
+		funding.Units != "1393035" || funding.NgnMinor != "231034" {
+		t.Errorf("funding = %+v", funding)
+	}
 	if conv.Kind != FeeKindConversion || conv.Label != "Flutterwave conversion fee (1.5%)" || conv.Provider != "Flutterwave" ||
-		conv.Units != "1462160" || conv.NgnMinor != "247480" {
+		conv.Units != "1471642" || conv.NgnMinor != "244071" {
 		t.Errorf("conversion = %+v", conv)
 	}
 	if network.Kind != FeeKindNetwork || network.Label != "Network fee" || network.Provider != "Flutterwave" ||
-		network.Units != "1500000" || network.NgnMinor != "253885" {
+		network.Units != "1500000" || network.NgnMinor != "248775" {
 		t.Errorf("network = %+v", network)
 	}
 }
 
-// Review Focus 5: tokenAmount = amount ÷ rate − Σfees, at every size, against
-// the 2-dp display rate the client is shown.
-func TestRoutedFees_InvariantHoldsAtEveryAmount(t *testing.T) {
+// Owner ruling 2026-10-07, worked example: ₦25,000 at Flutterwave's ₦1,387.51
+// and a 50 bps take is shown at ₦1,394.44 (17.928343 USDC) less three lines.
+func TestQuoteRoutedStableBuy_WorkedExample(t *testing.T) {
+	q, err := newRoutedQuoteService(t).QuoteRoutedStableBuy("USDC", "25000", "NGN", big.NewRat(138751, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnits(t, "display rate", q.DisplayRateMinor, 139444)
+	wantUnits(t, "net", q.AssetUnits, 15_912_187)
+	wantUnits(t, "effective rate", q.RatePerUnitMinor, 157113)
+	want := []StableBuyFee{
+		{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "Flutterwave", Units: "250996", NgnMinor: "34999"},
+		{Kind: FeeKindConversion, Label: "Flutterwave conversion fee (1.5%)", Provider: "Flutterwave", Units: "265160", NgnMinor: "36974"},
+		{Kind: FeeKindNetwork, Label: "Network fee", Provider: "Flutterwave", Units: "1500000", NgnMinor: "209166"},
+	}
+	if len(q.Fees) != len(want) {
+		t.Fatalf("fees = %+v", q.Fees)
+	}
+	for i := range want {
+		if q.Fees[i] != want[i] {
+			t.Errorf("fee %d = %+v, want %+v", i, q.Fees[i], want[i])
+		}
+	}
+}
+
+// Owner ruling 2026-10-07 (1): the company wallet's rate is the market
+// grossed up by the take; its only fee line is the central-account funding fee.
+func TestQuoteTreasuryBuy_MarketPlusTakeAndAFundingLine(t *testing.T) {
+	q, err := newRoutedQuoteService(t).QuoteTreasuryBuy("USDC", "10000", "NGN", treasuryMarket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ₦1,348 × 1.005 = ₦1,354.74 buys 7.381490; less 1.4% funding = 7.278150.
+	wantUnits(t, "display rate", q.DisplayRateMinor, 135474)
+	wantUnits(t, "net", q.AssetUnits, 7_278_150)
+	want := StableBuyFee{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "Flutterwave", Units: "103340", NgnMinor: "13999"}
+	if len(q.Fees) != 1 || q.Fees[0] != want {
+		t.Fatalf("fees = %+v, want only %+v", q.Fees, want)
+	}
+}
+
+// Owner ruling 2026-10-07 (3): the take moves the rate and nothing else — the
+// same third-party lines, at the same percentages, come off what it buys.
+func TestCompanyTake_ChangesOnlyOurMargin(t *testing.T) {
 	s := newRoutedQuoteService(t)
-	for _, rate := range []*big.Rat{routedFWRate, big.NewRat(180137, 100), big.NewRat(1499, 1)} {
-		for naira := int64(30_000); naira <= 3_000_000; naira += 7_919 {
-			q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(naira*100), rate, false)
-			if err != nil {
-				t.Fatalf("₦%d at %s: %v", naira, rate.FloatString(2), err)
+	fw50, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", routedFWRate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw50, err := s.QuoteTreasuryBuy("USDC", "10000", "NGN", treasuryMarket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRampBuyTerms(RampBuyTerms{CompanyTakeBps: 100}); err != nil {
+		t.Fatal(err)
+	}
+	fw100, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", routedFWRate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw100, err := s.QuoteTreasuryBuy("USDC", "10000", "NGN", treasuryMarket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rate is the base × (1 + take), to the kobo: ₦1,666.75 and ₦1,361.48.
+	wantUnits(t, "fw display at 100 bps", fw100.DisplayRateMinor, 166675)
+	wantUnits(t, "treasury display at 100 bps", tw100.DisplayRateMinor, 136148)
+	wantUnits(t, "fw net at 100 bps", fw100.AssetUnits, 94_659_551)
+	wantUnits(t, "treasury net at 100 bps", tw100.AssetUnits, 7_242_119)
+	for _, pair := range [][2]*StableBuyQuote{{fw50, fw100}, {tw50, tw100}} {
+		a, b := pair[0], pair[1]
+		if len(a.Fees) != len(b.Fees) {
+			t.Fatalf("fee lines changed with the take: %+v vs %+v", a.Fees, b.Fees)
+		}
+		for i := range a.Fees {
+			if a.Fees[i].Kind != b.Fees[i].Kind || a.Fees[i].Label != b.Fees[i].Label || a.Fees[i].Provider != b.Fees[i].Provider {
+				t.Fatalf("fee line %d changed with the take: %+v vs %+v", i, a.Fees[i], b.Fees[i])
 			}
-			sum := new(big.Int)
-			for _, f := range q.Fees {
-				u, _ := new(big.Int).SetString(f.Units, 10)
-				sum.Add(sum, u)
+			// A percentage line stays at its own share of what the rate buys:
+			// in naira it does not move by more than a kobo.
+			na, _ := new(big.Int).SetString(a.Fees[i].NgnMinor, 10)
+			nb, _ := new(big.Int).SetString(b.Fees[i].NgnMinor, 10)
+			if a.Fees[i].Kind != FeeKindNetwork && new(big.Int).Sub(na, nb).CmpAbs(big.NewInt(1)) > 0 {
+				t.Errorf("%s moved from %s to %s kobo with the take", a.Fees[i].Label, na, nb)
 			}
-			viaRate := new(big.Int).Sub(lockedUnits(q.FiatMinor, q.DisplayRateMinor), sum)
-			diff := new(big.Int).Sub(viaRate, q.AssetUnits)
-			if diff.CmpAbs(big.NewInt(1)) > 0 {
-				t.Fatalf("₦%d at %s: amount÷rate−fees = %s, tokenAmount = %s", naira, rate.FloatString(2), viaRate, q.AssetUnits)
+			if a.Fees[i].Kind == FeeKindNetwork && a.Fees[i].Units != b.Fees[i].Units {
+				t.Errorf("the send fee moved with the take: %s → %s", a.Fees[i].Units, b.Fees[i].Units)
 			}
 		}
 	}
 }
 
-// §14 as amended 2026-10-05: a venue with no fee lines (the company wallet,
-// Paycrest) has no exact invariant — its rate is rounded to the kobo — but its
-// rate is never more than one kobo from amount ÷ tokenAmount.
-func TestTreasuryQuote_RateIsAmountOverTokensWithinAKobo(t *testing.T) {
+// reconcilesExactly is §14's invariant: amount ÷ rate − Σfees = tokenAmount,
+// to the base unit, at the 2-dp display rate the client is shown.
+func reconcilesExactly(t *testing.T, what string, q *StableBuyQuote) {
+	t.Helper()
+	if len(q.Fees) == 0 {
+		t.Fatalf("%s: no fee lines", what)
+	}
+	sum := new(big.Int)
+	for _, f := range q.Fees {
+		u, _ := new(big.Int).SetString(f.Units, 10)
+		sum.Add(sum, u)
+	}
+	viaRate := new(big.Int).Sub(lockedUnits(q.FiatMinor, q.DisplayRateMinor), sum)
+	if viaRate.Cmp(q.AssetUnits) != 0 {
+		t.Fatalf("%s: amount÷rate−fees = %s, tokenAmount = %s", what, viaRate, q.AssetUnits)
+	}
+}
+
+// Review Focus 5 / owner ruling 2026-10-07 (4): both in-house providers carry
+// fee lines, and each reconciles exactly at every size and rate.
+func TestInHouseFees_ReconcileExactlyForBothProviders(t *testing.T) {
 	s := newRoutedQuoteService(t)
-	oneKobo := big.NewRat(1, 1)
+	for _, rate := range []*big.Rat{routedFWRate, big.NewRat(180137, 100), big.NewRat(1499, 1), big.NewRat(138751, 100)} {
+		for naira := int64(30_000); naira <= 3_000_000; naira += 7_919 {
+			q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(naira*100), rate, false)
+			if err != nil {
+				t.Fatalf("₦%d at %s: %v", naira, rate.FloatString(2), err)
+			}
+			reconcilesExactly(t, "flutterwave ₦"+big.NewInt(naira).String()+" at "+rate.FloatString(2), q)
+		}
+	}
 	for _, market := range []*big.Rat{treasuryMarket, big.NewRat(139733, 100), big.NewRat(1501, 1)} {
 		for naira := int64(100); naira <= 270_000; naira += 1_237 {
 			q, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(naira*100), market, false)
 			if err != nil {
 				t.Fatalf("₦%d at %s: %v", naira, market.FloatString(2), err)
 			}
-			if len(q.Fees) != 0 {
-				t.Fatalf("₦%d: a company-wallet quote carries fee lines %+v", naira, q.Fees)
-			}
-			// Kobo per whole token: fiatMinor × 10^6 ÷ base units.
-			exact := new(big.Rat).SetFrac(new(big.Int).Mul(q.FiatMinor, big.NewInt(1_000_000)), q.AssetUnits)
-			diff := new(big.Rat).Sub(new(big.Rat).SetInt(q.DisplayRateMinor), exact)
-			if diff.Abs(diff).Cmp(oneKobo) > 0 {
-				t.Fatalf("₦%d at %s: rate %s kobo, amount ÷ tokens = %s kobo", naira, market.FloatString(2),
-					q.DisplayRateMinor, exact.FloatString(4))
-			}
+			reconcilesExactly(t, "company wallet ₦"+big.NewInt(naira).String()+" at "+market.FloatString(2), q)
 		}
 	}
 }
 
 func TestQuoteRoutedStableBuy_Limits(t *testing.T) {
 	s := newRoutedQuoteService(t)
-	// ₦17,000 → 10.30 gross → 8.39 delivered: under 10.
+	// ₦17,000 → 10.30 gross → 8.46 delivered: under 10.
 	if _, err := s.QuoteRoutedStableBuy("USDC", "17000", "NGN", routedFWRate); !errors.Is(err, ErrStableBuyBelowMinimum) {
 		t.Fatalf("17000: %v, want ErrStableBuyBelowMinimum", err)
 	}
-	// ₦20,000 → 10.14 delivered: just over.
+	// ₦20,000 → 10.21 delivered: just over.
 	if _, err := s.QuoteRoutedStableBuy("USDC", "20000", "NGN", routedFWRate); err != nil {
 		t.Fatalf("20000: %v", err)
 	}
@@ -155,7 +245,7 @@ func TestQuoteRoutedStableBuy_IgnoresTheSellFloor(t *testing.T) {
 		t.Fatalf("old path: %v, want refused under the 100 floor (fixture check)", err)
 	}
 	if _, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", routedFWRate); err != nil {
-		t.Fatalf("routed: %v, want 94.5 accepted", err)
+		t.Fatalf("routed: %v, want 95.1 accepted", err)
 	}
 }
 
@@ -164,11 +254,11 @@ func TestSetRoutedStableBuyLimits_ConfiguresAndKeepsGoodValuesOnATypo(t *testing
 	if err := s.SetRoutedStableBuyLimits(RoutedStableBuyLimits{MinTokens: "5", MaxUSD: "500", SendFeeUSD: "0.5"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	// ₦9,000 → 5.45 gross → 5.24 → 4.74 after a 0.50 fee: under 5.
+	// ₦9,000 → 5.43 at the rate → 5.27 after funding and conversion → 4.77 after a 0.50 fee: under 5.
 	if _, err := s.QuoteRoutedStableBuy("USDC", "9000", "NGN", routedFWRate); !errors.Is(err, ErrStableBuyBelowMinimum) {
 		t.Fatalf("min 5: %v", err)
 	}
-	// ₦900,000 → ~523 delivered: over 500.
+	// ₦900,000 → ~527 delivered: over 500.
 	if _, err := s.QuoteRoutedStableBuy("USDC", "900000", "NGN", routedFWRate); !errors.Is(err, ErrStableBuyAboveMaximum) {
 		t.Fatalf("max 500: %v", err)
 	}
@@ -184,9 +274,9 @@ func TestSetRoutedStableBuyLimits_ConfiguresAndKeepsGoodValuesOnATypo(t *testing
 	}
 }
 
-// Owner 2026-10-04 #3 and S7: the routed spread and the conversion fee are
+// Owner 2026-10-04 #3 and S7: the company take and the conversion fee are
 // the routed buy's own; the old endpoint keeps 155 bps and no conversion fee.
-func TestRoutedSpreadAndConversionFee_AreSeparateFromTheITSpread(t *testing.T) {
+func TestRoutedTakeAndConversionFee_AreSeparateFromTheITSpread(t *testing.T) {
 	s := newRoutedQuoteService(t)
 	old, err := s.QuoteStableBuy(context.Background(), "USDC", "16502500", "NGN")
 	if err != nil || old.AssetUnits.Cmp(big.NewInt(98_450_000)) != 0 {
@@ -195,24 +285,24 @@ func TestRoutedSpreadAndConversionFee_AreSeparateFromTheITSpread(t *testing.T) {
 	if old.DisplayRateMinor == nil || old.DisplayRateMinor.Cmp(old.RatePerUnitMinor) != 0 || len(old.Fees) != 0 {
 		t.Fatalf("old path display = %v fees = %v, want the rate itself and no fee lines", old.DisplayRateMinor, old.Fees)
 	}
-	if s.RoutedSpreadBps() != DefaultRoutedSpreadBps {
-		t.Fatalf("routed spread = %d", s.RoutedSpreadBps())
+	if s.rampTerms().takeBps != DefaultRampCompanyTakeBps || s.rampTerms().fundingFeeBps != DefaultRampFundingFeeBps {
+		t.Fatalf("take/funding = %d/%d, want 50/140", s.rampTerms().takeBps, s.rampTerms().fundingFeeBps)
 	}
-	if err := s.SetRoutedStableBuyLimits(RoutedStableBuyLimits{SpreadBps: 300, ConversionFeeBps: 200}); err != nil {
+	if err := s.SetRoutedStableBuyLimits(RoutedStableBuyLimits{ConversionFeeBps: 200}); err != nil {
 		t.Fatal(err)
 	}
 	q, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", routedFWRate)
-	// 100 → 98.00 (200 bps) → 95.06 (300 bps) → 93.56 after the fee.
-	if err != nil || q.AssetUnits.Cmp(big.NewInt(93_560_000)) != 0 {
-		t.Fatalf("routed at 300/200 bps = %v %v", q, err)
+	// 99.502562 at ₦1,658.50 → less 1.4% → less 2.0% → less 1.50 = 94.647337.
+	if err != nil || q.AssetUnits.Cmp(big.NewInt(94_647_337)) != 0 {
+		t.Fatalf("routed at a 200 bps conversion fee = %v %v", q, err)
 	}
 	for _, bad := range []int64{-1, 10_000} {
-		if err := s.SetRoutedStableBuyLimits(RoutedStableBuyLimits{SpreadBps: bad}); err == nil {
-			t.Fatalf("spread %d accepted", bad)
+		if err := s.SetRampBuyTerms(RampBuyTerms{CompanyTakeBps: bad, FundingFeeBps: bad}); err == nil {
+			t.Fatalf("take/funding %d accepted", bad)
 		}
 	}
-	if s.RoutedSpreadBps() != 300 {
-		t.Fatalf("a bad spread changed it to %d", s.RoutedSpreadBps())
+	if s.rampTerms().takeBps != DefaultRampCompanyTakeBps || s.rampTerms().fundingFeeBps != DefaultRampFundingFeeBps {
+		t.Fatalf("a bad value changed take/funding to %d/%d", s.rampTerms().takeBps, s.rampTerms().fundingFeeBps)
 	}
 }
 
@@ -230,7 +320,7 @@ func TestSendFeeMode_DefaultsToWalletAndRefusesTypos(t *testing.T) {
 		t.Fatalf("typo accepted or mode lost: %v", err)
 	}
 	q, err := s.QuoteRoutedStableBuy("USDC", "165025", "NGN", routedFWRate)
-	if err != nil || q.AssetUnits.Cmp(big.NewInt(94_537_500)) != 0 {
+	if err != nil || q.AssetUnits.Cmp(big.NewInt(95_137_885)) != 0 {
 		t.Fatalf("amount-mode quote = %v %v", q, err)
 	}
 }
@@ -266,44 +356,39 @@ func TestStableBuyFiatPerUnit_GatesAndPlausibility(t *testing.T) {
 
 func TestQuoteRoutedLive_PricesAtTheLiveRateOnRoutedTerms(t *testing.T) {
 	q, err := newRoutedQuoteService(t).quoteRoutedLive(context.Background(), "USDC", big.NewInt(16_502_500), "NGN")
-	if err != nil || q.AssetUnits.Cmp(big.NewInt(94_537_500)) != 0 {
+	if err != nil || q.AssetUnits.Cmp(big.NewInt(95_137_885)) != 0 {
 		t.Fatalf("q = %+v err = %v", q, err)
 	}
 }
 
-// §2.3 #2/#3/#4: market + margin, ₦100 minimum on naira, $200 maximum on tokens.
-func TestQuoteTreasuryBuy_MarginMinimumMaximum(t *testing.T) {
+// §2.3 #2/#3/#4: market + take, ₦100 minimum on naira, $200 maximum on tokens.
+func TestQuoteTreasuryBuy_TakeMinimumMaximum(t *testing.T) {
 	s := newRoutedQuoteService(t)
 	q, err := s.QuoteTreasuryBuy("usdc", "10000", "ngn", treasuryMarket)
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}
 	wantUnits(t, "gross", q.GrossAssetUnits, 7_418_397)
-	wantUnits(t, "net", q.AssetUnits, 7_232_937)
-	wantUnits(t, "effective rate", q.RatePerUnitMinor, 138257)
-	wantUnits(t, "display rate", q.DisplayRateMinor, 138257)
-	if len(q.Fees) != 0 || q.SendFeeUnits != nil {
-		t.Fatalf("a company-wallet quote has no fee lines: %+v", q.Fees)
+	wantUnits(t, "net", q.AssetUnits, 7_278_150)
+	wantUnits(t, "effective rate", q.RatePerUnitMinor, 137398)
+	wantUnits(t, "display rate", q.DisplayRateMinor, 135474)
+	if len(q.Fees) != 1 || q.Fees[0].Kind != FeeKindFunding || q.SendFeeUnits != nil {
+		t.Fatalf("a company-wallet quote has the funding line only: %+v", q.Fees)
 	}
-	// Parity with the shared arithmetic (spec §4.1 extraction).
-	_, net, _ := priceStableBuyAt(treasuryMarket, big.NewInt(1_000_000), DefaultTreasuryMarginBps)
-	if net.Cmp(q.AssetUnits) != 0 {
-		t.Fatalf("priceStableBuyAt = %s, quote = %s", net, q.AssetUnits)
-	}
-	if q, err := s.QuoteTreasuryBuy("USDT", "100", "NGN", treasuryMarket); err != nil || q.AssetUnits.Cmp(big.NewInt(72_328)) != 0 {
-		t.Fatalf("₦100: %v %v, want 0.072328 USDT", q, err)
+	if q, err := s.QuoteTreasuryBuy("USDT", "100", "NGN", treasuryMarket); err != nil || q.AssetUnits.Cmp(big.NewInt(72_781)) != 0 {
+		t.Fatalf("₦100: %v %v, want 0.072781 USDT", q, err)
 	}
 	if _, err := s.QuoteTreasuryBuy("USDC", "99.99", "NGN", treasuryMarket); !errors.Is(err, ErrStableBuyBelowMinimum) {
 		t.Fatalf("₦99.99: %v", err)
 	}
-	// ₦276,554 → 200.029784 delivered: over 200.
+	// ₦276,554 → ~201.3 delivered: over 200.
 	if _, err := s.QuoteTreasuryBuy("USDC", "276554", "NGN", treasuryMarket); !errors.Is(err, ErrStableBuyAboveMaximum) {
 		t.Fatalf("over $200: %v", err)
 	}
 	if _, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(27_655_400), treasuryMarket, false); err != nil {
 		t.Fatalf("operator waiver: %v, want priced", err)
 	}
-	if got := s.TreasuryMinOrderUnits(treasuryMarket); got.Cmp(big.NewInt(72_328)) != 0 {
+	if got := s.TreasuryMinOrderUnits(treasuryMarket); got.Cmp(big.NewInt(72_781)) != 0 {
 		t.Fatalf("smallest order = %s, want what ₦100 buys", got)
 	}
 }
@@ -313,7 +398,7 @@ func TestSetTreasuryBuyLimits_ConfiguresAndKeepsGoodValuesOnATypo(t *testing.T) 
 	if c := s.treasuryLimits().confirmations; c != DefaultTreasuryConfirmations {
 		t.Fatalf("default confirmations = %d, want 5", c)
 	}
-	if err := s.SetTreasuryBuyLimits(TreasuryBuyLimits{MarginBps: 300, MinNGN: "500", MaxUSD: "100", DailyUserMaxUSD: "300",
+	if err := s.SetTreasuryBuyLimits(TreasuryBuyLimits{MinNGN: "500", MaxUSD: "100", DailyUserMaxUSD: "300",
 		SendStall: time.Hour, Confirmations: 12}); err != nil {
 		t.Fatal(err)
 	}
@@ -321,14 +406,14 @@ func TestSetTreasuryBuyLimits_ConfiguresAndKeepsGoodValuesOnATypo(t *testing.T) 
 		t.Fatalf("min ₦500: %v", err)
 	}
 	q, err := s.QuoteTreasuryBuy("USDC", "10000", "NGN", treasuryMarket)
-	if err != nil || q.AssetUnits.Cmp(big.NewInt(7_195_845)) != 0 {
-		t.Fatalf("300 bps: %v %v", q, err)
+	if err != nil || q.AssetUnits.Cmp(big.NewInt(7_278_150)) != 0 {
+		t.Fatalf("₦10,000: %v %v", q, err)
 	}
 	lim := s.treasuryLimits()
 	if lim.dailyUserMaxUnits.Cmp(big.NewInt(300_000_000)) != 0 || lim.sendStall != time.Hour || lim.confirmations != 12 {
 		t.Fatalf("limits = %+v", lim)
 	}
-	if err := s.SetTreasuryBuyLimits(TreasuryBuyLimits{MinNGN: "abc", MarginBps: 10_000}); err == nil {
+	if err := s.SetTreasuryBuyLimits(TreasuryBuyLimits{MinNGN: "abc", MaxUSD: "-1"}); err == nil {
 		t.Fatal("garbage accepted")
 	}
 	if _, err := s.QuoteTreasuryBuy("USDC", "100", "NGN", treasuryMarket); !errors.Is(err, ErrStableBuyBelowMinimum) {
