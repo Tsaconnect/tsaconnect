@@ -34,31 +34,56 @@ export interface FeeLinesProps {
   symbol: string;
 }
 
+/** The provider tag, unless the label already names it ("Flutterwave conversion fee"). */
+function providerTag(f: FeeLine): string | null {
+  if (!f.provider) return null;
+  return f.label.toLowerCase().includes(f.provider.toLowerCase()) ? null : `via ${f.provider}`;
+}
+
 export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
   const { colors, spacing } = useTheme();
   if (!fees.length) return null;
   return (
-    <View testID="ramp-fee-lines" style={{ marginTop: spacing.sm, gap: spacing.xs }}>
-      {fees.map((f) => (
-        <View
-          key={`${f.label}|${f.token}`}
-          style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm }}
-        >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexShrink: 1 }}>
-            <Text variant="caption" style={{ color: colors.textSecondary }}>
-              {f.label}
-            </Text>
-            {f.provider ? (
-              <Text variant="caption" weight="600" style={{ color: colors.textMuted }}>
-                {f.provider}
+    <View
+      testID="ramp-fee-lines"
+      style={{
+        marginTop: spacing.md,
+        paddingTop: spacing.sm,
+        borderTopWidth: 1,
+        borderTopColor: colors.border,
+        gap: spacing.sm,
+      }}
+    >
+      {fees.map((f) => {
+        const tag = providerTag(f);
+        return (
+          <View
+            key={`${f.label}|${f.token}`}
+            style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: spacing.md }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="caption" style={{ color: colors.textSecondary }}>
+                {f.label}
               </Text>
-            ) : null}
+              {tag ? (
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  {tag}
+                </Text>
+              ) : null}
+            </View>
+            <View style={{ alignItems: 'flex-end', flexShrink: 0 }}>
+              <Text variant="caption" weight="600" style={{ color: colors.textPrimary }}>
+                {`−${f.token} ${token}`}
+              </Text>
+              {f.ngn ? (
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  {`≈ ${fiatText(f.ngn, symbol)}`}
+                </Text>
+              ) : null}
+            </View>
           </View>
-          <Text variant="caption" style={{ color: colors.textSecondary }}>
-            {f.ngn ? `−${f.token} ${token} (≈ ${fiatText(f.ngn, symbol)})` : `−${f.token} ${token}`}
-          </Text>
-        </View>
-      ))}
+        );
+      })}
     </View>
   );
 };

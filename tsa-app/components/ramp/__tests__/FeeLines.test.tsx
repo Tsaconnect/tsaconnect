@@ -41,9 +41,10 @@ describe('FeeLines', () => {
     );
     expect(out).toContain('Flutterwave conversion fee (1.5%)');
     expect(out).toContain('Network fee');
-    expect(out.match(/Flutterwave \|/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
-    expect(out).toContain('−1.46216 USDC (≈ ₦2,474.80)');
-    expect(out).toContain('−1.5 USDC (≈ ₦2,538.85)');
+    // The tag appears only where the label doesn't already name the provider.
+    expect(out.match(/via Flutterwave/g)?.length).toBe(1);
+    expect(out).toContain('−1.46216 USDC | ≈ ₦2,474.80');
+    expect(out).toContain('−1.5 USDC | ≈ ₦2,538.85');
   });
 
   it('renders nothing without fees', () => {
