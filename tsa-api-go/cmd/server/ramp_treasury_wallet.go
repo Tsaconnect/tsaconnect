@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"log"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
@@ -97,7 +97,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 			alertReceiptsUnreadable(chain, rpcHost(cfg, chain), perr)
 		}
 		verifiers[chain] = services.NewLogTransferVerifier(client.Client)
-		probes[chain] = client.Client
+		probes[chain] = client.Probe()
 	}
 	if len(lanes) == 0 {
 		log.Printf("[ramp-company-wallet] dormant: no usable chain in RAMP_TREASURY_WALLET_CHAINS=%v", cfg.RampTreasuryWalletChains)
@@ -126,14 +126,10 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 	return w
 }
 
-// rpcHost names a chain's RPC by host only — never the full URL, which can
-// carry a key.
+// rpcHost names a chain's RPC (or failover list) by host only — never the
+// full URL, which can carry a key.
 func rpcHost(cfg *config.Config, chain string) string {
-	u, err := url.Parse(cfg.Networks["mainnet"].Chains[chain].RPCURL)
-	if err != nil || u.Host == "" {
-		return "unknown"
-	}
-	return u.Host
+	return blockchain.RPCHosts(cfg.Networks["mainnet"].Chains[chain].RPCURL)
 }
 
 // alertReceiptsUnreadable logs the boot probe failure. A go-ethereum transport

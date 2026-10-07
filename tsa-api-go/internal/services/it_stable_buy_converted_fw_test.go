@@ -409,6 +409,31 @@ func TestAttachConversionHash_RefusesATransferMinedBeforeTheDeliverySend(t *test
 	}
 }
 
+// The receipt, head and block time must come from one RPC endpoint: a
+// failover between them may mix a lagging node's answers, so the attach is
+// refused and the operator retries.
+func TestAttachConversionHash_RefusedAcrossAnRPCFailover(t *testing.T) {
+	s, intent := parkedHashlessFW(t)
+	hash := "0x" + strings.Repeat("cd", 32)
+	probe := &fakeTxProbe{head: 100, receiptBlock: 90, blockTime: time.Now().Add(-10 * time.Minute), switchOnReceipt: true}
+	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
+		Treasury:  &fakeConvertedTreasury{laned: map[string]bool{"polygon": true}},
+		Verifiers: map[string]ERC20TransferVerifier{"polygon": &stubReceiptVerifier{credited: big.NewInt(95_137_885)}},
+		Probes:    map[string]TreasuryTxProbe{"polygon": probe}})
+	if _, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); !errors.Is(err, ErrITBadState) ||
+		!strings.Contains(err.Error(), "RPC endpoint changed") {
+		t.Fatalf("attach across a failover: err = %v", err)
+	}
+	if rec := conversionRecord(t, s, intent.ID); rec.TxHash != "" {
+		t.Fatalf("a refused attach wrote: %+v", rec)
+	}
+	probe.switchOnReceipt = false
+	if rec, err := s.AttachConversionHash(context.Background(), uuid.New(), intent.ID, hash, "from FW support"); err != nil ||
+		rec.Status != models.PaycrestStatusConverting {
+		t.Fatalf("rec = %+v err = %v", rec, err)
+	}
+}
+
 // M5: a hashless park whose delivery never happened has an operator exit —
 // refunded in naira, the record closed in the same transaction. Any other
 // settled buy stays refused.

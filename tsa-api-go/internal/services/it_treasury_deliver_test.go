@@ -52,7 +52,14 @@ type fakeTxProbe struct {
 	// blockTime is the receipt block's time; zero reads as now, so a test
 	// that does not care about it sees a transfer mined just now.
 	blockTime time.Time
+	// gen is the RPC endpoint generation. switchOnScan / switchOnReceipt fail
+	// the client over to another endpoint during a filtered scan / a receipt
+	// read: the reads either side of it may come from different nodes.
+	gen                           uint64
+	switchOnScan, switchOnReceipt bool
 }
+
+func (p *fakeTxProbe) EndpointGeneration() uint64 { return p.gen }
 
 func (p *fakeTxProbe) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
 	if p.known {
@@ -71,6 +78,9 @@ func (p *fakeTxProbe) NonceAt(_ context.Context, _ common.Address, block *big.In
 }
 func (p *fakeTxProbe) BlockNumber(context.Context) (uint64, error) { return p.head, nil }
 func (p *fakeTxProbe) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+	if p.switchOnReceipt {
+		p.gen++
+	}
 	status := types.ReceiptStatusSuccessful
 	if p.receiptFailed {
 		status = types.ReceiptStatusFailed
@@ -92,6 +102,9 @@ func (p *fakeTxProbe) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]t
 	if len(q.Topics) == 3 {
 		p.scans++
 		src = p.matches
+		if p.switchOnScan {
+			p.gen++
+		}
 	}
 	var out []types.Log
 	for _, lg := range src {
@@ -631,6 +644,17 @@ func TestSecondPaymentGate_EveryEntryPointAgrees(t *testing.T) {
 			}},
 		{name: "dropped, nonce consumed, blind chunk", legs: []models.RampLeg{failed("dropped: operator re-send", "", nonce(5))},
 			setup: func(r *deliverRig) { r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4500}} }},
+		// A lagging fallback can answer "no logs" for blocks it has not seen:
+		// a failover anywhere inside the evidence decides nothing this tick.
+		{name: "dropped, nonce consumed, clean scan, but the RPC failed over mid-scan",
+			legs:  []models.RampLeg{failed("dropped: operator re-send", "", nonce(5))},
+			setup: func(r *deliverRig) { r.probe.switchOnScan = true }},
+		{name: "not broadcast before signing (no nonce), clean scan, but the RPC failed over mid-scan",
+			legs:  []models.RampLeg{failed("not broadcast: failed to get nonce", "", nil)},
+			setup: func(r *deliverRig) { r.probe.switchOnScan = true }},
+		{name: "reverted, 5+ deep, but the RPC failed over mid-check",
+			legs:  []models.RampLeg{failed("reverted: verify: transaction reverted", "0xrev", nonce(5))},
+			setup: func(r *deliverRig) { reverted(r); r.probe.switchOnReceipt = true }},
 		{name: "failed for an unknown reason", legs: []models.RampLeg{failed("something odd", "", nonce(5))}},
 		{name: "a live sale", legs: []models.RampLeg{{Status: models.RampLegStatusPending, TxHash: "0xlive", Nonce: nonce(5)}}, noLive: true},
 	}
@@ -724,6 +748,73 @@ func TestFinalizeTreasuryBuy_SettlesOnlyAtTheConfirmationDepth(t *testing.T) {
 	}
 	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusSettled {
 		t.Fatalf("5 confirmations: status = %s", got.Status)
+	}
+}
+
+// A failover between the verdict and the depth read means the two answers
+// may come from different nodes: neither a settle nor a revert is decided on
+// them. The next tick, on one endpoint, decides.
+func TestFinalizeTreasuryBuy_AnRPCFailoverMidCheckDecidesNothing(t *testing.T) {
+	for _, reverted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverted=%v", reverted), func(t *testing.T) {
+			r := newDeliverRig(t)
+			ctx := context.Background()
+			if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+				t.Fatal(err)
+			}
+			r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
+			if reverted {
+				r.verifier.credited, r.verifier.err = nil, fmt.Errorf("%w: 0xsponsored", ErrTransferReverted)
+				r.probe.receiptFailed = true
+			}
+			r.probe.receiptBlock, r.probe.head = 200, 260
+			r.probe.switchOnReceipt = true
+			if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusDelivering {
+				t.Fatalf("status = %s after a mid-check failover, want still delivering", got.Status)
+			}
+			if legs := r.legs(t); legs[0].Status != models.RampLegStatusPending {
+				t.Fatalf("leg = %s after a mid-check failover, want still pending", legs[0].Status)
+			}
+			r.probe.switchOnReceipt = false
+			if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+				t.Fatal(err)
+			}
+			want := models.RampLegStatusConfirmed
+			if reverted {
+				want = models.RampLegStatusFailed
+			}
+			if legs := r.legs(t); legs[0].Status != want {
+				t.Fatalf("leg = %s on a steady endpoint, want %s", legs[0].Status, want)
+			}
+		})
+	}
+}
+
+// The re-send evidence names the failover, so the operator knows to retry.
+func TestResendEvidence_AnRPCFailoverMidScanRefuses(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil { // nonce 7, from block 100
+		t.Fatal(err)
+	}
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("created_at", time.Now().Add(-31*time.Minute))
+	r.probe.pending, r.probe.latest, r.probe.head = 8, 8, 4500
+	r.probe.background = []types.Log{{BlockNumber: 2099}, {BlockNumber: 4099}, {BlockNumber: 4500}}
+	r.probe.switchOnScan = true
+	leg := r.legs(t)[0]
+	ev, err := r.s.resendEvidence(ctx, r.intent, &leg)
+	if err != nil || ev.Allowed || ev.ScanTrusted || !strings.Contains(ev.Reason, "RPC endpoint changed") {
+		t.Fatalf("evidence = %+v %v, want refused: the endpoint changed mid-scan", ev, err)
+	}
+	if _, err := r.s.ResendTreasuryBuy(ctx, uuid.New(), r.intent.ID, "checked"); !errors.Is(err, ErrTreasuryResendRefused) {
+		t.Fatalf("re-send across a failover: %v", err)
+	}
+	r.probe.switchOnScan = false
+	if ev, err := r.s.resendEvidence(ctx, r.intent, &leg); err != nil || !ev.Allowed {
+		t.Fatalf("evidence on a steady endpoint = %+v %v, want allowed", ev, err)
 	}
 }
 

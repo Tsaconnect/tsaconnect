@@ -119,7 +119,7 @@ func conversionProbes(chains *services.BlockchainService, keys []string) map[str
 	}
 	for _, chain := range keys {
 		if client := chains.ClientForChain(chain); client != nil && client.Client != nil {
-			out[chain] = client.Client
+			out[chain] = client.Probe()
 		}
 	}
 	return out

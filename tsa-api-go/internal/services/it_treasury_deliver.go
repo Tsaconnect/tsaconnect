@@ -340,10 +340,11 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 		}
 		return nil
 	}
-	verifier := s.wallet.Verifier(leg.ChainKey)
-	if verifier == nil {
-		return fmt.Errorf("company wallet: no verifier on %s", leg.ChainKey)
+	verifier, probe := s.wallet.Verifier(leg.ChainKey), s.wallet.Probe(leg.ChainKey)
+	if verifier == nil || probe == nil {
+		return fmt.Errorf("company wallet: no verifier or probe on %s", leg.ChainKey)
 	}
+	gen := probe.EndpointGeneration() // the verdict and its depth come from one endpoint
 	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, s.wallet.TokenAddress(leg.ChainKey, leg.Token),
 		s.wallet.Address(), intent.DestAddress)
 	switch ClassifyTransfer(credited, verr) {
@@ -355,7 +356,7 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 				intent.ID, leg.TxHash, credited, leg.Amount)
 			return fmt.Errorf("%w: %s credited %s of %s", ErrTreasurySendStalled, leg.TxHash, credited, leg.Amount)
 		}
-		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusSuccessful)
+		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusSuccessful, gen)
 		if err != nil || !deep {
 			return err // not deep enough yet: the next tick looks again
 		}
@@ -364,7 +365,7 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 		// Reverted: it moved nothing — but only a receipt RAMP_TREASURY_CONFIRMATIONS
 		// deep says so for good; a shallow one can be reorged into a success.
 		// Until then the leg stays live: no re-send, no refund.
-		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed)
+		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed, gen)
 		if err != nil || !deep {
 			return err
 		}
@@ -387,8 +388,10 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 // failed for a revert) and is at least RAMP_TREASURY_CONFIRMATIONS blocks deep
 // (review minor). The status is checked here too, so the verifier's verdict and
 // this depth read can never disagree about what happened. An unreadable
-// receipt or head, or a status other than want, reads as "not yet".
-func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want uint64) (bool, error) {
+// receipt or head, a status other than want, or an RPC endpoint change since
+// gen (the caller's verdict and this read may be different nodes' answers)
+// reads as "not yet".
+func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want, gen uint64) (bool, error) {
 	probe := s.wallet.Probe(leg.ChainKey)
 	if probe == nil {
 		return false, fmt.Errorf("company wallet: no probe on %s", leg.ChainKey)
@@ -399,6 +402,9 @@ func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want
 	}
 	head, err := probe.BlockNumber(ctx)
 	if err != nil {
+		return false, nil
+	}
+	if endpointSteady(probe, gen) != nil {
 		return false, nil
 	}
 	mined := receipt.BlockNumber.Uint64()
@@ -515,7 +521,9 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 // consumes it. A leg with no recorded nonce was never signed (the nonce is
 // written before the broadcast), so it needs only the trusted scan.
 //
-// The head is read once, so the nonce and the scan describe the same block.
+// The head is read once, so the nonce and the scan describe the same block —
+// and every read must come from one RPC endpoint: a failover anywhere between
+// the first read and the end of the scan makes the scan untrusted.
 // db reads the other orders' sale legs (the caller's transaction, if any).
 func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.RampLeg) (*ResendEvidence, error) {
 	ev := &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce}
@@ -523,6 +531,7 @@ func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.
 	if probe == nil {
 		return nil, fmt.Errorf("company wallet: no dropped-transaction probe on %s", leg.ChainKey)
 	}
+	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
 		_, _, terr := probe.TransactionByHash(ctx, common.HexToHash(leg.TxHash))
 		switch {
@@ -579,6 +588,9 @@ func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.
 		ev.NonceConsumed = true
 	}
 	found, others, from, serr := s.scanSaleTransfers(ctx, db, probe, leg, head)
+	if serr == nil {
+		serr = endpointSteady(probe, gen)
+	}
 	ev.ScannedFrom, ev.ScannedTo, ev.OtherOrdersTransfers = from, head, others
 	switch {
 	case serr != nil:
@@ -760,16 +772,17 @@ func (s *ITService) saleRefutedDeep(ctx context.Context, leg *models.RampLeg) (b
 	if leg.TxHash == "" {
 		return false, nil
 	}
-	verifier := s.wallet.Verifier(leg.ChainKey)
-	if verifier == nil {
-		return false, fmt.Errorf("company wallet: no verifier on %s", leg.ChainKey)
+	verifier, probe := s.wallet.Verifier(leg.ChainKey), s.wallet.Probe(leg.ChainKey)
+	if verifier == nil || probe == nil {
+		return false, fmt.Errorf("company wallet: no verifier or probe on %s", leg.ChainKey)
 	}
+	gen := probe.EndpointGeneration()
 	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, s.wallet.TokenAddress(leg.ChainKey, leg.Token),
 		s.wallet.Address(), leg.ToAddr)
 	if ClassifyTransfer(credited, verr) != TransferRefuted {
 		return false, nil
 	}
-	return s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed)
+	return s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed, gen)
 }
 
 // ResendTreasuryBuy is an operator's re-send of a stalled sale, allowed only

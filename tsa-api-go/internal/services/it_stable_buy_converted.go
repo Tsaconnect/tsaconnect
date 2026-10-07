@@ -531,6 +531,7 @@ func (s *ITService) AttachConversionHash(ctx context.Context, adminID, intentID 
 	if verifier == nil || probe == nil || lane == nil || lane.SponsorLane == nil || lane.tokenAddress(rec.Token) == "" || c.TreasuryAddress == "" {
 		return nil, fmt.Errorf("%w: no verifier or lane on %s", ErrConversionUnavailable, chain)
 	}
+	gen := probe.EndpointGeneration() // the proof, its depth and its time come from one endpoint
 	credited, err := verifier.VerifyTransfer(ctx, hash, lane.tokenAddress(rec.Token), c.TreasuryAddress)
 	if err != nil || credited == nil || credited.Cmp(delivered) < 0 {
 		reason := "it credited the treasury less than was delivered"
@@ -564,6 +565,9 @@ func (s *ITService) AttachConversionHash(ctx context.Context, adminID, intentID 
 			reason = RedactAlertText(err.Error())
 		}
 		return nil, fmt.Errorf("%w: its block is unreadable: %s", ErrITBadState, reason)
+	}
+	if err := endpointSteady(probe, gen); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrITBadState, err)
 	}
 	sent := intent.UpdatedAt.Add(-conversionHashSendSkew)
 	if minedAt := time.Unix(int64(header.Time), 0); minedAt.Before(sent) {

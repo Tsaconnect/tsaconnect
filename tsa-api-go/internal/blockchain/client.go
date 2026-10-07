@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // EVMClient wraps an Ethereum-compatible JSON-RPC client.
@@ -20,26 +23,64 @@ type EVMClient struct {
 	Client  *ethclient.Client
 	chainID *big.Int
 
+	// failover is set when the chain's RPC URL is a list; nil for one URL.
+	failover *failoverTransport
+
 	// decimalsCache memoises ERC-20 decimals() results keyed by lowercase
 	// contract address. Decimals are immutable on-chain so we cache forever.
 	decimalsCache sync.Map
 }
 
 // NewEVMClient connects to the given RPC endpoint and returns a ready client.
+// rpcURL may be a comma-separated list (primary first): the client then fails
+// over between them on rate limits and outages (failoverTransport). One URL
+// is dialled directly, exactly as before.
 func NewEVMClient(rpcURL string, chainID int64) (*EVMClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	client, err := ethclient.DialContext(ctx, rpcURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to RPC at %s: %w", rpcURL, err)
+	urls := SplitRPCURLs(rpcURL)
+	if len(urls) <= 1 {
+		client, err := ethclient.DialContext(ctx, strings.TrimSpace(rpcURL))
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to RPC at %s: %w", RPCHosts(rpcURL), err)
+		}
+		return &EVMClient{Client: client, chainID: big.NewInt(chainID)}, nil
 	}
 
-	return &EVMClient{
-		Client:  client,
-		chainID: big.NewInt(chainID),
-	}, nil
+	ft, err := newFailoverTransport(chainID, urls)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := rpc.DialOptions(ctx, urls[0], rpc.WithHTTPClient(&http.Client{Transport: ft}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to RPC at %s: %w", RPCHosts(rpcURL), err)
+	}
+	return &EVMClient{Client: ethclient.NewClient(rc), chainID: big.NewInt(chainID), failover: ft}, nil
 }
+
+// EndpointGeneration counts this client's RPC endpoint changes (always 0 for
+// a single URL). A decision built from several chain reads takes it before and
+// after, and decides nothing when it moved: the reads may come from nodes at
+// different heights.
+func (c *EVMClient) EndpointGeneration() uint64 {
+	if c.failover == nil {
+		return 0
+	}
+	return c.failover.Generation()
+}
+
+// ProbeClient is the go-ethereum client together with its endpoint
+// generation — what a multi-read chain decision is handed.
+type ProbeClient struct {
+	*ethclient.Client
+	owner *EVMClient
+}
+
+func (p ProbeClient) EndpointGeneration() uint64 { return p.owner.EndpointGeneration() }
+
+// Probe returns the client as a ProbeClient.
+func (c *EVMClient) Probe() ProbeClient { return ProbeClient{Client: c.Client, owner: c} }
 
 // ChainID returns the configured chain ID.
 func (c *EVMClient) ChainID() *big.Int {

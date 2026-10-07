@@ -83,6 +83,24 @@ type TreasuryTxProbe interface {
 	// check that a transfer was mined after the delivery was sent).
 	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
+	// EndpointGeneration counts the client's RPC endpoint changes
+	// (blockchain.ProbeClient). A decision built from several reads takes it
+	// before and after (endpointSteady) and decides nothing if it moved.
+	EndpointGeneration() uint64
+}
+
+// errRPCEndpointChanged: the client failed over to another RPC endpoint while
+// a decision was reading the chain, so its answers may come from nodes at
+// different heights — a lagging one returns "no logs" or "not found" for
+// blocks it has not seen. Nothing is decided; the next tick reads again.
+var errRPCEndpointChanged = errors.New("the RPC endpoint changed while the chain was read, so the answers may come from different nodes — not decided; the next tick reads again")
+
+// endpointSteady is nil while probe is still on the endpoint it was on at gen.
+func endpointSteady(probe TreasuryTxProbe, gen uint64) error {
+	if probe.EndpointGeneration() != gen {
+		return errRPCEndpointChanged
+	}
+	return nil
 }
 
 // CompanyWalletCaps are the company wallet lane's value caps: none. Its

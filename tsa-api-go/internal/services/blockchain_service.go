@@ -62,7 +62,7 @@ func NewBlockchainService(cfg *config.Config) *BlockchainService {
 				continue
 			}
 			bs.clients[key] = client
-			log.Printf("%s/%s blockchain client connected (chain ID: %d, RPC: %s)", network, name, chain.ChainID, chain.RPCURL)
+			log.Printf("%s/%s blockchain client connected (chain ID: %d, RPC: %s)", network, name, chain.ChainID, blockchain.RPCHosts(chain.RPCURL))
 		}
 	}
 
