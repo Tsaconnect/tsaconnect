@@ -109,7 +109,7 @@ func ValidateBuyDelivery(chain, asset, address string) error {
 	chain = strings.ToUpper(strings.TrimSpace(chain))
 	asset = strings.ToUpper(strings.TrimSpace(asset))
 	if !SupportsDelivery(chain, asset) {
-		return fmt.Errorf("%w: Flutterwave does not deliver %s on %s",
+		return fmt.Errorf("%w: we cannot deliver %s on %s",
 			ErrUnsupportedChainAsset, asset, chain)
 	}
 	return ValidateDeliveryAddress(chain, address)

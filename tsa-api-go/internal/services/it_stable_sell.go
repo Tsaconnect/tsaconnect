@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	ErrStableNoDepositAddress = errors.New("it stable: no Flutterwave deposit address configured")
+	ErrStableNoDepositAddress = errors.New("it stable: no deposit address configured")
 	ErrStableQuoteExpired     = errors.New("it stable: quote has expired")
 	ErrStableNoDestination    = errors.New("it stable: a payout destination is required")
 	// ErrStableIntentNotFound covers both "no such intent" and "this intent

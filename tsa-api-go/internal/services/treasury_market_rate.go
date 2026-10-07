@@ -58,7 +58,7 @@ func (s *ITService) StableFxReference(ctx context.Context, currency string) (*bi
 // only: USDT stock is 0 at launch (§13 Q1), and the two trade at par.
 func (s *ITService) StableMidFiatPerUnit(ctx context.Context, currency, asset string) (*big.Rat, error) {
 	if s == nil || s.rateQuoter == nil {
-		return nil, fmt.Errorf("%w: no Flutterwave rate source", ErrStableQuoteUnavailable)
+		return nil, fmt.Errorf("%w: no rate source", ErrStableQuoteUnavailable)
 	}
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	asset = strings.ToUpper(strings.TrimSpace(asset))
@@ -229,7 +229,7 @@ func (r *TreasuryMarketRate) paycrestRate(ctx context.Context, fiat string) (*bi
 
 func (r *TreasuryMarketRate) midRate(ctx context.Context, fiat string) (*big.Rat, error) {
 	if r.mid == nil {
-		return nil, fmt.Errorf("%w: no Flutterwave mid configured", ErrStableQuoteUnavailable)
+		return nil, fmt.Errorf("%w: no mid-rate source configured", ErrStableQuoteUnavailable)
 	}
 	r.mu.Lock()
 	last, ok := r.mids[fiat]

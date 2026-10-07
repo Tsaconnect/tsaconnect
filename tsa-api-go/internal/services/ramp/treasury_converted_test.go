@@ -62,7 +62,7 @@ func TestTreasuryQuoteConverted_VenueCarriesTheLiFiLineAndTheAllInRate(t *testin
 		t.Fatalf("venue = %+v", v)
 	}
 	last := v.Fees[len(v.Fees)-1]
-	if last.Label != "Conversion (LiFi)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.036391" || last.Ngn != "49.30" {
+	if last.Label != "Conversion (provider)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.036391" || last.Ngn != "49.30" {
 		t.Fatalf("fee = %+v", last)
 	}
 	if pricer.legs[0].ChainKey != "base" || pricer.legs[0].Delivered.Cmp(big.NewInt(7_278_150)) != 0 {

@@ -277,7 +277,7 @@ func (p *itBuyProvider) openConverted(ctx context.Context, c itConverted, r Requ
 
 // convertedVenue is one converted IT-backed venue (spec §15.7): the leg's
 // display rate, the all-in rate on T, T itself and the leg's fee lines plus
-// the Conversion (LiFi) line.
+// the Conversion (provider) line.
 func convertedVenue(provider string, q *services.StableBuyQuote, pv *services.PaycrestVenue, market float64) (Venue, error) {
 	terms, err := services.NewConvertedTerms(q, pv)
 	if err != nil {

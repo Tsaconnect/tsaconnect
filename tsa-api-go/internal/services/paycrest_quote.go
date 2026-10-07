@@ -103,7 +103,7 @@ type PaycrestVenue struct {
 	// MarkupBps is B′, the route's priced cost: LiFi's own cost plus the gas
 	// the treasury pays, plus routeBudgetHeadroomBps. Charged to her at cost
 	// on top of the company take — T = D·(1 − B′) — and shown as the
-	// "Conversion (LiFi)" fee line, never folded into the rate.
+	// "Conversion (provider)" fee line, never folded into the rate.
 	MarkupBps int `json:"markupBps,omitempty"`
 	// CostBps is what the priced route actually costs (LiFi's own cost, gas
 	// excluded), so a venue can be compared against the budget it was offered
@@ -919,7 +919,7 @@ type RequestedAsset struct {
 //   - PRICE. Paycrest is sent the company take, like every ramp order, and
 //     delivers D. The round trip — LiFi's own cost plus the gas the treasury
 //     pays, including one approve, plus headroom — is B′, passed on at cost:
-//     she is owed T = D·(1 − B′), shown as the "Conversion (LiFi)" line. A
+//     she is owed T = D·(1 − B′), shown as the "Conversion (provider)" line. A
 //     route whose B′ is over the requested chain's cap is not offered.
 //   - EXECUTABILITY. The route is priced twice: once on D to learn LiFi's
 //     cost l, then again on T/(1 − l), which is what the treasury will really
@@ -1099,7 +1099,7 @@ func (s *PaycrestQuoteService) deliveredLeg(chain, token string, leg SettlementL
 // owedLeg is the one pricing of a settlement leg that delivers `delivered`
 // (decimals dp) for fiatAmount at base.Rate (the leg's rate, take included):
 // at budget b she is owed ConversionOwed(D, b), the venue's all-in rate is
-// fiat ÷ T, and D − T is its "Conversion (LiFi)" line at base.Rate — so
+// fiat ÷ T, and D − T is its "Conversion (provider)" line at base.Rate — so
 // fiat ÷ Rate − fees = T to within a base unit (spec §14).
 func owedLeg(base PaycrestVenue, delivered *big.Int, decimals int, fiatAmount string, marketRate float64) (*settlementLeg, bool) {
 	if _, ok := parsePositiveDecimal(fiatAmount); !ok || delivered == nil || delivered.Sign() <= 0 || decimals <= 0 {

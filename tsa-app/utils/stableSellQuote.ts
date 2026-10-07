@@ -282,7 +282,7 @@ export function isTerminalStableStatus(status: string): boolean {
 // exists but has not reached the bank, and that gap is the one users ask about.
 const HOPS: { key: string; label: string }[] = [
   { key: 'sent', label: 'Sent from your wallet' },
-  { key: 'arrived', label: 'Arrived at Flutterwave' },
+  { key: 'arrived', label: 'Received by our payout partner' },
   { key: 'converted', label: 'Converted to ₦' },
   { key: 'paid', label: 'Paid to your bank' },
 ];

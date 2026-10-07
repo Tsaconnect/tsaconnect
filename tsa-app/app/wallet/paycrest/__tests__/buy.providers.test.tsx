@@ -157,7 +157,7 @@ const fwVenue = {
   handle: 'Zmx1dHRlcndhdmV8cG9seWdvbnxVU0RD', chain: 'polygon', token: 'USDC', rate: '1692.57', effectiveRate: '1745.61',
   spreadPercent: 5.78, tokenAmount: 94.5375, kind: 'direct',
   fees: [
-    { kind: 'conversion', label: 'Flutterwave conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2474.80' },
+    { kind: 'conversion', label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2474.80' },
     { kind: 'network', label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2538.85' },
   ],
 };
@@ -218,9 +218,10 @@ it('a Flutterwave venue shows its rate and fee lines and holds the order to the 
   ramp.createRampBuy.mockResolvedValueOnce({ ...order, id: 'f1', provider: 'flutterwave' } as any);
   const tree = await quoteAndConfirm('165025', '1,692.57', true);
   const out = text(tree);
-  expect(out).toContain('Flutterwave conversion fee (1.5%)');
+  expect(out).toContain('Provider conversion fee (1.5%)');
   expect(out).toContain('Network fee');
-  expect(out).toContain('Flutterwave');
+  expect(out).toContain('via provider');
+  expect(out).not.toMatch(/Flutterwave|LiFi/);
   expect(ramp.createRampBuy).toHaveBeenCalledWith(expect.objectContaining({
     quotedRate: '1745.61', handle: fwVenue.handle, chain: 'polygon', token: 'USDC',
   }));
@@ -234,7 +235,7 @@ it('opens a company-wallet converted venue through the router with the target', 
     kind: 'converted', handle: 'h-cw', viaChain: 'base', viaToken: 'USDC', requestedChain: 'optimism', requestedToken: 'USDT',
     requestedChainId: 10, requestedTokenAddress: '0xusdt', requestedTokenDecimals: 6, estimatedAmount: '7190000',
     promisedAmount: '7196772', etaSeconds: 60,
-    fees: [{ kind: 'conversion', label: 'Conversion (LiFi)', provider: 'LiFi', token: '0.036165', ngn: '50' }],
+    fees: [{ kind: 'conversion', label: 'Conversion (provider)', provider: 'LiFi', token: '0.036165', ngn: '50' }],
   };
   ramp.getRampQuote.mockResolvedValue(rampQuote('10000', [cw]) as any);
   ramp.createRampBuy.mockResolvedValueOnce({ id: 'i7', provider: 'treasury' } as any);
@@ -251,7 +252,7 @@ it('opens a company-wallet converted venue through the router with the target', 
   await act(async () => { jest.advanceTimersByTime(500); });
   await flush();
   expect(ramp.getRampQuote).toHaveBeenCalledWith('buy', '10000', 'NGN', expect.objectContaining({ chainId: 10 }));
-  expect(text(tree)).toContain('Conversion (LiFi)');
+  expect(text(tree)).toContain('Conversion (provider)');
   await act(async () => { await byLabel(tree, 'button:Continue').props.onPress(); });
   await flush();
   expect(ramp.createRampBuy).toHaveBeenCalledWith(expect.objectContaining({

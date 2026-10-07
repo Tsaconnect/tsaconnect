@@ -161,6 +161,57 @@ func (h *SwapLiFiHandler) lifiGet(client *http.Client, path string) (*http.Respo
 	return client.Do(req)
 }
 
+// User-facing swap errors never name the aggregator or pass its text through:
+// the upstream body can name the bridge, DEX or the aggregator itself. The
+// upstream detail goes to the log instead (swapUpstreamError).
+const (
+	swapProviderUnreachable = "Couldn't reach the swap provider. Try again shortly."
+	swapProviderUnreadable  = "The swap provider returned an unreadable response. Try again shortly."
+	// swapNoRouteMessage and swapNotSupportedMessage keep the phrases the app
+	// matches to show its own "no route" state (screens/all-swap.tsx).
+	swapNoRouteMessage      = "No available quotes for this swap right now."
+	swapNotSupportedMessage = "This swap is not supported."
+)
+
+// swapUpstreamError answers a non-200 from the aggregator with our own
+// envelope, keeping its status code so the app's ok/not-ok handling is
+// unchanged, and logs the upstream detail redacted.
+func swapUpstreamError(c *gin.Context, endpoint string, status int, body []byte) {
+	log.Printf("[allswap] upstream %s returned %d: %s", endpoint, status, swapUpstreamDetail(body))
+	utils.ErrorResponse(c, status, swapUpstreamMessage(status, body))
+}
+
+// swapUpstreamMessage is the fixed sentence for an upstream error body. Only
+// the two outcomes the app tells apart are recognised; everything else is a
+// generic error with the status.
+func swapUpstreamMessage(status int, body []byte) string {
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	lower := strings.ToLower(parsed.Message)
+	switch {
+	case strings.Contains(lower, "no available quotes"), strings.Contains(lower, "no quotes"),
+		strings.Contains(lower, "no route"):
+		return swapNoRouteMessage
+	case strings.Contains(lower, "not supported"):
+		return swapNotSupportedMessage
+	default:
+		return fmt.Sprintf("The swap provider returned an error (%d). Try again shortly.", status)
+	}
+}
+
+// swapUpstreamDetail is an upstream body fit for a log line: redacted and
+// bounded.
+func swapUpstreamDetail(body []byte) string {
+	const max = 500
+	s := services.RedactAlertText(string(body))
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
 // GetTokens handles GET /api/swap/lifi/tokens
 // Proxies LiFi token list with a 24-hour in-memory cache per chainId.
 func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
@@ -185,22 +236,22 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 	h.mu.Unlock()
 
 	// Bulk client: a cold-cache per-chain list (Ethereum especially) is several
-	// MB and routinely overruns the 10s client, surfacing as "failed to reach
-	// LiFi" → the app's "Failed to fetch token list".
+	// MB and routinely overruns the 10s client, surfacing as an unreachable-
+	// provider 502 → the app's "Failed to fetch token list".
 	resp, err := h.lifiGet(liFiBulkHTTPClient, fmt.Sprintf("/tokens?chains=%s", chainId))
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreachable)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreadable)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.Data(resp.StatusCode, "application/json", body)
+		swapUpstreamError(c, "tokens", resp.StatusCode, body)
 		return
 	}
 
@@ -226,18 +277,18 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 
 	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes="+lifiChainTypes)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreachable)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreadable)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.Data(resp.StatusCode, "application/json", body)
+		swapUpstreamError(c, "chains", resp.StatusCode, body)
 		return
 	}
 
@@ -263,14 +314,19 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 	// our request to LiFi.
 	resp, err := h.lifiGet(liFiHTTPClient, "/token?"+url.Values{"chain": {chain}, "token": {token}}.Encode())
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreachable)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreadable)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		swapUpstreamError(c, "token", resp.StatusCode, body)
 		return
 	}
 
@@ -284,7 +340,7 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 		return
 	}
 
-	c.Data(resp.StatusCode, "application/json", body)
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 // GetAllChainTokens handles GET /api/swap/lifi/tokens/all
@@ -342,7 +398,8 @@ func (h *SwapLiFiHandler) GetAllChainTokens(c *gin.Context) {
 
 	flat, err := h.getOrFetchAllTokens()
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
+		log.Printf("[allswap] all-chain token list unavailable: %v", err)
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreachable)
 		return
 	}
 
@@ -518,16 +575,16 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 	// all-chains search can surface them.
 	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes="+lifiChainTypes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to reach LiFi")
+		return nil, fmt.Errorf("lifi /tokens unreachable: %s", services.RedactAlertText(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read LiFi response")
+		return nil, fmt.Errorf("lifi /tokens unreadable: %s", services.RedactAlertText(err.Error()))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LiFi returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("lifi /tokens returned status %d: %s", resp.StatusCode, swapUpstreamDetail(body))
 	}
 
 	var parsed struct {
@@ -544,7 +601,7 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 		} `json:"tokens"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse LiFi response")
+		return nil, fmt.Errorf("lifi /tokens unparseable: %v", err)
 	}
 
 	flat := make([]tokenWithChain, 0, 8192)
@@ -622,14 +679,14 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 
 	resp, err := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreachable)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		utils.ErrorResponse(c, http.StatusBadGateway, swapProviderUnreadable)
 		return
 	}
 
@@ -645,12 +702,15 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 		params.Del("fee")
 		params.Del("integrator")
 		if status, rbody, ok := h.quoteWithoutFee(params); ok {
-			c.Data(status, "application/json", rbody)
-			return
+			resp.StatusCode, body = status, rbody
 		}
 	}
 
-	c.Data(resp.StatusCode, "application/json", body)
+	if resp.StatusCode != http.StatusOK {
+		swapUpstreamError(c, "quote", resp.StatusCode, body)
+		return
+	}
+	c.Data(http.StatusOK, "application/json", body)
 }
 
 // quoteWithoutFee re-asks LiFi for the same route with no integrator fee. Its

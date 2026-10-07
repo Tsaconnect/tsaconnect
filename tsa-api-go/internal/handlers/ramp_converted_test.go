@@ -194,7 +194,7 @@ func TestGetIntent_CarriesTheConversion(t *testing.T) {
 		cv, _ := data["conversion"].(map[string]any)
 		fee, _ := cv["fee"].(map[string]any)
 		if cv == nil || cv["orderId"] != rec.ID.String() || cv["requestedToken"] != "USDT" || cv["walletAddress"] != user.WalletAddress ||
-			fee == nil || fee["label"] != "Conversion (LiFi)" || data["intent"] == nil {
+			fee == nil || fee["label"] != "Conversion (provider)" || data["intent"] == nil {
 			t.Fatalf("%s: data = %v", name, data)
 		}
 	}

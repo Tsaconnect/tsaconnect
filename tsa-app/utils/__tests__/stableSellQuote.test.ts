@@ -373,3 +373,11 @@ describe('isTerminalStableStatus', () => {
     expect(isTerminalStableStatus('debited')).toBe(false);
   });
 });
+
+describe('statusToHops copy', () => {
+  it('never names the payout provider', () => {
+    const labels = statusToHops('sent').map((h) => h.label);
+    expect(labels).toContain('Received by our payout partner');
+    expect(labels.join(' ')).not.toMatch(/flutterwave|paycrest/i);
+  });
+});

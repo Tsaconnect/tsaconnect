@@ -278,7 +278,7 @@ func (c *LiFiQuoteClient) Quote(ctx context.Context, req LiFiQuoteRequest) (*LiF
 		tool = parsed.Tool
 	}
 	if tool == "" {
-		tool = "LiFi"
+		tool = "Best route"
 	}
 
 	route := &LiFiRoute{

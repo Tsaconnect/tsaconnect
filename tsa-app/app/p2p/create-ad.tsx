@@ -977,8 +977,8 @@ const CreateAdScreen: React.FC = () => {
                   <Icon name="info" size={14} color={rateStale ? colors.danger : colors.accent} />
                   <Text variant="caption" color={rateStale ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
                     {rateStale
-                      ? 'Bybit rate stale — verify before publishing'
-                      : `Current Bybit P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
+                      ? 'Market rate stale — verify before publishing'
+                      : `Current market P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
                   </Text>
                   <PressableScale onPress={() => setRateInput(String(suggestedRate))}>
                     <Text variant="caption" weight="700" color="accent">
@@ -1018,7 +1018,7 @@ const CreateAdScreen: React.FC = () => {
                 >
                   <Icon name="info" size={14} color={colors.accent} />
                   <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                    Anchor: Bybit P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
+                    Anchor: market P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
                     {effectiveRate != null && ` · Your rate: ${symbol}${effectiveRate.toFixed(2)}`}
                   </Text>
                 </View>

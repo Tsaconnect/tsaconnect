@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
 // The pay routes hand a paying customer the same order and intent records the
@@ -41,6 +42,7 @@ func payOrderView(o *models.PaycrestOrderRecord) *models.PaycrestOrderRecord {
 	// an internal figure, not one the payer was quoted (she sees the checkout's).
 	v.SenderFee = ""
 	v.SenderFeePercent = ""
+	v.FailureReason = services.UserFacingOrderFailure(o.Status, o.FailureReason)
 	return &v
 }
 
@@ -58,16 +60,25 @@ func payIntentView(in *models.RampSellIntent) *models.RampSellIntent {
 
 // The ordinary sell and order routes return the same records to their owner. A
 // record that is a pay payment's attempt (PayPaymentID set, at creation) is
-// masked there too; an ordinary sale's is returned as it is. The check is a
+// masked there too; an ordinary sale's keeps its own details. The check is a
 // field on the record itself, so no route makes a lookup and a list is never
 // an N+1.
+//
+// Every owner view replaces FailureReason with UserFacingOrderFailure: the
+// stored text is for operators (vendor names, hashes, raw errors). Admin
+// routes read the record directly and keep it.
 
-// orderForCaller is o as its owner may see it.
+// orderForCaller is o as its owner may see it. o itself is not changed.
 func orderForCaller(o *models.PaycrestOrderRecord) *models.PaycrestOrderRecord {
-	if o != nil && o.PayPaymentID != nil {
+	if o == nil {
+		return nil
+	}
+	if o.PayPaymentID != nil {
 		return payOrderView(o)
 	}
-	return o
+	v := *o
+	v.FailureReason = services.UserFacingOrderFailure(o.Status, o.FailureReason)
+	return &v
 }
 
 // intentForCaller is in as its owner may see it.
@@ -78,15 +89,11 @@ func intentForCaller(in *models.RampSellIntent) *models.RampSellIntent {
 	return in
 }
 
-// ordersForCaller masks each pay-linked order in rows, in a copy.
+// ordersForCaller is orderForCaller over rows, in a copy.
 func ordersForCaller(rows []models.PaycrestOrderRecord) []models.PaycrestOrderRecord {
 	out := make([]models.PaycrestOrderRecord, len(rows))
 	for i := range rows {
-		if rows[i].PayPaymentID != nil {
-			out[i] = *payOrderView(&rows[i])
-		} else {
-			out[i] = rows[i]
-		}
+		out[i] = *orderForCaller(&rows[i])
 	}
 	return out
 }

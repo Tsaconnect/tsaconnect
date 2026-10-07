@@ -2,7 +2,7 @@ import {
   getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, settleSwapFee,
   isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
   SUI_LIFI_CHAIN_ID, isSignableSourceChain, isNativeTokenAddress, chainsForLeg, sumGasCostsWei,
-  findTokenBySymbolForChain, toLiFiQuote, type LiFiToken,
+  findTokenBySymbolForChain, toLiFiQuote, ROUTE_LABEL, type LiFiToken,
 } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -44,6 +44,11 @@ describe('getLiFiChains', () => {
       { id: BTC_LIFI_CHAIN_ID, name: 'Bitcoin', key: 'btc', coin: 'BTC', chainType: 'UTXO' },
     ],
   };
+
+  it('fails without naming the vendor', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+    await expect(getLiFiChains()).rejects.toThrow('Failed to fetch chains');
+  });
 
   it('fetches through the backend proxy and includes Solana and Bitcoin on mainnet', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
@@ -264,6 +269,11 @@ describe('getLiFiQuote', () => {
     const quote = await getLiFiQuote({ fromChain: 56, toChain: 1, fromToken: '0xabc', toToken: '0xdef', fromAmount: '1000000', fromAddress: '0x123' });
     expect(quote.approvalAddress).toBe('0xspender');
     expect(quote.approvalToken).toBe('0xtoken');
+  });
+
+  it('never falls back to a vendor name for the route', () => {
+    expect(ROUTE_LABEL).toBe('Best route');
+    expect(toLiFiQuote({ estimate: { toAmount: '1' } }).tool).toBe('Best route');
   });
 
   it('throws on non-ok response', async () => {

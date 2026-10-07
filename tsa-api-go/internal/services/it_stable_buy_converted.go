@@ -22,7 +22,7 @@ const ITConversionRefPrefix = "ITC-"
 
 const (
 	FeeProviderLiFi     = "LiFi"
-	ConversionLiFiLabel = "Conversion (LiFi)"
+	ConversionLiFiLabel = "Conversion (provider)"
 )
 
 var ErrStableBuyAbandonCapReached = errors.New("too many unpaid purchases were cancelled or expired today")
@@ -312,7 +312,7 @@ func (s *ITService) convertedCeiling(ctx context.Context, intent *models.ITInten
 
 // ConvertedTerms are a converted venue's economics on a delivered leg (spec
 // §15.7): T, the all-in rate, and the fee lines — the leg's own plus the
-// conversion budget as "Conversion (LiFi)".
+// conversion budget as "Conversion (provider)".
 type ConvertedTerms struct {
 	OwedUnits          *big.Int
 	EffectiveRateMinor *big.Int

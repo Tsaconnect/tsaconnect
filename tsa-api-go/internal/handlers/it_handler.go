@@ -1436,7 +1436,7 @@ func (h *ITHandler) PostStableQuote(c *gin.Context) {
 	}
 	q, err := h.it.QuoteStableSell(c.Request.Context(), req.Asset, req.Amount, req.Currency)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	// Spread AND fee are both itemised: the spread replaces only the
@@ -1477,7 +1477,7 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 	ctx := c.Request.Context()
 	q, err := h.it.QuoteStableSell(ctx, req.Asset, req.Amount, req.Currency)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	bank := &services.ITSellBank{
@@ -1490,7 +1490,7 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 	}
 	intent, deposit, err := h.it.CreateStableSellIntent(ctx, user.ID, q, req.SourceChain, bank)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Sell created", gin.H{"intent": intent, "deposit": deposit})
@@ -1514,7 +1514,7 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 		return
 	}
 	if err := h.it.ReportStableDeposit(c.Request.Context(), user.ID, id, req.TxHash); err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
@@ -1586,7 +1586,7 @@ func (h *ITHandler) cancelBuy(c *gin.Context, cancel func(ctx context.Context, u
 				"Could not cancel the order right now. Try again.", stableCodeFor(err))
 			return
 		}
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	data := gin.H{"cancelled": true}
@@ -1669,6 +1669,7 @@ func stableStatusFor(err error) int {
 		// Re-pricing a converted buy above what it was opened for: refund it.
 		errors.Is(err, services.ErrConvertedOverpaid),
 		errors.Is(err, services.ErrStableBuyBelowMinimum),
+		errors.Is(err, services.ErrStableBuyAboveMaximum),
 		errors.Is(err, services.ErrStableBuyAlreadyOpen),
 		errors.Is(err, services.ErrStableBuyNoVA),
 		errors.Is(err, services.ErrStableBuyNoWallet),
@@ -1762,6 +1763,94 @@ func stableCodeFor(err error) string {
 	}
 }
 
+// stableFail answers a user-facing stablecoin ramp error. The message is
+// always a fixed sentence (stableMessageFor): the error text itself can carry
+// wrapped vendor names, addresses or database detail, so it is logged here and
+// never sent. Status and code are unchanged (stableStatusFor, stableCodeFor).
+func stableFail(c *gin.Context, err error) {
+	log.Printf("[it-stable] %s %s failed: %v", c.Request.Method, c.FullPath(), err)
+	utils.ErrorResponseWithCode(c, stableStatusFor(err), stableMessageFor(err), stableCodeFor(err))
+}
+
+// stableMessageFor is the fixed user sentence for a ramp error, in the same
+// order of precedence as stableCodeFor. The amount-limit errors also carry the
+// limit we computed ("minimum is 1,000.00 NGN") — our own figure, never vendor
+// text — because a bare "below the minimum" leaves her guessing.
+func stableMessageFor(err error) string {
+	switch {
+	case errors.Is(err, services.ErrStableDepositAlreadyClaimed):
+		return "This deposit has already been reported against another sell."
+	case errors.Is(err, services.ErrStableIntentNotFound):
+		return "We couldn't find that order."
+	case errors.Is(err, services.ErrStableQuoteExpired):
+		return "Your quote has expired. Get a fresh rate and try again."
+	case errors.Is(err, services.ErrStableRateImplausible):
+		return "We couldn't get a reliable rate right now. Please try again shortly."
+	case errors.Is(err, services.ErrStableBelowMinimum):
+		return withStableLimit("That amount is below the minimum.", err, services.ErrStableBelowMinimum)
+	case errors.Is(err, services.ErrStableNotAnAsset):
+		return "Only USDC and USDT are supported."
+	case errors.Is(err, services.ErrStableNoDepositAddress),
+		errors.Is(err, services.ErrStableNoTokenAddress),
+		errors.Is(err, services.ErrStableQuoteUnavailable):
+		return "This isn't available right now. Please try again later."
+	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
+		return "The fees would be more than you'd receive. Try a larger amount."
+	case errors.Is(err, services.ErrConvertedOverpaid):
+		return "This payment is more than the purchase was opened for, so it is on hold to be refunded to you."
+	case errors.Is(err, services.ErrStableBuyAbandonCapReached):
+		return "You've cancelled too many unpaid purchases today. Try again tomorrow."
+	case errors.Is(err, services.ErrITBadState):
+		return "This order can't do that in its current state."
+	case errors.Is(err, services.ErrStableBuyBelowMinimum):
+		return withStableLimit("That amount is below the minimum for this purchase.", err, services.ErrStableBuyBelowMinimum)
+	case errors.Is(err, services.ErrStableBuyAboveMaximum):
+		return withStableLimit("That amount is above the maximum for this purchase.", err, services.ErrStableBuyAboveMaximum)
+	case errors.Is(err, services.ErrStableBuyAlreadyOpen):
+		return "You have a purchase waiting for payment. Pay into it, or cancel it to start a new one."
+	case errors.Is(err, services.ErrStableBuyNoVA):
+		return "Set up your account for bank transfers first, then try again."
+	case errors.Is(err, services.ErrStableBuyNoWallet):
+		return "Set up your wallet first, then try again."
+	case errors.Is(err, services.ErrStableBuyWrongRamp):
+		return "Buying with this currency has moved. Update the app to continue."
+	case errors.Is(err, services.ErrUnsupportedChainAsset):
+		return "We can't deliver this coin on that network. Choose another network."
+	case errors.Is(err, services.ErrUnsupportedStableChain):
+		return "That network isn't supported."
+	case errors.Is(err, services.ErrBadDeliveryAddress):
+		return "Your wallet address isn't valid for this network."
+	case errors.Is(err, services.ErrStablePrecision):
+		return "Use at most 6 decimal places."
+	case errors.Is(err, services.ErrStableNoDestination):
+		return "Add a payout destination to continue."
+	case errors.Is(err, services.ErrStableDeliveryExhausted):
+		return "Your purchase needs a manual review. Your funds are safe and support has it."
+	case errors.Is(err, services.ErrKYCLegalNameMissing):
+		return services.ErrKYCLegalNameMissing.Error()
+	case errors.Is(err, services.ErrKYCVerificationRequired):
+		return services.ErrKYCVerificationRequired.Error()
+	default:
+		return "Something went wrong. Please try again."
+	}
+}
+
+// withStableLimit appends the computed limit a limit error was wrapped with
+// ("<sentinel>: minimum is 5 USDC") to msg. Only a "minimum …"/"maximum …"
+// detail is used; any other detail is dropped.
+func withStableLimit(msg string, err, sentinel error) string {
+	s := err.Error()
+	i := strings.Index(s, sentinel.Error()+": ")
+	if i < 0 {
+		return msg
+	}
+	detail := strings.TrimSpace(s[i+len(sentinel.Error())+2:])
+	if !strings.HasPrefix(detail, "minimum ") && !strings.HasPrefix(detail, "maximum ") {
+		return msg
+	}
+	return msg + " " + strings.ToUpper(detail[:1]) + detail[1:] + "."
+}
+
 // requireITAgreement is the shared trade gate for ActivateVA/Buy/Sell. It writes
 // a 403 with a machine code the app matches on to show the agreement, and
 // returns false when the caller is blocked (handler must stop).
@@ -1841,7 +1930,7 @@ func (h *ITHandler) PostStableBuyQuote(c *gin.Context) {
 	}
 	q, err := h.it.QuoteStableBuy(c.Request.Context(), req.Asset, req.Amount, currency)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
@@ -1882,7 +1971,7 @@ func (h *ITHandler) PostStableBuy(c *gin.Context) {
 
 	q, err := h.it.QuoteStableBuy(ctx, req.Asset, req.Amount, currency)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	// The address is OURS to supply, never the caller's to send: it is read
@@ -1890,12 +1979,12 @@ func (h *ITHandler) PostStableBuy(c *gin.Context) {
 	// request body.
 	addr, err := h.it.UserDeliveryAddress(ctx, user.ID, req.DestChain)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	intent, payInto, err := h.it.CreateStableBuyIntent(ctx, user.ID, q, req.DestChain, addr)
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Purchase created", gin.H{
@@ -1913,7 +2002,7 @@ func (h *ITHandler) GetStableBuyChains(c *gin.Context) {
 	}
 	chains, err := h.it.DeliverableChainsForUser(c.Request.Context(), user.ID, c.Query("asset"))
 	if err != nil {
-		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		stableFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Chains", gin.H{"chains": chains})

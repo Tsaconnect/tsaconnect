@@ -18,7 +18,7 @@ export function fiatText(value: string, symbol: string): string {
 
 export interface FeeLine {
   label: string;
-  /** The provider tag ("Flutterwave"). */
+  /** Who charges it — kept for attribution, never shown by name. */
   provider?: string;
   /** The fee in tokens, decimal string. */
   token: string;
@@ -34,10 +34,20 @@ export interface FeeLinesProps {
   symbol: string;
 }
 
-/** The provider tag, unless the label already names it ("Flutterwave conversion fee"). */
-function providerTag(f: FeeLine): string | null {
+/** Third-party names never reach the screen: a fee says "provider", and a
+ *  label stored before that rule ("Flutterwave conversion fee") is rewritten. */
+function feeLabel(f: FeeLine): string {
+  if (!f.provider) return f.label;
+  const name = f.provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return f.label
+    .replace(new RegExp(`^${name}\\b`, 'i'), 'Provider')
+    .replace(new RegExp(`\\b${name}\\b`, 'gi'), 'provider');
+}
+
+/** "via provider", unless the label already says provider. */
+function providerTag(f: FeeLine, label: string): string | null {
   if (!f.provider) return null;
-  return f.label.toLowerCase().includes(f.provider.toLowerCase()) ? null : `via ${f.provider}`;
+  return /provider/i.test(label) ? null : 'via provider';
 }
 
 export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
@@ -55,7 +65,8 @@ export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
       }}
     >
       {fees.map((f) => {
-        const tag = providerTag(f);
+        const label = feeLabel(f);
+        const tag = providerTag(f, label);
         return (
           <View
             key={`${f.label}|${f.token}`}
@@ -63,7 +74,7 @@ export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
           >
             <View style={{ flex: 1 }}>
               <Text variant="caption" style={{ color: colors.textSecondary }}>
-                {f.label}
+                {label}
               </Text>
               {tag ? (
                 <Text variant="caption" style={{ color: colors.textMuted }}>

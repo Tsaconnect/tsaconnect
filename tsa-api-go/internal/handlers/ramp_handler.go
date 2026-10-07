@@ -358,7 +358,7 @@ type itOrderView struct {
 }
 
 // conversionView is what an IT order shows of the conversion it feeds (spec
-// §15.8): where it is, what she receives, and the Conversion (LiFi) line in
+// §15.8): where it is, what she receives, and the Conversion (provider) line in
 // the intent's fee shape. One view for the ramp order and the IT intent.
 type conversionView struct {
 	OrderID                string                 `json:"orderId"`

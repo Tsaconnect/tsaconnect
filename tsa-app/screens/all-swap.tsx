@@ -27,7 +27,7 @@ import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee, getSwapDelivery,
+  getLiFiToken, getLiFiTokens, getLiFiQuote, settleSwapFee, getSwapDelivery, ROUTE_LABEL,
   type SwapDeliveryStatus,
   isSolanaLiFiChain, isBtcLiFiChain, isSuiLiFiChain, isNonEVMLiFiChain, isNativeTokenAddress, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
@@ -815,7 +815,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
 
         {/* Details */}
         <Card padding="lg" style={{ marginTop: spacing.md }}>
-          <DetailRow label="Route" value={quote?.tool ?? '—'} />
+          <DetailRow label="Route" value={quote ? ROUTE_LABEL : '—'} />
           <DetailRow label="Est. time" value={quote ? `~${Math.ceil(quote.estimatedDuration / 60)} min` : '—'} />
           <DetailRow label="Gas cost" value={`$${quote?.gasCostUSD ?? '0'}`} />
           {quote?.feeCostUSD ? <DetailRow label="Fee" value={`$${quote.feeCostUSD}`} highlight /> : null}
@@ -1040,7 +1040,7 @@ export default function AllSwapScreen({ preselect }: AllSwapScreenProps) {
             >
               <Icon name="bolt" size={13} color={colors.accent} />
               <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min
+                {ROUTE_LABEL} · ~{Math.ceil(quote.estimatedDuration / 60)} min
                 {quote.feeCostUSD ? ` · $${quote.feeCostUSD} fee` : ''} · ${quote.gasCostUSD} gas
               </Text>
               {quoteStatus === 'expired' ? (

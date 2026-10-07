@@ -75,7 +75,7 @@ func TestPaycrestTake_DirectSellPricesAtTheTakeOnly(t *testing.T) {
 
 // A converted buy is sent the take, delivers D at the take's rate, and owes
 // her T = D·(1 − B′), B′ being what the route really costs plus 10 bps
-// headroom — shown as "Conversion (LiFi)", with the §14 reconciliation:
+// headroom — shown as "Conversion (provider)", with the §14 reconciliation:
 // amount ÷ rate − fees = tokenAmount, to the base unit.
 func TestPaycrestTake_ConvertedBuyChargesTheTakePlusTheRoutesCost(t *testing.T) {
 	r := takeRig(t, 50)
@@ -95,7 +95,7 @@ func TestPaycrestTake_ConvertedBuyChargesTheTakePlusTheRoutesCost(t *testing.T) 
 		t.Fatalf("T = %s, want D·(1 − 0.3%%) = 99203979", v.TokenAmountBaseUnits)
 	}
 	if len(v.Fees) != 1 {
-		t.Fatalf("fees = %+v, want one Conversion (LiFi) line", v.Fees)
+		t.Fatalf("fees = %+v, want one Conversion (provider) line", v.Fees)
 	}
 	f := v.Fees[0]
 	if f.Kind != FeeKindConversion || f.Label != ConversionLiFiLabel || f.Provider != FeeProviderLiFi ||
@@ -129,7 +129,7 @@ func TestPaycrestTake_ConvertedBuyChargesTheTakePlusTheRoutesCost(t *testing.T) 
 
 // A swapped sell is sent the take and passes the round trip on at cost: our
 // LiFi fee is the gas we pay (g), never a budget's unspent rest, and the
-// route's whole cost is its "Conversion (LiFi)" line.
+// route's whole cost is its "Conversion (provider)" line.
 func TestPaycrestTake_SwappedSellChargesTheTakePlusTheRoundTripAtCost(t *testing.T) {
 	// l = 20 (9.98 of $10), g = the $0.02 relay = 20 bps; the fee-carrying
 	// route lands 9.96 (l2 = 40, our 20 inside it).

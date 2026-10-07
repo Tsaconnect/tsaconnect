@@ -161,7 +161,29 @@ func (h *BillHandler) Pay(c *gin.Context) {
 		billFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment accepted", order)
+	utils.SuccessResponse(c, http.StatusOK, "Payment accepted", billOrderForUser(order))
+}
+
+// billOrderForUser is o as its owner may see it: the stored FailureReason can
+// be the vendor's own remark or a raw error, so she gets the fixed sentence
+// for the order's state. Admin routes return the record as stored. o itself
+// is not changed.
+func billOrderForUser(o *models.BillOrder) *models.BillOrder {
+	if o == nil {
+		return nil
+	}
+	v := *o
+	v.FailureReason = services.UserFacingBillFailure(o.Status, o.FailureReason)
+	return &v
+}
+
+// billOrdersForUser is billOrderForUser over rows, in a copy.
+func billOrdersForUser(rows []models.BillOrder) []models.BillOrder {
+	out := make([]models.BillOrder, len(rows))
+	for i := range rows {
+		out[i] = *billOrderForUser(&rows[i])
+	}
+	return out
 }
 
 // GET /api/bills/orders/:id
@@ -181,7 +203,7 @@ func (h *BillHandler) GetOrder(c *gin.Context) {
 		billFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Order", order)
+	utils.SuccessResponse(c, http.StatusOK, "Order", billOrderForUser(order))
 }
 
 // GET /api/bills/orders
@@ -197,7 +219,7 @@ func (h *BillHandler) ListOrders(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, billMessage(err))
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Orders", orders)
+	utils.SuccessResponse(c, http.StatusOK, "Orders", billOrdersForUser(orders))
 }
 
 // POST /api/bills/orders/:id/report — file a complaint against one's own order.

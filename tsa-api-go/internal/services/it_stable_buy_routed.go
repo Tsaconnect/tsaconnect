@@ -496,7 +496,7 @@ func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat, ch Pay
 	return priceInHouseBuy(fiatMinor, fiatPerUnit, s.rampTerms().takeBps, []passThroughCost{
 		funding,
 		{kind: FeeKindConversion, provider: FeeProviderFlutterwave, bps: lim.conversionFeeBps,
-			label: fmt.Sprintf("Flutterwave conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
+			label: fmt.Sprintf("Provider conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
 		{kind: FeeKindNetwork, provider: FeeProviderFlutterwave, label: "Network fee", flat: lim.sendFeeUnits},
 	}), nil
 }
@@ -717,7 +717,7 @@ const RoutedDirectChain = "POLYGON"
 // address on Polygon — never an address from the request.
 func (s *ITService) OpenRoutedStableBuy(ctx context.Context, userID uuid.UUID, q *StableBuyQuote, destChain string) (*models.ITIntent, *StableBuyInstructions, error) {
 	if !strings.EqualFold(strings.TrimSpace(destChain), RoutedDirectChain) {
-		return nil, nil, fmt.Errorf("%w: a routed Flutterwave buy delivers on Polygon only, not %s",
+		return nil, nil, fmt.Errorf("%w: this buy delivers on Polygon only, not %s",
 			ErrUnsupportedChainAsset, strings.ToUpper(strings.TrimSpace(destChain)))
 	}
 	return s.openRoutedStableBuy(ctx, userID, q, routedDelivery{

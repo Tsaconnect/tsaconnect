@@ -195,7 +195,7 @@ export interface LiFiQuote {
 export async function getLiFiChains(): Promise<LiFiChain[]> {
   const headers = await getAuthHeaders();
   const res = await fetch(`${API_BASE_URL}/swap/lifi/chains`, { headers });
-  if (!res.ok) throw new Error('Failed to fetch LiFi chains');
+  if (!res.ok) throw new Error('Failed to fetch chains');
   const data = await res.json();
   const chains: LiFiChain[] = Array.isArray(data?.chains) ? data.chains : [];
   // Learn LiFi's UTXO chain ids from its own answer so isBtcLiFiChain stays
@@ -320,6 +320,12 @@ export function chainsForLeg(chains: LiFiChain[], mode: 'from' | 'to'): LiFiChai
   return mode === 'from' ? chains.filter(c => isSignableSourceChain(c.id)) : chains;
 }
 
+/**
+ * What a user is shown for a quote's route. Never the aggregator's tool name
+ * (`quote.tool`): users never see third-party vendor names.
+ */
+export const ROUTE_LABEL = 'Best route';
+
 export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> {
   const headers = await getAuthHeaders();
   const qs = new URLSearchParams({
@@ -355,7 +361,7 @@ export function toLiFiQuote(raw: unknown): LiFiQuote {
     gasCostUSD: data.estimate?.gasCosts?.[0]?.amountUSD ?? '0',
     gasCostWei: sumGasCostsWei(data.estimate?.gasCosts),
     feeCostUSD: sumFeeCostsUSD(data.estimate?.feeCosts),
-    tool: data.toolDetails?.name ?? data.tool ?? 'LiFi',
+    tool: data.toolDetails?.name ?? data.tool ?? ROUTE_LABEL,
     transactionRequest: data.transactionRequest,
     approvalAddress: data.estimate?.approvalAddress || undefined,
     approvalToken: data.action?.fromToken?.address || undefined,

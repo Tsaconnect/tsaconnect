@@ -5,10 +5,10 @@ const HASH = `0x${'ab'.repeat(32)}`;
 describe('intentFeeLines', () => {
   it('formats the stored fee lines the way the buy screen showed them (spec §14)', () => {
     expect(intentFeeLines([
-      { kind: 'conversion', label: 'Flutterwave conversion fee (1.5%)', provider: 'Flutterwave', units: '1462160', ngnMinor: '247480' },
+      { kind: 'conversion', label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', units: '1462160', ngnMinor: '247480' },
       { kind: 'network', label: 'Network fee', provider: 'Flutterwave', units: '1500000', ngnMinor: '253885' },
     ])).toEqual([
-      { label: 'Flutterwave conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2,474.80' },
+      { label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2,474.80' },
       { label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2,538.85' },
     ]);
   });

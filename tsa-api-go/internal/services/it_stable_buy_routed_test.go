@@ -82,7 +82,7 @@ func TestQuoteRoutedStableBuy_FeeLines(t *testing.T) {
 		funding.Units != "1393035" || funding.NgnMinor != "231034" {
 		t.Errorf("funding = %+v", funding)
 	}
-	if conv.Kind != FeeKindConversion || conv.Label != "Flutterwave conversion fee (1.5%)" || conv.Provider != "Flutterwave" ||
+	if conv.Kind != FeeKindConversion || conv.Label != "Provider conversion fee (1.5%)" || conv.Provider != "Flutterwave" ||
 		conv.Units != "1471642" || conv.NgnMinor != "244071" {
 		t.Errorf("conversion = %+v", conv)
 	}
@@ -104,7 +104,7 @@ func TestQuoteRoutedStableBuy_WorkedExample(t *testing.T) {
 	wantUnits(t, "effective rate", q.RatePerUnitMinor, 157113)
 	want := []StableBuyFee{
 		{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "Flutterwave", Units: "250996", NgnMinor: "34999"},
-		{Kind: FeeKindConversion, Label: "Flutterwave conversion fee (1.5%)", Provider: "Flutterwave", Units: "265160", NgnMinor: "36974"},
+		{Kind: FeeKindConversion, Label: "Provider conversion fee (1.5%)", Provider: "Flutterwave", Units: "265160", NgnMinor: "36974"},
 		{Kind: FeeKindNetwork, Label: "Network fee", Provider: "Flutterwave", Units: "1500000", NgnMinor: "209166"},
 	}
 	if len(q.Fees) != len(want) {

@@ -172,8 +172,8 @@ func TestSellIntentRoutes_MaskAPayIntentAndOrderAndLeaveOrdinarySalesAlone(t *te
 func TestPayRecordViews_AreOnlyAppliedToPayLinkedRecords(t *testing.T) {
 	payment := uuid.New()
 	o := &models.PaycrestOrderRecord{PayoutAccount: merchantAccount}
-	if got := orderForCaller(o); got != o {
-		t.Fatal("an ordinary order must be returned as is")
+	if got := orderForCaller(o); got.PayoutAccount != merchantAccount {
+		t.Fatal("an ordinary order must keep its own payout details")
 	}
 	o.PayPaymentID = &payment
 	if got := orderForCaller(o); got.PayoutAccount == merchantAccount {

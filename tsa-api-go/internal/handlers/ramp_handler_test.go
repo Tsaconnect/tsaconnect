@@ -276,7 +276,7 @@ func TestRamp_RejectsAMalformedCurrency(t *testing.T) {
 func TestRampOrder_ITViewCarriesTheQuotedBreakdown(t *testing.T) {
 	id := uuid.New()
 	until := time.Date(2026, 10, 5, 12, 15, 0, 0, time.UTC)
-	fees := datatypes.JSON(`[{"kind":"conversion","label":"Flutterwave conversion fee (1.5%)","provider":"Flutterwave","units":"1462160","ngnMinor":"247480"},` +
+	fees := datatypes.JSON(`[{"kind":"conversion","label":"Provider conversion fee (1.5%)","provider":"Flutterwave","units":"1462160","ngnMinor":"247480"},` +
 		`{"kind":"network","label":"Network fee","provider":"Flutterwave","units":"1500000","ngnMinor":"253885"}]`)
 	f := &fakeRampRoutes{order: &ramp.Order{
 		Provider: ramp.ProviderFlutterwave,
@@ -315,7 +315,7 @@ func TestRampOrder_ITViewCarriesTheQuotedBreakdown(t *testing.T) {
 		t.Fatalf("fees = %#v", d["fees"])
 	}
 	first, _ := feeRows[0].(map[string]any)
-	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "Flutterwave" || first["label"] != "Flutterwave conversion fee (1.5%)" {
+	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "Flutterwave" || first["label"] != "Provider conversion fee (1.5%)" {
 		t.Fatalf("fee = %#v", first)
 	}
 	// amount ÷ rate − Σfees = tokenAmount, within one base unit.

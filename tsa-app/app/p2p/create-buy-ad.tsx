@@ -397,7 +397,7 @@ const CreateBuyAdScreen: React.FC = () => {
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                 <Icon name="checkCircle" size={20} color={colors.accent} />
                 <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">Auto-paid from your Nomba account</Text>
+                  <Text variant="bodyMed" weight="700">Auto-paid from your payout account</Text>
                   <Text variant="caption" color="textSecondary">
                     Sellers are paid out automatically once they respond and deposit — no payment method needed.
                   </Text>

@@ -24,7 +24,7 @@ import (
 // cost, inside the route, and g, the gas we sponsor, recovered as our LiFi
 // integrator fee and nothing more. Admission is l + g ≤ the source chain's
 // RAMP_CONVERTED_FEE_MAX_BPS. The quote states the round trip as its
-// "Conversion (LiFi)" fee line.
+// "Conversion (provider)" fee line.
 //
 // A TSA Pay payment's converted payout (SellQuoteInput.TSAPay) keeps its own
 // split instead (PayFeeSplit): its F is all-in, B is the slice of F a round
@@ -118,7 +118,7 @@ type SellSwapQuote struct {
 	// Rate is the Paycrest sell rate with only the company take in it.
 	Rate string `json:"rate"`
 	// EffectiveRate is FiatEstimate ÷ the USDC the route would have landed at
-	// no cost, and Fees the round trip at cost as "Conversion (LiFi)" (spec
+	// no cost, and Fees the round trip at cost as "Conversion (provider)" (spec
 	// §14) — on a ramp sale only.
 	EffectiveRate string     `json:"effectiveRate,omitempty"`
 	Fees          []VenueFee `json:"fees,omitempty"`
@@ -468,7 +468,7 @@ func (q *RampSellQuoter) priceOfframp(in SellQuoteInput, t *deliveryTarget) bool
 
 // sellFeeLines states a ramp sale's round trip at cost (spec §14): what LiFi
 // took and the gas we recover — CostBps + FeeBps of what would have landed at
-// no cost — as one "Conversion (LiFi)" line in USDC at the display rate, and
+// no cost — as one "Conversion (provider)" line in USDC at the display rate, and
 // the all-in rate on that no-cost amount (rounded down: never flattering).
 // Gross − the line = what lands, exactly.
 func sellFeeLines(out *SellSwapQuote, landed *big.Int) {

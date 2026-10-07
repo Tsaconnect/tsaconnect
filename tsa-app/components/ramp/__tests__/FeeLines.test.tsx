@@ -34,17 +34,34 @@ describe('FeeLines', () => {
         token="USDC"
         symbol="₦"
         fees={[
-          { label: 'Flutterwave conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2474.80' },
+          { label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2474.80' },
           { label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2538.85' },
         ]}
       />,
     );
-    expect(out).toContain('Flutterwave conversion fee (1.5%)');
+    expect(out).toContain('Provider conversion fee (1.5%)');
     expect(out).toContain('Network fee');
-    // The tag appears only where the label doesn't already name the provider.
-    expect(out.match(/via Flutterwave/g)?.length).toBe(1);
+    // Never a third-party name: "via provider" only where the label doesn't already say it.
+    expect(out).not.toMatch(/Flutterwave|LiFi/);
+    expect(out.match(/via provider/g)?.length).toBe(1);
     expect(out).toContain('−1.46216 USDC | ≈ ₦2,474.80');
     expect(out).toContain('−1.5 USDC | ≈ ₦2,538.85');
+  });
+
+  it('rewrites a provider name in a label stored before the rule', () => {
+    const out = texts(
+      <FeeLines
+        token="USDC"
+        symbol="₦"
+        fees={[
+          { label: 'Flutterwave conversion fee (1.5%)', provider: 'Flutterwave', token: '0.2', ngn: '280' },
+          { label: 'Conversion (LiFi)', provider: 'LiFi', token: '0.3', ngn: '420' },
+        ]}
+      />,
+    );
+    expect(out).toContain('Provider conversion fee (1.5%)');
+    expect(out).toContain('Conversion (provider)');
+    expect(out).not.toMatch(/Flutterwave|LiFi|via provider/);
   });
 
   it('renders nothing without fees', () => {
